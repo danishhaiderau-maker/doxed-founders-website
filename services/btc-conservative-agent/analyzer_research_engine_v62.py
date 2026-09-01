@@ -112,6 +112,7 @@ POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
 POLICY_EVIDENCE_BINDING_REPORT_FILE = "policy_evidence_binding_report.json"
 EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE = "evidence_coverage_triage_report.json"
 LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE = "lifecycle_bundle_inventory.json"
+DYNAMIC_POLICY_ANALYSIS_REPORT_FILE = "dynamic_policy_analysis_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -778,6 +779,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Qualified Real-Copy Optimisation", REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE, "Fail-closed real-copy rows with complete policy, costs, and mature horizons"),
     ("Showcase Losing Cluster", SHOWCASE_LOSING_CLUSTER_REPORT_FILE, "PRELIMINARY_DESCRIPTIVE fresh Showcase losses; no live parameter recommendation"),
     ("Research Horizon Maturity", RESEARCH_HORIZON_MATURITY_REPORT_FILE, "1/5/15/30/60/120m horizon completeness for Showcase, unfilled, cluster-blocked, and copy-only rows"),
+    ("Dynamic Policy Analysis", DYNAMIC_POLICY_ANALYSIS_REPORT_FILE, "Checksum-bound canonical nested dynamic-policy research; UNKNOWN unless sealed evidence is complete"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
@@ -19811,12 +19813,12 @@ def write_report_manifest(
         or (manifest_started_at.timestamp() - (15 * 60))
     )
     """Manifest for research dashboard — no hardcoded report list in UI."""
+    policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
+    policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
     policy_cycle_error = None
     try:
         from research.policy_cycle_snapshot import build_policy_cycle_reports
 
-        policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
-        policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
         policy_cycle_reports = build_policy_cycle_reports(
             data_dir=policy_data_dir,
             report_dir=policy_report_dir,
@@ -19871,6 +19873,22 @@ def write_report_manifest(
     except Exception as exc:
         qualified_grid_error = f"{type(exc).__name__}: {exc}"
     reports = []
+    dynamic_policy_error = None
+    try:
+        from dynamic_policy_analyzer import build_dynamic_policy_analysis_report
+
+        dynamic_policy_report = build_dynamic_policy_analysis_report(
+            policy_data_dir,
+            generation_revision=str(generation_revision),
+            dataset_epoch=analysis_provenance.get("dataset_epoch"),
+            source_revision=analysis_provenance.get("source_revision"),
+        )
+        target = Path(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(dynamic_policy_report, indent=2), encoding="utf-8")
+        os.replace(temporary, target)
+    except Exception as exc:
+        dynamic_policy_error = f"{type(exc).__name__}: {exc}"
     baseline_replay_error = None
     try:
         from research.entry_baseline_replay import materialize_v3_opportunity_replay
@@ -20186,6 +20204,13 @@ def write_report_manifest(
                     for row in reports
                 ),
                 "generation_error": qualified_grid_error,
+            },
+            DYNAMIC_POLICY_ANALYSIS_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == DYNAMIC_POLICY_ANALYSIS_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": dynamic_policy_error,
             },
         },
         "data_scope": (payload or {}).get("data_scope"),

@@ -255,6 +255,7 @@ SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
 EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE = "evidence_coverage_triage_report.json"
 LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE = "lifecycle_bundle_inventory.json"
+DYNAMIC_POLICY_ANALYSIS_REPORT_FILE = "dynamic_policy_analysis_report.json"
 COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 ANALYZER_INTEGRITY_FILE = "analyzer_integrity_report.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
@@ -3599,50 +3600,89 @@ def api_integrity():
 
 @app.route("/api/dynamic-policy-research")
 def api_dynamic_policy_research():
-    source = _safe_policy_v3_dashboard_source()
-    report, screen = source["report"], source["screen"]
-    leaders = screen.get("dynamic_regime_leaders") or {}
-    rows = []
-    for regime, policies in sorted(leaders.items()):
-        supported = [
-            policy for policy in (policies or [])
-            if policy.get("expectancy_lcb_usd") is not None
-            or policy.get("sealed_oos_net_usd") is not None
-        ]
-        if supported:
-            rows.append({
-                "regime": regime,
-                "policies": [_public_policy_evidence_row(policy) for policy in supported],
-            })
+    report = _read_report(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE, {}) or {}
+    current_manifest = _read_json(REPORT_MANIFEST_FILE) or {}
+    legacy_rows = []
+    legacy_source = None
+    # Development/backward-compatible view only when no completed generation
+    # exists. Once a manifest exists, an absent dynamic artifact is UNKNOWN and
+    # an older safe-policy file must never be revived.
+    if not report:
+        legacy_source = _safe_policy_v3_dashboard_source()
+        for regime, policies in sorted(
+            ((legacy_source.get("screen") or {}).get("dynamic_regime_leaders") or {}).items()
+        ):
+            supported = [
+                policy for policy in (policies or [])
+                if policy.get("expectancy_lcb_usd") is not None
+                or policy.get("sealed_oos_net_usd") is not None
+            ]
+            if supported:
+                legacy_rows.append({
+                    "regime": regime,
+                    "policies": [_public_policy_evidence_row(policy) for policy in supported],
+                })
+    current_epoch = (
+        report.get("dataset_epoch")
+        or ((legacy_source or {}).get("epoch_id"))
+        or (current_manifest.get("fresh_epoch") or {}).get("epoch_id")
+        or current_manifest.get("dataset_epoch")
+    )
+    blockers = list(report.get("blockers") or [])
+    status = str(report.get("status") or "UNKNOWN")
+    sealed = report.get("sealed_holdout") or {}
+    protocol = report.get("nested_protocol") or {}
+    qualified = bool(
+        status == "PASS"
+        and sealed.get("qualification_eligible") is True
+        and sealed.get("sealed_holdout_evaluation_verified") is True
+    )
     return jsonify({
         "schema": "dynamic_policy_dashboard_v3_1",
-        "evidence_source": "safe_policy_genome_v3_report.json",
+        "evidence_source": (
+            DYNAMIC_POLICY_ANALYSIS_REPORT_FILE
+            if report or current_manifest else SAFE_POLICY_GENOME_V3_REPORT_FILE
+        ),
         "collector_generation": "V3.1",
-        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_REGIME_COVERAGE",
-        "qualification": "QUALIFIED" if source["qualified"] else "DESCRIPTIVE_ONLY",
-        "live_policy_change_allowed": source["qualified"],
-        "epoch_id": source["epoch_id"],
+        "status": status,
+        "qualification": "RESEARCH_PASS" if qualified else "UNKNOWN",
+        "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE",
+        "relay_eligible": False,
+        "live_policy_change_allowed": False,
+        "epoch_id": current_epoch,
         "policy_epoch_id": None,
-        "winner_kind": "DYNAMIC" if source["qualified"] and rows else "NONE",
-        "winner_status": "QUALIFIED" if source["qualified"] and rows else "NO_QUALIFIED_OOS_WINNER",
-        "relative_leader_kind": "DYNAMIC" if rows else "NONE",
-        "relative_leader_status": "EV_AVAILABLE" if rows else "UNAVAILABLE_EV_NOT_COMPUTABLE",
+        "winner_kind": "DYNAMIC_RESEARCH" if qualified else "NONE",
+        "winner_status": "SEALED_RESEARCH_PASS" if qualified else "NO_QUALIFIED_OOS_WINNER",
+        "relative_leader_kind": "DYNAMIC" if legacy_rows else "DYNAMIC_RESEARCH" if qualified else "NONE",
+        "relative_leader_status": "DESCRIPTIVE_ONLY" if legacy_rows else "SEALED_EVALUATION_AVAILABLE" if qualified else "UNKNOWN",
         "comparison_delta": {},
         "static_oos": None,
-        "dynamic_oos": None,
-        "regimes": rows,
-        "required_market_families": ["BULL", "BEAR", "SIDEWAYS"],
+        "dynamic_oos": {
+            "nested_protocol_passed": protocol.get("passed"),
+            "outer_fold_count": len(protocol.get("folds") or []),
+            "sealed_holdout_evaluation_verified": sealed.get("sealed_holdout_evaluation_verified"),
+            "qualification_eligible": sealed.get("qualification_eligible"),
+        },
+        "regimes": legacy_rows,
+        "required_runtime_regimes": [
+            "WEAKENING", "TRANSITION", "RANGE", "COMPRESSION", "EXPANSION", "TRENDING",
+        ],
+        "bull_bear_range_projection": None,
         "fallback": "CONTROL_OR_NO_TRADE",
+        "unseen_cell_fallback": "NO_TRADE",
         "warning": (
-            "No qualified dynamic OOS winner. Positive descriptive regime rows may exist, but they are not a "
-            "qualified strategy or a completed static-versus-dynamic comparison. "
-            + (screen.get("warning") or
-               "Dynamic selection remains unavailable until causal V3.1 regimes have later sealed OOS evidence.")
-        ) if not source["qualified"] else (
-            screen.get("warning") or
-            "Any profitable descriptive result remains unavailable for live policy changes."
+            "No qualified dynamic OOS winner. Dynamic policy evidence is UNKNOWN until the checksum-bound canonical input, "
+            "nested purged folds, and exact sealed holdout all verify. It remains research-only."
+        ) if not qualified else (
+            "Sealed research evaluation passed; this artifact is still relay-ineligible and cannot change live policy."
         ),
-        "blockers": source["blockers"],
+        "blockers": blockers or (
+            list((legacy_source or {}).get("blockers") or [])
+            if legacy_source else ([] if qualified else ["REPORT_NOT_IN_CURRENT_GENERATION"])
+        ),
+        "generation_revision": report.get("generation_revision"),
+        "input_receipt": report.get("input_receipt") or {},
+        "full_artifact": f"/api/report/{DYNAMIC_POLICY_ANALYSIS_REPORT_FILE}",
     })
 
 

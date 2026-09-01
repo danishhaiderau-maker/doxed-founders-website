@@ -12,6 +12,7 @@ from research.policy_evidence_evaluator import (
     persist_v3_conservative_results,
 )
 from research.policy_evidence_schema import canonical_json, stable_hash
+from combo_pathway_config import active_tile_registry_signature
 from research.quantity_execution import build_signed_quantity_constraints
 from lifecycle_bundles import LifecycleKey, materialize_bundle
 from lifecycle_completion_reconciler import evaluate_lifecycle_completion
@@ -363,8 +364,8 @@ def _phase7_result(cohort, regime, direction, *, missing=None, source=True):
     return {
         "epoch_id": "epoch-1",
         "source_revision": "rev-1",
-        "config_signature": "config-1",
-        "tile_signature": "tiles-1",
+        "manifest_entry_hash": "manifest-1",
+        "tile_config_signature": active_tile_registry_signature(),
         "opportunity_id": cohort,
         "episode_id": f"episode-{cohort}",
         "comparison_cohort_key": cohort,
@@ -383,7 +384,9 @@ def _small_phase7_config():
         "schema": "eligible_regime_direction_cells_v1",
         "runtime_taxonomy_signature": PHASE7_SUPPORT_GATE_V1["runtime_taxonomy"]["signature"],
         "source_revision": "rev-1", "epoch_id": "epoch-1",
-        "config_signature": "config-1", "tile_signature": "tiles-1",
+        "manifest_entry_hash": "manifest-1",
+        "tile_config_signature": active_tile_registry_signature(),
+        "active_tile_registry_signature": active_tile_registry_signature(),
         "eligible_cells": cells,
     }
     registry["signature"] = stable_hash("eligible-regime-direction-cells", registry)

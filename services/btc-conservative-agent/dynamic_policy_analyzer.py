@@ -6,6 +6,10 @@ causal taxonomy evidence needed for a fold is absent or ambiguous.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_dynamic_entry_policy import (
@@ -17,6 +21,99 @@ from research_v3_contract import canonical_hash
 
 
 SCHEMA = "dynamic_policy_analyzer_orchestration_v1"
+INPUT_SCHEMA = "dynamic_policy_analysis_input_v1"
+REPORT_FILE = "dynamic_policy_analysis_report.json"
+INPUT_FILE = "v3/dynamic_policy_analysis_input.json"
+
+
+def _unknown(*reasons: str, input_receipt: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "schema": SCHEMA,
+        "status": "UNKNOWN",
+        "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE",
+        "execution_class": "RESEARCH_ONLY",
+        "relay_eligible": False,
+        "live_policy_change_allowed": False,
+        "input_receipt": dict(input_receipt or {}),
+        "nested_protocol": None,
+        "fold_local_taxonomy_bindings": [],
+        "sealed_holdout": None,
+        "blockers": sorted(set(reason for reason in reasons if reason)),
+    }
+
+
+def _load_verified_canonical_input(data_root: str | os.PathLike[str]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Load only a checksum-bound file from the completed canonical mirror."""
+    root = Path(data_root).resolve()
+    receipt: dict[str, Any] = {"relative_path": INPUT_FILE, "verification": "UNKNOWN"}
+    if root.name != "canonical-research-data":
+        return None, {**receipt, "blocker": "CANONICAL_STORE_ROOT_NOT_SELECTED"}
+    try:
+        sync_state = json.loads((root / ".fly-sync-state.json").read_text(encoding="utf-8-sig"))
+        record = sync_state.get(INPUT_FILE) or sync_state.get(INPUT_FILE.replace("/", "\\"))
+        if not isinstance(record, Mapping) or not str(record.get("sha256") or "").strip():
+            return None, {**receipt, "blocker": "DYNAMIC_INPUT_NOT_IN_VERIFIED_MIRROR_MANIFEST"}
+        path = root / Path(INPUT_FILE)
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        receipt.update({"sha256": digest, "size_bytes": len(raw)})
+        if digest.lower() != str(record["sha256"]).strip().lower():
+            return None, {**receipt, "blocker": "DYNAMIC_INPUT_CHECKSUM_MISMATCH"}
+        payload = json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(payload, dict) or payload.get("schema") != INPUT_SCHEMA:
+            return None, {**receipt, "blocker": "DYNAMIC_INPUT_SCHEMA_INVALID"}
+        receipt["verification"] = "CHECKSUM_VERIFIED_CANONICAL_MIRROR"
+        return payload, receipt
+    except FileNotFoundError:
+        return None, {**receipt, "blocker": "DYNAMIC_INPUT_MISSING"}
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None, {**receipt, "blocker": "DYNAMIC_INPUT_INVALID"}
+
+
+def build_dynamic_policy_analysis_report(
+    data_root: str | os.PathLike[str], *, generation_revision: str,
+    dataset_epoch: str | None, source_revision: str | None,
+) -> dict[str, Any]:
+    """Build one manifest-ready report, failing closed on every missing binding."""
+    payload, receipt = _load_verified_canonical_input(data_root)
+    if payload is None:
+        return _unknown(str(receipt.get("blocker") or "DYNAMIC_INPUT_UNKNOWN"), input_receipt=receipt)
+    bindings = {
+        "generation_revision": generation_revision,
+        "dataset_epoch": dataset_epoch,
+        "source_revision": source_revision,
+    }
+    mismatches = [
+        f"DYNAMIC_INPUT_{key.upper()}_MISMATCH"
+        for key, expected in bindings.items()
+        if expected not in (None, "", "UNKNOWN")
+        and str(payload.get(key) or "") != str(expected)
+    ]
+    if mismatches:
+        return _unknown(*mismatches, input_receipt=receipt)
+    try:
+        result = orchestrate_dynamic_policy_analysis(
+            list(payload.get("training_episodes") or []),
+            list(payload.get("sealed_holdout_episodes") or []),
+            candidates=list(payload.get("candidates") or []),
+            feature_names=list(payload.get("feature_names") or []),
+            outer_folds=int(payload.get("outer_folds") or 0),
+            inner_folds=int(payload.get("inner_folds") or 0),
+            purge_sec=float(payload.get("purge_sec") or 0),
+            embargo_sec=float(payload.get("embargo_sec") or 0),
+            minimum_bucket_support=int(payload.get("minimum_bucket_support") or 0),
+            protocol_run_id=str(payload.get("protocol_run_id") or ""),
+            sealed_holdout_evaluation=payload.get("sealed_holdout_evaluation"),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return _unknown(f"DYNAMIC_ANALYSIS_INPUT_REJECTED:{type(exc).__name__}:{exc}", input_receipt=receipt)
+    result.update({
+        "execution_class": "RESEARCH_ONLY", "relay_eligible": False,
+        "live_policy_change_allowed": False, "input_receipt": receipt,
+        "generation_revision": generation_revision, "dataset_epoch": dataset_epoch,
+        "source_revision": source_revision,
+    })
+    return result
 
 
 def _fold_taxonomy_binding(
@@ -64,13 +161,16 @@ def orchestrate_dynamic_policy_analysis(
 ) -> dict[str, Any]:
     """Run nested OOS selection, freeze once, then consume a sealed holdout."""
     candidate_rows = list(candidates)
-    protocol = nested_purged_walk_forward_dynamic(
-        training_episodes, candidates=candidate_rows, feature_names=feature_names,
-        outer_folds=outer_folds, inner_folds=inner_folds,
-        purge_sec=purge_sec, embargo_sec=embargo_sec,
-        minimum_bucket_support=minimum_bucket_support,
-        protocol_run_id=protocol_run_id,
-    )
+    try:
+        protocol = nested_purged_walk_forward_dynamic(
+            training_episodes, candidates=candidate_rows, feature_names=feature_names,
+            outer_folds=outer_folds, inner_folds=inner_folds,
+            purge_sec=purge_sec, embargo_sec=embargo_sec,
+            minimum_bucket_support=minimum_bucket_support,
+            protocol_run_id=protocol_run_id,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return _unknown(f"NESTED_PROTOCOL_UNAVAILABLE:{type(exc).__name__}:{exc}")
     by_id = {str(row.get("episode_id") or ""): row for row in training_episodes}
     bindings, blockers = [], []
     for fold in protocol["folds"]:

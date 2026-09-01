@@ -1,8 +1,10 @@
 from research.policy_evidence_evaluator import (
     PHASE7_SUPPORT_GATE_V1,
+    build_signed_eligible_cell_registry,
     build_phase7_support_qualification,
 )
 from research.policy_evidence_schema import stable_hash
+from combo_pathway_config import active_tile_registry_signature
 
 
 def _row(decision, regime="RANGE", direction="LONG", *, lane="CONTROL", cluster=None):
@@ -17,7 +19,8 @@ def _row(decision, regime="RANGE", direction="LONG", *, lane="CONTROL", cluster=
         "epoch_id": "epoch-1", "opportunity_id": f"opp-{decision}",
         "episode_id": f"episode-{decision}", "lane": lane, "side": direction,
         "dependence_cluster_id": cluster, "source_revision": "rev-1",
-        "config_signature": "config-1", "tile_signature": "tiles-1",
+        "manifest_entry_hash": "manifest-1",
+        "tile_config_signature": active_tile_registry_signature(),
         "regime_features_at_signal": {
             key: {"status": "OBSERVED", "value": value, "source": f"fixture.{key}"}
             for key, value in values.items()
@@ -30,7 +33,9 @@ def _config(cells, minimum=1):
         "schema": "eligible_regime_direction_cells_v1",
         "runtime_taxonomy_signature": PHASE7_SUPPORT_GATE_V1["runtime_taxonomy"]["signature"],
         "source_revision": "rev-1", "epoch_id": "epoch-1",
-        "config_signature": "config-1", "tile_signature": "tiles-1",
+        "manifest_entry_hash": "manifest-1",
+        "tile_config_signature": active_tile_registry_signature(),
+        "active_tile_registry_signature": active_tile_registry_signature(),
         "eligible_cells": [
             {"regime": regime, "direction": direction} for regime, direction in cells
         ],
@@ -52,6 +57,21 @@ def test_sibling_lanes_count_as_one_canonical_independent_decision():
     assert receipt["cluster_adjusted_effective_n"] == 1
     assert receipt["sibling_lane_rows_deduplicated"] == 5
     assert receipt["qualification_allowed"] is True
+
+
+def test_generation_registry_is_signed_from_canonical_active_tiles():
+    receipt = build_signed_eligible_cell_registry({
+        "source_revision": "rev-1", "epoch_id": "epoch-1",
+        "manifest_entry_hash": "manifest-1",
+        "tile_config_signature": active_tile_registry_signature(),
+    })
+    assert receipt["active_tile_registry_signature"] == active_tile_registry_signature()
+    assert receipt["tile_config_signature"] == active_tile_registry_signature()
+    assert len(receipt["eligible_cells"]) == 12
+    assert receipt["signature"] == stable_hash(
+        "eligible-regime-direction-cells",
+        {key: value for key, value in receipt.items() if key != "signature"},
+    )
 
 
 def test_effective_n_is_cluster_adjusted_and_cannot_be_inflated_by_decisions():
@@ -82,7 +102,7 @@ def test_eligible_cells_require_exact_signed_registry():
 
 def test_eligible_cell_registry_signature_and_provenance_fail_closed():
     config = _config([("RANGE", "LONG")])
-    config["eligible_cell_registry"]["tile_signature"] = "wrong-after-signing"
+    config["eligible_cell_registry"]["tile_config_signature"] = "wrong-after-signing"
     receipt = build_phase7_support_qualification([_row("one")], config)
     assert receipt["qualification_allowed"] is False
     assert "ELIGIBLE_CELL_REGISTRY_SIGNATURE_MISMATCH" in receipt["reason_codes"]

@@ -29,6 +29,9 @@ from research.lifecycle_evidence_join import (
     build_lifecycle_evidence_index,
     join_lifecycle_evidence,
 )
+from combo_pathway_config import (
+    ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY, active_tile_registry_signature,
+)
 
 
 SCHEMA = "v3_conservative_policy_evidence_v1"
@@ -125,9 +128,16 @@ def _validate_eligible_cell_registry(
         reasons.append("ELIGIBLE_CELL_REGISTRY_SIGNATURE_MISMATCH")
     if receipt.get("runtime_taxonomy_signature") != taxonomy.get("signature"):
         reasons.append("ELIGIBLE_CELL_REGISTRY_TAXONOMY_MISMATCH")
+    current_tile_signature = active_tile_registry_signature()
+    if receipt.get("active_tile_registry_signature") != current_tile_signature:
+        reasons.append("ELIGIBLE_CELL_REGISTRY_ACTIVE_TILE_SIGNATURE_MISMATCH")
+    if receipt.get("tile_config_signature") != current_tile_signature:
+        reasons.append("ELIGIBLE_CELL_REGISTRY_GENERATION_TILE_SIGNATURE_MISMATCH")
     provenance = {
         name: str(receipt.get(name) or "")
-        for name in ("source_revision", "epoch_id", "config_signature", "tile_signature")
+        for name in (
+            "source_revision", "epoch_id", "manifest_entry_hash", "tile_config_signature",
+        )
     }
     if not all(provenance.values()):
         reasons.append("ELIGIBLE_CELL_REGISTRY_PROVENANCE_MISSING")
@@ -146,6 +156,38 @@ def _validate_eligible_cell_registry(
         "runtime_taxonomy_signature": receipt.get("runtime_taxonomy_signature"),
         **provenance,
     }, list(dict.fromkeys(reasons))
+
+
+def build_signed_eligible_cell_registry(generation: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind tradable cells to the sole active tile registry and exact generation."""
+    active_tiles = [
+        {
+            "tile_id": lane,
+            "policy_signature": ACTIVE_TILE_REGISTRY[lane]["policy_signature"],
+            "paper_eligible": bool(ACTIVE_TILE_REGISTRY[lane]["paper_eligible"]),
+        }
+        for lane in ACTIVE_TILE_ORDER
+    ]
+    body = {
+        "schema": "eligible_regime_direction_cells_v1",
+        "runtime_taxonomy_signature": RUNTIME_REGIME_TAXONOMY_V1["signature"],
+        "source_revision": str(generation.get("source_revision") or ""),
+        "epoch_id": str(generation.get("epoch_id") or ""),
+        "manifest_entry_hash": str(generation.get("manifest_entry_hash") or ""),
+        "tile_config_signature": str(generation.get("tile_config_signature") or ""),
+        "active_tile_registry_signature": active_tile_registry_signature(),
+        "active_tiles": active_tiles,
+        # The canonical registry declares no regime or direction exclusions;
+        # every paper-eligible active tile therefore has both directions in
+        # every frozen runtime regime when its independent toggle is ON.
+        "eligibility_basis": "ACTIVE_TILE_REGISTRY_NO_REGIME_OR_DIRECTION_EXCLUSIONS",
+        "eligible_cells": [
+            {"regime": regime, "direction": direction}
+            for regime in RUNTIME_REGIME_TAXONOMY_V1["regimes"]
+            for direction in RUNTIME_REGIME_TAXONOMY_V1["directions"]
+        ],
+    }
+    return {**body, "signature": stable_hash("eligible-regime-direction-cells", body)}
 
 
 def _validate_projection(config: Mapping[str, Any], decision_ids: set[str]) -> tuple[dict[str, Any], list[str]]:
@@ -750,7 +792,9 @@ def _bind_terminal_outcome(
             "exit_reason": execution.get("exit_reason")}
 
 
-def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
+def build_v3_conservative_results(
+    v3_root: str | Path, *, phase7_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Evaluate exactly-bound decisions and retain every UNKNOWN explicitly."""
     root = Path(v3_root).resolve()
     if root.name != "v3":
@@ -955,7 +999,7 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
     unknown_by_dimension = {
         name: len(results) - observed_by_dimension[name] for name in feature_names
     }
-    phase7_support = build_phase7_support_qualification(results)
+    phase7_support = build_phase7_support_qualification(results, phase7_config)
     lifecycle_status_counts = {
         status: sum((row.get("lifecycle_evidence") or {}).get("status") == status for row in results)
         for status in ("VERIFIED", "UNKNOWN")
@@ -1015,7 +1059,10 @@ def persist_v3_conservative_results(canonical_root: str | Path, *, analyzer_revi
         raise ValueError("POLICY_EVALUATOR_ROOT_NOT_CANONICAL")
     manifest = json.loads((root / "canonical_dataset_current.json").read_text(encoding="utf-8-sig"))
     generation = generation_identity(manifest, analyzer_revision=analyzer_revision)
-    report = build_v3_conservative_results(root / "v3")
+    phase7_config = {
+        "eligible_cell_registry": build_signed_eligible_cell_registry(generation),
+    }
+    report = build_v3_conservative_results(root / "v3", phase7_config=phase7_config)
     # Populate the disposable generation cache from these evaluator-produced
     # rows. UNKNOWN rows are retained so coverage failures are queryable and
     # cannot silently disappear from fill-rate denominators.
