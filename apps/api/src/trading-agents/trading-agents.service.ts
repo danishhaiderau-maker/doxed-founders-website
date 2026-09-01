@@ -599,6 +599,7 @@ export class TradingAgentsService implements OnModuleInit {
         status: null,
         relayExecutionMode: null,
         relayArmedAt: null,
+        realTradingConfirmedAt: null,
         liveDeskSessionStartedAt: null,
         lastError: null,
         positionMismatchDetectedAt: null,
@@ -620,6 +621,10 @@ export class TradingAgentsService implements OnModuleInit {
       relayExecutionMode:
         typeof dash.relayExecutionMode === 'string' ? dash.relayExecutionMode : null,
       relayArmedAt: typeof dash.relayArmedAt === 'string' ? dash.relayArmedAt : null,
+      realTradingConfirmedAt:
+        typeof dash.realTradingConfirmedAt === 'string'
+          ? dash.realTradingConfirmedAt
+          : null,
       liveDeskSessionStartedAt:
         typeof dash.liveDeskSessionStartedAt === 'string'
           ? dash.liveDeskSessionStartedAt
