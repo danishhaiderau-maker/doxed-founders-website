@@ -51,6 +51,8 @@ def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     assert 'status.get("bitfinex_live_enabled") is False' in DEPLOY
     assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in DEPLOY
     assert 'request_json("/api/reconcile/phantom-cancel"' in DEPLOY
+    assert "pause mutation attempt={attempt}" in DEPLOY
+    assert "checking durable state" in DEPLOY
 
 
 def test_failed_deploy_has_bounded_safe_paper_resume_without_weakening_live_flags():
