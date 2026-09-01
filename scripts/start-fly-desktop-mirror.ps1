@@ -107,6 +107,7 @@ $syncLock = Join-Path $repoRoot ".fly-data-sync-loop.lock"
 $canonicalMirror = Get-DoxxedFlyMirrorDir
 $syncHeartbeat = Join-Path $canonicalMirror ".fly-data-sync-loop.heartbeat.json"
 $syncHeartbeatMaxAgeSec = 600
+$syncBackoffGraceSec = 300
 $syncAlive = $false
 if (Test-Path -LiteralPath $syncLock) {
   try {
@@ -119,7 +120,22 @@ if (Test-Path -LiteralPath $syncLock) {
       } else {
         $syncAgeSec
       }
-      $syncAlive = ($heartbeatAgeSec -le $syncHeartbeatMaxAgeSec)
+      $insideDeclaredBackoff = $false
+      if (Test-Path -LiteralPath $syncHeartbeat -PathType Leaf) {
+        try {
+          $heartbeatState = Get-Content -LiteralPath $syncHeartbeat -Raw | ConvertFrom-Json
+          $nextRetryRaw = [string]($heartbeatState.nextRetryAt)
+          if ($nextRetryRaw) {
+            $nextRetryAt = [DateTimeOffset]::Parse($nextRetryRaw).ToUniversalTime()
+            $insideDeclaredBackoff = (
+              [DateTimeOffset]::UtcNow -le $nextRetryAt.AddSeconds($syncBackoffGraceSec)
+            )
+          }
+        } catch { }
+      }
+      $syncAlive = (
+        $heartbeatAgeSec -le $syncHeartbeatMaxAgeSec -or $insideDeclaredBackoff
+      )
       if (-not $syncAlive) {
         Stop-Process -Id $syncPid -Force -ErrorAction SilentlyContinue
       }

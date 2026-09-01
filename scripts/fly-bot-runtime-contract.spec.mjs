@@ -390,6 +390,8 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   const sync = await readFile(flySyncPath, 'utf8');
 
   assert.match(launcher, /syncHeartbeatMaxAgeSec\s*=\s*600/);
+  assert.match(launcher, /insideDeclaredBackoff/);
+  assert.match(launcher, /nextRetryAt\.AddSeconds\(\$syncBackoffGraceSec\)/);
   assert.match(launcher, /LastWriteTimeUtc/);
   assert.match(launcher, /Stop-Process -Id \$syncPid -Force/);
   assert.match(launcher, /Get-NetTCPConnection[\s\S]*LocalPort 7002/);
