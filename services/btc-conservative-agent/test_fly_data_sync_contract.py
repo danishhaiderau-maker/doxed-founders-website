@@ -84,6 +84,17 @@ def test_sync_loop_has_sha256_fallback_for_minimal_windows_hosts():
     assert "[System.IO.File]::OpenRead($resolved)" in SYNC_LOOP
 
 
+def test_sync_loop_streams_orphan_candidate_discovery_without_materializing_mirror():
+    body = SYNC_LOOP.split("function Remove-OrphanedMirrorCandidates", 1)[1]
+    body = body.split("# Growth trigger", 1)[0]
+    assert "[System.IO.Directory]::EnumerateFiles(" in body
+    assert "[System.IO.SearchOption]::AllDirectories" in body
+    assert "Get-ChildItem -LiteralPath $MirrorPath -Recurse" not in body
+    assert "@(" not in body
+    assert "orphan candidate enumeration failed closed" in body
+    assert "Remove-Item -LiteralPath $candidatePath" in body
+
+
 def test_long_sync_writes_secret_safe_per_file_and_chunk_progress_heartbeat():
     progress_function = SYNC_SCRIPT.split("function Write-SyncProgressHeartbeat", 1)[1]
     progress_function = progress_function.split("$syncState = @{}", 1)[0]
@@ -1472,6 +1483,12 @@ def _load_jsonl_writer(tmp_path):
         "rotate_log": lambda _path: None,
         "_transient_csv_lock_error": lambda _error: False,
         "_csv_write_fallback": lambda *_args: None,
+        "_data_sync_runtime_root": lambda: tmp_path,
+        "emergency_admission": lambda **_kwargs: {
+            "allowed": True,
+            "reason": None,
+            "threshold": 0.90,
+        },
         "utc_iso": lambda: datetime.now(timezone.utc).isoformat(),
         "logger": _Logger(),
     }

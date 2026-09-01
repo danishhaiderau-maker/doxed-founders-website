@@ -160,11 +160,29 @@ function Publish-AnalyzerLeaseDeferredReceipt {
 function Remove-OrphanedMirrorCandidates {
   param([Parameter(Mandatory = $true)][string]$MirrorPath)
   if (-not (Test-Path -LiteralPath $MirrorPath -PathType Container)) { return }
-  foreach ($candidate in @(Get-ChildItem -LiteralPath $MirrorPath -Recurse -File -Force -ErrorAction SilentlyContinue | Where-Object {
-    $_.Name -match '\.(?<owner>\d+)\.[0-9a-fA-F]{32}\.download(?:\.replace-backup)?$'
-  })) {
+  # Stream candidate names instead of materializing every FileInfo object in
+  # the multi-gigabyte canonical mirror.  The old Get-ChildItem pipeline made
+  # loop startup memory proportional to the complete mirror and delayed the
+  # first terminal heartbeat, which in turn blocked the analyzer fail-closed.
+  $candidatePattern = '\.(?<owner>\d+)\.[0-9a-fA-F]{32}\.download(?:\.replace-backup)?$'
+  try {
+    $candidatePaths = [System.IO.Directory]::EnumerateFiles(
+      [System.IO.Path]::GetFullPath($MirrorPath),
+      '*',
+      [System.IO.SearchOption]::AllDirectories
+    )
+  } catch {
+    Add-Content -LiteralPath $logFile -Value (
+      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`t" +
+      "orphan candidate enumeration failed closed: $($_.Exception.GetType().Name)"
+    )
+    return
+  }
+  foreach ($candidatePath in $candidatePaths) {
+    $candidateName = [System.IO.Path]::GetFileName($candidatePath)
+    if ($candidateName -notmatch $candidatePattern) { continue }
     $owner = 0
-    if ($candidate.Name -match '\.(?<owner>\d+)\.[0-9a-fA-F]{32}\.download(?:\.replace-backup)?$') {
+    if ($candidateName -match $candidatePattern) {
       $owner = [int]$matches['owner']
     }
     # The exclusive loop guard proves this process has no in-flight candidate
@@ -172,7 +190,7 @@ function Remove-OrphanedMirrorCandidates {
     # completed/failed prior cycle; candidates from dead PIDs are abandoned.
     $ownerAlive = $owner -gt 0 -and $null -ne (Get-Process -Id $owner -ErrorAction SilentlyContinue)
     if ($owner -eq $PID -or -not $ownerAlive) {
-      Remove-Item -LiteralPath $candidate.FullName -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
     }
   }
 }
