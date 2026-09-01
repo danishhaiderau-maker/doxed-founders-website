@@ -2652,7 +2652,7 @@ if __name__ == "__main__":
     test_incremental_sync_is_authenticated_and_chunk_verified()
     test_local_sync_has_fail_closed_30_gib_admission_guard()
     test_retention_never_removes_active_or_unacknowledged_files()
-    test_numbered_rotations_are_supported_and_highest_two_are_retained()
+    test_legacy_file_ack_rotations_are_all_retained_until_lifecycle_cleanup_exists()
     test_remote_analyzer_mirror_is_read_only_and_admin_gated()
     test_analyzer_bundle_validation_fails_closed_for_missing_dashboard_and_unsafe_paths()
     test_analyzer_bundle_accepts_complete_read_only_report_tree()
