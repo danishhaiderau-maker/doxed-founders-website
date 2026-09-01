@@ -7659,9 +7659,40 @@ async function loadGenome() {
     ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
     document.getElementById('genome-note').textContent = d.warning || 'Current signed V3.1 Safe Policy Genome evidence.';
     document.getElementById('genome-taxonomy-note').textContent = `Signed epoch ${d.epoch_id || 'not reported'} · source ${d.evidence_source || 'n/a'} · live policy changes ${d.live_policy_change_allowed ? 'allowed' : 'blocked'}.`;
-    document.getElementById('genome-cluster').textContent = JSON.stringify({epoch_id:d.epoch_id, collection:c, integrity:d.integrity}, null, 2);
+    // Keep the overview bounded. The collection object contains identity arrays
+    // and orphan rows large enough to make one panel dominate the whole page.
+    // Full evidence remains available through the declared report route.
+    const resolution = c.entry_resolution_integrity || {};
+    const compactCollection = {
+      independent_opportunities: c.independent_opportunities ?? 0,
+      decision_branches: c.decision_branches ?? 0,
+      terminal_lifecycles: c.terminal_lifecycles ?? 0,
+      market_segments: c.market_segments ?? 0,
+      decision_dispositions: c.decision_dispositions || {},
+      decision_outcomes: c.decision_outcomes || {},
+      effective_paper_execution_identity_count: Array.isArray(c.effective_paper_execution_identities)
+        ? c.effective_paper_execution_identities.length : 0,
+      entry_resolution_integrity: {
+        expected: resolution.expected ?? 0,
+        awaiting_within_deadline: resolution.awaiting_within_deadline ?? 0,
+        orphan_expected_order_count: Array.isArray(resolution.orphan_expected_orders)
+          ? resolution.orphan_expected_orders.length : (resolution.orphan_expected_order_count ?? 0),
+        status: resolution.status || 'UNKNOWN',
+      },
+    };
+    document.getElementById('genome-cluster').textContent = JSON.stringify({
+      epoch_id: d.epoch_id,
+      collection: compactCollection,
+      qualification: d.qualification,
+      blocker_count: Array.isArray(d.blockers) ? d.blockers.length : 0,
+      full_report: '/safe-policy-genome-v3.1',
+    }, null, 2);
     document.getElementById('genome-decision').textContent = JSON.stringify({search_progress:s, qualification:d.qualification}, null, 2);
-    document.getElementById('genome-lifecycle').textContent = JSON.stringify({collection:c, blockers:d.blockers}, null, 2);
+    document.getElementById('genome-lifecycle').textContent = JSON.stringify({
+      collection: compactCollection,
+      blockers: d.blockers,
+      full_report: '/safe-policy-genome-v3.1',
+    }, null, 2);
     // Do not stringify the complete candidate screen into the overview DOM.
     // The V3.1 screen contains thousands of nested policy/stop cells and made
     // the navigation button block the rendered page while duplicating the
