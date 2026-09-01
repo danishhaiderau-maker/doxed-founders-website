@@ -252,9 +252,14 @@ if (-not $env:BOT_ADMIN_TOKEN) {
   throw "BOT_ADMIN_TOKEN is required for the canonical Fly data mirror."
 }
 
-$preflightManifestAttempts = 13
+$preflightManifestAttempts = 35
 $preflightManifestTimeoutSec = 90
-$preflightInventoryWaitMaxSec = 120
+# The server's single-flight inventory worker has a hard 300-second deadline.
+# Join that one bounded build slightly longer than its deadline instead of
+# abandoning at 120 seconds and starting another full-sync cycle later. This
+# adds no competing worker or scan pressure; Retry-After pacing remains in
+# force and the prior canonical mirror remains published throughout.
+$preflightInventoryWaitMaxSec = 330
 $relaySyncAttempts = 2
 $fullSyncQuietSuccesses = 3
 $fullSyncQuietProbeTimeoutSec = 8
@@ -294,8 +299,9 @@ function Get-FlySyncPreflightManifest {
       }
       # BUILDING/STALE_REVALIDATING is a single-flight background scan, not a
       # reason to launch another worker. Respect the server's Retry-After as a
-      # minimum while bounding the complete join window to 120 seconds. Real
-      # production inventory scans can take 60-75 seconds on the shared CPU.
+      # minimum while bounding the complete join window just beyond the
+      # server's 300-second worker deadline. Production proved that a valid
+      # revalidation can exceed the old 120-second client window under load.
       $retryAfterSec = 0
       try {
         $response = $_.Exception.Response

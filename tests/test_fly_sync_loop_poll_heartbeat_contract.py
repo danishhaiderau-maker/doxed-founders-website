@@ -17,8 +17,8 @@ def _child_source() -> str:
 def test_manifest_preflight_has_bounded_retries_and_stage_diagnostics():
     source = _source()
 
-    assert "$preflightManifestAttempts = 13" in source
-    assert "$preflightInventoryWaitMaxSec = 120" in source
+    assert "$preflightManifestAttempts = 35" in source
+    assert "$preflightInventoryWaitMaxSec = 330" in source
     assert "$preflightManifestTimeoutSec = 90" in source
     assert "stage=loop_manifest_preflight failed after" in source
     assert '$currentStage = "loop_manifest_preflight"' in source
