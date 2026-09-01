@@ -40,9 +40,10 @@ def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     flat = DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
     predeploy = DEPLOY.index("- name: Recheck maintenance boundary immediately before deploy")
     deploy = DEPLOY.index("- name: Deploy the exact source revision")
+    postdeploy = DEPLOY.index("- name: Re-enter maintenance and flatten the exact deployed revision")
     accept = DEPLOY.index("- name: Prove liveness, execution safety, and exact revision")
     resume = DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
-    assert pause < flat < predeploy < deploy < accept < resume
+    assert pause < flat < predeploy < deploy < postdeploy < accept < resume
     assert 'status.get("manual_admin_pause") is True' in DEPLOY
     assert 'payload.get("manual_admin_pause") is True' in DEPLOY
     assert 'str(status.get("source_git_rev") or "").startswith(expected)' in DEPLOY
@@ -54,6 +55,24 @@ def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     assert 'request_json("/api/reconcile/phantom-cancel"' in DEPLOY
     assert "pause mutation attempt={attempt}" in DEPLOY
     assert "checking durable state" in DEPLOY
+
+
+def test_postdeploy_restart_boundary_is_exact_generation_fenced_and_flat():
+    block = DEPLOY[
+        DEPLOY.index("- name: Re-enter maintenance and flatten the exact deployed revision"):
+        DEPLOY.index("- name: Prove liveness, execution safety, and exact revision")
+    ]
+    exact = block.index('str(status.get("source_git_rev") or "") == expected')
+    pause = block.index('request_json("/api/pause", {}, timeout=30)')
+    assert exact < pause
+    assert 'status.get("execution_paused") is True' in block
+    assert 'status.get("manual_admin_pause") is True' in block
+    assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in block
+    assert 'request_json("/api/positions/close", {"trade_id": trade_id})' in block
+    assert 'generation <= round_generation' in block
+    assert 'fresh_state(required_generation)' in block
+    assert 'require_paused=True, require_flat=True' in block
+    assert 'if not final["orders"] and not final["positions"]:' in block
 
 
 def test_generationless_bootstrap_is_bound_to_one_exact_safe_revision():
@@ -129,15 +148,18 @@ def test_generation_remains_mandatory_outside_the_exact_bootstrap():
     assert 'raise SystemExit("maintenance reconciliation generation is missing")' in maintenance
 
 
-def test_failed_deploy_has_bounded_safe_paper_resume_without_weakening_live_flags():
-    failure_resume = DEPLOY.index("- name: Best-effort safe paper resume after failed guarded deploy")
-    assert failure_resume > DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
-    block = DEPLOY[failure_resume:]
+def test_failed_deploy_preserves_pause_and_never_resumes_unaccepted_revision():
+    failure_pause = DEPLOY.index("- name: Best-effort preserve safe paper maintenance after failed guarded deploy")
+    assert failure_pause > DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
+    block = DEPLOY[failure_pause:]
     assert "if: failure()" in block
     assert "continue-on-error: true" in block
+    assert 'base + "/api/pause"' in block
+    assert 'base + "/api/resume"' not in block
     assert 'status.get("force_paper_mode") is True' in block
     assert 'status.get("live_armed") is False' in block
     assert 'status.get("bitfinex_live_enabled") is False' in block
+    assert 'status.get("execution_paused") is True' in block
     assert 'status.get("manual_admin_pause") is True' in block
 
 

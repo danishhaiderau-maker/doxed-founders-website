@@ -625,6 +625,140 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
+      - name: Re-enter maintenance and flatten the exact deployed revision
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+
+          def request_json(path, payload=None, timeout=30):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + path,
+                  data=data,
+                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
+                  method="POST" if data else "GET",
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return json.load(response)
+
+          def exact_safe_status(*, require_paused=False, require_flat=False):
+              status = request_json("/api/status", timeout=20)
+              progress = status.get("strategy_progress") or {}
+              safe = (
+                  str(status.get("source_git_rev") or "") == expected
+                  and status.get("force_paper_mode") is True
+                  and status.get("live_armed") is False
+                  and status.get("bitfinex_live_enabled") is False
+              )
+              if require_paused:
+                  safe = safe and status.get("execution_paused") is True and status.get("manual_admin_pause") is True
+              if require_flat:
+                  safe = safe and int(progress.get("open_positions") or 0) == 0 and int(progress.get("pending_orders") or 0) == 0
+              if not safe:
+                  raise RuntimeError("exact postdeploy paper maintenance status is not proven")
+              return status
+
+          # Never mutate a different or partially booted revision.
+          last = None
+          for attempt in range(1, 41):
+              try:
+                  exact_safe_status()
+                  break
+              except Exception as exc:
+                  last = exc
+                  time.sleep(min(attempt, 5))
+          else:
+              raise SystemExit(f"exact deployed revision never became safely addressable: {type(last).__name__}")
+
+          for attempt in range(1, 11):
+              try:
+                  paused = request_json("/api/pause", {}, timeout=30)
+                  exact_safe_status(require_paused=True)
+                  if paused.get("status") == "paused" and paused.get("execution_paused") is True:
+                      break
+              except Exception as exc:
+                  last = exc
+              time.sleep(min(attempt, 5))
+          else:
+              raise SystemExit(f"postdeploy maintenance pause was not proven: {type(last).__name__}")
+
+          def fresh_state(minimum_generation=None):
+              last_state = None
+              for attempt in range(1, 31):
+                  try:
+                      exact_safe_status(require_paused=True)
+                      candidate = request_json("/api/relay-execution-state?fresh=1", timeout=30)
+                      generation = candidate.get("money_state_generation")
+                      if not isinstance(generation, int) or isinstance(generation, bool):
+                          raise RuntimeError("postdeploy relay generation is missing")
+                      if minimum_generation is not None and generation < minimum_generation:
+                          raise RuntimeError("postdeploy relay generation is stale")
+                      if not isinstance(candidate.get("orders"), list) or not isinstance(candidate.get("positions"), list):
+                          raise RuntimeError("postdeploy relay exposure arrays are missing")
+                      return candidate
+                  except urllib.error.HTTPError as exc:
+                      if exc.code != 503:
+                          raise
+                      last_state = exc
+                  except Exception as exc:
+                      last_state = exc
+                  time.sleep(min(attempt, 5))
+              raise RuntimeError(f"postdeploy generation-current relay state unavailable: {type(last_state).__name__}")
+
+          required_generation = None
+          for round_no in range(1, 6):
+              exposure = fresh_state(required_generation)
+              round_generation = exposure["money_state_generation"]
+              orders = sorted({str(row.get("trade_id") or "").strip() for row in exposure["orders"]} - {""})
+              positions = sorted({str(row.get("trade_id") or "").strip() for row in exposure["positions"]} - {""})
+              if not orders and not positions:
+                  final_status = exact_safe_status(require_paused=True, require_flat=True)
+                  print(
+                      f"Postdeploy maintenance boundary flat revision={expected} "
+                      f"generation={round_generation} round={round_no}"
+                  )
+                  break
+              for trade_id in orders:
+                  cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
+                  generation = cancelled.get("money_state_generation")
+                  if cancelled.get("status") != "cancelled":
+                      raise SystemExit(f"postdeploy order cancel was not confirmed for {trade_id}")
+                  if not isinstance(generation, int) or isinstance(generation, bool) or generation <= round_generation:
+                      raise SystemExit("postdeploy order cancel did not advance relay generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
+              for trade_id in positions:
+                  closed = request_json("/api/positions/close", {"trade_id": trade_id})
+                  generation = closed.get("money_state_generation")
+                  if closed.get("status") != "closed":
+                      raise SystemExit(f"postdeploy normal paper close was not confirmed for {trade_id}")
+                  if not isinstance(generation, int) or isinstance(generation, bool) or generation <= round_generation:
+                      raise SystemExit("postdeploy normal paper close did not advance relay generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
+              final = fresh_state(required_generation)
+              if not final["orders"] and not final["positions"]:
+                  exact_safe_status(require_paused=True, require_flat=True)
+                  print(
+                      f"Postdeploy maintenance flattened revision={expected} "
+                      f"generation={final['money_state_generation']} round={round_no}"
+                  )
+                  break
+              time.sleep(2)
+          else:
+              raise SystemExit("postdeploy maintenance boundary did not become generation-current and flat")
+          PY
+
       - name: Prove liveness, execution safety, and exact revision
         env:
           EXPECTED_REVISION: ${{ github.sha }}
@@ -765,29 +899,35 @@ jobs:
           raise SystemExit("exact-revision paper resume confirmation failed: " + json.dumps(last, sort_keys=True))
           PY
 
-      - name: Best-effort safe paper resume after failed guarded deploy
+      - name: Best-effort preserve safe paper maintenance after failed guarded deploy
         if: failure()
         continue-on-error: true
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
         run: |
           python - <<'PY'
-          import json, os, urllib.request
+          import json, os, time, urllib.request
           base = "https://doxed-btc-bot.fly.dev"
           headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
-          with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
-              status = json.load(response)
-          if not (
-              status.get("force_paper_mode") is True
-              and status.get("live_armed") is False
-              and status.get("bitfinex_live_enabled") is False
-              and status.get("manual_admin_pause") is True
-          ):
-              raise SystemExit("failed deploy left no safely resumable paper-only maintenance boundary")
-          request = urllib.request.Request(base + "/api/resume", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
-          with urllib.request.urlopen(request, timeout=30) as response:
-              resumed = json.load(response)
-          if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
-              raise SystemExit("bounded failure-path paper resume was rejected")
-          print("Failure-path paper resume acknowledged; live remains disabled and disarmed")
+          last = None
+          for attempt in range(1, 6):
+              try:
+                  request = urllib.request.Request(base + "/api/pause", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      json.load(response)
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                      status = json.load(response)
+                  if (
+                      status.get("force_paper_mode") is True
+                      and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False
+                      and status.get("execution_paused") is True
+                      and status.get("manual_admin_pause") is True
+                  ):
+                      print("Failure path preserved paper-only maintenance; no unaccepted revision was resumed")
+                      raise SystemExit(0)
+              except Exception as exc:
+                  last = exc
+              time.sleep(min(attempt, 5))
+          raise SystemExit(f"failed deploy paper maintenance could not be preserved: {type(last).__name__}")
           PY

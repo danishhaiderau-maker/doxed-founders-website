@@ -36307,11 +36307,13 @@ def api_close_showcase_position():
         positions=paper_positions,
         trades=paper_trades,
     )
+    cache_generation = _invalidate_relay_execution_snapshot()
     logger.warning("[ADMIN] Showcase paper position closed trade_id=%s", trade_id)
     return jsonify({
         "status": "closed",
         "trade_id": trade_id,
         "scope": "showcase_paper_only",
+        "money_state_generation": cache_generation,
     })
 
 
