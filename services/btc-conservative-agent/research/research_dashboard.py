@@ -4360,6 +4360,9 @@ def api_research_design():
     report, source = _declared_atomic_generation_report(
         POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE
     )
+    baseline_replay, baseline_source = _declared_atomic_generation_report(
+        "entry_baseline_replay_report.json"
+    )
     manifest = source.get("manifest") or {}
     freshness = _generation_freshness_meta(manifest)
     evaluator = report.get("conservative_evaluator") if isinstance(report, dict) else {}
@@ -4375,14 +4378,24 @@ def api_research_design():
         "profitability_calculated": False,
     }
     baselines = []
+    replay_summaries = (
+        baseline_replay.get("summaries")
+        if isinstance(baseline_replay, dict) else {}
+    )
+    replay_summaries = replay_summaries if isinstance(replay_summaries, dict) else {}
     for definition in ENTRY_BASELINE_REGISTRY["baselines"]:
-        baselines.append({
+        row = {
             key: definition.get(key) for key in (
                 "baseline_id", "entry_type", "timing", "policy_signature",
                 "execution_class", "relay_eligible", "places_order",
                 "missing_evidence_outcome", "required_evidence",
             )
-        })
+        }
+        row["replay_summary"] = replay_summaries.get(definition["baseline_id"]) or {
+            "opportunities": 0, "full_fills": 0, "partial_fills": 0,
+            "no_fills": 0, "unknown": 0,
+        }
+        baselines.append(row)
     available = (
         bool(report) and coverage_available
         and coverage.get("schema") == "phase7_regime_feature_coverage_v1"
@@ -4401,6 +4414,13 @@ def api_research_design():
         "generation_freshness": freshness,
         "entry_baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
         "entry_baselines": baselines,
+        "entry_baseline_replay": baseline_replay or {
+            "schema": "entry_baseline_same_opportunity_replay_v1",
+            "same_opportunity_count": 0,
+            "summaries": {},
+            "status": "UNKNOWN_CURRENT_GENERATION",
+            "reason": baseline_source.get("reason") or "REPORT_UNAVAILABLE",
+        },
         "regime_feature_coverage": coverage,
         "qualification_allowed": False,
         "profitability_calculated": False,
@@ -7444,6 +7464,7 @@ async function loadResearchDesign() {
   const coverage = d.regime_feature_coverage || {};
   document.getElementById('research-design-kpis').innerHTML = cards([
     ['Signed baselines', (d.entry_baselines || []).length],
+    ['Same-opportunity replay N', (d.entry_baseline_replay || {}).same_opportunity_count ?? 0],
     ['Evaluator rows', coverage.row_count ?? 0],
     ['Qualification', d.qualification_allowed ? 'ALLOWED' : 'DISABLED'],
     ['Profitability', d.profitability_calculated ? 'CALCULATED' : 'NOT CALCULATED'],
@@ -7453,7 +7474,8 @@ async function loadResearchDesign() {
     `<td>${escape(row.entry_type)}</td><td>${escape(row.timing)}</td>` +
     `<td>${escape((row.required_evidence || []).join(', '))}</td>` +
     `<td>RESEARCH ONLY · relay ${row.relay_eligible ? 'eligible' : 'disabled'} · places order ${row.places_order ? 'yes' : 'no'}</td>` +
-    `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}</td></tr>`
+    `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}<br><small>` +
+    `N ${row.replay_summary?.opportunities ?? 0} · full ${row.replay_summary?.full_fills ?? 0} · partial ${row.replay_summary?.partial_fills ?? 0} · no-fill ${row.replay_summary?.no_fills ?? 0} · UNKNOWN ${row.replay_summary?.unknown ?? 0}</small></td></tr>`
   ).join('') || '<tr><td colspan="6">No signed baseline definitions are available.</td></tr>';
   document.getElementById('research-regime-coverage-body').innerHTML = (coverage.dimensions || []).map(row =>
     `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 0}</td><td>${row.unknown_rows ?? 0}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`

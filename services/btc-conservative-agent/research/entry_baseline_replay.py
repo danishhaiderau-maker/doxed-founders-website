@@ -21,6 +21,8 @@ from research_entry_baselines import (
     missing_baseline_evidence,
 )
 from research_v3_contract import canonical_hash
+from pathlib import Path
+import json
 
 
 REPLAY_SCHEMA = "entry_baseline_same_opportunity_replay_v1"
@@ -302,3 +304,37 @@ def materialize_same_opportunity_replay(
     }
     material["report_id"] = canonical_hash("entry-baseline-replay", material)
     return material
+
+
+def materialize_v3_opportunity_replay(data_dir: str | Path) -> dict[str, Any]:
+    """Materialize the canonical opportunity cohort through this replay engine.
+
+    Missing joins remain explicit UNKNOWN results; no schedule or market data is
+    reconstructed from later evidence.
+    """
+    path = Path(data_dir) / "v3" / "ledgers" / "opportunity.jsonl"
+    episodes = []
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(row, Mapping):
+                    continue
+                snapshot = row.get("baseline_schedule_snapshot")
+                schedules = (
+                    snapshot.get("schedules")
+                    if isinstance(snapshot, Mapping) else row.get("baseline_schedules")
+                )
+                episodes.append({
+                    **dict(row),
+                    "opportunity_id": row.get("opportunity_id") or row.get("record_id"),
+                    "dataset_epoch": row.get("dataset_epoch") or row.get("epoch_id"),
+                    "source_revision": row.get("source_revision") or row.get("source_git_rev"),
+                    "tile_config_signature": row.get("tile_config_signature") or row.get("config_signature"),
+                    "direction": row.get("direction") or row.get("raw_direction"),
+                    "baseline_schedules": schedules,
+                })
+    return materialize_same_opportunity_replay(episodes)

@@ -334,6 +334,10 @@ class V3EvidenceStore:
             # causal identity once rather than relying on each bridge caller to
             # remember an evolving metadata contract.
             material["causal_identity"] = project_opportunity_causal_identity(material)
+            from research_entry_baselines import materialize_signal_time_baseline_schedules
+            snapshot = materialize_signal_time_baseline_schedules(material)
+            material["baseline_schedule_snapshot"] = snapshot
+            material["baseline_schedules"] = snapshot["schedules"]
         line = canonical_json(material) + "\n"
         with self._exclusive(path):
             durable_ids = self._cached_ids(path)

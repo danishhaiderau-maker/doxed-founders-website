@@ -16,6 +16,8 @@ from chase_offset_touch_grid import (
     COMPRESSED_SHADOW_POLICY_ID,
     COMPRESSED_SHADOW_STAGE_SECONDS,
     COMPRESSED_SHADOW_STEP_PCT,
+    orig_limit_price,
+    _chase_target,
 )
 from research_v3_contract import canonical_hash
 
@@ -41,6 +43,7 @@ _CORE_BASELINES = (
         "entry_type": "LIMIT",
         "timing": "SIGNAL_TIME_TO_EXPIRY",
         "offset_axis_pct": "0.01_TO_0.30",
+        "initial_offset_pct": 0.10,
         "chase_policy_id": "no_chase",
         "terminal_expiry_sec": 1800,
         "places_order": False,
@@ -141,6 +144,156 @@ def build_entry_baseline_registry() -> dict[str, Any]:
 
 
 ENTRY_BASELINE_REGISTRY = build_entry_baseline_registry()
+
+
+def materialize_signal_time_baseline_schedules(
+    opportunity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Freeze the baseline schedule evidence available at signal time.
+
+    This is deliberately not a schedule synthesizer.  Producers may supply an
+    already-observed/signed schedule envelope; absent schedule evidence is
+    persisted as UNKNOWN so a later analyzer cannot reconstruct a favourable
+    treatment from post-signal prices.
+    """
+    episode_id = str(opportunity.get("episode_id") or "").strip()
+    opportunity_id = str(
+        opportunity.get("opportunity_id") or opportunity.get("record_id") or ""
+    ).strip()
+    supplied = opportunity.get("baseline_schedules")
+    supplied = supplied if isinstance(supplied, Mapping) else {}
+
+    def first(*values: Any) -> Any:
+        return next((value for value in values if value not in (None, "")), None)
+
+    features = opportunity.get("feature_snapshot_at_signal")
+    features = features if isinstance(features, Mapping) else {}
+    source_features = features.get("source_features")
+    source_features = source_features if isinstance(source_features, Mapping) else {}
+    market_context = features.get("market_context")
+    market_context = market_context if isinstance(market_context, Mapping) else {}
+    explicit_bbo = opportunity.get("signal_time_bbo")
+    explicit_bbo = explicit_bbo if isinstance(explicit_bbo, Mapping) else {}
+    bbo = first(
+        explicit_bbo,
+        features.get("signal_time_bbo"), features.get("bbo"),
+        source_features.get("signal_time_bbo"), source_features.get("bbo"),
+        market_context.get("signal_time_bbo"), market_context.get("bbo"),
+    )
+    if not isinstance(bbo, Mapping) or not bbo:
+        bbo = features
+    bbo = bbo if isinstance(bbo, Mapping) else {}
+    try:
+        signal_ts = int(float(opportunity.get("signal_ts")))
+        direction = str(opportunity.get("direction") or opportunity.get("raw_direction") or "").upper()
+        bid = float(first(bbo.get("bid"), bbo.get("best_bid")))
+        ask = float(first(bbo.get("ask"), bbo.get("best_ask")))
+        bid_qty = float(first(bbo.get("bid_qty"), bbo.get("best_bid_qty")))
+        ask_qty = float(first(bbo.get("ask_qty"), bbo.get("best_ask_qty")))
+        side_quote = ask if direction == "LONG" else bid
+        reference = float(first(
+            opportunity.get("signal_price"), features.get("signal_price"),
+            source_features.get("signal_price"), market_context.get("signal_price"),
+            side_quote,
+        ))
+        inputs_complete = (
+            signal_ts > 0 and direction in {"LONG", "SHORT"}
+            and bid > 0 and ask > 0 and bid <= ask
+            and bid_qty > 0 and ask_qty > 0 and reference > 0
+        )
+    except (TypeError, ValueError):
+        inputs_complete = False
+        signal_ts = 0
+        direction = "UNKNOWN"
+        side_quote = reference = 0.0
+
+    def offset_limit(offset_pct: float) -> float:
+        return orig_limit_price(reference, direction, float(offset_pct))
+
+    def interval(start: int, end: int, limit: float, index: int) -> dict[str, Any]:
+        return {
+            "bucket_id": f"signal-schedule:{index}", "start_ts": start,
+            "end_ts": end, "limit_price": limit, "generation": index,
+            "reference_basis": "PRE_SIGNAL_REFERENCE_AND_BBO_ONLY",
+        }
+
+    def signed_schedule(baseline: Mapping[str, Any]) -> list[dict[str, Any]]:
+        baseline_id = baseline["baseline_id"]
+        if baseline_id == "FINAL_MARKET_AFTER_EXPIRY":
+            return []  # expiry BBO is unknowable at signal time
+        if baseline_id == "MARKET_ENTRY_AT_SIGNAL":
+            return [interval(signal_ts, signal_ts + 1, side_quote, 0)]
+        if baseline.get("entry_type") == "LIMIT_CHASE_WINDOW":
+            start = signal_ts + int(baseline["window_start_sec"])
+            end = signal_ts + int(baseline["window_end_sec"])
+            return [interval(start, end, offset_limit(0.10), 0)]
+        expiry = signal_ts + int(baseline.get("terminal_expiry_sec") or 1800)
+        limit = offset_limit(float(baseline.get("initial_offset_pct") or 0.10))
+        if baseline_id == "NO_CHASE_LIMIT":
+            return [interval(signal_ts, expiry, limit, 0)]
+        stage_times = baseline.get("stage_seconds")
+        if stage_times:
+            starts = [signal_ts + int(value) for value in stage_times]
+            step = float(baseline.get("remaining_gap_step_fraction") or 0.25)
+        else:
+            every = int(baseline.get("reprice_interval_sec") or 180)
+            windows = set(int(value) for value in (baseline.get("chase_window_buckets") or ()))
+            starts = [signal_ts] + [
+                ts for ts in range(signal_ts + every, expiry, every)
+                if ((ts - signal_ts) // CHASE_WINDOW_SECONDS) in windows
+            ]
+            step = float(baseline.get("remaining_gap_step_fraction") or 0.50)
+        rows = []
+        for index, start in enumerate(starts):
+            if index:
+                limit = _chase_target(direction, limit, reference, step)
+            end = starts[index + 1] if index + 1 < len(starts) else expiry
+            rows.append(interval(start, end, limit, index))
+        return rows
+    captured = {}
+    for baseline in ENTRY_BASELINE_REGISTRY["baselines"]:
+        baseline_id = baseline["baseline_id"]
+        candidate = supplied.get(baseline_id)
+        if isinstance(candidate, Mapping):
+            envelope = deepcopy(dict(candidate))
+            envelope.setdefault("episode_id", episode_id)
+            envelope.setdefault("opportunity_id", opportunity_id)
+            envelope.setdefault("policy_signature", baseline["policy_signature"])
+            envelope.setdefault("capture_status", "CAPTURED_AT_SIGNAL")
+        elif inputs_complete:
+            schedule = signed_schedule(baseline)
+            if schedule:
+                envelope = {
+                    "episode_id": episode_id,
+                    "opportunity_id": opportunity_id,
+                    "policy_signature": baseline["policy_signature"],
+                    "schedule": schedule,
+                    "capture_status": "CAPTURED_AT_SIGNAL",
+                    "capture_basis": "PRE_SIGNAL_REFERENCE_AND_BBO_ONLY",
+                }
+            else:
+                envelope = {
+                    "episode_id": episode_id, "opportunity_id": opportunity_id,
+                    "policy_signature": baseline["policy_signature"], "schedule": [],
+                    "capture_status": "UNKNOWN_FUTURE_BBO_REQUIRED",
+                    "rejection_codes": ["EXPIRY_BBO_UNAVAILABLE_AT_SIGNAL_TIME"],
+                }
+        else:
+            envelope = {
+                "episode_id": episode_id,
+                "opportunity_id": opportunity_id,
+                "policy_signature": baseline["policy_signature"],
+                "schedule": [],
+                "capture_status": "UNKNOWN_NOT_CAPTURED_AT_SIGNAL",
+                "rejection_codes": ["BASELINE_SCHEDULE_NOT_CAPTURED_AT_SIGNAL"],
+            }
+        captured[baseline_id] = envelope
+    return {
+        "schema": "entry_baseline_signal_schedule_snapshot_v1",
+        "signal_ts": opportunity.get("signal_ts"),
+        "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
+        "schedules": captured,
+    }
 
 
 def _evidence_present(value: Any) -> bool:

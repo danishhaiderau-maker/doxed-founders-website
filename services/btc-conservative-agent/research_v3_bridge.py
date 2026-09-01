@@ -206,6 +206,28 @@ def _opportunity_market(*sources: Mapping[str, Any]) -> str:
     return "UNKNOWN"
 
 
+def _signal_time_baseline_inputs(*sources: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only explicitly signal/pre-signal reference and BBO evidence."""
+    result: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        features = source.get("research_feature_snapshot")
+        features = features if isinstance(features, Mapping) else source.get("feature_snapshot_at_signal")
+        features = features if isinstance(features, Mapping) else {}
+        bbo = _first(
+            source.get("signal_time_bbo"), source.get("pre_signal_bbo"),
+            features.get("signal_time_bbo"), features.get("pre_signal_bbo"),
+            features.get("bbo"),
+        )
+        if isinstance(bbo, Mapping) and "signal_time_bbo" not in result:
+            result["signal_time_bbo"] = copy.deepcopy(dict(bbo))
+        signal_price = _first(source.get("signal_price"), features.get("signal_price"))
+        if signal_price not in (None, "") and "signal_price" not in result:
+            result["signal_price"] = signal_price
+    return result
+
+
 def _timestamp(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -785,6 +807,7 @@ def dual_write_lane_decision(
     )
     segment_refs: list[dict[str, Any]] = []
     segment_writes: list[dict[str, Any]] = []
+    baseline_inputs = _signal_time_baseline_inputs(source)
     pre_entry_features = copy.deepcopy(_first(
         source.get("feature_snapshot_at_signal"),
         source.get("research_feature_snapshot"),
@@ -825,6 +848,31 @@ def dual_write_lane_decision(
             "post_exit": False,
         }
         if segment_rows:
+            if "signal_time_bbo" not in baseline_inputs:
+                last_pre_signal = next((
+                    row for row in reversed(segment_rows)
+                    if _timestamp(_first(row.get("ts"), row.get("bucket_ts"))) is not None
+                    and _timestamp(_first(row.get("ts"), row.get("bucket_ts"))) <= signal_ts
+                    and _positive_finite(row.get("bid")) is not None
+                    and _positive_finite(row.get("ask")) is not None
+                    and _positive_finite(_first(row.get("bid_qty"), row.get("bid_size"))) is not None
+                    and _positive_finite(_first(row.get("ask_qty"), row.get("ask_size"))) is not None
+                ), None)
+                if last_pre_signal is not None:
+                    baseline_inputs["signal_time_bbo"] = {
+                        "bid": last_pre_signal.get("bid"),
+                        "ask": last_pre_signal.get("ask"),
+                        "bid_qty": _first(last_pre_signal.get("bid_qty"), last_pre_signal.get("bid_size")),
+                        "ask_qty": _first(last_pre_signal.get("ask_qty"), last_pre_signal.get("ask_size")),
+                        "observed_ts": _timestamp(_first(
+                            last_pre_signal.get("ts"), last_pre_signal.get("bucket_ts"),
+                        )),
+                        "capture_basis": "IMMUTABLE_PRE_SIGNAL_MARKET_SEGMENT",
+                    }
+                    baseline_inputs.setdefault(
+                        "signal_price",
+                        _first(last_pre_signal.get("price"), last_pre_signal.get("last")),
+                    )
             segment_ref = store.put_market_segment(
                 source="LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL",
                 symbol=identity["symbol"], timeframe="1s",
@@ -866,6 +914,7 @@ def dual_write_lane_decision(
         "market_context_segment_coverage": segment_coverage,
         "grouping_basis": identity["grouping_basis"],
         "collector_version": COLLECTOR_VERSION,
+        **baseline_inputs,
         **causal_ids,
     })
     decision = store.append("decision", {
@@ -1037,6 +1086,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "symbol": identity["symbol"], "raw_direction": identity["raw_direction"],
         "feature_snapshot_at_signal": signal.get("research_feature_snapshot") or {},
         "grouping_basis": identity["grouping_basis"], "collector_version": COLLECTOR_VERSION,
+        **_signal_time_baseline_inputs(signal, order),
         **causal_ids,
     })
     atr14_pct_at_signal = _paper_atr14_pct_3m(order, signal)
@@ -1617,6 +1667,7 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
         "first_observed_as_provisional": True,
         "grouping_basis": grouping_basis,
         "collector_version": COLLECTOR_VERSION,
+        **_signal_time_baseline_inputs(source),
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:opened",
@@ -1733,6 +1784,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "feature_snapshot_at_signal": record.get("feature_snapshot_at_signal") or {},
         "pre_signal_context": record.get("pre_signal_context") or {},
         "collector_version": COLLECTOR_VERSION,
+        **_signal_time_baseline_inputs(record, envelope),
     }))
     writes.append(store.append("decision", {
         "record_id": f"decision:{event_id}",

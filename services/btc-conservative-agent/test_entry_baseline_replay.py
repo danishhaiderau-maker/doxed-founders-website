@@ -3,6 +3,9 @@ from copy import deepcopy
 from research.quantity_execution import build_signed_quantity_constraints
 from research.entry_baseline_replay import materialize_same_opportunity_replay
 from research_entry_baselines import ENTRY_BASELINE_REGISTRY, classify_baseline_evidence
+from research_entry_baselines import materialize_signal_time_baseline_schedules
+from research.entry_baseline_replay import materialize_v3_opportunity_replay
+import json
 
 
 CONSTRAINTS = build_signed_quantity_constraints(
@@ -138,3 +141,60 @@ def test_window_schedule_outside_declared_bucket_is_unknown():
     result = next(row for row in receipt["results"] if row["baseline_id"] == "CHASE_WINDOW_3")
     assert result["outcome_state"] == "UNKNOWN"
     assert result["rejection_codes"] == ["CHASE_WINDOW_SCHEDULE_OUTSIDE_DECLARED_BUCKET"]
+
+
+def test_signal_time_snapshot_persists_unknown_for_every_uncaptured_schedule():
+    snapshot = materialize_signal_time_baseline_schedules({
+        "episode_id": "ep-1", "opportunity_id": "opp-1", "signal_ts": 100,
+    })
+    assert set(snapshot["schedules"]) == {
+        row["baseline_id"] for row in ENTRY_BASELINE_REGISTRY["baselines"]
+    }
+    assert all(
+        row["capture_status"] == "UNKNOWN_NOT_CAPTURED_AT_SIGNAL"
+        for row in snapshot["schedules"].values()
+    )
+
+
+def test_signal_time_snapshot_captures_pre_signal_market_limit_and_chase_schedules():
+    snapshot = materialize_signal_time_baseline_schedules({
+        "episode_id": "ep-1", "opportunity_id": "opp-1", "signal_ts": 100,
+        "raw_direction": "LONG", "signal_price": 100,
+        "signal_time_bbo": {"bid": 99, "ask": 101, "bid_qty": 2, "ask_qty": 3},
+    })
+    rows = snapshot["schedules"]
+    assert rows["MARKET_ENTRY_AT_SIGNAL"]["schedule"][0]["limit_price"] == 101
+    assert rows["NO_CHASE_LIMIT"]["schedule"][0]["limit_price"] == 99.9
+    assert len(rows["CHASE_13_MIN_COMPRESSED"]["schedule"]) == 6
+    assert len(rows["CHASE_30_MIN_LEGACY"]["schedule"]) > 1
+    assert all(rows[f"CHASE_WINDOW_{index}"]["schedule"] for index in range(6))
+    assert rows["FINAL_MARKET_AFTER_EXPIRY"]["capture_status"] == "UNKNOWN_FUTURE_BBO_REQUIRED"
+
+
+def test_signal_time_snapshot_is_unknown_when_depth_is_absent():
+    snapshot = materialize_signal_time_baseline_schedules({
+        "episode_id": "ep-1", "opportunity_id": "opp-1", "signal_ts": 100,
+        "raw_direction": "LONG", "signal_price": 100,
+        "signal_time_bbo": {"bid": 99, "ask": 101},
+    })
+    assert all(
+        row["capture_status"] == "UNKNOWN_NOT_CAPTURED_AT_SIGNAL"
+        for row in snapshot["schedules"].values()
+    )
+
+
+def test_v3_materializer_uses_existing_engine_and_missing_schedule_is_unknown(tmp_path):
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    opportunity = {
+        "record_id": "opp-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
+        "epoch_id": "epoch-1", "source_revision": "rev-1",
+        "tile_config_signature": "tiles-1", "raw_direction": "LONG",
+        "symbol": "BTC", "signal_ts": 100,
+    }
+    opportunity["baseline_schedule_snapshot"] = materialize_signal_time_baseline_schedules(opportunity)
+    (ledgers / "opportunity.jsonl").write_text(json.dumps(opportunity) + "\n", encoding="utf-8")
+    report = materialize_v3_opportunity_replay(tmp_path)
+    assert report["same_opportunity_count"] == 1
+    assert all(row["unknown"] == 1 for row in report["summaries"].values())
+    assert all(row["no_fills"] == 0 for row in report["summaries"].values())

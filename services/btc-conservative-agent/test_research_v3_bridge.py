@@ -46,6 +46,45 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_lane_decision_freezes_baselines_from_immutable_pre_signal_bbo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "market_microstructure_1s.jsonl").write_text(
+                json.dumps({
+                    "bucket_ts": 999, "last": 100.0,
+                    "bid": 99.99, "ask": 100.01,
+                    "bid_qty": 3.0, "ask_qty": 4.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            dual_write_lane_decision(
+                {
+                    "trade_id": "scan-pre-bbo", "shared_ai_call_id": "scan-pre-bbo",
+                    "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                    "feature_snapshot_at_signal": {"signal_price": 100.0},
+                },
+                lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS"},
+            )
+            opportunity = json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+                .ledger_path("opportunity").read_text().strip()
+            )
+            self.assertEqual(
+                opportunity["signal_time_bbo"]["capture_basis"],
+                "IMMUTABLE_PRE_SIGNAL_MARKET_SEGMENT",
+            )
+            schedules = opportunity["baseline_schedule_snapshot"]["schedules"]
+            self.assertEqual(
+                schedules["MARKET_ENTRY_AT_SIGNAL"]["capture_status"],
+                "CAPTURED_AT_SIGNAL",
+            )
+            self.assertEqual(
+                schedules["NO_CHASE_LIMIT"]["capture_status"],
+                "CAPTURED_AT_SIGNAL",
+            )
+
     def test_terminal_schedule_snapshot_is_append_only_idempotent_and_evidence_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             signal = {
@@ -1057,6 +1096,10 @@ class V3BridgeTests(unittest.TestCase):
                 "policy_epoch_id": "policy-epoch-paper",
                 "entry_limit_policy": "OFFSET_0.29_CHASE_w234_s25_i60",
                 "entry_offset_fraction": 0.0029,
+                "signal_time_bbo": {
+                    "bid": 100.69, "ask": 100.71,
+                    "bid_qty": 4.0, "ask_qty": 4.0,
+                },
                 "context": {"cycle_3m_universe": {"atr14_pct_3m": 0.081}},
             }
             order = {
@@ -1099,6 +1142,12 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
             self.assertEqual(intent["entry_children_count"], 1)
             self.assertEqual(intent["entry_children"][0]["offset_pct"], 0.29)
+            opportunity = json.loads(store.ledger_path("opportunity").read_text().strip())
+            baselines = opportunity["baseline_schedule_snapshot"]["schedules"]
+            self.assertEqual(baselines["MARKET_ENTRY_AT_SIGNAL"]["capture_status"], "CAPTURED_AT_SIGNAL")
+            self.assertEqual(baselines["NO_CHASE_LIMIT"]["capture_status"], "CAPTURED_AT_SIGNAL")
+            self.assertTrue(baselines["CHASE_13_MIN_COMPRESSED"]["schedule"])
+            self.assertTrue(baselines["CHASE_30_MIN_LEGACY"]["schedule"])
             self.assertTrue(intent["policy_signature"].startswith("paper-policy-"))
             self.assertTrue(intent["policy_epoch_id"].startswith("paper-policy-epoch-"))
             self.assertEqual(intent["base_policy_signature"], "policy-paper")

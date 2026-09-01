@@ -103,6 +103,7 @@ RESEARCH_FINDINGS_FILE = "research_findings.txt"
 RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
+ENTRY_BASELINE_REPLAY_REPORT_FILE = "entry_baseline_replay_report.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 SAFE_POLICY_EXHAUSTIVE_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
@@ -19870,6 +19871,30 @@ def write_report_manifest(
     except Exception as exc:
         qualified_grid_error = f"{type(exc).__name__}: {exc}"
     reports = []
+    baseline_replay_error = None
+    try:
+        from research.entry_baseline_replay import materialize_v3_opportunity_replay
+        baseline_replay = materialize_v3_opportunity_replay(policy_data_dir)
+        baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
+        baseline_replay["generation_revision"] = str(generation_revision)
+        target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(baseline_replay, indent=2), encoding="utf-8")
+        os.replace(temporary, target)
+        replay_mirror = _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_REPORT_FILE)
+        reports.append({
+            "title": "Same-Opportunity Entry Baseline Replay",
+            "file": ENTRY_BASELINE_REPLAY_REPORT_FILE,
+            "category": "Chase",
+            "description": "Signed baseline outcomes and truthful UNKNOWN schedule coverage",
+            "size_bytes": replay_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
+            "summaries": baseline_replay.get("summaries"),
+        })
+    except Exception as exc:
+        baseline_replay_error = f"{type(exc).__name__}: {exc}"
     try:
         if lifecycle_bundle_inventory is None and lifecycle_bundle_inventory_error is None:
             lifecycle_bundle_inventory = build_lifecycle_bundle_inventory(
@@ -20115,6 +20140,12 @@ def write_report_manifest(
             "kind": analysis_provenance["fresh_epoch_kind"],
         },
         "required_report_status": {
+            ENTRY_BASELINE_REPLAY_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == ENTRY_BASELINE_REPLAY_REPORT_FILE for row in reports
+                ),
+                "generation_error": baseline_replay_error,
+            },
             POLICY_EVIDENCE_BINDING_REPORT_FILE: {
                 "available_in_generation": any(
                     row.get("file") == POLICY_EVIDENCE_BINDING_REPORT_FILE
