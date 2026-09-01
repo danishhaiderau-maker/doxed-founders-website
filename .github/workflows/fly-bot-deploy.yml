@@ -30,6 +30,7 @@ on:
           - recover-stalled-runtime
           - restart-only
           - inspect-runtime
+          - expand-storage
           - close-paper-position
           - flatten-paper-exposure
       expected_unready_revision:
@@ -49,6 +50,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  expand-storage:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'expand-storage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Extend the sole attached BTC data volume without deleting evidence
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          inventory="$(flyctl volumes list --app doxed-btc-bot --json)"
+          readarray -t fields < <(printf '%s' "$inventory" | python -c 'import json,sys; rows=json.load(sys.stdin); attached=[r for r in rows if str(r.get("attached_machine_id") or "").strip()]; assert len(rows)==1 and len(attached)==1, f"expected exactly one attached volume, found volumes={len(rows)} attached={len(attached)}"; r=attached[0]; assert int(r.get("size_gb") or 0)==2, "refusing unexpected source volume size"; print(r["id"]); print(r["attached_machine_id"])')
+          volume_id="${fields[0]}"
+          machine_id="${fields[1]}"
+          result="$(flyctl volumes extend "$volume_id" --app doxed-btc-bot --size 4 --yes --json)"
+          printf '%s\n' "$result"
+          printf '%s' "$result" | python -c 'import json,sys; d=json.load(sys.stdin); v=d.get("volume") or d; assert int(v.get("size_gb") or 0)==4, f"extension did not reach 4 GB: {v}"'
+          sleep 5
+          flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); assert len(rows)==1 and int(rows[0].get("size_gb") or 0)==4; print(json.dumps({"volume_id":rows[0]["id"],"size_gb":rows[0]["size_gb"],"state":rows[0].get("state")},sort_keys=True))'
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "sh -lc 'df -h /app/data; df -i /app/data'"
+
   close-paper-position:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'close-paper-position'
     runs-on: ubuntu-latest
