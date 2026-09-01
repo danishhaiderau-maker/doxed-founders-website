@@ -24,11 +24,19 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
+
+
+@pytest.fixture(autouse=True)
+def _isolated_evidence_root(monkeypatch, tmp_path) -> None:
+    """Keep immutable receipt ledgers isolated across tests and reruns."""
+    monkeypatch.chdir(tmp_path)
 
 
 def _approved_ai(long_score: int, short_score: int) -> dict:
@@ -55,7 +63,14 @@ def _run_spawn(long_score: int, short_score: int, monkeypatch, textual_decision=
     monkeypatch.setattr(bot, "_spawn_combo_lane", fake_spawn_combo_lane)
     monkeypatch.setattr(bot, "continuous_ai_research_enabled", lambda: True)
 
-    ctx = {"trade_id": "test-ctx"}
+    # Immutable pre-entry evidence is keyed by causal opportunity identity.
+    # Each score case is a distinct synthetic opportunity, so do not reuse one
+    # trade id across parametrically different receipts in the same test run.
+    ctx = {
+        "trade_id": (
+            f"test-ctx-{long_score}-{short_score}-{textual_decision.lower()}"
+        )
+    }
     ai = _approved_ai(long_score, short_score)
     ai["decision"] = textual_decision
     ai["approved"] = textual_decision == "APPROVE"
