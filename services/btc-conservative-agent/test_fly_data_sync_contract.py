@@ -266,7 +266,7 @@ def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
 
 def test_optional_relay_evidence_is_process_isolated_and_cadence_bounded():
     assert "$relayEvidenceAttemptIntervalSec = 1800" in SYNC_LOOP
-    assert "$lastRelayEvidenceAttemptAt = [DateTimeOffset]::MinValue" in SYNC_LOOP
+    assert "$lastRelayEvidenceAttemptAt = [DateTimeOffset]::UtcNow" in SYNC_LOOP
     relay_body = SYNC_LOOP.split("function Invoke-OptionalRelayEvidenceSync", 1)[1]
     relay_body = relay_body.split("function Wait-FlyRuntimeQuietForFullSync", 1)[0]
     assert "$childHost = (Get-Process -Id $PID -ErrorAction Stop).Path" in relay_body

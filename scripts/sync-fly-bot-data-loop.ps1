@@ -363,7 +363,11 @@ $preflightManifestTimeoutSec = 90
 $preflightInventoryWaitMaxSec = 330
 $relaySyncAttempts = 2
 $relayEvidenceAttemptIntervalSec = 1800
-$lastRelayEvidenceAttemptAt = [DateTimeOffset]::MinValue
+# Core mirror ownership and its terminal receipt must become available first.
+# A fresh loop waits one optional cadence before the first relay collection;
+# this avoids a 7 MB nested payload expansion delaying analyzer admission at
+# every launcher/recovery boundary.
+$lastRelayEvidenceAttemptAt = [DateTimeOffset]::UtcNow
 $fullSyncQuietSuccesses = 3
 $fullSyncQuietProbeTimeoutSec = 8
 $fullSyncQuietMaxWaitSec = 90
