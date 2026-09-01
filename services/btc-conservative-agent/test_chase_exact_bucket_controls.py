@@ -119,6 +119,60 @@ def test_pending_order_registration_is_trade_id_idempotent():
     assert namespace["lane_pending_orders"]["CONTINUOUS"] == [first]
 
 
+def test_pending_signal_snapshot_retries_concurrent_nested_mapping_mutation():
+    """A lane writer racing evidence capture must not crash registration."""
+    tree = ast.parse(BOT_SOURCE)
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_stable_pending_signal_copy"
+    )
+    namespace = {"copy": copy, "time": time}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), "<signal-copy-test>", "exec"), namespace)
+
+    class MutatesOnce(dict):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.failed = False
+
+        def items(self):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("dictionary changed size during iteration")
+            return super().items()
+
+    signal = {"features": MutatesOnce({"velocity": 0.1})}
+    snapshot = namespace["_stable_pending_signal_copy"](signal)
+
+    assert snapshot == {"features": {"velocity": 0.1}}
+    assert snapshot is not signal
+    assert snapshot["features"] is not signal["features"]
+
+
+def test_pending_signal_snapshot_exhaustion_is_bounded_and_explicit():
+    tree = ast.parse(BOT_SOURCE)
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_stable_pending_signal_copy"
+    )
+    namespace = {"copy": copy, "time": time}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), "<signal-copy-test>", "exec"), namespace)
+
+    class AlwaysMutating(dict):
+        def items(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    try:
+        namespace["_stable_pending_signal_copy"]({"features": AlwaysMutating()})
+    except RuntimeError as exc:
+        assert str(exc) == "pending signal remained mutable during snapshot"
+    else:
+        raise AssertionError("persistent mutation must exhaust the bounded snapshot retries")
+
+
 def test_order_placement_does_not_hold_trade_lock_across_registration_hydration():
     """Slow collector/schedule hydration must not starve WS/API snapshots."""
     tree = ast.parse(BOT_SOURCE)

@@ -3618,6 +3618,21 @@ def _append_paper_action_receipt(
     )
 
 
+def _stable_pending_signal_copy(signal: dict, attempts: int = 3) -> dict:
+    """Snapshot a shared signal without propagating a transient writer race."""
+    last_error = None
+    for attempt in range(max(1, int(attempts))):
+        try:
+            return copy.deepcopy(signal) if isinstance(signal, dict) else {}
+        except RuntimeError as exc:
+            if "changed size during iteration" not in str(exc).lower():
+                raise
+            last_error = exc
+            if attempt + 1 < max(1, int(attempts)):
+                time.sleep(0)
+    raise RuntimeError("pending signal remained mutable during snapshot") from last_error
+
+
 def lane_register_pending_order(order: dict):
     """Dual-write once: global pending_orders + lane-owned bucket.
 
@@ -3701,11 +3716,26 @@ def lane_register_pending_order(order: dict):
             lst.append(order)
     trades_store = globals().get("trades_map") or {}
     master_signal = trades_store.get(tid, {}).get("signal_ref") if tid else None
+    try:
+        snapshot_fn = globals().get("_stable_pending_signal_copy", copy.deepcopy)
+        signal_snapshot = (
+            snapshot_fn(master_signal) if isinstance(master_signal, dict) else {}
+        )
+    except RuntimeError as exc:
+        # A hot shared signal must not kill the position manager.  The pending
+        # order is already canonical; continue with its lane-local fields and
+        # explicitly omit the unstable enrichment instead of publishing a
+        # torn cross-lane snapshot.
+        logger.warning(
+            f"[ORDER EVIDENCE] signal snapshot deferred trade_id={tid} error={exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        signal_snapshot = {}
     schedule_initializer = globals().get("initialize_research_order_schedule")
     if callable(schedule_initializer):
         schedule_initializer(
             order,
-            master_signal if isinstance(master_signal, dict) else None,
+            signal_snapshot,
             now=float(order.get("created_ts") or time.time()),
             registered=True,
         )
@@ -3718,7 +3748,6 @@ def lane_register_pending_order(order: dict):
             chase_acked=False,
             observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
         )
-    master_signal = master_signal if isinstance(master_signal, dict) else None
     is_paper_entry = not bool(order.get("bitfinex_order_id") or order.get("bitfinex_live_entry")) and str(order.get("entry_type") or "").upper() not in {"POSTONLY_TP", "REDUCE_ONLY", "EXIT"}
     if is_paper_entry:
         # Freeze the signed paper-policy identity at the atomic order boundary.
@@ -3727,7 +3756,7 @@ def lane_register_pending_order(order: dict):
         frozen_identity = paper_policy_identity_for_sources(
             _collector_v22_epoch_id(),
             order,
-            master_signal if isinstance(master_signal, dict) else {},
+            signal_snapshot,
         )
         order.update(copy.deepcopy(frozen_identity))
         capture_helper = globals().get("_capture_runtime_quantity_constraints")
@@ -3756,7 +3785,7 @@ def lane_register_pending_order(order: dict):
         if callable(receipt_writer):
             receipt_writer(
                 order,
-                master_signal,
+                signal_snapshot,
                 action_generation=0,
                 action_type="INITIAL_SUBMIT",
                 policy_due_ts=float(order.get("created_ts") or dispatch_ts),
@@ -3770,7 +3799,7 @@ def lane_register_pending_order(order: dict):
         evidence_key,
         {
             "order": copy.deepcopy(order),
-            "signal": copy.deepcopy(master_signal) if isinstance(master_signal, dict) else {},
+            "signal": signal_snapshot,
             "is_paper_entry": is_paper_entry,
         },
         source_ts=source_ts,
