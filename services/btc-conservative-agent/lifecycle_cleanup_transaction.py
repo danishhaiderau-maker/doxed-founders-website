@@ -12,6 +12,7 @@ import hmac
 import json
 import os
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA = "lifecycle_cleanup_transaction_v2"
+PURGE_SCHEMA = "lifecycle_cleanup_purge_v1"
 ATTESTATION_SCHEMA = "lifecycle_laptop_attestation_v1"
 TERMINAL_OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -325,6 +327,12 @@ class CleanupTransaction:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.link(temp, path)
+            if os.name != "nt":
+                directory_fd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -397,3 +405,226 @@ class CleanupTransaction:
             self._write_once(committed, committed_payload)
             results.append({"bundle_id": row["bundle_id"], "status": "COMMITTED_QUARANTINED"})
         return results
+
+
+class PurgeTransaction(CleanupTransaction):
+    """Proof-bound deletion of an aged v2 committed lifecycle quarantine.
+
+    This class has no production caller and defaults disabled.  A durable plan
+    is published before the quarantine is atomically isolated in purge staging;
+    retries can then remove only the exact declared files still present.
+    """
+
+    def __init__(
+        self, volume_root: Path, *, enabled: bool = False,
+        minimum_age_seconds: float = 86_400,
+    ):
+        super().__init__(volume_root, enabled=enabled)
+        self.minimum_age_seconds = max(0.0, float(minimum_age_seconds))
+        self.purge_tx_root = self.volume_root / "v3" / "lifecycle_purge_transactions"
+        self.purge_staging_root = self.volume_root / "v3" / "lifecycle_purge_staging"
+
+    @staticmethod
+    def _now(value: datetime | None) -> datetime:
+        current = value or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            raise CleanupRejected(["PURGE_NOW_TIMEZONE_MISSING"])
+        return current.astimezone(timezone.utc)
+
+    def _load_committed(self, path: Path) -> tuple[Path, dict[str, Any]]:
+        committed = self._contained(path, self.tx_root)
+        if committed.name != "COMMITTED.json":
+            raise CleanupRejected(["COMMITTED_PATH_INVALID"])
+        try:
+            row = json.loads(committed.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise CleanupRejected(["COMMITTED_RECORD_UNREADABLE"])
+        if row.get("schema") != SCHEMA or row.get("state") != "COMMITTED":
+            raise CleanupRejected(["V2_COMMITTED_RECORD_REQUIRED"])
+        return committed, row
+
+    @staticmethod
+    def _guard_current(
+        committed: Mapping[str, Any], current_identity: Mapping[str, Any],
+        active_references: Mapping[str, list[str]],
+    ) -> None:
+        reasons = []
+        for key in (
+            "source_git_rev", "deployed_git_rev", "collection_epoch_id",
+            "tile_registry_signature", "config_signature",
+        ):
+            if str(current_identity.get(key) or "") != str(committed.get(key) or ""):
+                reasons.append(f"CURRENT_{key.upper()}_MISMATCH")
+        for kind in ("runtime", "sync", "analyzer", "lifecycle_worker"):
+            if active_references.get(kind):
+                reasons.append(f"ACTIVE_{kind.upper()}_REFERENCE")
+        if reasons:
+            raise CleanupRejected(reasons)
+
+    @staticmethod
+    def _declared_plan(bundle: Path, proof: Mapping[str, Any]) -> list[dict[str, Any]]:
+        rows = [{
+            "path": "manifest.json", "sha256": _sha256_path(bundle / "manifest.json"),
+            "size": (bundle / "manifest.json").stat().st_size,
+        }]
+        rows.extend({
+            "path": str(row["path"]), "sha256": str(row["sha256"]),
+            "size": int(row["size"]),
+        } for row in proof.get("recomputed_files") or [])
+        return sorted(rows, key=lambda row: row["path"])
+
+    def execute_purge(
+        self, committed_path: Path, receipt: Mapping[str, Any], *,
+        current_identity: Mapping[str, Any],
+        active_references: Mapping[str, list[str]],
+        attestation_keys: Mapping[str, bytes],
+        now: datetime | None = None,
+        disk_free_bytes: Callable[[], int] | None = None,
+        delete_file: Callable[[Path], None] | None = None,
+    ) -> dict[str, Any]:
+        if not self.enabled:
+            return {"status": "DISABLED_QUARANTINE_RETAINED", "purge_authorized": False}
+        committed_path, committed = self._load_committed(committed_path)
+        current = self._now(now)
+        committed_at = _utc(committed.get("committed_at"))
+        if committed_at is None:
+            raise CleanupRejected(["IMMUTABLE_COMMITTED_AT_MISSING"])
+        committed_time = datetime.fromisoformat(committed_at.replace("Z", "+00:00"))
+        if (current - committed_time).total_seconds() < self.minimum_age_seconds:
+            raise CleanupRejected(["MINIMUM_QUARANTINE_AGE_NOT_MET"])
+        self._guard_current(committed, current_identity, active_references)
+
+        binding = _commit_binding(receipt)
+        for key, value in binding.items():
+            if not hmac.compare_digest(str(committed.get(key) or ""), str(value)):
+                raise CleanupRejected([f"COMMITTED_{key.upper()}_MISMATCH"])
+        attestation = receipt.get("laptop_attestation") or {}
+        attestation_key = attestation_keys.get(str(attestation.get("key_id") or ""))
+        expected_attestation = hmac.new(
+            attestation_key or b"", _canonical(attestation_material(receipt)), hashlib.sha256,
+        ).hexdigest()
+        if (
+            attestation.get("schema") != ATTESTATION_SCHEMA
+            or not attestation_key
+            or not hmac.compare_digest(
+                expected_attestation, str(attestation.get("hmac_sha256") or "")
+            )
+        ):
+            raise CleanupRejected(["LAPTOP_ATTESTATION_INVALID"])
+        bundle_id = str(committed.get("bundle_id") or "")
+        if not re.fullmatch(r"lifecycle-[0-9a-f]{64}", bundle_id):
+            raise CleanupRejected(["BUNDLE_ID_INVALID"])
+        quarantine = self._contained(
+            self.volume_root / str(committed.get("quarantine") or ""),
+            self.quarantine_root,
+        )
+        if quarantine.name != bundle_id:
+            raise CleanupRejected(["QUARANTINE_BUNDLE_ID_MISMATCH"])
+        staging = self._contained(self.purge_staging_root / bundle_id, self.purge_staging_root)
+        transaction_dir = self.purge_tx_root / hashlib.sha256(bundle_id.encode()).hexdigest()[:24]
+        prepared_path = transaction_dir / "PREPARED.json"
+        purged_path = transaction_dir / "PURGED.json"
+        if purged_path.exists():
+            result = json.loads(purged_path.read_text(encoding="utf-8"))
+            if result.get("schema") != PURGE_SCHEMA or result.get("receipt_sha256") != binding["receipt_sha256"]:
+                raise CleanupRejected(["PURGED_RECEIPT_CONFLICT"])
+            return result
+
+        free_bytes = disk_free_bytes or (lambda: int(shutil.disk_usage(self.volume_root).free))
+        if prepared_path.exists():
+            plan = json.loads(prepared_path.read_text(encoding="utf-8"))
+            if plan.get("schema") != PURGE_SCHEMA or plan.get("receipt_sha256") != binding["receipt_sha256"]:
+                raise CleanupRejected(["PURGE_PLAN_CONFLICT"])
+            if not hmac.compare_digest(
+                str(plan.get("committed_sha256") or ""), _sha256_path(committed_path)
+            ):
+                raise CleanupRejected(["COMMITTED_RECORD_CHANGED_AFTER_PREPARE"])
+        else:
+            if not quarantine.is_dir() or staging.exists():
+                raise CleanupRejected(["QUARANTINE_STATE_INVALID"])
+            proof = verify_bundle(
+                quarantine, receipt, current_identity=current_identity,
+                active_references=active_references, attestation_keys=attestation_keys,
+            )
+            if _sha256_canonical(proof) != str(committed.get("proof_sha256") or ""):
+                raise CleanupRejected(["COMMITTED_PROOF_SHA256_MISMATCH"])
+            files = self._declared_plan(quarantine, proof)
+            plan = {
+                "schema": PURGE_SCHEMA, "state": "PREPARED",
+                "bundle_id": bundle_id, "receipt_sha256": binding["receipt_sha256"],
+                "committed_sha256": _sha256_path(committed_path),
+                "prepared_at": current.isoformat().replace("+00:00", "Z"),
+                "before_free_bytes": int(free_bytes()),
+                "declared_bytes": sum(int(row["size"]) for row in files),
+                "files": files,
+            }
+            self._write_once(prepared_path, plan)
+            staging.parent.mkdir(parents=True, exist_ok=True)
+            quarantine.replace(staging)
+            if os.name != "nt":
+                for parent in (quarantine.parent, staging.parent):
+                    directory_fd = os.open(str(parent), os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+
+        if quarantine.exists() or not staging.is_dir():
+            raise CleanupRejected(["PURGE_STAGING_STATE_INVALID"])
+        declared = {str(row["path"]): row for row in plan.get("files") or []}
+        expected_directories = {
+            parent.as_posix()
+            for relative in declared
+            for parent in Path(relative).parents
+            if parent != Path(".")
+        }
+        tree_entries = list(staging.rglob("*"))
+        if any(path.is_symlink() for path in tree_entries):
+            raise CleanupRejected(["PURGE_STAGING_REPARSE_POINT"])
+        actual = {
+            path.relative_to(staging).as_posix(): path
+            for path in tree_entries if path.is_file()
+        }
+        unexpected = set(actual) - set(declared)
+        if unexpected:
+            raise CleanupRejected(["PURGE_STAGING_UNDECLARED_CONTENT"])
+        actual_directories = {
+            path.relative_to(staging).as_posix()
+            for path in tree_entries if path.is_dir()
+        }
+        if actual_directories - expected_directories:
+            raise CleanupRejected(["PURGE_STAGING_UNDECLARED_DIRECTORY"])
+        remover = delete_file or (lambda path: path.unlink())
+        for relative in sorted(actual):
+            path = actual[relative]
+            expected = declared[relative]
+            if path.stat().st_size != int(expected["size"]) or not hmac.compare_digest(
+                _sha256_path(path), str(expected["sha256"])
+            ):
+                raise CleanupRejected(["PURGE_STAGING_CONTENT_MISMATCH"])
+            remover(path)
+        for directory in sorted(
+            (path for path in tree_entries if path.is_dir()),
+            key=lambda path: len(path.parts), reverse=True,
+        ):
+            directory.rmdir()
+        staging.rmdir()
+        if os.name != "nt":
+            directory_fd = os.open(str(staging.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        after_free = int(free_bytes())
+        result = {
+            "schema": PURGE_SCHEMA, "state": "PURGED", "status": "PURGED",
+            "bundle_id": bundle_id, "receipt_sha256": binding["receipt_sha256"],
+            "committed_sha256": plan["committed_sha256"],
+            "before_free_bytes": int(plan["before_free_bytes"]),
+            "after_free_bytes": after_free,
+            "freed_bytes": max(0, after_free - int(plan["before_free_bytes"])),
+            "declared_bytes": int(plan["declared_bytes"]),
+            "purged_at": current.isoformat().replace("+00:00", "Z"),
+        }
+        self._write_once(purged_path, result)
+        return result

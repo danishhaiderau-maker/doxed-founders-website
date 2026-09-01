@@ -1,11 +1,13 @@
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from lifecycle_cleanup_transaction import (
-    CleanupRejected, CleanupTransaction, recompute_file, sign_attestation, verify_bundle,
+    CleanupRejected, CleanupTransaction, PurgeTransaction, recompute_file,
+    sign_attestation, verify_bundle,
 )
 
 BOT_SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
@@ -238,3 +240,123 @@ def test_runtime_route_wires_all_rechecks_and_keeps_default_disabled():
         assert "_reconcile_lifecycle_cleanup_transactions()" in source
         for kind in ("runtime", "sync", "analyzer", "lifecycle_worker"):
             assert f'"{kind}"' in source
+
+
+def _committed_quarantine(tmp_path):
+    root, bundle, receipt, current, keys = _fixture(tmp_path)
+    proof = verify_bundle(bundle, receipt, current_identity=current, active_references={}, attestation_keys=keys)
+    cleanup = CleanupTransaction(root, enabled=True)
+    cleanup.execute(bundle, receipt, proof, revalidate=lambda: proof)
+    committed = next(cleanup.tx_root.glob("*/COMMITTED.json"))
+    return (
+        root, receipt, current, keys, committed,
+        cleanup.quarantine_root / receipt["bundle_id"],
+        datetime.now(timezone.utc) + timedelta(days=2),
+    )
+
+
+def test_purge_is_default_disabled_and_retains_quarantine(tmp_path):
+    root, receipt, current, keys, committed, quarantine, future = _committed_quarantine(tmp_path)
+    result = PurgeTransaction(root).execute_purge(
+        committed, receipt, current_identity=current, active_references={},
+        attestation_keys=keys, now=future,
+    )
+    assert result == {"status": "DISABLED_QUARANTINE_RETAINED", "purge_authorized": False}
+    assert quarantine.is_dir()
+
+
+def test_purge_rejects_minimum_age_and_active_reference(tmp_path):
+    root, receipt, current, keys, committed, quarantine, _ = _committed_quarantine(tmp_path)
+    purge = PurgeTransaction(root, enabled=True, minimum_age_seconds=86400)
+    with pytest.raises(CleanupRejected, match="MINIMUM_QUARANTINE_AGE_NOT_MET"):
+        purge.execute_purge(
+            committed, receipt, current_identity=current, active_references={},
+            attestation_keys=keys, now=datetime.now(timezone.utc),
+        )
+    with pytest.raises(CleanupRejected, match="ACTIVE_RUNTIME_REFERENCE"):
+        purge.execute_purge(
+            committed, receipt, current_identity=current,
+            active_references={"runtime": ["order"]}, attestation_keys=keys,
+            now=datetime.now(timezone.utc) + timedelta(days=2),
+        )
+    assert quarantine.is_dir()
+
+
+def test_purge_rejects_current_identity_drift(tmp_path):
+    root, receipt, current, keys, committed, quarantine, future = _committed_quarantine(tmp_path)
+    drifted = dict(current, collection_epoch_id="different-epoch")
+    with pytest.raises(CleanupRejected, match="CURRENT_COLLECTION_EPOCH_ID_MISMATCH"):
+        PurgeTransaction(root, enabled=True, minimum_age_seconds=0).execute_purge(
+            committed, receipt, current_identity=drifted, active_references={},
+            attestation_keys=keys, now=future,
+        )
+    assert quarantine.is_dir()
+
+
+def test_purge_rejects_receipt_tamper_and_containment_escape(tmp_path):
+    root, receipt, current, keys, committed, quarantine, future = _committed_quarantine(tmp_path)
+    purge = PurgeTransaction(root, enabled=True, minimum_age_seconds=0)
+    tampered = json.loads(json.dumps(receipt))
+    tampered["terminal_at"] = "2026-09-01T04:00:00Z"
+    with pytest.raises(CleanupRejected, match="COMMITTED_RECEIPT_SHA256_MISMATCH"):
+        purge.execute_purge(
+            committed, tampered, current_identity=current, active_references={},
+            attestation_keys=keys, now=future,
+        )
+    row = json.loads(committed.read_text())
+    row["quarantine"] = "outside/" + receipt["bundle_id"]
+    committed.write_text(json.dumps(row), encoding="utf-8")
+    with pytest.raises(ValueError):
+        purge.execute_purge(
+            committed, receipt, current_identity=current, active_references={},
+            attestation_keys=keys, now=future,
+        )
+    assert quarantine.is_dir()
+
+
+def test_purge_success_receipt_and_idempotent_replay(tmp_path):
+    root, receipt, current, keys, committed, quarantine, future = _committed_quarantine(tmp_path)
+    samples = iter((1000, 1300))
+    purge = PurgeTransaction(root, enabled=True, minimum_age_seconds=0)
+    result = purge.execute_purge(
+        committed, receipt, current_identity=current, active_references={},
+        attestation_keys=keys, now=future, disk_free_bytes=lambda: next(samples),
+    )
+    assert result["status"] == "PURGED"
+    assert result["before_free_bytes"] == 1000
+    assert result["after_free_bytes"] == 1300
+    assert result["freed_bytes"] == 300
+    assert not quarantine.exists()
+    replay = purge.execute_purge(
+        committed, receipt, current_identity=current, active_references={},
+        attestation_keys=keys, now=future,
+    )
+    assert replay == result
+
+
+def test_purge_partial_failure_is_recoverable_without_false_receipt(tmp_path):
+    root, receipt, current, keys, committed, _, future = _committed_quarantine(tmp_path)
+    purge = PurgeTransaction(root, enabled=True, minimum_age_seconds=0)
+    calls = []
+
+    def fail_second(path):
+        calls.append(path.name)
+        if len(calls) == 2:
+            raise OSError("injected delete failure")
+        path.unlink()
+
+    with pytest.raises(OSError, match="injected delete failure"):
+        purge.execute_purge(
+            committed, receipt, current_identity=current, active_references={},
+            attestation_keys=keys, now=future, disk_free_bytes=lambda: 1000,
+            delete_file=fail_second,
+        )
+    assert not list(purge.purge_tx_root.glob("*/PURGED.json"))
+    staging = purge.purge_staging_root / receipt["bundle_id"]
+    assert staging.is_dir()
+    recovered = purge.execute_purge(
+        committed, receipt, current_identity=current, active_references={},
+        attestation_keys=keys, now=future, disk_free_bytes=lambda: 1400,
+    )
+    assert recovered["status"] == "PURGED"
+    assert not staging.exists()
