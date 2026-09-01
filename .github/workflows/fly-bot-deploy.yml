@@ -374,7 +374,20 @@ jobs:
               confirmations = 0
               last_snapshot_seq = None
               for attempt in range(1, 21):
-                  candidate = request_json("/api/relay-execution-state?fresh=1")
+                  try:
+                      candidate = request_json("/api/relay-execution-state?fresh=1")
+                      status_flat = require_legacy_bootstrap_status(require_flat=True)
+                  except Exception as exc:
+                      # A slow legacy process may miss one transport deadline.
+                      # The failed sample contributes no confirmation and the
+                      # bounded proof still requires three advancing successes.
+                      print(
+                          f"Legacy flat proof attempt={attempt} response={type(exc).__name__}",
+                          flush=True,
+                      )
+                      confirmations = 0
+                      time.sleep(min(attempt, 3))
+                      continue
                   generation = candidate.get("money_state_generation")
                   if isinstance(generation, int) and not isinstance(generation, bool):
                       raise SystemExit("relay generation appeared during legacy flat proof; restart with the normal fence")
@@ -388,7 +401,6 @@ jobs:
                       and not isinstance(sequence, bool)
                       and (last_snapshot_seq is None or sequence > last_snapshot_seq)
                   )
-                  status_flat = require_legacy_bootstrap_status(require_flat=True)
                   if not orders and not positions and status_flat and sequence_advanced:
                       confirmations += 1
                       last_snapshot_seq = sequence

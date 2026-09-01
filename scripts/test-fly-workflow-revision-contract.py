@@ -100,6 +100,22 @@ def test_legacy_missing_order_is_accepted_only_before_mandatory_flat_reproof():
     assert "raise" in maintenance[missing:marker]
 
 
+def test_legacy_flat_proof_ignores_transport_failures_but_not_confirmations():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    proof = maintenance[
+        maintenance.index("def prove_legacy_bootstrap_flat():"):
+        maintenance.index("def fresh_exposure", maintenance.index("def prove_legacy_bootstrap_flat():"))
+    ]
+    assert "for attempt in range(1, 21):" in proof
+    assert "except Exception as exc:" in proof
+    assert "confirmations = 0" in proof
+    assert "continue" in proof
+    assert "confirmations >= 3" in proof
+
+
 def test_generation_remains_mandatory_outside_the_exact_bootstrap():
     maintenance = DEPLOY[
         DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
