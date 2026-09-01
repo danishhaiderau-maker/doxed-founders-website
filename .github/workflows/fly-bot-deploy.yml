@@ -126,12 +126,6 @@ jobs:
               for attempt in range(1, 6):
                   try:
                       state = request_json("/api/relay-execution-state?fresh=1", timeout=20)
-                      if not (
-                          state.get("force_paper_mode") is True
-                          and state.get("live_armed") is False
-                          and state.get("bitfinex_live_enabled") is False
-                      ):
-                          raise RuntimeError("paper/live safety flags are not proven")
                       if not isinstance(state.get("orders"), list) or not isinstance(state.get("positions"), list):
                           raise RuntimeError("authenticated execution state omitted exposure arrays")
                       return state
@@ -139,6 +133,14 @@ jobs:
                       last = exc
                       time.sleep(min(2 * attempt, 8))
               raise RuntimeError(f"execution state unavailable: {type(last).__name__}")
+
+          health = request_json("/health", timeout=20)
+          if not (
+              health.get("force_paper_mode") is True
+              and health.get("live_armed") is False
+              and health.get("bitfinex_live_enabled") is False
+          ):
+              raise SystemExit("paper/live safety flags are not proven")
 
           actions = []
           for round_no in range(1, 4):

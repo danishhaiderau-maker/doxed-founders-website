@@ -3168,9 +3168,9 @@ def test_guarded_workflow_has_exact_paper_only_flatten_recovery_mode():
     workflow = (ROOT.parents[1] / ".github" / "workflows" / "fly-bot-deploy.yml").read_text(encoding="utf-8")
     assert "- flatten-paper-exposure" in workflow
     block = workflow.split("  flatten-paper-exposure:", 1)[1].split("\n  restart-only:", 1)[0]
-    assert 'state.get("force_paper_mode") is True' in block
-    assert 'state.get("live_armed") is False' in block
-    assert 'state.get("bitfinex_live_enabled") is False' in block
+    assert 'health.get("force_paper_mode") is True' in block
+    assert 'health.get("live_armed") is False' in block
+    assert 'health.get("bitfinex_live_enabled") is False' in block
     assert '"/api/reconcile/phantom-cancel"' in block
     assert '"/api/orders/cancel"' in block
     assert "AUTHORIZED_PAPER_UPGRADE_BOUNDARY_UNKNOWN" in block
