@@ -6,7 +6,11 @@ function Assert-True([bool]$Condition, [string]$Message) {
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("btc-lifecycle-copy-" + [guid]::NewGuid().ToString('N'))
+$savedAttestationKey = [Environment]::GetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY')
+$savedAttestationKeyId = [Environment]::GetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID')
 try {
+  [Environment]::SetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY', 'deterministic-test-key')
+  [Environment]::SetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID', 'test-laptop-1')
   $bundleId = 'lifecycle-' + ('a' * 64)
   $bundleRelative = "v3/lifecycle_bundles/aa/$bundleId"
   $bundleRoot = Join-Path $testRoot ($bundleRelative -replace '/', '\')
@@ -34,7 +38,7 @@ try {
     lifecycle_identity_id = 'identity-1'
     lifecycle_id = 'episode-1|policy-1|FIXED'
     identity = [ordered]@{ collection_epoch_id = 'epoch-1'; episode_id = 'episode-1'; policy_signature = 'policy-1'; research_lane = 'FIXED' }
-    provenance = [ordered]@{ source_revision = ('b' * 40); deployed_revision = ('c' * 40); tile_config_signature = ('d' * 64) }
+    provenance = [ordered]@{ source_revision = ('b' * 40); deployed_revision = ('c' * 40); tile_config_signature = ('d' * 64); config_signature = ('f' * 64) }
     completion = [ordered]@{ ready = $true; classification = 'NO_FILL'; terminal_ts = [double]1788220800.0; horizon_complete_ts = [double]1788228000.0; blockers = @() }
     files = @($eventRow)
     source_cleanup_authorized = $false
@@ -61,6 +65,9 @@ try {
   Assert-True (Test-Path -LiteralPath (Join-Path $testRoot "archive/lifecycle_bundles/$bundleId/events.jsonl")) 'recoverable archive is published'
   Assert-True (Test-Path -LiteralPath (Join-Path $testRoot "v3/lifecycle_bundle_index/$bundleId.json")) 'durable index is published'
   Assert-True ($first.Receipt.source_cleanup_authorized -ne $true) 'receipt cannot authorize cleanup'
+  Assert-True ([string]$first.Receipt.laptop_attestation.schema -ceq 'lifecycle_laptop_attestation_v1') 'laptop attestation is signed'
+  Assert-True ([string]$first.Receipt.laptop_attestation.key_id -ceq 'test-laptop-1') 'laptop attestation key identity is explicit'
+  Assert-True ([string]$first.Receipt.laptop_attestation.hmac_sha256 -match '^[0-9a-f]{64}$') 'laptop attestation HMAC is validly shaped'
 
   $transferId = 'transfer-' + ('e' * 64)
   $transferRelative = "v3/lifecycle_transfer_bundles/ee/$transferId"
@@ -205,5 +212,7 @@ try {
 
   Write-Output 'PASS qualification and transfer lifecycle canonical/archive/index ACK producer'
 } finally {
+  [Environment]::SetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY', $savedAttestationKey)
+  [Environment]::SetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID', $savedAttestationKeyId)
   if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
 }

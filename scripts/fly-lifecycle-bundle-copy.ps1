@@ -48,6 +48,13 @@ function Get-LifecycleTextSha256 {
   finally { $hasher.Dispose() }
 }
 
+function Get-LifecycleHmacSha256 {
+  param([Parameter(Mandatory = $true)][string]$Text, [Parameter(Mandatory = $true)][string]$Secret)
+  $hmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($Secret))
+  try { return [Convert]::ToHexString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).ToLowerInvariant() }
+  finally { $hmac.Dispose() }
+}
+
 function Get-LifecycleManifestContentSha256 {
   param([Parameter(Mandatory = $true)][string]$ManifestPath)
   $hasher = Join-Path $PSScriptRoot 'hash-lifecycle-manifest.py'
@@ -302,6 +309,7 @@ function Publish-LifecycleBundleCopyAndAck {
     deployed_git_rev = [string]$manifest.provenance.deployed_revision
     collection_epoch_id = [string]$manifest.identity.collection_epoch_id
     tile_registry_signature = [string]$manifest.provenance.tile_config_signature
+    config_signature = [string]$manifest.provenance.config_signature
     terminal_outcome = $terminalOutcome
     terminal_at = $terminalAt
     pending_order_ids = @()
@@ -341,6 +349,25 @@ function Publish-LifecycleBundleCopyAndAck {
     $identity.source_cleanup_authorized = $false
   }
   $receipt.immutable_identity_sha256 = Get-LifecycleTextSha256 (ConvertTo-LifecycleCanonicalJson $identity)
+  $attestationSecret = [string][Environment]::GetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY')
+  $attestationKeyId = [string][Environment]::GetEnvironmentVariable('LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID')
+  if ($attestationSecret -and $attestationKeyId) {
+    $attestationMaterial = [ordered]@{
+      schema = 'lifecycle_laptop_attestation_v1'
+      bundle_id = $bundleId
+      lifecycle_id = [string]$receipt.lifecycle_id
+      immutable_identity_sha256 = [string]$receipt.immutable_identity_sha256
+      manifest_sha256 = [string]$receipt.manifest_sha256
+      canonical_sha256 = [string]$receipt.laptop_acknowledgement.canonical.sha256
+      archive_sha256 = [string]$receipt.laptop_acknowledgement.archive.sha256
+      index_sha256 = [string]$receipt.laptop_acknowledgement.index.sha256
+    }
+    $receipt['laptop_attestation'] = [ordered]@{
+      schema = 'lifecycle_laptop_attestation_v1'
+      key_id = $attestationKeyId
+      hmac_sha256 = Get-LifecycleHmacSha256 (ConvertTo-LifecycleCanonicalJson $attestationMaterial) $attestationSecret
+    }
+  }
   $response = & $PostAcknowledgement $receipt
   if ($null -eq $response -or $response.ok -ne $true -or
       [string]$response.status -cne 'ACKNOWLEDGED_SOURCE_RETAINED' -or

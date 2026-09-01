@@ -45,6 +45,11 @@ from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
 from bounded_evidence_worker import BoundedEvidenceWorker
+from lifecycle_cleanup_transaction import (
+    CleanupRejected as LifecycleCleanupRejected,
+    CleanupTransaction,
+    verify_bundle as verify_lifecycle_cleanup_bundle,
+)
 from position_registry import (
     PositionCloseClaimScope,
     finalize_position_close,
@@ -37668,6 +37673,7 @@ _DATA_SYNC_INVENTORY_ORPHAN_SCAN_LIMIT = 1000
 _DATA_SYNC_INVENTORY_ORPHAN_REMOVE_LIMIT = 100
 _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS = 2
 _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS = 15 * 60
+_DATA_SYNC_SQLITE_SNAPSHOT_WORKER_NAME = "data_sync_sqlite_snapshot_worker.py"
 _data_sync_sqlite_snapshot_condition = threading.Condition()
 _data_sync_sqlite_snapshot_state = {
     "status": "EMPTY", "generation": None, "path": None, "lease": None,
@@ -38135,7 +38141,7 @@ def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at
     lease = None
     error = None
     try:
-        lease = _data_sync_sqlite_snapshot(path, deadline_monotonic=deadline_at)
+        lease = _data_sync_sqlite_snapshot_subprocess(path, deadline_at=deadline_at)
         if _data_sync_sqlite_generation(path) != generation:
             raise RuntimeError("SQLite source generation changed during snapshot build")
     except Exception as exc:
@@ -38153,6 +38159,66 @@ def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at
                           "lease": lease, "worker": None,
                           "completed_at": time.monotonic(), "error": error})
         _data_sync_sqlite_snapshot_condition.notify_all()
+
+
+def _data_sync_sqlite_snapshot_subprocess(path: Path, *, deadline_at: float) -> dict:
+    """Run backup, integrity check and SHA outside the request-serving process."""
+    snapshot_root = _data_sync_volume_root() / ".data-sync-snapshots"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    snapshot = snapshot_root / f"{token}.db"
+    request_path = snapshot_root / f".{token}.request.json"
+    result_path = snapshot_root / f".{token}.result.json"
+    remaining = max(1.0, deadline_at - time.monotonic())
+    max_output_bytes = int(os.getenv(
+        "DATA_SYNC_SQLITE_SNAPSHOT_MAX_BYTES", str(3 * 1024 * 1024 * 1024)
+    ))
+    if path.stat().st_size > max_output_bytes:
+        raise ValueError("SQLite source exceeds bounded snapshot output size")
+    request_payload = {
+        "source_path": str(path.resolve()), "destination_path": str(snapshot),
+        "deadline_seconds": remaining, "max_output_bytes": max_output_bytes,
+        "memory_bytes": int(os.getenv(
+            "DATA_SYNC_SQLITE_SNAPSHOT_MEMORY_BYTES", str(512 * 1024 * 1024)
+        )),
+    }
+    request_path.write_text(json.dumps(request_payload, sort_keys=True), encoding="utf-8")
+    worker_script = Path(__file__).resolve().parent / _DATA_SYNC_SQLITE_SNAPSHOT_WORKER_NAME
+    process = None
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(worker_script), "--request", str(request_path),
+             "--result", str(result_path)],
+            cwd=str(Path(__file__).resolve().parent),
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        try:
+            return_code = process.wait(timeout=max(1.0, deadline_at - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+            raise TimeoutError("SQLite snapshot subprocess exceeded deadline") from exc
+        if return_code != 0 or not result_path.is_file():
+            raise RuntimeError("SQLite snapshot subprocess failed")
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        size = int(result.get("snapshot_size") or -1)
+        digest = str(result.get("snapshot_sha256") or "").lower()
+        if result.get("ok") is not True or size != snapshot.stat().st_size:
+            raise RuntimeError("SQLite snapshot subprocess result mismatch")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RuntimeError("SQLite snapshot subprocess checksum invalid")
+        return {"snapshot_id": token, "snapshot_size": size, "snapshot_sha256": digest}
+    except Exception:
+        snapshot.unlink(missing_ok=True)
+        raise
+    finally:
+        request_path.unlink(missing_ok=True)
+        result_path.unlink(missing_ok=True)
 
 
 def _data_sync_request_sqlite_snapshot(path: Path) -> dict:
@@ -40854,6 +40920,109 @@ def api_data_sync_lifecycle_ack():
         "cleanup_blocker": "RUNTIME_AND_ANALYZER_LEASE_RECHECK_NOT_IMPLEMENTED",
         "source_cleanup_authorized": False,
     })
+
+
+def _data_sync_lifecycle_cleanup_current_identity() -> dict:
+    """Bind cleanup to the exact running revision, epoch, registry and config."""
+    revision = _runtime_git_rev()
+    config_material = {
+        key: state.get(key)
+        for key in sorted(_persistent_config_keys())
+        if key in state
+    }
+    return {
+        "source_git_rev": revision,
+        "deployed_git_rev": revision,
+        "collection_epoch_id": _collector_v22_epoch_id(),
+        "tile_registry_signature": active_tile_registry_signature(),
+        "config_signature": hashlib.sha256(json.dumps(
+            config_material, separators=(",", ":"), sort_keys=True,
+        ).encode("utf-8")).hexdigest(),
+    }
+
+
+def _data_sync_lifecycle_cleanup_active_references() -> dict:
+    """Snapshot every known runtime/transfer/analyzer owner fail-closed."""
+    runtime = []
+    with trade_lock:
+        runtime.extend(
+            str(row.get("trade_id") or row.get("order_id") or "UNKNOWN")
+            for row in pending_orders
+            if isinstance(row, dict) and row.get("status") == "PENDING"
+        )
+        runtime.extend(
+            str(row.get("trade_id") or row.get("position_id") or "UNKNOWN")
+            for row in open_positions if isinstance(row, dict)
+        )
+    sync = []
+    with _data_sync_inventory_cache_condition:
+        if _data_sync_inventory_cache.get("refreshing"):
+            sync.append("SYNC_INVENTORY_CACHE_REFRESH")
+        if _data_sync_async_inventory.get("refreshing"):
+            sync.append("SYNC_ASYNC_INVENTORY_REFRESH")
+    with _data_sync_sqlite_snapshot_condition:
+        if _data_sync_sqlite_snapshot_state.get("status") == "BUILDING":
+            sync.append("SQLITE_SNAPSHOT_BUILDING")
+    analyzer = []
+    analyzer_lease = _data_sync_volume_root() / ".fly-mirror-generation.lease"
+    if analyzer_lease.exists():
+        analyzer.append(analyzer_lease.name)
+    lifecycle_worker = []
+    worker = _LIFECYCLE_PIPELINE_RUNTIME
+    if worker is not None:
+        try:
+            if worker.status().get("running"):
+                lifecycle_worker.append("LIFECYCLE_PIPELINE_RUNTIME")
+        except BaseException:
+            lifecycle_worker.append("LIFECYCLE_PIPELINE_STATUS_UNKNOWN")
+    return {
+        "runtime": runtime, "sync": sync, "analyzer": analyzer,
+        "lifecycle_worker": lifecycle_worker,
+    }
+
+
+@app.route('/api/data-sync/lifecycle-cleanup/prepare', methods=['POST'])
+def api_data_sync_lifecycle_cleanup_prepare():
+    """Recheck cleanup proof; production quarantine remains disabled by default."""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "status": "INVALID_RECEIPT"}), 400
+    key_id = str(body.get("laptop_attestation", {}).get("key_id") or "")
+    secret = os.getenv("LIFECYCLE_LAPTOP_ATTESTATION_KEY", "").encode("utf-8")
+    keys = {key_id: secret} if key_id and secret else {}
+    try:
+        manifest_path = _data_sync_resolve_relpath(body.get("bundle_manifest_path"))
+        def revalidate_cleanup_proof():
+            return verify_lifecycle_cleanup_bundle(
+                manifest_path.parent, body,
+                current_identity=_data_sync_lifecycle_cleanup_current_identity(),
+                active_references=_data_sync_lifecycle_cleanup_active_references(),
+                attestation_keys=keys,
+            )
+        proof = revalidate_cleanup_proof()
+        transaction = CleanupTransaction(
+            _data_sync_volume_root(),
+            enabled=os.getenv("LIFECYCLE_CLEANUP_ENABLED", "false").lower() == "true",
+        )
+        result = transaction.execute(
+            manifest_path.parent, body, proof, revalidate=revalidate_cleanup_proof,
+        )
+    except (LifecycleCleanupRejected, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        reasons = getattr(exc, "reasons", [type(exc).__name__])
+        return jsonify({"ok": False, "status": "INELIGIBLE_SOURCE_RETAINED", "reasons": reasons, "source_cleanup_authorized": False}), 409
+    return jsonify({"ok": True, **result})
+
+
+def _reconcile_lifecycle_cleanup_transactions() -> list:
+    """Finalize only already-quarantined transactions after restart."""
+    transaction = CleanupTransaction(
+        _data_sync_volume_root(),
+        enabled=os.getenv("LIFECYCLE_CLEANUP_ENABLED", "false").lower() == "true",
+    )
+    results = transaction.reconcile()
+    if results:
+        logger.warning("lifecycle cleanup restart reconciliation results=%s", results)
+    return results
 
 
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
@@ -46663,6 +46832,7 @@ def main():
     prune_aux_logs_on_startup()
     _ensure_collector_v22_epoch()
     _prime_data_sync_identity_epoch_cache()
+    _reconcile_lifecycle_cleanup_transactions()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()

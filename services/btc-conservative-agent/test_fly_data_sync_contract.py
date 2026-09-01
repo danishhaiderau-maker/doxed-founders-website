@@ -1139,6 +1139,9 @@ def test_sqlite_snapshot_generation_is_single_flight_and_reused(tmp_path):
         "_data_sync_sqlite_snapshot": lambda path, deadline_monotonic=None: (
             builds.append(path) or lease.copy()
         ),
+        "_data_sync_sqlite_snapshot_subprocess": lambda path, deadline_at=None: (
+            builds.append(path) or lease.copy()
+        ),
         "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: source,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
