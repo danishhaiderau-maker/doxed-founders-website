@@ -25748,7 +25748,7 @@ class _TrackedRLock:
         }
 
 
-state_lock = threading.RLock()
+state_lock = _TrackedRLock("state_lock")
 trade_lock = _TrackedRLock("trade_lock")
 position_close_lock = threading.RLock()
 position_evaluation_lock = threading.Lock()
@@ -27911,6 +27911,75 @@ def safe_thread(fn):
                 time.sleep(2)
     return wrapper
 
+
+def _bounded_process_pressure_snapshot() -> dict:
+    """Return numeric-only process/host pressure evidence using the stdlib."""
+    def finite_round(value, digits=3):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return round(number, digits) if math.isfinite(number) else None
+
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    times = os.times()
+    process_cpu_sec = finite_round(times.user + times.system)
+    load_1m = load_5m = load_15m = None
+    try:
+        load_1m, load_5m, load_15m = (
+            finite_round(item) for item in os.getloadavg()
+        )
+    except (AttributeError, OSError):
+        pass
+
+    rss_bytes = None
+    try:
+        statm = Path("/proc/self/statm").read_text(encoding="ascii").split()
+        if len(statm) >= 2:
+            rss_bytes = int(statm[1]) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (OSError, ValueError, IndexError, AttributeError):
+        try:
+            import resource
+            peak_rss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            rss_bytes = peak_rss if sys.platform == "darwin" else peak_rss * 1024
+        except (ImportError, OSError, ValueError, AttributeError):
+            pass
+
+    disk_total = disk_used = disk_free = None
+    disk_used_pct = None
+    try:
+        # Fly persists evidence under BOT_DATA_DIR; measuring only the image
+        # filesystem can hide the exact volume pressure involved in a crash.
+        # The path itself is never emitted in the secret-free receipt.
+        disk_probe = Path((os.getenv("BOT_DATA_DIR") or "").strip() or Path.cwd())
+        usage = shutil.disk_usage(disk_probe)
+        disk_total = int(usage.total)
+        disk_used = int(usage.used)
+        disk_free = int(usage.free)
+        disk_used_pct = finite_round(
+            (100.0 * disk_used / disk_total) if disk_total > 0 else None
+        )
+    except OSError:
+        pass
+
+    return {
+        "schema": "process_pressure_v1",
+        "cpu_count": cpu_count,
+        "process_cpu_sec": process_cpu_sec,
+        "load_1m": load_1m,
+        "load_5m": load_5m,
+        "load_15m": load_15m,
+        "load_1m_per_cpu": finite_round(
+            load_1m / cpu_count if load_1m is not None else None
+        ),
+        "rss_bytes": int(rss_bytes) if rss_bytes is not None else None,
+        "disk_total_bytes": disk_total,
+        "disk_used_bytes": disk_used,
+        "disk_free_bytes": disk_free,
+        "disk_used_pct": disk_used_pct,
+    }
+
+
 def _watchdog_crash_context(progress=None, incident=None, *, trigger="UNSPECIFIED", restart_allowed=False):
     """Return a bounded, secret-free watchdog receipt from existing snapshots."""
     def bounded_stack(value):
@@ -27932,6 +28001,12 @@ def _watchdog_crash_context(progress=None, incident=None, *, trigger="UNSPECIFIE
     cycle = cycle if isinstance(cycle, dict) else {}
     lock = progress.get("trade_lock_diagnostics")
     lock = lock if isinstance(lock, dict) else {}
+    state_lock_detail = getattr(
+        state_lock, "diagnostics", lambda _now=None: {}
+    )(time.time())
+    state_lock_detail = (
+        state_lock_detail if isinstance(state_lock_detail, dict) else {}
+    )
     context = {
         "schema": "watchdog_crash_context_v1",
         "trigger": str(trigger)[:64],
@@ -27983,10 +28058,22 @@ def _watchdog_crash_context(progress=None, incident=None, *, trigger="UNSPECIFIE
             )
             if key in lock
         },
+        "state_lock": {
+            key: state_lock_detail.get(key)
+            for key in (
+                "owner_thread", "owner_active", "held_seconds", "depth",
+                "acquire_sequence", "timeout_count", "owner_transition_age_sec",
+            )
+            if key in state_lock_detail
+        },
+        "pressure": _bounded_process_pressure_snapshot(),
         "http_handlers": _dashboard_handler_snapshot(),
     }
     context["scheduled_ai_cycle"]["stack_tail"] = bounded_stack(cycle.get("stack_tail"))
     context["trade_lock"]["stack_tail"] = bounded_stack(lock.get("stack_tail"))
+    context["state_lock"]["stack_tail"] = bounded_stack(
+        state_lock_detail.get("stack_tail")
+    )
     return context
 
 

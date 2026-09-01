@@ -1,7 +1,11 @@
 """Cause-bound receipts for safe strategy-progress watchdog recovery."""
 
 import ast
+import math
+import os
+import shutil
 import threading
+import time
 from pathlib import Path
 
 
@@ -12,6 +16,12 @@ CONTEXT_FUNCTION = next(
     node
     for node in TREE.body
     if isinstance(node, ast.FunctionDef) and node.name == "_watchdog_crash_context"
+)
+PRESSURE_FUNCTION = next(
+    node
+    for node in TREE.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "_bounded_process_pressure_snapshot"
 )
 HANDLER_SNAPSHOT_FUNCTION = next(
     node
@@ -26,12 +36,34 @@ WATCHDOG_FUNCTION = next(
 
 
 def compile_context():
+    state_lock = type(
+        "StateLock",
+        (),
+        {"diagnostics": lambda self, _now=None: {
+            "owner_thread": "state-owner",
+            "owner_active": True,
+            "held_seconds": 12.5,
+            "depth": 2,
+            "stack_tail": [r"C:\private\operator\bot.py:4:mutate_state"],
+        }},
+    )()
     namespace = {
         "Path": Path,
+        "math": math,
+        "os": os,
+        "shutil": shutil,
+        "sys": __import__("sys"),
+        "time": time,
+        "state_lock": state_lock,
         "SOURCE_GIT_REV": "revision-under-test",
         "BOT_INSTANCE_ID": "paper-instance",
         "_force_paper_mode_active": lambda: True,
         "_dashboard_handler_snapshot": lambda: {"active_total": 0, "by_cap": {}},
+    }
+    namespace["_bounded_process_pressure_snapshot"] = lambda: {
+        "schema": "process_pressure_v1",
+        "rss_bytes": 1234,
+        "disk_used_pct": 25.0,
     }
     module = ast.Module(body=[CONTEXT_FUNCTION], type_ignores=[])
     ast.fix_missing_locations(module)
@@ -89,6 +121,10 @@ def test_watchdog_receipt_preserves_exact_progress_cause_and_lock_owner():
     assert receipt["scheduled_ai_cycle"]["stack_tail"] == ["bot.py:1:process_signal"]
     assert receipt["trade_lock"]["owner_thread"] == "Thread-8"
     assert receipt["trade_lock"]["stack_tail"]
+    assert receipt["state_lock"]["owner_thread"] == "state-owner"
+    assert receipt["state_lock"]["held_seconds"] == 12.5
+    assert receipt["state_lock"]["stack_tail"] == ["bot.py:4:mutate_state"]
+    assert receipt["pressure"]["rss_bytes"] == 1234
 
 
 def test_watchdog_receipt_is_bounded_and_secret_free():
@@ -109,6 +145,44 @@ def test_watchdog_receipt_is_bounded_and_secret_free():
     assert receipt["restart_allowed"] is False
     assert receipt["exit_code"] is None
     assert len(receipt["progress"]["reasons"]) == 16
+
+
+def test_pressure_receipt_is_fixed_shape_numeric_and_secret_free():
+    namespace = {
+        "Path": Path,
+        "math": math,
+        "os": os,
+        "shutil": shutil,
+        "sys": __import__("sys"),
+    }
+    module = ast.Module(body=[PRESSURE_FUNCTION], type_ignores=[])
+    ast.fix_missing_locations(module)
+    exec(compile(module, str(BOT_PATH), "exec"), namespace)
+    receipt = namespace["_bounded_process_pressure_snapshot"]()
+    assert set(receipt) == {
+        "schema", "cpu_count", "process_cpu_sec", "load_1m", "load_5m",
+        "load_15m", "load_1m_per_cpu", "rss_bytes", "disk_total_bytes",
+        "disk_used_bytes", "disk_free_bytes", "disk_used_pct",
+    }
+    assert receipt["schema"] == "process_pressure_v1"
+    for key, value in receipt.items():
+        if key != "schema" and value is not None:
+            assert isinstance(value, (int, float))
+    assert "cwd" not in receipt
+    assert "path" not in repr(receipt).lower()
+
+
+def test_state_lock_uses_the_same_tracked_rlock_contract():
+    assignment = next(
+        node for node in TREE.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "state_lock"
+                for target in node.targets)
+    )
+    assert isinstance(assignment.value, ast.Call)
+    assert isinstance(assignment.value.func, ast.Name)
+    assert assignment.value.func.id == "_TrackedRLock"
+    assert assignment.value.args[0].value == "state_lock"
 
 
 def test_handler_snapshot_is_bounded_and_uses_only_fixed_labels():
