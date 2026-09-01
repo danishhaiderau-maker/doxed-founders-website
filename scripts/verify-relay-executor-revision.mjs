@@ -2,6 +2,7 @@
 import { execFileSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 import { classifyRelaySourceRevision } from './relay-revision-policy.mjs';
+import { relayExecutorReceiptAccepted } from './relay-executor-receipt-policy.mjs';
 
 const expected = String(process.env.EXPECTED_SOURCE_REVISION ?? '').trim();
 const timeoutMs = Number(process.env.RELAY_REVISION_TIMEOUT_MS ?? 120_000);
@@ -73,23 +74,42 @@ try {
     if (!agent) throw new Error('conservative-btc agent missing');
     const instances = await prisma.tradingAgentInstance.findMany({
       where: { agentId: agent.id, exchangeProvider: 'bitfinex' },
-      select: { dashboardState: true },
+      select: { userId: true, status: true, dashboardState: true },
     });
-    const workers = instances
-      .map((instance) => instance.dashboardState?.relayExecutor)
-      .filter((health) => health?.serviceRole === 'executor-worker');
+    const workerRows = instances
+      .map((instance) => ({ instance, health: instance.dashboardState?.relayExecutor }))
+      .filter(({ health }) => health?.serviceRole === 'executor-worker');
     const nowMs = Date.now();
-    const currentWorkers = workers.filter((health) => {
+    const currentWorkers = workerRows.filter(({ health }) => {
       const observedAtMs = Date.parse(String(health?.observedAt ?? ''));
       const ageMs = nowMs - observedAtMs;
       return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= maxAgeMs;
     });
+    const exposedUsers = new Set((await prisma.signalCycleParticipant.findMany({
+      where: {
+        userId: { in: instances.map((instance) => instance.userId) },
+        status: { in: ['OPEN', 'PENDING_ENTRY'] },
+        cycle: { agentId: agent.id },
+      },
+      select: { userId: true },
+    })).map((row) => row.userId));
+    const acceptedWorkers = workerRows.filter(({ health, instance }) => {
+      const observedAtMs = Date.parse(String(health?.observedAt ?? ''));
+      const ageMs = Date.now() - observedAtMs;
+      const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= maxAgeMs;
+      return relayExecutorReceiptAccepted({
+        health,
+        fresh,
+        instancePaused: instance?.status === 'PAUSED',
+        flatExposure: instance ? !exposedUsers.has(instance.userId) : false,
+      });
+    });
     const ownerIds = new Set(
-      currentWorkers
-        .map((health) => String(health?.ownerId ?? '').trim())
+      acceptedWorkers
+        .map(({ health }) => String(health?.ownerId ?? '').trim())
         .filter(Boolean),
     );
-    lastObserved = currentWorkers.map((health) => ({
+    lastObserved = workerRows.map(({ health, instance }) => ({
       sourceRevision: health?.sourceRevision ?? null,
       healthy: health?.healthy === true,
       status: health?.status ?? null,
@@ -97,9 +117,12 @@ try {
       timeoutCount: health?.timeoutCount ?? null,
       observedAt: health?.observedAt ?? null,
       ownerPresent: String(health?.ownerId ?? '').trim() !== '',
+      instancePaused: instance.status === 'PAUSED',
+      flatExposure: !exposedUsers.has(instance.userId),
+      terminalState: health?.terminalState ?? null,
     }));
     const revisionClassifications = new Map();
-    for (const health of currentWorkers) {
+    for (const { health } of acceptedWorkers) {
       const observedRevision = String(health?.sourceRevision ?? '').trim();
       revisionClassifications.set(
         observedRevision,
@@ -107,26 +130,27 @@ try {
       );
     }
     const matched =
-      currentWorkers.length > 0 &&
+      acceptedWorkers.length > 0 &&
       ownerIds.size === 1 &&
-      currentWorkers.every(
-        (health) =>
+      acceptedWorkers.every(
+        ({ health, instance }) =>
           revisionClassifications.get(
             String(health?.sourceRevision ?? '').trim(),
           )?.accepted === true &&
-          health?.healthy === true &&
-          health?.status === 'RUNNING' &&
-          health?.executionEnabled === true &&
-          health?.timeoutCount === 0 &&
-          String(health?.ownerId ?? '').trim() !== '',
+          relayExecutorReceiptAccepted({
+            health,
+            fresh: currentWorkers.some((row) => row.health === health),
+            instancePaused: instance.status === 'PAUSED',
+            flatExposure: !exposedUsers.has(instance.userId),
+          }),
       );
     if (matched) {
       const observedRevision = String(
-        currentWorkers[0]?.sourceRevision ?? '',
+        acceptedWorkers[0]?.health?.sourceRevision ?? '',
       ).trim();
       const revisionProof = revisionClassifications.get(observedRevision);
       console.log(
-        `Relay executor owner ${[...ownerIds][0]} is fresh, enabled, RUNNING, and healthy ` +
+        `Relay executor owner ${[...ownerIds][0]} has an accepted healthy execution receipt ` +
         `on ${revisionProof.mode} revision ${observedRevision} (required safety ancestor ${expected})`,
       );
       process.exitCode = 0;
