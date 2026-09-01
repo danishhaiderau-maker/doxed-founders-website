@@ -26,6 +26,7 @@ def test_runtime_and_deploy_contract_changes_remain_revision_relevant():
 
 def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatness():
     assert "recover-stalled-runtime" in DEPLOY
+    assert "inputs.mode == 'recover-stalled-runtime'" in DEPLOY
     assert "Stalled runtime recovery anchored to guarded deployment" in DEPLOY
     assert 'run.get("conclusion") != "success"' in DEPLOY
     assert '"Deploy the exact source revision"' in DEPLOY

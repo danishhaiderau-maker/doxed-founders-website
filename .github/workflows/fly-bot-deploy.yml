@@ -148,7 +148,7 @@ jobs:
           flyctl machines restart --app doxed-btc-bot "$machine_id"
 
   test-and-deploy:
-    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready'
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
