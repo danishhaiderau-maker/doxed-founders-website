@@ -264,6 +264,18 @@ def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
     assert manifest_call < required_sync_gate < optional_gate < relay_call < relay_catch
 
 
+def test_optional_relay_evidence_is_process_isolated_and_cadence_bounded():
+    assert "$relayEvidenceAttemptIntervalSec = 1800" in SYNC_LOOP
+    assert "$lastRelayEvidenceAttemptAt = [DateTimeOffset]::MinValue" in SYNC_LOOP
+    relay_body = SYNC_LOOP.split("function Invoke-OptionalRelayEvidenceSync", 1)[1]
+    relay_body = relay_body.split("function Wait-FlyRuntimeQuietForFullSync", 1)[0]
+    assert "$childHost = (Get-Process -Id $PID -ErrorAction Stop).Path" in relay_body
+    assert "& $childHost -NoProfile -ExecutionPolicy Bypass -File $relayScript" in relay_body
+    assert "[RELAY_EVIDENCE_$safeCode]" in relay_body
+    assert "$relayEvidenceStatus.errorCode = \"DEFERRED_CADENCE\"" in SYNC_LOOP
+    assert "$lastRelayEvidenceAttemptAt = [DateTimeOffset]::UtcNow" in SYNC_LOOP
+
+
 def test_sync_loop_separates_poll_retry_and_full_mutation_cadence():
     assert "[int]$FullSyncIntervalSec = 1800" in SYNC_LOOP
     assert "$fullSyncSec = [Math]::Max(600, $FullSyncIntervalSec)" in SYNC_LOOP

@@ -362,6 +362,8 @@ $preflightManifestTimeoutSec = 90
 # force and the prior canonical mirror remains published throughout.
 $preflightInventoryWaitMaxSec = 330
 $relaySyncAttempts = 2
+$relayEvidenceAttemptIntervalSec = 1800
+$lastRelayEvidenceAttemptAt = [DateTimeOffset]::MinValue
 $fullSyncQuietSuccesses = 3
 $fullSyncQuietProbeTimeoutSec = 8
 $fullSyncQuietMaxWaitSec = 90
@@ -428,7 +430,25 @@ function Invoke-OptionalRelayEvidenceSync {
   $lastRelayError = $null
   for ($attempt = 1; $attempt -le $relaySyncAttempts; $attempt++) {
     try {
-      return & (Join-Path $scriptDir "sync-platform-relay-evidence.ps1")
+      # The validated relay payload can be several megabytes and expands into
+      # a large nested PowerShell object graph. Run it outside the long-lived
+      # core sync owner so that memory is reclaimed when the optional attempt
+      # exits and cannot accumulate across three-minute identity polls.
+      $childHost = (Get-Process -Id $PID -ErrorAction Stop).Path
+      $relayScript = Join-Path $scriptDir "sync-platform-relay-evidence.ps1"
+      $childOutput = @(
+        & $childHost -NoProfile -ExecutionPolicy Bypass -File $relayScript 2>&1 |
+          ForEach-Object { [string]$_ }
+      )
+      if ($LASTEXITCODE -ne 0) {
+        $safeCode = "CHILD_FAILED"
+        $boundedDiagnostic = ($childOutput -join "`n")
+        if ($boundedDiagnostic -match '\[RELAY_EVIDENCE_([A-Z0-9_]+)\]') {
+          $safeCode = $matches[1]
+        }
+        throw "[RELAY_EVIDENCE_$safeCode]"
+      }
+      return @($childOutput | Where-Object { $_ })[-1]
     } catch {
       $lastRelayError = $_
       if ($attempt -lt $relaySyncAttempts) { Start-Sleep -Seconds 2 }
@@ -639,6 +659,13 @@ try {
       } elseif ($needsFullInventory) {
         $relayEvidenceStatus.errorCode = "DEFERRED_REQUIRED_SYNC"
       }
+      $relayEvidenceDue = (
+        ([DateTimeOffset]::UtcNow - $lastRelayEvidenceAttemptAt).TotalSeconds -ge
+        $relayEvidenceAttemptIntervalSec
+      )
+      if (-not $relayEvidenceConfigMissing -and -not $needsFullInventory -and -not $relayEvidenceDue) {
+        $relayEvidenceStatus.errorCode = "DEFERRED_CADENCE"
+      }
       $currentTotalBytes = $lastSyncedTotalBytes
       $growthBytes = $volumeGrowthBytes
       if ($needsFullInventory) {
@@ -661,9 +688,11 @@ try {
       # mirror" contract true during deployments and recovery.
       if (
         -not $needsFullInventory -and
-        -not $relayEvidenceConfigMissing
+        -not $relayEvidenceConfigMissing -and
+        $relayEvidenceDue
       ) {
         $currentStage = "optional_relay_evidence"
+        $lastRelayEvidenceAttemptAt = [DateTimeOffset]::UtcNow
         try {
           $relayEvidencePath = Invoke-OptionalRelayEvidenceSync
           if ($relayEvidencePath -and (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf)) {
