@@ -314,6 +314,8 @@ jobs:
           if not token:
               raise SystemExit("BOT_ADMIN_TOKEN is missing")
           headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          legacy_bootstrap_revision = "e5e61229871744a062ae75651d3c442bae910b5d"
+          legacy_status_revision = legacy_bootstrap_revision[:12]
           status = None
           for attempt in range(1, 6):
               try:
@@ -347,6 +349,56 @@ jobs:
               )
               with urllib.request.urlopen(request, timeout=45) as response:
                   return json.load(response)
+          def require_legacy_bootstrap_status(*, require_flat):
+              legacy_status = request_json("/api/status")
+              progress = legacy_status.get("strategy_progress") or {}
+              try:
+                  open_positions = int(progress.get("open_positions") or 0)
+                  pending_orders = int(progress.get("pending_orders") or 0)
+              except (TypeError, ValueError):
+                  raise SystemExit("legacy bootstrap status counts are invalid")
+              safe = (
+                  str(legacy_status.get("source_git_rev") or "") == legacy_status_revision
+                  and legacy_status.get("execution_paused") is True
+                  and legacy_status.get("manual_admin_pause") is True
+                  and legacy_status.get("force_paper_mode") is True
+                  and legacy_status.get("live_armed") is False
+                  and legacy_status.get("bitfinex_live_enabled") is False
+              )
+              if not safe:
+                  raise SystemExit("generation-less relay authority is not the exact safe legacy bootstrap revision")
+              if require_flat and (open_positions != 0 or pending_orders != 0):
+                  return False
+              return True
+          def prove_legacy_bootstrap_flat():
+              confirmations = 0
+              last_snapshot_seq = None
+              for attempt in range(1, 21):
+                  candidate = request_json("/api/relay-execution-state?fresh=1")
+                  generation = candidate.get("money_state_generation")
+                  if isinstance(generation, int) and not isinstance(generation, bool):
+                      raise SystemExit("relay generation appeared during legacy flat proof; restart with the normal fence")
+                  if not isinstance(candidate.get("orders"), list) or not isinstance(candidate.get("positions"), list):
+                      raise SystemExit("legacy bootstrap relay exposure arrays are missing")
+                  orders = candidate.get("orders") or []
+                  positions = candidate.get("positions") or []
+                  sequence = candidate.get("snapshot_seq")
+                  sequence_advanced = (
+                      isinstance(sequence, int)
+                      and not isinstance(sequence, bool)
+                      and (last_snapshot_seq is None or sequence > last_snapshot_seq)
+                  )
+                  status_flat = require_legacy_bootstrap_status(require_flat=True)
+                  if not orders and not positions and status_flat and sequence_advanced:
+                      confirmations += 1
+                      last_snapshot_seq = sequence
+                      if confirmations >= 3:
+                          return candidate
+                  else:
+                      confirmations = 0
+                      last_snapshot_seq = sequence if isinstance(sequence, int) else None
+                  time.sleep(min(attempt, 3))
+              raise SystemExit("legacy bootstrap did not produce three advancing flat relay snapshots with flat status")
           def fresh_exposure(minimum_generation=None):
               last = None
               for attempt in range(1, 21):
@@ -354,7 +406,11 @@ jobs:
                       candidate = request_json("/api/relay-execution-state?fresh=1")
                       generation = candidate.get("money_state_generation")
                       if not isinstance(generation, int) or isinstance(generation, bool):
-                          raise SystemExit("relay execution generation is missing")
+                          if minimum_generation is not None:
+                              raise SystemExit("relay execution generation disappeared after a fenced mutation")
+                          require_legacy_bootstrap_status(require_flat=False)
+                          candidate["_legacy_exact_revision_bootstrap"] = True
+                          return candidate
                       if minimum_generation is None or generation >= minimum_generation:
                           return candidate
                       last = f"generation {generation} < {minimum_generation}"
@@ -373,6 +429,10 @@ jobs:
               positions = sorted({str(row.get("trade_id") or "").strip() for row in exposure.get("positions") or []} - {""})
               round_generation = exposure.get("money_state_generation")
               if not orders and not positions:
+                  if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                      prove_legacy_bootstrap_flat()
+                      print(f"Exact-revision legacy bootstrap boundary is flat after round {round_no}")
+                      break
                   if required_generation is not None and exposure.get("money_state_generation") < required_generation:
                       raise SystemExit("flat relay authority predates maintenance mutations")
                   print(f"Durable maintenance boundary is flat after round {round_no}")
@@ -382,6 +442,10 @@ jobs:
                   if cancelled.get("status") != "cancelled":
                       raise SystemExit(f"maintenance cancel was not confirmed for {trade_id}")
                   generation = cancelled.get("money_state_generation")
+                  if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                      if isinstance(generation, int) and not isinstance(generation, bool):
+                          raise SystemExit("relay generation appeared without a legacy mutation baseline")
+                      continue
                   if not isinstance(generation, int) or isinstance(generation, bool):
                       raise SystemExit("maintenance cancel generation is missing")
                   if generation <= round_generation:
@@ -393,12 +457,20 @@ jobs:
                   if reconciled.get("ok") is not True:
                       raise SystemExit(f"maintenance paper reconciliation was not confirmed for {trade_id}")
                   generation = reconciled.get("money_state_generation")
+                  if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                      if isinstance(generation, int) and not isinstance(generation, bool):
+                          raise SystemExit("relay generation appeared without a legacy mutation baseline")
+                      continue
                   if not isinstance(generation, int) or isinstance(generation, bool):
                       raise SystemExit("maintenance reconciliation generation is missing")
                   if generation <= round_generation:
                       raise SystemExit("maintenance reconciliation did not advance relay authority generation")
                   round_generation = generation
                   required_generation = max(required_generation or 0, generation)
+              if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                  prove_legacy_bootstrap_flat()
+                  print(f"Exact-revision legacy bootstrap mutations are flat after round {round_no}")
+                  break
               time.sleep(2)
           else:
               raise SystemExit("maintenance boundary did not become flat")
@@ -516,6 +588,7 @@ jobs:
               and status.get("manual_admin_pause") is True
               and status.get("live_armed") is False
               and status.get("bitfinex_live_enabled") is False
+              and status.get("force_paper_mode") is True
               and int(progress.get("open_positions") or 0) == 0
               and int(progress.get("pending_orders") or 0) == 0
           ):

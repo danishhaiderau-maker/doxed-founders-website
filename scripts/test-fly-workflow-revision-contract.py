@@ -49,10 +49,54 @@ def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     assert 'status.get("manual_admin_pause") is False' in DEPLOY
     assert 'status.get("live_armed") is False' in DEPLOY
     assert 'status.get("bitfinex_live_enabled") is False' in DEPLOY
+    assert 'status.get("force_paper_mode") is True' in DEPLOY
     assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in DEPLOY
     assert 'request_json("/api/reconcile/phantom-cancel"' in DEPLOY
     assert "pause mutation attempt={attempt}" in DEPLOY
     assert "checking durable state" in DEPLOY
+
+
+def test_generationless_bootstrap_is_bound_to_one_exact_safe_revision():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert 'legacy_bootstrap_revision = "e5e61229871744a062ae75651d3c442bae910b5d"' in maintenance
+    assert "legacy_status_revision = legacy_bootstrap_revision[:12]" in maintenance
+    assert 'str(legacy_status.get("source_git_rev") or "") == legacy_status_revision' in maintenance
+    assert 'str(legacy_status.get("source_git_rev") or "").startswith' not in maintenance
+    assert 'legacy_status.get("execution_paused") is True' in maintenance
+    assert 'legacy_status.get("manual_admin_pause") is True' in maintenance
+    assert 'legacy_status.get("force_paper_mode") is True' in maintenance
+    assert 'legacy_status.get("live_armed") is False' in maintenance
+    assert 'legacy_status.get("bitfinex_live_enabled") is False' in maintenance
+    assert 'raise SystemExit("generation-less relay authority is not the exact safe legacy bootstrap revision")' in maintenance
+
+
+def test_generationless_bootstrap_requires_repeated_relay_and_status_flatness():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert "def prove_legacy_bootstrap_flat():" in maintenance
+    assert "confirmations >= 3" in maintenance
+    assert "sequence > last_snapshot_seq" in maintenance
+    assert "not orders and not positions and status_flat and sequence_advanced" in maintenance
+    assert "open_positions != 0 or pending_orders != 0" in maintenance
+    assert maintenance.count("prove_legacy_bootstrap_flat()") == 3
+
+
+def test_generation_remains_mandatory_outside_the_exact_bootstrap():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert 'candidate["_legacy_exact_revision_bootstrap"] = True' in maintenance
+    assert 'if minimum_generation is not None:' in maintenance
+    assert 'raise SystemExit("relay execution generation disappeared after a fenced mutation")' in maintenance
+    assert 'raise SystemExit("relay generation appeared during legacy flat proof; restart with the normal fence")' in maintenance
+    assert 'raise SystemExit("maintenance cancel generation is missing")' in maintenance
+    assert 'raise SystemExit("maintenance reconciliation generation is missing")' in maintenance
 
 
 def test_failed_deploy_has_bounded_safe_paper_resume_without_weakening_live_flags():
