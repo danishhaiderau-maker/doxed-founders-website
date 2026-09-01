@@ -4478,6 +4478,24 @@ export function fetchTradingAgentDashboard(slug: string, token?: string) {
   return apiFetch<TradingAgentDashboard>(`/trading-agents/${slug}/dashboard`, {}, token);
 }
 
+export interface TradingAgentCoordinationStatus {
+  instanceStatus: string | null;
+  instanceMode: 'copy' | 'live' | null;
+  exchangeProvider: string | null;
+  relayArmed: boolean;
+  copyRelaySimActive: boolean;
+  userInstanceLastError: string | null;
+  projection: 'coordination_v1';
+}
+
+export function fetchTradingAgentCoordinationStatus(slug: string, token?: string) {
+  return apiFetch<TradingAgentCoordinationStatus>(
+    `/trading-agents/${slug}/coordination-status`,
+    {},
+    token,
+  );
+}
+
 export function fetchTradingAgentActivity(slug: string, limit = 30, token?: string) {
   return apiFetch<TradingAgentActivityEntry[]>(
     `/trading-agents/${slug}/activity?limit=${limit}`,

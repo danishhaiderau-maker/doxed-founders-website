@@ -27,6 +27,7 @@ import {
 import {
   fetchPublicAgentStatus,
   fetchTradingAgent,
+  fetchTradingAgentCoordinationStatus,
   fetchTradingAgentDashboard,
   fetchTradingAgents,
   followTradingAgent,
@@ -229,6 +230,21 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     }
   }, [slug, session?.accessToken, applyAgentMeta, loadLive]);
 
+  const loadCoordination = useCallback(async () => {
+    const token = session?.accessToken;
+    const [coordination, status] = await Promise.all([
+      fetchTradingAgentCoordinationStatus(slug, token),
+      fetchPublicAgentStatus(),
+    ]);
+    setInstanceStatus(coordination.instanceStatus);
+    setInstanceMode(coordination.instanceMode);
+    setCopyRelaySim((previous) => previous
+      ? { ...previous, active: coordination.copyRelaySimActive }
+      : previous);
+    setInstanceLastError(coordination.userInstanceLastError);
+    setPublicStatus(status);
+  }, [slug, session?.accessToken]);
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -241,9 +257,44 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
     } else if (botConnected) {
       pollMs = AGENT_HUB_POLL_BOT_MS;
     }
-    const interval = setInterval(() => void loadLive(), pollMs);
-    return () => clearInterval(interval);
-  }, [loadLive, copyRelaySim?.active, botConnected, liveViewEnabled, agent]);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
+    let inFlight = false;
+
+    const schedule = (delayMs: number) => {
+      if (disposed || document.hidden) return;
+      timer = setTimeout(() => void poll(), delayMs);
+    };
+    const poll = async () => {
+      if (disposed || document.hidden || inFlight) return;
+      inFlight = true;
+      try {
+        // Full Fly/Neon dashboard materialization is reserved for explicit
+        // Live view. Routine refresh reads only the coordination projection.
+        if (liveViewEnabled) await loadLive();
+        else await loadCoordination();
+      } finally {
+        inFlight = false;
+        schedule(pollMs);
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden || disposed) {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        return;
+      }
+      if (!inFlight) void poll();
+    };
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    schedule(pollMs);
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [loadLive, loadCoordination, copyRelaySim?.active, botConnected, liveViewEnabled, agent]);
 
   async function toggleFollow() {
     if (!session?.accessToken || !agent) return;

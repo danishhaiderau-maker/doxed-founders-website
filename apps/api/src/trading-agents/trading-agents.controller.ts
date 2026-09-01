@@ -66,6 +66,13 @@ export class TradingAgentsController {
 
   @Public()
   @UseGuards(OptionalJwtAuthGuard)
+  @Get(':slug/coordination-status')
+  coordinationStatus(@Param('slug') slug: string, @CurrentUser() user?: AuthUser) {
+    return this.tradingAgents.getCoordinationStatus(slug, user?.id);
+  }
+
+  @Public()
+  @UseGuards(OptionalJwtAuthGuard)
   @Get(':slug/dashboard')
   dashboard(@Param('slug') slug: string, @CurrentUser() user?: AuthUser) {
     return this.tradingAgents.getPublicDashboard(slug, user?.id, user?.role);

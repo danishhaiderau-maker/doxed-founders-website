@@ -1355,6 +1355,56 @@ export class TradingAgentsService implements OnModuleInit {
     return [];
   }
 
+  /** Tiny Neon projection used by routine agent-hub coordination polling. */
+  async getCoordinationStatus(slug: string, userId?: string) {
+    const agent = await this.prisma.tradingAgent.findUnique({
+      where: { slug },
+      select: { id: true },
+    });
+    if (!agent) throw new NotFoundException('Agent not found');
+
+    type CoordinationProjectionRow = {
+      status: string;
+      exchangeProvider: string;
+      instanceMode: string | null;
+      relayArmedAt: string | null;
+      copyRelaySimActive: boolean;
+      lastError: string | null;
+    };
+    const rows = userId
+      ? await this.prisma.$queryRaw<CoordinationProjectionRow[]>(Prisma.sql`
+          SELECT
+            i."status"::text AS "status",
+            i."exchangeProvider",
+            i."dashboardState" ->> 'instanceMode' AS "instanceMode",
+            i."dashboardState" ->> 'relayArmedAt' AS "relayArmedAt",
+            COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true'
+              AS "copyRelaySimActive",
+            i."lastError"
+          FROM "TradingAgentInstance" i
+          WHERE i."agentId" = ${agent.id}
+            AND i."userId" = ${userId}
+          LIMIT 1
+        `)
+      : [];
+    const row = rows[0] ?? null;
+    const instanceMode = row
+      ? row.instanceMode === 'live' && row.exchangeProvider !== 'paper' ? 'live' : 'copy'
+      : null;
+
+    return {
+      instanceStatus: row?.status ?? null,
+      instanceMode,
+      exchangeProvider: row?.exchangeProvider ?? null,
+      relayArmed: Boolean(row?.relayArmedAt),
+      copyRelaySimActive: row?.copyRelaySimActive ?? false,
+      userInstanceLastError: row?.lastError ?? null,
+      // This endpoint intentionally performs no full dashboard-state,
+      // participant/event, exchange-account, or research payload read.
+      projection: 'coordination_v1' as const,
+    };
+  }
+
   /** Public showcase dashboard — user instance overlays their own $500 session when signed in. */
   async getPublicDashboard(slug: string, userId?: string, _role?: string) {
     const agentRow = await this.prisma.tradingAgent.findUnique({ where: { slug } });

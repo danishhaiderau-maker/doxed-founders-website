@@ -127,15 +127,10 @@ test('relay executor polling keeps direct wake latency separate from Neon backst
   assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'PAUSED', 800), RECONCILIATION_PAUSED_POLL_MS);
   assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'IDLE', 800), RECONCILIATION_IDLE_POLL_MS);
   assert.ok(PERSISTED_WAKE_ACTIVE_POLL_MS > 250, 'Neon fallback must not regress to 4 Hz');
-  assert.ok(
-    PERSISTED_WAKE_PAUSED_POLL_MS >= 60_000,
-    'disarmed exposure-free relay must use the lowest bounded recovery cadence',
-  );
-  assert.ok(
-    RECONCILIATION_PAUSED_POLL_MS >= 60_000,
-    'disarmed exposure-free reconciliation must not keep Neon continuously busy',
-  );
-  assert.ok(PERSISTED_WAKE_IDLE_POLL_MS >= PERSISTED_WAKE_PAUSED_POLL_MS);
+  assert.equal(PERSISTED_WAKE_PAUSED_POLL_MS, null);
+  assert.equal(PERSISTED_WAKE_IDLE_POLL_MS, null);
+  assert.equal(RECONCILIATION_PAUSED_POLL_MS, null);
+  assert.equal(RECONCILIATION_IDLE_POLL_MS, null);
 });
 
 test('persisted wake backstop projects JSON in Postgres and never reinstates a 250ms full-state loop', () => {
@@ -154,7 +149,20 @@ test('persisted wake backstop projects JSON in Postgres and never reinstates a 2
   );
   assert.doesNotMatch(wakePollSource, /select:\s*\{\s*id:\s*true,\s*dashboardState:\s*true/);
   assert.doesNotMatch(wakePollSource, /dashboardState[^\n]*::boolean/);
-  assert.match(source, /if \(!this\.executorDestroyed\)/);
+  assert.match(source, /delayMs == null \|\| this\.reconciliationTimer/);
+  assert.match(source, /delayMs == null \|\| this\.persistedWakeTimer/);
+  const moduleInitSource = source.slice(
+    source.indexOf('onModuleInit()'),
+    source.indexOf('onModuleDestroy()', source.indexOf('onModuleInit()')),
+  );
+  assert.match(moduleInitSource, /this\.scheduleReconciliation\(POLL_MS\)/);
+  assert.match(moduleInitSource, /this\.schedulePersistedWakePoll\(PERSISTED_WAKE_ACTIVE_POLL_MS\)/);
+  const wakeNowSource = source.slice(
+    source.indexOf('async wakeNow('),
+    source.indexOf('/**\n   * F7', source.indexOf('async wakeNow(')),
+  );
+  assert.match(wakeNowSource, /this\.scheduleReconciliation\(POLL_MS\)/);
+  assert.match(wakeNowSource, /this\.schedulePersistedWakePoll\(PERSISTED_WAKE_ACTIVE_POLL_MS\)/);
 });
 
 test('Scenario C exchange stop promotion defaults on and requires an explicit rollback to disable', () => {

@@ -116,15 +116,14 @@ const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
 export const PERSISTED_WAKE_ACTIVE_POLL_MS = 2_000;
 /**
  * A disarmed, exposure-free relay has no money-path work to reconcile. Direct
- * authenticated wakes remain immediate; this one-minute durable fallback is
- * only for process-boundary recovery and remains inside the persisted wake's
- * two-minute validity window. Keeping PAUSED at 5/10 seconds prevented Neon
- * from ever reaching an idle period even when every relay was disarmed.
+ * authenticated wakes remain immediate. Startup performs one durable recovery
+ * read, then a durably disarmed and flat executor stops recurring Neon reads
+ * completely. Keeping PAUSED at any fixed cadence prevents Neon suspension.
  */
-export const PERSISTED_WAKE_PAUSED_POLL_MS = 60_000;
-export const PERSISTED_WAKE_IDLE_POLL_MS = 60_000;
-export const RECONCILIATION_PAUSED_POLL_MS = 60_000;
-export const RECONCILIATION_IDLE_POLL_MS = 60_000;
+export const PERSISTED_WAKE_PAUSED_POLL_MS = null;
+export const PERSISTED_WAKE_IDLE_POLL_MS = null;
+export const RECONCILIATION_PAUSED_POLL_MS = null;
+export const RECONCILIATION_IDLE_POLL_MS = null;
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
@@ -154,7 +153,7 @@ export function relayExecutorPollDelayMs(
   channel: 'RECONCILIATION' | 'PERSISTED_WAKE',
   activity: RelayExecutorPollActivity,
   activeReconciliationMs = POLL_MS,
-): number {
+): number | null {
   if (channel === 'PERSISTED_WAKE') {
     if (activity === 'ACTIVE') return PERSISTED_WAKE_ACTIVE_POLL_MS;
     if (activity === 'PAUSED') return PERSISTED_WAKE_PAUSED_POLL_MS;
@@ -3906,14 +3905,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
   /**
    * Full reconciliation stays at the configured money-path cadence while a
-   * relay is ACTIVE. A PAUSED relay retains a five-second exit/recovery
-   * backstop, while an installation with no relevant relay performs only a
-   * 30-second discovery pass. Explicit authenticated wakes still call
-   * wakeNow()/the signed fast path immediately and never wait for this timer.
+   * relay is ACTIVE. Once a pass proves the relay disarmed and flat, recurring
+   * reconciliation stops. Explicit authenticated wakes re-arm this timer, and
+   * process startup always performs a recovery pass.
    */
-  private scheduleReconciliation(delayMs: number): void {
-    if (this.executorDestroyed) return;
+  private scheduleReconciliation(delayMs: number | null): void {
+    if (this.executorDestroyed || delayMs == null || this.reconciliationTimer) return;
     this.reconciliationTimer = setTimeout(async () => {
+      this.reconciliationTimer = null;
       try {
         await this.tick();
       } finally {
@@ -3928,9 +3927,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /** Durable Neon wake polling is a backstop, not the latency path. */
-  private schedulePersistedWakePoll(delayMs: number): void {
-    if (this.executorDestroyed) return;
+  private schedulePersistedWakePoll(delayMs: number | null): void {
+    if (this.executorDestroyed || delayMs == null || this.persistedWakeTimer) return;
     this.persistedWakeTimer = setTimeout(async () => {
+      this.persistedWakeTimer = null;
       try {
         await this.pollPersistedFastWake();
       } finally {
@@ -5727,6 +5727,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
   async wakeNow(trigger?: RelayExecutorWakeRequest['trigger']) {
     if (!executionEnabled()) return;
+    // PAUSED/IDLE deliberately has no recurring Neon timer. Every explicit
+    // authenticated wake re-establishes both safety loops before doing work;
+    // the first startup probes provide the durable crash/restart recovery read.
+    this.scheduleReconciliation(POLL_MS);
+    this.schedulePersistedWakePoll(PERSISTED_WAKE_ACTIVE_POLL_MS);
     if (trigger) {
       this.lastShowcaseWakeAt = Date.now();
       this.lastShowcaseWakeTrigger =
