@@ -12,6 +12,10 @@ import math
 from typing import Any, Mapping
 
 from research_v3_contract import canonical_json
+from lifecycle_qualification_horizon import (
+    ACTUAL_EXECUTION_GROSS_BASIS,
+    NET_SUBTRACTION_BASIS,
+)
 
 
 COMPLETION_SCHEMA = "lifecycle_bundle_completion_v1"
@@ -149,14 +153,25 @@ def build_lifecycle_completion_receipt(
             "slippage_cost_usd", "latency_cost_usd", "net_pnl_usd",
         )
         parsed = {name: _finite(economics_source.get(name)) for name in names}
+        gross_basis = economics_source.get("gross_pnl_basis")
+        net_basis = economics_source.get("net_pnl_reconciliation_basis")
+        if gross_basis != ACTUAL_EXECUTION_GROSS_BASIS:
+            blockers.append("GROSS_PNL_BASIS_MISSING_OR_UNSUPPORTED")
+        if net_basis != NET_SUBTRACTION_BASIS:
+            blockers.append("NET_PNL_RECONCILIATION_BASIS_MISSING_OR_UNSUPPORTED")
         if any(value is None for value in parsed.values()):
             blockers.append("COST_EVIDENCE_INCOMPLETE")
         else:
             economics = {name: float(value) for name, value in parsed.items() if value is not None}
+            economics.update({
+                "gross_pnl_basis": ACTUAL_EXECUTION_GROSS_BASIS,
+                "net_pnl_reconciliation_basis": NET_SUBTRACTION_BASIS,
+                "separately_subtracted_from_gross": ["trading_fees_usd", "funding_fees_usd"],
+                "attribution_only_not_subtracted": ["slippage_cost_usd", "latency_cost_usd"],
+            })
             expected_net = (
                 economics["gross_pnl_usd"] - economics["trading_fees_usd"]
-                - economics["funding_fees_usd"] - economics["slippage_cost_usd"]
-                - economics["latency_cost_usd"]
+                - economics["funding_fees_usd"]
             )
             if abs(expected_net - economics["net_pnl_usd"]) > max(0.0, float(pnl_tolerance_usd)):
                 blockers.append("NET_PNL_UNRECONCILED")

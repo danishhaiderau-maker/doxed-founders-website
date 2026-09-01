@@ -12,7 +12,9 @@ from typing import Any, Mapping
 
 
 QUALIFICATION_HORIZON_SCHEMA = "lifecycle_qualification_horizon_v1"
-CANONICAL_ECONOMICS_SCHEMA = "paper_terminal_economics_usd_v1"
+CANONICAL_ECONOMICS_SCHEMA = "paper_terminal_economics_usd_v2"
+ACTUAL_EXECUTION_GROSS_BASIS = "ACTUAL_EXECUTION_PRICES_INCLUDES_PRICE_IMPACT"
+NET_SUBTRACTION_BASIS = "GROSS_MINUS_TRADING_FEES_MINUS_FUNDING_FEES"
 CANONICAL_EXTREMA_SCHEMA = "paper_path_extrema_usd_v1"
 
 
@@ -66,13 +68,21 @@ def canonical_terminal_economics(source: Mapping[str, Any]) -> dict[str, Any]:
         "net_pnl_usd": net,
     }
     if not blockers:
-        expected = gross - trading - funding - combined_slippage - latency
+        # Gross PnL is calculated from the actual entry and exit executions.
+        # Price impact, slippage and latency effects are therefore already in
+        # gross.  They remain mandatory causal attribution, but subtracting
+        # them here would charge the same execution cost twice.
+        expected = gross - trading - funding
         if abs(expected - net) > 1e-8:
             blockers.append("NET_PNL_UNRECONCILED")
     return {
         "schema": CANONICAL_ECONOMICS_SCHEMA,
         "status": "COMPLETE" if not blockers else "UNKNOWN",
         "unit": "USD",
+        "gross_pnl_basis": ACTUAL_EXECUTION_GROSS_BASIS,
+        "net_pnl_reconciliation_basis": NET_SUBTRACTION_BASIS,
+        "separately_subtracted_from_gross": ["trading_fees_usd", "funding_fees_usd"],
+        "attribution_only_not_subtracted": ["slippage_cost_usd", "latency_cost_usd"],
         **values,
         "blockers": sorted(set(blockers)),
     }

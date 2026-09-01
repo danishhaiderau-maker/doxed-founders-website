@@ -1,0 +1,187 @@
+import json
+import subprocess
+import time
+from pathlib import Path
+
+import lifecycle_pipeline_runtime as runtime_module
+from lifecycle_pipeline_runtime import LifecyclePipelineRuntime
+
+REVISION = "a" * 40
+
+
+def _runtime(tmp_path, **kwargs):
+    return LifecyclePipelineRuntime(
+        tmp_path, source_revision=REVISION, interval_sec=999,
+        wall_timeout_sec=2, **kwargs,
+    )
+
+
+class _Process:
+    def __init__(self, *, return_code=0, timeout=False):
+        self.return_code = return_code
+        self.timeout = timeout
+        self.terminated = False
+        self.killed = False
+
+    def wait(self, timeout=None):
+        if self.timeout and not self.terminated and not self.killed:
+            raise subprocess.TimeoutExpired("worker", timeout)
+        return self.return_code
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
+
+
+def _install_launch(monkeypatch, runtime, process, *, corrupt=False):
+    def launch(command):
+        request = Path(command[command.index("--request") + 1])
+        result = Path(command[command.index("--result") + 1])
+        nonce = command[command.index("--nonce") + 1]
+        if corrupt:
+            result.write_text("not-json", encoding="utf-8")
+        elif process.return_code == 0 and not process.timeout:
+            request_payload = json.loads(request.read_text(encoding="utf-8"))
+            payload = {
+                "schema": "lifecycle_pipeline_worker_result_v1", "nonce": nonce,
+                "source_revision": REVISION, "launched_unix": request_payload["launched_unix"],
+                "started_unix": 1, "generated_unix": 2, "generated_at": "x",
+                "request_sha256": runtime_module.hashlib.sha256(request.read_bytes()).hexdigest(),
+                "pipeline": {"candidate_count": 1, "bundle_count": 1,
+                             "pressure_mode": request_payload["pressure_mode"]},
+                "hard_runtime_result_deadline_enforced": True,
+                "source_cleanup_authorized": False,
+            }
+            payload["result_sha256"] = runtime_module.hashlib.sha256(
+                json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+            ).hexdigest()
+            result.write_text(json.dumps(payload), encoding="utf-8")
+        return process
+    monkeypatch.setattr(runtime, "_launch", launch)
+
+
+def test_success_resets_backoff_and_pressure_clamps_to_one(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path, pressure_probe=lambda: {"pressure": True})
+    runtime._status.update({"failure_count": 4, "backoff_sec": 1440})
+    _install_launch(monkeypatch, runtime, _Process())
+    assert runtime._run_once() is True
+    status = runtime.status()
+    assert status["source_revision"] == REVISION
+    assert status["failure_count"] == 0
+    assert status["backoff_sec"] == 0
+    assert status["last_result"]["pressure_mode"] is True
+    assert status["source_cleanup_authorized"] is False
+
+
+def test_timeout_terminates_child_and_backs_off(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    process = _Process(timeout=True)
+    _install_launch(monkeypatch, runtime, process)
+    assert runtime._run_once() is False
+    assert process.terminated is True
+    assert runtime.status()["last_outcome"] == "TIMEOUT"
+    assert runtime.status()["backoff_sec"] == 180
+
+
+def test_corrupt_result_fails_closed_and_backoff_is_bounded(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    for expected in (180, 360, 720, 1440, 1800, 1800):
+        _install_launch(monkeypatch, runtime, _Process(), corrupt=True)
+        assert runtime._run_once() is False
+        assert runtime.status()["backoff_sec"] == expected
+        assert runtime.status()["source_cleanup_authorized"] is False
+        assert not list(runtime.work_root.glob("pipeline-request-*.json"))
+        assert not list(runtime.work_root.glob("pipeline-result-*.json"))
+
+
+def test_overlap_and_emergency_pressure_skip_without_launch(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path, overlap_probe=lambda: "SYNC_ACTIVE")
+    monkeypatch.setattr(runtime, "_launch", lambda _command: (_ for _ in ()).throw(AssertionError()))
+    assert runtime._run_once() is False
+    assert runtime.status()["last_outcome"] == "OVERLAP_SKIPPED"
+
+    runtime.overlap_probe = lambda: False
+    runtime.pressure_probe = lambda: {"pressure": True, "emergency": True}
+    assert runtime._run_once() is False
+    assert runtime.status()["last_outcome"] == "PRESSURE_SKIPPED"
+
+
+def test_duplicate_owner_rejected_and_stop_releases_owner(tmp_path):
+    first = _runtime(tmp_path, overlap_probe=lambda: "HOLD")
+    second = _runtime(tmp_path, overlap_probe=lambda: "HOLD")
+    assert first.start() is True
+    try:
+        assert second.start() is False
+        assert second.status()["last_outcome"] == "DUPLICATE_OWNER_REJECTED"
+    finally:
+        assert first.stop() is True
+    assert not first.owner_path.exists()
+
+
+def test_pid_alive_probe_never_terminates_current_windows_process():
+    assert runtime_module._pid_alive(runtime_module.os.getpid()) is True
+    if runtime_module.os.name == "nt":
+        assert runtime_module._pid_alive(2_147_483_647) is False
+
+
+def test_stop_interrupts_active_child_without_propagating(tmp_path):
+    runtime = _runtime(tmp_path)
+    process = _Process(timeout=True)
+    with runtime._lock:
+        runtime._process = process
+    assert runtime.stop() is True
+    assert process.terminated is True
+
+
+def test_minimal_environment_excludes_credentials(monkeypatch):
+    monkeypatch.setenv("BITFINEX_API_SECRET", "forbidden")
+    monkeypatch.setenv("DATABASE_URL", "forbidden")
+    environment = runtime_module._minimal_worker_environment("a" * 40)
+    assert "BITFINEX_API_SECRET" not in environment
+    assert "DATABASE_URL" not in environment
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert environment["SOURCE_GIT_REV"] == "a" * 40
+    assert "SOURCE_GIT_REV" not in runtime_module._minimal_worker_environment("short")
+
+
+def test_revision_mismatch_fails_closed_and_capability_is_truthful(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    _install_launch(monkeypatch, runtime, _Process())
+    original = runtime_module.verify_result
+    monkeypatch.setattr(
+        runtime_module, "verify_result",
+        lambda *args: {**original(*args), "source_revision": "b" * 40},
+    )
+    assert runtime._run_once() is False
+    assert "SOURCE_REVISION_MISMATCH" in runtime.status()["last_error"]
+    limits = runtime.status()["resource_limits"]
+    assert limits["parent_wall_timeout_enforced"] is True
+    assert limits["cpu_rlimit_enforced"] is (runtime_module.os.name == "posix")
+    assert limits["rss_rlimit_enforced"] is (runtime_module.os.name == "posix")
+
+
+def test_requires_full_revision_and_rejects_symlink_root(tmp_path):
+    try:
+        _runtime(tmp_path, source_revision="short")
+    except TypeError:
+        # _runtime supplies its own revision; directly test the public class.
+        pass
+    try:
+        LifecyclePipelineRuntime(tmp_path, source_revision="short")
+    except ValueError as exc:
+        assert str(exc) == "SOURCE_REVISION_NOT_FULL_HEX"
+    else:
+        raise AssertionError("short revision accepted")
+    link = tmp_path.parent / f"{tmp_path.name}-link"
+    try:
+        link.symlink_to(tmp_path, target_is_directory=True)
+    except OSError:
+        return
+    try:
+        LifecyclePipelineRuntime(link, source_revision=REVISION)
+    except ValueError as exc:
+        assert str(exc) == "DATA_ROOT_LINKED_OR_INVALID"
+    else:
+        raise AssertionError("symlink root accepted")

@@ -4,6 +4,10 @@ import pytest
 
 from lifecycle_bundles import classify_completion
 from lifecycle_completion_receipts import build_lifecycle_completion_receipt
+from lifecycle_qualification_horizon import (
+    ACTUAL_EXECUTION_GROSS_BASIS,
+    NET_SUBTRACTION_BASIS,
+)
 
 
 NOW = 20_000.0
@@ -32,12 +36,14 @@ def filled_proof(outcome="FULL_FILL"):
         "requested_quantity": 2.0 if outcome == "PARTIAL_FILL" else 1.0,
         "exit_evidence": {"terminal": True, "close_ts": 11_000.0, "receipt_sha256": "b" * 64},
         "economics": {
+            "gross_pnl_basis": ACTUAL_EXECUTION_GROSS_BASIS,
+            "net_pnl_reconciliation_basis": NET_SUBTRACTION_BASIS,
             "gross_pnl_usd": 5.0,
             "trading_fees_usd": 1.0,
             "funding_fees_usd": 0.5,
             "slippage_cost_usd": 0.25,
             "latency_cost_usd": 0.25,
-            "net_pnl_usd": 3.0,
+            "net_pnl_usd": 3.5,
         },
         "path_extrema": {"mfe_usd": 7.0, "mae_usd": -2.0},
     })
@@ -97,6 +103,26 @@ def test_fill_receipt_requires_exact_economics_extrema_and_quantity(mutation, bl
     result = build_lifecycle_completion_receipt(source, now=NOW)
     assert result["receipt"] is None
     assert blocker in result["blockers"]
+
+
+def test_nonzero_slippage_and_latency_are_attribution_not_double_subtracted():
+    source = filled_proof()
+    source["economics"].update(slippage_cost_usd=1.25, latency_cost_usd=0.75)
+    result = build_lifecycle_completion_receipt(source, now=NOW)
+    assert result["ready"] is True
+    economics = result["receipt"]["economics"]
+    assert economics["net_pnl_usd"] == 3.5
+    assert economics["attribution_only_not_subtracted"] == [
+        "slippage_cost_usd", "latency_cost_usd",
+    ]
+
+
+def test_missing_or_unsupported_accounting_basis_fails_closed():
+    source = filled_proof()
+    source["economics"].pop("gross_pnl_basis")
+    result = build_lifecycle_completion_receipt(source, now=NOW)
+    assert result["ready"] is False
+    assert "GROSS_PNL_BASIS_MISSING_OR_UNSUPPORTED" in result["blockers"]
 
 
 def test_partial_fill_must_be_strictly_less_than_requested_quantity():

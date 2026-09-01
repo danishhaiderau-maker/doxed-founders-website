@@ -1,5 +1,6 @@
 from lifecycle_bundles import LifecycleKey
 from lifecycle_completion_reconciler import evaluate_lifecycle_completion
+from lifecycle_qualification_horizon import canonical_terminal_economics
 
 
 KEY = LifecycleKey("epoch-1", "episode-1", "policy-1", "CONTINUOUS")
@@ -77,3 +78,24 @@ def test_filled_path_requires_cost_and_extrema_fields_not_present_in_old_ledgers
     assert result["ready"] is False
     assert "COST_EVIDENCE_INCOMPLETE" in result["blockers"]
     assert "MFE_MAE_INCOMPLETE" in result["blockers"]
+
+
+def test_filled_path_uses_canonical_basis_and_does_not_double_subtract_attribution():
+    rows = no_fill_rows()
+    rows[1] = row("lifecycle", "filled", observation_status="PAPER_POSITION_OPEN", outcome_state="FULL_FILL")
+    economics = canonical_terminal_economics({
+        "gross_pnl_usd": 5.0, "trading_fees_usd": 1.0,
+        "funding_fees_usd": 0.5, "slippage_cost_usd": 1.25,
+        "latency_cost_usd": 0.75, "net_pnl_usd": 3.5,
+    })
+    rows.extend([
+        row("execution", "execution:trade-1:primary-fill"),
+        row("execution", "execution:trade-1:paper-close", close_ts=11_000.0,
+            filled_qty=1.0, canonical_economics=economics,
+            path_extrema={"mfe_usd": 7.0, "mae_usd": -2.0}),
+        row("lifecycle", "closed", terminal=True, observation_status="PAPER_POSITION_CLOSED"),
+    ])
+    result = evaluate_lifecycle_completion(KEY, rows, now=20_000.0)
+    assert result["ready"] is True
+    assert result["receipt"]["economics"]["net_pnl_usd"] == 3.5
+    assert result["receipt"]["economics"]["slippage_cost_usd"] == 1.25

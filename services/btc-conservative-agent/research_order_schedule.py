@@ -7,11 +7,15 @@ called only after those lifecycle actions have already succeeded.
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import math
 from typing import Any, Mapping
 
 
 SCHEMA = "research_chase_schedule_v1"
 QUANTITY_SCHEMA = "research_order_quantity_evidence_v1"
+ACTION_TIMING_SCHEMA = "research_order_action_timing_v1"
 
 
 def _positive(value: Any) -> float | None:
@@ -68,6 +72,113 @@ def _append_quantity_event(schedule: dict, order: Mapping[str, Any], *, event: s
         events.append(state)
     schedule["requested_qty"] = state["requested_qty"] or schedule.get("requested_qty")
     schedule["requested_qty_provenance"] = "SOURCE_TICKET_QTY" if schedule.get("requested_qty") else "MISSING"
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _action_receipt_sha(receipt: Mapping[str, Any]) -> str:
+    body = {key: copy.deepcopy(value) for key, value in receipt.items() if key != "receipt_sha256"}
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def append_action_timing_receipt(
+    order: dict,
+    signal: dict | None,
+    *,
+    action_generation: int,
+    action_type: str,
+    policy_due_ts: float,
+    eligibility_ts: float,
+    dispatch_start_ts: float,
+    acknowledgement_ts: float | None = None,
+    fill_ts: float | None = None,
+    fill_price: float | None = None,
+    filled_qty: float | None = None,
+    remaining_qty: float | None = None,
+    limit_price: float | None = None,
+    book_ref: Mapping[str, Any] | str | None = None,
+    tape_ref: Mapping[str, Any] | str | None = None,
+    non_intentional_delay: Mapping[str, Any] | None = None,
+) -> dict | None:
+    """Append an immutable observation receipt for an already-taken action.
+
+    This is evidence capture only.  It never sleeps, submits, reprices, fills,
+    or changes the schedule.  A duplicate identity is accepted only when its
+    canonical payload is byte-for-byte equivalent; conflicting observations
+    are rejected fail-closed.
+    """
+    schedule = order.get("research_chase_schedule") if isinstance(order, dict) else None
+    if not isinstance(schedule, dict) or schedule.get("authoritative") is not True:
+        return None
+    side = str(order.get("signal_dir") or order.get("dir") or (signal or {}).get("final_direction") or "").upper()
+    action = str(action_type or "").upper()
+    due = _finite(policy_due_ts)
+    eligible = _finite(eligibility_ts)
+    dispatched = _finite(dispatch_start_ts)
+    acknowledged = _finite(acknowledgement_ts)
+    filled = _finite(fill_ts)
+    generation_number = _finite(action_generation)
+    observed_fill_price = _positive(fill_price)
+    observed_filled_qty = _positive(filled_qty)
+    qty = _positive(remaining_qty) or _positive(order.get("remaining_qty")) or _positive(order.get("qty"))
+    limit = _positive(limit_price) or _positive(order.get("limit_price"))
+    if (
+        side not in {"LONG", "SHORT"} or not action or due is None or eligible is None
+        or dispatched is None or generation_number is None or generation_number < 0
+        or not generation_number.is_integer()
+    ):
+        return None
+    if dispatched < max(due, eligible):
+        return None
+    if acknowledged is not None and acknowledged < dispatched:
+        return None
+    if filled is not None and filled < dispatched:
+        return None
+    delay_proof = copy.deepcopy(dict(non_intentional_delay)) if isinstance(non_intentional_delay, Mapping) else None
+    if delay_proof is not None and _finite(delay_proof.get("seconds")) is not None:
+        delay_proof["seconds"] = _finite(delay_proof["seconds"])
+    payload = {
+        "schema": ACTION_TIMING_SCHEMA,
+        "trade_id": schedule.get("trade_id") or order.get("trade_id"),
+        "action_generation": int(generation_number),
+        "action_type": action,
+        "side": side,
+        "policy_due_ts": due,
+        "eligibility_ts": eligible,
+        "dispatch_start_ts": dispatched,
+        "acknowledgement_ts": acknowledged,
+        "fill_ts": filled,
+        "fill_price": observed_fill_price,
+        "filled_qty": observed_filled_qty,
+        "remaining_qty": qty,
+        "limit_price": limit,
+        "book_ref": copy.deepcopy(book_ref),
+        "tape_ref": copy.deepcopy(tape_ref),
+        "non_intentional_delay": delay_proof,
+        "attribution_only": True,
+    }
+    payload["receipt_sha256"] = _action_receipt_sha(payload)
+    identity = (payload["action_generation"], payload["action_type"])
+    receipts = schedule.setdefault("action_timing_receipts", [])
+    for existing in receipts:
+        if not isinstance(existing, Mapping):
+            continue
+        if (existing.get("action_generation"), existing.get("action_type")) != identity:
+            continue
+        if existing.get("receipt_sha256") != _action_receipt_sha(existing):
+            return None
+        return existing if existing.get("receipt_sha256") == payload["receipt_sha256"] else None
+    receipts.append(payload)
+    return payload
 
 
 def _attach(schedule: dict, order: dict, signal: dict | None) -> dict:

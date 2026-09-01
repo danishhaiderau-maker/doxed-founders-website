@@ -168,6 +168,7 @@ from collector_v22_schema import (
     COLLECTOR_VERSION as COLLECTOR_V22_VERSION,
     EVENT_INDEX_FILE as COLLECTOR_V22_EVENT_INDEX_FILE,
     RESEARCH_EVENTS_FILE as COLLECTOR_V22_RESEARCH_EVENTS_FILE,
+    STORAGE_PRESSURE_THRESHOLD,
     build_policy_identity,
 )
 from collector_v22 import (
@@ -178,7 +179,12 @@ from collector_v22 import (
     write_research_event_once,
 )
 from research_v3_contract import COLLECTOR_VERSION as COLLECTOR_V31_VERSION
-from collector_storage import storage_blocks_new_events, storage_state, project_capacity
+from collector_storage import (
+    disk_usage_fraction,
+    project_capacity,
+    storage_blocks_new_events,
+    storage_state,
+)
 from collector_v22_provisional import (
     PROVISIONAL_STORE_FILE as COLLECTOR_V22_PROVISIONAL_FILE,
     load_provisional_events,
@@ -1290,6 +1296,12 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         ),
         "entry_slippage": round(abs(float(entry) - float(signal_price)), 6),
         "book_slippage_usd": round(float((order.get("fill_sim") or {}).get("slippage_usd") or order.get("book_slippage_usd") or 0), 4),
+        # Preserve the immutable fill-time depth receipt for terminal economics.
+        # ``book_slippage_usd`` alone cannot distinguish a measured zero from a
+        # missing/empty book, so terminal qualification must inspect this
+        # evidence before treating a value as known.
+        "entry_fill_sim": copy.deepcopy(order.get("fill_sim") or {}),
+        "entry_filled_qty": order.get("filled_qty") or order.get("qty"),
         "entry_levels_consumed": int((order.get("fill_sim") or {}).get("levels_consumed") or 0),
         "entry_partial_fill": bool(order.get("partial_fill")),
         "entry_sr_state": context.get("sr_state", "UNKNOWN"),
@@ -5960,6 +5972,100 @@ def simulate_market_fill(side: str, qty_btc: float) -> dict:
     }
 
 
+def simulate_marketable_limit_fill(
+    side: str,
+    qty_btc: float,
+    limit_price: float,
+    levels,
+    *,
+    book_observed_ts=None,
+) -> dict:
+    """Walk only book levels executable at the order's hard limit.
+
+    A marketable limit is not an unrestricted market order.  Consuming levels
+    beyond the limit and then clipping the reported VWAP fabricates both price
+    and quantity.  This pure walk preserves honest partial/no-fill evidence and
+    keeps the stored slippage arithmetic tied to the exact consumed levels.
+    """
+    side = str(side or "").lower()
+    qty_btc = float(qty_btc or 0)
+    limit_price = float(limit_price or 0)
+    empty = {
+        "avg_price": 0.0,
+        "filled_qty": 0.0,
+        "slippage_usd": 0.0,
+        "fully_filled": qty_btc <= 0,
+        "levels_consumed": 0,
+        "partial_fill": False,
+        "best_price": 0.0,
+        "unfilled_qty": max(0.0, qty_btc),
+        "book_observed_ts": book_observed_ts,
+        "book_source": "CACHED_ORDER_BOOK",
+        "consumed_levels": [],
+        "evidence_status": "UNKNOWN",
+        "unknown_reason": None,
+    }
+    if side not in ("buy", "sell") or qty_btc <= 0 or limit_price <= 0:
+        empty["unknown_reason"] = "INVALID_LIMIT_FILL_REQUEST"
+        return empty
+    normalized = []
+    for raw in levels or []:
+        try:
+            price = float(raw[0])
+            size = float(raw[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if price <= 0 or size <= 0:
+            continue
+        normalized.append((price, size))
+    if not normalized:
+        empty["unknown_reason"] = "ORDER_BOOK_DEPTH_MISSING"
+        return empty
+    best = normalized[0][0]
+    empty["best_price"] = round(best, 2)
+    eligible = [
+        (price, size) for price, size in normalized
+        if (side == "buy" and price <= limit_price)
+        or (side == "sell" and price >= limit_price)
+    ]
+    if not eligible:
+        empty.update(evidence_status="COMPLETE", unknown_reason=None)
+        return empty
+    remaining = qty_btc
+    notional = 0.0
+    filled = 0.0
+    consumed = []
+    for price, size in eligible:
+        if remaining <= 1e-12:
+            break
+        take = min(remaining, size)
+        notional += take * price
+        filled += take
+        remaining -= take
+        consumed.append({"price": price, "quantity_btc": take})
+    if filled <= 0:
+        empty["unknown_reason"] = "ELIGIBLE_DEPTH_NOT_CONSUMABLE"
+        return empty
+    avg_price = notional / filled
+    slip_per_btc = (avg_price - best) if side == "buy" else (best - avg_price)
+    fully_filled = remaining <= 1e-9
+    return {
+        "avg_price": round(avg_price, 2),
+        "filled_qty": round(filled, 8),
+        "slippage_usd": round(max(0.0, slip_per_btc * filled), 4),
+        "fully_filled": fully_filled,
+        "levels_consumed": len(consumed),
+        "partial_fill": bool(filled > 0 and not fully_filled),
+        "best_price": round(best, 2),
+        "unfilled_qty": round(max(0.0, remaining), 8),
+        "book_observed_ts": book_observed_ts,
+        "book_source": "CACHED_ORDER_BOOK",
+        "consumed_levels": consumed,
+        "evidence_status": "COMPLETE",
+        "unknown_reason": None,
+    }
+
+
 def get_mark_price(direction: str, fallback: float = None) -> float:
     """Realistic mark for PnL/exits: LONG marks at bid (sellable), SHORT at ask (cover buy)."""
     direction = str(direction or "").upper()
@@ -5998,6 +6104,8 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
         bid = float(state.get("bid") or 0)
         ask = float(state.get("ask") or 0)
         last = float(state.get("price") or limit or 0)
+        book = copy.deepcopy(state.get("order_book") or {})
+        book_observed_ts = state.get("book_ts")
     is_market_order = order.get("entry_type") in ("SIM_MARKET", "MARKET")
     crossed_limit = (
         (side == "buy" and ask > 0 and limit >= ask)
@@ -6017,29 +6125,28 @@ def resolve_sim_fill_with_depth(order: dict) -> dict:
         # a worse price than its limit.  Walking the unrestricted market book
         # here previously produced impossible fills (for example a SHORT sell
         # below its sell limit) and broke paper-to-Bitfinex lifecycle fidelity.
-        sim = simulate_market_fill(side, qty) if qty > 0 else {}
-        book_vwap = float(sim.get("avg_price") or 0)
-        # Marketable limits receive available price improvement while the
-        # limit remains the hard worst-price boundary.
-        if side == "buy":
-            fill_px = min(book_vwap or ask or limit, limit)
-        else:
-            fill_px = max(book_vwap or bid or limit, limit)
-        filled_qty = float(sim.get("filled_qty") or qty)
-        if filled_qty <= 0:
-            filled_qty = qty
-        fill_px = round(fill_px, 2)
+        levels = book.get("asks") if side == "buy" else book.get("bids")
+        sim = simulate_marketable_limit_fill(
+            side, qty, limit, levels or [], book_observed_ts=book_observed_ts,
+        )
+        fill_px = float(sim.get("avg_price") or 0)
+        filled_qty = float(sim.get("filled_qty") or 0)
         return {
             "fill_price": fill_px,
             "filled_qty": filled_qty,
             "is_taker": True,
             "avg_price": fill_px,
-            "best_price": ask if side == "buy" else bid,
+            "best_price": sim.get("best_price"),
             "slippage_usd": float(sim.get("slippage_usd") or 0),
-            "fully_filled": bool(sim.get("fully_filled", True)),
+            "fully_filled": bool(sim.get("fully_filled", False)),
             "partial_fill": bool(sim.get("partial_fill", False)),
-            "levels_consumed": int(sim.get("levels_consumed") or 1),
+            "levels_consumed": int(sim.get("levels_consumed") or 0),
             "unfilled_qty": float(sim.get("unfilled_qty") or 0),
+            "book_observed_ts": sim.get("book_observed_ts"),
+            "book_source": sim.get("book_source"),
+            "consumed_levels": copy.deepcopy(sim.get("consumed_levels") or []),
+            "evidence_status": sim.get("evidence_status"),
+            "unknown_reason": sim.get("unknown_reason"),
         }
     fill_px = round(limit, 2) if limit > 0 else last
     return {
@@ -6068,6 +6175,13 @@ def resolve_sim_fill_price(order: dict) -> float:
     if result.get("partial_fill"):
         order["partial_fill"] = True
         order["qty"] = result["filled_qty"]
+        residual = float(result.get("unfilled_qty") or 0.0)
+        order["residual_cancelled_qty"] = residual
+        order["residual_disposition"] = "CANCELLED_AFTER_PARTIAL_SIM_FILL"
+        order["residual_cancelled_ts"] = time.time()
+        order["fill_sim"]["unfilled_disposition"] = (
+            "CANCELLED_AFTER_PARTIAL_SIM_FILL"
+        )
     elif result.get("is_taker") and result.get("slippage_usd"):
         order["book_slippage_usd"] = result["slippage_usd"]
     return result["fill_price"]
@@ -10371,6 +10485,11 @@ def process_virtual_chase_chase6_market_conversions(price: float):
         meta = trades_map.get(tid, {})
         signal = meta.get("signal_ref") or {}
         limit_price = float(order.get("limit_price") or 0)
+        # This path is the explicit final market conversion.  Freeze the order
+        # type before price resolution so it cannot accidentally reuse the
+        # passive limit walker and its hard-limit boundary.
+        order["entry_type"] = "SIM_MARKET"
+        order["fee_type"] = "TAKER"
         fill_px = resolve_sim_fill_price(order)
         slippage = None
         if limit_price > 0 and fill_px:
@@ -10379,8 +10498,6 @@ def process_virtual_chase_chase6_market_conversions(price: float):
                 slippage = round(float(fill_px) - limit_price, 4)
             elif direction == "SHORT":
                 slippage = round(limit_price - float(fill_px), 4)
-        order["entry_type"] = "SIM_MARKET"
-        order["fee_type"] = "TAKER"
         order["fill_price"] = fill_px
         order["limit_price"] = fill_px
         order["market_conversion"] = True
@@ -21188,6 +21305,24 @@ def process_pending_orders():
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
             fill_px = resolve_sim_fill_price(order)
+            if not fill_px or float(order.get("filled_qty") or 0) <= 0:
+                # A touched BBO without eligible cached depth is not a fill.
+                # Keep the order pending for the next authoritative snapshot;
+                # never manufacture quantity merely to advance the lifecycle.
+                order["fill_evidence_status"] = (
+                    (order.get("fill_sim") or {}).get("evidence_status") or "UNKNOWN"
+                )
+                order["fill_evidence_blocker"] = (
+                    (order.get("fill_sim") or {}).get("unknown_reason")
+                    or "NO_PRICE_ELIGIBLE_DEPTH"
+                )
+                logger.warning(
+                    f"[SIM] touched limit retained pending; eligible depth did not "
+                    f"prove a fill trade_id={order.get('trade_id')} "
+                    f"reason={order.get('fill_evidence_blocker')} "
+                    "[PIPELINE ENFORCEMENT]"
+                )
+                continue
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
             order["status"] = "FILLED"
@@ -21371,7 +21506,10 @@ def fill_order(order):
             order,
             signal if isinstance(signal, dict) else None,
             now=time.time(),
-            reason="FILLED",
+            reason=(
+                "PARTIAL_FILL_SIM_RESIDUAL_CANCELLED"
+                if order.get("partial_fill") else "FILLED"
+            ),
         )
     collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
     if callable(collector_refresh):
@@ -24724,6 +24862,206 @@ def _paper_terminal_pnl_components(
     }
 
 
+def _finite_terminal_number(value):
+    """Return a finite evidence number without treating booleans as quantities."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _paper_depth_slippage_receipt(
+    fill_sim: dict,
+    *,
+    phase: str,
+    execution_price: float,
+    quantity_btc: float,
+    entry_type: str = None,
+) -> dict:
+    """Validate a side-correct depth-walk cost without inventing missing depth.
+
+    The simulator's ``slippage_usd`` is already a total USD cost for the named
+    BTC quantity versus the same-side best executable quote.  It is not a
+    per-BTC price difference.  Empty-book fallbacks, maker-limit touches and
+    partial depth walks do not prove a complete execution cost and remain
+    UNKNOWN.
+    """
+    phase = str(phase or "UNKNOWN").upper()
+    receipt = {
+        "schema": "paper_depth_slippage_cost_v1",
+        "phase": phase,
+        "status": "UNKNOWN",
+        "unit": "USD",
+        "quantity_unit": "BTC",
+        "price_unit": "USD_PER_BTC",
+        "baseline": "SIDE_CORRECT_BEST_EXECUTABLE_BBO",
+        "slippage_cost_usd": None,
+        "quantity_btc": None,
+        "baseline_price_usd_per_btc": None,
+        "execution_vwap_usd_per_btc": None,
+        "blockers": [],
+    }
+    if not isinstance(fill_sim, dict) or not fill_sim:
+        receipt["blockers"] = [f"{phase}_DEPTH_RECEIPT_MISSING"]
+        return receipt
+    if fill_sim.get("book_empty"):
+        receipt["blockers"] = [f"{phase}_DEPTH_UNAVAILABLE_BBO_FALLBACK"]
+        return receipt
+    if phase == "ENTRY" and not (
+        bool(fill_sim.get("is_taker"))
+        or str(entry_type or "").upper() in ("MARKET", "SIM_MARKET")
+    ):
+        receipt["blockers"] = ["ENTRY_MAKER_TOUCH_HAS_NO_DEPTH_WALK"]
+        return receipt
+    if fill_sim.get("fully_filled") is not True:
+        receipt["blockers"] = [f"{phase}_DEPTH_WALK_NOT_FULLY_FILLED"]
+        return receipt
+
+    quantity = _finite_terminal_number(fill_sim.get("filled_qty"))
+    if quantity is None:
+        quantity = _finite_terminal_number(quantity_btc)
+    best = _finite_terminal_number(fill_sim.get("best_price"))
+    avg = _finite_terminal_number(fill_sim.get("avg_price"))
+    if avg is None:
+        avg = _finite_terminal_number(execution_price)
+    cost = _finite_terminal_number(fill_sim.get("slippage_usd"))
+    blockers = []
+    if quantity is None or quantity <= 0:
+        blockers.append(f"{phase}_EXECUTED_QUANTITY_MISSING")
+    if best is None or best <= 0:
+        blockers.append(f"{phase}_SIDE_CORRECT_BBO_MISSING")
+    if avg is None or avg <= 0:
+        blockers.append(f"{phase}_EXECUTION_VWAP_MISSING")
+    if cost is None or cost < 0:
+        blockers.append(f"{phase}_SLIPPAGE_COST_MISSING")
+    receipt.update({
+        "quantity_btc": quantity,
+        "baseline_price_usd_per_btc": best,
+        "execution_vwap_usd_per_btc": avg,
+        "slippage_cost_usd": cost,
+        "levels_consumed": int(fill_sim.get("levels_consumed") or 0),
+        "blockers": blockers,
+    })
+    if blockers:
+        return receipt
+
+    # Recompute from the immutable prices/quantity as an integrity check.  The
+    # stored simulator total is rounded to four decimals, so use half a cent as
+    # the acceptance tolerance rather than requiring impossible bit equality.
+    recomputed = abs(avg - best) * quantity
+    receipt["recomputed_slippage_cost_usd"] = round(recomputed, 8)
+    if abs(recomputed - cost) > 0.005:
+        receipt["blockers"] = [f"{phase}_SLIPPAGE_ARITHMETIC_MISMATCH"]
+        return receipt
+    receipt["status"] = "COMPLETE"
+    return receipt
+
+
+def _paper_terminal_cost_evidence(
+    pos: dict,
+    exit_sim: dict,
+    *,
+    entry_price: float,
+    exit_price: float,
+    original_qty: float,
+    remaining_qty: float,
+    gross_pnl: float,
+    trading_fees: float,
+    funding_total: float,
+    net_pnl: float,
+) -> dict:
+    """Build fail-closed terminal costs while preserving PnL accounting truth.
+
+    Gross PnL is calculated from actual execution prices.  Therefore depth-walk
+    and latency attribution must never be subtracted from it a second time.
+    Fees and funding are the only separately-subtracted costs in
+    ``terminal_single_count_v1``.
+    """
+    entry_receipt = _paper_depth_slippage_receipt(
+        pos.get("entry_fill_sim") or {},
+        phase="ENTRY",
+        execution_price=entry_price,
+        quantity_btc=pos.get("entry_filled_qty") or original_qty,
+        entry_type=pos.get("entry_type"),
+    )
+    terminal_exit_receipt = _paper_depth_slippage_receipt(
+        exit_sim or {},
+        phase="EXIT",
+        execution_price=exit_price,
+        quantity_btc=remaining_qty,
+    )
+    partial_receipts = [
+        row for row in (pos.get("partial_exit_receipts") or [])
+        if isinstance(row, dict)
+        and _finite_terminal_number(row.get("closed_qty")) not in (None, 0.0)
+        and _finite_terminal_number(row.get("remaining_fraction")) not in (None, 0.0)
+    ]
+    exit_receipt = copy.deepcopy(terminal_exit_receipt)
+    if partial_receipts:
+        exit_receipt["status"] = "UNKNOWN"
+        exit_receipt["slippage_cost_usd"] = None
+        exit_receipt["blockers"] = sorted(set(
+            list(exit_receipt.get("blockers") or [])
+            + ["PARTIAL_EXIT_DEPTH_COST_RECEIPTS_MISSING"]
+        ))
+        exit_receipt["terminal_leg_receipt"] = terminal_exit_receipt
+
+    entry_cost = (
+        entry_receipt.get("slippage_cost_usd")
+        if entry_receipt.get("status") == "COMPLETE" else None
+    )
+    exit_cost = (
+        exit_receipt.get("slippage_cost_usd")
+        if exit_receipt.get("status") == "COMPLETE" else None
+    )
+    combined_cost = (
+        entry_cost + exit_cost
+        if entry_cost is not None and exit_cost is not None else None
+    )
+    expected_net = gross_pnl - trading_fees - funding_total
+    reconciliation_delta = net_pnl - expected_net
+    return {
+        "terminal_cost_evidence_schema": "paper_terminal_cost_evidence_v1",
+        "entry_slippage_cost_usd": entry_cost,
+        "exit_slippage_cost_usd": exit_cost,
+        "slippage_cost_usd": combined_cost,
+        "latency_cost_usd": None,
+        "entry_slippage_cost_receipt": entry_receipt,
+        "exit_slippage_cost_receipt": exit_receipt,
+        "latency_cost_receipt": {
+            "schema": "paper_latency_cost_v1",
+            "status": "UNKNOWN",
+            "unit": "USD",
+            "latency_cost_usd": None,
+            "blockers": [
+                "DECISION_TIME_EXECUTABLE_COUNTERFACTUAL_PATH_MISSING"
+            ],
+            "note": (
+                "Elapsed signal/order time does not isolate latency cost from "
+                "intentional offset, chase, repricing, or market movement."
+            ),
+        },
+        "execution_cost_accounting": {
+            "schema": "terminal_single_count_v1",
+            "gross_pnl_basis": "ACTUAL_EXECUTION_PRICES_INCLUDES_PRICE_IMPACT",
+            "separately_subtracted_from_gross": [
+                "trading_fees_usd", "funding_fees_usd"
+            ],
+            "attribution_only_not_subtracted_again": [
+                "entry_slippage_cost_usd", "exit_slippage_cost_usd",
+                "slippage_cost_usd", "latency_cost_usd",
+            ],
+            "expected_net_pnl_usd": round(expected_net, 8),
+            "observed_net_pnl_usd": round(net_pnl, 8),
+            "reconciliation_delta_usd": round(reconciliation_delta, 8),
+            "reconciled": abs(reconciliation_delta) <= 1e-8,
+        },
+    }
+
+
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     if not validate_state():
@@ -24854,6 +25192,18 @@ def close_position(pos: dict, exit_reason: str):
             ai_factors = {}
         close_iso = utc_iso()
         close_mel = _format_melbourne_hm(close_iso)
+        terminal_cost_evidence = _paper_terminal_cost_evidence(
+            pos,
+            exit_sim,
+            entry_price=float(entry),
+            exit_price=float(price),
+            original_qty=pnl_components["original_qty"],
+            remaining_qty=pnl_components["remaining_qty"],
+            gross_pnl=gross_pnl,
+            trading_fees=trading_fees,
+            funding_total=funding_total,
+            net_pnl=net_pnl,
+        )
         trade_row = {
             "ts": close_iso,
             "close_ts": close_iso,
@@ -24906,6 +25256,7 @@ def close_position(pos: dict, exit_reason: str):
             "fees_usd": round(trading_fees, 2),
             "funding_fees_usd": round(funding_total, 2),
             "total_cost_usd": round(trading_fees + funding_total, 2),
+            **terminal_cost_evidence,
             "exit_reason": exit_reason,
             "leverage": pos.get("leverage", DEFAULT_RESEARCH_LEVERAGE),
             "r_multiple": round(r_multiple, 2),
@@ -25042,12 +25393,27 @@ def close_position(pos: dict, exit_reason: str):
                 "atr14_pct_3m": ((state.get("cycle_3m_universe") or {}).get("atr14_pct_3m")),
             },
             "exit_market_receipt": {
-                "basis": "SIDE_CORRECT_BBO_DEPTH" if exit_sim else "UNAVAILABLE",
-                "observed_ts": close_iso, "best_bid": (exit_sim or {}).get("best_bid"),
-                "best_ask": (exit_sim or {}).get("best_ask"),
-                "visible_executable_qty": (exit_sim or {}).get("available_qty"),
+                "basis": (
+                    "SIDE_CORRECT_BBO_DEPTH"
+                    if terminal_cost_evidence["exit_slippage_cost_receipt"].get("status") == "COMPLETE"
+                    else "SIDE_CORRECT_TRIGGER_ONLY"
+                    if (exit_sim or {}).get("source") == "exit_trigger_side_correct"
+                    else "UNVERIFIED_EXECUTION_PRICE"
+                    if exit_sim else "UNAVAILABLE"
+                ),
+                "observed_ts": close_iso,
+                "book_observed_ts": (exit_sim or {}).get("book_observed_ts"),
+                "best_executable_price": (exit_sim or {}).get("best_price"),
+                "execution_vwap": (exit_sim or {}).get("avg_price"),
+                "visible_executable_qty": (exit_sim or {}).get("filled_qty"),
                 "levels_consumed": (exit_sim or {}).get("levels_consumed"),
                 "slippage_usd": (exit_sim or {}).get("slippage_usd"),
+                "evidence_status": terminal_cost_evidence[
+                    "exit_slippage_cost_receipt"
+                ].get("status"),
+                "blockers": copy.deepcopy(terminal_cost_evidence[
+                    "exit_slippage_cost_receipt"
+                ].get("blockers") or []),
             },
             **{f"cfg_{k}": v for k, v in get_exit_config_snapshot(pos.get("research_lane")).items() if not isinstance(v, (list, tuple))},
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
@@ -37094,6 +37460,119 @@ def _data_sync_volume_root() -> Path:
     return _data_sync_runtime_root()
 
 
+_LIFECYCLE_PIPELINE_RUNTIME = None
+_LIFECYCLE_PIPELINE_LAST_STATUS = None
+
+
+def _lifecycle_pipeline_pressure_probe() -> dict:
+    """Project existing collector pressure without inventing a new threshold."""
+    try:
+        used_fraction = float(
+            disk_usage_fraction(str(_data_sync_runtime_root()))
+        )
+        return {
+            "pressure": bool(used_fraction >= STORAGE_PRESSURE_THRESHOLD),
+            "emergency": used_fraction >= 0.90,
+            "used_fraction": used_fraction,
+        }
+    except Exception as exc:
+        raise RuntimeError(type(exc).__name__) from exc
+
+
+def _lifecycle_pipeline_overlap_probe():
+    """Avoid competing with either physical Fly inventory generation."""
+    active = []
+    with _data_sync_inventory_cache_condition:
+        if _data_sync_inventory_cache.get("refreshing"):
+            active.append("SYNC_INVENTORY_CACHE_REFRESH")
+        if _data_sync_async_inventory.get("refreshing"):
+            active.append("SYNC_ASYNC_INVENTORY_REFRESH")
+    return active
+
+
+def _start_lifecycle_pipeline_runtime() -> bool:
+    """Start optional evidence processing; never alter trading availability."""
+    global _LIFECYCLE_PIPELINE_RUNTIME, _LIFECYCLE_PIPELINE_LAST_STATUS
+    revision = str(_runtime_git_rev() or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        logger.warning(
+            "[LIFECYCLE PIPELINE] not started: exact 40-character source revision "
+            "is unavailable; trading remains unchanged"
+        )
+        return False
+    try:
+        runtime_module = importlib.import_module("lifecycle_pipeline_runtime")
+        started = runtime_module.start(
+            _data_sync_runtime_root(),
+            source_revision=revision,
+            pressure_probe=_lifecycle_pipeline_pressure_probe,
+            overlap_probe=_lifecycle_pipeline_overlap_probe,
+        )
+        logger.info(
+            "[LIFECYCLE PIPELINE] optional owner started=%s cleanup_authorized=false",
+            started,
+        )
+        if started:
+            _LIFECYCLE_PIPELINE_RUNTIME = runtime_module
+        _LIFECYCLE_PIPELINE_LAST_STATUS = runtime_module.status()
+        return bool(started)
+    except BaseException as exc:
+        logger.error(
+            "[LIFECYCLE PIPELINE] optional owner start failed closed: %s; "
+            "trading remains unchanged",
+            type(exc).__name__,
+        )
+        return False
+
+
+def _stop_lifecycle_pipeline_runtime(timeout: float = 5.0) -> bool:
+    global _LIFECYCLE_PIPELINE_RUNTIME, _LIFECYCLE_PIPELINE_LAST_STATUS
+    runtime_module = _LIFECYCLE_PIPELINE_RUNTIME
+    if runtime_module is None:
+        return True
+    try:
+        stopped = bool(runtime_module.stop(timeout=timeout))
+        _LIFECYCLE_PIPELINE_LAST_STATUS = runtime_module.status()
+        if stopped:
+            _LIFECYCLE_PIPELINE_RUNTIME = None
+        return stopped
+    except BaseException as exc:
+        logger.error(
+            "[LIFECYCLE PIPELINE] optional owner stop failed: %s",
+            type(exc).__name__,
+        )
+        return False
+
+
+def _lifecycle_pipeline_runtime_status() -> dict:
+    runtime_module = _LIFECYCLE_PIPELINE_RUNTIME
+    if runtime_module is None:
+        if isinstance(_LIFECYCLE_PIPELINE_LAST_STATUS, dict):
+            return copy.deepcopy(_LIFECYCLE_PIPELINE_LAST_STATUS)
+        return {
+            "schema": "lifecycle_pipeline_runtime_status_v1",
+            "running": False,
+            "owner": False,
+            "active": False,
+            "last_outcome": "NOT_STARTED",
+            "source_revision": None,
+            "source_cleanup_authorized": False,
+        }
+    try:
+        return runtime_module.status()
+    except BaseException as exc:
+        return {
+            "schema": "lifecycle_pipeline_runtime_status_v1",
+            "running": False,
+            "owner": False,
+            "active": False,
+            "last_outcome": "STATUS_UNAVAILABLE",
+            "last_error": type(exc).__name__,
+            "source_revision": None,
+            "source_cleanup_authorized": False,
+        }
+
+
 def _data_sync_allowed_roots() -> list:
     """Return unique, non-overlapping physical roots within the Fly volume.
 
@@ -38462,6 +38941,7 @@ def api_data_sync_manifest():
             "free": int(usage.free),
             "used_pct": round((usage.used / usage.total) * 100, 2) if usage.total else None,
         },
+        "lifecycle_pipeline_runtime": _lifecycle_pipeline_runtime_status(),
     }
     if inventory_status in {"BUILDING", "STALE", "STALE_REVALIDATING"}:
         response = jsonify(payload)
@@ -39787,6 +40267,8 @@ def shutdown_handler(signum, frame):
     logger.warning(f"[SHUTDOWN] Post-AI evidence drained={post_ai_drained}")
     combo_drained = _shutdown_combo_lane_execution_workers(timeout=5.0)
     logger.warning(f"[SHUTDOWN] Combo-lane execution drained={combo_drained}")
+    lifecycle_stopped = _stop_lifecycle_pipeline_runtime(timeout=5.0)
+    logger.warning(f"[SHUTDOWN] Lifecycle pipeline stopped={lifecycle_stopped}")
     logger.warning("[SHUTDOWN] Controlled shutdown initiated")
 
 signal.signal(signal.SIGINT, shutdown_handler)
@@ -44738,6 +45220,7 @@ def main():
     load_positions()
     load_paper_lifecycle()
     _reconcile_overdue_v3_expected_orders(force=True)
+    _start_lifecycle_pipeline_runtime()
     rebuild_state_from_snapshots()
     reconcile_restored_paper_terminal_conflicts()
     reconcile_stale_signals()
@@ -44991,6 +45474,7 @@ def main():
                         dump_replay(tid)
                         with replay_lock:
                             replay_buffers.pop(tid, None)
+                _stop_lifecycle_pipeline_runtime(timeout=5.0)
                 break
         except Exception as e:
             logger.critical(f"[FATAL] Restarting after crash: {e}")

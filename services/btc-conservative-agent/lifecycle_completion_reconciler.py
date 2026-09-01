@@ -157,6 +157,8 @@ def evaluate_lifecycle_completion(
         else:
             outcome = str(fill_lifecycle[0]["outcome_state"]).upper()
         close = close_rows[0] if len(close_rows) == 1 else {}
+        canonical_economics = close.get("canonical_economics")
+        economics_source = canonical_economics if isinstance(canonical_economics, Mapping) else close
         proof.update({
             "entry_outcome": outcome,
             "position_state": "CLOSED",
@@ -168,9 +170,14 @@ def evaluate_lifecycle_completion(
                 "receipt_sha256": hashlib.sha256(canonical_json(close).encode("utf-8")).hexdigest() if close else None,
             },
             "economics": {
-                name: close.get(name) for name in (
+                name: economics_source.get(name) for name in (
                     "gross_pnl_usd", "trading_fees_usd", "funding_fees_usd",
                     "slippage_cost_usd", "latency_cost_usd", "net_pnl_usd",
+                )
+            } | {
+                name: economics_source.get(name) for name in (
+                    "gross_pnl_basis", "net_pnl_reconciliation_basis",
+                    "separately_subtracted_from_gross", "attribution_only_not_subtracted",
                 )
             },
             "path_extrema": {

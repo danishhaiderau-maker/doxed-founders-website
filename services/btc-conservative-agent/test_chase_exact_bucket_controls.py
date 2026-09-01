@@ -539,10 +539,18 @@ def _compile_function(name, namespace):
 def test_marketable_limit_fill_never_violates_hard_limit_price():
     market_walk_calls = []
     namespace = {
+        "copy": copy,
         "refresh_bbo_state": lambda: None,
         "refresh_order_book_state": lambda: None,
         "state_lock": threading.RLock(),
-        "state": {"bid": 63167.0, "ask": 63177.0, "price": 63154.44},
+        "state": {
+            "bid": 63167.0, "ask": 63177.0, "price": 63154.44,
+            "book_ts": 100.0,
+            "order_book": {
+                "bids": [[63167.0, 1, 0.03163], [63166.0, 1, 1.0]],
+                "asks": [[63177.0, 1, 1.0]],
+            },
+        },
         "simulate_market_fill": lambda side, qty: market_walk_calls.append((side, qty))
         or {
             "avg_price": 63154.44 if side == "sell" else 63189.0,
@@ -551,6 +559,9 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
             "partial_fill": False,
         },
     }
+    namespace["simulate_marketable_limit_fill"] = _compile_function(
+        "simulate_marketable_limit_fill", namespace,
+    )
     resolve = _compile_function("resolve_sim_fill_with_depth", namespace)
 
     short_fill = resolve(
@@ -565,7 +576,13 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
     assert short_fill["fill_price"] >= 63167.0
     assert short_fill["is_taker"] is True
 
-    namespace["state"].update({"bid": 63157.0, "ask": 63167.0})
+    namespace["state"].update({
+        "bid": 63157.0, "ask": 63167.0,
+        "order_book": {
+            "bids": [[63157.0, 1, 1.0]],
+            "asks": [[63167.0, 1, 0.03163], [63168.0, 1, 1.0]],
+        },
+    })
     long_fill = resolve(
         {
             "side": "buy",
@@ -576,7 +593,7 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
     )
     assert long_fill["fill_price"] == 63167.0
     assert long_fill["fill_price"] <= 63167.0
-    assert market_walk_calls == [("sell", 0.03163), ("buy", 0.03163)]
+    assert market_walk_calls == []
 
     market_fill = resolve(
         {
@@ -587,15 +604,23 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
         }
     )
     assert market_fill["fill_price"] == 63154.44
-    assert market_walk_calls == [("sell", 0.03163), ("buy", 0.03163), ("sell", 0.03163)]
+    assert market_walk_calls == [("sell", 0.03163)]
 
 
 def test_marketable_limit_fill_receives_bbo_depth_price_improvement():
     namespace = {
+        "copy": copy,
         "refresh_bbo_state": lambda: None,
         "refresh_order_book_state": lambda: None,
         "state_lock": threading.RLock(),
-        "state": {"bid": 63200.0, "ask": 63210.0, "price": 63205.0},
+        "state": {
+            "bid": 63200.0, "ask": 63210.0, "price": 63205.0,
+            "book_ts": 100.0,
+            "order_book": {
+                "bids": [[63200.0, 1, 1.0]],
+                "asks": [[63210.0, 1, 1.0]],
+            },
+        },
         "simulate_market_fill": lambda side, qty: {
             "avg_price": 63200.0 if side == "sell" else 63210.0,
             "filled_qty": qty,
@@ -603,11 +628,77 @@ def test_marketable_limit_fill_receives_bbo_depth_price_improvement():
             "partial_fill": False,
         },
     }
+    namespace["simulate_marketable_limit_fill"] = _compile_function(
+        "simulate_marketable_limit_fill", namespace,
+    )
     resolve = _compile_function("resolve_sim_fill_with_depth", namespace)
     short_fill = resolve({"side": "sell", "qty": 0.01, "limit_price": 63150.0, "entry_type": "SIM_LIMIT"})
     assert short_fill["fill_price"] == 63200.0
     long_fill = resolve({"side": "buy", "qty": 0.01, "limit_price": 63250.0, "entry_type": "SIM_LIMIT"})
     assert long_fill["fill_price"] == 63210.0
+
+
+def test_marketable_limit_walk_never_consumes_depth_beyond_hard_limit():
+    walk = _compile_function("simulate_marketable_limit_fill", {})
+    buy = walk(
+        "buy", 2.0, 101.0,
+        [[100.0, 1, 0.5], [101.0, 1, 0.5], [102.0, 1, 5.0]],
+        book_observed_ts=123.5,
+    )
+    assert buy["filled_qty"] == 1.0
+    assert buy["partial_fill"] is True
+    assert buy["fully_filled"] is False
+    assert buy["unfilled_qty"] == 1.0
+    assert buy["avg_price"] == 100.5
+    assert buy["slippage_usd"] == 0.5
+    assert [row["price"] for row in buy["consumed_levels"]] == [100.0, 101.0]
+    assert buy["book_observed_ts"] == 123.5
+
+    sell = walk(
+        "sell", 2.0, 99.0,
+        [[100.0, 1, 0.5], [99.0, 1, 0.5], [98.0, 1, 5.0]],
+    )
+    assert sell["filled_qty"] == 1.0
+    assert sell["avg_price"] == 99.5
+    assert sell["slippage_usd"] == 0.5
+    assert [row["price"] for row in sell["consumed_levels"]] == [100.0, 99.0]
+
+
+def test_marketable_limit_missing_depth_is_unknown_not_a_fabricated_fill():
+    walk = _compile_function("simulate_marketable_limit_fill", {})
+    result = walk("buy", 0.25, 101.0, [], book_observed_ts=None)
+    assert result["filled_qty"] == 0.0
+    assert result["fully_filled"] is False
+    assert result["evidence_status"] == "UNKNOWN"
+    assert result["unknown_reason"] == "ORDER_BOOK_DEPTH_MISSING"
+
+
+def test_marketable_limit_partial_explicitly_cancels_ioc_residual():
+    resolve = _compile_function(
+        "resolve_sim_fill_price",
+        {
+            "time": type("_Clock", (), {"time": staticmethod(lambda: 123.0)}),
+            "resolve_sim_fill_with_depth": lambda _order: {
+                "fill_price": 100.5,
+                "filled_qty": 1.0,
+                "unfilled_qty": 1.0,
+                "partial_fill": True,
+                "is_taker": True,
+                "slippage_usd": 0.5,
+            },
+        },
+    )
+    order = {"qty": 2.0, "limit_price": 101.0}
+    assert resolve(order) == 100.5
+    assert order["requested_qty"] == 2.0
+    assert order["qty"] == 1.0
+    assert order["filled_qty"] == 1.0
+    assert order["remaining_qty"] == 1.0
+    assert order["residual_cancelled_qty"] == 1.0
+    assert order["residual_disposition"] == "CANCELLED_AFTER_PARTIAL_SIM_FILL"
+    assert order["fill_sim"]["unfilled_disposition"] == (
+        "CANCELLED_AFTER_PARTIAL_SIM_FILL"
+    )
 
 def test_marketable_fallback_requires_full_visible_depth_at_hard_limit():
     depth = _compile_function(

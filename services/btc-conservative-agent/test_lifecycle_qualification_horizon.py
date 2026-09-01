@@ -50,10 +50,14 @@ class QualificationHorizonUnitTests(unittest.TestCase):
             "gross_pnl_usd": 1.0, "trading_fees_usd": 0.1,
             "funding_fees_usd": 0.05, "entry_slippage_cost_usd": 0.01,
             "exit_slippage_cost_usd": 0.02, "latency_cost_usd": 0.02,
-            "net_pnl_usd": 0.8,
+            "net_pnl_usd": 0.85,
         })
         self.assertEqual(costs["status"], "COMPLETE")
         self.assertAlmostEqual(costs["slippage_cost_usd"], 0.03)
+        self.assertEqual(
+            costs["attribution_only_not_subtracted"],
+            ["slippage_cost_usd", "latency_cost_usd"],
+        )
         extrema = canonical_path_extrema_usd(
             {"basis": "OBSERVED_1S_PRICE_PATH", "mfe_pct": 2, "mae_pct": -1},
             entry_price=100, filled_quantity=0.2,
@@ -116,7 +120,7 @@ class QualificationHorizonBridgeTests(unittest.TestCase):
                 "gross_pnl_usd": 1.0, "trading_fees_usd": 0.1,
                 "funding_fees_usd": 0.05, "entry_slippage_cost_usd": 0.01,
                 "exit_slippage_cost_usd": 0.02, "latency_cost_usd": 0.02,
-                "net_pnl_usd": 0.8, "exit_reason": "ATR_TP_2_5",
+                "net_pnl_usd": 0.85, "exit_reason": "ATR_TP_2_5",
             }
             dual_write_paper_close(
                 position, signal, outcome, epoch_id="epoch-qh", data_dir=tmp,
