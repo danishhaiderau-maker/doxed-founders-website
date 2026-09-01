@@ -15,9 +15,15 @@ def episode(index, pnl, *, state="FULL_FILL", regime=None, measured_costs=True):
         outcome["cost_evidence"] = {
             "schema": "measured_execution_cost_receipt_v1",
             "status": "MEASURED",
+            "entry_fee_usd": 0.0, "exit_fee_usd": 0.0,
             "trading_fees_usd": 0.0,
             "funding_usd": 0.0,
-            "slippage_usd": 0.0,
+            "entry_slippage_usd": 0.0, "exit_slippage_usd": 0.0,
+            "slippage_usd": 0.0, "latency_cost_usd": 0.0,
+            "gross_pnl_usd": pnl, "net_pnl_usd": pnl,
+            "gross_pnl_basis": "ACTUAL_EXECUTION_PRICES_INCLUDES_PRICE_IMPACT",
+            "net_pnl_reconciliation_basis": "GROSS_MINUS_TRADING_FEES_MINUS_FUNDING_FEES",
+            "blockers": [],
             "source_receipt_ids": [f"cost-{index}"],
         }
     return {

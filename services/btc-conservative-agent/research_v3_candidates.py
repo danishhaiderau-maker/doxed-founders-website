@@ -19,6 +19,7 @@ from research_v3_policy_replay import prepare_replay_price_path, replay_protecte
 from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
 from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
+from execution_cost_receipt_adapter import build_measured_execution_cost_receipt
 
 
 def protection_screen() -> list[dict[str, Any]]:
@@ -863,6 +864,8 @@ def load_candidate_inputs(
             row for row in executions
             if _number(row.get("fill_ts")) is not None and _number(row.get("fill_price")) is not None
         ), {})
+        terminal_executions = [row for row in executions if row.get("close_ts") is not None]
+        terminal_execution = terminal_executions[0] if len(terminal_executions) == 1 else {}
         atr14_pct = next((value for value in (
             _number(fill_execution.get("atr14_pct_at_fill")),
             _number(intent.get("atr14_pct_at_signal")),
@@ -885,6 +888,12 @@ def load_candidate_inputs(
                 row.get("record_id") or row.get("fill_id")
                 for row in executions
                 if row.get("record_id") or row.get("fill_id")
+            ],
+            "authoritative_cost_source": terminal_execution,
+            "authoritative_cost_source_ids": [
+                value for value in (
+                    terminal_execution.get("record_id"), lifecycle.get("record_id")
+                ) if value
             ],
             "tape_ids": [
                 ref.get("sha256")
@@ -1196,6 +1205,11 @@ def evaluate_protection_screen(
                         "underwater_observation_ratio": replay.get("underwater_observation_ratio"),
                         "replay_path_basis": replay_path_basis,
                     }
+                    outcome["cost_evidence"] = build_measured_execution_cost_receipt(
+                        source.get("authoritative_cost_source") or {},
+                        source_receipt_ids=source.get("authoritative_cost_source_ids") or [],
+                        expected_net_pnl_usd=outcome.get("net_pnl_usd"),
+                    )
                 diagnostic_outcome: dict[str, Any]
                 if child.get("fill_ts") is None:
                     diagnostic_outcome = {"outcome_state": "NO_FILL", "net_pnl_usd": None}

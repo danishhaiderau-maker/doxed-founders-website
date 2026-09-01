@@ -13,7 +13,11 @@ from research_v3_liquidation_buffer import verify_liquidation_buffer_receipt
 
 SUPPORTED_TERMINAL_STATES = {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
 EXECUTED_TERMINAL_STATES = {"FULL_FILL", "PARTIAL_FILL", "REALIZED_ZERO_PNL"}
-REQUIRED_MEASURED_COST_FIELDS = ("trading_fees_usd", "funding_usd", "slippage_usd")
+REQUIRED_MEASURED_COST_FIELDS = (
+    "entry_fee_usd", "exit_fee_usd", "trading_fees_usd", "funding_usd",
+    "entry_slippage_usd", "exit_slippage_usd", "slippage_usd",
+    "latency_cost_usd", "gross_pnl_usd", "net_pnl_usd",
+)
 
 
 def _measured_cost_evidence(
@@ -42,6 +46,8 @@ def _measured_cost_evidence(
                 reasons.append("MEASURED_COST_RECEIPT_SCHEMA_INVALID")
             if receipt.get("status") != "MEASURED":
                 reasons.append("MEASURED_COST_STATUS_REQUIRED")
+            if receipt.get("blockers"):
+                reasons.append("MEASURED_COST_RECEIPT_HAS_BLOCKERS")
             receipt_ids = receipt.get("source_receipt_ids")
             if not isinstance(receipt_ids, list) or not any(str(value).strip() for value in receipt_ids):
                 reasons.append("MEASURED_COST_SOURCE_RECEIPT_REQUIRED")
@@ -50,7 +56,21 @@ def _measured_cost_evidence(
                 if isinstance(value, bool) or not isinstance(value, (int, float)):
                     reasons.append(f"{field.upper()}_MEASUREMENT_MISSING")
                 elif float(value) < 0:
-                    reasons.append(f"{field.upper()}_MEASUREMENT_NEGATIVE")
+                    if field not in {"gross_pnl_usd", "net_pnl_usd"}:
+                        reasons.append(f"{field.upper()}_MEASUREMENT_NEGATIVE")
+            if receipt.get("gross_pnl_basis") != "ACTUAL_EXECUTION_PRICES_INCLUDES_PRICE_IMPACT":
+                reasons.append("MEASURED_COST_GROSS_BASIS_INVALID")
+            if receipt.get("net_pnl_reconciliation_basis") != "GROSS_MINUS_TRADING_FEES_MINUS_FUNDING_FEES":
+                reasons.append("MEASURED_COST_NET_BASIS_INVALID")
+            numeric = all(isinstance(receipt.get(key), (int, float)) and not isinstance(receipt.get(key), bool)
+                          for key in ("entry_fee_usd", "exit_fee_usd", "trading_fees_usd", "funding_usd", "gross_pnl_usd", "net_pnl_usd"))
+            if numeric:
+                if abs(receipt["entry_fee_usd"] + receipt["exit_fee_usd"] - receipt["trading_fees_usd"]) > 1e-8:
+                    reasons.append("MEASURED_COST_FEE_RECONCILIATION_MISMATCH")
+                if abs(receipt["gross_pnl_usd"] - receipt["trading_fees_usd"] - receipt["funding_usd"] - receipt["net_pnl_usd"]) > 1e-8:
+                    reasons.append("MEASURED_COST_NET_RECONCILIATION_MISMATCH")
+                if outcome.get("net_pnl_usd") is not None and abs(float(outcome["net_pnl_usd"]) - receipt["net_pnl_usd"]) > 1e-8:
+                    reasons.append("MEASURED_COST_OUTCOME_NET_MISMATCH")
         if reasons:
             defects.append({
                 "episode_id": episode_id,
