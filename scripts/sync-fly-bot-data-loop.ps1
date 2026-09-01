@@ -382,7 +382,7 @@ try {
       # from continuously restarting a metadata-heavy Fly-volume scan after
       # its 150-second cache expires.
       $manifest = Get-FlySyncPreflightManifest `
-        -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest?identity_only=1") `
+        -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/identity") `
         -IdentityOnly
       if ($manifest.PSObject.Properties.Name -contains "source_git_rev") {
         $observedSourceRevision = [string]$manifest.source_git_rev

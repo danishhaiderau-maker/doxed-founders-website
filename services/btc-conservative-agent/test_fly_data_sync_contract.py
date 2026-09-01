@@ -314,15 +314,67 @@ def test_identity_poll_uses_o1_volume_growth_to_trigger_full_inventory():
     assert 'growthBasis = "FLY_VOLUME_USED_BYTES_O1"' in SYNC_LOOP
 
 
-def test_identity_manifest_exposes_o1_disk_usage_and_ui_states_real_cadence():
-    route_start = BOT.index("def api_data_sync_manifest():")
-    route_end = BOT.index("\n@app.route", route_start + 10)
-    route_body = BOT[route_start:route_end]
-    assert 'if not targeted_path and (identity_only or inventory_status == "CURRENT")' in route_body
-    assert 'shutil.disk_usage(_data_sync_volume_root())' in route_body
+def test_reserved_identity_preflight_is_memory_only_and_full_manifest_retains_usage():
+    identity_start = BOT.index("def api_data_sync_identity():")
+    identity_end = BOT.index("\n@app.route", identity_start + 10)
+    identity_body = BOT[identity_start:identity_end]
+    assert "return jsonify(_data_sync_memory_identity_payload())" in identity_body
+    for forbidden in (
+        "disk_usage", "_data_sync_volume_root", "_load_research_session_meta",
+        "_lifecycle_pipeline_runtime_status", "_data_sync_request_async_inventory",
+        "state_lock", "trade_lock",
+    ):
+        assert forbidden not in identity_body
+
+    payload_start = BOT.index("def _data_sync_memory_identity_payload():")
+    payload_end = BOT.index("\n\n@app.route('/api/data-sync/identity')", payload_start)
+    payload_body = BOT[payload_start:payload_end]
+    assert 'payload["inventory_status"] = "IDENTITY_ONLY"' in payload_body
+    assert "_data_sync_identity_cache_lock" in payload_body
+    assert "_data_sync_identity_epoch_cache" in payload_body
+    for forbidden in (
+        "disk_usage", "_data_sync_volume_root", "_load_research_session_meta",
+        "_lifecycle_pipeline_runtime_status", "_data_sync_request_async_inventory",
+        "state_lock", "trade_lock",
+    ):
+        assert forbidden not in payload_body
+
+    manifest_start = BOT.index("def api_data_sync_manifest():")
+    manifest_end = BOT.index("\n@app.route", manifest_start + 10)
+    manifest_body = BOT[manifest_start:manifest_end]
+    assert 'shutil.disk_usage(_data_sync_volume_root())' in manifest_body
     assert "checks Fly identity and O(1) volume usage every 3 min" in BOT
     assert "or at least every 30 min" in BOT
     assert "ACK-qualified pruning remains deferred" in BOT
+
+
+def test_reserved_identity_preflight_has_independent_admission_and_auth_contract():
+    assert "@app.route('/api/data-sync/identity')" in BOT
+    assert 'b"/api/data-sync/identity"' in BOT
+    classifier = BOT[BOT.index("def _request_cap(self, request):"):BOT.index(
+        "def _reject_overload(", BOT.index("def _request_cap(self, request):")
+    )]
+    assert classifier.index("_data_sync_identity_paths") < classifier.index(
+        "_data_sync_paths"
+    )
+    assert "_data_sync_identity_thread_cap" in classifier
+    guard = BOT[BOT.index("_READ_ONLY_GET_PATHS"):BOT.index("def _client_ip")]
+    assert "/api/data-sync/identity" not in guard
+    assert "/api/data-sync/manifest" not in guard
+
+
+def test_identity_epoch_cache_is_primed_at_boot_and_updated_on_fresh_reset():
+    main = BOT[BOT.index("def main():"):]
+    assert main.index("_ensure_collector_v22_epoch()") < main.index(
+        "_prime_data_sync_identity_epoch_cache()"
+    )
+    fresh = BOT[BOT.index("def _perform_fresh_collection_reset_locked("):BOT.index(
+        "replay_buffers:", BOT.index("def _perform_fresh_collection_reset_locked(")
+    )]
+    signal_read = 'signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)'
+    cache_update = "_update_data_sync_identity_epoch_cache("
+    assert fresh.index(signal_read) < fresh.index(cache_update, fresh.index(signal_read))
+    assert "collection_epoch_id=_collector_v22_epoch_id()" in fresh
 
 
 def _load_bot_functions(*names):

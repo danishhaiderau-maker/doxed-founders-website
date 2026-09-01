@@ -27061,6 +27061,10 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
     with state_lock:
         signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
+    _update_data_sync_identity_epoch_cache(
+        collection_epoch_id=_collector_v22_epoch_id(),
+        fresh_collection_signal_ts=signal_ts,
+    )
     if send_local_signal:
         logger.info(
             f"[FRESH COLLECTION] Local-sync signal bumped to {signal_ts} "
@@ -39875,6 +39879,10 @@ def api_data_sync_manifest():
             )
         except (TypeError, ValueError):
             fresh_collection_signal_ts = 0.0
+    _update_data_sync_identity_epoch_cache(
+        collection_epoch_id=collection_epoch_id or None,
+        fresh_collection_signal_ts=fresh_collection_signal_ts,
+    )
     tile_registry = active_tile_lifecycle_manifest()
     payload = {
         "schema": "fly_runtime_incremental_sync_v1",
@@ -39966,6 +39974,85 @@ def api_data_sync_manifest():
         response.headers["Retry-After"] = "2"
         return response, 503
     return jsonify(payload)
+
+
+_data_sync_identity_cache_lock = threading.Lock()
+_data_sync_identity_static_cache = {
+    "payload": {
+        "schema": "fly_runtime_sync_identity_v1",
+        "source_git_rev": _runtime_git_rev(),
+        "bot_version": EXECUTION_FIX_VERSION,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "active_tiles": active_tile_lifecycle_manifest(),
+    }
+}
+_data_sync_identity_epoch_cache = {
+    "collection_epoch_id": None,
+    "fresh_collection_signal_ts": 0.0,
+}
+
+
+def _update_data_sync_identity_epoch_cache(
+    *, collection_epoch_id=None, fresh_collection_signal_ts=None,
+):
+    """Publish already-observed epoch identity without request-path I/O."""
+    with _data_sync_identity_cache_lock:
+        if collection_epoch_id:
+            _data_sync_identity_epoch_cache["collection_epoch_id"] = str(
+                collection_epoch_id
+            )
+        if fresh_collection_signal_ts is not None:
+            _data_sync_identity_epoch_cache["fresh_collection_signal_ts"] = float(
+                fresh_collection_signal_ts or 0.0
+            )
+
+
+def _prime_data_sync_identity_epoch_cache() -> None:
+    """Read durable epoch identity once during startup, never in the handler."""
+    session = _load_research_session_meta() or {}
+    epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
+    try:
+        signal_ts = float(
+            state.get("fresh_collection_signal_ts")
+            or session.get("fresh_collection_start_time")
+            or 0.0
+        )
+    except (TypeError, ValueError):
+        signal_ts = 0.0
+    _update_data_sync_identity_epoch_cache(
+        collection_epoch_id=epoch_id or None,
+        fresh_collection_signal_ts=signal_ts,
+    )
+
+
+def _data_sync_memory_identity_payload():
+    """Return the O(1), memory-only authority identity used by preflight."""
+    with _data_sync_identity_cache_lock:
+        static = _data_sync_identity_static_cache["payload"]
+        payload = dict(static)
+        payload.update(_data_sync_identity_epoch_cache)
+    # Fresh Collection is an in-memory monotonic signal. Reading this scalar
+    # does not touch the volume or acquire the trading/state locks.
+    payload["fresh_collection_signal_ts"] = float(
+        state.get("fresh_collection_signal_ts")
+        or payload.get("fresh_collection_signal_ts")
+        or 0.0
+    )
+    payload["generated_at"] = utc_iso()
+    epoch_id = str(payload.get("collection_epoch_id") or "").strip()
+    payload["collection_epoch_id"] = epoch_id or None
+    payload["collection_epoch_status"] = "BOUND" if epoch_id else "UNAVAILABLE"
+    payload["identity_only"] = True
+    payload["inventory_status"] = "IDENTITY_ONLY"
+    return payload
+
+
+@app.route('/api/data-sync/identity')
+def api_data_sync_identity():
+    """Reserved-capacity preflight with no volume, session or lifecycle I/O."""
+    return jsonify(_data_sync_memory_identity_payload())
 
 
 @app.route('/api/data-sync/sqlite-snapshot')
@@ -45789,6 +45876,7 @@ def _create_dashboard_server():
         # with one chunk/ack and one bounded diagnostic without borrowing from
         # presentation traffic or weakening the global dispatch cap.
         _data_sync_thread_cap = threading.BoundedSemaphore(4)
+        _data_sync_identity_thread_cap = threading.BoundedSemaphore(2)
         _control_thread_cap = threading.BoundedSemaphore(2)
         _canonical_paths = (
             b"/api/relay-execution-state",
@@ -45804,6 +45892,9 @@ def _create_dashboard_server():
             b"/api/data-sync/lifecycle-ack",
             b"/api/data-sync/analyzer-report",
             b"/api/data-sync/platform-relay-evidence",
+        )
+        _data_sync_identity_paths = (
+            b"/api/data-sync/identity",
         )
         _control_paths = (
             b"/api/ping",
@@ -45871,6 +45962,8 @@ def _create_dashboard_server():
                     return self._canonical_thread_cap, "canonical", request_path.decode("ascii")
                 if request_path in self._relay_state_paths:
                     return self._relay_state_thread_cap, "relay_state", request_path.decode("ascii")
+                if request_path in self._data_sync_identity_paths:
+                    return self._data_sync_identity_thread_cap, "data_sync_identity", request_path.decode("ascii")
                 if request_path in self._data_sync_paths:
                     return self._data_sync_thread_cap, "data_sync", request_path.decode("ascii")
             except (OSError, TimeoutError):
@@ -46371,6 +46464,7 @@ def main():
     ).start()
     prune_aux_logs_on_startup()
     _ensure_collector_v22_epoch()
+    _prime_data_sync_identity_epoch_cache()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()

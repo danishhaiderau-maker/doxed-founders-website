@@ -66,7 +66,7 @@ assert "Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl" in sync_loop
 assert "$env:BOT_ADMIN_TOKEN" in sync_loop
 assert 'Set-Item -Path ("env:" + $matches[1].Trim())' not in sync_loop
 assert "FLY_VOLUME_SYNC_THRESHOLD_MB" in sync_loop
-assert "/api/data-sync/manifest?identity_only=1" in sync_loop
+assert "/api/data-sync/identity" in sync_loop
 assert "$FullSyncIntervalSec = 1800" in sync_loop
 assert "identity match; full inventory not due" in sync_loop
 assert "size -le 50MB" not in sync_loop

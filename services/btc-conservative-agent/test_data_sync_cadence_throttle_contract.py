@@ -204,9 +204,9 @@ def test_default_cadence_is_bounded_to_180_seconds_and_cache_expires_first():
 
 
 def test_ordinary_poll_uses_identity_only_and_full_inventory_is_due_gated():
-    """Identity polling reads O(1) volume usage and gates full inventory work."""
+    """Identity polling uses the reserved endpoint and gates full inventory work."""
     source = LOOP_PATH.read_text(encoding="utf-8")
-    identity_call = source.index('/api/data-sync/manifest?identity_only=1')
+    identity_call = source.index('/api/data-sync/identity')
     due_gate = source.index('$needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision -or $forceByGrowth')
     full_call = source.index('-ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")', due_gate)
     assert identity_call < due_gate < full_call
