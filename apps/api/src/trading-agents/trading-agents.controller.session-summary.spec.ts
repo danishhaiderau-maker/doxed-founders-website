@@ -160,6 +160,54 @@ test('ops pause authenticates before all mutation and uses canonical pause settl
   ]);
 });
 
+test('ops flat-audit refresh authenticates paused disarmed state and only requests a pause wake', async () => {
+  const calls: unknown[][] = [];
+  const controller = new TradingAgentsController(
+    { getOpsRelayStatus: async (...args: unknown[]) => {
+      calls.push(args);
+      return {
+        status: 'PAUSED', relayExecutionMode: 'PAUSED', relayArmedAt: null,
+        realTradingConfirmedAt: null,
+      };
+    } } as never,
+    {} as never, {} as never, {} as never,
+    { requestExecutorWake: async (...args: unknown[]) => { calls.push(args); } } as never,
+  );
+  const result = await controller.opsRefreshFlatAudit(
+    'conservative-btc',
+    { userId: 'private-user', confirmation: 'REFRESH_PAUSED_FLAT_AUDIT' },
+    'admin-token',
+  );
+  assert.deepEqual(result, {
+    accepted: true, status: 'PAUSED', resumed: false, armed: false,
+  });
+  assert.deepEqual(calls, [
+    ['conservative-btc', 'private-user', 'admin-token', undefined],
+    ['USER_PAUSE'],
+  ]);
+});
+
+test('ops flat-audit refresh refuses armed state before dispatch', async () => {
+  let wakes = 0;
+  const controller = new TradingAgentsController(
+    { getOpsRelayStatus: async () => ({
+      status: 'PAUSED', relayExecutionMode: 'PAUSED', relayArmedAt: 'armed',
+      realTradingConfirmedAt: null,
+    }) } as never,
+    {} as never, {} as never, {} as never,
+    { requestExecutorWake: async () => { wakes += 1; } } as never,
+  );
+  await assert.rejects(
+    controller.opsRefreshFlatAudit(
+      'conservative-btc',
+      { userId: 'private-user', confirmation: 'REFRESH_PAUSED_FLAT_AUDIT' },
+      'admin-token',
+    ),
+    /paused, disarmed relay/,
+  );
+  assert.equal(wakes, 0);
+});
+
 test('ops emergency reconcile requires admin-scoped paused mismatch and explicit confirmation', async () => {
   const calls: unknown[][] = [];
   const tradingAgents = {

@@ -133,6 +133,19 @@ test('relay executor polling keeps direct wake latency separate from Neon backst
   assert.equal(RECONCILIATION_IDLE_POLL_MS, null);
 });
 
+test('public API pause audit wake uses private dispatch plus durable fallback', () => {
+  const source = readFileSync(
+    resolve(__dirname, 'signal-subscriber-execution.service.ts'),
+    'utf8',
+  );
+  const start = source.indexOf('async requestExecutorWake(');
+  const end = source.indexOf('requestExecutorPreWake(', start);
+  const method = source.slice(start, end);
+  assert.match(method, /void this\.dispatchDirectExecutorWake\(payload\)/);
+  assert.match(method, /\{ \[RELAY_EXECUTOR_WAKE_KEY\]: payload \}/);
+  assert.match(method, /status: \{ in: \[TradingAgentInstanceStatus\.ACTIVE, TradingAgentInstanceStatus\.PAUSED\] \}/);
+});
+
 test('persisted wake backstop projects JSON in Postgres and never reinstates a 250ms full-state loop', () => {
   const source = readFileSync(
     resolve(__dirname, 'signal-subscriber-execution.service.ts'),

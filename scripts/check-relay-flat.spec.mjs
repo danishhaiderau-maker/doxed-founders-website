@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 import {
   buildOwnerHttpsRequestOptions,
@@ -227,33 +228,49 @@ test('durable recovery order proof accepts stored known zeros but rejects unknow
 test('strict proof refresh uses only the authenticated paused wake', async () => {
   const calls = [];
   await refreshPausedRelayAudit(
-    'https://relay-executor.example.test/',
-    'redacted-control-secret',
+    'https://api.example.test/',
+    'redacted-admin-secret',
+    'private-user-id',
     async (url, options) => {
       calls.push({ url, options });
-      return { status: 202 };
+      return { ok: true, status: 202 };
     },
-    new Date('2026-07-24T05:45:00.000Z'),
   );
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, 'https://relay-executor.example.test/api/wake');
+  assert.equal(
+    calls[0].url,
+    'https://api.example.test/trading-agents/conservative-btc/ops/refresh-flat-audit',
+  );
   assert.equal(calls[0].options.method, 'POST');
-  assert.equal(calls[0].options.headers['x-bot-control-secret'], 'redacted-control-secret');
+  assert.equal(calls[0].options.headers['x-bot-admin-token'], 'redacted-admin-secret');
   assert.deepEqual(JSON.parse(calls[0].options.body), {
-    trigger: 'USER_PAUSE', tradeId: null, at: '2026-07-24T05:45:00.000Z',
+    userId: 'private-user-id', confirmation: 'REFRESH_PAUSED_FLAT_AUDIT',
   });
 });
 
 test('strict proof refresh fails closed without HTTPS auth or acknowledgement', async () => {
-  await assert.rejects(refreshPausedRelayAudit('', 'secret'), /requires the authenticated/);
+  await assert.rejects(refreshPausedRelayAudit('', 'secret', 'user'), /requires authenticated/);
   await assert.rejects(
-    refreshPausedRelayAudit('http://relay.internal', 'secret'),
-    /requires an HTTPS executor wake URL/,
+    refreshPausedRelayAudit('http://api.internal', 'secret', 'user'),
+    /requires an HTTPS platform API URL/,
   );
   await assert.rejects(
     refreshPausedRelayAudit(
-      'https://relay.example.test', 'secret', async () => ({ status: 401 }),
+      'https://api.example.test', 'secret', 'user', async () => ({ ok: false, status: 401 }),
     ),
-    /failed HTTP 401/,
+    /refresh failed HTTP 401/,
   );
+});
+
+test('guarded deploy uses the public API and no unreachable private executor secrets', () => {
+  const workflow = fs.readFileSync(
+    new URL('../.github/workflows/fly-bot-deploy.yml', import.meta.url),
+    'utf8',
+  );
+  const strictStep = workflow.slice(
+    workflow.indexOf('Prove the current Fly owner and every relay account are flat'),
+    workflow.indexOf('Prove exact unready Fly revision'),
+  );
+  assert.match(strictStep, /PLATFORM_API_URL: "https:\/\/doxed-founders-website-production\.up\.railway\.app\/api"/);
+  assert.doesNotMatch(strictStep, /RELAY_EXECUTOR_WAKE_URL|BOT_CONTROL_SECRET/);
 });
