@@ -616,7 +616,8 @@ def test_generation_bound_artifact_and_query_cache_retain_every_result(tmp_path)
     root = tmp_path / "canonical-research-data"
     _fixture(root, entry_rows=[_row(10, ask=101), _row(11, ask=101)])
     manifest = {"entry_hash": "a" * 64, "dataset_epoch": "epoch-1",
-                "source_revision": "rev-1", "tile_config_signature": "b" * 64}
+                "source_revision": "rev-1", "deployed_revision": "rev-1",
+                "tile_config_signature": "b" * 64}
     (root / "canonical_dataset_current.json").write_text(json.dumps(manifest), encoding="utf-8")
     summary = persist_v3_conservative_results(root, analyzer_revision="rev-1")
     artifact = root / summary["relative_path"]
@@ -655,7 +656,8 @@ def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
     }
     _write(opportunity_path, [opportunity])
     manifest = {"entry_hash": "a" * 64, "dataset_epoch": "epoch-1",
-                "source_revision": "rev-1", "tile_config_signature": "b" * 64}
+                "source_revision": "rev-1", "deployed_revision": "rev-1",
+                "tile_config_signature": "b" * 64}
     (root / "canonical_dataset_current.json").write_text(json.dumps(manifest), encoding="utf-8")
     summary = persist_v3_conservative_results(root, analyzer_revision="rev-1")
     assert summary["cache_rows_ingested"] == 1
@@ -686,7 +688,8 @@ def test_missing_opportunity_identity_remains_unknown_in_artifact_and_is_explici
     decision["opportunity_id"] = None
     _write(decision_path, [decision])
     manifest = {"entry_hash": "a" * 64, "dataset_epoch": "epoch-1",
-                "source_revision": "rev-1", "tile_config_signature": "b" * 64}
+                "source_revision": "rev-1", "deployed_revision": "rev-1",
+                "tile_config_signature": "b" * 64}
     (root / "canonical_dataset_current.json").write_text(json.dumps(manifest), encoding="utf-8")
     summary = persist_v3_conservative_results(root, analyzer_revision="rev-1")
     assert summary["row_count"] == 1

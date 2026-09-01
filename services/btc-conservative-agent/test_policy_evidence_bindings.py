@@ -289,6 +289,7 @@ def test_persisted_index_is_generation_bound_and_rebuildable(tmp_path):
     v3, _ = _fixture(root)
     manifest = {
         "entry_hash": "a" * 64, "dataset_epoch": "epoch-1", "source_revision": "rev-1",
+        "deployed_revision": "rev-1",
         "tile_config_signature": "b" * 64,
     }
     (root / "canonical_dataset_current.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -306,6 +307,7 @@ def test_summary_publications_are_atomic_and_leave_no_temporary_files(tmp_path):
     _fixture(root)
     manifest = {
         "entry_hash": "a" * 64, "dataset_epoch": "epoch-1", "source_revision": "rev-1",
+        "deployed_revision": "rev-1",
         "tile_config_signature": "b" * 64,
     }
     (root / "canonical_dataset_current.json").write_text(json.dumps(manifest), encoding="utf-8")

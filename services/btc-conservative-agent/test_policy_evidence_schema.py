@@ -20,10 +20,13 @@ class PolicyEvidenceSchemaTests(unittest.TestCase):
         self.assertEqual(stable_hash("q", a), stable_hash("q", b))
 
     def test_generation_is_manifest_and_revision_bound(self):
-        manifest = {"entry_hash":"h", "dataset_epoch":"e", "source_revision":"s", "tile_config_signature":"t"}
+        manifest = {"entry_hash":"h", "dataset_epoch":"e", "source_revision":"s", "deployed_revision":"d1", "tile_config_signature":"t"}
         a = generation_identity(manifest, analyzer_revision="a1")
         b = generation_identity(manifest, analyzer_revision="a2")
+        deployed = generation_identity({**manifest, "deployed_revision": "d2"}, analyzer_revision="a1")
+        self.assertEqual(a["deployed_revision"], "d1")
         self.assertNotEqual(a["generation_key"], b["generation_key"])
+        self.assertNotEqual(a["generation_key"], deployed["generation_key"])
 
 
 if __name__ == "__main__":

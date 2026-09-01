@@ -8,7 +8,7 @@ from research.policy_evidence_schema import generation_identity
 
 def generation(revision="a"):
     return generation_identity(
-        {"entry_hash":"manifest", "dataset_epoch":"epoch", "source_revision":"source", "tile_config_signature":"tiles"},
+        {"entry_hash":"manifest", "dataset_epoch":"epoch", "source_revision":"source", "deployed_revision":"deployed", "tile_config_signature":"tiles"},
         analyzer_revision=revision,
     )
 
