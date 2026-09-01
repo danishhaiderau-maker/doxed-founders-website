@@ -35855,9 +35855,13 @@ def health():
 @app.route('/api/ready')
 def ready():
     """Strict strategy readiness; /health remains the process-liveness probe."""
-    with state_lock:
-        hb = state.get("last_heartbeat", last_heartbeat)
-        ohlcv_ready = bool(state.get("ohlcv_ready", False))
+    # Read scalar readiness fields without waiting for the global state lock.
+    # A long collector/order-manager mutation must not make the readiness HTTP
+    # route itself disappear behind the Fly proxy.  These individual dict reads
+    # are atomic under CPython's GIL; all strict multi-field safety decisions
+    # below still come from their bounded snapshot helpers and fail closed.
+    hb = state.get("last_heartbeat", last_heartbeat)
+    ohlcv_ready = bool(state.get("ohlcv_ready", False))
     now = time.time()
     heartbeat_age = max(0.0, now - float(hb or 0))
     market_health = _market_data_health_snapshot(now)
