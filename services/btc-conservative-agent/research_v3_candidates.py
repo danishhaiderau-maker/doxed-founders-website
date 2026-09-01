@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from research_v3_contract import LADDERS, PARTIAL_TAKE_PROFIT_PLANS, canonical_hash
 from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
+from research_v3_sealed_holdout import verify_evaluation_receipt
 from research_v3_validation import validate_policy, validate_purged_walk_forward
 from research.conservative_limit_fill import EVALUATOR_VERSION, evaluate_limit_fill
 
@@ -1042,7 +1043,7 @@ def _comparison_cohort_receipt(
 def evaluate_protection_screen(
     inputs: list[dict[str, Any]],
     *,
-    sealed_holdout: bool = False,
+    sealed_holdout: Mapping[str, Any] | bool | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Evaluate exact policies; return descriptive rows and gated candidates."""
@@ -1240,11 +1241,17 @@ def evaluate_protection_screen(
                 if prior is None or str(source.get("event_id")) < str(prior.get("source_event_id")):
                     episodes_by_policy[policy_id][episode_id] = {
                         "epoch_id": source.get("epoch_id"),
+                        "dataset_epoch": source.get("dataset_epoch") or source.get("epoch_id"),
+                        "source_revision": source.get("source_revision"),
+                        "deployed_revision": source.get("deployed_revision"),
+                        "tile_config_signature": source.get("tile_config_signature"),
+                        "cohort_signature": source.get("cohort_signature"),
                         "episode_id": episode_id,
                         "opportunity_id": source.get("opportunity_id"),
                         "tape_ids": list(source.get("tape_ids") or []),
                         "source_event_id": source.get("event_id"),
                         "signal_ts": source.get("signal_ts"),
+                        "evidence_collected_at": source.get("evidence_collected_at"),
                         "required_end_ts": (float(source.get("signal_ts") or 0) + 7200),
                         "regime": source.get("regime"),
                         "replay_path_basis": replay_path_basis,
@@ -1270,10 +1277,31 @@ def evaluate_protection_screen(
         rows = sorted(by_episode.values(), key=lambda row: float(row.get("signal_ts") or 0))
         holdout_start = int(len(rows) * 0.7)
         oos = rows[holdout_start:]
+        # The candidate screen accepts only a content-addressed evaluation
+        # receipt.  A per-policy map is required when several policies are
+        # screened because each receipt is bound to that exact policy
+        # signature and evaluated cohort.  Legacy booleans remain accepted by
+        # the function signature solely to fail closed rather than crash.
+        holdout_receipt = (
+            sealed_holdout
+            if isinstance(sealed_holdout, Mapping)
+            and sealed_holdout.get("schema") == "sealed_holdout_evaluation_v1"
+            else (
+                sealed_holdout.get(policy_id)
+                if isinstance(sealed_holdout, Mapping)
+                else None
+            )
+        )
+        holdout_verified = verify_evaluation_receipt(
+            holdout_receipt,
+            policy_id=policy_id,
+            policy_signature=policy_signatures[policy_id],
+            holdout_episodes=oos,
+        )
         comparison_cohort = _comparison_cohort_receipt(
             rows,
             holdout_start=holdout_start,
-            sealed_holdout=sealed_holdout,
+            sealed_holdout=holdout_verified,
         )
         diagnostic_comparison_cohort = _comparison_cohort_receipt(
             rows,
@@ -1296,6 +1324,7 @@ def evaluate_protection_screen(
         validation = validate_policy(
             oos,
             policy_id=policy_id,
+            policy_signature=policy_signatures[policy_id],
             starting_equity_usd=1000,
             max_drawdown_usd=50,
             max_drawdown_pct=5,
@@ -1303,7 +1332,7 @@ def evaluate_protection_screen(
             policies_tested=policies_tested,
             conservative_execution=conservative_execution_ready,
             neighborhood_stable=False,
-            sealed_holdout=sealed_holdout,
+            sealed_holdout=holdout_receipt,
             liquidation_buffer_verified=False,
             purged_walk_forward=walk_forward,
         )
@@ -1318,6 +1347,7 @@ def evaluate_protection_screen(
         diagnostic_validation = validate_policy(
             diagnostic_rows,
             policy_id=policy_id,
+            policy_signature=policy_signatures[policy_id],
             starting_equity_usd=1000,
             max_drawdown_usd=50,
             max_drawdown_pct=5,

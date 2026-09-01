@@ -288,6 +288,7 @@ def validate_policy(
     episodes: list[dict[str, Any]],
     *,
     policy_id: str,
+    policy_signature: str | None = None,
     starting_equity_usd: float,
     max_drawdown_usd: float,
     max_drawdown_pct: float,
@@ -351,7 +352,10 @@ def validate_policy(
         # A boolean is an assertion, not evidence. Only a content-addressed,
         # single-use evaluation receipt can satisfy this qualification gate.
         "sealed_holdout_pass": verify_evaluation_receipt(
-            sealed_holdout, policy_id=policy_id, holdout_episodes=episodes,
+            sealed_holdout,
+            policy_id=policy_id,
+            policy_signature=policy_signature,
+            holdout_episodes=episodes,
         ),
     }
     return {

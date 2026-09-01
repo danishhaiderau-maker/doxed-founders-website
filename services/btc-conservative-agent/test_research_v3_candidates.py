@@ -19,6 +19,7 @@ from research_v3_candidates import (
 )
 from research_v3_store import V3EvidenceStore
 from research_v3_ranking import rank_safe_policies
+from research_v3_sealed_holdout import consume_seal, create_seal
 from research.quantity_execution import build_signed_quantity_constraints
 
 
@@ -91,6 +92,135 @@ def conservative_source(*, visible_qty=2.0, crossed=True):
 
 
 class V3CandidateTests(unittest.TestCase):
+    @staticmethod
+    def _holdout_sources():
+        rows = []
+        for index in range(4):
+            row = source(f"event-{index}", f"episode-{index}")
+            row.update({
+                "epoch_id": "epoch-sealed",
+                "dataset_epoch": "epoch-sealed",
+                "source_revision": "source-sealed",
+                "deployed_revision": "deploy-sealed",
+                "tile_config_signature": "tiles-sealed",
+                "cohort_signature": "cohort-sealed",
+                "signal_ts": 1000 + index * 10,
+                "evidence_collected_at": 2000 + index,
+            })
+            row["ordered_1s_prices"] = [
+                {"ts": 1000 + index * 10, "price": 100},
+                {"ts": 1001 + index * 10, "price": 100.3},
+            ]
+            row["entry_children"][0]["fill_ts"] = 1000 + index * 10
+            rows.append(row)
+        return rows
+
+    def _candidate_holdout_fixture(self, root):
+        rows = self._holdout_sources()
+        captured = {}
+        original_validate = research_v3_candidates.validate_policy
+
+        def capture(episodes, **kwargs):
+            policy_id = kwargs["policy_id"]
+            captured.setdefault(policy_id, [dict(row) for row in episodes])
+            return original_validate(episodes, **kwargs)
+
+        one_protection = [protection_screen()[0]]
+        with patch.object(research_v3_candidates, "protection_screen", return_value=one_protection), \
+             patch.object(research_v3_candidates, "validate_policy", side_effect=capture):
+            baseline = evaluate_protection_screen(rows, sealed_holdout=False)
+        candidate = baseline["candidates"][0]
+        policy_id = candidate["policy_id"]
+        seal = create_seal(
+            root,
+            dataset_epoch="epoch-sealed",
+            source_revision="source-sealed",
+            deployed_revision="deploy-sealed",
+            tile_config_signature="tiles-sealed",
+            cohort_signature="cohort-sealed",
+            training_snapshot_hash="training-sealed",
+            training_completed_at=50,
+            sealed_at=100,
+            holdout_start_ts=900,
+            policy_candidates=[{
+                "policy_id": policy_id,
+                "policy_signature": candidate["policy_signature"],
+            }],
+        )
+        receipt = consume_seal(
+            root,
+            seal_id=seal["seal_id"],
+            policy_candidates=[{
+                "policy_id": policy_id,
+                "policy_signature": candidate["policy_signature"],
+            }],
+            holdout_episodes=captured[policy_id],
+            evaluation_started_at=3000,
+        )
+        return rows, one_protection, candidate, receipt, captured[policy_id]
+
+    def test_candidate_screen_rejects_boolean_holdout_assertion(self):
+        with patch.object(
+            research_v3_candidates, "protection_screen", return_value=[protection_screen()[0]],
+        ):
+            report = evaluate_protection_screen(self._holdout_sources(), sealed_holdout=True)
+        self.assertFalse(report["candidates"][0]["gates"]["sealed_holdout_pass"])
+        self.assertFalse(report["candidates"][0]["comparison_cohort"]["sealed_holdout"])
+
+    def test_candidate_screen_accepts_only_exact_policy_and_cohort_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, one_protection, candidate, receipt, holdout_rows = self._candidate_holdout_fixture(tmp)
+            with patch.object(research_v3_candidates, "protection_screen", return_value=one_protection):
+                verified = evaluate_protection_screen(
+                    rows, sealed_holdout={candidate["policy_id"]: receipt},
+                )
+            accepted = verified["candidates"][0]
+            self.assertTrue(accepted["gates"]["sealed_holdout_pass"])
+            self.assertTrue(accepted["comparison_cohort"]["sealed_holdout"])
+
+            mismatch_candidate = [{
+                "policy_id": candidate["policy_id"],
+                "policy_signature": "different-policy-signature",
+            }]
+            mismatch_seal = create_seal(
+                tmp,
+                dataset_epoch="epoch-sealed",
+                source_revision="source-sealed",
+                deployed_revision="deploy-sealed",
+                tile_config_signature="tiles-sealed",
+                cohort_signature="cohort-sealed",
+                training_snapshot_hash="different-training",
+                training_completed_at=51,
+                sealed_at=101,
+                holdout_start_ts=900,
+                policy_candidates=mismatch_candidate,
+            )
+            mismatched = consume_seal(
+                tmp,
+                seal_id=mismatch_seal["seal_id"],
+                policy_candidates=mismatch_candidate,
+                holdout_episodes=holdout_rows,
+                evaluation_started_at=3000,
+            )
+            with patch.object(research_v3_candidates, "protection_screen", return_value=one_protection):
+                mismatch_report = evaluate_protection_screen(
+                    rows, sealed_holdout={candidate["policy_id"]: mismatched},
+                )
+            self.assertFalse(mismatch_report["candidates"][0]["gates"]["sealed_holdout_pass"])
+
+    def test_candidate_screen_rejects_receipt_reuse_after_holdout_leakage_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows, one_protection, candidate, receipt, _ = self._candidate_holdout_fixture(tmp)
+            changed = [dict(row) for row in rows]
+            changed[-1] = dict(changed[-1])
+            changed[-1]["regime"] = "POST_HOC_SELECTED_REGIME"
+            with patch.object(research_v3_candidates, "protection_screen", return_value=one_protection):
+                report = evaluate_protection_screen(
+                    changed, sealed_holdout={candidate["policy_id"]: receipt},
+                )
+            self.assertFalse(report["candidates"][0]["gates"]["sealed_holdout_pass"])
+            self.assertFalse(report["candidates"][0]["comparison_cohort"]["sealed_holdout"])
+
     def test_validation_receipt_identity_drops_unconsumed_receipt_evidence(self):
         receipt = {
             "identity": {

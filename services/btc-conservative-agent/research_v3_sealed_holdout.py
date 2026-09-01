@@ -217,6 +217,7 @@ def verify_evaluation_receipt(
     receipt: Any,
     *,
     policy_id: str,
+    policy_signature: str | None = None,
     holdout_episodes: Iterable[Mapping[str, Any]] | None = None,
 ) -> bool:
     """Cryptographically verify the in-memory receipt and frozen candidate."""
@@ -237,6 +238,21 @@ def verify_evaluation_receipt(
             })
         except (AttributeError, TypeError, ValueError):
             return False
+    expected_candidate = {
+        "policy_id": str(policy_id),
+        "policy_signature": str(policy_signature or ""),
+    }
+    candidate_matches = bool(
+        isinstance(candidates, list)
+        and (
+            expected_candidate in candidates
+            if policy_signature is not None
+            else any(
+                str(row.get("policy_id") or "") == str(policy_id)
+                for row in candidates if isinstance(row, Mapping)
+            )
+        )
+    )
     return bool(
         receipt.get("schema") == EVALUATION_SCHEMA
         and receipt.get("purpose") == PURPOSE
@@ -244,8 +260,7 @@ def verify_evaluation_receipt(
         and receipt.get("consumption_status") == "CONSUMED"
         and receipt.get("selection_after_seal") is False
         and receipt.get("historical_data_retroactively_sealed") is False
-        and isinstance(candidates, list)
-        and any(str(row.get("policy_id") or "") == str(policy_id) for row in candidates if isinstance(row, Mapping))
+        and candidate_matches
         and receipt.get("holdout_episode_identities") == supplied_identities
         and receipt.get("holdout_cohort_hash") == canonical_hash(
             "holdout-cohort", supplied_identities, length=64,
