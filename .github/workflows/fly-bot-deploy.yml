@@ -29,6 +29,7 @@ on:
           - recover-unready
           - restart-only
           - inspect-runtime
+          - close-paper-position
       expected_unready_revision:
         description: Exact 12-character Fly revision permitted for recover-unready
         required: false
@@ -46,6 +47,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  close-paper-position:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'close-paper-position'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close one explicitly authorized paper position through normal accounting
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PAPER_TRADE_ID: ${{ inputs.expected_unready_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          trade_id = str(os.environ.get("PAPER_TRADE_ID") or "").strip()
+          if not re.fullmatch(r"[A-Za-z0-9_-]{6,96}", trade_id):
+              raise SystemExit("close-paper-position requires one exact paper trade id")
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          with urllib.request.urlopen(base + "/health", timeout=10) as response:
+              health = json.load(response)
+          if not (
+              health.get("force_paper_mode") is True
+              and health.get("bitfinex_live_enabled") is False
+              and health.get("live_armed") is False
+          ):
+              raise SystemExit("refusing paper close because live-safety flags are not proven")
+          request = urllib.request.Request(
+              base + "/api/positions/close",
+              data=json.dumps({"trade_id": trade_id}).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "X-Bot-Admin-Token": token,
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              result = json.load(response)
+          if result.get("status") != "closed" or result.get("trade_id") != trade_id:
+              raise SystemExit("paper close did not return its exact accounting receipt")
+          print(json.dumps({"status": "closed", "trade_id": trade_id, "scope": result.get("scope")}, sort_keys=True))
+          PY
+
   inspect-runtime:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'inspect-runtime'
     runs-on: ubuntu-latest
