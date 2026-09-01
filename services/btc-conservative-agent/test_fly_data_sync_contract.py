@@ -89,6 +89,9 @@ def test_sync_loop_streams_orphan_candidate_discovery_without_materializing_mirr
     body = body.split("# Growth trigger", 1)[0]
     assert "[System.IO.Directory]::EnumerateFiles(" in body
     assert "[System.IO.SearchOption]::AllDirectories" in body
+    assert ").GetEnumerator()" in body
+    assert "while ($candidateEnumerator.MoveNext())" in body
+    assert "$candidatePaths" not in body
     assert "Get-ChildItem -LiteralPath $MirrorPath -Recurse" not in body
     assert "@(" not in body
     assert "orphan candidate enumeration failed closed" in body

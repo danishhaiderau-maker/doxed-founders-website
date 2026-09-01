@@ -165,12 +165,16 @@ function Remove-OrphanedMirrorCandidates {
   # loop startup memory proportional to the complete mirror and delayed the
   # first terminal heartbeat, which in turn blocked the analyzer fail-closed.
   $candidatePattern = '\.(?<owner>\d+)\.[0-9a-fA-F]{32}\.download(?:\.replace-backup)?$'
+  $candidateEnumerator = $null
   try {
-    $candidatePaths = [System.IO.Directory]::EnumerateFiles(
+    # PowerShell otherwise auto-enumerates an IEnumerable assigned from a
+    # method call and materializes the full result. Hold the .NET enumerator
+    # explicitly so memory stays O(1) as the mirror grows.
+    $candidateEnumerator = [System.IO.Directory]::EnumerateFiles(
       [System.IO.Path]::GetFullPath($MirrorPath),
       '*',
       [System.IO.SearchOption]::AllDirectories
-    )
+    ).GetEnumerator()
   } catch {
     Add-Content -LiteralPath $logFile -Value (
       "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`t" +
@@ -178,20 +182,27 @@ function Remove-OrphanedMirrorCandidates {
     )
     return
   }
-  foreach ($candidatePath in $candidatePaths) {
-    $candidateName = [System.IO.Path]::GetFileName($candidatePath)
-    if ($candidateName -notmatch $candidatePattern) { continue }
-    $owner = 0
-    if ($candidateName -match $candidatePattern) {
+  try {
+    while ($candidateEnumerator.MoveNext()) {
+      $candidatePath = [string]$candidateEnumerator.Current
+      $candidateName = [System.IO.Path]::GetFileName($candidatePath)
+      if ($candidateName -notmatch $candidatePattern) { continue }
       $owner = [int]$matches['owner']
+      # The exclusive loop guard proves this process has no in-flight candidate
+      # at the top of a cycle. Candidates owned by this PID are leftovers from a
+      # completed/failed prior cycle; candidates from dead PIDs are abandoned.
+      $ownerAlive = $owner -gt 0 -and $null -ne (Get-Process -Id $owner -ErrorAction SilentlyContinue)
+      if ($owner -eq $PID -or -not $ownerAlive) {
+        Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
+      }
     }
-    # The exclusive loop guard proves this process has no in-flight candidate
-    # at the top of a cycle. Candidates owned by this PID are leftovers from a
-    # completed/failed prior cycle; candidates from dead PIDs are abandoned.
-    $ownerAlive = $owner -gt 0 -and $null -ne (Get-Process -Id $owner -ErrorAction SilentlyContinue)
-    if ($owner -eq $PID -or -not $ownerAlive) {
-      Remove-Item -LiteralPath $candidatePath -Force -ErrorAction SilentlyContinue
-    }
+  } catch {
+    Add-Content -LiteralPath $logFile -Value (
+      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`t" +
+      "orphan candidate traversal failed closed: $($_.Exception.GetType().Name)"
+    )
+  } finally {
+    if ($candidateEnumerator -is [System.IDisposable]) { $candidateEnumerator.Dispose() }
   }
 }
 
