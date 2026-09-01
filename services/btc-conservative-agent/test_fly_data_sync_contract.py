@@ -1858,7 +1858,7 @@ def test_ack_validation_uses_validated_inventory_without_filesystem_calls():
 
 def test_ack_http_path_is_bounded_and_never_prunes_synchronously():
     body = BOT[BOT.index("def api_data_sync_ack"):BOT.index(
-        "_PLATFORM_RELAY_EVIDENCE_MAX_BYTES"
+        "def _data_sync_validate_lifecycle_ack_bundle"
     )]
     assert "_data_sync_validated_inventory_index(" in body
     assert "requested_inventory_sha256, requested_inventory_generated_at" in body

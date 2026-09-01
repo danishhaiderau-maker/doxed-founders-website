@@ -25461,7 +25461,7 @@ _dashboard_handler_lock = threading.Lock()
 _dashboard_active_handlers = {}
 _DASHBOARD_TELEMETRY_STATIC_ROUTES = frozenset({
     "/api/data-sync/manifest", "/api/data-sync/sqlite-snapshot",
-    "/api/data-sync/file", "/api/data-sync/ack",
+    "/api/data-sync/file", "/api/data-sync/ack", "/api/data-sync/lifecycle-ack",
     "/api/data-sync/analyzer-report", "/api/data-sync/platform-relay-evidence",
     "/api/ping", "/api/pause", "/api/resume", "/health", "/ready",
     "/api/ready", "/api/status", "/status", "/api/relay-state",
@@ -38008,6 +38008,60 @@ _DATA_SYNC_TERMINAL_OUTCOMES = frozenset({
 })
 
 
+def _data_sync_lifecycle_ack_path(bundle_id: object) -> Path:
+    """Resolve one immutable ACK target under the persistent Fly volume."""
+    value = str(bundle_id or "").strip().lower()
+    if not re.fullmatch(r"lifecycle-[0-9a-f]{64}", value):
+        raise ValueError("invalid lifecycle bundle identity")
+    root = (_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks").resolve()
+    root.relative_to(_data_sync_volume_root().resolve())
+    root.mkdir(parents=True, exist_ok=True)
+    target = (root / f"{value}.json").resolve()
+    target.relative_to(root)
+    return target
+
+
+def _data_sync_persist_lifecycle_ack(receipt: dict, eligibility: dict) -> Path:
+    """Atomically retain one immutable laptop triple acknowledgement."""
+    target = _data_sync_lifecycle_ack_path(receipt.get("bundle_id"))
+    if target.exists():
+        existing = json.loads(target.read_text(encoding="utf-8"))
+        if existing.get("receipt") == receipt:
+            return target
+        raise ValueError("conflicting lifecycle acknowledgement already exists")
+    payload = {
+        "schema": "lifecycle_bundle_ack_persistence_v1",
+        "acknowledged_at": utc_iso(),
+        "receipt": receipt,
+        "transfer_receipt_validation": eligibility,
+        # Persistence proves transfer only. Source deletion remains separately
+        # fenced and is intentionally false in this release.
+        "source_cleanup_authorized": False,
+    }
+    temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # A hard-link publication is atomic and, unlike os.replace(), cannot
+        # overwrite a conflicting acknowledgement created by another worker.
+        os.link(temporary, target)
+        if os.name != "nt":
+            directory_fd = os.open(str(target.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return target
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def _data_sync_iso8601_utc(value: object) -> str | None:
     """Return a normalized timestamp only for an explicit timezone value."""
     text = str(value or "").strip()
@@ -38633,6 +38687,107 @@ def api_data_sync_ack():
             "until terminal identity, full integrity, laptop canonical/archive/index, "
             "runtime-reference, and lease proofs all pass"
         ),
+    })
+
+
+def _data_sync_validate_lifecycle_ack_bundle(receipt: dict) -> dict:
+    """Bind a laptop ACK to the exact immutable bundle still present on Fly."""
+    relative = str(receipt.get("bundle_manifest_path") or "").strip()
+    manifest_path = _data_sync_resolve_relpath(relative)
+    if (
+        manifest_path.name != "manifest.json"
+        or manifest_path.parent.name != str(receipt.get("bundle_id") or "")
+        or "lifecycle_bundles" not in manifest_path.parts
+    ):
+        raise ValueError("lifecycle manifest path identity mismatch")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    supplied_manifest_sha = str(manifest.get("manifest_sha256") or "")
+    manifest_material = dict(manifest)
+    manifest_material.pop("manifest_sha256", None)
+    actual_manifest_sha = hashlib.sha256(json.dumps(
+        manifest_material, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    identity = manifest.get("identity") if isinstance(manifest, dict) else None
+    provenance = manifest.get("provenance") if isinstance(manifest, dict) else None
+    if not (
+        manifest.get("schema") == "research_lifecycle_bundle_v1"
+        and hmac.compare_digest(supplied_manifest_sha, actual_manifest_sha)
+        and manifest.get("source_cleanup_authorized") is False
+        and manifest.get("bundle_id") == receipt.get("bundle_id")
+        and manifest.get("lifecycle_id") == receipt.get("lifecycle_id")
+        and isinstance(identity, dict)
+        and isinstance(provenance, dict)
+        and identity.get("collection_epoch_id") == receipt.get("collection_epoch_id")
+        and provenance.get("source_revision") == receipt.get("source_git_rev")
+        and provenance.get("deployed_revision") == receipt.get("deployed_git_rev")
+        and provenance.get("tile_config_signature") == receipt.get("tile_registry_signature")
+        and hmac.compare_digest(
+            str(manifest.get("cleanup_manifest_sha256") or ""),
+            str(receipt.get("manifest_sha256") or ""),
+        )
+        and hmac.compare_digest(
+            _data_sync_lifecycle_manifest_sha256(manifest.get("files") or []),
+            str(receipt.get("manifest_sha256") or ""),
+        )
+    ):
+        raise ValueError("lifecycle acknowledgement does not match Fly bundle")
+    bundle_root = manifest_path.parent.resolve()
+    for file_row in manifest.get("files") or []:
+        relative_file = str(file_row.get("path") or "")
+        candidate = (bundle_root / relative_file).resolve(strict=True)
+        candidate.relative_to(bundle_root)
+        stat = candidate.stat()
+        digest = hashlib.sha256()
+        with candidate.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        if (
+            int(stat.st_size) != int(file_row.get("size") or -1)
+            or not hmac.compare_digest(
+                digest.hexdigest(), str(file_row.get("sha256") or "")
+            )
+        ):
+            raise ValueError(f"lifecycle bundle file integrity mismatch: {relative_file}")
+    return manifest
+
+
+@app.route('/api/data-sync/lifecycle-ack', methods=['POST'])
+def api_data_sync_lifecycle_ack():
+    """Persist a verified laptop canonical+archive+index acknowledgement.
+
+    The global API guard requires BOT_ADMIN_TOKEN remotely. This endpoint can
+    prove transfer completeness but can never delete source evidence.
+    """
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"error": "acknowledgement must be an object"}), 400
+    transfer_validation = _data_sync_lifecycle_cleanup_eligibility(body)
+    if not transfer_validation.get("proof_complete"):
+        return jsonify({
+            "ok": False,
+            "status": "INELIGIBLE_RETAIN_SOURCE",
+            "reasons": transfer_validation.get("reasons") or [],
+            "source_cleanup_authorized": False,
+        }), 409
+    try:
+        manifest = _data_sync_validate_lifecycle_ack_bundle(body)
+        target = _data_sync_persist_lifecycle_ack(body, transfer_validation)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return jsonify({
+            "ok": False,
+            "status": "BUNDLE_PROOF_REJECTED",
+            "reason": str(exc),
+            "source_cleanup_authorized": False,
+        }), 409
+    return jsonify({
+        "ok": True,
+        "status": "ACKNOWLEDGED_SOURCE_RETAINED",
+        "bundle_id": manifest.get("bundle_id"),
+        "ack_receipt": target.relative_to(_data_sync_volume_root().resolve()).as_posix(),
+        "transfer_proof_complete": True,
+        "cleanup_proof_complete": False,
+        "cleanup_blocker": "RUNTIME_AND_ANALYZER_LEASE_RECHECK_NOT_IMPLEMENTED",
+        "source_cleanup_authorized": False,
     })
 
 
@@ -43863,6 +44018,7 @@ def _create_dashboard_server():
             b"/api/data-sync/sqlite-snapshot",
             b"/api/data-sync/file",
             b"/api/data-sync/ack",
+            b"/api/data-sync/lifecycle-ack",
             b"/api/data-sync/analyzer-report",
             b"/api/data-sync/platform-relay-evidence",
         )
