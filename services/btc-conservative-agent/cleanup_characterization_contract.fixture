@@ -51,6 +51,7 @@
     ["POST", "/api/set_spread_gate", "set_spread_gate_api"],
     ["POST", "/api/live-copy-coordination", "api_live_copy_coordination"],
     ["GET", "/api/download_debug_config", "download_debug_config"],
+    ["GET", "/api/data-sync/identity", "api_data_sync_identity"],
     ["GET", "/api/data-sync/manifest", "api_data_sync_manifest"],
     ["GET", "/api/data-sync/sqlite-snapshot", "api_data_sync_sqlite_snapshot"],
     ["GET", "/api/data-sync/file", "api_data_sync_file"],
