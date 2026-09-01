@@ -12,6 +12,9 @@ from research.policy_evidence_evaluator import (
 )
 from research.policy_evidence_schema import canonical_json
 from research.quantity_execution import build_signed_quantity_constraints
+from lifecycle_bundles import LifecycleKey, materialize_bundle
+from lifecycle_completion_reconciler import evaluate_lifecycle_completion
+from lifecycle_completion_receipts import build_evidence_collected_receipt
 
 
 def _write(path: Path, rows):
@@ -60,7 +63,8 @@ def _segment(v3, identity, role, rows, index):
 
 def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=True):
     v3 = tmp_path / "v3"
-    identity = {"epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1"}
+    identity = {"epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
+                "research_lane": "CONTINUOUS"}
     decision = {**identity, "event_id": "decision-1", "policy_id": "policy-1",
                 "policy_signature": "sig-1", "direction": direction,
                 "policy_family": "ATR_TRAIL", "entry_offset_pct": .1,
@@ -96,6 +100,40 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
     _write(v3 / "ledgers/market_segment.jsonl", segments)
     for name in ("execution", "lifecycle"):
         _write(v3 / f"ledgers/{name}.jsonl", [])
+    key = LifecycleKey("epoch-1", "ep-1", "sig-1", "CONTINUOUS")
+    provenance = {"source_revision": "a" * 40, "deployed_revision": "a" * 40,
+                  "tile_config_signature": "b" * 64}
+    def lifecycle_row(ledger, record_id, **extra):
+        return {**key.as_dict(), **provenance, "ledger": ledger, "record_id": record_id,
+                "event_id": "decision-1", "observed_ts": 10_000.0, **extra}
+    lifecycle_rows = [
+        lifecycle_row(
+            "order_intent", "terminal-schedule",
+            intent_kind="AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
+            schedule_lifecycle_final=True, chase_schedule_authoritative=True,
+            schedule_sha256="c" * 64, requested_qty=1.0,
+            chase_schedule={"terminal_ts": 10_000.0, "terminal_reason": "TTL_EXPIRED"},
+        ),
+        lifecycle_row("lifecycle", "terminal", terminal=True, terminal_no_fill=True),
+        lifecycle_row("market_segment", "post", context_role="POST_EXIT_PATH",
+                      coverage={"complete": True, "gaps_absent": True,
+                                "complete_through_ts": 18_000.0}),
+    ]
+    completion = evaluate_lifecycle_completion(key, lifecycle_rows, now=20_000.0)["receipt"]
+    collected = build_evidence_collected_receipt(
+        completion, identity=key.as_dict(), event_id="decision-1",
+        provenance=provenance, collected_at=20_000.0,
+    )["receipt"]
+    lifecycle_rows.extend([
+        lifecycle_row("lifecycle", "bundle-completion", terminal=True,
+                      observation_status="LIFECYCLE_BUNDLE_COMPLETE",
+                      bundle_completion=completion),
+        lifecycle_row("lifecycle", "evidence-collected", terminal=True,
+                      observation_status="EVIDENCE_COLLECTION_COMPLETE",
+                      evidence_collected_at=20_000.0,
+                      evidence_collection_receipt=collected),
+    ])
+    assert materialize_bundle(tmp_path, key, lifecycle_rows, now=20_000.0)["written"] is True
     return v3
 
 
@@ -114,6 +152,9 @@ def test_buy_sell_touch_and_trade_through_are_full_fills(tmp_path, direction, ro
     assert row["slippage_usd"] == (1 if direction == "LONG" and rows[0]["ask"] == 99 else 0)
     assert row["missed_entry_cost_usd"] is None
     assert row["missed_entry_cost_basis"] == "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON"
+    assert row["qualification_evidence_collected"] is True
+    assert row["lifecycle_evidence"]["status"] == "VERIFIED"
+    assert result["lifecycle_evidence_coverage"]["coverage_complete"] is True
     assert row["volatility_at_signal"] == {
         "volatility_atr": 145.5,
         "volatility_percentile": 72.5,
@@ -121,6 +162,35 @@ def test_buy_sell_touch_and_trade_through_are_full_fills(tmp_path, direction, ro
         "atr14_pct_3m": 0.18,
         "realized_volatility": None,
         "volatility_metric": None,
+    }
+
+
+def test_missing_lifecycle_receipt_blocks_episode_before_ranking(tmp_path):
+    v3 = _fixture(tmp_path)
+    for manifest in (v3 / "lifecycle_bundles").glob("*/*/manifest.json"):
+        import shutil
+        shutil.rmtree(manifest.parent)
+    result = build_v3_conservative_results(v3)
+    row = result["results"][0]
+    assert row["classification"] == "UNKNOWN"
+    assert row["supported"] is False
+    assert row["qualification_evidence_collected"] is False
+    assert "UNKNOWN_LIFECYCLE_EVIDENCE_RECEIPT_MISSING" in row["unknown_reason_codes"]
+    assert result["classification_counts"] == {
+        "FULL_FILL": 0, "PARTIAL_FILL": 0, "NO_FILL": 0, "UNKNOWN": 1,
+    }
+    assert result["lifecycle_evidence_coverage"] == {
+        "schema": "lifecycle_evidence_analyzer_coverage_v1",
+        "episodes_total": 1,
+        "verified_episode_count": 0,
+        "unknown_episode_count": 1,
+        "coverage_complete": False,
+        "unknown_reason_counts": {"UNKNOWN_LIFECYCLE_EVIDENCE_RECEIPT_MISSING": 1},
+        "bundle_index": {
+            "schema": "lifecycle_evidence_join_index_v1", "manifest_count": 0,
+            "valid_unique_count": 0, "invalid_count": 0,
+            "duplicate_identity_count": 0, "defect_counts": {},
+        },
     }
 
 

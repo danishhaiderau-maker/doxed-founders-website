@@ -12,6 +12,11 @@ from lifecycle_completion_reconciler import (
     reconcile_lifecycle_completions,
 )
 from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
+from research.lifecycle_evidence_join import (
+    build_lifecycle_evidence_index,
+    join_lifecycle_evidence,
+    verify_manifest_collection_receipt,
+)
 
 
 NOW = 20_000.0
@@ -149,3 +154,58 @@ def test_analyzer_inventory_reports_collection_receipt_coverage(tmp_path):
         "missing_count": 0,
         "coverage_complete": True,
     }
+    index = build_lifecycle_evidence_index(tmp_path / "v3")
+    assert index["valid_unique_count"] == 1
+    joined = join_lifecycle_evidence(index, {
+        "epoch_id": "epoch-1", "episode_id": "episode-1",
+        "policy_signature": "policy-1", "research_lane": "CONTINUOUS",
+    })
+    assert joined["status"] == "VERIFIED"
+    assert joined["receipt"]["evidence_collected_receipt_sha256"] == collected["evidence_collected_receipt_sha256"]
+
+
+def test_analyzer_join_fails_closed_for_missing_duplicate_and_mismatch(tmp_path):
+    missing = join_lifecycle_evidence({"by_key": {}}, {
+        "epoch_id": "epoch-1", "episode_id": "episode-1",
+        "policy_signature": "policy-1", "research_lane": "CONTINUOUS",
+    })
+    assert missing == {
+        "status": "UNKNOWN",
+        "reason_codes": ["UNKNOWN_LIFECYCLE_EVIDENCE_RECEIPT_MISSING"],
+    }
+    key = ("epoch-1", "episode-1", "policy-1", "CONTINUOUS")
+    duplicate = join_lifecycle_evidence({"by_key": {key: [{"valid": True}, {"valid": True}]}}, {
+        "epoch_id": "epoch-1", "episode_id": "episode-1",
+        "policy_signature": "policy-1", "research_lane": "CONTINUOUS",
+    })
+    assert duplicate["reason_codes"] == ["UNKNOWN_LIFECYCLE_EVIDENCE_RECEIPT_DUPLICATE"]
+
+    completion = _completion()
+    collected = build_evidence_collected_receipt(
+        completion, identity=KEY.as_dict(), event_id="trade-1",
+        provenance=PROVENANCE, collected_at=NOW,
+    )["receipt"]
+    manifest = {
+        "schema": "research_lifecycle_bundle_v1", "identity": KEY.as_dict(),
+        "provenance": PROVENANCE, "completion": completion,
+        "evidence_collection": {"ready": True, "receipt": collected},
+    }
+    tampered = copy.deepcopy(manifest)
+    tampered["evidence_collection"]["receipt"]["event_id"] = "tampered"
+    events = [{"bundle_completion": completion}]
+    verified = verify_manifest_collection_receipt(tampered, events)
+    assert verified["valid"] is False
+    assert "EVIDENCE_COLLECTION_RECEIPT_SHA256_MISMATCH" in verified["blockers"]
+
+    rebound = copy.deepcopy(manifest)
+    rebound["evidence_collection"]["receipt"]["completion_receipt_sha256"] = "d" * 64
+    receipt = rebound["evidence_collection"]["receipt"]
+    material = dict(receipt)
+    material.pop("evidence_collected_receipt_sha256")
+    import hashlib
+    from research_v3_contract import canonical_json
+    receipt["evidence_collected_receipt_sha256"] = hashlib.sha256(
+        canonical_json(material).encode("utf-8")
+    ).hexdigest()
+    verified = verify_manifest_collection_receipt(rebound, events)
+    assert "EVIDENCE_COLLECTION_COMPLETION_BINDING_MISMATCH" in verified["blockers"]

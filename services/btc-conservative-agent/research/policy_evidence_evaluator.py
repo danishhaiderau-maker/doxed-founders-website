@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -24,6 +25,10 @@ from research.policy_evidence_bindings import (
     segment_role,
 )
 from research.policy_evidence_schema import canonical_json, generation_identity, stable_hash
+from research.lifecycle_evidence_join import (
+    build_lifecycle_evidence_index,
+    join_lifecycle_evidence,
+)
 
 
 SCHEMA = "v3_conservative_policy_evidence_v1"
@@ -609,11 +614,15 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
     for row in ledgers["market_segment"]:
         segments.setdefault(_identity(row), []).append(row)
 
+    lifecycle_evidence_index = build_lifecycle_evidence_index(root)
     results = []
     for binding in bindings:
         decision = decisions.get(str(binding.get("event_id") or ""), {})
         identity = _identity(binding)
         reasons = list(binding.get("unknown_reason_codes") or [])
+        lifecycle_evidence = join_lifecycle_evidence(lifecycle_evidence_index, binding)
+        if lifecycle_evidence["status"] != "VERIFIED":
+            reasons.extend(lifecycle_evidence["reason_codes"])
         matching_intents = authoritative_schedule_intents(
             intents.get((*identity, str(binding.get("policy_signature") or "")), [])
         )
@@ -670,7 +679,10 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             tape_ids.append(str(segment["segment_ref"]["sha256"]))
 
         if reasons:
-            results.append(_unknown(binding, decision, opportunities.get(identity, {}), reasons))
+            unknown = _unknown(binding, decision, opportunities.get(identity, {}), reasons)
+            unknown["lifecycle_evidence"] = lifecycle_evidence
+            unknown["qualification_evidence_collected"] = False
+            results.append(unknown)
             continue
         receipt = evaluate_limit_fill(
             tape_rows, direction=direction, requested_qty=requested_qty,
@@ -678,14 +690,20 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             symbol=str(intent.get("symbol") or "BTCUSD"), quantity_constraints=constraints,
         )
         if receipt.get("supported") is not True:
-            results.append(_unknown(binding, decision, opportunities.get(identity, {}), [
+            unknown = _unknown(binding, decision, opportunities.get(identity, {}), [
                 "UNKNOWN_CONSERVATIVE_EVALUATOR_" + str(reason)
                 for reason in receipt.get("negative_reasons") or ["UNSPECIFIED"]
-            ]))
+            ])
+            unknown["lifecycle_evidence"] = lifecycle_evidence
+            unknown["qualification_evidence_collected"] = True
+            results.append(unknown)
             continue
         classification = str(receipt.get("final_classification") or "UNKNOWN")
         if classification not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL"}:
-            results.append(_unknown(binding, decision, opportunities.get(identity, {}), ["UNKNOWN_EVALUATOR_CLASSIFICATION"]))
+            unknown = _unknown(binding, decision, opportunities.get(identity, {}), ["UNKNOWN_EVALUATOR_CLASSIFICATION"])
+            unknown["lifecycle_evidence"] = lifecycle_evidence
+            unknown["qualification_evidence_collected"] = True
+            results.append(unknown)
             continue
         cohort = stable_hash("cohort", {
             "epoch_id": identity[0], "opportunity_id": identity[1],
@@ -717,6 +735,8 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             "slippage_usd": receipt.get("slippage_usd"),
             "missed_entry_cost_usd": receipt.get("missed_entry_cost_usd"),
             "missed_entry_cost_basis": receipt.get("missed_entry_cost_basis"),
+            "lifecycle_evidence": lifecycle_evidence,
+            "qualification_evidence_collected": True,
         })
         policy_key = (*identity, str(binding.get("policy_signature") or ""))
         if binding.get("required_pre_entry_path_complete") is not True:
@@ -756,6 +776,29 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
         name: len(results) - observed_by_dimension[name] for name in feature_names
     }
     phase7_support = build_phase7_support_qualification(results)
+    lifecycle_status_counts = {
+        status: sum((row.get("lifecycle_evidence") or {}).get("status") == status for row in results)
+        for status in ("VERIFIED", "UNKNOWN")
+    }
+    lifecycle_reason_counts: Counter[str] = Counter(
+        reason for row in results
+        for reason in ((row.get("lifecycle_evidence") or {}).get("reason_codes") or [])
+    )
+    lifecycle_evidence_coverage = {
+        "schema": "lifecycle_evidence_analyzer_coverage_v1",
+        "episodes_total": len(results),
+        "verified_episode_count": lifecycle_status_counts["VERIFIED"],
+        "unknown_episode_count": lifecycle_status_counts["UNKNOWN"],
+        "coverage_complete": bool(results) and lifecycle_status_counts["VERIFIED"] == len(results),
+        "unknown_reason_counts": dict(sorted(lifecycle_reason_counts.items())),
+        "bundle_index": {
+            key: lifecycle_evidence_index[key]
+            for key in (
+                "schema", "manifest_count", "valid_unique_count", "invalid_count",
+                "duplicate_identity_count", "defect_counts",
+            )
+        },
+    }
     regime_feature_coverage = {
         "schema": "phase7_regime_feature_coverage_v1",
         "row_count": len(results),
@@ -782,6 +825,7 @@ def build_v3_conservative_results(v3_root: str | Path) -> dict[str, Any]:
             "results_sha256": hashlib.sha256(canonical_json(results).encode()).hexdigest(),
             "regime_feature_coverage": regime_feature_coverage,
             "phase7_support_qualification": phase7_support,
+            "lifecycle_evidence_coverage": lifecycle_evidence_coverage,
             "results": results}
 
 
