@@ -353,14 +353,16 @@ if (-not $env:BOT_ADMIN_TOKEN) {
   throw "BOT_ADMIN_TOKEN is required for the canonical Fly data mirror."
 }
 
-$preflightManifestAttempts = 35
+$preflightManifestAttempts = 220
 $preflightManifestTimeoutSec = 90
-# The server's single-flight inventory worker has a hard 300-second deadline.
-# Join that one bounded build slightly longer than its deadline instead of
-# abandoning at 120 seconds and starting another full-sync cycle later. This
-# adds no competing worker or scan pressure; Retry-After pacing remains in
-# force and the prior canonical mirror remains published throughout.
-$preflightInventoryWaitMaxSec = 330
+# One inventory generation may require several resumable child invocations;
+# 300 seconds is the bound for each child, not for the complete generation.
+# Join one nonce-bound build while its bounded counters advance. A stalled
+# build and the total join both retain independent hard limits, and the prior
+# canonical mirror remains published throughout.
+$preflightInventoryStallMaxSec = 360
+$preflightInventoryWaitMaxSec = 1800
+$preflightInventoryElapsedProvider = $null
 $relaySyncAttempts = 2
 $relayEvidenceAttemptIntervalSec = 1800
 # Core mirror ownership and its terminal receipt must become available first.
@@ -378,16 +380,59 @@ function Get-FlySyncPreflightManifest {
     [switch]$IdentityOnly
   )
   $preflightHeaders = @{ "X-Bot-Admin-Token" = $env:BOT_ADMIN_TOKEN }
+  $requestUri = $ManifestUri
+  if (-not $IdentityOnly) {
+    $refreshNonce = [guid]::NewGuid().ToString("N")
+    $separator = if ($requestUri.Contains("?")) { "&" } else { "?" }
+    $requestUri = "$requestUri${separator}fresh=1&nonce=$refreshNonce"
+  }
   $preflightWait = [System.Diagnostics.Stopwatch]::StartNew()
+  $lastProgressKey = $null
+  $lastProgressAtSec = 0.0
   for ($attempt = 1; $attempt -le $preflightManifestAttempts; $attempt++) {
+    $terminalInventoryFailure = $false
     try {
       $preflight = Invoke-RestMethod `
-        -Uri $ManifestUri `
+        -Uri $requestUri `
         -Headers $preflightHeaders `
         -TimeoutSec $preflightManifestTimeoutSec `
         -ErrorAction Stop
       $expectedInventoryStatus = if ($IdentityOnly) { "IDENTITY_ONLY" } else { "CURRENT" }
       if ([string]$preflight.inventory_status -ne $expectedInventoryStatus) {
+        $elapsedSec = if ($preflightInventoryElapsedProvider) {
+          [double](& $preflightInventoryElapsedProvider)
+        } else {
+          [double]$preflightWait.Elapsed.TotalSeconds
+        }
+        $worker = $preflight.inventory_worker
+        $progressKey = @(
+          [string]$worker.phase,
+          [string]$worker.files_seen,
+          [string]$worker.dirs_seen,
+          [string]$worker.rows_discovered
+        ) -join ":"
+        if ($null -eq $lastProgressKey -or $progressKey -cne $lastProgressKey) {
+          $lastProgressKey = $progressKey
+          $lastProgressAtSec = $elapsedSec
+        }
+        $refreshing = [bool]$worker.refreshing
+        $terminalInventoryFailure = (
+          -not $refreshing -or
+          -not [string]::IsNullOrWhiteSpace([string]$preflight.inventory_error) -or
+          [string]$preflight.inventory_build_status -eq "FAILED"
+        )
+        if ($terminalInventoryFailure) {
+          throw (
+            "Fly data-sync inventory terminated without CURRENT " +
+            "(status=$([string]$preflight.inventory_status), " +
+            "build=$([string]$preflight.inventory_build_status), " +
+            "error=$([string]$preflight.inventory_error))."
+          )
+        }
+        if (($elapsedSec - $lastProgressAtSec) -ge $preflightInventoryStallMaxSec) {
+          $terminalInventoryFailure = $true
+          throw "Fly data-sync inventory made no bounded progress before the stall deadline."
+        }
         throw (
           "Fly data-sync inventory is not CURRENT " +
           "(status=$([string]$preflight.inventory_status), expected=$expectedInventoryStatus)."
@@ -395,20 +440,27 @@ function Get-FlySyncPreflightManifest {
       }
       return $preflight
     } catch {
-      $remainingWaitSec = [Math]::Floor(
-        $preflightInventoryWaitMaxSec - $preflightWait.Elapsed.TotalSeconds
-      )
+      if ($terminalInventoryFailure) { throw }
+      $elapsedSec = if ($preflightInventoryElapsedProvider) {
+        [double](& $preflightInventoryElapsedProvider)
+      } else {
+        [double]$preflightWait.Elapsed.TotalSeconds
+      }
+      if (($elapsedSec - $lastProgressAtSec) -ge $preflightInventoryStallMaxSec) {
+        throw "Fly data-sync preflight made no observable progress before the stall deadline."
+      }
+      $remainingWaitSec = [Math]::Floor($preflightInventoryWaitMaxSec - $elapsedSec)
       if ($attempt -ge $preflightManifestAttempts -or $remainingWaitSec -le 0) {
         throw (
           "Fly data-sync stage=loop_manifest_preflight failed after " +
           "$attempt/$preflightManifestAttempts attempt(s): $($_.Exception.Message)"
         )
       }
-      # BUILDING/STALE_REVALIDATING is a single-flight background scan, not a
+      # BUILDING/STALE_REVALIDATING is a single-flight resumable scan, not a
       # reason to launch another worker. Respect the server's Retry-After as a
       # minimum while bounding the complete join window just beyond the
-      # server's 300-second worker deadline. Production proved that a valid
-      # revalidation can exceed the old 120-second client window under load.
+      # bounded child invocation. Progress may span several such invocations;
+      # the independent stall and absolute deadlines above prevent starvation.
       $retryAfterSec = 0
       try {
         $response = $_.Exception.Response

@@ -224,7 +224,7 @@ def test_building_inventory_retries_through_a_modeled_fifty_second_scan():
     function_source = source[start:end]
     harness = (
         "$preflightManifestAttempts=13; $preflightManifestTimeoutSec=90; "
-        "$preflightInventoryWaitMaxSec=120; $env:BOT_ADMIN_TOKEN='test'; "
+        "$preflightInventoryStallMaxSec=120; $preflightInventoryWaitMaxSec=120; $env:BOT_ADMIN_TOKEN='test'; "
         "$script:calls=0; $script:delays=@(); "
         "function Invoke-RestMethod { $script:calls += 1; "
         "if ($script:calls -lt 8) { throw 'inventory building' }; "
@@ -256,7 +256,7 @@ def _run_modeled_preflight(success_call: int | None) -> tuple[int, int, int]:
     )
     harness = (
         "$preflightManifestAttempts=13; $preflightManifestTimeoutSec=90; "
-        "$preflightInventoryWaitMaxSec=120; $env:BOT_ADMIN_TOKEN='test'; "
+        "$preflightInventoryStallMaxSec=120; $preflightInventoryWaitMaxSec=120; $env:BOT_ADMIN_TOKEN='test'; "
         "$script:calls=0; $script:delays=@(); $script:failed=0; "
         "function Invoke-RestMethod { $script:calls += 1; "
         f"if ({success_condition}) {{ throw 'inventory building' }}; "
@@ -285,6 +285,78 @@ def test_building_inventory_join_remains_bounded_when_worker_never_completes():
     assert modeled_wait == 100
     assert modeled_wait <= 120
     assert failed == 1
+
+
+def _run_progress_preflight(rows, *, stall=30, absolute=100):
+    source = LOOP_PATH.read_text(encoding="utf-8")
+    start = source.index("function Get-FlySyncPreflightManifest")
+    end = source.index("\nfunction Invoke-OptionalRelayEvidenceSync", start)
+    function_source = source[start:end]
+    encoded = json.dumps(rows, separators=(",", ":"))
+    harness = (
+        f"$preflightManifestAttempts=50; $preflightManifestTimeoutSec=90; "
+        f"$preflightInventoryStallMaxSec={stall}; $preflightInventoryWaitMaxSec={absolute}; "
+        "$env:BOT_ADMIN_TOKEN='test'; $script:calls=0; $script:elapsed=0; $script:uris=@(); "
+        f"$script:rows=ConvertFrom-Json '{encoded}'; "
+        "$preflightInventoryElapsedProvider={ $script:elapsed }; "
+        "function Start-Sleep { param([int]$Seconds) $script:elapsed += $Seconds }; "
+        "function Invoke-RestMethod { param([string]$Uri) $script:uris += $Uri; "
+        "$row=$script:rows[[Math]::Min($script:calls,$script:rows.Count-1)]; "
+        "$script:calls += 1; $row }; " + function_source +
+        "; $script:failed=0; try { $null=Get-FlySyncPreflightManifest -ManifestUri "
+        "'https://example.invalid/api/data-sync/manifest?fresh=1&nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' } "
+        "catch { $script:failed=1 }; $unique=($script:uris | Select-Object -Unique).Count; "
+        "$nonceBound=[int](($script:uris | Where-Object { $_ -match "
+        """'[?&]fresh=1&nonce=[0-9a-f]{32}$'""" + " }).Count -eq $script:uris.Count); "
+        "Write-Output \"$script:calls,$script:elapsed,$script:failed,$unique,$nonceBound\""
+    )
+    completed = subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", harness],
+        capture_output=True, text=True, timeout=45, check=True,
+    )
+    return tuple(map(int, completed.stdout.strip().splitlines()[-1].split(",")))
+
+
+def _inventory(status="STALE_REVALIDATING", *, refreshing=True, phase="SCAN", files=0, error=None):
+    return {
+        "inventory_status": status,
+        "inventory_build_status": "FAILED" if error else "BUILDING",
+        "inventory_error": error,
+        "inventory_worker": {
+            "refreshing": refreshing, "phase": phase,
+            "files_seen": files, "dirs_seen": files, "rows_discovered": files,
+        },
+    }
+
+
+def test_progress_extends_same_nonce_join_until_current():
+    rows = [_inventory(files=value) for value in (0, 10, 20, 30)] + [_inventory("CURRENT", refreshing=False)]
+    calls, elapsed, failed, unique_uris, nonce_bound = _run_progress_preflight(rows, stall=15, absolute=100)
+    assert calls == 5 and failed == 0
+    assert elapsed > 15
+    assert unique_uris == 1
+    assert nonce_bound == 1
+
+
+def test_unchanged_inventory_progress_fails_at_stall_deadline():
+    calls, elapsed, failed, _, _ = _run_progress_preflight([_inventory(files=1)], stall=15, absolute=100)
+    assert failed == 1 and elapsed >= 15
+    assert calls < 50
+
+
+def test_inventory_join_has_absolute_cap_despite_progress():
+    rows = [_inventory(files=value) for value in range(50)]
+    calls, elapsed, failed, _, _ = _run_progress_preflight(rows, stall=100, absolute=25)
+    assert failed == 1 and elapsed <= 25
+    assert calls < 50
+
+
+def test_terminal_inventory_state_fails_immediately_and_never_accepts_stale():
+    calls, elapsed, failed, _, _ = _run_progress_preflight([
+        _inventory(error="RuntimeError", refreshing=False),
+        _inventory("CURRENT", refreshing=False),
+    ])
+    assert (calls, elapsed, failed) == (1, 0, 1)
 
 
 def test_fly_deployment_workflow_executes_cadence_contract_suite():
