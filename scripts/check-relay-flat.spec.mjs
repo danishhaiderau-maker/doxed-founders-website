@@ -11,6 +11,7 @@ import {
   isRelayPausedAndDisarmed,
   isRetryablePrismaConnectionError,
   ownerFetchErrorChain,
+  refreshPausedRelayAudit,
 } from './check-relay-flat.mjs';
 
 test('native HTTPS fallback preserves auth and pins the canonical proof to IPv4', () => {
@@ -221,4 +222,38 @@ test('durable recovery order proof accepts stored known zeros but rejects unknow
   assert.equal(isCompleteStoredExchangeOrderAuditFlat(stored), true);
   assert.equal(isCompleteStoredExchangeOrderAuditFlat({ ...stored, known: false }), false);
   assert.equal(isCompleteStoredExchangeOrderAuditFlat({ ...stored, foreignActiveOrderCount: 1 }), false);
+});
+
+test('strict proof refresh uses only the authenticated paused wake', async () => {
+  const calls = [];
+  await refreshPausedRelayAudit(
+    'https://relay-executor.example.test/',
+    'redacted-control-secret',
+    async (url, options) => {
+      calls.push({ url, options });
+      return { status: 202 };
+    },
+    new Date('2026-07-24T05:45:00.000Z'),
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://relay-executor.example.test/api/wake');
+  assert.equal(calls[0].options.method, 'POST');
+  assert.equal(calls[0].options.headers['x-bot-control-secret'], 'redacted-control-secret');
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    trigger: 'USER_PAUSE', tradeId: null, at: '2026-07-24T05:45:00.000Z',
+  });
+});
+
+test('strict proof refresh fails closed without HTTPS auth or acknowledgement', async () => {
+  await assert.rejects(refreshPausedRelayAudit('', 'secret'), /requires the authenticated/);
+  await assert.rejects(
+    refreshPausedRelayAudit('http://relay.internal', 'secret'),
+    /requires an HTTPS executor wake URL/,
+  );
+  await assert.rejects(
+    refreshPausedRelayAudit(
+      'https://relay.example.test', 'secret', async () => ({ status: 401 }),
+    ),
+    /failed HTTP 401/,
+  );
 });

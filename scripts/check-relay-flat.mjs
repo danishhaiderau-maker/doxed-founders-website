@@ -36,15 +36,17 @@ for (const envFile of [
 const { PrismaClient } = prismaPackage;
 const prisma = new PrismaClient();
 const dedicatedAdminToken = process.env.BOT_ADMIN_TOKEN?.trim() || '';
+const relayControlSecret = process.env.BOT_CONTROL_SECRET?.trim() || '';
 const adminToken =
   dedicatedAdminToken
-  || process.env.BOT_CONTROL_SECRET?.trim()
+  || relayControlSecret
   || '';
 const CANONICAL_FLY_OWNER_URL = 'https://doxed-btc-bot.fly.dev';
 const requireCanonicalFlyOwner =
   process.env.REQUIRE_CANONICAL_FLY_OWNER === 'YES';
 const durableOnlyRecovery =
   process.env.DURABLE_RELAYS_ONLY_RECOVERY === 'YES';
+const relayExecutorWakeUrl = process.env.RELAY_EXECUTOR_WAKE_URL?.trim() || '';
 if (durableOnlyRecovery && requireCanonicalFlyOwner) {
   throw new Error(
     'DURABLE_RELAYS_ONLY_RECOVERY cannot be combined with REQUIRE_CANONICAL_FLY_OWNER=YES',
@@ -350,6 +352,35 @@ export function isCompleteStoredExchangeOrderAuditFlat(audit) {
   );
 }
 
+export async function refreshPausedRelayAudit(
+  wakeUrl,
+  secret,
+  fetchImpl = fetch,
+  now = new Date(),
+) {
+  const base = String(wakeUrl ?? '').trim().replace(/\/$/, '');
+  const controlSecret = String(secret ?? '').trim();
+  if (!base || !controlSecret) {
+    throw new Error('strict relay proof requires the authenticated executor wake configuration');
+  }
+  const parsed = new URL(base);
+  if (parsed.protocol !== 'https:') {
+    throw new Error('strict relay proof requires an HTTPS executor wake URL');
+  }
+  const response = await fetchImpl(`${base}/api/wake`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-bot-control-secret': controlSecret,
+    },
+    body: JSON.stringify({ trigger: 'USER_PAUSE', tradeId: null, at: now.toISOString() }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status !== 202 && response.status !== 409) {
+    throw new Error(`authenticated executor audit wake failed HTTP ${response.status}`);
+  }
+}
+
 export function isRetryablePrismaConnectionError(error) {
   const message = String(error?.message ?? error ?? '');
   return /P1001|P1002|P1017|Can't reach database server|Server has closed the connection/i.test(message);
@@ -429,7 +460,26 @@ async function main() {
       ),
   );
 
-  const rows = await loadRelayBoundaryRows();
+  if (!durableOnlyRecovery) {
+    await refreshPausedRelayAudit(relayExecutorWakeUrl, relayControlSecret);
+  }
+  let rows = [];
+  for (let attempt = 1; attempt <= (durableOnlyRecovery ? 1 : 10); attempt += 1) {
+    rows = await loadRelayBoundaryRows();
+    const cheetah = rows.filter((row) => String(row.user).toLowerCase().includes('cheetah'));
+    if (
+      durableOnlyRecovery
+      || (
+        cheetah.length > 0
+        && cheetah.every((row) => (
+          isRelayPausedAndDisarmed(row)
+          && isStrictRawFlatReconcileSnapshot(row.reconcile)
+          && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
+        ))
+      )
+    ) break;
+    if (attempt < 10) await new Promise((resolve) => setTimeout(resolve, 3_000));
+  }
 
   const output = {
     at: new Date().toISOString(),

@@ -375,6 +375,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          BOT_CONTROL_SECRET: ${{ secrets.BOT_CONTROL_SECRET }}
+          RELAY_EXECUTOR_WAKE_URL: ${{ secrets.RELAY_EXECUTOR_WAKE_URL }}
           REQUIRE_BOT_ADMIN_TOKEN: "YES"
           REQUIRE_CANONICAL_FLY_OWNER: "YES"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
