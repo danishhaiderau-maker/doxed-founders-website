@@ -13,9 +13,28 @@ def test_read_only_fly_inspection_cannot_hang_the_entire_job():
     assert "timeout --signal=TERM --kill-after=5s 30s flyctl machines list" in section
     for label in (
         "FLY_STATUS", "MACHINE_STATUS", "RECENT_PLATFORM_LOGS",
-        "PROCESS_AND_BOT_LOG", "RELAY_STREAM_VALIDATION", "INCIDENT_LOG_SCAN",
+        "DURABLE_PAPER_LIFECYCLE", "PROCESS_AND_BOT_LOG",
+        "RELAY_STREAM_VALIDATION", "INCIDENT_LOG_SCAN",
     ):
         assert f"run_probe {label}" in section
+    assert "flyctl machine exec" in section
+    assert "/app/data/runtime/paper_lifecycle_v1.json" in section
+    for field in (
+        '"saved_at"', '"snapshot_git_rev"', '"runtime_source_git_rev"',
+        '"paper_only"', '"live_armed"', '"open_position_count"',
+        '"open_position_id_sample"', '"open_position_ids_truncated"',
+        '"pending_order_count"', '"pending_order_id_sample"',
+        '"pending_order_ids_truncated"',
+    ):
+        assert field.replace('"', '\\"') in section
+    assert 'assert d.get(\\"schema\\")==\\"paper_lifecycle_v1\\"' in section
+    assert 'assert d.get(\\"paper_only\\") is True and d.get(\\"live_armed\\") is False' in section
+    assert "assert isinstance(positions,list) and isinstance(orders,list)" in section
+    assert "len(positions)<=100000 and len(orders)<=100000" in section
+    assert 'upper()==\\"OPEN\\" for x in positions' in section
+    assert 'upper()==\\"PENDING\\" for x in orders' in section
+    assert "pids[:20]" in section
+    assert "oids[:20]" in section
     assert "continuing with the remaining bounded probes" in section
 
 
