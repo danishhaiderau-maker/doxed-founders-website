@@ -27,6 +27,7 @@ on:
         options:
           - deploy
           - recover-unready
+          - recover-stalled-runtime
           - restart-only
           - inspect-runtime
           - close-paper-position
@@ -259,6 +260,47 @@ jobs:
           if not deployed or not failed_liveness:
               raise SystemExit("recovery run lacks successful deploy plus failed post-deploy liveness proof")
           print(f"Exact unready recovery target proven by Actions run {run_id}: {expected}")
+          PY
+          node scripts/check-relay-flat.mjs
+
+      - name: Prove stalled runtime recovery from the last guarded deployment
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-stalled-runtime'
+        working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+          EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+          RECOVERY_PROOF_RUN_ID: ${{ inputs.recovery_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
+          run_id = str(os.environ.get("RECOVERY_PROOF_RUN_ID") or "").strip()
+          if len(expected) != 12 or not run_id.isdigit():
+              raise SystemExit("stalled-runtime recovery requires exact revision and proof run")
+          base = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions"
+          headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
+          def fetch(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
+                  return json.load(response)
+          run = fetch(f"{base}/runs/{run_id}")
+          if str(run.get("head_sha") or "")[:12] != expected or run.get("conclusion") != "success":
+              raise SystemExit("proof run is not the successful guarded deployment of the expected revision")
+          jobs = fetch(f"{base}/runs/{run_id}/jobs?per_page=100").get("jobs") or []
+          steps = [step for job in jobs for step in (job.get("steps") or [])]
+          required = {
+              "Deploy the exact source revision",
+              "Prove liveness, execution safety, and exact revision",
+          }
+          passed = {step.get("name") for step in steps if step.get("conclusion") == "success"}
+          if not required.issubset(passed):
+              raise SystemExit("proof run lacks guarded deploy and post-deploy safety receipts")
+          print(f"Stalled runtime recovery anchored to guarded deployment {run_id}: {expected}")
           PY
           node scripts/check-relay-flat.mjs
 

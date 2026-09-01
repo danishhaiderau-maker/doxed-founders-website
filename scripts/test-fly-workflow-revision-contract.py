@@ -22,3 +22,13 @@ def test_runtime_and_deploy_contract_changes_remain_revision_relevant():
     ):
         assert path in DEPLOY
         assert path.replace("/**", "") in MONITOR
+
+
+def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatness():
+    assert "recover-stalled-runtime" in DEPLOY
+    assert "Stalled runtime recovery anchored to guarded deployment" in DEPLOY
+    assert 'run.get("conclusion") != "success"' in DEPLOY
+    assert '"Deploy the exact source revision"' in DEPLOY
+    assert '"Prove liveness, execution safety, and exact revision"' in DEPLOY
+    assert 'DURABLE_RELAYS_ONLY_RECOVERY: "YES"' in DEPLOY
+    assert 'REQUIRE_CANONICAL_FLY_OWNER: "NO"' in DEPLOY
