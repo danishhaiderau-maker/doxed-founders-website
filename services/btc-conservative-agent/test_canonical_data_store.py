@@ -124,6 +124,20 @@ def test_parity_and_analyzer_selection_require_all_causal_identity(tmp_path):
         require_analyzer_dataset(root, expected)
 
 
+def test_analyzer_selection_rejects_missing_deployed_revision_expected_key(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    root = initialize_store(default_store_root(project), project)
+    current = append_manifest(root, _fields())
+    expected = {
+        key: current[key]
+        for key in ("dataset_epoch", "source_revision", "tile_config_signature")
+    }
+
+    with pytest.raises(CanonicalStoreError, match="PARITY_MISMATCH"):
+        require_analyzer_dataset(root, expected)
+
+
 def test_parity_status_is_atomic_and_bound_to_current_manifest(tmp_path):
     project = tmp_path / "project"
     project.mkdir()

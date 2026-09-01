@@ -148,6 +148,15 @@ def assert_mirror_coherent(
     if not all(_revision_matches(values[0], value) for value in values[1:]):
         raise MirrorCoherenceError("MIRROR_REVISION_IDENTITY_MISMATCH")
 
+    # New terminal receipts state the authenticated deployed revision
+    # explicitly. Older receipts may predate that field; only after a terminal
+    # MATCH receipt and unanimous source identity have passed above is the
+    # mirrored revision a safe compatibility value. An explicit divergent
+    # deployedRevision is retained so canonical parity rejects it below.
+    deployed_revision = payload.get("deployedRevision")
+    if not str(deployed_revision or "").strip():
+        deployed_revision = values[2]
+
     age_limit = int(
         max_age_seconds
         if max_age_seconds is not None
@@ -184,6 +193,7 @@ def assert_mirror_coherent(
                 {
                     "dataset_epoch": epoch,
                     "source_revision": str(values[2]).strip().lower(),
+                    "deployed_revision": str(deployed_revision).strip().lower(),
                     "tile_config_signature": str(payload.get("tileRegistrySignature") or ""),
                 },
             )

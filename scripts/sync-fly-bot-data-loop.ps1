@@ -610,6 +610,7 @@ try {
           sourceRevision = $lastSyncedSourceRevision
           observedSourceRevision = $observedSourceRevision
           mirroredSourceRevision = $lastSyncedSourceRevision
+          deployedRevision = $observedSourceRevision
           revisionParity = $revisionParity
           botVersion = $(if ($manifest.PSObject.Properties.Name -contains "bot_version") { [string]$manifest.bot_version } else { $null })
           tileRegistrySignature = $(if ($manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
@@ -713,6 +714,7 @@ try {
         sourceRevision = $lastSyncedSourceRevision
         observedSourceRevision = $observedSourceRevision
         mirroredSourceRevision = $lastSyncedSourceRevision
+        deployedRevision = $observedSourceRevision
         revisionParity = $(
           if (-not $observedSourceRevision -or -not $lastSyncedSourceRevision) { "UNKNOWN" }
           elseif ($observedSourceRevision.Equals($lastSyncedSourceRevision, [StringComparison]::OrdinalIgnoreCase)) { "MATCH" }

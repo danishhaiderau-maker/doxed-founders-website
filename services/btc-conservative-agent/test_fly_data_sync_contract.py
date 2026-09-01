@@ -115,6 +115,13 @@ def test_successful_sync_commits_a_completed_revision_normalized_heartbeat():
     assert "-Completed" in SYNC_SCRIPT
 
 
+def test_parent_terminal_heartbeat_carries_authenticated_deployed_revision():
+    assert SYNC_LOOP.count("deployedRevision = $observedSourceRevision") == 2
+    assert SYNC_LOOP.index("deployedRevision = $observedSourceRevision") < SYNC_LOOP.index(
+        "$heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile"
+    )
+
+
 def test_sync_keeps_generation_lease_until_terminal_heartbeat_is_published():
     sync_call = SYNC_LOOP.index('$result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1")')
     publish = SYNC_LOOP.index(

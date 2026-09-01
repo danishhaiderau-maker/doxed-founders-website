@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from research.mirror_coherence import MirrorCoherenceError, assert_mirror_coherent
+from research.canonical_data_store import append_manifest, initialize_store
 from research.mirror_generation_lease import (
     MirrorGenerationLease,
     MirrorGenerationLeaseTimeout,
@@ -66,6 +67,75 @@ def _assert(repo: Path, mirror: Path, previous=None):
         now=NOW,
         max_age_seconds=600,
     )
+
+
+def _canonical_fixture(tmp_path: Path, *, deployed_revision: str | None) -> tuple[Path, Path]:
+    repo, old_mirror, _ = _fixture(tmp_path)
+    mirror = repo / "canonical-research-data"
+    initialize_store(mirror, repo)
+    for name in (".fly-sync-state.json", "research_session.json"):
+        (mirror / name).write_bytes((old_mirror / name).read_bytes())
+    heartbeat = json.loads(
+        (old_mirror / ".fly-data-sync-loop.heartbeat.json").read_text(encoding="utf-8")
+    )
+    heartbeat["tileRegistrySignature"] = "tile-signature"
+    if deployed_revision is not None:
+        heartbeat["deployedRevision"] = deployed_revision
+    _write_json(mirror / ".fly-data-sync-loop.heartbeat.json", heartbeat)
+    append_manifest(
+        mirror,
+        {
+            "dataset_epoch": "epoch-current",
+            "source_revision": REVISION[:12],
+            "deployed_revision": REVISION[:12],
+            "tile_config_signature": "tile-signature",
+            "collection_started_at": "2026-08-27T11:00:00Z",
+            "collection_observed_at": "2026-08-27T11:29:00Z",
+            "file_count": 1,
+            "byte_count": 1024,
+            "row_count": 1,
+            "opportunity_count": 1,
+            "dataset_checksum": "a" * 64,
+            "analyzer_status": "PENDING_CANONICAL_ANALYZER_RUN",
+            "analyzer_completed_at": None,
+            "analyzer_schema_version": "v62",
+        },
+    )
+    return repo, mirror
+
+
+@pytest.mark.parametrize("deployed_revision", [REVISION[:12], None])
+def test_current_terminal_heartbeat_admits_canonical_manifest(
+    tmp_path: Path, deployed_revision: str | None
+) -> None:
+    repo, mirror = _canonical_fixture(tmp_path, deployed_revision=deployed_revision)
+
+    token = assert_mirror_coherent(
+        repo_root=repo,
+        data_root=mirror,
+        expected_revision=REVISION,
+        now=NOW,
+        max_age_seconds=600,
+        require_canonical_manifest=True,
+    )
+
+    assert token.revision == REVISION[:12]
+
+
+def test_mismatched_terminal_deployed_revision_is_rejected(tmp_path: Path) -> None:
+    repo, mirror = _canonical_fixture(tmp_path, deployed_revision="deadbeef0000")
+
+    with pytest.raises(
+        MirrorCoherenceError, match="CANONICAL_DATASET_MANIFEST_INVALID"
+    ):
+        assert_mirror_coherent(
+            repo_root=repo,
+            data_root=mirror,
+            expected_revision=REVISION,
+            now=NOW,
+            max_age_seconds=600,
+            require_canonical_manifest=True,
+        )
 
 
 def test_timestamp_only_heartbeat_refresh_does_not_change_generation(tmp_path: Path) -> None:
