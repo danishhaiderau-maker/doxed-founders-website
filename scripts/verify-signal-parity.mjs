@@ -21,6 +21,8 @@ const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sy
 const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
 const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/platform_relay_evidence_worker.py');
 const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
+const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
+const lifecycleCleanupEngine = join(root, 'services/btc-signal-engine/lifecycle_cleanup_transaction.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
@@ -101,6 +103,18 @@ if (relayEvidenceWorkerAgentHash !== relayEvidenceWorkerEngineHash) {
   );
 }
 console.log(`OK  relay-evidence validation worker matches (${relayEvidenceWorkerAgentHash})`);
+
+if (!existsSync(lifecycleCleanupAgent) || !existsSync(lifecycleCleanupEngine)) {
+  fail('Missing lifecycle cleanup transaction dependency in canonical bot or signal engine');
+}
+const lifecycleCleanupAgentHash = sha256(lifecycleCleanupAgent);
+const lifecycleCleanupEngineHash = sha256(lifecycleCleanupEngine);
+if (lifecycleCleanupAgentHash !== lifecycleCleanupEngineHash) {
+  fail(
+    `lifecycle cleanup transaction (${lifecycleCleanupAgentHash}) !== signal-engine copy (${lifecycleCleanupEngineHash})`,
+  );
+}
+console.log(`OK  lifecycle cleanup transaction matches (${lifecycleCleanupAgentHash})`);
 
 if (existsSync(manifestPath)) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));

@@ -48,6 +48,7 @@ from bounded_evidence_worker import BoundedEvidenceWorker
 from lifecycle_cleanup_transaction import (
     CleanupRejected as LifecycleCleanupRejected,
     CleanupTransaction,
+    PurgeTransaction,
     verify_bundle as verify_lifecycle_cleanup_bundle,
 )
 from position_registry import (
@@ -5390,6 +5391,8 @@ venue_fill_trade_tape_lock = threading.Lock()
 _microstructure_last_bucket = 0
 _microstructure_rows_written = 0
 _microstructure_write_failures = 0
+_microstructure_admission_suppressions = 0
+_microstructure_io_write_failures = 0
 ret_1m_buffer = deque(maxlen=20)
 ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
@@ -23337,7 +23340,8 @@ def microstructure_capture_loop():
     bucket already written by the prior process.
     """
     global _microstructure_last_bucket, _microstructure_rows_written
-    global _microstructure_write_failures
+    global _microstructure_write_failures, _microstructure_admission_suppressions
+    global _microstructure_io_write_failures
     next_bucket = int(time.time()) + 1
     while not shutdown_event.is_set():
         wait = max(0.01, next_bucket + 1.0 - time.time())
@@ -23368,14 +23372,20 @@ def microstructure_capture_loop():
             ask_qty=ask_qty, last=last, source_ts=source_ts,
             trades=bucket_trades, symbol=BITFINEX_WS_SYMBOL,
         )
+        append_outcome = {}
         if _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
             label="MARKET_MICROSTRUCTURE_1S", fallback_on_error=False,
+            outcome=append_outcome,
         ):
             _microstructure_last_bucket = bucket
             _microstructure_rows_written += 1
         else:
             _microstructure_write_failures += 1
+            if append_outcome.get("status") == "ADMISSION_SUPPRESSED":
+                _microstructure_admission_suppressions += 1
+            else:
+                _microstructure_io_write_failures += 1
 
 
 def _enqueue_ws_tick_lifecycle(price: float, received_ts: float = None) -> bool:
@@ -35872,6 +35882,7 @@ def status():
         "process_alive": process_alive,
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
+        "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
@@ -35926,6 +35937,12 @@ def status():
                 "last_bucket_ts": int(_microstructure_last_bucket or 0),
                 "rows_written_this_process": int(_microstructure_rows_written),
                 "write_failures_this_process": int(_microstructure_write_failures),
+                "admission_suppressions_this_process": int(
+                    _microstructure_admission_suppressions
+                ),
+                "io_write_failures_this_process": int(
+                    _microstructure_io_write_failures
+                ),
                 "qualification_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
             },
             "control_cell": CONTROL_CELL,
@@ -37896,6 +37913,112 @@ def _lifecycle_pipeline_runtime_status() -> dict:
         }
 
 
+def _lifecycle_artifact_counts(now: float, maximum_entries: int = 4096) -> dict:
+    """Count lifecycle artifacts with fixed traversal and no content reads."""
+    root = _data_sync_runtime_root() / "v3"
+    specifications = {
+        "transfer_bundles": (root / "lifecycle_transfer_bundles", "transfer-", True),
+        "completion_bundles": (root / "lifecycle_bundles", "lifecycle-", True),
+        "acks": (_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks", "lifecycle-", False),
+    }
+    result = {}
+    for label, (parent, prefix, nested) in specifications.items():
+        count = 0
+        newest = 0.0
+        inspected = 0
+        truncated = False
+        try:
+            containers = []
+            if parent.is_dir():
+                with os.scandir(parent) as entries:
+                    for index, entry in enumerate(entries):
+                        if index >= 256:
+                            truncated = True
+                            break
+                        containers.append(Path(entry.path))
+            candidates = (
+                (item for bucket in containers if bucket.is_dir() for item in bucket.iterdir())
+                if nested else iter(containers)
+            )
+            for item in candidates:
+                inspected += 1
+                if inspected > maximum_entries:
+                    truncated = True
+                    break
+                name = item.name
+                valid = (
+                    item.is_dir() and name.startswith(prefix)
+                    if nested else item.is_file() and name.startswith(prefix) and name.endswith(".json")
+                )
+                if not valid:
+                    continue
+                count += 1
+                newest = max(newest, float(item.stat().st_mtime))
+        except OSError:
+            truncated = True
+        result[label] = {
+            "count": count,
+            "newest_age_sec": max(0.0, now - newest) if newest else None,
+            "scan_truncated": truncated,
+        }
+    return result
+
+
+def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
+    """Return bounded lifecycle telemetry without identifiers or proof material."""
+    current = float(now or time.time())
+    internal = _lifecycle_pipeline_runtime_status()
+    last = internal.get("last_result") if isinstance(internal.get("last_result"), dict) else {}
+    failure = internal.get("last_worker_failure") if isinstance(internal.get("last_worker_failure"), dict) else {}
+    next_run = internal.get("next_run_unix")
+    last_success = internal.get("last_success_unix")
+    runtime_revision = str(internal.get("source_revision") or "")
+    exact_revision = str(_runtime_git_rev_exact() or "")
+    overlap_raw = str(internal.get("overlap_code") or "")[:160]
+    overlap_code = (
+        overlap_raw
+        if re.fullmatch(r"[A-Z0-9_:,.-]{1,160}", overlap_raw)
+        else "OVERLAP_ACTIVE_REDACTED" if overlap_raw else None
+    )
+    safe_counts = lambda value: {
+        str(key)[:96]: max(0, int(count))
+        for key, count in list((value or {}).items())[:32]
+        if re.fullmatch(r"[A-Z0-9_:.-]{1,96}", str(key))
+        and isinstance(count, int) and not isinstance(count, bool)
+    }
+    return {
+        "schema": "lifecycle_pipeline_public_status_v1",
+        "owner": bool(internal.get("owner")),
+        "running": bool(internal.get("running")),
+        "active": bool(internal.get("active")),
+        "source_revision_match": bool(
+            runtime_revision and exact_revision and runtime_revision == exact_revision
+        ),
+        "last_outcome": str(internal.get("last_outcome") or "UNKNOWN")[:80],
+        "last_error_code": str(
+            internal.get("last_error_code")
+            or failure.get("error_code") or failure.get("error_class") or ""
+        )[:80] or None,
+        "failure_count": max(0, int(internal.get("failure_count") or 0)),
+        "backoff_sec": max(0.0, float(internal.get("backoff_sec") or 0.0)),
+        "next_run_in_sec": max(0.0, float(next_run) - current) if next_run else None,
+        "pressure": bool(internal.get("pressure")),
+        "emergency": bool(internal.get("emergency")),
+        "overlap_code": overlap_code,
+        "last_success_age_sec": max(0.0, current - float(last_success)) if last_success else None,
+        "progress": {
+            key: max(0, int(last.get(key) or 0))
+            for key in (
+                "rows_scanned", "bytes_indexed", "pending_dirty_lifecycles",
+                "promoted_qualification_retries", "candidate_count",
+                "transfer_ready_count", "transfer_bundle_count",
+                "completion_appended_count", "bundle_count",
+            )
+        } | {"caught_up": bool(last.get("caught_up"))},
+        "stage_counts": safe_counts(last.get("stage_counts")),
+        "blocker_counts": safe_counts(last.get("blocker_counts")),
+        "artifacts": _lifecycle_artifact_counts(current),
+    }
 def _data_sync_allowed_roots() -> list:
     """Return unique, non-overlapping physical roots within the Fly volume.
 
@@ -41053,6 +41176,116 @@ def _reconcile_lifecycle_cleanup_transactions() -> list:
     if results:
         logger.warning("lifecycle cleanup restart reconciliation results=%s", results)
     return results
+
+
+_LIFECYCLE_PURGE_LOCK = threading.Lock()
+_LIFECYCLE_PURGE_CONFIRM_PREFIX = "PURGE_COMMITTED_LIFECYCLE:"
+_LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS = 86_400
+
+
+def _lifecycle_purge_minimum_age_seconds() -> int:
+    """Return configured quarantine age without permitting a sub-day bypass."""
+    try:
+        configured = int(os.getenv(
+            "LIFECYCLE_PURGE_MIN_AGE_SECONDS",
+            str(_LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS),
+        ))
+    except (TypeError, ValueError):
+        configured = _LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS
+    return max(_LIFECYCLE_PURGE_MINIMUM_AGE_FLOOR_SECONDS, configured)
+
+
+def _lifecycle_purge_resolve_inputs(bundle_id: object) -> tuple[Path, dict, dict]:
+    """Resolve a committed record and retained receipt from internal roots only."""
+    value = str(bundle_id or "").strip().lower()
+    if not re.fullmatch(r"lifecycle-[0-9a-f]{64}", value):
+        raise ValueError("invalid lifecycle bundle identity")
+    ack_path = _data_sync_lifecycle_ack_path(value)
+    persisted = json.loads(ack_path.read_text(encoding="utf-8"))
+    receipt = persisted.get("receipt") if isinstance(persisted, dict) else None
+    if not isinstance(receipt, dict) or str(receipt.get("bundle_id") or "") != value:
+        raise ValueError("retained lifecycle receipt unavailable")
+    transaction = CleanupTransaction(_data_sync_volume_root())
+    transaction_dir = transaction.tx_root / hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+    committed_path = transaction_dir / "COMMITTED.json"
+    committed = json.loads(committed_path.read_text(encoding="utf-8"))
+    if (
+        committed.get("schema") != "lifecycle_cleanup_transaction_v2"
+        or committed.get("state") != "COMMITTED"
+        or committed.get("bundle_id") != value
+    ):
+        raise ValueError("v2 committed lifecycle quarantine unavailable")
+    return committed_path, committed, receipt
+
+
+@app.route('/api/data-sync/lifecycle-purge/execute', methods=['POST'])
+def api_data_sync_lifecycle_purge_execute():
+    """Explicitly purge one proof-bound committed quarantine; disabled by default."""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "status": "INVALID_REQUEST"}), 400
+    bundle_id = str(body.get("bundle_id") or "").strip().lower()
+    expected_confirmation = f"{_LIFECYCLE_PURGE_CONFIRM_PREFIX}{bundle_id}"
+    if not bundle_id or not hmac.compare_digest(
+        str(body.get("confirmation") or ""), expected_confirmation,
+    ):
+        return jsonify({"ok": False, "status": "EXACT_CONFIRMATION_REQUIRED"}), 409
+    if not _LIFECYCLE_PURGE_LOCK.acquire(blocking=False):
+        return jsonify({"ok": False, "status": "PURGE_BUSY"}), 409
+    try:
+        purge_enabled = os.getenv("LIFECYCLE_PURGE_ENABLED", "false").lower() == "true"
+        if not purge_enabled:
+            return jsonify({
+                "ok": True, "status": "DISABLED_QUARANTINE_RETAINED",
+                "purge_authorized": False,
+            })
+        committed_path, _committed, receipt = _lifecycle_purge_resolve_inputs(bundle_id)
+        key_id = str((receipt.get("laptop_attestation") or {}).get("key_id") or "")
+        secret = os.getenv("LIFECYCLE_LAPTOP_ATTESTATION_KEY", "").encode("utf-8")
+        keys = {key_id: secret} if key_id and secret else {}
+        transaction = PurgeTransaction(
+            _data_sync_volume_root(),
+            enabled=purge_enabled,
+            minimum_age_seconds=_lifecycle_purge_minimum_age_seconds(),
+        )
+        result = transaction.execute_purge(
+            committed_path, receipt,
+            current_identity=_data_sync_lifecycle_cleanup_current_identity(),
+            active_references=_data_sync_lifecycle_cleanup_active_references(),
+            attestation_keys=keys,
+        )
+    except (LifecycleCleanupRejected, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        reasons = list(getattr(exc, "reasons", [type(exc).__name__]))[:8]
+        return jsonify({
+            "ok": False, "status": "PURGE_INELIGIBLE_QUARANTINE_RETAINED",
+            "reasons": reasons,
+        }), 409
+    finally:
+        _LIFECYCLE_PURGE_LOCK.release()
+    return jsonify({"ok": True, **result})
+
+
+def _audit_lifecycle_purge_recovery() -> list:
+    """Report interrupted purge state at startup; never delete automatically."""
+    root = _data_sync_volume_root() / "v3" / "lifecycle_purge_transactions"
+    if not root.is_dir():
+        return []
+    rows = []
+    for transaction_dir in sorted(root.iterdir())[:128]:
+        if not transaction_dir.is_dir():
+            continue
+        if (transaction_dir / "PREPARED.json").is_file() and not (
+            transaction_dir / "PURGED.json"
+        ).is_file():
+            rows.append({
+                "transaction": transaction_dir.name,
+                "status": "PREPARED_REQUIRES_EXPLICIT_REPLAY",
+            })
+    if rows:
+        logger.warning(
+            "lifecycle purge recovery requires explicit admin replay count=%s", len(rows)
+        )
+    return rows
 
 
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
@@ -46125,8 +46358,13 @@ def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
 
 def _safe_append_jsonl(
     path: str, row: dict, label: str = "JSONL", *, fallback_on_error: bool = True,
+    outcome: dict | None = None,
 ):
-    """Append one JSONL row with rotation + retries (non-fatal for research logs)."""
+    """Append one JSONL row with rotation + retries (non-fatal for research logs).
+
+    Existing callers retain the boolean contract. Callers that need telemetry
+    classification may supply ``outcome``; admission is still evaluated once.
+    """
     terminal_labels = {
         "TRADE_LIFECYCLE", "TRADE_OUTCOME", "FILL_QUALITY", "EXECUTION_SETTINGS",
         "DUPLICATE_INTENT_AUDIT", "COUNTERFACTUAL", "PATH_REPLAY",
@@ -46166,6 +46404,8 @@ def _safe_append_jsonl(
         lifecycle_required=lifecycle_required, lifecycle_existing=lifecycle_existing,
     )
     if not admission["allowed"]:
+        if outcome is not None:
+            outcome["status"] = "ADMISSION_SUPPRESSED"
         logger.warning(
             "[%s] append suppressed: %s used-threshold=%.2f [PIPELINE ENFORCEMENT]",
             label, admission["reason"], admission["threshold"],
@@ -46201,6 +46441,8 @@ def _safe_append_jsonl(
                         f"{receipt_error}; row is durable and will not be retried "
                         "[PIPELINE ENFORCEMENT]"
                     )
+                if outcome is not None:
+                    outcome["status"] = "WRITTEN"
                 return True
             except Exception as e:
                 last_err = e
@@ -46211,6 +46453,8 @@ def _safe_append_jsonl(
     logger.error(f"[{label}] append failed ({path}): {last_err} [PIPELINE ENFORCEMENT]")
     if fallback_on_error:
         _csv_write_fallback(path, row, last_err)
+    if outcome is not None:
+        outcome["status"] = "WRITE_FAILED"
     return False
 
 
@@ -46907,6 +47151,7 @@ def main():
     _ensure_collector_v22_epoch()
     _prime_data_sync_identity_epoch_cache()
     _reconcile_lifecycle_cleanup_transactions()
+    _audit_lifecycle_purge_recovery()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()

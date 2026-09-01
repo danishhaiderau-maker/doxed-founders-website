@@ -20,6 +20,8 @@ const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sy
 const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
 const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/platform_relay_evidence_worker.py');
 const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
+const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
+const lifecycleCleanupEngine = join(root, 'services/btc-signal-engine/lifecycle_cleanup_transaction.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
 const engineDir = join(root, 'services/btc-signal-engine');
@@ -81,6 +83,12 @@ if (!existsSync(relayEvidenceWorkerAgent)) {
 }
 copyFileSync(relayEvidenceWorkerAgent, relayEvidenceWorkerEngine);
 console.log(`Mirrored relay-evidence validation worker (${sha256(readFileSync(relayEvidenceWorkerAgent, 'utf8'))})`);
+
+if (!existsSync(lifecycleCleanupAgent)) {
+  throw new Error('Missing canonical lifecycle cleanup transaction dependency');
+}
+copyFileSync(lifecycleCleanupAgent, lifecycleCleanupEngine);
+console.log(`Mirrored lifecycle cleanup transaction (${sha256(readFileSync(lifecycleCleanupAgent, 'utf8'))})`);
 
 // Registry-owned policy dependencies are part of the executable mirror. Copy
 // only the active family modules plus their common implementation and remove
