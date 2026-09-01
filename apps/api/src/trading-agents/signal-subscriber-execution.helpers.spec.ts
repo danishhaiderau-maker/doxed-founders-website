@@ -111,7 +111,46 @@ import {
   resolveEffectiveStopLossMarginPct,
   isDeterministicBitfinexSubmitRejection,
   desiredLiveCopyCoordinationState,
+  relayExecutorPollDelayMs,
+  PERSISTED_WAKE_ACTIVE_POLL_MS,
+  PERSISTED_WAKE_PAUSED_POLL_MS,
+  PERSISTED_WAKE_IDLE_POLL_MS,
+  RECONCILIATION_PAUSED_POLL_MS,
+  RECONCILIATION_IDLE_POLL_MS,
 } from './signal-subscriber-execution.service';
+
+test('executor stops recurring Neon polling only when disarmed and flat', () => {
+  assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'ACTIVE', 800), 800);
+  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'ACTIVE', 800), PERSISTED_WAKE_ACTIVE_POLL_MS);
+  assert.equal(PERSISTED_WAKE_PAUSED_POLL_MS, null);
+  assert.equal(PERSISTED_WAKE_IDLE_POLL_MS, null);
+  assert.equal(RECONCILIATION_PAUSED_POLL_MS, null);
+  assert.equal(RECONCILIATION_IDLE_POLL_MS, null);
+});
+
+test('executor retains startup recovery and explicit wake re-arming without interval pollers', () => {
+  const source = readFileSync(
+    resolve(__dirname, './signal-subscriber-execution.service.ts'),
+    'utf8',
+  );
+  const moduleInitSource = source.slice(
+    source.indexOf('onModuleInit()'),
+    source.indexOf('onModuleDestroy()', source.indexOf('onModuleInit()')),
+  );
+  assert.match(moduleInitSource, /this\.scheduleReconciliation\(POLL_MS\)/);
+  assert.match(moduleInitSource, /this\.schedulePersistedWakePoll\(PERSISTED_WAKE_ACTIVE_POLL_MS\)/);
+  assert.doesNotMatch(moduleInitSource, /setInterval\(\(\) => void this\.tick/);
+  assert.doesNotMatch(moduleInitSource, /setInterval\(\(\) => void this\.pollPersistedFastWake/);
+  const wakeNowSource = source.slice(
+    source.indexOf('async wakeNow('),
+    source.indexOf('/**\n   * F7', source.indexOf('async wakeNow(')),
+  );
+  assert.match(wakeNowSource, /this\.scheduleReconciliation\(POLL_MS\)/);
+  assert.match(wakeNowSource, /this\.schedulePersistedWakePoll\(PERSISTED_WAKE_ACTIVE_POLL_MS\)/);
+  assert.match(source, /armedOrSimActive \|\| exposure\s*\? 'ACTIVE'/);
+  assert.match(source, /delayMs == null \|\| this\.reconciliationTimer/);
+  assert.match(source, /delayMs == null \|\| this\.persistedWakeTimer/);
+});
 
 test('Scenario C exchange stop promotion defaults on and requires an explicit rollback to disable', () => {
   const prior = process.env.EXCHANGE_DYNAMIC_STOPS_ENABLED;
