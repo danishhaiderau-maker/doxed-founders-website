@@ -93,6 +93,22 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.assertEqual(self.bot.pending_orders[0]["chase_count"], 3)
         self.assertEqual(self.bot.pending_orders[0]["exit_profile_id"], "ATR_TP_2.5_ATR_SL_1.5")
 
+    def test_round_trip_persists_exact_revision_identity(self):
+        exact = "a" * 40
+        with mock.patch.object(self.bot, "_runtime_git_rev_exact", return_value=exact):
+            self.assertTrue(self.bot.save_paper_lifecycle(reason="exact-revision"))
+        payload = json.loads(Path(self.bot.PAPER_LIFECYCLE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(payload["git_rev"], exact)
+        self.bot.pending_orders.clear()
+        self.bot.open_positions.clear()
+        self.assertEqual(self.bot.load_paper_lifecycle()["invalid"], 0)
+
+    def test_snapshot_revision_fails_closed_when_exact_identity_unavailable(self):
+        with mock.patch.object(self.bot, "_runtime_git_rev_exact", return_value="unknown"):
+            self.assertTrue(self.bot.save_paper_lifecycle(reason="unknown-revision"))
+        payload = json.loads(Path(self.bot.PAPER_LIFECYCLE_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(payload["git_rev"], "unknown")
+
     def test_family_snapshot_persists_only_enforced_policy_protection(self):
         self.bot.open_positions.append(self._position())
         self.assertTrue(self.bot.save_paper_lifecycle(reason="test"))

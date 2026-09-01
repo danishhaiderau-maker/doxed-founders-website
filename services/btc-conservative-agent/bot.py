@@ -8304,6 +8304,35 @@ def _runtime_git_rev() -> str:
     return "unknown"
 
 
+_RUNTIME_GIT_REV_EXACT_CACHE = {"value": ""}
+
+
+def _runtime_git_rev_exact() -> str:
+    """Return the exact 40-character deployment revision for internal fences."""
+    cached = str(_RUNTIME_GIT_REV_EXACT_CACHE.get("value") or "").lower()
+    if re.fullmatch(r"[0-9a-f]{40}", cached):
+        return cached
+    candidates = [
+        str(os.getenv(name) or "").strip().lower()
+        for name in ("SOURCE_GIT_REV", "GIT_COMMIT", "GITHUB_SHA", "RAILWAY_GIT_COMMIT_SHA")
+    ]
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=here, capture_output=True,
+            text=True, timeout=4,
+        )
+        if completed.returncode == 0:
+            candidates.append(str(completed.stdout or "").strip().lower())
+    except Exception:
+        pass
+    for candidate in candidates:
+        if re.fullmatch(r"[0-9a-f]{40}", candidate):
+            _RUNTIME_GIT_REV_EXACT_CACHE["value"] = candidate
+            return candidate
+    return "unknown"
+
+
 
 
 
@@ -28514,7 +28543,7 @@ def _watchdog_crash_context(progress=None, incident=None, *, trigger="UNSPECIFIE
         "trigger": str(trigger)[:64],
         "restart_allowed": bool(restart_allowed),
         "exit_code": 75 if restart_allowed else None,
-        "source_revision": str(SOURCE_GIT_REV or ""),
+        "source_revision": _runtime_git_rev_exact(),
         "bot_instance_id": str(BOT_INSTANCE_ID or ""),
         "incident": {
             "active": bool(incident.get("active")),
@@ -34807,7 +34836,7 @@ def _build_api_state_snapshot():
                 float(process_boot_time), tz=timezone.utc
             ).isoformat(),
             current_instance_id=str(BOT_INSTANCE_ID or "") or None,
-            current_revision=str(SOURCE_GIT_REV or _runtime_git_rev() or "") or None,
+            current_revision=str(_runtime_git_rev_exact() or "") or None,
         )
         coord = live_copy_coordination_state()
         snapshot["live_copy_coordination_state"] = coord
@@ -37629,7 +37658,7 @@ def _lifecycle_pipeline_overlap_probe():
 def _start_lifecycle_pipeline_runtime() -> bool:
     """Start optional evidence processing; never alter trading availability."""
     global _LIFECYCLE_PIPELINE_RUNTIME, _LIFECYCLE_PIPELINE_LAST_STATUS
-    revision = str(_runtime_git_rev() or "").strip().lower()
+    revision = str(_runtime_git_rev_exact() or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         logger.warning(
             "[LIFECYCLE PIPELINE] not started: exact 40-character source revision "
@@ -39028,8 +39057,8 @@ def api_data_sync_manifest():
     )
     session = _load_research_session_meta() or {}
     collection_epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
-    with state_lock:
-        fresh_collection_signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
+    # Keep the identity-only manifest independent of trading-state contention.
+    fresh_collection_signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
     if fresh_collection_signal_ts <= 0:
         # The in-memory notification is lost on a normal machine restart, but
         # research_session.json is the durable epoch authority. Re-publish the
@@ -40919,7 +40948,8 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
         )
         return False
     payload = {
-        "schema": "paper_lifecycle_v1", "saved_at": utc_iso(), "git_rev": _runtime_git_rev(),
+        "schema": "paper_lifecycle_v1", "saved_at": utc_iso(),
+        "git_rev": _runtime_git_rev_exact(),
         "reason": reason, "paper_only": bool(_force_paper_mode_active()),
         "live_armed": bool(state.get("live_armed")), "positions": positions,
         "pending_orders": orders, "awaiting_signals": awaiting_signals,
@@ -44973,10 +45003,10 @@ def heartbeat_loop():
     global last_heartbeat
     while not shutdown_event.is_set():
         now = time.time()
-        with state_lock:
-            state["heartbeat"] = now
-            state["last_heartbeat"] = now
         last_heartbeat = now
+        # Process liveness must never wait behind strategy/state work.
+        state["heartbeat"] = now
+        state["last_heartbeat"] = now
         try:
             _maybe_record_heartbeat_cycle_3m()
         except Exception:
@@ -45200,6 +45230,10 @@ def main():
     # A port conflict is therefore fatal to the entire bot, never just a web thread.
     dashboard_httpd = _create_dashboard_server()
     threading.Thread(target=run_flask, args=(dashboard_httpd,), daemon=True).start()
+    # Publish liveness before synchronous restore, preload, and reconciliation.
+    threading.Thread(
+        target=safe_thread(heartbeat_loop), name="process-heartbeat", daemon=True
+    ).start()
     prune_aux_logs_on_startup()
     _ensure_collector_v22_epoch()
     global DEEPSEEK_API_KEY
@@ -45564,7 +45598,6 @@ def main():
     ).start()
     threading.Thread(target=safe_thread(position_manager), daemon=True).start()
     threading.Thread(target=safe_thread(ttl_monitor), daemon=True).start()
-    threading.Thread(target=safe_thread(heartbeat_loop), daemon=True).start()
     threading.Thread(target=safe_thread(periodic_pipeline_loop), daemon=True).start()
     threading.Thread(target=safe_thread(watchdog_loop), daemon=True).start()
     threading.Thread(

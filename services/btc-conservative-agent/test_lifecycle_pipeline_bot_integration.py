@@ -69,7 +69,7 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
         "_LIFECYCLE_PIPELINE_RUNTIME": None,
         "_LIFECYCLE_PIPELINE_LAST_STATUS": None,
         "copy": __import__("copy"),
-        "_runtime_git_rev": lambda: revision,
+        "_runtime_git_rev_exact": lambda: revision,
         "_data_sync_runtime_root": lambda: tmp_path / "runtime",
         "_data_sync_volume_root": lambda: tmp_path,
         "disk_usage_fraction": lambda _root: 0.81,
@@ -116,7 +116,7 @@ def test_optional_owner_skips_unknown_revision_and_contains_failure(tmp_path):
     )
     assert scope["_start_lifecycle_pipeline_runtime"]() is False
     assert runtime.calls == []
-    scope["_runtime_git_rev"] = lambda: "b" * 40
+    scope["_runtime_git_rev_exact"] = lambda: "b" * 40
     assert scope["_start_lifecycle_pipeline_runtime"]() is False
     assert len(runtime.calls) == 1
 

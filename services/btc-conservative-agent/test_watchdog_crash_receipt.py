@@ -55,7 +55,7 @@ def compile_context():
         "sys": __import__("sys"),
         "time": time,
         "state_lock": state_lock,
-        "SOURCE_GIT_REV": "revision-under-test",
+        "_runtime_git_rev_exact": lambda: "a" * 40,
         "BOT_INSTANCE_ID": "paper-instance",
         "_force_paper_mode_active": lambda: True,
         "_dashboard_handler_snapshot": lambda: {"active_total": 0, "by_cap": {}},
@@ -111,7 +111,7 @@ def test_watchdog_receipt_preserves_exact_progress_cause_and_lock_owner():
     )
 
     assert receipt["schema"] == "watchdog_crash_context_v1"
-    assert receipt["source_revision"] == "revision-under-test"
+    assert receipt["source_revision"] == "a" * 40
     assert receipt["trigger"] == "STRATEGY_PROGRESS_EXIT_75"
     assert receipt["restart_allowed"] is True
     assert receipt["exit_code"] == 75
