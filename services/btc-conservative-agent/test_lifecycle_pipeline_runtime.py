@@ -188,9 +188,48 @@ def test_worker_failure_receipt_is_retained_as_bounded_status_then_cleaned(tmp_p
         "error_class": "RuntimeError",
         "error_code": "WORKER_PIPELINE_FAILED",
     }
+    assert status["last_worker_failure_unix"] is not None
     assert "RuntimeError" not in status["last_error"]
     assert not list(runtime.work_root.glob("pipeline-request-*.json"))
     assert not list(runtime.work_root.glob("pipeline-result-*.json"))
+
+
+def test_worker_failure_receipt_survives_later_overlap_skip(tmp_path, monkeypatch, caplog):
+    runtime = _runtime(tmp_path)
+    process = _Process(return_code=7)
+
+    def launch(command):
+        request = Path(command[command.index("--request") + 1])
+        result = Path(command[command.index("--result") + 1])
+        nonce = command[command.index("--nonce") + 1]
+        request_payload = json.loads(request.read_text(encoding="utf-8"))
+        payload = {
+            "schema": "lifecycle_pipeline_worker_result_v1", "status": "FAILED",
+            "nonce": nonce, "source_revision": REVISION,
+            "launched_unix": request_payload["launched_unix"],
+            "started_unix": 1, "generated_unix": 2, "generated_at": "x",
+            "request_sha256": runtime_module.hashlib.sha256(request.read_bytes()).hexdigest(),
+            "failure": {"error_class": "RuntimeError", "error_code": "WORKER_PIPELINE_FAILED"},
+            "source_cleanup_authorized": False,
+        }
+        unsigned = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        payload["result_sha256"] = runtime_module.hashlib.sha256(unsigned).hexdigest()
+        result.write_text(json.dumps(payload), encoding="utf-8")
+        return process
+
+    monkeypatch.setattr(runtime, "_launch", launch)
+    with caplog.at_level("ERROR"):
+        assert runtime._run_once() is False
+    retained = runtime.status()["last_worker_failure_unix"]
+    runtime.overlap_probe = lambda: "SYNC_ACTIVE"
+    assert runtime._run_once() is False
+    status = runtime.status()
+    assert status["last_outcome"] == "OVERLAP_SKIPPED"
+    assert status["last_worker_failure"] == {
+        "error_class": "RuntimeError", "error_code": "WORKER_PIPELINE_FAILED",
+    }
+    assert status["last_worker_failure_unix"] == retained
+    assert "class=RuntimeError code=WORKER_PIPELINE_FAILED" in caplog.text
 
 
 def test_overlap_skips_but_emergency_launches_bounded_closure_worker(tmp_path, monkeypatch):

@@ -37972,6 +37972,7 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
     failure = internal.get("last_worker_failure") if isinstance(internal.get("last_worker_failure"), dict) else {}
     next_run = internal.get("next_run_unix")
     last_success = internal.get("last_success_unix")
+    last_failure = internal.get("last_worker_failure_unix")
     runtime_revision = str(internal.get("source_revision") or "")
     exact_revision = str(_runtime_git_rev_exact() or "")
     overlap_raw = str(internal.get("overlap_code") or "")[:160]
@@ -37979,6 +37980,24 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         overlap_raw
         if re.fullmatch(r"[A-Z0-9_:,.-]{1,160}", overlap_raw)
         else "OVERLAP_ACTIVE_REDACTED" if overlap_raw else None
+    )
+    failure_class_raw = str(failure.get("error_class") or "")
+    failure_code_raw = str(failure.get("error_code") or "")
+    failure_class = (
+        failure_class_raw[:80]
+        if re.fullmatch(r"[A-Za-z0-9_.]{1,80}", failure_class_raw)
+        else "FAILURE_CLASS_REDACTED" if failure_class_raw else None
+    )
+    failure_code = (
+        failure_code_raw[:80]
+        if re.fullmatch(r"[A-Z0-9_.:-]{1,80}", failure_code_raw)
+        else "FAILURE_CODE_REDACTED" if failure_code_raw else None
+    )
+    current_error_raw = str(internal.get("last_error_code") or "")
+    current_error_code = (
+        current_error_raw[:80]
+        if re.fullmatch(r"[A-Z0-9_.:-]{1,80}", current_error_raw)
+        else "ERROR_CODE_REDACTED" if current_error_raw else None
     )
     safe_counts = lambda value: {
         str(key)[:96]: max(0, int(count))
@@ -37995,10 +38014,12 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
             runtime_revision and exact_revision and runtime_revision == exact_revision
         ),
         "last_outcome": str(internal.get("last_outcome") or "UNKNOWN")[:80],
-        "last_error_code": str(
-            internal.get("last_error_code")
-            or failure.get("error_code") or failure.get("error_class") or ""
-        )[:80] or None,
+        "last_error_code": current_error_code or failure_code or failure_class,
+        "last_failure_class": failure_class,
+        "last_failure_code": failure_code,
+        "last_failure_age_sec": (
+            max(0.0, current - float(last_failure)) if last_failure else None
+        ),
         "failure_count": max(0, int(internal.get("failure_count") or 0)),
         "backoff_sec": max(0.0, float(internal.get("backoff_sec") or 0.0)),
         "next_run_in_sec": max(0.0, float(next_run) - current) if next_run else None,

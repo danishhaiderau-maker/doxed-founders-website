@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import subprocess
 import sys
@@ -20,6 +21,8 @@ from typing import Any, Callable, Mapping, Sequence
 
 from lifecycle_pipeline_worker import create_request, verify_result
 
+
+logger = logging.getLogger(__name__)
 
 RUNTIME_SCHEMA = "lifecycle_pipeline_runtime_status_v1"
 MIN_BACKOFF_SEC = 180.0
@@ -200,6 +203,7 @@ class LifecyclePipelineRuntime:
             "last_error": None,
             "last_error_code": None,
             "last_worker_failure": None,
+            "last_worker_failure_unix": None,
             "last_result": None,
             "last_success_unix": None,
             "pressure": False,
@@ -283,6 +287,12 @@ class LifecyclePipelineRuntime:
     def _record_failure(
         self, outcome: str, error: str, *, worker_failure: Mapping[str, Any] | None = None,
     ) -> None:
+        retained_worker_failure = None
+        if isinstance(worker_failure, Mapping):
+            retained_worker_failure = {
+                "error_class": str(worker_failure.get("error_class") or "")[:80],
+                "error_code": str(worker_failure.get("error_code") or "")[:80],
+            }
         with self._lock:
             failures = int(self._status["failure_count"]) + 1
             backoff = min(MAX_BACKOFF_SEC, MIN_BACKOFF_SEC * (2 ** (failures - 1)))
@@ -294,15 +304,13 @@ class LifecyclePipelineRuntime:
                     (worker_failure or {}).get("error_code")
                     or (worker_failure or {}).get("error_class") or outcome
                 )[:80],
-                "last_worker_failure": (
-                    {
-                        "error_class": str(worker_failure.get("error_class") or "")[:80],
-                        "error_code": str(worker_failure.get("error_code") or "")[:80],
-                    }
-                    if isinstance(worker_failure, Mapping) else None
-                ),
                 "source_cleanup_authorized": False,
             })
+            if retained_worker_failure is not None:
+                self._status.update({
+                    "last_worker_failure": retained_worker_failure,
+                    "last_worker_failure_unix": self.clock(),
+                })
 
     def _record_skip(self, outcome: str, reason: str, *, delay: float = 30.0) -> None:
         with self._lock:
@@ -455,6 +463,12 @@ class LifecyclePipelineRuntime:
                         worker_failure = receipt.get("failure")
                 except BaseException:
                     pass
+                if isinstance(worker_failure, Mapping):
+                    logger.error(
+                        "[LIFECYCLE PIPELINE] worker failed class=%s code=%s",
+                        str(worker_failure.get("error_class") or "UNKNOWN")[:80],
+                        str(worker_failure.get("error_code") or "UNKNOWN")[:80],
+                    )
                 self._record_failure(
                     "WORKER_FAILED", f"worker exit code {return_code}",
                     worker_failure=worker_failure,

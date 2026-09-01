@@ -36,6 +36,10 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
         "source_revision": "a" * 40, "last_outcome": "SUCCESS",
         "failure_count": 0, "backoff_sec": 0, "next_run_unix": 1010,
         "last_success_unix": 990, "pressure": False, "emergency": False,
+        "last_worker_failure_unix": 980,
+        "last_worker_failure": {
+            "error_class": "RuntimeError", "error_code": "WORKER_PIPELINE_FAILED",
+        },
         "overlap_code": "ACTIVE_OVERLAP_PATH:/secret/runtime/lease",
         "last_result": {
             "rows_scanned": 7, "bytes_indexed": 80,
@@ -62,8 +66,27 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
     assert len(payload["stage_counts"]) <= 32
     assert "unsafe/path/value" not in payload["blocker_counts"]
     assert payload["last_success_age_sec"] == 10
+    assert payload["last_failure_class"] == "RuntimeError"
+    assert payload["last_failure_code"] == "WORKER_PIPELINE_FAILED"
+    assert payload["last_failure_age_sec"] == 20
     assert payload["next_run_in_sec"] == 10
     assert payload["overlap_code"] == "OVERLAP_ACTIVE_REDACTED"
+
+
+def test_public_status_redacts_unbounded_worker_failure_material(tmp_path):
+    runtime = {
+        "last_worker_failure_unix": 900,
+        "last_worker_failure": {
+            "error_class": "RuntimeError /secret/path token=abc",
+            "error_code": "BAD CODE user@example.test",
+        },
+    }
+    payload = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)
+    assert payload["last_failure_class"] == "FAILURE_CLASS_REDACTED"
+    assert payload["last_failure_code"] == "FAILURE_CODE_REDACTED"
+    assert payload["last_failure_age_sec"] == 100
+    assert "secret" not in repr(payload)
+    assert "example" not in repr(payload)
 
 
 def test_artifact_counts_are_content_free_and_report_age(tmp_path):
