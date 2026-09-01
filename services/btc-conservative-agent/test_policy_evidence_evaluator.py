@@ -7,10 +7,11 @@ from pathlib import Path
 import pytest
 
 from research.policy_evidence_evaluator import (
+    PHASE7_SUPPORT_GATE_V1,
     build_phase7_support_qualification, build_v3_conservative_results,
     persist_v3_conservative_results,
 )
-from research.policy_evidence_schema import canonical_json
+from research.policy_evidence_schema import canonical_json, stable_hash
 from research.quantity_execution import build_signed_quantity_constraints
 from lifecycle_bundles import LifecycleKey, materialize_bundle
 from lifecycle_completion_reconciler import evaluate_lifecycle_completion
@@ -336,6 +337,7 @@ def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_pa
 
 
 def _phase7_result(cohort, regime, direction, *, missing=None, source=True):
+    regime = {"BEAR": "WEAKENING", "BULL": "TRENDING"}.get(regime, regime)
     values = {
         "realized_volatility": 0.004,
         "volatility_of_volatility": 0.0002,
@@ -359,6 +361,12 @@ def _phase7_result(cohort, regime, direction, *, missing=None, source=True):
         for name, value in values.items()
     }
     return {
+        "epoch_id": "epoch-1",
+        "source_revision": "rev-1",
+        "config_signature": "config-1",
+        "tile_signature": "tiles-1",
+        "opportunity_id": cohort,
+        "episode_id": f"episode-{cohort}",
         "comparison_cohort_key": cohort,
         "side": direction,
         "regime_features_at_signal": features,
@@ -366,9 +374,24 @@ def _phase7_result(cohort, regime, direction, *, missing=None, source=True):
 
 
 def _small_phase7_config():
+    cells = [
+        {"regime": regime, "direction": direction}
+        for regime in ("WEAKENING", "TRENDING", "RANGE")
+        for direction in ("LONG", "SHORT")
+    ]
+    registry = {
+        "schema": "eligible_regime_direction_cells_v1",
+        "runtime_taxonomy_signature": PHASE7_SUPPORT_GATE_V1["runtime_taxonomy"]["signature"],
+        "source_revision": "rev-1", "epoch_id": "epoch-1",
+        "config_signature": "config-1", "tile_signature": "tiles-1",
+        "eligible_cells": cells,
+    }
+    registry["signature"] = stable_hash("eligible-regime-direction-cells", registry)
     return {
         "minimum_independent_cohorts": 6,
+        "minimum_effective_cohorts": 6,
         "minimum_cohorts_per_regime_direction": 1,
+        "eligible_cell_registry": registry,
     }
 
 

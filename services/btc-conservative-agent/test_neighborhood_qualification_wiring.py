@@ -1,6 +1,19 @@
 from research.v3_policy_report_adapter import candidate_from_genome
 
 
+CELL_SUPPORT = {
+    "phase7_support_qualification": {
+        "schema": "phase7_regime_support_qualification_v2",
+        "qualification_allowed": True,
+        "raw_independent_decision_n": 100,
+        "cluster_adjusted_effective_n": 100,
+        "eligible_regime_direction_cells": ["RANGE|LONG"],
+        "gates": {"every_eligible_regime_direction_cell_supported": True},
+        "reason_codes": [],
+    }
+}
+
+
 def _genome(neighborhood_value):
     winner_gates = {
         "chronological_untouched_oos": True,
@@ -48,7 +61,7 @@ def _genome(neighborhood_value):
 
 
 def test_adapter_maps_supported_neighborhood_evidence_to_mandatory_gate():
-    report = candidate_from_genome(_genome(True), {"snapshot_id": "snapshot-1"})
+    report = candidate_from_genome(_genome(True), {"snapshot_id": "snapshot-1"}, CELL_SUPPORT)
 
     assert report["qualification_gates"]["parameter_neighborhood_stability"] is True
     assert "QUALIFICATION_GATE_FAILED:parameter_neighborhood_stability" not in report["blockers"]
@@ -57,9 +70,20 @@ def test_adapter_maps_supported_neighborhood_evidence_to_mandatory_gate():
 
 
 def test_adapter_fails_closed_when_neighborhood_evidence_is_missing():
-    report = candidate_from_genome(_genome(None), {"snapshot_id": "snapshot-1"})
+    report = candidate_from_genome(_genome(None), {"snapshot_id": "snapshot-1"}, CELL_SUPPORT)
 
     assert report["qualification_gates"]["parameter_neighborhood_stability"] is False
     assert "QUALIFICATION_GATE_FAILED:parameter_neighborhood_stability" in report["blockers"]
     assert report["status"] == "BLOCKED"
     assert report["candidate"] is None
+
+
+def test_adapter_fails_closed_without_canonical_independent_cell_receipt():
+    report = candidate_from_genome(_genome(True), {"snapshot_id": "snapshot-1"})
+
+    assert report["qualification_gates"]["detailed_regime_support"] is False
+    assert "QUALIFICATION_GATE_FAILED:detailed_regime_support" in report["blockers"]
+    assert report["qualification_gate_evidence"]["detailed_regime_support"]["blocker"] == (
+        "CANONICAL_CELL_SUPPORT_RECEIPT_MISSING"
+    )
+    assert report["status"] == "BLOCKED"

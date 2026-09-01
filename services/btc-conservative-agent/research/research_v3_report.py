@@ -496,6 +496,127 @@ def _persist_exhaustive_policies(
     return manifest
 
 
+def _strategy_leader_projection(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Bounded public identity/metrics for one explicitly labelled truth tier."""
+    if not isinstance(candidate, dict):
+        return None
+    validation = candidate.get("validation") or {}
+    risk = validation.get("risk") or {}
+    ideal = candidate.get("ideal_touch_diagnostic") or {}
+    full = int(candidate.get("full_fills") or 0)
+    partial = int(candidate.get("partial_fills") or 0)
+    supported = int(candidate.get("supported_conservative_episodes") or 0)
+    unknown = int(candidate.get("unsupported_episodes") or 0)
+    return {
+        "policy_id": candidate.get("policy_id"),
+        "policy_signature": candidate.get("policy_signature"),
+        "policy_family": candidate.get("policy_family") or "UNKNOWN",
+        "policy_spec": candidate.get("policy_spec") or {},
+        "independent_oos_opportunities": int(candidate.get("oos_episodes") or 0),
+        "supported_conservative_episodes": supported,
+        "full_fills": full,
+        "partial_fills": partial,
+        "no_fills": int(candidate.get("no_fills") or 0),
+        "unknown_evidence_count": unknown,
+        "conservative_fill_rate": candidate.get("conservative_fill_rate"),
+        "execution_net_pnl_usd": risk.get("net_pnl_usd") if full + partial else None,
+        "execution_expectancy_per_independent_opportunity_usd": (
+            round(float(risk["net_pnl_usd"]) / int(candidate.get("oos_episodes") or 0), 8)
+            if full + partial and risk.get("net_pnl_usd") is not None
+            and int(candidate.get("oos_episodes") or 0) else None
+        ),
+        "execution_max_drawdown_usd": risk.get("max_drawdown_usd") if full + partial else None,
+        "execution_cvar95_usd": risk.get("cvar95_usd") if full + partial else None,
+        "ideal_touch_diagnostic": {
+            "evidence_world": ideal.get("evidence_world") or "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "touches": int(ideal.get("touches") or 0),
+            "net_pnl_usd": ideal.get("oos_net_usd"),
+            "max_drawdown_usd": ideal.get("max_drawdown_usd"),
+            "qualification_eligible": False,
+        },
+        "failed_gates": sorted(
+            str(name) for name, passed in (candidate.get("gates") or {}).items()
+            if passed is not True
+        ),
+        "ranking_blockers": sorted(set(candidate.get("ranking_blockers") or [])),
+    }
+
+
+def build_three_tier_strategy_leaders(
+    candidates: list[dict[str, Any]], ranking: dict[str, Any], *,
+    generated_at: str, source_revision: str, analyzer_revision: str,
+    epoch_id: str | None, tile_config_signature: str, report_blockers: list[str],
+) -> dict[str, Any]:
+    """Keep diagnostic, execution, and qualification claims visibly separate."""
+    rows = [row for row in candidates if isinstance(row, dict)]
+    descriptive_candidates = [
+        row for row in rows
+        if (row.get("ideal_touch_diagnostic") or {}).get("oos_net_usd") is not None
+    ]
+    descriptive = max(
+        descriptive_candidates,
+        key=lambda row: float((row.get("ideal_touch_diagnostic") or {}).get("oos_net_usd") or 0),
+        default=None,
+    )
+    execution_candidates = [
+        row for row in rows
+        if int(row.get("supported_conservative_episodes") or 0) > 0
+        and int(row.get("full_fills") or 0) + int(row.get("partial_fills") or 0) > 0
+        and ((row.get("validation") or {}).get("risk") or {}).get("net_pnl_usd") is not None
+    ]
+    execution = max(
+        execution_candidates,
+        key=lambda row: (
+            float(((row.get("validation") or {}).get("risk") or {}).get("net_pnl_usd") or 0)
+            / max(1, int(row.get("oos_episodes") or 0))
+        ),
+        default=None,
+    )
+    qualified = ranking.get("number_one")
+    unknown_blocker_counts = Counter(
+        blocker
+        for row in rows if int(row.get("unsupported_episodes") or 0) > 0
+        for blocker in (
+            row.get("unknown_reason_codes")
+            or row.get("evidence_blockers")
+            or ["UNKNOWN_EXECUTION_EVIDENCE"]
+        )
+    )
+    currency = {
+        "generated_at": generated_at,
+        "source_revision": source_revision,
+        "analyzer_revision": analyzer_revision,
+        "dataset_epoch_id": epoch_id,
+        "tile_config_signature": tile_config_signature,
+    }
+    return {
+        "schema": "three_tier_strategy_leaders_v1",
+        "currency": currency,
+        "unknown_evidence": {
+            "episode_count": sum(int(row.get("unsupported_episodes") or 0) for row in rows),
+            "blocker_counts": dict(sorted(unknown_blocker_counts.items())),
+        },
+        "descriptive_ideal_touch": {
+            "status": "AVAILABLE" if descriptive else "NO_EVALUATED_DIAGNOSTIC_POLICY",
+            "claim_label": "IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · DOES NOT SHOW THAT IT WORKS",
+            "leader": _strategy_leader_projection(descriptive),
+            "blockers": sorted(set(report_blockers + (["NO_IDEAL_TOUCH_DIAGNOSTIC_RESULT"] if not descriptive else []))),
+        },
+        "execution_supported": {
+            "status": "AVAILABLE" if execution else "NO_EXECUTION_SUPPORTED_POLICY",
+            "claim_label": "EXECUTION-SUPPORTED OBSERVATION · NOT FULLY QUALIFIED · NOT LIVE READY",
+            "leader": _strategy_leader_projection(execution),
+            "blockers": sorted(set(report_blockers + (["NO_SUPPORTED_CONSERVATIVE_FILL_POLICY"] if not execution else []))),
+        },
+        "fully_qualified": {
+            "status": "AVAILABLE" if qualified else "NO_FULLY_QUALIFIED_POLICY",
+            "claim_label": "FULLY QUALIFIED RESEARCH POLICY · LIVE ARM STILL REQUIRES EXPLICIT AUTHORIZATION",
+            "leader": _strategy_leader_projection(qualified),
+            "blockers": [] if qualified else sorted(set(report_blockers + ["NO_SAFE_QUALIFIED_POLICY"])),
+        },
+    }
+
+
 def _fresh_cutoff(data_dir: str | Path) -> float | None:
     try:
         session = json.loads((Path(data_dir) / "research_session.json").read_text(encoding="utf-8"))
@@ -950,11 +1071,37 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "unique_policies_evaluated": candidate_screen.get("unique_policies_evaluated", 0),
             "independent_episodes": len({row.get("episode_id") for row in opportunities if row.get("episode_id")}),
         })
+    generated_at = datetime.now(timezone.utc).isoformat()
+    source_revision = _source_revision(data_dir)
+    analyzer_revision = str(
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    report_blockers = (
+        (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else [])
+        + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else [])
+        + (["PRE_ENTRY_FEATURE_EVIDENCE_INCOMPLETE"] if pre_entry_feature_coverage["unknown_opportunities"] else [])
+        + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else [])
+        + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else [])
+        + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else [])
+        + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else [])
+    )
+    strategy_leaders = build_three_tier_strategy_leaders(
+        list(candidates or []), ranking,
+        generated_at=generated_at,
+        source_revision=source_revision,
+        analyzer_revision=analyzer_revision,
+        epoch_id=epoch_id,
+        tile_config_signature=active_tile_registry_signature(),
+        report_blockers=report_blockers,
+    )
     report = {
         "schema": "safe_policy_genome_v3_1_report_v1",
         "extension": "ADAPTIVE_EXIT_AND_DRAWDOWN_LAB_V3_1",
         "data_scope": "FRESH-COLLECTION" if selected_epoch is not None else "SESSION",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at,
         "status": "V3_INTEGRITY_FAILED" if not verification["passed"] else "V3_ORDER_RESOLUTION_INTEGRITY_FAILED" if not entry_resolution_integrity["passed"] else "V3_EPOCH_CONTAMINATION_BLOCKED" if contamination else "V3_COLLECTING" if opportunities else "V3_READY_FOR_FRESH_EPOCH",
         "live_policy_change_allowed": False,
         "real_bitfinex_trading_allowed": False,
@@ -1019,8 +1166,9 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "exhaustive_policy_results": exhaustive_manifest,
         "safe_policy_ranking": persisted_ranking,
         "number_one_strategy": ranking["number_one"],
+        "strategy_leaders": strategy_leaders,
         "qualification": ranking["qualification"],
-        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else []) + (["PRE_ENTRY_FEATURE_EVIDENCE_INCOMPLETE"] if pre_entry_feature_coverage["unknown_opportunities"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
+        "blockers": report_blockers,
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
     _atomic_json(Path(report_dir) / REPORT_FILE, report)

@@ -119,10 +119,39 @@ def test_evaluation_rejects_training_overlap_and_receipt_tampering():
     assert result["episodes_scored"] == 0
     assert result["unknown_episodes"][0]["reasons"] == ["TRAIN_EVALUATION_OVERLAP_OR_EMBARGO_BREACH"]
     tampered = deepcopy(receipt)
-    tampered["fallback_policy_id"] = "NO_CHASE_LIMIT"
+    tampered["unseen_cell_fallback"]["decision"] = "NO_CHASE_LIMIT"
     assert not verify_frozen_dynamic_policy(tampered)
     with pytest.raises(ValueError, match="INVALID_FROZEN"):
         evaluate_frozen_dynamic_policy(tampered, [episode(100)], evaluation_mode="SEALED_HOLDOUT")
+
+
+def test_unseen_cell_abstains_and_accounts_same_episode_opportunity_and_loss():
+    receipt = train_frozen_dynamic_policy(
+        train_rows(), candidates=candidates(), feature_names=FEATURES, inner_folds=4,
+        purge_sec=1000, embargo_sec=100, minimum_bucket_support=3,
+        training_run_id="run-fallback",
+    )
+    winner = episode(100)
+    loser = episode(101)
+    for row in (winner, loser):
+        row["pre_entry_features"]["atr_bucket"]["value"] = "UNSEEN"
+        row["pre_entry_features"]["regime"]["value"] = "EXPANSION"
+    loser["policy_outcomes"] = {
+        "MARKET_ENTRY_AT_SIGNAL": {"outcome_state": "FULL_FILL", "net_pnl_usd": -3},
+        "NO_CHASE_LIMIT": {"outcome_state": "FULL_FILL", "net_pnl_usd": -2},
+    }
+    result = evaluate_frozen_dynamic_policy(
+        receipt, [winner, loser], evaluation_mode="OUTER_PURGED_VALIDATION",
+    )
+    assert [row["selected_policy_id"] for row in result["selections"]] == ["NO_TRADE", "NO_TRADE"]
+    assert result["dynamic"]["net_pnl_usd"] == 0
+    assert result["fallback_accounting"] == {
+        "unseen_cell_abstentions": 2,
+        "abstention_cost_usd": 4.0,
+        "missed_opportunity_cost_usd": 4.0,
+        "avoided_loss_usd": 2.0,
+        "accounting_semantics": "SAME_EPISODE_SIGNED_CANDIDATE_OUTCOMES_ONLY",
+    }
 
 
 def test_immutable_receipt_is_contained_and_conflicts_fail_closed(tmp_path):

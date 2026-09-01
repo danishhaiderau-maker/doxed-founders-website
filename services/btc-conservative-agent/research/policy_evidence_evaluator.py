@@ -37,12 +37,28 @@ EVIDENCE_WORLD = "CONSERVATIVE_BBO_DEPTH_TAPE"
 # This is an explicit research-support floor, not a profitability threshold.
 # It prevents a Phase-7 segmented result from being described as supported from
 # a handful of repeated policy rows that all belong to the same opportunity.
+RUNTIME_REGIME_TAXONOMY_V1 = {
+    "schema": "frozen_runtime_regime_taxonomy_v1",
+    "version": "btc_v31_runtime_regimes_v1",
+    "regimes": [
+        "WEAKENING", "TRANSITION", "RANGE", "COMPRESSION", "EXPANSION", "TRENDING",
+    ],
+    "directions": ["LONG", "SHORT"],
+}
+RUNTIME_REGIME_TAXONOMY_V1["signature"] = stable_hash(
+    "runtime-regime-taxonomy", RUNTIME_REGIME_TAXONOMY_V1
+)
+
 PHASE7_SUPPORT_GATE_V1 = {
-    "schema": "phase7_regime_support_gate_config_v1",
+    "schema": "phase7_regime_support_gate_config_v2",
     "minimum_independent_cohorts": 30,
+    "minimum_effective_cohorts": 30,
     "minimum_cohorts_per_regime_direction": 3,
-    "required_regimes": ["BEAR", "BULL", "RANGE"],
-    "required_directions": ["LONG", "SHORT"],
+    "runtime_taxonomy": RUNTIME_REGIME_TAXONOMY_V1,
+    # Eligibility is supplied by the signed policy/tile registry for the exact
+    # generation.  The evaluator must not silently assume every taxonomy cell
+    # is tradable, nor omit a cell merely because no evidence was observed.
+    "eligible_cells": [],
     "required_dimensions": [
         "realized_volatility", "volatility_of_volatility", "market_spread_bps",
         "bid_depth_qty", "ask_depth_qty", "liquidity", "regime", "adx",
@@ -50,11 +66,116 @@ PHASE7_SUPPORT_GATE_V1 = {
     ],
     "purpose": "RESEARCH_FEATURE_SUPPORT_ONLY",
     "threshold_basis": (
-        "Conservative eligibility floor: 30 independent opportunities overall and "
-        "at least 3 in every BEAR/BULL/RANGE x LONG/SHORT cell. This does not prove "
+        "Conservative eligibility floor: 30 canonical independent decisions overall and "
+        "at least 3 in every frozen runtime-taxonomy cell eligible to trade. This does not prove "
         "profitability, statistical power, execution quality, or live readiness."
     ),
 }
+
+
+def _canonical_decision_identity(row: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """Return a lane-independent identity and an explicit failure reason.
+
+    A research lane, policy signature, tape, or schedule must never multiply N.
+    """
+    fields = {
+        name: str(row.get(name) or "")
+        for name in ("epoch_id", "opportunity_id", "episode_id")
+    }
+    if not all(fields.values()):
+        return None, "MISSING_CANONICAL_DECISION_IDENTITY"
+    return stable_hash("independent-decision", fields), None
+
+
+def _validate_runtime_taxonomy(config: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    taxonomy = config.get("runtime_taxonomy")
+    reasons: list[str] = []
+    if not isinstance(taxonomy, Mapping):
+        return {}, ["FROZEN_RUNTIME_TAXONOMY_MISSING"]
+    unsigned = {key: value for key, value in taxonomy.items() if key != "signature"}
+    expected = stable_hash("runtime-regime-taxonomy", unsigned)
+    signature = str(taxonomy.get("signature") or "")
+    if taxonomy.get("schema") != "frozen_runtime_regime_taxonomy_v1":
+        reasons.append("FROZEN_RUNTIME_TAXONOMY_SCHEMA_MISMATCH")
+    if signature != expected:
+        reasons.append("FROZEN_RUNTIME_TAXONOMY_SIGNATURE_MISMATCH")
+    regimes = [str(value).upper() for value in taxonomy.get("regimes") or []]
+    directions = [str(value).upper() for value in taxonomy.get("directions") or []]
+    if not regimes or len(regimes) != len(set(regimes)) or not directions:
+        reasons.append("FROZEN_RUNTIME_TAXONOMY_INVALID")
+    return {
+        "schema": taxonomy.get("schema"), "version": taxonomy.get("version"),
+        "signature": signature, "regimes": regimes, "directions": directions,
+    }, reasons
+
+
+def _validate_eligible_cell_registry(
+    config: Mapping[str, Any], taxonomy: Mapping[str, Any], rows: list[dict[str, Any]],
+) -> tuple[list[Mapping[str, Any]], dict[str, Any], list[str]]:
+    receipt = config.get("eligible_cell_registry")
+    if not isinstance(receipt, Mapping):
+        return [], {}, ["SIGNED_ELIGIBLE_CELL_REGISTRY_MISSING"]
+    reasons: list[str] = []
+    unsigned = {key: value for key, value in receipt.items() if key != "signature"}
+    if receipt.get("schema") != "eligible_regime_direction_cells_v1":
+        reasons.append("ELIGIBLE_CELL_REGISTRY_SCHEMA_MISMATCH")
+    if str(receipt.get("signature") or "") != stable_hash(
+        "eligible-regime-direction-cells", unsigned
+    ):
+        reasons.append("ELIGIBLE_CELL_REGISTRY_SIGNATURE_MISMATCH")
+    if receipt.get("runtime_taxonomy_signature") != taxonomy.get("signature"):
+        reasons.append("ELIGIBLE_CELL_REGISTRY_TAXONOMY_MISMATCH")
+    provenance = {
+        name: str(receipt.get(name) or "")
+        for name in ("source_revision", "epoch_id", "config_signature", "tile_signature")
+    }
+    if not all(provenance.values()):
+        reasons.append("ELIGIBLE_CELL_REGISTRY_PROVENANCE_MISSING")
+    for row in rows:
+        for name, expected in provenance.items():
+            observed = str(row.get(name) or "")
+            if observed and observed != expected:
+                reasons.append("ELIGIBLE_CELL_REGISTRY_PROVENANCE_MISMATCH")
+                break
+    cells = receipt.get("eligible_cells")
+    if not isinstance(cells, list):
+        reasons.append("ELIGIBLE_CELL_REGISTRY_CELLS_INVALID")
+        cells = []
+    return cells, {
+        "schema": receipt.get("schema"), "signature": receipt.get("signature"),
+        "runtime_taxonomy_signature": receipt.get("runtime_taxonomy_signature"),
+        **provenance,
+    }, list(dict.fromkeys(reasons))
+
+
+def _validate_projection(config: Mapping[str, Any], decision_ids: set[str]) -> tuple[dict[str, Any], list[str]]:
+    receipt = config.get("regime_projection")
+    if not isinstance(receipt, Mapping):
+        return {"status": "NOT_USED"}, ["SIGNED_FOLD_FITTED_REGIME_PROJECTION_MISSING"]
+    reasons: list[str] = []
+    unsigned = {key: value for key, value in receipt.items() if key != "signature"}
+    expected = stable_hash("fold-fitted-regime-projection", unsigned)
+    if receipt.get("schema") != "fold_fitted_regime_projection_v1":
+        reasons.append("REGIME_PROJECTION_SCHEMA_MISMATCH")
+    if str(receipt.get("signature") or "") != expected:
+        reasons.append("REGIME_PROJECTION_SIGNATURE_MISMATCH")
+    if receipt.get("fit_scope") != "TRAINING_FOLD_ONLY" or not receipt.get("fold_id"):
+        reasons.append("REGIME_PROJECTION_NOT_FOLD_FITTED")
+    taxonomy = config.get("runtime_taxonomy") or {}
+    if receipt.get("source_taxonomy_signature") != taxonomy.get("signature"):
+        reasons.append("REGIME_PROJECTION_SOURCE_TAXONOMY_MISMATCH")
+    fit_ids = {str(value) for value in receipt.get("fit_decision_ids") or [] if value}
+    evaluation_ids = {str(value) for value in receipt.get("evaluation_decision_ids") or [] if value}
+    if fit_ids.intersection(evaluation_ids) or fit_ids.intersection(decision_ids):
+        reasons.append("REGIME_PROJECTION_FIT_EVALUATION_LEAKAGE")
+    if evaluation_ids != decision_ids:
+        reasons.append("REGIME_PROJECTION_EVALUATION_COHORT_MISMATCH")
+    return {
+        "status": "VALID" if not reasons else "INVALID",
+        "schema": receipt.get("schema"), "fold_id": receipt.get("fold_id"),
+        "signature": receipt.get("signature"), "fit_decision_count": len(fit_ids),
+        "evaluation_decision_count": len(evaluation_ids),
+    }, reasons
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -208,41 +329,58 @@ def _regime_features_at_signal(
 def build_phase7_support_qualification(
     results: list[dict[str, Any]], config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Fail-closed support receipt for Phase-7 regime segmentation.
-
-    Policy rows are first collapsed to their immutable comparison cohort, so a
-    large policy grid cannot manufacture sample size. Every required feature
-    must be observed, source-attributed, and consistent within a cohort.
-    """
+    """Build a fail-closed, lane-deduplicated cell-support receipt."""
     gate = dict(PHASE7_SUPPORT_GATE_V1)
     if config is not None:
         gate.update(dict(config))
     minimum = int(gate["minimum_independent_cohorts"])
+    minimum_effective = int(gate.get("minimum_effective_cohorts", minimum))
     minimum_cell = int(gate["minimum_cohorts_per_regime_direction"])
-    if minimum < 1 or minimum_cell < 1:
+    if minimum < 1 or minimum_effective < 1 or minimum_cell < 1:
         raise ValueError("PHASE7_SUPPORT_THRESHOLDS_MUST_BE_POSITIVE")
     required_dimensions = tuple(str(v) for v in gate["required_dimensions"])
-    required_regimes = tuple(str(v).upper() for v in gate["required_regimes"])
-    required_directions = tuple(str(v).upper() for v in gate["required_directions"])
+    taxonomy, taxonomy_reasons = _validate_runtime_taxonomy(gate)
+    projection_config = gate.get("regime_projection") or {}
+    projected_targets = {
+        str(value).upper() for value in projection_config.get("target_regimes") or []
+    } if isinstance(projection_config, Mapping) else set()
+    eligible_cells, eligible_registry, registry_reasons = _validate_eligible_cell_registry(
+        gate, taxonomy, results
+    )
+    cells: list[tuple[str, str]] = []
+    cell_config_reasons: list[str] = []
+    for cell in eligible_cells:
+        if not isinstance(cell, Mapping):
+            cell_config_reasons.append("ELIGIBLE_RUNTIME_CELL_INVALID")
+            continue
+        pair = (str(cell.get("regime") or "").upper(), str(cell.get("direction") or "").upper())
+        if (not all(pair)
+                or pair[0] not in set(taxonomy.get("regimes", [])).union(projected_targets)
+                or pair[1] not in taxonomy.get("directions", [])):
+            cell_config_reasons.append("ELIGIBLE_RUNTIME_CELL_TAXONOMY_MISMATCH")
+        elif pair not in cells:
+            cells.append(pair)
+    if not cells:
+        cell_config_reasons.append("ELIGIBLE_RUNTIME_CELLS_MISSING")
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     missing_identity_rows = 0
     for row in results:
-        cohort = str(row.get("comparison_cohort_key") or "")
-        if not cohort:
+        decision_id, identity_reason = _canonical_decision_identity(row)
+        if identity_reason:
             missing_identity_rows += 1
             continue
-        grouped.setdefault(cohort, []).append(row)
+        grouped.setdefault(str(decision_id), []).append(row)
 
     observed_counts = {name: 0 for name in required_dimensions}
     unknown_counts = {name: 0 for name in required_dimensions}
     inconsistent_counts = {name: 0 for name in required_dimensions}
-    cell_counts = {
-        f"{regime}|{direction}": 0
-        for regime in required_regimes for direction in required_directions
-    }
+    cell_counts = {f"{regime}|{direction}": 0 for regime, direction in cells}
+    cell_clusters: dict[str, set[str]] = {name: set() for name in cell_counts}
     fully_observed_cohorts = 0
-    for rows in grouped.values():
+    taxonomy_mismatch_decisions = 0
+    sibling_lane_rows_deduplicated = sum(max(0, len(rows) - 1) for rows in grouped.values())
+    for decision_id, rows in grouped.items():
         cohort_complete = True
         for name in required_dimensions:
             observations = []
@@ -264,16 +402,25 @@ def build_phase7_support_qualification(
             str((((row.get("regime_features_at_signal") or {}).get("regime") or {}).get("value")) or "").upper()
             for row in rows
         }
-        valid_directions = directions.intersection(required_directions)
-        valid_regimes = regimes.intersection(required_regimes)
-        if (
-            len(valid_directions) != 1 or len(valid_regimes) != 1
-            or directions != valid_directions or regimes != valid_regimes
-        ):
+        if len(directions) != 1 or len(regimes) != 1:
+            cohort_complete = False
+        direction = next(iter(directions), "")
+        regime = next(iter(regimes), "")
+        if (direction not in taxonomy.get("directions", [])
+                or regime not in set(taxonomy.get("regimes", [])).union(projected_targets)):
+            taxonomy_mismatch_decisions += 1
             cohort_complete = False
         if cohort_complete:
             fully_observed_cohorts += 1
-            cell_counts[f"{next(iter(valid_regimes))}|{next(iter(valid_directions))}"] += 1
+            cell_name = f"{regime}|{direction}"
+            if cell_name in cell_counts:
+                cell_counts[cell_name] += 1
+                cluster_ids = {
+                    str(row.get("dependence_cluster_id") or row.get("price_cluster_id") or decision_id)
+                    for row in rows
+                }
+                if len(cluster_ids) == 1:
+                    cell_clusters[cell_name].update(cluster_ids)
 
     dimension_gates = {
         name: (
@@ -284,25 +431,47 @@ def build_phase7_support_qualification(
         )
         for name in required_dimensions
     }
-    cell_gates = {name: count >= minimum_cell for name, count in cell_counts.items()}
-    gates = {
-        "all_rows_have_causal_cohort_identity": missing_identity_rows == 0,
-        "minimum_independent_cohorts": fully_observed_cohorts >= minimum,
-        "all_required_dimensions_observed_and_consistent": all(dimension_gates.values()),
-        "required_regime_direction_cells_supported": all(cell_gates.values()),
+    effective_cell_counts = {name: len(cell_clusters[name]) for name in cell_counts}
+    effective_n = len({cluster for clusters in cell_clusters.values() for cluster in clusters})
+    cell_gates = {
+        name: cell_counts[name] >= minimum_cell and effective_cell_counts[name] >= minimum_cell
+        for name in cell_counts
     }
-    reasons = []
+    uses_projected_regimes = any(regime in {"BULL", "BEAR"} for regime, _ in cells)
+    projection, projection_reasons = (
+        _validate_projection(gate, set(grouped)) if uses_projected_regimes
+        else ({"status": "NOT_USED"}, [])
+    )
+    gates = {
+        "all_rows_have_canonical_independent_decision_identity": missing_identity_rows == 0,
+        "frozen_runtime_taxonomy_valid": not taxonomy_reasons,
+        "eligible_cells_match_frozen_taxonomy": not cell_config_reasons,
+        "eligible_cells_bound_to_exact_signed_registry": not registry_reasons,
+        "observed_regimes_match_frozen_taxonomy": taxonomy_mismatch_decisions == 0,
+        "projected_regime_schema_signed_and_fold_fitted": not projection_reasons,
+        "minimum_independent_cohorts": fully_observed_cohorts >= minimum,
+        "minimum_cluster_adjusted_effective_cohorts": effective_n >= minimum_effective,
+        "all_required_dimensions_observed_and_consistent": all(dimension_gates.values()),
+        "every_eligible_regime_direction_cell_supported": bool(cell_gates) and all(cell_gates.values()),
+    }
+    reasons = list(dict.fromkeys(
+        taxonomy_reasons + registry_reasons + cell_config_reasons + projection_reasons
+    ))
     if missing_identity_rows:
-        reasons.append("MISSING_COMPARISON_COHORT_IDENTITY")
+        reasons.append("MISSING_CANONICAL_DECISION_IDENTITY")
+    if taxonomy_mismatch_decisions:
+        reasons.append("OBSERVED_RUNTIME_TAXONOMY_MISMATCH")
     if fully_observed_cohorts < minimum:
         reasons.append("INSUFFICIENT_INDEPENDENT_COHORTS")
+    if effective_n < minimum_effective:
+        reasons.append("INSUFFICIENT_CLUSTER_ADJUSTED_EFFECTIVE_COHORTS")
     if not all(dimension_gates.values()):
         reasons.append("REQUIRED_PHASE7_FEATURES_UNKNOWN_OR_INCONSISTENT")
     if not all(cell_gates.values()):
         reasons.append("INSUFFICIENT_REGIME_DIRECTION_COHORT_SUPPORT")
     eligible = all(gates.values())
     return {
-        "schema": "phase7_regime_support_qualification_v1",
+        "schema": "phase7_regime_support_qualification_v2",
         "status": "SUPPORTED_FOR_PHASE7_RESEARCH" if eligible else "NOT_SUPPORTED",
         "qualification_allowed": eligible,
         "scope": "PHASE7_RESEARCH_FEATURE_SUPPORT_ONLY",
@@ -311,6 +480,10 @@ def build_phase7_support_qualification(
         "config": gate,
         "row_count": len(results),
         "independent_cohort_count": len(grouped),
+        "raw_independent_decision_n": len(grouped),
+        "cluster_adjusted_effective_n": effective_n,
+        "effective_n_method": "CONSERVATIVE_UNIQUE_DEPENDENCE_CLUSTER_COUNT",
+        "sibling_lane_rows_deduplicated": sibling_lane_rows_deduplicated,
         "fully_observed_independent_cohort_count": fully_observed_cohorts,
         "missing_identity_rows": missing_identity_rows,
         "dimension_evidence": {
@@ -320,7 +493,14 @@ def build_phase7_support_qualification(
                    "gate_passed": dimension_gates[name]}
             for name in required_dimensions
         },
+        "frozen_runtime_taxonomy": taxonomy,
+        "eligible_cell_registry": eligible_registry,
+        "eligible_regime_direction_cells": [f"{regime}|{direction}" for regime, direction in cells],
+        "taxonomy_mismatch_decisions": taxonomy_mismatch_decisions,
+        "regime_projection": projection,
         "regime_direction_cohorts": cell_counts,
+        "regime_direction_raw_independent_n": cell_counts,
+        "regime_direction_cluster_adjusted_effective_n": effective_cell_counts,
         "regime_direction_gates": cell_gates,
         "gates": gates,
         "reason_codes": reasons,

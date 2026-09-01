@@ -23,6 +23,12 @@ from research_v3_validation import SUPPORTED_TERMINAL_STATES, chronological_fold
 RECEIPT_SCHEMA = "frozen_dynamic_entry_policy_v1"
 EVALUATION_SCHEMA = "dynamic_entry_policy_evaluation_v1"
 PURPOSE = "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE"
+UNSEEN_CELL_FALLBACK = {
+    "schema": "dynamic_unseen_cell_fallback_v1",
+    "decision": "NO_TRADE",
+    "execution_policy_id": None,
+    "semantics": "ABSTAIN_WITHOUT_LEARNED_GLOBAL_WINNER",
+}
 DEFAULT_CAUSAL_FEATURES = (
     "atr_bucket", "realized_volatility_bucket", "spread_bucket",
     "depth_bucket", "liquidity_bucket", "regime", "direction",
@@ -138,7 +144,6 @@ def train_frozen_dynamic_policy(
     bucket_scores: dict[tuple[str, ...], dict[str, list[float]]] = defaultdict(
         lambda: defaultdict(list)
     )
-    global_scores: dict[str, list[float]] = defaultdict(list)
     defects, scored_ids = [], []
     # Inner validation is used for selection. Inner training exists to establish
     # chronological, purged nesting; no outer/holdout observation enters here.
@@ -166,9 +171,7 @@ def train_frozen_dynamic_policy(
             scored_ids.append(str(row.get("episode_id") or ""))
             for policy_id, value in values.items():
                 bucket_scores[key][policy_id].append(value)
-                global_scores[policy_id].append(value)
-    fallback = _choose(global_scores, int(minimum_bucket_support))
-    if fallback is None:
+    if not scored_ids:
         raise ValueError("INSUFFICIENT_COMPLETE_INNER_FOLD_EVIDENCE")
     rules = []
     for key in sorted(bucket_scores):
@@ -208,7 +211,7 @@ def train_frozen_dynamic_policy(
         "training_cohort_hash": canonical_hash("dynamic-training-cohort", training_rows, length=64),
         "inner_validation_episode_ids": sorted(set(scored_ids)),
         "training_cutoff_required_end_ts": max(row["required_end_ts"] for row in training_rows),
-        "fallback_policy_id": fallback, "rules": rules,
+        "unseen_cell_fallback": UNSEEN_CELL_FALLBACK, "rules": rules,
         "training_unknown_reasons": unique_defects,
         "training_evidence_complete": not unique_defects,
     }
@@ -228,6 +231,7 @@ def verify_frozen_dynamic_policy(receipt: Mapping[str, Any]) -> bool:
         and receipt.get("execution_class") == "RESEARCH_ONLY"
         and receipt.get("relay_eligible") is False
         and receipt.get("post_hoc_regime_selection_allowed") is False
+        and receipt.get("unseen_cell_fallback") == UNSEEN_CELL_FALLBACK
         and receipt.get("entry_baseline_registry_signature") == ENTRY_BASELINE_REGISTRY["registry_signature"]
         and receipt.get("policy_id") == canonical_hash("frozen-dynamic-entry-policy", body, length=32)
         and receipt.get("content_sha256") == _sha256_body(body)
@@ -279,6 +283,10 @@ def evaluate_frozen_dynamic_policy(
     cutoff = float(receipt["training_cutoff_required_end_ts"])
     candidate_ids = [row["policy_id"] for row in receipt["candidates"]]
     dynamic_values, selections, unknown = [], [], []
+    abstention_cost = 0.0
+    missed_opportunity_cost = 0.0
+    avoided_loss = 0.0
+    unseen_cell_count = 0
     static_values: dict[str, list[float]] = {policy_id: [] for policy_id in candidate_ids}
     for row in sorted(episodes, key=lambda item: (float(item.get("signal_ts") or 0), str(item.get("episode_id") or ""))):
         episode_id = str(row.get("episode_id") or "")
@@ -294,7 +302,6 @@ def evaluate_frozen_dynamic_policy(
         if defects:
             unknown.append({"episode_id": episode_id, "reasons": defects})
             continue
-        selected = rules.get(key, receipt["fallback_policy_id"])
         candidate_values = {
             policy_id: _opportunity_value(row, policy_id)
             for policy_id in candidate_ids
@@ -312,8 +319,24 @@ def evaluate_frozen_dynamic_policy(
                 ],
             })
             continue
-        value = candidate_values[selected]
-        selections.append({"episode_id": episode_id, "selected_policy_id": selected, "feature_values": list(key)})
+        selected = rules.get(key)
+        if selected is None:
+            unseen_cell_count += 1
+            best_observed = max(candidate_values.values())
+            missed = max(0.0, best_observed)
+            avoided = max(0.0, -best_observed)
+            abstention_cost += missed
+            missed_opportunity_cost += missed
+            avoided_loss += avoided
+            value = 0.0
+            selections.append({
+                "episode_id": episode_id, "selected_policy_id": "NO_TRADE",
+                "selection_reason": "UNSEEN_DYNAMIC_CELL_SIGNED_FALLBACK",
+                "feature_values": list(key),
+            })
+        else:
+            value = candidate_values[selected]
+            selections.append({"episode_id": episode_id, "selected_policy_id": selected, "selection_reason": "FROZEN_CELL_RULE", "feature_values": list(key)})
         dynamic_values.append(value)
         for policy_id, static_value in candidate_values.items():
             static_values[policy_id].append(static_value)
@@ -340,6 +363,14 @@ def evaluate_frozen_dynamic_policy(
         "episodes_supplied": len(episodes), "episodes_scored": len(dynamic_values),
         "unknown_episodes": unknown, "selections": selections,
         "dynamic": summary(dynamic_values),
+        "unseen_cell_fallback": receipt["unseen_cell_fallback"],
+        "fallback_accounting": {
+            "unseen_cell_abstentions": unseen_cell_count,
+            "abstention_cost_usd": round(abstention_cost, 8),
+            "missed_opportunity_cost_usd": round(missed_opportunity_cost, 8),
+            "avoided_loss_usd": round(avoided_loss, 8),
+            "accounting_semantics": "SAME_EPISODE_SIGNED_CANDIDATE_OUTCOMES_ONLY",
+        },
         "signed_static_baselines": {
             policy_id: summary(values) for policy_id, values in sorted(static_values.items())
         },

@@ -3488,6 +3488,34 @@ def _best_policy_research_v31_payload() -> dict:
         "real_bitfinex_trading_allowed": bool(qualified and report.get("real_bitfinex_trading_allowed")),
         "current_candidate": ranking.get("number_one") if qualified else None,
         "descriptive_challenger": descriptive[0] if descriptive else None,
+        "strategy_leaders": report.get("strategy_leaders") or {
+            "schema": "three_tier_strategy_leaders_v1",
+            "currency": {
+                "generated_at": generated_at,
+                "source_revision": freshness.get("source_revision"),
+                "analyzer_revision": freshness.get("analyzer_revision"),
+                "dataset_epoch_id": source["epoch_id"],
+                "tile_config_signature": report.get("tile_config_signature"),
+            },
+            "unknown_evidence": {"episode_count": 0, "blocker_counts": {}},
+            "descriptive_ideal_touch": {
+                "status": "AVAILABLE" if descriptive else "NO_EVALUATED_DIAGNOSTIC_POLICY",
+                "claim_label": "IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · DOES NOT SHOW THAT IT WORKS",
+                "leader": descriptive[0] if descriptive else None,
+                "blockers": source["blockers"],
+            },
+            "execution_supported": {
+                "status": "NO_EXECUTION_SUPPORTED_POLICY", "leader": None,
+                "claim_label": "EXECUTION-SUPPORTED OBSERVATION · NOT FULLY QUALIFIED · NOT LIVE READY",
+                "blockers": sorted(set(source["blockers"] + ["NO_SUPPORTED_CONSERVATIVE_FILL_POLICY"])),
+            },
+            "fully_qualified": {
+                "status": "AVAILABLE" if qualified else "NO_FULLY_QUALIFIED_POLICY",
+                "leader": ranking.get("number_one") if qualified else None,
+                "claim_label": "FULLY QUALIFIED RESEARCH POLICY · LIVE ARM STILL REQUIRES EXPLICIT AUTHORIZATION",
+                "blockers": [] if qualified else source["blockers"],
+            },
+        },
         "epoch_id": source["epoch_id"],
         "policy_epoch_id": (
             execution_identity.get("policy_epoch_id")
@@ -6240,6 +6268,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
     <p class="note"><strong>V3.1 evidence:</strong> <a href="/safe-policy-genome-v3.1">Safe Policy Genome</a> · <a href="/cross-world-evidence">Cross-world evidence</a> · <a href="/static-policies">Static policies</a> · <a href="/dynamic-policies">Dynamic/regime</a> · <a href="/shadow-research">Shadow paths</a> · <a href="/risk-drawdown">Risk/drawdown</a> · <a href="/chronological-oos">Chronological OOS</a> · <a href="/evidence-maturity">Evidence maturity</a> · <a href="/partial-reduction">Partial-reduction reconciliation</a></p>
     <div class="kpis" id="decision-readiness"></div>
+    <h3>Three strategy truth tiers</h3>
+    <p class="note">The descriptive tier remains visible when integrity or qualification fails. It is an ideal-touch diagnostic, not evidence that a strategy works.</p>
+    <div class="table-scroll" tabindex="0"><table><thead><tr><th>Tier</th><th>Status</th><th>Leader</th><th>Evidence label</th><th>UNKNOWN</th><th>Blockers</th></tr></thead><tbody id="strategy-leader-tiers"><tr><td colspan="6">Loading current atomic generation…</td></tr></tbody></table></div>
     <h3>Mandatory Bitfinex qualification gates</h3>
     <p class="note">PASS requires current-generation evidence. FAIL is a measured failure, UNKNOWN means the evidence has not been supplied, and UNAVAILABLE means no exact current analyzer generation can be evaluated.</p>
     <div class="table-scroll" tabindex="0"><table><thead><tr><th>Gate</th><th>Status</th><th>Evidence / receipt</th><th>Precise blocker</th></tr></thead><tbody id="qualification-gate-body"><tr><td colspan="4">Loading qualification gates…</td></tr></tbody></table></div>
@@ -6874,6 +6905,7 @@ async function loadDecisionReadiness() {
   const searchCounts = design.counts || {};
   const deployed = d.deployed_policy_collection || {};
   const deployedPolicies = deployed.policies || [];
+  const tiers = d.strategy_leaders || {};
   const candidateName = candidate.policy_id || candidate.name || 'Hidden until qualified';
   const candidateKind = candidate.kind || '—';
   const dynamicSummary = candidate.kind === 'DYNAMIC'
@@ -6900,6 +6932,19 @@ async function loadDecisionReadiness() {
   document.getElementById('decision-readiness').innerHTML = cards.map(([label, value, cls]) =>
     `<div class="kpi"><div class="lbl">${label}</div><div class="val ${cls}">${value}</div></div>`
   ).join('');
+  const unknownEvidence = tiers.unknown_evidence || {};
+  const tierRows = [
+    ['Best descriptive / ideal-touch', tiers.descriptive_ideal_touch || {}],
+    ['Best execution-supported', tiers.execution_supported || {}],
+    ['Best fully qualified', tiers.fully_qualified || {}],
+  ];
+  document.getElementById('strategy-leader-tiers').innerHTML = tierRows.map(([label, tier]) => {
+    const leader = tier.leader || {};
+    const unknown = leader.unknown_evidence_count ?? unknownEvidence.episode_count ?? 0;
+    return `<tr><td><strong>${label}</strong></td><td>${tier.status || 'UNAVAILABLE'}</td>`
+      + `<td>${leader.policy_id || 'NONE'}</td><td>${tier.claim_label || 'UNAVAILABLE'}</td>`
+      + `<td>${unknown}</td><td>${(tier.blockers || []).join(', ') || 'none'}</td></tr>`;
+  }).join('');
   const gateRows = d.qualification_gate_details || [];
   document.getElementById('qualification-gate-body').innerHTML = gateRows.length
     ? gateRows.map(row => {
@@ -6912,6 +6957,10 @@ async function loadDecisionReadiness() {
     `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || 'UNAVAILABLE'} · `
     + `Evidence policy: ${d.evidence_policy_signature || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
     + `Collecting deployed identities (not qualified): ${deployedPolicies.map(x => `${x.policy_id} [${x.policy_signature}]`).join(' · ') || 'UNAVAILABLE'} · `
+    + `Generation: ${((tiers.currency || {}).generated_at) || d.last_analysis || 'UNAVAILABLE'} · `
+    + `Revision: ${((tiers.currency || {}).source_revision) || 'UNAVAILABLE'} / analyzer ${((tiers.currency || {}).analyzer_revision) || 'UNAVAILABLE'} · `
+    + `Config: ${((tiers.currency || {}).tile_config_signature) || 'UNAVAILABLE'} · `
+    + `UNKNOWN blockers: ${JSON.stringify(unknownEvidence.blocker_counts || {})} · `
     + `Blockers: ${(d.blockers || []).join(', ') || 'none'} · ${d.note || ''}`;
 }
 

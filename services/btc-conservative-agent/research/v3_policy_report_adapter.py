@@ -162,6 +162,13 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
     execution_count = int(collection.get("execution_rows") or 0)
     segment_count = int(collection.get("market_segments") or 0)
     integrity_passed = bool((genome.get("integrity") or {}).get("passed"))
+    microstructure = microstructure_evidence if isinstance(microstructure_evidence, dict) else {}
+    evaluator = microstructure.get("conservative_evaluator") or {}
+    cell_support = (
+        microstructure.get("phase7_support_qualification")
+        or (evaluator.get("phase7_support_qualification") if isinstance(evaluator, dict) else None)
+        or {}
+    )
     gates = {name: bool(winner_gates.get(name)) for name in required}
     # The genome validation schema names this mandatory safety gate with its
     # explicit pass suffix.  Preserve that evidence instead of silently
@@ -174,7 +181,11 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
         "sealed_holdout_receipt": bool(winner_gates.get("sealed_holdout_pass")),
         "measured_execution_costs": bool(winner_gates.get("measured_costs_pass")),
         "liquidation_buffer": bool(winner_gates.get("liquidation_buffer_pass")),
-        "detailed_regime_support": bool(winner_gates.get("regime_coverage_pass")),
+        "detailed_regime_support": bool(
+            cell_support.get("schema") == "phase7_regime_support_qualification_v2"
+            and cell_support.get("qualification_allowed") is True
+            and (cell_support.get("gates") or {}).get("every_eligible_regime_direction_cell_supported") is True
+        ),
         "baseline_replay_coverage": bool(winner_gates.get("baseline_replay_coverage_pass")),
     })
     purged = validation.get("purged_walk_forward") or {}
@@ -206,8 +217,12 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
             "source": "winner.validation.liquidation_buffer",
         },
         "detailed_regime_support": {
-            "evidence": f"regimes={len(validation.get('regimes') or [])}",
-            "source": "winner.validation.regimes",
+            "evidence": cell_support.get("schema"),
+            "raw_independent_decision_n": cell_support.get("raw_independent_decision_n"),
+            "cluster_adjusted_effective_n": cell_support.get("cluster_adjusted_effective_n"),
+            "eligible_cells": cell_support.get("eligible_regime_direction_cells"),
+            "blocker": next(iter(cell_support.get("reason_codes") or ["CANONICAL_CELL_SUPPORT_RECEIPT_MISSING"]), None),
+            "source": "conservative_microstructure_evidence.phase7_support_qualification",
         },
         "baseline_replay_coverage": {
             "evidence": ((winner or {}).get("baseline_replay_coverage") or {}).get("schema"),
