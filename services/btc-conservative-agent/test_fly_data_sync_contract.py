@@ -141,10 +141,13 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert '-Stage "manifest_post_ack_identity"' in SYNC_SCRIPT
     assert "stage=file_chunk failed for path=$rel" in SYNC_SCRIPT
     assert "file=$selectedFileIndex/$selectedFileCount offset=$offset" in SYNC_SCRIPT
-    assert "$attempt/$MaxAttempts attempt(s)" in SYNC_SCRIPT
+    assert "$attempt/$effectiveMaxAttempts attempt(s)" in SYNC_SCRIPT
     assert "[int]$MaxAttempts = $transportAttempts" in SYNC_SCRIPT
     assert "elapsed_ms=" in SYNC_SCRIPT
-    assert "-MaxAttempts $resourcePressureCircuitThreshold" in SYNC_SCRIPT
+    assert "$sqliteSnapshotBuildingMaxAttempts = 35" in SYNC_SCRIPT
+    assert "-MaxAttempts $sqliteSnapshotBuildingMaxAttempts" in SYNC_SCRIPT
+    assert '"snapshot_status"\\s*:\\s*"BUILDING"' in SYNC_SCRIPT
+    assert "[Math]::Min($MaxAttempts, $resourcePressureCircuitThreshold)" in SYNC_SCRIPT
     # Retry hardening must not weaken the candidate/checksum/atomic contract.
     assert "Get-FileHash -LiteralPath $tmp -Algorithm SHA256" in SYNC_SCRIPT
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
@@ -216,8 +219,8 @@ def test_revision_refresh_uses_verified_one_read_for_small_hot_reports():
 
 
 def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
-    assert "$preflightManifestAttempts = 13" in SYNC_LOOP
-    assert "$preflightInventoryWaitMaxSec = 120" in SYNC_LOOP
+    assert "$preflightManifestAttempts = 35" in SYNC_LOOP
+    assert "$preflightInventoryWaitMaxSec = 330" in SYNC_LOOP
     assert "$preflightManifestTimeoutSec = 90" in SYNC_LOOP
     assert "function Get-FlySyncPreflightManifest" in SYNC_LOOP
     assert "stage=loop_manifest_preflight failed after" in SYNC_LOOP

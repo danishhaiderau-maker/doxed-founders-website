@@ -42,6 +42,7 @@ $headers = @{ "X-Bot-Admin-Token" = $AdminToken }
 Add-Type -AssemblyName System.Net.Http
 $transportAttempts = 5
 $resourcePressureCircuitThreshold = 2
+$sqliteSnapshotBuildingMaxAttempts = 35
 $consecutiveChunkPressureFailures = 0
 $manifestTimeoutSec = 90
 # A busy paper-runtime can take a little over two minutes to begin streaming a
@@ -103,16 +104,35 @@ function Invoke-DataSyncJsonRequest {
       )
       return $result
     } catch {
-      Write-Warning (
-        "[FLY SYNC] stage=$Stage attempt=$attempt/$MaxAttempts " +
-        "elapsed_ms=$([Math]::Round($requestWatch.Elapsed.TotalMilliseconds)) " +
-        "status=failed error=$($_.Exception.Message)"
+      $structuredSnapshotBuilding = (
+        $Stage -eq "sqlite_snapshot_lease" -and
+        [string]$_.ErrorDetails.Message -match '"snapshot_status"\s*:\s*"BUILDING"'
       )
-      if ($attempt -ge $MaxAttempts) {
+      $effectiveMaxAttempts = if (
+        $Stage -eq "sqlite_snapshot_lease" -and -not $structuredSnapshotBuilding
+      ) {
+        [Math]::Min($MaxAttempts, $resourcePressureCircuitThreshold)
+      } else {
+        $MaxAttempts
+      }
+      Write-Warning (
+        "[FLY SYNC] stage=$Stage attempt=$attempt/$effectiveMaxAttempts " +
+        "elapsed_ms=$([Math]::Round($requestWatch.Elapsed.TotalMilliseconds)) " +
+        "status=$(if ($structuredSnapshotBuilding) { 'building' } else { 'failed' }) " +
+        "error=$($_.Exception.Message)"
+      )
+      if ($attempt -ge $effectiveMaxAttempts) {
         throw (
           "Fly data-sync stage=$Stage failed after " +
-          "$attempt/$MaxAttempts attempt(s): $($_.Exception.Message)"
+          "$attempt/$effectiveMaxAttempts attempt(s): $($_.Exception.Message)"
         )
+      }
+      if ($structuredSnapshotBuilding) {
+        # The server proves that this is the same single-flight background
+        # build, so joining it cannot start duplicate SQLite work. Keep raw or
+        # proxy 503s on the two-strike pressure circuit below.
+        Start-Sleep -Seconds 2
+        continue
       }
       $resourcePressure = Test-DataSyncResourcePressureError -Message $_.Exception.Message
       Start-Sleep -Seconds (Get-DataSyncRetryDelaySec `
@@ -486,7 +506,7 @@ function Set-SqliteSnapshotLease {
     -Stage "sqlite_snapshot_lease" `
     -Uri "$base/api/data-sync/sqlite-snapshot?path=$([uri]::EscapeDataString($rel))" `
     -TimeoutSec $manifestTimeoutSec `
-    -MaxAttempts $resourcePressureCircuitThreshold
+    -MaxAttempts $sqliteSnapshotBuildingMaxAttempts
   if (
     $lease.schema -ne "fly_runtime_sqlite_snapshot_lease_v1" -or
     [string]$lease.path -ne $rel -or
