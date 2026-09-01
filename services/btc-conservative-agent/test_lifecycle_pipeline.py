@@ -202,6 +202,42 @@ def test_pressure_mode_clamps_all_relevant_limits(tmp_path):
     assert report["source_cleanup_authorized"] is False
 
 
+def test_emergency_closure_materializes_only_terminal_lifecycle(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    for row in _ready_rows():
+        _append(tmp_path, row)
+    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, pressure_mode=True, emergency_closure_mode=True,
+    )
+    assert first["emergency_closure_mode"] is True
+    assert first["transfer_bundle_count"] == 1
+    assert first["completion_appended_count"] == 1
+    assert first["source_cleanup_authorized"] is False
+    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, pressure_mode=True, emergency_closure_mode=True,
+    )
+    assert second["bundle_count"] == 1
+    assert (tmp_path / "v3" / "ledgers" / "lifecycle.jsonl").is_file()
+
+
+def test_emergency_closure_defers_nonterminal_without_research_expansion(tmp_path):
+    _append(tmp_path, _row("opportunity", "new-opportunity", terminal=False))
+    source = tmp_path / "v3" / "ledgers" / "opportunity.jsonl"
+    before = source.read_bytes()
+    report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, pressure_mode=True, emergency_closure_mode=True,
+    )
+    assert report["candidate_count"] == 1
+    assert report["results"][0]["stage"] == "EMERGENCY_NONTERMINAL_BLOCKED"
+    assert report["transfer_bundle_count"] == 0
+    assert report["completion_appended_count"] == 0
+    assert report["bundle_count"] == 0
+    assert source.read_bytes() == before
+    assert not (tmp_path / "v3" / "lifecycle_transfer_bundles").exists()
+    assert not (tmp_path / "v3" / "lifecycle_bundles").exists()
+    assert report["source_cleanup_authorized"] is False
+
+
 def test_runtime_provenance_mismatch_remains_dirty_for_later_retry(tmp_path, monkeypatch):
     for row in _ready_rows():
         _append(tmp_path, row)

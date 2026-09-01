@@ -31,7 +31,7 @@ _FIELDS = frozenset({
     "schema", "nonce", "data_root", "work_root", "source_revision",
     "launched_unix", "now", "max_lifecycles", "max_scan_bytes",
     "max_scan_rows", "max_lifecycle_rows", "max_lifecycle_bytes",
-    "max_runtime_sec", "pressure_mode",
+    "max_runtime_sec", "pressure_mode", "emergency_closure_mode",
 })
 _SENSITIVE = ("secret", "token", "password", "credential", "api_key", "private_key")
 MAX_ERROR_CLASS_LENGTH = 80
@@ -120,11 +120,17 @@ def _load(request_path: Path, result_path: Path, nonce: str) -> dict[str, Any]:
     pressure = payload.get("pressure_mode", False)
     if not isinstance(pressure, bool):
         raise ValueError("PRESSURE_MODE_INVALID")
+    emergency_closure = payload.get("emergency_closure_mode", False)
+    if not isinstance(emergency_closure, bool):
+        raise ValueError("EMERGENCY_CLOSURE_MODE_INVALID")
+    if emergency_closure and not pressure:
+        raise ValueError("EMERGENCY_CLOSURE_REQUIRES_PRESSURE_MODE")
     payload.update({
         "_data_root": data_root,
         "_now": now,
         "_runtime": runtime,
         "_pressure": pressure,
+        "_emergency_closure": emergency_closure,
         "_max_lifecycles": _bounded_int(payload, "max_lifecycles", DEFAULT_MAX_LIFECYCLES, MAX_LIFECYCLES),
         "_max_scan_bytes": _bounded_int(payload, "max_scan_bytes", 8 * 1024 * 1024, MAX_SCAN_BYTES),
         "_max_scan_rows": _bounded_int(payload, "max_scan_rows", 10_000, MAX_SCAN_ROWS),
@@ -150,6 +156,7 @@ def create_request(
     source_revision: str,
     now: float | None = None,
     pressure_mode: bool = False,
+    emergency_closure_mode: bool = False,
     max_lifecycles: int = DEFAULT_MAX_LIFECYCLES,
     max_scan_bytes: int = 8 * 1024 * 1024,
     max_scan_rows: int = 10_000,
@@ -187,6 +194,7 @@ def create_request(
         "max_lifecycle_bytes": max_lifecycle_bytes,
         "max_runtime_sec": max_runtime_sec,
         "pressure_mode": bool(pressure_mode),
+        "emergency_closure_mode": bool(emergency_closure_mode),
     }
     # Validate the exact payload before publication.
     temporary = request_path.with_name(f"{request_path.name}.{uuid.uuid4().hex}.tmp")
@@ -285,6 +293,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             max_lifecycle_rows=request["_max_lifecycle_rows"],
             max_lifecycle_bytes=request["_max_lifecycle_bytes"],
             max_runtime_sec=request["_runtime"], pressure_mode=request["_pressure"],
+            emergency_closure_mode=request["_emergency_closure"],
         )
         # A caller must still terminate the subprocess at the same deadline to
         # cap wall time while a filesystem syscall is in flight.  Independently

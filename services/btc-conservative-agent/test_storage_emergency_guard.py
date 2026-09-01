@@ -120,3 +120,16 @@ def test_existing_content_addressed_segment_remains_idempotently_readable(tmp_pa
 
     assert duplicate["sha256"] == first["sha256"]
     assert blocked["blocked"] is True
+
+
+def test_terminal_lifecycle_segment_can_close_under_emergency(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.925)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    result = store.put_market_segment(
+        source="terminal-path", symbol="BTC", timeframe="1s",
+        start_ts=1, end_ts=2, rows=({"ts": 1, "bid": 10},),
+        lifecycle_existing=True,
+    )
+    assert result.get("blocked") is not True
+    assert len(result["sha256"]) == 64

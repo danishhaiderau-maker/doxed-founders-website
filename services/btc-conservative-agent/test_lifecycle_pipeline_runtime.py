@@ -52,6 +52,7 @@ def _install_launch(monkeypatch, runtime, process, *, corrupt=False, pipeline=No
                 "pipeline": pipeline or {
                     "candidate_count": 1, "bundle_count": 1,
                     "pressure_mode": request_payload["pressure_mode"],
+                    "emergency_closure_mode": request_payload.get("emergency_closure_mode", False),
                 },
                 "hard_runtime_result_deadline_enforced": True,
                 "source_cleanup_authorized": False,
@@ -192,7 +193,7 @@ def test_worker_failure_receipt_is_retained_as_bounded_status_then_cleaned(tmp_p
     assert not list(runtime.work_root.glob("pipeline-result-*.json"))
 
 
-def test_overlap_and_emergency_pressure_skip_without_launch(tmp_path, monkeypatch):
+def test_overlap_skips_but_emergency_launches_bounded_closure_worker(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path, overlap_probe=lambda: "SYNC_ACTIVE")
     monkeypatch.setattr(runtime, "_launch", lambda _command: (_ for _ in ()).throw(AssertionError()))
     assert runtime._run_once() is False
@@ -200,8 +201,12 @@ def test_overlap_and_emergency_pressure_skip_without_launch(tmp_path, monkeypatc
 
     runtime.overlap_probe = lambda: False
     runtime.pressure_probe = lambda: {"pressure": True, "emergency": True}
-    assert runtime._run_once() is False
-    assert runtime.status()["last_outcome"] == "PRESSURE_SKIPPED"
+    _install_launch(monkeypatch, runtime, _Process())
+    assert runtime._run_once() is True
+    assert runtime.status()["last_outcome"] == "SUCCESS"
+    assert runtime.status()["emergency"] is True
+    assert runtime.status()["last_result"]["pressure_mode"] is True
+    assert runtime.status()["last_result"]["emergency_closure_mode"] is True
 
 
 def test_duplicate_owner_rejected_and_stop_releases_owner(tmp_path):

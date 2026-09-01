@@ -424,6 +424,7 @@ class V3EvidenceStore:
         start_ts: float,
         end_ts: float,
         rows: Iterable[dict[str, Any]],
+        lifecycle_existing: bool = False,
     ) -> dict[str, Any]:
         frozen_rows = tuple(dict(row) for row in rows)
         envelope = {
@@ -446,7 +447,7 @@ class V3EvidenceStore:
             else:
                 admission = emergency_admission(
                     data_dir=str(self.root), purpose="v3:market_segment",
-                    lifecycle_existing=False,
+                    lifecycle_existing=bool(lifecycle_existing),
                 )
                 if not admission["allowed"]:
                     return {

@@ -333,6 +333,7 @@ class LifecyclePipelineRuntime:
             "transfer_bundle_count": pipeline.get("transfer_bundle_count"),
             "completion_appended_count": pipeline.get("completion_appended_count"),
             "pressure_mode": pipeline.get("pressure_mode"),
+            "emergency_closure_mode": bool(pipeline.get("emergency_closure_mode")),
             "pending_dirty_lifecycles": pending_dirty,
             "promoted_qualification_retries": scan.get("promoted_qualification_retries"),
             "rows_scanned": scan.get("rows_scanned"),
@@ -353,7 +354,9 @@ class LifecyclePipelineRuntime:
                 # _run_once rechecks sync overlap and resource pressure before
                 # every child, preserving the existing fail-closed fences.
                 "next_run_unix": self.clock() + (
-                    BACKLOG_INTERVAL_SEC if backlog_pending else self.interval_sec
+                    BACKLOG_INTERVAL_SEC
+                    if backlog_pending and not pipeline.get("emergency_closure_mode")
+                    else self.interval_sec
                 ),
                 "last_outcome": "SUCCESS", "last_error": None,
                 "last_error_code": None,
@@ -408,9 +411,9 @@ class LifecyclePipelineRuntime:
                 "pressure": bool(pressure), "emergency": bool(emergency),
                 "overlap_code": None,
             })
-        if pressure_error or emergency:
+        if pressure_error:
             self._record_skip(
-                "PRESSURE_SKIPPED", pressure_error or "EMERGENCY_RESOURCE_PRESSURE",
+                "PRESSURE_SKIPPED", pressure_error,
                 delay=MIN_BACKOFF_SEC,
             )
             return False
@@ -418,7 +421,9 @@ class LifecyclePipelineRuntime:
         try:
             launch = create_request(
                 self.data_root, self.work_root, source_revision=self.source_revision,
-                pressure_mode=pressure, max_lifecycles=1 if pressure else 5,
+                pressure_mode=bool(pressure or emergency),
+                emergency_closure_mode=bool(emergency),
+                max_lifecycles=1 if pressure or emergency else 5,
                 max_runtime_sec=min(120.0, max(1.0, self.wall_timeout_sec - 1.0)),
             )
             command = [

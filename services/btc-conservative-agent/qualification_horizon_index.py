@@ -310,6 +310,7 @@ def produce_post_exit_path(candidate: Mapping[str, Any], *, data_dir: str | Path
             segment_ref = store.put_market_segment(
                 source="LIVE_MICROSTRUCTURE_1S_INDEXED", symbol=str(candidate.get("symbol") or "UNKNOWN"),
                 timeframe="1s", start_ts=terminal_ts, end_ts=required_end, rows=rows,
+                lifecycle_existing=True,
             )
             record_id = f"market-segment:{event_id}:post-exit:{segment_ref['sha256']}"
             write = store.append("market_segment", {

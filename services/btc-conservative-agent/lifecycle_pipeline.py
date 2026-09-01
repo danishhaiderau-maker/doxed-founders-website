@@ -56,6 +56,7 @@ MAX_LIFECYCLE_BYTES = 64 * 1024 * 1024
 _PROVENANCE_FIELDS = ("source_revision", "deployed_revision", "tile_config_signature")
 QUALIFICATION_RETRY_SEC = 60.0
 QUALIFICATION_HORIZON_SEC = 7200.0
+EMERGENCY_NONTERMINAL_RETRY_SEC = 1800.0
 
 
 def _ensure_retry_queue(connection) -> None:
@@ -220,6 +221,7 @@ def process_incremental_lifecycle_pipeline(
     max_tape_query_rows: int = DEFAULT_MAX_TAPE_QUERY_ROWS,
     max_runtime_sec: float = 60.0,
     pressure_mode: bool = False,
+    emergency_closure_mode: bool = False,
 ) -> dict[str, Any]:
     """Process a bounded batch using the existing restart-safe index.
 
@@ -308,6 +310,30 @@ def process_incremental_lifecycle_pipeline(
             for key, rows in dirty:
                 if time.monotonic() - started >= runtime_limit:
                     break
+                if emergency_closure_mode and _terminal_candidate(key, rows) is None:
+                    _enqueue_retry(
+                        connection, key,
+                        retry_at=current + EMERGENCY_NONTERMINAL_RETRY_SEC,
+                        reason="EMERGENCY_NONTERMINAL_DEFERRED", now=current,
+                    )
+                    _clear_dirty(connection, key)
+                    results.append({
+                        "lifecycle_identity_id": key.identity_id,
+                        "identity": key.as_dict(),
+                        "qualification_ready": False,
+                        "classification": "UNKNOWN",
+                        "blockers": ["EMERGENCY_TERMINAL_EVIDENCE_REQUIRED"],
+                        "completion_appended": False,
+                        "completion_duplicate": False,
+                        "bundle_written_or_verified": False,
+                        "transfer_ready": False,
+                        "transfer_blockers": ["EMERGENCY_TERMINAL_EVIDENCE_REQUIRED"],
+                        "transfer_bundle_written_or_verified": False,
+                        "transfer_stage": "EMERGENCY_NONTERMINAL_BLOCKED",
+                        "stage": "EMERGENCY_NONTERMINAL_BLOCKED",
+                        "retry_at": current + EMERGENCY_NONTERMINAL_RETRY_SEC,
+                    })
+                    continue
                 transfer = evaluate_lifecycle_transfer_ready(
                     key, rows, now=current,
                     lifecycle_horizon_sec=QUALIFICATION_HORIZON_SEC,
@@ -457,6 +483,7 @@ def process_incremental_lifecycle_pipeline(
         "schema": PIPELINE_SCHEMA,
         "generated_unix": time.time(),
         "pressure_mode": bool(pressure_mode),
+        "emergency_closure_mode": bool(emergency_closure_mode),
         "candidate_count": len(results),
         "completion_appended_count": sum(item["completion_appended"] for item in results),
         "bundle_count": sum(item["bundle_written_or_verified"] for item in results),
