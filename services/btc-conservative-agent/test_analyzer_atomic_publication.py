@@ -97,6 +97,53 @@ def test_publication_coherence_uses_dataset_identity_not_analyzer_code_revision(
     assert observed["expected_dataset_checksum"] == manifest["dataset_checksum"]
 
 
+def test_report_provenance_maps_canonical_entry_hash_to_manifest_identity(
+    tmp_path, monkeypatch
+):
+    analyzer = _load("canonical_entry_identity_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    canonical = {
+        "source_revision": "577a188d2abc",
+        "deployed_revision": "577a188d2abc",
+        "dataset_epoch": "epoch-current",
+        "tile_config_signature": "config-current",
+        "entry_hash": "3" * 64,
+        "dataset_checksum": "4" * 64,
+    }
+    (tmp_path / "canonical_dataset_current.json").write_text(
+        json.dumps(canonical), encoding="utf-8"
+    )
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+
+    provenance = analyzer._report_source_evidence_provenance()
+
+    assert provenance["manifest_entry_hash"] == canonical["entry_hash"]
+    assert provenance["dataset_checksum"] == canonical["dataset_checksum"]
+
+
+def test_report_provenance_does_not_use_conflicting_manifest_entry_alias(
+    tmp_path, monkeypatch
+):
+    analyzer = _load("canonical_entry_alias_analyzer", AGENT / "analyzer_research_engine_v62.py")
+    canonical = {
+        "source_revision": "577a188d2abc",
+        "deployed_revision": "577a188d2abc",
+        "dataset_epoch": "epoch-current",
+        "tile_config_signature": "config-current",
+        "entry_hash": "3" * 64,
+        "manifest_entry_hash": "9" * 64,
+        "dataset_checksum": "4" * 64,
+    }
+    (tmp_path / "canonical_dataset_current.json").write_text(
+        json.dumps(canonical), encoding="utf-8"
+    )
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+
+    provenance = analyzer._report_source_evidence_provenance()
+
+    assert provenance["manifest_entry_hash"] == canonical["entry_hash"]
+    assert provenance["manifest_entry_hash"] != canonical["manifest_entry_hash"]
+
+
 def test_policy_evidence_library_manifest_is_declared_inventory_and_status_only(tmp_path, monkeypatch):
     analyzer = _load("policy_library_atomic_analyzer", AGENT / "analyzer_research_engine_v62.py")
     dashboard = _load("policy_library_atomic_dashboard", AGENT / "research" / "research_dashboard.py")

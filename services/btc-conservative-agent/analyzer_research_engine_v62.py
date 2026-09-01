@@ -19161,10 +19161,12 @@ def _report_source_evidence_provenance():
             )
         )
         if isinstance(manifest, dict):
+            source_fields = {
+                "config_signature": "tile_config_signature",
+                "manifest_entry_hash": "entry_hash",
+            }
             for field in canonical_identity:
-                value = manifest.get(
-                    "tile_config_signature" if field == "config_signature" else field
-                )
+                value = manifest.get(source_fields.get(field, field))
                 if value is not None and str(value).strip():
                     canonical_identity[field] = str(value).strip()
     except (OSError, ValueError, TypeError):
