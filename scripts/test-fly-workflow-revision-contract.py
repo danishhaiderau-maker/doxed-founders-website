@@ -86,6 +86,20 @@ def test_generationless_bootstrap_requires_repeated_relay_and_status_flatness():
     assert maintenance.count("prove_legacy_bootstrap_flat()") == 3
 
 
+def test_legacy_missing_order_is_accepted_only_before_mandatory_flat_reproof():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    missing = maintenance.index('if exc.code != 404 or exposure.get("_legacy_exact_revision_bootstrap") is not True:')
+    marker = maintenance.index('cancelled = {"status": "not_found"}', missing)
+    skip = maintenance.index('if cancelled.get("status") == "not_found":', marker)
+    reproof = maintenance.rindex("prove_legacy_bootstrap_flat()")
+    assert missing < marker < skip < reproof
+    assert "if exc.code != 404 or" in maintenance
+    assert "raise" in maintenance[missing:marker]
+
+
 def test_generation_remains_mandatory_outside_the_exact_bootstrap():
     maintenance = DEPLOY[
         DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):

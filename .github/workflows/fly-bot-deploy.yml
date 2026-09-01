@@ -438,7 +438,19 @@ jobs:
                   print(f"Durable maintenance boundary is flat after round {round_no}")
                   break
               for trade_id in orders:
-                  cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
+                  try:
+                      cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
+                  except urllib.error.HTTPError as exc:
+                      if exc.code != 404 or exposure.get("_legacy_exact_revision_bootstrap") is not True:
+                          raise
+                      # The legacy relay cache may name an order already removed
+                      # from authoritative state.  Accept that idempotent race only
+                      # inside the exact revision bridge; the advancing three-sample
+                      # flat proof below remains mandatory before deployment.
+                      cancelled = {"status": "not_found"}
+                      print(f"Legacy maintenance order already absent trade_id={trade_id}", flush=True)
+                  if cancelled.get("status") == "not_found":
+                      continue
                   if cancelled.get("status") != "cancelled":
                       raise SystemExit(f"maintenance cancel was not confirmed for {trade_id}")
                   generation = cancelled.get("money_state_generation")
