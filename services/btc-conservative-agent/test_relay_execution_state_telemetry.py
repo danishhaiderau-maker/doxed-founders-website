@@ -15,12 +15,16 @@ at module load — neither appropriate for focused unit tests.
 from __future__ import annotations
 
 import ast
+import json
+import threading
+import time
 from pathlib import Path
 
 
 BOT_PATH = Path(__file__).with_name("bot.py")
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8")
 BOT_TREE = ast.parse(BOT_SOURCE)
+WORKFLOW_SOURCE = (BOT_PATH.parents[2] / ".github" / "workflows" / "fly-bot-deploy.yml").read_text(encoding="utf-8")
 
 
 def _function(name: str) -> ast.FunctionDef:
@@ -168,6 +172,76 @@ def test_execution_snapshot_publisher_assigns_one_monotonic_sequence() -> None:
     assert body_src.index('_RELAY_EXECUTION_SNAPSHOT_SEQ += 1') < body_src.index('json.dumps('), (
         "snapshot sequence must be embedded before the immutable response body is serialized"
     )
+
+
+def _publisher_namespace(builder):
+    selected = [
+        _function("_invalidate_relay_execution_snapshot"),
+        _function("_publish_relay_execution_snapshot"),
+    ]
+    namespace = {
+        "json": json, "time": time,
+        "_RELAY_EXECUTION_CACHE_LOCK": threading.Lock(),
+        "_RELAY_EXECUTION_REFRESH_LOCK": threading.Lock(),
+        "_RELAY_EXECUTION_CACHE_PAYLOAD": {"old": True},
+        "_RELAY_EXECUTION_CACHE_BODY": b"old",
+        "_RELAY_EXECUTION_CACHE_AT": 1.0,
+        "_RELAY_EXECUTION_SNAPSHOT_SEQ": 0,
+        "_RELAY_EXECUTION_MONEY_STATE_GENERATION": 0,
+        "_build_relay_execution_state_snapshot": builder,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOT_PATH), "exec"), namespace)
+    return namespace
+
+
+def test_inflight_pre_mutation_snapshot_cannot_republish_after_invalidation() -> None:
+    namespace = None
+
+    def stale_builder():
+        namespace["_invalidate_relay_execution_snapshot"]()
+        return {"money_state_generation": 0, "state_integrity": {}}
+
+    namespace = _publisher_namespace(stale_builder)
+    assert namespace["_publish_relay_execution_snapshot"]() is None
+    assert namespace["_RELAY_EXECUTION_MONEY_STATE_GENERATION"] == 1
+    assert namespace["_RELAY_EXECUTION_CACHE_PAYLOAD"] is None
+    assert namespace["_RELAY_EXECUTION_CACHE_BODY"] is None
+
+
+def test_generation_matching_snapshot_publishes_immutable_authority() -> None:
+    namespace = _publisher_namespace(
+        lambda: {"money_state_generation": 0, "orders": [], "positions": [], "state_integrity": {}}
+    )
+    payload = namespace["_publish_relay_execution_snapshot"]()
+    assert payload["money_state_generation"] == 0
+    assert namespace["_RELAY_EXECUTION_CACHE_PAYLOAD"] is payload
+    assert json.loads(namespace["_RELAY_EXECUTION_CACHE_BODY"])["positions"] == []
+
+
+def test_fresh_route_and_confirmed_admin_mutations_are_generation_fenced() -> None:
+    route = ast.get_source_segment(BOT_SOURCE, _function("api_relay_execution_state"))
+    cancel = ast.get_source_segment(BOT_SOURCE, _function("api_cancel_showcase_pending_order"))
+    phantom = ast.get_source_segment(BOT_SOURCE, _function("api_reconcile_phantom_cancel"))
+    assert route and cancel and phantom
+    assert 'request.args.get("fresh")' in route
+    assert "if not _admin_authed()" in route
+    assert "_publish_relay_execution_snapshot() is None" in route
+    assert "generation_matches" in route and "503" in route
+    assert "_invalidate_relay_execution_snapshot()" in cancel
+    assert cancel.index('if not result.get("finalized")') < cancel.index("_invalidate_relay_execution_snapshot()")
+    assert phantom.count("_invalidate_relay_execution_snapshot()") == 2
+    assert "len(live_matches) > 1" in phantom
+    assert "has_real_marker" in phantom
+
+
+def test_guarded_deploy_requires_post_mutation_generation_and_retries_only_503() -> None:
+    assert "def fresh_exposure(minimum_generation=None):" in WORKFLOW_SOURCE
+    assert "if exc.code != 503:" in WORKFLOW_SOURCE
+    assert 'request_json("/api/relay-execution-state?fresh=1")' in WORKFLOW_SOURCE
+    assert "required_generation = max(required_generation or 0, generation)" in WORKFLOW_SOURCE
+    assert "generation <= round_generation" in WORKFLOW_SOURCE
+    assert "flat relay authority predates maintenance mutations" in WORKFLOW_SOURCE
+    assert "if not orders and not positions:" in WORKFLOW_SOURCE
 
 
 def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:

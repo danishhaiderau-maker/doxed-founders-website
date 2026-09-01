@@ -308,7 +308,7 @@ jobs:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
         run: |
           python - <<'PY'
-          import json, os, time, urllib.request
+          import json, os, time, urllib.error, urllib.request
           base = "https://doxed-btc-bot.fly.dev"
           token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
           if not token:
@@ -347,23 +347,58 @@ jobs:
               )
               with urllib.request.urlopen(request, timeout=45) as response:
                   return json.load(response)
+          def fresh_exposure(minimum_generation=None):
+              last = None
+              for attempt in range(1, 21):
+                  try:
+                      candidate = request_json("/api/relay-execution-state?fresh=1")
+                      generation = candidate.get("money_state_generation")
+                      if not isinstance(generation, int) or isinstance(generation, bool):
+                          raise SystemExit("relay execution generation is missing")
+                      if minimum_generation is None or generation >= minimum_generation:
+                          return candidate
+                      last = f"generation {generation} < {minimum_generation}"
+                  except urllib.error.HTTPError as exc:
+                      if exc.code != 503:
+                          raise
+                      last = "503 rebuilding generation-matching authority"
+                  time.sleep(min(attempt, 5))
+              raise SystemExit(f"generation-matching relay authority unavailable: {last}")
+          required_generation = None
           for round_no in range(1, 4):
-              exposure = request_json("/api/relay-execution-state?fresh=1")
+              exposure = fresh_exposure(required_generation)
               if not isinstance(exposure.get("orders"), list) or not isinstance(exposure.get("positions"), list):
                   raise SystemExit("authenticated maintenance exposure arrays are missing")
               orders = sorted({str(row.get("trade_id") or "").strip() for row in exposure.get("orders") or []} - {""})
               positions = sorted({str(row.get("trade_id") or "").strip() for row in exposure.get("positions") or []} - {""})
+              round_generation = exposure.get("money_state_generation")
               if not orders and not positions:
+                  if required_generation is not None and exposure.get("money_state_generation") < required_generation:
+                      raise SystemExit("flat relay authority predates maintenance mutations")
                   print(f"Durable maintenance boundary is flat after round {round_no}")
                   break
               for trade_id in orders:
                   cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
                   if cancelled.get("status") != "cancelled":
                       raise SystemExit(f"maintenance cancel was not confirmed for {trade_id}")
+                  generation = cancelled.get("money_state_generation")
+                  if not isinstance(generation, int) or isinstance(generation, bool):
+                      raise SystemExit("maintenance cancel generation is missing")
+                  if generation <= round_generation:
+                      raise SystemExit("maintenance cancel did not advance relay authority generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
               for trade_id in positions:
                   reconciled = request_json("/api/reconcile/phantom-cancel", {"trade_id": trade_id, "reason": "GUARDED_DEPLOY_MAINTENANCE_BOUNDARY"})
                   if reconciled.get("ok") is not True:
                       raise SystemExit(f"maintenance paper reconciliation was not confirmed for {trade_id}")
+                  generation = reconciled.get("money_state_generation")
+                  if not isinstance(generation, int) or isinstance(generation, bool):
+                      raise SystemExit("maintenance reconciliation generation is missing")
+                  if generation <= round_generation:
+                      raise SystemExit("maintenance reconciliation did not advance relay authority generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
               time.sleep(2)
           else:
               raise SystemExit("maintenance boundary did not become flat")

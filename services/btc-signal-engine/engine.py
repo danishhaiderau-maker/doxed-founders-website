@@ -33308,6 +33308,7 @@ _RELAY_EXECUTION_CACHE_PAYLOAD = None
 _RELAY_EXECUTION_CACHE_BODY = None
 _RELAY_EXECUTION_CACHE_AT = 0.0
 _RELAY_EXECUTION_SNAPSHOT_SEQ = 0
+_RELAY_EXECUTION_MONEY_STATE_GENERATION = 0
 _RELAY_EXECUTION_REFRESH_INTERVAL_SEC = max(
     1.0,
     # A canonical build takes roughly 0.4-0.7s on the shared 1x Fly VM.  The
@@ -33329,6 +33330,18 @@ _RELAY_EXECUTION_MAX_STALE_SEC = max(
 )
 
 
+def _invalidate_relay_execution_snapshot() -> int:
+    """Fence cached authority after a confirmed money-state mutation."""
+    global _RELAY_EXECUTION_MONEY_STATE_GENERATION
+    global _RELAY_EXECUTION_CACHE_PAYLOAD, _RELAY_EXECUTION_CACHE_BODY, _RELAY_EXECUTION_CACHE_AT
+    with _RELAY_EXECUTION_CACHE_LOCK:
+        _RELAY_EXECUTION_MONEY_STATE_GENERATION += 1
+        _RELAY_EXECUTION_CACHE_PAYLOAD = None
+        _RELAY_EXECUTION_CACHE_BODY = None
+        _RELAY_EXECUTION_CACHE_AT = 0.0
+        return _RELAY_EXECUTION_MONEY_STATE_GENERATION
+
+
 def _publish_relay_execution_snapshot() -> dict:
     """Build canonical authority once and publish one immutable JSON response.
 
@@ -33347,6 +33360,9 @@ def _publish_relay_execution_snapshot() -> dict:
     try:
         started = time.perf_counter()
         payload = _build_relay_execution_state_snapshot()
+        captured_generation = int(payload.get("money_state_generation", -1))
+        if captured_generation != _RELAY_EXECUTION_MONEY_STATE_GENERATION:
+            return None
         _RELAY_EXECUTION_SNAPSHOT_SEQ += 1
         payload["snapshot_seq"] = _RELAY_EXECUTION_SNAPSHOT_SEQ
         payload["build_ms"] = round((time.perf_counter() - started) * 1000, 3)
@@ -33362,6 +33378,8 @@ def _publish_relay_execution_snapshot() -> dict:
             default=str,
         ).encode("utf-8")
         with _RELAY_EXECUTION_CACHE_LOCK:
+            if captured_generation != _RELAY_EXECUTION_MONEY_STATE_GENERATION:
+                return None
             _RELAY_EXECUTION_CACHE_PAYLOAD = payload
             _RELAY_EXECUTION_CACHE_BODY = body
             _RELAY_EXECUTION_CACHE_AT = time.monotonic()
@@ -34036,6 +34054,7 @@ def _build_relay_execution_state_snapshot() -> dict:
     try:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
+        money_state_generation = _RELAY_EXECUTION_MONEY_STATE_GENERATION
         (
             raw_recent_trades,
             relay_trades_copy,
@@ -34089,6 +34108,7 @@ def _build_relay_execution_state_snapshot() -> dict:
         for row in positions_copy
         if isinstance(row, dict)
     ]
+    snapshot["money_state_generation"] = money_state_generation
     snapshot["trades"] = [
         _relay_trade_row_lite(row)
         for row in recent_trades
@@ -34216,6 +34236,14 @@ def _build_relay_execution_state_snapshot() -> dict:
 @app.route('/api/relay-execution-state')
 def api_relay_execution_state():
     """Canonical execution authority served without money-state lock access."""
+    if str(request.args.get("fresh") or "").strip().lower() in {"1", "true", "yes"}:
+        if not _admin_authed():
+            return jsonify({"error": "admin authentication required for fresh authority"}), 401
+        if _publish_relay_execution_snapshot() is None:
+            return jsonify({
+                "api_state_error": "generation-matching execution snapshot is rebuilding",
+                "money_state_generation": _RELAY_EXECUTION_MONEY_STATE_GENERATION,
+            }), 503
     payload, body, age = _cached_relay_execution_snapshot()
     if body is None:
         # Cold bootstrap gets one bounded synchronous attempt. Concurrent cold
@@ -34225,7 +34253,12 @@ def api_relay_execution_state():
         except Exception as exc:
             logger.error(f"/api/relay-execution-state cold build error: {exc}")
         payload, body, age = _cached_relay_execution_snapshot()
-    if body is None or age is None or age > _RELAY_EXECUTION_MAX_STALE_SEC:
+    generation_matches = bool(
+        isinstance(payload, dict)
+        and int(payload.get("money_state_generation", -1))
+        == _RELAY_EXECUTION_MONEY_STATE_GENERATION
+    )
+    if body is None or age is None or age > _RELAY_EXECUTION_MAX_STALE_SEC or not generation_matches:
         stale_age = round(age, 3) if isinstance(age, (int, float)) else None
         response = jsonify({
             "api_state_error": "canonical execution snapshot unavailable or stale",
@@ -36320,8 +36353,12 @@ def api_cancel_showcase_pending_order():
         paper_orders = copy.deepcopy(pending_orders)
         paper_positions = copy.deepcopy(open_positions)
     _patch_api_state_cache_fields(orders=paper_orders, positions=paper_positions)
+    cache_generation = _invalidate_relay_execution_snapshot()
     logger.warning("[ADMIN] Showcase pending order cancelled trade_id=%s", trade_id)
-    return jsonify({"status": "cancelled", "trade_id": trade_id, "result": result})
+    return jsonify({
+        "status": "cancelled", "trade_id": trade_id, "result": result,
+        "money_state_generation": cache_generation,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -36500,11 +36537,13 @@ def api_reconcile_phantom_cancel():
                 "[ADMIN] Phantom-cancel late skip trade_id=%s (closed under lock)",
                 trade_id,
             )
+            cache_generation = _invalidate_relay_execution_snapshot()
             return jsonify({
                 "ok": True,
                 "already_cancelled": True,
                 "cancelled_trade_id": trade_id,
                 "timestamp": cancel_iso,
+                "money_state_generation": cache_generation,
             })
         pos["_close_in_progress"] = True
 
@@ -36602,6 +36641,7 @@ def api_reconcile_phantom_cancel():
         positions=paper_positions,
         trades=paper_trades,
     )
+    cache_generation = _invalidate_relay_execution_snapshot()
 
     # Emit a POSITION_CLOSED relay event so any downstream subscriber that
     # mirrors Fly's paper state so the dashboard and current research learn the
@@ -36639,6 +36679,7 @@ def api_reconcile_phantom_cancel():
         "cancelled_trade_id": trade_id,
         "exit_reason": PHANTOM_CANCEL_REASON,
         "timestamp": cancel_iso,
+        "money_state_generation": cache_generation,
         "scope": "showcase_paper_only",
     })
 
