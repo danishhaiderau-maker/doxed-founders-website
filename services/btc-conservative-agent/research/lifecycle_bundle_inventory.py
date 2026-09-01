@@ -118,6 +118,7 @@ def build_lifecycle_bundle_inventory(
     root, started = Path(data_dir).resolve(), time.monotonic()
     invalid, blockers, scan = Counter(), Counter(), Counter()
     outcomes = {"qualification": Counter(), "transfer": Counter()}
+    collection = Counter()
     provenance = {"qualification": defaultdict(set), "transfer": defaultdict(set)}
     identities = {"qualification": [], "transfer": []}
     counts, bytes_read, processed, truncated = Counter(), 0, 0, False
@@ -149,6 +150,11 @@ def build_lifecycle_bundle_inventory(
                 if manifest.get("maturity") not in (None, "QUALIFICATION_READY"):
                     invalid["QUALIFICATION_BUNDLE_MATURITY_INVALID"] += 1
                     continue
+                collection_receipt = (manifest.get("evidence_collection") or {}).get("receipt")
+                if isinstance(collection_receipt, dict):
+                    collection["receipt_count"] += 1
+                else:
+                    collection["missing_count"] += 1
             elif schema == TRANSFER_BUNDLE_SCHEMA:
                 tier, evidence = "transfer", manifest.get("transfer_receipt") or {}
                 if not (manifest.get("maturity") == "TRANSFER_READY"
@@ -197,6 +203,14 @@ def build_lifecycle_bundle_inventory(
             "unique_lifecycle_count": len(unique["qualification"]),
             "duplicate_identity_count": duplicates["qualification"],
             "entry_outcome_counts": dict(sorted(outcomes["qualification"].items()))},
+        "evidence_collection": {
+            "schema": "lifecycle_evidence_collected_v1",
+            "receipt_count": collection["receipt_count"],
+            "missing_count": collection["missing_count"],
+            "coverage_complete": (
+                complete and collection["receipt_count"] == counts["qualification"]
+            ),
+        },
         "transfer": {"label": "transfer-ready audit copies", "audit_only": True,
             "profitability_supported": False, "ranking_eligible": False,
             "source_cleanup_authorized": False, "manifest_count": counts["transfer"],

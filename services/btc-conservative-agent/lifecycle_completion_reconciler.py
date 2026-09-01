@@ -14,6 +14,8 @@ from typing import Any, Iterable, Mapping
 
 from lifecycle_bundles import LifecycleKey, collect_lifecycle_rows
 from lifecycle_completion_receipts import (
+    EVIDENCE_COLLECTED_SCHEMA,
+    build_evidence_collected_receipt,
     build_lifecycle_completion_receipt,
     build_lifecycle_transfer_ready_receipt,
 )
@@ -275,6 +277,7 @@ def reconcile_lifecycle_completions(
     runtime_provenance = _collection_provenance()
     assessments = []
     writes = []
+    collection_writes = []
     for key, rows in sorted(grouped.items()):
         if key.collection_epoch_id != str(epoch_id):
             continue
@@ -299,6 +302,58 @@ def reconcile_lifecycle_completions(
             continue
         receipt = assessment["receipt"]
         event_id = assessment["event_id"]
+        existing_collection_rows = [
+            row for row in rows
+            if row.get("ledger") == "lifecycle"
+            and row.get("observation_status") == "EVIDENCE_COLLECTION_COMPLETE"
+            and str(row.get("record_id") or "") == f"lifecycle:{event_id}:evidence-collected"
+        ]
+        if len(existing_collection_rows) > 1:
+            assessment["ready"] = False
+            assessment["receipt"] = None
+            assessment["blockers"] = sorted(set(
+                assessment["blockers"] + ["EVIDENCE_COLLECTION_RECEIPT_AMBIGUOUS"]
+            ))
+            continue
+        collected = build_evidence_collected_receipt(
+            receipt, identity=key.as_dict(), event_id=event_id,
+            provenance=assessment["provenance"], collected_at=now,
+            lifecycle_horizon_sec=lifecycle_horizon_sec,
+            reconciliation_allowance_sec=reconciliation_allowance_sec,
+        )
+        if not collected["ready"]:
+            assessment["ready"] = False
+            assessment["receipt"] = None
+            assessment["blockers"] = sorted(set(
+                assessment["blockers"] + collected["blockers"]
+            ))
+            continue
+        if existing_collection_rows:
+            existing = existing_collection_rows[0].get("evidence_collection_receipt")
+            if not isinstance(existing, Mapping) or existing.get("schema") != EVIDENCE_COLLECTED_SCHEMA:
+                assessment["ready"] = False
+                assessment["receipt"] = None
+                assessment["blockers"] = sorted(set(
+                    assessment["blockers"] + ["EVIDENCE_COLLECTION_RECEIPT_COLLISION"]
+                ))
+                continue
+            # The first durable collection timestamp is immutable. Rebuild
+            # against it and require byte-for-byte canonical equality.
+            expected = build_evidence_collected_receipt(
+                receipt, identity=key.as_dict(), event_id=event_id,
+                provenance=assessment["provenance"],
+                collected_at=existing.get("evidence_collected_at"),
+                lifecycle_horizon_sec=lifecycle_horizon_sec,
+                reconciliation_allowance_sec=reconciliation_allowance_sec,
+            )
+            if not expected["ready"] or canonical_json(existing) != canonical_json(expected["receipt"]):
+                assessment["ready"] = False
+                assessment["receipt"] = None
+                assessment["blockers"] = sorted(set(
+                    assessment["blockers"] + ["EVIDENCE_COLLECTION_RECEIPT_COLLISION"]
+                ))
+                continue
+            collected = expected
         row = {
             "record_id": f"lifecycle:{event_id}:bundle-completion:{receipt['completion_receipt_sha256'][:16]}",
             "event_id": event_id,
@@ -312,6 +367,20 @@ def reconcile_lifecycle_completions(
             **assessment["provenance"],
         }
         writes.append(store.append("lifecycle", row))
+        collection_row = {
+            "record_id": f"lifecycle:{event_id}:evidence-collected",
+            "event_id": event_id,
+            "episode_id": key.episode_id,
+            "policy_signature": key.policy_signature,
+            "research_lane": key.research_lane,
+            "terminal": True,
+            "observation_status": "EVIDENCE_COLLECTION_COMPLETE",
+            "outcome_state": receipt["entry_outcome"],
+            "evidence_collected_at": collected["receipt"]["evidence_collected_at"],
+            "evidence_collection_receipt": collected["receipt"],
+            **assessment["provenance"],
+        }
+        collection_writes.append(store.append("lifecycle", collection_row))
     return {
         "schema": RECONCILER_SCHEMA,
         "epoch_id": str(epoch_id),
@@ -319,6 +388,13 @@ def reconcile_lifecycle_completions(
         "ready_count": sum(item["ready"] for item in assessments),
         "written_count": sum(item.get("written") is True for item in writes),
         "duplicate_count": sum(item.get("duplicate") is True for item in writes),
+        "evidence_collected_written_count": sum(
+            item.get("written") is True for item in collection_writes
+        ),
+        "evidence_collected_duplicate_count": sum(
+            item.get("duplicate") is True for item in collection_writes
+        ),
         "assessments": assessments,
         "writes": writes,
+        "evidence_collection_writes": collection_writes,
     }

@@ -27,6 +27,7 @@ BUNDLE_SCHEMA = "research_lifecycle_bundle_v1"
 TRANSFER_BUNDLE_SCHEMA = "research_lifecycle_transfer_bundle_v1"
 TRANSFER_POINTER_SCHEMA = "research_lifecycle_transfer_pointer_v1"
 COMPLETION_SCHEMA = "lifecycle_bundle_completion_v1"
+EVIDENCE_COLLECTED_SCHEMA = "lifecycle_evidence_collected_v1"
 ENTRY_OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
 INDEX_SCHEMA = "lifecycle_bundle_incremental_index_v1"
 DEFAULT_MAX_SCAN_BYTES = 8 * 1024 * 1024
@@ -530,6 +531,52 @@ def classify_completion(
     }
 
 
+def classify_evidence_collection(
+    rows: Iterable[dict[str, Any]], key: LifecycleKey,
+) -> dict[str, Any]:
+    """Require one hash-valid receipt bound to the selected completion."""
+    material = list(rows)
+    candidates = [
+        row.get("evidence_collection_receipt") for row in material
+        if isinstance(row.get("evidence_collection_receipt"), dict)
+        and row["evidence_collection_receipt"].get("schema") == EVIDENCE_COLLECTED_SCHEMA
+    ]
+    if not candidates:
+        return {"ready": False, "blockers": ["EVIDENCE_COLLECTION_RECEIPT_MISSING"]}
+    if len(candidates) != 1:
+        return {"ready": False, "blockers": ["EVIDENCE_COLLECTION_RECEIPT_AMBIGUOUS"]}
+    receipt = dict(candidates[0])
+    supplied = str(receipt.pop("evidence_collected_receipt_sha256", "")).lower()
+    actual = hashlib.sha256(canonical_json(receipt).encode("utf-8")).hexdigest()
+    blockers = []
+    if supplied != actual:
+        blockers.append("EVIDENCE_COLLECTION_RECEIPT_SHA256_MISMATCH")
+    if float(receipt.get("evidence_collected_at") or 0) < float(receipt.get("qualification_eligible_at") or 0):
+        blockers.append("EVIDENCE_COLLECTION_TOO_EARLY")
+    completions = [
+        row.get("bundle_completion") for row in material
+        if isinstance(row.get("bundle_completion"), dict)
+        and row["bundle_completion"].get("schema") == COMPLETION_SCHEMA
+    ]
+    if len(completions) != 1 or (
+        receipt.get("completion_receipt_sha256")
+        != completions[0].get("completion_receipt_sha256")
+    ):
+        blockers.append("EVIDENCE_COLLECTION_COMPLETION_BINDING_MISMATCH")
+    if receipt.get("identity") != key.as_dict():
+        blockers.append("EVIDENCE_COLLECTION_IDENTITY_MISMATCH")
+    try:
+        if receipt.get("provenance") != _consistent_provenance(material):
+            blockers.append("EVIDENCE_COLLECTION_PROVENANCE_MISMATCH")
+    except ValueError:
+        blockers.append("EVIDENCE_COLLECTION_PROVENANCE_MISMATCH")
+    return {
+        "ready": not blockers,
+        "blockers": sorted(set(blockers)),
+        "receipt": candidates[0] if not blockers else None,
+    }
+
+
 def _referenced_market_segments(root: Path, rows: Iterable[dict[str, Any]]) -> list[Path]:
     paths: set[Path] = set()
     for row in rows:
@@ -646,6 +693,7 @@ def materialize_bundle(
     )
     if not completion["ready"]:
         return {"written": False, "lifecycle_identity_id": key.identity_id, "completion": completion}
+    evidence_collection = classify_evidence_collection(frozen, key)
     segments = _referenced_market_segments(root, frozen)
     bundle_id = _bundle_content_id(key, frozen, completion, segments)
     bundle_root = root / "v3" / "lifecycle_bundles"
@@ -708,6 +756,7 @@ def materialize_bundle(
             "identity": key.as_dict(),
             "provenance": _consistent_provenance(frozen),
             "completion": completion,
+            "evidence_collection": evidence_collection,
             "files": sorted(receipts, key=lambda row: row["path"]),
             "source_cleanup_authorized": False,
         }

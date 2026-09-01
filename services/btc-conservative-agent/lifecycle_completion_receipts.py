@@ -19,6 +19,7 @@ from lifecycle_qualification_horizon import (
 
 
 COMPLETION_SCHEMA = "lifecycle_bundle_completion_v1"
+EVIDENCE_COLLECTED_SCHEMA = "lifecycle_evidence_collected_v1"
 TRANSFER_READY_SCHEMA = "lifecycle_bundle_transfer_ready_v1"
 ENTRY_OUTCOMES = frozenset({"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"})
 FLAT_POSITION_STATES = frozenset({"CLOSED", "NEVER_OPENED"})
@@ -370,3 +371,85 @@ def build_lifecycle_transfer_ready_receipt(
         "qualification_blockers": qualification_blockers,
         "receipt": receipt,
     }
+
+
+def build_evidence_collected_receipt(
+    completion_receipt: Mapping[str, Any], *, identity: Mapping[str, Any],
+    event_id: Any, provenance: Mapping[str, Any], collected_at: float,
+    lifecycle_horizon_sec: float = 7200.0,
+    reconciliation_allowance_sec: float = 180.0,
+) -> dict[str, Any]:
+    """Bind the instant at which one lifecycle became qualification-complete.
+
+    This is intentionally downstream of ``lifecycle_bundle_completion_v1``.
+    It never reconstructs terminal evidence and therefore cannot turn elapsed
+    wall time or a partial lifecycle into qualification evidence.
+    """
+    blockers: list[str] = []
+    completion = dict(completion_receipt) if isinstance(completion_receipt, Mapping) else {}
+    if completion.get("schema") != COMPLETION_SCHEMA:
+        blockers.append("COMPLETION_RECEIPT_MISSING_OR_INVALID")
+    supplied_completion_sha = _valid_sha256(completion.get("completion_receipt_sha256"))
+    completion_material = dict(completion)
+    completion_material.pop("completion_receipt_sha256", None)
+    actual_completion_sha = hashlib.sha256(
+        canonical_json(completion_material).encode("utf-8")
+    ).hexdigest() if completion else None
+    if supplied_completion_sha is None or supplied_completion_sha != actual_completion_sha:
+        blockers.append("COMPLETION_RECEIPT_SHA256_MISMATCH")
+
+    terminal_ts = _positive_timestamp(completion.get("terminal_ts"))
+    horizon_complete_ts = _positive_timestamp(completion.get("horizon_complete_ts"))
+    collected_ts = _positive_timestamp(collected_at)
+    if completion.get("terminal") is not True:
+        blockers.append("LIFECYCLE_NOT_TERMINAL")
+    if completion.get("post_observation_complete") is not True:
+        blockers.append("POST_OBSERVATION_INCOMPLETE")
+    required_horizon = (
+        terminal_ts + max(0.0, float(lifecycle_horizon_sec))
+        if terminal_ts is not None else None
+    )
+    if horizon_complete_ts is None or required_horizon is None or horizon_complete_ts < required_horizon:
+        blockers.append("LIFECYCLE_HORIZON_INCOMPLETE")
+    eligible_at = (
+        horizon_complete_ts + max(0.0, float(reconciliation_allowance_sec))
+        if horizon_complete_ts is not None else None
+    )
+    if collected_ts is None:
+        blockers.append("EVIDENCE_COLLECTED_AT_INVALID")
+    elif eligible_at is None or collected_ts < eligible_at:
+        blockers.append("EVIDENCE_COLLECTION_TOO_EARLY")
+
+    identity_fields = (
+        "collection_epoch_id", "episode_id", "policy_signature", "research_lane",
+    )
+    normalized_identity = {name: _text(identity.get(name)) for name in identity_fields}
+    if any(value is None for value in normalized_identity.values()):
+        blockers.append("LIFECYCLE_IDENTITY_INCOMPLETE")
+    normalized_event_id = _text(event_id)
+    if normalized_event_id is None:
+        blockers.append("EVENT_ID_MISSING")
+    provenance_fields = ("source_revision", "deployed_revision", "tile_config_signature")
+    normalized_provenance = {name: _text(provenance.get(name)) for name in provenance_fields}
+    if any(value is None for value in normalized_provenance.values()):
+        blockers.append("PROVENANCE_INCOMPLETE")
+
+    blockers = sorted(set(blockers))
+    if blockers:
+        return {"ready": False, "blockers": blockers, "receipt": None}
+    receipt = {
+        "schema": EVIDENCE_COLLECTED_SCHEMA,
+        "evidence_collected_at": collected_ts,
+        "qualification_eligible_at": eligible_at,
+        "terminal_ts": terminal_ts,
+        "horizon_complete_ts": horizon_complete_ts,
+        "entry_outcome": completion.get("entry_outcome"),
+        "event_id": normalized_event_id,
+        "identity": normalized_identity,
+        "provenance": normalized_provenance,
+        "completion_receipt_sha256": supplied_completion_sha,
+    }
+    receipt["evidence_collected_receipt_sha256"] = hashlib.sha256(
+        canonical_json(receipt).encode("utf-8")
+    ).hexdigest()
+    return {"ready": True, "blockers": [], "receipt": receipt}
