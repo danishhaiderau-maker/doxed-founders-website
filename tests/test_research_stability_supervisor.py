@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 import pytest
@@ -46,6 +47,130 @@ def deterministic_supervisor_storage(monkeypatch):
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def write_atomic_generation(
+    mirror: Path,
+    *,
+    revision: str = "a" * 40,
+    epoch: str = "epoch-new",
+    config_signature: str = TEST_TILE_SIGNATURE,
+    analyzer_status: str = "COMPLETE",
+):
+    root = mirror / "analyzer"
+    root.mkdir(parents=True, exist_ok=True)
+    report = root / "safe_policy_genome_v3_report.json"
+    write_json(report, {"generated_at": NOW.isoformat(), "collection": {}})
+    manifest = {
+        "schema": "report_manifest_v1",
+        "generation_id": "generation-current",
+        "generation_revision": revision,
+        "fresh_epoch": {"epoch_id": epoch},
+        "tile_registry_signature": config_signature,
+        "report_count": 1,
+        "reports": [{"file": report.name, "size_bytes": report.stat().st_size}],
+    }
+    manifest_path = root / "report_manifest.json"
+    write_json(manifest_path, manifest)
+    write_json(mirror / "canonical_dataset_current.json", {
+        "schema": "canonical_research_manifest_v1",
+        "analyzer_status": analyzer_status,
+        "analyzer_report_manifest_relative": "analyzer/report_manifest.json",
+        "analyzer_report_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "source_revision": revision,
+        "dataset_epoch": epoch,
+        "tile_config_signature": config_signature,
+    })
+    return root, manifest_path
+
+
+def test_authoritative_generation_ignores_newer_loose_report_root(tmp_path):
+    mirror = tmp_path / "mirror"
+    stale = tmp_path / "newer-loose-reports"
+    mirror.mkdir(); stale.mkdir()
+    current, _manifest = write_atomic_generation(mirror)
+    write_json(stale / "safe_policy_genome_v3_report.json", {
+        "generated_at": "2099-01-01T00:00:00+00:00", "number_one_strategy": "STALE",
+    })
+
+    selected, manifest, detail = module.resolve_authoritative_report_generation(
+        mirror, stale,
+        expected_revision="a" * 40,
+        expected_epochs=["epoch-new"],
+        expected_config_signature=TEST_TILE_SIGNATURE,
+        explicit_report_dir=False,
+    )
+
+    assert selected == current
+    assert manifest["generation_id"] == "generation-current"
+    assert detail["status"] == "CURRENT_ATOMIC_GENERATION"
+    assert detail["atomic_current_pointer"] is True
+
+
+@pytest.mark.parametrize(
+    ("pointer_change", "expected_reason"),
+    [
+        ({"source_revision": "b" * 40}, "REVISION_PARITY_MISMATCH"),
+        ({"dataset_epoch": "epoch-stale"}, "EPOCH_PARITY_MISMATCH"),
+        ({"tile_config_signature": "x" * 64}, "CONFIG_PARITY_MISMATCH"),
+    ],
+)
+def test_authoritative_generation_rejects_identity_mismatch(tmp_path, pointer_change, expected_reason):
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    _root, _manifest = write_atomic_generation(mirror)
+    pointer_path = mirror / "canonical_dataset_current.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer.update(pointer_change)
+    write_json(pointer_path, pointer)
+
+    selected, manifest, detail = module.resolve_authoritative_report_generation(
+        mirror, tmp_path / "loose",
+        expected_revision="a" * 40,
+        expected_epochs=["epoch-new"],
+        expected_config_signature=TEST_TILE_SIGNATURE,
+        explicit_report_dir=False,
+    )
+
+    assert selected is None and manifest == {}
+    assert detail["status"] == "REJECTED"
+    assert expected_reason in detail["reason"]
+
+
+def test_authoritative_generation_rejects_incomplete_atomic_publication(tmp_path):
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    root, _manifest = write_atomic_generation(mirror, analyzer_status="IN_PROGRESS")
+    # A complete-looking loose report and even the files beneath analyzer/ are
+    # insufficient until the append-first current pointer says COMPLETE.
+    assert (root / "safe_policy_genome_v3_report.json").is_file()
+
+    selected, manifest, detail = module.resolve_authoritative_report_generation(
+        mirror, root,
+        expected_revision="a" * 40,
+        expected_epochs=["epoch-new"],
+        expected_config_signature=TEST_TILE_SIGNATURE,
+        explicit_report_dir=False,
+    )
+
+    assert selected is None and manifest == {}
+    assert "ANALYZER_PUBLICATION_INCOMPLETE" in detail["reason"]
+
+
+def test_explicit_report_dir_remains_compatibility_only(tmp_path):
+    reports = tmp_path / "explicit"
+    reports.mkdir()
+    selected, manifest, detail = module.resolve_authoritative_report_generation(
+        tmp_path / "missing-mirror", reports,
+        expected_revision="", expected_epochs=[], expected_config_signature="",
+        explicit_report_dir=True,
+    )
+    assert selected == reports and manifest == {}
+    assert detail == {
+        "status": "EXPLICIT_REPORT_DIR_COMPATIBILITY",
+        "report_dir": str(reports),
+        "atomic_current_pointer": False,
+    }
 
 
 def test_default_paths_select_only_repo_canonical_store(tmp_path):

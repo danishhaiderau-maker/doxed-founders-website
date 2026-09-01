@@ -14,6 +14,11 @@ import time
 from research_v3_contract import COLLECTOR_VERSION
 from research_v3_store import V3EvidenceStore
 from research_v3_contract import canonical_json, normalize_lifecycle_outcome
+from lifecycle_qualification_horizon import (
+    canonical_path_extrema_usd,
+    canonical_terminal_economics,
+    qualification_post_observation,
+)
 
 
 _OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
@@ -1241,6 +1246,12 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         segment_rows, direction=identity["executed_direction"],
         entry_price=entry_price, fill_ts=fill_ts,
     )
+    path_receipt.update(canonical_path_extrema_usd(
+        path_receipt,
+        entry_price=entry_price,
+        filled_quantity=_first(outcome.get("execution_qty"), position.get("qty")),
+    ))
+    economics = canonical_terminal_economics(outcome)
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
@@ -1248,6 +1259,9 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         "filled_qty": _first(outcome.get("execution_qty"), position.get("qty")), "net_pnl_usd": outcome.get("net_pnl_usd"),
         "gross_pnl_usd": outcome.get("gross_pnl_usd"), "trading_fees_usd": outcome.get("trading_fees_usd"),
         "funding_fees_usd": outcome.get("funding_fees_usd"), "exit_reason": outcome.get("exit_reason"),
+        "slippage_cost_usd": economics.get("slippage_cost_usd"),
+        "latency_cost_usd": economics.get("latency_cost_usd"),
+        "canonical_economics": economics,
         "entry_context": _observed_context(outcome, phase="ENTRY"),
         "exit_context": _observed_context(outcome, phase="EXIT"),
         "path_extrema": path_receipt,
@@ -1294,6 +1308,114 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
             **causal_ids, **policy,
             "writes": [execution, *segment_writes, lifecycle], "store_verification": store.verify()}
+
+
+def dual_write_lifecycle_qualification_horizon(
+    subject: Mapping[str, Any], signal: Mapping[str, Any], terminal: Mapping[str, Any], *,
+    entry_outcome: str, epoch_id: str, data_dir: str,
+    lifecycle_horizon_sec: float = 7200.0,
+) -> dict[str, Any]:
+    """Freeze explicit post-terminal BBO/depth coverage for one paper lifecycle.
+
+    This is a bridge API for the bounded runtime worker.  Calling it after two
+    hours is not itself proof: the source tape must cover both boundaries,
+    contain no cadence/parse/BBO/depth gaps, and remain hash-addressable.
+    """
+    requested_outcome = str(entry_outcome or "").upper()
+    canonical_outcome = (
+        requested_outcome
+        if requested_outcome in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"}
+        else "UNKNOWN"
+    )
+    event_id = str(_first(
+        subject.get("trade_id"), terminal.get("trade_id"), signal.get("trade_id")
+    ) or "")
+    identity = _causal_identity(event_id, signal, subject, terminal)
+    policy = _paper_policy_identity(str(epoch_id), subject, terminal, signal)
+    schedule = _first(
+        subject.get("research_chase_schedule"), terminal.get("research_chase_schedule"),
+        signal.get("research_chase_schedule"),
+    )
+    schedule_available = isinstance(schedule, Mapping) and schedule.get("authoritative") is True
+    terminal_ts = _timestamp(_first(
+        terminal.get("close_ts"), terminal.get("terminal_ts_exact"), terminal.get("terminal_ts"),
+        schedule.get("terminal_ts_exact") if isinstance(schedule, Mapping) else None,
+        schedule.get("terminal_ts") if isinstance(schedule, Mapping) else None,
+    ))
+    rows: list[dict[str, Any]] = []
+    coverage: dict[str, Any]
+    if terminal_ts is None:
+        coverage = {
+            "schema": "paper_market_segment_coverage_v1",
+            "requested_start_ts": None, "requested_end_ts": None,
+            "observed_start_ts": None, "observed_end_ts": None,
+            "requested_bounds_complete": False, "two_second_or_better": False,
+            "all_rows_have_valid_bbo": False, "all_rows_have_visible_depth": False,
+            "parse_errors": 0, "invalid_timestamp_rows": 0, "invalid_price_rows": 0,
+            "invalid_bbo_rows": 0, "invalid_depth_rows": 0,
+        }
+    else:
+        rows, coverage = _paper_market_segment(
+            data_dir, start_ts=terminal_ts,
+            end_ts=terminal_ts + max(0.0, float(lifecycle_horizon_sec)),
+        )
+    post_observation = qualification_post_observation(
+        coverage, terminal_ts=terminal_ts,
+        lifecycle_horizon_sec=lifecycle_horizon_sec,
+    )
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    segment_ref = None
+    if rows and terminal_ts is not None:
+        segment_ref = store.put_market_segment(
+            source="LIVE_MICROSTRUCTURE_1S", symbol=identity["symbol"], timeframe="1s",
+            start_ts=terminal_ts,
+            end_ts=terminal_ts + max(0.0, float(lifecycle_horizon_sec)), rows=rows,
+        )
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+        include_schedule=schedule_available,
+        include_fill=canonical_outcome in {"FULL_FILL", "PARTIAL_FILL"},
+        tape_id=f"tape:{segment_ref['sha256']}" if segment_ref else None,
+    )
+    lifecycle_identity = {
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "research_lane": policy["paper_policy_spec"].get("research_lane"),
+        **causal_ids, **policy,
+    }
+    writes = []
+    if segment_ref:
+        writes.append(store.append("market_segment", {
+            "record_id": f"market-segment:{event_id}:post-exit:{segment_ref['sha256']}",
+            "episode_id": identity["episode_id"], "event_id": event_id,
+            "segment_ref": segment_ref, "context_role": "POST_EXIT_PATH",
+            "coverage": {**coverage, **post_observation}, **lifecycle_identity,
+        }))
+    writes.append(store.append("lifecycle", {
+        "record_id": (
+            f"lifecycle:{event_id}:qualification-horizon:"
+            f"{segment_ref['sha256'][:16] if segment_ref else 'unknown'}"
+        ),
+        "episode_id": identity["episode_id"], "event_id": event_id,
+        "terminal": True, "observation_status": "QUALIFICATION_HORIZON_OBSERVED",
+        "outcome_state": canonical_outcome,
+        "unknown_reason": (
+            _first(terminal.get("unknown_reason"), "ENTRY_OUTCOME_INVALID")
+            if canonical_outcome == "UNKNOWN" else None
+        ),
+        "post_observation": post_observation,
+        "market_segment_ref": segment_ref,
+        "ranking_eligible": False,
+        "ranking_blocker": None if post_observation["complete"] else "POST_OBSERVATION_INCOMPLETE",
+        **lifecycle_identity,
+    }))
+    return {
+        "schema": "v3_lifecycle_qualification_horizon_receipt_v1",
+        "epoch_id": str(epoch_id), **identity, **causal_ids, **policy,
+        "entry_outcome": canonical_outcome,
+        "post_observation": post_observation,
+        "segment_ref": segment_ref, "writes": writes,
+        "store_verification": store.verify(),
+    }
 
 
 def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:

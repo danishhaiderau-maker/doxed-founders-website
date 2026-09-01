@@ -1,0 +1,267 @@
+"""Fail-closed reconciliation of Research V3 lifecycle completion evidence.
+
+The scanner joins only the immutable composite lifecycle identity used by
+``lifecycle_bundles``.  It does not translate an old ``terminal`` label into a
+completion receipt: terminal schedule, entry outcome, flat position, gap-free
+post-observation horizon, and (for fills) cost-complete exit evidence must all
+already exist in the V3 ledgers.
+"""
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+from lifecycle_bundles import LifecycleKey, collect_lifecycle_rows
+from lifecycle_completion_receipts import build_lifecycle_completion_receipt
+from research_v3_contract import canonical_json
+from research_v3_store import V3EvidenceStore, _collection_provenance
+
+
+RECONCILER_SCHEMA = "lifecycle_completion_reconciliation_v1"
+_PROVENANCE_FIELDS = ("source_revision", "deployed_revision", "tile_config_signature")
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result == result and abs(result) != float("inf") else None
+
+
+def _unique(rows: Iterable[Mapping[str, Any]], predicate) -> list[Mapping[str, Any]]:
+    return [row for row in rows if predicate(row)]
+
+
+def _provenance(rows: list[Mapping[str, Any]]) -> tuple[dict[str, str], list[str]]:
+    proven: dict[str, str] = {}
+    blockers: list[str] = []
+    for field in _PROVENANCE_FIELDS:
+        values = {str(row.get(field) or "").strip() for row in rows}
+        if "" in values:
+            blockers.append(f"{field.upper()}_MISSING")
+            values.discard("")
+        if len(values) != 1:
+            blockers.append(f"{field.upper()}_AMBIGUOUS")
+        elif values:
+            proven[field] = next(iter(values))
+    return proven, blockers
+
+
+def _post_observation(rows: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """Return one explicit gap-free observation proof, never a time inference."""
+    candidates: list[Mapping[str, Any]] = []
+    for row in rows:
+        direct = row.get("post_observation")
+        if isinstance(direct, Mapping):
+            candidates.append(direct)
+        coverage = row.get("coverage")
+        if (
+            str(row.get("ledger") or "") == "market_segment"
+            and str(row.get("context_role") or "").upper() in {"POST_EXIT_PATH", "FULL_LIFECYCLE"}
+            and isinstance(coverage, Mapping)
+        ):
+            candidates.append(coverage)
+    valid = [
+        item for item in candidates
+        if item.get("complete") is True
+        and item.get("gaps_absent") is True
+        and _finite(item.get("complete_through_ts")) is not None
+    ]
+    if not valid:
+        return None
+    valid.sort(key=lambda item: float(item["complete_through_ts"]))
+    return valid[-1]
+
+
+def evaluate_lifecycle_completion(
+    key: LifecycleKey, rows: Iterable[Mapping[str, Any]], *, now: float,
+    lifecycle_horizon_sec: float = 7200.0,
+    reconciliation_allowance_sec: float = 180.0,
+) -> dict[str, Any]:
+    """Build a receipt only when one exact lifecycle is completely proven."""
+    material = [dict(row) for row in rows]
+    blockers: list[str] = []
+    provenance, provenance_blockers = _provenance(material)
+    blockers.extend(provenance_blockers)
+
+    event_ids = {str(row.get("event_id") or "").strip() for row in material}
+    event_ids.discard("")
+    if len(event_ids) != 1:
+        blockers.append("EVENT_ID_MISSING_OR_AMBIGUOUS")
+
+    schedules = _unique(material, lambda row: (
+        row.get("ledger") == "order_intent"
+        and row.get("intent_kind") == "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL"
+        and row.get("schedule_lifecycle_final") is True
+        and row.get("chase_schedule_authoritative") is True
+    ))
+    schedule_hashes = {str(row.get("schedule_sha256") or "") for row in schedules}
+    if len(schedules) != 1 or len(schedule_hashes) != 1 or "" in schedule_hashes:
+        blockers.append("UNIQUE_TERMINAL_SCHEDULE_NOT_PROVEN")
+        schedule_row: Mapping[str, Any] = {}
+    else:
+        schedule_row = schedules[0]
+    chase_schedule = schedule_row.get("chase_schedule")
+    chase_schedule = chase_schedule if isinstance(chase_schedule, Mapping) else {}
+    terminal_ts = _finite(chase_schedule.get("terminal_ts_exact")) or _finite(chase_schedule.get("terminal_ts"))
+
+    fill_rows = _unique(material, lambda row: (
+        row.get("ledger") == "execution" and str(row.get("record_id") or "").endswith(":primary-fill")
+    ))
+    close_rows = _unique(material, lambda row: (
+        row.get("ledger") == "execution" and str(row.get("record_id") or "").endswith(":paper-close")
+    ))
+    closed_lifecycle = _unique(material, lambda row: (
+        row.get("ledger") == "lifecycle"
+        and row.get("terminal") is True
+        and row.get("observation_status") == "PAPER_POSITION_CLOSED"
+    ))
+    no_fill_rows = _unique(material, lambda row: (
+        row.get("ledger") == "lifecycle"
+        and row.get("terminal") is True
+        and row.get("terminal_no_fill") is True
+    ))
+    explicit_unknown = _unique(material, lambda row: (
+        row.get("ledger") == "lifecycle"
+        and row.get("terminal") is True
+        and str(row.get("entry_outcome") or "").upper() == "UNKNOWN"
+        and bool(str(row.get("unknown_reason") or "").strip())
+    ))
+
+    proof: dict[str, Any] = {
+        "terminal_schedule": {
+            "authoritative": schedule_row.get("chase_schedule_authoritative") is True,
+            "schedule_lifecycle_final": schedule_row.get("schedule_lifecycle_final") is True,
+            "terminal_ts": terminal_ts,
+            "terminal_reason": chase_schedule.get("terminal_reason"),
+            "schedule_sha256": schedule_row.get("schedule_sha256"),
+        },
+        "open_quantity": 0.0,
+        "post_observation": _post_observation(material),
+    }
+    if fill_rows or close_rows or closed_lifecycle:
+        if len(fill_rows) != 1 or len(close_rows) != 1 or len(closed_lifecycle) != 1:
+            blockers.append("UNIQUE_FILLED_LIFECYCLE_NOT_PROVEN")
+        fill_lifecycle = _unique(material, lambda row: (
+            row.get("ledger") == "lifecycle"
+            and row.get("observation_status") == "PAPER_POSITION_OPEN"
+            and str(row.get("outcome_state") or "").upper() in {"FULL_FILL", "PARTIAL_FILL"}
+        ))
+        if len(fill_lifecycle) != 1:
+            blockers.append("UNIQUE_ENTRY_OUTCOME_NOT_PROVEN")
+            outcome = "UNKNOWN"
+        else:
+            outcome = str(fill_lifecycle[0]["outcome_state"]).upper()
+        close = close_rows[0] if len(close_rows) == 1 else {}
+        proof.update({
+            "entry_outcome": outcome,
+            "position_state": "CLOSED",
+            "filled_quantity": close.get("filled_qty"),
+            "requested_quantity": schedule_row.get("requested_qty"),
+            "exit_evidence": {
+                "terminal": len(closed_lifecycle) == 1,
+                "close_ts": close.get("close_ts"),
+                "receipt_sha256": hashlib.sha256(canonical_json(close).encode("utf-8")).hexdigest() if close else None,
+            },
+            "economics": {
+                name: close.get(name) for name in (
+                    "gross_pnl_usd", "trading_fees_usd", "funding_fees_usd",
+                    "slippage_cost_usd", "latency_cost_usd", "net_pnl_usd",
+                )
+            },
+            "path_extrema": {
+                "mfe_usd": (close.get("path_extrema") or {}).get("mfe_usd") if isinstance(close.get("path_extrema"), Mapping) else None,
+                "mae_usd": (close.get("path_extrema") or {}).get("mae_usd") if isinstance(close.get("path_extrema"), Mapping) else None,
+            },
+        })
+    elif len(no_fill_rows) == 1 and not explicit_unknown:
+        proof.update({"entry_outcome": "NO_FILL", "position_state": "NEVER_OPENED"})
+    elif len(explicit_unknown) == 1 and not no_fill_rows:
+        proof.update({
+            "entry_outcome": "UNKNOWN", "position_state": "NEVER_OPENED",
+            "unknown_reason": explicit_unknown[0].get("unknown_reason"),
+        })
+    else:
+        proof.update({"entry_outcome": "UNKNOWN", "position_state": "UNKNOWN"})
+        blockers.append("UNIQUE_ENTRY_OUTCOME_NOT_PROVEN")
+
+    built = build_lifecycle_completion_receipt(
+        proof, now=now, lifecycle_horizon_sec=lifecycle_horizon_sec,
+        reconciliation_allowance_sec=reconciliation_allowance_sec,
+    )
+    blockers = sorted(set(blockers + built["blockers"]))
+    return {
+        "schema": RECONCILER_SCHEMA,
+        "identity": key.as_dict(),
+        "ready": not blockers and built["receipt"] is not None,
+        "classification": built["classification"],
+        "blockers": blockers,
+        "provenance": provenance,
+        "event_id": next(iter(event_ids)) if len(event_ids) == 1 else None,
+        "receipt": built["receipt"] if not blockers else None,
+    }
+
+
+def reconcile_lifecycle_completions(
+    root: str | Path, *, epoch_id: str, now: float, append: bool = True,
+    lifecycle_horizon_sec: float = 7200.0,
+    reconciliation_allowance_sec: float = 180.0,
+) -> dict[str, Any]:
+    """Scan all exact identities and idempotently append proven completions."""
+    root = Path(root).resolve()
+    grouped = collect_lifecycle_rows(root)
+    store = V3EvidenceStore(root, epoch_id=str(epoch_id))
+    runtime_provenance = _collection_provenance()
+    assessments = []
+    writes = []
+    for key, rows in sorted(grouped.items()):
+        if key.collection_epoch_id != str(epoch_id):
+            continue
+        assessment = evaluate_lifecycle_completion(
+            key, rows, now=now, lifecycle_horizon_sec=lifecycle_horizon_sec,
+            reconciliation_allowance_sec=reconciliation_allowance_sec,
+        )
+        assessments.append(assessment)
+        if not append or not assessment["ready"]:
+            continue
+        provenance_mismatch = [
+            field for field in _PROVENANCE_FIELDS
+            if assessment["provenance"].get(field) != runtime_provenance.get(field)
+        ]
+        if provenance_mismatch:
+            assessment["ready"] = False
+            assessment["receipt"] = None
+            assessment["blockers"] = sorted(set(
+                assessment["blockers"]
+                + [f"RUNTIME_{field.upper()}_MISMATCH" for field in provenance_mismatch]
+            ))
+            continue
+        receipt = assessment["receipt"]
+        event_id = assessment["event_id"]
+        row = {
+            "record_id": f"lifecycle:{event_id}:bundle-completion:{receipt['completion_receipt_sha256'][:16]}",
+            "event_id": event_id,
+            "episode_id": key.episode_id,
+            "policy_signature": key.policy_signature,
+            "research_lane": key.research_lane,
+            "terminal": True,
+            "observation_status": "LIFECYCLE_BUNDLE_COMPLETE",
+            "outcome_state": receipt["entry_outcome"],
+            "bundle_completion": receipt,
+            **assessment["provenance"],
+        }
+        writes.append(store.append("lifecycle", row))
+    return {
+        "schema": RECONCILER_SCHEMA,
+        "epoch_id": str(epoch_id),
+        "identity_count": len(assessments),
+        "ready_count": sum(item["ready"] for item in assessments),
+        "written_count": sum(item.get("written") is True for item in writes),
+        "duplicate_count": sum(item.get("duplicate") is True for item in writes),
+        "assessments": assessments,
+        "writes": writes,
+    }

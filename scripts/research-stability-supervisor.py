@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 import re
@@ -117,6 +118,148 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{path.name} is not a JSON object")
     return value
+
+
+def _identity_value(payload: dict[str, Any], *paths: tuple[str, ...]) -> str:
+    """Return the first non-empty identity value at one of ``paths``."""
+    for path in paths:
+        value: Any = payload
+        for part in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(part)
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def resolve_authoritative_report_generation(
+    mirror: Path,
+    fallback_report_dir: Path,
+    *,
+    expected_revision: str,
+    expected_epochs: list[str],
+    expected_config_signature: str,
+    explicit_report_dir: bool,
+) -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
+    """Resolve exactly one checksum-bound, atomically published generation.
+
+    Normal operation is anchored by ``canonical_dataset_current.json``.  That
+    append-first pointer names and hashes the analyzer manifest published for
+    the completed canonical mirror.  A loose report directory, filesystem
+    recency, or a second report root is never considered.  ``--report-dir`` is
+    retained as an explicit compatibility escape hatch for offline fixtures;
+    its non-atomic status is surfaced rather than silently treated as current.
+    """
+    if explicit_report_dir:
+        return fallback_report_dir, {}, {
+            "status": "EXPLICIT_REPORT_DIR_COMPATIBILITY",
+            "report_dir": str(fallback_report_dir),
+            "atomic_current_pointer": False,
+        }
+
+    pointer_path = mirror / "canonical_dataset_current.json"
+    detail: dict[str, Any] = {
+        "status": "UNAVAILABLE",
+        "pointer": str(pointer_path),
+        "atomic_current_pointer": True,
+    }
+    try:
+        pointer = read_json(pointer_path)
+        if pointer.get("schema") != "canonical_research_manifest_v1":
+            raise ValueError("CURRENT_POINTER_SCHEMA_MISMATCH")
+        if pointer.get("analyzer_status") != "COMPLETE":
+            raise ValueError("ANALYZER_PUBLICATION_INCOMPLETE")
+        relative = str(pointer.get("analyzer_report_manifest_relative") or "").replace("\\", "/")
+        declared_hash = str(pointer.get("analyzer_report_manifest_sha256") or "").lower()
+        if not relative or not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+            raise ValueError("ANALYZER_MANIFEST_RECEIPT_MISSING")
+        manifest_path = (mirror / relative).resolve()
+        mirror_root = mirror.resolve()
+        if manifest_path == mirror_root or mirror_root not in manifest_path.parents:
+            raise ValueError("ANALYZER_MANIFEST_PATH_OUTSIDE_MIRROR")
+        raw = manifest_path.read_bytes()
+        actual_hash = hashlib.sha256(raw).hexdigest()
+        if actual_hash != declared_hash:
+            raise ValueError("ANALYZER_MANIFEST_HASH_MISMATCH")
+        manifest = json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(manifest, dict) or manifest.get("schema") != "report_manifest_v1":
+            raise ValueError("ANALYZER_MANIFEST_SCHEMA_MISMATCH")
+
+        pointer_revision = str(pointer.get("source_revision") or "").lower()
+        report_revision = _identity_value(
+            manifest, ("deployed_revision",), ("source_revision",), ("generation_revision",),
+        ).lower()
+        expected_revision_lower = str(expected_revision or "").lower()
+        pointer_epoch = str(pointer.get("dataset_epoch") or "")
+        report_epoch = _identity_value(manifest, ("dataset_epoch",), ("fresh_epoch", "epoch_id"))
+        pointer_config = str(pointer.get("tile_config_signature") or "")
+        report_config = _identity_value(
+            manifest, ("config_signature",), ("tile_registry_signature",),
+        )
+        unique_expected_epochs = sorted({str(value) for value in expected_epochs if value})
+        if not expected_revision_lower or not pointer_revision or not report_revision:
+            raise ValueError("REVISION_IDENTITY_MISSING")
+        if not (
+            pointer_revision == expected_revision_lower
+            and report_revision == expected_revision_lower
+        ):
+            raise ValueError("REVISION_PARITY_MISMATCH")
+        if len(unique_expected_epochs) != 1 or not pointer_epoch or not report_epoch:
+            raise ValueError("EPOCH_IDENTITY_AMBIGUOUS_OR_MISSING")
+        if pointer_epoch != unique_expected_epochs[0] or report_epoch != pointer_epoch:
+            raise ValueError("EPOCH_PARITY_MISMATCH")
+        if not expected_config_signature or not pointer_config or not report_config:
+            raise ValueError("CONFIG_IDENTITY_MISSING")
+        if not (
+            pointer_config == expected_config_signature
+            and report_config == expected_config_signature
+        ):
+            raise ValueError("CONFIG_PARITY_MISMATCH")
+        if not str(manifest.get("generation_id") or ""):
+            raise ValueError("GENERATION_ID_MISSING")
+
+        rows = manifest.get("reports")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("ANALYZER_REPORT_SET_EMPTY")
+        if int(manifest.get("report_count") or -1) != len(rows):
+            raise ValueError("ANALYZER_REPORT_COUNT_MISMATCH")
+        names: set[str] = set()
+        report_root = manifest_path.parent
+        resolved_report_root = report_root.resolve()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("ANALYZER_REPORT_ROW_INVALID")
+            name = str(row.get("file") or "").replace("\\", "/")
+            if not name or name in names or name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError("ANALYZER_REPORT_MEMBERSHIP_INVALID")
+            names.add(name)
+            candidate = (report_root / name).resolve()
+            if candidate == resolved_report_root or resolved_report_root not in candidate.parents:
+                raise ValueError("ANALYZER_REPORT_PATH_OUTSIDE_GENERATION")
+            if not candidate.is_file():
+                raise ValueError(f"ANALYZER_REPORT_MISSING:{name}")
+            declared_size = row.get("size_bytes")
+            if declared_size is not None and int(declared_size) != candidate.stat().st_size:
+                raise ValueError(f"ANALYZER_REPORT_SIZE_MISMATCH:{name}")
+
+        detail.update({
+            "status": "CURRENT_ATOMIC_GENERATION",
+            "manifest": str(manifest_path),
+            "manifest_sha256": actual_hash,
+            "generation_id": manifest.get("generation_id"),
+            "revision": report_revision,
+            "dataset_epoch": report_epoch,
+            "config_signature": report_config,
+            "report_count": len(rows),
+            "report_dir": str(report_root),
+        })
+        return report_root, manifest, detail
+    except Exception as exc:
+        detail.update({"status": "REJECTED", "reason": f"{type(exc).__name__}: {exc}"})
+        return None, {}, detail
 
 
 def directory_size(path: Path) -> tuple[int, int]:
@@ -1003,6 +1146,7 @@ class Supervisor:
     progress_state_file: Path | None = None
     storage_state_file: Path | None = None
     require_loop_owner: bool = True
+    explicit_report_dir: bool = True
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
@@ -1305,11 +1449,42 @@ class Supervisor:
             atomic_json(progress_path, next_progress)
             add("independent_opportunity_progress", progress_ok, progress_detail)
 
+        expected_epochs = list((current_evidence_summary or {}).get("epoch_ids") or [])
+        if not expected_epochs and event_summary:
+            expected_epochs = [str(event_summary.get("epoch_id") or "")]
+        selected_report_dir, analyzer_manifest, generation_detail = resolve_authoritative_report_generation(
+            self.mirror,
+            self.report_dir,
+            expected_revision=str(source_revision or ""),
+            expected_epochs=expected_epochs,
+            expected_config_signature=str(manifest_registry_signature or ""),
+            explicit_report_dir=self.explicit_report_dir,
+        )
+        add(
+            "authoritative_analyzer_generation",
+            selected_report_dir is not None,
+            generation_detail,
+        )
+        declared_generation_reports = {
+            str(row.get("file") or "").replace("\\", "/")
+            for row in (analyzer_manifest.get("reports") or [])
+            if isinstance(row, dict)
+        }
+
+        def selected_report_path(filename: str) -> Path:
+            if selected_report_dir is None:
+                return Path("__unavailable__") / filename
+            if self.explicit_report_dir or filename in declared_generation_reports:
+                return selected_report_dir / filename
+            # A stale loose artifact can coexist beside an atomic generation.
+            # It is not current merely because it remains on disk.
+            return Path("__not_in_current_generation__") / filename
+
         reports: dict[str, dict[str, Any]] = {}
         report_times: dict[str, datetime] = {}
         report_freshness: dict[str, bool] = {}
         for filename in ("policy_candidate_oos_report.json", "best_policy_research_report.json"):
-            path = self.report_dir / filename
+            path = selected_report_path(filename)
             try:
                 report = read_json(path)
                 generated = parse_time(report.get("generated_at"))
@@ -1376,7 +1551,7 @@ class Supervisor:
                 "reports": {name: {key: report.get(key) for key in ("epoch_id", "policy_epoch_id", "evidence_policy_signature")}
                             for name, report in reports.items()}})
 
-        v3_report_path = self.report_dir / "safe_policy_genome_v3_report.json"
+        v3_report_path = selected_report_path("safe_policy_genome_v3_report.json")
         manifest_has_v3 = any(str(row.get("path") or "").replace("\\", "/").startswith("v3/") for row in (manifest.get("files") or []))
         if v3_report_path.is_file() or manifest_has_v3:
             try:
@@ -1473,6 +1648,7 @@ def main() -> int:
         args.fly_url, token, repair=args.repair_missing_local,
         runtime_repo=args.runtime_repo.resolve() if args.runtime_repo else None,
         require_loop_owner=args.loop,
+        explicit_report_dir=args.report_dir is not None,
     )
     try:
         with exclusive_process_lock(process_lock):
