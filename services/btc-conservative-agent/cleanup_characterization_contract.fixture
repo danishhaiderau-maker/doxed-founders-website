@@ -58,6 +58,7 @@
     ["POST", "/api/data-sync/ack", "api_data_sync_ack"],
     ["POST", "/api/data-sync/analyzer-report", "api_data_sync_analyzer_report"],
     ["POST", "/api/data-sync/lifecycle-ack", "api_data_sync_lifecycle_ack"],
+    ["POST", "/api/data-sync/lifecycle-cleanup/prepare", "api_data_sync_lifecycle_cleanup_prepare"],
     ["POST", "/api/data-sync/platform-relay-evidence", "api_data_sync_platform_relay_evidence"],
     ["GET", "/api/analyzer-mirror/status", "api_analyzer_mirror_status"],
     ["GET", "/analysis", "analyzer_mirror_dashboard"],
