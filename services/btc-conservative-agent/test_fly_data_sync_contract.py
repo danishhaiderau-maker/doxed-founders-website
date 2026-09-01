@@ -236,13 +236,11 @@ def test_sync_loop_retries_manifest_preflight_and_keeps_relay_optional():
     assert "function Invoke-OptionalRelayEvidenceSync" in SYNC_LOOP
     assert "stage=optional_relay_evidence failed after" in SYNC_LOOP
     manifest_call = SYNC_LOOP.index("$manifest = Get-FlySyncPreflightManifest")
-    required_sync_gate = SYNC_LOOP.index(
-        "-not ($forceByTime -or $forceByGrowth -or $forceFresh -or $forceByRevision)",
-        manifest_call,
-    )
+    required_sync_gate = SYNC_LOOP.index("$needsFullInventory =", manifest_call)
+    optional_gate = SYNC_LOOP.index("-not $needsFullInventory", required_sync_gate)
     relay_call = SYNC_LOOP.index("$relayEvidencePath = Invoke-OptionalRelayEvidenceSync")
     relay_catch = SYNC_LOOP.index("} catch {", relay_call)
-    assert manifest_call < required_sync_gate < relay_call < relay_catch
+    assert manifest_call < required_sync_gate < optional_gate < relay_call < relay_catch
 
 
 def test_sync_loop_separates_poll_retry_and_full_mutation_cadence():

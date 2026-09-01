@@ -77,6 +77,45 @@ def test_continuous_fly_mirror_also_schedules_platform_evidence_join():
     assert '$_.Exception.Message' not in relay_log
 
 
+def test_optional_relay_status_distinguishes_not_attempted_deferred_and_missing_config():
+    initial = LOOP.split("$relayEvidenceStatus = [ordered]@{", 1)[1].split("}", 1)[0]
+    assert 'ok = $null' in initial
+    assert 'errorCode = "NOT_ATTEMPTED"' in initial
+    assert 'errorCode = "CONFIG_MISSING"' not in initial
+
+    classification = LOOP.split("$relayEvidenceConfigMissing = -not (", 1)[1]
+    classification = classification.split("$currentTotalBytes", 1)[0]
+    for key in (
+        "PLATFORM_API_BASE_URL",
+        "PLATFORM_RELAY_AGENT_SLUG",
+        "PLATFORM_RELAY_USER_ID",
+    ):
+        assert f"$env:{key}" in classification
+    assert 'if ($relayEvidenceConfigMissing)' in classification
+    assert '$relayEvidenceStatus.errorCode = "CONFIG_MISSING"' in classification
+    assert 'elseif ($needsFullInventory)' in classification
+    assert '$relayEvidenceStatus.errorCode = "DEFERRED_REQUIRED_SYNC"' in classification
+
+
+def test_forced_revision_sync_can_succeed_independently_of_optional_relay_status():
+    # A revision mismatch contributes to the mandatory inventory decision and
+    # is classified before the child sync starts. The relay status is passed
+    # through as receipt metadata only; it is never a success/parity gate.
+    assert "$needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision -or $forceByGrowth" in LOOP
+    full_sync = LOOP[
+        LOOP.index("$syncArgs = @{"):
+        LOOP.index("$failureAt = (Get-Date).ToUniversalTime()")
+    ]
+    assert "ProgressRelayEvidenceJson = ($relayEvidenceStatus | ConvertTo-Json -Compress)" in full_sync
+    assert "if ($forceByRevision) { $syncArgs.ForceFullRefresh = $true }" in full_sync
+    assert "$result = & (Join-Path $scriptDir \"sync-fly-bot-data.ps1\") @syncArgs" in full_sync
+    assert "ok = $true" in full_sync
+    assert "revisionParity = $(" in full_sync
+    assert "relayEvidence = $relayEvidenceStatus" in full_sync
+    assert "if ($relayEvidenceStatus" not in full_sync
+    assert "if (-not $relayEvidenceStatus" not in full_sync
+
+
 def _run_sync(
     tmp_path: Path,
     payload: dict,

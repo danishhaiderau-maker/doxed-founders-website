@@ -417,8 +417,8 @@ try {
     $observedSourceRevision = $null
     $currentStage = "loop_start"
     $relayEvidenceStatus = [ordered]@{
-      ok = $false
-      errorCode = "CONFIG_MISSING"
+      ok = $null
+      errorCode = "NOT_ATTEMPTED"
       lastSuccessAt = $relayEvidenceLastSuccessAt
     }
     try {
@@ -524,6 +524,20 @@ try {
       )
 
       $needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision -or $forceByGrowth
+      $relayEvidenceConfigMissing = -not (
+        $env:PLATFORM_API_BASE_URL -and
+        $env:PLATFORM_RELAY_AGENT_SLUG -and
+        $env:PLATFORM_RELAY_USER_ID
+      )
+      if ($relayEvidenceConfigMissing) {
+        # CONFIG_MISSING is reserved for an explicit configuration result. It
+        # must not describe a configured optional stage that was merely
+        # deferred while a mandatory mirror repair takes priority.
+        $relayEvidenceStatus.ok = $false
+        $relayEvidenceStatus.errorCode = "CONFIG_MISSING"
+      } elseif ($needsFullInventory) {
+        $relayEvidenceStatus.errorCode = "DEFERRED_REQUIRED_SYNC"
+      }
       $currentTotalBytes = $lastSyncedTotalBytes
       $growthBytes = $volumeGrowthBytes
       if ($needsFullInventory) {
@@ -545,10 +559,8 @@ try {
       # matched cycle.  This makes the earlier "never blocks the canonical
       # mirror" contract true during deployments and recovery.
       if (
-        -not ($forceByTime -or $forceByGrowth -or $forceFresh -or $forceByRevision) -and
-        $env:PLATFORM_API_BASE_URL -and
-        $env:PLATFORM_RELAY_AGENT_SLUG -and
-        $env:PLATFORM_RELAY_USER_ID
+        -not $needsFullInventory -and
+        -not $relayEvidenceConfigMissing
       ) {
         $currentStage = "optional_relay_evidence"
         try {
