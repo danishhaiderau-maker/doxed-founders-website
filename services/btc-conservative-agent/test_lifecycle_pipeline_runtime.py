@@ -35,7 +35,7 @@ class _Process:
         self.killed = True
 
 
-def _install_launch(monkeypatch, runtime, process, *, corrupt=False):
+def _install_launch(monkeypatch, runtime, process, *, corrupt=False, pipeline=None):
     def launch(command):
         request = Path(command[command.index("--request") + 1])
         result = Path(command[command.index("--result") + 1])
@@ -49,8 +49,10 @@ def _install_launch(monkeypatch, runtime, process, *, corrupt=False):
                 "source_revision": REVISION, "launched_unix": request_payload["launched_unix"],
                 "started_unix": 1, "generated_unix": 2, "generated_at": "x",
                 "request_sha256": runtime_module.hashlib.sha256(request.read_bytes()).hexdigest(),
-                "pipeline": {"candidate_count": 1, "bundle_count": 1,
-                             "pressure_mode": request_payload["pressure_mode"]},
+                "pipeline": pipeline or {
+                    "candidate_count": 1, "bundle_count": 1,
+                    "pressure_mode": request_payload["pressure_mode"],
+                },
                 "hard_runtime_result_deadline_enforced": True,
                 "source_cleanup_authorized": False,
             }
@@ -73,6 +75,57 @@ def test_success_resets_backoff_and_pressure_clamps_to_one(tmp_path, monkeypatch
     assert status["backoff_sec"] == 0
     assert status["last_result"]["pressure_mode"] is True
     assert status["source_cleanup_authorized"] is False
+
+
+def test_success_promptly_continues_until_dirty_and_cursor_backlog_are_drained(
+    tmp_path, monkeypatch,
+):
+    clock = lambda: 1000.0
+    runtime = LifecyclePipelineRuntime(
+        tmp_path, source_revision=REVISION, interval_sec=999,
+        wall_timeout_sec=2, clock=clock,
+    )
+    pipeline = {
+        "candidate_count": 5,
+        "bundle_count": 0,
+        "pressure_mode": False,
+        "scan": {
+            "pending_dirty_lifecycles": 4045,
+            "ledgers": {"lifecycle": {"caught_up": False}},
+        },
+    }
+    _install_launch(monkeypatch, runtime, _Process(), pipeline=pipeline)
+
+    assert runtime._run_once() is True
+    status = runtime.status()
+    assert status["next_run_unix"] == 1000.0 + runtime_module.BACKLOG_INTERVAL_SEC
+    assert status["last_result"]["pending_dirty_lifecycles"] == 4045
+    assert status["last_result"]["backlog_pending"] is True
+
+
+def test_success_returns_to_normal_cadence_only_after_backlog_is_drained(
+    tmp_path, monkeypatch,
+):
+    clock = lambda: 2000.0
+    runtime = LifecyclePipelineRuntime(
+        tmp_path, source_revision=REVISION, interval_sec=999,
+        wall_timeout_sec=2, clock=clock,
+    )
+    pipeline = {
+        "candidate_count": 0,
+        "bundle_count": 0,
+        "pressure_mode": False,
+        "scan": {
+            "pending_dirty_lifecycles": 0,
+            "ledgers": {"lifecycle": {"caught_up": True}},
+        },
+    }
+    _install_launch(monkeypatch, runtime, _Process(), pipeline=pipeline)
+
+    assert runtime._run_once() is True
+    status = runtime.status()
+    assert status["next_run_unix"] == 2999.0
+    assert status["last_result"]["backlog_pending"] is False
 
 
 def test_timeout_terminates_child_and_backs_off(tmp_path, monkeypatch):

@@ -25,6 +25,7 @@ RUNTIME_SCHEMA = "lifecycle_pipeline_runtime_status_v1"
 MIN_BACKOFF_SEC = 180.0
 MAX_BACKOFF_SEC = 1800.0
 DEFAULT_INTERVAL_SEC = 180.0
+BACKLOG_INTERVAL_SEC = 1.0
 DEFAULT_WALL_TIMEOUT_SEC = 75.0
 DEFAULT_CPU_LIMIT_SEC = 60
 DEFAULT_RSS_LIMIT_BYTES = 512 * 1024 * 1024
@@ -304,6 +305,16 @@ class LifecyclePipelineRuntime:
 
     def _record_success(self, receipt: Mapping[str, Any]) -> None:
         pipeline = receipt.get("pipeline") if isinstance(receipt.get("pipeline"), Mapping) else {}
+        scan = pipeline.get("scan") if isinstance(pipeline.get("scan"), Mapping) else {}
+        ledgers = scan.get("ledgers") if isinstance(scan.get("ledgers"), Mapping) else {}
+        pending_dirty = scan.get("pending_dirty_lifecycles")
+        backlog_pending = (
+            isinstance(pending_dirty, int) and not isinstance(pending_dirty, bool)
+            and pending_dirty > 0
+        ) or any(
+            isinstance(row, Mapping) and row.get("caught_up") is False
+            for row in ledgers.values()
+        )
         summary = {
             "nonce": receipt.get("nonce"),
             "result_sha256": receipt.get("result_sha256"),
@@ -311,11 +322,19 @@ class LifecyclePipelineRuntime:
             "candidate_count": pipeline.get("candidate_count"),
             "bundle_count": pipeline.get("bundle_count"),
             "pressure_mode": pipeline.get("pressure_mode"),
+            "pending_dirty_lifecycles": pending_dirty,
+            "backlog_pending": backlog_pending,
         }
         with self._lock:
             self._status.update({
                 "active": False, "failure_count": 0, "backoff_sec": 0.0,
-                "next_run_unix": self.clock() + self.interval_sec,
+                # A successful bounded batch is not completion while indexed
+                # identities or unread ledger bytes remain. Continue promptly;
+                # _run_once rechecks sync overlap and resource pressure before
+                # every child, preserving the existing fail-closed fences.
+                "next_run_unix": self.clock() + (
+                    BACKLOG_INTERVAL_SEC if backlog_pending else self.interval_sec
+                ),
                 "last_outcome": "SUCCESS", "last_error": None,
                 "last_worker_failure": None,
                 "last_result": summary, "source_cleanup_authorized": False,
