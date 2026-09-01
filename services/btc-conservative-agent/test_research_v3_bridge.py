@@ -1,3 +1,4 @@
+import copy
 import json
 import hashlib
 import subprocess
@@ -427,7 +428,7 @@ class V3BridgeTests(unittest.TestCase):
                 epoch_id="epoch-v3-test", data_dir=tmp,
                 lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
             )
-            self.assertEqual(len(receipt["writes"]), 3)
+            self.assertEqual(len(receipt["writes"]), 4)
             rows = [json.loads(line) for line in V3EvidenceStore(
                 tmp, epoch_id="epoch-v3-test",
             ).ledger_path("lifecycle").read_text().splitlines()]
@@ -571,7 +572,7 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(verification["full_store_verified"])
             self.assertEqual(
                 set(verification["ledger_counts"]),
-                {"opportunity", "decision", "lifecycle"},
+                {"opportunity", "pre_entry_features", "decision", "lifecycle"},
             )
             self.assertNotIn("order_intent.jsonl", loaded)
             self.assertFalse(store.verify()["passed"])
@@ -695,7 +696,7 @@ class V3BridgeTests(unittest.TestCase):
             )
             self.assertEqual(context_row["event_id"], "market-context:episode-" + hashlib.sha256(b"shared:scan-context").hexdigest()[:20])
             self.assertEqual(context_row["tape_id"], f"tape:{refs[0]['sha256']}")
-            self.assertEqual(len(receipts[0]["writes"]), 4)
+            self.assertEqual(len(receipts[0]["writes"]), 5)
             self.assertTrue(receipts[1]["writes"][1]["duplicate"])
             for receipt in receipts:
                 verification = receipt["store_verification"]
@@ -703,7 +704,7 @@ class V3BridgeTests(unittest.TestCase):
                 self.assertEqual(verification["market_segment_count"], 1)
                 self.assertEqual(
                     set(verification["ledger_counts"]),
-                    {"opportunity", "market_segment", "decision", "lifecycle"},
+                    {"opportunity", "pre_entry_features", "market_segment", "decision", "lifecycle"},
                 )
 
     def test_accepted_but_disabled_lane_is_no_trade_not_zero_pnl(self):
@@ -727,6 +728,110 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(row["execution_disposition"], "LANE_DISABLED_NO_ORDER")
             self.assertEqual(row["outcome_state"], "NO_TRADE")
             self.assertNotEqual(row["outcome_state"], "REALIZED_ZERO_PNL")
+
+    def test_approved_and_rejected_opportunities_emit_bound_pre_entry_receipts(self):
+        from policy_search_manifest import compact_search_receipt
+
+        for suffix, policy_decision, disposition in (
+            ("approved", "ACCEPT", "ORDER_ELIGIBLE"),
+            ("rejected", "REJECT", "AI_REJECTED_NO_ORDER"),
+        ):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmp:
+                features = {
+                    "research_feature_schema_version": "causal-features-v7",
+                    "price": 100.25, "adx": 27.0,
+                    "volatility_percentile": 0.72,
+                }
+                receipt = dual_write_lane_decision(
+                    {
+                        "trade_id": f"scan-{suffix}",
+                        "shared_ai_call_id": f"scan-{suffix}",
+                        "shared_ai_call_ts_epoch": 1000,
+                        "symbol": "tBTCF0:USTF0", "raw_direction": "LONG",
+                        "feature_snapshot_at_signal": features,
+                    },
+                    lane="CONTINUOUS", policy_decision=policy_decision,
+                    execution_disposition=disposition, exact_reason=policy_decision,
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+                )
+                store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+                row = json.loads(
+                    store.ledger_path("pre_entry_features").read_text().strip()
+                )
+                search = compact_search_receipt()
+                self.assertEqual(row["receipt_schema"], "pre_entry_features_v1")
+                self.assertEqual(row["captured_at_ts"], 1000.0)
+                self.assertEqual(row["availability_boundary"], "PRE_DECISION_ONLY")
+                self.assertEqual(row["feature_schema_version"], "causal-features-v7")
+                self.assertEqual(row["bucket_definition_signature"], search["signature"])
+                self.assertEqual(row["bucket_definition_version"], search["version"])
+                self.assertEqual(row["features"], features)
+                self.assertEqual(
+                    row["source_evidence_refs"]["feature_snapshot_sha256"],
+                    hashlib.sha256(canonical_json(features).encode("utf-8")).hexdigest(),
+                )
+                self.assertEqual(row["episode_id"], receipt["episode_id"])
+                self.assertEqual(
+                    row["opportunity_id"], f"opportunity:{receipt['episode_id']}"
+                )
+                self.assertNotIn("policy_decision", row)
+                self.assertNotIn("outcome_state", row)
+
+    def test_pre_entry_receipt_is_one_per_episode_and_rejects_content_collision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-one-feature", "shared_ai_call_id": "scan-one-feature",
+                "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                "feature_snapshot_at_signal": {
+                    "research_feature_schema_version": "causal-v1", "price": 100.0,
+                },
+            }
+            common = {
+                "policy_decision": "ACCEPT", "execution_disposition": "ORDER_ELIGIBLE",
+                "exact_reason": "APPROVE", "epoch_id": "epoch-v3-test", "data_dir": tmp,
+            }
+            dual_write_lane_decision(
+                source, lane="CONTINUOUS",
+                lane_policy={"policy_id": "CONTINUOUS"}, **common,
+            )
+            retry = dual_write_lane_decision(
+                source, lane="FAMILY_ATR_TRAIL",
+                lane_policy={"policy_id": "FAMILY_ATR_TRAIL"}, **common,
+            )
+            self.assertTrue(retry["writes"][0]["duplicate"])
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertEqual(
+                len(store.ledger_path("pre_entry_features").read_text().splitlines()), 1,
+            )
+            mutated = copy.deepcopy(source)
+            mutated["feature_snapshot_at_signal"]["price"] = 101.0
+            with self.assertRaisesRegex(ValueError, "PRE_ENTRY_FEATURE_RECEIPT_COLLISION"):
+                dual_write_lane_decision(
+                    mutated, lane="FAMILY_MFE_GIVEBACK",
+                    lane_policy={"policy_id": "FAMILY_MFE_GIVEBACK"}, **common,
+                )
+
+    def test_pre_entry_receipt_fails_closed_on_post_decision_feature_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "POST_DECISION_FEATURE_LEAK"):
+                dual_write_lane_decision(
+                    {
+                        "trade_id": "scan-leak", "shared_ai_call_id": "scan-leak",
+                        "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                        "feature_snapshot_at_signal": {
+                            "research_feature_schema_version": "causal-v1",
+                            "price": 100.0, "terminal": {"net_pnl_usd": 9.0},
+                        },
+                    },
+                    lane="CONTINUOUS", policy_decision="ACCEPT",
+                    execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS"},
+                )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertFalse(store.ledger_path("pre_entry_features").exists())
+            self.assertFalse(store.ledger_path("decision").exists())
 
     def test_lane_decision_retry_is_write_once(self):
         with tempfile.TemporaryDirectory() as tmp:

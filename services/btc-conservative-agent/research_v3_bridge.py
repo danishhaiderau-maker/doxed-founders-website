@@ -19,12 +19,108 @@ from lifecycle_qualification_horizon import (
     canonical_terminal_economics,
     qualification_post_observation,
 )
+from policy_search_manifest import compact_search_receipt
 
 
 _OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
 DEFAULT_DECLARED_ENTRY_TTL_SEC = 30 * 60
 ENTRY_RECONCILIATION_ALLOWANCE_SEC = 3 * 60
 PRE_SIGNAL_CONTEXT_SEC = 3 * 60
+PRE_ENTRY_FEATURES_SCHEMA = "pre_entry_features_v1"
+_POST_DECISION_FEATURE_KEYS = frozenset({
+    "entry_fill_price", "execution_outcome", "exit_price", "exit_reason",
+    "exit_ts", "fees_paid", "fill_price", "filled_qty", "funding_paid",
+    "mae", "mae_usd", "mfe", "mfe_usd", "net_pnl", "net_pnl_usd",
+    "outcome_state", "post_exit", "post_exit_path", "realized_pnl",
+    "slippage", "slippage_usd", "terminal_outcome",
+})
+
+
+@lru_cache(maxsize=4096)
+def _existing_pre_entry_payload_hash(
+    ledger_path_text: str, ledger_size: int, ledger_mtime_ns: int, record_id: str,
+) -> str | None:
+    """Resolve a duplicate receipt without rescanning once per sibling lane."""
+    ledger_path = Path(ledger_path_text)
+    with ledger_path.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, 1):
+            if not line.endswith("\n"):
+                raise ValueError(
+                    f"TRUNCATED_JSONL_LINE:pre_entry_features:{line_no}"
+                )
+            existing = json.loads(line)
+            if existing.get("record_id") == record_id:
+                return str(existing.get("receipt_payload_sha256") or "")
+    return None
+
+
+def _assert_pre_decision_feature_snapshot(value: Any, *, path: str = "features") -> None:
+    """Fail closed if terminal/execution facts leak into a causal feature row."""
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = str(key or "").strip().lower()
+            if normalized in _POST_DECISION_FEATURE_KEYS:
+                raise ValueError(f"POST_DECISION_FEATURE_LEAK:{path}.{normalized}")
+            _assert_pre_decision_feature_snapshot(child, path=f"{path}.{normalized}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _assert_pre_decision_feature_snapshot(child, path=f"{path}[{index}]")
+
+
+def _pre_entry_features_receipt(
+    *, store: V3EvidenceStore, source: Mapping[str, Any],
+    identity: Mapping[str, Any], causal_ids: Mapping[str, Any], signal_ts: float,
+    segment_refs: list[dict[str, Any]], features: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Append one immutable, lane-independent pre-decision feature receipt."""
+    features = copy.deepcopy(dict(features))
+    _assert_pre_decision_feature_snapshot(features)
+    search = compact_search_receipt()
+    feature_schema = str(_first(
+        features.get("research_feature_schema_version"),
+        features.get("feature_schema_version"),
+        source.get("feature_schema_version"),
+        "UNVERSIONED_SOURCE_FEATURES",
+    ))
+    feature_sha256 = hashlib.sha256(
+        canonical_json(features).encode("utf-8")
+    ).hexdigest()
+    row = {
+        "record_id": f"pre-entry-features:{identity['episode_id']}",
+        "receipt_schema": PRE_ENTRY_FEATURES_SCHEMA,
+        "captured_at_ts": float(signal_ts),
+        "captured_at_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "availability_boundary": "PRE_DECISION_ONLY",
+        "episode_id": identity["episode_id"],
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "symbol": identity["symbol"],
+        "opportunity_id": causal_ids["opportunity_id"],
+        "feature_schema_version": feature_schema,
+        "bucket_definition_schema": search["schema"],
+        "bucket_definition_version": search["version"],
+        "bucket_definition_signature": search["signature"],
+        "features": features,
+        "source_evidence_refs": {
+            "feature_snapshot_sha256": feature_sha256,
+            "market_context_segment_refs": copy.deepcopy(segment_refs),
+        },
+    }
+    row["receipt_payload_sha256"] = hashlib.sha256(
+        canonical_json(row).encode("utf-8")
+    ).hexdigest()
+    write = store.append("pre_entry_features", row)
+    if write.get("duplicate"):
+        ledger_path = store.ledger_path("pre_entry_features")
+        stat = ledger_path.stat()
+        existing_hash = _existing_pre_entry_payload_hash(
+            str(ledger_path.resolve()), int(stat.st_size), int(stat.st_mtime_ns),
+            row["record_id"],
+        )
+        if existing_hash != row["receipt_payload_sha256"]:
+            raise ValueError(
+                f"PRE_ENTRY_FEATURE_RECEIPT_COLLISION:{row['record_id']}"
+            )
+    return write
 
 
 def _normalize_market_rows(rows: list[Any], *, timeframe: str) -> list[dict[str, Any]]:
@@ -646,6 +742,14 @@ def dual_write_lane_decision(
     )
     segment_refs: list[dict[str, Any]] = []
     segment_writes: list[dict[str, Any]] = []
+    pre_entry_features = copy.deepcopy(_first(
+        source.get("feature_snapshot_at_signal"),
+        source.get("research_feature_snapshot"),
+    ) or {})
+    if not isinstance(pre_entry_features, Mapping):
+        raise ValueError("PRE_ENTRY_FEATURE_SNAPSHOT_NOT_MAPPING")
+    pre_entry_features = dict(pre_entry_features)
+    _assert_pre_decision_feature_snapshot(pre_entry_features)
     segment_coverage: dict[str, Any] = {
         "context_role": "PRE_SIGNAL_ONLY",
         "lookback_sec": PRE_SIGNAL_CONTEXT_SEC,
@@ -701,6 +805,10 @@ def dual_write_lane_decision(
                 "coverage": segment_coverage,
                 **context_causal_ids,
             }))
+    feature_receipt = _pre_entry_features_receipt(
+        store=store, source=source, identity=identity, causal_ids=causal_ids,
+        signal_ts=signal_ts, segment_refs=segment_refs, features=pre_entry_features,
+    )
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{identity['episode_id']}",
         "episode_id": identity["episode_id"],
@@ -710,9 +818,7 @@ def dual_write_lane_decision(
         "market": _opportunity_market(source),
         "symbol": identity["symbol"],
         "raw_direction": identity["raw_direction"],
-        "feature_snapshot_at_signal": _first(
-            source.get("feature_snapshot_at_signal"), source.get("research_feature_snapshot")
-        ) or {},
+        "feature_snapshot_at_signal": pre_entry_features,
         "market_context_segment_refs": segment_refs,
         "market_context_segment_coverage": segment_coverage,
         "grouping_basis": identity["grouping_basis"],
@@ -759,10 +865,11 @@ def dual_write_lane_decision(
         "schema": "v3_lane_decision_receipt_v1",
         "epoch_id": str(epoch_id),
         **identity,
-        "writes": [opportunity, *segment_writes, decision, resolution["write"]],
+        "writes": [feature_receipt, opportunity, *segment_writes, decision, resolution["write"]],
         "store_verification": store.verify_write_set(
             ledgers=(
                 "opportunity",
+                "pre_entry_features",
                 *(('market_segment',) if segment_writes else ()),
                 "decision",
                 "lifecycle",
