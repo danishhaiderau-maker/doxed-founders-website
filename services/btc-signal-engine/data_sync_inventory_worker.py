@@ -915,6 +915,21 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 after_path = descriptor["last_path"]
 
         elapsed = time.monotonic() - started
+        pages_written = int(connection.execute(
+            "SELECT COUNT(*) FROM pages"
+        ).fetchone()[0])
+        pages_total = None
+        if checkpoint["phase"] == "FINALIZE" or generation is not None:
+            last_page = connection.execute(
+                "SELECT descriptor_json FROM pages ORDER BY page_index DESC LIMIT 1"
+            ).fetchone()
+            last_path = str(json.loads(last_page[0])["last_path"]) if last_page else ""
+            remaining_rows = int(connection.execute(
+                "SELECT COUNT(*) FROM rows WHERE path > ?", (last_path,)
+            ).fetchone()[0])
+            pages_total = max(
+                1, pages_written + ((remaining_rows + page_rows - 1) // page_rows)
+            )
         checkpoint["elapsed_seconds"] = float(checkpoint.get("elapsed_seconds") or 0.0) + elapsed
         checkpoint["invocations"] += 1
         receipt = {
@@ -927,6 +942,8 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             "dirs_seen": checkpoint["dirs_seen"],
             "rows_written": checkpoint["rows_written"],
             "invocations": checkpoint["invocations"],
+            "pages_written": pages_written,
+            "pages_total": pages_total,
             "invocation_files_seen": invocation_files,
             "invocation_dirs_seen": invocation_dirs,
             "invocation_elapsed_seconds": elapsed,
@@ -1000,6 +1017,9 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                 "dirs_seen": worker_receipt["dirs_seen"],
                 "rows_discovered": worker_receipt["rows_written"],
                 "phase": worker_receipt["phase"],
+                "invocations": worker_receipt["invocations"],
+                "pages_written": worker_receipt["pages_written"],
+                "pages_total": worker_receipt["pages_total"],
                 "retry_after_seconds": 5,
             }
             _atomic_json(result_path, payload)

@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +24,130 @@ def test_manifest_preflight_has_bounded_retries_and_stage_diagnostics():
     assert "stage=loop_manifest_preflight failed after" in source
     assert '$currentStage = "loop_manifest_preflight"' in source
     assert '"$failureAt`tERROR`tstage=$currentStage`tfailures=$consecutiveFailures' in source
+
+
+def _inventory_progress_key(worker: dict[str, object]) -> tuple[str, ...]:
+    """Executable model of the ordered PowerShell progress tuple."""
+    return tuple(
+        str(worker.get(field, ""))
+        for field in (
+            "phase",
+            "files_seen",
+            "dirs_seen",
+            "rows_discovered",
+            "pages_written",
+            "pages_total",
+        )
+    )
+
+
+def _stalls(
+    observations: list[tuple[float, dict[str, object]]], limit: float = 360
+) -> bool:
+    last_key: tuple[str, ...] | None = None
+    last_progress_at = 0.0
+    for elapsed, worker in observations:
+        key = _inventory_progress_key(worker)
+        if last_key is None or key != last_key:
+            last_key = key
+            last_progress_at = elapsed
+        if elapsed - last_progress_at >= limit:
+            return True
+    return False
+
+
+def test_finalize_page_progress_is_observable_and_does_not_false_stall():
+    source = _source()
+    progress_start = source.index("function Get-FlyInventorySemanticProgressKey")
+    progress_block = source[progress_start : source.index("function Set-FlyInventoryDiagnostic", progress_start)]
+    for field in (
+        "phase",
+        "files_seen",
+        "dirs_seen",
+        "rows_discovered",
+        "pages_written",
+        "pages_total",
+    ):
+        assert f"$worker.{field}" in progress_block
+    assert "$worker.invocations" not in progress_block
+    assert "Get-FlyInventorySemanticProgressKey -Manifest $preflight" in source
+
+    # FINALIZE can make progress while scan counters and phase remain fixed.
+    observations = [
+        (0, {"phase": "FINALIZE", "invocations": 4, "pages_written": 1, "pages_total": 3}),
+        (300, {"phase": "FINALIZE", "invocations": 5, "pages_written": 2, "pages_total": 3}),
+        (590, {"phase": "FINALIZE", "invocations": 6, "pages_written": 3, "pages_total": 3}),
+    ]
+    assert not _stalls(observations)
+
+
+def test_frozen_inventory_progress_tuple_stalls_at_existing_360_second_cap():
+    source = _source()
+    assert "$preflightInventoryStallMaxSec = 360" in source
+    assert "$preflightInventoryWaitMaxSec = 1800" in source
+
+    frozen = {"phase": "FINALIZE", "invocations": 4, "pages_written": 1, "pages_total": 3}
+    assert _stalls([(0, frozen), (359, frozen), (360, frozen)])
+
+
+def test_http_500_and_503_inventory_failures_are_persisted_fail_closed():
+    source = _source()
+    assert '$errorClass = "HTTP_$httpStatus"' in source
+    assert '$heartbeat["inventoryDiagnostic"] = $lastInventoryDiagnostic' in source
+    assert "inventoryDiagnostic = $lastInventoryDiagnostic" in source
+    assert '`thttp=$($inventoryLog.httpStatus)`terrorClass=$($inventoryLog.errorClass)' in source
+    assert "Get-BoundedDiagnosticText" in source
+    assert "ConvertTo-BoundedNullableCounter" in source
+    assert "Get-FlyInventoryErrorClass" in source
+
+    # There is no success return in the catch path: either it retries under
+    # the unchanged bounds or throws, while retaining an HTTP-class receipt.
+    catch_start = source.index(
+        "    } catch {", source.index("function Get-FlySyncPreflightManifest")
+    )
+    catch_block = source[catch_start : source.index("      Start-Sleep -Seconds $delaySec")]
+    assert "return $preflight" not in catch_block
+
+    def error_class(status: int) -> str:
+        return f"HTTP_{status}"
+
+    assert error_class(500) == "HTTP_500"
+    assert error_class(503) == "HTTP_503"
+
+
+def test_actual_powershell_progress_and_diagnostic_contract():
+    harness = ROOT / "scripts" / "test-sync-fly-bot-data-loop-progress.ps1"
+    completed = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(harness),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "sync-progress-contract-ok" in completed.stdout
+
+
+def test_receipt_bootstrap_pending_is_retryable_but_remains_bounded():
+    source = _source()
+    assert '$Manifest.inventory_build_status -eq "PENDING"' in source
+    assert '$worker.phase -eq "WAITING_RECEIPT_BOOTSTRAP"' in source
+    assert '$bootstrap.status -eq "PENDING"' in source
+    assert "$bootstrap.blocked -ne $true" in source
+    assert "(-not [bool]$worker.refreshing -and -not $bootstrapPending)" in source
+    assert '$bootstrap.status -eq "BLOCKED"' in source
+    assert "$bootstrap.blocked -eq $true" in source
+    assert "Test-FlyInventoryTerminalFailure -Manifest $preflight" in source
+    assert "$preflightInventoryStallMaxSec = 360" in source
+    assert "$preflightInventoryWaitMaxSec = 1800" in source
 
 
 def test_transient_poll_failure_retains_only_a_qualified_completed_match():

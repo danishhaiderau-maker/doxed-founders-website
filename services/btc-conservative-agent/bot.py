@@ -37881,6 +37881,9 @@ _data_sync_async_inventory = {
     "refresh_completed_at": None,
     "last_failure_at": None,
     "error": None,
+    "worker_invocations": 0,
+    "worker_pages_written": 0,
+    "worker_pages_total": None,
 }
 _DATA_SYNC_MANIFEST_PAGE_DEFAULT = 250
 _DATA_SYNC_MANIFEST_PAGE_MAX = 500
@@ -40024,7 +40027,10 @@ def _data_sync_load_persisted_inventory_snapshot() -> dict | None:
         ):
             return None
         return payload
-    except (OSError, ValueError, TypeError):
+    except (OSError, RuntimeError, ValueError, TypeError):
+        # A persisted v2 pointer is only acceleration, never authority. Older
+        # or malformed summaries must not permanently 500 the manifest route;
+        # retain the bytes in place and rebuild a fresh fenced generation.
         return None
 
 
@@ -40077,6 +40083,65 @@ def _data_sync_cleanup_inventory_worker_orphans(
         except OSError:
             continue
     return removed
+
+
+def _data_sync_receipt_bootstrap_gate() -> dict:
+    """Return the fail-closed lifecycle receipt-bootstrap admission state."""
+    runtime = _lifecycle_pipeline_runtime_status()
+    bootstrap = (
+        runtime.get("receipt_bootstrap")
+        if isinstance(runtime.get("receipt_bootstrap"), dict) else {}
+    )
+    status = str(bootstrap.get("status") or "PENDING").upper()
+    required = bootstrap.get("required") is True
+    explicitly_not_required = bootstrap.get("required") is False
+    complete = bool(
+        bootstrap.get("complete") is True
+        and bootstrap.get("blocked") is not True
+        and (
+            (required and status == "COMPLETE")
+            or (explicitly_not_required and status == "NOT_REQUIRED")
+        )
+    )
+    if status not in {"PENDING", "COMPLETE", "BLOCKED", "NOT_REQUIRED"}:
+        status = "PENDING"
+    return {
+        "required": required,
+        "status": status,
+        "complete": complete,
+        "blocked": bootstrap.get("blocked") is True,
+        "ledger": bootstrap.get("ledger"),
+        "ledgers_checked": max(0, int(bootstrap.get("ledgers_checked") or 0)),
+        "records_indexed": max(0, int(bootstrap.get("records_indexed") or 0)),
+        "bytes_indexed": max(0, int(bootstrap.get("bytes_indexed") or 0)),
+        "cursor": (
+            bootstrap.get("cursor")
+            if isinstance(bootstrap.get("cursor"), int)
+            and not isinstance(bootstrap.get("cursor"), bool)
+            and bootstrap.get("cursor") >= 0 else None
+        ),
+    }
+
+
+def _data_sync_bootstrap_pending_inventory_state(refresh_nonce=None, bootstrap=None) -> dict:
+    """Return non-authoritative retry metadata without admitting disk work."""
+    return {
+        "status": "BUILDING", "rows": [], "generation": None,
+        "generated_at": None, "generation_id": None,
+        "generation_available": False, "refreshing": True,
+        "refresh_nonce": str(refresh_nonce or "") or None,
+        "refresh_started_at": None, "refresh_completed_at": None,
+        "last_failure_at": None, "worker_phase": "WAITING_RECEIPT_BOOTSTRAP",
+        "worker_files_seen": 0, "worker_dirs_seen": 0,
+        "worker_rows_discovered": 0, "worker_invocations": 0,
+        "worker_pages_written": 0, "worker_pages_total": None,
+        "worker_bootstrap_ledger": (bootstrap or {}).get("ledger"),
+        "worker_bootstrap_ledgers_checked": (bootstrap or {}).get("ledgers_checked", 0),
+        "worker_bootstrap_records_indexed": (bootstrap or {}).get("records_indexed", 0),
+        "worker_bootstrap_bytes_indexed": (bootstrap or {}).get("bytes_indexed", 0),
+        "worker_bootstrap_cursor": (bootstrap or {}).get("cursor"),
+        "retry_after_seconds": 2, "error": None,
+    }
 
 
 def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> None:
@@ -40209,6 +40274,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                         "worker_dirs_seen": result.get("dirs_seen"),
                         "worker_rows_discovered": result.get("rows_discovered"),
                         "worker_resume_token": result.get("resume_token"),
+                        "worker_invocations": result.get("invocations"),
+                        "worker_pages_written": result.get("pages_written"),
+                        "worker_pages_total": result.get("pages_total"),
                         "retry_after_seconds": retry_after,
                         "error": None,
                         "worker_active": False,
@@ -40229,6 +40297,15 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
         disk_generation = _data_sync_validate_disk_inventory_generation(
             result, work_root
         )
+        # Receipt bootstrap and the physical inventory run concurrently after
+        # restart. Re-check at the publication boundary so a scan admitted
+        # while COMPLETE cannot promote after bootstrap authority regresses.
+        bootstrap_gate = _data_sync_receipt_bootstrap_gate()
+        if not bootstrap_gate["complete"]:
+            with _data_sync_inventory_cache_condition:
+                _data_sync_async_inventory["worker_phase"] = "WAITING_RECEIPT_BOOTSTRAP"
+                _data_sync_inventory_cache_condition.notify_all()
+            raise RuntimeError("receipt bootstrap is incomplete at inventory promotion")
         # Only the trading parent may promote the nonce-bound worker result to
         # the canonical restart snapshot.
         with _data_sync_inventory_cache_condition:
@@ -40258,6 +40335,11 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 "worker_phase": "COMPLETE",
                 "worker_files_seen": int(result.get("file_count") or 0),
                 "worker_rows_discovered": int(result.get("file_count") or 0),
+                "worker_invocations": int(
+                    (result.get("worker_receipt") or {}).get("invocations") or 0
+                ),
+                "worker_pages_written": int(result.get("page_count") or 0),
+                "worker_pages_total": int(result.get("page_count") or 0),
                 "retry_after_seconds": 0,
                 "error": None,
             })
@@ -40400,6 +40482,14 @@ def _data_sync_request_async_inventory(
                 "refresh_started_at": _data_sync_async_inventory.get("refresh_started_at"),
                 "refresh_completed_at": _data_sync_async_inventory.get("refresh_completed_at"),
                 "last_failure_at": _data_sync_async_inventory.get("last_failure_at"),
+                "worker_phase": _data_sync_async_inventory.get("worker_phase"),
+                "worker_files_seen": _data_sync_async_inventory.get("worker_files_seen"),
+                "worker_dirs_seen": _data_sync_async_inventory.get("worker_dirs_seen"),
+                "worker_rows_discovered": _data_sync_async_inventory.get("worker_rows_discovered"),
+                "worker_resume_token": _data_sync_async_inventory.get("worker_resume_token"),
+                "worker_invocations": _data_sync_async_inventory.get("worker_invocations"),
+                "worker_pages_written": _data_sync_async_inventory.get("worker_pages_written"),
+                "worker_pages_total": _data_sync_async_inventory.get("worker_pages_total"),
                 "error": None,
             }
         if not _data_sync_async_inventory.get("refreshing"):
@@ -40442,6 +40532,9 @@ def _data_sync_request_async_inventory(
             "worker_dirs_seen": _data_sync_async_inventory.get("worker_dirs_seen"),
             "worker_rows_discovered": _data_sync_async_inventory.get("worker_rows_discovered"),
             "worker_resume_token": _data_sync_async_inventory.get("worker_resume_token"),
+            "worker_invocations": _data_sync_async_inventory.get("worker_invocations"),
+            "worker_pages_written": _data_sync_async_inventory.get("worker_pages_written"),
+            "worker_pages_total": _data_sync_async_inventory.get("worker_pages_total"),
             "retry_after_seconds": _data_sync_async_inventory.get("retry_after_seconds") or 2,
             "error": _data_sync_async_inventory.get("error"),
         }
@@ -41095,6 +41188,12 @@ def api_data_sync_manifest():
             "error": "manifest generation identity is invalid",
             "inventory_status": "INVALID_REQUEST",
         }), 400
+    receipt_bootstrap = (
+        _data_sync_receipt_bootstrap_gate()
+        if not identity_only and not targeted_path
+        else {"required": True, "status": "NOT_APPLICABLE", "complete": False,
+              "blocked": False}
+    )
     # Identity-only fences intentionally skip the physical inventory. File
     # correctness remains protected by the initial full manifest plus the
     # per-file before/after generation checks in /api/data-sync/file.
@@ -41133,6 +41232,13 @@ def api_data_sync_manifest():
             }
         except (OSError, TypeError, ValueError) as exc:
             return jsonify({"error": str(exc), "inventory_status": "INVALID_PATH"}), 400
+    elif not receipt_bootstrap["complete"]:
+        # A full inventory can only become an authority after append-ledger
+        # receipts are complete. Return retryable metadata without admitting a
+        # scan or exposing a retained generation as CURRENT/ack-eligible.
+        inventory_state = _data_sync_bootstrap_pending_inventory_state(
+            refresh_nonce, receipt_bootstrap
+        )
     elif requested_generation_id:
         retained_generation = _data_sync_inventory_generation(
             requested_generation_id
@@ -41284,9 +41390,12 @@ def api_data_sync_manifest():
             "generation_available"
         ),
         "inventory_authoritative": inventory_status == "CURRENT",
+        "inventory_ack_eligible": inventory_status == "CURRENT" and receipt_bootstrap["complete"],
+        "receipt_bootstrap": receipt_bootstrap,
         "inventory_error": inventory_state.get("error"),
         "inventory_build_status": (
-            "BUILDING" if inventory_state.get("refreshing")
+            "PENDING" if inventory_state.get("worker_phase") == "WAITING_RECEIPT_BOOTSTRAP"
+            else "BUILDING" if inventory_state.get("refreshing")
             else "FAILED" if inventory_state.get("error")
             else "IDLE"
         ),
@@ -41348,6 +41457,14 @@ def api_data_sync_manifest():
             "dirs_seen": inventory_state.get("worker_dirs_seen"),
             "rows_discovered": inventory_state.get("worker_rows_discovered"),
             "resume_token": inventory_state.get("worker_resume_token"),
+            "invocations": inventory_state.get("worker_invocations"),
+            "pages_written": inventory_state.get("worker_pages_written"),
+            "pages_total": inventory_state.get("worker_pages_total"),
+            "bootstrap_ledger": inventory_state.get("worker_bootstrap_ledger"),
+            "bootstrap_ledgers_checked": inventory_state.get("worker_bootstrap_ledgers_checked"),
+            "bootstrap_records_indexed": inventory_state.get("worker_bootstrap_records_indexed"),
+            "bootstrap_bytes_indexed": inventory_state.get("worker_bootstrap_bytes_indexed"),
+            "bootstrap_cursor": inventory_state.get("worker_bootstrap_cursor"),
         },
     }
     if inventory_status == "BUILDING" and not files:
@@ -41817,6 +41934,16 @@ def _data_sync_ack_v3(body: dict):
         "source_cleanup_authorized": False,
     }
     with _data_sync_ack_lock:
+        bootstrap_gate = _data_sync_receipt_bootstrap_gate()
+        if not bootstrap_gate["complete"]:
+            return jsonify({
+                "error": "receipt bootstrap regressed before acknowledgement",
+                "accepted": 0,
+                "rejected_count": int(generation["file_count"]),
+                "inventory_status": "BOOTSTRAP_PENDING",
+                "receipt_bootstrap": bootstrap_gate,
+                "retry_after_seconds": 2,
+            }), 503
         _write_data_sync_ack(compact_ack)
     return jsonify({
         "ok": True,
@@ -41936,6 +42063,16 @@ def api_data_sync_ack():
     )
     acknowledged_at = utc_iso()
     with _data_sync_ack_lock:
+        bootstrap_gate = _data_sync_receipt_bootstrap_gate()
+        if not bootstrap_gate["complete"]:
+            return jsonify({
+                "error": "receipt bootstrap regressed before acknowledgement",
+                "accepted": 0,
+                "rejected_count": len(received),
+                "inventory_status": "BOOTSTRAP_PENDING",
+                "receipt_bootstrap": bootstrap_gate,
+                "retry_after_seconds": 2,
+            }), 503
         acks = _read_data_sync_ack()
         for rel, row in accepted_rows.items():
             acks[rel] = {

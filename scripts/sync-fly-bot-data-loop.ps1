@@ -373,6 +373,108 @@ $lastRelayEvidenceAttemptAt = [DateTimeOffset]::UtcNow
 $fullSyncQuietSuccesses = 3
 $fullSyncQuietProbeTimeoutSec = 8
 $fullSyncQuietMaxWaitSec = 90
+$lastInventoryDiagnostic = [ordered]@{}
+
+function Get-BoundedDiagnosticText {
+  param([object]$Value, [int]$MaximumLength = 240)
+  if ($null -eq $Value) { return $null }
+  $text = ([string]$Value) -replace '[\r\n\t]+', ' '
+  if ($text.Length -le $MaximumLength) { return $text }
+  return $text.Substring(0, $MaximumLength)
+}
+
+function ConvertTo-BoundedNullableCounter {
+  param([object]$Value, [long]$MaximumValue = 9007199254740991)
+  if ($null -eq $Value -or $Value -is [bool]) { return $null }
+  $parsed = [long]0
+  if (-not [long]::TryParse([string]$Value, [ref]$parsed) -or $parsed -lt 0) {
+    return $null
+  }
+  return [Math]::Min($parsed, $MaximumValue)
+}
+
+function Get-FlyInventoryErrorClass {
+  param([object]$Value)
+  if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
+  $candidate = ([string]$Value).Trim().ToUpperInvariant()
+  if ($candidate -match '^[A-Z][A-Z0-9_]{0,95}$') { return $candidate }
+  return "INVENTORY_ERROR_PRESENT"
+}
+
+function Get-FlyInventorySemanticProgressKey {
+  param([object]$Manifest)
+  $worker = $Manifest.inventory_worker
+  $bootstrap = $Manifest.receipt_bootstrap
+  return @(
+    [string]$worker.phase,
+    [string]$worker.files_seen,
+    [string]$worker.dirs_seen,
+    [string]$worker.rows_discovered,
+    [string]$worker.pages_written,
+    [string]$worker.pages_total,
+    [string]$bootstrap.status,
+    [string]$bootstrap.ledger,
+    [string]$bootstrap.records_indexed,
+    [string]$bootstrap.bytes_indexed,
+    [string]$bootstrap.cursor
+  ) -join ":"
+}
+
+function Test-FlyInventoryTerminalFailure {
+  param([object]$Manifest)
+  $worker = $Manifest.inventory_worker
+  $bootstrap = $Manifest.receipt_bootstrap
+  $bootstrapBlocked = (
+    $bootstrap.blocked -eq $true -or
+    [string]$bootstrap.status -eq "BLOCKED"
+  )
+  if ($bootstrapBlocked) { return $true }
+  $bootstrapPending = (
+    [string]$Manifest.inventory_build_status -eq "PENDING" -and
+    [string]$worker.phase -eq "WAITING_RECEIPT_BOOTSTRAP" -and
+    [string]$bootstrap.status -eq "PENDING" -and
+    $bootstrap.blocked -ne $true
+  )
+  return (
+    (-not [bool]$worker.refreshing -and -not $bootstrapPending) -or
+    -not [string]::IsNullOrWhiteSpace([string]$Manifest.inventory_error) -or
+    [string]$Manifest.inventory_build_status -eq "FAILED"
+  )
+}
+
+function Set-FlyInventoryDiagnostic {
+  param(
+    [object]$Manifest = $null,
+    [object]$Failure = $null
+  )
+  $worker = if ($Manifest) { $Manifest.inventory_worker } else { $null }
+  $httpStatus = $null
+  $errorClass = $null
+  if ($Failure) {
+    $errorClass = Get-BoundedDiagnosticText -Value $Failure.Exception.GetType().Name -MaximumLength 96
+    try {
+      if ($Failure.Exception.Response -and $Failure.Exception.Response.StatusCode) {
+        $httpStatus = [int]$Failure.Exception.Response.StatusCode
+        $errorClass = "HTTP_$httpStatus"
+      }
+    } catch { $httpStatus = $null }
+  }
+  $prior = $script:lastInventoryDiagnostic
+  $script:lastInventoryDiagnostic = [ordered]@{
+    inventoryStatus = $(if ($Manifest) { Get-BoundedDiagnosticText $Manifest.inventory_status 64 } else { $prior.inventoryStatus })
+    buildStatus = $(if ($Manifest) { Get-BoundedDiagnosticText $Manifest.inventory_build_status 64 } else { $prior.buildStatus })
+    phase = $(if ($worker) { Get-BoundedDiagnosticText $worker.phase 64 } else { $prior.phase })
+    invocations = $(if ($worker) { ConvertTo-BoundedNullableCounter $worker.invocations } else { $prior.invocations })
+    filesSeen = $(if ($worker) { ConvertTo-BoundedNullableCounter $worker.files_seen } else { $prior.filesSeen })
+    dirsSeen = $(if ($worker) { ConvertTo-BoundedNullableCounter $worker.dirs_seen } else { $prior.dirsSeen })
+    rowsDiscovered = $(if ($worker) { ConvertTo-BoundedNullableCounter $worker.rows_discovered } else { $prior.rowsDiscovered })
+    pagesWritten = $(if ($worker) { ConvertTo-BoundedNullableCounter $worker.pages_written } else { $prior.pagesWritten })
+    pagesTotal = $(if ($worker) { ConvertTo-BoundedNullableCounter $worker.pages_total } else { $prior.pagesTotal })
+    httpStatus = $(if ($null -ne $httpStatus -and $httpStatus -ge 100 -and $httpStatus -le 599) { $httpStatus } else { $null })
+    errorClass = $errorClass
+    inventoryErrorClass = $(if ($Manifest) { Get-FlyInventoryErrorClass $Manifest.inventory_error } else { $prior.inventoryErrorClass })
+  }
+}
 
 function Get-FlySyncPreflightManifest {
   param(
@@ -390,6 +492,7 @@ function Get-FlySyncPreflightManifest {
   $lastProgressKey = $null
   $lastProgressAtSec = 0.0
   for ($attempt = 1; $attempt -le $preflightManifestAttempts; $attempt++) {
+    $preflight = $null
     $terminalInventoryFailure = $false
     try {
       $preflight = Invoke-RestMethod `
@@ -397,6 +500,7 @@ function Get-FlySyncPreflightManifest {
         -Headers $preflightHeaders `
         -TimeoutSec $preflightManifestTimeoutSec `
         -ErrorAction Stop
+      Set-FlyInventoryDiagnostic -Manifest $preflight
       $expectedInventoryStatus = if ($IdentityOnly) { "IDENTITY_ONLY" } else { "CURRENT" }
       if ([string]$preflight.inventory_status -ne $expectedInventoryStatus) {
         $elapsedSec = if ($preflightInventoryElapsedProvider) {
@@ -405,22 +509,12 @@ function Get-FlySyncPreflightManifest {
           [double]$preflightWait.Elapsed.TotalSeconds
         }
         $worker = $preflight.inventory_worker
-        $progressKey = @(
-          [string]$worker.phase,
-          [string]$worker.files_seen,
-          [string]$worker.dirs_seen,
-          [string]$worker.rows_discovered
-        ) -join ":"
+        $progressKey = Get-FlyInventorySemanticProgressKey -Manifest $preflight
         if ($null -eq $lastProgressKey -or $progressKey -cne $lastProgressKey) {
           $lastProgressKey = $progressKey
           $lastProgressAtSec = $elapsedSec
         }
-        $refreshing = [bool]$worker.refreshing
-        $terminalInventoryFailure = (
-          -not $refreshing -or
-          -not [string]::IsNullOrWhiteSpace([string]$preflight.inventory_error) -or
-          [string]$preflight.inventory_build_status -eq "FAILED"
-        )
+        $terminalInventoryFailure = Test-FlyInventoryTerminalFailure -Manifest $preflight
         if ($terminalInventoryFailure) {
           throw (
             "Fly data-sync inventory terminated without CURRENT " +
@@ -440,6 +534,7 @@ function Get-FlySyncPreflightManifest {
       }
       return $preflight
     } catch {
+      if (-not $preflight) { Set-FlyInventoryDiagnostic -Failure $_ }
       if ($terminalInventoryFailure) { throw }
       $elapsedSec = if ($preflightInventoryElapsedProvider) {
         [double](& $preflightInventoryElapsedProvider)
@@ -990,6 +1085,7 @@ try {
         $heartbeat["consecutiveFailures"] = $consecutiveFailures
         $heartbeat["backoffSec"] = $sleepSec
         $heartbeat["nextRetryAt"] = $nextRetryAt
+        $heartbeat["inventoryDiagnostic"] = $lastInventoryDiagnostic
       } else {
         $heartbeat = [ordered]@{
           ok = $false
@@ -1013,10 +1109,17 @@ try {
           consecutiveFailures = $consecutiveFailures
           backoffSec = $sleepSec
           nextRetryAt = $nextRetryAt
+          inventoryDiagnostic = $lastInventoryDiagnostic
         }
       }
+      $inventoryLog = $lastInventoryDiagnostic
       Add-Content -LiteralPath $logFile -Value (
-        "$failureAt`tERROR`tstage=$currentStage`tfailures=$consecutiveFailures`tbackoff=${sleepSec}s`tnextRetry=$nextRetryAt`t$failureMessage"
+        "$failureAt`tERROR`tstage=$currentStage`tfailures=$consecutiveFailures`tbackoff=${sleepSec}s`tnextRetry=$nextRetryAt" +
+        "`tinvStatus=$($inventoryLog.inventoryStatus)`tinvBuild=$($inventoryLog.buildStatus)" +
+        "`tinvPhase=$($inventoryLog.phase)`tinvocations=$($inventoryLog.invocations)" +
+        "`tpages=$($inventoryLog.pagesWritten)/$($inventoryLog.pagesTotal)" +
+        "`thttp=$($inventoryLog.httpStatus)`terrorClass=$($inventoryLog.errorClass)" +
+        "`tinvErrorClass=$($inventoryLog.inventoryErrorClass)`t$failureMessage"
       )
     }
     $heartbeat | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $heartbeatFile -Encoding UTF8

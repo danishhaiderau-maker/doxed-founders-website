@@ -3826,6 +3826,164 @@ def test_persisted_inventory_snapshot_is_atomic_and_tamper_evident(tmp_path):
     assert namespace["_data_sync_load_persisted_inventory_snapshot"]() is None
 
 
+def test_invalid_v2_persisted_inventory_snapshot_is_ignored_without_deletion(tmp_path):
+    tree = ast.parse(BOT)
+    wanted = {"_data_sync_inventory_snapshot_path", "_data_sync_load_persisted_inventory_snapshot"}
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    target = tmp_path / "sync_inventory_current.json"
+    target.write_text(json.dumps({
+        "schema": "fly_runtime_inventory_snapshot_v2",
+        "generation": {"top_files": [{"path": f"row-{index}"} for index in range(6)]},
+    }), encoding="utf-8")
+    namespace = {
+        "Path": Path, "json": json,
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_NAME": "sync_inventory_current.json",
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA": "fly_runtime_inventory_snapshot_v1",
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2": "fly_runtime_inventory_snapshot_v2",
+        "_data_sync_volume_root": lambda: tmp_path,
+        "_data_sync_inventory_work_root": lambda: tmp_path,
+        "_data_sync_validate_disk_inventory_generation": (
+            lambda payload, root: (_ for _ in ()).throw(
+                RuntimeError("inventory top-files summary is invalid")
+            )
+        ),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    assert namespace["_data_sync_load_persisted_inventory_snapshot"]() is None
+    assert target.is_file()
+    assert len(json.loads(target.read_text(encoding="utf-8"))["generation"]["top_files"]) == 6
+
+
+def test_full_inventory_admission_and_promotion_are_bootstrap_fenced():
+    tree = ast.parse(BOT)
+    selected = [
+        node for node in tree.body if isinstance(node, ast.FunctionDef)
+        and node.name in {
+            "_data_sync_receipt_bootstrap_gate",
+            "_data_sync_bootstrap_pending_inventory_state",
+        }
+    ]
+    bootstrap = {"required": True, "status": "PENDING", "complete": False, "blocked": False}
+    namespace = {"_lifecycle_pipeline_runtime_status": lambda: {"receipt_bootstrap": dict(bootstrap)}}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    pending_gate = namespace["_data_sync_receipt_bootstrap_gate"]()
+    assert pending_gate["required"] is True
+    assert pending_gate["status"] == "PENDING"
+    assert pending_gate["complete"] is False and pending_gate["blocked"] is False
+    bootstrap.update({"status": "COMPLETE", "complete": True})
+    assert namespace["_data_sync_receipt_bootstrap_gate"]()["complete"] is True
+    bootstrap.update({"status": "PENDING", "complete": False})
+    bootstrap.update({
+        "ledger": "lifecycle", "ledgers_checked": 7,
+        "records_indexed": 31, "bytes_indexed": 4096, "cursor": 3072,
+    })
+    pending_gate = namespace["_data_sync_receipt_bootstrap_gate"]()
+    pending = namespace["_data_sync_bootstrap_pending_inventory_state"](
+        "a" * 32, pending_gate
+    )
+    assert pending["status"] == "BUILDING"
+    assert pending["generation"] is None and pending["generation_id"] is None
+    assert pending["generation_available"] is False
+    assert pending["refreshing"] is True
+    assert pending["worker_phase"] == "WAITING_RECEIPT_BOOTSTRAP"
+    assert pending["worker_bootstrap_ledger"] == "lifecycle"
+    assert pending["worker_bootstrap_records_indexed"] == 31
+    assert pending["worker_bootstrap_bytes_indexed"] == 4096
+    assert pending["worker_bootstrap_cursor"] == 3072
+    assert pending["retry_after_seconds"] == 2
+
+    bootstrap.clear()
+    bootstrap.update({
+        "required": False, "status": "NOT_REQUIRED", "complete": True,
+        "blocked": False,
+    })
+    not_required = namespace["_data_sync_receipt_bootstrap_gate"]()
+    assert not_required["required"] is False
+    assert not_required["status"] == "NOT_REQUIRED"
+    assert not_required["complete"] is True
+    bootstrap["complete"] = False
+    assert namespace["_data_sync_receipt_bootstrap_gate"]()["complete"] is False
+
+    route = BOT[BOT.index("def api_data_sync_manifest") : BOT.index("_data_sync_identity_cache_lock")]
+    assert route.index('elif not receipt_bootstrap["complete"]') < route.index(
+        "inventory_state = _data_sync_request_async_inventory("
+    )
+    worker = BOT[
+        BOT.index("def _data_sync_inventory_refresh_worker"):
+        BOT.index("def _data_sync_request_async_inventory")
+    ]
+    assert worker.index("bootstrap_gate = _data_sync_receipt_bootstrap_gate()") < worker.index(
+        "_data_sync_persist_disk_inventory_snapshot(disk_generation, generated_at)"
+    )
+    assert 'if not bootstrap_gate["complete"]' in worker
+    ack = BOT[BOT.index("def _data_sync_ack_v3") : BOT.index("@app.route('/api/data-sync/lifecycle-ack'")]
+    assert ack.count("bootstrap_gate = _data_sync_receipt_bootstrap_gate()") >= 2
+    assert ack.index("bootstrap_gate = _data_sync_receipt_bootstrap_gate()") < ack.index(
+        "_write_data_sync_ack(compact_ack)"
+    )
+
+
+def test_invalid_persisted_v2_snapshot_starts_exactly_one_async_rebuild(tmp_path):
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_inventory_snapshot_path",
+        "_data_sync_load_persisted_inventory_snapshot",
+        "_data_sync_request_async_inventory",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    target = tmp_path / "sync_inventory_current.json"
+    target.write_text(json.dumps({
+        "schema": "fly_runtime_inventory_snapshot_v2",
+        "generation": {"top_files": [{"path": f"row-{index}"} for index in range(6)]},
+    }), encoding="utf-8")
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def start(self): started.append(self.kwargs)
+
+    state = {
+        "status": "EMPTY", "rows": None, "generation": None,
+        "generated_at": None, "expires_at": 0.0,
+        "served_since_refresh": False, "refreshing": False, "error": None,
+    }
+    namespace = {
+        "Path": Path, "json": json, "hmac": hmac, "uuid": uuid, "time": time,
+        "threading": SimpleNamespace(Thread=FakeThread),
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_NAME": "sync_inventory_current.json",
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA": "fly_runtime_inventory_snapshot_v1",
+        "_DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2": "fly_runtime_inventory_snapshot_v2",
+        "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 150.0,
+        "_data_sync_volume_root": lambda: tmp_path,
+        "_data_sync_inventory_work_root": lambda: tmp_path,
+        "_data_sync_validate_disk_inventory_generation": (
+            lambda payload, root: (_ for _ in ()).throw(
+                RuntimeError("inventory top-files summary is invalid")
+            )
+        ),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_retain_disk_inventory_generation": lambda *args, **kwargs: "e" * 64,
+        "_data_sync_inventory_refresh_worker": lambda *args: None,
+        "utc_iso": lambda: "2026-09-02T00:00:00Z",
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    request_inventory = namespace["_data_sync_request_async_inventory"]
+    first = request_inventory(force_refresh=True, refresh_nonce="a" * 32)
+    second = request_inventory(force_refresh=True, refresh_nonce="a" * 32)
+    assert first["status"] == second["status"] == "BUILDING"
+    assert first["refresh_nonce"] == second["refresh_nonce"] == "a" * 32
+    assert len(started) == 1
+    assert target.is_file()
+
+
 def test_async_inventory_cold_start_is_nonblocking_single_flight():
     tree = ast.parse(BOT)
     node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_request_async_inventory")
@@ -3885,6 +4043,8 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
         "status": "CURRENT", "rows": [{"path": "sealed.json", "size": 7}],
         "generated_at": "completed-before-backoff", "expires_at": 0.0,
         "served_since_refresh": False, "refreshing": False, "error": None,
+        "worker_phase": "COMPLETE", "worker_invocations": 7,
+        "worker_pages_written": 4, "worker_pages_total": 4,
     }
     namespace = {
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
@@ -3905,6 +4065,9 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
     assert delivered["rows"] == [{"path": "sealed.json", "size": 7}]
     assert delivered["generated_at"] == "completed-before-backoff"
     assert delivered["error"] is None
+    assert delivered["worker_phase"] == "COMPLETE"
+    assert delivered["worker_invocations"] == 7
+    assert delivered["worker_pages_written"] == delivered["worker_pages_total"] == 4
     assert state["served_since_refresh"] is True
     assert started == []
     revalidating = request_inventory()

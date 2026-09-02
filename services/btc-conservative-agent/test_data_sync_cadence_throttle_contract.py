@@ -217,11 +217,16 @@ def test_ordinary_poll_uses_identity_only_and_full_inventory_is_due_gated():
     assert 'currentTotalBytes = $null' in source
 
 
+def _preflight_function_source(source: str) -> str:
+    """Extract the production preflight and every helper it calls."""
+    start = source.index("function Get-BoundedDiagnosticText")
+    end = source.index("\nfunction Invoke-OptionalRelayEvidenceSync", start)
+    return source[start:end]
+
+
 def test_building_inventory_retries_through_a_modeled_fifty_second_scan():
     source = LOOP_PATH.read_text(encoding="utf-8")
-    start = source.index("function Get-FlySyncPreflightManifest")
-    end = source.index("\nfunction Invoke-OptionalRelayEvidenceSync", start)
-    function_source = source[start:end]
+    function_source = _preflight_function_source(source)
     harness = (
         "$preflightManifestAttempts=13; $preflightManifestTimeoutSec=90; "
         "$preflightInventoryStallMaxSec=120; $preflightInventoryWaitMaxSec=120; $env:BOT_ADMIN_TOKEN='test'; "
@@ -247,9 +252,7 @@ def test_building_inventory_retries_through_a_modeled_fifty_second_scan():
 
 def _run_modeled_preflight(success_call: int | None) -> tuple[int, int, int]:
     source = LOOP_PATH.read_text(encoding="utf-8")
-    start = source.index("function Get-FlySyncPreflightManifest")
-    end = source.index("\nfunction Invoke-OptionalRelayEvidenceSync", start)
-    function_source = source[start:end]
+    function_source = _preflight_function_source(source)
     success_condition = (
         f"$script:calls -lt {success_call}"
         if success_call is not None else "$true"
@@ -289,9 +292,7 @@ def test_building_inventory_join_remains_bounded_when_worker_never_completes():
 
 def _run_progress_preflight(rows, *, stall=30, absolute=100):
     source = LOOP_PATH.read_text(encoding="utf-8")
-    start = source.index("function Get-FlySyncPreflightManifest")
-    end = source.index("\nfunction Invoke-OptionalRelayEvidenceSync", start)
-    function_source = source[start:end]
+    function_source = _preflight_function_source(source)
     encoded = json.dumps(rows, separators=(",", ":"))
     harness = (
         f"$preflightManifestAttempts=50; $preflightManifestTimeoutSec=90; "

@@ -269,10 +269,12 @@ def test_finalization_advances_by_one_page_per_bounded_invocation(tmp_path):
         (runtime / f"row-{index:02d}.json").write_text("{}", encoding="utf-8")
 
     page_counts = []
+    progress = []
     result = None
     for ordinal in range(401, 410):
         code, result_path = _run_generation(_load_worker(), volume, ordinal, payload)
         current = json.loads(result_path.read_text(encoding="utf-8"))
+        progress.append(current.get("worker_receipt") or {})
         staged = volume / ".data-sync-snapshots" / "inventory-generations"
         page_counts.append(len(list(staged.glob(".building-*/p*.json"))))
         if code == 0:
@@ -284,6 +286,16 @@ def test_finalization_advances_by_one_page_per_bounded_invocation(tmp_path):
     assert all(after - before <= 1 for before, after in zip(page_counts, page_counts[1:]))
     assert result["file_count"] == 8
     assert len(_generation_rows(result)) == 8
+    assert [row["invocations"] for row in progress] == list(
+        range(1, len(progress) + 1)
+    )
+    finalize = [row for row in progress if row.get("phase") in {"FINALIZE", "COMPLETE"}]
+    assert finalize
+    assert len({row["pages_total"] for row in finalize}) == 1
+    assert [row["pages_written"] for row in finalize] == sorted(
+        row["pages_written"] for row in finalize
+    )
+    assert finalize[-1]["pages_written"] == finalize[-1]["pages_total"] == 4
 
 
 def test_real_worker_nonzero_for_missing_request_and_orphan_cannot_satisfy_nonce(tmp_path):
