@@ -45,6 +45,52 @@ def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatn
     assert 'REQUIRE_CANONICAL_FLY_OWNER: "NO"' in DEPLOY
 
 
+def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailable():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert "inputs.mode != 'recover-unready'" in maintenance
+    recovery = DEPLOY[
+        DEPLOY.index("- name: Prove exact unready Fly revision and every durable relay account is flat"):
+        DEPLOY.index("- name: Prove stalled runtime recovery from the last guarded deployment")
+    ]
+    assert 'flyctl machine exec --app doxed-btc-bot' in recovery
+    assert 're.fullmatch(r"[0-9a-f]{12}", expected)' in recovery
+    assert '[[ "$EXPECTED_UNREADY_REVISION" =~ ^[0-9a-f]{12}$ ]]' in recovery
+    assert 'FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"' in recovery
+    assert 'GITHUB_ENV' not in recovery
+    assert 'os.getenv(\\"SOURCE_GIT_REV\\",\\"\\")[:12]==expected' in recovery
+    assert 'p.stat().st_mtime>=threshold' in recovery
+    assert 'd.get(\\"paper_only\\") is True and d.get(\\"live_armed\\") is False' in recovery
+    assert 'd.get(\\"positions\\")==[] and d.get(\\"pending_orders\\")==[]' in recovery
+    assert 'c.get(\\"manual_admin_pause\\") is True' in recovery
+    assert 'os.getenv(\\"FORCE_PAPER_MODE\\",\\"\\").lower()==\\"true\\"' in recovery
+    assert 'b\\"ModuleNotFoundError\\" in log' in recovery
+    assert 'b\\"research.mirror_generation_lease\\" in log' in recovery
+    assert 'run.get("name") != "Deploy Fly BTC bot"' in recovery
+    assert 'run.get("path") or "").startswith(".github/workflows/fly-bot-deploy.yml@")' in recovery
+    assert 'deploy_jobs = [job for job in jobs if job.get("name") == "test-and-deploy"]' in recovery
+    assert 'int(deployed[0]["number"]) < int(failed_acceptance[0]["number"]) < int(preserved[0]["number"])' in recovery
+    assert '"Re-enter maintenance and flatten the exact deployed revision"' in recovery
+    assert '"Prove liveness, execution safety, and exact revision"' in recovery
+    assert '"Best-effort preserve safe paper maintenance after failed guarded deploy"' in recovery
+    predeploy = DEPLOY[
+        DEPLOY.index("- name: Recheck maintenance boundary immediately before deploy"):
+        DEPLOY.index("- name: Deploy the exact source revision")
+    ]
+    assert "inputs.mode != 'recover-unready'" in predeploy
+
+
+def test_all_bitfinex_instances_must_be_paused_disarmed_and_reconciled_flat():
+    helper = (ROOT / "scripts/check-relay-flat.mjs").read_text(encoding="utf-8")
+    assert "const cheetahRows" not in helper
+    assert "const cheetah = rows.filter" not in helper
+    assert "const relayPausedAndDisarmed = rows.length > 0" in helper
+    assert "const reconciledFlat = rows.length > 0" in helper
+    assert "&& rows.every(isRelayPausedAndDisarmed)" in helper
+
+
 def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     pause = DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary")
     flat = DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")

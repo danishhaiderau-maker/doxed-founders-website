@@ -467,10 +467,7 @@ async function main() {
 
   let rows = await loadRelayBoundaryRows();
   if (!durableOnlyRecovery) {
-    const refreshTargets = rows.filter((row) => (
-      String(row.user).toLowerCase().includes('cheetah')
-      && isRelayPausedAndDisarmed(row)
-    ));
+    const refreshTargets = rows.filter(isRelayPausedAndDisarmed);
     if (refreshTargets.length === 0) {
       throw new Error('strict relay proof found no paused, disarmed Cheetah audit target');
     }
@@ -480,12 +477,11 @@ async function main() {
   }
   for (let attempt = 1; attempt <= (durableOnlyRecovery ? 1 : 10); attempt += 1) {
     rows = await loadRelayBoundaryRows();
-    const cheetah = rows.filter((row) => String(row.user).toLowerCase().includes('cheetah'));
     if (
       durableOnlyRecovery
       || (
-        cheetah.length > 0
-        && cheetah.every((row) => (
+        rows.length > 0
+        && rows.every((row) => (
           isRelayPausedAndDisarmed(row)
           && isStrictRawFlatReconcileSnapshot(row.reconcile)
           && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
@@ -514,12 +510,10 @@ async function main() {
     output.showcase.positions === 0 && output.showcase.pendingOrders === 0
   );
   const trackedFlat = rows.every((row) => row.activeParticipants === 0);
-  const cheetahRows = rows
-    .filter((row) => String(row.user).toLowerCase().includes('cheetah'));
-  const relayPausedAndDisarmed = cheetahRows.length > 0
-    && cheetahRows.every(isRelayPausedAndDisarmed);
-  const reconciledFlat = cheetahRows.length > 0
-    && cheetahRows.every((row) => {
+  const relayPausedAndDisarmed = rows.length > 0
+    && rows.every(isRelayPausedAndDisarmed);
+  const reconciledFlat = rows.length > 0
+    && rows.every((row) => {
       return (
         (durableOnlyRecovery
           ? isCompleteStoredRawFlatReconcileSnapshot(row.reconcile)

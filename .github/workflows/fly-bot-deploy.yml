@@ -792,7 +792,10 @@ jobs:
           npm ci
           npx prisma generate
 
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
       - name: Enter durable authenticated paper maintenance boundary
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
@@ -1007,6 +1010,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           REQUIRE_BOT_ADMIN_TOKEN: "NO"
           REQUIRE_CANONICAL_FLY_OWNER: "NO"
           DURABLE_RELAYS_ONLY_RECOVERY: "YES"
@@ -1017,10 +1021,10 @@ jobs:
           GH_REPOSITORY: ${{ github.repository }}
         run: |
           python - <<'PY'
-          import json, os, urllib.request
+          import json, os, re, urllib.request
           expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
           run_id = str(os.environ.get("RECOVERY_FAILED_RUN_ID") or "").strip()
-          if len(expected) != 12:
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
               raise SystemExit("recover-unready requires an exact 12-character revision")
           if not run_id.isdigit():
               raise SystemExit("recover-unready requires the failed deployment run id")
@@ -1030,16 +1034,49 @@ jobs:
               with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
                   return json.load(response)
           run = fetch(f"{base}/runs/{run_id}")
-          if str(run.get("head_sha") or "")[:12] != expected or run.get("conclusion") != "failure":
+          if (
+              str(run.get("head_sha") or "")[:12] != expected
+              or run.get("conclusion") != "failure"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("name") != "Deploy Fly BTC bot"
+              or not str(run.get("path") or "").startswith(".github/workflows/fly-bot-deploy.yml@")
+          ):
               raise SystemExit("recovery run does not bind the expected failed revision")
           jobs = fetch(f"{base}/runs/{run_id}/jobs?per_page=100").get("jobs") or []
-          steps = [step for job in jobs for step in (job.get("steps") or [])]
-          deployed = any(step.get("name") == "Deploy the exact source revision" and step.get("conclusion") == "success" for step in steps)
-          failed_liveness = any(step.get("name") == "Prove liveness, execution safety, and exact revision" and step.get("conclusion") == "failure" for step in steps)
-          if not deployed or not failed_liveness:
-              raise SystemExit("recovery run lacks successful deploy plus failed post-deploy liveness proof")
+          deploy_jobs = [job for job in jobs if job.get("name") == "test-and-deploy"]
+          if len(deploy_jobs) != 1 or deploy_jobs[0].get("conclusion") != "failure":
+              raise SystemExit("recovery run lacks one failed test-and-deploy job")
+          steps = deploy_jobs[0].get("steps") or []
+          deployed = [step for step in steps if step.get("name") == "Deploy the exact source revision" and step.get("conclusion") == "success"]
+          failed_acceptance = [step for step in steps if (
+              step.get("name") in {
+                  "Re-enter maintenance and flatten the exact deployed revision",
+                  "Prove liveness, execution safety, and exact revision",
+              }
+              and step.get("conclusion") == "failure"
+          )]
+          preserved = [step for step in steps if (
+              step.get("name") == "Best-effort preserve safe paper maintenance after failed guarded deploy"
+              and step.get("conclusion") == "success"
+          )]
+          if len(deployed) != 1 or len(failed_acceptance) != 1 or len(preserved) != 1:
+              raise SystemExit("recovery run lacks deploy, failed post-deploy acceptance, and maintenance preservation receipts")
+          if not (int(deployed[0]["number"]) < int(failed_acceptance[0]["number"]) < int(preserved[0]["number"])):
+              raise SystemExit("recovery receipt steps are out of order")
+          completed_at = str(deployed[0].get("completed_at") or "")
+          if not completed_at:
+              raise SystemExit("deployed step completion time is missing")
+          receipt_path = os.path.join(os.environ["RUNNER_TEMP"], "failed-deploy-completed-at.txt")
+          with open(receipt_path, "x", encoding="utf-8") as handle:
+              handle.write(completed_at)
           print(f"Exact unready recovery target proven by Actions run {run_id}: {expected}")
           PY
+          [[ "$EXPECTED_UNREADY_REVISION" =~ ^[0-9a-f]{12}$ ]]
+          FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"
+          [[ "$FAILED_DEPLOY_COMPLETED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "env EXPECTED_UNREADY_REVISION='${EXPECTED_UNREADY_REVISION}' FAILED_DEPLOY_COMPLETED_AT='${FAILED_DEPLOY_COMPLETED_AT}' python -c 'from pathlib import Path; from datetime import datetime; import json,os; expected=os.environ[\"EXPECTED_UNREADY_REVISION\"]; threshold=datetime.fromisoformat(os.environ[\"FAILED_DEPLOY_COMPLETED_AT\"].replace(\"Z\",\"+00:00\")).timestamp(); assert os.getenv(\"SOURCE_GIT_REV\",\"\")[:12]==expected; assert os.getenv(\"FORCE_PAPER_MODE\",\"\").lower()==\"true\"; p=Path(\"/app/data/runtime/paper_lifecycle_v1.json\"); d=json.loads(p.read_text(encoding=\"utf-8\")); c=json.loads(Path(\"/app/data/runtime/config-7002.json\").read_text(encoding=\"utf-8\")); assert p.stat().st_mtime>=threshold; assert d.get(\"schema\")==\"paper_lifecycle_v1\"; assert d.get(\"paper_only\") is True and d.get(\"live_armed\") is False; assert d.get(\"positions\")==[] and d.get(\"pending_orders\")==[]; assert c.get(\"manual_admin_pause\") is True; log=Path(\"/app/data/bot.log\").read_bytes()[-2097152:]; assert b\"ModuleNotFoundError\" in log and b\"research.mirror_generation_lease\" in log; print(\"Exact crashed runtime, fresh durable flat paper snapshot, and persisted pause proven\")'"
           node scripts/check-relay-flat.mjs
 
       - name: Prove stalled runtime recovery from the last guarded deployment
@@ -1083,9 +1120,8 @@ jobs:
           PY
           node scripts/check-relay-flat.mjs
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-
       - name: Recheck maintenance boundary immediately before deploy
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
