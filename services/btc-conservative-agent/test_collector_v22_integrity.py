@@ -41,8 +41,8 @@ class CollectorIntegrityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             event = _mature_event("crash-window")
             self.assertFalse(event_already_written("crash-window", data_dir=root))
-            real_save = collector_v22._save_event_index
-            with mock.patch.object(collector_v22, "_save_event_index", side_effect=OSError("crash after append")):
+            real_insert = collector_v22._insert_index_line
+            with mock.patch.object(collector_v22, "_insert_index_line", side_effect=OSError("crash after append")):
                 with self.assertRaisesRegex(OSError, "crash after append"):
                     write_research_event_once(event, data_dir=root)
             ok, reason = write_research_event_once(event, data_dir=root)
@@ -51,7 +51,7 @@ class CollectorIntegrityTests(unittest.TestCase):
             with open(os.path.join(root, RESEARCH_EVENTS_FILE), encoding="utf-8") as handle:
                 rows = [json.loads(line) for line in handle if line.strip().startswith("{")]
             self.assertEqual([row["event_id"] for row in rows], ["crash-window"])
-            self.assertTrue(real_save)
+            self.assertTrue(real_insert)
 
     def test_corrupt_or_missing_index_rebuilds_from_durable_rows(self):
         with tempfile.TemporaryDirectory() as root:
@@ -61,9 +61,9 @@ class CollectorIntegrityTests(unittest.TestCase):
             with open(index_path, "w", encoding="utf-8") as handle:
                 handle.write('{"events":')
             self.assertTrue(event_already_written("repair-index", data_dir=root))
-            with open(index_path, encoding="utf-8") as handle:
-                repaired = json.load(handle)
-            self.assertIn("repair-index", repaired["events"])
+            # The legacy JSON is immutable migration evidence, not the live index.
+            with self.assertRaises(json.JSONDecodeError):
+                json.loads(open(index_path, encoding="utf-8").read())
             os.remove(index_path)
             self.assertTrue(event_already_written("repair-index", data_dir=root))
 
@@ -478,7 +478,7 @@ class CollectorIntegrityTests(unittest.TestCase):
                 evaluation_ts=SIGNAL_TS + 181 * 60,
             )
             self.assertFalse(event_already_written("negative-crash", data_dir=root))
-            with mock.patch.object(collector_v22, "_save_event_index", side_effect=OSError("crash after negative append")):
+            with mock.patch.object(collector_v22, "_insert_index_line", side_effect=OSError("crash after negative append")):
                 with self.assertRaisesRegex(OSError, "crash after negative append"):
                     write_research_event_once(event, data_dir=root)
             self.assertEqual(write_research_event_once(event, data_dir=root), (False, "duplicate event_id"))

@@ -1,6 +1,7 @@
 import json
 import multiprocessing
 import os
+import sqlite3
 import threading
 import time
 from unittest import mock
@@ -14,7 +15,7 @@ from collector_v22 import (
     rotate_research_events,
     write_research_event_once,
 )
-from collector_v22_schema import EVENT_INDEX_FILE, OBS_DATA_ERROR, RESEARCH_EVENTS_FILE
+from collector_v22_schema import EVENT_SQLITE_INDEX_FILE, OBS_DATA_ERROR, RESEARCH_EVENTS_FILE
 from opportunity_capture_v22 import analyze_v22_events
 
 
@@ -35,6 +36,13 @@ def _hold_cross_process_writer_lock(root, ready, release):
         release.wait(5.0)
 
 
+def _cross_process_write(root, event, results):
+    try:
+        results.put(("ok", write_research_event_once(event, data_dir=root)))
+    except Exception as exc:
+        results.put(("error", type(exc).__name__, str(exc)))
+
+
 def test_rotation_seals_under_authority_and_preserves_idempotency(tmp_path):
     assert write_research_event_once(_event("before"), data_dir=str(tmp_path))[0]
     result = rotate_research_events(data_dir=str(tmp_path))
@@ -51,9 +59,9 @@ def test_rotation_seals_under_authority_and_preserves_idempotency(tmp_path):
         "duplicate event_id",
     )
     assert write_research_event_once(_event("after"), data_dir=str(tmp_path))[0]
-    index = json.loads((tmp_path / EVENT_INDEX_FILE).read_text("utf-8"))
-    assert index["events"]["before"]["generation"] == 1
-    assert index["events"]["after"]["generation"] == 0
+    with sqlite3.connect(tmp_path / EVENT_SQLITE_INDEX_FILE) as index:
+        assert index.execute("SELECT generation FROM events WHERE event_id='before'").fetchone()[0] == 1
+        assert index.execute("SELECT generation FROM events WHERE event_id='after'").fetchone()[0] == 0
     report = analyze_v22_events(data_dir=str(tmp_path))
     assert report["replay_integrity"]["ineligible_events"] == 2
 
@@ -132,7 +140,7 @@ def test_hash_tamper_revokes_sealed_generation_authority(tmp_path):
 def test_rotation_refuses_malformed_tail_without_moving_active(tmp_path):
     active = tmp_path / RESEARCH_EVENTS_FILE
     active.write_bytes((json.dumps(_event("good")) + "\n{bad}\n").encode("utf-8"))
-    with pytest.raises(RuntimeError, match="V22_ROTATION_JSON_INVALID"):
+    with pytest.raises(RuntimeError, match="V22_(ROTATION|EVENT_INDEX)_JSON_INVALID"):
         rotate_research_events(data_dir=str(tmp_path))
     assert active.is_file()
     assert not (tmp_path / f"{RESEARCH_EVENTS_FILE}.1").exists()
@@ -177,8 +185,8 @@ def test_exact_duplicate_across_generations_is_deduplicated(tmp_path):
     sealed_payload = (tmp_path / f"{RESEARCH_EVENTS_FILE}.1").read_bytes()
     (tmp_path / RESEARCH_EVENTS_FILE).write_bytes(sealed_payload)
     assert event_already_written("duplicate", data_dir=str(tmp_path))
-    index = json.loads((tmp_path / EVENT_INDEX_FILE).read_text("utf-8"))
-    assert list(index["events"]) == ["duplicate"]
+    with sqlite3.connect(tmp_path / EVENT_SQLITE_INDEX_FILE) as index:
+        assert index.execute("SELECT event_id FROM events").fetchall() == [("duplicate",)]
 
 
 def test_steady_state_append_does_not_rescan_ledger(tmp_path, monkeypatch):
@@ -189,6 +197,34 @@ def test_steady_state_append_does_not_rescan_ledger(tmp_path, monkeypatch):
         lambda *args, **kwargs: pytest.fail("steady-state append rescanned ledger"),
     )
     assert write_research_event_once(_event("second"), data_dir=str(tmp_path))[0]
+
+
+def test_second_append_never_loads_or_saves_legacy_json_or_rebuilds(tmp_path, monkeypatch):
+    assert write_research_event_once(_event("first"), data_dir=str(tmp_path))[0]
+    monkeypatch.setattr(collector_v22, "_load_event_index", lambda *a, **k: pytest.fail("legacy JSON loaded"))
+    monkeypatch.setattr(collector_v22, "_save_event_index", lambda *a, **k: pytest.fail("legacy JSON saved"))
+    monkeypatch.setattr(collector_v22, "_rebuild_sqlite_event_index", lambda *a, **k: pytest.fail("index rebuilt"))
+    monkeypatch.setattr(collector_v22, "_scan_durable_event_rows_with_count", lambda *a, **k: pytest.fail("JSONL scanned"))
+    assert write_research_event_once(_event("second"), data_dir=str(tmp_path))[0]
+
+
+def test_legacy_json_is_preserved_and_exact_hash_coverage_receipted(tmp_path):
+    encoded = (json.dumps(_event("legacy"), separators=(",", ":")) + "\n").encode("utf-8")
+    (tmp_path / RESEARCH_EVENTS_FILE).write_bytes(encoded)
+    legacy = {
+        "schema": "research_event_index_v1",
+        "events": {"legacy": {"row_sha256": collector_v22.hashlib.sha256(encoded).hexdigest()}},
+    }
+    legacy_path = tmp_path / "research_events_v22.index.json"
+    legacy_bytes = json.dumps(legacy, sort_keys=True).encode("utf-8")
+    legacy_path.write_bytes(legacy_bytes)
+    assert event_already_written("legacy", data_dir=str(tmp_path))
+    assert legacy_path.read_bytes() == legacy_bytes
+    with sqlite3.connect(tmp_path / EVENT_SQLITE_INDEX_FILE) as index:
+        meta = {key: json.loads(value) for key, value in index.execute("SELECT key,value FROM metadata")}
+    assert meta["legacy_json_preserved"] is True
+    assert meta["legacy_coverage_proven"] is True
+    assert meta["exact_identity_count"] == 1
 
 
 def test_all_v22_analysis_readers_see_sealed_and_active(tmp_path, monkeypatch):
@@ -243,3 +279,28 @@ def test_process_shared_lock_blocks_second_writer(tmp_path):
     holder.join(3.0)
     assert holder.exitcode == 0
     assert result and result[0][0]
+
+
+def test_cross_process_duplicate_is_idempotent_and_conflict_fails_closed(tmp_path):
+    context = multiprocessing.get_context("spawn")
+    results = context.Queue()
+    first = context.Process(target=_cross_process_write, args=(str(tmp_path), _event("shared"), results))
+    first.start()
+    first.join(5.0)
+    assert first.exitcode == 0
+    first_result = results.get(timeout=1.0)
+    assert first_result[0] == "ok" and first_result[1][0] is True
+    duplicate = context.Process(target=_cross_process_write, args=(str(tmp_path), _event("shared"), results))
+    duplicate.start()
+    duplicate.join(5.0)
+    assert duplicate.exitcode == 0
+    assert results.get(timeout=1.0) == ("ok", (False, "duplicate event_id"))
+    changed = _event("shared")
+    changed["exact_reason"] = "CONFLICT"
+    conflict = context.Process(target=_cross_process_write, args=(str(tmp_path), changed, results))
+    conflict.start()
+    conflict.join(5.0)
+    assert conflict.exitcode == 0
+    outcome = results.get(timeout=1.0)
+    assert outcome[:2] == ("error", "RuntimeError")
+    assert outcome[2] == "V22_EVENT_ID_CONFLICT:shared"

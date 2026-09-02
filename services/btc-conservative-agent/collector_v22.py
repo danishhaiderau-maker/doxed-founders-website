@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ from collector_v22_schema import (
     EVAL_NOT_EVALUATED,
     EVAL_PASS,
     EVENT_INDEX_FILE,
+    EVENT_SQLITE_INDEX_FILE,
     EVENT_SCHEMA,
     EPISODE_FALLBACK_WINDOW_SEC,
     EPISODE_SCHEMA,
@@ -827,6 +829,219 @@ def _load_event_index(path: str) -> dict:
     return {"schema": "research_event_index_v1", "events": {}}
 
 
+_EVENT_SQLITE_SCHEMA = "research_event_identity_index_v2"
+
+
+def _event_sqlite_path(root: str) -> str:
+    return os.path.join(root, EVENT_SQLITE_INDEX_FILE)
+
+
+def _event_index_connect(root: str) -> sqlite3.Connection:
+    """Open the durable identity index; WAL keeps readers off the writer path."""
+    os.makedirs(root, exist_ok=True)
+    connection = sqlite3.connect(_event_sqlite_path(root), timeout=30.0)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute("PRAGMA synchronous=FULL")
+    connection.execute("PRAGMA busy_timeout=30000")
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS events (
+               event_id TEXT PRIMARY KEY,
+               generation INTEGER NOT NULL,
+               generation_line_number INTEGER NOT NULL,
+               global_line_number INTEGER NOT NULL,
+               byte_offset INTEGER NOT NULL,
+               byte_length INTEGER NOT NULL,
+               row_sha256 TEXT NOT NULL,
+               written_at TEXT,
+               observation_status TEXT
+           )"""
+    )
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    connection.commit()
+    return connection
+
+
+def _index_meta(connection: sqlite3.Connection) -> dict[str, Any]:
+    return {key: json.loads(value) for key, value in connection.execute(
+        "SELECT key, value FROM metadata"
+    )}
+
+
+def _set_index_meta(connection: sqlite3.Connection, values: Mapping[str, Any]) -> None:
+    connection.executemany(
+        "INSERT OR REPLACE INTO metadata(key,value) VALUES (?,?)",
+        [(key, json.dumps(value, separators=(",", ":"), sort_keys=True)) for key, value in values.items()],
+    )
+
+
+def _event_generation_signature(root: str, events_file: str) -> list[list[Any]]:
+    signature = []
+    for receipt in _load_valid_event_seals(root, events_file, validate_hash=False):
+        path = os.path.join(root, str(receipt["relative_path"]))
+        stat = os.stat(path)
+        signature.append([
+            int(receipt["generation"]), str(receipt["sha256"]),
+            int(stat.st_size), int(stat.st_mtime_ns),
+        ])
+    return signature
+
+
+def _insert_index_line(
+    connection: sqlite3.Connection, line: bytes, *, generation: int,
+    generation_line_number: int, global_line_number: int, byte_offset: int,
+) -> None:
+    try:
+        row = json.loads(line)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"V22_EVENT_INDEX_JSON_INVALID:{generation}:{generation_line_number}") from exc
+    if not isinstance(row, dict):
+        raise RuntimeError(f"V22_EVENT_INDEX_ROW_INVALID:{generation}:{generation_line_number}")
+    event_id = str(row.get("event_id") or row.get("trade_id") or "")
+    if not event_id:
+        raise RuntimeError(f"V22_EVENT_INDEX_ID_MISSING:{generation}:{generation_line_number}")
+    row_sha = hashlib.sha256(line).hexdigest()
+    existing = connection.execute(
+        "SELECT row_sha256 FROM events WHERE event_id=?", (event_id,)
+    ).fetchone()
+    if existing:
+        if existing[0] != row_sha:
+            raise RuntimeError(f"V22_EVENT_ID_CONFLICT:{event_id}")
+        return
+    connection.execute(
+        """INSERT INTO events(event_id,generation,generation_line_number,
+               global_line_number,byte_offset,byte_length,row_sha256,written_at,
+               observation_status) VALUES (?,?,?,?,?,?,?,?,?)""",
+        (event_id, generation, generation_line_number, global_line_number,
+         byte_offset, len(line), row_sha,
+         json.dumps((row.get("envelope") or {}).get("signal_ts")),
+         row.get("observation_status")),
+    )
+
+
+def _rebuild_sqlite_event_index(
+    connection: sqlite3.Connection, root: str, events_file: str,
+    generation_signature: list[list[Any]],
+) -> dict:
+    """Maintenance-only exact rebuild; normal appends never enter this path."""
+    legacy_path = os.path.join(root, EVENT_INDEX_FILE)
+    legacy = _load_event_index(legacy_path)
+    legacy_events = legacy.get("events") or {}
+    legacy_count = len(legacy_events)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute("DELETE FROM events")
+        global_line = 0
+        active_rows = 0
+        active_size = 0
+        for path in research_event_generation_paths(root, events_file):
+            if not os.path.isfile(path):
+                continue
+            suffix = path[len(os.path.join(root, events_file)) + 1:] if path.startswith(os.path.join(root, events_file) + ".") else "0"
+            generation = int(suffix) if suffix.isdigit() else 0
+            offset = 0
+            with open(path, "rb") as handle:
+                for generation_line, line in enumerate(handle, start=1):
+                    global_line += 1
+                    _insert_index_line(
+                        connection, line, generation=generation,
+                        generation_line_number=generation_line,
+                        global_line_number=global_line, byte_offset=offset,
+                    )
+                    offset += len(line)
+            if generation == 0:
+                active_rows = generation_line if offset else 0
+                active_size = offset
+        exact_count = int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+        legacy_coverage_proven = not os.path.isfile(legacy_path)
+        if os.path.isfile(legacy_path) and legacy_count == exact_count:
+            durable_identities = {
+                event_id: row_sha for event_id, row_sha in connection.execute(
+                    "SELECT event_id,row_sha256 FROM events"
+                )
+            }
+            legacy_coverage_proven = all(
+                event_id in durable_identities
+                and str((metadata or {}).get("row_sha256") or "") == durable_identities[event_id]
+                for event_id, metadata in legacy_events.items()
+            )
+        _set_index_meta(connection, {
+            "schema": _EVENT_SQLITE_SCHEMA,
+            "ready": True,
+            "events_file": events_file,
+            "generation_signature": generation_signature,
+            "active_indexed_bytes": active_size,
+            "active_row_count": active_rows,
+            "global_row_count": global_line,
+            "exact_identity_count": exact_count,
+            "legacy_json_preserved": os.path.isfile(legacy_path),
+            "legacy_json_event_count": legacy_count,
+            "legacy_coverage_proven": legacy_coverage_proven,
+        })
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return _index_meta(connection)
+
+
+def _reconcile_sqlite_event_index(root: str, events_file: str = RESEARCH_EVENTS_FILE) -> tuple[sqlite3.Connection, dict]:
+    """Reconcile only an unindexed ACTIVE suffix during steady operation."""
+    _recover_event_rotation(root, events_file)
+    signature = _event_generation_signature(root, events_file)
+    connection = _event_index_connect(root)
+    meta = _index_meta(connection)
+    active_path = os.path.join(root, events_file)
+    active_size = os.path.getsize(active_path) if os.path.isfile(active_path) else 0
+    if not (
+        meta.get("schema") == _EVENT_SQLITE_SCHEMA
+        and meta.get("ready") is True
+        and meta.get("events_file") == events_file
+        and meta.get("generation_signature") == signature
+        and 0 <= int(meta.get("active_indexed_bytes") or 0) <= active_size
+    ):
+        try:
+            meta = _rebuild_sqlite_event_index(connection, root, events_file, signature)
+            return connection, meta
+        except Exception:
+            connection.close()
+            raise
+    indexed = int(meta.get("active_indexed_bytes") or 0)
+    if indexed == active_size:
+        return connection, meta
+    active_rows = int(meta.get("active_row_count") or 0)
+    global_rows = int(meta.get("global_row_count") or 0)
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        with open(active_path, "rb") as handle:
+            handle.seek(indexed)
+            offset = indexed
+            while line := handle.readline():
+                if not line.endswith(b"\n"):
+                    raise RuntimeError("V22_EVENT_INDEX_ACTIVE_TAIL_INVALID")
+                active_rows += 1
+                global_rows += 1
+                _insert_index_line(
+                    connection, line, generation=0,
+                    generation_line_number=active_rows,
+                    global_line_number=global_rows, byte_offset=offset,
+                )
+                offset += len(line)
+        _set_index_meta(connection, {
+            "active_indexed_bytes": active_size,
+            "active_row_count": active_rows,
+            "global_row_count": global_rows,
+            "exact_identity_count": int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]),
+        })
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        connection.close()
+        raise
+    return connection, _index_meta(connection)
+
+
 _EVENT_WRITER_LOCK = threading.RLock()
 _EVENT_SEAL_CACHE_LOCK = threading.Lock()
 _EVENT_SEAL_VALIDATION_CACHE: dict[str, tuple[int, int, str]] = {}
@@ -1096,13 +1311,16 @@ def rotate_research_events(*, data_dir: Optional[str] = None, failpoint: str = "
             handle.seek(-1, os.SEEK_END)
             if handle.read(1) != b"\n":
                 raise RuntimeError("V22_ROTATION_ACTIVE_TAIL_INVALID")
-        index = _reconcile_event_index(root)
-        prior_event_ids = {
-            event_id
-            for event_id, metadata in (index.get("events") or {}).items()
-            if int((metadata or {}).get("generation") or 0) > 0
-        }
-        row_count = _validate_active_event_ledger(active_path, prior_event_ids)
+        connection, index_meta = _reconcile_sqlite_event_index(root)
+        try:
+            prior_event_ids = {
+                row[0] for row in connection.execute(
+                    "SELECT event_id FROM events WHERE generation > 0"
+                )
+            }
+            row_count = _validate_active_event_ledger(active_path, prior_event_ids)
+        finally:
+            connection.close()
         seals = _load_valid_event_seals(root)
         generation = (max((int(row["generation"]) for row in seals), default=0) + 1)
         sealed_name = f"{RESEARCH_EVENTS_FILE}.{generation}"
@@ -1127,7 +1345,11 @@ def rotate_research_events(*, data_dir: Optional[str] = None, failpoint: str = "
         recovered = _recover_event_rotation(root)
         if failpoint == "AFTER_SEAL":
             raise RuntimeError("V22_ROTATION_FAILPOINT_AFTER_SEAL")
-        _reconcile_event_index(root)
+        # Reconciliation after the committed rename is maintenance-only. It
+        # rebinds ACTIVE rows to the sealed generation and creates the empty
+        # successor authority; normal appends remain O(1).
+        connection, _ = _reconcile_sqlite_event_index(root)
+        connection.close()
         return recovered or {}
 
 
@@ -1249,8 +1471,26 @@ def _save_event_index(path: str, index: dict) -> None:
 def event_already_written(event_id: str, *, data_dir: Optional[str] = None) -> bool:
     root = data_dir or os.getcwd()
     with _event_writer_exclusive(root):
-        index = _reconcile_event_index(root)
-        return str(event_id) in (index.get("events") or {})
+        connection, _ = _reconcile_sqlite_event_index(root)
+        try:
+            return connection.execute(
+                "SELECT 1 FROM events WHERE event_id=?", (str(event_id),)
+            ).fetchone() is not None
+        finally:
+            connection.close()
+
+
+def event_index_identity_count(*, data_dir: Optional[str] = None) -> int:
+    """Read the durable identity count without mutating an analyzer source tree."""
+    root = data_dir or os.getcwd()
+    sqlite_path = _event_sqlite_path(root)
+    if os.path.isfile(sqlite_path):
+        connection = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+        try:
+            return int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+        finally:
+            connection.close()
+    return len((_load_event_index(os.path.join(root, EVENT_INDEX_FILE)).get("events") or {}))
 
 
 def write_research_event_once(
@@ -1269,15 +1509,22 @@ def write_research_event_once(
     negative_evidence = status in (OBS_INSUFFICIENT_PATH, OBS_DATA_ERROR)
     if not terminal_observation(status) or (not eligibility.get("eligible") and not negative_evidence):
         return False, "provisional or replay-ineligible event"
+    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
+    if "\n" in line:
+        raise ValueError("research event must be one JSON line")
+    encoded = (line + "\n").encode("utf-8")
+    candidate_sha = hashlib.sha256(encoded).hexdigest()
     with _event_writer_exclusive(root):
-        index_path = os.path.join(root, EVENT_INDEX_FILE)
-        index = _reconcile_event_index(root, events_file)
-        if event_id in (index.get("events") or {}):
+        connection, index_meta = _reconcile_sqlite_event_index(root, events_file)
+        existing = connection.execute(
+            "SELECT row_sha256 FROM events WHERE event_id=?", (event_id,)
+        ).fetchone()
+        if existing:
+            connection.close()
+            if existing[0] != candidate_sha:
+                raise RuntimeError(f"V22_EVENT_ID_CONFLICT:{event_id}")
             return False, "duplicate event_id"
         events_path = os.path.join(root, events_file)
-        line = json.dumps(record, separators=(",", ":"), ensure_ascii=True)
-        if "\n" in line:
-            raise ValueError("research event must be one JSON line")
         os.makedirs(root, exist_ok=True)
         with open(events_path, "ab+") as handle:
             handle.seek(0, os.SEEK_END)
@@ -1286,28 +1533,32 @@ def write_research_event_once(
                 if handle.read(1) != b"\n":
                     handle.seek(0, os.SEEK_END)
                     handle.write(b"\n")
-            encoded = (line + "\n").encode("utf-8")
             handle.seek(0, os.SEEK_END)
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        index.setdefault("events", {})[event_id] = {
-            "written_at": record.get("envelope", {}).get("signal_ts"),
-            "observation_status": record.get("observation_status"),
-            "bytes": len(line.encode("utf-8")),
-            "line_number": len(index.get("events") or {}) + 1,
-            "generation": 0,
-            "generation_line_number": int(index.get("active_row_count") or 0) + 1,
-            "global_line_number": len(index.get("events") or {}) + 1,
-            "row_sha256": hashlib.sha256(encoded).hexdigest(),
-        }
-        prior_active_size = int(index.get("active_file_size") or 0)
-        index["active_file_size"] = os.path.getsize(events_path)
-        index["events_file_size"] = int(index.get("events_file_size") or 0) + (
-            index["active_file_size"] - prior_active_size
-        )
-        index["active_row_count"] = int(index.get("active_row_count") or 0) + 1
-        _save_event_index(index_path, index)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            active_row = int(index_meta.get("active_row_count") or 0) + 1
+            global_row = int(index_meta.get("global_row_count") or 0) + 1
+            _insert_index_line(
+                connection, encoded, generation=0,
+                generation_line_number=active_row,
+                global_line_number=global_row,
+                byte_offset=os.path.getsize(events_path) - len(encoded),
+            )
+            _set_index_meta(connection, {
+                "active_indexed_bytes": os.path.getsize(events_path),
+                "active_row_count": active_row,
+                "global_row_count": global_row,
+                "exact_identity_count": int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]),
+            })
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            connection.close()
+            raise
+        connection.close()
         # V3 dual-write is deliberately downstream of the durable v2 append.
         # V2 remains the recovery source during migration; V3 failures are
         # surfaced in a receipt without corrupting or duplicating the source.

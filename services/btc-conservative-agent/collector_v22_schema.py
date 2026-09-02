@@ -13,6 +13,7 @@ EVENT_SCHEMA = "research_event_v2.2"
 PRE_SIGNAL_CONTEXT_SCHEMA = "pre_signal_context_v1"
 RESEARCH_EVENTS_FILE = "research_events_v22.jsonl"
 EVENT_INDEX_FILE = "research_events_v22.index.json"
+EVENT_SQLITE_INDEX_FILE = "research_events_v22.index.sqlite3"
 STORAGE_STATE_FILE = "collector_storage_state.json"
 EPISODE_SCHEMA = "event_episode_v1"
 EPISODE_FALLBACK_WINDOW_SEC = 300.0
