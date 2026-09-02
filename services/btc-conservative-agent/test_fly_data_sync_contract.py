@@ -201,6 +201,8 @@ function Invoke-RestMethod {{
   if ($response -eq "CURRENT") {{ return @{{ snapshot_status = "CURRENT" }} }}
   $message = if ($response -eq "BUILDING") {{
     '{{"snapshot_status":"BUILDING","retry_after_seconds":2}}'
+  }} elseif ($response -eq "EXPIRED") {{
+    '{{"snapshot_status":"EXPIRED","retry_after_seconds":2}}'
   }} else {{
     '{{"ok":false,"error":"dashboard_busy","retry_after_sec":1}}'
   }}
@@ -241,6 +243,13 @@ def test_sqlite_lease_retry_opens_only_after_two_consecutive_pressure_failures()
     assert result["ok"] is False
     assert result["calls"] == 5
     assert "2/2 consecutive pressure attempt(s)" in result["error"]
+
+
+def test_sqlite_lease_retry_stops_immediately_on_terminal_expiry():
+    result = _run_sqlite_lease_retry_sequence(["EXPIRED", "BUILDING", "CURRENT"])
+    assert result["ok"] is False
+    assert result["calls"] == 1
+    assert "terminal snapshot lease attempt(s)" in result["error"]
 
 
 def test_successful_slow_chunks_increase_throttle_instead_of_masking_pressure():
@@ -1260,6 +1269,7 @@ def test_sqlite_snapshot_lease_materializes_only_requested_database(tmp_path):
         "app": app,
         "request": request,
         "jsonify": jsonify,
+        "re": re,
         "sqlite3": sqlite3,
         "_data_sync_resolve_relpath": lambda rel: {
             "first.db": first,
@@ -1268,19 +1278,29 @@ def test_sqlite_snapshot_lease_materializes_only_requested_database(tmp_path):
         "_data_sync_consistency_mode": lambda path: (
             "sqlite_snapshot_v1" if path.suffix == ".db" else "strict_generation_v1"
         ),
-        "_data_sync_request_sqlite_snapshot": lambda path: (
+        "_data_sync_request_sqlite_snapshot": lambda path, request_id, inventory_generation_id, inventory_sha256, source_identity: (
             calls.append(path.name)
             or {"snapshot_status": "CURRENT", "snapshot_id": "a" * 32,
-                "snapshot_size": 5, "snapshot_sha256": "b" * 64}
+                "snapshot_size": 5, "snapshot_sha256": "b" * 64,
+                "request_id": request_id, "build_id": "c" * 32,
+                "inventory_generation_id": inventory_generation_id,
+                "inventory_sha256": inventory_sha256}
         ),
         "_data_sync_relpath": lambda path: path.name,
         "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
-    with app.test_request_context("/api/data-sync/sqlite-snapshot?path=first.db"):
+    with app.test_request_context(
+            "/api/data-sync/sqlite-snapshot?path=first.db&request_id=" + "d" * 32
+            + "&inventory_generation_id=" + "e" * 64
+            + "&inventory_sha256=" + "e" * 64):
         payload = namespace["api_data_sync_sqlite_snapshot"]().get_json()
     assert payload["path"] == "first.db"
     assert calls == ["first.db"]
+    with app.test_request_context("/api/data-sync/sqlite-snapshot?path=first.db"):
+        response, status = namespace["api_data_sync_sqlite_snapshot"]()
+    assert status == 400
+    assert response.get_json()["error"] == "invalid sqlite snapshot request identity"
     with app.test_request_context("/api/data-sync/sqlite-snapshot?path=../escape.db"):
         response, status = namespace["api_data_sync_sqlite_snapshot"]()
     assert status == 400
@@ -1313,6 +1333,9 @@ def test_sqlite_snapshot_generation_is_single_flight_and_reused(tmp_path):
             return self.started
 
     condition = threading.Condition()
+    request_id = "c" * 32
+    inventory_generation_id = "7" * 64
+    inventory_sha256 = "7" * 64
     state = {
         "status": "EMPTY", "generation": None, "path": None, "lease": None,
         "worker": None, "started_at": 0.0, "deadline_at": 0.0,
@@ -1321,37 +1344,49 @@ def test_sqlite_snapshot_generation_is_single_flight_and_reused(tmp_path):
     lease = {"snapshot_id": "a" * 32, "snapshot_size": 17,
              "snapshot_sha256": "b" * 64}
     namespace = {
-        "Path": Path, "time": time,
+        "Path": Path, "time": time, "re": re, "uuid": uuid, "hmac": hmac,
         "threading": SimpleNamespace(Thread=DeferredThread),
         "_data_sync_sqlite_snapshot_condition": condition,
-        "_data_sync_sqlite_snapshot_states": {str(source.resolve()): state},
+        "_data_sync_sqlite_snapshot_states": {
+            (str(source.resolve()), request_id,
+             inventory_generation_id, inventory_sha256): state,
+        },
         "_data_sync_sqlite_snapshot_build_slots": threading.BoundedSemaphore(1),
         "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
         "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_authorize_sqlite_snapshot_request": lambda path, generation, digest, identity: {"path": path.name},
+        "_data_sync_unlink_sqlite_snapshot_artifact": lambda snapshot_id: True,
+        "_data_sync_sweep_sqlite_snapshot_artifacts": lambda protected: 0,
         "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
         "_data_sync_sqlite_snapshot": lambda path, deadline_monotonic=None: (
             builds.append(path) or lease.copy()
         ),
-        "_data_sync_sqlite_snapshot_subprocess": lambda path, deadline_at=None: (
+        "_data_sync_sqlite_snapshot_subprocess": lambda path, deadline_at=None, snapshot_id=None: (
             builds.append(path) or lease.copy()
         ),
         "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: source,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     request_snapshot = namespace["_data_sync_request_sqlite_snapshot"]
-    first = request_snapshot(source)
-    second = request_snapshot(source)
+    first = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    second = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
     assert first["snapshot_status"] == "BUILDING"
     assert second["snapshot_status"] == "BUILDING"
     assert len(started) == 1
     assert builds == []
     started[0].target(*started[0].args)
-    current = request_snapshot(source)
-    assert current == {"snapshot_status": "CURRENT", **lease}
+    current = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    assert current["snapshot_status"] == "CURRENT"
+    assert current["snapshot_id"] == lease["snapshot_id"]
+    assert current["request_id"] == request_id
+    assert re.fullmatch(r"[0-9a-f]{32}", current["build_id"])
     assert builds == [source]
     assert len(started) == 1
     Path(f"{source}-wal").write_bytes(b"new-wal-evidence")
-    changed = request_snapshot(source)
+    changed_request_id = "d" * 32
+    changed = request_snapshot(
+        source, changed_request_id, inventory_generation_id, inventory_sha256,
+    )
     assert changed["snapshot_status"] == "BUILDING"
     assert len(started) == 2
 
@@ -1389,15 +1424,18 @@ def test_sqlite_snapshot_single_flight_is_isolated_per_canonical_path(tmp_path):
                         "snapshot_sha256": "d" * 64},
     }
     namespace = {
-        "Path": Path, "time": time,
+        "Path": Path, "time": time, "re": re, "uuid": uuid, "hmac": hmac,
         "threading": SimpleNamespace(Thread=DeferredThread),
         "_data_sync_sqlite_snapshot_condition": threading.Condition(),
         "_data_sync_sqlite_snapshot_states": {},
         "_data_sync_sqlite_snapshot_build_slots": threading.BoundedSemaphore(1),
         "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
         "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_authorize_sqlite_snapshot_request": lambda path, generation, digest, identity: {"path": path.name},
+        "_data_sync_unlink_sqlite_snapshot_artifact": lambda snapshot_id: True,
+        "_data_sync_sweep_sqlite_snapshot_artifacts": lambda protected: 0,
         "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
-        "_data_sync_sqlite_snapshot_subprocess": lambda path, deadline_at=None: (
+        "_data_sync_sqlite_snapshot_subprocess": lambda path, deadline_at=None, snapshot_id=None: (
             builds.append(path) or leases[path].copy()
         ),
         "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: first_source,
@@ -1405,18 +1443,449 @@ def test_sqlite_snapshot_single_flight_is_isolated_per_canonical_path(tmp_path):
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     request_snapshot = namespace["_data_sync_request_sqlite_snapshot"]
 
-    assert request_snapshot(first_source)["snapshot_status"] == "BUILDING"
-    assert request_snapshot(first_source)["snapshot_status"] == "BUILDING"
-    assert request_snapshot(second_source)["snapshot_status"] == "BUILDING"
+    first_request = "e" * 32
+    second_request = "f" * 32
+    inventory_generation_id = "7" * 64
+    inventory_sha256 = "7" * 64
+    assert request_snapshot(first_source, first_request, inventory_generation_id, inventory_sha256)["snapshot_status"] == "BUILDING"
+    assert request_snapshot(first_source, first_request, inventory_generation_id, inventory_sha256)["snapshot_status"] == "BUILDING"
+    assert request_snapshot(second_source, second_request, inventory_generation_id, inventory_sha256)["snapshot_status"] == "BUILDING"
     assert len(started) == 2
     assert set(namespace["_data_sync_sqlite_snapshot_states"]) == {
-        str(first_source), str(second_source),
+        (str(first_source), first_request, inventory_generation_id, inventory_sha256),
+        (str(second_source), second_request, inventory_generation_id, inventory_sha256),
     }
     started[0].target(*started[0].args)
     started[1].target(*started[1].args)
-    assert request_snapshot(first_source)["snapshot_id"] == "a" * 32
-    assert request_snapshot(second_source)["snapshot_id"] == "c" * 32
+    assert request_snapshot(first_source, first_request, inventory_generation_id, inventory_sha256)["snapshot_id"] == "a" * 32
+    assert request_snapshot(second_source, second_request, inventory_generation_id, inventory_sha256)["snapshot_id"] == "c" * 32
     assert builds == [first_source, second_source]
+
+
+def test_sqlite_snapshot_request_flight_survives_hot_wal_and_replays(tmp_path):
+    source = (tmp_path / "hot.db").resolve()
+    source.write_bytes(b"database")
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_sqlite_generation", "_data_sync_sqlite_snapshot_worker",
+        "_data_sync_request_sqlite_snapshot",
+    }
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    started = []
+    builds = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target, self.args, self.started = target, args, False
+
+        def start(self):
+            self.started = True
+            started.append(self)
+
+        def is_alive(self):
+            return self.started
+
+    def build(path, deadline_at=None, snapshot_id=None):
+        builds.append(path)
+        Path(f"{path}-wal").write_bytes(b"wal-advanced-during-backup")
+        return {"snapshot_id": "1" * 32, "snapshot_size": 8,
+                "snapshot_sha256": "2" * 64}
+
+    namespace = {
+        "Path": Path, "time": time, "re": re, "uuid": uuid, "hmac": hmac,
+        "threading": SimpleNamespace(Thread=DeferredThread),
+        "_data_sync_sqlite_snapshot_condition": threading.Condition(),
+        "_data_sync_sqlite_snapshot_states": {},
+        "_data_sync_sqlite_snapshot_build_slots": threading.BoundedSemaphore(1),
+        "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_authorize_sqlite_snapshot_request": lambda path, generation, digest, identity: {"path": path.name},
+        "_data_sync_unlink_sqlite_snapshot_artifact": lambda snapshot_id: True,
+        "_data_sync_sweep_sqlite_snapshot_artifacts": lambda protected: 0,
+        "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
+        "_data_sync_sqlite_snapshot_subprocess": build,
+        "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: source,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    request_snapshot = namespace["_data_sync_request_sqlite_snapshot"]
+    request_id = "3" * 32
+    inventory_generation_id = "7" * 64
+    inventory_sha256 = "7" * 64
+
+    building = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    assert building["request_id"] == request_id
+    build_id = building["build_id"]
+    assert len(started) == 1
+    started[0].target(*started[0].args)
+
+    first = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    replay = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    assert first == replay
+    assert first["snapshot_status"] == "CURRENT"
+    assert first["request_id"] == request_id
+    assert first["build_id"] == build_id
+    assert first["source_changed_during_build"] is True
+    assert first["source_generation_start"] != first["source_generation_end"]
+    assert builds == [source]
+
+    next_inventory = request_snapshot(
+        source, request_id, "9" * 64, "9" * 64,
+    )
+    assert next_inventory["snapshot_status"] == "BUILDING"
+    assert next_inventory["build_id"] != build_id
+
+    # A new logical sync must not silently reuse the prior request's lease.
+    next_request = request_snapshot(
+        source, "4" * 32, inventory_generation_id, inventory_sha256,
+    )
+    assert next_request["snapshot_status"] == "BUILDING"
+    assert next_request["build_id"] != build_id
+    assert len(started) == 3
+
+
+def test_sqlite_snapshot_failed_request_is_terminal_but_new_request_can_build(tmp_path):
+    source = (tmp_path / "failed.db").resolve()
+    source.write_bytes(b"database")
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_sqlite_generation", "_data_sync_sqlite_snapshot_worker",
+        "_data_sync_request_sqlite_snapshot",
+    }
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    started = []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.target, self.args, self.started = target, args, False
+
+        def start(self):
+            self.started = True
+            started.append(self)
+
+        def is_alive(self):
+            return self.started
+
+    namespace = {
+        "Path": Path, "time": time, "re": re, "uuid": uuid, "hmac": hmac,
+        "threading": SimpleNamespace(Thread=DeferredThread),
+        "_data_sync_sqlite_snapshot_condition": threading.Condition(),
+        "_data_sync_sqlite_snapshot_states": {},
+        "_data_sync_sqlite_snapshot_build_slots": threading.BoundedSemaphore(1),
+        "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_authorize_sqlite_snapshot_request": lambda path, generation, digest, identity: {"path": path.name},
+        "_data_sync_unlink_sqlite_snapshot_artifact": lambda snapshot_id: True,
+        "_data_sync_sweep_sqlite_snapshot_artifacts": lambda protected: 0,
+        "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
+        "_data_sync_sqlite_snapshot_subprocess": lambda path, deadline_at=None, snapshot_id=None: (
+            (_ for _ in ()).throw(TimeoutError("bounded failure"))
+        ),
+        "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: source,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    request_snapshot = namespace["_data_sync_request_sqlite_snapshot"]
+    request_id = "5" * 32
+    inventory_generation_id = "7" * 64
+    inventory_sha256 = "7" * 64
+    request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    started[0].target(*started[0].args)
+
+    failed = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    failed_replay = request_snapshot(source, request_id, inventory_generation_id, inventory_sha256)
+    assert failed == failed_replay
+    assert failed["snapshot_status"] == "FAILED"
+    assert failed["request_id"] == request_id
+    assert "bounded failure" in failed["error"]
+    assert len(started) == 1
+    assert request_snapshot(source, "6" * 32, inventory_generation_id, inventory_sha256)["snapshot_status"] == "BUILDING"
+    assert len(started) == 2
+
+
+def test_sqlite_snapshot_expiry_is_stable_until_new_nonce_and_inactive_eviction(tmp_path):
+    source = (tmp_path / "expiry.db").resolve()
+    source.write_bytes(b"database")
+    request_id, generation_id = "a" * 32, "b" * 64
+    build_id, snapshot_id = "c" * 32, "d" * 32
+    lease = {
+        "request_id": request_id, "build_id": build_id,
+        "inventory_generation_id": generation_id,
+        "inventory_sha256": generation_id, "source_path": str(source),
+        "snapshot_id": snapshot_id, "snapshot_size": 8,
+        "snapshot_sha256": "e" * 64,
+    }
+    state_key = (str(source), request_id, generation_id, generation_id)
+    states = {state_key: {
+        "status": "CURRENT", "lease": lease, "build_id": build_id,
+        "worker": None, "completed_at": time.monotonic() - 1000,
+        "last_accessed_at": time.monotonic() - 1000,
+    }}
+    started, removed = [], []
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.started = False
+        def start(self):
+            self.started = True
+            started.append(self)
+        def is_alive(self):
+            return self.started
+
+    tree = ast.parse(BOT)
+    wanted = {"_data_sync_sqlite_generation", "_data_sync_request_sqlite_snapshot"}
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    namespace = {
+        "Path": Path, "time": time, "re": re, "uuid": uuid, "hmac": hmac,
+        "threading": SimpleNamespace(Thread=DeferredThread),
+        "_data_sync_sqlite_snapshot_condition": threading.Condition(),
+        "_data_sync_sqlite_snapshot_states": states,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_authorize_sqlite_snapshot_request": lambda path, generation, digest, identity: {"path": path.name},
+        "_data_sync_unlink_sqlite_snapshot_artifact": lambda token: removed.append(token) or True,
+        "_data_sync_sweep_sqlite_snapshot_artifacts": lambda protected: 0,
+        "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
+        "_data_sync_resolve_sqlite_snapshot": lambda token: source,
+        "_data_sync_sqlite_snapshot_worker": lambda *args: None,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    request_snapshot = namespace["_data_sync_request_sqlite_snapshot"]
+    expired = request_snapshot(source, request_id, generation_id, generation_id)
+    replay = request_snapshot(source, request_id, generation_id, generation_id)
+    assert expired["snapshot_status"] == replay["snapshot_status"] == "EXPIRED"
+    assert expired["build_id"] == replay["build_id"] == build_id
+    assert states[state_key]["lease"]["snapshot_id"] == snapshot_id
+    assert removed == [] and started == []
+
+    fresh = request_snapshot(source, "f" * 32, generation_id, generation_id)
+    assert fresh["snapshot_status"] == "BUILDING"
+    assert fresh["build_id"] != build_id
+    assert len(started) == 1
+    assert removed == []  # recent EXPIRED access protects the old artifact
+
+    states[state_key]["last_accessed_at"] = time.monotonic() - 1000
+    request_snapshot(source, "1" * 32, generation_id, generation_id)
+    assert removed == [snapshot_id]
+
+
+def test_sqlite_snapshot_client_binds_one_request_and_validates_server_identity():
+    lease_body = SYNC_SCRIPT[
+        SYNC_SCRIPT.index("function Set-SqliteSnapshotLease"):
+        SYNC_SCRIPT.index("# The long-running loop already performs",)
+    ]
+    assert '$requestId = [guid]::NewGuid().ToString("N")' in lease_body
+    assert '"&request_id=$requestId"' in lease_body
+    assert '"&inventory_generation_id=$inventoryGenerationId"' in lease_body
+    assert '"&inventory_sha256=$inventorySha256"' in lease_body
+    assert '"&source_physical_size=$([int64]$Row.physical_size)"' in lease_body
+    assert '"&source_mtime_ns=$([int64]$Row.mtime_ns)"' in lease_body
+    assert '"&source_inode=$([int64]$Row.inode)"' in lease_body
+    assert '"&source_consistency_mode=$([string]$Row.consistency_mode)"' in lease_body
+    assert "[string]$lease.request_id -cne $requestId" in lease_body
+    assert "[string]$lease.build_id -notmatch '^[0-9a-f]{32}$'" in lease_body
+    assert "[string]$lease.inventory_generation_id -cne $inventoryGenerationId" in lease_body
+    assert "[string]$lease.inventory_sha256 -cne $inventorySha256" in lease_body
+    assert "snapshot_request_id" in lease_body
+    assert "snapshot_build_id" in lease_body
+    assert lease_body.count("[guid]::NewGuid()") == 1
+
+
+def test_sqlite_snapshot_file_resolver_rejects_cross_flight_identity(tmp_path):
+    source = (tmp_path / "source.db").resolve()
+    snapshot = (tmp_path / "snapshot.db").resolve()
+    snapshot.write_bytes(b"immutable")
+    request_id, build_id = "1" * 32, "2" * 32
+    inventory_generation_id, inventory_sha256 = "3" * 64, "3" * 64
+    snapshot_id, snapshot_sha256 = "5" * 32, "6" * 64
+    lease = {
+        "request_id": request_id, "build_id": build_id,
+        "inventory_generation_id": inventory_generation_id,
+        "inventory_sha256": inventory_sha256,
+        "source_path": str(source), "snapshot_id": snapshot_id,
+        "snapshot_size": snapshot.stat().st_size,
+        "snapshot_sha256": snapshot_sha256,
+    }
+    state_key = (
+        str(source), request_id, inventory_generation_id, inventory_sha256,
+    )
+    tree = ast.parse(BOT)
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_data_sync_resolve_sqlite_snapshot_flight"]
+    namespace = {
+        "Path": Path, "re": re, "hmac": hmac, "time": time,
+        "_data_sync_sqlite_snapshot_condition": threading.Condition(),
+        "_data_sync_sqlite_snapshot_states": {
+            state_key: {"status": "CURRENT", "lease": lease,
+                        "completed_at": time.monotonic() - 1000,
+                        "last_accessed_at": time.monotonic() - 1000},
+        },
+        "_data_sync_resolve_sqlite_snapshot": lambda token: snapshot,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    resolve = namespace["_data_sync_resolve_sqlite_snapshot_flight"]
+    args = [source, request_id, build_id, inventory_generation_id,
+            inventory_sha256, snapshot_id, snapshot.stat().st_size, snapshot_sha256]
+    assert resolve(*args) == snapshot
+    assert namespace["_data_sync_sqlite_snapshot_states"][state_key][
+        "last_accessed_at"
+    ] > time.monotonic() - 2
+    for index, replacement in (
+        (1, "7" * 32), (2, "8" * 32), (3, "9" * 64),
+        (4, "a" * 64), (5, "b" * 32), (7, "c" * 64),
+    ):
+        mismatched = list(args)
+        mismatched[index] = replacement
+        with pytest.raises(ValueError, match="identity mismatch"):
+            resolve(*mismatched)
+
+
+def test_sqlite_snapshot_file_chunks_carry_complete_flight_identity():
+    assert '&snapshot_request_id=$([string]$row.snapshot_request_id)' in SYNC_SCRIPT
+    assert '&snapshot_build_id=$([string]$row.snapshot_build_id)' in SYNC_SCRIPT
+    assert '&inventory_generation_id=$([string]$row.snapshot_inventory_generation_id)' in SYNC_SCRIPT
+    assert '&inventory_sha256=$([string]$row.snapshot_inventory_sha256)' in SYNC_SCRIPT
+    file_body = BOT[BOT.index("def api_data_sync_file"):BOT.index("def _data_sync_ack_v3_identity_matches")]
+    assert "_data_sync_resolve_sqlite_snapshot_flight(" in file_body
+    assert "sqlite snapshot acknowledgement identity mismatch" in file_body
+    assert "X-Data-Snapshot-Request-Id" in file_body
+    assert "X-Data-Snapshot-Build-Id" in file_body
+    assert "X-Data-Inventory-Generation-Id" in file_body
+    assert "X-Data-Inventory-Sha256" in file_body
+    assert '$returnedRequestId -ne [string]$row.snapshot_request_id' in SYNC_SCRIPT
+    assert '$returnedBuildId -ne [string]$row.snapshot_build_id' in SYNC_SCRIPT
+
+
+def test_sqlite_snapshot_authority_requires_exact_current_inventory_row(tmp_path):
+    source = (tmp_path / "authority.db").resolve()
+    source.write_bytes(b"authority")
+    stat = source.stat()
+    generation_id = "d" * 64
+    row = {
+        "path": "authority.db", "physical_size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "inode": int(getattr(stat, "st_ino", 0) or 0),
+        "consistency_mode": "sqlite_snapshot_v1",
+    }
+    generation = {
+        "status": "CURRENT", "ack_eligible": True,
+        "storage": "memory_v1", "rows": [row],
+    }
+    tree = ast.parse(BOT)
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef)
+                and node.name == "_data_sync_authorize_sqlite_snapshot_request"]
+    namespace = {
+        "Path": Path, "hmac": hmac,
+        "_data_sync_inventory_generation": lambda digest: generation if digest == generation_id else None,
+        "_data_sync_disk_manifest_page": lambda retained, raw_cursor="": {"rows": [row]},
+        "_data_sync_manifest_cursor": lambda digest, page: f"{digest}.{page}",
+        "_data_sync_relpath": lambda path: path.name,
+        "_data_sync_generation_matches": lambda observed, size, mtime_ns, inode: (
+            observed.st_size == size and observed.st_mtime_ns == mtime_ns
+            and int(getattr(observed, "st_ino", 0) or 0) == inode
+        ),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    authorize = namespace["_data_sync_authorize_sqlite_snapshot_request"]
+    assert authorize(source, generation_id, generation_id, row)["path"] == "authority.db"
+    with pytest.raises(ValueError, match="unavailable"):
+        authorize(source, "e" * 64, "e" * 64, row)
+    generation["rows"] = [{**row, "path": "other.db"}]
+    with pytest.raises(ValueError, match="absent"):
+        authorize(source, generation_id, generation_id, row)
+    generation["rows"] = [{**row, "consistency_mode": "strict_generation_v1"}]
+    with pytest.raises(ValueError, match="not a SQLite snapshot"):
+        authorize(source, generation_id, generation_id, row)
+    generation["rows"] = [{**row, "physical_size": stat.st_size + 1}]
+    with pytest.raises(ValueError, match="identity mismatch"):
+        authorize(source, generation_id, generation_id, row)
+    generation.update({
+        "status": "CURRENT", "ack_eligible": True,
+        "storage": "disk_pages_v2", "page_count": 1,
+    })
+    generation.pop("rows", None)
+    assert authorize(source, generation_id, generation_id, row)["path"] == "authority.db"
+    generation.update({"status": "STALE", "ack_eligible": False, "rows": [row]})
+    with pytest.raises(ValueError, match="unavailable"):
+        authorize(source, generation_id, generation_id, row)
+
+
+def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
+    snapshot_root = tmp_path / ".data-sync-snapshots"
+    snapshot_root.mkdir()
+    expired_id, orphan_id, active_id = "1" * 32, "2" * 32, "3" * 32
+    for token in (expired_id, orphan_id, active_id):
+        target = snapshot_root / f"{token}.db"
+        target.write_bytes(token.encode("ascii"))
+        os.utime(target, (time.time() - 2000, time.time() - 2000))
+    linked_id = "8" * 32
+    linked_target = tmp_path / "must-survive.db"
+    linked_target.write_bytes(b"outside")
+    linked_path = snapshot_root / f"{linked_id}.db"
+    try:
+        linked_path.symlink_to(linked_target)
+    except OSError:
+        linked_path = None
+    source = (tmp_path / "source.db").resolve()
+    source.write_bytes(b"source")
+    request_id, generation_id = "4" * 32, "5" * 64
+
+    class AliveWorker:
+        def is_alive(self):
+            return True
+
+    class DeferredThread:
+        def __init__(self, *, target, args, name, daemon):
+            self.started = False
+        def start(self):
+            self.started = True
+        def is_alive(self):
+            return self.started
+
+    old = time.monotonic() - 2000
+    states = {
+        (str(source), "6" * 32, generation_id, generation_id): {
+            "status": "CURRENT", "lease": {"snapshot_id": expired_id},
+            "worker": None, "completed_at": old,
+        },
+        (str(source), "7" * 32, generation_id, generation_id): {
+            "status": "BUILDING", "lease": None, "snapshot_id": active_id,
+            "worker": AliveWorker(), "completed_at": 0.0,
+        },
+    }
+    wanted = {
+        "_data_sync_sqlite_generation", "_data_sync_unlink_sqlite_snapshot_artifact",
+        "_data_sync_sweep_sqlite_snapshot_artifacts", "_data_sync_request_sqlite_snapshot",
+    }
+    tree = ast.parse(BOT)
+    selected = [node for node in tree.body
+                if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    namespace = {
+        "Path": Path, "time": time, "os": os, "re": re, "uuid": uuid,
+        "hmac": hmac, "threading": SimpleNamespace(Thread=DeferredThread),
+        "_data_sync_volume_root": lambda: tmp_path,
+        "_data_sync_sqlite_snapshot_condition": threading.Condition(),
+        "_data_sync_sqlite_snapshot_states": states,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
+        "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
+        "_data_sync_authorize_sqlite_snapshot_request": lambda path, generation, digest, identity: {"path": path.name},
+        "_data_sync_sqlite_snapshot_deadline_seconds": lambda: 60,
+        "_data_sync_resolve_sqlite_snapshot": lambda snapshot_id: snapshot_root / f"{snapshot_id}.db",
+        "_data_sync_sqlite_snapshot_worker": lambda *args: None,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    namespace["_data_sync_request_sqlite_snapshot"](
+        source, request_id, generation_id, generation_id,
+    )
+    assert not (snapshot_root / f"{expired_id}.db").exists()
+    assert not (snapshot_root / f"{orphan_id}.db").exists()
+    assert (snapshot_root / f"{active_id}.db").is_file()
+    assert linked_target.read_bytes() == b"outside"
+    if linked_path is not None:
+        assert linked_path.is_symlink()
 
 
 def test_manifest_is_metadata_only_and_snapshot_hash_is_streamed():

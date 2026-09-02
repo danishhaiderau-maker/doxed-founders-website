@@ -110,6 +110,10 @@ function Invoke-DataSyncJsonRequest {
         $Stage -eq "sqlite_snapshot_lease" -and
         [string]$_.ErrorDetails.Message -match '"snapshot_status"\s*:\s*"BUILDING"'
       )
+      $structuredSnapshotTerminal = (
+        $Stage -eq "sqlite_snapshot_lease" -and
+        [string]$_.ErrorDetails.Message -match '"snapshot_status"\s*:\s*"(FAILED|EXPIRED)"'
+      )
       if ($Stage -eq "sqlite_snapshot_lease") {
         if ($structuredSnapshotBuilding) {
           $consecutiveNonBuildingPressureFailures = 0
@@ -129,9 +133,11 @@ function Invoke-DataSyncJsonRequest {
         "status=$(if ($structuredSnapshotBuilding) { 'building' } else { 'failed' }) " +
         "error=$($_.Exception.Message)"
       )
-      if ($snapshotPressureCircuitOpen -or $attempt -ge $effectiveMaxAttempts) {
+      if ($structuredSnapshotTerminal -or $snapshotPressureCircuitOpen -or $attempt -ge $effectiveMaxAttempts) {
         $failureProgress = if ($snapshotPressureCircuitOpen) {
           "$consecutiveNonBuildingPressureFailures/$resourcePressureCircuitThreshold consecutive pressure"
+        } elseif ($structuredSnapshotTerminal) {
+          "terminal snapshot lease"
         } else {
           "$attempt/$effectiveMaxAttempts"
         }
@@ -515,14 +521,28 @@ $base = $SourceUrl.TrimEnd("/")
 function Set-SqliteSnapshotLease {
   param([Parameter(Mandatory = $true)]$Row)
   $rel = [string]$Row.path
+  # One identity is reused by every transport retry. This makes a lost HTTP
+  # response an idempotent poll of the same immutable snapshot flight.
+  $requestId = [guid]::NewGuid().ToString("N")
   $lease = Invoke-DataSyncJsonRequest `
     -Stage "sqlite_snapshot_lease" `
-    -Uri "$base/api/data-sync/sqlite-snapshot?path=$([uri]::EscapeDataString($rel))" `
+    -Uri ("$base/api/data-sync/sqlite-snapshot?path=$([uri]::EscapeDataString($rel))" +
+      "&request_id=$requestId" +
+      "&inventory_generation_id=$inventoryGenerationId" +
+      "&inventory_sha256=$inventorySha256" +
+      "&source_physical_size=$([int64]$Row.physical_size)" +
+      "&source_mtime_ns=$([int64]$Row.mtime_ns)" +
+      "&source_inode=$([int64]$Row.inode)" +
+      "&source_consistency_mode=$([string]$Row.consistency_mode)") `
     -TimeoutSec $manifestTimeoutSec `
     -MaxAttempts $sqliteSnapshotBuildingMaxAttempts
   if (
     $lease.schema -ne "fly_runtime_sqlite_snapshot_lease_v1" -or
     [string]$lease.path -ne $rel -or
+    [string]$lease.request_id -cne $requestId -or
+    [string]$lease.build_id -notmatch '^[0-9a-f]{32}$' -or
+    [string]$lease.inventory_generation_id -cne $inventoryGenerationId -or
+    [string]$lease.inventory_sha256 -cne $inventorySha256 -or
     -not [string]$lease.snapshot_id -or
     [int64]$lease.snapshot_size -lt 0 -or
     [string]$lease.snapshot_sha256 -notmatch '^[0-9a-f]{64}$'
@@ -530,6 +550,10 @@ function Set-SqliteSnapshotLease {
     throw "Invalid Fly SQLite snapshot lease for $rel."
   }
   $Row | Add-Member -NotePropertyName snapshot_id -NotePropertyValue ([string]$lease.snapshot_id) -Force
+  $Row | Add-Member -NotePropertyName snapshot_request_id -NotePropertyValue $requestId -Force
+  $Row | Add-Member -NotePropertyName snapshot_build_id -NotePropertyValue ([string]$lease.build_id) -Force
+  $Row | Add-Member -NotePropertyName snapshot_inventory_generation_id -NotePropertyValue ([string]$lease.inventory_generation_id) -Force
+  $Row | Add-Member -NotePropertyName snapshot_inventory_sha256 -NotePropertyValue ([string]$lease.inventory_sha256) -Force
   $Row | Add-Member -NotePropertyName snapshot_size -NotePropertyValue ([int64]$lease.snapshot_size) -Force
   $Row | Add-Member -NotePropertyName snapshot_sha256 -NotePropertyValue ([string]$lease.snapshot_sha256) -Force
   $Row.size = [int64]$lease.snapshot_size
@@ -838,6 +862,10 @@ foreach ($row in $selectedFiles) {
             if ($consistencyMode -eq "sqlite_snapshot_v1") {
               $requestUrl += (
                 "&snapshot_id=$([uri]::EscapeDataString([string]$row.snapshot_id))" +
+                "&snapshot_request_id=$([string]$row.snapshot_request_id)" +
+                "&snapshot_build_id=$([string]$row.snapshot_build_id)" +
+                "&inventory_generation_id=$([string]$row.snapshot_inventory_generation_id)" +
+                "&inventory_sha256=$([string]$row.snapshot_inventory_sha256)" +
                 "&expected_snapshot_size=$([int64]$row.snapshot_size)" +
                 "&expected_snapshot_sha256=$([string]$row.snapshot_sha256)"
               )
@@ -867,8 +895,24 @@ foreach ($row in $selectedFiles) {
               $returnedSnapshotSha = [string](
                 $response.Headers.GetValues("X-Data-Snapshot-Sha256") | Select-Object -First 1
               )
+              $returnedRequestId = [string](
+                $response.Headers.GetValues("X-Data-Snapshot-Request-Id") | Select-Object -First 1
+              )
+              $returnedBuildId = [string](
+                $response.Headers.GetValues("X-Data-Snapshot-Build-Id") | Select-Object -First 1
+              )
+              $returnedInventoryGenerationId = [string](
+                $response.Headers.GetValues("X-Data-Inventory-Generation-Id") | Select-Object -First 1
+              )
+              $returnedInventorySha256 = [string](
+                $response.Headers.GetValues("X-Data-Inventory-Sha256") | Select-Object -First 1
+              )
               if ($returnedSnapshotId -ne [string]$row.snapshot_id -or
-                  $returnedSnapshotSha -ne [string]$row.snapshot_sha256) {
+                  $returnedSnapshotSha -ne [string]$row.snapshot_sha256 -or
+                  $returnedRequestId -ne [string]$row.snapshot_request_id -or
+                  $returnedBuildId -ne [string]$row.snapshot_build_id -or
+                  $returnedInventoryGenerationId -ne [string]$row.snapshot_inventory_generation_id -or
+                  $returnedInventorySha256 -ne [string]$row.snapshot_inventory_sha256) {
                 throw "SQLite snapshot identity changed while downloading $rel."
               }
             }

@@ -60,6 +60,7 @@ class _Runtime:
 
 def _namespace(tmp_path, runtime=None, revision="a" * 40):
     condition = threading.Condition()
+    snapshot_condition = threading.Condition()
     runtime = runtime or _Runtime()
     return {
         "Path": Path,
@@ -77,6 +78,8 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
         "_data_sync_inventory_cache_condition": condition,
         "_data_sync_inventory_cache": {"refreshing": False},
         "_data_sync_async_inventory": {"refreshing": False},
+        "_data_sync_sqlite_snapshot_condition": snapshot_condition,
+        "_data_sync_sqlite_snapshot_states": {},
     }
 
 
@@ -99,6 +102,17 @@ def test_optional_owner_uses_exact_revision_pressure_and_overlap_probes(tmp_path
     assert kwargs["pressure_probe"]()["emergency"] is False
     scope["_data_sync_async_inventory"]["refreshing"] = True
     assert kwargs["overlap_probe"]() == ["SYNC_ASYNC_INVENTORY_REFRESH"]
+    scope["_data_sync_sqlite_snapshot_states"]["research.db"] = {
+        "status": "BUILDING",
+    }
+    assert kwargs["overlap_probe"]() == [
+        "SYNC_ASYNC_INVENTORY_REFRESH",
+        "SQLITE_SNAPSHOT_BUILDING",
+    ]
+    scope["_data_sync_async_inventory"]["refreshing"] = False
+    assert kwargs["overlap_probe"]() == ["SQLITE_SNAPSHOT_BUILDING"]
+    scope["_data_sync_sqlite_snapshot_states"]["research.db"]["status"] = "CURRENT"
+    assert kwargs["overlap_probe"]() == []
     assert scope["_stop_lifecycle_pipeline_runtime"](3.0) is True
     assert runtime.calls[-1] == ("stop", 3.0)
 
