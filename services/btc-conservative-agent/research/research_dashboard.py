@@ -6310,6 +6310,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
   #decision-readiness { grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
   #decision-readiness .val { font-size: 1rem; overflow-wrap: break-word; word-break: normal; }
+  #genome-kpis { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+  #genome-kpis .val { font-size: 1rem; overflow-wrap: break-word; word-break: normal; }
   .kpi { min-width: 0; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
   .kpi .lbl { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; }
   .kpi .val { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
@@ -7732,7 +7734,10 @@ async function loadGenome() {
       ['Market segments', c.market_segments ?? 0],
       ['Policies evaluated', cs.unique_policies_evaluated ?? s.unique_policies_evaluated ?? 0],
       ['Qualification', d.qualification || 'NO SAFE QUALIFIED POLICY'],
-    ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
+    ].map(([l,v]) => {
+      const visibleValue = l === 'Qualification' ? String(v).replaceAll('_', ' ') : v;
+      return `<div class="kpi"><div class="lbl">${l}</div><div class="val">${visibleValue}</div></div>`;
+    }).join('');
     document.getElementById('genome-note').textContent = d.warning || 'Current signed V3.1 Safe Policy Genome evidence.';
     document.getElementById('genome-taxonomy-note').textContent = `Signed epoch ${d.epoch_id || 'not reported'} · source ${d.evidence_source || 'n/a'} · live policy changes ${d.live_policy_change_allowed ? 'allowed' : 'blocked'}.`;
     // Keep the overview bounded. The collection object contains identity arrays

@@ -271,3 +271,6 @@ def test_dashboard_visibly_labels_diagnostic_and_execution_evidence():
     ):
         assert heading in html
     assert "Execution PnL, EV, wins/losses, and drawdown are UNAVAILABLE" in html
+    assert "#genome-kpis { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }" in html
+    assert "#genome-kpis .val { font-size: 1rem; overflow-wrap: break-word; word-break: normal; }" in html
+    assert "l === 'Qualification' ? String(v).replaceAll('_', ' ') : v" in html
