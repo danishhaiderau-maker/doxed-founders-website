@@ -116,9 +116,12 @@ def test_bridge_lifecycle_progresses_transfer_then_qualification(tmp_path, monke
         position, signal, outcome, epoch_id="epoch-bridge-e2e", data_dir=tmp_path,
     )
 
-    early = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-        tmp_path, now=104.0
-    )
+    for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
+        early = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+            tmp_path, now=104.0
+        )
+        if early["transfer_bundle_count"] == 1:
+            break
     assert early["transfer_bundle_count"] == 1
     transfer = early["results"][0]["transfer_bundle"]
     assert transfer["manifest"]["maturity"] == "TRANSFER_READY"
@@ -137,16 +140,22 @@ def test_bridge_lifecycle_progresses_transfer_then_qualification(tmp_path, monke
         lifecycle_horizon_sec=4.0,
     )
 
-    completion = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-        tmp_path, now=300.0
-    )
+    for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
+        completion = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+            tmp_path, now=300.0
+        )
+        if completion["completion_appended_count"] == 1:
+            break
     assert completion["completion_appended_count"] == 1
     assert completion["bundle_count"] == 0
     assert completion["results"][0]["stage"] == "COMPLETION_PENDING_REINDEX"
 
-    qualified = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-        tmp_path, now=300.0
-    )
+    for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
+        qualified = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+            tmp_path, now=300.0
+        )
+        if qualified["bundle_count"] == 1:
+            break
     assert qualified["bundle_count"] == 1, json.dumps(qualified, indent=2)
     assert qualified["results"][0]["stage"] == "BUNDLE_MATERIALIZED_OR_VERIFIED"
     bundle = qualified["results"][0]["bundle"]

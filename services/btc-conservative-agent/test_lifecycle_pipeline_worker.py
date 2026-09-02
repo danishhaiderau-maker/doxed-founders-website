@@ -17,6 +17,35 @@ def _write_pressure_round_robin_ledgers(root: Path):
     return first, second
 
 
+def test_normal_worker_returns_verified_success_without_fragmenting_next_ledger(tmp_path):
+    ledger_dir = tmp_path / "v3" / "ledgers"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    row = json.dumps({"padding": "a" * 2_096_000}, separators=(",", ":")).encode() + b"\n"
+    first = row * 4
+    second = json.dumps({"padding": "b" * 5_000}, separators=(",", ":")).encode() + b"\n"
+    (ledger_dir / "opportunity.jsonl").write_bytes(first)
+    (ledger_dir / "pre_entry_features.jsonl").write_bytes(second)
+    work = tmp_path / "v3" / "lifecycle_worker"
+    work.mkdir(parents=True)
+    launch = worker.create_request(
+        tmp_path, work, source_revision=REVISION, max_runtime_sec=5,
+    )
+
+    assert worker.run(
+        launch["request_path"], launch["result_path"], launch["nonce"]
+    ) == 0
+    receipt = worker.verify_result(
+        launch["request_path"], launch["result_path"], launch["nonce"]
+    )
+
+    assert receipt["status"] == "SUCCESS"
+    assert receipt["pipeline"]["pressure_mode"] is False
+    assert tuple(receipt["pipeline"]["scan"]["ledgers"]) == ("opportunity",)
+    assert receipt["pipeline"]["scan"]["bytes_indexed"] == len(first)
+    assert receipt["pipeline"]["scan"]["caught_up"] is False
+    assert receipt["source_cleanup_authorized"] is False
+
+
 def test_pressure_worker_returns_verified_bounded_success(tmp_path):
     first, _second = _write_pressure_round_robin_ledgers(tmp_path)
     work = tmp_path / "v3" / "lifecycle_worker"

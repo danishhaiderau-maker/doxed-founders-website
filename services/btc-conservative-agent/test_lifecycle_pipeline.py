@@ -68,19 +68,34 @@ def _patch_provenance(monkeypatch):
     monkeypatch.setattr(research_v3_store, "_collection_provenance", lambda: dict(PROV))
 
 
+def _run_until(root: Path, predicate, **kwargs):
+    for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
+        report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+            root, **kwargs,
+        )
+        if predicate(report):
+            return report
+    raise AssertionError("bounded lifecycle round-robin did not reach expected state")
+
+
 def test_pipeline_requires_reindexed_completion_before_materialization(tmp_path, monkeypatch):
     _patch_provenance(monkeypatch)
     for row in _ready_rows():
         _append(tmp_path, row)
 
-    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    first = _run_until(
+        tmp_path, lambda report: report["completion_appended_count"] == 1, now=NOW,
+    )
     assert first["completion_appended_count"] == 1
     assert first["bundle_count"] == 0
     assert first["results"][0]["stage"] == "COMPLETION_PENDING_REINDEX"
     assert first["scan"]["pending_dirty_lifecycles"] == 1
+    assert first["scan"]["caught_up"] is False
     assert first["source_cleanup_authorized"] is False
 
-    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    second = _run_until(
+        tmp_path, lambda report: report["bundle_count"] == 1, now=NOW,
+    )
     assert second["completion_appended_count"] == 0
     assert second["bundle_count"] == 1
     assert second["results"][0]["stage"] == "BUNDLE_MATERIALIZED_OR_VERIFIED"
@@ -101,13 +116,15 @@ def test_incomplete_is_unknown_and_late_evidence_redirties(tmp_path, monkeypatch
     rows = _ready_rows()[:-1]
     for row in rows:
         _append(tmp_path, row)
-    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
     assert first["results"][0]["stage"] == "QUALIFICATION_EVIDENCE_RETRY_QUEUED"
     assert "POST_OBSERVATION" in " ".join(first["results"][0]["blockers"])
     assert first["scan"]["pending_dirty_lifecycles"] == 0
 
     _append(tmp_path, _ready_rows()[-1])
-    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    second = _run_until(
+        tmp_path, lambda report: report["completion_appended_count"] == 1, now=NOW,
+    )
     assert second["completion_appended_count"] == 1
     assert second["scan"]["pending_dirty_lifecycles"] == 1
 
@@ -119,7 +136,7 @@ def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path
     rows[0]["chase_schedule"]["terminal_ts"] = 19_950.0
     for row in rows:
         _append(tmp_path, row)
-    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
     assert first["results"][0]["stage"] == "QUALIFICATION_DEFERRED_UNTIL_MATURITY"
     assert first["transfer_ready_count"] == 1
     assert first["transfer_bundle_count"] == 1
@@ -159,15 +176,18 @@ def test_complete_indexed_horizon_obeys_reindex_before_completion(tmp_path, monk
             )
             handle.write(json.dumps(row, separators=(",", ":")) + "\n")
 
-    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-        tmp_path, now=17_200.0,
+    first = _run_until(
+        tmp_path, lambda report: bool(report["results"]), now=17_200.0,
         max_tape_index_bytes=16 * 1024 * 1024, max_tape_index_rows=10_000,
     )
     assert first["results"][0]["stage"] == "QUALIFICATION_HORIZON_PENDING_REINDEX"
     assert first["completion_appended_count"] == 0
     assert first["bundle_count"] == 0
 
-    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=17_380.0)
+    second = _run_until(
+        tmp_path, lambda report: report["completion_appended_count"] == 1,
+        now=17_380.0,
+    )
     assert second["results"][0]["stage"] == "COMPLETION_PENDING_REINDEX", second["results"][0]
     assert second["completion_appended_count"] == 1
     assert second["bundle_count"] == 0
@@ -177,7 +197,9 @@ def test_complete_indexed_horizon_obeys_reindex_before_completion(tmp_path, monk
         assert any("bundle_completion" in row for row in indexed_rows)
         return {"written": True, "completion": {"blockers": []}}
     monkeypatch.setattr(lifecycle_pipeline, "materialize_bundle", materialize)
-    third = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=17_380.0)
+    third = _run_until(
+        tmp_path, lambda report: report["bundle_count"] == 1, now=17_380.0,
+    )
     assert third["results"][0]["stage"] == "BUNDLE_MATERIALIZED_OR_VERIFIED"
     assert third["bundle_count"] == 1
 
@@ -210,6 +232,47 @@ def _write_pressure_round_robin_ledgers(root: Path):
     (ledger_dir / "opportunity.jsonl").write_bytes(first)
     (ledger_dir / "pre_entry_features.jsonl").write_bytes(second)
     return first, second
+
+
+def _write_normal_round_robin_ledgers(root: Path):
+    ledger_dir = root / "v3" / "ledgers"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    row = json.dumps({"padding": "a" * 2_096_000}, separators=(",", ":")).encode() + b"\n"
+    first = row * 4
+    second = json.dumps({"padding": "b" * 5_000}, separators=(",", ":")).encode() + b"\n"
+    (ledger_dir / "opportunity.jsonl").write_bytes(first)
+    (ledger_dir / "pre_entry_features.jsonl").write_bytes(second)
+    return first, second
+
+
+def test_normal_mode_does_not_fragment_next_ledger_first_record(tmp_path):
+    first, _second = _write_normal_round_robin_ledgers(tmp_path)
+
+    report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW,
+    )
+
+    assert tuple(report["scan"]["ledgers"]) == ("opportunity",)
+    assert report["scan"]["bytes_indexed"] == len(first)
+    assert report["scan"]["ledgers"]["opportunity"]["caught_up"] is True
+    assert report["scan"]["caught_up"] is False
+
+
+def test_normal_mode_advances_round_robin_and_reports_full_cycle_caught_up(tmp_path):
+    first, second = _write_normal_round_robin_ledgers(tmp_path)
+    initial = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW,
+    )
+    assert initial["scan"]["bytes_indexed"] == len(first)
+    assert initial["scan"]["caught_up"] is False
+
+    report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW,
+    )
+
+    assert tuple(report["scan"]["ledgers"]) == ("pre_entry_features",)
+    assert report["scan"]["bytes_indexed"] == len(second)
+    assert report["scan"]["caught_up"] is True
 
 
 def test_pressure_mode_scans_at_most_one_eligible_ledger(tmp_path):
@@ -289,7 +352,7 @@ def test_runtime_provenance_mismatch_remains_dirty_for_later_retry(tmp_path, mon
         "_collection_provenance",
         lambda: {**PROV, "deployed_revision": "new-deploy"},
     )
-    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
     assert first["results"][0]["stage"] == "RUNTIME_PROVENANCE_MISMATCH"
     # Transfer preserves the internally consistent historical provenance and
     # never authorizes cleanup; qualification remains fail-closed against the
@@ -301,7 +364,9 @@ def test_runtime_provenance_mismatch_remains_dirty_for_later_retry(tmp_path, mon
     assert first["scan"]["pending_dirty_lifecycles"] == 1
 
     _patch_provenance(monkeypatch)
-    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    second = _run_until(
+        tmp_path, lambda report: report["completion_appended_count"] == 1, now=NOW,
+    )
     assert second["completion_appended_count"] == 1
     assert second["results"][0]["stage"] == "COMPLETION_PENDING_REINDEX"
 

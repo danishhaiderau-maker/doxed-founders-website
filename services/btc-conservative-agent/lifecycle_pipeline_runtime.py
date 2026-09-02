@@ -324,15 +324,12 @@ class LifecyclePipelineRuntime:
     def _record_success(self, receipt: Mapping[str, Any]) -> None:
         pipeline = receipt.get("pipeline") if isinstance(receipt.get("pipeline"), Mapping) else {}
         scan = pipeline.get("scan") if isinstance(pipeline.get("scan"), Mapping) else {}
-        ledgers = scan.get("ledgers") if isinstance(scan.get("ledgers"), Mapping) else {}
         pending_dirty = scan.get("pending_dirty_lifecycles")
+        sources_caught_up = scan.get("caught_up") is True
         backlog_pending = (
             isinstance(pending_dirty, int) and not isinstance(pending_dirty, bool)
             and pending_dirty > 0
-        ) or any(
-            isinstance(row, Mapping) and row.get("caught_up") is False
-            for row in ledgers.values()
-        )
+        ) or not sources_caught_up
         summary = {
             "generated_at": receipt.get("generated_at"),
             "candidate_count": pipeline.get("candidate_count"),
@@ -346,10 +343,7 @@ class LifecyclePipelineRuntime:
             "promoted_qualification_retries": scan.get("promoted_qualification_retries"),
             "rows_scanned": scan.get("rows_scanned"),
             "bytes_indexed": scan.get("bytes_indexed"),
-            "caught_up": bool(ledgers) and all(
-                isinstance(row, Mapping) and row.get("caught_up") is True
-                for row in ledgers.values()
-            ),
+            "caught_up": sources_caught_up,
             "stage_counts": dict(pipeline.get("stage_counts") or {}),
             "blocker_counts": dict(pipeline.get("blocker_counts") or {}),
             "backlog_pending": backlog_pending,

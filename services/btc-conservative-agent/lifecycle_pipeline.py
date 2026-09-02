@@ -28,6 +28,7 @@ from lifecycle_bundles import (
     _exclusive_index_lock,
     _index_ledger_chunk,
     _open_incremental_index,
+    _validate_source_identity,
     materialize_bundle,
     materialize_transfer_bundle,
 )
@@ -206,6 +207,22 @@ def _runtime_provenance_blockers(assessment: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _ledger_sources_caught_up(connection, ledger_dir: Path) -> bool:
+    for ledger in LEDGER_NAMES:
+        path = ledger_dir / f"{ledger}.jsonl"
+        if not path.exists():
+            continue
+        cursor = connection.execute(
+            "SELECT * FROM ledger_cursor WHERE ledger = ?", (ledger,)
+        ).fetchone()
+        if cursor is None:
+            return False
+        stat = _validate_source_identity(path, cursor)
+        if int(cursor["byte_offset"]) < int(stat.st_size):
+            return False
+    return True
+
+
 def process_incremental_lifecycle_pipeline(
     root: str | Path,
     *,
@@ -299,15 +316,19 @@ def process_incremental_lifecycle_pipeline(
                         "UPDATE index_meta SET next_ledger = ? WHERE singleton = 1",
                         ((LEDGER_NAMES.index(ledger) + 1) % len(LEDGER_NAMES),),
                     )
-                if pressure_mode:
-                    break
+                break
 
-            dirty = _dirty_lifecycle_rows(
-                connection,
-                root,
-                maximum=lifecycle_limit,
-                max_events_per_lifecycle=lifecycle_row_limit,
-                max_bytes_per_lifecycle=lifecycle_byte_limit,
+            sources_caught_up = _ledger_sources_caught_up(connection, ledger_dir)
+
+            dirty = (
+                _dirty_lifecycle_rows(
+                    connection,
+                    root,
+                    maximum=lifecycle_limit,
+                    max_events_per_lifecycle=lifecycle_row_limit,
+                    max_bytes_per_lifecycle=lifecycle_byte_limit,
+                )
+                if sources_caught_up else []
             )
             for key, rows in dirty:
                 if time.monotonic() - started >= runtime_limit:
@@ -467,6 +488,7 @@ def process_incremental_lifecycle_pipeline(
                 item["blockers"] = list((bundle.get("completion") or {}).get("blockers") or [])
                 _clear_dirty(connection, key)
                 results.append(item)
+            sources_caught_up = _ledger_sources_caught_up(connection, ledger_dir)
         finally:
             pending_dirty = int(connection.execute(
                 "SELECT COUNT(*) FROM dirty_lifecycle"
@@ -498,6 +520,7 @@ def process_incremental_lifecycle_pipeline(
         "results": results,
         "scan": {
             "ledgers": scan_receipts,
+            "caught_up": sources_caught_up,
             "bytes_indexed": scan_byte_limit - remaining_bytes,
             "rows_scanned": scan_row_limit - remaining_rows,
             "byte_limit": scan_byte_limit,

@@ -92,6 +92,7 @@ def test_success_promptly_continues_until_dirty_and_cursor_backlog_are_drained(
         "pressure_mode": False,
         "scan": {
             "pending_dirty_lifecycles": 4045,
+            "caught_up": False,
             "ledgers": {"lifecycle": {"caught_up": False}},
         },
     }
@@ -118,6 +119,7 @@ def test_success_returns_to_normal_cadence_only_after_backlog_is_drained(
         "pressure_mode": False,
         "scan": {
             "pending_dirty_lifecycles": 0,
+            "caught_up": True,
             "ledgers": {"lifecycle": {"caught_up": True}},
         },
     }
