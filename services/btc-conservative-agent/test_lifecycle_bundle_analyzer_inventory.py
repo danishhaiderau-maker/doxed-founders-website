@@ -1,7 +1,9 @@
 import json
+import hashlib
 from pathlib import Path
 
 from lifecycle_bundles import LifecycleKey, materialize_bundle, materialize_transfer_bundle
+from research_v3_contract import canonical_json
 from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
 
 
@@ -25,13 +27,34 @@ def _completion():
 
 
 def _row(key, record_id, *, completion=True):
-    return {
+    row = {
         **key.as_dict(), "ledger": "lifecycle", "record_id": record_id,
         "event_id": "trade-1", "observed_ts": 10_000.0,
         "source_revision": "src", "deployed_revision": "dep",
         "tile_config_signature": "tile",
         "bundle_completion": _completion() if completion else None,
     }
+    if completion:
+        completion_receipt = row["bundle_completion"]
+        completion_receipt["completion_receipt_sha256"] = hashlib.sha256(
+            canonical_json(completion_receipt).encode("utf-8")
+        ).hexdigest()
+        collected = {
+            "schema": "lifecycle_evidence_collected_v1",
+            "identity": key.as_dict(), "event_id": "trade-1",
+            "provenance": {
+                "source_revision": "src", "deployed_revision": "dep",
+                "tile_config_signature": "tile",
+            },
+            "completion_receipt_sha256": completion_receipt["completion_receipt_sha256"],
+            "qualification_eligible_at": 18_000.0,
+            "evidence_collected_at": 20_000.0,
+        }
+        collected["evidence_collected_receipt_sha256"] = hashlib.sha256(
+            canonical_json(collected).encode("utf-8")
+        ).hexdigest()
+        row["evidence_collection_receipt"] = collected
+    return row
 
 
 def _transfer_assessment():

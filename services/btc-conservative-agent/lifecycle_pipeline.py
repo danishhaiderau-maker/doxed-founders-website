@@ -36,6 +36,7 @@ from lifecycle_completion_reconciler import (
     evaluate_lifecycle_completion,
     evaluate_lifecycle_transfer_ready,
 )
+from lifecycle_completion_receipts import build_evidence_collected_receipt
 from qualification_horizon_index import (
     DEFAULT_MAX_INDEX_BYTES as DEFAULT_MAX_TAPE_INDEX_BYTES,
     DEFAULT_MAX_INDEX_ROWS as DEFAULT_MAX_TAPE_INDEX_ROWS,
@@ -181,6 +182,46 @@ def _completion_present(rows: list[dict[str, Any]]) -> bool:
         and row["bundle_completion"].get("schema") == "lifecycle_bundle_completion_v1"
         for row in rows
     )
+
+
+def _evidence_collection_present(rows: list[dict[str, Any]]) -> bool:
+    return any(
+        isinstance(row.get("evidence_collection_receipt"), Mapping)
+        and row["evidence_collection_receipt"].get("schema")
+        == "lifecycle_evidence_collected_v1"
+        for row in rows
+    )
+
+
+def _evidence_collection_row(
+    key: LifecycleKey, assessment: Mapping[str, Any], *, collected_at: float,
+) -> dict[str, Any]:
+    receipt = assessment["receipt"]
+    event_id = str(assessment.get("event_id") or "")
+    collected = build_evidence_collected_receipt(
+        receipt,
+        identity=key.as_dict(),
+        event_id=event_id,
+        provenance=assessment["provenance"],
+        collected_at=collected_at,
+        lifecycle_horizon_sec=QUALIFICATION_HORIZON_SEC,
+    )
+    if not event_id or not collected.get("ready"):
+        raise ValueError("READY_EVIDENCE_COLLECTION_IDENTITY_MISSING")
+    evidence_receipt = collected["receipt"]
+    return {
+        "record_id": f"lifecycle:{event_id}:evidence-collected",
+        "event_id": event_id,
+        "episode_id": key.episode_id,
+        "policy_signature": key.policy_signature,
+        "research_lane": key.research_lane,
+        "terminal": True,
+        "observation_status": "EVIDENCE_COLLECTION_COMPLETE",
+        "outcome_state": receipt["entry_outcome"],
+        "evidence_collected_at": evidence_receipt["evidence_collected_at"],
+        "evidence_collection_receipt": evidence_receipt,
+        **dict(assessment["provenance"]),
+    }
 
 
 def _completion_row(
@@ -476,6 +517,22 @@ def _process_incremental_lifecycle_pipeline(
                     item["stage"] = "COMPLETION_PENDING_REINDEX"
                     # Deliberately retain dirty.  The next invocation must index
                     # and hash-verify the append before bundle publication.
+                    results.append(item)
+                    continue
+
+                if not _evidence_collection_present(rows):
+                    _remove_retry(connection, key)
+                    store = V3EvidenceStore(root, epoch_id=key.collection_epoch_id)
+                    write = store.append(
+                        "lifecycle",
+                        _evidence_collection_row(
+                            key, assessment, collected_at=current,
+                        ),
+                    )
+                    item["evidence_collection_appended"] = write.get("written") is True
+                    item["evidence_collection_duplicate"] = write.get("duplicate") is True
+                    item["stage"] = "EVIDENCE_COLLECTION_PENDING_REINDEX"
+                    # Retain dirty until the append is indexed and hash-verified.
                     results.append(item)
                     continue
 

@@ -696,7 +696,16 @@ def materialize_bundle(
     )
     if not completion["ready"]:
         return {"written": False, "lifecycle_identity_id": key.identity_id, "completion": completion}
+    provenance = _consistent_provenance(frozen)
     evidence_collection = classify_evidence_collection(frozen, key)
+    if not evidence_collection["ready"]:
+        return {
+            "written": False,
+            "lifecycle_identity_id": key.identity_id,
+            "completion": completion,
+            "evidence_collection": evidence_collection,
+            "maturity": "QUALIFICATION_PENDING",
+        }
     segments = _referenced_market_segments(root, frozen)
     bundle_id = _bundle_content_id(key, frozen, completion, segments)
     bundle_root = root / "v3" / "lifecycle_bundles"
@@ -757,7 +766,8 @@ def materialize_bundle(
             "lifecycle_identity_id": key.identity_id,
             "lifecycle_id": "|".join((key.episode_id, key.policy_signature, key.research_lane)),
             "identity": key.as_dict(),
-            "provenance": _consistent_provenance(frozen),
+            "provenance": provenance,
+            "maturity": "QUALIFICATION_READY",
             "completion": completion,
             "evidence_collection": evidence_collection,
             "files": sorted(receipts, key=lambda row: row["path"]),
@@ -1076,7 +1086,18 @@ def verify_bundle(bundle_path: str | Path) -> dict[str, Any]:
         if schema == BUNDLE_SCHEMA:
             evidence = manifest.get("completion") or {}
             prefix = "lifecycle-"
-            if manifest.get("maturity") not in (None, "QUALIFICATION_READY"):
+            collection = manifest.get("evidence_collection")
+            collection_receipt = (
+                collection.get("receipt") if isinstance(collection, dict) else None
+            )
+            if not (
+                manifest.get("maturity") == "QUALIFICATION_READY"
+                and isinstance(collection, dict)
+                and collection.get("ready") is True
+                and isinstance(collection_receipt, dict)
+                and collection_receipt.get("schema") == EVIDENCE_COLLECTED_SCHEMA
+                and not collection.get("blockers")
+            ):
                 defects.append("QUALIFICATION_BUNDLE_MATURITY_INVALID")
         elif schema == TRANSFER_BUNDLE_SCHEMA:
             evidence = manifest.get("transfer_receipt") or {}

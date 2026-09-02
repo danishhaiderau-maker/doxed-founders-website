@@ -43,6 +43,30 @@ def row(key, record_id, now, **extra):
         "bundle_completion": completion(now),
     }
     material.update(extra)
+    if record_id in {"life-1", "qualification-horizon"}:
+        receipt = material.get("bundle_completion")
+        if isinstance(receipt, dict):
+            completion_material = dict(receipt)
+            receipt["completion_receipt_sha256"] = __import__("hashlib").sha256(
+                lifecycle_bundles.canonical_json(completion_material).encode("utf-8")
+            ).hexdigest()
+            collected = {
+                "schema": "lifecycle_evidence_collected_v1",
+                "identity": key.as_dict(),
+                "event_id": record_id,
+                "provenance": {
+                    "source_revision": material["source_revision"],
+                    "deployed_revision": material["deployed_revision"],
+                    "tile_config_signature": material["tile_config_signature"],
+                },
+                "completion_receipt_sha256": receipt["completion_receipt_sha256"],
+                "qualification_eligible_at": now - 2_000,
+                "evidence_collected_at": now - 1_999,
+            }
+            collected["evidence_collected_receipt_sha256"] = __import__("hashlib").sha256(
+                lifecycle_bundles.canonical_json(collected).encode("utf-8")
+            ).hexdigest()
+            material["evidence_collection_receipt"] = collected
     return material
 
 
@@ -141,11 +165,29 @@ def test_bundle_is_content_addressed_idempotent_and_never_authorizes_cleanup():
     assert len(manifest["cleanup_manifest_sha256"]) == 64
 
 
+def test_qualification_bundle_is_not_published_without_evidence_collection_receipt():
+    now = 20_000.0
+    key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
+    incomplete = row(key, "no-collection-receipt", now)
+    with tempfile.TemporaryDirectory() as tmp:
+        result = materialize_bundle(tmp, key, [incomplete], now=now)
+        assert result["written"] is False
+        assert result["maturity"] == "QUALIFICATION_PENDING"
+        assert result["evidence_collection"]["ready"] is False
+        assert result["evidence_collection"]["blockers"] == [
+            "EVIDENCE_COLLECTION_RECEIPT_MISSING"
+        ]
+        assert not (Path(tmp) / "v3" / "lifecycle_bundles").exists()
+
+
 def test_late_terminal_evidence_creates_new_content_bundle_instead_of_being_ignored():
     now = 20_000.0
     key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
     first_rows = [row(key, "life-1", now)]
-    late_rows = [*first_rows, row(key, "late-cost-reconciliation", now, observed_ts=now - 1_900)]
+    late_rows = [*first_rows, row(
+        key, "late-cost-reconciliation", now,
+        observed_ts=now - 1_900, bundle_completion=None,
+    )]
     with tempfile.TemporaryDirectory() as tmp:
         first = materialize_bundle(tmp, key, first_rows, now=now)
         second = materialize_bundle(tmp, key, late_rows, now=now)

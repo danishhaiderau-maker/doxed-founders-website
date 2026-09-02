@@ -13,9 +13,9 @@ from research_v3_bridge import (
 
 
 PROVENANCE = {
-    "source_revision": "source-e2e",
-    "deployed_revision": "deployed-e2e",
-    "tile_config_signature": "tile-e2e",
+    "source_revision": "a" * 40,
+    "deployed_revision": "b" * 40,
+    "tile_config_signature": "c" * 64,
 }
 
 

@@ -40631,6 +40631,11 @@ def _data_sync_lifecycle_identity_sha256(receipt: dict) -> str:
         "terminal_outcome": str(receipt.get("terminal_outcome") or ""),
         "terminal_at": str(receipt.get("terminal_at") or ""),
         "manifest_sha256": str(receipt.get("manifest_sha256") or "").lower(),
+        "qualification_maturity": str(receipt.get("qualification_maturity") or ""),
+        "evidence_collection_ready": receipt.get("evidence_collection_ready") is True,
+        "evidence_collected_receipt_sha256": str(
+            receipt.get("evidence_collected_receipt_sha256") or ""
+        ).lower(),
     }
     encoded = json.dumps(
         identity, separators=(",", ":"), sort_keys=True,
@@ -40655,6 +40660,16 @@ def _data_sync_lifecycle_cleanup_eligibility(
     row = receipt if isinstance(receipt, dict) else {}
     if row.get("schema") != _DATA_SYNC_LIFECYCLE_CLEANUP_ACK_SCHEMA:
         reasons.append("ACK_SCHEMA_UNAVAILABLE")
+
+    if row.get("qualification_maturity") != "QUALIFICATION_READY":
+        reasons.append("QUALIFICATION_MATURITY_NOT_READY")
+    if row.get("evidence_collection_ready") is not True:
+        reasons.append("EVIDENCE_COLLECTION_NOT_READY")
+    collection_sha = str(
+        row.get("evidence_collected_receipt_sha256") or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", collection_sha):
+        reasons.append("EVIDENCE_COLLECTION_RECEIPT_BINDING_MISSING")
 
     bundle_id = str(row.get("bundle_id") or "").strip()
     lifecycle_id = str(row.get("lifecycle_id") or "").strip()
@@ -41808,8 +41823,32 @@ def _data_sync_validate_lifecycle_ack_bundle(receipt: dict) -> dict:
     ).encode("utf-8")).hexdigest()
     identity = manifest.get("identity") if isinstance(manifest, dict) else None
     provenance = manifest.get("provenance") if isinstance(manifest, dict) else None
+    collection = manifest.get("evidence_collection") if isinstance(manifest, dict) else None
+    collection_receipt = (
+        collection.get("receipt") if isinstance(collection, dict) else None
+    )
+    collection_material = dict(collection_receipt) if isinstance(collection_receipt, dict) else {}
+    supplied_collection_sha = str(
+        collection_material.pop("evidence_collected_receipt_sha256", "")
+    ).lower()
+    actual_collection_sha = hashlib.sha256(json.dumps(
+        collection_material, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
     if not (
         manifest.get("schema") == "research_lifecycle_bundle_v1"
+        and manifest.get("maturity") == "QUALIFICATION_READY"
+        and isinstance(collection, dict)
+        and collection.get("ready") is True
+        and not collection.get("blockers")
+        and isinstance(collection_receipt, dict)
+        and collection_receipt.get("schema") == "lifecycle_evidence_collected_v1"
+        and hmac.compare_digest(supplied_collection_sha, actual_collection_sha)
+        and hmac.compare_digest(
+            supplied_collection_sha,
+            str(receipt.get("evidence_collected_receipt_sha256") or "").lower(),
+        )
+        and receipt.get("qualification_maturity") == "QUALIFICATION_READY"
+        and receipt.get("evidence_collection_ready") is True
         and hmac.compare_digest(supplied_manifest_sha, actual_manifest_sha)
         and manifest.get("source_cleanup_authorized") is False
         and manifest.get("bundle_id") == receipt.get("bundle_id")

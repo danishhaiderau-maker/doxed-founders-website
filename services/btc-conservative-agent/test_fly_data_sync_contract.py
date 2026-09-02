@@ -3165,6 +3165,9 @@ def _complete_lifecycle_cleanup_receipt(namespace):
         "open_position_ids": [],
         "files": files,
         "manifest_sha256": manifest_sha,
+        "qualification_maturity": "QUALIFICATION_READY",
+        "evidence_collection_ready": True,
+        "evidence_collected_receipt_sha256": "d" * 64,
     }
     receipt["immutable_identity_sha256"] = namespace[
         "_data_sync_lifecycle_identity_sha256"

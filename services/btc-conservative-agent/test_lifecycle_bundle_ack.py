@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from lifecycle_bundles import COMPLETION_SCHEMA, LifecycleKey, materialize_bundle
+from research_v3_contract import canonical_json
 
 
 BOT_PATH = Path(__file__).with_name("bot.py")
@@ -28,6 +29,8 @@ def _namespace(root: Path):
         "_data_sync_iso8601_utc", "_data_sync_lifecycle_manifest_sha256",
         "_data_sync_lifecycle_identity_sha256", "_data_sync_lifecycle_cleanup_eligibility",
         "_data_sync_lifecycle_ack_path", "_data_sync_persist_lifecycle_ack",
+        "_data_sync_lifecycle_ack_index_path", "_data_sync_persist_lifecycle_ack_index",
+        "_data_sync_resolve_lifecycle_bundle_manifest",
         "_data_sync_validate_lifecycle_ack_bundle",
     )
     namespace = {
@@ -62,6 +65,28 @@ def _bundle(root: Path, now=20_000.0):
             "horizon_complete_ts": now - 2_000,
         },
     }
+    completion = row["bundle_completion"]
+    completion_material = dict(completion)
+    completion["completion_receipt_sha256"] = hashlib.sha256(
+        canonical_json(completion_material).encode("utf-8")
+    ).hexdigest()
+    collected = {
+        "schema": "lifecycle_evidence_collected_v1",
+        "identity": key.as_dict(),
+        "event_id": "life-1",
+        "provenance": {
+            "source_revision": "a" * 40,
+            "deployed_revision": "b" * 40,
+            "tile_config_signature": "c" * 64,
+        },
+        "completion_receipt_sha256": completion["completion_receipt_sha256"],
+        "qualification_eligible_at": now - 2_000,
+        "evidence_collected_at": now - 1_999,
+    }
+    collected["evidence_collected_receipt_sha256"] = hashlib.sha256(
+        canonical_json(collected).encode("utf-8")
+    ).hexdigest()
+    row["evidence_collection_receipt"] = collected
     result = materialize_bundle(root, key, [row], now=now)
     return Path(result["path"]), result["manifest"]
 
@@ -80,6 +105,11 @@ def _receipt(namespace, root, bundle_path, manifest):
         "terminal_at": "1970-01-01T02:46:40Z",
         "pending_order_ids": [], "open_position_ids": [],
         "files": manifest["files"], "manifest_sha256": manifest["cleanup_manifest_sha256"],
+        "qualification_maturity": manifest["maturity"],
+        "evidence_collection_ready": manifest["evidence_collection"]["ready"],
+        "evidence_collected_receipt_sha256": manifest["evidence_collection"]["receipt"][
+            "evidence_collected_receipt_sha256"
+        ],
     }
     receipt["immutable_identity_sha256"] = namespace["_data_sync_lifecycle_identity_sha256"](receipt)
     receipt["laptop_acknowledgement"] = {
@@ -119,6 +149,47 @@ def test_bundle_ack_rejects_manifest_or_revision_mismatch():
         receipt = _receipt(namespace, root, bundle_path, manifest)
         receipt["source_git_rev"] = "d" * 40
         receipt["immutable_identity_sha256"] = namespace["_data_sync_lifecycle_identity_sha256"](receipt)
+        with pytest.raises(ValueError, match="does not match Fly bundle"):
+            namespace["_data_sync_validate_lifecycle_ack_bundle"](receipt)
+
+
+@pytest.mark.parametrize("defect", ("maturity", "collection_ready", "collection_binding"))
+def test_cleanup_proof_fails_closed_without_qualification_evidence(defect):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        namespace = _namespace(root)
+        bundle_path, manifest = _bundle(root)
+        receipt = _receipt(namespace, root, bundle_path, manifest)
+        if defect == "maturity":
+            receipt["qualification_maturity"] = "TRANSFER_READY"
+        elif defect == "collection_ready":
+            receipt["evidence_collection_ready"] = False
+        else:
+            receipt["evidence_collected_receipt_sha256"] = ""
+        receipt["immutable_identity_sha256"] = namespace[
+            "_data_sync_lifecycle_identity_sha256"
+        ](receipt)
+        result = namespace["_data_sync_lifecycle_cleanup_eligibility"](receipt)
+        assert result["proof_complete"] is False
+        assert result["cleanup_authorized"] is False
+        assert result["status"] == "INELIGIBLE_RETAIN_SOURCE"
+
+
+def test_bundle_ack_rejects_tampered_evidence_collection_receipt():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        namespace = _namespace(root)
+        bundle_path, manifest = _bundle(root)
+        receipt = _receipt(namespace, root, bundle_path, manifest)
+        manifest_path = bundle_path / "manifest.json"
+        stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+        stored["evidence_collection"]["receipt"]["event_id"] = "tampered"
+        material = dict(stored)
+        material.pop("manifest_sha256", None)
+        stored["manifest_sha256"] = hashlib.sha256(
+            canonical_json(material).encode("utf-8")
+        ).hexdigest()
+        manifest_path.write_text(canonical_json(stored) + "\n", encoding="utf-8")
         with pytest.raises(ValueError, match="does not match Fly bundle"):
             namespace["_data_sync_validate_lifecycle_ack_bundle"](receipt)
 
