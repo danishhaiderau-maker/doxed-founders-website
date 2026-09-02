@@ -14,16 +14,20 @@ from typing import Callable, Mapping
 from raw_generation_cleanup import (_has_symlink_component, RawGenerationCleanupRejected,
                                     RawGenerationCleanupTransaction, verify_generation)
 
-_ID = re.compile(r"V3:([1-9][0-9]*)")
+_ID = re.compile(r"V3:([a-z][a-z0-9_]{0,63}):([1-9][0-9]*)")
+_PROCESS_LOCK = threading.Lock()
 
 
 class RawGenerationCleanupOwner:
     """Use only persisted server authority; process at most one ledger generation."""
     def __init__(self, volume_root: Path, *, enabled: bool = False,
                  identity: Callable[[], Mapping[str, str]],
-                 leases: Callable[[str], Mapping[str, list[str]]]):
+                 leases: Callable[[str], Mapping[str, list[str]]],
+                 gate_acquire: Callable[[], bool] = lambda: True,
+                 gate_release: Callable[[], None] = lambda: None):
         self.root = volume_root.resolve(); self.enabled = bool(enabled)
-        self.identity = identity; self.leases = leases; self.lock = threading.Lock()
+        self.identity = identity; self.leases = leases; self.lock = _PROCESS_LOCK
+        self.gate_acquire = gate_acquire; self.gate_release = gate_release
         self.manifests = self.root / "v3" / "raw_generation_manifests"
         self.acks = self.root / "v3" / "raw_generation_laptop_acks"
         self.tx = RawGenerationCleanupTransaction(self.root, enabled=self.enabled)
@@ -63,10 +67,26 @@ class RawGenerationCleanupOwner:
         members = manifest.get("members") or []
         if not source.is_file() or len(members) != 1 or source.name != str((members[0] or {}).get("path") or ""):
             raise RawGenerationCleanupRejected(["SEALED_V3_SOURCE_PATH_INVALID"])
+        seal = (members[0] or {}).get("seal") or {}
+        expected_sealed_relative = source.relative_to(self.root / "v3").as_posix()
+        sealed_ref = seal.get("sealed_ref") or {}
+        if (seal.get("ledger") != manifest.get("ledger")
+                or seal.get("relative_path") != expected_sealed_relative
+                or sealed_ref.get("relative_path") != expected_sealed_relative
+                or sealed_ref.get("ledger") != manifest.get("ledger")):
+            raise RawGenerationCleanupRejected(["SEALED_V3_SEAL_PATH_BINDING_INVALID"])
         return source
 
     def persist_authority(self, manifest: Mapping, ack: Mapping) -> dict:
         """Verify then immutably register a complete laptop-acknowledged mapping."""
+        if not self.lock.acquire(blocking=False):
+            raise RawGenerationCleanupRejected(["RAW_GENERATION_CLEANUP_BUSY"])
+        try:
+            return self._persist_authority_locked(manifest, ack)
+        finally:
+            self.lock.release()
+
+    def _persist_authority_locked(self, manifest: Mapping, ack: Mapping) -> dict:
         generation_id = str(manifest.get("generation_id") or "")
         key = self._key(generation_id)
         if manifest.get("caught_up_cycle_complete") is not True or len(manifest.get("members") or []) != 1:
@@ -106,7 +126,10 @@ class RawGenerationCleanupOwner:
     def quarantine(self, generation_id: str, *, dry_run: bool = True) -> dict:
         if not self.lock.acquire(blocking=False):
             raise RawGenerationCleanupRejected(["RAW_GENERATION_CLEANUP_BUSY"])
+        gated = False
         try:
+            gated = bool(self.gate_acquire())
+            if not gated: raise RawGenerationCleanupRejected(["LIFECYCLE_CLEANUP_LEASE_BUSY"])
             source, proof = self._authority(generation_id)
             before = shutil.disk_usage(self.root).free
             result = self.tx.quarantine(source, proof, dry_run=dry_run,
@@ -114,19 +137,63 @@ class RawGenerationCleanupOwner:
             after = shutil.disk_usage(self.root).free
             return {**result, "free_bytes_before": before, "free_bytes_after": after,
                     "free_bytes_delta": after - before}
-        finally: self.lock.release()
+        finally:
+            if gated: self.gate_release()
+            self.lock.release()
 
     def purge(self, generation_id: str, *, dry_run: bool = True) -> dict:
         if not self.lock.acquire(blocking=False):
             raise RawGenerationCleanupRejected(["RAW_GENERATION_CLEANUP_BUSY"])
+        gated = False
         try:
+            gated = bool(self.gate_acquire())
+            if not gated: raise RawGenerationCleanupRejected(["LIFECYCLE_CLEANUP_LEASE_BUSY"])
             self._authority(generation_id, quarantined=True)
             before = shutil.disk_usage(self.root).free
             result = self.tx.purge(generation_id, dry_run=dry_run)
             after = shutil.disk_usage(self.root).free
             return {**result, "free_bytes_before": before, "free_bytes_after": after,
                     "free_bytes_delta": after - before}
-        finally: self.lock.release()
+        finally:
+            if gated: self.gate_release()
+            self.lock.release()
 
-    def reconcile(self) -> dict:
-        return {"quarantines": self.tx.reconcile(), "purges": self.tx.reconcile_purges()}
+    def audit_recovery(self) -> list[dict]:
+        """Report interrupted states without moving or deleting anything."""
+        rows = []
+        if not self.tx.tx_root.is_dir(): return rows
+        for path in sorted(self.tx.tx_root.glob("*/PREPARED.json")):
+            value = json.loads(path.read_text("utf-8"))
+            if not (path.parent / "QUARANTINED.json").exists():
+                rows.append({"generation_id": value.get("generation_id"), "action": "QUARANTINE",
+                             "status": "EXPLICIT_REPLAY_REQUIRED"})
+        for path in sorted(self.tx.tx_root.glob("*/PURGE_PREPARED.json")):
+            value = json.loads(path.read_text("utf-8"))
+            if not (path.parent / "PURGED.json").exists():
+                rows.append({"generation_id": value.get("generation_id"), "action": "PURGE",
+                             "status": "EXPLICIT_REPLAY_REQUIRED"})
+        return rows
+
+    def replay(self, generation_id: str, action: str) -> list[dict]:
+        if not self.enabled:
+            return [{"generation_id": generation_id, "status": "DISABLED_REPLAY_NOT_RUN"}]
+        if not self.lock.acquire(blocking=False):
+            raise RawGenerationCleanupRejected(["RAW_GENERATION_CLEANUP_BUSY"])
+        gated = False
+        try:
+            gated = bool(self.gate_acquire())
+            if not gated: raise RawGenerationCleanupRejected(["LIFECYCLE_CLEANUP_LEASE_BUSY"])
+            if action == "QUARANTINE":
+                recovery = self.tx.reconcile(generation_id)
+                if recovery and recovery[0].get("status") == "PREPARED_REVALIDATION_REQUIRED":
+                    source, proof = self._authority(generation_id)
+                    return [self.tx.quarantine(
+                        source, proof, dry_run=False,
+                        revalidate=lambda: self._authority(generation_id)[1],
+                    )]
+                return recovery
+            if action == "PURGE": return self.tx.reconcile_purges(generation_id)
+            raise RawGenerationCleanupRejected(["REPLAY_ACTION_INVALID"])
+        finally:
+            if gated: self.gate_release()
+            self.lock.release()

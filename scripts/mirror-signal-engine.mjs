@@ -4,7 +4,7 @@
  * Safe direction: services/btc-conservative-agent/* → services/btc-signal-engine/*
  * Does NOT pull from external bybit_bot.py (use sync-btc-research-bot for that).
  */
-import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, rmSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +26,8 @@ const rawCleanupAgent = join(root, 'services/btc-conservative-agent/raw_generati
 const rawCleanupEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup.py');
 const rawCleanupOwnerAgent = join(root, 'services/btc-conservative-agent/raw_generation_cleanup_owner.py');
 const rawCleanupOwnerEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup_owner.py');
+const mirrorLeaseAgent = join(root, 'services/btc-conservative-agent/research/mirror_generation_lease.py');
+const mirrorLeaseEngine = join(root, 'services/btc-signal-engine/research/mirror_generation_lease.py');
 const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
 const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
@@ -99,8 +101,10 @@ console.log(`Mirrored lifecycle cleanup transaction (${sha256(readFileSync(lifec
 for (const [source, target, label] of [
   [rawCleanupAgent, rawCleanupEngine, 'raw generation cleanup transaction'],
   [rawCleanupOwnerAgent, rawCleanupOwnerEngine, 'raw generation cleanup owner'],
+  [mirrorLeaseAgent, mirrorLeaseEngine, 'mirror generation lease'],
 ]) {
   if (!existsSync(source)) throw new Error(`Missing canonical ${label}`);
+  mkdirSync(dirname(target), { recursive: true });
   copyFileSync(source, target);
   console.log(`Mirrored ${label} (${sha256(readFileSync(source, 'utf8'))})`);
 }

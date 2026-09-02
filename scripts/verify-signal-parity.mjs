@@ -27,6 +27,8 @@ const rawCleanupAgent = join(root, 'services/btc-conservative-agent/raw_generati
 const rawCleanupEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup.py');
 const rawCleanupOwnerAgent = join(root, 'services/btc-conservative-agent/raw_generation_cleanup_owner.py');
 const rawCleanupOwnerEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup_owner.py');
+const mirrorLeaseAgent = join(root, 'services/btc-conservative-agent/research/mirror_generation_lease.py');
+const mirrorLeaseEngine = join(root, 'services/btc-signal-engine/research/mirror_generation_lease.py');
 const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
 const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
@@ -125,6 +127,7 @@ console.log(`OK  lifecycle cleanup transaction matches (${lifecycleCleanupAgentH
 for (const [canonical, mirror, label] of [
   [rawCleanupAgent, rawCleanupEngine, 'raw generation cleanup transaction'],
   [rawCleanupOwnerAgent, rawCleanupOwnerEngine, 'raw generation cleanup owner'],
+  [mirrorLeaseAgent, mirrorLeaseEngine, 'mirror generation lease'],
 ]) {
   if (!existsSync(canonical) || !existsSync(mirror)) fail(`Missing ${label} dependency`);
   const canonicalHash = sha256(canonical);

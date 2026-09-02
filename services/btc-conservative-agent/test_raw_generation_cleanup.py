@@ -28,11 +28,12 @@ def fixture(tmp_path: Path):
                 "config_signature": SHA}
     payload_sha = hashlib.sha256(payload.read_bytes()).hexdigest()
     manifest = {"schema": MANIFEST_SCHEMA, "generation_kind": "V3", "generation": 1,
-                "generation_id": "V3:1", "identity": identity,
+                "generation_id": "V3:decision:1", "ledger": "decision", "identity": identity,
                 "members": [{"path": payload.name, "size": payload.stat().st_size,
                              "sha256": payload_sha,
                              "seal": {"schema": "v3_ledger_rotation_seal_v1", "generation": 1,
-                                      "relative_path": f"v3/ledgers/{payload.name}",
+                                      "ledger": "decision", "relative_path": f"ledgers/{payload.name}",
+                                      "sealed_ref": {"schema": "v3_ledger_generation_ref_v1", "state": "SEALED", "ledger": "decision", "generation": 1, "relative_path": f"ledgers/{payload.name}"},
                                       "size": payload.stat().st_size, "sha256": payload_sha},
                              "lifecycle_ids": ["e1|p1|lane"]}],
                 "lifecycles": [{"lifecycle_id": "e1|p1|lane", "qualification_ready": True,
@@ -40,7 +41,7 @@ def fixture(tmp_path: Path):
     manifest["manifest_sha256"] = hashlib.sha256(canonical(manifest)).hexdigest()
     ack = {"schema": ACK_SCHEMA, "immutable": True, "identity": identity}
     for copy in ("canonical", "archive", "index"):
-        ack[copy] = {"complete": True, "generation_id": "V3:1",
+        ack[copy] = {"complete": True, "generation_id": "V3:decision:1",
                      "manifest_sha256": manifest["manifest_sha256"], "sha256": SHA}
     ack["acknowledgement_sha256"] = hashlib.sha256(canonical(ack)).hexdigest()
     return source, manifest, ack, identity
@@ -52,7 +53,7 @@ def test_complete_manifest_produces_exact_dry_run_without_mutation(tmp_path):
                               active_leases={"reader": [], "sync": [], "analyzer": []})
     tx = RawGenerationCleanupTransaction(tmp_path)
     result = tx.quarantine(source, proof, dry_run=True)
-    assert result == {"status": "DRY_RUN_SOURCE_RETAINED", "generation_id": "V3:1",
+    assert result == {"status": "DRY_RUN_SOURCE_RETAINED", "generation_id": "V3:decision:1",
                       "planned_bytes": proof["source_bytes"], "freed_bytes": 0,
                       "source_cleanup_authorized": False}
     assert source.is_dir()
@@ -61,7 +62,7 @@ def test_complete_manifest_produces_exact_dry_run_without_mutation(tmp_path):
 @pytest.mark.parametrize("mutation,reason", [
     (lambda manifest, ack, leases: manifest["lifecycles"][0].update(qualification_ready=False),
      "LIFECYCLE_NOT_QUALIFICATION_READY_OR_EXPLICIT_UNKNOWN"),
-    (lambda manifest, ack, leases: leases["analyzer"].append("V3:1"),
+    (lambda manifest, ack, leases: leases["analyzer"].append("V3:decision:1"),
      "ACTIVE_GENERATION_ANALYZER_LEASE"),
     (lambda manifest, ack, leases: ack["archive"].update(complete=False),
      "LAPTOP_ARCHIVE_ACK_INVALID"),
@@ -100,12 +101,12 @@ def test_quarantine_restart_reconcile_and_exact_purge_receipt(tmp_path):
     tx = RawGenerationCleanupTransaction(tmp_path, enabled=True)
     with pytest.raises(RuntimeError, match="FAILPOINT_AFTER_MOVE"):
         tx.quarantine(source, proof, dry_run=False, revalidate=lambda: proof, failpoint="AFTER_MOVE")
-    assert tx.reconcile() == [{"generation_id": "V3:1", "status": "QUARANTINED_RECOVERED"}]
-    preview = tx.purge("V3:1", dry_run=True)
+    assert tx.reconcile() == [{"generation_id": "V3:decision:1", "status": "QUARANTINED_RECOVERED"}]
+    preview = tx.purge("V3:decision:1", dry_run=True)
     assert preview["planned_freed_bytes"] == proof["source_bytes"] and preview["freed_bytes"] == 0
     with pytest.raises(RuntimeError, match="FAILPOINT_AFTER_PURGE_ISOLATION"):
-        tx.purge("V3:1", dry_run=False, failpoint="AFTER_PURGE_ISOLATION")
-    assert tx.reconcile_purges() == [{"generation_id": "V3:1", "status": "PURGED_RECOVERED",
+        tx.purge("V3:decision:1", dry_run=False, failpoint="AFTER_PURGE_ISOLATION")
+    assert tx.reconcile_purges() == [{"generation_id": "V3:decision:1", "status": "PURGED_RECOVERED",
                                      "freed_bytes": proof["source_bytes"]}]
     receipt = json.loads(next(tx.tx_root.glob("*/PURGED.json")).read_text("utf-8"))
     assert receipt["state"] == "PURGED" and receipt["freed_bytes"] == proof["source_bytes"]
@@ -121,7 +122,7 @@ def test_same_size_substitution_is_rejected_before_purge(tmp_path):
     original = quarantined.read_bytes()
     quarantined.write_bytes(b"X" * len(original))
     with pytest.raises(RawGenerationCleanupRejected) as caught:
-        tx.purge("V3:1", dry_run=False)
+        tx.purge("V3:decision:1", dry_run=False)
     assert "QUARANTINE_MEMBER_HASH_OR_SIZE_DRIFT" in caught.value.reasons
     assert quarantined.exists()
 
@@ -144,7 +145,7 @@ def _isolate_purge_for_restart(tmp_path):
     tx = RawGenerationCleanupTransaction(tmp_path, enabled=True)
     tx.quarantine(source, proof, dry_run=False, revalidate=lambda: proof)
     with pytest.raises(RuntimeError, match="FAILPOINT_AFTER_PURGE_ISOLATION"):
-        tx.purge("V3:1", dry_run=False, failpoint="AFTER_PURGE_ISOLATION")
+        tx.purge("V3:decision:1", dry_run=False, failpoint="AFTER_PURGE_ISOLATION")
     staging = next(tx.quarantine_root.glob(".*.purging"))
     return tx, staging
 

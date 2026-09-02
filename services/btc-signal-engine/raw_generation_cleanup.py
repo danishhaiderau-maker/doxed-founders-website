@@ -28,6 +28,7 @@ PURGE_SCHEMA = "raw_generation_purge_receipt_v1"
 _SHA = re.compile(r"[0-9a-f]{64}")
 _REV = re.compile(r"[0-9a-f]{7,64}")
 _KINDS = frozenset({"V3", "V22"})
+_LEDGER = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _LEASE_KINDS = ("reader", "sync", "analyzer")
 
 
@@ -157,7 +158,9 @@ def verify_generation(
     generation_id = str(manifest.get("generation_id") or "")
     if kind not in _KINDS or not isinstance(generation, int) or isinstance(generation, bool) or generation <= 0:
         reasons.append("SEALED_GENERATION_IDENTITY_INVALID")
-    if generation_id != f"{kind}:{generation}":
+    ledger = str(manifest.get("ledger") or "")
+    expected_generation_id = f"V3:{ledger}:{generation}" if kind == "V3" else f"V22:{generation}"
+    if generation_id != expected_generation_id or (kind == "V3" and not _LEDGER.fullmatch(ledger)):
         reasons.append("SEALED_GENERATION_IDENTITY_INVALID")
 
     identity = manifest.get("identity") or {}
@@ -203,8 +206,16 @@ def verify_generation(
         seal = member.get("seal") or {}
         seal_schema = "v3_ledger_rotation_seal_v1" if kind == "V3" else "research_event_v22_seal_v1"
         seal_size = seal.get("size") if kind == "V3" else seal.get("size_bytes")
+        sealed_ref = seal.get("sealed_ref") or {}
+        v3_seal_valid = (kind != "V3" or (
+            seal.get("ledger") == ledger
+            and sealed_ref == {"schema": "v3_ledger_generation_ref_v1", "state": "SEALED",
+                               "ledger": ledger, "generation": generation,
+                               "relative_path": str(seal.get("relative_path") or "")}
+        ))
         if not (seal.get("schema") == seal_schema and seal.get("generation") == generation
                 and (kind != "V22" or seal.get("state") == "SEALED")
+                and v3_seal_valid
                 and str(seal.get("relative_path") or "").replace("\\", "/").endswith(relative)
                 and seal_size == actual_size and hmac.compare_digest(str(seal.get("sha256") or ""), actual_sha)):
             reasons.append("GENERATION_MEMBER_SEAL_AUTHORITY_INVALID")
@@ -300,7 +311,17 @@ class RawGenerationCleanupTransaction:
                     "quarantine": destination.relative_to(self.root).as_posix(),
                     "proof_sha256": proof.get("proof_sha256"), "source_bytes": proof.get("source_bytes"),
                     "members": proof.get("members"), "free_bytes_before": free_before}
-        _write_once(tx / "PREPARED.json", prepared)
+        prepared_path = tx / "PREPARED.json"
+        if prepared_path.exists():
+            existing = json.loads(prepared_path.read_text("utf-8"))
+            stable_keys = ("schema", "state", "generation_id", "source", "quarantine",
+                           "proof_sha256", "source_bytes", "members")
+            if any(existing.get(key) != prepared.get(key) for key in stable_keys):
+                raise RawGenerationCleanupRejected(["TRANSACTION_CONFLICT"])
+            prepared = existing
+            free_before = int(existing["free_bytes_before"])
+        else:
+            _write_once(prepared_path, prepared)
         if failpoint == "AFTER_PREPARED":
             raise RuntimeError("FAILPOINT_AFTER_PREPARED")
         fresh = revalidate()
@@ -366,7 +387,7 @@ class RawGenerationCleanupTransaction:
         _write_once(tx / "PURGED.json", receipt)
         return receipt
 
-    def reconcile_purges(self) -> list[dict[str, Any]]:
+    def reconcile_purges(self, generation_id: str | None = None) -> list[dict[str, Any]]:
         """Finish only a previously isolated purge staging tree."""
         results = []
         if not self.enabled or not self.tx_root.is_dir():
@@ -376,6 +397,8 @@ class RawGenerationCleanupTransaction:
             if (tx / "PURGED.json").exists():
                 continue
             row = json.loads(prepared_path.read_text("utf-8"))
+            if generation_id is not None and row.get("generation_id") != generation_id:
+                continue
             quarantine = self.root / row["quarantine"]
             staging = self.root / row["staging"]
             if quarantine.exists() or not staging.is_dir():
@@ -399,7 +422,7 @@ class RawGenerationCleanupTransaction:
                             "status": "PURGED_RECOVERED", "freed_bytes": actual})
         return results
 
-    def reconcile(self) -> list[dict[str, Any]]:
+    def reconcile(self, generation_id: str | None = None) -> list[dict[str, Any]]:
         """Record moved quarantines after restart; never performs deletion."""
         results = []
         if not self.enabled or not self.tx_root.is_dir():
@@ -409,6 +432,8 @@ class RawGenerationCleanupTransaction:
             if (tx / "QUARANTINED.json").exists():
                 continue
             row = json.loads(prepared_path.read_text("utf-8"))
+            if generation_id is not None and row.get("generation_id") != generation_id:
+                continue
             source = self.root / row["source"]
             quarantine = self.root / row["quarantine"]
             if source.exists() and not quarantine.exists():

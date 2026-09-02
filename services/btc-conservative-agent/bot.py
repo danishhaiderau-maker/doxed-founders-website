@@ -54,6 +54,7 @@ from lifecycle_cleanup_transaction import (
 )
 from raw_generation_cleanup import RawGenerationCleanupRejected
 from raw_generation_cleanup_owner import RawGenerationCleanupOwner
+from research.mirror_generation_lease import MirrorGenerationLease, MirrorGenerationLeaseTimeout
 from emergency_evidence_wal import EmergencyEvidenceWal
 from position_registry import (
     PositionCloseClaimScope,
@@ -26518,6 +26519,9 @@ scheduled_ai_cycle_state = {
     "stage": "IDLE",
     "stage_started_ts": 0.0,
     "last_completed_hook": None,
+    "last_poll_ts": 0.0,
+    "last_poll_entry_eligible": None,
+    "last_poll_reason": None,
     "skipped_busy": 0,
 }
 process_lock = threading.RLock()
@@ -28876,6 +28880,28 @@ def _strategy_progress_health_snapshot(
         evaluation_ts and evaluation_age <= ai_stale_sec
     )
     scheduled_snapshot = copy.deepcopy(scheduled_ai_cycle_state)
+    scheduled_poll_ts = float(scheduled_snapshot.get("last_poll_ts") or 0)
+    scheduled_poll_age = (
+        max(0.0, now - scheduled_poll_ts) if scheduled_poll_ts else None
+    )
+    scheduler_proves_entry_blocked = bool(
+        scheduled_poll_ts
+        # The scheduler poll interval is clamped to at most 30 seconds. Three
+        # missed polls is a bounded fence and cannot mask a wedged owner.
+        and scheduled_poll_age <= 90.0
+        and scheduled_snapshot.get("last_poll_entry_eligible") is False
+    )
+    scheduled_completed_ts = float(scheduled_snapshot.get("completed_ts") or 0)
+    scheduled_completed_age = (
+        max(0.0, now - scheduled_completed_ts) if scheduled_completed_ts else None
+    )
+    evaluation_progressing = bool(
+        evaluation_progressing
+        or (
+            scheduled_completed_ts
+            and scheduled_completed_age <= ai_stale_sec
+        )
+    )
     scheduled_started = float(scheduled_snapshot.get("started_ts") or 0)
     scheduled_owner_ident = scheduled_snapshot.get("owner_ident")
     scheduled_owner_frame = (
@@ -28901,6 +28927,7 @@ def _strategy_progress_health_snapshot(
         and (os.getenv("DEEPSEEK_API_KEY") or "").strip()
         and startup_age >= ai_stale_sec
         and not evaluation_progressing
+        and not scheduler_proves_entry_blocked
         and not scheduled_cycle_within_bound
     )
 
@@ -42383,6 +42410,7 @@ def _audit_lifecycle_purge_recovery() -> list:
 
 
 _RAW_GENERATION_PURGE_CONFIRM_PREFIX = "PURGE_SEALED_RAW_GENERATION:"
+_RAW_GENERATION_GATE_LOCAL = threading.local()
 
 
 def _raw_generation_cleanup_identity() -> dict:
@@ -42402,8 +42430,32 @@ def _raw_generation_cleanup_leases(_generation_id: str) -> dict:
     return {
         "reader": list(active.get("runtime") or []) + list(active.get("lifecycle_worker") or []),
         "sync": list(active.get("sync") or []),
-        "analyzer": list(active.get("analyzer") or []),
+        "analyzer": [] if getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None) else list(active.get("analyzer") or []),
     }
+
+
+def _raw_generation_cleanup_gate_acquire() -> bool:
+    runtime = _LIFECYCLE_PIPELINE_RUNTIME
+    if runtime is not None and not runtime.acquire_cleanup_lease(timeout=0.0):
+        return False
+    try:
+        mirror = MirrorGenerationLease(_data_sync_volume_root(), owner="raw-generation-cleanup")
+        mirror.acquire(timeout_seconds=0.0)
+        _RAW_GENERATION_GATE_LOCAL.runtime = runtime
+        _RAW_GENERATION_GATE_LOCAL.mirror = mirror
+        return True
+    except (OSError, MirrorGenerationLeaseTimeout):
+        if runtime is not None: runtime.release_cleanup_lease()
+        return False
+
+
+def _raw_generation_cleanup_gate_release() -> None:
+    mirror = getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None)
+    runtime = getattr(_RAW_GENERATION_GATE_LOCAL, "runtime", None)
+    if mirror is not None: mirror.release()
+    if runtime is not None: runtime.release_cleanup_lease()
+    for name in ("mirror", "runtime"):
+        if hasattr(_RAW_GENERATION_GATE_LOCAL, name): delattr(_RAW_GENERATION_GATE_LOCAL, name)
 
 
 def _raw_generation_cleanup_owner(*, purge: bool = False) -> RawGenerationCleanupOwner:
@@ -42414,6 +42466,8 @@ def _raw_generation_cleanup_owner(*, purge: bool = False) -> RawGenerationCleanu
         _data_sync_volume_root(), enabled=enabled,
         identity=_raw_generation_cleanup_identity,
         leases=_raw_generation_cleanup_leases,
+        gate_acquire=_raw_generation_cleanup_gate_acquire,
+        gate_release=_raw_generation_cleanup_gate_release,
     )
 
 
@@ -42462,6 +42516,34 @@ def api_data_sync_raw_generation_purge():
         return jsonify({"ok": False, "status": "RAW_GENERATION_PURGE_INELIGIBLE_RETAINED",
                         "reasons": list(getattr(exc, "reasons", [type(exc).__name__]))[:12]}), 409
     return jsonify({"ok": True, **result})
+
+
+@app.route('/api/data-sync/raw-generation/replay', methods=['POST'])
+def api_data_sync_raw_generation_replay():
+    """Explicitly replay one interrupted state; startup itself is audit-only."""
+    body = request.get_json(silent=True) or {}
+    generation_id = str(body.get("generation_id") or "") if isinstance(body, dict) else ""
+    action = str(body.get("action") or "").upper() if isinstance(body, dict) else ""
+    expected = f"REPLAY_RAW_GENERATION:{action}:{generation_id}"
+    if not hmac.compare_digest(str(body.get("confirmation") or ""), expected):
+        return jsonify({"ok": False, "status": "EXACT_CONFIRMATION_REQUIRED"}), 409
+    owner = _raw_generation_cleanup_owner(purge=action == "PURGE")
+    try:
+        result = owner.replay(generation_id, action)
+    except (RawGenerationCleanupRejected, OSError, TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "status": "RAW_GENERATION_REPLAY_REJECTED_RETAINED",
+                        "reasons": list(getattr(exc, "reasons", [type(exc).__name__]))[:12]}), 409
+    return jsonify({"ok": True, "results": result})
+
+
+def _audit_raw_generation_cleanup_recovery() -> list:
+    """Startup visibility only: never move or delete interrupted generations."""
+    try:
+        rows = _raw_generation_cleanup_owner().audit_recovery()
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        rows = [{"status": "RAW_GENERATION_RECOVERY_AUDIT_FAILED", "reason": str(exc)[:240]}]
+    if rows: logger.warning("raw generation cleanup requires explicit replay states=%s", rows)
+    return rows
 
 
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024
@@ -48302,6 +48384,12 @@ def periodic_pipeline_loop():
             break
         now = time.time()
         entry_ok, entry_reason, _runtime = can_progress_new_entry(now)
+        with state_lock:
+            scheduled_ai_cycle_state.update({
+                "last_poll_ts": time.time(),
+                "last_poll_entry_eligible": bool(entry_ok),
+                "last_poll_reason": str(entry_reason or "UNKNOWN")[:120],
+            })
         recovery_observation_only = False
         if not entry_ok:
             recovery_observation_only = can_run_ai_recovery_observation(now)[0]
@@ -48519,6 +48607,7 @@ def main():
     _prime_data_sync_identity_epoch_cache()
     _reconcile_lifecycle_cleanup_transactions()
     _audit_lifecycle_purge_recovery()
+    _audit_raw_generation_cleanup_recovery()
     global DEEPSEEK_API_KEY
     _load_local_dotenv()
     DEEPSEEK_API_KEY = _deepseek_api_key()
