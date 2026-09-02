@@ -348,9 +348,27 @@ export function isNeverArmedUncredentialedRelay(
 ) {
   const reconcileAbsent = row?.reconcile == null;
   const orderAuditAbsent = row?.exchangeOrderAudit == null;
+  const guard = row?.liveFidelityGuard;
+  const observedAtMs = Date.parse(String(guard?.lastObservedAt ?? ''));
+  const credentialUpdatedAtMs = Date.parse(String(row?.providerCredentialUpdatedAt ?? ''));
+  const providerCredentialProvenUnusable = (
+    row?.providerCredentialPresent === true
+    && row?.providerCredentialReadStable === true
+    && row?.lastError === 'Exchange credentials missing — re-hire with API keys'
+    && guard?.status === 'IDLE'
+    && guard?.lastResetReason === 'EXCHANGE_CREDENTIALS_MISSING'
+    && Number.isFinite(observedAtMs)
+    && Number.isFinite(credentialUpdatedAtMs)
+    && observedAtMs >= credentialUpdatedAtMs
+  );
+  const providerCredentialAbsent = (
+    row?.providerCredentialPresent === false
+    && row?.providerCredentialReadStable === true
+  );
   return (
     allowDurableExemption
-    && row?.credentialConfigured === false
+    && row?.instanceCredentialId == null
+    && (providerCredentialAbsent || providerCredentialProvenUnusable)
     && row?.liveDeskSessionStartedAt == null
     && isRelayPausedAndDisarmed(row)
     && row?.activeParticipants === 0
@@ -427,15 +445,21 @@ async function loadRelayBoundaryRows() {
           user: { select: { platformHandle: true, name: true } },
         },
       });
+      const credentialWhere = {
+        provider: 'exchange:bitfinex',
+        userId: { in: instances.map((instance) => instance.userId) },
+      };
       const providerCredentials = await prisma.integrationCredential.findMany({
         where: {
-          provider: 'exchange:bitfinex',
-          userId: { in: instances.map((instance) => instance.userId) },
+          ...credentialWhere,
         },
-        select: { userId: true },
+        select: { userId: true, updatedAt: true },
       });
-      const providerCredentialUsers = new Set(
-        providerCredentials.map((credential) => credential.userId),
+      const firstCredentialVersions = new Map(
+        providerCredentials.map((credential) => [
+          credential.userId,
+          credential.updatedAt.toISOString(),
+        ]),
       );
 
       const rows = [];
@@ -461,19 +485,42 @@ async function loadRelayBoundaryRows() {
             || instance.userId,
           status: instance.status,
           lastError: instance.lastError,
+          instanceCredentialId: instance.credentialId,
           credentialConfigured: Boolean(
-            instance.credentialId || providerCredentialUsers.has(instance.userId)
+            instance.credentialId || firstCredentialVersions.has(instance.userId)
           ),
+          providerCredentialPresent: firstCredentialVersions.has(instance.userId),
+          providerCredentialUpdatedAt: firstCredentialVersions.get(instance.userId) ?? null,
           activeParticipants,
           reconcile,
           relayExecutionMode: dashboard.relayExecutionMode ?? null,
           relayArmedAt: dashboard.relayArmedAt ?? null,
           realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
           liveDeskSessionStartedAt: dashboard.liveDeskSessionStartedAt ?? null,
+          liveFidelityGuard: dashboard.liveFidelityGuard ?? null,
           exchangeOrderAudit: dashboard.exchangeOrderAudit ?? null,
           orphanOrderIds: dashboard.orphanOrderIds,
           orphanPositionIds: dashboard.orphanPositionIds,
         });
+      }
+      // Re-read only non-secret credential metadata after the per-instance
+      // evidence queries. Any insertion, deletion, or update during the proof
+      // makes the recovery-only exemption unavailable.
+      const credentialRecheck = await prisma.integrationCredential.findMany({
+        where: { ...credentialWhere },
+        select: { userId: true, updatedAt: true },
+      });
+      const finalCredentialVersions = new Map(
+        credentialRecheck.map((credential) => [
+          credential.userId,
+          credential.updatedAt.toISOString(),
+        ]),
+      );
+      for (const row of rows) {
+        row.providerCredentialReadStable = (
+          firstCredentialVersions.get(row.refreshUserId)
+          === finalCredentialVersions.get(row.refreshUserId)
+        );
       }
       return rows;
     } catch (error) {

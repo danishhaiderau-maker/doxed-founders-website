@@ -18,6 +18,10 @@ import {
 
 const inertUncredentialedRelay = {
   credentialConfigured: false,
+  instanceCredentialId: null,
+  providerCredentialPresent: false,
+  providerCredentialUpdatedAt: null,
+  providerCredentialReadStable: true,
   liveDeskSessionStartedAt: null,
   status: 'PAUSED',
   relayExecutionMode: 'PAUSED',
@@ -39,7 +43,7 @@ test('durable recovery waives absent audits only for a never-armed uncredentiale
   }, true), false);
   assert.equal(isNeverArmedUncredentialedRelay({
     ...inertUncredentialedRelay,
-    credentialConfigured: true,
+    instanceCredentialId: 'credential-link',
   }, true), false);
   assert.equal(isNeverArmedUncredentialedRelay({
     ...inertUncredentialedRelay,
@@ -48,6 +52,42 @@ test('durable recovery waives absent audits only for a never-armed uncredentiale
   assert.equal(isNeverArmedUncredentialedRelay({
     ...inertUncredentialedRelay,
     orphanOrderIds: null,
+  }, true), false);
+});
+
+test('durable recovery accepts a stable provider row only after an exact newer missing-credential receipt', () => {
+  const staleProviderRow = {
+    ...inertUncredentialedRelay,
+    credentialConfigured: true,
+    providerCredentialPresent: true,
+    providerCredentialUpdatedAt: '2026-09-03T01:00:00.000Z',
+    lastError: 'Exchange credentials missing — re-hire with API keys',
+    liveFidelityGuard: {
+      status: 'IDLE',
+      lastResetReason: 'EXCHANGE_CREDENTIALS_MISSING',
+      lastObservedAt: '2026-09-03T01:00:01.000Z',
+    },
+  };
+  assert.equal(isNeverArmedUncredentialedRelay(staleProviderRow, true), true);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    providerCredentialReadStable: false,
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    liveFidelityGuard: { ...staleProviderRow.liveFidelityGuard, lastObservedAt: '2026-09-03T00:59:59.000Z' },
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    lastError: 'different error',
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    liveFidelityGuard: { ...staleProviderRow.liveFidelityGuard, lastResetReason: 'LIVE_RELAY_INACTIVE' },
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    reconcile: {},
   }, true), false);
 });
 
