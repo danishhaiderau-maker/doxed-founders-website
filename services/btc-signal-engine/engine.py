@@ -37915,13 +37915,22 @@ def _lifecycle_pipeline_pressure_probe() -> dict:
 
 
 def _lifecycle_pipeline_overlap_probe():
-    """Avoid competing with either physical Fly inventory generation."""
+    """Avoid competing with physical inventory or SQLite snapshot generation."""
     active = []
     with _data_sync_inventory_cache_condition:
         if _data_sync_inventory_cache.get("refreshing"):
             active.append("SYNC_INVENTORY_CACHE_REFRESH")
         if _data_sync_async_inventory.get("refreshing"):
             active.append("SYNC_ASYNC_INVENTORY_REFRESH")
+    # Let the optional lifecycle indexer yield while the bounded snapshot
+    # worker is BUILDING. SQLite online backup remains valid while the WAL
+    # advances, but avoiding another writer reduces one-vCPU and I/O pressure.
+    with _data_sync_sqlite_snapshot_condition:
+        if any(
+            state.get("status") == "BUILDING"
+            for state in _data_sync_sqlite_snapshot_states.values()
+        ):
+            active.append("SQLITE_SNAPSHOT_BUILDING")
     return active
 
 
@@ -38381,13 +38390,6 @@ def _data_sync_sqlite_snapshot(path: Path, *, deadline_monotonic=None) -> dict:
 
     snapshot_root = _data_sync_volume_root() / ".data-sync-snapshots"
     snapshot_root.mkdir(parents=True, exist_ok=True)
-    cutoff = time.time() - (15 * 60)
-    for stale in snapshot_root.glob("*.db"):
-        try:
-            if stale.stat().st_mtime < cutoff:
-                stale.unlink()
-        except OSError:
-            pass
     token = uuid.uuid4().hex
     snapshot = snapshot_root / f"{token}.db"
     source = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=15)
@@ -38445,7 +38447,11 @@ def _data_sync_sqlite_snapshot(path: Path, *, deadline_monotonic=None) -> dict:
     }
 
 
-def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at: float):
+def _data_sync_sqlite_snapshot_worker(
+        path: Path, request_id: str, build_id: str,
+        inventory_generation_id: str, inventory_sha256: str,
+        start_generation: tuple, manifest_source_identity: dict,
+        snapshot_id: str, deadline_at: float):
     lease = None
     error = None
     build_slot_acquired = False
@@ -38455,9 +38461,25 @@ def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at
         )
         if not build_slot_acquired:
             raise TimeoutError("SQLite snapshot build capacity exceeded deadline")
-        lease = _data_sync_sqlite_snapshot_subprocess(path, deadline_at=deadline_at)
-        if _data_sync_sqlite_generation(path) != generation:
-            raise RuntimeError("SQLite source generation changed during snapshot build")
+        lease = _data_sync_sqlite_snapshot_subprocess(
+            path, deadline_at=deadline_at, snapshot_id=snapshot_id,
+        )
+        # sqlite3_backup produces a transactionally consistent database.  A
+        # busy WAL is expected to advance while that backup is running; bind
+        # the completed immutable artifact to this request flight instead of
+        # discarding it merely because the live source advanced afterwards.
+        end_generation = _data_sync_sqlite_generation(path)
+        lease.update({
+            "request_id": request_id,
+            "build_id": build_id,
+            "inventory_generation_id": inventory_generation_id,
+            "inventory_sha256": inventory_sha256,
+            "source_path": str(path.resolve()),
+            "manifest_source_identity": dict(manifest_source_identity),
+            "source_generation_start": start_generation,
+            "source_generation_end": end_generation,
+            "source_changed_during_build": end_generation != start_generation,
+        })
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
         if lease:
@@ -38470,21 +38492,28 @@ def _data_sync_sqlite_snapshot_worker(path: Path, generation: tuple, deadline_at
         if build_slot_acquired:
             _data_sync_sqlite_snapshot_build_slots.release()
     with _data_sync_sqlite_snapshot_condition:
-        state = _data_sync_sqlite_snapshot_states.get(str(path.resolve()))
+        state_key = (
+            str(path.resolve()), request_id,
+            inventory_generation_id, inventory_sha256,
+        )
+        state = _data_sync_sqlite_snapshot_states.get(state_key)
         if state is None:
             return
-        if state.get("generation") == generation:
+        if state.get("build_id") == build_id:
             state.update({"status": "CURRENT" if lease else "FAILED",
                           "lease": lease, "worker": None,
                           "completed_at": time.monotonic(), "error": error})
         _data_sync_sqlite_snapshot_condition.notify_all()
 
 
-def _data_sync_sqlite_snapshot_subprocess(path: Path, *, deadline_at: float) -> dict:
+def _data_sync_sqlite_snapshot_subprocess(
+        path: Path, *, deadline_at: float, snapshot_id: str | None = None) -> dict:
     """Run backup, integrity check and SHA outside the request-serving process."""
     snapshot_root = _data_sync_volume_root() / ".data-sync-snapshots"
     snapshot_root.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex
+    token = str(snapshot_id or uuid.uuid4().hex).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        raise ValueError("invalid sqlite snapshot artifact identity")
     snapshot = snapshot_root / f"{token}.db"
     request_path = snapshot_root / f".{token}.request.json"
     result_path = snapshot_root / f".{token}.result.json"
@@ -38540,51 +38569,302 @@ def _data_sync_sqlite_snapshot_subprocess(path: Path, *, deadline_at: float) -> 
         result_path.unlink(missing_ok=True)
 
 
-def _data_sync_request_sqlite_snapshot(path: Path) -> dict:
-    """Return a cached lease or start exactly one bounded background build."""
+def _data_sync_authorize_sqlite_snapshot_request(
+        path: Path, inventory_generation_id: str, inventory_sha256: str,
+        supplied_source_identity: dict) -> dict:
+    """Copy and verify the retained manifest row before taking snapshot locks."""
+    if not hmac.compare_digest(inventory_generation_id, inventory_sha256):
+        raise ValueError("sqlite snapshot inventory identity mismatch")
+    generation = _data_sync_inventory_generation(inventory_generation_id)
+    if (not isinstance(generation, dict)
+            or generation.get("ack_eligible") is not True
+            or str(generation.get("status") or "").upper() != "CURRENT"):
+        raise ValueError("sqlite snapshot inventory generation is unavailable")
+    rows = []
+    if generation.get("storage") == "disk_pages_v2":
+        for page_index in range(int(generation.get("page_count") or 0)):
+            page = _data_sync_disk_manifest_page(
+                generation,
+                raw_cursor=(
+                    "" if page_index == 0
+                    else _data_sync_manifest_cursor(inventory_generation_id, page_index)
+                ),
+            )
+            rows.extend(page.get("rows") or [])
+    else:
+        rows = generation.get("rows") or []
+    relpath = _data_sync_relpath(path.resolve())
+    matches = [dict(row) for row in rows if str(row.get("path") or "") == relpath]
+    if len(matches) != 1:
+        raise ValueError("sqlite snapshot path is absent from retained inventory")
+    row = matches[0]
+    if str(row.get("consistency_mode") or "") != "sqlite_snapshot_v1":
+        raise ValueError("retained inventory row is not a SQLite snapshot")
+    try:
+        retained_identity = {
+            "path": relpath,
+            "physical_size": int(row["physical_size"]),
+            "mtime_ns": int(row["mtime_ns"]),
+            "inode": int(row["inode"]),
+            "consistency_mode": "sqlite_snapshot_v1",
+        }
+        supplied_identity = {
+            "path": str(supplied_source_identity.get("path") or ""),
+            "physical_size": int(supplied_source_identity.get("physical_size")),
+            "mtime_ns": int(supplied_source_identity.get("mtime_ns")),
+            "inode": int(supplied_source_identity.get("inode")),
+            "consistency_mode": str(supplied_source_identity.get("consistency_mode") or ""),
+        }
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("retained SQLite source identity is invalid") from exc
+    if supplied_identity != retained_identity:
+        raise ValueError("retained SQLite source identity mismatch")
+    # The live DB/WAL may advance after this authenticated manifest row. That
+    # is the hot-file case the online backup handles; start/end generations
+    # below record the actual capture provenance without weakening authority.
+    return {
+        "path": relpath,
+        "physical_size": retained_identity["physical_size"],
+        "mtime_ns": retained_identity["mtime_ns"],
+        "inode": retained_identity["inode"],
+        "consistency_mode": "sqlite_snapshot_v1",
+    }
+
+
+def _data_sync_unlink_sqlite_snapshot_artifact(snapshot_id: str) -> bool:
+    """Best-effort unlink of one regular snapshot file without following links."""
+    token = str(snapshot_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", token):
+        return False
+    root = (_data_sync_volume_root() / ".data-sync-snapshots").resolve()
+    candidate = root / f"{token}.db"
+    try:
+        if candidate.is_symlink() or not candidate.is_file():
+            return False
+        if candidate.resolve(strict=True).parent != root:
+            return False
+        candidate.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _data_sync_sweep_sqlite_snapshot_artifacts(protected_ids: set, *, limit: int = 64) -> int:
+    """Bounded stale-orphan sweep; active artifacts and links are never removed."""
+    root = _data_sync_volume_root() / ".data-sync-snapshots"
+    cutoff = time.time() - _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS
+    removed = 0
+    try:
+        with os.scandir(root) as entries:
+            for index, entry in enumerate(entries):
+                if index >= max(1, min(256, int(limit))):
+                    break
+                match = re.fullmatch(r"([0-9a-f]{32})\.db", entry.name.lower())
+                if (not match or match.group(1) in protected_ids
+                        or entry.is_symlink()
+                        or not entry.is_file(follow_symlinks=False)
+                        or entry.stat(follow_symlinks=False).st_mtime >= cutoff):
+                    continue
+                if _data_sync_unlink_sqlite_snapshot_artifact(match.group(1)):
+                    removed += 1
+    except OSError:
+        pass
+    return removed
+
+
+def _data_sync_request_sqlite_snapshot(
+        path: Path, request_id: str,
+        inventory_generation_id: str, inventory_sha256: str,
+        manifest_source_identity: dict | None = None) -> dict:
+    """Return or start one idempotent, request-bound snapshot flight."""
     path = path.resolve()
-    state_key = str(path)
+    request_id = str(request_id or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise ValueError("invalid sqlite snapshot request identity")
+    inventory_generation_id = str(inventory_generation_id or "").strip().lower()
+    inventory_sha256 = str(inventory_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", inventory_generation_id):
+        raise ValueError("invalid sqlite snapshot inventory generation")
+    if not re.fullmatch(r"[0-9a-f]{64}", inventory_sha256):
+        raise ValueError("invalid sqlite snapshot inventory checksum")
+    if not hmac.compare_digest(inventory_generation_id, inventory_sha256):
+        raise ValueError("sqlite snapshot inventory identity mismatch")
+    # The helper obtains a defensive inventory copy under the inventory
+    # condition and releases it before this function takes the snapshot lock.
+    manifest_source_identity = _data_sync_authorize_sqlite_snapshot_request(
+        path, inventory_generation_id, inventory_sha256,
+        manifest_source_identity or {},
+    )
+    state_key = (str(path), request_id, inventory_generation_id, inventory_sha256)
     generation = _data_sync_sqlite_generation(path)
     now = time.monotonic()
     with _data_sync_sqlite_snapshot_condition:
+        # Request identities are short lived. Do not let abandoned flights
+        # accumulate forever, but never remove a worker that is still alive.
+        evicted_snapshot_ids = set()
+        for stale_key, stale_state in list(_data_sync_sqlite_snapshot_states.items()):
+            stale_worker = stale_state.get("worker")
+            stale_at = max(
+                float(stale_state.get("completed_at") or 0.0),
+                float(stale_state.get("last_accessed_at") or 0.0),
+            )
+            if (stale_key != state_key and stale_at
+                    and now - stale_at >= _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS
+                    and not (stale_worker and stale_worker.is_alive())):
+                removed_state = _data_sync_sqlite_snapshot_states.pop(stale_key, None) or {}
+                removed_lease = removed_state.get("lease") or {}
+                if removed_lease.get("snapshot_id"):
+                    evicted_snapshot_ids.add(str(removed_lease["snapshot_id"]).lower())
+        protected_snapshot_ids = set()
+        for active_state in _data_sync_sqlite_snapshot_states.values():
+            active_at = max(
+                float(active_state.get("completed_at") or 0.0),
+                float(active_state.get("last_accessed_at") or 0.0),
+            )
+            recently_expired = (
+                active_state.get("status") == "EXPIRED"
+                and now - active_at < _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS
+            )
+            if (active_state.get("status") not in {"CURRENT", "BUILDING"}
+                    and not recently_expired):
+                continue
+            active_lease = active_state.get("lease") or {}
+            active_id = active_lease.get("snapshot_id") or active_state.get("snapshot_id")
+            if active_id:
+                protected_snapshot_ids.add(str(active_id).lower())
+        for evicted_id in evicted_snapshot_ids - protected_snapshot_ids:
+            _data_sync_unlink_sqlite_snapshot_artifact(evicted_id)
+        _data_sync_sweep_sqlite_snapshot_artifacts(protected_snapshot_ids)
         state = _data_sync_sqlite_snapshot_states.setdefault(state_key, {
-            "status": "EMPTY", "generation": None, "path": state_key,
+            "status": "EMPTY", "request_id": request_id,
+            "inventory_generation_id": inventory_generation_id,
+            "inventory_sha256": inventory_sha256,
+            "build_id": None, "generation": None, "path": str(path),
             "lease": None, "worker": None, "started_at": 0.0,
-            "deadline_at": 0.0, "completed_at": 0.0, "error": None,
+            "deadline_at": 0.0, "completed_at": 0.0,
+            "last_accessed_at": 0.0, "error": None,
         })
         worker = state.get("worker")
-        same_generation = state.get("generation") == generation
-        lease = state.get("lease") if same_generation else None
-        if (state.get("status") == "CURRENT" and lease
-                and now - float(state.get("completed_at") or 0.0)
-                < _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS):
-            try:
-                _data_sync_resolve_sqlite_snapshot(lease["snapshot_id"])
-                return {"snapshot_status": "CURRENT", **lease}
-            except (OSError, TypeError, ValueError):
-                state.update({"status": "EXPIRED", "lease": None})
+        lease = state.get("lease")
+        if state.get("status") == "CURRENT" and lease:
+            lease_current = (
+                now - float(state.get("completed_at") or 0.0)
+                < _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS
+            )
+            if lease_current:
+                try:
+                    _data_sync_resolve_sqlite_snapshot(lease["snapshot_id"])
+                    state["last_accessed_at"] = now
+                    return {"snapshot_status": "CURRENT", **lease}
+                except (OSError, TypeError, ValueError):
+                    pass
+            # Expiry is terminal for this request identity. Keep the immutable
+            # artifact until it has also been inactive for the ordinary stale
+            # eviction window; never rebuild behind the same nonce.
+            state.update({"status": "EXPIRED", "last_accessed_at": now})
+            return {
+                "snapshot_status": "EXPIRED",
+                "request_id": request_id, "build_id": state.get("build_id"),
+                "inventory_generation_id": inventory_generation_id,
+                "inventory_sha256": inventory_sha256,
+                "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS,
+                "error": "SQLite snapshot lease expired; use a new request identity",
+            }
         if worker and worker.is_alive():
             return {"snapshot_status": "BUILDING",
+                    "request_id": request_id, "build_id": state.get("build_id"),
+                    "inventory_generation_id": inventory_generation_id,
+                    "inventory_sha256": inventory_sha256,
                     "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS}
-        if (same_generation and state.get("status") == "FAILED"
-                and now - float(state.get("completed_at") or 0.0)
-                < _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS):
+        # A failed request flight is terminal. The caller must apply bounded
+        # backoff and use a new identity; silently restarting the same flight
+        # allowed BUILDING responses to reset its pressure circuit forever.
+        if state.get("status") == "FAILED":
             return {"snapshot_status": "FAILED",
+                    "request_id": request_id, "build_id": state.get("build_id"),
+                    "inventory_generation_id": inventory_generation_id,
+                    "inventory_sha256": inventory_sha256,
                     "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS,
                     "error": state.get("error") or "SQLite snapshot build failed"}
+        if state.get("status") == "EXPIRED":
+            state["last_accessed_at"] = now
+            return {"snapshot_status": "EXPIRED",
+                    "request_id": request_id, "build_id": state.get("build_id"),
+                    "inventory_generation_id": inventory_generation_id,
+                    "inventory_sha256": inventory_sha256,
+                    "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS,
+                    "error": "SQLite snapshot lease expired; use a new request identity"}
         deadline_at = now + _data_sync_sqlite_snapshot_deadline_seconds()
+        build_id = uuid.uuid4().hex
+        snapshot_id = uuid.uuid4().hex
         worker = threading.Thread(
             target=_data_sync_sqlite_snapshot_worker,
-            args=(path, generation, deadline_at),
+            args=(path, request_id, build_id, inventory_generation_id,
+                  inventory_sha256, generation, manifest_source_identity,
+                  snapshot_id, deadline_at),
             name="data-sync-sqlite-snapshot", daemon=True,
         )
         state.update({"status": "BUILDING", "generation": generation,
+                      "request_id": request_id, "build_id": build_id,
+                      "inventory_generation_id": inventory_generation_id,
+                      "inventory_sha256": inventory_sha256,
+                      "manifest_source_identity": manifest_source_identity,
+                      "snapshot_id": snapshot_id,
                       "path": str(path), "lease": None, "worker": worker,
                       "started_at": now, "deadline_at": deadline_at,
-                      "completed_at": 0.0, "error": None})
+                      "completed_at": 0.0, "last_accessed_at": now,
+                      "error": None})
         worker.start()
         return {"snapshot_status": "BUILDING",
+                "request_id": request_id, "build_id": build_id,
+                "inventory_generation_id": inventory_generation_id,
+                "inventory_sha256": inventory_sha256,
                 "retry_after_seconds": _DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS}
+
+
+def _data_sync_resolve_sqlite_snapshot_flight(
+        path: Path, request_id: str, build_id: str,
+        inventory_generation_id: str, inventory_sha256: str,
+        snapshot_id: str, snapshot_size: int, snapshot_sha256: str) -> Path:
+    """Resolve only the immutable artifact issued by one exact lease flight."""
+    path = path.resolve()
+    request_id = str(request_id or "").strip().lower()
+    build_id = str(build_id or "").strip().lower()
+    inventory_generation_id = str(inventory_generation_id or "").strip().lower()
+    inventory_sha256 = str(inventory_sha256 or "").strip().lower()
+    snapshot_id = str(snapshot_id or "").strip().lower()
+    snapshot_sha256 = str(snapshot_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+        raise ValueError("invalid sqlite snapshot request identity")
+    if not re.fullmatch(r"[0-9a-f]{32}", build_id):
+        raise ValueError("invalid sqlite snapshot build identity")
+    if not re.fullmatch(r"[0-9a-f]{64}", inventory_generation_id):
+        raise ValueError("invalid sqlite snapshot inventory generation")
+    if not re.fullmatch(r"[0-9a-f]{64}", inventory_sha256):
+        raise ValueError("invalid sqlite snapshot inventory checksum")
+    if not hmac.compare_digest(inventory_generation_id, inventory_sha256):
+        raise ValueError("sqlite snapshot inventory identity mismatch")
+    if not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha256):
+        raise ValueError("invalid sqlite snapshot checksum")
+    state_key = (str(path), request_id, inventory_generation_id, inventory_sha256)
+    with _data_sync_sqlite_snapshot_condition:
+        state = _data_sync_sqlite_snapshot_states.get(state_key)
+        lease = state.get("lease") if state and state.get("status") == "CURRENT" else None
+        expected = {
+            "request_id": request_id, "build_id": build_id,
+            "inventory_generation_id": inventory_generation_id,
+            "inventory_sha256": inventory_sha256,
+            "source_path": str(path), "snapshot_id": snapshot_id,
+            "snapshot_size": int(snapshot_size),
+            "snapshot_sha256": snapshot_sha256,
+        }
+        if not lease or any(lease.get(key) != value for key, value in expected.items()):
+            raise ValueError("sqlite snapshot flight identity mismatch")
+        state["last_accessed_at"] = time.monotonic()
+    snapshot = _data_sync_resolve_sqlite_snapshot(snapshot_id)
+    if snapshot.stat().st_size != int(snapshot_size):
+        raise ValueError("sqlite snapshot flight size mismatch")
+    return snapshot
 
 
 def _data_sync_resolve_sqlite_snapshot(snapshot_id: str) -> Path:
@@ -40643,7 +40923,21 @@ def api_data_sync_sqlite_snapshot():
         path = _data_sync_resolve_relpath(request.args.get("path"))
         if _data_sync_consistency_mode(path) != "sqlite_snapshot_v1":
             return jsonify({"error": "requested path is not an allowed SQLite database"}), 400
-        snapshot = _data_sync_request_sqlite_snapshot(path)
+        request_id = str(request.args.get("request_id") or "").strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+            raise ValueError("invalid sqlite snapshot request identity")
+        inventory_generation_id = request.args.get("inventory_generation_id")
+        inventory_sha256 = request.args.get("inventory_sha256")
+        snapshot = _data_sync_request_sqlite_snapshot(
+            path, request_id, inventory_generation_id, inventory_sha256,
+            {
+                "path": _data_sync_relpath(path),
+                "physical_size": request.args.get("source_physical_size"),
+                "mtime_ns": request.args.get("source_mtime_ns"),
+                "inode": request.args.get("source_inode"),
+                "consistency_mode": request.args.get("source_consistency_mode"),
+            },
+        )
         payload = {
             "schema": "fly_runtime_sqlite_snapshot_lease_v1",
             "path": _data_sync_relpath(path),
@@ -40683,9 +40977,23 @@ def api_data_sync_file():
         if requested_mode != server_mode:
             return jsonify({"error": "file consistency mode mismatch"}), 409
         if requested_mode == "sqlite_snapshot_v1":
-            snapshot = _data_sync_resolve_sqlite_snapshot(request.args.get("snapshot_id"))
             expected_snapshot_size = int(request.args.get("expected_snapshot_size") or -1)
             expected_snapshot_sha = str(request.args.get("expected_snapshot_sha256") or "").lower()
+            request_id = request.args.get("snapshot_request_id")
+            build_id = request.args.get("snapshot_build_id")
+            inventory_generation_id = request.args.get("inventory_generation_id")
+            inventory_sha256 = request.args.get("inventory_sha256")
+            if not hmac.compare_digest(str(ack_inventory_sha256), str(inventory_sha256 or "")):
+                return jsonify({"error": "sqlite snapshot acknowledgement identity mismatch"}), 409
+            try:
+                snapshot = _data_sync_resolve_sqlite_snapshot_flight(
+                    path, request_id, build_id,
+                    inventory_generation_id, inventory_sha256,
+                    request.args.get("snapshot_id"),
+                    expected_snapshot_size, expected_snapshot_sha,
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 409
             snapshot_size = snapshot.stat().st_size
             if snapshot_size != expected_snapshot_size:
                 return jsonify({"error": "sqlite snapshot size mismatch"}), 409
@@ -40704,6 +41012,10 @@ def api_data_sync_file():
             response.headers["X-Data-Published-Size"] = str(snapshot_size)
             response.headers["X-Data-Snapshot-Id"] = str(request.args.get("snapshot_id"))
             response.headers["X-Data-Snapshot-Sha256"] = expected_snapshot_sha
+            response.headers["X-Data-Snapshot-Request-Id"] = str(request_id)
+            response.headers["X-Data-Snapshot-Build-Id"] = str(build_id)
+            response.headers["X-Data-Inventory-Generation-Id"] = str(inventory_generation_id)
+            response.headers["X-Data-Inventory-Sha256"] = str(inventory_sha256)
             response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
             response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= snapshot_size else "0"
             _data_sync_register_served_ack_generation(
