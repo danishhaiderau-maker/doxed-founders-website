@@ -38830,16 +38830,49 @@ def _data_sync_unlink_sqlite_snapshot_artifact(snapshot_id: str) -> bool:
         return False
 
 
+_data_sync_sqlite_snapshot_sweep_cursor = None
+_data_sync_sqlite_snapshot_sweep_cursor_root = None
+
+
 def _data_sync_sweep_sqlite_snapshot_artifacts(protected_ids: set, *, limit: int = 64) -> int:
-    """Bounded stale-orphan sweep; active artifacts and links are never removed."""
+    """Bounded continuing stale-orphan sweep; active artifacts are retained.
+
+    The shared work directory also contains inventory generations and worker
+    receipts.  Counting those unrelated entries against the old 64-entry
+    budget meant a stale SQLite snapshot later in directory order was never
+    examined.  Retain one scandir cursor across calls so each invocation does
+    bounded metadata work while the sweep makes forward progress through the
+    complete directory.  This helper is called while the snapshot condition
+    is held, so the process-global cursor has one owner.
+    """
+    global _data_sync_sqlite_snapshot_sweep_cursor
+    global _data_sync_sqlite_snapshot_sweep_cursor_root
     root = _data_sync_volume_root() / ".data-sync-snapshots"
     cutoff = time.time() - _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS
     removed = 0
+    scan_budget = max(64, min(1024, max(1, int(limit)) * 4))
     try:
-        with os.scandir(root) as entries:
-            for index, entry in enumerate(entries):
-                if index >= max(1, min(256, int(limit))):
-                    break
+        resolved_root = root.resolve(strict=True)
+        root_stat = resolved_root.stat()
+        root_identity = (str(resolved_root), int(root_stat.st_dev), int(root_stat.st_ino))
+        if (
+            _data_sync_sqlite_snapshot_sweep_cursor is None
+            or _data_sync_sqlite_snapshot_sweep_cursor_root != root_identity
+        ):
+            if _data_sync_sqlite_snapshot_sweep_cursor is not None:
+                _data_sync_sqlite_snapshot_sweep_cursor.close()
+            _data_sync_sqlite_snapshot_sweep_cursor = os.scandir(root)
+            _data_sync_sqlite_snapshot_sweep_cursor_root = root_identity
+        entries = _data_sync_sqlite_snapshot_sweep_cursor
+        for _ in range(scan_budget):
+            try:
+                entry = next(entries)
+            except StopIteration:
+                entries.close()
+                _data_sync_sqlite_snapshot_sweep_cursor = None
+                _data_sync_sqlite_snapshot_sweep_cursor_root = None
+                break
+            try:
                 match = re.fullmatch(r"([0-9a-f]{32})\.db", entry.name.lower())
                 if (not match or match.group(1) in protected_ids
                         or entry.is_symlink()
@@ -38848,8 +38881,18 @@ def _data_sync_sweep_sqlite_snapshot_artifacts(protected_ids: set, *, limit: int
                     continue
                 if _data_sync_unlink_sqlite_snapshot_artifact(match.group(1)):
                     removed += 1
+                    if removed >= max(1, min(256, int(limit))):
+                        break
+            except OSError:
+                continue
     except OSError:
-        pass
+        if _data_sync_sqlite_snapshot_sweep_cursor is not None:
+            try:
+                _data_sync_sqlite_snapshot_sweep_cursor.close()
+            except OSError:
+                pass
+        _data_sync_sqlite_snapshot_sweep_cursor = None
+        _data_sync_sqlite_snapshot_sweep_cursor_root = None
     return removed
 
 

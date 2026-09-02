@@ -1862,6 +1862,12 @@ def test_sqlite_snapshot_authority_requires_exact_current_inventory_row(tmp_path
 def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
     snapshot_root = tmp_path / ".data-sync-snapshots"
     snapshot_root.mkdir()
+    # Regression: unrelated inventory/worker artifacts used to consume the
+    # entire 64-entry sweep budget, so stale DBs created later were never seen.
+    for index in range(300):
+        (snapshot_root / f"unrelated-{index:03d}.json").write_text(
+            "{}", encoding="utf-8",
+        )
     expired_id, orphan_id, active_id, reader_id = "1" * 32, "2" * 32, "3" * 32, "9" * 32
     for token in (expired_id, orphan_id, active_id, reader_id):
         target = snapshot_root / f"{token}.db"
@@ -1878,6 +1884,24 @@ def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
     source = (tmp_path / "source.db").resolve()
     source.write_bytes(b"source")
     request_id, generation_id = "4" * 32, "5" * 64
+
+    real_entries = list(os.scandir(snapshot_root))
+    ordered_entries = sorted(
+        real_entries,
+        key=lambda entry: (not entry.name.startswith("unrelated-"), entry.name),
+    )
+
+    class OrderedScandir:
+        def __init__(self):
+            self._entries = iter(ordered_entries)
+        def __iter__(self):
+            return self
+        def __next__(self):
+            return next(self._entries)
+        def close(self):
+            return None
+
+    scan_os = SimpleNamespace(scandir=lambda _root: OrderedScandir())
 
     class AliveWorker:
         def is_alive(self):
@@ -1915,11 +1939,13 @@ def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
     selected = [node for node in tree.body
                 if isinstance(node, ast.FunctionDef) and node.name in wanted]
     namespace = {
-        "Path": Path, "time": time, "os": os, "re": re, "uuid": uuid,
+        "Path": Path, "time": time, "os": scan_os, "re": re, "uuid": uuid,
         "hmac": hmac, "threading": SimpleNamespace(Thread=DeferredThread),
         "_data_sync_volume_root": lambda: tmp_path,
         "_data_sync_sqlite_snapshot_condition": threading.Condition(),
         "_data_sync_sqlite_snapshot_states": states,
+        "_data_sync_sqlite_snapshot_sweep_cursor": None,
+        "_data_sync_sqlite_snapshot_sweep_cursor_root": None,
         "_DATA_SYNC_SQLITE_SNAPSHOT_RETRY_SECONDS": 2,
         "_DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS": 900,
         "_data_sync_authorize_sqlite_snapshot_request": lambda path, generation, digest, identity: {"path": path.name},
@@ -1931,10 +1957,18 @@ def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
     namespace["_data_sync_request_sqlite_snapshot"](
         source, request_id, generation_id, generation_id,
     )
+    assert (snapshot_root / f"{orphan_id}.db").is_file()
+    assert namespace["_data_sync_sqlite_snapshot_sweep_cursor"] is not None
+    # One call is deliberately bounded to 256 directory entries.  The second
+    # resumes the same iterator instead of rescanning the unrelated prefix.
+    namespace["_data_sync_request_sqlite_snapshot"](
+        source, request_id, generation_id, generation_id,
+    )
     assert not (snapshot_root / f"{expired_id}.db").exists()
     assert not (snapshot_root / f"{orphan_id}.db").exists()
     assert (snapshot_root / f"{active_id}.db").is_file()
     assert (snapshot_root / f"{reader_id}.db").is_file()
+    assert len(list(snapshot_root.glob("unrelated-*.json"))) == 300
     assert linked_target.read_bytes() == b"outside"
     if linked_path is not None:
         assert linked_path.is_symlink()
