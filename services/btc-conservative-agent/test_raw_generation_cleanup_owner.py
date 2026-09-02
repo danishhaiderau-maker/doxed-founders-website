@@ -7,6 +7,7 @@ import pytest
 
 from raw_generation_cleanup import ACK_SCHEMA, MANIFEST_SCHEMA, RawGenerationCleanupRejected
 from raw_generation_cleanup_owner import RawGenerationCleanupOwner
+from research.mirror_generation_lease import MirrorGenerationLease, mirror_generation_lease_held
 
 SHA = "a" * 64
 REV = "b" * 40
@@ -147,6 +148,24 @@ def test_cleanup_gate_spans_initial_proof_revalidation_and_move(tmp_path):
     result = service.quarantine("V3:decision:1", dry_run=False)
     assert result["status"] == "QUARANTINED_SOURCE_RETAINED"
     assert state == {"held": False, "lease_checks": 2}
+
+
+def test_disabled_quarantine_releases_os_lease_without_permanent_blocker(tmp_path):
+    source, identity = persisted_authority(tmp_path)
+    held = {"lease": None}
+    def acquire():
+        held["lease"] = MirrorGenerationLease(tmp_path, owner="disabled-cleanup").acquire(timeout_seconds=0)
+        return True
+    def release(): held["lease"].release()
+    service = RawGenerationCleanupOwner(
+        tmp_path, enabled=False, identity=lambda: identity,
+        leases=lambda _g: {"reader": [], "sync": [], "analyzer": []},
+        gate_acquire=acquire, gate_release=release,
+    )
+    assert service.quarantine("V3:decision:1")["status"] == "DRY_RUN_SOURCE_RETAINED"
+    assert (tmp_path / ".fly-mirror-generation.lease").is_file()
+    assert mirror_generation_lease_held(tmp_path) is False
+    assert source.exists()
 
 
 def test_restart_is_audit_only_then_explicit_bounded_replay(tmp_path):

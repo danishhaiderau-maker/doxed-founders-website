@@ -54,7 +54,8 @@ from lifecycle_cleanup_transaction import (
 )
 from raw_generation_cleanup import RawGenerationCleanupRejected
 from raw_generation_cleanup_owner import RawGenerationCleanupOwner
-from research.mirror_generation_lease import MirrorGenerationLease, MirrorGenerationLeaseTimeout
+from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
+                                              mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
 from position_registry import (
     PositionCloseClaimScope,
@@ -37986,7 +37987,7 @@ def _lifecycle_pipeline_overlap_probe():
             for state in _data_sync_sqlite_snapshot_states.values()
         ):
             active.append("SQLITE_SNAPSHOT_BUILDING")
-    if (_data_sync_volume_root() / ".fly-mirror-generation.lease").is_file():
+    if mirror_generation_lease_held(_data_sync_volume_root()):
         active.append("ANALYZER_GENERATION_LEASE")
     return active
 
@@ -42064,9 +42065,8 @@ def _data_sync_lifecycle_cleanup_active_references() -> dict:
         ):
             sync.append("SQLITE_SNAPSHOT_BUILDING")
     analyzer = []
-    analyzer_lease = _data_sync_volume_root() / ".fly-mirror-generation.lease"
-    if analyzer_lease.exists():
-        analyzer.append(analyzer_lease.name)
+    if mirror_generation_lease_held(_data_sync_volume_root()):
+        analyzer.append(".fly-mirror-generation.lease")
     lifecycle_worker = []
     worker = _LIFECYCLE_PIPELINE_RUNTIME
     if worker is not None:

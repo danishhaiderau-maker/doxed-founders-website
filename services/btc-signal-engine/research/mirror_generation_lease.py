@@ -22,6 +22,17 @@ class MirrorGenerationLeaseTimeout(TimeoutError):
     """The mirror generation remained owned beyond the bounded wait."""
 
 
+def mirror_generation_lease_held(repo_root: str | os.PathLike[str]) -> bool:
+    """Probe the authoritative OS lock; a stale metadata pathname is inactive."""
+    probe = MirrorGenerationLease(repo_root, owner="nonmutating-lock-probe")
+    try:
+        handle = probe._open_exclusive()
+    except (OSError, PermissionError):
+        return True
+    handle.close()
+    return False
+
+
 class MirrorGenerationLease:
     def __init__(self, repo_root: str | os.PathLike[str], *, owner: str = "analyzer"):
         self.path = Path(repo_root).resolve() / LEASE_FILE_NAME
@@ -117,4 +128,3 @@ class MirrorGenerationLease:
 
     def __exit__(self, _exc_type, _exc, _tb):
         self.release()
-

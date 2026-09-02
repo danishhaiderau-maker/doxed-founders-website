@@ -7,6 +7,7 @@ import production_rotation_orchestrator as module
 from production_rotation_orchestrator import ProductionRotationOrchestrator
 from research_v3_contract import LEDGER_NAMES
 from research_v3_store import V3EvidenceStore
+from research.mirror_generation_lease import MirrorGenerationLease, mirror_generation_lease_held
 
 
 REVISION = "a" * 40
@@ -97,3 +98,31 @@ def test_legacy_nonempty_ledger_remains_manual(tmp_path):
     receipt = _orchestrator(tmp_path).run_caught_up_cycle(caught_up=True, pressure=False)
     assert receipt["status"] == "NOOP_LEGACY_ADOPTION_REQUIRED"
     assert receipt["reason"] == "MANUAL_GUARDED_LEGACY_ADOPTION_REQUIRED"
+
+
+def test_released_stale_lease_file_does_not_block_rotation(tmp_path):
+    _initialize(tmp_path)
+    _sized(tmp_path / "v3" / "ledgers" / "decision.jsonl", 1024 * 1024)
+    lease = MirrorGenerationLease(tmp_path, owner="released-test").acquire(timeout_seconds=0)
+    lease.release()
+    assert (tmp_path / ".fly-mirror-generation.lease").is_file()
+    assert mirror_generation_lease_held(tmp_path) is False
+    overlap = "ANALYZER_GENERATION_LEASE" if mirror_generation_lease_held(tmp_path) else None
+    assert _orchestrator(tmp_path).run_caught_up_cycle(
+        caught_up=True, pressure=False, overlap=overlap,
+    )["status"] == "ROTATED_ONE"
+
+
+def test_held_os_lease_blocks_rotation(tmp_path):
+    _initialize(tmp_path)
+    _sized(tmp_path / "v3" / "ledgers" / "decision.jsonl", 1024 * 1024)
+    lease = MirrorGenerationLease(tmp_path, owner="held-test").acquire(timeout_seconds=0)
+    try:
+        assert mirror_generation_lease_held(tmp_path) is True
+        overlap = "ANALYZER_GENERATION_LEASE" if mirror_generation_lease_held(tmp_path) else None
+        result = _orchestrator(tmp_path).run_caught_up_cycle(
+            caught_up=True, pressure=False, overlap=overlap,
+        )
+        assert result["status"] == "NOOP_OVERLAP"
+    finally:
+        lease.release()
