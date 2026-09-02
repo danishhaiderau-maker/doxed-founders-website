@@ -29549,11 +29549,11 @@ __ADMIN_ACCESS_CONTROLS__
 <p id="wipeFlyOnlyStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
 <div id="dataStoragePanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
-  <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + cleanup status</strong>
+  <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + retention status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
-    Fly volume size and largest files so you know when to trigger Fresh Collection or Wipe Fly Data Only.
+    Fly volume size and largest files. The 50 MB value is a synchronization trigger, not a storage cap and not deletion authorization.
   Canonical analyzer store at <code>C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data</code> checks Fly identity and O(1) volume usage every 3 min. It performs a full mirror when used space grows by
-    ≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code> (default 50 MB), on revision/epoch change, or at least every 30 min. ACK-qualified pruning remains deferred; a sync does not immediately delete Fly data.
+    ≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code> (default 50 MB), on revision/epoch change, or at least every 30 min. Safe source pruning is disabled until lifecycle-complete, immutable local acknowledgement and active-reader gates are proven. Moving evidence to quarantine on the same volume reclaims zero bytes.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
@@ -29567,7 +29567,7 @@ __ADMIN_ACCESS_CONTROLS__
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;font-size:0.82em;color:#8b949e;">
         <span><span id="dataSizeVolumePct">-</span>% used</span>
-        <span id="dataSizeCleanupBadge" style="padding:2px 8px;border-radius:10px;background:#1f2937;color:#8b949e;font-weight:600;font-size:0.78rem;">Cleanup: -</span>
+        <span id="dataSizeCleanupBadge" style="padding:2px 8px;border-radius:10px;background:#1f2937;color:#8b949e;font-weight:600;font-size:0.78rem;">Retention: disabled</span>
       </div>
       <p id="dataSizeRuntimePath" style="color:#6e7681;font-size:0.74em;margin:6px 0 0 0;word-break:break-all;"></p>
     </div>
@@ -30609,10 +30609,10 @@ DASHBOARD_JS = """(function () {
     }
     function _setDataSizeCleanup(pct, badgeEl, barEl) {
       let color = '#3fb950';   // green
-      let label = 'Cleanup: ok';
+      let label = 'Retention: disabled';
       if (pct != null && !isNaN(pct)) {
-        if (pct > 80) { color = '#ef4444'; label = 'Cleanup recommended'; }
-        else if (pct > 60) { color = '#d29922'; label = 'Cleanup: watch'; }
+        if (pct > 80) { color = '#ef4444'; label = 'Storage critical · retention disabled'; }
+        else if (pct > 60) { color = '#d29922'; label = 'Storage watch · retention disabled'; }
       }
       if (badgeEl) {
         badgeEl.textContent = label;
@@ -30629,7 +30629,7 @@ DASHBOARD_JS = """(function () {
       try {
         const r = await fetch('/api/data_size?_=' + Date.now(), { cache: 'no-store' });
         if (!r.ok) {
-          if (badgeEl) { badgeEl.textContent = 'Cleanup: unauthorized'; badgeEl.style.background = '#7f1d1d'; badgeEl.style.color = '#fecaca'; }
+          if (badgeEl) { badgeEl.textContent = 'Retention status unavailable'; badgeEl.style.background = '#7f1d1d'; badgeEl.style.color = '#fecaca'; }
           return;
         }
         const body = await r.json();

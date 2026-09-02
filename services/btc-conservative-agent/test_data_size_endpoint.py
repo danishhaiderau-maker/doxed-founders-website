@@ -100,6 +100,12 @@ class DataSizeEndpointTests(unittest.TestCase):
         body = resp.get_json()
         self.assertEqual(body["status"], "error")
 
+    def test_dashboard_distinguishes_sync_trigger_from_disabled_source_retention(self):
+        self.assertIn("50 MB value is a synchronization trigger, not a storage cap", bot.HTML)
+        self.assertIn("Retention: disabled", bot.HTML)
+        self.assertIn("Moving evidence to quarantine on the same volume reclaims zero bytes", bot.HTML)
+        self.assertNotIn("Cleanup: ok", bot.HTML)
+
     def test_authenticated_response_shape(self):
         # Strict auth passes so the endpoint runs the (stubbed) du/wc probes.
         # Top files now come from os.walk (not `du path/*`, which never expands).
