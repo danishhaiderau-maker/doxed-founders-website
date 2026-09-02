@@ -54,6 +54,10 @@ on:
         description: Exact SHA-256 of the raw corrupt line including its line ending
         required: false
         type: string
+      expected_execution_funnel_deployed_revision:
+        description: Exact 12-character Fly runtime revision permitted for the repair
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -71,7 +75,7 @@ jobs:
       - name: Repair one exact corrupt execution-funnel record without fabricating evidence
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
-          EXPECTED_SOURCE_REVISION: ${{ github.sha }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_execution_funnel_deployed_revision }}
           EXPECTED_FUNNEL_SHA256: ${{ inputs.expected_execution_funnel_sha256 }}
           EXPECTED_INVALID_LINE: ${{ inputs.expected_execution_funnel_invalid_line }}
           EXPECTED_INVALID_LINE_SHA256: ${{ inputs.expected_execution_funnel_invalid_line_sha256 }}
@@ -87,8 +91,8 @@ jobs:
           expected_line_sha = str(os.environ.get("EXPECTED_INVALID_LINE_SHA256") or "").strip().lower()
           if not token:
               raise SystemExit("BOT_ADMIN_TOKEN is missing")
-          if not re.fullmatch(r"[0-9a-f]{40}", expected_revision):
-              raise SystemExit("workflow source revision is invalid")
+          if not re.fullmatch(r"[0-9a-f]{12}", expected_revision):
+              raise SystemExit("exact 12-character deployed revision is required")
           if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
               raise SystemExit("exact execution-funnel SHA-256 is required")
           if not re.fullmatch(r"[1-9][0-9]*", expected_line_text):
