@@ -141,7 +141,14 @@ class DataSizeEndpointTests(unittest.TestCase):
         self.assertEqual(body["runtime_size_mb"], 480.0)
         # 480/1024*100 = 46.875 -> rounded to one decimal = 46.9
         self.assertAlmostEqual(body["volume_pct"], 46.9, delta=0.05)
+        self.assertEqual(body["capacity_status"], "ok")
         self.assertEqual(body["cleanup_status"], "ok")
+        self.assertEqual(
+            body["source_retention_status"],
+            "DISABLED_PENDING_ACK_AND_LIFECYCLE_PROOF",
+        )
+        self.assertIs(body["source_cleanup_authorized"], False)
+        self.assertEqual(body["source_reclaimed_bytes"], 0)
 
         # Top-5 files are sorted descending by size and capped at 5.
         top = body["top_files"]
