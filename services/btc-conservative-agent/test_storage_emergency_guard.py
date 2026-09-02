@@ -3,6 +3,8 @@ import os
 import threading
 from pathlib import Path
 
+import pytest
+
 import collector_storage
 import research_v3_store
 from research_v3_store import V3EvidenceStore
@@ -578,3 +580,31 @@ def test_lifecycle_membership_binding_is_generation_aware(tmp_path, monkeypatch)
     current["ledger_generation"] = {**current["ledger_generation"], "state": "SEALED", "generation": 1}
     store._atomic_json_receipt(store._lifecycle_membership_dir / "current.json", current)
     assert store._episode_has_lifecycle_receipt("episode-generation") is False
+
+
+def test_generation_resolver_is_contained_and_fails_closed_for_missing_or_stale_refs(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store.append("decision", {"record_id": "decision:active", "episode_id": "active"})
+    active = store._active_ledger_generation("decision")
+    assert store.resolve_ledger_generation("decision", None) == store.ledger_path("decision").resolve()
+    stale = {**active, "state": "SEALED", "generation": 8,
+             "relative_path": "v3/ledgers/decision.jsonl.8"}
+    with pytest.raises(ValueError):
+        store.resolve_ledger_generation("decision", stale)
+    escaped = {**stale, "relative_path": "../victim.jsonl.8"}
+    with pytest.raises(ValueError):
+        store.resolve_ledger_generation("decision", escaped)
+
+
+def test_analyzer_facing_generation_resolver_orders_sealed_then_active_identity(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store.append("decision", {"record_id": "decision:active", "episode_id": "active"})
+    (store.ledger_dir / "decision.jsonl.2").write_text('{"record_id":"sealed-2"}\n', "utf-8")
+    (store.ledger_dir / "decision.jsonl.1").write_text('{"record_id":"sealed-1"}\n', "utf-8")
+    (store.ledger_dir / "decision.jsonl.0").write_text('{"record_id":"alias-zero"}\n', "utf-8")
+    (store.ledger_dir / "decision.jsonl.01").write_text('{"record_id":"alias-one"}\n', "utf-8")
+    rows = store.ledger_generation_paths("decision")
+    assert [ref["generation"] for ref, _path in rows] == [0, 1, 2]
+    assert [ref["state"] for ref, _path in rows] == ["ACTIVE", "SEALED", "SEALED"]

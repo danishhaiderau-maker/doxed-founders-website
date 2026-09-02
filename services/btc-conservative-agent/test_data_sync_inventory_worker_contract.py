@@ -590,3 +590,30 @@ def test_sparse_approximately_1_2_gib_artifact_keeps_manifest_metadata_bounded(t
     assert result_path.stat().st_size < 10_000
     page_path = next(Path(result["generation_dir"]).glob("p*.json"))
     assert page_path.stat().st_size < 64 * 1024
+
+
+def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"; nonce = "1" * 32
+    runtime = volume / "runtime"; ledgers = runtime / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    (ledgers / "decision.jsonl").write_text('{"record_id":"active"}\n', "utf-8")
+    (ledgers / "decision.jsonl.7").write_text('{"record_id":"sealed"}\n', "utf-8")
+    (ledgers / "decision.jsonl.0").write_text('{"record_id":"alias-zero"}\n', "utf-8")
+    (ledgers / "decision.jsonl.01").write_text('{"record_id":"alias-one"}\n', "utf-8")
+    request_path, result_path = _paths(volume, nonce)
+    request_path.write_text(json.dumps(_request(volume, nonce)), "utf-8")
+    assert worker.run(request_path, result_path, nonce) == 0
+    rows = {row["path"]: row for row in _generation_rows(json.loads(result_path.read_text("utf-8")))}
+    assert rows["v3/ledgers/decision.jsonl"]["ledger_generation"] == {
+        "schema": "v3_ledger_generation_ref_v1", "state": "ACTIVE", "ledger": "decision",
+        "generation": 0, "relative_path": "v3/ledgers/decision.jsonl",
+    }
+    assert rows["v3/ledgers/decision.jsonl.7"]["ledger_generation"] == {
+        "schema": "v3_ledger_generation_ref_v1", "state": "SEALED", "ledger": "decision",
+        "generation": 7, "relative_path": "v3/ledgers/decision.jsonl.7",
+    }
+    assert rows["v3/ledgers/decision.jsonl"]["consistency_mode"] == "append_prefix_v1"
+    assert rows["v3/ledgers/decision.jsonl.7"]["consistency_mode"] == "strict_generation_v1"
+    assert "ledger_generation" not in rows["v3/ledgers/decision.jsonl.0"]
+    assert "ledger_generation" not in rows["v3/ledgers/decision.jsonl.01"]

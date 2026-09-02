@@ -414,6 +414,63 @@ class V3EvidenceStore:
         generation = receipt.get("ledger_generation")
         return generation is None or generation == self._active_ledger_generation(ledger)
 
+    def resolve_ledger_generation(
+        self, ledger: str, generation_ref: dict[str, Any] | None = None,
+    ) -> Path:
+        """Resolve one explicit ledger generation without following links.
+
+        A missing reference is legacy and means the current ACTIVE object only.
+        SEALED generations use the inventory's existing numeric rotation naming
+        convention and can never alias the mutable active filename.
+        """
+        if ledger not in LEDGER_NAMES:
+            raise ValueError("unknown V3 ledger generation")
+        ref = self._active_ledger_generation(ledger) if generation_ref is None else generation_ref
+        if not isinstance(ref, dict) or set(ref) != {
+            "schema", "state", "ledger", "generation", "relative_path",
+        }:
+            raise ValueError("invalid V3 ledger generation reference")
+        state = str(ref.get("state") or "")
+        try:
+            generation = int(ref.get("generation"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid V3 ledger generation number") from exc
+        expected = self.ledger_path(ledger) if state == "ACTIVE" and generation == 0 else (
+            self.ledger_dir / f"{ledger}.jsonl.{generation}"
+            if state == "SEALED" and generation > 0 else None
+        )
+        if expected is None:
+            raise ValueError("invalid V3 ledger generation state")
+        expected_relative = expected.relative_to(self.root).as_posix()
+        if (ref.get("schema") != "v3_ledger_generation_ref_v1"
+                or ref.get("ledger") != ledger
+                or ref.get("relative_path") != expected_relative
+                or expected.is_symlink()):
+            raise ValueError("V3 ledger generation identity mismatch")
+        try:
+            resolved = expected.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("V3 ledger generation is missing") from exc
+        resolved.relative_to(self.ledger_dir.resolve())
+        if resolved != Path(os.path.abspath(expected)) or not resolved.is_file():
+            raise ValueError("V3 ledger generation must be a contained regular file")
+        return resolved
+
+    def ledger_generation_paths(self, ledger: str) -> tuple[tuple[dict[str, Any], Path], ...]:
+        """Analyzer-facing deterministic ACTIVE + SEALED generation inventory."""
+        active_ref = self._active_ledger_generation(ledger)
+        rows: list[tuple[dict[str, Any], Path]] = [(active_ref, self.resolve_ledger_generation(ledger, active_ref))]
+        prefix = f"{ledger}.jsonl."
+        for candidate in sorted(self.ledger_dir.glob(f"{prefix}*"), key=lambda path: path.name):
+            suffix = candidate.name[len(prefix):]
+            if (not suffix.isdigit() or int(suffix) <= 0
+                    or suffix != str(int(suffix))):
+                continue
+            ref = {"schema": "v3_ledger_generation_ref_v1", "state": "SEALED", "ledger": ledger,
+                   "generation": int(suffix), "relative_path": candidate.relative_to(self.root).as_posix()}
+            rows.append((ref, self.resolve_ledger_generation(ledger, ref)))
+        return tuple(sorted(rows, key=lambda row: int(row[0]["generation"])))
+
     @property
     def _lifecycle_membership_dir(self) -> Path:
         return self.receipt_dir / "lifecycle_membership_v1"

@@ -176,6 +176,25 @@ def _consistency_mode(path: Path, request: dict) -> str:
     return "append_prefix_v1" if append else "strict_generation_v1"
 
 
+def _v3_ledger_generation(path: Path) -> dict | None:
+    parts = tuple(part.lower() for part in path.parts)
+    if len(parts) < 3 or parts[-3:-1] != ("v3", "ledgers"):
+        return None
+    rotation = _rotation_parts(path.name, {".jsonl"})
+    rotation_suffix = path.name.rpartition(".")[2]
+    if path.suffix.lower() == ".jsonl":
+        ledger, state, generation = path.stem, "ACTIVE", 0
+    elif (rotation is not None and int(rotation[1]) > 0
+          and rotation_suffix == str(int(rotation[1]))):
+        ledger, state, generation = Path(rotation[0]).stem, "SEALED", int(rotation[1])
+    else:
+        return None
+    if not ledger or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in ledger):
+        return None
+    return {"schema": "v3_ledger_generation_ref_v1", "state": state, "ledger": ledger,
+            "generation": generation, "relative_path": None}
+
+
 def _row(path: Path, request: dict) -> dict | None:
     try:
         # Never turn a linked filename into the identity of its target. The
@@ -186,7 +205,7 @@ def _row(path: Path, request: dict) -> dict | None:
         if not _allowed(resolved, request):
             return None
         stat = resolved.stat()
-        return {
+        row = {
             "path": _relpath(resolved, request),
             "size": _complete_record_size(resolved, int(stat.st_size)),
             "physical_size": int(stat.st_size),
@@ -194,6 +213,11 @@ def _row(path: Path, request: dict) -> dict | None:
             "inode": int(getattr(stat, "st_ino", 0) or 0),
             "consistency_mode": _consistency_mode(resolved, request),
         }
+        generation = _v3_ledger_generation(resolved)
+        if generation is not None:
+            generation["relative_path"] = row["path"]
+            row["ledger_generation"] = generation
+        return row
     except (OSError, ValueError):
         return None
 
