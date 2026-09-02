@@ -181,10 +181,13 @@ def _source_anchor(path: Path, end_offset: int) -> str:
     return hashlib.sha256(material).hexdigest()
 
 
-def _open_incremental_index(root: Path) -> sqlite3.Connection:
+def _open_incremental_index(
+    root: Path, *, database_path: Path | None = None,
+) -> sqlite3.Connection:
     index_dir = root / "v3" / "lifecycle_bundle_index"
     index_dir.mkdir(parents=True, exist_ok=True)
-    database = index_dir / "lifecycle_index.sqlite3"
+    database = database_path or (index_dir / "lifecycle_index.sqlite3")
+    database.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(str(database), timeout=5.0)
     connection.row_factory = sqlite3.Row
     try:

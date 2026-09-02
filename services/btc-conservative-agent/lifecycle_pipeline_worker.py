@@ -43,6 +43,16 @@ _CLASSIFIED_FAILURE_CODES = frozenset({
     "SOURCE_LEDGER_TRUNCATED", "TRUNCATED_JSONL_LINE",
     "INVALID_JSONL_ROW", "NON_OBJECT_JSONL_ROW",
     "JSONL_RECORD_TOO_LARGE", "SCAN_BYTE_LIMIT_SPLITS_RECORD",
+    "LIFECYCLE_RECOVERY_CURSOR_INVALID", "LIFECYCLE_RECOVERY_HASH_FAILED",
+    "LIFECYCLE_RECOVERY_INDEX_MISSING", "LIFECYCLE_RECOVERY_INDEX_TAMPERED",
+    "LIFECYCLE_RECOVERY_INDEX_UNSTABLE", "LIFECYCLE_RECOVERY_PHASE_INVALID",
+    "LIFECYCLE_RECOVERY_QUARANTINE_TAMPERED", "LIFECYCLE_RECOVERY_REBUILD_MISSING",
+    "LIFECYCLE_RECOVERY_REBUILD_TAMPERED", "LIFECYCLE_RECOVERY_RESULT_MISSING",
+    "LIFECYCLE_RECOVERY_SOURCE_INVALID", "LIFECYCLE_RECOVERY_SOURCE_PREFIX_CHANGED",
+    "LIFECYCLE_RECOVERY_SOURCE_TRUNCATED", "LIFECYCLE_RECOVERY_SOURCE_UNSTABLE",
+    "LIFECYCLE_RECOVERY_STAGED_SOURCE_TAMPERED", "LIFECYCLE_RECOVERY_STATE_INVALID",
+    "LIFECYCLE_RECOVERY_STATE_MISMATCH", "LIFECYCLE_RECOVERY_STATE_TAMPERED",
+    "LIFECYCLE_RECOVERY_SWAP_FAILED", "LIFECYCLE_RECOVERY_TRIGGER_INVALID",
 })
 
 
@@ -56,6 +66,19 @@ def _classified_failure(exc: BaseException) -> dict[str, Any]:
     }
     if not isinstance(exc, ValueError):
         return generic
+    recovery_match = re.fullmatch(
+        r"(LIFECYCLE_RECOVERY_[A-Z_]+)(?::([A-Za-z0-9_]+)\.jsonl)?", str(exc),
+    )
+    if recovery_match:
+        code, ledger = recovery_match.groups()
+        if code not in _CLASSIFIED_FAILURE_CODES:
+            return generic
+        classified = {"error_class": "ValueError", "error_code": code}
+        if ledger in LEDGER_NAMES:
+            classified["ledger"] = ledger
+        elif ledger is not None:
+            return generic
+        return classified
     match = re.fullmatch(
         r"([A-Z_]+):([A-Za-z0-9_]+)\.jsonl(?::([0-9]+))?", str(exc),
     )
@@ -308,6 +331,13 @@ def verify_result(
         code = failure["error_code"]
         if code == "WORKER_PIPELINE_FAILED":
             if set(failure) != {"error_class", "error_code"}:
+                raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
+        elif str(code).startswith("LIFECYCLE_RECOVERY_"):
+            if failure.get("error_class") != "ValueError":
+                raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
+            if "ledger" in failure and failure.get("ledger") not in LEDGER_NAMES:
+                raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
+            if "byte_offset" in failure:
                 raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
         else:
             if failure.get("error_class") != "ValueError" or failure.get("ledger") not in LEDGER_NAMES:

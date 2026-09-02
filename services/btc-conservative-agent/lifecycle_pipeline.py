@@ -233,7 +233,7 @@ def _ledger_sources_caught_up(connection, ledger_dir: Path) -> bool:
     return True
 
 
-def process_incremental_lifecycle_pipeline(
+def _process_incremental_lifecycle_pipeline(
     root: str | Path,
     *,
     now: float | None = None,
@@ -550,4 +550,50 @@ def process_incremental_lifecycle_pipeline(
             "bounded": True,
         },
         "source_cleanup_authorized": False,
+    }
+
+
+def process_incremental_lifecycle_pipeline(
+    root: str | Path, **kwargs,
+) -> dict[str, Any]:
+    from lifecycle_index_recovery import (
+        recover_rotated_index, resume_rotated_index_recovery,
+    )
+    recovery = resume_rotated_index_recovery(root)
+    try:
+        if recovery is None or recovery.get("complete"):
+            return _process_incremental_lifecycle_pipeline(root, **kwargs)
+    except ValueError as exc:
+        trigger = str(exc)
+        if not trigger.startswith("SOURCE_LEDGER_ROTATED:"):
+            raise
+        recovery = recover_rotated_index(root, trigger)
+    if recovery is None:
+        raise ValueError("LIFECYCLE_RECOVERY_RESULT_MISSING")
+    return _recovery_pending_report(recovery, kwargs)
+
+
+def _recovery_pending_report(
+    recovery: Mapping[str, Any], kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+            "schema": PIPELINE_SCHEMA,
+            "generated_unix": time.time(),
+            "pressure_mode": bool(kwargs.get("pressure_mode", False)),
+            "emergency_closure_mode": bool(kwargs.get("emergency_closure_mode", False)),
+            "candidate_count": 0,
+            "completion_appended_count": 0,
+            "bundle_count": 0,
+            "transfer_ready_count": 0,
+            "transfer_bundle_count": 0,
+            "stage_counts": {"INDEX_RECOVERY_PENDING": 1},
+            "blocker_counts": {},
+            "results": [],
+            "scan": {
+                "ledgers": {}, "caught_up": False, "bytes_indexed": 0,
+                "rows_scanned": 0, "pending_dirty_lifecycles": 0,
+                "promoted_qualification_retries": 0, "bounded": True,
+            },
+            "index_recovery": dict(recovery),
+            "source_cleanup_authorized": False,
     }

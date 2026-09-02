@@ -113,6 +113,13 @@ def test_pipeline_exception_writes_sanitized_hash_bound_failure(tmp_path, monkey
         "error_class": "ValueError", "error_code": "INVALID_JSONL_ROW",
         "ledger": "lifecycle", "byte_offset": 1406,
     }),
+    ("LIFECYCLE_RECOVERY_STATE_TAMPERED", {
+        "error_class": "ValueError", "error_code": "LIFECYCLE_RECOVERY_STATE_TAMPERED",
+    }),
+    ("LIFECYCLE_RECOVERY_SOURCE_PREFIX_CHANGED:opportunity.jsonl", {
+        "error_class": "ValueError", "error_code": "LIFECYCLE_RECOVERY_SOURCE_PREFIX_CHANGED",
+        "ledger": "opportunity",
+    }),
 ])
 def test_known_lifecycle_failure_is_classified_without_free_form_text(
     tmp_path, monkeypatch, message, expected,
