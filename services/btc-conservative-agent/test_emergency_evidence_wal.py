@@ -99,15 +99,17 @@ def test_persisted_header_control_character_is_rejected(tmp_path):
         row=wal._read_headers(hf)[0]; row["record_id"]="terminal:\n1"; wal._write_header(hf,0,row)
     with pytest.raises(RuntimeError, match="HEADER_INVALID"): wal.status()
 
-def test_torn_one_control_copy_reconstructs_with_persistent_alarm(tmp_path):
+def test_torn_one_control_copy_recovers_empty_reserve_with_auditable_incident(tmp_path):
     wal = EmergencyEvidenceWal(tmp_path, identity=IDENTITY, extents=1)
     with wal.control_path.open("r+b") as handle:
         handle.seek(CONTROL_SLOT_BYTES); handle.write(b"torn" + bytes(40)); handle.flush(); os.fsync(handle.fileno())
     with pytest.raises(RuntimeError, match="REDUNDANCY_LOST"): wal.status()
     restarted = EmergencyEvidenceWal(tmp_path, identity=IDENTITY, extents=1)
-    assert "EMERGENCY_WAL_CONTROL_COPY_CORRUPT" in restarted.status()["alarms"]
+    recovered = restarted.status()
+    assert recovered["alarms"] == []
+    assert "EMERGENCY_WAL_CONTROL_COPY_CORRUPT" in recovered["incident_alarms"]
     again = EmergencyEvidenceWal(tmp_path, identity=IDENTITY, extents=1)
-    assert "EMERGENCY_WAL_CONTROL_COPY_CORRUPT" in again.status()["alarms"]
+    assert "EMERGENCY_WAL_CONTROL_COPY_CORRUPT" in again.status()["incident_alarms"]
     with pytest.raises(RuntimeError, match="RESET_BRIDGE_UNAVAILABLE"): restarted.reset_alarm({"forged": True})
 
 def test_header_control_crash_is_detected_and_recover_repairs_with_alarm(tmp_path, monkeypatch):
@@ -152,7 +154,9 @@ def test_both_torn_controls_are_reconstructed_and_fsynced(tmp_path, monkeypatch)
     repaired = EmergencyEvidenceWal(tmp_path, identity=IDENTITY, extents=1)
     controls, invalid = repaired._controls()
     assert invalid == 0 and len(controls) == 2 and controls[1]["version"] > controls[0]["version"]
-    assert "EMERGENCY_WAL_CONTROL_RECONSTRUCTED" in repaired.status()["alarms"] and calls
+    status = repaired.status()
+    assert status["alarms"] == []
+    assert "EMERGENCY_WAL_CONTROL_RECONSTRUCTED" in status["incident_alarms"] and calls
 
 def test_defer_repairs_single_control_before_mutating_header(tmp_path):
     wal = EmergencyEvidenceWal(tmp_path, identity=IDENTITY, extents=2)

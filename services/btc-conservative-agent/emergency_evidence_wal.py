@@ -174,7 +174,8 @@ class EmergencyEvidenceWal:
     def _initial_control(self, version: int) -> dict[str, Any]:
         return {"schema": "emergency_evidence_wal_control_v2", "version": version,
                 "identity_sha256": self.identity_sha256, "capacity_extents": self.extents,
-                "deferred_count": 0, "deferred_bytes": 0, "free_extents": self.extents, "alarms": []}
+                "deferred_count": 0, "deferred_bytes": 0, "free_extents": self.extents,
+                "alarms": [], "incident_alarms": []}
 
     def _provision(self) -> None:
         for path in (self.data_path, self.header_path, self.control_path, self.lock_path): self._assert_regular(path)
@@ -272,6 +273,10 @@ class EmergencyEvidenceWal:
                                 for k in ("deferred_count", "deferred_bytes", "free_extents"))
                         and isinstance(value.get("alarms"), list) and len(value["alarms"]) <= 32
                         and all(isinstance(alarm, str) and 0 < len(alarm) <= 128 for alarm in value["alarms"])
+                        and isinstance(value.get("incident_alarms", []), list)
+                        and len(value.get("incident_alarms", [])) <= 32
+                        and all(isinstance(alarm, str) and 0 < len(alarm) <= 128
+                                for alarm in value.get("incident_alarms", []))
                     )
                 except (KeyError, TypeError):
                     structurally_valid = False
@@ -288,24 +293,29 @@ class EmergencyEvidenceWal:
         populated = [h for h in headers if h]
         return {"deferred_count": len(populated), "deferred_bytes": sum(int(h["length"]) for h in populated), "free_extents": self.extents - len(populated)}
 
-    def _publish_control(self, headers, alarms):
+    def _publish_control(self, headers, alarms, incident_alarms=None):
         valid, _ = self._controls(); version = max([int(v.get("version", -1)) for v in valid], default=-1) + 1
+        if incident_alarms is None:
+            incident_alarms = [a for control in valid for a in control.get("incident_alarms", [])]
         value = {"schema": "emergency_evidence_wal_control_v2", "version": version,
                  "identity_sha256": self.identity_sha256, "capacity_extents": self.extents,
-                 **self._derived(headers), "alarms": sorted(set(alarms))[:32]}
+                 **self._derived(headers), "alarms": sorted(set(alarms))[:32],
+                 "incident_alarms": sorted(set(incident_alarms))[:32]}
         with self.control_path.open("r+b") as handle:
             handle.seek((version % CONTROL_COPIES) * CONTROL_SLOT_BYTES); handle.write(_encode_block(_CONTROL_MAGIC, value, CONTROL_SLOT_BYTES)); handle.flush(); os.fsync(handle.fileno())
         return value
 
-    def _reconstruct_both_controls(self, headers, alarms):
+    def _reconstruct_both_controls(self, headers, alarms, incident_alarms=None):
         """Replace both unusable control copies with monotonic fresh versions."""
         base = max(time.time_ns(), 1)
+        incident_alarms = incident_alarms or []
         values = []
         with self.control_path.open("r+b") as handle:
             for slot in range(CONTROL_COPIES):
                 value = {"schema": "emergency_evidence_wal_control_v2", "version": base + slot,
                          "identity_sha256": self.identity_sha256, "capacity_extents": self.extents,
-                         **self._derived(headers), "alarms": sorted(set(alarms))[:32]}
+                         **self._derived(headers), "alarms": sorted(set(alarms))[:32],
+                         "incident_alarms": sorted(set(incident_alarms))[:32]}
                 handle.seek(slot * CONTROL_SLOT_BYTES)
                 handle.write(_encode_block(_CONTROL_MAGIC, value, CONTROL_SLOT_BYTES)); values.append(value)
             handle.flush(); os.fsync(handle.fileno())
@@ -326,6 +336,7 @@ class EmergencyEvidenceWal:
                     "deferred_bytes": int(snapshot["deferred_bytes"]),
                     "free_extents": int(snapshot["free_extents"]),
                     "alarms": sorted(set(alarms))[:32],
+                    "incident_alarms": sorted(set(snapshot.get("incident_alarms", [])))[:32],
                 }
                 handle.seek(slot * CONTROL_SLOT_BYTES)
                 handle.write(_encode_block(_CONTROL_MAGIC, value, CONTROL_SLOT_BYTES)); values.append(value)
@@ -358,6 +369,7 @@ class EmergencyEvidenceWal:
     def _ensure_control_health_locked(self, headers):
         controls, invalid = self._controls()
         alarms = [a for c in controls for a in c.get("alarms", []) if isinstance(a, str)]
+        incidents = [a for c in controls for a in c.get("incident_alarms", []) if isinstance(a, str)]
         latest = max(controls, key=lambda v: int(v["version"]), default=None)
         mismatch = latest is None or any(latest.get(k) != v for k, v in {
             "identity_sha256": self.identity_sha256, "capacity_extents": self.extents,
@@ -365,14 +377,14 @@ class EmergencyEvidenceWal:
         }.items())
         if not controls:
             return self._reconstruct_both_controls(
-                headers, alarms + ["EMERGENCY_WAL_CONTROL_RECONSTRUCTED"]
+                headers, alarms + ["EMERGENCY_WAL_CONTROL_RECONSTRUCTED"], incidents
             )
         if invalid or mismatch:
             if invalid: alarms.append("EMERGENCY_WAL_CONTROL_COPY_CORRUPT")
             if mismatch: alarms.append("EMERGENCY_WAL_CONTROL_TELEMETRY_RECOVERED")
             # Repair both copies; one healthy but stale copy must not survive as
             # an apparently authoritative rollback candidate.
-            return self._reconstruct_both_controls(headers, alarms)
+            return self._reconstruct_both_controls(headers, alarms, incidents)
         return latest
 
     def _validate_extent(self, data, header) -> bool:
@@ -403,6 +415,7 @@ class EmergencyEvidenceWal:
         with _cross_process_lock(self.lock_path, timeout=self.lock_timeout), self.header_path.open("r+b") as hf, self.data_path.open("rb") as data:
             headers = self._read_validate_headers_or_alarm(hf)
             controls, invalid = self._controls(); alarms = [a for c in controls for a in c.get("alarms", []) if isinstance(a, str)]
+            incidents = [a for c in controls for a in c.get("incident_alarms", []) if isinstance(a, str)]
             if invalid: alarms.append("EMERGENCY_WAL_CONTROL_COPY_CORRUPT")
             latest = max(controls, key=lambda v: int(v.get("version", -1)), default=None)
             if latest is None: alarms.append("EMERGENCY_WAL_CONTROL_RECONSTRUCTED")
@@ -411,13 +424,24 @@ class EmergencyEvidenceWal:
                 if header is None: continue
                 if not self._validate_extent(data, header):
                     code = "EMERGENCY_WAL_PREPARED_PAYLOAD_UNPROVABLE" if header["state"] == "PREPARED" else "EMERGENCY_WAL_DEFERRED_PAYLOAD_UNPROVABLE"
-                    self._reconstruct_both_controls(headers, alarms + [code]); raise RuntimeError(code)
+                    self._reconstruct_both_controls(headers, alarms + [code], incidents); raise RuntimeError(code)
                 if header["state"] == "PREPARED":
                     header = dict(header, state="DEFERRED"); self._write_header(hf, slot, header); headers[slot] = header
             if not controls:
                 self._reconstruct_both_controls(headers, alarms)
             else:
                 self._ensure_control_health_locked(headers)
+            # A successful empty-reserve recovery proves every header slot,
+            # data extent, binding, capacity value, and both rewritten control
+            # copies.  Recovery alarms are then historical incidents, not a
+            # reason to keep the currently healthy reserve unavailable.
+            if not any(headers):
+                healthy, unhealthy = self._controls()
+                if not unhealthy and len(healthy) == CONTROL_COPIES:
+                    active = [a for c in healthy for a in c.get("alarms", []) if isinstance(a, str)]
+                    prior = [a for c in healthy for a in c.get("incident_alarms", []) if isinstance(a, str)]
+                    if active:
+                        self._reconstruct_both_controls(headers, [], prior + active)
             return self._status_locked(headers, data)
 
     def _status_locked(self, headers, data=None):

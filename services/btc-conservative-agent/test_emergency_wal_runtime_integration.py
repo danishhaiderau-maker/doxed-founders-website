@@ -1,4 +1,5 @@
 import errno
+import os
 from pathlib import Path
 
 import collector_storage
@@ -151,3 +152,19 @@ def test_runtime_wal_keeps_source_and_deployed_revision_distinct(tmp_path, monke
     assert result["deferred"] is True
     assert store._emergency_wal().identity["source_revision"] == "a" * 40
     assert store._emergency_wal().identity["deployed_revision"] == "c" * 40
+
+
+def test_restart_surfaces_recovered_empty_reserve_incident_without_active_alarm(tmp_path, monkeypatch):
+    _production_identity(monkeypatch)
+    store = _store(tmp_path, monkeypatch)
+    wal = store._emergency_wal()
+    with wal.control_path.open("r+b") as handle:
+        handle.seek(wal.control_path.stat().st_size // 2)
+        handle.write(b"corrupt")
+        handle.flush()
+        os.fsync(handle.fileno())
+    restarted = _store(tmp_path, monkeypatch)
+    status = restarted.emergency_wal_runtime_status()
+    assert status["retained_count"] == 0 and status["free_extents"] == 4
+    assert status["alarms"] == []
+    assert "EMERGENCY_WAL_CONTROL_COPY_CORRUPT" in status["incident_alarms"]

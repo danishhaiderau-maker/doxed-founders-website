@@ -38185,6 +38185,10 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
             str(value)[:128] for value in list(wal.get("alarms") or [])[:32]
             if re.fullmatch(r"[A-Z0-9_.:-]{1,128}", str(value))
         ]
+        incident_alarms = [
+            str(value)[:128] for value in list(wal.get("incident_alarms") or [])[:32]
+            if re.fullmatch(r"[A-Z0-9_.:-]{1,128}", str(value))
+        ]
         generation = str(wal.get("oldest_generation") or "")
         action_generation = str(wal_action.get("generation") or "")
         action_reason = str(wal_action.get("reason") or "")
@@ -38236,6 +38240,7 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
             "oldest_generation": generation if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", generation) else None,
             "oldest_state": wal.get("oldest_state") if wal.get("oldest_state") in ("PREPARED", "DEFERRED", "REPLAYED") else None,
             "alarms": alarms,
+            "incident_alarms": incident_alarms,
             "last_action": {
                 "replayed": wal_action.get("replayed") is True,
                 "released": wal_action.get("released") is True,

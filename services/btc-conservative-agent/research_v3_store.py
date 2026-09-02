@@ -394,6 +394,7 @@ class V3EvidenceStore:
             "oldest_generation": str((oldest or {}).get("generation") or "") or None,
             "oldest_state": str((oldest or {}).get("state") or "") or None,
             "alarms": [str(value)[:128] for value in list(raw.get("alarms") or [])[:32]],
+            "incident_alarms": [str(value)[:128] for value in list(raw.get("incident_alarms") or [])[:32]],
         }
 
     def _assert_contained(self, path: Path) -> Path:

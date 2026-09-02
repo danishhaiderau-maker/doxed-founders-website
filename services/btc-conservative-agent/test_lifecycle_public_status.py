@@ -166,6 +166,28 @@ def test_public_status_redacts_unbounded_worker_failure_material(tmp_path):
     assert "example" not in repr(payload)
 
 
+def test_public_status_keeps_recovered_incident_auditable_but_current(tmp_path):
+    identity = {
+        "epoch_id": "epoch-live", "source_revision": "a" * 40,
+        "deployed_revision": "a" * 40, "tile_config_signature": "b" * 64,
+    }
+    digest = hashlib.sha256(json.dumps(
+        identity, separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+    runtime = {"last_result": {"emergency_wal": {
+        "observed_unix": 999, "identity": identity, "identity_sha256": digest,
+        "capacity_extents": 4, "free_extents": 4, "retained_count": 0,
+        "retained_bytes": 0,
+        "state_counts": {"PREPARED": 0, "DEFERRED": 0, "REPLAYED": 0},
+        "oldest_generation": None, "oldest_state": None, "alarms": [],
+        "incident_alarms": ["EMERGENCY_WAL_CONTROL_COPY_CORRUPT", "secret/path"],
+    }}}
+    wal = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)["emergency_wal"]
+    assert wal["status"] == "CURRENT" and wal["reserve_ready"] is True
+    assert wal["alarms"] == []
+    assert wal["incident_alarms"] == ["EMERGENCY_WAL_CONTROL_COPY_CORRUPT"]
+
+
 def test_artifact_counts_are_content_free_and_report_age(tmp_path):
     completion = tmp_path / "runtime" / "v3" / "lifecycle_bundles" / "aa" / ("lifecycle-" + "1" * 64)
     transfer = tmp_path / "runtime" / "v3" / "lifecycle_transfer_bundles" / "bb" / ("transfer-" + "2" * 64)
