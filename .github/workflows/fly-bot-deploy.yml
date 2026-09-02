@@ -1073,7 +1073,7 @@ jobs:
           PY
           [[ "$EXPECTED_UNREADY_REVISION" =~ ^[0-9a-f]{12}$ ]]
           FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"
-          [[ "$FAILED_DEPLOY_COMPLETED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]
+          [[ "$FAILED_DEPLOY_COMPLETED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$ ]]
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
           cat > "$RUNNER_TEMP/recover-unready-guest.py" <<'PY'
           from datetime import datetime
@@ -1082,22 +1082,16 @@ jobs:
           import json
           import os
           import stat
+          import sys
 
-          expected = os.environ["EXPECTED_UNREADY_REVISION"]
-          pid1_environment = {}
-          for item in Path("/proc/1/environ").read_bytes().split(b"\0"):
-              if b"=" not in item:
-                  continue
-              key, value = item.split(b"=", 1)
-              if key in {b"SOURCE_GIT_REV", b"FORCE_PAPER_MODE"}:
-                  pid1_environment[key.decode("ascii")] = value.decode("utf-8", "strict")
+          expected = sys.argv[1]
           threshold = datetime.fromisoformat(
-              os.environ["FAILED_DEPLOY_COMPLETED_AT"].replace("Z", "+00:00")
+              sys.argv[2].replace("Z", "+00:00")
           ).timestamp()
-          runtime_revision = pid1_environment.get("SOURCE_GIT_REV", "").lower()
+          runtime_revision = os.getenv("SOURCE_GIT_REV", "").lower()
           if runtime_revision[:12] != expected:
               raise SystemExit("RECOVERY_RUNTIME_REVISION_MISMATCH:" + (runtime_revision[:12] or "MISSING"))
-          if pid1_environment.get("FORCE_PAPER_MODE", "").lower() != "true":
+          if os.getenv("FORCE_PAPER_MODE", "").lower() != "true":
               raise SystemExit("RECOVERY_FORCE_PAPER_MODE_NOT_PROVEN")
           lifecycle_path = Path("/app/data/runtime/paper_lifecycle_v1.json")
           config_path = Path("/app/data/runtime/config-7002.json")
@@ -1157,7 +1151,7 @@ jobs:
           PY
           guest_program="$(base64 -w0 "$RUNNER_TEMP/recover-unready-guest.py")"
           guest_output="$(flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "env EXPECTED_UNREADY_REVISION='${EXPECTED_UNREADY_REVISION}' FAILED_DEPLOY_COMPLETED_AT='${FAILED_DEPLOY_COMPLETED_AT}' python -c 'import base64; exec(base64.b64decode(\"${guest_program}\"))'")"
+            "python -c 'import base64; exec(base64.b64decode(\"${guest_program}\"))' '${EXPECTED_UNREADY_REVISION}' '${FAILED_DEPLOY_COMPLETED_AT}'")"
           printf '%s\n' "$guest_output"
           printf '%s\n' "$guest_output" | python -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin if line.lstrip().startswith("{")]; assert len(rows)==1; row=rows[0]; assert row.get("schema")=="recover_unready_guest_pause_v1" and row.get("status")=="SAFE_BOUNDARY_PROVEN" and row.get("revision")==sys.argv[1] and row.get("paper_only") is True and row.get("live_armed") is False and row.get("open_positions")==0 and row.get("pending_orders")==0 and row.get("manual_admin_pause") is True' "$EXPECTED_UNREADY_REVISION"
           node scripts/check-relay-flat.mjs

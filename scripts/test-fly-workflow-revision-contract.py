@@ -61,10 +61,11 @@ def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailab
     assert '[[ "$EXPECTED_UNREADY_REVISION" =~ ^[0-9a-f]{12}$ ]]' in recovery
     assert 'FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"' in recovery
     assert 'GITHUB_ENV' not in recovery
-    assert 'Path("/proc/1/environ").read_bytes().split(b"\\0")' in recovery
-    assert 'runtime_revision = pid1_environment.get("SOURCE_GIT_REV", "").lower()' in recovery
+    assert 'expected = sys.argv[1]' in recovery
+    assert 'sys.argv[2].replace("Z", "+00:00")' in recovery
+    assert 'runtime_revision = os.getenv("SOURCE_GIT_REV", "").lower()' in recovery
     assert 'RECOVERY_RUNTIME_REVISION_MISMATCH:' in recovery
-    assert 'pid1_environment.get("FORCE_PAPER_MODE", "").lower() != "true"' in recovery
+    assert 'os.getenv("FORCE_PAPER_MODE", "").lower() != "true"' in recovery
     assert 'lifecycle_path.stat().st_mtime >= threshold' in recovery
     assert 'lifecycle.get("paper_only") is True and lifecycle.get("live_armed") is False' in recovery
     assert 'lifecycle.get("positions") == [] and lifecycle.get("pending_orders") == []' in recovery
@@ -77,6 +78,7 @@ def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailab
     assert 'os.replace(temp_path, config_path)' in recovery
     assert 'os.fsync(directory_fd)' in recovery
     assert 'guest_output="$(flyctl machine exec' in recovery
+    assert "'${EXPECTED_UNREADY_REVISION}' '${FAILED_DEPLOY_COMPLETED_AT}'" in recovery
     assert 'assert len(rows)==1' in recovery
     assert 'RECOVERY_FORCE_PAPER_MODE_NOT_PROVEN' in recovery
     assert 'b"ModuleNotFoundError" in log' in recovery
