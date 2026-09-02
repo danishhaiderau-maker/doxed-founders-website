@@ -49,7 +49,8 @@ def _within(candidate: Path, root: Path) -> bool:
 
 def _rotation_parts(name: str, extensions: set[str]):
     base_name, separator, generation = Path(name).name.rpartition(".")
-    if not separator or not generation.isdigit():
+    if (not separator or not generation.isdigit() or generation == "0"
+            or generation.startswith("0")):
         return None
     return (base_name, int(generation)) if Path(base_name).suffix.lower() in extensions else None
 

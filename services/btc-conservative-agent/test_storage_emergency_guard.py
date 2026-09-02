@@ -606,5 +606,154 @@ def test_analyzer_facing_generation_resolver_orders_sealed_then_active_identity(
     (store.ledger_dir / "decision.jsonl.0").write_text('{"record_id":"alias-zero"}\n', "utf-8")
     (store.ledger_dir / "decision.jsonl.01").write_text('{"record_id":"alias-one"}\n', "utf-8")
     rows = store.ledger_generation_paths("decision")
-    assert [ref["generation"] for ref, _path in rows] == [0, 1, 2]
-    assert [ref["state"] for ref, _path in rows] == ["ACTIVE", "SEALED", "SEALED"]
+    assert [ref["generation"] for ref, _path in rows] == [0]
+    assert [ref["state"] for ref, _path in rows] == ["ACTIVE"]
+
+
+def _generation_ready_store(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    assert store.initialize_ledger_generation_authority("decision")["generation"] == 1
+    store.append("decision", {"record_id": "decision:before-rotation", "episode_id": "active"})
+    return store
+
+
+def test_rotation_seals_exact_bytes_advances_pointer_and_keeps_successor_active(tmp_path, monkeypatch):
+    store = _generation_ready_store(tmp_path, monkeypatch)
+    before = store.ledger_path("decision").read_bytes()
+    receipt = json.loads(store._record_receipt_path(
+        "decision", "decision:before-rotation",
+    ).read_text("utf-8"))
+    result = store.rotate_ledger("decision")
+    sealed = store.resolve_ledger_generation("decision", result["sealed_ref"])
+    assert sealed.read_bytes() == before
+    assert store.ledger_path("decision").read_bytes() == b""
+    assert store._active_ledger_generation("decision")["generation"] == 2
+    assert result["seal_receipt"].is_file()
+    assert store.resolve_receipt_ledger_generation("decision", receipt) == sealed
+
+
+@pytest.mark.parametrize("failpoint", ["AFTER_PREPARED", "AFTER_RENAME", "AFTER_POINTER"])
+def test_rotation_restart_recovery_is_idempotent_at_each_crash_window(tmp_path, monkeypatch, failpoint):
+    store = _generation_ready_store(tmp_path, monkeypatch)
+    before = store.ledger_path("decision").read_bytes()
+    with pytest.raises(RuntimeError, match="FAILPOINT"):
+        store.rotate_ledger("decision", failpoint=failpoint)
+    restarted = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    recovered = restarted.recover_ledger_rotations("decision")
+    assert recovered == [{"ledger": "decision", "generation": 1, "status": "COMMITTED_RECOVERED"}]
+    assert (restarted.ledger_dir / "decision.jsonl.1").read_bytes() == before
+    assert restarted.ledger_path("decision").read_bytes() == b""
+    assert restarted._active_ledger_generation("decision")["generation"] == 2
+    assert restarted.recover_ledger_rotations("decision") == []
+
+
+def test_rotation_holds_canonical_writer_lock_until_pointer_and_seal_commit(tmp_path, monkeypatch):
+    store = _generation_ready_store(tmp_path, monkeypatch)
+    started, finished = threading.Event(), threading.Event()
+    result = {}
+    def writer():
+        started.set()
+        result.update(store.append("decision", {"record_id": "decision:concurrent", "episode_id": "active"}))
+        finished.set()
+    thread = threading.Thread(target=writer)
+    def under_lock():
+        thread.start(); assert started.wait(1); assert not finished.wait(0.05)
+    rotation = store.rotate_ledger("decision", under_lock_hook=under_lock)
+    thread.join(2); assert finished.is_set() and result["written"] is True
+    sealed = store.resolve_ledger_generation("decision", rotation["sealed_ref"])
+    assert b"decision:concurrent" not in sealed.read_bytes()
+    assert b"decision:concurrent" in store.ledger_path("decision").read_bytes()
+
+
+def test_rotation_recovery_rejects_stale_prepared_journal_and_legacy_nonempty_store(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    legacy = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    legacy.append("decision", {"record_id": "decision:legacy-nonempty", "episode_id": "active"})
+    with pytest.raises(RuntimeError, match="LEGACY_LEDGER_GENERATION_MIGRATION_REQUIRED"):
+        legacy.initialize_ledger_generation_authority("decision")
+
+    other = tmp_path / "other"; store = _generation_ready_store(other, monkeypatch)
+    with pytest.raises(RuntimeError, match="PREPARED"):
+        store.rotate_ledger("decision", failpoint="AFTER_PREPARED")
+    store.ledger_path("decision").write_bytes(b"stale mutation\n")
+    with pytest.raises(RuntimeError, match="STALE_JOURNAL"):
+        store.recover_ledger_rotations("decision")
+
+
+def test_rotation_recovery_rejects_tampered_committed_journal(tmp_path, monkeypatch):
+    store = _generation_ready_store(tmp_path, monkeypatch)
+    store.rotate_ledger("decision")
+    committed = store._rotation_transaction_path("decision", 1, "COMMITTED")
+    row = json.loads(committed.read_text("utf-8")); row["seal_sha256"] = "0" * 64
+    committed.write_text(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n", "utf-8")
+    with pytest.raises(RuntimeError, match="COMMITTED_INVALID"):
+        store.recover_ledger_rotations("decision")
+
+
+def test_one_time_legacy_migration_binds_receipts_and_survives_first_seal(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store.append("decision", {"record_id":"decision:legacy-migrate","episode_id":"active"})
+    while not store.advance_emergency_idempotency_bootstrap("decision")["complete"]: pass
+    receipt = json.loads(store._record_receipt_path("decision","decision:legacy-migrate").read_text("utf-8"))
+    receipt.pop("ledger_generation", None)
+    store._atomic_json_receipt(store._record_receipt_path("decision","decision:legacy-migrate"), receipt)
+    migration = store.migrate_legacy_ledger_generation("decision")
+    assert migration["from_generation"] == 0 and migration["to_generation"] == 1
+    assert store.resolve_receipt_ledger_generation("decision", receipt) == store.ledger_path("decision").resolve()
+    rotated = store.rotate_ledger("decision")
+    assert store.resolve_receipt_ledger_generation("decision", receipt) == store.resolve_ledger_generation("decision",rotated["sealed_ref"])
+
+
+def test_legacy_migration_receipt_to_pointer_crash_replays_idempotently(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    store=V3EvidenceStore(tmp_path,epoch_id="epoch-1")
+    store.append("decision",{"record_id":"decision:migration-crash","episode_id":"active"})
+    while not store.advance_emergency_idempotency_bootstrap("decision")["complete"]: pass
+    with pytest.raises(RuntimeError,match="MIGRATION_RECEIPT"):
+        store.migrate_legacy_ledger_generation("decision",failpoint="AFTER_MIGRATION_RECEIPT")
+    restarted=V3EvidenceStore(tmp_path,epoch_id="epoch-1")
+    assert restarted.migrate_legacy_ledger_generation("decision")["to_generation"] == 1
+    assert restarted._active_ledger_generation("decision")["generation"] == 1
+
+
+def test_legacy_migration_requires_complete_exact_record_receipt_coverage(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    store=V3EvidenceStore(tmp_path,epoch_id="epoch-1")
+    store.append("decision",{"record_id":"decision:migration-missing","episode_id":"active"})
+    while not store.advance_emergency_idempotency_bootstrap("decision")["complete"]: pass
+    store._record_receipt_path("decision","decision:migration-missing").unlink()
+    with pytest.raises(RuntimeError,match="COVERAGE_INCOMPLETE"):
+        store.migrate_legacy_ledger_generation("decision")
+
+
+def test_legacy_migration_rejects_late_or_modified_generationless_receipt(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path); _fraction(monkeypatch, 0.50)
+    store=V3EvidenceStore(tmp_path,epoch_id="epoch-1")
+    store.append("decision",{"record_id":"decision:migrated-original","episode_id":"active"})
+    while not store.advance_emergency_idempotency_bootstrap("decision")["complete"]: pass
+    original=json.loads(store._record_receipt_path("decision","decision:migrated-original").read_text("utf-8"))
+    original.pop("ledger_generation",None)
+    store._atomic_json_receipt(store._record_receipt_path("decision","decision:migrated-original"),original)
+    store.migrate_legacy_ledger_generation("decision")
+    modified={**original,"row_sha256":"0"*64}
+    late={**original,"record_id":"decision:late-forged"}
+    with pytest.raises(ValueError,match="absent from migration"):
+        store.resolve_receipt_ledger_generation("decision",modified)
+    with pytest.raises(ValueError,match="absent from migration"):
+        store.resolve_receipt_ledger_generation("decision",late)
+
+
+def test_uncommitted_or_orphan_numeric_generation_has_no_sealed_authority(tmp_path, monkeypatch):
+    store = _generation_ready_store(tmp_path, monkeypatch)
+    with pytest.raises(RuntimeError, match="AFTER_RENAME"):
+        store.rotate_ledger("decision", failpoint="AFTER_RENAME")
+    ref = {"schema":"v3_ledger_generation_ref_v1","state":"SEALED","ledger":"decision",
+           "generation":1,"relative_path":"v3/ledgers/decision.jsonl.1"}
+    with pytest.raises(ValueError): store.resolve_ledger_generation("decision", ref)
+    with pytest.raises(ValueError): store.ledger_generation_paths("decision")
+    store.recover_ledger_rotations("decision")
+    assert store.resolve_ledger_generation("decision", ref).is_file()
+    orphan = store.ledger_dir / "decision.jsonl.99"; orphan.write_text("orphan\n", "utf-8")
+    assert all(item[0]["generation"] != 99 for item in store.ledger_generation_paths("decision"))

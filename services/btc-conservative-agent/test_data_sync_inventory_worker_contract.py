@@ -615,5 +615,5 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
     }
     assert rows["v3/ledgers/decision.jsonl"]["consistency_mode"] == "append_prefix_v1"
     assert rows["v3/ledgers/decision.jsonl.7"]["consistency_mode"] == "strict_generation_v1"
-    assert "ledger_generation" not in rows["v3/ledgers/decision.jsonl.0"]
-    assert "ledger_generation" not in rows["v3/ledgers/decision.jsonl.01"]
+    assert rows.get("v3/ledgers/decision.jsonl.0") is None
+    assert rows.get("v3/ledgers/decision.jsonl.01") is None
