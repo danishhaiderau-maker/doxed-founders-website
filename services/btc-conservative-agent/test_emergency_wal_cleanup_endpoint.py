@@ -4,7 +4,9 @@ import json
 import bot
 import collector_storage
 import research_v3_store
-from lifecycle_cleanup_transaction import recompute_file, sign_attestation
+from lifecycle_cleanup_transaction import (
+    lifecycle_cleanup_identity_sha256, recompute_file, sign_attestation,
+)
 from research_v3_store import V3EvidenceStore
 
 
@@ -42,7 +44,7 @@ def test_signed_cleanup_endpoint_commits_quarantine_and_releases_exactly_one_ext
     root = tmp_path / "volume"
     identity = {
         "source_revision": "a" * 40, "deployed_revision": "a" * 40,
-        "tile_config_signature": "b" * 64,
+        "tile_config_signature": "b" * 64, "config_signature": "c" * 64,
     }
     current = {
         "source_git_rev": "a" * 40, "deployed_git_rev": "a" * 40,
@@ -84,6 +86,13 @@ def test_signed_cleanup_endpoint_commits_quarantine_and_releases_exactly_one_ext
             "source_revision": "a" * 40, "deployed_revision": "a" * 40,
             "tile_config_signature": "b" * 64, "config_signature": "c" * 64,
         },
+        "evidence_collection": {
+            "ready": True,
+            "receipt": {
+                "schema": "lifecycle_evidence_collected_v1",
+                "evidence_collected_receipt_sha256": "d" * 64,
+            },
+        },
         "files": [file_row], "cleanup_manifest_sha256": manifest_sha,
     }
     (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -94,15 +103,11 @@ def test_signed_cleanup_endpoint_commits_quarantine_and_releases_exactly_one_ext
         "deployed_git_rev": "a" * 40, "collection_epoch_id": "epoch-1",
         "tile_registry_signature": "b" * 64, "config_signature": "c" * 64,
         "terminal_outcome": "NO_FILL", "terminal_at": "2026-09-02T00:00:00Z",
+        "qualification_maturity": "QUALIFICATION_READY",
+        "evidence_collection_ready": True,
+        "evidence_collected_receipt_sha256": "d" * 64,
     }
-    identity_material = {key: receipt[key] for key in (
-        "bundle_id", "lifecycle_id", "source_git_rev", "deployed_git_rev",
-        "collection_epoch_id", "tile_registry_signature", "terminal_outcome",
-        "terminal_at", "manifest_sha256",
-    )}
-    receipt["immutable_identity_sha256"] = hashlib.sha256(json.dumps(
-        identity_material, separators=(",", ":"), sort_keys=True,
-    ).encode()).hexdigest()
+    receipt["immutable_identity_sha256"] = lifecycle_cleanup_identity_sha256(receipt)
     receipt["laptop_acknowledgement"] = {name: {
         "complete": True, "bundle_id": bundle_id, "lifecycle_id": lifecycle_id,
         "sha256": hashlib.sha256(name.encode()).hexdigest(),

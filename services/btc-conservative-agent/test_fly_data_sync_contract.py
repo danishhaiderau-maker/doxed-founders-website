@@ -3131,6 +3131,9 @@ def _load_lifecycle_cleanup_model():
         "hashlib": hashlib,
         "hmac": __import__("hmac"),
         "re": re,
+        "lifecycle_cleanup_identity_sha256": __import__(
+            "lifecycle_cleanup_transaction"
+        ).lifecycle_cleanup_identity_sha256,
         "_DATA_SYNC_LIFECYCLE_CLEANUP_ACK_SCHEMA": "lifecycle_bundle_cleanup_ack_v1",
         "_DATA_SYNC_LIFECYCLE_CLEANUP_ENABLED": False,
         "_DATA_SYNC_TERMINAL_OUTCOMES": frozenset({
@@ -3159,6 +3162,7 @@ def _complete_lifecycle_cleanup_receipt(namespace):
         "deployed_git_rev": "b" * 40,
         "collection_epoch_id": "epoch-001",
         "tile_registry_signature": "c" * 64,
+        "config_signature": "e" * 64,
         "terminal_outcome": "UNKNOWN",
         "terminal_at": "2026-08-31T02:10:00Z",
         "pending_order_ids": [],

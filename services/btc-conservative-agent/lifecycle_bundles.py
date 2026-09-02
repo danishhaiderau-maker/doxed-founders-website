@@ -646,7 +646,10 @@ def _cleanup_manifest_sha256(files: Iterable[dict[str, Any]]) -> str:
 
 
 def _consistent_provenance(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
-    fields = ("source_revision", "deployed_revision", "tile_config_signature")
+    fields = (
+        "source_revision", "deployed_revision", "tile_config_signature",
+        "config_signature",
+    )
     material = list(rows)
     result: dict[str, str] = {}
     for field in fields:

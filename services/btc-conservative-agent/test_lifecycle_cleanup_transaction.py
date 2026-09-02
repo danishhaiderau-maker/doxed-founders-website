@@ -6,9 +6,12 @@ from pathlib import Path
 import pytest
 
 from lifecycle_cleanup_transaction import (
-    CleanupRejected, CleanupTransaction, PurgeTransaction, recompute_file,
-    sign_attestation, verify_bundle,
+    CleanupRejected, CleanupTransaction, PurgeTransaction,
+    build_cleanup_acknowledgement, lifecycle_cleanup_identity_sha256,
+    recompute_file, sign_attestation, verify_bundle,
 )
+from lifecycle_bundles import COMPLETION_SCHEMA, LifecycleKey, materialize_bundle
+from research_v3_contract import canonical_json
 
 BOT_SOURCE = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
 ENGINE_SOURCE = (Path(__file__).parents[1] / "btc-signal-engine" / "engine.py").read_text(encoding="utf-8")
@@ -37,6 +40,13 @@ def _fixture(tmp_path: Path):
             "tile_config_signature": "b" * 64,
             "config_signature": "c" * 64,
         },
+        "evidence_collection": {
+            "ready": True,
+            "receipt": {
+                "schema": "lifecycle_evidence_collected_v1",
+                "evidence_collected_receipt_sha256": "d" * 64,
+            },
+        },
         "files": [{"path": "events.jsonl", "mtime_ns": events.stat().st_mtime_ns, **file_proof}],
     }
     manifest["cleanup_manifest_sha256"] = hashlib.sha256(json.dumps([{
@@ -58,15 +68,11 @@ def _fixture(tmp_path: Path):
         "config_signature": "c" * 64,
         "terminal_outcome": "UNKNOWN",
         "terminal_at": "2026-09-01T02:10:00Z",
+        "qualification_maturity": "QUALIFICATION_READY",
+        "evidence_collection_ready": True,
+        "evidence_collected_receipt_sha256": "d" * 64,
     }
-    identity = {key: receipt[key] for key in (
-        "bundle_id", "lifecycle_id", "source_git_rev", "deployed_git_rev",
-        "collection_epoch_id", "tile_registry_signature", "terminal_outcome",
-        "terminal_at", "manifest_sha256",
-    )}
-    receipt["immutable_identity_sha256"] = hashlib.sha256(
-        json.dumps(identity, separators=(",", ":"), sort_keys=True).encode()
-    ).hexdigest()
+    receipt["immutable_identity_sha256"] = lifecycle_cleanup_identity_sha256(receipt)
     receipt["laptop_acknowledgement"] = {
         name: {
             "complete": True, "bundle_id": bundle_id,
@@ -90,6 +96,89 @@ def test_full_source_parity_and_signed_attestation_pass(tmp_path):
     proof = verify_bundle(bundle, receipt, current_identity=current, active_references={}, attestation_keys=keys)
     assert proof["recomputed_files"][0]["row_count"] == 2
     assert proof["recomputed_files"][0]["last_timestamp"] == "2026-09-01T02:10:00Z"
+
+
+def test_materialized_bundle_generates_one_verifiable_cleanup_ack_contract(tmp_path):
+    """Exercise real bundle output through ACK construction and cleanup proof."""
+    root = tmp_path / "volume"
+    key = LifecycleKey("epoch-1", "episode-1", "policy-a", "FIXED")
+    now = 20_000.0
+    completion = {
+        "schema": COMPLETION_SCHEMA, "terminal": True,
+        "entry_outcome": "NO_FILL", "entry_schedule_terminal": True,
+        "position_closed_or_never_opened": True,
+        "post_observation_complete": True,
+        "terminal_ts": now - 10_000, "horizon_complete_ts": now - 2_000,
+    }
+    completion["completion_receipt_sha256"] = hashlib.sha256(
+        canonical_json(completion).encode("utf-8")
+    ).hexdigest()
+    provenance = {
+        "source_revision": "a" * 40, "deployed_revision": "a" * 40,
+        "tile_config_signature": "b" * 64, "config_signature": "c" * 64,
+    }
+    collected = {
+        "schema": "lifecycle_evidence_collected_v1",
+        "identity": key.as_dict(), "event_id": "life-1",
+        "provenance": {key: provenance[key] for key in (
+            "source_revision", "deployed_revision", "tile_config_signature",
+            "config_signature",
+        )},
+        "completion_receipt_sha256": completion["completion_receipt_sha256"],
+        "qualification_eligible_at": now - 2_000,
+        "evidence_collected_at": now - 1_999,
+    }
+    collected["evidence_collected_receipt_sha256"] = hashlib.sha256(
+        canonical_json(collected).encode("utf-8")
+    ).hexdigest()
+    row = {
+        "record_id": "life-1", "ledger": "lifecycle",
+        "epoch_id": key.collection_epoch_id, "episode_id": key.episode_id,
+        "policy_signature": key.policy_signature,
+        "research_lane": key.research_lane, "observed_ts": now - 10_000,
+        **provenance, "bundle_completion": completion,
+        "evidence_collection_receipt": collected,
+    }
+    materialized = materialize_bundle(root, key, [row], now=now)
+    bundle = Path(materialized["path"])
+    manifest = materialized["manifest"]
+    assert manifest["provenance"] == provenance
+    copies = {
+        name: {
+            "complete": True, "bundle_id": manifest["bundle_id"],
+            "lifecycle_id": manifest["lifecycle_id"],
+            "sha256": hashlib.sha256(name.encode()).hexdigest(),
+            "manifest_sha256": manifest["cleanup_manifest_sha256"],
+            "acknowledged_at": "2026-09-01T03:00:00Z",
+        } for name in ("canonical", "archive", "index")
+    }
+    receipt = build_cleanup_acknowledgement(
+        manifest,
+        bundle_manifest_path=(bundle / "manifest.json").relative_to(root).as_posix(),
+        laptop_acknowledgement=copies,
+    )
+    attestation_key = b"test-only-attestation-key"
+    receipt["laptop_attestation"] = sign_attestation(
+        receipt, attestation_key, "laptop-1",
+    )
+    current = {
+        "source_git_rev": provenance["source_revision"],
+        "deployed_git_rev": provenance["deployed_revision"],
+        "collection_epoch_id": key.collection_epoch_id,
+        "tile_registry_signature": provenance["tile_config_signature"],
+        "config_signature": provenance["config_signature"],
+    }
+    proof = verify_bundle(
+        bundle, receipt, current_identity=current, active_references={},
+        attestation_keys={"laptop-1": attestation_key},
+    )
+    assert proof["commit_binding"]["config_signature"] == "c" * 64
+    assert receipt["qualification_maturity"] == "QUALIFICATION_READY"
+    assert receipt["evidence_collection_ready"] is True
+    assert CleanupTransaction(root).execute(bundle, receipt, proof) == {
+        "status": "DISABLED_SOURCE_RETAINED", "source_cleanup_authorized": False,
+    }
+    assert bundle.is_dir()
 
 
 @pytest.mark.parametrize("kind", ["runtime", "sync", "analyzer", "lifecycle_worker"])

@@ -55,7 +55,10 @@ DEFAULT_MAX_LIFECYCLE_BYTES = 8 * 1024 * 1024
 MAX_LIFECYCLES = 25
 MAX_LIFECYCLE_ROWS = 100_000
 MAX_LIFECYCLE_BYTES = 64 * 1024 * 1024
-_PROVENANCE_FIELDS = ("source_revision", "deployed_revision", "tile_config_signature")
+_PROVENANCE_FIELDS = (
+    "source_revision", "deployed_revision", "tile_config_signature",
+    "config_signature",
+)
 QUALIFICATION_RETRY_SEC = 60.0
 QUALIFICATION_HORIZON_SEC = 7200.0
 EMERGENCY_NONTERMINAL_RETRY_SEC = 1800.0

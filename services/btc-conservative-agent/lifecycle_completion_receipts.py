@@ -429,7 +429,10 @@ def build_evidence_collected_receipt(
     normalized_event_id = _text(event_id)
     if normalized_event_id is None:
         blockers.append("EVENT_ID_MISSING")
-    provenance_fields = ("source_revision", "deployed_revision", "tile_config_signature")
+    provenance_fields = (
+        "source_revision", "deployed_revision", "tile_config_signature",
+        "config_signature",
+    )
     normalized_provenance = {name: _text(provenance.get(name)) for name in provenance_fields}
     if any(value is None for value in normalized_provenance.values()):
         blockers.append("PROVENANCE_INCOMPLETE")

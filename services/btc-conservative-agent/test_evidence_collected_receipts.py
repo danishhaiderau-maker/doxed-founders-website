@@ -25,6 +25,7 @@ PROVENANCE = {
     "source_revision": "a" * 40,
     "deployed_revision": "a" * 40,
     "tile_config_signature": "b" * 64,
+    "config_signature": "c" * 64,
 }
 
 

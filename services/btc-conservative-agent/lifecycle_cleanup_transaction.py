@@ -74,11 +74,79 @@ def _immutable_identity_sha256(receipt: Mapping[str, Any]) -> str:
         "deployed_git_rev": str(receipt.get("deployed_git_rev") or ""),
         "collection_epoch_id": str(receipt.get("collection_epoch_id") or ""),
         "tile_registry_signature": str(receipt.get("tile_registry_signature") or ""),
+        "config_signature": str(receipt.get("config_signature") or ""),
         "terminal_outcome": str(receipt.get("terminal_outcome") or ""),
         "terminal_at": str(receipt.get("terminal_at") or ""),
         "manifest_sha256": str(receipt.get("manifest_sha256") or "").lower(),
+        "qualification_maturity": str(receipt.get("qualification_maturity") or ""),
+        "evidence_collection_ready": receipt.get("evidence_collection_ready") is True,
+        "evidence_collected_receipt_sha256": str(
+            receipt.get("evidence_collected_receipt_sha256") or ""
+        ).lower(),
     }
     return _sha256_canonical(material)
+
+
+def lifecycle_cleanup_identity_sha256(receipt: Mapping[str, Any]) -> str:
+    """Public canonical ACK/cleanup identity hash shared by every producer."""
+    return _immutable_identity_sha256(receipt)
+
+
+def build_cleanup_acknowledgement(
+    manifest: Mapping[str, Any], *, bundle_manifest_path: str,
+    laptop_acknowledgement: Mapping[str, Any], terminal_at: Any | None = None,
+) -> dict[str, Any]:
+    """Build one fail-closed cleanup ACK from a materialized lifecycle bundle.
+
+    This function does not attest, persist, quarantine, or delete anything.
+    It merely eliminates hand-maintained schema drift between the bundle
+    producer, laptop acknowledgement producer, and cleanup verifier.
+    """
+    identity = manifest.get("identity") if isinstance(manifest, Mapping) else None
+    provenance = manifest.get("provenance") if isinstance(manifest, Mapping) else None
+    completion = manifest.get("completion") if isinstance(manifest, Mapping) else None
+    collection = manifest.get("evidence_collection") if isinstance(manifest, Mapping) else None
+    collection_receipt = collection.get("receipt") if isinstance(collection, Mapping) else None
+    if not (
+        manifest.get("schema") == "research_lifecycle_bundle_v1"
+        and manifest.get("maturity") == "QUALIFICATION_READY"
+        and isinstance(identity, Mapping)
+        and isinstance(provenance, Mapping)
+        and isinstance(completion, Mapping)
+        and isinstance(collection, Mapping)
+        and collection.get("ready") is True
+        and isinstance(collection_receipt, Mapping)
+        and collection_receipt.get("schema") == "lifecycle_evidence_collected_v1"
+    ):
+        raise CleanupRejected(["QUALIFICATION_BUNDLE_ACK_SOURCE_INVALID"])
+    normalized_terminal = _utc(
+        terminal_at if terminal_at is not None else completion.get("terminal_ts")
+    )
+    receipt = {
+        "schema": "lifecycle_bundle_cleanup_ack_v1",
+        "bundle_id": str(manifest.get("bundle_id") or ""),
+        "lifecycle_id": str(manifest.get("lifecycle_id") or ""),
+        "bundle_manifest_path": str(bundle_manifest_path or ""),
+        "source_git_rev": str(provenance.get("source_revision") or ""),
+        "deployed_git_rev": str(provenance.get("deployed_revision") or ""),
+        "collection_epoch_id": str(identity.get("collection_epoch_id") or ""),
+        "tile_registry_signature": str(provenance.get("tile_config_signature") or ""),
+        "config_signature": str(provenance.get("config_signature") or ""),
+        "terminal_outcome": str(completion.get("classification") or "").upper(),
+        "terminal_at": normalized_terminal or "",
+        "pending_order_ids": [],
+        "open_position_ids": [],
+        "files": list(manifest.get("files") or []),
+        "manifest_sha256": str(manifest.get("cleanup_manifest_sha256") or "").lower(),
+        "qualification_maturity": str(manifest.get("maturity") or ""),
+        "evidence_collection_ready": collection.get("ready") is True,
+        "evidence_collected_receipt_sha256": str(
+            collection_receipt.get("evidence_collected_receipt_sha256") or ""
+        ).lower(),
+        "laptop_acknowledgement": dict(laptop_acknowledgement),
+    }
+    receipt["immutable_identity_sha256"] = _immutable_identity_sha256(receipt)
+    return receipt
 
 
 def _commit_binding(receipt: Mapping[str, Any]) -> dict[str, Any]:
@@ -252,6 +320,25 @@ def verify_bundle(
         reasons.append("EXACT_REVISION_PARITY_MISSING")
     if not _SHA256.fullmatch(str(receipt.get("tile_registry_signature") or "")) or not _SHA256.fullmatch(str(receipt.get("config_signature") or "")):
         reasons.append("CONFIG_IDENTITY_INVALID")
+    if receipt.get("qualification_maturity") != "QUALIFICATION_READY":
+        reasons.append("QUALIFICATION_MATURITY_NOT_READY")
+    if receipt.get("evidence_collection_ready") is not True:
+        reasons.append("EVIDENCE_COLLECTION_NOT_READY")
+    collection_receipt = (
+        (manifest.get("evidence_collection") or {}).get("receipt")
+        if isinstance(manifest.get("evidence_collection"), Mapping) else None
+    )
+    collection_sha = str(receipt.get("evidence_collected_receipt_sha256") or "").lower()
+    if not (
+        isinstance(collection_receipt, Mapping)
+        and collection_receipt.get("schema") == "lifecycle_evidence_collected_v1"
+        and _SHA256.fullmatch(collection_sha)
+        and hmac.compare_digest(
+            collection_sha,
+            str(collection_receipt.get("evidence_collected_receipt_sha256") or "").lower(),
+        )
+    ):
+        reasons.append("EVIDENCE_COLLECTION_RECEIPT_BINDING_INVALID")
     if str(receipt.get("terminal_outcome") or "").upper() not in TERMINAL_OUTCOMES or not _utc(receipt.get("terminal_at")):
         reasons.append("TERMINAL_OR_UNKNOWN_INVALID")
 

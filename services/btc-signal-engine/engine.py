@@ -51,7 +51,9 @@ from lifecycle_cleanup_transaction import (
     CleanupTransaction,
     PurgeTransaction,
     verify_bundle as verify_lifecycle_cleanup_bundle,
+    lifecycle_cleanup_identity_sha256,
 )
+from research_v3_store import set_collection_config_signature_provider
 from raw_generation_cleanup import RawGenerationCleanupRejected
 from raw_generation_cleanup_owner import RawGenerationCleanupOwner
 from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
@@ -40699,26 +40701,7 @@ def _data_sync_lifecycle_manifest_sha256(files: list) -> str:
 
 def _data_sync_lifecycle_identity_sha256(receipt: dict) -> str:
     """Bind immutable lifecycle identity independently of mutable ACK state."""
-    identity = {
-        "bundle_id": str(receipt.get("bundle_id") or ""),
-        "lifecycle_id": str(receipt.get("lifecycle_id") or ""),
-        "source_git_rev": str(receipt.get("source_git_rev") or ""),
-        "deployed_git_rev": str(receipt.get("deployed_git_rev") or ""),
-        "collection_epoch_id": str(receipt.get("collection_epoch_id") or ""),
-        "tile_registry_signature": str(receipt.get("tile_registry_signature") or ""),
-        "terminal_outcome": str(receipt.get("terminal_outcome") or ""),
-        "terminal_at": str(receipt.get("terminal_at") or ""),
-        "manifest_sha256": str(receipt.get("manifest_sha256") or "").lower(),
-        "qualification_maturity": str(receipt.get("qualification_maturity") or ""),
-        "evidence_collection_ready": receipt.get("evidence_collection_ready") is True,
-        "evidence_collected_receipt_sha256": str(
-            receipt.get("evidence_collected_receipt_sha256") or ""
-        ).lower(),
-    }
-    encoded = json.dumps(
-        identity, separators=(",", ":"), sort_keys=True,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return lifecycle_cleanup_identity_sha256(receipt)
 
 
 def _data_sync_lifecycle_cleanup_eligibility(
@@ -40772,6 +40755,10 @@ def _data_sync_lifecycle_cleanup_eligibility(
         r"[0-9a-fA-F]{64}", str(row.get("tile_registry_signature") or "")
     ):
         reasons.append("TILE_SIGNATURE_INVALID")
+    if not re.fullmatch(
+        r"[0-9a-fA-F]{64}", str(row.get("config_signature") or "")
+    ):
+        reasons.append("CONFIG_SIGNATURE_INVALID")
 
     pending_refs = row.get("pending_order_ids")
     open_refs = row.get("open_position_ids")
@@ -41937,6 +41924,7 @@ def _data_sync_validate_lifecycle_ack_bundle(receipt: dict) -> dict:
         and provenance.get("source_revision") == receipt.get("source_git_rev")
         and provenance.get("deployed_revision") == receipt.get("deployed_git_rev")
         and provenance.get("tile_config_signature") == receipt.get("tile_registry_signature")
+        and provenance.get("config_signature") == receipt.get("config_signature")
         and hmac.compare_digest(
             str(manifest.get("cleanup_manifest_sha256") or ""),
             str(receipt.get("manifest_sha256") or ""),
@@ -48621,6 +48609,9 @@ def main():
     _validate_research_ledgers_on_startup()
     _restore_collector_v22_provisionals()
     load_persistent_config()
+    set_collection_config_signature_provider(
+        lambda: _data_sync_lifecycle_cleanup_current_identity()["config_signature"]
+    )
     _apply_env_live_gating()
     reset_transient_runtime_state()
     load_lane_pnl_ledgers_from_disk()

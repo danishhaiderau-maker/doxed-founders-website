@@ -24,7 +24,10 @@ from research_v3_store import V3EvidenceStore, _collection_provenance
 
 
 RECONCILER_SCHEMA = "lifecycle_completion_reconciliation_v1"
-_PROVENANCE_FIELDS = ("source_revision", "deployed_revision", "tile_config_signature")
+_PROVENANCE_FIELDS = (
+    "source_revision", "deployed_revision", "tile_config_signature",
+    "config_signature",
+)
 _PROVENANCE_SENTINELS = frozenset({"", "UNKNOWN", "NOT_DEPLOYED_LOCAL"})
 
 

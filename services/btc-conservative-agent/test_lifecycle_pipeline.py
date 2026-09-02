@@ -17,6 +17,7 @@ PROV = {
     "source_revision": "a" * 40,
     "deployed_revision": "b" * 40,
     "tile_config_signature": "d" * 64,
+    "config_signature": "e" * 64,
 }
 
 

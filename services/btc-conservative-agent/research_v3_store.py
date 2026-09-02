@@ -27,6 +27,7 @@ _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _provenance_cache: dict[str, str] | None = None
+_config_signature_provider = None
 _MAX_MEMBERSHIP_EPISODE_ID_BYTES = 512
 _MAX_RECEIPT_RECORD_ID_BYTES = 1024
 _MAX_RECEIPT_ROW_BYTES = 8 * 1024 * 1024
@@ -147,6 +148,18 @@ def project_opportunity_causal_identity(row: dict[str, Any]) -> dict[str, Any]:
     return identity
 
 
+def set_collection_config_signature_provider(provider) -> None:
+    """Install the runtime-owned immutable config signature projector.
+
+    The store cannot import the bot's mutable runtime state.  The owner must
+    therefore provide the exact persisted-config signature after restore and
+    before any V3 append.  Missing, malformed, or failing providers remain
+    explicit UNKNOWN evidence and consequently fail lifecycle cleanup closed.
+    """
+    global _config_signature_provider
+    _config_signature_provider = provider
+
+
 def _collection_provenance() -> dict[str, str]:
     """Bind every newly appended ledger row to its running source/config.
 
@@ -156,7 +169,18 @@ def _collection_provenance() -> dict[str, str]:
     """
     global _provenance_cache
     if _provenance_cache is not None:
-        return dict(_provenance_cache)
+        result = dict(_provenance_cache)
+        if _config_signature_provider is None:
+            signature = str(result.get("config_signature") or "").strip()
+        else:
+            try:
+                signature = str(_config_signature_provider() or "").strip()
+            except Exception:
+                signature = ""
+        result["config_signature"] = (
+            signature if re.fullmatch(r"[0-9a-f]{64}", signature) else "UNKNOWN"
+        )
+        return result
     deployed = str(os.getenv("SOURCE_GIT_REV") or "").strip()
     source = deployed
     if not source:
@@ -185,7 +209,7 @@ def _collection_provenance() -> dict[str, str]:
         "deployed_revision": deployed or "NOT_DEPLOYED_LOCAL",
         "tile_config_signature": active_tile_registry_signature(),
     }
-    return dict(_provenance_cache)
+    return _collection_provenance()
 
 
 def _path_lock(path: Path) -> threading.RLock:

@@ -40,6 +40,7 @@ def row(key, record_id, now, **extra):
         "source_revision": "a" * 40,
         "deployed_revision": "b" * 40,
         "tile_config_signature": "c" * 64,
+        "config_signature": "d" * 64,
         "bundle_completion": completion(now),
     }
     material.update(extra)
@@ -58,6 +59,7 @@ def row(key, record_id, now, **extra):
                     "source_revision": material["source_revision"],
                     "deployed_revision": material["deployed_revision"],
                     "tile_config_signature": material["tile_config_signature"],
+                    "config_signature": material["config_signature"],
                 },
                 "completion_receipt_sha256": receipt["completion_receipt_sha256"],
                 "qualification_eligible_at": now - 2_000,

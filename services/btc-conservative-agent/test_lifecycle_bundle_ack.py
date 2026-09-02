@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from lifecycle_bundles import COMPLETION_SCHEMA, LifecycleKey, materialize_bundle
+from lifecycle_cleanup_transaction import lifecycle_cleanup_identity_sha256
 from research_v3_contract import canonical_json
 
 
@@ -37,6 +38,7 @@ def _namespace(root: Path):
         "Path": Path, "datetime": datetime, "timezone": timezone,
         "json": json, "hashlib": hashlib, "hmac": hmac, "re": re,
         "os": os, "uuid": uuid,
+        "lifecycle_cleanup_identity_sha256": lifecycle_cleanup_identity_sha256,
         "utc_iso": lambda: "2026-09-01T00:00:00Z",
         "_data_sync_volume_root": lambda: root,
         "_DATA_SYNC_LIFECYCLE_CLEANUP_ACK_SCHEMA": "lifecycle_bundle_cleanup_ack_v1",
@@ -58,6 +60,7 @@ def _bundle(root: Path, now=20_000.0):
         "research_lane": key.research_lane, "observed_ts": now - 10_000,
         "source_revision": "a" * 40, "deployed_revision": "b" * 40,
         "tile_config_signature": "c" * 64,
+        "config_signature": "d" * 64,
         "bundle_completion": {
             "schema": COMPLETION_SCHEMA, "terminal": True, "entry_outcome": "NO_FILL",
             "entry_schedule_terminal": True, "position_closed_or_never_opened": True,
@@ -78,6 +81,7 @@ def _bundle(root: Path, now=20_000.0):
             "source_revision": "a" * 40,
             "deployed_revision": "b" * 40,
             "tile_config_signature": "c" * 64,
+            "config_signature": "d" * 64,
         },
         "completion_receipt_sha256": completion["completion_receipt_sha256"],
         "qualification_eligible_at": now - 2_000,
@@ -101,6 +105,7 @@ def _receipt(namespace, root, bundle_path, manifest):
         "deployed_git_rev": manifest["provenance"]["deployed_revision"],
         "collection_epoch_id": manifest["identity"]["collection_epoch_id"],
         "tile_registry_signature": manifest["provenance"]["tile_config_signature"],
+        "config_signature": manifest["provenance"]["config_signature"],
         "terminal_outcome": manifest["completion"]["classification"],
         "terminal_at": "1970-01-01T02:46:40Z",
         "pending_order_ids": [], "open_position_ids": [],

@@ -7,7 +7,10 @@ from lifecycle_qualification_horizon import canonical_terminal_economics
 
 
 KEY = LifecycleKey("epoch-1", "episode-1", "policy-1", "CONTINUOUS")
-PROV = {"source_revision": "src", "deployed_revision": "dep", "tile_config_signature": "tile"}
+PROV = {
+    "source_revision": "src", "deployed_revision": "dep",
+    "tile_config_signature": "tile", "config_signature": "config",
+}
 
 
 def row(ledger, record_id, **extra):

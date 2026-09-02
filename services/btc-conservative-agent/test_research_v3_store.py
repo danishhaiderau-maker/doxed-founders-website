@@ -156,7 +156,11 @@ class ResearchV3StoreTests(unittest.TestCase):
             os.environ, {"SOURCE_GIT_REV": "abcdef1234567890"}, clear=False,
         ):
             previous = research_v3_store._provenance_cache
+            previous_provider = research_v3_store._config_signature_provider
             research_v3_store._provenance_cache = None
+            research_v3_store.set_collection_config_signature_provider(
+                lambda: "1" * 64
+            )
             try:
                 store = V3EvidenceStore(tmp, epoch_id="epoch-provenance")
                 store.append("decision", {
@@ -169,6 +173,7 @@ class ResearchV3StoreTests(unittest.TestCase):
                 row = json.loads(store.ledger_path("decision").read_text())
             finally:
                 research_v3_store._provenance_cache = previous
+                research_v3_store._config_signature_provider = previous_provider
         self.assertEqual(row["evidence_provenance_schema"], "v3_collection_provenance_v1")
         self.assertEqual(row["source_revision"], "abcdef1234567890")
         self.assertEqual(row["deployed_revision"], "abcdef1234567890")
@@ -176,6 +181,7 @@ class ResearchV3StoreTests(unittest.TestCase):
             row["tile_config_signature"],
             research_v3_store.active_tile_registry_signature(),
         )
+        self.assertEqual(row["config_signature"], "1" * 64)
 
     def test_future_opportunity_gets_one_central_truthful_causal_identity(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
