@@ -28,6 +28,7 @@ on:
           - deploy
           - recover-unready
           - recover-stalled-runtime
+          - resume-bootstrap
           - restart-only
           - inspect-runtime
           - repair-execution-funnel
@@ -43,6 +44,14 @@ on:
         type: string
       recovery_failed_run_id:
         description: Failed deploy run that proves the exact unready revision reached Fly
+        required: false
+        type: string
+      expected_bootstrap_revision:
+        description: Exact 12-character currently deployed revision permitted for resume-bootstrap
+        required: false
+        type: string
+      bootstrap_failed_run_id:
+        description: Failed guarded deploy run whose bootstrap gate may be continued without deployment
         required: false
         type: string
       expected_execution_funnel_sha256:
@@ -84,12 +93,38 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: fly-btc-production
   cancel-in-progress: false
 
 jobs:
+  resume-bootstrap:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate failed guarded bootstrap proof
+        env:
+          EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
+          BOOTSTRAP_FAILED_RUN_ID: ${{ inputs.bootstrap_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python scripts/fly_resume_bootstrap.py validate-proof
+          --expected "$EXPECTED_BOOTSTRAP_REVISION"
+          --run-id "$BOOTSTRAP_FAILED_RUN_ID"
+
+      - name: Continue exact-revision bootstrap and resume paper once
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
+        run: >-
+          python scripts/fly_resume_bootstrap.py continue
+          --expected "$EXPECTED_BOOTSTRAP_REVISION"
   repair-execution-tail:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail'
     runs-on: ubuntu-latest
@@ -1482,7 +1517,7 @@ jobs:
           EXPECTED_REVISION: ${{ github.sha }}
         run: |
           python - <<'PY'
-          import json, os, time, urllib.request
+          import json, os, time, urllib.error, urllib.request
 
           base = "https://doxed-btc-bot.fly.dev"
           expected = os.environ["EXPECTED_REVISION"][:12].lower()
@@ -1500,6 +1535,25 @@ jobs:
               )
               with urllib.request.urlopen(request, timeout=timeout) as response:
                   return json.load(response)
+
+          def observe_status(deadline):
+              last = None
+              attempt = 0
+              while time.monotonic() < deadline:
+                  attempt += 1
+                  try:
+                      return call("/api/status")
+                  except urllib.error.HTTPError as exc:
+                      if exc.code not in {502, 503, 504}:
+                          raise
+                      last = exc
+                  except (urllib.error.URLError, TimeoutError) as exc:
+                      last = exc
+                  delay = min(2 ** min(attempt - 1, 4), max(0.0, deadline - time.monotonic()))
+                  print(f"transient status observation attempt={attempt} error={type(last).__name__}", flush=True)
+                  if delay:
+                      time.sleep(delay)
+              raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")
 
           # The audited current cohort has at least 21,353 legacy rows.  At the
           # bounded 64-receipt worker batch and one-second backlog cadence,
@@ -1525,7 +1579,7 @@ jobs:
           while time.monotonic() < deadline:
               # The lifecycle owner is independent of paper execution and
               # continues bounded subprocess cycles while the pause remains.
-              status = call("/api/status")
+              status = observe_status(deadline)
               last = status
               pipeline = status.get("lifecycle_pipeline") or {}
               bootstrap = pipeline.get("receipt_bootstrap") or {}

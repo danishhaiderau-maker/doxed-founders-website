@@ -7,6 +7,7 @@ import textwrap
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = (ROOT / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
 MONITOR = (ROOT / ".github/workflows/fly-bot-monitor.yml").read_text(encoding="utf-8")
+BOOTSTRAP_HELPER = (ROOT / "scripts/fly_resume_bootstrap.py").read_text(encoding="utf-8")
 TEST_PATH = "services/btc-conservative-agent/test*.py"
 
 
@@ -44,6 +45,87 @@ def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatn
     assert '"Prove liveness, execution safety, and exact revision"' in DEPLOY
     assert 'DURABLE_RELAYS_ONLY_RECOVERY: "YES"' in DEPLOY
     assert 'REQUIRE_CANONICAL_FLY_OWNER: "NO"' in DEPLOY
+
+
+def test_bootstrap_continuation_is_proof_bound_and_never_deploys_or_restarts():
+    block = DEPLOY[
+        DEPLOY.index("  resume-bootstrap:"):
+        DEPLOY.index("  repair-execution-tail:")
+    ]
+    assert "inputs.mode == 'resume-bootstrap'" in block
+    assert "uses: actions/checkout@v4" in block
+    assert "python scripts/fly_resume_bootstrap.py validate-proof" in block
+    assert "python scripts/fly_resume_bootstrap.py continue" in block
+    assert 're.fullmatch(r"[0-9a-f]{12}", revision)' in BOOTSTRAP_HELPER
+    assert 're.fullmatch(r"[0-9a-f]{40}", head_sha)' in BOOTSTRAP_HELPER
+    assert 'head_sha[:12] != expected' in BOOTSTRAP_HELPER
+    assert 'run.get("conclusion") != "failure"' in BOOTSTRAP_HELPER
+    assert 'run.get("path") or "").split("@", 1)[0] != WORKFLOW_PATH' in BOOTSTRAP_HELPER
+    for name, conclusion in (
+        ("Deploy the exact source revision", "success"),
+        ("Prove liveness, execution safety, and exact revision", "success"),
+        ("Complete receipt bootstrap inside exact-revision maintenance", "failure"),
+        ("Best-effort preserve safe paper maintenance after failed guarded deploy", "success"),
+    ):
+        assert f'unique_step("{name}", "{conclusion}")' in BOOTSTRAP_HELPER
+    assert 'int(deployed["number"]) < int(live["number"]) < int(failed["number"])' in BOOTSTRAP_HELPER
+    assert 'step.get("name") == "Resume paper execution after exact-revision acceptance"' in BOOTSTRAP_HELPER
+    assert BOOTSTRAP_HELPER.count('request_json("/api/resume", {})') == 1
+    assert "flyctl deploy" not in block
+    assert "machines restart" not in block
+    assert 'request_json("/api/pause"' not in block
+    assert 'request_json("/api/orders/cancel"' not in block
+    assert 'request_json("/api/positions/close"' not in block
+
+
+def test_bootstrap_continuation_requires_exact_safe_owner_and_complete_receipt():
+    block = BOOTSTRAP_HELPER
+    assert 'str(status.get("source_git_rev") or "").lower() == expected' in block
+    assert 'status.get("execution_paused") is paused' in block
+    assert 'status.get("manual_admin_pause") is paused' in block
+    assert 'status.get("process_alive") is True' in block
+    assert 'progress.get("ok") is True' in block
+    assert 'progress.get("trade_lock_available") is True' in block
+    assert 'status.get("force_paper_mode") is True' in block
+    assert 'status.get("bitfinex_live_enabled") is False' in block
+    assert 'status.get("live_armed") is False' in block
+    assert 'int(progress.get("open_positions") or 0) == 0' in block
+    assert 'int(progress.get("pending_orders") or 0) == 0' in block
+    assert 'pipeline.get("owner") is True' in block
+    assert 'pipeline.get("running") is True' in block
+    assert 'pipeline.get("source_revision_match") is True' in block
+    assert 'bootstrap.get("blocked") is True' in block
+    assert 'bootstrap.get("status") == "COMPLETE"' in block
+    assert 'bootstrap.get("complete") is True' in block
+    assert "timeout=45 * 60" in block
+    assert "bootstrap_deadline = deadline - min(60, timeout / 4)" in block
+    after_resume = block[block.index('resumed = request_json("/api/resume", {})'):]
+    assert '_common_safe(final, expected, paused=False)' in after_resume
+    assert '_require_complete(bootstrap)' in after_resume
+
+
+def test_bootstrap_status_observation_retries_only_transient_transport_failures():
+    main = DEPLOY[
+        DEPLOY.index("- name: Complete receipt bootstrap inside exact-revision maintenance"):
+        DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
+    ]
+    continuation = BOOTSTRAP_HELPER
+    for block in (main, continuation):
+        assert "while " in block and "monotonic() <" in block
+        assert "attempt += 1" in block
+        assert "urllib.error.URLError" in block and "TimeoutError" in block
+        assert "- " in block and "monotonic()" in block
+        assert "2 ** min(attempt - 1, 4)" in block
+        assert 'raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")' in block
+    assert "if exc.code not in {502, 503, 504}:" in main
+    assert "exc.code in TRANSIENT_HTTP" in continuation
+    assert 'status = observe_status(deadline)' in main
+    assert 'until=bootstrap_deadline' in continuation
+    assert 'until=deadline' in continuation
+
+
+def test_bootstrap_continuation_program_is_valid_python():
+    compile(BOOTSTRAP_HELPER, "fly_resume_bootstrap.py", "exec")
 
 
 def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailable():
