@@ -37863,6 +37863,9 @@ _DATA_SYNC_MANIFEST_PAGE_MAX = 500
 _DATA_SYNC_ACK_FILE_MAX = 100_000
 _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS = 2 * 60 * 60
 _DATA_SYNC_INVENTORY_GENERATION_MAX = 8
+_DATA_SYNC_INVENTORY_GC_SCAN_LIMIT = 64
+_DATA_SYNC_INVENTORY_GC_REMOVE_LIMIT = 8
+_DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX = _DATA_SYNC_ACK_FILE_MAX
 _data_sync_inventory_generations = {}
 _data_sync_ack_lock = threading.RLock()
 _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
@@ -39347,6 +39350,7 @@ def _data_sync_validate_disk_inventory_generation(
     if (
         page_count < 1 or file_count < 0 or total_bytes < 0
         or page_size < 1 or page_size > 1000
+        or page_count > _DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX
     ):
         raise RuntimeError("inventory generation totals are out of bounds")
     root = work_root.resolve(strict=True)
@@ -39373,6 +39377,8 @@ def _data_sync_validate_disk_inventory_generation(
     descriptors_seen = 0
     with index_path.open("r", encoding="utf-8") as handle:
         for line in handle:
+            if descriptors_seen >= _DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX:
+                raise RuntimeError("inventory page descriptor count exceeds bound")
             if len(line) > 16 * 1024:
                 raise RuntimeError("inventory page descriptor exceeds bound")
             try:
@@ -39460,13 +39466,6 @@ def _data_sync_retain_disk_inventory_generation(
                     key=lambda key: float(alternatives[key].get("retained_at") or 0.0),
                 )
             _data_sync_inventory_generations.pop(oldest, None)
-        protected = {
-            key for key, value in _data_sync_inventory_generations.items()
-            if isinstance(value, dict)
-        }
-    _data_sync_gc_disk_inventory_generations(
-        _data_sync_inventory_work_root(), protected_generation_ids=protected
-    )
     return generation_id
 
 
@@ -39514,7 +39513,9 @@ def _data_sync_gc_disk_inventory_generations(
             pass
     candidates = []
     try:
-        for path in root.iterdir():
+        for scanned, path in enumerate(root.iterdir()):
+            if scanned >= _DATA_SYNC_INVENTORY_GC_SCAN_LIMIT:
+                break
             if not re.fullmatch(r"[0-9a-f]{64}", path.name):
                 continue
             resolved = path.resolve(strict=True)
@@ -39540,9 +39541,29 @@ def _data_sync_gc_disk_inventory_generations(
                 if lease.is_dir() and not lease.is_symlink():
                     shutil.rmtree(lease)
             removed.append(path.name)
+            if len(removed) >= _DATA_SYNC_INVENTORY_GC_REMOVE_LIMIT:
+                break
         except OSError:
             continue
     return removed
+
+
+def _data_sync_inventory_generation_gc_worker(work_root: Path) -> None:
+    """Best-effort bounded GC after a verified generation is publishable."""
+    try:
+        with _data_sync_inventory_cache_condition:
+            protected = {
+                key for key, value in _data_sync_inventory_generations.items()
+                if isinstance(value, dict)
+            }
+        _data_sync_gc_disk_inventory_generations(
+            work_root, protected_generation_ids=protected
+        )
+    except BaseException as exc:
+        logger.warning(
+            "data-sync derived inventory generation GC deferred: %s",
+            type(exc).__name__,
+        )
 
 
 def _data_sync_disk_page_descriptor(generation: dict, page_index: int) -> dict:
@@ -40016,11 +40037,17 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
         generated_at = str(result.get("generated_at") or "")
         if not generated_at:
             raise RuntimeError("inventory subprocess timestamp is missing")
+        with _data_sync_inventory_cache_condition:
+            _data_sync_async_inventory["worker_phase"] = "VALIDATING_INDEX"
+            _data_sync_inventory_cache_condition.notify_all()
         disk_generation = _data_sync_validate_disk_inventory_generation(
             result, work_root
         )
         # Only the trading parent may promote the nonce-bound worker result to
         # the canonical restart snapshot.
+        with _data_sync_inventory_cache_condition:
+            _data_sync_async_inventory["worker_phase"] = "PERSISTING_POINTER"
+            _data_sync_inventory_cache_condition.notify_all()
         _data_sync_persist_disk_inventory_snapshot(disk_generation, generated_at)
         inventory_generation_id = _data_sync_retain_disk_inventory_generation(
             disk_generation,
@@ -40049,6 +40076,12 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 "error": None,
             })
             _data_sync_inventory_cache_condition.notify_all()
+        threading.Thread(
+            target=_data_sync_inventory_generation_gc_worker,
+            args=(work_root,),
+            name="data-sync-inventory-generation-gc",
+            daemon=True,
+        ).start()
     except BaseException as exc:
         logger.error(f"data-sync inventory background refresh failed: {exc}")
         with _data_sync_inventory_cache_condition:

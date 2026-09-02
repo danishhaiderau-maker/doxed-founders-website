@@ -3947,6 +3947,7 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
         "hmac": hmac,
         "json": json,
         "re": re,
+        "_DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX": 100_000,
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     work = tmp_path / ".data-sync-snapshots"
@@ -4047,6 +4048,8 @@ def test_disk_generation_gc_is_confined_bounded_and_preserves_current_or_leased(
         "time": time,
         "_DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS": 100,
         "_DATA_SYNC_INVENTORY_GENERATION_MAX": 2,
+        "_DATA_SYNC_INVENTORY_GC_SCAN_LIMIT": 64,
+        "_DATA_SYNC_INVENTORY_GC_REMOVE_LIMIT": 8,
         "_data_sync_inventory_snapshot_path": lambda: snapshot_path,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
@@ -4060,6 +4063,30 @@ def test_disk_generation_gc_is_confined_bounded_and_preserves_current_or_leased(
     assert ids[7] not in removed and (generations / ids[7]).is_dir()
     assert removed
     assert all(not (generations / value).exists() for value in removed)
+
+
+def test_verified_inventory_is_published_before_best_effort_generation_gc():
+    worker = BOT[
+        BOT.index("def _data_sync_inventory_refresh_worker"):
+        BOT.index("def _data_sync_request_async_inventory")
+    ]
+    current_publish = worker.index('"status": "CURRENT"')
+    gc_start = worker.index("target=_data_sync_inventory_generation_gc_worker")
+    assert current_publish < gc_start
+    retain = BOT[
+        BOT.index("def _data_sync_retain_disk_inventory_generation"):
+        BOT.index("def _data_sync_gc_disk_inventory_generations")
+    ]
+    assert "_data_sync_gc_disk_inventory_generations(" not in retain
+    assert '"VALIDATING_INDEX"' in worker
+    assert '"PERSISTING_POINTER"' in worker
+
+
+def test_inventory_generation_validation_and_gc_have_explicit_item_bounds():
+    assert "page_count > _DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX" in BOT
+    assert "descriptors_seen >= _DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX" in BOT
+    assert "scanned >= _DATA_SYNC_INVENTORY_GC_SCAN_LIMIT" in BOT
+    assert "len(removed) >= _DATA_SYNC_INVENTORY_GC_REMOVE_LIMIT" in BOT
 
 
 def test_sync_requires_current_inventory_and_targeted_refresh_never_walks_volume():
