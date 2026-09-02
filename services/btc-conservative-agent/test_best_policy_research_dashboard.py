@@ -449,6 +449,51 @@ def test_genome_prefers_current_safe_v31_over_retired_missing_source(monkeypatch
     assert payload["legacy_genome"]["status"].startswith("RETIRED_RESEARCH_DB")
 
 
+def test_genome_compact_row_preserves_diagnostic_truth_not_execution_spoof(monkeypatch):
+    report = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "candidate_screen": {
+            "descriptive_top_100": [],
+            "profitable_ideal_touch_diagnostic_top_100": [{
+                "policy_id": "diagnostic-policy",
+                "policy_family": "HYBRID_RUNNER",
+                "full_fills": 7,
+                "sealed_oos_net_usd": 999.0,
+                "qualification": "QUALIFIED",
+                "ranking_eligible": True,
+                "gates": {"integrity_pass": False},
+                "evidence_blockers": ["UNKNOWN_EXECUTION_EVIDENCE"],
+                "ideal_touch_diagnostic": {
+                    "oos_net_usd": 1.25,
+                    "max_drawdown_usd": -0.2,
+                },
+            }],
+        },
+    }
+    monkeypatch.setattr(
+        dashboard, "_read_json",
+        lambda name, *args: report
+        if str(name).replace("\\", "/").endswith("safe_policy_genome_v3_report.json")
+        else {},
+    )
+
+    row = dashboard._genome_payload()["candidate_screen"]["descriptive_top_100"][0]
+
+    assert row["policy_id"] == "diagnostic-policy"
+    assert row["diagnostic_replay_net_pnl_usd"] == 1.25
+    assert row["diagnostic_replay_max_drawdown_usd"] == -0.2
+    assert row["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert row["qualification_eligibility"] == "NOT QUALIFICATION ELIGIBLE"
+    assert row["descriptive_blockers"] == [
+        "NOT_EXECUTION_VERIFIED", "NOT_QUALIFICATION_ELIGIBLE",
+        "UNKNOWN_EXECUTION_EVIDENCE", "integrity_pass",
+    ]
+    assert row["sealed_oos_net_usd"] is None
+    assert row["max_drawdown_usd"] is None
+    assert "qualification" not in row
+    assert "ranking_eligible" not in row
+
+
 def test_api_cache_key_changes_with_analyzer_report_generation(tmp_path, monkeypatch):
     manifest = tmp_path / dashboard.REPORT_MANIFEST_FILE
     safe = tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
