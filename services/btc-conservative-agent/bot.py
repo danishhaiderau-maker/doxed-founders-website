@@ -37819,6 +37819,10 @@ _DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"
 _DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA = "fly_runtime_inventory_worker_request_v1"
 _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v2"
 _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS = 300
+# The worker is resumable, so short slices preserve completeness while yielding
+# the single Fly CPU and publishing progress well inside the desktop client's
+# no-progress fence.
+_DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS = 15.0
 _DATA_SYNC_INVENTORY_ORPHAN_MAX_AGE_SECONDS = 15 * 60
 _DATA_SYNC_INVENTORY_ORPHAN_SCAN_LIMIT = 1000
 _DATA_SYNC_INVENTORY_ORPHAN_REMOVE_LIMIT = 100
@@ -39844,6 +39848,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             ),
             "rewrite_targets": sorted(rewrite_targets),
             "max_rows": 5000,
+            "inventory_elapsed_budget_seconds": (
+                _DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS
+            ),
             "inventory_page_rows": _DATA_SYNC_MANIFEST_PAGE_DEFAULT,
         }
         request_tmp = request_path.with_name(f"{request_path.name}.tmp")

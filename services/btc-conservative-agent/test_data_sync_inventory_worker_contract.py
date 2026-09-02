@@ -221,6 +221,8 @@ def test_parent_contract_handles_missing_nonzero_timeout_and_cleans_unique_trans
     assert "if completed.returncode != 0:" in source
     assert 'result_path.read_text(encoding="utf-8")' in source
     assert "timeout=_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS" in source
+    assert "_DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS = 15.0" in source
+    assert '"inventory_elapsed_budget_seconds": (' in source
     assert "except BaseException as exc:" in source
     assert "transient_paths = [request_path, result_path]" in source
     assert 'request_path.parent.glob(f"*{nonce}*")' in source
