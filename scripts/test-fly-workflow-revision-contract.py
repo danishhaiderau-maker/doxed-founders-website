@@ -56,6 +56,9 @@ def test_bootstrap_continuation_is_proof_bound_and_never_deploys_or_restarts():
     assert "uses: actions/checkout@v4" in block
     assert "python scripts/fly_resume_bootstrap.py validate-proof" in block
     assert "python scripts/fly_resume_bootstrap.py continue" in block
+    assert "python scripts/fly_resume_bootstrap.py preserve-maintenance" in block
+    assert "if: failure() && steps.continue-bootstrap.outcome == 'failure'" in block
+    assert "continue-on-error: true" in block
     assert 're.fullmatch(r"[0-9a-f]{12}", revision)' in BOOTSTRAP_HELPER
     assert 're.fullmatch(r"[0-9a-f]{40}", head_sha)' in BOOTSTRAP_HELPER
     assert 'head_sha[:12] != expected' in BOOTSTRAP_HELPER
@@ -73,24 +76,24 @@ def test_bootstrap_continuation_is_proof_bound_and_never_deploys_or_restarts():
     assert BOOTSTRAP_HELPER.count('request_json("/api/resume", {})') == 1
     assert "flyctl deploy" not in block
     assert "machines restart" not in block
-    assert 'request_json("/api/pause"' not in block
+    assert BOOTSTRAP_HELPER.count('request_json("/api/pause", {})') == 1
     assert 'request_json("/api/orders/cancel"' not in block
     assert 'request_json("/api/positions/close"' not in block
 
 
 def test_bootstrap_continuation_requires_exact_safe_owner_and_complete_receipt():
     block = BOOTSTRAP_HELPER
-    assert 'str(status.get("source_git_rev") or "").lower() == expected' in block
+    assert '"revision_exact": observed_revision == expected' in block
     assert 'status.get("execution_paused") is paused' in block
     assert 'status.get("manual_admin_pause") is paused' in block
     assert 'status.get("process_alive") is True' in block
     assert 'progress.get("ok") is True' in block
-    assert 'progress.get("trade_lock_available") is True' in block
+    assert '"trade_lock_progressing": progress.get("trade_lock_progressing") is True' in block
     assert 'status.get("force_paper_mode") is True' in block
     assert 'status.get("bitfinex_live_enabled") is False' in block
     assert 'status.get("live_armed") is False' in block
-    assert 'int(progress.get("open_positions") or 0) == 0' in block
-    assert 'int(progress.get("pending_orders") or 0) == 0' in block
+    assert '"open_positions_zero": open_positions == 0' in block
+    assert '"pending_orders_zero": pending_orders == 0' in block
     assert 'pipeline.get("owner") is True' in block
     assert 'pipeline.get("running") is True' in block
     assert 'pipeline.get("source_revision_match") is True' in block
@@ -101,7 +104,7 @@ def test_bootstrap_continuation_requires_exact_safe_owner_and_complete_receipt()
     assert "bootstrap_deadline = deadline - min(60, timeout / 4)" in block
     after_resume = block[block.index('resumed = request_json("/api/resume", {})'):]
     assert '_common_safe(final, expected, paused=False)' in after_resume
-    assert '_require_complete(bootstrap)' in after_resume
+    assert '"receipt_bootstrap_complete"' in after_resume
 
 
 def test_bootstrap_status_observation_retries_only_transient_transport_failures():

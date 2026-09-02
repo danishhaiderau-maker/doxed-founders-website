@@ -2,7 +2,7 @@ import urllib.error
 
 import pytest
 
-from fly_resume_bootstrap import continue_bootstrap, observe_status, validate_failed_run
+from fly_resume_bootstrap import continue_bootstrap, observe_status, preserve_maintenance, validate_failed_run
 
 
 REV = "a" * 12
@@ -28,7 +28,7 @@ def status(*, paused=True, complete=True, **updates):
         "live_armed": False,
         "execution_paused": paused,
         "manual_admin_pause": paused,
-        "strategy_progress": {"ok": True, "trade_lock_available": True, "open_positions": 0, "pending_orders": 0},
+        "strategy_progress": {"ok": True, "trade_lock_available": True, "trade_lock_busy_transient": False, "trade_lock_progressing": True, "open_positions": 0, "pending_orders": 0},
         "lifecycle_pipeline": {"owner": True, "running": True, "source_revision_match": True, "receipt_bootstrap": {"required": True, "status": "COMPLETE" if complete else "PENDING", "complete": complete, "blocked": False}},
     }
     value.update(updates)
@@ -79,7 +79,7 @@ def test_status_observation_401_fails_immediately():
     lambda row: row.update(source_git_rev="b" * 12),
     lambda row: row.update(process_alive=False),
     lambda row: row["strategy_progress"].update(ok=False),
-    lambda row: row["strategy_progress"].update(trade_lock_available=False),
+    lambda row: row["strategy_progress"].update(trade_lock_progressing=False),
     lambda row: row["strategy_progress"].update(open_positions=1),
     lambda row: row["strategy_progress"].update(pending_orders=1),
     lambda row: row["lifecycle_pipeline"].update(owner=False),
@@ -97,6 +97,85 @@ def test_pre_resume_safety_and_owner_regressions_never_resume(mutate):
     assert posts == []
 
 
+def test_unsafe_status_reports_exact_allowlisted_failed_predicates():
+    clock = Clock(); row = status()
+    row["process_alive"] = False
+    row["strategy_progress"]["pending_orders"] = 2
+    row["lifecycle_pipeline"]["owner"] = False
+    row["secret_token"] = "must-not-leak"
+    def request(path, payload):
+        return row
+    with pytest.raises(RuntimeError) as caught:
+        continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    message = str(caught.value)
+    assert '"failed_predicates":["lifecycle_owner","pending_orders_zero","process_alive"]' in message
+    assert '"pending_orders":2' in message
+    assert '"required_paused":true' in message
+    assert "must-not-leak" not in message
+    assert "secret_token" not in message
+
+
+@pytest.mark.parametrize("malformed", ["unknown", "0", 0.5, False])
+def test_malformed_exposure_count_is_diagnostic_and_never_treated_as_zero(malformed):
+    clock = Clock(); row = status()
+    row["strategy_progress"]["open_positions"] = malformed
+    def request(path, payload):
+        return row
+    with pytest.raises(RuntimeError) as caught:
+        continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    message = str(caught.value)
+    assert '"failed_predicates":["open_positions_zero"]' in message
+    assert '"open_positions":null' in message
+
+
+def test_failure_path_preserves_exact_flat_paper_maintenance_with_one_pause():
+    clock = Clock(); rows = [status(paused=False), status(paused=True)]; pauses = []
+    def request(path, payload):
+        if path == "/api/pause":
+            pauses.append(payload); return {"status": "paused", "execution_paused": True}
+        return rows.pop(0)
+    final = preserve_maintenance(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    assert final["manual_admin_pause"] is True
+    assert pauses == [{}]
+
+
+def test_failure_path_refuses_hard_drift_without_pause():
+    clock = Clock(); row = status(paused=False, source_git_rev="b" * 12); pauses = []
+    def request(path, payload):
+        if path == "/api/pause": pauses.append(payload)
+        return row
+    with pytest.raises(RuntimeError, match="refused non-exact, unsafe, or invalid-schema"):
+        preserve_maintenance(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    assert pauses == []
+
+
+def test_failure_path_pauses_before_reporting_new_nonflat_paper_exposure():
+    clock = Clock(); pauses = []
+    before = status(paused=False); before["strategy_progress"]["pending_orders"] = 1
+    after = status(paused=True); after["strategy_progress"]["pending_orders"] = 1
+    rows = [before, after]
+    def request(path, payload):
+        if path == "/api/pause":
+            pauses.append(payload); return {"status": "paused", "execution_paused": True}
+        return rows.pop(0)
+    with pytest.raises(RuntimeError, match="maintenance preserved with nonflat paper exposure") as caught:
+        preserve_maintenance(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    assert pauses == [{}]
+    assert '"open_positions":0' in str(caught.value)
+    assert '"pending_orders":1' in str(caught.value)
+
+
+def test_failure_path_never_retries_ambiguous_pause():
+    clock = Clock(); pauses = []
+    def request(path, payload):
+        if path == "/api/pause":
+            pauses.append(payload); raise urllib.error.URLError("ambiguous")
+        return status(paused=False)
+    with pytest.raises(urllib.error.URLError):
+        preserve_maintenance(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    assert pauses == [{}]
+
+
 def test_pending_bootstrap_waits_then_resumes_exactly_once():
     clock = Clock(); statuses = [status(complete=False), status(), status(paused=False)]; posts = []
     def request(path, payload):
@@ -108,13 +187,72 @@ def test_pending_bootstrap_waits_then_resumes_exactly_once():
     assert posts == [{}]
 
 
-def test_post_resume_bootstrap_regression_fails_after_one_post():
+def test_zero_wait_lock_busy_is_accepted_when_progressing_is_true():
+    clock = Clock(); posts = []
+    pre = status()
+    pre["strategy_progress"].update(trade_lock_available=False, trade_lock_busy_transient=True, trade_lock_progressing=True)
+    post = status(paused=False)
+    post["strategy_progress"].update(trade_lock_available=False, trade_lock_busy_transient=True, trade_lock_progressing=True)
+    rows = [pre, post]
+    def request(path, payload):
+        if path == "/api/resume":
+            posts.append(payload); return {"status": "resumed", "execution_paused": False}
+        return rows.pop(0)
+    assert continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)["execution_paused"] is False
+    assert posts == [{}]
+
+
+def test_nonprogressing_lock_is_reobserved_until_deadline_without_resume():
+    clock = Clock(); status_calls = 0; posts = []
+    row = status(); row["strategy_progress"]["trade_lock_progressing"] = False
+    def request(path, payload):
+        nonlocal status_calls
+        if path == "/api/resume":
+            posts.append(payload); return {"status": "resumed"}
+        status_calls += 1; return row
+    with pytest.raises(RuntimeError, match="bounded deadline expired") as caught:
+        continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    assert status_calls > 1 and posts == []
+    assert '"failed_readiness_predicates":["trade_lock_progressing"]' in str(caught.value)
+
+
+def test_resume_requires_complete_and_every_readiness_gate_in_one_snapshot():
+    clock = Clock(); posts = []
+    complete_not_ready = status()
+    complete_not_ready["strategy_progress"]["trade_lock_progressing"] = False
+    ready_not_complete = status(complete=False)
+    rows = [complete_not_ready, ready_not_complete, status(), status(paused=False)]
+    def request(path, payload):
+        if path == "/api/resume":
+            posts.append((payload, len(rows)))
+            return {"status": "resumed", "execution_paused": False}
+        return rows.pop(0)
+    continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=40)
+    # Three pre-resume observations were required; neither partial snapshot was
+    # sufficient on its own. One post-resume observation remains at mutation.
+    assert posts == [({}, 1)]
+
+
+def test_hard_revision_drift_fails_on_first_snapshot():
+    clock = Clock(); calls = 0; posts = []
+    row = status(source_git_rev="b" * 12)
+    def request(path, payload):
+        nonlocal calls
+        calls += 1
+        if path == "/api/resume": posts.append(payload)
+        return row
+    with pytest.raises(RuntimeError, match="UNSAFE_BOOTSTRAP_STATUS"):
+        continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
+    assert calls == 1 and posts == []
+
+
+def test_post_resume_bootstrap_regression_deadline_fails_after_one_post():
     clock = Clock(); posts = []
     def request(path, payload):
         if path == "/api/resume":
             posts.append(payload); return {"status": "resumed", "execution_paused": False}
         return status() if not posts else status(paused=False, complete=False)
-    with pytest.raises(RuntimeError, match="receipt bootstrap is not complete"):
+    with pytest.raises(RuntimeError, match="post-resume readiness deadline expired"):
         continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
     assert posts == [{}]
 

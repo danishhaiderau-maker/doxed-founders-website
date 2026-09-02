@@ -119,11 +119,22 @@ jobs:
           --run-id "$BOOTSTRAP_FAILED_RUN_ID"
 
       - name: Continue exact-revision bootstrap and resume paper once
+        id: continue-bootstrap
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
         run: >-
           python scripts/fly_resume_bootstrap.py continue
+          --expected "$EXPECTED_BOOTSTRAP_REVISION"
+
+      - name: Best-effort preserve bootstrap continuation maintenance
+        if: failure() && steps.continue-bootstrap.outcome == 'failure'
+        continue-on-error: true
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
+        run: >-
+          python scripts/fly_resume_bootstrap.py preserve-maintenance
           --expected "$EXPECTED_BOOTSTRAP_REVISION"
   repair-execution-tail:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail'
