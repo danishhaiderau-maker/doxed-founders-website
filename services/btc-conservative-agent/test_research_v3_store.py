@@ -26,6 +26,11 @@ def _segment_process(root, start, result_queue):
     ))
 
 
+def _rotate_process(root, start, result_queue):
+    start.wait()
+    result_queue.put(V3EvidenceStore(root, epoch_id="epoch-multiprocess").rotate_ledger("decision"))
+
+
 class ResearchV3StoreTests(unittest.TestCase):
     @staticmethod
     def _run_processes(target, args, count):
@@ -84,6 +89,31 @@ class ResearchV3StoreTests(unittest.TestCase):
             verification = store.verify()
             self.assertTrue(verification["passed"])
             self.assertEqual(verification["market_segment_count"], 1)
+
+    def test_multiprocess_rotation_and_writers_lose_no_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-multiprocess")
+            store.initialize_ledger_generation_authority("decision")
+            store.append("decision", {"record_id": "before", "episode_id": "before"})
+            context = multiprocessing.get_context("spawn")
+            start = context.Event(); result_queue = context.Queue()
+            processes = [context.Process(target=_rotate_process, args=(tmp, start, result_queue))]
+            processes += [context.Process(
+                target=_append_process, args=(tmp, f"during-{index}", start, result_queue),
+            ) for index in range(8)]
+            for process in processes: process.start()
+            start.set()
+            results = [result_queue.get(timeout=30) for _ in processes]
+            for process in processes:
+                process.join(timeout=30)
+                self.assertEqual(process.exitcode, 0)
+            restarted = V3EvidenceStore(tmp, epoch_id="epoch-multiprocess")
+            rows = []
+            for _ref, path in restarted.ledger_generation_paths("decision"):
+                rows.extend(json.loads(line) for line in path.read_text("utf-8").splitlines())
+            self.assertEqual({row["record_id"] for row in rows},
+                             {"before", *(f"during-{index}" for index in range(8))})
+            self.assertEqual(sum(result.get("written") is True for result in results), 8)
 
     def test_lock_target_outside_store_root_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:

@@ -623,12 +623,28 @@ class V3EvidenceStore:
 
     def rotate_ledger(self, ledger: str, *, failpoint: str | None = None,
                       under_lock_hook=None) -> dict[str, Any]:
-        """Seal one opted-in ACTIVE generation under the canonical writer lock."""
+        """Cut over one ACTIVE generation, then attest immutable bytes unlocked.
+
+        The writer lock protects only the small journal/rename/create/pointer
+        transaction.  Once renamed, the old inode is immutable and may be
+        hashed without stopping appends to the successor generation.
+        """
         active = self.ledger_path(ledger)
         with self._exclusive(active):
             ref = self._active_ledger_generation(ledger); generation = int(ref["generation"])
             if generation < 1:
                 raise RuntimeError("LEGACY_LEDGER_GENERATION_MIGRATION_REQUIRED")
+            for pending_generation in (generation - 1, generation):
+                if pending_generation < 1:
+                    continue
+                prepared_path = self._rotation_transaction_path(
+                    ledger, pending_generation, "PREPARED",
+                )
+                committed_path = self._rotation_transaction_path(
+                    ledger, pending_generation, "COMMITTED",
+                )
+                if prepared_path.exists() and not committed_path.exists():
+                    raise RuntimeError("V3_LEDGER_ROTATION_RECOVERY_REQUIRED")
             signature = _path_signature(active)
             if signature is None or signature[2] <= 0:
                 raise RuntimeError("EMPTY_OR_MISSING_ACTIVE_LEDGER")
@@ -648,99 +664,100 @@ class V3EvidenceStore:
             sealed_stat = _path_signature(sealed)
             if sealed_stat != signature:
                 raise RuntimeError("SEALED_LEDGER_SIGNATURE_MISMATCH")
-            seal = {"schema": "v3_ledger_rotation_seal_v1", "ledger": ledger,
-                    "generation": generation, "identity": self._identity_binding(),
-                    "active_ref": material["active_ref"],
-                    "sealed_ref": material["sealed_ref"], "successor_ref": material["successor_ref"],
-                    "size": signature[2], "mtime_ns": signature[3],
-                    "sha256": hashlib.sha256(sealed.read_bytes()).hexdigest()}
-            seal["binding_sha256"] = hashlib.sha256(canonical_json(seal).encode()).hexdigest()
-            self._write_immutable_receipt(self._rotation_transaction_path(ledger, generation, "SEALED"), seal)
             self._atomic_json_receipt(self._generation_root(ledger) / "ACTIVE.json",
                                       self._active_generation_pointer(ledger, generation + 1))
             if failpoint == "AFTER_POINTER": raise RuntimeError("FAILPOINT_AFTER_POINTER")
-            committed_material = {**material, "state": "COMMITTED", "seal_sha256": hashlib.sha256(
-                self._rotation_transaction_path(ledger, generation, "SEALED").read_bytes()).hexdigest()}
-            committed = {**committed_material, "binding_sha256": hashlib.sha256(canonical_json(committed_material).encode()).hexdigest()}
-            self._write_immutable_receipt(self._rotation_transaction_path(ledger, generation, "COMMITTED"), committed)
             _id_cache.pop(str(active.resolve()), None)
-            return {"rotated": True, "sealed_ref": material["sealed_ref"], "active_ref": material["successor_ref"],
-                    "seal_receipt": self._rotation_transaction_path(ledger, generation, "SEALED")}
+        if failpoint == "AFTER_CUTOVER":
+            raise RuntimeError("FAILPOINT_AFTER_CUTOVER")
+        return self._finalize_ledger_rotation(ledger, generation, material)
+
+    def _finalize_ledger_rotation(self, ledger: str, generation: int,
+                                  material: dict[str, Any]) -> dict[str, Any]:
+        """Hash and commit an already immutable sealed generation, lock-free."""
+        sealed = self.ledger_dir / f"{ledger}.jsonl.{generation}"
+        values = material.get("source_signature") or {}
+        signature = tuple(values.get(key) for key in ("device", "inode", "size", "mtime_ns"))
+        if any(not isinstance(value, int) for value in signature) or _path_signature(sealed) != signature:
+            raise RuntimeError("V3_LEDGER_ROTATION_SEALED_MISMATCH")
+        seal = {"schema": "v3_ledger_rotation_seal_v1", "ledger": ledger,
+                "generation": generation, "identity": self._identity_binding(),
+                "active_ref": material["active_ref"], "sealed_ref": material["sealed_ref"],
+                "successor_ref": material["successor_ref"], "size": signature[2],
+                "mtime_ns": signature[3], "sha256": self._sha256_file(sealed)}
+        seal["binding_sha256"] = hashlib.sha256(canonical_json(seal).encode()).hexdigest()
+        seal_path = self._rotation_transaction_path(ledger, generation, "SEALED")
+        self._write_immutable_receipt(seal_path, seal)
+        committed_material = {**material, "state": "COMMITTED",
+                              "seal_sha256": hashlib.sha256(seal_path.read_bytes()).hexdigest()}
+        committed = {**committed_material, "binding_sha256": hashlib.sha256(
+            canonical_json(committed_material).encode()).hexdigest()}
+        self._write_immutable_receipt(
+            self._rotation_transaction_path(ledger, generation, "COMMITTED"), committed,
+        )
+        return {"rotated": True, "sealed_ref": material["sealed_ref"],
+                "active_ref": material["successor_ref"], "seal_receipt": seal_path}
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def recover_ledger_rotations(self, ledger: str) -> list[dict[str, Any]]:
-        """Finish only digest-bound PREPARED rotations after interruption."""
-        active = self.ledger_path(ledger); recovered = []
-        with self._exclusive(active):
-            rotation_root = self._generation_root(ledger) / "rotations"
-            for prepared_path in sorted(rotation_root.glob("*.PREPARED.json")):
-                generation = int(prepared_path.name.split(".", 1)[0])
-                committed_path = self._rotation_transaction_path(ledger, generation, "COMMITTED")
-                if committed_path.exists():
-                    committed = json.loads(committed_path.read_text("utf-8"))
-                    supplied = str(committed.get("binding_sha256") or "")
-                    committed_material = dict(committed); committed_material.pop("binding_sha256", None)
-                    if (committed_material.get("schema") != "v3_ledger_rotation_transaction_v1"
-                            or committed_material.get("state") != "COMMITTED"
-                            or committed_material.get("ledger") != ledger
-                            or committed_material.get("generation") != generation
-                            or committed_material.get("identity") != self._identity_binding()
-                            or not hmac.compare_digest(supplied, hashlib.sha256(
-                                canonical_json(committed_material).encode()
-                            ).hexdigest())):
-                        raise RuntimeError("V3_LEDGER_ROTATION_COMMITTED_INVALID")
-                    seal = self._load_rotation_seal(ledger, generation)
-                    if committed_material.get("seal_sha256") != hashlib.sha256(
-                        self._rotation_transaction_path(ledger, generation, "SEALED").read_bytes()
-                    ).hexdigest() or self._active_ledger_generation(ledger) != seal.get("successor_ref"):
-                        raise RuntimeError("V3_LEDGER_ROTATION_COMMITTED_BINDING_INVALID")
-                    continue
-                prepared = json.loads(prepared_path.read_text("utf-8"))
-                supplied = str(prepared.get("binding_sha256") or "")
-                material = dict(prepared); material.pop("binding_sha256", None)
-                if (material.get("schema") != "v3_ledger_rotation_transaction_v1"
-                        or material.get("state") != "PREPARED" or material.get("ledger") != ledger
-                        or material.get("generation") != generation or material.get("identity") != self._identity_binding()
-                        or not hmac.compare_digest(supplied, hashlib.sha256(canonical_json(material).encode()).hexdigest())):
-                    raise RuntimeError("V3_LEDGER_ROTATION_JOURNAL_INVALID")
-                values = material.get("source_signature") or {}
-                signature = tuple(values.get(key) for key in ("device", "inode", "size", "mtime_ns"))
-                if any(not isinstance(value, int) for value in signature) or signature[2] <= 0:
-                    raise RuntimeError("V3_LEDGER_ROTATION_JOURNAL_SIGNATURE_INVALID")
-                sealed = self.ledger_dir / f"{ledger}.jsonl.{generation}"
+        """Recover cutover under lock; hash immutable generations afterward."""
+        active = self.ledger_path(ledger)
+        pending: list[tuple[int, dict[str, Any]]] = []
+        rotation_root = self._generation_root(ledger) / "rotations"
+        for prepared_path in sorted(rotation_root.glob("*.PREPARED.json")):
+            generation = int(prepared_path.name.split(".", 1)[0])
+            if self._rotation_transaction_path(ledger, generation, "COMMITTED").exists():
+                try:
+                    self._load_rotation_committed(ledger, generation)
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    raise RuntimeError("V3_LEDGER_ROTATION_COMMITTED_INVALID") from exc
+                continue
+            prepared = json.loads(prepared_path.read_text("utf-8"))
+            supplied = str(prepared.get("binding_sha256") or "")
+            material = dict(prepared); material.pop("binding_sha256", None)
+            if (material.get("schema") != "v3_ledger_rotation_transaction_v1"
+                    or material.get("state") != "PREPARED" or material.get("ledger") != ledger
+                    or material.get("generation") != generation or material.get("identity") != self._identity_binding()
+                    or not hmac.compare_digest(supplied, hashlib.sha256(canonical_json(material).encode()).hexdigest())):
+                raise RuntimeError("V3_LEDGER_ROTATION_JOURNAL_INVALID")
+            values = material.get("source_signature") or {}
+            signature = tuple(values.get(key) for key in ("device", "inode", "size", "mtime_ns"))
+            if any(not isinstance(value, int) for value in signature) or signature[2] <= 0:
+                raise RuntimeError("V3_LEDGER_ROTATION_JOURNAL_SIGNATURE_INVALID")
+            sealed = self.ledger_dir / f"{ledger}.jsonl.{generation}"
+            with self._exclusive(active):
+                current = self._active_ledger_generation(ledger)
                 if not sealed.exists():
-                    if _path_signature(active) != signature:
+                    if current["generation"] != generation or _path_signature(active) != signature:
                         raise RuntimeError("V3_LEDGER_ROTATION_STALE_JOURNAL")
                     os.replace(active, sealed); _fsync_directory(self.ledger_dir)
                 if _path_signature(sealed) != signature:
                     raise RuntimeError("V3_LEDGER_ROTATION_SEALED_MISMATCH")
-                if not active.exists():
-                    with active.open("xb") as handle:
-                        handle.flush(); os.fsync(handle.fileno())
-                    _fsync_directory(self.ledger_dir)
-                elif active.stat().st_size:
-                    raise RuntimeError("V3_LEDGER_ROTATION_SUCCESSOR_NOT_EMPTY")
-                seal = {"schema": "v3_ledger_rotation_seal_v1", "ledger": ledger,
-                        "generation": generation, "identity": self._identity_binding(),
-                        "active_ref": material["active_ref"],
-                        "sealed_ref": material["sealed_ref"], "successor_ref": material["successor_ref"],
-                        "size": signature[2], "mtime_ns": signature[3],
-                        "sha256": hashlib.sha256(sealed.read_bytes()).hexdigest()}
-                seal["binding_sha256"] = hashlib.sha256(canonical_json(seal).encode()).hexdigest()
-                seal_path = self._rotation_transaction_path(ledger, generation, "SEALED")
-                self._write_immutable_receipt(seal_path, seal)
-                current = self._active_ledger_generation(ledger)
-                if current["generation"] not in {generation, generation + 1}:
+                if current["generation"] == generation:
+                    if not active.exists():
+                        with active.open("xb") as handle:
+                            handle.flush(); os.fsync(handle.fileno())
+                        _fsync_directory(self.ledger_dir)
+                    elif active.stat().st_size:
+                        raise RuntimeError("V3_LEDGER_ROTATION_SUCCESSOR_NOT_EMPTY")
+                    self._atomic_json_receipt(self._generation_root(ledger) / "ACTIVE.json",
+                                              self._active_generation_pointer(ledger, generation + 1))
+                elif current["generation"] != generation + 1:
                     raise RuntimeError("V3_LEDGER_ROTATION_POINTER_STALE")
-                self._atomic_json_receipt(self._generation_root(ledger) / "ACTIVE.json",
-                                          self._active_generation_pointer(ledger, generation + 1))
-                committed_material = {**material, "state": "COMMITTED",
-                                      "seal_sha256": hashlib.sha256(seal_path.read_bytes()).hexdigest()}
-                committed = {**committed_material, "binding_sha256": hashlib.sha256(
-                    canonical_json(committed_material).encode()).hexdigest()}
-                self._write_immutable_receipt(committed_path, committed)
-                recovered.append({"ledger": ledger, "generation": generation,
-                                  "status": "COMMITTED_RECOVERED"})
-            _id_cache.pop(str(active.resolve()), None)
+                _id_cache.pop(str(active.resolve()), None)
+            pending.append((generation, material))
+        recovered = []
+        for generation, material in pending:
+            self._finalize_ledger_rotation(ledger, generation, material)
+            recovered.append({"ledger": ledger, "generation": generation,
+                              "status": "COMMITTED_RECOVERED"})
         return recovered
 
     def _receipt_targets_active_generation(self, ledger: str, receipt: dict[str, Any]) -> bool:

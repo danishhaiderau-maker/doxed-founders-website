@@ -634,15 +634,46 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
     ledgers.mkdir(parents=True)
     (ledgers / "decision.jsonl").write_text('{"record_id":"active"}\n', "utf-8")
     (ledgers / "decision.jsonl.7").write_text('{"record_id":"sealed"}\n', "utf-8")
+    (ledgers / "decision.jsonl.9").write_text('{"record_id":"uncommitted"}\n', "utf-8")
     (ledgers / "decision.jsonl.0").write_text('{"record_id":"alias-zero"}\n', "utf-8")
     (ledgers / "decision.jsonl.01").write_text('{"record_id":"alias-one"}\n', "utf-8")
+    identity = {"epoch_id": "epoch-1", "source_revision": "a" * 40,
+                "deployed_revision": "a" * 40, "tile_config_signature": "b" * 64}
+    receipt_root = runtime / "v3" / "receipts" / "ledger_generations_v1" / "decision"
+    rotations = receipt_root / "rotations"; rotations.mkdir(parents=True)
+    active_ref = {"schema":"v3_ledger_generation_ref_v1","state":"ACTIVE","ledger":"decision",
+                  "generation":7,"relative_path":"v3/ledgers/decision.jsonl"}
+    sealed_ref = {"schema":"v3_ledger_generation_ref_v1","state":"SEALED","ledger":"decision",
+                  "generation":7,"relative_path":"v3/ledgers/decision.jsonl.7"}
+    successor_ref = {**active_ref, "generation":8}
+    pointer = {"schema":"v3_ledger_active_generation_v1","ledger":"decision","generation":8,
+               "identity":identity,"relative_path":"v3/ledgers/decision.jsonl"}
+    (receipt_root / "ACTIVE.json").write_text(json.dumps(pointer), "utf-8")
+    seal = {"schema":"v3_ledger_rotation_seal_v1","ledger":"decision","generation":7,
+            "identity":identity,"active_ref":active_ref,"sealed_ref":sealed_ref,
+            "successor_ref":successor_ref,"size":24,"mtime_ns":1,"sha256":"c"*64}
+    seal["binding_sha256"] = hashlib.sha256(json.dumps(
+        seal, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+    seal_path = rotations / "00000000000000000007.SEALED.json"
+    seal_path.write_text(json.dumps(seal, sort_keys=True, separators=(",", ":")), "utf-8")
+    committed = {"schema":"v3_ledger_rotation_transaction_v1","state":"COMMITTED",
+                 "ledger":"decision","generation":7,"identity":identity,"active_ref":active_ref,
+                 "sealed_ref":sealed_ref,"successor_ref":successor_ref,"source_signature":{},
+                 "seal_sha256":hashlib.sha256(seal_path.read_bytes()).hexdigest()}
+    committed["binding_sha256"] = hashlib.sha256(json.dumps(
+        committed, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
+    (rotations / "00000000000000000007.COMMITTED.json").write_text(
+        json.dumps(committed, sort_keys=True, separators=(",", ":")), "utf-8",
+    )
     request_path, result_path = _paths(volume, nonce)
     request_path.write_text(json.dumps(_request(volume, nonce)), "utf-8")
     assert worker.run(request_path, result_path, nonce) == 0
     rows = {row["path"]: row for row in _generation_rows(json.loads(result_path.read_text("utf-8")))}
     assert rows["v3/ledgers/decision.jsonl"]["ledger_generation"] == {
         "schema": "v3_ledger_generation_ref_v1", "state": "ACTIVE", "ledger": "decision",
-        "generation": 0, "relative_path": "v3/ledgers/decision.jsonl",
+        "generation": 8, "relative_path": "v3/ledgers/decision.jsonl",
     }
     assert rows["v3/ledgers/decision.jsonl.7"]["ledger_generation"] == {
         "schema": "v3_ledger_generation_ref_v1", "state": "SEALED", "ledger": "decision",
@@ -652,3 +683,4 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
     assert rows["v3/ledgers/decision.jsonl.7"]["consistency_mode"] == "strict_generation_v1"
     assert rows.get("v3/ledgers/decision.jsonl.0") is None
     assert rows.get("v3/ledgers/decision.jsonl.01") is None
+    assert rows.get("v3/ledgers/decision.jsonl.9") is None

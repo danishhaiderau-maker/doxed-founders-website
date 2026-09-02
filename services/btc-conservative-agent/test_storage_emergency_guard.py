@@ -633,7 +633,7 @@ def test_rotation_seals_exact_bytes_advances_pointer_and_keeps_successor_active(
     assert store.resolve_receipt_ledger_generation("decision", receipt) == sealed
 
 
-@pytest.mark.parametrize("failpoint", ["AFTER_PREPARED", "AFTER_RENAME", "AFTER_POINTER"])
+@pytest.mark.parametrize("failpoint", ["AFTER_PREPARED", "AFTER_RENAME", "AFTER_POINTER", "AFTER_CUTOVER"])
 def test_rotation_restart_recovery_is_idempotent_at_each_crash_window(tmp_path, monkeypatch, failpoint):
     store = _generation_ready_store(tmp_path, monkeypatch)
     before = store.ledger_path("decision").read_bytes()
@@ -664,6 +664,27 @@ def test_rotation_holds_canonical_writer_lock_until_pointer_and_seal_commit(tmp_
     sealed = store.resolve_ledger_generation("decision", rotation["sealed_ref"])
     assert b"decision:concurrent" not in sealed.read_bytes()
     assert b"decision:concurrent" in store.ledger_path("decision").read_bytes()
+
+
+def test_rotation_hash_finalization_does_not_hold_writer_lock(tmp_path, monkeypatch):
+    store = _generation_ready_store(tmp_path, monkeypatch)
+    hashing, release_hash, writer_finished = threading.Event(), threading.Event(), threading.Event()
+    original = store._sha256_file
+    def slow_hash(path):
+        hashing.set(); assert release_hash.wait(2)
+        return original(path)
+    monkeypatch.setattr(store, "_sha256_file", slow_hash)
+    rotation_result = {}
+    thread = threading.Thread(target=lambda: rotation_result.update(store.rotate_ledger("decision")))
+    thread.start(); assert hashing.wait(2)
+    writer = threading.Thread(target=lambda: (
+        store.append("decision", {"record_id":"decision:during-hash","episode_id":"active"}),
+        writer_finished.set(),
+    ))
+    writer.start(); assert writer_finished.wait(2)
+    release_hash.set(); thread.join(2); writer.join(2)
+    assert rotation_result["rotated"] is True
+    assert b"decision:during-hash" in store.ledger_path("decision").read_bytes()
 
 
 def test_rotation_recovery_rejects_stale_prepared_journal_and_legacy_nonempty_store(tmp_path, monkeypatch):

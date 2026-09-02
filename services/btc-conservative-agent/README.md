@@ -100,6 +100,14 @@ mandatory and fail-closed, but its throttle timestamp is recorded after the
 scan finishes so startup reconciliation cannot immediately trigger the same
 full-ledger pass again.
 
+V3 ledger rotation uses a short writer-lock cutover: it durably journals the
+source identity, renames the active file, creates the empty successor, and
+advances `ACTIVE.json`. The sealed file is immutable before its SHA-256 and
+`SEALED`/`COMMITTED` receipts are finalized outside the writer lock. Recovery
+replays an incomplete cutover idempotently. Analyzer and sync inventory readers
+ignore numeric ledger files until both receipts validate, and report the active
+generation from the pointer (legacy generation zero remains explicit).
+
 ## Safe deployment
 
 Changes to this directory trigger `.github/workflows/fly-bot-deploy.yml`.
