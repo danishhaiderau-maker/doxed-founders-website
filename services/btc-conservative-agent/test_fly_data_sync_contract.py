@@ -3860,6 +3860,43 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
     assert len(started) == 1
 
 
+def test_completed_inventory_survives_new_force_refresh_nonce_after_client_timeout():
+    tree = ast.parse(BOT)
+    node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_data_sync_request_async_inventory")
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs): self.kwargs = kwargs
+        def start(self): started.append(self.kwargs)
+
+    state = {
+        "status": "CURRENT", "rows": [{"path": "sealed.json", "size": 7}],
+        "generation": None, "generation_id": "a" * 64,
+        "generated_at": "completed-after-client-timeout", "expires_at": 0.0,
+        "served_since_refresh": False, "refreshing": False,
+        "completed_refresh_nonce": "b" * 32, "error": None,
+    }
+    namespace = {
+        "time": time, "threading": SimpleNamespace(Thread=FakeThread),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_inventory_refresh_worker": lambda *args: None,
+        "hmac": hmac, "uuid": uuid,
+        "utc_iso": lambda: "2026-09-02T14:30:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+
+    result = namespace["_data_sync_request_async_inventory"](
+        force_refresh=True, refresh_nonce="c" * 32,
+    )
+    assert result["status"] == "CURRENT"
+    assert result["generated_at"] == "completed-after-client-timeout"
+    assert state["served_since_refresh"] is True
+    assert started == []
+
+
 def test_same_refresh_nonce_consumes_completed_generation_without_restarting_worker():
     tree = ast.parse(BOT)
     node = next(

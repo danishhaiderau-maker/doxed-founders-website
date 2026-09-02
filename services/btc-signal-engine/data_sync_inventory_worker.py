@@ -186,7 +186,7 @@ def _receipt_binding_valid(row: dict) -> bool:
     return hmac.compare_digest(supplied, expected)
 
 
-def _v3_ledger_generation(path: Path) -> dict | None:
+def _v3_ledger_generation(path: Path, request: dict) -> dict | None:
     parts = tuple(part.lower() for part in path.parts)
     if len(parts) < 3 or parts[-3:-1] != ("v3", "ledgers"):
         return None
@@ -206,8 +206,9 @@ def _v3_ledger_generation(path: Path) -> dict | None:
                     or authority.get("ledger") != ledger
                     or not isinstance(authority.get("generation"), int)
                     or authority["generation"] < 1
-                    or not isinstance(authority.get("identity"), dict)
-                    or authority.get("relative_path") != f"v3/ledgers/{ledger}.jsonl"):
+                    or authority.get("identity") != request.get("v3_runtime_identity")
+                    or authority.get("relative_path") != f"v3/ledgers/{ledger}.jsonl"
+                    or not _receipt_binding_valid(authority)):
                 return None
             generation = int(authority["generation"])
     elif (rotation is not None and int(rotation[1]) > 0
@@ -232,11 +233,15 @@ def _v3_ledger_generation(path: Path) -> dict | None:
                             "relative_path": f"v3/ledgers/{path.name}"}
             if (seal.get("schema") != "v3_ledger_rotation_seal_v1"
                     or seal.get("ledger") != ledger or seal.get("generation") != generation
+                    or seal.get("identity") != request.get("v3_runtime_identity")
                     or seal.get("sealed_ref") != expected_ref or not _receipt_binding_valid(seal)
+                    or seal.get("size") != path.stat().st_size
+                    or seal.get("sha256") != _file_sha256(path)
                     or committed.get("schema") != "v3_ledger_rotation_transaction_v1"
                     or committed.get("state") != "COMMITTED"
                     or committed.get("ledger") != ledger
                     or committed.get("generation") != generation
+                    or committed.get("identity") != request.get("v3_runtime_identity")
                     or committed.get("seal_sha256") != hashlib.sha256(seal_path.read_bytes()).hexdigest()
                     or not _receipt_binding_valid(committed)):
                 return None
@@ -264,7 +269,7 @@ def _row(path: Path, request: dict) -> dict | None:
             "inode": int(getattr(stat, "st_ino", 0) or 0),
             "consistency_mode": _consistency_mode(resolved, request),
         }
-        generation = _v3_ledger_generation(resolved)
+        generation = _v3_ledger_generation(resolved, request)
         parts = tuple(part.lower() for part in resolved.parts)
         is_v3_ledger_object = len(parts) >= 3 and parts[-3:-1] == ("v3", "ledgers") and (
             resolved.suffix.lower() == ".jsonl" or _rotation_parts(resolved.name, {".jsonl"}) is not None
@@ -284,7 +289,7 @@ def _stable_request(request: dict) -> dict:
     keys = (
         "source_revision", "top_level_receipt_names", "extensions",
         "excluded_names", "excluded_dir_names", "append_prefix_names",
-        "serialized_append_targets", "rewrite_targets",
+        "serialized_append_targets", "rewrite_targets", "v3_runtime_identity",
     )
     stable = {key: request.get(key) for key in keys}
     stable["inventory_page_rows"] = min(MAX_PAGE_ROWS, max(

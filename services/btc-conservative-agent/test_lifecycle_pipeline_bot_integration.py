@@ -77,7 +77,7 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
         "STORAGE_PRESSURE_THRESHOLD": 0.8,
         "_data_sync_inventory_cache_condition": condition,
         "_data_sync_inventory_cache": {"refreshing": False},
-        "_data_sync_async_inventory": {"refreshing": False},
+        "_data_sync_async_inventory": {"refreshing": False, "worker_active": False},
         "_data_sync_sqlite_snapshot_condition": snapshot_condition,
         "_data_sync_sqlite_snapshot_states": {},
     }
@@ -101,6 +101,8 @@ def test_optional_owner_uses_exact_revision_pressure_and_overlap_probes(tmp_path
     assert kwargs["pressure_probe"]()["pressure"] is True
     assert kwargs["pressure_probe"]()["emergency"] is False
     scope["_data_sync_async_inventory"]["refreshing"] = True
+    assert kwargs["overlap_probe"]() == []
+    scope["_data_sync_async_inventory"]["worker_active"] = True
     assert kwargs["overlap_probe"]() == ["SYNC_ASYNC_INVENTORY_REFRESH"]
     scope["_data_sync_sqlite_snapshot_states"]["research.db"] = {
         "status": "BUILDING",
@@ -110,6 +112,7 @@ def test_optional_owner_uses_exact_revision_pressure_and_overlap_probes(tmp_path
         "SQLITE_SNAPSHOT_BUILDING",
     ]
     scope["_data_sync_async_inventory"]["refreshing"] = False
+    scope["_data_sync_async_inventory"]["worker_active"] = False
     assert kwargs["overlap_probe"]() == ["SQLITE_SNAPSHOT_BUILDING"]
     scope["_data_sync_sqlite_snapshot_states"]["research.db"]["status"] = "CURRENT"
     assert kwargs["overlap_probe"]() == []

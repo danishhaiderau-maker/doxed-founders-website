@@ -639,6 +639,8 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
     (ledgers / "decision.jsonl.01").write_text('{"record_id":"alias-one"}\n', "utf-8")
     identity = {"epoch_id": "epoch-1", "source_revision": "a" * 40,
                 "deployed_revision": "a" * 40, "tile_config_signature": "b" * 64}
+    payload = _request(volume, nonce)
+    payload["v3_runtime_identity"] = identity
     receipt_root = runtime / "v3" / "receipts" / "ledger_generations_v1" / "decision"
     rotations = receipt_root / "rotations"; rotations.mkdir(parents=True)
     active_ref = {"schema":"v3_ledger_generation_ref_v1","state":"ACTIVE","ledger":"decision",
@@ -648,10 +650,15 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
     successor_ref = {**active_ref, "generation":8}
     pointer = {"schema":"v3_ledger_active_generation_v1","ledger":"decision","generation":8,
                "identity":identity,"relative_path":"v3/ledgers/decision.jsonl"}
+    pointer["binding_sha256"] = hashlib.sha256(json.dumps(
+        pointer, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode()).hexdigest()
     (receipt_root / "ACTIVE.json").write_text(json.dumps(pointer), "utf-8")
+    sealed_bytes = (ledgers / "decision.jsonl.7").read_bytes()
     seal = {"schema":"v3_ledger_rotation_seal_v1","ledger":"decision","generation":7,
             "identity":identity,"active_ref":active_ref,"sealed_ref":sealed_ref,
-            "successor_ref":successor_ref,"size":24,"mtime_ns":1,"sha256":"c"*64}
+            "successor_ref":successor_ref,"size":len(sealed_bytes),"mtime_ns":1,
+            "sha256":hashlib.sha256(sealed_bytes).hexdigest()}
     seal["binding_sha256"] = hashlib.sha256(json.dumps(
         seal, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     ).encode()).hexdigest()
@@ -668,7 +675,7 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
         json.dumps(committed, sort_keys=True, separators=(",", ":")), "utf-8",
     )
     request_path, result_path = _paths(volume, nonce)
-    request_path.write_text(json.dumps(_request(volume, nonce)), "utf-8")
+    request_path.write_text(json.dumps(payload | {"nonce": nonce}), "utf-8")
     assert worker.run(request_path, result_path, nonce) == 0
     rows = {row["path"]: row for row in _generation_rows(json.loads(result_path.read_text("utf-8")))}
     assert rows["v3/ledgers/decision.jsonl"]["ledger_generation"] == {
@@ -684,3 +691,26 @@ def test_inventory_labels_active_and_sealed_v3_ledger_generations(tmp_path):
     assert rows.get("v3/ledgers/decision.jsonl.0") is None
     assert rows.get("v3/ledgers/decision.jsonl.01") is None
     assert rows.get("v3/ledgers/decision.jsonl.9") is None
+
+    # Authority is fail-closed: immutable bytes must still match the seal and
+    # the ACTIVE pointer must retain its self-binding and runtime identity.
+    (ledgers / "decision.jsonl.7").write_text('{"record_id":"tampered"}\n', "utf-8")
+    code, tampered_path = _run_generation(_load_worker(), volume, 702, payload)
+    assert code == 0
+    tampered_rows = {
+        row["path"]: row for row in _generation_rows(
+            json.loads(tampered_path.read_text("utf-8"))
+        )
+    }
+    assert "v3/ledgers/decision.jsonl.7" not in tampered_rows
+
+    pointer["binding_sha256"] = "0" * 64
+    (receipt_root / "ACTIVE.json").write_text(json.dumps(pointer), "utf-8")
+    code, invalid_pointer_path = _run_generation(_load_worker(), volume, 703, payload)
+    assert code == 0
+    invalid_pointer_rows = {
+        row["path"]: row for row in _generation_rows(
+            json.loads(invalid_pointer_path.read_text("utf-8"))
+        )
+    }
+    assert "v3/ledgers/decision.jsonl" not in invalid_pointer_rows
