@@ -272,6 +272,32 @@ class V3EvidenceStore:
         if self._emergency_wal_identity_available():
             self._emergency_wal()
 
+    @classmethod
+    def open_read_only(cls, root: str | Path) -> "V3EvidenceStore":
+        """Open generation authorities without creating files or WAL state."""
+        resolved = Path(root).resolve(strict=True)
+        instance = cls.__new__(cls)
+        instance.root = resolved
+        instance.ledger_dir = resolved / "v3" / "ledgers"
+        instance.segment_dir = resolved / "v3" / "market_segments"
+        instance.receipt_dir = resolved / "v3" / "receipts"
+        instance.lock_dir = resolved / "v3" / ".locks"
+        instance.__emergency_wal = None
+        instance.epoch_id = ""
+        instance._read_identity_override = None
+        pointers = sorted((instance.receipt_dir / "ledger_generations_v1").glob("*/ACTIVE.json"))
+        for pointer in pointers:
+            try:
+                row = json.loads(pointer.read_text("utf-8")); identity = row.get("identity")
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(identity, dict):
+                if instance._read_identity_override not in (None, identity):
+                    raise ValueError("V3 read authority identity conflict")
+                instance._read_identity_override = dict(identity)
+                instance.epoch_id = str(identity.get("epoch_id") or "")
+        return instance
+
     def _emergency_wal(self) -> EmergencyEvidenceWal:
         """Open the preallocated mandatory-evidence reserve lazily.
 
@@ -921,6 +947,9 @@ class V3EvidenceStore:
         return payload is not None and hashlib.sha256(payload).hexdigest() == expected
 
     def _identity_binding(self) -> dict[str, str]:
+        override = getattr(self, "_read_identity_override", None)
+        if override is not None:
+            return dict(override)
         provenance = _collection_provenance()
         return {
             "epoch_id": self.epoch_id,

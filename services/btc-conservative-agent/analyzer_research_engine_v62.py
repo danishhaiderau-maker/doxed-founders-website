@@ -12175,13 +12175,40 @@ def _first_number(*values):
 
 
 def _v3_ledger_rows(name):
+    configured_root = os.getenv("BTC_AGENT_DATA_DIR")
     candidates = (
-        Path("v3") / "ledgers" / f"{name}.jsonl",
-        Path(os.getenv("BTC_AGENT_DATA_DIR") or ".") / "v3" / "ledgers" / f"{name}.jsonl",
+        [Path(configured_root) / "v3" / "ledgers" / f"{name}.jsonl"]
+        if configured_root
+        else [Path("v3") / "ledgers" / f"{name}.jsonl"]
     )
+    seen = set()
     for path in candidates:
+        resolved = str(path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
         if path.is_file():
-            return _load_jsonl_rows(str(path))
+            try:
+                from research_v3_store import V3EvidenceStore
+                store = V3EvidenceStore.open_read_only(path.parent.parent.parent)
+                rows = []
+                by_record_id = {}
+                for _ref, generation_path in store.ledger_generation_paths(name):
+                    for row in _load_jsonl_rows(str(generation_path)):
+                        record_id = str(row.get("record_id") or "")
+                        if not record_id:
+                            raise ValueError("V3 analyzer row missing record identity")
+                        prior = by_record_id.get(record_id)
+                        if prior is not None:
+                            if prior != row:
+                                raise ValueError("V3 analyzer duplicate record conflict")
+                            continue
+                        by_record_id[record_id] = row
+                        rows.append(row)
+                return rows
+            except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                print(f"  ⚠️ V3 ledger authority unavailable for {name}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+                return []
     return []
 
 
@@ -19594,7 +19621,7 @@ def fill_time_guard_counterfactual_report(trades=None):
     """
     from research.fill_time_guard_counterfactual import build_fill_time_guard_counterfactual
 
-    execution_rows = _load_jsonl_rows(os.path.join("v3", "ledgers", "execution.jsonl"))
+    execution_rows = _v3_ledger_rows("execution")
     primary_fills = [row for row in execution_rows if row.get("fill_ts") is not None]
     epoch_ids = sorted({str(row.get("epoch_id") or "") for row in primary_fills if row.get("epoch_id")})
     # A mixed ledger must not silently choose an epoch. Current mirrors normally
