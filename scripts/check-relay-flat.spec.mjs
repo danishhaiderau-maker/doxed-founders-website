@@ -20,6 +20,7 @@ const inertUncredentialedRelay = {
   credentialConfigured: false,
   instanceCredentialId: null,
   providerCredentialPresent: false,
+  providerCredentialId: null,
   providerCredentialUpdatedAt: null,
   providerCredentialReadStable: true,
   liveDeskSessionStartedAt: null,
@@ -28,6 +29,8 @@ const inertUncredentialedRelay = {
   relayArmedAt: null,
   realTradingConfirmedAt: null,
   activeParticipants: 0,
+  totalParticipants: 0,
+  participantReadStable: true,
   orphanOrderIds: [],
   orphanPositionIds: [],
   reconcile: null,
@@ -52,6 +55,7 @@ test('durable recovery waives absent audits only for a never-armed uncredentiale
   assert.equal(isNeverArmedUncredentialedRelay({
     ...inertUncredentialedRelay,
     orphanOrderIds: null,
+    totalParticipants: 1,
   }, true), false);
 });
 
@@ -59,7 +63,9 @@ test('durable recovery accepts a stable provider row only after an exact newer m
   const staleProviderRow = {
     ...inertUncredentialedRelay,
     credentialConfigured: true,
+    instanceCredentialId: 'credential-row',
     providerCredentialPresent: true,
+    providerCredentialId: 'credential-row',
     providerCredentialUpdatedAt: '2026-09-03T01:00:00.000Z',
     lastError: 'Exchange credentials missing — re-hire with API keys',
     liveFidelityGuard: {
@@ -69,6 +75,10 @@ test('durable recovery accepts a stable provider row only after an exact newer m
     },
   };
   assert.equal(isNeverArmedUncredentialedRelay(staleProviderRow, true), true);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    providerCredentialId: 'different-row',
+  }, true), false);
   assert.equal(isNeverArmedUncredentialedRelay({
     ...staleProviderRow,
     providerCredentialReadStable: false,
@@ -89,6 +99,19 @@ test('durable recovery accepts a stable provider row only after an exact newer m
     ...staleProviderRow,
     reconcile: {},
   }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    totalParticipants: 1,
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    participantReadStable: false,
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    orphanOrderIds: undefined,
+    orphanPositionIds: undefined,
+  }, true), true);
 });
 
 test('native HTTPS fallback preserves auth and pins the canonical proof to IPv4', () => {

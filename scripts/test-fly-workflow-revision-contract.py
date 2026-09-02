@@ -114,7 +114,9 @@ def test_all_bitfinex_instances_must_be_paused_disarmed_and_reconciled_flat():
     assert "const reconciledFlat = rows.length > 0" in helper
     assert "&& rows.every(isRelayPausedAndDisarmed)" in helper
     assert "provider: 'exchange:bitfinex'" in helper
-    assert "select: { userId: true, updatedAt: true }" in helper
+    assert "select: { id: true, userId: true, updatedAt: true }" in helper
+    assert "row?.instanceCredentialId === row.providerCredentialId" in helper
+    assert "row?.participantReadStable === true" in helper
     assert "firstCredentialVersions.has(instance.userId)" in helper
     assert "providerCredentialReadStable" in helper
     assert "lastResetReason === 'EXCHANGE_CREDENTIALS_MISSING'" in helper

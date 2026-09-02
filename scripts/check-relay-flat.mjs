@@ -354,6 +354,9 @@ export function isNeverArmedUncredentialedRelay(
   const providerCredentialProvenUnusable = (
     row?.providerCredentialPresent === true
     && row?.providerCredentialReadStable === true
+    && typeof row?.providerCredentialId === 'string'
+    && row.providerCredentialId.length > 0
+    && row?.instanceCredentialId === row.providerCredentialId
     && row?.lastError === 'Exchange credentials missing — re-hire with API keys'
     && guard?.status === 'IDLE'
     && guard?.lastResetReason === 'EXCHANGE_CREDENTIALS_MISSING'
@@ -364,18 +367,27 @@ export function isNeverArmedUncredentialedRelay(
   const providerCredentialAbsent = (
     row?.providerCredentialPresent === false
     && row?.providerCredentialReadStable === true
+    && row?.instanceCredentialId == null
+  );
+  const noDurableRelayHistory = row?.totalParticipants === 0;
+  const orphanOrdersClear = (
+    (Array.isArray(row?.orphanOrderIds) && row.orphanOrderIds.length === 0)
+    || (row?.orphanOrderIds == null && noDurableRelayHistory)
+  );
+  const orphanPositionsClear = (
+    (Array.isArray(row?.orphanPositionIds) && row.orphanPositionIds.length === 0)
+    || (row?.orphanPositionIds == null && noDurableRelayHistory)
   );
   return (
     allowDurableExemption
-    && row?.instanceCredentialId == null
     && (providerCredentialAbsent || providerCredentialProvenUnusable)
     && row?.liveDeskSessionStartedAt == null
     && isRelayPausedAndDisarmed(row)
     && row?.activeParticipants === 0
-    && Array.isArray(row?.orphanOrderIds)
-    && row.orphanOrderIds.length === 0
-    && Array.isArray(row?.orphanPositionIds)
-    && row.orphanPositionIds.length === 0
+    && row?.participantReadStable === true
+    && noDurableRelayHistory
+    && orphanOrdersClear
+    && orphanPositionsClear
     && reconcileAbsent
     && orderAuditAbsent
   );
@@ -453,13 +465,16 @@ async function loadRelayBoundaryRows() {
         where: {
           ...credentialWhere,
         },
-        select: { userId: true, updatedAt: true },
+        select: { id: true, userId: true, updatedAt: true },
       });
       const firstCredentialVersions = new Map(
         providerCredentials.map((credential) => [
           credential.userId,
-          credential.updatedAt.toISOString(),
+          `${credential.id}:${credential.updatedAt.toISOString()}`,
         ]),
+      );
+      const firstCredentials = new Map(
+        providerCredentials.map((credential) => [credential.userId, credential]),
       );
 
       const rows = [];
@@ -472,6 +487,10 @@ async function loadRelayBoundaryRows() {
             status: { in: ['PENDING_ENTRY', 'OPEN'] },
           },
         });
+        const totalParticipants = await prisma.signalCycleParticipant.count({
+          where: { userId: instance.userId },
+        });
+        const providerCredential = firstCredentials.get(instance.userId);
         const reconcile =
           dashboard.copyRelayReconcile
           ?? dashboard.copyRelaySim?.reconcile
@@ -490,8 +509,10 @@ async function loadRelayBoundaryRows() {
             instance.credentialId || firstCredentialVersions.has(instance.userId)
           ),
           providerCredentialPresent: firstCredentialVersions.has(instance.userId),
-          providerCredentialUpdatedAt: firstCredentialVersions.get(instance.userId) ?? null,
+          providerCredentialId: providerCredential?.id ?? null,
+          providerCredentialUpdatedAt: providerCredential?.updatedAt.toISOString() ?? null,
           activeParticipants,
+          totalParticipants,
           reconcile,
           relayExecutionMode: dashboard.relayExecutionMode ?? null,
           relayArmedAt: dashboard.relayArmedAt ?? null,
@@ -508,12 +529,12 @@ async function loadRelayBoundaryRows() {
       // makes the recovery-only exemption unavailable.
       const credentialRecheck = await prisma.integrationCredential.findMany({
         where: { ...credentialWhere },
-        select: { userId: true, updatedAt: true },
+        select: { id: true, userId: true, updatedAt: true },
       });
       const finalCredentialVersions = new Map(
         credentialRecheck.map((credential) => [
           credential.userId,
-          credential.updatedAt.toISOString(),
+          `${credential.id}:${credential.updatedAt.toISOString()}`,
         ]),
       );
       for (const row of rows) {
@@ -521,6 +542,10 @@ async function loadRelayBoundaryRows() {
           firstCredentialVersions.get(row.refreshUserId)
           === finalCredentialVersions.get(row.refreshUserId)
         );
+        const finalParticipantCount = await prisma.signalCycleParticipant.count({
+          where: { userId: row.refreshUserId },
+        });
+        row.participantReadStable = finalParticipantCount === row.totalParticipants;
       }
       return rows;
     } catch (error) {
@@ -607,10 +632,6 @@ async function main() {
           && (durableOnlyRecovery
             ? isCompleteStoredExchangeOrderAuditFlat(row.exchangeOrderAudit)
             : isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit))
-          && Array.isArray(row.orphanOrderIds)
-          && row.orphanOrderIds.length === 0
-          && Array.isArray(row.orphanPositionIds)
-          && row.orphanPositionIds.length === 0
         )
       );
     });
