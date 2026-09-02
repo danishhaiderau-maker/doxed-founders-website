@@ -7,7 +7,7 @@ from collections import Counter
 from typing import Any, Iterable, Mapping, Optional
 
 from collector_storage import project_capacity
-from collector_v22 import BYTES_PER_EVENT_TYPICAL, RESEARCH_EVENTS_FILE
+from collector_v22 import BYTES_PER_EVENT_TYPICAL, RESEARCH_EVENTS_FILE, research_event_generation_paths
 from collector_v22_schema import (
     COLLECTOR_VERSION,
     PRIMARY_ACCEPTED_FILLED,
@@ -50,7 +50,8 @@ def analyze_v22_events(
 ) -> dict:
     root = data_dir or os.getcwd()
     path = events_path or os.path.join(root, RESEARCH_EVENTS_FILE)
-    rows = [r for r in _load_jsonl(path) if _version_ok(r, min_collector_version)]
+    paths = [path] if events_path else research_event_generation_paths(root)
+    rows = [r for candidate in paths for r in _load_jsonl(candidate) if _version_ok(r, min_collector_version)]
     filled = [r for r in rows if r.get("primary_outcome") == PRIMARY_ACCEPTED_FILLED]
     unfilled = [r for r in rows if r.get("primary_outcome") == PRIMARY_ACCEPTED_UNFILLED]
     rejected = [r for r in rows if r.get("primary_outcome") == PRIMARY_REJECTED]

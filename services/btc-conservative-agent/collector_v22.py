@@ -6,6 +6,7 @@ import hashlib
 import os
 import threading
 import uuid
+from contextlib import contextmanager
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from chase_offset_touch_grid import (
@@ -827,15 +828,320 @@ def _load_event_index(path: str) -> dict:
 
 
 _EVENT_WRITER_LOCK = threading.RLock()
+_EVENT_SEAL_CACHE_LOCK = threading.Lock()
+_EVENT_SEAL_VALIDATION_CACHE: dict[str, tuple[int, int, str]] = {}
+_EVENT_MAX_SEALED_GENERATIONS = 1024
+
+_EVENT_SEAL_SCHEMA = "research_event_v22_seal_v1"
+_EVENT_ROTATION_SCHEMA = "research_event_v22_rotation_v1"
 
 
-def _scan_durable_event_rows(events_path: str) -> dict:
-    """Rebuild event identity from the append-only source of truth."""
+def _event_seal_dir(root: str) -> str:
+    return os.path.join(root, "research_events_v22.seals")
+
+
+def _event_rotation_path(root: str) -> str:
+    return os.path.join(_event_seal_dir(root), "rotation.pending.json")
+
+
+@contextmanager
+def _event_writer_exclusive(root: str):
+    """The in-process writer lock plus a process-shared one-byte file lock."""
+    lock_path = os.path.join(root, ".research_events_v22.writer.lock")
+    os.makedirs(root, exist_ok=True)
+    with _EVENT_WRITER_LOCK:
+        with open(lock_path, "a+b") as lock_handle:
+            lock_handle.seek(0, os.SEEK_END)
+            if lock_handle.tell() == 0:
+                lock_handle.write(b"0")
+                lock_handle.flush()
+            lock_handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock_handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                lock_handle.seek(0)
+                if os.name == "nt":
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_active_event_ledger(path: str, prior_event_ids: set[str]) -> int:
+    """Require a complete JSON-object line and globally unique identity per row."""
+    seen = set()
+    with open(path, encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"V22_ROTATION_JSON_INVALID:{line_number}") from exc
+            if not isinstance(row, dict):
+                raise RuntimeError(f"V22_ROTATION_ROW_INVALID:{line_number}")
+            event_id = str(row.get("event_id") or row.get("trade_id") or "")
+            if not event_id:
+                raise RuntimeError(f"V22_ROTATION_EVENT_ID_MISSING:{line_number}")
+            if event_id in seen or event_id in prior_event_ids:
+                raise RuntimeError(f"V22_ROTATION_EVENT_ID_DUPLICATE:{line_number}")
+            seen.add(event_id)
+    return len(seen)
+
+
+def _atomic_json(path: str, payload: Mapping[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, separators=(",", ":"), sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    _fsync_parent(path)
+
+
+def _fsync_parent(path: str) -> None:
+    """Best-effort directory durability on Fly/Linux; Windows lacks this primitive."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(os.path.dirname(path) or ".", flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
+
+
+def _load_valid_event_seals(
+    root: str,
+    events_file: str = RESEARCH_EVENTS_FILE,
+    *,
+    validate_hash: bool = True,
+) -> list[dict]:
+    """Return only hash-bound, canonical positive numeric sealed generations."""
+    seal_dir = _event_seal_dir(root)
+    if not os.path.isdir(seal_dir):
+        return []
+    seals = []
+    matching_receipts = 0
+    for name in os.listdir(seal_dir):
+        if not (name.startswith("generation-") and name.endswith(".json")):
+            continue
+        matching_receipts += 1
+        if matching_receipts > _EVENT_MAX_SEALED_GENERATIONS:
+            raise RuntimeError("V22_SEAL_GENERATION_LIMIT_EXCEEDED")
+        try:
+            generation = int(name[len("generation-"):-len(".json")])
+        except ValueError as exc:
+            raise RuntimeError("V22_SEAL_RECEIPT_NAME_NONCANONICAL") from exc
+        if name != f"generation-{generation}.json":
+            raise RuntimeError("V22_SEAL_RECEIPT_NAME_NONCANONICAL")
+        if generation <= 0:
+            raise RuntimeError("V22_SEAL_RECEIPT_NAME_NONCANONICAL")
+        receipt_path = os.path.join(seal_dir, name)
+        try:
+            with open(receipt_path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"V22_SEAL_RECEIPT_INVALID:{generation}") from exc
+        expected_name = f"{events_file}.{generation}"
+        sealed_path = os.path.join(root, expected_name)
+        receipt_sha = str(receipt.get("sha256") or "") if isinstance(receipt, dict) else ""
+        if not (
+            isinstance(receipt, dict)
+            and receipt.get("schema") == _EVENT_SEAL_SCHEMA
+            and receipt.get("state") == "SEALED"
+            and isinstance(receipt.get("generation"), int)
+            and not isinstance(receipt.get("generation"), bool)
+            and receipt.get("generation") == generation
+            and receipt.get("relative_path") == expected_name
+            and isinstance(receipt.get("row_count"), int)
+            and receipt.get("row_count") > 0
+            and len(receipt_sha) == 64
+            and all(char in "0123456789abcdef" for char in receipt_sha)
+            and os.path.isfile(sealed_path)
+        ):
+            raise RuntimeError(f"V22_SEAL_RECEIPT_INVALID:{generation}")
+        try:
+            size = os.path.getsize(sealed_path)
+            if size != int(receipt.get("size_bytes") or -1):
+                raise RuntimeError(f"V22_SEAL_INTEGRITY_FAILED:{generation}")
+            if validate_hash:
+                stat = os.stat(sealed_path)
+                cache_value = (size, int(stat.st_mtime_ns), str(receipt.get("sha256") or ""))
+                with _EVENT_SEAL_CACHE_LOCK:
+                    cached = _EVENT_SEAL_VALIDATION_CACHE.get(sealed_path)
+                if cached != cache_value:
+                    if _sha256_file(sealed_path) != receipt.get("sha256"):
+                        raise RuntimeError(f"V22_SEAL_INTEGRITY_FAILED:{generation}")
+                    with _EVENT_SEAL_CACHE_LOCK:
+                        _EVENT_SEAL_VALIDATION_CACHE[sealed_path] = cache_value
+        except RuntimeError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"V22_SEAL_INTEGRITY_FAILED:{generation}") from exc
+        seals.append(receipt)
+    return sorted(seals, key=lambda row: int(row["generation"]))
+
+
+def research_event_generation_paths(root: str, events_file: str = RESEARCH_EVENTS_FILE) -> list[str]:
+    """Resolve authorized sealed generations oldest-first, followed by ACTIVE."""
+    if os.path.isfile(_event_rotation_path(root)):
+        raise RuntimeError("V22_ROTATION_IN_PROGRESS")
+    paths = [os.path.join(root, str(row["relative_path"])) for row in _load_valid_event_seals(root, events_file)]
+    paths.append(os.path.join(root, events_file))
+    return paths
+
+
+def research_event_generation_stat_signature(
+    root: str, events_file: str = RESEARCH_EVENTS_FILE
+) -> tuple[tuple[int, int, int], ...]:
+    """O(generation-count), byte-scan-free change token for reconciliation polls."""
+    rows = []
+    for receipt in _load_valid_event_seals(root, events_file, validate_hash=False):
+        stat = os.stat(os.path.join(root, str(receipt["relative_path"])))
+        rows.append((int(receipt["generation"]), int(stat.st_size), int(stat.st_mtime_ns)))
+    active = os.path.join(root, events_file)
+    if os.path.isfile(active):
+        stat = os.stat(active)
+        rows.append((0, int(stat.st_size), int(stat.st_mtime_ns)))
+    return tuple(rows)
+
+
+def _recover_event_rotation(root: str, events_file: str = RESEARCH_EVENTS_FILE) -> Optional[dict]:
+    """Finish or roll back the single hash-bound rotation transaction."""
+    pending_path = _event_rotation_path(root)
+    if not os.path.isfile(pending_path):
+        return None
+    try:
+        with open(pending_path, encoding="utf-8") as handle:
+            pending = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError("V22_ROTATION_RECEIPT_INVALID") from exc
+    generation = int(pending.get("generation") or 0)
+    expected_name = f"{events_file}.{generation}"
+    if not (
+        pending.get("schema") == _EVENT_ROTATION_SCHEMA
+        and generation > 0
+        and pending.get("relative_path") == expected_name
+    ):
+        raise RuntimeError("V22_ROTATION_RECEIPT_INVALID")
+    active_path = os.path.join(root, events_file)
+    sealed_path = os.path.join(root, expected_name)
+    expected_size = int(pending.get("size_bytes") or -1)
+    expected_sha = str(pending.get("sha256") or "")
+    if not os.path.exists(sealed_path):
+        # The crash occurred before rename. The unchanged ACTIVE remains authoritative.
+        if os.path.isfile(active_path) and os.path.getsize(active_path) == expected_size and _sha256_file(active_path) == expected_sha:
+            os.remove(pending_path)
+            _fsync_parent(pending_path)
+            return {"state": "ROLLED_BACK", "generation": generation}
+        raise RuntimeError("V22_ROTATION_SOURCE_MISSING")
+    if os.path.getsize(sealed_path) != expected_size or _sha256_file(sealed_path) != expected_sha:
+        raise RuntimeError("V22_ROTATION_SEALED_HASH_MISMATCH")
+    if not os.path.exists(active_path):
+        with open(active_path, "xb") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_parent(active_path)
+    seal = {
+        "schema": _EVENT_SEAL_SCHEMA,
+        "state": "SEALED",
+        "generation": generation,
+        "relative_path": expected_name,
+        "size_bytes": expected_size,
+        "sha256": expected_sha,
+        "row_count": int(pending.get("row_count") or 0),
+    }
+    seal_path = os.path.join(_event_seal_dir(root), f"generation-{generation}.json")
+    if os.path.isfile(seal_path):
+        with open(seal_path, encoding="utf-8") as handle:
+            if json.load(handle) != seal:
+                raise RuntimeError("V22_ROTATION_SEAL_CONFLICT")
+    else:
+        _atomic_json(seal_path, seal)
+    os.remove(pending_path)
+    _fsync_parent(pending_path)
+    return seal
+
+
+def rotate_research_events(*, data_dir: Optional[str] = None, failpoint: str = "") -> dict:
+    """Manually seal ACTIVE under the collector's real writer lock; never deletes."""
+    root = data_dir or os.getcwd()
+    with _event_writer_exclusive(root):
+        recovered = _recover_event_rotation(root)
+        if recovered and recovered.get("state") != "ROLLED_BACK":
+            return recovered
+        active_path = os.path.join(root, RESEARCH_EVENTS_FILE)
+        if not os.path.isfile(active_path) or os.path.getsize(active_path) <= 0:
+            raise RuntimeError("V22_ROTATION_ACTIVE_EMPTY")
+        with open(active_path, "rb") as handle:
+            handle.seek(-1, os.SEEK_END)
+            if handle.read(1) != b"\n":
+                raise RuntimeError("V22_ROTATION_ACTIVE_TAIL_INVALID")
+        index = _reconcile_event_index(root)
+        prior_event_ids = {
+            event_id
+            for event_id, metadata in (index.get("events") or {}).items()
+            if int((metadata or {}).get("generation") or 0) > 0
+        }
+        row_count = _validate_active_event_ledger(active_path, prior_event_ids)
+        seals = _load_valid_event_seals(root)
+        generation = (max((int(row["generation"]) for row in seals), default=0) + 1)
+        sealed_name = f"{RESEARCH_EVENTS_FILE}.{generation}"
+        sealed_path = os.path.join(root, sealed_name)
+        if os.path.exists(sealed_path):
+            raise RuntimeError("V22_ROTATION_GENERATION_OCCUPIED")
+        pending = {
+            "schema": _EVENT_ROTATION_SCHEMA,
+            "generation": generation,
+            "relative_path": sealed_name,
+            "size_bytes": os.path.getsize(active_path),
+            "sha256": _sha256_file(active_path),
+            "row_count": row_count,
+        }
+        _atomic_json(_event_rotation_path(root), pending)
+        if failpoint == "AFTER_PREPARED":
+            raise RuntimeError("V22_ROTATION_FAILPOINT_AFTER_PREPARED")
+        os.replace(active_path, sealed_path)
+        _fsync_parent(sealed_path)
+        if failpoint == "AFTER_RENAME":
+            raise RuntimeError("V22_ROTATION_FAILPOINT_AFTER_RENAME")
+        recovered = _recover_event_rotation(root)
+        if failpoint == "AFTER_SEAL":
+            raise RuntimeError("V22_ROTATION_FAILPOINT_AFTER_SEAL")
+        _reconcile_event_index(root)
+        return recovered or {}
+
+
+def _scan_durable_event_rows_with_count(
+    events_path: str, *, generation: int = 0, line_offset: int = 0
+) -> tuple[dict, int]:
+    """Rebuild event identity and count in one bounded sequential scan."""
     found = {}
     if not os.path.isfile(events_path):
-        return found
+        return found, 0
+    line_count = 0
     with open(events_path, encoding="utf-8", errors="replace") as handle:
         for line_number, line in enumerate(handle, start=1):
+            line_count = line_number
             try:
                 row = json.loads(line)
             except json.JSONDecodeError:
@@ -843,30 +1149,87 @@ def _scan_durable_event_rows(events_path: str) -> dict:
             if not isinstance(row, dict):
                 continue
             event_id = str(row.get("event_id") or row.get("trade_id") or "")
-            if not event_id or event_id in found:
+            if not event_id:
                 continue
-            found[event_id] = {
+            metadata = {
                 "written_at": (row.get("envelope") or {}).get("signal_ts"),
                 "observation_status": row.get("observation_status"),
                 "bytes": len(line.encode("utf-8")),
                 "line_number": line_number,
+                "generation": generation,
+                "generation_line_number": line_number,
+                "global_line_number": line_offset + line_number,
+                "row_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
             }
-    return found
+            existing = found.get(event_id)
+            if existing and existing.get("row_sha256") != metadata["row_sha256"]:
+                raise RuntimeError(f"V22_EVENT_ID_CONFLICT:{event_id}")
+            found.setdefault(event_id, metadata)
+    return found, line_count
+
+
+def _scan_durable_event_rows(events_path: str, *, generation: int = 0, line_offset: int = 0) -> dict:
+    """Compatibility wrapper returning event identity metadata only."""
+    return _scan_durable_event_rows_with_count(
+        events_path, generation=generation, line_offset=line_offset
+    )[0]
 
 
 def _reconcile_event_index(root: str, events_file: str = RESEARCH_EVENTS_FILE) -> dict:
     """Repair missing, corrupt, or stale indexes from durable JSONL rows."""
     index_path = os.path.join(root, EVENT_INDEX_FILE)
     events_path = os.path.join(root, events_file)
-    durable_size = os.path.getsize(events_path) if os.path.isfile(events_path) else 0
+    _recover_event_rotation(root, events_file)
+    seals = _load_valid_event_seals(root, events_file, validate_hash=False)
+    durable_size = (os.path.getsize(events_path) if os.path.isfile(events_path) else 0) + sum(
+        int(row["size_bytes"]) for row in seals
+    )
+    seal_signature = [row["sha256"] for row in seals]
+    seal_stat_signature = []
+    for row in seals:
+        stat = os.stat(os.path.join(root, str(row["relative_path"])))
+        seal_stat_signature.append(
+            [int(row["generation"]), int(stat.st_size), int(stat.st_mtime_ns)]
+        )
     index = _load_event_index(index_path)
     indexed_size = index.get("events_file_size")
-    if indexed_size is not None and int(indexed_size) == durable_size:
+    active_size = os.path.getsize(events_path) if os.path.isfile(events_path) else 0
+    if (
+        indexed_size is not None
+        and int(indexed_size) == durable_size
+        and int(index.get("active_file_size") or 0) == active_size
+        and index.get("seal_signature") == seal_signature
+        and index.get("seal_stat_signature") == seal_stat_signature
+        and index.get("active_row_count") is not None
+    ):
         return index
-    durable = _scan_durable_event_rows(events_path)
+    generation_paths = research_event_generation_paths(root, events_file)
+    durable = {}
+    line_offset = 0
+    active_row_count = 0
+    for path in generation_paths:
+        if not os.path.isfile(path):
+            continue
+        suffix = path[len(events_path) + 1:] if path.startswith(events_path + ".") else "0"
+        generation = int(suffix) if suffix.isdigit() else 0
+        rows, row_count = _scan_durable_event_rows_with_count(
+            path, generation=generation, line_offset=line_offset
+        )
+        for event_id, metadata in rows.items():
+            existing = durable.get(event_id)
+            if existing and existing.get("row_sha256") != metadata.get("row_sha256"):
+                raise RuntimeError(f"V22_EVENT_ID_CONFLICT:{event_id}")
+            durable.setdefault(event_id, metadata)
+        line_offset += row_count
+        if generation == 0:
+            active_row_count = row_count
     index = {
         "schema": "research_event_index_v1",
         "events_file_size": durable_size,
+        "active_file_size": active_size,
+        "seal_signature": seal_signature,
+        "seal_stat_signature": seal_stat_signature,
+        "active_row_count": active_row_count,
         "events": durable,
     }
     os.makedirs(root, exist_ok=True)
@@ -885,7 +1248,7 @@ def _save_event_index(path: str, index: dict) -> None:
 
 def event_already_written(event_id: str, *, data_dir: Optional[str] = None) -> bool:
     root = data_dir or os.getcwd()
-    with _EVENT_WRITER_LOCK:
+    with _event_writer_exclusive(root):
         index = _reconcile_event_index(root)
         return str(event_id) in (index.get("events") or {})
 
@@ -906,7 +1269,7 @@ def write_research_event_once(
     negative_evidence = status in (OBS_INSUFFICIENT_PATH, OBS_DATA_ERROR)
     if not terminal_observation(status) or (not eligibility.get("eligible") and not negative_evidence):
         return False, "provisional or replay-ineligible event"
-    with _EVENT_WRITER_LOCK:
+    with _event_writer_exclusive(root):
         index_path = os.path.join(root, EVENT_INDEX_FILE)
         index = _reconcile_event_index(root, events_file)
         if event_id in (index.get("events") or {}):
@@ -933,8 +1296,17 @@ def write_research_event_once(
             "observation_status": record.get("observation_status"),
             "bytes": len(line.encode("utf-8")),
             "line_number": len(index.get("events") or {}) + 1,
+            "generation": 0,
+            "generation_line_number": int(index.get("active_row_count") or 0) + 1,
+            "global_line_number": len(index.get("events") or {}) + 1,
+            "row_sha256": hashlib.sha256(encoded).hexdigest(),
         }
-        index["events_file_size"] = os.path.getsize(events_path)
+        prior_active_size = int(index.get("active_file_size") or 0)
+        index["active_file_size"] = os.path.getsize(events_path)
+        index["events_file_size"] = int(index.get("events_file_size") or 0) + (
+            index["active_file_size"] - prior_active_size
+        )
+        index["active_row_count"] = int(index.get("active_row_count") or 0) + 1
         _save_event_index(index_path, index)
         # V3 dual-write is deliberately downstream of the durable v2 append.
         # V2 remains the recovery source during migration; V3 failures are

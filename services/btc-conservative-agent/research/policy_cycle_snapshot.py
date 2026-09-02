@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
+from collector_v22 import research_event_generation_paths
 from microstructure_tape import FILE_NAME as MICROSTRUCTURE_FILE, validate_window
 
 CONSERVATIVE_FILL_REPORT_FILE = "conservative_fill_descriptive_report.json"
@@ -112,22 +113,22 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
             "microstructure": _microstructure_evidence([], tape_snapshot),
             "microstructure_snapshot": tape_snapshot,
         }
-    path = Path(data_dir) / RESEARCH_EVENTS_FILE
     events = []
     digest = hashlib.sha256()
-    for line in _read_snapshot_lines(path):
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            # A concurrent append may expose an incomplete final line. It
-            # belongs to the next cycle, never this snapshot.
-            continue
-        if not isinstance(row, dict):
-            continue
-        frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
-        events.append(frozen)
-        digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-        digest.update(b"\n")
+    for source_path in research_event_generation_paths(str(data_dir)):
+        for line in _read_snapshot_lines(Path(source_path)):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # A concurrent append may expose an incomplete final line. It
+                # belongs to the next cycle, never this snapshot.
+                continue
+            if not isinstance(row, dict):
+                continue
+            frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
+            events.append(frozen)
+            digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            digest.update(b"\n")
     last = events[-1] if events else {}
     envelope = last.get("envelope") or {}
     receipt = {

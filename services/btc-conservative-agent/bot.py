@@ -186,6 +186,7 @@ from collector_v22 import (
     event_already_written,
     terminal_observation,
     write_research_event_once,
+    research_event_generation_stat_signature,
 )
 from research_v3_contract import COLLECTOR_VERSION as COLLECTOR_V31_VERSION
 from collector_storage import (
@@ -13246,8 +13247,7 @@ def _maybe_complete_pending_order_multiverse():
     # Reconcile once per changed V2 generation; failures retry next poll.
     try:
         v3_data_dir = os.getcwd()
-        v22_path = os.path.join(v3_data_dir, "research_events_v22.jsonl")
-        v22_size = os.path.getsize(v22_path) if os.path.exists(v22_path) else 0
+        v22_size = research_event_generation_stat_signature(v3_data_dir)
         if v22_size != _v3_terminal_reconcile_last_v22_size:
             from research_v3_bridge import reconcile_terminal_v22_into_v3
             receipt = reconcile_terminal_v22_into_v3(

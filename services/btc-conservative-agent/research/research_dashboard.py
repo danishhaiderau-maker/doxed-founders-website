@@ -60,6 +60,7 @@ def _parse_utc_dt(value):
 from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
 
 try:
+    from collector_v22 import research_event_generation_paths
     from collector_v22_schema import RESEARCH_EVENTS_FILE
     from replay_eligibility import validate_replay_eligibility
     from research.best_policy_research import (
@@ -70,6 +71,7 @@ try:
     )
 except ImportError:
     RESEARCH_EVENTS_FILE = "research_events_v22.jsonl"
+    research_event_generation_paths = lambda root: [str(Path(root) / RESEARCH_EVENTS_FILE)]
     validate_replay_eligibility = None
     QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v2"
     candidate_contract_blockers = lambda candidate: ["CANDIDATE_VALIDATOR_UNAVAILABLE"]
@@ -3101,20 +3103,20 @@ def _read_research_events_v22() -> list[dict]:
         return []
     path = max(candidates, key=lambda item: item.stat().st_mtime)
     rows = []
-    try:
-        # Close the Windows source handle before parsing a large ledger. The
-        # dashboard may receive overlapping refresh requests; retaining the
-        # handle during JSON decoding can otherwise starve atomic mirror sync.
-        payload = path.read_bytes()
-    except OSError:
-        return []
-    for raw_line in payload.splitlines():
+    for generation_path in research_event_generation_paths(str(path.parent)):
         try:
-            row = json.loads(raw_line.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
+            # Close each Windows source handle before parsing. Only immutable,
+            # hash-authorized numeric generations are returned by the resolver.
+            payload = Path(generation_path).read_bytes()
+        except OSError:
             continue
-        if isinstance(row, dict):
-            rows.append(row)
+        for raw_line in payload.splitlines():
+            try:
+                row = json.loads(raw_line.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
     return rows
 
 

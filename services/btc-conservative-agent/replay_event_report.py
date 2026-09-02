@@ -16,7 +16,7 @@ from collector_v22_schema import (
 )
 from collector_storage import project_capacity
 from collector_v22_schema import RESEARCH_EVENTS_FILE
-from collector_v22 import BYTES_PER_EVENT_TYPICAL, _load_event_index
+from collector_v22 import BYTES_PER_EVENT_TYPICAL, _load_event_index, research_event_generation_paths
 from path_replay_v1 import (
     CONTROL_CELL,
     LIVE_THESIS_CUT,
@@ -33,19 +33,19 @@ ATR_ROLLING = "ROLLING"
 
 
 def _load_events(data_dir: str) -> list:
-    path = os.path.join(data_dir, RESEARCH_EVENTS_FILE)
     rows = []
-    if not os.path.isfile(path):
-        return rows
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    for path in research_event_generation_paths(data_dir):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     return rows
 
 

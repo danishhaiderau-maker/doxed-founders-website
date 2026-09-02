@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
+from collector_v22 import research_event_generation_paths
 from replay_eligibility import validate_replay_eligibility
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
 
@@ -154,17 +155,19 @@ def _json(path: Path) -> dict:
 
 def _events(path: Path) -> list[dict]:
     rows = []
-    try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
-    except OSError:
-        pass
+    paths = research_event_generation_paths(str(path.parent)) if path.name == RESEARCH_EVENTS_FILE else [str(path)]
+    for candidate in paths:
+        try:
+            with Path(candidate).open(encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except OSError:
+            pass
     return rows
 
 

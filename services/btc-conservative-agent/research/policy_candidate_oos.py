@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collector_v22_schema import OBS_DATA_ERROR, OBS_INSUFFICIENT_PATH, RESEARCH_EVENTS_FILE
+from collector_v22 import research_event_generation_paths
 from replay_eligibility import validate_replay_eligibility
 from replay_event_report import replay_event_report
 from research.best_policy_research import (
@@ -142,16 +143,18 @@ def _oos_policy_comparison(static_oos, dynamic_oos) -> dict:
 
 def _read_events(path: Path) -> list[dict]:
     rows = []
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-    except OSError:
-        pass
+    paths = research_event_generation_paths(str(path.parent)) if path.name == RESEARCH_EVENTS_FILE else [str(path)]
+    for candidate in paths:
+        try:
+            for line in Path(candidate).read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+        except OSError:
+            pass
     return rows
 
 
