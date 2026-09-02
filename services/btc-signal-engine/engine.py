@@ -34239,7 +34239,16 @@ def api_relay_execution_state():
     if str(request.args.get("fresh") or "").strip().lower() in {"1", "true", "yes"}:
         if not _admin_authed():
             return jsonify({"error": "admin authentication required for fresh authority"}), 401
-        if _publish_relay_execution_snapshot() is None:
+        try:
+            published = _publish_relay_execution_snapshot()
+        except TimeoutError as exc:
+            logger.warning(
+                "[RELAY EXECUTION] fresh authority temporarily unavailable: %s "
+                "[PIPELINE ENFORCEMENT]",
+                exc,
+            )
+            published = None
+        if published is None:
             return jsonify({
                 "api_state_error": "generation-matching execution snapshot is rebuilding",
                 "money_state_generation": _RELAY_EXECUTION_MONEY_STATE_GENERATION,

@@ -57,3 +57,13 @@ def test_relay_execution_staleness_remains_fail_closed_and_loop_is_serial() -> N
     assert "response.status_code = 503" in route
     assert loop.count("_publish_relay_execution_snapshot()") == 1
     assert "shutdown_event.wait(_RELAY_EXECUTION_REFRESH_INTERVAL_SEC)" in loop
+
+
+def test_fresh_relay_lock_timeout_is_classified_retryable_not_http_500() -> None:
+    route = ast.get_source_segment(SOURCE, _function("api_relay_execution_state"))
+
+    assert "except TimeoutError" in route
+    assert "published = None" in route
+    assert "if published is None" in route
+    assert "generation-matching execution snapshot is rebuilding" in route
+    assert "), 503" in route
