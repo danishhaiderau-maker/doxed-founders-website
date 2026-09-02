@@ -30,6 +30,7 @@ on:
           - recover-stalled-runtime
           - restart-only
           - inspect-runtime
+          - repair-execution-funnel
           - expand-storage
           - close-paper-position
           - flatten-paper-exposure
@@ -41,6 +42,18 @@ on:
         description: Failed deploy run that proves the exact unready revision reached Fly
         required: false
         type: string
+      expected_execution_funnel_sha256:
+        description: Exact pre-repair execution_funnel.jsonl SHA-256
+        required: false
+        type: string
+      expected_execution_funnel_invalid_line:
+        description: Exact one-based corrupt line number
+        required: false
+        type: string
+      expected_execution_funnel_invalid_line_sha256:
+        description: Exact SHA-256 of the raw corrupt line including its line ending
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -50,6 +63,93 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  repair-execution-funnel:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-funnel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Repair one exact corrupt execution-funnel record without fabricating evidence
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ github.sha }}
+          EXPECTED_FUNNEL_SHA256: ${{ inputs.expected_execution_funnel_sha256 }}
+          EXPECTED_INVALID_LINE: ${{ inputs.expected_execution_funnel_invalid_line }}
+          EXPECTED_INVALID_LINE_SHA256: ${{ inputs.expected_execution_funnel_invalid_line_sha256 }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          expected_revision = str(os.environ.get("EXPECTED_SOURCE_REVISION") or "").strip().lower()
+          expected_sha = str(os.environ.get("EXPECTED_FUNNEL_SHA256") or "").strip().lower()
+          expected_line_text = str(os.environ.get("EXPECTED_INVALID_LINE") or "").strip()
+          expected_line_sha = str(os.environ.get("EXPECTED_INVALID_LINE_SHA256") or "").strip().lower()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          if not re.fullmatch(r"[0-9a-f]{40}", expected_revision):
+              raise SystemExit("workflow source revision is invalid")
+          if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+              raise SystemExit("exact execution-funnel SHA-256 is required")
+          if not re.fullmatch(r"[1-9][0-9]*", expected_line_text):
+              raise SystemExit("exact positive corrupt line number is required")
+          if not re.fullmatch(r"[0-9a-f]{64}", expected_line_sha):
+              raise SystemExit("exact raw corrupt-line SHA-256 is required")
+
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          def get_json(path):
+              req = urllib.request.Request(base + path, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          status = get_json("/api/status")
+          health = get_json("/health")
+          deployed = str(status.get("source_git_rev") or "").strip().lower()
+          if deployed != expected_revision:
+              raise SystemExit(f"refusing repair on unexpected deployed revision {deployed[:12]}")
+          if not (
+              health.get("force_paper_mode") is True
+              and health.get("live_armed") is False
+              and health.get("bitfinex_live_enabled") is False
+          ):
+              raise SystemExit("refusing repair because exact paper/live safety is not proven")
+
+          payload = {
+              "expected_sha256": expected_sha,
+              "expected_invalid_line": int(expected_line_text),
+              "expected_invalid_line_sha256": expected_line_sha,
+          }
+          request = urllib.request.Request(
+              base + "/api/research/repair-execution-funnel",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={**headers, "Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=60) as response:
+              receipt = json.load(response)
+          if not (
+              receipt.get("complete") is True
+              and receipt.get("status") in {"repaired", "already_repaired"}
+              and receipt.get("source_sha256") == expected_sha
+              and receipt.get("invalid_line_numbers") == [int(expected_line_text)]
+              and receipt.get("expected_invalid_line_sha256") == expected_line_sha
+              and receipt.get("excluded_line_count") == 1
+              and receipt.get("qualification") == "UNKNOWN"
+              and receipt.get("ranking_eligible") is False
+              and re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("rebuilt_sha256") or ""))
+          ):
+              raise SystemExit("repair endpoint did not return the exact complete fail-closed receipt")
+          print(json.dumps({
+              "status": receipt["status"],
+              "source_revision": deployed,
+              "source_sha256": receipt["source_sha256"],
+              "rebuilt_sha256": receipt["rebuilt_sha256"],
+              "valid_line_count": receipt.get("valid_line_count"),
+              "excluded_line_count": receipt["excluded_line_count"],
+              "qualification": receipt["qualification"],
+          }, sort_keys=True))
+          PY
+
   expand-storage:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'expand-storage'
     runs-on: ubuntu-latest

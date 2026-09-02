@@ -36363,6 +36363,60 @@ def api_cancel_showcase_pending_order():
     })
 
 
+@app.route('/api/research/repair-execution-funnel', methods=['POST'])
+def api_repair_execution_funnel_jsonl():
+    """Repair one operator-inspected corrupt funnel file, paper-only."""
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    with state_lock:
+        live_armed = bool(state.get("live_armed", False))
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled", False))
+    if not _force_paper_mode_active() or live_armed or bitfinex_live_enabled:
+        return jsonify({
+            "error": "repair requires forced paper mode with all live execution disabled"
+        }), 409
+    body = request.get_json(silent=True) or {}
+    expected_sha256 = str(body.get("expected_sha256") or "").strip().lower()
+    expected_invalid_line = body.get("expected_invalid_line")
+    expected_invalid_line_sha256 = str(
+        body.get("expected_invalid_line_sha256") or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        return jsonify({"error": "expected_sha256 must be a lowercase SHA-256"}), 400
+    if (
+        not isinstance(expected_invalid_line, int)
+        or isinstance(expected_invalid_line, bool)
+        or expected_invalid_line < 1
+    ):
+        return jsonify({"error": "expected_invalid_line must be a positive integer"}), 400
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_invalid_line_sha256):
+        return jsonify({
+            "error": "expected_invalid_line_sha256 must be a lowercase SHA-256"
+        }), 400
+    import execution_funnel
+    target = os.path.abspath(execution_funnel.FUNNEL_FILE)
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+    try:
+        with research_gate, _jsonl_path_lock(target), execution_funnel._lock:
+            receipt = _repair_execution_funnel_jsonl(
+                target,
+                expected_sha256=expected_sha256,
+                expected_invalid_line=expected_invalid_line,
+                expected_invalid_line_sha256=expected_invalid_line_sha256,
+            )
+    except FileNotFoundError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 409
+    logger.warning(
+        "[ADMIN] execution funnel corruption repair status=%s source_sha256=%s",
+        receipt.get("status"), expected_sha256,
+    )
+    return jsonify(receipt)
+
+
 # ---------------------------------------------------------------------------
 # Cure 2 — Phantom paper position cancellation (Railway-initiated).
 #
@@ -46439,6 +46493,197 @@ def _validate_or_quarantine_jsonl(path: str, label: str) -> bool:
         "new active file will start [PIPELINE ENFORCEMENT]"
     )
     return False
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _completed_jsonl_repair(
+    path: str, expected_sha256: str, invalid_line: int, invalid_line_sha256: str,
+):
+    """Return an immutable completed repair only while its rebuilt file is active."""
+    root = os.path.join(os.path.dirname(os.path.abspath(path)), "corrupt_evidence_quarantine")
+    try:
+        candidates = sorted(os.scandir(root), key=lambda item: item.name, reverse=True)[:64]
+    except OSError:
+        return None
+    for item in candidates:
+        receipt_path = os.path.join(item.path, "repair_receipt.json")
+        try:
+            with open(receipt_path, "r", encoding="utf-8") as handle:
+                receipt = json.load(handle)
+            if (
+                receipt.get("schema") == "jsonl_corruption_repair_receipt_v1"
+                and receipt.get("complete") is True
+                and receipt.get("source_sha256") == expected_sha256
+                and receipt.get("invalid_line_numbers") == [invalid_line]
+                and receipt.get("expected_invalid_line_sha256") == invalid_line_sha256
+                and os.path.isfile(path)
+                and _sha256_file(path) == receipt.get("rebuilt_sha256")
+            ):
+                return receipt
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def _repair_execution_funnel_jsonl(
+    path: str, *, expected_sha256: str, expected_invalid_line: int,
+    expected_invalid_line_sha256: str,
+) -> dict:
+    """Quarantine exact corrupt bytes and atomically retain every valid raw line.
+
+    The caller must hold the research gate, the bot path lock, and the funnel
+    writer lock. Preconditions bind the operator's inspection to the exact
+    bytes being repaired, so a concurrent append or different corrupt line
+    fails closed without creating artifacts.
+    """
+    key = os.path.abspath(path)
+    expected_sha256 = str(expected_sha256 or "").strip().lower()
+    expected_invalid_line_sha256 = str(expected_invalid_line_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("expected_sha256 must be a lowercase SHA-256")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_invalid_line_sha256):
+        raise ValueError("expected_invalid_line_sha256 must be a lowercase SHA-256")
+    if not isinstance(expected_invalid_line, int) or isinstance(expected_invalid_line, bool) or expected_invalid_line < 1:
+        raise ValueError("expected_invalid_line must be a positive integer")
+    if os.path.basename(key) != "execution_funnel.jsonl":
+        raise ValueError("repair target is restricted to execution_funnel.jsonl")
+    if not os.path.isfile(key):
+        raise FileNotFoundError("execution_funnel.jsonl is missing")
+
+    current_sha256 = _sha256_file(key)
+    if current_sha256 != expected_sha256:
+        completed = _completed_jsonl_repair(
+            key, expected_sha256, expected_invalid_line, expected_invalid_line_sha256,
+        )
+        if completed is not None:
+            return {**completed, "status": "already_repaired", "idempotent": True}
+        raise RuntimeError("SOURCE_SHA256_MISMATCH")
+
+    with open(key, "rb") as handle:
+        raw = handle.read()
+    raw_lines = raw.splitlines(keepends=True)
+    invalid = []
+    valid_lines = []
+    for line_number, raw_line in enumerate(raw_lines, 1):
+        try:
+            decoded = raw_line.decode("utf-8")
+            if decoded.strip():
+                json.loads(decoded)
+            valid_lines.append(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            invalid.append({
+                "line_number": line_number,
+                "raw_sha256": hashlib.sha256(raw_line).hexdigest(),
+                "size_bytes": len(raw_line),
+                "error_class": type(exc).__name__,
+                "classification": "UNKNOWN_CORRUPT_EVIDENCE",
+                "ranking_eligible": False,
+            })
+    invalid_numbers = [row["line_number"] for row in invalid]
+    if invalid_numbers != [expected_invalid_line]:
+        raise RuntimeError(
+            "INVALID_LINE_PRECONDITION_MISMATCH:" + ",".join(map(str, invalid_numbers))
+        )
+    if invalid[0]["raw_sha256"] != expected_invalid_line_sha256:
+        raise RuntimeError("INVALID_LINE_SHA256_MISMATCH")
+
+    quarantine_root = os.path.join(
+        os.path.dirname(key), "corrupt_evidence_quarantine",
+        datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ") + "_repair_" + uuid.uuid4().hex[:8],
+    )
+    os.makedirs(quarantine_root, exist_ok=False)
+    preserved_path = os.path.join(quarantine_root, os.path.basename(key))
+    with open(preserved_path, "xb") as handle:
+        handle.write(raw)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if _sha256_file(preserved_path) != expected_sha256:
+        raise RuntimeError("QUARANTINE_HASH_MISMATCH")
+
+    manifest = {
+        "schema": "corrupt_jsonl_quarantine_v2",
+        "complete": True,
+        "quarantined_at": utc_iso(),
+        "source_name": os.path.basename(key),
+        "source_sha256": expected_sha256,
+        "source_size_bytes": len(raw),
+        "preserved_path": os.path.basename(preserved_path),
+        "invalid_line_numbers": invalid_numbers,
+        "expected_invalid_line_sha256": expected_invalid_line_sha256,
+        "valid_line_count": len(valid_lines),
+        "excluded_line_count": len(invalid),
+    }
+    for name, payload in (
+        ("quarantine_manifest.json", manifest),
+        ("excluded_lines_unknown.json", {
+            "schema": "excluded_corrupt_jsonl_lines_v1", "complete": True,
+            "qualification": "UNKNOWN", "ranking_eligible": False, "lines": invalid,
+        }),
+    ):
+        target = os.path.join(quarantine_root, name)
+        with open(target + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(target + ".tmp", target)
+
+    rebuilt = b"".join(valid_lines)
+    rebuilt_sha256 = hashlib.sha256(rebuilt).hexdigest()
+    temp_active = key + ".repair.tmp"
+    with open(temp_active, "xb") as handle:
+        handle.write(rebuilt)
+        handle.flush()
+        os.fsync(handle.fileno())
+    # Recheck the source immediately before the atomic replace. Locks cover all
+    # in-process writers; this second hash also refuses external mutations.
+    if _sha256_file(key) != expected_sha256:
+        os.unlink(temp_active)
+        raise RuntimeError("SOURCE_CHANGED_DURING_REPAIR")
+    os.replace(temp_active, key)
+    _fsync_jsonl_validation_parent(key)
+    if _sha256_file(key) != rebuilt_sha256:
+        raise RuntimeError("REBUILT_HASH_MISMATCH")
+    # Full parse, not merely the durable tail shortcut, proves exact rebuild.
+    with open(key, "rb") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if line.strip():
+                json.loads(line.decode("utf-8"))
+    signature = _jsonl_validation_signature(key)
+    _persist_jsonl_validation_receipt(key, signature)
+    receipt = {
+        "schema": "jsonl_corruption_repair_receipt_v1",
+        "complete": True,
+        "status": "repaired",
+        "idempotent": False,
+        "source_name": os.path.basename(key),
+        "source_sha256": expected_sha256,
+        "rebuilt_sha256": rebuilt_sha256,
+        "source_size_bytes": len(raw),
+        "rebuilt_size_bytes": len(rebuilt),
+        "valid_line_count": len(valid_lines),
+        "excluded_line_count": len(invalid),
+        "invalid_line_numbers": invalid_numbers,
+        "expected_invalid_line_sha256": expected_invalid_line_sha256,
+        "qualification": "UNKNOWN",
+        "ranking_eligible": False,
+        "validation_receipt": os.path.basename(_jsonl_validation_receipt_path(key)),
+        "quarantine_manifest_sha256": _sha256_file(os.path.join(quarantine_root, "quarantine_manifest.json")),
+    }
+    receipt_path = os.path.join(quarantine_root, "repair_receipt.json")
+    with open(receipt_path + ".tmp", "w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, indent=2, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(receipt_path + ".tmp", receipt_path)
+    _fsync_jsonl_validation_parent(receipt_path)
+    return receipt
 
 
 def _safe_append_jsonl(
