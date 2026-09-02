@@ -39960,6 +39960,13 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             ),
             "rewrite_targets": sorted(rewrite_targets),
             "max_rows": 5000,
+            # One resumable manifest page is the scheduling quantum.  The
+            # worker fsyncs each page and its SQLite descriptor, so allowing
+            # the legacy 5,000-row slice to finalize up to twenty pages in one
+            # child process can monopolize the shared Fly CPU/storage long
+            # enough to starve the lifecycle pipeline.  Checkpointing makes
+            # this O(1) per invocation without weakening completeness.
+            "inventory_file_budget": _DATA_SYNC_MANIFEST_PAGE_DEFAULT,
             "inventory_elapsed_budget_seconds": (
                 _DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS
             ),

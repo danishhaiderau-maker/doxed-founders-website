@@ -233,6 +233,41 @@ def test_parent_contract_handles_missing_nonzero_timeout_and_cleans_unique_trans
     assert 'work_root / f"inventory-result-{nonce}.json"' in source
 
 
+def test_parent_limits_each_resumable_inventory_slice_to_one_manifest_page():
+    source = BOT_PATH.read_text(encoding="utf-8")
+    assert '"inventory_file_budget": _DATA_SYNC_MANIFEST_PAGE_DEFAULT' in source
+    assert '"inventory_page_rows": _DATA_SYNC_MANIFEST_PAGE_DEFAULT' in source
+
+
+def test_finalization_advances_by_one_page_per_bounded_invocation(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["inventory_page_rows"] = 3
+    payload["inventory_file_budget"] = 3
+    payload["max_rows"] = 5000
+    for index in range(8):
+        (runtime / f"row-{index:02d}.json").write_text("{}", encoding="utf-8")
+
+    page_counts = []
+    result = None
+    for ordinal in range(401, 410):
+        code, result_path = _run_generation(_load_worker(), volume, ordinal, payload)
+        current = json.loads(result_path.read_text(encoding="utf-8"))
+        staged = volume / ".data-sync-snapshots" / "inventory-generations"
+        page_counts.append(len(list(staged.glob(".building-*/p*.json"))))
+        if code == 0:
+            result = current
+            break
+        assert code == 75 and current["status"] == "BUILDING"
+
+    assert result is not None
+    assert all(after - before <= 1 for before, after in zip(page_counts, page_counts[1:]))
+    assert result["file_count"] == 8
+    assert len(_generation_rows(result)) == 8
+
+
 def test_real_worker_nonzero_for_missing_request_and_orphan_cannot_satisfy_nonce(tmp_path):
     volume = tmp_path / "volume"
     work = volume / ".data-sync-snapshots"
