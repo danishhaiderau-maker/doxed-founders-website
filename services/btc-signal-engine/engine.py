@@ -37855,6 +37855,10 @@ _data_sync_async_inventory = {
     "expires_at": 0.0,
     "served_since_refresh": False,
     "refreshing": False,
+    # Physical child/validation work is distinct from the durable single-flight
+    # refresh lease. Lifecycle processing may use checkpoint sleep intervals,
+    # but cleanup remains fenced by ``refreshing`` until publication completes.
+    "worker_active": False,
     "active_refresh_nonce": None,
     "completed_refresh_nonce": None,
     "refresh_started_at": None,
@@ -37942,7 +37946,7 @@ def _lifecycle_pipeline_overlap_probe():
     with _data_sync_inventory_cache_condition:
         if _data_sync_inventory_cache.get("refreshing"):
             active.append("SYNC_INVENTORY_CACHE_REFRESH")
-        if _data_sync_async_inventory.get("refreshing"):
+        if _data_sync_async_inventory.get("worker_active"):
             active.append("SYNC_ASYNC_INVENTORY_REFRESH")
     # Let the optional lifecycle indexer yield while the bounded snapshot
     # worker is BUILDING. SQLite online backup remains valid while the WAL
@@ -37953,6 +37957,8 @@ def _lifecycle_pipeline_overlap_probe():
             for state in _data_sync_sqlite_snapshot_states.values()
         ):
             active.append("SQLITE_SNAPSHOT_BUILDING")
+    if (_data_sync_volume_root() / ".fly-mirror-generation.lease").is_file():
+        active.append("ANALYZER_GENERATION_LEASE")
     return active
 
 
@@ -37968,12 +37974,27 @@ def _start_lifecycle_pipeline_runtime() -> bool:
         return False
     try:
         runtime_module = importlib.import_module("lifecycle_pipeline_runtime")
+        os_module = globals().get("os")
+        rotation_enabled_raw = (
+            os_module.getenv("V3_PRODUCTION_ROTATION_ENABLED", "")
+            if os_module is not None else ""
+        )
+        rotation_target_raw = (
+            os_module.getenv(
+                "V3_PRODUCTION_ROTATION_TARGET_BYTES", str(64 * 1024 * 1024)
+            ) if os_module is not None else str(64 * 1024 * 1024)
+        )
+        epoch_provider = globals().get("_collector_v22_epoch_id")
+        epoch_id = epoch_provider() if callable(epoch_provider) else None
         started = runtime_module.start(
             _data_sync_runtime_root(),
             source_revision=revision,
-            epoch_id=_collector_v22_epoch_id(),
+            epoch_id=epoch_id,
             pressure_probe=_lifecycle_pipeline_pressure_probe,
             overlap_probe=_lifecycle_pipeline_overlap_probe,
+            rotation_enabled=str(rotation_enabled_raw).strip().lower()
+            in {"1", "true", "yes", "on"},
+            rotation_target_bytes=int(rotation_target_raw),
         )
         logger.info(
             "[LIFECYCLE PIPELINE] optional owner started=%s cleanup_authorized=false",
@@ -39945,6 +39966,12 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             for value in (globals().get("SIGNAL_SNAPSHOT_FILE"),)
             if isinstance(value, str) and value
         ]
+        v3_runtime_identity = {
+            "epoch_id": _collector_v22_epoch_id(),
+            "source_revision": _runtime_git_rev(),
+            "deployed_revision": _runtime_git_rev(),
+            "tile_config_signature": active_tile_registry_signature(),
+        }
         request_payload = {
             "schema": _DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA,
             "nonce": nonce,
@@ -39964,6 +39991,7 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 for path in globals().get("_jsonl_serialized_append_targets", set())
             ),
             "rewrite_targets": sorted(rewrite_targets),
+            "v3_runtime_identity": v3_runtime_identity,
             "max_rows": 5000,
             # One resumable manifest page is the scheduling quantum.  The
             # worker fsyncs each page and its SQLite descriptor, so allowing
@@ -40008,6 +40036,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             "PYTHONHASHSEED": "0",
         })
         while True:
+            with _data_sync_inventory_cache_condition:
+                _data_sync_async_inventory["worker_active"] = True
+                _data_sync_inventory_cache_condition.notify_all()
             completed = subprocess.run(
                 command,
                 stdin=subprocess.DEVNULL,
@@ -40042,6 +40073,7 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                         "worker_resume_token": result.get("resume_token"),
                         "retry_after_seconds": retry_after,
                         "error": None,
+                        "worker_active": False,
                     })
                     _data_sync_inventory_cache_condition.notify_all()
                 time.sleep(retry_after)
@@ -40116,6 +40148,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             })
             _data_sync_inventory_cache_condition.notify_all()
     finally:
+        with _data_sync_inventory_cache_condition:
+            _data_sync_async_inventory["worker_active"] = False
+            _data_sync_inventory_cache_condition.notify_all()
         transient_paths = [request_path, result_path]
         if nonce and request_path is not None:
             try:
@@ -40203,7 +40238,8 @@ def _data_sync_request_async_inventory(
             )
         )
         if (
-            (not force_refresh and (current or deliver_completed_generation))
+            deliver_completed_generation
+            or (not force_refresh and current)
             or matching_completed_refresh
         ):
             _data_sync_async_inventory["served_since_refresh"] = True

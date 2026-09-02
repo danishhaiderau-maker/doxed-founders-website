@@ -37957,6 +37957,8 @@ def _lifecycle_pipeline_overlap_probe():
             for state in _data_sync_sqlite_snapshot_states.values()
         ):
             active.append("SQLITE_SNAPSHOT_BUILDING")
+    if (_data_sync_volume_root() / ".fly-mirror-generation.lease").is_file():
+        active.append("ANALYZER_GENERATION_LEASE")
     return active
 
 
@@ -37972,12 +37974,27 @@ def _start_lifecycle_pipeline_runtime() -> bool:
         return False
     try:
         runtime_module = importlib.import_module("lifecycle_pipeline_runtime")
+        os_module = globals().get("os")
+        rotation_enabled_raw = (
+            os_module.getenv("V3_PRODUCTION_ROTATION_ENABLED", "")
+            if os_module is not None else ""
+        )
+        rotation_target_raw = (
+            os_module.getenv(
+                "V3_PRODUCTION_ROTATION_TARGET_BYTES", str(64 * 1024 * 1024)
+            ) if os_module is not None else str(64 * 1024 * 1024)
+        )
+        epoch_provider = globals().get("_collector_v22_epoch_id")
+        epoch_id = epoch_provider() if callable(epoch_provider) else None
         started = runtime_module.start(
             _data_sync_runtime_root(),
             source_revision=revision,
-            epoch_id=_collector_v22_epoch_id(),
+            epoch_id=epoch_id,
             pressure_probe=_lifecycle_pipeline_pressure_probe,
             overlap_probe=_lifecycle_pipeline_overlap_probe,
+            rotation_enabled=str(rotation_enabled_raw).strip().lower()
+            in {"1", "true", "yes", "on"},
+            rotation_target_bytes=int(rotation_target_raw),
         )
         logger.info(
             "[LIFECYCLE PIPELINE] optional owner started=%s cleanup_authorized=false",
