@@ -730,6 +730,10 @@ try {
         $currentStage = "loop_full_manifest"
         $manifest = Get-FlySyncPreflightManifest `
           -ManifestUri ($SourceUrl.TrimEnd("/") + "/api/data-sync/manifest")
+        # The quiet soak can span a deployment. Bind all downstream defer,
+        # child, and terminal receipts to this newly authenticated manifest,
+        # never to the O(1) preflight observed before the soak.
+        $observedSourceRevision = [string]$manifest.source_git_rev
         if ($manifest.PSObject.Properties.Name -contains "total_bytes") {
           $currentTotalBytes = [int64]$manifest.total_bytes
         } else {
@@ -885,12 +889,23 @@ try {
       # collide with the next sync on its one-minute retry.
       $currentStage = "atomic_mirror_sync"
       $result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs
+      $childSourceRevision = [string]$result.SourceRevision
+      if (
+        $childSourceRevision -notmatch '^[0-9a-fA-F]{7,64}$' -or
+        $result.AckAccepted -ne $true
+      ) {
+        throw "Child Fly sync returned an invalid terminal revision or unaccepted acknowledgement."
+      }
       $didSync = $true
       $consecutiveFailures = 0
       $lastSyncedTotalBytes = $currentTotalBytes
       $lastSyncedVolumeUsedBytes = $currentVolumeUsedBytes
       $lastSyncAt = [datetime]::UtcNow
-      $lastSyncedSourceRevision = $(if ($result.SourceRevision) { [string]$result.SourceRevision } else { $observedSourceRevision })
+      # The child owns the final manifest fence and ACK. Its exact accepted
+      # identity is authoritative for terminal parity even if an earlier outer
+      # observation belonged to a superseded deployment.
+      $observedSourceRevision = $childSourceRevision
+      $lastSyncedSourceRevision = $childSourceRevision
       @{
         lastSyncedTotalBytes = $lastSyncedTotalBytes
         lastSyncedVolumeUsedBytes = $lastSyncedVolumeUsedBytes
@@ -905,6 +920,7 @@ try {
         source = $SourceUrl
         files = $result.Files
         bytes = $result.Bytes
+        ackAccepted = $result.AckAccepted
         sourceRevision = $lastSyncedSourceRevision
         observedSourceRevision = $observedSourceRevision
         mirroredSourceRevision = $lastSyncedSourceRevision

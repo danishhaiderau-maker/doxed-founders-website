@@ -17,8 +17,8 @@ def _child_source() -> str:
 def test_manifest_preflight_has_bounded_retries_and_stage_diagnostics():
     source = _source()
 
-    assert "$preflightManifestAttempts = 35" in source
-    assert "$preflightInventoryWaitMaxSec = 330" in source
+    assert "$preflightManifestAttempts = 220" in source
+    assert "$preflightInventoryWaitMaxSec = 1800" in source
     assert "$preflightManifestTimeoutSec = 90" in source
     assert "stage=loop_manifest_preflight failed after" in source
     assert '$currentStage = "loop_manifest_preflight"' in source
@@ -70,6 +70,34 @@ def test_full_sync_reuses_authenticated_loop_preflight_without_duplicate_fetch()
     assert "$ack = Invoke-DataSyncJsonRequest" in child_source
     assert "AckAccepted = $ack.accepted" in child_source
     assert "Canonical manifest commit failed" in child_source
+
+
+def test_post_soak_manifest_and_child_ack_own_terminal_revision_identity():
+    source = _source()
+
+    refetch = source.index('$currentStage = "loop_full_manifest"')
+    refreshed_observation = source.index(
+        '$observedSourceRevision = [string]$manifest.source_git_rev', refetch
+    )
+    child_sync = source.index(
+        '$result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1") @syncArgs'
+    )
+    child_identity = source.index(
+        '$childSourceRevision = [string]$result.SourceRevision', child_sync
+    )
+    ack_gate = source.index('$result.AckAccepted -ne $true', child_identity)
+    terminal_observation = source.index(
+        '$observedSourceRevision = $childSourceRevision', ack_gate
+    )
+    terminal_heartbeat = source.index('ackAccepted = $result.AckAccepted', terminal_observation)
+
+    assert refetch < refreshed_observation < child_sync
+    assert child_sync < child_identity < ack_gate < terminal_observation < terminal_heartbeat
+    assert '$lastSyncedSourceRevision = $childSourceRevision' in source
+    assert (
+        'Child Fly sync returned an invalid terminal revision or unaccepted acknowledgement.'
+        in source
+    )
 
 
 def test_full_sync_waits_for_a_bounded_quiet_health_soak():
