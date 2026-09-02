@@ -35,6 +35,7 @@ research/*
 !research/conservative_limit_fill.py
 !research/quantity_execution.py
 !research/venue_quantity_constraints.py
+!research/mirror_generation_lease.py
 
 # 4. Re-include deploy + Python dependency manifests.
 !requirements.txt

@@ -1,0 +1,15 @@
+{
+  "schema": "production_failure_receipt_v1",
+  "observed_at_utc": "2026-09-02T15:29:06Z",
+  "deployed_revision": "db64abb89989",
+  "error_code": "IMAGE_RUNTIME_MODULE_MISSING",
+  "component": "bot_startup_import",
+  "module": "research.mirror_generation_lease",
+  "evidence_run_id": "33648779804",
+  "failed_deploy_run_id": "33646978872",
+  "ledger": null,
+  "byte_offset": null,
+  "contains_secrets": false,
+  "classification": "PROVEN",
+  "required_fix": "include the imported module in the production image and verify it during image build"
+}
