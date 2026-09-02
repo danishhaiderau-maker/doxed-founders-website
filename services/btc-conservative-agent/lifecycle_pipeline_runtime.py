@@ -142,6 +142,7 @@ class LifecyclePipelineRuntime:
         data_root: str | Path,
         *,
         source_revision: str,
+        epoch_id: str | None = None,
         work_root: str | Path | None = None,
         interval_sec: float = DEFAULT_INTERVAL_SEC,
         wall_timeout_sec: float = DEFAULT_WALL_TIMEOUT_SEC,
@@ -173,6 +174,12 @@ class LifecyclePipelineRuntime:
             char not in "0123456789abcdef" for char in self.source_revision
         ):
             raise ValueError("SOURCE_REVISION_NOT_FULL_HEX")
+        if epoch_id is not None and (
+            not isinstance(epoch_id, str)
+            or not epoch_id.startswith("epoch-")
+        ):
+            raise ValueError("EPOCH_ID_INVALID")
+        self.epoch_id = epoch_id
         self.interval_sec = max(1.0, float(interval_sec))
         self.wall_timeout_sec = max(1.0, float(wall_timeout_sec))
         self.cpu_limit_sec = max(1, int(cpu_limit_sec))
@@ -187,6 +194,11 @@ class LifecyclePipelineRuntime:
         self.owner_path = self.work_root / "pipeline-runtime-owner.json"
         self.owner_token = uuid.uuid4().hex
         self._lock = threading.RLock()
+        # Cleanup may quarantine a fully acknowledged lifecycle bundle only
+        # while no worker cycle can begin or remain in flight.  This gate is
+        # separate from the status lock so HTTP cleanup never waits while
+        # holding runtime bookkeeping state.
+        self._cycle_gate = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen | None = None
@@ -402,6 +414,10 @@ class LifecyclePipelineRuntime:
                 pass
 
     def _run_once(self) -> bool:
+        with self._cycle_gate:
+            return self._run_once_guarded()
+
+    def _run_once_guarded(self) -> bool:
         """Execute one guarded cycle; all failures are converted to status."""
         with self._lock:
             if self._process is not None:
@@ -429,6 +445,7 @@ class LifecyclePipelineRuntime:
         try:
             launch = create_request(
                 self.data_root, self.work_root, source_revision=self.source_revision,
+                epoch_id=self.epoch_id,
                 pressure_mode=bool(pressure or emergency),
                 emergency_closure_mode=bool(emergency),
                 max_lifecycles=1 if pressure or emergency else 5,
@@ -556,9 +573,18 @@ class LifecyclePipelineRuntime:
         with self._lock:
             return json.loads(json.dumps(self._status))
 
+    def acquire_cleanup_lease(self, timeout: float = 0.0) -> bool:
+        """Exclude worker cycles across the cleanup proof/move/ACK window."""
+        timeout = max(0.0, min(5.0, float(timeout)))
+        return self._cycle_gate.acquire(timeout=timeout)
+
+    def release_cleanup_lease(self) -> None:
+        self._cycle_gate.release()
+
 
 _default_runtime: LifecyclePipelineRuntime | None = None
 _default_lock = threading.Lock()
+_cleanup_lease_local = threading.local()
 
 
 def start(data_root: str | Path, **kwargs: Any) -> bool:
@@ -599,3 +625,24 @@ def status() -> dict[str, Any]:
             "source_cleanup_authorized": False,
         }
     return runtime.status()
+
+
+def acquire_cleanup_lease(timeout: float = 0.0) -> bool:
+    """Acquire the process-global worker exclusion lease, if an owner exists."""
+    with _default_lock:
+        runtime = _default_runtime
+    if runtime is None:
+        _cleanup_lease_local.runtime = None
+        return True
+    acquired = runtime.acquire_cleanup_lease(timeout)
+    if acquired:
+        _cleanup_lease_local.runtime = runtime
+    return acquired
+
+
+def release_cleanup_lease() -> None:
+    runtime = getattr(_cleanup_lease_local, "runtime", None)
+    if runtime is not None:
+        runtime.release_cleanup_lease()
+    if hasattr(_cleanup_lease_local, "runtime"):
+        del _cleanup_lease_local.runtime

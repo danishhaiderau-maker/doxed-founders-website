@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -139,6 +140,21 @@ def test_timeout_terminates_child_and_backs_off(tmp_path, monkeypatch):
     assert process.terminated is True
     assert runtime.status()["last_outcome"] == "TIMEOUT"
     assert runtime.status()["backoff_sec"] == 180
+
+
+def test_cleanup_lease_excludes_worker_cycle_without_calling_overlap_probe(tmp_path, monkeypatch):
+    overlap_calls = []
+    runtime = _runtime(tmp_path, overlap_probe=lambda: overlap_calls.append(True) or False)
+    _install_launch(monkeypatch, runtime, _Process())
+    assert runtime.acquire_cleanup_lease(timeout=0.0) is True
+    result = []
+    contender = threading.Thread(target=lambda: result.append(runtime.acquire_cleanup_lease(timeout=0.0)))
+    contender.start(); contender.join(timeout=1)
+    assert result == [False]
+    assert overlap_calls == []
+    runtime.release_cleanup_lease()
+    assert runtime._run_once() is True
+    assert overlap_calls == [True]
 
 
 def test_corrupt_result_fails_closed_and_backoff_is_bounded(tmp_path, monkeypatch):

@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import subprocess
+import tempfile
 import threading
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,14 +16,18 @@ from typing import Any, Iterable
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 from combo_pathway_config import active_tile_registry_signature
-from collector_storage import emergency_admission
+from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
+from emergency_evidence_wal import EmergencyEvidenceWal
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
 _id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
-_lifecycle_episode_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
 _provenance_cache: dict[str, str] | None = None
+_MAX_MEMBERSHIP_EPISODE_ID_BYTES = 512
+_MAX_RECEIPT_RECORD_ID_BYTES = 1024
+_MAX_RECEIPT_ROW_BYTES = 8 * 1024 * 1024
+_BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
 
 
 def _first_present(*values: Any) -> Any:
@@ -255,6 +262,82 @@ class V3EvidenceStore:
         self.lock_dir = self.root / "v3" / ".locks"
         for path in (self.ledger_dir, self.segment_dir, self.receipt_dir, self.lock_dir):
             path.mkdir(parents=True, exist_ok=True)
+        self.__emergency_wal: EmergencyEvidenceWal | None = None
+        # Reserve must exist before pressure/ENOSPC. Local inspect-only runs do
+        # not possess a deployed revision and therefore cannot create a
+        # misleading production-bound reserve.
+        if self._emergency_wal_identity_available():
+            self._emergency_wal()
+
+    def _emergency_wal(self) -> EmergencyEvidenceWal:
+        """Open the preallocated mandatory-evidence reserve lazily.
+
+        The reserve is deliberately outside the receipt tree: receipt growth is
+        exactly what cannot be relied on after the filesystem enters pressure.
+        A production identity mismatch fails closed in ``EmergencyEvidenceWal``.
+        """
+        if self.__emergency_wal is None:
+            self.__emergency_wal = EmergencyEvidenceWal(
+                self.root / "v3" / "emergency_evidence_wal_v2",
+                identity=self._identity_binding(),
+            )
+        return self.__emergency_wal
+
+    def _emergency_wal_identity_available(self) -> bool:
+        identity = self._identity_binding()
+        return all(
+            value not in {"", "UNKNOWN", "UNAVAILABLE", "NOT_DEPLOYED_LOCAL"}
+            for value in identity.values()
+        )
+
+    def _defer_mandatory_to_wal(
+        self, ledger: str, record_id: str, material: dict[str, Any], line: str,
+    ) -> dict[str, Any]:
+        if not self._mandatory_lifecycle_write(ledger, material):
+            raise RuntimeError("EMERGENCY_WAL_OPTIONAL_ROW_REFUSED")
+        record = self._emergency_wal().defer(
+            ledger=ledger, record_id=record_id, payload=line.encode("utf-8"),
+        )
+        return {
+            "written": False, "duplicate": bool(record.get("duplicate")),
+            "deferred": True, "record_id": record_id, "ledger": ledger,
+            "wal_generation": record["generation"],
+            "reason": "MANDATORY_ROW_DURABLY_DEFERRED_TO_PREALLOCATED_WAL",
+        }
+
+    def replay_one_emergency_wal_record(self) -> dict[str, Any]:
+        """Replay at most one retained row into its canonical ledger.
+
+        Replay is intentionally separate from release.  A crash at any point
+        is repaired by canonical ``record_id`` idempotency followed by the
+        exact receipt/byte proof persisted by ``mark_replayed``.
+        """
+        if storage_blocks_new_nonessential_research(str(self.root)):
+            return {"replayed": False, "blocked": True, "reason": "STORAGE_EMERGENCY"}
+        wal = self._emergency_wal()
+        released = wal.release_oldest_if_acknowledged()
+        if released.get("released") is True:
+            return {"replayed": False, "released": True, **released}
+        record = wal.oldest_record()
+        if record is None:
+            return {"replayed": False, "empty": True}
+        try:
+            row = json.loads(record["payload"].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("EMERGENCY_WAL_ROW_JSON_INVALID") from exc
+        if not isinstance(row, dict) or row.get("record_id") != record["record_id"]:
+            raise RuntimeError("EMERGENCY_WAL_ROW_IDENTITY_MISMATCH")
+        result = self.append(record["ledger"], row)
+        if not (result.get("written") is True or result.get("duplicate") is True):
+            raise RuntimeError("EMERGENCY_WAL_CANONICAL_REPLAY_BLOCKED")
+        replay = wal.mark_replayed(
+            record["generation"], canonical_ledger=self.ledger_path(record["ledger"]),
+            canonical_receipt=self._record_receipt_path(record["ledger"], record["record_id"]),
+        )
+        return {
+            "replayed": True, "canonical_duplicate": bool(result.get("duplicate")),
+            "generation": record["generation"], "state": replay["state"],
+        }
 
     def _assert_contained(self, path: Path) -> Path:
         resolved = path.resolve()
@@ -282,34 +365,146 @@ class V3EvidenceStore:
             raise ValueError(f"unknown V3 ledger: {name}")
         return self.ledger_dir / f"{name}.jsonl"
 
-    def _episode_has_lifecycle(self, episode_id: str) -> bool:
-        if not episode_id:
-            return False
-        path = self.ledger_path("lifecycle")
-        key = str(path.resolve())
-        signature = _path_signature(path)
-        cached = _lifecycle_episode_cache.get(key)
-        if cached is not None and cached[0] == signature:
-            return episode_id in cached[1]
-        episodes: set[str] = set()
+    @property
+    def _lifecycle_membership_dir(self) -> Path:
+        return self.receipt_dir / "lifecycle_membership_v1"
+
+    def _atomic_json_receipt(self, path: Path, payload: dict[str, Any]) -> None:
+        """Publish one small receipt without exposing a partial JSON file."""
+        path = self._assert_contained(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        candidate: str | None = None
         try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line_no, line in enumerate(handle, 1):
-                    if not line.endswith("\n"):
-                        raise ValueError(f"TRUNCATED_JSONL_LINE:{line_no}")
-                    row = json.loads(line)
-                    value = str(row.get("episode_id") or "")
-                    if value:
-                        episodes.add(value)
-        except FileNotFoundError:
-            pass
-        except (OSError, json.JSONDecodeError, ValueError):
-            # Optional/new research fails closed. Mandatory lifecycle writes do
-            # not consult this cache and therefore remain available for repair.
+            fd, candidate = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(canonical_json(payload) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(candidate, path)
+            candidate = None
+            _fsync_directory(path.parent)
+        finally:
+            if candidate:
+                try:
+                    os.unlink(candidate)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _signature_payload(signature: tuple[int, int, int, int]) -> dict[str, int]:
+        return dict(zip(("device", "inode", "size", "mtime_ns"), signature))
+
+    @staticmethod
+    def _bounded_slice(path: Path, offset: int, length: int) -> bytes | None:
+        if offset < 0 or length < 1 or length > _MAX_RECEIPT_ROW_BYTES:
+            return None
+        try:
+            fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            try:
+                os.lseek(fd, offset, os.SEEK_SET)
+                payload = os.read(fd, length)
+            finally:
+                os.close(fd)
+        except OSError:
+            return None
+        return payload if len(payload) == length else None
+
+    def _anchor_valid(self, ledger: Path, anchor: Any) -> bool:
+        if not isinstance(anchor, dict):
             return False
-        frozen = frozenset(episodes)
-        _lifecycle_episode_cache[key] = (signature, frozen)
-        return episode_id in frozen
+        try:
+            offset, length = int(anchor["offset"]), int(anchor["length"])
+            expected = str(anchor["sha256"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        payload = self._bounded_slice(ledger, offset, length)
+        return payload is not None and hashlib.sha256(payload).hexdigest() == expected
+
+    def _identity_binding(self) -> dict[str, str]:
+        provenance = _collection_provenance()
+        return {
+            "epoch_id": self.epoch_id,
+            "source_revision": provenance["source_revision"],
+            "deployed_revision": provenance["deployed_revision"],
+            "tile_config_signature": provenance["tile_config_signature"],
+        }
+
+    def _record_lifecycle_membership(
+        self, episode_id: str, signature: tuple[int, int, int, int], anchor: dict[str, Any]
+    ) -> None:
+        """Record membership before publishing the exact ledger-generation fence.
+
+        A crash before the final binding replace leaves the old generation and
+        therefore fails optional writes closed. It can never make an episode
+        appear to exist in a ledger generation that was not durably appended.
+        """
+        encoded_episode = episode_id.encode("utf-8")
+        if not encoded_episode or len(encoded_episode) > _MAX_MEMBERSHIP_EPISODE_ID_BYTES:
+            return
+        directory = self._lifecycle_membership_dir
+        generation_id = ""
+        try:
+            previous = json.loads((directory / "current.json").read_text("utf-8"))
+            prior_signature = previous.get("lifecycle_ledger") or {}
+            same_lineage = (
+                prior_signature.get("device") == signature[0]
+                and prior_signature.get("inode") == signature[1]
+            )
+            append_only_advance = int(signature[2]) > int(prior_signature.get("size", -1))
+            exact_same_file = prior_signature == self._signature_payload(signature)
+            same_identity = previous.get("identity") == self._identity_binding()
+            prior_anchor_valid = self._anchor_valid(self.ledger_path("lifecycle"), previous.get("tail_anchor"))
+            if same_identity and same_lineage and prior_anchor_valid and (append_only_advance or exact_same_file):
+                generation_id = str(previous.get("generation_id") or "")
+        except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        generation_id = generation_id or str(uuid.uuid4())
+        episode_hash = hashlib.sha256(episode_id.encode("utf-8")).hexdigest()
+        self._atomic_json_receipt(directory / f"{episode_hash}.json", {
+            "schema": "lifecycle_episode_membership_v1",
+            "episode_id": episode_id,
+            "episode_sha256": episode_hash,
+            "generation_id": generation_id,
+            "identity": self._identity_binding(),
+        })
+        self._atomic_json_receipt(directory / "current.json", {
+            "schema": "lifecycle_membership_generation_v1",
+            "generation_id": generation_id,
+            "identity": self._identity_binding(),
+            "lifecycle_ledger": self._signature_payload(signature),
+            "tail_anchor": anchor,
+        })
+
+    def _episode_has_lifecycle_receipt(self, episode_id: str) -> bool:
+        """O(1) fail-closed membership lookup; never opens the lifecycle ledger."""
+        encoded_episode = episode_id.encode("utf-8")
+        if not encoded_episode or len(encoded_episode) > _MAX_MEMBERSHIP_EPISODE_ID_BYTES:
+            return False
+        ledger = self.ledger_path("lifecycle")
+        before = _path_signature(ledger)
+        if before is None:
+            return False
+        episode_hash = hashlib.sha256(episode_id.encode("utf-8")).hexdigest()
+        try:
+            binding = json.loads((self._lifecycle_membership_dir / "current.json").read_text("utf-8"))
+            marker = json.loads((self._lifecycle_membership_dir / f"{episode_hash}.json").read_text("utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+        after = _path_signature(ledger)
+        return bool(
+            before == after
+            and binding.get("schema") == "lifecycle_membership_generation_v1"
+            and isinstance(binding.get("generation_id"), str)
+            and bool(binding.get("generation_id"))
+            and binding.get("identity") == self._identity_binding()
+            and binding.get("lifecycle_ledger") == self._signature_payload(before)
+            and self._anchor_valid(ledger, binding.get("tail_anchor"))
+            and marker.get("schema") == "lifecycle_episode_membership_v1"
+            and marker.get("generation_id") == binding.get("generation_id")
+            and marker.get("identity") == self._identity_binding()
+            and marker.get("episode_id") == episode_id
+            and marker.get("episode_sha256") == episode_hash
+        )
 
     @staticmethod
     def _mandatory_lifecycle_write(ledger: str, row: dict[str, Any]) -> bool:
@@ -329,11 +524,310 @@ class V3EvidenceStore:
     def _emergency_admission(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
         episode_id = str(row.get("episode_id") or "")
         mandatory = self._mandatory_lifecycle_write(ledger, row)
+        emergency = storage_blocks_new_nonessential_research(str(self.root))
         return emergency_admission(
             data_dir=str(self.root), purpose=f"v3:{ledger}",
             lifecycle_required=mandatory,
-            lifecycle_existing=(False if mandatory else self._episode_has_lifecycle(episode_id)),
+            lifecycle_existing=(
+                False if mandatory or not emergency
+                else self._episode_has_lifecycle_receipt(episode_id)
+            ),
         )
+
+    def _record_receipt_path(self, ledger: str, record_id: str) -> Path:
+        digest = hashlib.sha256(f"{ledger}\0{record_id}".encode("utf-8")).hexdigest()
+        return self.receipt_dir / "emergency_record_idempotency_v1" / ledger / f"{digest}.json"
+
+    def _completeness_path(self, ledger: str) -> Path:
+        return self.receipt_dir / "emergency_record_idempotency_v1" / ledger / "complete.json"
+
+    def _bootstrap_path(self, ledger: str) -> Path:
+        return self.receipt_dir / "emergency_record_idempotency_v1" / ledger / "bootstrap.json"
+
+    def _complete_generation(self, ledger: str, signature: tuple[int, int, int, int] | None) -> bool:
+        try:
+            receipt = json.loads(self._completeness_path(ledger).read_text("utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            return False
+        return bool(
+            receipt.get("schema") == "emergency_record_index_complete_v1"
+            and receipt.get("identity") == self._identity_binding()
+            and receipt.get("ledger") == ledger
+            and receipt.get("ledger_signature") == (
+                None if signature is None else self._signature_payload(signature)
+            )
+            and (
+                signature is None or signature[2] == 0
+                or self._anchor_valid(self.ledger_path(ledger), receipt.get("tail_anchor"))
+            )
+        )
+
+    def _publish_record_receipt(
+        self, ledger: str, record_id: str, *, offset: int, payload: bytes, state: str
+    ) -> dict[str, Any]:
+        receipt = {
+            "schema": "emergency_record_idempotency_v1", "state": state,
+            "ledger": ledger, "record_id": record_id,
+            "row_sha256": hashlib.sha256(payload).hexdigest(),
+            "offset": int(offset), "length": len(payload), "identity": self._identity_binding(),
+        }
+        self._atomic_json_receipt(self._record_receipt_path(ledger, record_id), receipt)
+        return receipt
+
+    def advance_emergency_idempotency_bootstrap(
+        self, ledger: str, *, max_bytes: int = _BOOTSTRAP_BYTES_PER_STEP
+    ) -> dict[str, Any]:
+        """Cooperatively index a bounded ledger prefix outside pressure only."""
+        path = self.ledger_path(ledger)
+        if storage_blocks_new_nonessential_research(str(self.root)):
+            return {"complete": False, "blocked": True, "reason": "STORAGE_EMERGENCY"}
+        limit = max(1, min(int(max_bytes), _BOOTSTRAP_BYTES_PER_STEP))
+        with self._exclusive(path):
+            signature = _path_signature(path)
+            if signature is None:
+                self._atomic_json_receipt(self._completeness_path(ledger), {
+                    "schema": "emergency_record_index_complete_v1", "ledger": ledger,
+                    "identity": self._identity_binding(), "ledger_signature": None,
+                    "tail_anchor": None,
+                })
+                return {"complete": True, "bytes_indexed": 0, "cursor": 0}
+            if self._complete_generation(ledger, signature):
+                return {"complete": True, "bytes_indexed": 0, "cursor": signature[2]}
+            state = {}
+            try:
+                state = json.loads(self._bootstrap_path(ledger).read_text("utf-8"))
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                pass
+            same_source = (
+                state.get("schema") == "emergency_record_index_bootstrap_v1"
+                and state.get("identity") == self._identity_binding()
+                and (state.get("source") or {}).get("device") == signature[0]
+                and (state.get("source") or {}).get("inode") == signature[1]
+                and int(state.get("cursor", -1)) <= signature[2]
+                and (
+                    int(state.get("cursor", 0)) == 0
+                    or self._anchor_valid(path, state.get("cursor_anchor"))
+                )
+            )
+            cursor = int(state.get("cursor", 0)) if same_source else 0
+            cursor_anchor = state.get("cursor_anchor") if same_source else None
+            consumed = 0
+            try:
+                fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+                with os.fdopen(fd, "rb") as handle:
+                    handle.seek(cursor)
+                    while consumed < limit and cursor < signature[2]:
+                        offset = cursor
+                        payload = handle.readline(_MAX_RECEIPT_ROW_BYTES + 1)
+                        if not payload or len(payload) > _MAX_RECEIPT_ROW_BYTES or not payload.endswith(b"\n"):
+                            raise ValueError("BOOTSTRAP_INVALID_OR_OVERSIZE_JSONL_ROW")
+                        row = json.loads(payload.decode("utf-8"))
+                        record_id = str(row.get("record_id") or "")
+                        if not record_id or len(record_id.encode("utf-8")) > _MAX_RECEIPT_RECORD_ID_BYTES:
+                            raise ValueError("BOOTSTRAP_INVALID_OR_OVERSIZE_RECORD_ID")
+                        self._publish_record_receipt(
+                            ledger, record_id, offset=offset, payload=payload, state="COMMITTED"
+                        )
+                        cursor += len(payload)
+                        consumed += len(payload)
+                        cursor_anchor = {
+                            "offset": offset, "length": len(payload),
+                            "sha256": hashlib.sha256(payload).hexdigest(),
+                        }
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                return {"complete": False, "blocked": True, "reason": str(exc), "cursor": cursor}
+            after = _path_signature(path)
+            self._atomic_json_receipt(self._bootstrap_path(ledger), {
+                "schema": "emergency_record_index_bootstrap_v1", "ledger": ledger,
+                "identity": self._identity_binding(), "source": self._signature_payload(signature),
+                "cursor": cursor, "cursor_anchor": cursor_anchor,
+            })
+            complete = after == signature and cursor == signature[2]
+            if complete:
+                self._atomic_json_receipt(self._completeness_path(ledger), {
+                    "schema": "emergency_record_index_complete_v1", "ledger": ledger,
+                    "identity": self._identity_binding(),
+                    "ledger_signature": self._signature_payload(signature),
+                    "tail_anchor": cursor_anchor,
+                })
+            return {"complete": complete, "bytes_indexed": consumed, "cursor": cursor}
+
+    def _bootstrap_empty_ledgers(self) -> None:
+        """Fence absent/empty ledgers cheaply before an emergency transition."""
+        for name in LEDGER_NAMES:
+            signature = _path_signature(self.ledger_path(name))
+            if signature is None or signature[2] == 0:
+                self.advance_emergency_idempotency_bootstrap(name, max_bytes=1)
+
+    def _emergency_append(
+        self, ledger: str, path: Path, record_id: str, material: dict[str, Any], line: str
+    ) -> dict[str, Any]:
+        """Append with bounded, crash-replayable idempotency at emergency."""
+        payload = line.encode("utf-8")
+        if (
+            len(record_id.encode("utf-8")) > _MAX_RECEIPT_RECORD_ID_BYTES
+            or len(payload) > _MAX_RECEIPT_ROW_BYTES
+        ):
+            return {
+                "written": False, "duplicate": False, "blocked": True,
+                "record_id": record_id, "ledger": ledger,
+                "reason": "EMERGENCY_ID_OR_ROW_EXCEEDS_BOUNDED_RECEIPT_LIMIT",
+            }
+        receipt_path = self._record_receipt_path(ledger, record_id)
+        expected_identity = self._identity_binding()
+        row_sha = hashlib.sha256(payload).hexdigest()
+        receipt = None
+        try:
+            receipt = json.loads(receipt_path.read_text("utf-8"))
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError):
+            return {
+                "written": False, "duplicate": False, "blocked": True,
+                "record_id": record_id, "ledger": ledger,
+                "reason": "EMERGENCY_IDEMPOTENCY_RECEIPT_INVALID",
+            }
+        if receipt is not None:
+            structurally_valid = (
+                receipt.get("schema") == "emergency_record_idempotency_v1"
+                and receipt.get("ledger") == ledger
+                and receipt.get("record_id") == record_id
+                and receipt.get("identity") == expected_identity
+            )
+            exact_prepared = (
+                structurally_valid and receipt.get("state") == "PREPARED"
+                and receipt.get("row_sha256") == row_sha
+                and receipt.get("length") == len(payload)
+            )
+            committed = structurally_valid and receipt.get("state") == "COMMITTED"
+            deferred = (
+                structurally_valid and receipt.get("state") == "DEFERRED"
+                and receipt.get("row_sha256") == row_sha
+                and receipt.get("length") == len(payload)
+                and receipt.get("row_payload_utf8") == line
+            )
+            if not (exact_prepared or committed or deferred):
+                return {
+                    "written": False, "duplicate": False, "blocked": True,
+                    "record_id": record_id, "ledger": ledger,
+                    "reason": "EMERGENCY_IDEMPOTENCY_RECEIPT_MISMATCH",
+                }
+            if deferred:
+                source_signature = _path_signature(path)
+                if not self._complete_generation(ledger, source_signature):
+                    return {
+                        "written": False, "duplicate": False, "deferred": True,
+                        "record_id": record_id, "ledger": ledger,
+                        "reason": "MANDATORY_ROW_DURABLY_DEFERRED_PENDING_IDEMPOTENCY_BOOTSTRAP",
+                    }
+                offset = source_signature[2] if source_signature is not None else 0
+                prepared = self._publish_record_receipt(
+                    ledger, record_id, offset=offset, payload=payload, state="PREPARED"
+                )
+                with path.open("ab") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                anchor = {"offset": offset, "length": len(payload), "sha256": row_sha}
+                if ledger == "lifecycle":
+                    signature = _path_signature(path)
+                    if signature is None:
+                        raise RuntimeError("LIFECYCLE_LEDGER_MISSING_AFTER_DEFERRED_APPEND")
+                    self._record_lifecycle_membership(
+                        str(material.get("episode_id") or ""), signature, anchor
+                    )
+                prepared["state"] = "COMMITTED"
+                self._atomic_json_receipt(receipt_path, prepared)
+                final_signature = _path_signature(path)
+                if final_signature is not None:
+                    self._atomic_json_receipt(self._completeness_path(ledger), {
+                        "schema": "emergency_record_index_complete_v1", "ledger": ledger,
+                        "identity": self._identity_binding(),
+                        "ledger_signature": self._signature_payload(final_signature),
+                        "tail_anchor": anchor,
+                    })
+                return {
+                    "written": True, "duplicate": False, "resumed_deferred": True,
+                    "record_id": record_id, "ledger": ledger,
+                }
+            try:
+                receipt_offset = int(receipt.get("offset", -1))
+            except (TypeError, ValueError):
+                receipt_offset = -1
+            receipt_length = int(receipt.get("length", -1))
+            durable = self._bounded_slice(path, receipt_offset, receipt_length)
+            durable_hash = hashlib.sha256(durable).hexdigest() if durable is not None else ""
+            if durable_hash != str(receipt.get("row_sha256") or ""):
+                return {
+                    "written": False, "duplicate": False, "blocked": True,
+                    "record_id": record_id, "ledger": ledger,
+                    "reason": "EMERGENCY_PREPARED_RECORD_NOT_PROVABLE",
+                }
+            anchor = {
+                "offset": receipt_offset, "length": receipt_length,
+                "sha256": str(receipt.get("row_sha256") or ""),
+            }
+            if ledger == "lifecycle" and exact_prepared:
+                signature = _path_signature(path)
+                if signature is None:
+                    raise RuntimeError("LIFECYCLE_LEDGER_MISSING_DURING_RECEIPT_REPAIR")
+                self._record_lifecycle_membership(str(material.get("episode_id") or ""), signature, anchor)
+            repaired = dict(receipt)
+            repaired["state"] = "COMMITTED"
+            self._atomic_json_receipt(receipt_path, repaired)
+            return {
+                "written": False, "duplicate": True, "record_id": record_id, "ledger": ledger,
+                "idempotency_receipt_repaired": exact_prepared,
+            }
+
+        source_signature = _path_signature(path)
+        if not self._complete_generation(ledger, source_signature):
+            # Mandatory terminal/reconciliation rows are still journalled and
+            # replay-safe from this point forward. Optional rows require a
+            # complete historical index before they may expand the ledger.
+            if not self._mandatory_lifecycle_write(ledger, material):
+                return {
+                    "written": False, "duplicate": False, "blocked": True,
+                    "record_id": record_id, "ledger": ledger,
+                    "reason": "EMERGENCY_IDEMPOTENCY_INDEX_INCOMPLETE",
+                }
+            deferred = {
+                "schema": "emergency_record_idempotency_v1", "state": "DEFERRED",
+                "ledger": ledger, "record_id": record_id, "row_sha256": row_sha,
+                "length": len(payload), "identity": expected_identity,
+                "row_payload_utf8": line,
+            }
+            self._atomic_json_receipt(receipt_path, deferred)
+            return {
+                "written": False, "duplicate": False, "deferred": True,
+                "record_id": record_id, "ledger": ledger,
+                "reason": "MANDATORY_ROW_DURABLY_DEFERRED_PENDING_IDEMPOTENCY_BOOTSTRAP",
+            }
+        offset = int(path.stat().st_size) if path.exists() else 0
+        prepared = self._publish_record_receipt(
+            ledger, record_id, offset=offset, payload=payload, state="PREPARED"
+        )
+        with path.open("ab") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        anchor = {"offset": offset, "length": len(payload), "sha256": row_sha}
+        if ledger == "lifecycle":
+            signature = _path_signature(path)
+            if signature is None:
+                raise RuntimeError("LIFECYCLE_LEDGER_MISSING_AFTER_DURABLE_APPEND")
+            self._record_lifecycle_membership(str(material.get("episode_id") or ""), signature, anchor)
+        prepared["state"] = "COMMITTED"
+        self._atomic_json_receipt(receipt_path, prepared)
+        final_signature = _path_signature(path)
+        if final_signature is not None and self._complete_generation(ledger, source_signature):
+            self._atomic_json_receipt(self._completeness_path(ledger), {
+                "schema": "emergency_record_index_complete_v1", "ledger": ledger,
+                "identity": self._identity_binding(),
+                "ledger_signature": self._signature_payload(final_signature),
+                "tail_anchor": anchor,
+            })
+        return {"written": True, "duplicate": False, "record_id": record_id, "ledger": ledger}
 
     @staticmethod
     def _load_ids(path: Path) -> set[str]:
@@ -394,10 +888,18 @@ class V3EvidenceStore:
             material["baseline_schedule_snapshot"] = snapshot
             material["baseline_schedules"] = snapshot["schedules"]
         line = canonical_json(material) + "\n"
+        initial_emergency = storage_blocks_new_nonessential_research(str(self.root))
+        if not initial_emergency:
+            self._bootstrap_empty_ledgers()
+            self.advance_emergency_idempotency_bootstrap(ledger)
         with self._exclusive(path):
-            durable_ids = self._cached_ids(path)
-            if record_id in durable_ids:
-                return {"written": False, "duplicate": True, "record_id": record_id, "ledger": ledger}
+            # A durable PREPARED receipt proves the exact bounded row location.
+            # Let its replay repair a membership publication that crashed after
+            # ledger fsync; ordinary admission would correctly see that stale
+            # membership and otherwise strand the lifecycle forever.
+            emergency_now = storage_blocks_new_nonessential_research(str(self.root))
+            if emergency_now and self._record_receipt_path(ledger, record_id).exists():
+                return self._emergency_append(ledger, path, record_id, material, line)
             admission = self._emergency_admission(ledger, material)
             if not admission["allowed"]:
                 return {
@@ -405,14 +907,63 @@ class V3EvidenceStore:
                     "record_id": record_id, "ledger": ledger,
                     "storage_admission": admission,
                 }
-            with path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
+            if admission.get("emergency"):
+                if (
+                    self._mandatory_lifecycle_write(ledger, material)
+                    and self._emergency_wal_identity_available()
+                ):
+                    return self._defer_mandatory_to_wal(
+                        ledger, record_id, material, line,
+                    )
+                return self._emergency_append(ledger, path, record_id, material, line)
+            durable_ids = self._cached_ids(path)
+            if record_id in durable_ids:
+                return {"written": False, "duplicate": True, "record_id": record_id, "ledger": ledger}
+            source_signature = _path_signature(path)
+            source_complete = self._complete_generation(ledger, source_signature)
+            offset = source_signature[2] if source_signature is not None else 0
+            try:
+                with path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(line)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except OSError as exc:
+                if (
+                    exc.errno != errno.ENOSPC
+                    or not self._mandatory_lifecycle_write(ledger, material)
+                    or not self._emergency_wal_identity_available()
+                ):
+                    raise
+                return self._defer_mandatory_to_wal(
+                    ledger, record_id, material, line,
+                )
             durable_ids.add(record_id)
             _id_cache[str(path.resolve())] = (_path_signature(path), frozenset(durable_ids))
+            payload = line.encode("utf-8")
+            self._publish_record_receipt(
+                ledger, record_id, offset=offset, payload=payload, state="COMMITTED"
+            )
             if ledger == "lifecycle":
-                _lifecycle_episode_cache.pop(str(path.resolve()), None)
+                signature = _path_signature(path)
+                if signature is None:
+                    raise RuntimeError("LIFECYCLE_LEDGER_MISSING_AFTER_DURABLE_APPEND")
+                anchor = {
+                    "offset": signature[2] - len(line.encode("utf-8")),
+                    "length": len(line.encode("utf-8")),
+                    "sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
+                }
+                self._record_lifecycle_membership(str(material.get("episode_id") or ""), signature, anchor)
+            final_signature = _path_signature(path)
+            if source_complete and final_signature is not None:
+                self._atomic_json_receipt(self._completeness_path(ledger), {
+                    "schema": "emergency_record_index_complete_v1", "ledger": ledger,
+                    "identity": self._identity_binding(),
+                    "ledger_signature": self._signature_payload(final_signature),
+                    "tail_anchor": anchor if ledger == "lifecycle" else {
+                        "offset": offset, "length": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    },
+                })
             return {"written": True, "duplicate": False, "record_id": record_id, "ledger": ledger}
 
     def put_market_segment(

@@ -221,17 +221,27 @@ class EmergencyEvidenceWal:
     def _validate_header(self, value: dict[str, Any], slot: int) -> None:
         try:
             uuid.UUID(str(value["generation"])); ledger, record_id = value["ledger"], value["record_id"]
-            valid = (value.get("schema") == "emergency_evidence_wal_record_v2" and value.get("state") in {"PREPARED", "DEFERRED"}
+            valid = (value.get("schema") == "emergency_evidence_wal_record_v2" and value.get("state") in {"PREPARED", "DEFERRED", "REPLAYED"}
                      and value.get("identity_sha256") == self.identity_sha256 and int(value.get("slot", -1)) == slot
                      and int(value.get("offset", -1)) == slot * EXTENT_BYTES and 1 <= int(value.get("length", -1)) <= MAX_ROW_BYTES
                      and isinstance(value.get("row_sha256"), str) and len(value["row_sha256"]) == 64
+                     and isinstance(value.get("sequence"), int) and value["sequence"] >= 1
                      and all(ch in "0123456789abcdef" for ch in value["row_sha256"])
                      and self._valid_record_identity(ledger, record_id))
+            if valid and value.get("state") == "REPLAYED":
+                valid = (
+                    isinstance(value.get("replay_offset"), int)
+                    and value["replay_offset"] >= 0
+                    and value.get("replay_length") == value.get("length")
+                    and value.get("replay_sha256") == value.get("row_sha256")
+                    and isinstance(value.get("replay_receipt_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", value["replay_receipt_sha256"])
+                )
         except (KeyError, TypeError, ValueError, UnicodeEncodeError): valid = False
         if not valid: raise RuntimeError("EMERGENCY_WAL_HEADER_INVALID")
 
     def _validate_headers(self, headers) -> None:
-        generations, identities = set(), set()
+        generations, identities, sequences = set(), set(), set()
         for slot, header in enumerate(headers):
             if header is None: continue
             self._validate_header(header, slot)
@@ -239,6 +249,10 @@ class EmergencyEvidenceWal:
             record_identity = (header["ledger"], header["record_id"])
             if generation in generations or record_identity in identities:
                 raise RuntimeError("EMERGENCY_WAL_HEADER_DUPLICATE_IDENTITY")
+            if value_sequence := header.get("sequence"):
+                if value_sequence in sequences:
+                    raise RuntimeError("EMERGENCY_WAL_HEADER_DUPLICATE_IDENTITY")
+                sequences.add(value_sequence)
             generations.add(generation); identities.add(record_identity)
 
     def _controls(self, *, enforce_binding: bool = True) -> tuple[list[dict[str, Any]], int]:
@@ -368,7 +382,7 @@ class EmergencyEvidenceWal:
         except RuntimeError: return False
         if prefix is None or any(prefix.get(k) != header.get(k) for k in (
                 "generation", "length", "row_sha256", "identity_sha256",
-                "ledger", "record_id", "slot", "offset")): return False
+                "ledger", "record_id", "slot", "offset", "sequence")): return False
         payload = data.read(length); data.seek(offset + DATA_PREFIX_BYTES + MAX_ROW_BYTES); trailer = data.read(DATA_TRAILER_BYTES)
         expected = _TRAILER_MAGIC + hashlib.sha256(prefix_raw + payload).digest()
         return len(payload) == length and hashlib.sha256(payload).hexdigest() == header["row_sha256"] and trailer[:len(expected)] == expected
@@ -448,22 +462,178 @@ class EmergencyEvidenceWal:
             except ValueError:
                 prior = self._status_locked(headers, data).get("alarms", []); self._publish_control(headers, prior + ["EMERGENCY_WAL_CAPACITY_EXHAUSTED"]); raise RuntimeError("EMERGENCY_WAL_CAPACITY_EXHAUSTED")
             generation, offset = str(uuid.uuid4()), slot * EXTENT_BYTES
+            sequence = max((int(row.get("sequence", 0)) for row in headers if row), default=0) + 1
             header = {"schema": "emergency_evidence_wal_record_v2", "state": "PREPARED", "generation": generation,
                       "slot": slot, "offset": offset, "length": len(payload), "row_sha256": digest,
-                      "ledger": ledger, "record_id": record_id, "identity_sha256": self.identity_sha256}
+                      "ledger": ledger, "record_id": record_id, "identity_sha256": self.identity_sha256,
+                      "sequence": sequence}
             self._write_header(hf, slot, header)
             prefix = _encode_block(_DATA_MAGIC, {k: header[k] for k in (
                 "generation", "length", "row_sha256", "identity_sha256",
-                "ledger", "record_id", "slot", "offset")}, DATA_PREFIX_BYTES)
+                "ledger", "record_id", "slot", "offset", "sequence")}, DATA_PREFIX_BYTES)
             data.seek(offset); data.write(prefix); data.write(payload); data.seek(offset + DATA_PREFIX_BYTES + MAX_ROW_BYTES)
             data.write(_TRAILER_MAGIC + hashlib.sha256(prefix + payload).digest()); os.fsync(data.fileno())
             header = dict(header, state="DEFERRED"); self._write_header(hf, slot, header); headers[slot] = header
             controls, _ = self._controls(); alarms = [a for c in controls for a in c.get("alarms", []) if isinstance(a, str)]
             self._publish_control(headers, alarms); return {**header, "duplicate": False}
 
+    def oldest_record(self) -> dict[str, Any] | None:
+        """Return a verified copy of the oldest retained payload.
+
+        This does not mutate replay state and does not accept callbacks.  A
+        drainer can therefore release the WAL lock before touching a canonical
+        ledger, avoiding lock inversion with evidence producers.
+        """
+        with _cross_process_lock(self.lock_path, timeout=self.lock_timeout), self.header_path.open("rb") as hf, self.data_path.open("rb") as data:
+            headers = self._read_validate_headers_or_alarm(hf)
+            self._validate_all_extents(data, headers)
+            occupied = [row for row in headers if row]
+            if not occupied:
+                return None
+            header = min(occupied, key=lambda row: int(row["sequence"]))
+            data.seek(int(header["offset"]) + DATA_PREFIX_BYTES)
+            payload = data.read(int(header["length"]))
+            return {**header, "payload": payload}
+
+    def mark_replayed(
+        self, generation: str, *, canonical_ledger: str | Path,
+        canonical_receipt: str | Path,
+    ) -> dict[str, Any]:
+        """Persist exact canonical replay proof, without releasing capacity."""
+        ledger_path = Path(canonical_ledger).resolve(strict=True)
+        receipt_path = Path(canonical_receipt).resolve(strict=True)
+        volume_root = self.root.parent.parent
+        expected_ledgers = (volume_root / "v3" / "ledgers").resolve()
+        expected_receipts = (volume_root / "v3" / "receipts").resolve()
+        try:
+            ledger_path.relative_to(expected_ledgers)
+            receipt_path.relative_to(expected_receipts)
+        except ValueError as exc:
+            raise RuntimeError("EMERGENCY_WAL_REPLAY_PATH_OUTSIDE_VOLUME") from exc
+        receipt_raw = receipt_path.read_bytes()
+        try:
+            receipt = json.loads(receipt_raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("EMERGENCY_WAL_REPLAY_RECEIPT_INVALID") from exc
+        with _cross_process_lock(self.lock_path, timeout=self.lock_timeout), self.header_path.open("r+b") as hf, self.data_path.open("rb") as data:
+            headers = self._read_validate_headers_or_alarm(hf)
+            self._validate_all_extents(data, headers)
+            occupied = sorted((row for row in headers if row), key=lambda row: int(row["sequence"]))
+            if not occupied or occupied[0]["generation"] != generation:
+                raise RuntimeError("EMERGENCY_WAL_REPLAY_OUT_OF_ORDER")
+            header = occupied[0]
+            if header["state"] == "REPLAYED":
+                return {**header, "duplicate": True}
+            if ledger_path.name != f'{header["ledger"]}.jsonl':
+                raise RuntimeError("EMERGENCY_WAL_REPLAY_LEDGER_MISMATCH")
+            expected_receipt = {
+                "schema": "emergency_record_idempotency_v1",
+                "state": "COMMITTED", "ledger": header["ledger"],
+                "record_id": header["record_id"],
+                "row_sha256": header["row_sha256"], "length": header["length"],
+            }
+            if any(receipt.get(key) != value for key, value in expected_receipt.items()):
+                raise RuntimeError("EMERGENCY_WAL_REPLAY_RECEIPT_MISMATCH")
+            if receipt.get("identity") != self.identity:
+                raise RuntimeError("EMERGENCY_WAL_REPLAY_IDENTITY_MISMATCH")
+            try:
+                offset = int(receipt["offset"])
+                with ledger_path.open("rb") as source:
+                    source.seek(offset); replayed = source.read(int(header["length"]))
+            except (KeyError, OSError, TypeError, ValueError) as exc:
+                raise RuntimeError("EMERGENCY_WAL_CANONICAL_REPLAY_UNPROVABLE") from exc
+            if hashlib.sha256(replayed).hexdigest() != header["row_sha256"]:
+                raise RuntimeError("EMERGENCY_WAL_CANONICAL_REPLAY_UNPROVABLE")
+            updated = dict(
+                header, state="REPLAYED", replay_offset=offset,
+                replay_length=header["length"], replay_sha256=header["row_sha256"],
+                replay_receipt_sha256=hashlib.sha256(receipt_raw).hexdigest(),
+            )
+            self._write_header(hf, int(header["slot"]), updated)
+            headers[int(header["slot"])] = updated
+            controls, _ = self._controls()
+            alarms = [alarm for control in controls for alarm in control.get("alarms", [])]
+            self._publish_control(headers, alarms)
+            return {**updated, "duplicate": False}
+
     def acknowledge(self, generation: str, proof: dict[str, Any]):
-        del generation, proof
-        raise RuntimeError("EMERGENCY_WAL_ACK_BRIDGE_UNAVAILABLE")
+        del proof
+        ack_root = (self.root.parent / "emergency_wal_release_acks").resolve()
+        return self.release_from_persisted_ack(
+            ack_root / f"{generation}.json", generation=generation,
+        )
+
+    def release_oldest_if_acknowledged(self) -> dict[str, Any]:
+        record = self.oldest_record()
+        if record is None:
+            return {"released": False, "empty": True}
+        if record.get("state") != "REPLAYED":
+            return {"released": False, "reason": "OLDEST_NOT_REPLAYED"}
+        ack = self.root.parent / "emergency_wal_release_acks" / f'{record["generation"]}.json'
+        if not ack.exists():
+            return {"released": False, "reason": "ACK_MISSING"}
+        return self.release_from_persisted_ack(ack, generation=record["generation"])
+
+    def release_from_persisted_ack(
+        self, ack_path: str | Path, *, generation: str,
+    ) -> dict[str, Any]:
+        """Release one oldest replayed extent from a server-persisted ACK.
+
+        The ACK path is fixed under the volume's V3 receipt namespace.  It is
+        expected to be published only by the authenticated lifecycle cleanup
+        bridge after bundle verification and two lease snapshots.
+        """
+        expected_root = (self.root.parent / "emergency_wal_release_acks").resolve()
+        try: candidate = Path(ack_path).resolve(strict=True)
+        except OSError as exc: raise RuntimeError("EMERGENCY_WAL_ACK_MISSING") from exc
+        try: candidate.relative_to(expected_root)
+        except ValueError as exc: raise RuntimeError("EMERGENCY_WAL_ACK_PATH_INVALID") from exc
+        if candidate != expected_root / f"{generation}.json":
+            raise RuntimeError("EMERGENCY_WAL_ACK_PATH_INVALID")
+        raw = candidate.read_bytes()
+        try: proof = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc: raise RuntimeError("EMERGENCY_WAL_ACK_INVALID") from exc
+        supplied = str(proof.get("binding_sha256") or "")
+        material = dict(proof); material.pop("binding_sha256", None)
+        actual = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        before, after = proof.get("lease_snapshot_before"), proof.get("lease_snapshot_after")
+        leases_clear = lambda value: isinstance(value, dict) and set(value) == {"runtime", "sync", "analyzer", "lifecycle_worker"} and all(value[key] == [] for key in value)
+        required_hashes = (
+            "row_sha256", "manifest_sha256", "replay_receipt_sha256",
+            "cleanup_transaction_sha256", "lifecycle_ack_sha256", "config_signature",
+        )
+        valid = (
+            proof.get("schema") == "emergency_wal_lifecycle_release_ack_v1"
+            and supplied == actual and re.fullmatch(r"[0-9a-f]{64}", supplied)
+            and proof.get("source_cleanup_authorized") is True
+            and proof.get("generation") == generation
+            and proof.get("identity") == self.identity
+            and leases_clear(before) and leases_clear(after)
+            and all(re.fullmatch(r"[0-9a-f]{64}", str(proof.get(key) or "")) for key in required_hashes)
+            and re.fullmatch(r"lifecycle-[0-9a-f]{64}", str(proof.get("bundle_id") or ""))
+            and isinstance(proof.get("lifecycle_id"), str) and bool(proof["lifecycle_id"])
+            and proof.get("ledger") in {"lifecycle", "execution", "order_intent", "order_schedule"}
+            and self._valid_record_identity(proof.get("ledger"), proof.get("record_id"))
+        )
+        if not valid: raise RuntimeError("EMERGENCY_WAL_ACK_INVALID")
+        with _cross_process_lock(self.lock_path, timeout=self.lock_timeout), self.header_path.open("r+b") as hf, self.data_path.open("rb") as data:
+            headers = self._read_validate_headers_or_alarm(hf); self._validate_all_extents(data, headers)
+            occupied = sorted((row for row in headers if row), key=lambda row: int(row["sequence"]))
+            if not occupied or occupied[0]["generation"] != generation:
+                raise RuntimeError("EMERGENCY_WAL_ACK_STALE_OR_OUT_OF_ORDER")
+            header = occupied[0]
+            if header["state"] != "REPLAYED": raise RuntimeError("EMERGENCY_WAL_ACK_BEFORE_REPLAY")
+            exact = {
+                "ledger": header["ledger"], "record_id": header["record_id"],
+                "row_sha256": header["row_sha256"],
+                "replay_receipt_sha256": header["replay_receipt_sha256"],
+            }
+            if any(proof.get(key) != value for key, value in exact.items()):
+                raise RuntimeError("EMERGENCY_WAL_ACK_BINDING_MISMATCH")
+            slot = int(header["slot"]); self._write_header(hf, slot, None); headers[slot] = None
+            controls, _ = self._controls(); alarms = [alarm for control in controls for alarm in control.get("alarms", [])]
+            self._publish_control(headers, alarms)
+            return {"released": True, "generation": generation, "slot": slot}
 
     def reset_alarm(self, proof: dict[str, Any]):
         del proof

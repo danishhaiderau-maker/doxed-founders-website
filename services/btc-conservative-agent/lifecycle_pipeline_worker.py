@@ -22,6 +22,7 @@ from lifecycle_pipeline import (
     LEDGER_NAMES,
     process_incremental_lifecycle_pipeline,
 )
+from research_v3_store import V3EvidenceStore
 
 
 REQUEST_SCHEMA = "lifecycle_pipeline_worker_request_v1"
@@ -33,7 +34,7 @@ _FIELDS = frozenset({
     "schema", "nonce", "data_root", "work_root", "source_revision",
     "launched_unix", "now", "max_lifecycles", "max_scan_bytes",
     "max_scan_rows", "max_lifecycle_rows", "max_lifecycle_bytes",
-    "max_runtime_sec", "pressure_mode", "emergency_closure_mode",
+    "max_runtime_sec", "pressure_mode", "emergency_closure_mode", "epoch_id",
 })
 _SENSITIVE = ("secret", "token", "password", "credential", "api_key", "private_key")
 MAX_ERROR_CLASS_LENGTH = 80
@@ -159,12 +160,19 @@ def _load(request_path: Path, result_path: Path, nonce: str) -> dict[str, Any]:
         raise ValueError("EMERGENCY_CLOSURE_MODE_INVALID")
     if emergency_closure and not pressure:
         raise ValueError("EMERGENCY_CLOSURE_REQUIRES_PRESSURE_MODE")
+    epoch_id = payload.get("epoch_id")
+    if epoch_id is not None and (
+        not isinstance(epoch_id, str)
+        or not re.fullmatch(r"epoch-[A-Za-z0-9._-]+", epoch_id)
+    ):
+        raise ValueError("EPOCH_ID_INVALID")
     payload.update({
         "_data_root": data_root,
         "_now": now,
         "_runtime": runtime,
         "_pressure": pressure,
         "_emergency_closure": emergency_closure,
+        "_epoch_id": epoch_id,
         "_max_lifecycles": _bounded_int(payload, "max_lifecycles", DEFAULT_MAX_LIFECYCLES, MAX_LIFECYCLES),
         "_max_scan_bytes": _bounded_int(payload, "max_scan_bytes", 8 * 1024 * 1024, MAX_SCAN_BYTES),
         "_max_scan_rows": _bounded_int(payload, "max_scan_rows", 10_000, MAX_SCAN_ROWS),
@@ -188,6 +196,7 @@ def create_request(
     work_root: str | Path,
     *,
     source_revision: str,
+    epoch_id: str | None = None,
     now: float | None = None,
     pressure_mode: bool = False,
     emergency_closure_mode: bool = False,
@@ -219,6 +228,7 @@ def create_request(
         "data_root": str(data),
         "work_root": str(work),
         "source_revision": str(source_revision or ""),
+        "epoch_id": epoch_id,
         "launched_unix": time.time(),
         "now": now,
         "max_lifecycles": max_lifecycles,
@@ -335,6 +345,11 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
         request = _load(request_path, result_path, nonce)
         started = time.time()
         deadline = time.monotonic() + request["_runtime"]
+        emergency_wal = None
+        if request.get("_epoch_id"):
+            emergency_wal = V3EvidenceStore(
+                request["_data_root"], epoch_id=request["_epoch_id"],
+            ).replay_one_emergency_wal_record()
         pipeline = process_incremental_lifecycle_pipeline(
             request["_data_root"], now=request["_now"],
             max_lifecycles=request["_max_lifecycles"],
@@ -362,6 +377,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "request_sha256": request["_request_sha256"],
             "pipeline": pipeline,
+            "emergency_wal": emergency_wal,
             "hard_runtime_result_deadline_enforced": True,
             "source_cleanup_authorized": False,
         }

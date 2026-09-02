@@ -51,6 +51,7 @@ from lifecycle_cleanup_transaction import (
     PurgeTransaction,
     verify_bundle as verify_lifecycle_cleanup_bundle,
 )
+from emergency_evidence_wal import EmergencyEvidenceWal
 from position_registry import (
     PositionCloseClaimScope,
     finalize_position_close,
@@ -37958,6 +37959,7 @@ def _start_lifecycle_pipeline_runtime() -> bool:
         started = runtime_module.start(
             _data_sync_runtime_root(),
             source_revision=revision,
+            epoch_id=_collector_v22_epoch_id(),
             pressure_probe=_lifecycle_pipeline_pressure_probe,
             overlap_probe=_lifecycle_pipeline_overlap_probe,
         )
@@ -40225,6 +40227,7 @@ def _data_sync_persist_lifecycle_ack(receipt: dict, eligibility: dict) -> Path:
     if target.exists():
         existing = json.loads(target.read_text(encoding="utf-8"))
         if existing.get("receipt") == receipt:
+            _data_sync_persist_lifecycle_ack_index(receipt, target)
             return target
         raise ValueError("conflicting lifecycle acknowledgement already exists")
     payload = {
@@ -40252,12 +40255,103 @@ def _data_sync_persist_lifecycle_ack(receipt: dict, eligibility: dict) -> Path:
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+        _data_sync_persist_lifecycle_ack_index(receipt, target)
         return target
     finally:
         try:
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _data_sync_lifecycle_ack_index_path(lifecycle_id: object) -> Path:
+    value = str(lifecycle_id or "")
+    if not value or len(value.encode("utf-8")) > 4096:
+        raise ValueError("invalid lifecycle acknowledgement index identity")
+    lexical_root = _data_sync_volume_root() / "v3" / "lifecycle_cleanup_ack_index"
+    if lexical_root.is_symlink():
+        raise ValueError("lifecycle acknowledgement index root must not be linked")
+    root = lexical_root.resolve()
+    root.relative_to(_data_sync_volume_root().resolve())
+    root.mkdir(parents=True, exist_ok=True)
+    lexical_target = root / f"{hashlib.sha256(value.encode('utf-8')).hexdigest()}.json"
+    if lexical_target.is_symlink():
+        raise ValueError("lifecycle acknowledgement index must not be linked")
+    target = lexical_target.resolve()
+    target.relative_to(root)
+    return target
+
+
+def _data_sync_persist_lifecycle_ack_index(receipt: dict, ack_path: Path) -> Path:
+    """Publish an immutable O(1) lifecycle-to-ACK pointer for restart recovery."""
+    lifecycle_id = str(receipt.get("lifecycle_id") or "")
+    bundle_id = str(receipt.get("bundle_id") or "")
+    target = _data_sync_lifecycle_ack_index_path(lifecycle_id)
+    ack = ack_path.resolve(strict=True)
+    if ack_path.is_symlink():
+        raise ValueError("lifecycle acknowledgement must not be linked")
+    ack.relative_to((_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks").resolve())
+    material = {
+        "schema": "lifecycle_bundle_ack_index_v1",
+        "lifecycle_id": lifecycle_id,
+        "bundle_id": bundle_id,
+        "ack_path": ack.relative_to(_data_sync_volume_root().resolve()).as_posix(),
+        "ack_sha256": hashlib.sha256(ack.read_bytes()).hexdigest(),
+    }
+    material["binding_sha256"] = hashlib.sha256(json.dumps(
+        material, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    encoded = json.dumps(material, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(encoded); handle.flush(); os.fsync(handle.fileno())
+        try:
+            os.link(temporary, target)
+            if os.name != "nt":
+                directory_fd = os.open(str(target.parent), os.O_RDONLY)
+                try: os.fsync(directory_fd)
+                finally: os.close(directory_fd)
+        except FileExistsError:
+            if target.read_bytes() != encoded:
+                raise ValueError("conflicting lifecycle acknowledgement index")
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def _data_sync_resolve_lifecycle_ack_index(lifecycle_id: object) -> tuple[Path, dict]:
+    """Resolve and self-validate exactly one immutable ACK without directory scans."""
+    target = _data_sync_lifecycle_ack_index_path(lifecycle_id)
+    raw = target.read_bytes()
+    row = json.loads(raw.decode("utf-8"))
+    supplied = str(row.get("binding_sha256") or "")
+    material = dict(row); material.pop("binding_sha256", None)
+    expected = hashlib.sha256(json.dumps(
+        material, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    if (
+        row.get("schema") != "lifecycle_bundle_ack_index_v1"
+        or row.get("lifecycle_id") != str(lifecycle_id or "")
+        or not hmac.compare_digest(supplied, expected)
+        or not re.fullmatch(r"[0-9a-f]{64}", str(row.get("ack_sha256") or ""))
+    ):
+        raise ValueError("lifecycle acknowledgement index invalid")
+    relative_ack = str(row.get("ack_path") or "").replace("\\", "/").strip("/")
+    if not relative_ack or relative_ack.startswith(".") or ".." in relative_ack.split("/"):
+        raise ValueError("lifecycle acknowledgement index path invalid")
+    ack = (_data_sync_volume_root() / relative_ack).resolve(strict=True)
+    ack.relative_to((_data_sync_volume_root() / "v3" / "lifecycle_cleanup_acks").resolve())
+    expected_ack = _data_sync_lifecycle_ack_path(row.get("bundle_id"))
+    if ack != expected_ack or not hmac.compare_digest(
+        hashlib.sha256(ack.read_bytes()).hexdigest(), row["ack_sha256"],
+    ):
+        raise ValueError("lifecycle acknowledgement index binding mismatch")
+    persisted = json.loads(ack.read_text(encoding="utf-8"))
+    receipt = persisted.get("receipt") if isinstance(persisted, dict) else None
+    if not isinstance(receipt, dict) or receipt.get("lifecycle_id") != str(lifecycle_id or ""):
+        raise ValueError("lifecycle acknowledgement index receipt mismatch")
+    return ack, receipt
 
 
 def _data_sync_iso8601_utc(value: object) -> str | None:
@@ -41470,7 +41564,7 @@ def api_data_sync_ack():
 def _data_sync_validate_lifecycle_ack_bundle(receipt: dict) -> dict:
     """Bind a laptop ACK to the exact immutable bundle still present on Fly."""
     relative = str(receipt.get("bundle_manifest_path") or "").strip()
-    manifest_path = _data_sync_resolve_relpath(relative)
+    manifest_path = _data_sync_resolve_lifecycle_bundle_manifest(relative)
     if (
         manifest_path.name != "manifest.json"
         or manifest_path.parent.name != str(receipt.get("bundle_id") or "")
@@ -41526,6 +41620,19 @@ def _data_sync_validate_lifecycle_ack_bundle(receipt: dict) -> dict:
         ):
             raise ValueError(f"lifecycle bundle file integrity mismatch: {relative_file}")
     return manifest
+
+
+def _data_sync_resolve_lifecycle_bundle_manifest(raw_rel: object) -> Path:
+    """Resolve only a manifest in the volume lifecycle-bundle namespace."""
+    relative = str(raw_rel or "").replace("\\", "/").strip("/")
+    if not relative or relative.startswith(".") or ".." in relative.split("/"):
+        raise ValueError("invalid lifecycle bundle manifest path")
+    root = (_data_sync_volume_root() / "v3" / "lifecycle_bundles").resolve()
+    candidate = (_data_sync_volume_root() / relative).resolve(strict=True)
+    candidate.relative_to(root)
+    if candidate.name != "manifest.json" or candidate.is_symlink() or not candidate.is_file():
+        raise ValueError("invalid lifecycle bundle manifest path")
+    return candidate
 
 
 @app.route('/api/data-sync/lifecycle-ack', methods=['POST'])
@@ -41620,7 +41727,7 @@ def _data_sync_lifecycle_cleanup_active_references() -> dict:
     worker = _LIFECYCLE_PIPELINE_RUNTIME
     if worker is not None:
         try:
-            if worker.status().get("running"):
+            if worker.status().get("active"):
                 lifecycle_worker.append("LIFECYCLE_PIPELINE_RUNTIME")
         except BaseException:
             lifecycle_worker.append("LIFECYCLE_PIPELINE_STATUS_UNKNOWN")
@@ -41628,6 +41735,100 @@ def _data_sync_lifecycle_cleanup_active_references() -> dict:
         "runtime": runtime, "sync": sync, "analyzer": analyzer,
         "lifecycle_worker": lifecycle_worker,
     }
+
+
+def _data_sync_release_one_replayed_wal_extent(
+    receipt: dict, proof: dict, cleanup_result: dict,
+    lease_snapshot_before: dict, lease_snapshot_after: dict,
+) -> dict:
+    """Bind one replayed reserve row to a committed lifecycle transfer proof."""
+    empty = {"runtime": [], "sync": [], "analyzer": [], "lifecycle_worker": []}
+    if (
+        cleanup_result.get("source_cleanup_authorized") is not True
+        or lease_snapshot_before != empty or lease_snapshot_after != empty
+    ):
+        raise ValueError("emergency WAL release lease or cleanup authorization missing")
+    volume = _data_sync_volume_root().resolve()
+    current = _data_sync_lifecycle_cleanup_current_identity()
+    identity = {
+        "epoch_id": current["collection_epoch_id"],
+        "source_revision": str(receipt.get("source_git_rev") or ""),
+        "deployed_revision": str(receipt.get("deployed_git_rev") or ""),
+        "tile_config_signature": current["tile_registry_signature"],
+    }
+    wal = EmergencyEvidenceWal(
+        volume / "v3" / "emergency_evidence_wal_v2", identity=identity,
+    )
+    record = wal.oldest_record()
+    if record is None or record.get("state") != "REPLAYED":
+        raise ValueError("no oldest replayed emergency WAL row")
+    lifecycle_id = "|".join(str(value or "") for value in (
+        json.loads(record["payload"].decode("utf-8")).get("episode_id"),
+        json.loads(record["payload"].decode("utf-8")).get("policy_signature"),
+        json.loads(record["payload"].decode("utf-8")).get("research_lane"),
+    ))
+    if lifecycle_id != str(receipt.get("lifecycle_id") or ""):
+        raise ValueError("emergency WAL lifecycle acknowledgement mismatch")
+    quarantine = (volume / str(cleanup_result.get("quarantine") or "")).resolve(strict=True)
+    quarantine.relative_to((volume / "v3" / "lifecycle_cleanup_quarantine").resolve())
+    events = quarantine / "events.jsonl"
+    matched, scanned = False, 0
+    with events.open("rb") as handle:
+        while scanned <= 64 * 1024 * 1024:
+            line = handle.readline(8 * 1024 * 1024 + 1)
+            if not line: break
+            scanned += len(line)
+            if len(line) > 8 * 1024 * 1024 or not line.endswith(b"\n"):
+                raise ValueError("emergency WAL acknowledged bundle row invalid")
+            if hashlib.sha256(line).hexdigest() == record["row_sha256"]:
+                matched = True; break
+    if not matched:
+        raise ValueError("emergency WAL row absent from acknowledged lifecycle bundle")
+    tx_dir = volume / "v3" / "lifecycle_cleanup_transactions" / hashlib.sha256(
+        str(receipt["bundle_id"]).encode("utf-8")
+    ).hexdigest()[:24]
+    committed = tx_dir / "COMMITTED.json"
+    committed_raw = committed.read_bytes()
+    committed_row = json.loads(committed_raw.decode("utf-8"))
+    if committed_row.get("state") != "COMMITTED" or committed_row.get("bundle_id") != receipt.get("bundle_id"):
+        raise ValueError("emergency WAL cleanup transaction is not committed")
+    persisted_lifecycle_ack = _data_sync_lifecycle_ack_path(receipt["bundle_id"]).read_bytes()
+    material = {
+        "schema": "emergency_wal_lifecycle_release_ack_v1",
+        "source_cleanup_authorized": True,
+        "generation": record["generation"], "identity": identity,
+        "ledger": record["ledger"], "record_id": record["record_id"],
+        "row_sha256": record["row_sha256"],
+        "replay_receipt_sha256": record["replay_receipt_sha256"],
+        "manifest_sha256": str(receipt.get("manifest_sha256") or ""),
+        "cleanup_transaction_sha256": hashlib.sha256(committed_raw).hexdigest(),
+        "lifecycle_ack_sha256": hashlib.sha256(persisted_lifecycle_ack).hexdigest(),
+        "config_signature": current["config_signature"],
+        "bundle_id": receipt["bundle_id"],
+        "lifecycle_id": receipt["lifecycle_id"],
+        "lease_snapshot_before": lease_snapshot_before,
+        "lease_snapshot_after": lease_snapshot_after,
+    }
+    material["binding_sha256"] = hashlib.sha256(json.dumps(
+        material, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+    ack_root = volume / "v3" / "emergency_wal_release_acks"; ack_root.mkdir(parents=True, exist_ok=True)
+    target = ack_root / f'{record["generation"]}.json'
+    encoded = json.dumps(material, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(encoded); handle.flush(); os.fsync(handle.fileno())
+        os.link(temporary, target)
+        if os.name != "nt":
+            directory_fd = os.open(str(target.parent), os.O_RDONLY)
+            try: os.fsync(directory_fd)
+            finally: os.close(directory_fd)
+    except FileExistsError:
+        if target.read_bytes() != encoded: raise ValueError("conflicting emergency WAL release acknowledgement")
+    finally:
+        temporary.unlink(missing_ok=True)
+    return wal.acknowledge(record["generation"], {})
 
 
 @app.route('/api/data-sync/lifecycle-cleanup/prepare', methods=['POST'])
@@ -41639,8 +41840,23 @@ def api_data_sync_lifecycle_cleanup_prepare():
     key_id = str(body.get("laptop_attestation", {}).get("key_id") or "")
     secret = os.getenv("LIFECYCLE_LAPTOP_ATTESTATION_KEY", "").encode("utf-8")
     keys = {key_id: secret} if key_id and secret else {}
+    runtime_module = _LIFECYCLE_PIPELINE_RUNTIME
+    cleanup_lease_acquired = False
     try:
-        manifest_path = _data_sync_resolve_relpath(body.get("bundle_manifest_path"))
+        if runtime_module is not None:
+            cleanup_lease_acquired = bool(
+                runtime_module.acquire_cleanup_lease(timeout=0.0)
+            )
+            if not cleanup_lease_acquired:
+                raise LifecycleCleanupRejected(["ACTIVE_LIFECYCLE_WORKER_REFERENCE"])
+        manifest_path = _data_sync_resolve_lifecycle_bundle_manifest(
+            body.get("bundle_manifest_path")
+        )
+        _persisted_ack_path, persisted_receipt = (
+            _data_sync_resolve_lifecycle_ack_index(body.get("lifecycle_id"))
+        )
+        if persisted_receipt != body:
+            raise LifecycleCleanupRejected(["PERSISTED_LIFECYCLE_ACK_MISMATCH"])
         def revalidate_cleanup_proof():
             return verify_lifecycle_cleanup_bundle(
                 manifest_path.parent, body,
@@ -41648,6 +41864,7 @@ def api_data_sync_lifecycle_cleanup_prepare():
                 active_references=_data_sync_lifecycle_cleanup_active_references(),
                 attestation_keys=keys,
             )
+        lease_snapshot_before = _data_sync_lifecycle_cleanup_active_references()
         proof = revalidate_cleanup_proof()
         transaction = CleanupTransaction(
             _data_sync_volume_root(),
@@ -41656,9 +41873,20 @@ def api_data_sync_lifecycle_cleanup_prepare():
         result = transaction.execute(
             manifest_path.parent, body, proof, revalidate=revalidate_cleanup_proof,
         )
-    except (LifecycleCleanupRejected, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        if (
+            result.get("source_cleanup_authorized") is True
+            and (_data_sync_volume_root() / "v3" / "emergency_evidence_wal_v2").exists()
+        ):
+            lease_snapshot_after = _data_sync_lifecycle_cleanup_active_references()
+            result["emergency_wal_release"] = _data_sync_release_one_replayed_wal_extent(
+                body, proof, result, lease_snapshot_before, lease_snapshot_after,
+            )
+    except (LifecycleCleanupRejected, OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         reasons = getattr(exc, "reasons", [type(exc).__name__])
         return jsonify({"ok": False, "status": "INELIGIBLE_SOURCE_RETAINED", "reasons": reasons, "source_cleanup_authorized": False}), 409
+    finally:
+        if cleanup_lease_acquired:
+            runtime_module.release_cleanup_lease()
     return jsonify({"ok": True, **result})
 
 
@@ -41669,9 +41897,62 @@ def _reconcile_lifecycle_cleanup_transactions() -> list:
         enabled=os.getenv("LIFECYCLE_CLEANUP_ENABLED", "false").lower() == "true",
     )
     results = transaction.reconcile()
+    wal_recovery = _reconcile_one_emergency_wal_release()
+    if wal_recovery is not None:
+        results.append(wal_recovery)
     if results:
         logger.warning("lifecycle cleanup restart reconciliation results=%s", results)
     return results
+
+
+def _reconcile_one_emergency_wal_release() -> dict | None:
+    """Recover the commit-to-release-ACK crash window for the oldest row."""
+    volume = _data_sync_volume_root().resolve()
+    wal_root = volume / "v3" / "emergency_evidence_wal_v2"
+    if not wal_root.exists(): return None
+    current = _data_sync_lifecycle_cleanup_current_identity()
+    identity = {
+        "epoch_id": current["collection_epoch_id"],
+        "source_revision": current["source_git_rev"],
+        "deployed_revision": current["deployed_git_rev"],
+        "tile_config_signature": current["tile_registry_signature"],
+    }
+    try:
+        wal = EmergencyEvidenceWal(wal_root, identity=identity)
+        record = wal.oldest_record()
+        if record is None or record.get("state") != "REPLAYED": return None
+        existing = wal.release_oldest_if_acknowledged()
+        if existing.get("released") is True:
+            return {"status": "EMERGENCY_WAL_RELEASE_ACK_RECOVERED", **existing}
+        row = json.loads(record["payload"].decode("utf-8"))
+        lifecycle_id = "|".join(str(row.get(key) or "") for key in (
+            "episode_id", "policy_signature", "research_lane",
+        ))
+        _ack_path, receipt = _data_sync_resolve_lifecycle_ack_index(lifecycle_id)
+        bundle_id = str(receipt.get("bundle_id") or "")
+        quarantine = volume / "v3" / "lifecycle_cleanup_quarantine" / bundle_id
+        tx = volume / "v3" / "lifecycle_cleanup_transactions" / hashlib.sha256(
+            bundle_id.encode("utf-8")
+        ).hexdigest()[:24] / "COMMITTED.json"
+        if not quarantine.is_dir() or not tx.is_file():
+            return {"status": "EMERGENCY_WAL_RELEASE_ACK_PENDING", "released": False}
+        key_id = str((receipt.get("laptop_attestation") or {}).get("key_id") or "")
+        secret = os.getenv("LIFECYCLE_LAPTOP_ATTESTATION_KEY", "").encode("utf-8")
+        keys = {key_id: secret} if key_id and secret else {}
+        before = _data_sync_lifecycle_cleanup_active_references()
+        proof = verify_lifecycle_cleanup_bundle(
+            quarantine, receipt, current_identity=current,
+            active_references=before, attestation_keys=keys,
+        )
+        after = _data_sync_lifecycle_cleanup_active_references()
+        released = _data_sync_release_one_replayed_wal_extent(
+            receipt, proof,
+            {"source_cleanup_authorized": True, "quarantine": quarantine.relative_to(volume).as_posix()},
+            before, after,
+        )
+        return {"status": "EMERGENCY_WAL_COMMIT_WINDOW_RECOVERED", **released}
+    except (OSError, TypeError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        return {"status": "EMERGENCY_WAL_RELEASE_RECOVERY_BLOCKED", "released": False, "reason": str(exc)[:240]}
 
 
 _LIFECYCLE_PURGE_LOCK = threading.Lock()

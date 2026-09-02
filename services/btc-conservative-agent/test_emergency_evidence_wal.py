@@ -163,13 +163,93 @@ def test_defer_repairs_single_control_before_mutating_header(tmp_path):
     assert invalid == 0 and len(controls) == 2
     assert "EMERGENCY_WAL_CONTROL_COPY_CORRUPT" in wal.status()["alarms"]
 
-def test_ack_and_alarm_reset_are_hard_noop_without_concrete_bridge(tmp_path):
+def test_ack_is_hard_noop_without_concrete_persisted_bridge_receipt(tmp_path):
     wal = EmergencyEvidenceWal(tmp_path, identity=IDENTITY, extents=1)
     generation = wal.defer(ledger="execution", record_id="terminal:1", payload=b"row")["generation"]
     before = wal.header_path.read_bytes()
-    with pytest.raises(RuntimeError, match="ACK_BRIDGE_UNAVAILABLE"): wal.acknowledge(generation, {"authenticated":True})
+    with pytest.raises(RuntimeError, match="ACK_MISSING"): wal.acknowledge(generation, {"authenticated":True})
     with pytest.raises(RuntimeError, match="RESET_BRIDGE_UNAVAILABLE"): wal.reset_alarm({"authenticated":True})
     assert wal.header_path.read_bytes() == before and wal.status()["deferred_count"] == 1
+
+def test_oldest_record_is_verified_and_in_durable_admission_order(tmp_path):
+    wal = EmergencyEvidenceWal(tmp_path, identity=IDENTITY, extents=3)
+    first = wal.defer(ledger="lifecycle", record_id="terminal:oldest", payload=b"one")
+    wal.defer(ledger="execution", record_id="terminal:newer", payload=b"two")
+    oldest = wal.oldest_record()
+    assert oldest["generation"] == first["generation"]
+    assert oldest["payload"] == b"one"
+    assert oldest["sequence"] < max(row["sequence"] for row in wal.status()["records"])
+
+def test_mark_replayed_requires_exact_canonical_receipt_and_oldest_generation(tmp_path):
+    wal_root = tmp_path / "v3" / "emergency_evidence_wal_v2"
+    wal = EmergencyEvidenceWal(wal_root, identity=IDENTITY, extents=2)
+    payload = b'{"record_id":"terminal:oldest"}\n'
+    first = wal.defer(ledger="lifecycle", record_id="terminal:oldest", payload=payload)
+    second = wal.defer(ledger="execution", record_id="terminal:newer", payload=b"newer\n")
+    ledgers = tmp_path / "v3" / "ledgers"; ledgers.mkdir(parents=True)
+    receipts = tmp_path / "v3" / "receipts"; receipts.mkdir(parents=True)
+    ledger = ledgers / "lifecycle.jsonl"; ledger.write_bytes(payload)
+    receipt = receipts / "oldest.json"
+    receipt.write_text(json.dumps({
+        "schema": "emergency_record_idempotency_v1", "state": "COMMITTED",
+        "ledger": "lifecycle", "record_id": "terminal:oldest",
+        "row_sha256": hashlib.sha256(payload).hexdigest(), "offset": 0,
+        "length": len(payload), "identity": IDENTITY,
+    }), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="OUT_OF_ORDER"):
+        wal.mark_replayed(second["generation"], canonical_ledger=ledger, canonical_receipt=receipt)
+    replayed = wal.mark_replayed(first["generation"], canonical_ledger=ledger, canonical_receipt=receipt)
+    assert replayed["state"] == "REPLAYED" and replayed["duplicate"] is False
+    assert wal.mark_replayed(first["generation"], canonical_ledger=ledger, canonical_receipt=receipt)["duplicate"] is True
+    assert EmergencyEvidenceWal(wal_root, identity=IDENTITY, extents=2).oldest_record()["state"] == "REPLAYED"
+
+def test_release_requires_exact_persisted_lifecycle_ack_and_two_clear_leases(tmp_path):
+    wal_root = tmp_path / "v3" / "emergency_evidence_wal_v2"
+    wal = EmergencyEvidenceWal(wal_root, identity=IDENTITY, extents=1)
+    payload = b'{"record_id":"terminal:release"}\n'
+    deferred = wal.defer(ledger="lifecycle", record_id="terminal:release", payload=payload)
+    ledgers = tmp_path / "v3" / "ledgers"; ledgers.mkdir(parents=True)
+    receipts = tmp_path / "v3" / "receipts"; receipts.mkdir(parents=True)
+    ledger = ledgers / "lifecycle.jsonl"; ledger.write_bytes(payload)
+    receipt_path = receipts / "release.json"
+    receipt_path.write_text(json.dumps({
+        "schema": "emergency_record_idempotency_v1", "state": "COMMITTED",
+        "ledger": "lifecycle", "record_id": "terminal:release",
+        "row_sha256": hashlib.sha256(payload).hexdigest(), "offset": 0,
+        "length": len(payload), "identity": IDENTITY,
+    }), encoding="utf-8")
+    replayed = wal.mark_replayed(deferred["generation"], canonical_ledger=ledger, canonical_receipt=receipt_path)
+    clear = {key: [] for key in ("runtime", "sync", "analyzer", "lifecycle_worker")}
+    proof = {
+        "schema": "emergency_wal_lifecycle_release_ack_v1",
+        "source_cleanup_authorized": True, "generation": deferred["generation"],
+        "identity": IDENTITY, "ledger": "lifecycle", "record_id": "terminal:release",
+        "row_sha256": deferred["row_sha256"],
+        "replay_receipt_sha256": replayed["replay_receipt_sha256"],
+        "manifest_sha256": "c" * 64, "cleanup_transaction_sha256": "d" * 64,
+        "lifecycle_ack_sha256": "f" * 64, "config_signature": "1" * 64,
+        "bundle_id": "lifecycle-" + "e" * 64,
+        "lifecycle_id": "episode|policy|lane",
+        "lease_snapshot_before": clear, "lease_snapshot_after": clear,
+    }
+    proof["binding_sha256"] = hashlib.sha256(json.dumps(proof, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    ack_dir = tmp_path / "v3" / "emergency_wal_release_acks"; ack_dir.mkdir()
+    ack = ack_dir / f'{deferred["generation"]}.json'; ack.write_text(json.dumps(proof), encoding="utf-8")
+    assert wal.acknowledge(deferred["generation"], {})["released"] is True
+    assert wal.status()["free_extents"] == 1
+    with pytest.raises(RuntimeError, match="STALE_OR_OUT_OF_ORDER"):
+        wal.acknowledge(deferred["generation"], {})
+
+def test_release_rejects_active_lease_and_forged_binding(tmp_path):
+    ack_dir = tmp_path / "v3" / "emergency_wal_release_acks"; ack_dir.mkdir(parents=True)
+    wal = EmergencyEvidenceWal(tmp_path / "v3" / "emergency_evidence_wal_v2", identity=IDENTITY, extents=1)
+    generation = wal.defer(ledger="lifecycle", record_id="terminal:blocked", payload=b"row\n")["generation"]
+    proof = {"schema": "emergency_wal_lifecycle_release_ack_v1", "binding_sha256": "0" * 64}
+    (ack_dir / f"{generation}.json").write_text(json.dumps(proof), encoding="utf-8")
+    before = wal.header_path.read_bytes()
+    with pytest.raises(RuntimeError, match="ACK_INVALID"):
+        wal.acknowledge(generation, {})
+    assert wal.header_path.read_bytes() == before
 
 def test_required_identity_and_rollover_fail_closed(tmp_path):
     for key in IDENTITY:
