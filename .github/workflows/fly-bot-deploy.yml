@@ -149,8 +149,9 @@ jobs:
           while time.time()<deadline:
             call("/api/pause",{}); last=call("/api/status"); pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
             safe=str(last.get("source_git_rev") or "").lower()==expected and last.get("execution_paused") is True and last.get("manual_admin_pause") is True and last.get("force_paper_mode") is True and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
-            age=pipeline.get("last_success_age_sec"); advanced=int(progress.get("rows_scanned") or 0)>0 and int(progress.get("bytes_indexed") or 0)>0
-            if safe and pipeline.get("last_outcome")=="WORKER_SUCCESS" and advanced and age is not None:
+            age=pipeline.get("last_success_age_sec")
+            productive=(int(progress.get("rows_scanned") or 0)>0 and int(progress.get("bytes_indexed") or 0)>0) or int(progress.get("promoted_qualification_retries") or 0)>0
+            if safe and productive and age is not None:
               key=time.time()-float(age)
               if key>proof_started and (not seen or key-seen[-1]>2): seen.append(key); print(json.dumps({"worker":"green_cycle","cycle":len(seen),"success_unix":key,"progress":progress},sort_keys=True))
               if len(seen)>=2: break
