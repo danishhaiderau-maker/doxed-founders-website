@@ -80,6 +80,7 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
         "_data_sync_async_inventory": {"refreshing": False, "worker_active": False},
         "_data_sync_sqlite_snapshot_condition": snapshot_condition,
         "_data_sync_sqlite_snapshot_states": {},
+        "mirror_generation_lease_held": lambda _root: False,
     }
 
 
