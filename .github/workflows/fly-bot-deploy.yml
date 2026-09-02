@@ -154,7 +154,10 @@ jobs:
               key=time.time()-float(age)
               if key>proof_started and (not seen or key-seen[-1]>2): seen.append(key); print(json.dumps({"worker":"green_cycle","cycle":len(seen),"success_unix":key,"progress":progress},sort_keys=True))
               if len(seen)>=2: break
-            if pipeline.get("last_outcome")=="WORKER_FAILED": raise SystemExit("new classified blocker: "+json.dumps(pipeline,sort_keys=True))
+            failure_age=pipeline.get("last_failure_age_sec")
+            failure_unix=(time.time()-float(failure_age)) if failure_age is not None else 0
+            if pipeline.get("last_outcome")=="WORKER_FAILED" and failure_unix>proof_started:
+              raise SystemExit("new classified blocker: "+json.dumps(pipeline,sort_keys=True))
             time.sleep(10)
           if len(seen)<2: raise SystemExit("two advancing successes not proven: "+json.dumps(last or {},sort_keys=True))
           PY
