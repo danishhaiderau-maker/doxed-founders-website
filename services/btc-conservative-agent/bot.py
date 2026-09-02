@@ -38088,6 +38088,21 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         if re.fullmatch(r"[A-Z0-9_.:-]{1,80}", failure_code_raw)
         else "FAILURE_CODE_REDACTED" if failure_code_raw else None
     )
+    failure_ledger_raw = failure.get("ledger")
+    failure_ledger = (
+        failure_ledger_raw
+        if failure_ledger_raw in (
+            "opportunity", "pre_entry_features", "evidence_failure", "decision",
+            "order_intent", "execution", "market_segment", "lifecycle",
+        ) else None
+    )
+    failure_offset_raw = failure.get("byte_offset")
+    failure_offset = (
+        failure_offset_raw
+        if isinstance(failure_offset_raw, int)
+        and not isinstance(failure_offset_raw, bool)
+        and failure_offset_raw >= 0 else None
+    )
     current_error_raw = str(internal.get("last_error_code") or "")
     current_error_code = (
         current_error_raw[:80]
@@ -38112,6 +38127,8 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         "last_error_code": current_error_code or failure_code or failure_class,
         "last_failure_class": failure_class,
         "last_failure_code": failure_code,
+        "last_failure_ledger": failure_ledger,
+        "last_failure_byte_offset": failure_offset,
         "last_failure_age_sec": (
             max(0.0, current - float(last_failure)) if last_failure else None
         ),

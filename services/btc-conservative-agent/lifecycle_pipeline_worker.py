@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from lifecycle_pipeline import (
     MAX_LIFECYCLE_BYTES,
     MAX_LIFECYCLE_ROWS,
     MAX_LIFECYCLES,
+    LEDGER_NAMES,
     process_incremental_lifecycle_pipeline,
 )
 
@@ -35,6 +37,38 @@ _FIELDS = frozenset({
 })
 _SENSITIVE = ("secret", "token", "password", "credential", "api_key", "private_key")
 MAX_ERROR_CLASS_LENGTH = 80
+_CLASSIFIED_FAILURE_CODES = frozenset({
+    "SOURCE_LEDGER_ROTATED", "SOURCE_LEDGER_PREFIX_CHANGED",
+    "SOURCE_LEDGER_TRUNCATED", "TRUNCATED_JSONL_LINE",
+    "INVALID_JSONL_ROW", "NON_OBJECT_JSONL_ROW",
+    "JSONL_RECORD_TOO_LARGE", "SCAN_BYTE_LIMIT_SPLITS_RECORD",
+})
+
+
+def _classified_failure(exc: BaseException) -> dict[str, Any]:
+    error_class = type(exc).__name__[:MAX_ERROR_CLASS_LENGTH]
+    if not error_class.replace("_", "").isalnum():
+        error_class = "Exception"
+    generic = {
+        "error_class": error_class,
+        "error_code": "WORKER_PIPELINE_FAILED",
+    }
+    if not isinstance(exc, ValueError):
+        return generic
+    match = re.fullmatch(
+        r"([A-Z_]+):([A-Za-z0-9_]+)\.jsonl(?::([0-9]+))?", str(exc),
+    )
+    if not match:
+        return generic
+    code, ledger, raw_offset = match.groups()
+    if code not in _CLASSIFIED_FAILURE_CODES or ledger not in LEDGER_NAMES:
+        return generic
+    classified: dict[str, Any] = {
+        "error_class": "ValueError", "error_code": code, "ledger": ledger,
+    }
+    if raw_offset is not None and code in {"INVALID_JSONL_ROW", "NON_OBJECT_JSONL_ROW"}:
+        classified["byte_offset"] = int(raw_offset)
+    return classified
 
 
 def _sensitive(value: Any) -> bool:
@@ -246,15 +280,31 @@ def verify_result(
         raise ValueError("WORKER_RESULT_CLEANUP_INVARIANT_FAILED")
     if payload.get("status") == "FAILED":
         failure = payload.get("failure")
-        if not isinstance(failure, dict) or set(failure) != {"error_class", "error_code"}:
+        if not isinstance(failure, dict) or not {
+            "error_class", "error_code",
+        }.issubset(failure) or set(failure) - {
+            "error_class", "error_code", "ledger", "byte_offset",
+        }:
             raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
         error_class = str(failure.get("error_class") or "")
         if (
             not error_class or len(error_class) > MAX_ERROR_CLASS_LENGTH
             or not error_class.replace("_", "").isalnum()
-            or failure.get("error_code") != "WORKER_PIPELINE_FAILED"
+            or failure.get("error_code") not in (
+                _CLASSIFIED_FAILURE_CODES | {"WORKER_PIPELINE_FAILED"}
+            )
         ):
             raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
+        code = failure["error_code"]
+        if code == "WORKER_PIPELINE_FAILED":
+            if set(failure) != {"error_class", "error_code"}:
+                raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
+        else:
+            if failure.get("error_class") != "ValueError" or failure.get("ledger") not in LEDGER_NAMES:
+                raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
+            offset = failure.get("byte_offset")
+            if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int) or offset < 0):
+                raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
     return payload
 
 
@@ -335,10 +385,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                 "generated_unix": time.time(),
                 "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "request_sha256": request["_request_sha256"],
-                "failure": {
-                    "error_class": error_class,
-                    "error_code": "WORKER_PIPELINE_FAILED",
-                },
+                "failure": _classified_failure(exc),
                 "source_cleanup_authorized": False,
             }
             try:

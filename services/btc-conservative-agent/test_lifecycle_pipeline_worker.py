@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 import lifecycle_pipeline_worker as worker
 
 
@@ -102,6 +104,46 @@ def test_pipeline_exception_writes_sanitized_hash_bound_failure(tmp_path, monkey
     assert receipt["source_cleanup_authorized"] is False
 
 
+@pytest.mark.parametrize("message,expected", [
+    ("SOURCE_LEDGER_ROTATED:opportunity.jsonl", {
+        "error_class": "ValueError", "error_code": "SOURCE_LEDGER_ROTATED",
+        "ledger": "opportunity",
+    }),
+    ("INVALID_JSONL_ROW:lifecycle.jsonl:1406", {
+        "error_class": "ValueError", "error_code": "INVALID_JSONL_ROW",
+        "ledger": "lifecycle", "byte_offset": 1406,
+    }),
+])
+def test_known_lifecycle_failure_is_classified_without_free_form_text(
+    tmp_path, monkeypatch, message, expected,
+):
+    work = tmp_path / "v3" / "lifecycle_worker"; work.mkdir(parents=True)
+    launch = worker.create_request(tmp_path, work, source_revision=REVISION)
+    monkeypatch.setattr(
+        worker, "process_incremental_lifecycle_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError(message)),
+    )
+    assert worker.run(launch["request_path"], launch["result_path"], launch["nonce"]) == 1
+    receipt = worker.verify_result(launch["request_path"], launch["result_path"], launch["nonce"])
+    assert receipt["failure"] == expected
+    assert ".jsonl" not in json.dumps(receipt["failure"])
+
+
+def test_unknown_or_noncanonical_failure_remains_generic(tmp_path, monkeypatch):
+    work = tmp_path / "v3" / "lifecycle_worker"; work.mkdir(parents=True)
+    launch = worker.create_request(tmp_path, work, source_revision=REVISION)
+    secret = "SOURCE_LEDGER_ROTATED:../../secret.jsonl"
+    monkeypatch.setattr(
+        worker, "process_incremental_lifecycle_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError(secret)),
+    )
+    assert worker.run(launch["request_path"], launch["result_path"], launch["nonce"]) == 1
+    raw = launch["result_path"].read_text()
+    assert "secret" not in raw
+    receipt = worker.verify_result(launch["request_path"], launch["result_path"], launch["nonce"])
+    assert receipt["failure"]["error_code"] == "WORKER_PIPELINE_FAILED"
+
+
 def test_failure_receipt_rejects_unbounded_or_message_shaped_diagnostics(tmp_path):
     work = tmp_path / "v3" / "lifecycle_worker"
     work.mkdir(parents=True)
@@ -128,3 +170,23 @@ def test_failure_receipt_rejects_unbounded_or_message_shaped_diagnostics(tmp_pat
         assert str(exc) == "WORKER_FAILURE_RECEIPT_INVALID"
     else:
         raise AssertionError("message-shaped worker diagnostic was accepted")
+
+
+@pytest.mark.parametrize("failure", [
+    {"error_class": "ValueError", "error_code": "SOURCE_LEDGER_ROTATED"},
+    {"error_class": "ValueError", "error_code": "SOURCE_LEDGER_ROTATED", "ledger": "../../secret"},
+    {"error_class": "ValueError", "error_code": "INVALID_JSONL_ROW", "ledger": "lifecycle", "byte_offset": -1},
+    {"error_class": "ValueError", "error_code": "NOT_ALLOWLISTED", "ledger": "lifecycle"},
+])
+def test_failure_receipt_rejects_invalid_classified_schema(tmp_path, failure):
+    work = tmp_path / "v3" / "lifecycle_worker"; work.mkdir(parents=True)
+    launch = worker.create_request(tmp_path, work, source_revision=REVISION)
+    payload = {
+        "schema": worker.RESULT_SCHEMA, "status": "FAILED", "nonce": launch["nonce"],
+        "request_sha256": launch["request_sha256"],
+        "source_cleanup_authorized": False, "failure": failure,
+    }
+    payload["result_sha256"] = worker._result_hash(payload)
+    launch["result_path"].write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="WORKER_FAILURE_RECEIPT_INVALID"):
+        worker.verify_result(launch["request_path"], launch["result_path"], launch["nonce"])

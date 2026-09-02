@@ -152,6 +152,29 @@ def test_corrupt_result_fails_closed_and_backoff_is_bounded(tmp_path, monkeypatc
         assert not list(runtime.work_root.glob("pipeline-result-*.json"))
 
 
+def test_classified_worker_failure_retains_only_canonical_diagnostics(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._record_failure("WORKER_FAILED", "sanitized", worker_failure={
+        "error_class": "ValueError", "error_code": "INVALID_JSONL_ROW",
+        "ledger": "lifecycle", "byte_offset": 1406,
+    })
+    assert runtime.status()["last_worker_failure"] == {
+        "error_class": "ValueError", "error_code": "INVALID_JSONL_ROW",
+        "ledger": "lifecycle", "byte_offset": 1406,
+    }
+
+
+def test_runtime_drops_noncanonical_ledger_and_invalid_offset(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime._record_failure("WORKER_FAILED", "sanitized", worker_failure={
+        "error_class": "ValueError", "error_code": "WORKER_PIPELINE_FAILED",
+        "ledger": "../../secret", "byte_offset": -1,
+    })
+    assert runtime.status()["last_worker_failure"] == {
+        "error_class": "ValueError", "error_code": "WORKER_PIPELINE_FAILED",
+    }
+
+
 def test_worker_failure_receipt_is_retained_as_bounded_status_then_cleaned(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     process = _Process(return_code=1)

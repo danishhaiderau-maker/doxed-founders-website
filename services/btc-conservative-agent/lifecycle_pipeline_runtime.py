@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from lifecycle_pipeline_worker import create_request, verify_result
+from lifecycle_pipeline_worker import LEDGER_NAMES, create_request, verify_result
 
 
 logger = logging.getLogger(__name__)
@@ -293,6 +293,12 @@ class LifecyclePipelineRuntime:
                 "error_class": str(worker_failure.get("error_class") or "")[:80],
                 "error_code": str(worker_failure.get("error_code") or "")[:80],
             }
+            ledger = worker_failure.get("ledger")
+            if isinstance(ledger, str) and ledger in LEDGER_NAMES:
+                retained_worker_failure["ledger"] = ledger
+            offset = worker_failure.get("byte_offset")
+            if isinstance(offset, int) and not isinstance(offset, bool) and offset >= 0:
+                retained_worker_failure["byte_offset"] = offset
         with self._lock:
             failures = int(self._status["failure_count"]) + 1
             backoff = min(MAX_BACKOFF_SEC, MIN_BACKOFF_SEC * (2 ** (failures - 1)))

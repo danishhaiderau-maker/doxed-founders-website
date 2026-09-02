@@ -38,7 +38,8 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
         "last_success_unix": 990, "pressure": False, "emergency": False,
         "last_worker_failure_unix": 980,
         "last_worker_failure": {
-            "error_class": "RuntimeError", "error_code": "WORKER_PIPELINE_FAILED",
+            "error_class": "ValueError", "error_code": "INVALID_JSONL_ROW",
+            "ledger": "lifecycle", "byte_offset": 1406,
         },
         "overlap_code": "ACTIVE_OVERLAP_PATH:/secret/runtime/lease",
         "last_result": {
@@ -66,8 +67,10 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
     assert len(payload["stage_counts"]) <= 32
     assert "unsafe/path/value" not in payload["blocker_counts"]
     assert payload["last_success_age_sec"] == 10
-    assert payload["last_failure_class"] == "RuntimeError"
-    assert payload["last_failure_code"] == "WORKER_PIPELINE_FAILED"
+    assert payload["last_failure_class"] == "ValueError"
+    assert payload["last_failure_code"] == "INVALID_JSONL_ROW"
+    assert payload["last_failure_ledger"] == "lifecycle"
+    assert payload["last_failure_byte_offset"] == 1406
     assert payload["last_failure_age_sec"] == 20
     assert payload["next_run_in_sec"] == 10
     assert payload["overlap_code"] == "OVERLAP_ACTIVE_REDACTED"
@@ -79,12 +82,15 @@ def test_public_status_redacts_unbounded_worker_failure_material(tmp_path):
         "last_worker_failure": {
             "error_class": "RuntimeError /secret/path token=abc",
             "error_code": "BAD CODE user@example.test",
+            "ledger": "../../secret", "byte_offset": "1406/private",
         },
     }
     payload = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)
     assert payload["last_failure_class"] == "FAILURE_CLASS_REDACTED"
     assert payload["last_failure_code"] == "FAILURE_CODE_REDACTED"
     assert payload["last_failure_age_sec"] == 100
+    assert payload["last_failure_ledger"] is None
+    assert payload["last_failure_byte_offset"] is None
     assert "secret" not in repr(payload)
     assert "example" not in repr(payload)
 
