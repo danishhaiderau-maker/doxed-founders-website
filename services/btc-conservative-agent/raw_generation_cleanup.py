@@ -91,6 +91,44 @@ def _write_once(path: Path, value: Mapping[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _verify_quarantine_members(
+    quarantine: Path, declared: Any, expected_bytes: Any,
+) -> int:
+    """Revalidate the exact proof-bound quarantine contents before deletion."""
+    if not isinstance(declared, list) or not declared:
+        raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_PROOF_MISSING"])
+    actual_paths: set[str] = set()
+    exact_bytes = 0
+    for row in declared:
+        relative = str((row or {}).get("path") or "").replace("\\", "/")
+        lexical = quarantine / relative
+        if _has_symlink_component(lexical, quarantine):
+            raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_SYMLINK"])
+        try:
+            member = lexical.resolve(strict=True)
+            member.relative_to(quarantine.resolve())
+        except (OSError, ValueError):
+            raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_UNSAFE_OR_MISSING"])
+        if not member.is_file():
+            raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_INVALID"])
+        size = member.stat().st_size
+        exact_bytes += size
+        actual_paths.add(relative)
+        if size != row.get("size") or not hmac.compare_digest(
+            _digest(member), str(row.get("sha256") or "")
+        ):
+            raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_HASH_OR_SIZE_DRIFT"])
+    on_disk = {
+        path.relative_to(quarantine).as_posix()
+        for path in quarantine.rglob("*") if path.is_file()
+    }
+    if on_disk != actual_paths:
+        raise RawGenerationCleanupRejected(["QUARANTINE_CONTENT_SET_DRIFT"])
+    if exact_bytes != expected_bytes:
+        raise RawGenerationCleanupRejected(["QUARANTINE_BYTE_COUNT_DRIFT"])
+    return exact_bytes
+
+
 def verify_generation(
     source_root: Path,
     manifest: Mapping[str, Any],
@@ -282,32 +320,9 @@ class RawGenerationCleanupTransaction:
             raise RawGenerationCleanupRejected(["COMMITTED_QUARANTINE_REQUIRED"])
         committed = json.loads(committed_path.read_text("utf-8"))
         declared = committed.get("members")
-        if not isinstance(declared, list) or not declared:
-            raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_PROOF_MISSING"])
-        actual_paths: set[str] = set()
-        exact_bytes = 0
-        for row in declared:
-            relative = str((row or {}).get("path") or "").replace("\\", "/")
-            lexical = quarantine / relative
-            if _has_symlink_component(lexical, quarantine):
-                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_SYMLINK"])
-            try:
-                member = lexical.resolve(strict=True)
-                member.relative_to(quarantine.resolve())
-            except (OSError, ValueError):
-                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_UNSAFE_OR_MISSING"])
-            if not member.is_file():
-                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_INVALID"])
-            size = member.stat().st_size
-            exact_bytes += size
-            actual_paths.add(relative)
-            if size != row.get("size") or not hmac.compare_digest(_digest(member), str(row.get("sha256") or "")):
-                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_HASH_OR_SIZE_DRIFT"])
-        on_disk = {path.relative_to(quarantine).as_posix() for path in quarantine.rglob("*") if path.is_file()}
-        if on_disk != actual_paths:
-            raise RawGenerationCleanupRejected(["QUARANTINE_CONTENT_SET_DRIFT"])
-        if exact_bytes != committed.get("source_bytes"):
-            raise RawGenerationCleanupRejected(["QUARANTINE_BYTE_COUNT_DRIFT"])
+        exact_bytes = _verify_quarantine_members(
+            quarantine, declared, committed.get("source_bytes"),
+        )
         if dry_run or not self.enabled:
             return {"status": "DRY_RUN_QUARANTINE_RETAINED" if dry_run else "DISABLED_QUARANTINE_RETAINED",
                     "generation_id": generation_id, "planned_freed_bytes": exact_bytes, "freed_bytes": 0}
@@ -316,7 +331,8 @@ class RawGenerationCleanupTransaction:
                           "generation_id": generation_id,
                           "quarantine": quarantine.relative_to(self.root).as_posix(),
                           "staging": staging.relative_to(self.root).as_posix(),
-                          "exact_freed_bytes": exact_bytes}
+                          "exact_freed_bytes": exact_bytes, "members": declared,
+                          "proof_sha256": committed.get("proof_sha256")}
         _write_once(tx / "PURGE_PREPARED.json", purge_prepared)
         if quarantine.exists() and not staging.exists():
             quarantine.replace(staging)
@@ -347,9 +363,9 @@ class RawGenerationCleanupTransaction:
                 results.append({"generation_id": row["generation_id"],
                                 "status": "PURGE_PREPARED_REQUIRES_EXPLICIT_REPLAY"})
                 continue
-            actual = sum(path.stat().st_size for path in staging.rglob("*") if path.is_file())
-            if actual != row.get("exact_freed_bytes"):
-                raise RawGenerationCleanupRejected(["PURGE_STAGING_BYTE_COUNT_DRIFT"])
+            actual = _verify_quarantine_members(
+                staging, row.get("members"), row.get("exact_freed_bytes"),
+            )
             shutil.rmtree(staging)
             receipt = {"schema": PURGE_SCHEMA, "state": "PURGED",
                        "generation_id": row["generation_id"], "freed_bytes": actual,

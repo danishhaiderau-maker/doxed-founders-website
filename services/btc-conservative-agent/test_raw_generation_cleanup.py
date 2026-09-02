@@ -134,3 +134,36 @@ def test_symlink_member_is_rejected_lexically(tmp_path, monkeypatch):
         verify_generation(source, manifest, ack, current_identity=identity,
                           active_leases={"reader": [], "sync": [], "analyzer": []})
     assert "GENERATION_MEMBER_UNSAFE_OR_MISSING" in caught.value.reasons
+
+
+def _isolate_purge_for_restart(tmp_path):
+    source, manifest, ack, identity = fixture(tmp_path)
+    proof = verify_generation(source, manifest, ack, current_identity=identity,
+                              active_leases={"reader": [], "sync": [], "analyzer": []})
+    tx = RawGenerationCleanupTransaction(tmp_path, enabled=True)
+    tx.quarantine(source, proof, dry_run=False, revalidate=lambda: proof)
+    with pytest.raises(RuntimeError, match="FAILPOINT_AFTER_PURGE_ISOLATION"):
+        tx.purge("V3:1", dry_run=False, failpoint="AFTER_PURGE_ISOLATION")
+    staging = next(tx.quarantine_root.glob(".*.purging"))
+    return tx, staging
+
+
+def test_restart_recovery_rejects_same_size_substitution(tmp_path):
+    tx, staging = _isolate_purge_for_restart(tmp_path)
+    member = staging / "decision.jsonl.1"
+    member.write_bytes(b"Z" * member.stat().st_size)
+    with pytest.raises(RawGenerationCleanupRejected) as caught:
+        tx.reconcile_purges()
+    assert "QUARANTINE_MEMBER_HASH_OR_SIZE_DRIFT" in caught.value.reasons
+    assert staging.is_dir()
+
+
+def test_restart_recovery_rejects_symlink_member_lexically(tmp_path, monkeypatch):
+    tx, staging = _isolate_purge_for_restart(tmp_path)
+    member = staging / "decision.jsonl.1"
+    original = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda self: True if self == member else original(self))
+    with pytest.raises(RawGenerationCleanupRejected) as caught:
+        tx.reconcile_purges()
+    assert "QUARANTINE_MEMBER_SYMLINK" in caught.value.reasons
+    assert staging.is_dir()
