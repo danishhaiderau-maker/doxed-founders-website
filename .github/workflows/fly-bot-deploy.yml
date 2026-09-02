@@ -1075,8 +1075,81 @@ jobs:
           FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"
           [[ "$FAILED_DEPLOY_COMPLETED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]]
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
-          flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "env EXPECTED_UNREADY_REVISION='${EXPECTED_UNREADY_REVISION}' FAILED_DEPLOY_COMPLETED_AT='${FAILED_DEPLOY_COMPLETED_AT}' python -c 'from pathlib import Path; from datetime import datetime; import json,os; expected=os.environ[\"EXPECTED_UNREADY_REVISION\"]; threshold=datetime.fromisoformat(os.environ[\"FAILED_DEPLOY_COMPLETED_AT\"].replace(\"Z\",\"+00:00\")).timestamp(); assert os.getenv(\"SOURCE_GIT_REV\",\"\")[:12]==expected; assert os.getenv(\"FORCE_PAPER_MODE\",\"\").lower()==\"true\"; p=Path(\"/app/data/runtime/paper_lifecycle_v1.json\"); d=json.loads(p.read_text(encoding=\"utf-8\")); c=json.loads(Path(\"/app/data/runtime/config-7002.json\").read_text(encoding=\"utf-8\")); assert p.stat().st_mtime>=threshold; assert d.get(\"schema\")==\"paper_lifecycle_v1\"; assert d.get(\"paper_only\") is True and d.get(\"live_armed\") is False; assert d.get(\"positions\")==[] and d.get(\"pending_orders\")==[]; assert c.get(\"manual_admin_pause\") is True; log=Path(\"/app/data/bot.log\").read_bytes()[-2097152:]; assert b\"ModuleNotFoundError\" in log and b\"research.mirror_generation_lease\" in log; print(\"Exact crashed runtime, fresh durable flat paper snapshot, and persisted pause proven\")'"
+          cat > "$RUNNER_TEMP/recover-unready-guest.py" <<'PY'
+          from datetime import datetime
+          from pathlib import Path
+          import hashlib
+          import json
+          import os
+          import stat
+
+          expected = os.environ["EXPECTED_UNREADY_REVISION"]
+          threshold = datetime.fromisoformat(
+              os.environ["FAILED_DEPLOY_COMPLETED_AT"].replace("Z", "+00:00")
+          ).timestamp()
+          assert os.getenv("SOURCE_GIT_REV", "")[:12] == expected
+          assert os.getenv("FORCE_PAPER_MODE", "").lower() == "true"
+          lifecycle_path = Path("/app/data/runtime/paper_lifecycle_v1.json")
+          config_path = Path("/app/data/runtime/config-7002.json")
+          assert lifecycle_path.is_file() and not lifecycle_path.is_symlink()
+          assert config_path.is_file() and not config_path.is_symlink()
+          lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+          config_bytes = config_path.read_bytes()
+          config = json.loads(config_bytes.decode("utf-8"))
+          assert isinstance(config, dict)
+          assert lifecycle_path.stat().st_mtime >= threshold
+          assert lifecycle.get("schema") == "paper_lifecycle_v1"
+          assert lifecycle.get("paper_only") is True and lifecycle.get("live_armed") is False
+          assert lifecycle.get("positions") == [] and lifecycle.get("pending_orders") == []
+          assert config.get("live_armed") is not True
+          assert config.get("bitfinex_live_enabled") is not True
+          log = Path("/app/data/bot.log").read_bytes()[-2097152:]
+          assert b"ModuleNotFoundError" in log and b"research.mirror_generation_lease" in log
+
+          before = dict(config)
+          old_sha256 = hashlib.sha256(config_bytes).hexdigest()
+          changed = config.get("manual_admin_pause") is not True
+          if changed:
+              config["manual_admin_pause"] = True
+              mode = stat.S_IMODE(config_path.stat().st_mode)
+              temp_path = config_path.with_name(f".{config_path.name}.recover-{os.getpid()}.tmp")
+              with temp_path.open("x", encoding="utf-8") as handle:
+                  json.dump(config, handle, sort_keys=True, separators=(",", ":"))
+                  handle.flush()
+                  os.fsync(handle.fileno())
+              os.chmod(temp_path, mode)
+              os.replace(temp_path, config_path)
+              directory_fd = os.open(str(config_path.parent), os.O_RDONLY)
+              try:
+                  os.fsync(directory_fd)
+              finally:
+                  os.close(directory_fd)
+
+          final_bytes = config_path.read_bytes()
+          final = json.loads(final_bytes.decode("utf-8"))
+          expected_final = dict(before)
+          expected_final["manual_admin_pause"] = True
+          assert final == expected_final
+          print(json.dumps({
+              "schema": "recover_unready_guest_pause_v1",
+              "status": "SAFE_BOUNDARY_PROVEN",
+              "revision": expected,
+              "paper_only": True,
+              "live_armed": False,
+              "open_positions": 0,
+              "pending_orders": 0,
+              "manual_admin_pause": True,
+              "changed": changed,
+              "old_sha256": old_sha256,
+              "new_sha256": hashlib.sha256(final_bytes).hexdigest(),
+              "mode": stat.S_IMODE(config_path.stat().st_mode),
+          }, sort_keys=True))
+          PY
+          guest_program="$(base64 -w0 "$RUNNER_TEMP/recover-unready-guest.py")"
+          guest_output="$(flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "env EXPECTED_UNREADY_REVISION='${EXPECTED_UNREADY_REVISION}' FAILED_DEPLOY_COMPLETED_AT='${FAILED_DEPLOY_COMPLETED_AT}' python -c 'import base64; exec(base64.b64decode(\"${guest_program}\"))'")"
+          printf '%s\n' "$guest_output"
+          printf '%s\n' "$guest_output" | python -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin if line.lstrip().startswith("{")]; assert len(rows)==1; row=rows[0]; assert row.get("schema")=="recover_unready_guest_pause_v1" and row.get("status")=="SAFE_BOUNDARY_PROVEN" and row.get("revision")==sys.argv[1] and row.get("paper_only") is True and row.get("live_armed") is False and row.get("open_positions")==0 and row.get("pending_orders")==0 and row.get("manual_admin_pause") is True' "$EXPECTED_UNREADY_REVISION"
           node scripts/check-relay-flat.mjs
 
       - name: Prove stalled runtime recovery from the last guarded deployment

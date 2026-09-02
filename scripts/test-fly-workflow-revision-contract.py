@@ -1,6 +1,7 @@
 """Static parity checks for Fly deploy and revision-monitor path semantics."""
 
 from pathlib import Path
+import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,14 +61,23 @@ def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailab
     assert '[[ "$EXPECTED_UNREADY_REVISION" =~ ^[0-9a-f]{12}$ ]]' in recovery
     assert 'FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"' in recovery
     assert 'GITHUB_ENV' not in recovery
-    assert 'os.getenv(\\"SOURCE_GIT_REV\\",\\"\\")[:12]==expected' in recovery
-    assert 'p.stat().st_mtime>=threshold' in recovery
-    assert 'd.get(\\"paper_only\\") is True and d.get(\\"live_armed\\") is False' in recovery
-    assert 'd.get(\\"positions\\")==[] and d.get(\\"pending_orders\\")==[]' in recovery
-    assert 'c.get(\\"manual_admin_pause\\") is True' in recovery
-    assert 'os.getenv(\\"FORCE_PAPER_MODE\\",\\"\\").lower()==\\"true\\"' in recovery
-    assert 'b\\"ModuleNotFoundError\\" in log' in recovery
-    assert 'b\\"research.mirror_generation_lease\\" in log' in recovery
+    assert 'os.getenv("SOURCE_GIT_REV", "")[:12] == expected' in recovery
+    assert 'lifecycle_path.stat().st_mtime >= threshold' in recovery
+    assert 'lifecycle.get("paper_only") is True and lifecycle.get("live_armed") is False' in recovery
+    assert 'lifecycle.get("positions") == [] and lifecycle.get("pending_orders") == []' in recovery
+    assert '"schema": "recover_unready_guest_pause_v1"' in recovery
+    assert '"status": "SAFE_BOUNDARY_PROVEN"' in recovery
+    assert 'config["manual_admin_pause"] = True' in recovery
+    assert 'config_path.is_file() and not config_path.is_symlink()' in recovery
+    assert 'config.get("live_armed") is not True' in recovery
+    assert 'config.get("bitfinex_live_enabled") is not True' in recovery
+    assert 'os.replace(temp_path, config_path)' in recovery
+    assert 'os.fsync(directory_fd)' in recovery
+    assert 'guest_output="$(flyctl machine exec' in recovery
+    assert 'assert len(rows)==1' in recovery
+    assert 'os.getenv("FORCE_PAPER_MODE", "").lower() == "true"' in recovery
+    assert 'b"ModuleNotFoundError" in log' in recovery
+    assert 'b"research.mirror_generation_lease" in log' in recovery
     assert 'run.get("name") != "Deploy Fly BTC bot"' in recovery
     assert 'run.get("path") or "").split("@", 1)[0] != ".github/workflows/fly-bot-deploy.yml"' in recovery
     assert 'deploy_jobs = [job for job in jobs if job.get("name") == "test-and-deploy"]' in recovery
@@ -82,6 +92,14 @@ def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailab
     assert "inputs.mode != 'recover-unready'" in predeploy
 
 
+def test_recover_unready_guest_program_is_valid_python():
+    marker = "cat > \"$RUNNER_TEMP/recover-unready-guest.py\" <<'PY'\n"
+    start = DEPLOY.index(marker) + len(marker)
+    end = DEPLOY.index("\n          PY", start)
+    source = textwrap.dedent(DEPLOY[start:end])
+    compile(source, "recover-unready-guest.py", "exec")
+
+
 def test_all_bitfinex_instances_must_be_paused_disarmed_and_reconciled_flat():
     helper = (ROOT / "scripts/check-relay-flat.mjs").read_text(encoding="utf-8")
     assert "const cheetahRows" not in helper
@@ -89,6 +107,13 @@ def test_all_bitfinex_instances_must_be_paused_disarmed_and_reconciled_flat():
     assert "const relayPausedAndDisarmed = rows.length > 0" in helper
     assert "const reconciledFlat = rows.length > 0" in helper
     assert "&& rows.every(isRelayPausedAndDisarmed)" in helper
+    assert "provider: 'exchange:bitfinex'" in helper
+    assert "providerCredentials.map((credential) => credential.userId)" in helper
+    assert "instance.credentialId || providerCredentialUsers.has(instance.userId)" in helper
+    assert "dashboard.liveDeskSessionStartedAt ?? null" in helper
+    assert "orphanOrderIds: dashboard.orphanOrderIds," in helper
+    assert "orphanPositionIds: dashboard.orphanPositionIds," in helper
+    assert "isNeverArmedUncredentialedRelay(row)" in helper
 
 
 def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():

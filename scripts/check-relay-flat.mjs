@@ -342,6 +342,27 @@ export function isRelayPausedAndDisarmed(row) {
   );
 }
 
+export function isNeverArmedUncredentialedRelay(
+  row,
+  allowDurableExemption = durableOnlyRecovery,
+) {
+  const reconcileAbsent = row?.reconcile == null;
+  const orderAuditAbsent = row?.exchangeOrderAudit == null;
+  return (
+    allowDurableExemption
+    && row?.credentialConfigured === false
+    && row?.liveDeskSessionStartedAt == null
+    && isRelayPausedAndDisarmed(row)
+    && row?.activeParticipants === 0
+    && Array.isArray(row?.orphanOrderIds)
+    && row.orphanOrderIds.length === 0
+    && Array.isArray(row?.orphanPositionIds)
+    && row.orphanPositionIds.length === 0
+    && reconcileAbsent
+    && orderAuditAbsent
+  );
+}
+
 export function isCompleteStoredExchangeOrderAuditFlat(audit) {
   return (
     audit != null && typeof audit === 'object' && audit.known === true
@@ -406,6 +427,16 @@ async function loadRelayBoundaryRows() {
           user: { select: { platformHandle: true, name: true } },
         },
       });
+      const providerCredentials = await prisma.integrationCredential.findMany({
+        where: {
+          provider: 'exchange:bitfinex',
+          userId: { in: instances.map((instance) => instance.userId) },
+        },
+        select: { userId: true },
+      });
+      const providerCredentialUsers = new Set(
+        providerCredentials.map((credential) => credential.userId),
+      );
 
       const rows = [];
       for (const instance of instances) {
@@ -430,14 +461,18 @@ async function loadRelayBoundaryRows() {
             || instance.userId,
           status: instance.status,
           lastError: instance.lastError,
+          credentialConfigured: Boolean(
+            instance.credentialId || providerCredentialUsers.has(instance.userId)
+          ),
           activeParticipants,
           reconcile,
           relayExecutionMode: dashboard.relayExecutionMode ?? null,
           relayArmedAt: dashboard.relayArmedAt ?? null,
           realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
+          liveDeskSessionStartedAt: dashboard.liveDeskSessionStartedAt ?? null,
           exchangeOrderAudit: dashboard.exchangeOrderAudit ?? null,
-          orphanOrderIds: dashboard.orphanOrderIds ?? [],
-          orphanPositionIds: dashboard.orphanPositionIds ?? [],
+          orphanOrderIds: dashboard.orphanOrderIds,
+          orphanPositionIds: dashboard.orphanPositionIds,
         });
       }
       return rows;
@@ -467,7 +502,9 @@ async function main() {
 
   let rows = await loadRelayBoundaryRows();
   if (!durableOnlyRecovery) {
-    const refreshTargets = rows.filter(isRelayPausedAndDisarmed);
+    const refreshTargets = rows.filter((row) => (
+      row.credentialConfigured === true && isRelayPausedAndDisarmed(row)
+    ));
     if (refreshTargets.length === 0) {
       throw new Error('strict relay proof found no paused, disarmed Cheetah audit target');
     }
@@ -515,14 +552,19 @@ async function main() {
   const reconciledFlat = rows.length > 0
     && rows.every((row) => {
       return (
-        (durableOnlyRecovery
-          ? isCompleteStoredRawFlatReconcileSnapshot(row.reconcile)
-          : isStrictRawFlatReconcileSnapshot(row.reconcile))
-        && (durableOnlyRecovery
-          ? isCompleteStoredExchangeOrderAuditFlat(row.exchangeOrderAudit)
-          : isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit))
-        && row.orphanOrderIds.length === 0
-        && row.orphanPositionIds.length === 0
+        isNeverArmedUncredentialedRelay(row)
+        || (
+          (durableOnlyRecovery
+            ? isCompleteStoredRawFlatReconcileSnapshot(row.reconcile)
+            : isStrictRawFlatReconcileSnapshot(row.reconcile))
+          && (durableOnlyRecovery
+            ? isCompleteStoredExchangeOrderAuditFlat(row.exchangeOrderAudit)
+            : isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit))
+          && Array.isArray(row.orphanOrderIds)
+          && row.orphanOrderIds.length === 0
+          && Array.isArray(row.orphanPositionIds)
+          && row.orphanPositionIds.length === 0
+        )
       );
     });
   process.exitCode =

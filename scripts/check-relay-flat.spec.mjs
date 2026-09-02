@@ -7,6 +7,7 @@ import {
   hasFullOwnerOrderState,
   isCompleteStoredExchangeOrderAuditFlat,
   isCompleteStoredRawFlatReconcileSnapshot,
+  isNeverArmedUncredentialedRelay,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
   isRelayPausedAndDisarmed,
@@ -14,6 +15,41 @@ import {
   ownerFetchErrorChain,
   refreshPausedRelayAudit,
 } from './check-relay-flat.mjs';
+
+const inertUncredentialedRelay = {
+  credentialConfigured: false,
+  liveDeskSessionStartedAt: null,
+  status: 'PAUSED',
+  relayExecutionMode: 'PAUSED',
+  relayArmedAt: null,
+  realTradingConfirmedAt: null,
+  activeParticipants: 0,
+  orphanOrderIds: [],
+  orphanPositionIds: [],
+  reconcile: null,
+  exchangeOrderAudit: null,
+};
+
+test('durable recovery waives absent audits only for a never-armed uncredentialed relay', () => {
+  assert.equal(isNeverArmedUncredentialedRelay(inertUncredentialedRelay, true), true);
+  assert.equal(isNeverArmedUncredentialedRelay(inertUncredentialedRelay, false), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    liveDeskSessionStartedAt: '2026-08-01T00:00:00.000Z',
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    credentialConfigured: true,
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    reconcile: { rawExchangePositionQty: 1 },
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    orphanOrderIds: null,
+  }, true), false);
+});
 
 test('native HTTPS fallback preserves auth and pins the canonical proof to IPv4', () => {
   const options = buildOwnerHttpsRequestOptions(
