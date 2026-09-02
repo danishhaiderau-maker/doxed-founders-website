@@ -9332,16 +9332,81 @@ def _build_funnel_trade_index():
     return index
 
 
+_EXPIRED_ORDER_RECORD_START = re.compile(
+    r"(?=(?:19|20)\d{2}-\d{2}-\d{2}T[^,\r\n]+,[^,\r\n]+,(?:LONG|SHORT)(?:,|$))"
+)
+
+
+def _load_expired_orders_csv(path=EXPIRED_ORDERS_FILE, usecols=None):
+    """Load the append-only expiry ledger without discarding damaged records.
+
+    The historical writer used CR record separators. A crash once omitted that
+    separator and joined two otherwise identifiable rows inside the final
+    quoted evidence field. Recover only boundaries carrying the complete
+    timestamp/trade/direction prefix; every other over-wide row fails closed.
+    Older rows missing trailing schema fields retain their identity and receive
+    explicit UNKNOWN values rather than being silently skipped.
+    """
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin1")
+    physical = text.splitlines()
+    if not physical:
+        return pd.DataFrame(columns=list(usecols or ()))
+    header_rows = list(csv.reader([physical[0]]))
+    if len(header_rows) != 1 or not header_rows[0]:
+        raise ValueError("EXPIRED_ORDERS_HEADER_INVALID")
+    header = header_rows[0]
+    if len(set(header)) != len(header):
+        raise ValueError("EXPIRED_ORDERS_HEADER_DUPLICATE_COLUMNS")
+    normalized = []
+    for source_line, physical_row in enumerate(physical[1:], start=2):
+        starts = [match.start() for match in _EXPIRED_ORDER_RECORD_START.finditer(physical_row)]
+        if not starts or starts[0] != 0:
+            raise ValueError(f"EXPIRED_ORDERS_RECORD_BOUNDARY_UNKNOWN:{source_line}")
+        starts.append(len(physical_row))
+        recovered_boundary = len(starts) > 2
+        for part_index, (begin, end) in enumerate(zip(starts, starts[1:]), start=1):
+            segment = physical_row[begin:end]
+            row = next(csv.reader([segment]))
+            if len(row) > len(header):
+                raise ValueError(
+                    f"EXPIRED_ORDERS_SCHEMA_OVERFLOW:{source_line}:{part_index}:"
+                    f"{len(row)}:{len(header)}"
+                )
+            missing = len(header) - len(row)
+            row.extend(["UNKNOWN"] * missing)
+            material = dict(zip(header, row))
+            material["_csv_source_line"] = source_line
+            material["_csv_parse_status"] = (
+                "RECOVERED_MISSING_RECORD_SEPARATOR" if recovered_boundary else
+                ("NORMALIZED_MISSING_FIELDS" if missing else "EXACT")
+            )
+            material["_csv_missing_fields"] = missing
+            normalized.append(material)
+    frame = pd.DataFrame(normalized)
+    # Match pandas' established CSV contract for fields that are present but
+    # empty. This is distinct from an absent schema field, which remains the
+    # explicit string UNKNOWN above.
+    if not frame.empty:
+        frame.loc[:, header] = frame.loc[:, header].replace("", np.nan)
+    if usecols is not None:
+        missing_columns = [column for column in usecols if column not in frame.columns]
+        if missing_columns:
+            raise ValueError("EXPIRED_ORDERS_REQUIRED_COLUMNS_MISSING:" + ",".join(missing_columns))
+        return frame.loc[:, list(usecols)]
+    return frame
+
+
 def _build_missed_by_usd_index():
     """Merge fill_quality.jsonl + expired_orders CSV into trade_id → missed_by_usd."""
     rows = []
     if os.path.exists(FILL_QUALITY_JSONL_FILE):
         rows.extend(_load_jsonl_rows(FILL_QUALITY_JSONL_FILE))
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8")
-        except UnicodeDecodeError:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1")
+        exp = _load_expired_orders_csv(EXPIRED_ORDERS_FILE)
         if not exp.empty:
             seen_ids = {str(r.get("trade_id")) for r in rows if r.get("trade_id")}
             for _, r in exp.iterrows():
@@ -9476,15 +9541,9 @@ def shadow_fill_outcome_matrix(trades=None, session=None, blocked=None):
     expired_lanes = {}
     expired_reasons = {}
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8", usecols=["trade_id", "reason", "research_lane"])
-        except (UnicodeDecodeError, ValueError):
-            try:
-                exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1", usecols=["trade_id", "reason", "research_lane"])
-            except Exception:
-                exp = pd.DataFrame()
-        except Exception:
-            exp = pd.DataFrame()
+        exp = _load_expired_orders_csv(
+            EXPIRED_ORDERS_FILE, usecols=["trade_id", "reason", "research_lane"]
+        )
         for _, r in exp.iterrows():
             tid = str(r.get("trade_id") or "").strip()
             if not tid:
@@ -9796,15 +9855,9 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
     funnel_index = _build_funnel_trade_index()
     expired_lanes = {}
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8", usecols=["trade_id", "research_lane"])
-        except (UnicodeDecodeError, ValueError):
-            try:
-                exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1", usecols=["trade_id", "research_lane"])
-            except Exception:
-                exp = pd.DataFrame()
-        except Exception:
-            exp = pd.DataFrame()
+        exp = _load_expired_orders_csv(
+            EXPIRED_ORDERS_FILE, usecols=["trade_id", "research_lane"]
+        )
         for _, r in exp.iterrows():
             tid = str(r.get("trade_id") or "").strip()
             if tid and pd.notna(r.get("research_lane")):
@@ -10204,10 +10257,9 @@ def horizon_counterfactual_report(trades=None, session=None, shadow_report=None,
     block_map = _blocked_reason_by_trade_id(blocked)
     expired_lanes = {}
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8", usecols=["trade_id", "research_lane"])
-        except Exception:
-            exp = pd.DataFrame()
+        exp = _load_expired_orders_csv(
+            EXPIRED_ORDERS_FILE, usecols=["trade_id", "research_lane"]
+        )
         for _, r in exp.iterrows():
             tid = str(r.get("trade_id") or "").strip()
             if tid and pd.notna(r.get("research_lane")):
@@ -18617,10 +18669,7 @@ def fill_distance_report():
         rows.extend(_load_jsonl_rows(fq_path))
         print(f"  fill_quality.jsonl rows: {len(rows)} {PIPELINE_ENFORCEMENT_TAG}")
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8")
-        except UnicodeDecodeError:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1")
+        exp = _load_expired_orders_csv(EXPIRED_ORDERS_FILE)
         if not exp.empty:
             seen_ids = {r.get("trade_id") for r in rows}
             for _, r in exp.iterrows():
