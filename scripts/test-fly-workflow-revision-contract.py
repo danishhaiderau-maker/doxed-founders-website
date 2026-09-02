@@ -24,6 +24,16 @@ def test_runtime_and_deploy_contract_changes_remain_revision_relevant():
         assert path.replace("/**", "") in MONITOR
 
 
+def test_monitor_splits_fast_liveness_from_full_readiness_fail_closed():
+    assert MONITOR.count('"https://doxed-btc-bot.fly.dev/health"') == 2
+    assert MONITOR.count('"https://doxed-btc-bot.fly.dev/ready"') == 2
+    assert '"https://doxed-btc-bot.fly.dev/api/status"' not in MONITOR
+    assert MONITOR.count("require_health(") == 2
+    assert MONITOR.count("require_ready(") == 2
+    assert "require_strategy_progress(ready)" in MONITOR
+    assert "require_tile_registry(" in MONITOR
+
+
 def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatness():
     assert "recover-stalled-runtime" in DEPLOY
     assert "inputs.mode == 'recover-stalled-runtime'" in DEPLOY
