@@ -38,6 +38,10 @@ RUN python -c "import platform_relay_streaming, research.analysis_eligibility, r
 # V3 dual-write is on the Fly bot's critical evidence path. Fail the image
 # build if the whitelist omits any collector dependency.
 RUN python -c "import collector_v22, collector_v22_provisional, research_v3_contract, research_v3_store, research_v3_bridge"
+# The exact lifecycle-tail recovery command is invoked only by its guarded
+# workflow, but must still be importable in the production image.
+RUN python -m py_compile lifecycle_tail_repair.py lifecycle_tail_repair_verify.py \
+    && python -c "import lifecycle_tail_repair, lifecycle_tail_repair_verify"
 # Quantity-aware conservative paper evidence is part of both the runtime
 # collector and analyzer path. Fail the image build if the whitelist omits it.
 RUN python -c "import research.conservative_fill_cohort, research.conservative_limit_fill, research.quantity_execution, research.venue_quantity_constraints"
