@@ -33,6 +33,7 @@ on:
           - repair-execution-funnel
           - repair-lifecycle-tail
           - repair-lifecycle-cursor
+          - repair-execution-tail
           - expand-storage
           - close-paper-position
           - flatten-paper-exposure
@@ -72,6 +73,14 @@ on:
         description: Exact lifecycle.jsonl mtime_ns observed in the authenticated manifest
         required: false
         type: string
+      expected_execution_inode:
+        description: Exact execution.jsonl inode observed in the authenticated probe
+        required: false
+        type: string
+      expected_execution_mtime_ns:
+        description: Exact execution.jsonl mtime_ns observed in the authenticated probe
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -81,6 +90,87 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  repair-execution-tail:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Repair only the exact execution tail and preserve its cursor boundary
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+          EXPECTED_INODE: ${{ inputs.expected_execution_inode }}
+          EXPECTED_MTIME_NS: ${{ inputs.expected_execution_mtime_ns }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,os,re,time,urllib.request
+          base="https://doxed-btc-bot.fly.dev"; token=str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          expected=str(os.environ.get("EXPECTED_SOURCE_REVISION") or "").strip().lower()
+          inode=str(os.environ.get("EXPECTED_INODE") or "").strip(); mtime=str(os.environ.get("EXPECTED_MTIME_NS") or "").strip()
+          if not token or not re.fullmatch(r"[0-9a-f]{12}",expected): raise SystemExit("exact token and revision required")
+          if expected != str(os.environ.get("GITHUB_SHA") or "")[:12].lower(): raise SystemExit("workflow source must equal deployed repair revision")
+          if inode!="663" or mtime!="1788303277103206804": raise SystemExit("exact execution source identity required")
+          headers={"X-Bot-Admin-Token":token,"Cache-Control":"no-cache"}
+          def call(path,payload=None):
+            data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
+            with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
+          status=call("/api/status")
+          if str(status.get("source_git_rev") or "").lower()!=expected: raise SystemExit("unexpected deployed revision")
+          if not(status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False): raise SystemExit("paper safety not proven")
+          call("/api/pause",{})
+          for _ in range(8):
+            status=call("/api/status"); progress=status.get("strategy_progress") or {}
+            if status.get("execution_paused") is True and status.get("manual_admin_pause") is True and int(progress.get("pending_orders") or 0)==0 and int(progress.get("open_positions") or 0)==0: break
+            time.sleep(2)
+          else: raise SystemExit("flat maintenance boundary not proven")
+          PY
+          machine_json="$(flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          output="$(flyctl machine exec --app doxed-btc-bot --timeout 120 "$machine_id" "python /app/execution_tail_repair.py --root /app/data/runtime --expected-source-size 266240 --expected-source-sha256 a1d83c507265143f0cd4c37ab065c85985234cae6cf10b046d185b842c349250 --expected-prefix-size 265886 --expected-prefix-sha256 2614f49656ae19f8ca3b1c09652ee27cf9d016cd2a58f63092df68894f632b34 --expected-tail-size 354 --expected-tail-sha256 586328be5ab061de70ff01568023d7d3c5eaeca87a86563ceb7805be055b2b61 --expected-inode 663 --expected-mtime-ns 1788303277103206804")"
+          printf '%s\n' "$output"
+          printf '%s' "$output" | python -c 'import json,sys; d=json.loads([x for x in sys.stdin if x.lstrip().startswith("{")][-1]); r=d.get("receipt") or {}; assert d.get("ok") is True and r.get("status")=="REPAIRED" and r.get("byte_offset_preserved") is True and r.get("anchor_preserved") is True and r.get("ranking_eligible") is False and r.get("source_cleanup_authorized") is False'
+          flyctl machine exec --app doxed-btc-bot --timeout 120 "$machine_id" "python /app/execution_tail_repair_verify.py --root /app/data/runtime --expected-revision $EXPECTED_SOURCE_REVISION"
+      - name: Prove two advancing worker cycles before paper resume
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+        run: |
+          python - <<'PY'
+          import json,os,time,urllib.request
+          base="https://doxed-btc-bot.fly.dev"; expected=os.environ["EXPECTED_SOURCE_REVISION"].lower(); headers={"X-Bot-Admin-Token":os.environ["BOT_ADMIN_TOKEN"],"Cache-Control":"no-cache"}
+          def call(path,payload=None):
+            data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
+            with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
+          seen=[]; last=None; proof_started=time.time(); deadline=proof_started+1000
+          while time.time()<deadline:
+            call("/api/pause",{}); last=call("/api/status"); pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
+            safe=str(last.get("source_git_rev") or "").lower()==expected and last.get("execution_paused") is True and last.get("manual_admin_pause") is True and last.get("force_paper_mode") is True and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
+            age=pipeline.get("last_success_age_sec"); advanced=int(progress.get("rows_scanned") or 0)>0 and int(progress.get("bytes_indexed") or 0)>0
+            if safe and pipeline.get("last_outcome")=="WORKER_SUCCESS" and advanced and age is not None:
+              key=time.time()-float(age)
+              if key>proof_started and (not seen or key-seen[-1]>2): seen.append(key); print(json.dumps({"worker":"green_cycle","cycle":len(seen),"success_unix":key,"progress":progress},sort_keys=True))
+              if len(seen)>=2: break
+            if pipeline.get("last_outcome")=="WORKER_FAILED": raise SystemExit("new classified blocker: "+json.dumps(pipeline,sort_keys=True))
+            time.sleep(10)
+          if len(seen)<2: raise SystemExit("two advancing successes not proven: "+json.dumps(last or {},sort_keys=True))
+          PY
+          machine_json="$(flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          flyctl machine exec --app doxed-btc-bot --timeout 120 "$machine_id" "python /app/execution_tail_repair_verify.py --root /app/data/runtime --expected-revision $EXPECTED_SOURCE_REVISION"
+          python - <<'PY'
+          import json,os,urllib.request
+          base="https://doxed-btc-bot.fly.dev"; expected=os.environ["EXPECTED_SOURCE_REVISION"].lower(); headers={"X-Bot-Admin-Token":os.environ["BOT_ADMIN_TOKEN"],"Cache-Control":"no-cache"}
+          def call(path,payload=None):
+            data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
+            with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
+          resumed=call("/api/resume",{}); final=call("/api/status")
+          if not(resumed.get("status")=="resumed" and final.get("execution_paused") is False and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False): raise SystemExit("safe paper resume not proven")
+          PY
+
   repair-lifecycle-cursor:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-cursor'
     runs-on: ubuntu-latest
@@ -679,6 +769,7 @@ jobs:
           python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py -q
           python -m pytest test_lifecycle_tail_repair.py -q
           python -m pytest test_lifecycle_cursor_rebind.py -q
+          python -m pytest test_execution_tail_repair.py -q
           python -m pytest test_collector_v22_integrity.py test_compressed_shadow_chase.py test_paper_lifecycle_restart.py test_cleanup_characterization_contract.py test_v3_lane_entry_bot_wiring.py -q
           python -m pytest test_v31_overview_best_policy_counts.py -q
 
