@@ -177,14 +177,39 @@ def _consistency_mode(path: Path, request: dict) -> str:
     return "append_prefix_v1" if append else "strict_generation_v1"
 
 
+def _receipt_binding_valid(row: dict) -> bool:
+    supplied = str(row.get("binding_sha256") or "")
+    material = dict(row); material.pop("binding_sha256", None)
+    expected = hashlib.sha256(json.dumps(
+        material, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    ).encode("utf-8")).hexdigest()
+    return hmac.compare_digest(supplied, expected)
+
+
 def _v3_ledger_generation(path: Path) -> dict | None:
     parts = tuple(part.lower() for part in path.parts)
     if len(parts) < 3 or parts[-3:-1] != ("v3", "ledgers"):
         return None
     rotation = _rotation_parts(path.name, {".jsonl"})
     rotation_suffix = path.name.rpartition(".")[2]
+    runtime = path.parents[2]
     if path.suffix.lower() == ".jsonl":
-        ledger, state, generation = path.stem, "ACTIVE", 0
+        ledger, state = path.stem, "ACTIVE"
+        pointer = runtime / "v3" / "receipts" / "ledger_generations_v1" / ledger / "ACTIVE.json"
+        generation = 0
+        if pointer.is_file() and not pointer.is_symlink():
+            try:
+                authority = json.loads(pointer.read_text("utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+            if (authority.get("schema") != "v3_ledger_active_generation_v1"
+                    or authority.get("ledger") != ledger
+                    or not isinstance(authority.get("generation"), int)
+                    or authority["generation"] < 1
+                    or not isinstance(authority.get("identity"), dict)
+                    or authority.get("relative_path") != f"v3/ledgers/{ledger}.jsonl"):
+                return None
+            generation = int(authority["generation"])
     elif (rotation is not None and int(rotation[1]) > 0
           and rotation_suffix == str(int(rotation[1]))):
         ledger, state, generation = Path(rotation[0]).stem, "SEALED", int(rotation[1])
@@ -192,6 +217,31 @@ def _v3_ledger_generation(path: Path) -> dict | None:
         return None
     if not ledger or any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for char in ledger):
         return None
+    if state == "SEALED":
+        rotations = runtime / "v3" / "receipts" / "ledger_generations_v1" / ledger / "rotations"
+        stem = f"{generation:020d}"
+        try:
+            seal_path = rotations / f"{stem}.SEALED.json"
+            committed_path = rotations / f"{stem}.COMMITTED.json"
+            if any(item.is_symlink() or not item.is_file() for item in (seal_path, committed_path)):
+                return None
+            seal = json.loads(seal_path.read_text("utf-8"))
+            committed = json.loads(committed_path.read_text("utf-8"))
+            expected_ref = {"schema": "v3_ledger_generation_ref_v1", "state": "SEALED",
+                            "ledger": ledger, "generation": generation,
+                            "relative_path": f"v3/ledgers/{path.name}"}
+            if (seal.get("schema") != "v3_ledger_rotation_seal_v1"
+                    or seal.get("ledger") != ledger or seal.get("generation") != generation
+                    or seal.get("sealed_ref") != expected_ref or not _receipt_binding_valid(seal)
+                    or committed.get("schema") != "v3_ledger_rotation_transaction_v1"
+                    or committed.get("state") != "COMMITTED"
+                    or committed.get("ledger") != ledger
+                    or committed.get("generation") != generation
+                    or committed.get("seal_sha256") != hashlib.sha256(seal_path.read_bytes()).hexdigest()
+                    or not _receipt_binding_valid(committed)):
+                return None
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return None
     return {"schema": "v3_ledger_generation_ref_v1", "state": state, "ledger": ledger,
             "generation": generation, "relative_path": None}
 
@@ -215,6 +265,12 @@ def _row(path: Path, request: dict) -> dict | None:
             "consistency_mode": _consistency_mode(resolved, request),
         }
         generation = _v3_ledger_generation(resolved)
+        parts = tuple(part.lower() for part in resolved.parts)
+        is_v3_ledger_object = len(parts) >= 3 and parts[-3:-1] == ("v3", "ledgers") and (
+            resolved.suffix.lower() == ".jsonl" or _rotation_parts(resolved.name, {".jsonl"}) is not None
+        )
+        if is_v3_ledger_object and generation is None:
+            return None
         if generation is not None:
             generation["relative_path"] = row["path"]
             row["ledger_generation"] = generation
