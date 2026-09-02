@@ -33,6 +33,7 @@ def _parent_validate_generation(result: dict, work_root: Path) -> dict:
     ]
     namespace = {
         "Path": Path, "hashlib": hashlib, "hmac": hmac, "json": json, "re": re,
+        "_DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX": 100_000,
     }
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace["_data_sync_validate_disk_inventory_generation"](result, work_root)
