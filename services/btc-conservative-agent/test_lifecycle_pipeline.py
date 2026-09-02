@@ -14,9 +14,9 @@ from microstructure_tape import build_bucket
 NOW = 20_000.0
 KEY = LifecycleKey("epoch-1", "episode-1", "policy-1", "CONTINUOUS")
 PROV = {
-    "source_revision": "src",
-    "deployed_revision": "dep",
-    "tile_config_signature": "tile",
+    "source_revision": "a" * 40,
+    "deployed_revision": "b" * 40,
+    "tile_config_signature": "d" * 64,
 }
 
 
@@ -459,7 +459,7 @@ def test_runtime_provenance_mismatch_remains_dirty_for_later_retry(tmp_path, mon
     monkeypatch.setattr(
         lifecycle_pipeline,
         "_collection_provenance",
-        lambda: {**PROV, "deployed_revision": "new-deploy"},
+        lambda: {**PROV, "deployed_revision": "c" * 40},
     )
     first = _run_until(tmp_path, lambda report: bool(report["results"]), now=NOW)
     assert first["results"][0]["stage"] == "RUNTIME_PROVENANCE_MISMATCH"
