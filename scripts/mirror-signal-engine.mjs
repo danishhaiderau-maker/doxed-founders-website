@@ -22,6 +22,8 @@ const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/pla
 const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
 const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
 const lifecycleCleanupEngine = join(root, 'services/btc-signal-engine/lifecycle_cleanup_transaction.py');
+const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
+const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
 const engineDir = join(root, 'services/btc-signal-engine');
@@ -89,6 +91,12 @@ if (!existsSync(lifecycleCleanupAgent)) {
 }
 copyFileSync(lifecycleCleanupAgent, lifecycleCleanupEngine);
 console.log(`Mirrored lifecycle cleanup transaction (${sha256(readFileSync(lifecycleCleanupAgent, 'utf8'))})`);
+
+if (!existsSync(rotationAgent)) {
+  throw new Error('Missing production rotation orchestrator dependency');
+}
+copyFileSync(rotationAgent, rotationEngine);
+console.log(`Mirrored production rotation orchestrator (${sha256(readFileSync(rotationAgent, 'utf8'))})`);
 
 // Registry-owned policy dependencies are part of the executable mirror. Copy
 // only the active family modules plus their common implementation and remove

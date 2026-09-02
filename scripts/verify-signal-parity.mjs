@@ -23,6 +23,8 @@ const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/pla
 const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
 const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
 const lifecycleCleanupEngine = join(root, 'services/btc-signal-engine/lifecycle_cleanup_transaction.py');
+const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
+const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
@@ -115,6 +117,18 @@ if (lifecycleCleanupAgentHash !== lifecycleCleanupEngineHash) {
   );
 }
 console.log(`OK  lifecycle cleanup transaction matches (${lifecycleCleanupAgentHash})`);
+
+if (!existsSync(rotationAgent) || !existsSync(rotationEngine)) {
+  fail('Missing production rotation orchestrator in canonical bot or signal engine');
+}
+const rotationAgentHash = sha256(rotationAgent);
+const rotationEngineHash = sha256(rotationEngine);
+if (rotationAgentHash !== rotationEngineHash) {
+  fail(
+    `production rotation orchestrator (${rotationAgentHash}) !== signal-engine copy (${rotationEngineHash})`,
+  );
+}
+console.log(`OK  production rotation orchestrator matches (${rotationAgentHash})`);
 
 if (existsSync(manifestPath)) {
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));

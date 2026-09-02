@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from lifecycle_pipeline_worker import LEDGER_NAMES, create_request, verify_result
+from production_rotation_orchestrator import (
+    DEFAULT_TARGET_BYTES, ProductionRotationOrchestrator,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -155,6 +158,8 @@ class LifecyclePipelineRuntime:
         monotonic: Callable[[], float] = time.monotonic,
         python_executable: str | Path | None = None,
         worker_path: str | Path | None = None,
+        rotation_enabled: bool = False,
+        rotation_target_bytes: int = DEFAULT_TARGET_BYTES,
     ) -> None:
         data_lexical = Path(os.path.abspath(str(data_root)))
         self.data_root = data_lexical.resolve(strict=True)
@@ -191,6 +196,11 @@ class LifecyclePipelineRuntime:
         self.monotonic = monotonic
         self.python_executable = str(python_executable or sys.executable)
         self.worker_path = Path(worker_path or Path(__file__).with_name("lifecycle_pipeline_worker.py")).resolve(strict=True)
+        self.rotation = ProductionRotationOrchestrator(
+            self.data_root, source_revision=self.source_revision,
+            epoch_id=self.epoch_id or "epoch-unknown",
+            enabled=rotation_enabled, target_bytes=rotation_target_bytes,
+        )
         self.owner_path = self.work_root / "pipeline-runtime-owner.json"
         self.owner_token = uuid.uuid4().hex
         self._lock = threading.RLock()
@@ -222,6 +232,7 @@ class LifecyclePipelineRuntime:
             "emergency": False,
             "overlap_code": None,
             "source_cleanup_authorized": False,
+            "rotation": None,
             "resource_limits": {
                 "parent_wall_timeout_enforced": True,
                 "cpu_rlimit_enforced": os.name == "posix",
@@ -531,6 +542,18 @@ class LifecyclePipelineRuntime:
             )
             if receipt.get("source_revision") != self.source_revision:
                 raise ValueError("WORKER_RESULT_SOURCE_REVISION_MISMATCH")
+            pipeline = receipt.get("pipeline") if isinstance(receipt.get("pipeline"), Mapping) else {}
+            scan = pipeline.get("scan") if isinstance(pipeline.get("scan"), Mapping) else {}
+            # Still under the singleton cycle gate: recheck overlap immediately
+            # before mutation so sync, SQLite snapshot, analyzer, and cleanup
+            # cannot overlap a generation boundary.
+            overlap = self._overlap_reason() if self.rotation.enabled else None
+            rotation = self.rotation.run_caught_up_cycle(
+                caught_up=scan.get("caught_up") is True,
+                pressure=bool(pressure or emergency), overlap=overlap,
+            )
+            with self._lock:
+                self._status["rotation"] = rotation
             self._record_success(receipt)
             return True
         except BaseException as exc:
