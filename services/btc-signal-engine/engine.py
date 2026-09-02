@@ -28886,7 +28886,9 @@ def _strategy_progress_health_snapshot(
     )
     scheduler_proves_entry_blocked = bool(
         scheduled_poll_ts
-        and scheduled_poll_age <= max(30.0, HEARTBEAT_INTERVAL * 3.0)
+        # The scheduler poll interval is clamped to at most 30 seconds. Three
+        # missed polls is a bounded fence and cannot mask a wedged owner.
+        and scheduled_poll_age <= 90.0
         and scheduled_snapshot.get("last_poll_entry_eligible") is False
     )
     scheduled_completed_ts = float(scheduled_snapshot.get("completed_ts") or 0)

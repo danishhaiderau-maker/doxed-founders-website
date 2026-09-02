@@ -332,6 +332,49 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.assertFalse(result["ai_progressing"])
         self.assertFalse(result["ok"])
 
+    def test_recent_no_trigger_cycle_is_valid_scheduler_progress(self):
+        self.state["last_ai_call_ts"] = self.now - 501
+        self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
+            "owner": None, "owner_ident": None, "started_ts": 0.0,
+            "completed_ts": self.now - 5, "stage": "IDLE",
+            "stage_started_ts": 0.0, "last_poll_ts": self.now - 5,
+            "last_poll_entry_eligible": True, "last_poll_reason": "READY",
+        }
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertFalse(result["ai_expected"])
+        self.assertTrue(result["evaluation_progressing"])
+        self.assertTrue(result["ok"])
+
+    def test_recent_entry_gate_block_does_not_invent_ai_stall(self):
+        self.state["last_ai_call_ts"] = self.now - 501
+        self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
+            "owner": None, "owner_ident": None, "started_ts": 0.0,
+            "completed_ts": 0.0, "stage": "IDLE", "stage_started_ts": 0.0,
+            "last_poll_ts": self.now - 5,
+            "last_poll_entry_eligible": False,
+            "last_poll_reason": "REST_ENTRY_QUOTE_NOT_READY",
+        }
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertFalse(result["ai_expected"])
+        self.assertTrue(result["ai_progressing"])
+        self.assertTrue(result["ok"])
+
+    def test_stale_entry_gate_poll_cannot_mask_ai_stall(self):
+        self.state["last_ai_call_ts"] = self.now - 501
+        self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
+            "owner": None, "owner_ident": None, "started_ts": 0.0,
+            "completed_ts": 0.0, "stage": "IDLE", "stage_started_ts": 0.0,
+            "last_poll_ts": self.now - 91,
+            "last_poll_entry_eligible": False,
+            "last_poll_reason": "REST_ENTRY_QUOTE_NOT_READY",
+        }
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertTrue(result["ai_expected"])
+        self.assertFalse(result["ok"])
+
     def test_owned_scheduled_cycle_gets_separate_bounded_completion_window(self):
         self.state["last_ai_call_ts"] = self.now - 501
         self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
