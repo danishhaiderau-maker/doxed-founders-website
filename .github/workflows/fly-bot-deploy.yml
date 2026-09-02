@@ -46,6 +46,10 @@ on:
         description: Failed deploy run that proves the exact unready revision reached Fly
         required: false
         type: string
+      recovery_continuation_run_id:
+        description: Successful proof-bound resume-bootstrap run following a bootstrap-observation-only deploy failure
+        required: false
+        type: string
       expected_bootstrap_revision:
         description: Exact 12-character currently deployed revision permitted for resume-bootstrap
         required: false
@@ -1221,34 +1225,14 @@ jobs:
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
           EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
           RECOVERY_PROOF_RUN_ID: ${{ inputs.recovery_failed_run_id }}
+          RECOVERY_CONTINUATION_RUN_ID: ${{ inputs.recovery_continuation_run_id }}
           GH_TOKEN: ${{ github.token }}
           GH_REPOSITORY: ${{ github.repository }}
         run: |
-          python - <<'PY'
-          import json, os, urllib.request
-          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
-          run_id = str(os.environ.get("RECOVERY_PROOF_RUN_ID") or "").strip()
-          if len(expected) != 12 or not run_id.isdigit():
-              raise SystemExit("stalled-runtime recovery requires exact revision and proof run")
-          base = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions"
-          headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
-          def fetch(url):
-              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
-                  return json.load(response)
-          run = fetch(f"{base}/runs/{run_id}")
-          if str(run.get("head_sha") or "")[:12] != expected or run.get("conclusion") != "success":
-              raise SystemExit("proof run is not the successful guarded deployment of the expected revision")
-          jobs = fetch(f"{base}/runs/{run_id}/jobs?per_page=100").get("jobs") or []
-          steps = [step for job in jobs for step in (job.get("steps") or [])]
-          required = {
-              "Deploy the exact source revision",
-              "Prove liveness, execution safety, and exact revision",
-          }
-          passed = {step.get("name") for step in steps if step.get("conclusion") == "success"}
-          if not required.issubset(passed):
-              raise SystemExit("proof run lacks guarded deploy and post-deploy safety receipts")
-          print(f"Stalled runtime recovery anchored to guarded deployment {run_id}: {expected}")
-          PY
+          python scripts/fly_stalled_recovery_proof.py \
+            --expected "$EXPECTED_UNREADY_REVISION" \
+            --run-id "$RECOVERY_PROOF_RUN_ID" \
+            --continuation-run-id "$RECOVERY_CONTINUATION_RUN_ID"
           node scripts/check-relay-flat.mjs
 
       - name: Recheck maintenance boundary immediately before deploy
@@ -1256,6 +1240,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          DEPLOY_MODE: ${{ inputs.mode }}
+          EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
         run: |
           python - <<'PY'
           import json, os, urllib.request
@@ -1264,16 +1250,35 @@ jobs:
           with urllib.request.urlopen(request, timeout=20) as response:
               status = json.load(response)
           progress = status.get("strategy_progress") or {}
+          pipeline = status.get("lifecycle_pipeline") or {}
+          bootstrap = pipeline.get("receipt_bootstrap") or {}
+          stalled_recovery = os.environ.get("DEPLOY_MODE") == "recover-stalled-runtime"
+          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
+          open_positions = progress.get("open_positions")
+          pending_orders = progress.get("pending_orders")
           if not (
               status.get("execution_paused") is True
               and status.get("manual_admin_pause") is True
               and status.get("live_armed") is False
               and status.get("bitfinex_live_enabled") is False
               and status.get("force_paper_mode") is True
-              and int(progress.get("open_positions") or 0) == 0
-              and int(progress.get("pending_orders") or 0) == 0
+              and type(open_positions) is int and open_positions == 0
+              and type(pending_orders) is int and pending_orders == 0
           ):
               raise SystemExit("maintenance boundary or flatness changed before deploy")
+          if stalled_recovery and not (
+              str(status.get("source_git_rev") or "") == expected
+              and status.get("process_alive") is True
+              and progress.get("ok") is True
+              and progress.get("trade_lock_progressing") is True
+              and pipeline.get("owner") is True
+              and pipeline.get("running") is True
+              and pipeline.get("source_revision_match") is True
+              and bootstrap.get("status") == "COMPLETE"
+              and bootstrap.get("complete") is True
+              and bootstrap.get("blocked") is not True
+          ):
+              raise SystemExit("stalled-runtime exact-revision health or receipt bootstrap changed before deploy")
           print("Maintenance boundary remains paused, disarmed, and flat immediately before deploy")
           PY
 

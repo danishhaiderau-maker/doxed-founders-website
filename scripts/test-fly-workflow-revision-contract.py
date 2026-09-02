@@ -39,12 +39,33 @@ def test_monitor_splits_fast_liveness_from_full_readiness_fail_closed():
 def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatness():
     assert "recover-stalled-runtime" in DEPLOY
     assert "inputs.mode == 'recover-stalled-runtime'" in DEPLOY
-    assert "Stalled runtime recovery anchored to guarded deployment" in DEPLOY
-    assert 'run.get("conclusion") != "success"' in DEPLOY
-    assert '"Deploy the exact source revision"' in DEPLOY
-    assert '"Prove liveness, execution safety, and exact revision"' in DEPLOY
+    assert "recovery_continuation_run_id:" in DEPLOY
+    assert "python scripts/fly_stalled_recovery_proof.py" in DEPLOY
+    assert '--continuation-run-id "$RECOVERY_CONTINUATION_RUN_ID"' in DEPLOY
     assert 'DURABLE_RELAYS_ONLY_RECOVERY: "YES"' in DEPLOY
     assert 'REQUIRE_CANONICAL_FLY_OWNER: "NO"' in DEPLOY
+
+
+def test_stalled_runtime_predeploy_recheck_remains_exact_healthy_complete_and_flat():
+    block = DEPLOY[
+        DEPLOY.index("- name: Recheck maintenance boundary immediately before deploy"):
+        DEPLOY.index("- name: Deploy the exact source revision")
+    ]
+    assert 'DEPLOY_MODE: ${{ inputs.mode }}' in block
+    assert 'EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}' in block
+    assert 'str(status.get("source_git_rev") or "") == expected' in block
+    assert 'status.get("process_alive") is True' in block
+    assert 'progress.get("ok") is True' in block
+    assert 'progress.get("trade_lock_progressing") is True' in block
+    assert 'progress.get("trade_lock_available") is True' not in block
+    assert 'pipeline.get("owner") is True' in block
+    assert 'pipeline.get("running") is True' in block
+    assert 'pipeline.get("source_revision_match") is True' in block
+    assert 'bootstrap.get("status") == "COMPLETE"' in block
+    assert 'bootstrap.get("complete") is True' in block
+    assert 'bootstrap.get("blocked") is not True' in block
+    assert 'type(open_positions) is int and open_positions == 0' in block
+    assert 'type(pending_orders) is int and pending_orders == 0' in block
 
 
 def test_bootstrap_continuation_is_proof_bound_and_never_deploys_or_restarts():
