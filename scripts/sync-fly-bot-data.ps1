@@ -720,6 +720,10 @@ foreach ($row in $selectedFiles) {
     [int64](Get-Item -LiteralPath $local).Length
   } else { 0 }
   $extension = [System.IO.Path]::GetExtension($local).ToLowerInvariant()
+  $opaqueQuarantineEvidence = $rel.Replace("\", "/").ToLowerInvariant().StartsWith(
+    "corrupt_evidence_quarantine/",
+    [System.StringComparison]::Ordinal
+  )
   $appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")
   $consistencyMode = [string]$(if ($row.consistency_mode) { $row.consistency_mode } else { "strict_generation_v1" })
   if ($consistencyMode -eq "sqlite_snapshot_v1") {
@@ -750,6 +754,19 @@ foreach ($row in $selectedFiles) {
       $localSize -eq $remoteSize
     )
   }
+  $verifiedFullSha256 = $null
+  if ($opaqueQuarantineEvidence -and $sameGeneration -and $localSize -eq $remoteSize) {
+    $storedFullSha256 = [string]$previous.full_sha256
+    if ($storedFullSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+      $sameGeneration = $false
+    } else {
+      $verifiedFullSha256 = (Get-FileHash -LiteralPath $local -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($verifiedFullSha256 -ne $storedFullSha256.ToLowerInvariant()) {
+        $sameGeneration = $false
+        $verifiedFullSha256 = $null
+      }
+    }
+  }
   $downloadedGeneration = $false
   if (-not ($sameGeneration -and $localSize -eq $remoteSize)) {
   # Assemble and validate a complete same-directory candidate. Never append
@@ -776,13 +793,16 @@ foreach ($row in $selectedFiles) {
     # refreshes discovering that the report is hot.
     $atomicSnapshotFallback = (
       $ForceFullRefresh -and
+      -not $opaqueQuarantineEvidence -and
       $consistencyMode -eq "strict_generation_v1" -and
       $remoteSize -le $chunkLimit
     )
     while ($true) {
       $refreshGeneration = $false
+      $chunkReceipts = [System.Collections.Generic.List[object]]::new()
       if (
         $sameGeneration -and
+        -not $opaqueQuarantineEvidence -and
         -not $fullReplaceRetry -and
         -not $atomicSnapshotFallback -and
         (Test-Path -LiteralPath $local)
@@ -876,6 +896,7 @@ foreach ($row in $selectedFiles) {
           if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
             throw "Chunk checksum mismatch for $rel at offset $offset."
           }
+          $chunkOffset = $offset
           $input = [System.IO.File]::OpenRead($tmp)
           try {
             $output = [System.IO.File]::Open(
@@ -886,6 +907,13 @@ foreach ($row in $selectedFiles) {
             )
             try { $input.CopyTo($output) } finally { $output.Dispose() }
           } finally { $input.Dispose() }
+          if ($opaqueQuarantineEvidence) {
+            $chunkReceipts.Add([ordered]@{
+              offset = [int64]$chunkOffset
+              length = [int64]$payload.Length
+              sha256 = $actualHash
+            })
+          }
           $offset = [int64](Get-Item -LiteralPath $candidate).Length
           $chunkComplete = $true
           # Any successfully checksum-verified chunk proves the pressure
@@ -1042,12 +1070,17 @@ foreach ($row in $selectedFiles) {
           throw "SQLite snapshot checksum mismatch for $rel."
         }
       }
+      if ($opaqueQuarantineEvidence) {
+        $verifiedFullSha256 = Test-OpaqueMirrorChunkReceipts `
+          -Path $candidate `
+          -ExpectedSize $remoteSize `
+          -Receipts @($chunkReceipts)
+      }
       try {
         Test-MirrorCandidate `
           -Path $candidate `
           -RelativePath $rel `
-          -ExpectedSize $remoteSize `
-          -ExpectedSha256 ([string]$row.sha256)
+          -ExpectedSize $remoteSize
         break
       } catch {
         # Same-inode JSONL/CSV rewrites (signal_snapshot patches) keep st_ino
@@ -1082,6 +1115,9 @@ foreach ($row in $selectedFiles) {
       mtime_ns = [int64]$row.mtime_ns
       synced_at = (Get-Date).ToUniversalTime().ToString("o")
     }
+    if ($opaqueQuarantineEvidence) {
+      $syncState[$rel].full_sha256 = $verifiedFullSha256
+    }
     $pendingStateWrites += 1
     # Preserve bounded resumability without rewriting the complete state map
     # for every unchanged manifest row. Metadata is still reconciled when an
@@ -1093,11 +1129,15 @@ foreach ($row in $selectedFiles) {
       $pendingStateWrites = 0
     }
   }
-  $ackRows.Add([ordered]@{
+  $ackRow = [ordered]@{
     path = $rel
     size = $remoteSize
     mtime_ns = [int64]$row.mtime_ns
-  })
+  }
+  if ($opaqueQuarantineEvidence) {
+    $ackRow.full_sha256 = $verifiedFullSha256
+  }
+  $ackRows.Add($ackRow)
   # A final chunk is immediately followed by the next file request otherwise.
   # Yield briefly after every downloaded file as well as between chunks so the
   # shared-CPU Fly machine can schedule health/ready/status handlers.  This

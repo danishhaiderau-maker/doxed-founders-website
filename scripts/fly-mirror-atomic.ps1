@@ -2,8 +2,7 @@ function Test-MirrorCandidate {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$RelativePath,
-    [Nullable[Int64]]$ExpectedSize = $null,
-    [string]$ExpectedSha256 = $null
+    [Nullable[Int64]]$ExpectedSize = $null
   )
   $normalizedRelativePath = $RelativePath.Replace("\", "/").Trim("/")
   $relativeParts = @($normalizedRelativePath.Split("/"))
@@ -25,21 +24,14 @@ function Test-MirrorCandidate {
     if ($null -eq $ExpectedSize -or [int64]$ExpectedSize -lt 0) {
       throw "Quarantine evidence manifest size is unavailable for $RelativePath."
     }
-    $expectedHash = [string]$ExpectedSha256
-    if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
-      throw "Quarantine evidence manifest SHA-256 is unavailable for $RelativePath."
-    }
     $candidateSize = [int64](Get-Item -LiteralPath $Path).Length
     if ($candidateSize -ne [int64]$ExpectedSize) {
       throw "Quarantine evidence manifest size mismatch for $RelativePath."
     }
-    $candidateHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
-    if (-not $candidateHash.Equals($expectedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
-      throw "Quarantine evidence manifest SHA-256 mismatch for $RelativePath."
-    }
     # These are immutable forensic bytes. A corrupt or truncated JSONL payload
     # is the evidence being preserved, so semantic parsing would destroy the
-    # quarantine contract. Size/hash binding above is the admission gate.
+    # quarantine contract. Authenticated contiguous chunk receipts are checked
+    # separately before this semantic admission gate.
     return
   }
   # This legacy filename is an append-only newline-delimited crash journal,
@@ -97,6 +89,54 @@ function Test-MirrorCandidate {
       } finally { $reader.Dispose() }
     } finally { $stream.Dispose() }
   }
+}
+
+function Test-OpaqueMirrorChunkReceipts {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][Int64]$ExpectedSize,
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Receipts
+  )
+  if ($ExpectedSize -lt 0) { throw "Opaque mirror expected size is invalid." }
+  $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+  try {
+    if ($stream.Length -ne $ExpectedSize) { throw "Opaque mirror candidate size mismatch." }
+    $cursor = [int64]0
+    foreach ($receipt in @($Receipts)) {
+      $offset = [int64]$receipt.offset
+      $length = [int64]$receipt.length
+      $expectedHash = [string]$receipt.sha256
+      if ($offset -ne $cursor -or $length -le 0 -or ($offset + $length) -gt $ExpectedSize) {
+        throw "Opaque mirror chunk receipts contain a gap, overlap, or invalid range at offset $offset."
+      }
+      if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "Opaque mirror chunk receipt checksum is missing or invalid at offset $offset."
+      }
+      $stream.Position = $offset
+      $remaining = $length
+      $sha = [System.Security.Cryptography.SHA256]::Create()
+      try {
+        $buffer = [byte[]]::new([Math]::Min(1048576, [int]$length))
+        while ($remaining -gt 0) {
+          $wanted = [int][Math]::Min([int64]$buffer.Length, $remaining)
+          $read = $stream.Read($buffer, 0, $wanted)
+          if ($read -le 0) { throw "Opaque mirror chunk receipt range is incomplete at offset $offset." }
+          [void]$sha.TransformBlock($buffer, 0, $read, $null, 0)
+          $remaining -= $read
+        }
+        [void]$sha.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $actualHash = [System.BitConverter]::ToString($sha.Hash).Replace("-", "").ToLowerInvariant()
+      } finally { $sha.Dispose() }
+      if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
+        throw "Opaque mirror chunk receipt checksum mismatch at offset $offset."
+      }
+      $cursor += $length
+    }
+    if ($cursor -ne $ExpectedSize) {
+      throw "Opaque mirror chunk receipts do not cover the complete candidate."
+    }
+  } finally { $stream.Dispose() }
+  return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
 function Publish-MirrorCandidate {

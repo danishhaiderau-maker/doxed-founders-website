@@ -2138,17 +2138,23 @@ def test_invalid_jsonl_candidate_preserves_previous_mirror_and_valid_candidate_r
     }
 
 
-def test_corrupt_quarantine_jsonl_is_opaque_only_with_exact_manifest_size_and_hash():
+def test_corrupt_quarantine_first_transfer_accepts_contiguous_authenticated_chunks():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         candidate = root / "quarantine.download"
         candidate.write_bytes(b'{"valid":true}\n{"incomplete":')
-        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        data = candidate.read_bytes()
+        first = hashlib.sha256(data[:8]).hexdigest()
+        second = hashlib.sha256(data[8:]).hexdigest()
         relative = "corrupt_evidence_quarantine/repair-1/execution_funnel.jsonl"
         command = (
             f". '{ATOMIC_HELPER}'; "
+            f"$receipts=@(@{{offset=0;length=8;sha256='{first}'}},"
+            f"@{{offset=8;length={len(data)-8};sha256='{second}'}}); "
+            f"$full=Test-OpaqueMirrorChunkReceipts -Path '{candidate}' "
+            f"-ExpectedSize {len(data)} -Receipts $receipts; "
             f"Test-MirrorCandidate -Path '{candidate}' -RelativePath '{relative}' "
-            f"-ExpectedSize {candidate.stat().st_size} -ExpectedSha256 '{digest}'"
+            f"-ExpectedSize {len(data)}"
         )
         subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
@@ -2162,11 +2168,10 @@ def test_same_incomplete_jsonl_outside_corrupt_quarantine_is_rejected():
     with tempfile.TemporaryDirectory() as tmp:
         candidate = Path(tmp) / "active.download"
         candidate.write_bytes(b'{"valid":true}\n{"incomplete":')
-        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
         command = (
             f". '{ATOMIC_HELPER}'; $failed=$false; try {{ "
             f"Test-MirrorCandidate -Path '{candidate}' -RelativePath 'execution_funnel.jsonl' "
-            f"-ExpectedSize {candidate.stat().st_size} -ExpectedSha256 '{digest}' "
+            f"-ExpectedSize {candidate.stat().st_size} "
             "} catch { $failed=$true }; if(-not $failed){ exit 9 }"
         )
         subprocess.run(
@@ -2177,26 +2182,30 @@ def test_same_incomplete_jsonl_outside_corrupt_quarantine_is_rejected():
         )
 
 
-@pytest.mark.parametrize("defect", ["size", "hash", "missing_hash", "traversal"])
-def test_corrupt_quarantine_opaque_admission_rejects_manifest_or_path_defects(defect):
+@pytest.mark.parametrize("defect", ["size", "tamper", "gap", "overlap", "missing_hash"])
+def test_corrupt_quarantine_chunk_receipts_fail_closed(defect):
     with tempfile.TemporaryDirectory() as tmp:
         candidate = Path(tmp) / "quarantine.download"
         candidate.write_bytes(b'{"incomplete":')
         size = candidate.stat().st_size
         digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-        relative = "corrupt_evidence_quarantine/repair-1/raw.jsonl"
+        offset, length = 0, size
         if defect == "size":
             size += 1
-        elif defect == "hash":
+        elif defect == "tamper":
             digest = "0" * 64
         elif defect == "missing_hash":
             digest = ""
-        elif defect == "traversal":
-            relative = "corrupt_evidence_quarantine/../raw.jsonl"
+        elif defect == "gap":
+            offset = 1
+            length -= 1
+        elif defect == "overlap":
+            offset = -1
+            length += 1
         command = (
             f". '{ATOMIC_HELPER}'; $failed=$false; try {{ "
-            f"Test-MirrorCandidate -Path '{candidate}' -RelativePath '{relative}' "
-            f"-ExpectedSize {size} -ExpectedSha256 '{digest}' "
+            f"$receipts=@(@{{offset={offset};length={length};sha256='{digest}'}}); "
+            f"Test-OpaqueMirrorChunkReceipts -Path '{candidate}' -ExpectedSize {size} -Receipts $receipts "
             "} catch { $failed=$true }; if(-not $failed){ exit 9 }"
         )
         subprocess.run(
@@ -2207,13 +2216,26 @@ def test_corrupt_quarantine_opaque_admission_rejects_manifest_or_path_defects(de
         )
 
 
-def test_quarantine_candidate_validation_precedes_publish_and_ack():
-    validation = SYNC_SCRIPT.index("Test-MirrorCandidate")
+def test_quarantine_transfer_rebuilds_from_zero_and_reuse_requires_local_full_hash():
+    quarantine_flag = SYNC_SCRIPT.index("$opaqueQuarantineEvidence =")
+    candidate_copy = SYNC_SCRIPT.index("[System.IO.File]::Copy($local, $candidate", quarantine_flag)
+    assert "-not $opaqueQuarantineEvidence -and" in SYNC_SCRIPT[quarantine_flag:candidate_copy]
+    assert "$storedFullSha256 = [string]$previous.full_sha256" in SYNC_SCRIPT
+    assert "Get-FileHash -LiteralPath $local -Algorithm SHA256" in SYNC_SCRIPT
+    assert "$sameGeneration = $false" in SYNC_SCRIPT
+
+
+def test_quarantine_candidate_receipts_and_full_hash_precede_publish_and_ack():
+    validation = SYNC_SCRIPT.index("Test-OpaqueMirrorChunkReceipts")
     publication = SYNC_SCRIPT.index("Publish-MirrorCandidate", validation)
     acknowledgement = SYNC_SCRIPT.index('$ackSessionId = [guid]::NewGuid()', publication)
     assert validation < publication < acknowledgement
+    assert "$chunkReceipts.Add" in SYNC_SCRIPT
+    assert "offset = [int64]$chunkOffset" in SYNC_SCRIPT
+    assert "length = [int64]$payload.Length" in SYNC_SCRIPT
+    assert "$syncState[$rel].full_sha256 = $verifiedFullSha256" in SYNC_SCRIPT
+    assert "$ackRow.full_sha256 = $verifiedFullSha256" in SYNC_SCRIPT
     assert "-ExpectedSize $remoteSize" in SYNC_SCRIPT
-    assert "-ExpectedSha256 ([string]$row.sha256)" in SYNC_SCRIPT
 
 
 def test_legacy_crash_dump_json_is_validated_as_jsonl():
