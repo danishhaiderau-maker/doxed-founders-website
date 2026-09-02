@@ -347,9 +347,13 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
         deadline = time.monotonic() + request["_runtime"]
         emergency_wal = None
         if request.get("_epoch_id"):
-            emergency_wal = V3EvidenceStore(
+            evidence_store = V3EvidenceStore(
                 request["_data_root"], epoch_id=request["_epoch_id"],
-            ).replay_one_emergency_wal_record()
+            )
+            emergency_wal = {
+                "action": evidence_store.replay_one_emergency_wal_record(),
+                "status": evidence_store.emergency_wal_runtime_status(),
+            }
         pipeline = process_incremental_lifecycle_pipeline(
             request["_data_root"], now=request["_now"],
             max_lifecycles=request["_max_lifecycles"],

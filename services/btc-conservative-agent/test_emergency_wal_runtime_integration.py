@@ -52,6 +52,19 @@ def test_low_space_terminal_row_uses_fixed_wal_and_is_idempotent(tmp_path, monke
     status = store._emergency_wal().status()
     assert status["deferred_count"] == 1
     assert status["free_extents"] == 3
+    public = store.emergency_wal_runtime_status()
+    assert public["capacity_extents"] == 4
+    assert public["free_extents"] == 3
+    assert public["retained_count"] == 1
+    assert public["state_counts"] == {
+        "PREPARED": 0, "DEFERRED": 1, "REPLAYED": 0,
+    }
+    assert public["oldest_generation"] == first["wal_generation"]
+    assert public["identity"] == {
+        "epoch_id": "epoch-runtime", **IDENTITY,
+    }
+    assert "records" not in public
+    assert "record_id" not in repr(public)
 
 
 def test_low_space_optional_row_cannot_consume_wal(tmp_path, monkeypatch):

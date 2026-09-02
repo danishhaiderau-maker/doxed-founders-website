@@ -1,4 +1,6 @@
 import ast
+import hashlib
+import json
 import os
 import re
 import time
@@ -21,6 +23,7 @@ def _namespace(root, runtime):
     ]
     namespace = {
         "Path": Path, "os": os, "re": re, "time": time,
+        "hashlib": hashlib, "json": json,
         "_data_sync_runtime_root": lambda: root / "runtime",
         "_data_sync_volume_root": lambda: root,
         "_lifecycle_pipeline_runtime_status": lambda: runtime,
@@ -31,6 +34,10 @@ def _namespace(root, runtime):
 
 
 def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
+    wal_identity = {
+        "epoch_id": "epoch-live", "source_revision": "a" * 40,
+        "deployed_revision": "a" * 40, "tile_config_signature": "b" * 64,
+    }
     runtime = {
         "owner": True, "running": True, "active": False,
         "source_revision": "a" * 40, "last_outcome": "SUCCESS",
@@ -57,6 +64,18 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
                 "POST_OBSERVATION_INCOMPLETE": 2,
                 "unsafe/path/value": 99,
             },
+            "emergency_wal": {
+                "observed_unix": 995,
+                "identity": wal_identity,
+                "identity_sha256": hashlib.sha256(json.dumps(
+                    wal_identity, separators=(",", ":"), sort_keys=True,
+                ).encode()).hexdigest(), "capacity_extents": 4,
+                "free_extents": 3, "retained_count": 1, "retained_bytes": 100,
+                "state_counts": {"PREPARED": 0, "DEFERRED": 0, "REPLAYED": 1},
+                "oldest_generation": "12345678-1234-1234-1234-123456789abc",
+                "oldest_state": "REPLAYED", "alarms": [],
+                "last_action": {"replayed": True, "state": "REPLAYED"},
+            },
         },
     }
     payload = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)
@@ -74,6 +93,58 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
     assert payload["last_failure_age_sec"] == 20
     assert payload["next_run_in_sec"] == 10
     assert payload["overlap_code"] == "OVERLAP_ACTIVE_REDACTED"
+    assert payload["emergency_wal"]["status"] == "CURRENT"
+    assert payload["emergency_wal"]["reserve_ready"] is True
+    assert payload["emergency_wal"]["observed_age_sec"] == 5
+    assert payload["emergency_wal"]["retained_count"] == 1
+    assert payload["emergency_wal"]["state_counts"]["REPLAYED"] == 1
+    assert payload["emergency_wal"]["last_action"]["replayed"] is True
+
+
+def test_public_status_wal_identity_is_fail_closed_and_content_free(tmp_path):
+    runtime = {"last_result": {"emergency_wal": {
+        "observed_unix": 999, "identity": {
+            "epoch_id": "../secret", "source_revision": "token=secret",
+            "deployed_revision": "a" * 40, "tile_config_signature": "b" * 64,
+        },
+        "capacity_extents": 4, "free_extents": 4, "retained_count": 0,
+        "retained_bytes": 0, "state_counts": {},
+        "alarms": ["SAFE_ALARM", "secret/path"],
+        "last_action": {"reason": "SECRET/PATH"},
+    }}}
+    payload = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)
+    wal = payload["emergency_wal"]
+    assert wal["status"] == "INVALID"
+    assert wal["identity"] is None
+    assert wal["alarms"] == ["SAFE_ALARM"]
+    assert "secret/path" not in repr(payload).lower()
+
+
+def test_public_status_wal_never_false_greens_stale_future_or_inconsistent_state(tmp_path):
+    identity = {
+        "epoch_id": "epoch-live", "source_revision": "a" * 40,
+        "deployed_revision": "a" * 40, "tile_config_signature": "b" * 64,
+    }
+    digest = hashlib.sha256(json.dumps(
+        identity, separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+    base = {
+        "identity": identity, "identity_sha256": digest,
+        "capacity_extents": 4, "free_extents": 4, "retained_count": 0,
+        "retained_bytes": 0,
+        "state_counts": {"PREPARED": 0, "DEFERRED": 0, "REPLAYED": 0},
+        "oldest_generation": None, "oldest_state": None, "alarms": [],
+    }
+    for observed, expected in ((600, "STALE"), (1010, "INVALID")):
+        runtime = {"last_result": {"emergency_wal": {**base, "observed_unix": observed}}}
+        wal = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)["emergency_wal"]
+        assert wal["status"] == expected
+        assert wal["reserve_ready"] is False
+    inconsistent = {**base, "observed_unix": 999, "free_extents": 4, "retained_count": 1}
+    runtime = {"last_result": {"emergency_wal": inconsistent}}
+    wal = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)["emergency_wal"]
+    assert wal["status"] == "INVALID"
+    assert wal["reserve_ready"] is False
 
 
 def test_public_status_redacts_unbounded_worker_failure_material(tmp_path):

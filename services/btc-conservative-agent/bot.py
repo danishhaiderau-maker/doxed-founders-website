@@ -38135,6 +38135,105 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         if re.fullmatch(r"[A-Z0-9_:.-]{1,96}", str(key))
         and isinstance(count, int) and not isinstance(count, bool)
     }
+    wal = last.get("emergency_wal") if isinstance(last.get("emergency_wal"), dict) else {}
+    wal_identity = wal.get("identity") if isinstance(wal.get("identity"), dict) else {}
+    wal_action = wal.get("last_action") if isinstance(wal.get("last_action"), dict) else {}
+    wal_observed = wal.get("observed_unix")
+    exact_identity = {
+        "epoch_id": str(wal_identity.get("epoch_id") or "")[:128],
+        "source_revision": str(wal_identity.get("source_revision") or "")[:64],
+        "deployed_revision": str(wal_identity.get("deployed_revision") or "")[:64],
+        "tile_config_signature": str(wal_identity.get("tile_config_signature") or "")[:64],
+    }
+    wal_identity_valid = bool(
+        re.fullmatch(r"epoch-[A-Za-z0-9._-]+", exact_identity["epoch_id"])
+        and re.fullmatch(r"[0-9a-f]{7,64}", exact_identity["source_revision"])
+        and re.fullmatch(r"[0-9a-f]{7,64}", exact_identity["deployed_revision"])
+        and re.fullmatch(r"[0-9a-f]{64}", exact_identity["tile_config_signature"])
+    )
+    wal_identity_sha = hashlib.sha256(json.dumps(
+        exact_identity, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest() if wal_identity_valid else ""
+    wal_observed_age = (
+        current - float(wal_observed)
+        if isinstance(wal_observed, (int, float)) and not isinstance(wal_observed, bool)
+        else None
+    )
+    wal_binding_valid = bool(
+        wal_identity_valid
+        and wal_identity_sha == str(wal.get("identity_sha256") or "")
+        and exact_identity["source_revision"] == exact_revision
+        and exact_identity["deployed_revision"] == exact_revision
+    )
+    wal_public = None
+    if wal:
+        state_counts = wal.get("state_counts") if isinstance(wal.get("state_counts"), dict) else {}
+        event_counts = wal.get("event_counts") if isinstance(wal.get("event_counts"), dict) else {}
+        alarms = [
+            str(value)[:128] for value in list(wal.get("alarms") or [])[:32]
+            if re.fullmatch(r"[A-Z0-9_.:-]{1,128}", str(value))
+        ]
+        generation = str(wal.get("oldest_generation") or "")
+        action_generation = str(wal_action.get("generation") or "")
+        action_reason = str(wal_action.get("reason") or "")
+        numeric_values = tuple(wal.get(key) for key in (
+            "capacity_extents", "free_extents", "retained_count", "retained_bytes",
+        ))
+        numeric_valid = all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in numeric_values
+        )
+        capacity, free, retained, retained_bytes = numeric_values if numeric_valid else (0, 0, 0, 0)
+        projected_states = {
+            key: max(0, int(state_counts.get(key) or 0))
+            if isinstance(state_counts.get(key, 0), int) and not isinstance(state_counts.get(key, 0), bool)
+            else 0
+            for key in ("PREPARED", "DEFERRED", "REPLAYED")
+        }
+        structurally_valid = bool(
+            numeric_valid and 1 <= capacity <= 64 and free <= capacity
+            and retained + free == capacity
+            and sum(projected_states.values()) == retained
+            and retained_bytes <= retained * 8 * 1024 * 1024
+            and bool(generation) == bool(retained)
+        )
+        fresh = wal_observed_age is not None and -5.0 <= wal_observed_age <= 300.0
+        reserve_ready = bool(wal_binding_valid and structurally_valid and fresh and not alarms)
+        wal_public = {
+            "status": (
+                "CURRENT" if reserve_ready
+                else "ALARM" if wal_binding_valid and structurally_valid and fresh and alarms
+                else "STALE" if wal_binding_valid and structurally_valid and wal_observed_age is not None and wal_observed_age > 300.0
+                else "INVALID"
+            ),
+            "reserve_ready": reserve_ready,
+            "observed_age_sec": max(0.0, wal_observed_age) if wal_observed_age is not None else None,
+            "identity": exact_identity if wal_binding_valid else None,
+            "identity_sha256": wal_identity_sha if wal_binding_valid else None,
+            "capacity_extents": capacity,
+            "free_extents": free,
+            "retained_count": retained,
+            "retained_bytes": retained_bytes,
+            "state_counts": projected_states,
+            "event_counts_since_runtime_start": {
+                key: max(0, int(event_counts.get(key) or 0))
+                if isinstance(event_counts.get(key, 0), int) and not isinstance(event_counts.get(key, 0), bool)
+                else 0
+                for key in ("replayed", "released")
+            },
+            "oldest_generation": generation if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", generation) else None,
+            "oldest_state": wal.get("oldest_state") if wal.get("oldest_state") in ("PREPARED", "DEFERRED", "REPLAYED") else None,
+            "alarms": alarms,
+            "last_action": {
+                "replayed": wal_action.get("replayed") is True,
+                "released": wal_action.get("released") is True,
+                "blocked": wal_action.get("blocked") is True,
+                "empty": wal_action.get("empty") is True,
+                "reason": action_reason if re.fullmatch(r"[A-Z0-9_.:-]{1,80}", action_reason) else None,
+                "generation": action_generation if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", action_generation) else None,
+                "state": wal_action.get("state") if wal_action.get("state") in ("PREPARED", "DEFERRED", "REPLAYED") else None,
+            },
+        }
     return {
         "schema": "lifecycle_pipeline_public_status_v1",
         "owner": bool(internal.get("owner")),
@@ -38171,6 +38270,7 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         "stage_counts": safe_counts(last.get("stage_counts")),
         "blocker_counts": safe_counts(last.get("blocker_counts")),
         "artifacts": _lifecycle_artifact_counts(current),
+        "emergency_wal": wal_public,
     }
 def _data_sync_allowed_roots() -> list:
     """Return unique, non-overlapping physical roots within the Fly volume.

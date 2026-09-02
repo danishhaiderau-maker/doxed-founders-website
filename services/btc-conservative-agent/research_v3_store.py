@@ -8,6 +8,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -337,6 +338,34 @@ class V3EvidenceStore:
         return {
             "replayed": True, "canonical_duplicate": bool(result.get("duplicate")),
             "generation": record["generation"], "state": replay["state"],
+        }
+
+    def emergency_wal_runtime_status(self) -> dict[str, Any]:
+        """Return a bounded, content-free status for the fixed-size reserve."""
+        wal = self._emergency_wal()
+        raw = wal.status()
+        records = raw.get("records") if isinstance(raw.get("records"), list) else []
+        state_counts = {"PREPARED": 0, "DEFERRED": 0, "REPLAYED": 0}
+        for record in records[:64]:
+            if isinstance(record, dict) and record.get("state") in state_counts:
+                state_counts[record["state"]] += 1
+        oldest = min(
+            (record for record in records if isinstance(record, dict)),
+            key=lambda record: int(record.get("sequence") or 0), default=None,
+        )
+        return {
+            "schema": "emergency_evidence_wal_runtime_status_v1",
+            "observed_unix": time.time(),
+            "identity": dict(wal.identity),
+            "identity_sha256": str(raw.get("identity_sha256") or ""),
+            "capacity_extents": int(raw.get("capacity_extents") or 0),
+            "free_extents": int(raw.get("free_extents") or 0),
+            "retained_count": int(raw.get("deferred_count") or 0),
+            "retained_bytes": int(raw.get("deferred_bytes") or 0),
+            "state_counts": state_counts,
+            "oldest_generation": str((oldest or {}).get("generation") or "") or None,
+            "oldest_state": str((oldest or {}).get("state") or "") or None,
+            "alarms": [str(value)[:128] for value in list(raw.get("alarms") or [])[:32]],
         }
 
     def _assert_contained(self, path: Path) -> Path:

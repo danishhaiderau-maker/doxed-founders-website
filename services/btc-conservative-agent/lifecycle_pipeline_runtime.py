@@ -348,6 +348,30 @@ class LifecyclePipelineRuntime:
             isinstance(pending_dirty, int) and not isinstance(pending_dirty, bool)
             and pending_dirty > 0
         ) or not sources_caught_up
+        wal = receipt.get("emergency_wal") if isinstance(receipt.get("emergency_wal"), Mapping) else {}
+        wal_action = wal.get("action") if isinstance(wal.get("action"), Mapping) else {}
+        wal_status = wal.get("status") if isinstance(wal.get("status"), Mapping) else {}
+        retained_wal = None
+        if wal_status:
+            retained_wal = {
+                "observed_unix": wal_status.get("observed_unix"),
+                "identity": dict(wal_status.get("identity") or {}),
+                "identity_sha256": wal_status.get("identity_sha256"),
+                "capacity_extents": wal_status.get("capacity_extents"),
+                "free_extents": wal_status.get("free_extents"),
+                "retained_count": wal_status.get("retained_count"),
+                "retained_bytes": wal_status.get("retained_bytes"),
+                "state_counts": dict(wal_status.get("state_counts") or {}),
+                "oldest_generation": wal_status.get("oldest_generation"),
+                "oldest_state": wal_status.get("oldest_state"),
+                "alarms": list(wal_status.get("alarms") or [])[:32],
+                "last_action": {
+                    key: wal_action.get(key) for key in (
+                        "replayed", "released", "blocked", "empty", "reason",
+                        "generation", "state",
+                    ) if key in wal_action
+                },
+            }
         summary = {
             "generated_at": receipt.get("generated_at"),
             "candidate_count": pipeline.get("candidate_count"),
@@ -365,8 +389,18 @@ class LifecyclePipelineRuntime:
             "stage_counts": dict(pipeline.get("stage_counts") or {}),
             "blocker_counts": dict(pipeline.get("blocker_counts") or {}),
             "backlog_pending": backlog_pending,
+            "emergency_wal": retained_wal,
         }
         with self._lock:
+            if retained_wal is not None:
+                previous = self._status.get("last_result")
+                previous_wal = previous.get("emergency_wal") if isinstance(previous, Mapping) else {}
+                previous_counts = previous_wal.get("event_counts") if isinstance(previous_wal, Mapping) else {}
+                retained_wal["event_counts"] = {
+                    key: max(0, int((previous_counts or {}).get(key) or 0))
+                    + (1 if wal_action.get(key) is True else 0)
+                    for key in ("replayed", "released")
+                }
             self._status.update({
                 "active": False, "failure_count": 0, "backoff_sec": 0.0,
                 # A successful bounded batch is not completion while indexed

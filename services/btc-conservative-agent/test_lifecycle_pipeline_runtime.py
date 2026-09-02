@@ -36,7 +36,7 @@ class _Process:
         self.killed = True
 
 
-def _install_launch(monkeypatch, runtime, process, *, corrupt=False, pipeline=None):
+def _install_launch(monkeypatch, runtime, process, *, corrupt=False, pipeline=None, emergency_wal=None):
     def launch(command):
         request = Path(command[command.index("--request") + 1])
         result = Path(command[command.index("--result") + 1])
@@ -57,6 +57,7 @@ def _install_launch(monkeypatch, runtime, process, *, corrupt=False, pipeline=No
                 },
                 "hard_runtime_result_deadline_enforced": True,
                 "source_cleanup_authorized": False,
+                "emergency_wal": emergency_wal,
             }
             payload["result_sha256"] = runtime_module.hashlib.sha256(
                 json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
@@ -77,6 +78,48 @@ def test_success_resets_backoff_and_pressure_clamps_to_one(tmp_path, monkeypatch
     assert status["backoff_sec"] == 0
     assert status["last_result"]["pressure_mode"] is True
     assert status["source_cleanup_authorized"] is False
+
+
+def test_success_retains_only_bounded_emergency_wal_observability(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    generation = "12345678-1234-1234-1234-123456789abc"
+    emergency_wal = {
+        "action": {"replayed": True, "generation": generation, "state": "REPLAYED"},
+        "status": {
+            "observed_unix": 123.5,
+            "identity": {
+                "epoch_id": "epoch-test", "source_revision": REVISION,
+                "deployed_revision": REVISION, "tile_config_signature": "b" * 64,
+            },
+            "identity_sha256": "c" * 64, "capacity_extents": 4,
+            "free_extents": 3, "retained_count": 1, "retained_bytes": 100,
+            "state_counts": {"PREPARED": 0, "DEFERRED": 0, "REPLAYED": 1},
+            "oldest_generation": generation, "oldest_state": "REPLAYED",
+            "alarms": [], "records": [{"payload": "must-not-survive"}],
+        },
+    }
+    _install_launch(monkeypatch, runtime, _Process(), emergency_wal=emergency_wal)
+    assert runtime._run_once() is True
+    retained = runtime.status()["last_result"]["emergency_wal"]
+    assert retained["capacity_extents"] == 4
+    assert retained["last_action"] == {
+        "replayed": True, "generation": generation, "state": "REPLAYED",
+    }
+    assert retained["event_counts"] == {"replayed": 1, "released": 0}
+    assert "records" not in retained
+    assert "payload" not in repr(retained)
+
+    emergency_wal["action"] = {"released": True, "generation": generation}
+    emergency_wal["status"].update({
+        "free_extents": 4, "retained_count": 0, "retained_bytes": 0,
+        "state_counts": {"PREPARED": 0, "DEFERRED": 0, "REPLAYED": 0},
+        "oldest_generation": None, "oldest_state": None,
+    })
+    _install_launch(monkeypatch, runtime, _Process(), emergency_wal=emergency_wal)
+    assert runtime._run_once() is True
+    assert runtime.status()["last_result"]["emergency_wal"]["event_counts"] == {
+        "replayed": 1, "released": 1,
+    }
 
 
 def test_success_promptly_continues_until_dirty_and_cursor_backlog_are_drained(
