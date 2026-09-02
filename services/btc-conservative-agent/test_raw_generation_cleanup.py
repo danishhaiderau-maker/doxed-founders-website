@@ -24,7 +24,8 @@ def fixture(tmp_path: Path):
     payload = source / "decision.jsonl.1"
     payload.write_text('{"episode_id":"e1"}\n', encoding="utf-8")
     identity = {"source_revision": REV, "deployed_revision": REV,
-                "collection_epoch_id": "epoch-1", "config_signature": SHA}
+                "collection_epoch_id": "epoch-1", "tile_registry_signature": SHA,
+                "config_signature": SHA}
     payload_sha = hashlib.sha256(payload.read_bytes()).hexdigest()
     manifest = {"schema": MANIFEST_SCHEMA, "generation_kind": "V3", "generation": 1,
                 "generation_id": "V3:1", "identity": identity,

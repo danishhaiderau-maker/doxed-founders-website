@@ -52,6 +52,8 @@ from lifecycle_cleanup_transaction import (
     PurgeTransaction,
     verify_bundle as verify_lifecycle_cleanup_bundle,
 )
+from raw_generation_cleanup import RawGenerationCleanupRejected
+from raw_generation_cleanup_owner import RawGenerationCleanupOwner
 from emergency_evidence_wal import EmergencyEvidenceWal
 from position_registry import (
     PositionCloseClaimScope,
@@ -42378,6 +42380,88 @@ def _audit_lifecycle_purge_recovery() -> list:
             "lifecycle purge recovery requires explicit admin replay count=%s", len(rows)
         )
     return rows
+
+
+_RAW_GENERATION_PURGE_CONFIRM_PREFIX = "PURGE_SEALED_RAW_GENERATION:"
+
+
+def _raw_generation_cleanup_identity() -> dict:
+    current = _data_sync_lifecycle_cleanup_current_identity()
+    return {
+        "source_revision": current["source_git_rev"],
+        "deployed_revision": current["deployed_git_rev"],
+        "collection_epoch_id": current["collection_epoch_id"],
+        "tile_registry_signature": current["tile_registry_signature"],
+        "config_signature": current["config_signature"],
+    }
+
+
+def _raw_generation_cleanup_leases(_generation_id: str) -> dict:
+    """Conservatively translate all known owners into generation leases."""
+    active = _data_sync_lifecycle_cleanup_active_references()
+    return {
+        "reader": list(active.get("runtime") or []) + list(active.get("lifecycle_worker") or []),
+        "sync": list(active.get("sync") or []),
+        "analyzer": list(active.get("analyzer") or []),
+    }
+
+
+def _raw_generation_cleanup_owner(*, purge: bool = False) -> RawGenerationCleanupOwner:
+    enabled = os.getenv("RAW_GENERATION_CLEANUP_ENABLED", "false").lower() == "true"
+    if purge:
+        enabled = enabled and os.getenv("RAW_GENERATION_PURGE_ENABLED", "false").lower() == "true"
+    return RawGenerationCleanupOwner(
+        _data_sync_volume_root(), enabled=enabled,
+        identity=_raw_generation_cleanup_identity,
+        leases=_raw_generation_cleanup_leases,
+    )
+
+
+@app.route('/api/data-sync/raw-generation/authority', methods=['POST'])
+def api_data_sync_raw_generation_authority():
+    """Verify and write-once persist an exact lifecycle mapping and laptop ACK."""
+    body = request.get_json(silent=True) or {}
+    manifest = body.get("manifest") if isinstance(body, dict) else None
+    acknowledgement = body.get("acknowledgement") if isinstance(body, dict) else None
+    if not isinstance(manifest, dict) or not isinstance(acknowledgement, dict):
+        return jsonify({"ok": False, "status": "RAW_GENERATION_AUTHORITY_INVALID"}), 400
+    try:
+        result = _raw_generation_cleanup_owner().persist_authority(manifest, acknowledgement)
+    except (RawGenerationCleanupRejected, OSError, TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "status": "RAW_GENERATION_AUTHORITY_REJECTED_SOURCE_RETAINED",
+                        "reasons": list(getattr(exc, "reasons", [type(exc).__name__]))[:12]}), 409
+    return jsonify({"ok": True, **result})
+
+
+@app.route('/api/data-sync/raw-generation/quarantine', methods=['POST'])
+def api_data_sync_raw_generation_quarantine():
+    """Plan, or when separately enabled quarantine, exactly one sealed V3 generation."""
+    body = request.get_json(silent=True) or {}
+    generation_id = str(body.get("generation_id") or "") if isinstance(body, dict) else ""
+    owner = _raw_generation_cleanup_owner()
+    try:
+        result = owner.quarantine(generation_id, dry_run=not owner.enabled)
+    except (RawGenerationCleanupRejected, OSError, TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "status": "RAW_GENERATION_INELIGIBLE_SOURCE_RETAINED",
+                        "reasons": list(getattr(exc, "reasons", [type(exc).__name__]))[:12]}), 409
+    return jsonify({"ok": True, **result})
+
+
+@app.route('/api/data-sync/raw-generation/purge', methods=['POST'])
+def api_data_sync_raw_generation_purge():
+    """Explicitly purge one already-quarantined generation; disabled by default."""
+    body = request.get_json(silent=True) or {}
+    generation_id = str(body.get("generation_id") or "") if isinstance(body, dict) else ""
+    expected = f"{_RAW_GENERATION_PURGE_CONFIRM_PREFIX}{generation_id}"
+    if not hmac.compare_digest(str(body.get("confirmation") or ""), expected):
+        return jsonify({"ok": False, "status": "EXACT_CONFIRMATION_REQUIRED"}), 409
+    owner = _raw_generation_cleanup_owner(purge=True)
+    try:
+        result = owner.purge(generation_id, dry_run=not owner.enabled)
+    except (RawGenerationCleanupRejected, OSError, TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "status": "RAW_GENERATION_PURGE_INELIGIBLE_RETAINED",
+                        "reasons": list(getattr(exc, "reasons", [type(exc).__name__]))[:12]}), 409
+    return jsonify({"ok": True, **result})
 
 
 _PLATFORM_RELAY_EVIDENCE_MAX_BYTES = 25 * 1024 * 1024

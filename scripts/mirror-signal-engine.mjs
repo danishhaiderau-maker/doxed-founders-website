@@ -22,6 +22,10 @@ const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/pla
 const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
 const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
 const lifecycleCleanupEngine = join(root, 'services/btc-signal-engine/lifecycle_cleanup_transaction.py');
+const rawCleanupAgent = join(root, 'services/btc-conservative-agent/raw_generation_cleanup.py');
+const rawCleanupEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup.py');
+const rawCleanupOwnerAgent = join(root, 'services/btc-conservative-agent/raw_generation_cleanup_owner.py');
+const rawCleanupOwnerEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup_owner.py');
 const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
 const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
@@ -91,6 +95,15 @@ if (!existsSync(lifecycleCleanupAgent)) {
 }
 copyFileSync(lifecycleCleanupAgent, lifecycleCleanupEngine);
 console.log(`Mirrored lifecycle cleanup transaction (${sha256(readFileSync(lifecycleCleanupAgent, 'utf8'))})`);
+
+for (const [source, target, label] of [
+  [rawCleanupAgent, rawCleanupEngine, 'raw generation cleanup transaction'],
+  [rawCleanupOwnerAgent, rawCleanupOwnerEngine, 'raw generation cleanup owner'],
+]) {
+  if (!existsSync(source)) throw new Error(`Missing canonical ${label}`);
+  copyFileSync(source, target);
+  console.log(`Mirrored ${label} (${sha256(readFileSync(source, 'utf8'))})`);
+}
 
 if (!existsSync(rotationAgent)) {
   throw new Error('Missing production rotation orchestrator dependency');
