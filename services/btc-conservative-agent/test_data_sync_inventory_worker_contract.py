@@ -162,6 +162,45 @@ def test_worker_deduplicates_overlapping_roots_and_filters_sensitive_files(tmp_p
     assert [row["path"] for row in rows] == ["research/good.json"]
 
 
+def test_worker_inventories_exact_safe_quarantine_artifacts_and_blocks_others(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    repair = runtime / "corrupt_evidence_quarantine" / "repair-1"
+    repair.mkdir(parents=True)
+    expected = {
+        "execution_funnel.jsonl", "quarantine_manifest.json",
+        "excluded_lines_unknown.json", "repair_receipt.json",
+    }
+    for name in expected:
+        (repair / name).write_text("{}\n", encoding="utf-8")
+    for name in ("admin_secret.json", "credential.json", ".env.json", "unsupported.bin"):
+        (repair / name).write_text("blocked", encoding="utf-8")
+    target = runtime / "research_archive" / "linked-target.json"
+    target.parent.mkdir()
+    target.write_text("{}", encoding="utf-8")
+    linked = repair / "linked.json"
+    linked_created = False
+    try:
+        linked.symlink_to(target)
+        linked_created = True
+    except OSError:
+        pass
+
+    nonce = "e" * 32
+    request_path, result_path = _paths(volume, nonce)
+    payload = _request(volume, nonce)
+    payload["excluded_dir_names"].append("research_archive")
+    assert "corrupt_evidence_quarantine" not in payload["excluded_dir_names"]
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert worker.run(request_path, result_path, nonce) == 0
+    rows = _generation_rows(json.loads(result_path.read_text(encoding="utf-8")))
+    prefix = "corrupt_evidence_quarantine/repair-1/"
+    assert [row["path"] for row in rows] == [prefix + name for name in sorted(expected)]
+    if linked_created:
+        assert prefix + "linked.json" not in {row["path"] for row in rows}
+
+
 def test_parent_contract_validates_v2_identity_pages_hashes_and_totals():
     source = BOT_PATH.read_text(encoding="utf-8")
     assert 'result.get("schema") != _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA' in source

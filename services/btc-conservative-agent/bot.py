@@ -37793,9 +37793,6 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "archive-v2",
     "object-store",
     "object_store",
-    # Original corrupt evidence is preserved with a hash/line receipt for
-    # manual review. It must not starve the active mirror sync repeatedly.
-    "corrupt_evidence_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 # A complete canonical mirror pass can legitimately take several minutes on
@@ -38220,6 +38217,28 @@ def _data_sync_relpath(path: Path) -> str:
 
 def _data_sync_path_allowed(path: Path) -> bool:
     try:
+        # File symlinks are never evidence. Directory links are handled by the
+        # bounded-root traversal, but a linked file could otherwise resolve to
+        # an allowed extension and bypass the lexical manifest identity.
+        if path.is_symlink():
+            return False
+        lexical = Path(os.path.abspath(path))
+        runtime_lexical = Path(os.path.abspath(_data_sync_runtime_root()))
+        try:
+            runtime_relative = lexical.relative_to(runtime_lexical)
+        except ValueError:
+            runtime_relative = None
+        if (
+            runtime_relative is not None
+            and "corrupt_evidence_quarantine" in {
+                part.lower() for part in runtime_relative.parts
+            }
+        ):
+            current = runtime_lexical
+            for part in runtime_relative.parts:
+                current = current / part
+                if current.is_symlink():
+                    return False
         resolved = path.resolve(strict=True)
         volume = _data_sync_volume_root()
         resolved.relative_to(volume)

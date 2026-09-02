@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 import zipfile
+import pytest
 from flask import Flask, jsonify, request
 from types import SimpleNamespace
 from datetime import datetime, timezone
@@ -561,7 +562,6 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
             "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({
                 "research_epoch_quarantine", "research_archive",
                 "research_session_archives", "archive-v2", "object-store", "object_store",
-                "corrupt_evidence_quarantine",
             }),
             "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
             "_data_sync_volume_root": lambda: root,
@@ -576,6 +576,99 @@ def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
         ]
         for path in excluded:
             assert namespace["_data_sync_path_allowed"](path) is False
+
+
+def test_data_sync_inventory_and_retrieval_include_only_safe_quarantine_evidence(
+    tmp_path, monkeypatch,
+):
+    root = tmp_path.resolve()
+    quarantine = root / "corrupt_evidence_quarantine" / "exact_repair"
+    quarantine.mkdir(parents=True)
+    expected = {
+        "execution_funnel.jsonl": b'{"ok":1}\n',
+        "quarantine_manifest.json": b'{}',
+        "excluded_lines_unknown.json": b'{}',
+        "repair_receipt.json": b'{}',
+    }
+    for name, payload in expected.items():
+        (quarantine / name).write_bytes(payload)
+    (quarantine / "operator_secret.json").write_text("{}", encoding="utf-8")
+    (quarantine / "credential-copy.json").write_text("{}", encoding="utf-8")
+    (quarantine / ".env.json").write_text("{}", encoding="utf-8")
+    (quarantine / "raw.bin").write_bytes(b"blocked")
+
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_rotation_parts", "_data_sync_path_allowed",
+        "_data_sync_is_linked_directory",
+        "_data_sync_resolve_relpath", "_data_sync_complete_record_size",
+        "_data_sync_consistency_mode", "_data_sync_inventory_record",
+        "_data_sync_inventory",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {
+        "Path": Path, "os": os, "time": time,
+        "_DATA_SYNC_EXTENSIONS": frozenset({".json", ".jsonl"}),
+        "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({"research_archive"}),
+        "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
+        "_data_sync_volume_root": lambda: root,
+        "_data_sync_runtime_root": lambda: root,
+        "_data_sync_allowed_roots": lambda: [root],
+        "_data_sync_relpath": lambda path: path.resolve().relative_to(root).as_posix(),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+
+    prefix = "corrupt_evidence_quarantine/exact_repair/"
+    rows = namespace["_data_sync_inventory"]()
+    assert [row["path"] for row in rows] == [prefix + name for name in sorted(expected)]
+    for name, payload in expected.items():
+        resolved = namespace["_data_sync_resolve_relpath"](prefix + name)
+        assert resolved.read_bytes() == payload
+    for blocked in ("operator_secret.json", "credential-copy.json", ".env.json", "raw.bin"):
+        with pytest.raises(ValueError, match="allowed runtime data file|invalid relative path"):
+            namespace["_data_sync_resolve_relpath"](prefix + blocked)
+
+    target = root / "research_archive" / "linked-target.json"
+    target.parent.mkdir()
+    target.write_text("{}", encoding="utf-8")
+    linked = quarantine / "linked.json"
+    try:
+        linked.symlink_to(target)
+    except OSError:
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path == linked)
+    assert namespace["_data_sync_path_allowed"](linked) is False
+    linked_directory = quarantine / "linked-directory"
+    target_directory = root / "research_archive" / "linked-directory-target"
+    target_directory.mkdir()
+    (target_directory / "nested.json").write_text("{}", encoding="utf-8")
+    directory_link_created = False
+    try:
+        linked_directory.symlink_to(target_directory, target_is_directory=True)
+        directory_link_created = True
+    except OSError:
+        pass
+    if directory_link_created:
+        assert namespace["_data_sync_path_allowed"](
+            linked_directory / "nested.json"
+        ) is False
+    assert "corrupt_evidence_quarantine" not in _excluded_directory_names_from_source()
+
+
+def _excluded_directory_names_from_source():
+    tree = ast.parse(BOT)
+    assignment = next(
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_DATA_SYNC_EXCLUDED_DIR_NAMES"
+                for target in node.targets)
+    )
+    call = assignment.value
+    return set(ast.literal_eval(call.args[0]))
 
 
 def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():

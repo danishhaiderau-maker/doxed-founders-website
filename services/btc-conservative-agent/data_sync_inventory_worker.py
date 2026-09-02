@@ -178,6 +178,10 @@ def _consistency_mode(path: Path, request: dict) -> str:
 
 def _row(path: Path, request: dict) -> dict | None:
     try:
+        # Never turn a linked filename into the identity of its target. The
+        # parent applies the same rule to targeted retrieval.
+        if path.is_symlink():
+            return None
         resolved = path.resolve(strict=True)
         if not _allowed(resolved, request):
             return None
