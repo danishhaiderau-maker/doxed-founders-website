@@ -24,7 +24,7 @@ from emergency_evidence_wal import EmergencyEvidenceWal
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
-_id_cache: dict[str, tuple[tuple[int, int, int, int] | None, frozenset[str]]] = {}
+_id_cache: dict[str, tuple[tuple[int, int, int, int] | None, set[str]]] = {}
 _segment_hash_cache: dict[str, tuple[tuple[int, int, int, int], str]] = {}
 _provenance_cache: dict[str, str] | None = None
 _config_signature_provider = None
@@ -141,6 +141,8 @@ def project_opportunity_causal_identity(row: dict[str, Any]) -> dict[str, Any]:
         "market_regime": identity["regime_volatility"]["market_regime"],
         "atr14_pct_3m": identity["regime_volatility"]["atr14_pct_3m"],
         "realized_volatility": identity["regime_volatility"]["realized_volatility"],
+        "volatility_of_volatility": identity["regime_volatility"]["volatility_of_volatility"],
+        "adx": identity["regime_volatility"]["adx"],
     }
     identity["missing_fields"] = sorted(
         name for name, value in required_paths.items() if value in (None, "", "UNKNOWN")
@@ -1614,6 +1616,9 @@ class V3EvidenceStore:
                         "ledger_signature": self._signature_payload(final_signature),
                         "tail_anchor": anchor,
                     })
+                self._advance_cached_ids_after_append(
+                    path, record_id, source_signature, final_signature, len(payload),
+                )
                 self._clear_append_head(ledger)
                 return {
                     "written": True, "duplicate": False, "resumed_deferred": True,
@@ -1671,6 +1676,9 @@ class V3EvidenceStore:
                             "ledger_signature": self._signature_payload(final_signature),
                             "tail_anchor": anchor,
                         })
+                    self._advance_cached_ids_after_append(
+                        path, record_id, current_signature, final_signature, len(payload),
+                    )
                     return {
                         "written": True, "duplicate": False,
                         "resumed_prepared": True, "record_id": record_id,
@@ -1751,6 +1759,9 @@ class V3EvidenceStore:
                 "ledger_signature": self._signature_payload(final_signature),
                 "tail_anchor": anchor,
             })
+        self._advance_cached_ids_after_append(
+            path, record_id, source_signature, final_signature, len(payload),
+        )
         self._clear_append_head(ledger)
         return {"written": True, "duplicate": False, "record_id": record_id, "ledger": ledger}
 
@@ -1793,6 +1804,41 @@ class V3EvidenceStore:
             raise ValueError("TRUNCATED_JSONL_LINE:TAIL")
 
     @classmethod
+    def _advance_cached_ids_after_append(
+        cls,
+        path: Path,
+        record_id: str,
+        pre_signature: tuple[int, int, int, int] | None,
+        final_signature: tuple[int, int, int, int] | None,
+        appended_length: int,
+    ) -> None:
+        """Advance an already-proven ID cache without scanning old rows.
+
+        A cache miss or signature mismatch remains invalidated.  Only the
+        caller's path lock and an exact pre-append signature let a durable,
+        receipt-proven append extend the cached ID set safely.
+        """
+        if final_signature is None or appended_length <= 0:
+            return
+        if pre_signature is None:
+            exact_append = int(final_signature[2]) == int(appended_length)
+        else:
+            exact_append = (
+                final_signature[:2] == pre_signature[:2]
+                and int(final_signature[2])
+                == int(pre_signature[2]) + int(appended_length)
+            )
+        if not exact_append:
+            return
+        key = str(path.resolve())
+        cached = _id_cache.get(key)
+        if cached is None or cached[0] != pre_signature:
+            return
+        ids = cached[1]
+        ids.add(record_id)
+        _id_cache[key] = (final_signature, ids)
+
+    @classmethod
     def _cached_ids(cls, path: Path) -> set[str]:
         """Return durable IDs without reparsing an unchanged append ledger.
 
@@ -1805,10 +1851,15 @@ class V3EvidenceStore:
         signature = _path_signature(path)
         cached = _id_cache.get(key)
         if cached is not None and cached[0] == signature:
-            return set(cached[1])
+            return cached[1]
         ids = cls._load_ids(path)
-        _id_cache[key] = (signature, frozenset(ids))
+        _id_cache[key] = (signature, ids)
         return ids
+
+    @classmethod
+    def _cached_id_count(cls, path: Path) -> int:
+        """Count exact durable IDs without copying a warm cache."""
+        return len(cls._cached_ids(path))
 
     def append(self, ledger: str, row: dict[str, Any]) -> dict[str, Any]:
         path = self.ledger_path(ledger)
@@ -1997,7 +2048,7 @@ class V3EvidenceStore:
             path = self.ledger_path(ledger)
             try:
                 with self._exclusive(path):
-                    counts[ledger] = len(self._cached_ids(path))
+                    counts[ledger] = self._cached_id_count(path)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 counts[ledger] = 0
                 defects.append({"ledger": ledger, "reason": str(exc)})
@@ -2046,7 +2097,7 @@ class V3EvidenceStore:
             path = self.ledger_path(ledger)
             try:
                 with self._exclusive(path):
-                    counts[ledger] = len(self._cached_ids(path))
+                    counts[ledger] = self._cached_id_count(path)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 counts[ledger] = 0
                 defects.append({"ledger": ledger, "reason": str(exc)})

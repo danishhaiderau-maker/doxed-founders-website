@@ -488,9 +488,18 @@ def make_fixture(tmp_path):
         "ok": True,
         "syncedAt": NOW.isoformat(),
         "sourceRevision": "a" * 40,
+        "ackAccepted": True,
+        "revisionParity": "MATCH",
         "tileRegistrySignature": TEST_TILE_SIGNATURE,
     }
     write_json(mirror / ".fly-data-sync-loop.heartbeat.json", heartbeat)
+    write_json(mirror / "canonical_dataset_current.json", {
+        "schema": "canonical_research_manifest_v1",
+        "source_revision": "a" * 40,
+        "deployed_revision": "a" * 40,
+        "dataset_epoch": "epoch-new",
+        "tile_config_signature": TEST_TILE_SIGNATURE,
+    })
     events = []
     for index in range(3):
         events.append({
@@ -530,6 +539,7 @@ def fetcher(url, token, timeout):
             "source_git_rev": "a" * 40,
             "tile_registry_signature": TEST_TILE_SIGNATURE,
             "active_tiles": [{"lane": lane} for lane in TEST_TILE_LANES],
+            "dataset_epoch": "epoch-new",
         }
     if url.endswith("/api/status"):
         return {
@@ -539,6 +549,7 @@ def fetcher(url, token, timeout):
             "virtual_count": 2, "pending_count": 1, "position_count": 0,
             "tile_registry_signature": TEST_TILE_SIGNATURE,
             "active_tiles": [{"lane": lane} for lane in TEST_TILE_LANES],
+            "dataset_epoch": "epoch-new",
         }
     return {"volume_pct": 15.0, "cleanup_status": "ok"}
 
@@ -1342,6 +1353,65 @@ def test_exact_mirror_parity_refreshes_one_stale_analyzer_through_safe_launcher(
     assert result["repairs"] == ["refreshed_stale_analyzer_through_safe_launcher"]
     parity = next(x for x in result["checks"] if x["name"] == "analyzer_process_revision_parity")
     assert parity["ok"] is False
+
+
+@pytest.mark.parametrize(
+    ("break_gate", "expected_detail"),
+    [
+        ("heartbeat_failed", "heartbeat_ok"),
+        ("ack_missing", "heartbeat_ok"),
+        ("revision_receipt_mismatch", "revision_parity"),
+        ("epoch_mismatch", "epoch_parity"),
+        ("config_mismatch", "config_and_tile_parity"),
+        ("transfer_staging", "transfer_artifact_count"),
+    ],
+)
+def test_stale_analyzer_refresh_requires_complete_atomic_identity_boundary(
+    tmp_path, break_gate, expected_detail,
+):
+    repo, mirror, reports = make_fixture(tmp_path)
+    if break_gate in {"heartbeat_failed", "ack_missing", "revision_receipt_mismatch"}:
+        path = mirror / ".fly-data-sync-loop.heartbeat.json"
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        if break_gate == "heartbeat_failed":
+            heartbeat["ok"] = False
+        elif break_gate == "ack_missing":
+            heartbeat.pop("ackAccepted")
+        else:
+            heartbeat["revisionParity"] = "MISMATCH"
+        write_json(path, heartbeat)
+    elif break_gate == "epoch_mismatch":
+        pointer_path = mirror / "canonical_dataset_current.json"
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        pointer["dataset_epoch"] = "epoch-other"
+        write_json(pointer_path, pointer)
+    elif break_gate == "config_mismatch":
+        pointer_path = mirror / "canonical_dataset_current.json"
+        pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+        pointer["tile_config_signature"] = "x" * 64
+        write_json(pointer_path, pointer)
+    else:
+        write_json(mirror.parent / "fly-data-staging" / "generation.json", {"pending": True})
+
+    calls = []
+    rows = [
+        {"ProcessId": 1, "CommandLine": "powershell sync-fly-bot-data-loop.ps1"},
+        {"ProcessId": 2, "CommandLine": f"python analyzer_research_engine_v62.py --owner-port=9001 --source-revision={'b' * 40}"},
+        {"ProcessId": 3, "CommandLine": "python research_dashboard.py --standalone"},
+        {"ProcessId": 4, "CommandLine": "python research-stability-supervisor.py --loop"},
+    ]
+    checker = module.Supervisor(
+        repo, mirror, reports, "https://fly.invalid", "token", repair=True,
+        now=lambda: NOW, fetcher=fetcher, process_reader=lambda: rows,
+        launcher=lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    result = checker.check()
+
+    assert calls == []
+    gate = next(x for x in result["checks"] if x["name"] == "stale_analyzer_refresh_gate")
+    assert gate["ok"] is False
+    assert gate["detail"][expected_detail] in (False, 1)
 
 
 def test_stale_analyzer_is_not_refreshed_before_mirror_revision_matches_fly(tmp_path):

@@ -1,5 +1,6 @@
 import ast
 import copy
+import json
 import os
 from pathlib import Path
 
@@ -297,6 +298,169 @@ def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
     assert writes[0][1]["policy_decision"] == expected_policy
     assert writes[0][1]["execution_disposition"] == expected_disposition
     assert len(enqueues) == (1 if decision == "APPROVE" else 0)
+
+
+def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tmp_path):
+    from research_v3_bridge import dual_write_lane_decision
+
+    decisions = []
+    base_features = {
+        "research_feature_schema_version": "causal-v1",
+        "price": 100.0,
+        "regime": "BULL",
+        "atr14_pct_3m": 0.42,
+        "realized_volatility": 0.08,
+        "volatility_of_volatility": 0.01,
+        "adx": 27.0,
+        "market_context": {
+            "market": "BITFINEX",
+            "symbol": "BTCUSD",
+            "regime_label": "BULL",
+            "trend_strength": {"adx": 27.0},
+        },
+        "cycle_3m_universe": {
+            "atr14_pct_3m": 0.42,
+            "realized_volatility_30m_pct": 0.08,
+            "volatility_of_volatility_30m_pct": 0.01,
+            "adx14": 27.0,
+        },
+    }
+    ai = {
+        "decision": "APPROVE", "direction": "LONG", "raw_direction": "LONG",
+        "shared_ai_call_id": "scan-canonical-feature",
+    }
+    ctx = {
+        "trade_id": "scan-canonical-feature",
+        "shared_ai_call_id": "scan-canonical-feature",
+        "created_ts_ts": 1000.0,
+        "symbol": "BTCUSD",
+    }
+
+    def persist(lane, lane_ai, lane_ctx, receipt_features, **verdict):
+        decisions.append((lane, copy.deepcopy(receipt_features)))
+        source = {
+            "trade_id": lane_ctx["trade_id"],
+            "shared_ai_call_id": lane_ai["shared_ai_call_id"],
+            "shared_ai_call_ts_epoch": lane_ctx["created_ts_ts"],
+            "symbol": lane_ctx["symbol"],
+            "raw_direction": lane_ai["raw_direction"],
+            "executed_direction": lane_ai["direction"],
+            "feature_snapshot_at_signal": copy.deepcopy(receipt_features),
+        }
+        receipt = dual_write_lane_decision(
+            source, lane=lane, epoch_id="epoch-canonical-feature",
+            data_dir=str(tmp_path), lane_policy={"policy_id": lane}, **verdict,
+        )
+        return bool(receipt["store_verification"]["passed"])
+
+    namespace = {
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "state": {"invert_signal": False},
+        "compute_directional_spread": lambda *_args: 5,
+        "_enrich_combo_lane_features": lambda features, _ctx: {
+            **features, "lane_enriched_marker": True,
+        },
+        "COMBO_EXECUTION_LANES": ("FAMILY_ONE", "FAMILY_TWO"),
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: False,
+        "is_patient_chase_lane": lambda _lane: False,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
+        "is_research_lane_enabled": lambda _lane: True,
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-canonical-feature",
+        "_v3_lane_policy_material": lambda lane: {"policy_signature": lane},
+        "_write_v3_shared_lane_decision": persist,
+        "_enqueue_combo_lane_execution": lambda *_args, **_kwargs: None,
+        "COMBO_LANE_SPECS": {
+            "FAMILY_ONE": {"combo_key": "ONE"},
+            "FAMILY_TWO": {"combo_key": "TWO"},
+        },
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    fanout = load_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout(ctx, ai, 2.0, base_features, "AI_SCAN")
+    assert persist(
+        "CONTINUOUS", ai, ctx, base_features,
+        policy_decision="ACCEPT", execution_disposition="ORDER_ELIGIBLE",
+        exact_reason="APPROVE",
+    )
+
+    assert decisions == [
+        ("FAMILY_ONE", base_features),
+        ("FAMILY_TWO", base_features),
+        ("CONTINUOUS", base_features),
+    ]
+    ledger_dir = tmp_path / "v3" / "ledgers"
+    pre_entry_rows = [
+        json.loads(line)
+        for line in (ledger_dir / "pre_entry_features.jsonl").read_text().splitlines()
+    ]
+    decision_rows = [
+        json.loads(line)
+        for line in (ledger_dir / "decision.jsonl").read_text().splitlines()
+    ]
+    opportunity_rows = [
+        json.loads(line)
+        for line in (ledger_dir / "opportunity.jsonl").read_text().splitlines()
+    ]
+    assert len(pre_entry_rows) == 1
+    assert pre_entry_rows[0]["features"] == base_features
+    assert {row["research_lane"] for row in decision_rows} == {
+        "FAMILY_ONE", "FAMILY_TWO", "CONTINUOUS",
+    }
+    assert len(opportunity_rows) == 1
+    identity = opportunity_rows[0]["causal_identity"]
+    assert identity["collection_identity_complete"] is True
+    assert identity["missing_fields"] == []
+    assert identity["regime_volatility"] == {
+        "market_regime": "BULL",
+        "atr14_pct_3m": 0.42,
+        "realized_volatility": 0.08,
+        "volatility_of_volatility": 0.01,
+        "adx": 27.0,
+    }
+
+    mutated = {**base_features, "price": 101.0}
+    with pytest.raises(ValueError, match="PRE_ENTRY_FEATURE_RECEIPT_COLLISION"):
+        persist(
+            "MUTATED", ai, ctx, mutated,
+            policy_decision="ACCEPT", execution_disposition="ORDER_ELIGIBLE",
+            exact_reason="APPROVE",
+        )
+
+
+def test_shared_causal_snapshot_is_pre_ai_complete_and_lane_independent():
+    namespace = {"copy": copy}
+    freeze = load_function("_freeze_shared_causal_feature_snapshot", namespace)
+    original = {"price": 100.0, "policy_only": "base"}
+    ctx = {
+        "regime": "BEAR",
+        "market_context": {
+            "market": "BITFINEX", "symbol": "BTCUSD",
+            "trend_strength": {"adx": 31.0},
+        },
+        "cycle_3m_universe": {
+            "atr14_pct_3m": 0.55,
+            "realized_volatility_30m_pct": 0.09,
+            "volatility_of_volatility_30m_pct": 0.02,
+            "adx14": 30.0,
+        },
+    }
+
+    frozen = freeze(original, ctx)
+    ctx["regime"] = "BULL"
+    ctx["cycle_3m_universe"]["atr14_pct_3m"] = 9.9
+
+    assert frozen["regime"] == "BEAR"
+    assert frozen["atr14_pct_3m"] == 0.55
+    assert frozen["realized_volatility"] == 0.09
+    assert frozen["volatility_of_volatility"] == 0.02
+    assert frozen["adx"] == 30.0
+    assert frozen["causal_snapshot_phase"] == "PRE_AI_DECISION"
+    assert original == {"price": 100.0, "policy_only": "base"}
 
 
 def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter():

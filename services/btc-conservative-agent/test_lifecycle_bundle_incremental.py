@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -6,12 +7,16 @@ from pathlib import Path
 import pytest
 
 from lifecycle_bundles import (
-    COMPLETION_SCHEMA, LifecycleKey, _exclusive_index_lock,
+    COMPLETION_SCHEMA, EVIDENCE_COLLECTED_SCHEMA, LifecycleKey, _exclusive_index_lock,
+    canonical_json,
     materialize_ready_bundles,
 )
 
 
-def _row(key: LifecycleKey, record_id: str, now: float, **updates):
+def _row(
+    key: LifecycleKey, record_id: str, now: float, *,
+    evidence_collection: bool = True, **updates,
+):
     row = {
         "record_id": record_id,
         "epoch_id": key.collection_epoch_id,
@@ -22,6 +27,7 @@ def _row(key: LifecycleKey, record_id: str, now: float, **updates):
         "source_revision": "a" * 40,
         "deployed_revision": "b" * 40,
         "tile_config_signature": "c" * 64,
+        "config_signature": "d" * 64,
         "bundle_completion": {
             "schema": COMPLETION_SCHEMA,
             "terminal": True,
@@ -34,6 +40,31 @@ def _row(key: LifecycleKey, record_id: str, now: float, **updates):
         },
     }
     row.update(updates)
+    if evidence_collection:
+        completion = row["bundle_completion"]
+        completion["completion_receipt_sha256"] = hashlib.sha256(
+            canonical_json(completion).encode("utf-8")
+        ).hexdigest()
+        collected = {
+            "schema": EVIDENCE_COLLECTED_SCHEMA,
+            "identity": key.as_dict(),
+            "event_id": record_id,
+            "provenance": {
+                field: row[field] for field in (
+                    "source_revision", "deployed_revision",
+                    "tile_config_signature", "config_signature",
+                )
+            },
+            "completion_receipt_sha256": completion["completion_receipt_sha256"],
+            "qualification_eligible_at": now - 2_000,
+            "evidence_collected_at": now - 1_999,
+        }
+        collected["evidence_collected_receipt_sha256"] = hashlib.sha256(
+            canonical_json(collected).encode("utf-8")
+        ).hexdigest()
+        row["evidence_collection_receipt"] = collected
+    else:
+        row.pop("bundle_completion", None)
     return row
 
 
@@ -54,12 +85,15 @@ def test_incremental_cursor_avoids_rescan_and_late_event_supersedes_bundle(tmp_p
     first = materialize_ready_bundles(tmp_path, now=now)
     second = materialize_ready_bundles(tmp_path, now=now)
     _append(tmp_path, "lifecycle", [_row(
-        key, "late-cost", now, observed_ts=now - 1_500,
+        key, "late-cost", now, evidence_collection=False, observed_ts=now - 1_500,
     )])
     third = materialize_ready_bundles(tmp_path, now=now)
 
     assert first["scan"]["bytes_indexed"] == source.stat().st_size - (
-        json.dumps(_row(key, "late-cost", now, observed_ts=now - 1_500), separators=(",", ":"), sort_keys=True).__len__() + 1
+        json.dumps(_row(
+            key, "late-cost", now, evidence_collection=False,
+            observed_ts=now - 1_500,
+        ), separators=(",", ":"), sort_keys=True).__len__() + 1
     )
     assert first["materialized_or_verified"] == 1
     assert second["scan"]["bytes_indexed"] == 0

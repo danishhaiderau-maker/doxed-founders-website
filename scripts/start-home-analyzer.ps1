@@ -150,6 +150,35 @@ $sourceRevision = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
   throw "Analyzer source revision could not be resolved to a full Git SHA."
 }
+# A Git SHA is truthful executable provenance only when the analyzer and its
+# import surface match that commit.  Refuse tracked edits or untracked Python
+# modules in the analyzer dependency roots instead of publishing mixed code
+# under the clean HEAD marker.
+$analyzerProvenancePaths = @(
+  "scripts/start-home-analyzer.ps1",
+  "services/btc-conservative-agent/analyzer_research_engine_v62.py",
+  "services/btc-conservative-agent/research_dashboard.py",
+  "services/btc-conservative-agent/research_v3_store.py",
+  "services/btc-conservative-agent/dynamic_policy_analyzer.py",
+  "services/btc-conservative-agent/combo_pathway_config.py",
+  "services/btc-conservative-agent/research"
+)
+$dirtyAnalyzerSources = @(
+  & git -C $repoRoot status --porcelain=v1 --untracked-files=all -- @analyzerProvenancePaths 2>$null |
+    Where-Object {
+      $path = ([string]$_).Substring([Math]::Min(3, ([string]$_).Length)).Trim('"')
+      $path -match '\.py$' -or $path -eq 'scripts/start-home-analyzer.ps1'
+    }
+)
+if ($LASTEXITCODE -ne 0) {
+  throw "Analyzer executable provenance could not be verified against Git HEAD."
+}
+if ($dirtyAnalyzerSources.Count -gt 0) {
+  throw (
+    "REFUSED: analyzer executable provenance is dirty relative to $sourceRevision; " +
+    "commit/revert the imported analyzer source or launch from a clean exact-revision worktree."
+  )
+}
 # This revision identifies the analyzer code that is actually executing.  The
 # deployed Fly/data revision is recorded independently by the canonical sync
 # receipt and report source-data provenance.  Stamping local HEAD as the old

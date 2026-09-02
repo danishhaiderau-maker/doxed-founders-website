@@ -140,6 +140,95 @@ class ResearchV3StoreTests(unittest.TestCase):
             self.assertEqual(second["ledger_counts"]["opportunity"], 1)
             self.assertEqual(load_ids.call_count, first_calls)
 
+    def test_receipt_proven_append_advances_only_matching_id_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            research_v3_store._id_cache.clear()
+            store = V3EvidenceStore(tmp, epoch_id="epoch-cache-append")
+            path = store.ledger_path("decision")
+            store.append("decision", {"record_id": "decision-1", "episode_id": "episode-1"})
+            self.assertTrue(store.verify_write_set(ledgers=("decision",))["passed"])
+
+            with mock.patch.object(
+                V3EvidenceStore, "_load_ids", wraps=V3EvidenceStore._load_ids,
+            ) as load_ids:
+                written = store.append(
+                    "decision", {"record_id": "decision-2", "episode_id": "episode-2"},
+                )
+                verified = store.verify_write_set(ledgers=("decision",))
+
+            self.assertTrue(written["written"])
+            self.assertTrue(verified["passed"])
+            self.assertEqual(verified["ledger_counts"]["decision"], 2)
+            self.assertEqual(load_ids.call_count, 0)
+
+            key = str(path.resolve())
+            cached = research_v3_store._id_cache[key]
+            cached_ids = cached[1]
+            store.append(
+                "decision", {"record_id": "decision-3", "episode_id": "episode-3"},
+            )
+            self.assertIs(research_v3_store._id_cache[key][1], cached_ids)
+            self.assertEqual(
+                research_v3_store._id_cache[key][1],
+                {"decision-1", "decision-2", "decision-3"},
+            )
+            cached = research_v3_store._id_cache[key]
+            V3EvidenceStore._advance_cached_ids_after_append(
+                path, "must-not-enter", (0, 0, 0, 0), cached[0], 1,
+            )
+            self.assertEqual(research_v3_store._id_cache[key], cached)
+            research_v3_store._id_cache.pop(key)
+            V3EvidenceStore._advance_cached_ids_after_append(
+                path, "must-not-populate", cached[0], cached[0], 1,
+            )
+            self.assertNotIn(key, research_v3_store._id_cache)
+
+    def test_cache_advance_rejects_unaccounted_external_size_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            research_v3_store._id_cache.clear()
+            store = V3EvidenceStore(tmp, epoch_id="epoch-cache-fence")
+            path = store.ledger_path("decision")
+            store.append("decision", {"record_id": "decision-1"})
+            self.assertEqual(store._cached_id_count(path), 1)
+            cached = research_v3_store._id_cache[str(path.resolve())]
+            pre_signature = cached[0]
+
+            payload = b'{"record_id":"external"}\n'
+            with path.open("ab") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            final_signature = research_v3_store._path_signature(path)
+            V3EvidenceStore._advance_cached_ids_after_append(
+                path, "must-not-enter", pre_signature, final_signature,
+                len(payload) - 1,
+            )
+
+            self.assertEqual(research_v3_store._id_cache[str(path.resolve())], cached)
+            self.assertEqual(store._cached_id_count(path), 2)
+
+    def test_count_only_verification_does_not_iterate_or_copy_warm_ids(self):
+        class ExactIds(set):
+            def __iter__(self):
+                raise AssertionError("warm count path must not iterate IDs")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            research_v3_store._id_cache.clear()
+            store = V3EvidenceStore(tmp, epoch_id="epoch-cache-count")
+            path = store.ledger_path("decision")
+            store.append("decision", {"record_id": "decision-1"})
+            self.assertTrue(store.verify_write_set(ledgers=("decision",))["passed"])
+            key = str(path.resolve())
+            signature, ids = research_v3_store._id_cache[key]
+            exact_ids = ExactIds(ids)
+            research_v3_store._id_cache[key] = (signature, exact_ids)
+
+            verified = store.verify_write_set(ledgers=("decision",))
+
+            self.assertTrue(verified["passed"])
+            self.assertEqual(verified["ledger_counts"]["decision"], 1)
+            self.assertIs(research_v3_store._id_cache[key][1], exact_ids)
+
     def test_normalized_ledgers_are_idempotent_and_epoch_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
@@ -204,6 +293,7 @@ class ResearchV3StoreTests(unittest.TestCase):
                         "market_context": {
                             "regime_label": "BULL",
                             "realized_volatility": 0.012,
+                            "volatility_of_volatility": 0.003,
                         },
                         "cycle_3m_universe": {"atr14_pct_3m": 0.42, "adx14": 28.0},
                     },
@@ -222,6 +312,8 @@ class ResearchV3StoreTests(unittest.TestCase):
         self.assertEqual(identity["direction"], "LONG")
         self.assertEqual(identity["regime_volatility"]["market_regime"], "BULL")
         self.assertEqual(identity["regime_volatility"]["atr14_pct_3m"], 0.42)
+        self.assertEqual(identity["regime_volatility"]["volatility_of_volatility"], 0.003)
+        self.assertEqual(identity["regime_volatility"]["adx"], 28.0)
         self.assertTrue(identity["collection_identity_complete"])
 
     def test_historical_sparse_opportunity_projects_missing_fields_as_unknown(self):

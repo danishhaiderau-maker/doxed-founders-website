@@ -16514,6 +16514,40 @@ def _enrich_combo_lane_features(features: dict = None, ctx: dict = None) -> dict
     return out
 
 
+def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = None) -> dict:
+    """Freeze one lane-independent, pre-decision market snapshot.
+
+    Policy/lane enrichment is deliberately excluded.  Every child spawned from
+    one paid AI call must bind the same causal inputs, including the dimensions
+    needed for later regime-conditioned qualification.  Missing measurements
+    remain ``None`` and therefore fail the evidence completeness gate rather
+    than being inferred after the decision.
+    """
+    source = copy.deepcopy(features or {})
+    context = copy.deepcopy(ctx or {})
+    market_context = copy.deepcopy(context.get("market_context") or {})
+    cycle = copy.deepcopy(
+        context.get("cycle_3m_universe")
+        or context.get("exhaustion_3m")
+        or {}
+    )
+    trend = market_context.get("trend_strength") or {}
+    source["market_context"] = market_context
+    source["cycle_3m_universe"] = cycle
+    source["regime"] = (
+        context.get("regime")
+        or market_context.get("regime_label")
+        or market_context.get("regime")
+        or "UNKNOWN"
+    )
+    source["atr14_pct_3m"] = cycle.get("atr14_pct_3m")
+    source["realized_volatility"] = cycle.get("realized_volatility_30m_pct")
+    source["volatility_of_volatility"] = cycle.get("volatility_of_volatility_30m_pct")
+    source["adx"] = cycle.get("adx14") if cycle.get("adx14") is not None else trend.get("adx")
+    source["causal_snapshot_phase"] = "PRE_AI_DECISION"
+    return source
+
+
 def _prepare_shared_lane_spawn_features(event: dict = None, features: dict = None, ctx: dict = None) -> dict:
     """Build inherited-lane features before the downstream signal object exists."""
     event_features = (event or {}).get("features") if isinstance(event, dict) else None
@@ -17007,7 +17041,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             ),
         )
         evidence_ready = _write_v3_shared_lane_decision(
-            lane, ai, ctx, enriched,
+            lane, ai, ctx, features or {},
             policy_decision=(
                 "ERROR" if bool(ai.get("ai_error"))
                 else "ACCEPT" if policy_accepted else "REJECT"
@@ -22211,6 +22245,12 @@ def process_signal(event: dict):
                     _set_lane_pipeline_stage(research_lane, "IDLE")
                     state["last_pipeline_stage"] = "IDLE"
                     return
+
+                # Bind the exact lane-independent market state before the AI
+                # decision.  Family-specific matching may enrich its own copy
+                # later, but evidence receipts and all spawned decisions retain
+                # this single immutable causal snapshot.
+                features = _freeze_shared_causal_feature_snapshot(features, ctx)
 
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
                 if not invoke_ai:

@@ -855,9 +855,14 @@ def test_mandatory_row_defers_until_historical_index_complete_then_appends_once(
     _fraction(monkeypatch, 0.50)
     while not store.advance_emergency_idempotency_bootstrap("execution")["complete"]:
         pass
+    assert store.verify_write_set(ledgers=("execution",))["passed"] is True
     _fraction(monkeypatch, 0.925)
     resumed = store.append("execution", row)
     assert resumed["written"] is True and resumed["resumed_deferred"] is True
+    cache_key = str(execution.resolve())
+    cache_signature, cache_ids = research_v3_store._id_cache[cache_key]
+    assert cache_signature == research_v3_store._path_signature(execution)
+    assert cache_ids == frozenset({"execution:historical", row["record_id"]})
     after = execution.stat().st_size
     duplicate = store.append("execution", row)
     assert duplicate["duplicate"] is True

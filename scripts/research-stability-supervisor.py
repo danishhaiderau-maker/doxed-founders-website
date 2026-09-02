@@ -1038,6 +1038,26 @@ def mirror_partial_artifacts(
     return sorted(artifacts)
 
 
+def mirror_transfer_artifacts(mirror: Path) -> list[str]:
+    """Return every in-flight candidate that forbids an analyzer handoff."""
+    artifacts: list[str] = []
+    roots = ((mirror, "mirror"), (mirror.parent / "fly-data-staging", "staging"))
+    for root, label in roots:
+        if not root.is_dir():
+            continue
+        for candidate in root.rglob("*"):
+            try:
+                if not candidate.is_file() or candidate.is_symlink():
+                    continue
+            except OSError:
+                artifacts.append(f"{label}:INSPECTION_FAILED")
+                continue
+            name = candidate.name.lower()
+            if label == "staging" or name.endswith(".download") or name.endswith(".download.replace-backup"):
+                artifacts.append(f"{label}:{candidate.relative_to(root).as_posix()}")
+    return sorted(artifacts)
+
+
 def evaluate_runtime_readiness(
     status: dict[str, Any],
     prior: dict[str, Any],
@@ -1224,6 +1244,7 @@ class Supervisor:
                 "paths": partials[:20],
             })
         except Exception as exc:
+            partials = [f"INSPECTION_FAILED:{type(exc).__name__}"]
             add("mirror_partial_artifacts", False, f"{type(exc).__name__}: {exc}")
 
         readiness_path = self.readiness_state_file or self.repo / ".research-runtime-readiness-state.json"
@@ -1254,6 +1275,7 @@ class Supervisor:
         heartbeat_path = self.mirror / ".fly-data-sync-loop.heartbeat.json"
         sync_revision = None
         sync_registry_signature = None
+        sync_heartbeat_ok = False
         try:
             heartbeat = read_json(heartbeat_path)
             # Progress heartbeats emitted during a long atomic download use
@@ -1264,9 +1286,18 @@ class Supervisor:
             age = (self.now() - stamp).total_seconds() if stamp else float("inf")
             sync_revision = heartbeat.get("sourceRevision") or heartbeat.get("source_revision")
             sync_registry_signature = heartbeat.get("tileRegistrySignature") or heartbeat.get("tile_registry_signature")
-            add("atomic_sync_heartbeat", heartbeat.get("ok") is True and age <= SYNC_MAX_AGE_SECONDS,
+            sync_heartbeat_ok = bool(
+                heartbeat.get("ok") is True
+                and heartbeat.get("inProgress") is not True
+                and heartbeat.get("ackAccepted") is True
+                and str(heartbeat.get("revisionParity") or "") == "MATCH"
+                and age <= SYNC_MAX_AGE_SECONDS
+            )
+            add("atomic_sync_heartbeat", sync_heartbeat_ok,
                 {"age_seconds": round(age, 1), "ok": heartbeat.get("ok"), "sourceRevision": sync_revision,
-                 "tileRegistrySignature": sync_registry_signature})
+                 "tileRegistrySignature": sync_registry_signature,
+                 "ackAccepted": heartbeat.get("ackAccepted"),
+                 "revisionParity": heartbeat.get("revisionParity")})
         except Exception as exc:
             add("atomic_sync_heartbeat", False, type(exc).__name__)
         revision_match = bool(source_revision and sync_revision and (
@@ -1358,6 +1389,64 @@ class Supervisor:
             "fly_source_revision": source_revision,
             "analyzer_process_revisions": analyzer_process_revisions,
         })
+        refresh_identity_ok = False
+        refresh_identity_detail: dict[str, Any] = {"status": "UNAVAILABLE"}
+        try:
+            transfer_artifacts = mirror_transfer_artifacts(self.mirror)
+            current_pointer = read_json(self.mirror / "canonical_dataset_current.json")
+            pointer_revision = str(current_pointer.get("source_revision") or "").lower()
+            pointer_deployed_revision = str(
+                current_pointer.get("deployed_revision") or pointer_revision
+            ).lower()
+            pointer_epoch = str(current_pointer.get("dataset_epoch") or "")
+            pointer_config = str(current_pointer.get("tile_config_signature") or "")
+            manifest_epoch = str(manifest.get("dataset_epoch") or "")
+            status_epoch = str(
+                status.get("dataset_epoch")
+                or (status.get("research_session") or {}).get("dataset_epoch")
+                or ""
+            )
+            normalized_source_revision = str(source_revision or "").lower()
+            normalized_sync_revision = str(sync_revision or "").lower()
+            epoch_parity = bool(
+                pointer_epoch
+                and manifest_epoch == pointer_epoch
+                and (not status_epoch or status_epoch == pointer_epoch)
+            )
+            refresh_identity_ok = bool(
+                sync_heartbeat_ok
+                and normalized_source_revision
+                and normalized_source_revision == normalized_sync_revision
+                and pointer_revision == normalized_source_revision
+                and pointer_deployed_revision == normalized_source_revision
+                and epoch_parity
+                and pointer_config
+                and pointer_config == manifest_registry_signature
+                and registry_parity
+                and not partials
+                and not transfer_artifacts
+            )
+            refresh_identity_detail = {
+                "status": "EXACT_COMPLETE_MIRROR" if refresh_identity_ok else "INCOMPLETE",
+                "heartbeat_ok": sync_heartbeat_ok,
+                "revision_parity": normalized_source_revision == normalized_sync_revision == pointer_revision == pointer_deployed_revision,
+                "epoch_parity": epoch_parity,
+                "config_and_tile_parity": bool(pointer_config and pointer_config == manifest_registry_signature and registry_parity),
+                "partial_artifact_count": len(partials),
+                "transfer_artifact_count": len(transfer_artifacts),
+            }
+        except Exception as exc:
+            refresh_identity_detail = {
+                "status": "REJECTED",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        # This gate is actionable only when the incumbent analyzer is stale.
+        # A current analyzer does not need a completed replacement boundary.
+        add(
+            "stale_analyzer_refresh_gate",
+            analyzer_revision_match or refresh_identity_ok,
+            {**refresh_identity_detail, "replacement_required": not analyzer_revision_match},
+        )
         # A deployed revision can leave a healthy-looking long-lived analyzer
         # pinned to the previous source marker.  Refresh it only after the
         # completed mirror proves exact Fly parity and process ownership is
@@ -1365,7 +1454,7 @@ class Supervisor:
         # validation and preserves the independent read-only dashboard.
         if (
             self.repair
-            and revision_match
+            and refresh_identity_ok
             and len(inventory["sync"]) == 1
             and len(inventory["analyzer"]) == 1
             and len(inventory["dashboard"]) <= 1
