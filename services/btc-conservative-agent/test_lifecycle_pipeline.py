@@ -202,21 +202,64 @@ def test_pressure_mode_clamps_all_relevant_limits(tmp_path):
     assert report["source_cleanup_authorized"] is False
 
 
+def _write_pressure_round_robin_ledgers(root: Path):
+    ledger_dir = root / "v3" / "ledgers"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    first = json.dumps({"padding": "a" * 1_046_000}, separators=(",", ":")).encode() + b"\n"
+    second = json.dumps({"padding": "b" * 5_000}, separators=(",", ":")).encode() + b"\n"
+    (ledger_dir / "opportunity.jsonl").write_bytes(first)
+    (ledger_dir / "pre_entry_features.jsonl").write_bytes(second)
+    return first, second
+
+
+def test_pressure_mode_scans_at_most_one_eligible_ledger(tmp_path):
+    first, _second = _write_pressure_round_robin_ledgers(tmp_path)
+
+    report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, pressure_mode=True,
+    )
+
+    assert tuple(report["scan"]["ledgers"]) == ("opportunity",)
+    assert report["scan"]["bytes_indexed"] == len(first)
+    assert report["scan"]["ledgers"]["opportunity"]["caught_up"] is True
+    assert report["source_cleanup_authorized"] is False
+
+
+def test_pressure_mode_next_invocation_advances_round_robin_with_full_budget(tmp_path):
+    first, second = _write_pressure_round_robin_ledgers(tmp_path)
+    initial = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, pressure_mode=True,
+    )
+    assert initial["scan"]["bytes_indexed"] == len(first)
+
+    report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, pressure_mode=True,
+    )
+
+    assert tuple(report["scan"]["ledgers"]) == ("pre_entry_features",)
+    assert report["scan"]["bytes_indexed"] == len(second)
+    assert report["scan"]["ledgers"]["pre_entry_features"]["caught_up"] is True
+    assert report["source_cleanup_authorized"] is False
+
+
 def test_emergency_closure_materializes_only_terminal_lifecycle(tmp_path, monkeypatch):
     _patch_provenance(monkeypatch)
     for row in _ready_rows():
         _append(tmp_path, row)
-    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-        tmp_path, now=NOW, pressure_mode=True, emergency_closure_mode=True,
-    )
-    assert first["emergency_closure_mode"] is True
-    assert first["transfer_bundle_count"] == 1
-    assert first["completion_appended_count"] == 1
-    assert first["source_cleanup_authorized"] is False
-    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
-        tmp_path, now=NOW, pressure_mode=True, emergency_closure_mode=True,
-    )
-    assert second["bundle_count"] == 1
+    reports = []
+    for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
+        report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+            tmp_path, now=NOW, pressure_mode=True, emergency_closure_mode=True,
+        )
+        reports.append(report)
+        assert report["emergency_closure_mode"] is True
+        assert len(report["scan"]["ledgers"]) <= 1
+        assert report["source_cleanup_authorized"] is False
+        if report["bundle_count"] == 1:
+            break
+    assert any(report["transfer_bundle_count"] == 1 for report in reports)
+    assert sum(report["completion_appended_count"] for report in reports) == 1
+    assert reports[-1]["bundle_count"] == 1
     assert (tmp_path / "v3" / "ledgers" / "lifecycle.jsonl").is_file()
 
 

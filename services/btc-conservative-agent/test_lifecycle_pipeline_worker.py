@@ -1,9 +1,47 @@
 import json
+from pathlib import Path
 
 import lifecycle_pipeline_worker as worker
 
 
 REVISION = "a" * 40
+
+
+def _write_pressure_round_robin_ledgers(root: Path):
+    ledger_dir = root / "v3" / "ledgers"
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    first = json.dumps({"padding": "a" * 1_046_000}, separators=(",", ":")).encode() + b"\n"
+    second = json.dumps({"padding": "b" * 5_000}, separators=(",", ":")).encode() + b"\n"
+    (ledger_dir / "opportunity.jsonl").write_bytes(first)
+    (ledger_dir / "pre_entry_features.jsonl").write_bytes(second)
+    return first, second
+
+
+def test_pressure_worker_returns_verified_bounded_success(tmp_path):
+    first, _second = _write_pressure_round_robin_ledgers(tmp_path)
+    work = tmp_path / "v3" / "lifecycle_worker"
+    work.mkdir(parents=True)
+    launch = worker.create_request(
+        tmp_path,
+        work,
+        source_revision=REVISION,
+        pressure_mode=True,
+        max_runtime_sec=5,
+    )
+
+    assert worker.run(
+        launch["request_path"], launch["result_path"], launch["nonce"]
+    ) == 0
+    receipt = worker.verify_result(
+        launch["request_path"], launch["result_path"], launch["nonce"]
+    )
+
+    assert receipt["status"] == "SUCCESS"
+    assert receipt["pipeline"]["pressure_mode"] is True
+    assert tuple(receipt["pipeline"]["scan"]["ledgers"]) == ("opportunity",)
+    assert receipt["pipeline"]["scan"]["bytes_indexed"] == len(first)
+    assert receipt["pipeline"]["scan"]["bytes_indexed"] <= 1024 * 1024
+    assert receipt["source_cleanup_authorized"] is False
 
 
 def test_pipeline_exception_writes_sanitized_hash_bound_failure(tmp_path, monkeypatch):

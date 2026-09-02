@@ -299,6 +299,8 @@ def process_incremental_lifecycle_pipeline(
                         "UPDATE index_meta SET next_ledger = ? WHERE singleton = 1",
                         ((LEDGER_NAMES.index(ledger) + 1) % len(LEDGER_NAMES),),
                     )
+                if pressure_mode:
+                    break
 
             dirty = _dirty_lifecycle_rows(
                 connection,
