@@ -1039,7 +1039,7 @@ jobs:
               or run.get("conclusion") != "failure"
               or run.get("event") != "workflow_dispatch"
               or run.get("name") != "Deploy Fly BTC bot"
-              or not str(run.get("path") or "").startswith(".github/workflows/fly-bot-deploy.yml@")
+              or str(run.get("path") or "").split("@", 1)[0] != ".github/workflows/fly-bot-deploy.yml"
           ):
               raise SystemExit("recovery run does not bind the expected failed revision")
           jobs = fetch(f"{base}/runs/{run_id}/jobs?per_page=100").get("jobs") or []

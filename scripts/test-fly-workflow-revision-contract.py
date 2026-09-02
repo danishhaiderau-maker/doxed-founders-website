@@ -69,7 +69,7 @@ def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailab
     assert 'b\\"ModuleNotFoundError\\" in log' in recovery
     assert 'b\\"research.mirror_generation_lease\\" in log' in recovery
     assert 'run.get("name") != "Deploy Fly BTC bot"' in recovery
-    assert 'run.get("path") or "").startswith(".github/workflows/fly-bot-deploy.yml@")' in recovery
+    assert 'run.get("path") or "").split("@", 1)[0] != ".github/workflows/fly-bot-deploy.yml"' in recovery
     assert 'deploy_jobs = [job for job in jobs if job.get("name") == "test-and-deploy"]' in recovery
     assert 'int(deployed[0]["number"]) < int(failed_acceptance[0]["number"]) < int(preserved[0]["number"])' in recovery
     assert '"Re-enter maintenance and flatten the exact deployed revision"' in recovery

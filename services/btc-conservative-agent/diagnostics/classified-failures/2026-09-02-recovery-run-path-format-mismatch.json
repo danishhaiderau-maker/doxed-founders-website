@@ -1,0 +1,12 @@
+{
+  "schema": "classified_failure_receipt_v1",
+  "observed_at_utc": "2026-09-02T15:54:07Z",
+  "deployed_revision": "db64abb89989",
+  "workflow_revision": "7ecc3d408586",
+  "workflow_run_id": 33651212619,
+  "source_receipt_run_id": 33646978872,
+  "error_code": "RECOVERY_RUN_PATH_FORMAT_MISMATCH",
+  "scope": "guarded_recovery_receipt_validation",
+  "mutation_reached": false,
+  "secrets_included": false
+}
