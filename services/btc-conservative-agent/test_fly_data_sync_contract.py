@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 import zipfile
+from contextlib import contextmanager
 import pytest
 from flask import Flask, jsonify, request
 from types import SimpleNamespace
@@ -1742,13 +1743,58 @@ def test_sqlite_snapshot_file_resolver_rejects_cross_flight_identity(tmp_path):
             resolve(*mismatched)
 
 
+def test_sqlite_snapshot_chunk_reader_hash_binds_and_pins_exact_flight(tmp_path):
+    source = (tmp_path / "source.db").resolve(); source.write_bytes(b"source")
+    snapshot = (tmp_path / "snapshot.db").resolve(); snapshot.write_bytes(b"immutable")
+    request_id, build_id = "1" * 32, "2" * 32
+    inventory_id, snapshot_id = "3" * 64, "5" * 32
+    snapshot_sha = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    lease = {
+        "request_id": request_id, "build_id": build_id,
+        "inventory_generation_id": inventory_id, "inventory_sha256": inventory_id,
+        "source_path": str(source), "snapshot_id": snapshot_id,
+        "snapshot_size": snapshot.stat().st_size, "snapshot_sha256": snapshot_sha,
+    }
+    state_key = (str(source), request_id, inventory_id, inventory_id)
+    state = {"status": "CURRENT", "lease": lease, "active_readers": 0}
+    tree = ast.parse(BOT)
+    wanted = {
+        "_data_sync_resolve_sqlite_snapshot_flight",
+        "_data_sync_sqlite_snapshot_file_identity",
+        "_data_sync_open_sqlite_snapshot_flight",
+    }
+    selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    namespace = {
+        "Path": Path, "re": re, "hmac": hmac, "time": time,
+        "os": os, "hashlib": hashlib, "contextmanager": contextmanager,
+        "_data_sync_sqlite_snapshot_condition": threading.Condition(),
+        "_data_sync_sqlite_snapshot_states": {state_key: state},
+        "_data_sync_resolve_sqlite_snapshot": lambda token: snapshot,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    open_flight = namespace["_data_sync_open_sqlite_snapshot_flight"]
+    args = (source, request_id, build_id, inventory_id, inventory_id,
+            snapshot_id, snapshot.stat().st_size, snapshot_sha)
+    with open_flight(*args) as (handle, identity):
+        assert state["active_readers"] == 1
+        assert identity[2] == len(b"immutable")
+        assert handle.read() == b"immutable"
+    assert state["active_readers"] == 0
+    assert state["verified_artifact_identity"][2] == len(b"immutable")
+
+    snapshot.write_bytes(b"tampered!")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        with open_flight(*args):
+            pass
+
+
 def test_sqlite_snapshot_file_chunks_carry_complete_flight_identity():
     assert '&snapshot_request_id=$([string]$row.snapshot_request_id)' in SYNC_SCRIPT
     assert '&snapshot_build_id=$([string]$row.snapshot_build_id)' in SYNC_SCRIPT
     assert '&inventory_generation_id=$([string]$row.snapshot_inventory_generation_id)' in SYNC_SCRIPT
     assert '&inventory_sha256=$([string]$row.snapshot_inventory_sha256)' in SYNC_SCRIPT
     file_body = BOT[BOT.index("def api_data_sync_file"):BOT.index("def _data_sync_ack_v3_identity_matches")]
-    assert "_data_sync_resolve_sqlite_snapshot_flight(" in file_body
+    assert "_data_sync_open_sqlite_snapshot_flight(" in file_body
     assert "sqlite snapshot acknowledgement identity mismatch" in file_body
     assert "X-Data-Snapshot-Request-Id" in file_body
     assert "X-Data-Snapshot-Build-Id" in file_body
@@ -1816,8 +1862,8 @@ def test_sqlite_snapshot_authority_requires_exact_current_inventory_row(tmp_path
 def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
     snapshot_root = tmp_path / ".data-sync-snapshots"
     snapshot_root.mkdir()
-    expired_id, orphan_id, active_id = "1" * 32, "2" * 32, "3" * 32
-    for token in (expired_id, orphan_id, active_id):
+    expired_id, orphan_id, active_id, reader_id = "1" * 32, "2" * 32, "3" * 32, "9" * 32
+    for token in (expired_id, orphan_id, active_id, reader_id):
         target = snapshot_root / f"{token}.db"
         target.write_bytes(token.encode("ascii"))
         os.utime(target, (time.time() - 2000, time.time() - 2000))
@@ -1855,6 +1901,11 @@ def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
             "status": "BUILDING", "lease": None, "snapshot_id": active_id,
             "worker": AliveWorker(), "completed_at": 0.0,
         },
+        (str(source), "a" * 32, generation_id, generation_id): {
+            "status": "EXPIRED", "lease": {"snapshot_id": reader_id},
+            "worker": None, "completed_at": old, "last_accessed_at": old,
+            "active_readers": 1,
+        },
     }
     wanted = {
         "_data_sync_sqlite_generation", "_data_sync_unlink_sqlite_snapshot_artifact",
@@ -1883,6 +1934,7 @@ def test_sqlite_snapshot_eviction_and_orphan_sweep_preserve_active(tmp_path):
     assert not (snapshot_root / f"{expired_id}.db").exists()
     assert not (snapshot_root / f"{orphan_id}.db").exists()
     assert (snapshot_root / f"{active_id}.db").is_file()
+    assert (snapshot_root / f"{reader_id}.db").is_file()
     assert linked_target.read_bytes() == b"outside"
     if linked_path is not None:
         assert linked_path.is_symlink()

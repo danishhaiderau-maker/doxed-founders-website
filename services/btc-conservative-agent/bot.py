@@ -41,6 +41,7 @@ import socket
 import hashlib
 import hmac
 import sqlite3
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
@@ -38825,7 +38826,8 @@ def _data_sync_request_sqlite_snapshot(
             )
             if (stale_key != state_key and stale_at
                     and now - stale_at >= _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS
-                    and not (stale_worker and stale_worker.is_alive())):
+                    and not (stale_worker and stale_worker.is_alive())
+                    and int(stale_state.get("active_readers") or 0) == 0):
                 removed_state = _data_sync_sqlite_snapshot_states.pop(stale_key, None) or {}
                 removed_lease = removed_state.get("lease") or {}
                 if removed_lease.get("snapshot_id"):
@@ -38840,6 +38842,13 @@ def _data_sync_request_sqlite_snapshot(
                 active_state.get("status") == "EXPIRED"
                 and now - active_at < _DATA_SYNC_SQLITE_SNAPSHOT_CACHE_SECONDS
             )
+            if int(active_state.get("active_readers") or 0) > 0:
+                active_id = (active_state.get("lease") or {}).get(
+                    "snapshot_id"
+                ) or active_state.get("snapshot_id")
+                if active_id:
+                    protected_snapshot_ids.add(str(active_id).lower())
+                continue
             if (active_state.get("status") not in {"CURRENT", "BUILDING"}
                     and not recently_expired):
                 continue
@@ -38858,6 +38867,7 @@ def _data_sync_request_sqlite_snapshot(
             "lease": None, "worker": None, "started_at": 0.0,
             "deadline_at": 0.0, "completed_at": 0.0,
             "last_accessed_at": 0.0, "error": None,
+            "active_readers": 0,
         })
         worker = state.get("worker")
         lease = state.get("lease")
@@ -38980,6 +38990,83 @@ def _data_sync_resolve_sqlite_snapshot_flight(
     if snapshot.stat().st_size != int(snapshot_size):
         raise ValueError("sqlite snapshot flight size mismatch")
     return snapshot
+
+
+def _data_sync_sqlite_snapshot_file_identity(handle) -> tuple:
+    stat = os.fstat(handle.fileno())
+    return (
+        int(getattr(stat, "st_dev", 0) or 0),
+        int(getattr(stat, "st_ino", 0) or 0),
+        int(stat.st_size), int(stat.st_mtime_ns),
+        int(getattr(stat, "st_ctime_ns", 0) or 0),
+    )
+
+
+@contextmanager
+def _data_sync_open_sqlite_snapshot_flight(
+        path: Path, request_id: str, build_id: str,
+        inventory_generation_id: str, inventory_sha256: str,
+        snapshot_id: str, snapshot_size: int, snapshot_sha256: str):
+    """Pin and hash-verify one exact lease artifact for a chunk read."""
+    resolved_path = path.resolve()
+    state_key = (
+        str(resolved_path), str(request_id or "").strip().lower(),
+        str(inventory_generation_id or "").strip().lower(),
+        str(inventory_sha256 or "").strip().lower(),
+    )
+    handle = None
+    with _data_sync_sqlite_snapshot_condition:
+        snapshot = _data_sync_resolve_sqlite_snapshot_flight(
+            resolved_path, request_id, build_id,
+            inventory_generation_id, inventory_sha256,
+            snapshot_id, snapshot_size, snapshot_sha256,
+        )
+        state = _data_sync_sqlite_snapshot_states.get(state_key)
+        if state is None or state.get("status") != "CURRENT":
+            raise ValueError("sqlite snapshot flight is no longer current")
+        state["active_readers"] = int(state.get("active_readers") or 0) + 1
+        try:
+            handle = snapshot.open("rb")
+        except BaseException:
+            state["active_readers"] -= 1
+            _data_sync_sqlite_snapshot_condition.notify_all()
+            raise
+    try:
+        identity = _data_sync_sqlite_snapshot_file_identity(handle)
+        with _data_sync_sqlite_snapshot_condition:
+            state = _data_sync_sqlite_snapshot_states.get(state_key)
+            verified_identity = state.get("verified_artifact_identity") if state else None
+        if verified_identity != identity:
+            digest = hashlib.sha256()
+            handle.seek(0)
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+            if (
+                _data_sync_sqlite_snapshot_file_identity(handle) != identity
+                or identity[2] != int(snapshot_size)
+                or not hmac.compare_digest(digest.hexdigest(), str(snapshot_sha256).lower())
+            ):
+                raise ValueError("sqlite snapshot artifact checksum mismatch")
+            handle.seek(0)
+            with _data_sync_sqlite_snapshot_condition:
+                state = _data_sync_sqlite_snapshot_states.get(state_key)
+                if state is None or state.get("status") != "CURRENT":
+                    raise ValueError("sqlite snapshot flight is no longer current")
+                state["verified_artifact_identity"] = identity
+        yield handle, identity
+        if _data_sync_sqlite_snapshot_file_identity(handle) != identity:
+            raise ValueError("sqlite snapshot artifact changed during chunk read")
+    finally:
+        if handle is not None:
+            handle.close()
+        with _data_sync_sqlite_snapshot_condition:
+            state = _data_sync_sqlite_snapshot_states.get(state_key)
+            if state is not None:
+                state["active_readers"] = max(
+                    0, int(state.get("active_readers") or 0) - 1,
+                )
+                state["last_accessed_at"] = time.monotonic()
+            _data_sync_sqlite_snapshot_condition.notify_all()
 
 
 def _data_sync_resolve_sqlite_snapshot(snapshot_id: str) -> Path:
@@ -41196,22 +41283,19 @@ def api_data_sync_file():
             if not hmac.compare_digest(str(ack_inventory_sha256), str(inventory_sha256 or "")):
                 return jsonify({"error": "sqlite snapshot acknowledgement identity mismatch"}), 409
             try:
-                snapshot = _data_sync_resolve_sqlite_snapshot_flight(
+                with _data_sync_open_sqlite_snapshot_flight(
                     path, request_id, build_id,
                     inventory_generation_id, inventory_sha256,
                     request.args.get("snapshot_id"),
                     expected_snapshot_size, expected_snapshot_sha,
-                )
+                ) as (handle, artifact_identity):
+                    snapshot_size = artifact_identity[2]
+                    if offset > snapshot_size:
+                        return jsonify({"error": "offset beyond sqlite snapshot", "size": snapshot_size}), 416
+                    handle.seek(offset)
+                    payload = handle.read(min(limit, snapshot_size - offset))
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 409
-            snapshot_size = snapshot.stat().st_size
-            if snapshot_size != expected_snapshot_size:
-                return jsonify({"error": "sqlite snapshot size mismatch"}), 409
-            if offset > snapshot_size:
-                return jsonify({"error": "offset beyond sqlite snapshot", "size": snapshot_size}), 416
-            with snapshot.open("rb") as handle:
-                handle.seek(offset)
-                payload = handle.read(min(limit, snapshot_size - offset))
             if not re.fullmatch(r"[0-9a-f]{64}", expected_snapshot_sha):
                 return jsonify({"error": "sqlite snapshot identity is invalid"}), 409
             response = make_response(payload)
