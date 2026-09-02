@@ -170,6 +170,76 @@ def test_public_leader_payload_excludes_zero_information_grid_rows():
     assert [row["policy_id"] for row in payload["safe_policy_ranking"]["ranked_policies"]] == ["supported-no-fill"]
 
 
+def test_bounded_payload_uses_modern_diagnostic_fallback_without_promotion():
+    diagnostic = {
+        "policy_id": "diagnostic-only",
+        "policy_family": "HYBRID_RUNNER",
+        "oos_episodes": 2,
+        "unsupported_episodes": 2,
+        "supported_conservative_episodes": 99,
+        "full_fills": 99,
+        "sealed_oos_net_usd": 9999.0,
+        "max_drawdown_usd": -1.0,
+        "qualification": "QUALIFIED",
+        "ranking_eligible": True,
+        "gates": {"integrity_pass": False, "measured_costs_pass": True},
+        "ranking_blockers": ["NO_SUPPORTED_CONSERVATIVE_FILL_POLICY"],
+        "ideal_touch_diagnostic": {
+            "touches": 2,
+            "oos_net_usd": 1.25,
+            "expectancy_lcb_usd": 0.4,
+            "max_drawdown_usd": -0.2,
+            "cvar95_usd": -0.1,
+        },
+    }
+    payload = dashboard._bounded_safe_policy_payload({
+        "candidate_screen": {
+            "descriptive_top_100": [{
+                "policy_id": "zero-information-regular-row",
+                "supported_conservative_episodes": 0,
+            }],
+            "profitable_ideal_touch_diagnostic_top_100": [diagnostic],
+            "drawdown_control_leaders": [],
+            "profit_capture_leaders": {},
+        },
+        "safe_policy_ranking": {"ranked_policies": []},
+    })
+
+    row = payload["candidate_screen"]["descriptive_top_100"][0]
+    assert row["diagnostic_replay_net_pnl_usd"] == 1.25
+    assert row["diagnostic_replay_expectancy_lcb_usd"] == 0.4
+    assert row["diagnostic_replay_max_drawdown_usd"] == -0.2
+    assert row["diagnostic_replay_cvar95_usd"] == -0.1
+    assert row["sealed_oos_net_usd"] is None
+    assert row["max_drawdown_usd"] is None
+    assert row["supported_conservative_episodes"] == 0
+    assert row["supported_terminal_fills"] == 0
+    assert row["full_fills"] == 0
+    assert row["ranking_eligible"] is False
+    assert row["qualification"] == "INSUFFICIENT_EXECUTION_EVIDENCE"
+    assert row["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert row["execution_verification"] == "NOT EXECUTION VERIFIED"
+    assert row["qualification_eligibility"] == "NOT QUALIFICATION ELIGIBLE"
+    assert row["descriptive_blockers"] == [
+        "NOT_EXECUTION_VERIFIED", "NOT_QUALIFICATION_ELIGIBLE",
+        "NO_SUPPORTED_CONSERVATIVE_FILL_POLICY", "integrity_pass",
+    ]
+    assert all(row["gates"][blocker] is False for blocker in row["descriptive_blockers"])
+    assert payload["candidate_screen"]["drawdown_control_leaders"] == []
+    assert payload["candidate_screen"]["profit_capture_leaders"] == {}
+    assert "ranked_policies" not in payload["safe_policy_ranking"]
+
+    absent_nested = dashboard._public_policy_diagnostic_row({
+        "policy_id": "no-nested-diagnostic",
+        "sealed_oos_net_usd": 12345.0,
+        "max_drawdown_usd": -99.0,
+        "cvar95_usd": -88.0,
+    })
+    assert absent_nested["diagnostic_replay_net_pnl_usd"] is None
+    assert absent_nested["diagnostic_replay_max_drawdown_usd"] is None
+    assert absent_nested["diagnostic_replay_cvar95_usd"] is None
+
+
 def test_dashboard_visibly_labels_diagnostic_and_execution_evidence():
     html = dashboard.app.test_client().get("/").get_data(as_text=True)
     safe_html = dashboard.app.test_client().get("/safe-policy-genome-v3.1").get_data(as_text=True)
@@ -181,6 +251,13 @@ def test_dashboard_visibly_labels_diagnostic_and_execution_evidence():
     ):
         assert warning in html
         assert warning in safe_html
+    for rendered_field in (
+        "diagnostic_replay_net_pnl_usd",
+        "diagnostic_replay_max_drawdown_usd",
+        "descriptive_blockers",
+    ):
+        assert rendered_field in html
+        assert rendered_field in safe_html
     for heading in (
         "Supported episodes",
         "Full fills",

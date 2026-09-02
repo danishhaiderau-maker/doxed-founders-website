@@ -428,9 +428,8 @@ def test_safe_and_combo_public_payloads_are_bounded(monkeypatch):
     assert safe["analysis_provenance"]["data_root_kind"] == "CANONICAL_LOCAL_FLY_MIRROR"
     assert safe["cohorts"]["SAFE_POLICY"]["included_row_count"] == 9
     assert safe["report_eligibility"]["reasons"] == ["IMMATURE"]
-    # Zero-evidence rows must not be published merely because the source list
-    # is large.  The public API is bounded *and* fail-closed on execution
-    # evidence, so this fixture's 500 ineligible rows produce no leaders.
+    # Zero-evidence rows in the ordinary descriptive list remain filtered;
+    # only the explicitly named diagnostic shortlist may provide fallback.
     assert safe["candidate_screen"]["descriptive_top_100"] == []
     assert safe["candidate_screen"]["profit_capture_leaders"] == {}
     sweep = safe["candidate_screen"]["scenario_c_atr_stop_sweep"]
