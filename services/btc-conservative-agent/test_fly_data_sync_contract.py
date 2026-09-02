@@ -2481,11 +2481,12 @@ def test_sync_refetches_only_a_bounded_changed_generation_from_byte_zero():
 def test_sync_prioritizes_and_can_refresh_short_lived_sqlite_snapshot_leases():
     assert '$selectedFiles | Sort-Object' in SYNC_SCRIPT
     assert 'if ([string]$_.consistency_mode -eq "sqlite_snapshot_v1") { 0 } else { 1 }' in SYNC_SCRIPT
-    assert '$sqliteLeaseExpired = (' in SYNC_SCRIPT
+    assert '$sqliteLeaseRefreshRequired = (' in SYNC_SCRIPT
     assert '$consistencyMode -eq "sqlite_snapshot_v1"' in SYNC_SCRIPT
-    assert "-match '^Fly sync HTTP 400 '" in SYNC_SCRIPT
-    assert "-match 'sqlite snapshot is unavailable or expired'" in SYNC_SCRIPT
-    assert '($generationChanged -or $sqliteLeaseExpired)' in SYNC_SCRIPT
+    assert "-match '^Fly sync HTTP 409 '" in SYNC_SCRIPT
+    assert 'sqlite snapshot (?:is unavailable or expired|flight identity mismatch|' in SYNC_SCRIPT
+    assert 'acknowledgement identity mismatch)' in SYNC_SCRIPT
+    assert '($generationChanged -or $sqliteLeaseRefreshRequired)' in SYNC_SCRIPT
     assert 'Set-SqliteSnapshotLease -Row $row' in SYNC_SCRIPT
 
 

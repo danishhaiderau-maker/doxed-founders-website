@@ -1001,12 +1001,15 @@ foreach ($row in $selectedFiles) {
             $_.Exception.Message -match '^Fly sync HTTP 409 ' -and
             $_.Exception.Message -match 'generation changed'
           )
-          $sqliteLeaseExpired = (
+          $sqliteLeaseRefreshRequired = (
             $consistencyMode -eq "sqlite_snapshot_v1" -and
-            $_.Exception.Message -match '^Fly sync HTTP 400 ' -and
-            $_.Exception.Message -match 'sqlite snapshot is unavailable or expired'
+            $_.Exception.Message -match '^Fly sync HTTP 409 ' -and
+            $_.Exception.Message -match (
+              'sqlite snapshot (?:is unavailable or expired|flight identity mismatch|' +
+              'acknowledgement identity mismatch)'
+            )
           )
-          if (($generationChanged -or $sqliteLeaseExpired) -and $generationRefreshCount -lt 3) {
+          if (($generationChanged -or $sqliteLeaseRefreshRequired) -and $generationRefreshCount -lt 3) {
             $refreshGeneration = $true
             break
           }
