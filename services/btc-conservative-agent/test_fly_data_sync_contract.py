@@ -3080,6 +3080,21 @@ def test_manifest_publishes_and_retains_its_exact_inventory_generation():
     assert 'inventory_status == "CURRENT" and not targeted_path' in manifest
 
 
+def test_building_manifest_is_observable_but_never_authoritative_or_promotable():
+    """PowerShell 5.1 must receive BUILDING counters without an HTTP error."""
+    manifest = BOT[BOT.index("def api_data_sync_manifest"):BOT.index(
+        "@app.route('/api/data-sync/sqlite-snapshot')"
+    )]
+    building = manifest[manifest.index('if inventory_status == "BUILDING" and not files:'):]
+    assert 'response.headers["Retry-After"] = "2"' in building
+    assert "return response, 503" not in building
+    assert "return response" in building
+    assert '"inventory_authoritative": inventory_status == "CURRENT"' in manifest
+    assert 'inventory_sha256 = (\n        inventory_generation_id if inventory_status == "CURRENT" else None' in manifest
+    assert '[string]$preflight.inventory_status -ne $expectedInventoryStatus' in SYNC_LOOP
+    assert '$expectedInventoryStatus = if ($IdentityOnly) { "IDENTITY_ONLY" } else { "CURRENT" }' in SYNC_LOOP
+
+
 def test_atomic_ack_write_preserves_previous_receipt_on_replace_failure(tmp_path):
     namespace = _load_bot_functions("_write_data_sync_ack")
     target = tmp_path / "sync_ack.json"

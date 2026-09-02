@@ -49,6 +49,11 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
             "ledger": "lifecycle", "byte_offset": 1406,
         },
         "overlap_code": "ACTIVE_OVERLAP_PATH:/secret/runtime/lease",
+        "receipt_bootstrap": {
+            "required": True, "status": "PENDING", "complete": False,
+            "blocked": False, "ledger": "decision", "ledgers_checked": 3,
+            "records_indexed": 16, "bytes_indexed": 2048, "cursor": 4096,
+        },
         "last_result": {
             "rows_scanned": 7, "bytes_indexed": 80,
             "pending_dirty_lifecycles": 2, "promoted_qualification_retries": 1,
@@ -93,6 +98,11 @@ def test_public_status_distinguishes_pipeline_stages_and_is_bounded(tmp_path):
     assert payload["last_failure_age_sec"] == 20
     assert payload["next_run_in_sec"] == 10
     assert payload["overlap_code"] == "OVERLAP_ACTIVE_REDACTED"
+    assert payload["receipt_bootstrap"] == {
+        "required": True, "status": "PENDING", "complete": False,
+        "blocked": False, "ledger": "decision", "ledgers_checked": 3,
+        "records_indexed": 16, "bytes_indexed": 2048, "cursor": 4096,
+    }
     assert payload["emergency_wal"]["status"] == "CURRENT"
     assert payload["emergency_wal"]["reserve_ready"] is True
     assert payload["emergency_wal"]["observed_age_sec"] == 5
@@ -210,10 +220,27 @@ def test_public_status_contract_excludes_identity_and_secret_material():
     artifact = ast.unparse(FUNCTIONS["_lifecycle_artifact_counts"])
     assert '"lifecycle_pipeline": _lifecycle_pipeline_public_status(now)' in BOT
     for forbidden in (
-        "nonce", "receipt", "attestation", "key_id", "bundle_id",
+        "nonce", "attestation", "key_id", "bundle_id", "receipt_path",
+        "receipt_sha256", "receipt_body",
         "lifecycle_id", "user_id", "manifest_path",
     ):
         assert forbidden not in helper.lower()
         assert forbidden not in artifact.lower()
     assert "maximum_entries: int=4096" in artifact
     assert "index >= 256" in artifact
+
+
+def test_public_bootstrap_status_fails_closed_on_unrecognized_values(tmp_path):
+    runtime = {"receipt_bootstrap": {
+        "required": True, "status": "secret/path", "complete": False,
+        "blocked": True, "ledger": "../../secret", "ledgers_checked": 99,
+        "records_indexed": 5, "bytes_indexed": 10, "cursor": -1,
+    }}
+    bootstrap = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)[
+        "receipt_bootstrap"
+    ]
+    assert bootstrap == {
+        "required": True, "status": "PENDING", "complete": False,
+        "blocked": True, "ledger": None, "ledgers_checked": 8,
+        "records_indexed": 5, "bytes_indexed": 10, "cursor": None,
+    }

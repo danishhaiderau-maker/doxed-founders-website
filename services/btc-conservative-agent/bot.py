@@ -37274,8 +37274,26 @@ def api_fresh_epoch_reset():
     }), status
 
 def _data_size_cached_inventory_summary() -> dict:
-    """Copy only fixed-size, worker-validated inventory telemetry."""
-    with _data_sync_inventory_cache_condition:
+    """Copy fixed-size telemetry without waiting behind inventory work.
+
+    The inventory condition is shared with the asynchronous scanner and its
+    publication/validation bookkeeping.  Dashboard polling must never inherit
+    latency from that work, so contention fails closed instead of waiting.
+    """
+    acquired = _data_sync_inventory_cache_condition.acquire(blocking=False)
+    if not acquired:
+        return {
+            "status": "BUSY",
+            "generated_at": None,
+            "expires_at": None,
+            "generation_id": None,
+            "error": "INVENTORY_SNAPSHOT_LOCK_BUSY",
+            "refreshing": True,
+            "file_count": None,
+            "total_bytes": None,
+            "top_files": [],
+        }
+    try:
         status = str(_data_sync_async_inventory.get("status") or "EMPTY").upper()
         generation = _data_sync_async_inventory.get("generation")
         generation = generation if isinstance(generation, dict) else {}
@@ -37293,6 +37311,8 @@ def _data_size_cached_inventory_summary() -> dict:
                 if isinstance(row, dict)
             ],
         }
+    finally:
+        _data_sync_inventory_cache_condition.release()
 
 
 @app.get("/api/data_size")
@@ -38113,6 +38133,10 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
     current = float(now or time.time())
     internal = _lifecycle_pipeline_runtime_status()
     last = internal.get("last_result") if isinstance(internal.get("last_result"), dict) else {}
+    bootstrap = (
+        internal.get("receipt_bootstrap")
+        if isinstance(internal.get("receipt_bootstrap"), dict) else {}
+    )
     failure = internal.get("last_worker_failure") if isinstance(internal.get("last_worker_failure"), dict) else {}
     next_run = internal.get("next_run_unix")
     last_success = internal.get("last_success_unix")
@@ -38163,6 +38187,36 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         for key, count in list((value or {}).items())[:32]
         if re.fullmatch(r"[A-Z0-9_:.-]{1,96}", str(key))
         and isinstance(count, int) and not isinstance(count, bool)
+    }
+    def bounded_nonnegative(value, maximum=None):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return 0
+        return min(value, maximum) if maximum is not None else value
+    bootstrap_status = str(bootstrap.get("status") or "PENDING").upper()
+    if bootstrap_status not in {"PENDING", "COMPLETE", "BLOCKED", "NOT_REQUIRED"}:
+        bootstrap_status = "PENDING"
+    bootstrap_ledger = bootstrap.get("ledger")
+    if bootstrap_ledger not in (
+        "opportunity", "pre_entry_features", "evidence_failure", "decision",
+        "order_intent", "execution", "market_segment", "lifecycle",
+    ):
+        bootstrap_ledger = None
+    bootstrap_public = {
+        "required": bootstrap.get("required") is True,
+        "status": bootstrap_status,
+        "complete": bootstrap.get("complete") is True,
+        "blocked": bootstrap.get("blocked") is True,
+        "ledger": bootstrap_ledger,
+        "ledgers_checked": bounded_nonnegative(bootstrap.get("ledgers_checked"), 8),
+        "records_indexed": bounded_nonnegative(bootstrap.get("records_indexed")),
+        "bytes_indexed": bounded_nonnegative(bootstrap.get("bytes_indexed")),
+        "cursor": (
+            bootstrap.get("cursor")
+            if isinstance(bootstrap.get("cursor"), int)
+            and not isinstance(bootstrap.get("cursor"), bool)
+            and bootstrap.get("cursor") >= 0
+            else None
+        ),
     }
     wal = last.get("emergency_wal") if isinstance(last.get("emergency_wal"), dict) else {}
     wal_identity = wal.get("identity") if isinstance(wal.get("identity"), dict) else {}
@@ -38303,6 +38357,7 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         } | {"caught_up": bool(last.get("caught_up"))},
         "stage_counts": safe_counts(last.get("stage_counts")),
         "blocker_counts": safe_counts(last.get("blocker_counts")),
+        "receipt_bootstrap": bootstrap_public,
         "artifacts": _lifecycle_artifact_counts(current),
         "emergency_wal": wal_public,
     }
@@ -41296,9 +41351,16 @@ def api_data_sync_manifest():
         },
     }
     if inventory_status == "BUILDING" and not files:
+        # BUILDING is an expected, retryable metadata state rather than an
+        # HTTP/service failure.  In particular, Windows PowerShell 5.1 makes
+        # Invoke-RestMethod throw on a 503 before callers can inspect the JSON
+        # worker counters.  Returning the normal payload lets the sole desktop
+        # join observe bounded progress without starting another scan.  The
+        # explicit authority fields still fail closed: only CURRENT can be
+        # downloaded, acknowledged, or promoted by the sync client.
         response = jsonify(payload)
         response.headers["Retry-After"] = "2"
-        return response, 503
+        return response
     return jsonify(payload)
 
 

@@ -232,6 +232,20 @@ class LifecyclePipelineRuntime:
             "emergency": False,
             "overlap_code": None,
             "source_cleanup_authorized": False,
+            # Deployment reads this in-memory projection only.  A fresh owner
+            # with a bound epoch is pending until a bounded worker receipt has
+            # proved every legacy ledger bootstrap complete.
+            "receipt_bootstrap": {
+                "required": bool(self.epoch_id),
+                "status": "PENDING" if self.epoch_id else "NOT_REQUIRED",
+                "complete": not bool(self.epoch_id),
+                "blocked": False,
+                "ledger": None,
+                "ledgers_checked": 0,
+                "records_indexed": 0,
+                "bytes_indexed": 0,
+                "cursor": None,
+            },
             "rotation": None,
             "resource_limits": {
                 "parent_wall_timeout_enforced": True,
@@ -359,6 +373,46 @@ class LifecyclePipelineRuntime:
             isinstance(pending_dirty, int) and not isinstance(pending_dirty, bool)
             and pending_dirty > 0
         ) or not sources_caught_up
+        bootstrap = (
+            receipt.get("emergency_idempotency_bootstrap")
+            if isinstance(receipt.get("emergency_idempotency_bootstrap"), Mapping)
+            else {}
+        )
+        bootstrap_required = bool(self.epoch_id)
+        bootstrap_complete = bool(
+            not bootstrap_required or bootstrap.get("all_complete") is True
+        )
+        bootstrap_blocked = bool(
+            bootstrap_required and bootstrap.get("blocked") is True
+        )
+        bootstrap_pending = bool(bootstrap_required and not bootstrap_complete)
+        backlog_pending = backlog_pending or bootstrap_pending
+        bootstrap_ledger = bootstrap.get("ledger")
+        if bootstrap_ledger not in LEDGER_NAMES:
+            bootstrap_ledger = None
+        receipt_bootstrap = {
+            "required": bootstrap_required,
+            "status": (
+                "NOT_REQUIRED" if not bootstrap_required
+                else "COMPLETE" if bootstrap_complete
+                else "BLOCKED" if bootstrap_blocked
+                else "PENDING"
+            ),
+            "complete": bootstrap_complete,
+            "blocked": bootstrap_blocked,
+            "ledger": bootstrap_ledger,
+            "ledgers_checked": max(0, min(
+                len(LEDGER_NAMES), int(bootstrap.get("ledgers_checked") or 0)
+            )),
+            "records_indexed": max(0, int(bootstrap.get("records_indexed") or 0)),
+            "bytes_indexed": max(0, int(bootstrap.get("bytes_indexed") or 0)),
+            "cursor": (
+                max(0, int(bootstrap.get("cursor")))
+                if isinstance(bootstrap.get("cursor"), int)
+                and not isinstance(bootstrap.get("cursor"), bool)
+                else None
+            ),
+        }
         wal = receipt.get("emergency_wal") if isinstance(receipt.get("emergency_wal"), Mapping) else {}
         wal_action = wal.get("action") if isinstance(wal.get("action"), Mapping) else {}
         wal_status = wal.get("status") if isinstance(wal.get("status"), Mapping) else {}
@@ -401,6 +455,8 @@ class LifecyclePipelineRuntime:
             "stage_counts": dict(pipeline.get("stage_counts") or {}),
             "blocker_counts": dict(pipeline.get("blocker_counts") or {}),
             "backlog_pending": backlog_pending,
+            "idempotency_bootstrap_pending": bootstrap_pending,
+            "receipt_bootstrap": receipt_bootstrap,
             "emergency_wal": retained_wal,
         }
         with self._lock:
@@ -428,6 +484,7 @@ class LifecyclePipelineRuntime:
                 "last_error_code": None,
                 "last_worker_failure": None,
                 "last_result": summary, "last_success_unix": self.clock(),
+                "receipt_bootstrap": receipt_bootstrap,
                 "overlap_code": None, "source_cleanup_authorized": False,
             })
 

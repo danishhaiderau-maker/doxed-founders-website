@@ -58,10 +58,11 @@ def _ready_rows():
 
 
 def _append(root: Path, row):
-    path = root / "v3" / "ledgers" / f"{row['ledger']}.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as handle:
-        handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+    store = research_v3_store.V3EvidenceStore(
+        root, epoch_id=row["epoch_id"],
+    )
+    result = store.append(row["ledger"], row)
+    assert result["written"] is True
 
 
 def _patch_provenance(monkeypatch):
@@ -455,6 +456,7 @@ def test_emergency_closure_defers_nonterminal_without_research_expansion(tmp_pat
 
 
 def test_runtime_provenance_mismatch_remains_dirty_for_later_retry(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
     for row in _ready_rows():
         _append(tmp_path, row)
     monkeypatch.setattr(

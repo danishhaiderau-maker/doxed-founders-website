@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -32,7 +32,7 @@ _MAX_MEMBERSHIP_EPISODE_ID_BYTES = 512
 _MAX_RECEIPT_RECORD_ID_BYTES = 1024
 _MAX_RECEIPT_ROW_BYTES = 8 * 1024 * 1024
 _BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
-_BOOTSTRAP_RECORDS_PER_STEP = 16
+_BOOTSTRAP_RECORDS_PER_STEP = 64
 
 
 def _first_present(*values: Any) -> Any:
@@ -1122,6 +1122,144 @@ class V3EvidenceStore:
     def _bootstrap_round_robin_path(self) -> Path:
         return self.receipt_dir / "emergency_record_idempotency_v1" / "round_robin.json"
 
+    def _append_head_path(self, ledger: str) -> Path:
+        return (
+            self.receipt_dir / "emergency_record_idempotency_v1"
+            / "append_heads" / f"{ledger}.json"
+        )
+
+    def _publish_append_head(
+        self, ledger: str, record_id: str, *, offset: int,
+        payload: bytes, pre_signature: tuple[int, int, int, int] | None,
+    ) -> dict[str, Any]:
+        if self._append_head_path(ledger).exists():
+            raise RuntimeError("LEDGER_APPEND_HEAD_ALREADY_EXISTS")
+        material = {
+            "schema": "v3_ledger_append_head_v1", "state": "PREPARED",
+            "ledger": ledger, "record_id": record_id,
+            "row_sha256": hashlib.sha256(payload).hexdigest(),
+            "row_payload_utf8": payload.decode("utf-8"),
+            "offset": int(offset), "length": len(payload),
+            "identity": self._identity_binding(),
+            "ledger_generation": self._active_ledger_generation(ledger),
+            "pre_signature": (
+                None if pre_signature is None
+                else self._signature_payload(pre_signature)
+            ),
+        }
+        material["binding_sha256"] = hashlib.sha256(
+            canonical_json(material).encode("utf-8")
+        ).hexdigest()
+        self._atomic_json_receipt(self._append_head_path(ledger), material)
+        return material
+
+    def _clear_append_head(self, ledger: str) -> None:
+        path = self._append_head_path(ledger)
+        path.unlink(missing_ok=True)
+        if path.parent.exists():
+            _fsync_directory(path.parent)
+
+    def _recover_append_head(self, ledger: str, path: Path) -> dict[str, Any]:
+        """Finish exactly one interrupted ledger append before admitting another."""
+        head_path = self._append_head_path(ledger)
+        try:
+            head = json.loads(head_path.read_text("utf-8"))
+        except FileNotFoundError:
+            return {"recovered": False}
+        except (OSError, json.JSONDecodeError):
+            return {"recovered": False, "blocked": True,
+                    "reason": "LEDGER_APPEND_HEAD_INVALID"}
+        supplied_binding = str(head.get("binding_sha256") or "")
+        material = dict(head); material.pop("binding_sha256", None)
+        try:
+            payload_text = str(head["row_payload_utf8"])
+            payload = payload_text.encode("utf-8")
+            record_id = str(head["record_id"])
+            offset = int(head["offset"]); length = int(head["length"])
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            return {"recovered": False, "blocked": True,
+                    "reason": "LEDGER_APPEND_HEAD_INVALID"}
+        expected_pre = head.get("pre_signature")
+        valid = bool(
+            head.get("schema") == "v3_ledger_append_head_v1"
+            and head.get("state") == "PREPARED"
+            and head.get("ledger") == ledger
+            and record_id
+            and len(record_id.encode("utf-8")) <= _MAX_RECEIPT_RECORD_ID_BYTES
+            and 0 <= offset
+            and 0 < length <= _MAX_RECEIPT_ROW_BYTES
+            and len(payload) == length
+            and payload.endswith(b"\n")
+            and head.get("row_sha256") == hashlib.sha256(payload).hexdigest()
+            and head.get("identity") == self._identity_binding()
+            and head.get("ledger_generation") == self._active_ledger_generation(ledger)
+            and (expected_pre is None or (
+                isinstance(expected_pre, dict)
+                and set(expected_pre) == {"device", "inode", "size", "mtime_ns"}
+                and all(isinstance(expected_pre[key], int) for key in expected_pre)
+                and int(expected_pre["size"]) == offset
+            ))
+            and hmac.compare_digest(
+                supplied_binding,
+                hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest(),
+            )
+        )
+        if not valid:
+            return {"recovered": False, "blocked": True,
+                    "reason": "LEDGER_APPEND_HEAD_INVALID"}
+
+        current_signature = _path_signature(path)
+        durable = self._bounded_slice(path, offset, length)
+        exact_durable = bool(
+            durable == payload and current_signature is not None
+            and int(current_signature[2]) == offset + length
+        )
+        unchanged_eof = bool(
+            (expected_pre is None and current_signature is None and offset == 0)
+            or (
+                isinstance(expected_pre, dict) and current_signature is not None
+                and self._signature_payload(current_signature) == expected_pre
+                and int(current_signature[2]) == offset
+            )
+        )
+        if not exact_durable and not unchanged_eof:
+            return {"recovered": False, "blocked": True,
+                    "reason": "LEDGER_APPEND_HEAD_LEDGER_DIVERGED",
+                    "record_id": record_id, "ledger": ledger}
+        receipt_path = self._record_receipt_path(ledger, record_id)
+        if unchanged_eof:
+            self._publish_record_receipt(
+                ledger, record_id, offset=offset, payload=payload, state="PREPARED",
+            )
+            with path.open("ab") as handle:
+                handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+        anchor = {"offset": offset, "length": length,
+                  "sha256": str(head["row_sha256"])}
+        if ledger == "lifecycle":
+            signature = _path_signature(path)
+            if signature is None:
+                raise RuntimeError("LIFECYCLE_LEDGER_MISSING_AFTER_HEAD_RECOVERY")
+            recovered_row = json.loads(payload.decode("utf-8"))
+            self._record_lifecycle_membership(
+                str(recovered_row.get("episode_id") or ""), signature, anchor,
+            )
+        self._publish_record_receipt(
+            ledger, record_id, offset=offset, payload=payload, state="COMMITTED",
+        )
+        final_signature = _path_signature(path)
+        if final_signature is None:
+            raise RuntimeError("LEDGER_MISSING_AFTER_HEAD_RECOVERY")
+        self._atomic_json_receipt(self._completeness_path(ledger), {
+            "schema": "emergency_record_index_complete_v1", "ledger": ledger,
+            "identity": self._identity_binding(),
+            "ledger_generation": self._active_ledger_generation(ledger),
+            "ledger_signature": self._signature_payload(final_signature),
+            "tail_anchor": anchor,
+        })
+        self._clear_append_head(ledger)
+        return {"recovered": True, "record_id": record_id,
+                "ledger": ledger, "appended": unchanged_eof}
+
     def _complete_generation(self, ledger: str, signature: tuple[int, int, int, int] | None) -> bool:
         try:
             receipt = json.loads(self._completeness_path(ledger).read_text("utf-8"))
@@ -1252,12 +1390,14 @@ class V3EvidenceStore:
             }
 
     def advance_one_emergency_bootstrap_round_robin(self) -> dict[str, Any]:
-        """Advance one ledger row for the killable low-priority worker.
+        """Advance one bounded batch for the killable low-priority worker.
 
-        The cursor advances only after the selected bootstrap call returns, so
-        pressure, failure, or subprocess termination retries the same ledger.
-        Lifecycle processing invokes this after its primary work; bootstrap
-        can therefore never consume that work's time allotment first.
+        The cursor advances only after the selected ledger is complete. Pressure,
+        failure, or subprocess termination retries that ledger. Already-complete
+        ledgers are skipped in the same call, avoiding an eight-cycle restart
+        tax while the parent process still provides the hard wall-clock bound.
+        Lifecycle processing invokes this after its primary work; bootstrap can
+        therefore never consume that work's time allotment first.
         """
         state_path = self._bootstrap_round_robin_path()
         state: dict[str, Any] = {}
@@ -1276,18 +1416,98 @@ class V3EvidenceStore:
             or index < 0 or index >= len(ledgers)
         ):
             index = 0
-        ledger = ledgers[index]
-        result = self.advance_emergency_idempotency_bootstrap(
-            ledger, max_records=1,
-        )
-        if result.get("blocked") is not True:
-            self._atomic_json_receipt(state_path, {
-                "schema": "emergency_bootstrap_round_robin_v1",
-                "identity": self._identity_binding(),
-                "last_ledger": ledger,
-                "next_index": (index + 1) % len(ledgers),
-            })
-        return {"ledger": ledger, **result}
+        total_records_indexed = 0
+        total_bytes_indexed = 0
+        for checked in range(len(ledgers)):
+            ledger = ledgers[index]
+            result = self.advance_emergency_idempotency_bootstrap(
+                ledger, max_records=_BOOTSTRAP_RECORDS_PER_STEP,
+            )
+            total_records_indexed += int(result.get("records_indexed") or 0)
+            total_bytes_indexed += int(result.get("bytes_indexed") or 0)
+            if result.get("blocked") is True:
+                return {
+                    "ledger": ledger, "ledgers_checked": checked + 1, **result,
+                    "records_indexed": total_records_indexed,
+                    "bytes_indexed": total_bytes_indexed,
+                }
+            if result.get("complete") is not True:
+                self._atomic_json_receipt(state_path, {
+                    "schema": "emergency_bootstrap_round_robin_v1",
+                    "identity": self._identity_binding(),
+                    "last_ledger": ledger,
+                    "next_index": index,
+                })
+                return {
+                    "ledger": ledger, "ledgers_checked": checked + 1, **result,
+                    "records_indexed": total_records_indexed,
+                    "bytes_indexed": total_bytes_indexed,
+                }
+            index = (index + 1) % len(ledgers)
+
+        # The per-ledger checks above are deliberately bounded and sequential.
+        # Before reporting a globally complete bootstrap, freeze every ledger
+        # in canonical order and revalidate each completeness receipt against
+        # its exact current signature.  Otherwise ledger 0 could grow after it
+        # was checked while ledger 7 was being processed, yielding a false
+        # all_complete result.
+        with ExitStack() as frozen:
+            for ledger in ledgers:
+                frozen.enter_context(self._exclusive(self.ledger_path(ledger)))
+            for recheck_index, ledger in enumerate(ledgers):
+                ledger_path = self.ledger_path(ledger)
+                head_recovery = self._recover_append_head(ledger, ledger_path)
+                if (
+                    head_recovery.get("blocked") is True
+                    or self._append_head_path(ledger).exists()
+                ):
+                    self._atomic_json_receipt(state_path, {
+                        "schema": "emergency_bootstrap_round_robin_v1",
+                        "identity": self._identity_binding(),
+                        "last_ledger": ledgers[(index - 1) % len(ledgers)],
+                        "next_index": recheck_index,
+                    })
+                    return {
+                        "ledger": ledger, "complete": False,
+                        "all_complete": False, "blocked": True,
+                        "reason": str(
+                            head_recovery.get("reason")
+                            or "LEDGER_APPEND_HEAD_UNRESOLVED"
+                        ),
+                        "append_head_record_id": head_recovery.get("record_id"),
+                        "ledgers_checked": len(ledgers),
+                        "records_indexed": total_records_indexed,
+                        "bytes_indexed": total_bytes_indexed,
+                    }
+                signature = _path_signature(ledger_path)
+                if not self._complete_generation(ledger, signature):
+                    self._atomic_json_receipt(state_path, {
+                        "schema": "emergency_bootstrap_round_robin_v1",
+                        "identity": self._identity_binding(),
+                        "last_ledger": ledgers[(index - 1) % len(ledgers)],
+                        "next_index": recheck_index,
+                    })
+                    return {
+                        "ledger": ledger, "complete": False,
+                        "all_complete": False,
+                        "reason": "FINAL_REVALIDATION_CHANGED",
+                        "ledgers_checked": len(ledgers),
+                        "records_indexed": total_records_indexed,
+                        "bytes_indexed": total_bytes_indexed,
+                    }
+        self._atomic_json_receipt(state_path, {
+            "schema": "emergency_bootstrap_round_robin_v1",
+            "identity": self._identity_binding(),
+            "last_ledger": ledgers[(index - 1) % len(ledgers)],
+            "next_index": index,
+        })
+        return {
+            "ledger": ledgers[(index - 1) % len(ledgers)],
+            "complete": True, "all_complete": True,
+            "ledgers_checked": len(ledgers),
+            "records_indexed": total_records_indexed,
+            "bytes_indexed": total_bytes_indexed,
+        }
 
     def _bootstrap_empty_ledgers(self) -> None:
         """Fence absent/empty ledgers cheaply before an emergency transition."""
@@ -1359,6 +1579,15 @@ class V3EvidenceStore:
                         "reason": "MANDATORY_ROW_DURABLY_DEFERRED_PENDING_IDEMPOTENCY_BOOTSTRAP",
                     }
                 offset = source_signature[2] if source_signature is not None else 0
+                # A DEFERRED receipt is only the durable migration spool.  Once
+                # bootstrap permits replay, use the same single-flight append
+                # head as every other append before replacing DEFERRED with
+                # PREPARED.  A later append can then finish this exact payload
+                # after a crash, even when it is for a different record.
+                self._publish_append_head(
+                    ledger, record_id, offset=offset, payload=payload,
+                    pre_signature=source_signature,
+                )
                 prepared = self._publish_record_receipt(
                     ledger, record_id, offset=offset, payload=payload, state="PREPARED"
                 )
@@ -1385,6 +1614,7 @@ class V3EvidenceStore:
                         "ledger_signature": self._signature_payload(final_signature),
                         "tail_anchor": anchor,
                     })
+                self._clear_append_head(ledger)
                 return {
                     "written": True, "duplicate": False, "resumed_deferred": True,
                     "record_id": record_id, "ledger": ledger,
@@ -1397,6 +1627,55 @@ class V3EvidenceStore:
             durable = self._bounded_slice(path, receipt_offset, receipt_length)
             durable_hash = hashlib.sha256(durable).hexdigest() if durable is not None else ""
             if durable_hash != str(receipt.get("row_sha256") or ""):
+                # PREPARED is published before the ledger append. If the process
+                # died in that exact window, retry is safe only when the same
+                # generation still ends at the prepared offset. Any partial or
+                # changed tail remains ambiguous and fails closed below.
+                current_signature = _path_signature(path)
+                if (
+                    exact_prepared
+                    and (
+                        (current_signature is None and receipt_offset == 0)
+                        or (
+                            current_signature is not None
+                            and int(current_signature[2]) == receipt_offset
+                        )
+                    )
+                ):
+                    with path.open("ab") as handle:
+                        handle.write(payload)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    anchor = {
+                        "offset": receipt_offset, "length": receipt_length,
+                        "sha256": row_sha,
+                    }
+                    if ledger == "lifecycle":
+                        signature = _path_signature(path)
+                        if signature is None:
+                            raise RuntimeError(
+                                "LIFECYCLE_LEDGER_MISSING_AFTER_PREPARED_RESUME"
+                            )
+                        self._record_lifecycle_membership(
+                            str(material.get("episode_id") or ""), signature, anchor,
+                        )
+                    repaired = dict(receipt)
+                    repaired["state"] = "COMMITTED"
+                    self._atomic_json_receipt(receipt_path, repaired)
+                    final_signature = _path_signature(path)
+                    if final_signature is not None:
+                        self._atomic_json_receipt(self._completeness_path(ledger), {
+                            "schema": "emergency_record_index_complete_v1",
+                            "ledger": ledger, "identity": self._identity_binding(),
+                            "ledger_generation": self._active_ledger_generation(ledger),
+                            "ledger_signature": self._signature_payload(final_signature),
+                            "tail_anchor": anchor,
+                        })
+                    return {
+                        "written": True, "duplicate": False,
+                        "resumed_prepared": True, "record_id": record_id,
+                        "ledger": ledger,
+                    }
                 return {
                     "written": False, "duplicate": False, "blocked": True,
                     "record_id": record_id, "ledger": ledger,
@@ -1444,6 +1723,10 @@ class V3EvidenceStore:
                 "reason": "MANDATORY_ROW_DURABLY_DEFERRED_PENDING_IDEMPOTENCY_BOOTSTRAP",
             }
         offset = int(path.stat().st_size) if path.exists() else 0
+        self._publish_append_head(
+            ledger, record_id, offset=offset, payload=payload,
+            pre_signature=source_signature,
+        )
         prepared = self._publish_record_receipt(
             ledger, record_id, offset=offset, payload=payload, state="PREPARED"
         )
@@ -1468,6 +1751,7 @@ class V3EvidenceStore:
                 "ledger_signature": self._signature_payload(final_signature),
                 "tail_anchor": anchor,
             })
+        self._clear_append_head(ledger)
         return {"written": True, "duplicate": False, "record_id": record_id, "ledger": ledger}
 
     @staticmethod
@@ -1488,6 +1772,25 @@ class V3EvidenceStore:
         except FileNotFoundError:
             pass
         return ids
+
+    @staticmethod
+    def _assert_bounded_jsonl_tail(path: Path) -> None:
+        """Reject a truncated append boundary with one fixed-size read."""
+        signature = _path_signature(path)
+        if signature is None or signature[2] == 0:
+            return
+        size = int(signature[2])
+        try:
+            fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            try:
+                os.lseek(fd, size - 1, os.SEEK_SET)
+                tail = os.read(fd, 1)
+            finally:
+                os.close(fd)
+        except OSError:
+            raise
+        if tail != b"\n":
+            raise ValueError("TRUNCATED_JSONL_LINE:TAIL")
 
     @classmethod
     def _cached_ids(cls, path: Path) -> set[str]:
@@ -1535,6 +1838,25 @@ class V3EvidenceStore:
             # Historical indexing is deliberately not advanced here.
             self._bootstrap_empty_ledgers()
         with self._exclusive(path):
+            head_recovery = self._recover_append_head(ledger, path)
+            if head_recovery.get("blocked") is True:
+                return {
+                    "written": False, "duplicate": False, "blocked": True,
+                    "record_id": record_id, "ledger": ledger,
+                    "reason": head_recovery.get("reason")
+                    or "LEDGER_APPEND_HEAD_RECOVERY_BLOCKED",
+                    "append_head_record_id": head_recovery.get("record_id"),
+                }
+            if (
+                head_recovery.get("recovered") is True
+                and head_recovery.get("record_id") == record_id
+            ):
+                appended = head_recovery.get("appended") is True
+                return {
+                    "written": appended, "duplicate": not appended,
+                    "record_id": record_id, "ledger": ledger,
+                    "resumed_append_head": True,
+                }
             # A durable PREPARED receipt proves the exact bounded row location.
             # Let its replay repair a membership publication that crashed after
             # ledger fsync; ordinary admission would correctly see that stale
@@ -1558,56 +1880,16 @@ class V3EvidenceStore:
                         ledger, record_id, material, line,
                     )
                 return self._emergency_append(ledger, path, record_id, material, line)
-            durable_ids = self._cached_ids(path)
-            if record_id in durable_ids:
-                return {"written": False, "duplicate": True, "record_id": record_id, "ledger": ledger}
-            source_signature = _path_signature(path)
-            source_complete = self._complete_generation(ledger, source_signature)
-            offset = source_signature[2] if source_signature is not None else 0
-            try:
-                with path.open("a", encoding="utf-8", newline="\n") as handle:
-                    handle.write(line)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            except OSError as exc:
-                if (
-                    exc.errno != errno.ENOSPC
-                    or not self._mandatory_lifecycle_write(ledger, material)
-                    or not self._emergency_wal_identity_available()
-                ):
-                    raise
-                return self._defer_mandatory_to_wal(
-                    ledger, record_id, material, line,
-                )
-            durable_ids.add(record_id)
-            _id_cache[str(path.resolve())] = (_path_signature(path), frozenset(durable_ids))
-            payload = line.encode("utf-8")
-            self._publish_record_receipt(
-                ledger, record_id, offset=offset, payload=payload, state="COMMITTED"
+            # Membership is proved by the bounded, hash/offset/generation-bound
+            # receipt path below.  Never reconstruct a process-local ID set by
+            # scanning the historical ledger in a foreground collector call.
+            # An old generation whose receipt bootstrap is incomplete remains
+            # ambiguous and therefore fails closed (or durably defers a
+            # mandatory lifecycle row) until the killable worker catches up.
+            self._assert_bounded_jsonl_tail(path)
+            return self._emergency_append(
+                ledger, path, record_id, material, line,
             )
-            if ledger == "lifecycle":
-                signature = _path_signature(path)
-                if signature is None:
-                    raise RuntimeError("LIFECYCLE_LEDGER_MISSING_AFTER_DURABLE_APPEND")
-                anchor = {
-                    "offset": signature[2] - len(line.encode("utf-8")),
-                    "length": len(line.encode("utf-8")),
-                    "sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
-                }
-                self._record_lifecycle_membership(str(material.get("episode_id") or ""), signature, anchor)
-            final_signature = _path_signature(path)
-            if source_complete and final_signature is not None:
-                self._atomic_json_receipt(self._completeness_path(ledger), {
-                    "schema": "emergency_record_index_complete_v1", "ledger": ledger,
-                    "identity": self._identity_binding(),
-                    "ledger_generation": self._active_ledger_generation(ledger),
-                    "ledger_signature": self._signature_payload(final_signature),
-                    "tail_anchor": anchor if ledger == "lifecycle" else {
-                        "offset": offset, "length": len(payload),
-                        "sha256": hashlib.sha256(payload).hexdigest(),
-                    },
-                })
-            return {"written": True, "duplicate": False, "record_id": record_id, "ledger": ledger}
 
     def put_market_segment(
         self,

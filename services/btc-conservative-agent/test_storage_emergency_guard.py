@@ -257,10 +257,123 @@ def test_receipt_publish_failure_is_restart_safe_and_fails_closed(tmp_path, monk
         "outcome_state": "CENSORED",
     })
     assert replay["duplicate"] is True
-    assert replay["idempotency_receipt_repaired"] is True
+    assert replay["resumed_append_head"] is True
     assert restarted.append("decision", {
         "record_id": "decision:crashed:after-restart", "episode_id": "crashed",
     })["written"] is True
+
+
+@pytest.mark.parametrize(("ledger", "row"), [
+    ("decision", {
+        "record_id": "decision:prepared-crash", "episode_id": "active",
+    }),
+    ("lifecycle", {
+        "record_id": "lifecycle:prepared-crash:terminal",
+        "episode_id": "active", "terminal": True,
+        "outcome_state": "NO_FILL",
+    }),
+])
+def test_prepared_receipt_before_ledger_write_resumes_once_after_restart(
+    tmp_path, monkeypatch, ledger, row,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store._bootstrap_empty_ledgers()
+    original_publish = store._publish_record_receipt
+    crashed = {"value": False}
+
+    def crash_after_prepared(*args, **kwargs):
+        receipt = original_publish(*args, **kwargs)
+        if kwargs.get("state") == "PREPARED" and not crashed["value"]:
+            crashed["value"] = True
+            raise OSError("simulated crash after PREPARED receipt")
+        return receipt
+
+    monkeypatch.setattr(store, "_publish_record_receipt", crash_after_prepared)
+    with pytest.raises(OSError, match="simulated crash after PREPARED"):
+        store.append(ledger, row)
+    ledger_path = store.ledger_path(ledger)
+    assert not ledger_path.exists() or ledger_path.stat().st_size == 0
+
+    restarted = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    resumed = restarted.append(ledger, row)
+    assert resumed["written"] is True
+    assert resumed["resumed_append_head"] is True
+    duplicate = restarted.append(ledger, row)
+    assert duplicate["duplicate"] is True
+    assert len(restarted.ledger_path(ledger).read_text("utf-8").splitlines()) == 1
+
+
+@pytest.mark.parametrize("ledger", ["decision", "lifecycle"])
+def test_next_record_autonomously_recovers_prior_append_head(
+    tmp_path, monkeypatch, ledger,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store._bootstrap_empty_ledgers()
+    prior = {
+        "record_id": f"{ledger}:prior:terminal",
+        "episode_id": "prior", "terminal": ledger == "lifecycle",
+        "outcome_state": "NO_FILL" if ledger == "lifecycle" else "CENSORED",
+    }
+    following = {
+        "record_id": f"{ledger}:following:terminal",
+        "episode_id": "following", "terminal": ledger == "lifecycle",
+        "outcome_state": "NO_FILL" if ledger == "lifecycle" else "CENSORED",
+    }
+    original_publish = store._publish_record_receipt
+    monkeypatch.setattr(
+        store, "_publish_record_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated crash after durable append head")
+        ),
+    )
+    with pytest.raises(OSError, match="durable append head"):
+        store.append(ledger, prior)
+    assert store._append_head_path(ledger).is_file()
+
+    monkeypatch.setattr(store, "_publish_record_receipt", original_publish)
+    result = store.append(ledger, following)
+    assert result["written"] is True
+    rows = [
+        json.loads(line) for line in
+        store.ledger_path(ledger).read_text("utf-8").splitlines()
+    ]
+    assert [item["record_id"] for item in rows] == [
+        prior["record_id"], following["record_id"],
+    ]
+    assert not store._append_head_path(ledger).exists()
+    assert store.append(ledger, prior)["duplicate"] is True
+
+
+def test_append_head_divergence_is_classified_and_retained(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store._bootstrap_empty_ledgers()
+    prior = {"record_id": "decision:prior", "episode_id": "prior"}
+    monkeypatch.setattr(
+        store, "_publish_record_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated crash after durable append head")
+        ),
+    )
+    with pytest.raises(OSError, match="durable append head"):
+        store.append("decision", prior)
+    ledger = store.ledger_path("decision")
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text('{"record_id":"external"}\n', "utf-8")
+
+    restarted = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    blocked = restarted.append(
+        "decision", {"record_id": "decision:following", "episode_id": "next"},
+    )
+    assert blocked["blocked"] is True
+    assert blocked["reason"] == "LEDGER_APPEND_HEAD_LEDGER_DIVERGED"
+    assert blocked["append_head_record_id"] == prior["record_id"]
+    assert restarted._append_head_path("decision").is_file()
 
 
 def test_concurrent_lifecycle_append_and_admission_remain_fail_closed(tmp_path, monkeypatch):
@@ -442,7 +555,7 @@ def test_historical_upgrade_bootstrap_is_bounded_and_publishes_exact_completenes
     })["written"] is True
 
 
-def test_foreground_append_never_waits_for_slow_historical_bootstrap_and_next_cycle_progresses(
+def test_foreground_append_never_scans_ambiguous_historical_ledger(
     tmp_path, monkeypatch,
 ):
     _mounted(monkeypatch, tmp_path)
@@ -458,40 +571,41 @@ def test_foreground_append_never_waits_for_slow_historical_bootstrap_and_next_cy
     ), "utf-8")
     store._bootstrap_empty_ledgers()
 
-    original_publish = store._publish_record_receipt
-    historical_bootstrap_calls = []
+    research_v3_store._id_cache.clear()
 
-    def forbidden_historical_publish(ledger, record_id, **kwargs):
-        if record_id.startswith("decision:historical:"):
-            historical_bootstrap_calls.append(record_id)
-            raise OSError("slow historical bootstrap must not run in foreground")
-        return original_publish(ledger, record_id, **kwargs)
+    def forbidden_historical_scan(_path):
+        raise AssertionError("ordinary append performed a full historical ledger scan")
 
     monkeypatch.setattr(
-        store, "_publish_record_receipt", forbidden_historical_publish,
+        V3EvidenceStore, "_load_ids", staticmethod(forbidden_historical_scan),
     )
     first = store.append("decision", {
         "record_id": "decision:cycle:1", "episode_id": "active",
     })
-    assert first["written"] is True
-    assert historical_bootstrap_calls == []
+    assert first["written"] is False
+    assert first["blocked"] is True
+    assert first["reason"] == "EMERGENCY_IDEMPOTENCY_INDEX_INCOMPLETE"
 
-    second = store.append("decision", {
-        "record_id": "decision:cycle:2", "episode_id": "active",
-    })
-    assert second["written"] is True
-    assert historical_bootstrap_calls == []
-    rows = [json.loads(line) for line in decision.read_text("utf-8").splitlines()]
-    assert [row["record_id"] for row in rows[-2:]] == [
-        "decision:cycle:1", "decision:cycle:2",
-    ]
-
-    monkeypatch.setattr(store, "_publish_record_receipt", original_publish)
+    # Once the isolated bootstrap supplies exact membership receipts, the
+    # first append in a restarted process succeeds without consulting the
+    # historical JSONL contents.
+    monkeypatch.undo()
     bounded = store.advance_emergency_idempotency_bootstrap(
-        "decision", max_records=1,
+        "decision", max_records=16,
     )
-    assert bounded["records_indexed"] == 1
-    assert bounded["complete"] is False
+    while not bounded["complete"]:
+        bounded = store.advance_emergency_idempotency_bootstrap(
+            "decision", max_records=16,
+        )
+    restarted = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    research_v3_store._id_cache.clear()
+    monkeypatch.setattr(
+        V3EvidenceStore, "_load_ids", staticmethod(forbidden_historical_scan),
+    )
+    appended = restarted.append("decision", {
+        "record_id": "decision:cycle:1", "episode_id": "active",
+    })
+    assert appended["written"] is True
 
 
 def test_bootstrap_receipt_failure_returns_blocked_without_advancing_cursor(
@@ -533,19 +647,136 @@ def test_low_priority_round_robin_bootstrap_converges_without_ledger_starvation(
             "record_id": f"{ledger}:historical", "episode_id": "active",
         }) + "\n", "utf-8")
 
-    observed = []
-    for _ in research_v3_store.LEDGER_NAMES:
-        step = store.advance_one_emergency_bootstrap_round_robin()
-        observed.append(step["ledger"])
-        assert step["records_indexed"] == 1
-        assert step["complete"] is True
-    assert observed == list(research_v3_store.LEDGER_NAMES)
+    step = store.advance_one_emergency_bootstrap_round_robin()
+    assert step["all_complete"] is True
+    assert step["ledgers_checked"] == len(research_v3_store.LEDGER_NAMES)
+    assert step["records_indexed"] == len(research_v3_store.LEDGER_NAMES)
+    for ledger in research_v3_store.LEDGER_NAMES:
+        assert store._complete_generation(
+            ledger, research_v3_store._path_signature(store.ledger_path(ledger)),
+        )
 
     _fraction(monkeypatch, 0.925)
     blocked = store.advance_one_emergency_bootstrap_round_robin()
     assert blocked["blocked"] is True
     state = json.loads(store._bootstrap_round_robin_path().read_text("utf-8"))
     assert state["next_index"] == 0
+
+
+def test_round_robin_never_reports_complete_across_concurrent_ledger_growth(
+    tmp_path, monkeypatch,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store._bootstrap_empty_ledgers()
+    ledgers = tuple(research_v3_store.LEDGER_NAMES)
+    for ledger in ledgers:
+        store.ledger_path(ledger).write_text(json.dumps({
+            "record_id": f"{ledger}:historical", "episode_id": "active",
+        }) + "\n", "utf-8")
+
+    mutate = threading.Event()
+    mutated = threading.Event()
+    errors = []
+    first_path = store.ledger_path(ledgers[0])
+
+    def concurrent_writer():
+        try:
+            assert mutate.wait(5)
+            with store._exclusive(first_path):
+                with first_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "record_id": f"{ledgers[0]}:concurrent",
+                        "episode_id": "active",
+                    }) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+        except BaseException as exc:  # surfaced deterministically below
+            errors.append(exc)
+        finally:
+            mutated.set()
+
+    writer = threading.Thread(target=concurrent_writer)
+    writer.start()
+    original_advance = store.advance_emergency_idempotency_bootstrap
+
+    def advance_and_mutate_after_last(ledger, **kwargs):
+        result = original_advance(ledger, **kwargs)
+        if ledger == ledgers[-1]:
+            mutate.set()
+            assert mutated.wait(5)
+        return result
+
+    monkeypatch.setattr(
+        store, "advance_emergency_idempotency_bootstrap",
+        advance_and_mutate_after_last,
+    )
+    result = store.advance_one_emergency_bootstrap_round_robin()
+    writer.join(timeout=5)
+
+    assert not errors
+    assert not writer.is_alive()
+    assert result["complete"] is False
+    assert result["all_complete"] is False
+    assert result["ledger"] == ledgers[0]
+    assert result["reason"] == "FINAL_REVALIDATION_CHANGED"
+    state = json.loads(store._bootstrap_round_robin_path().read_text("utf-8"))
+    assert state["next_index"] == 0
+
+
+def test_global_bootstrap_recovers_head_only_crash_before_reporting_complete(
+    tmp_path, monkeypatch,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store._bootstrap_empty_ledgers()
+    ledger = "decision"
+    record_id = "decision:head-only-crash"
+    payload = (json.dumps({
+        "record_id": record_id, "episode_id": "active",
+    }, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    store._publish_append_head(
+        ledger, record_id, offset=0, payload=payload, pre_signature=None,
+    )
+    assert not store.ledger_path(ledger).exists()
+    assert store._complete_generation(ledger, None)
+
+    result = store.advance_one_emergency_bootstrap_round_robin()
+
+    assert result["all_complete"] is True
+    assert not store._append_head_path(ledger).exists()
+    assert store.ledger_path(ledger).read_bytes() == payload
+    receipt = json.loads(
+        store._record_receipt_path(ledger, record_id).read_text("utf-8")
+    )
+    assert receipt["state"] == "COMMITTED"
+    assert store._complete_generation(
+        ledger, research_v3_store._path_signature(store.ledger_path(ledger)),
+    )
+
+
+def test_global_bootstrap_blocks_invalid_unresolved_append_head(
+    tmp_path, monkeypatch,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store._bootstrap_empty_ledgers()
+    ledger = "decision"
+    head = store._append_head_path(ledger)
+    head.parent.mkdir(parents=True, exist_ok=True)
+    head.write_text("{", "utf-8")
+
+    result = store.advance_one_emergency_bootstrap_round_robin()
+
+    assert result["complete"] is False
+    assert result["all_complete"] is False
+    assert result["blocked"] is True
+    assert result["ledger"] == ledger
+    assert result["reason"] == "LEDGER_APPEND_HEAD_INVALID"
+    assert head.exists()
 
 
 def test_historical_completeness_rejects_replacement_and_truncation(tmp_path, monkeypatch):
@@ -631,6 +862,65 @@ def test_mandatory_row_defers_until_historical_index_complete_then_appends_once(
     duplicate = store.append("execution", row)
     assert duplicate["duplicate"] is True
     assert execution.stat().st_size == after
+
+
+def test_two_deferred_rows_recover_first_append_head_before_replaying_second(
+    tmp_path, monkeypatch,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    execution = store.ledger_path("execution")
+    historical_id = "execution:historical"
+    execution.write_text(json.dumps({
+        "record_id": historical_id, "episode_id": "active",
+    }) + "\n", "utf-8")
+    first = {
+        "record_id": "execution:deferred:a", "episode_id": "active",
+        "status": "CLOSED",
+    }
+    second = {
+        "record_id": "execution:deferred:b", "episode_id": "active",
+        "status": "CLOSED",
+    }
+
+    _fraction(monkeypatch, 0.925)
+    assert store.append("execution", first)["deferred"] is True
+    assert store.append("execution", second)["deferred"] is True
+    _fraction(monkeypatch, 0.50)
+    while not store.advance_emergency_idempotency_bootstrap("execution")["complete"]:
+        pass
+
+    original_publish = store._publish_record_receipt
+    crashed = {"value": False}
+
+    def crash_first_after_prepared(ledger, record_id, **kwargs):
+        receipt = original_publish(ledger, record_id, **kwargs)
+        if (
+            record_id == first["record_id"]
+            and kwargs.get("state") == "PREPARED"
+            and not crashed["value"]
+        ):
+            crashed["value"] = True
+            raise OSError("simulated deferred replay crash after PREPARED")
+        return receipt
+
+    monkeypatch.setattr(store, "_publish_record_receipt", crash_first_after_prepared)
+    with pytest.raises(OSError, match="deferred replay crash"):
+        store.append("execution", first)
+    assert store._append_head_path("execution").is_file()
+
+    monkeypatch.setattr(store, "_publish_record_receipt", original_publish)
+    replayed = store.append("execution", second)
+    assert replayed["written"] is True
+    assert replayed["resumed_deferred"] is True
+    rows = [json.loads(line) for line in execution.read_text("utf-8").splitlines()]
+    assert [row["record_id"] for row in rows] == [
+        historical_id, first["record_id"], second["record_id"],
+    ]
+    assert not store._append_head_path("execution").exists()
+    assert store.append("execution", first)["duplicate"] is True
+    assert store.append("execution", second)["duplicate"] is True
 
 
 def test_new_record_and_completeness_receipts_bind_active_generation_path(tmp_path, monkeypatch):

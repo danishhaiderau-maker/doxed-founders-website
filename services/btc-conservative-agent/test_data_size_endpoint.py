@@ -55,10 +55,13 @@ class DataSizeEndpointTests(unittest.TestCase):
              mock.patch.object(bot.subprocess, "run", side_effect=forbidden), \
              mock.patch.object(bot.os, "walk", side_effect=forbidden), \
              mock.patch.object(bot, "_data_sync_request_async_inventory", side_effect=forbidden), \
-             mock.patch.object(bot, "storage_state", return_value={}), \
-             mock.patch.object(bot, "project_capacity", return_value={}):
+             mock.patch.object(bot, "storage_state") as storage_state, \
+             mock.patch.object(bot, "project_capacity") as project_capacity:
             with bot.app.test_client() as client:
-                return client.get("/api/data_size")
+                response = client.get("/api/data_size")
+        storage_state.assert_not_called()
+        project_capacity.assert_not_called()
+        return response
 
     def test_unauthenticated_request_is_rejected(self):
         with mock.patch.object(bot, "_admin_authed_strict", return_value=False):
@@ -113,6 +116,83 @@ class DataSizeEndpointTests(unittest.TestCase):
         self._state()
         self.assertEqual(self._get(700).get_json()["cleanup_status"], "warn")
         self.assertEqual(self._get(900).get_json()["cleanup_status"], "critical")
+
+    def test_inventory_lock_contention_fails_closed_without_waiting(self):
+        self._state()
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_inventory_condition():
+            with bot._data_sync_inventory_cache_condition:
+                held.set()
+                release.wait(timeout=2.0)
+
+        owner = threading.Thread(target=hold_inventory_condition, daemon=True)
+        owner.start()
+        self.assertTrue(held.wait(timeout=1.0))
+        started = time.monotonic()
+        try:
+            body = self._get().get_json()
+        finally:
+            release.set()
+            owner.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.25)
+        self.assertEqual(body["runtime_size_status"], "UNAVAILABLE")
+        self.assertIsNone(body["inventory_transferable_mb"])
+        self.assertEqual(body["top_files"], [])
+        self.assertTrue(body["inventory_refreshing"])
+        self.assertEqual(body["inventory_error"], "INVENTORY_SNAPSHOT_LOCK_BUSY")
+
+    def test_concurrent_pollers_do_not_queue_behind_inventory_lock(self):
+        self._state()
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_inventory_condition():
+            with bot._data_sync_inventory_cache_condition:
+                held.set()
+                release.wait(timeout=2.0)
+
+        owner = threading.Thread(target=hold_inventory_condition, daemon=True)
+        owner.start()
+        self.assertTrue(held.wait(timeout=1.0))
+        started = time.monotonic()
+        try:
+            with mock.patch.object(bot, "_admin_authed_strict", return_value=True), \
+                 mock.patch.object(bot.shutil, "disk_usage", return_value=self._usage()), \
+                 mock.patch.object(bot.subprocess, "run", side_effect=AssertionError("subprocess")), \
+                 mock.patch.object(bot.os, "walk", side_effect=AssertionError("walk")), \
+                 mock.patch.object(bot, "_data_sync_request_async_inventory", side_effect=AssertionError("refresh")), \
+                 mock.patch.object(bot, "storage_state") as storage_state, \
+                 mock.patch.object(bot, "project_capacity") as project_capacity:
+                responses = []
+
+                def poll():
+                    with bot.app.test_client() as client:
+                        responses.append(client.get("/api/data_size"))
+
+                pollers = [threading.Thread(target=poll) for _ in range(8)]
+                for poller in pollers:
+                    poller.start()
+                for poller in pollers:
+                    poller.join(timeout=0.5)
+                self.assertTrue(all(not poller.is_alive() for poller in pollers))
+                storage_state.assert_not_called()
+                project_capacity.assert_not_called()
+        finally:
+            release.set()
+            owner.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(len(responses), 8)
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertTrue(all(
+            response.get_json()["runtime_size_status"] == "UNAVAILABLE"
+            for response in responses
+        ))
 
     def test_dashboard_explains_trigger_and_disabled_retention(self):
         self.assertIn("50 MB value is a synchronization trigger, not a storage cap", bot.HTML)

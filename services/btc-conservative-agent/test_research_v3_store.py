@@ -320,14 +320,14 @@ class ResearchV3StoreTests(unittest.TestCase):
             self.assertFalse(report["passed"])
             self.assertIn("TRUNCATED_JSONL_LINE", report["defects"][0]["reason"])
 
-    def test_repeated_appends_reuse_the_durable_id_cache(self):
+    def test_repeated_appends_use_bounded_receipts_without_loading_historical_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             original = V3EvidenceStore._load_ids
             with mock.patch.object(V3EvidenceStore, "_load_ids", wraps=original) as load_ids:
                 for index in range(10):
                     store.append("opportunity", {"record_id": f"opp-{index}", "episode_id": "episode-1"})
-            self.assertEqual(load_ids.call_count, 1)
+            self.assertEqual(load_ids.call_count, 0)
 
     def test_external_append_invalidates_cache_and_preserves_idempotency(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -344,7 +344,11 @@ class ResearchV3StoreTests(unittest.TestCase):
             with path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(json.dumps(external, sort_keys=True, separators=(",", ":")) + "\n")
             duplicate = store.append("opportunity", {"record_id": "opp-external", "episode_id": "episode-2"})
-            self.assertTrue(duplicate["duplicate"])
+            self.assertFalse(duplicate["written"])
+            self.assertTrue(duplicate["blocked"])
+            self.assertEqual(
+                duplicate["reason"], "EMERGENCY_IDEMPOTENCY_INDEX_INCOMPLETE",
+            )
             self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
 
     def test_external_truncation_invalidates_cache_and_fails_closed(self):

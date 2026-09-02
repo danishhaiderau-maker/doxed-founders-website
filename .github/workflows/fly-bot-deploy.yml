@@ -732,7 +732,7 @@ jobs:
   test-and-deploy:
     if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: services/btc-conservative-agent
@@ -779,6 +779,7 @@ jobs:
           python -m pytest test_lifecycle_tail_repair.py -q
           python -m pytest test_lifecycle_cursor_rebind.py -q
           python -m pytest test_execution_tail_repair.py -q
+          python -m pytest test_lifecycle_pipeline_runtime.py test_lifecycle_public_status.py test_fly_inspect_runtime_bounded.py -q
           python -m pytest test_collector_v22_integrity.py test_compressed_shadow_chase.py test_paper_lifecycle_restart.py test_cleanup_characterization_contract.py test_v3_lane_entry_bot_wiring.py -q
           python -m pytest test_v31_overview_best_policy_counts.py -q
 
@@ -1473,6 +1474,105 @@ jobs:
                   )
               time.sleep(3)
           raise SystemExit(f"Fly failed exact-revision liveness proof: {last}")
+          PY
+
+      - name: Complete receipt bootstrap inside exact-revision maintenance
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12].lower()
+          headers = {
+              "X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"],
+              "Cache-Control": "no-cache",
+          }
+
+          def call(path, payload=None, timeout=20):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + path, data=data,
+                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
+                  method="POST" if data is not None else "GET",
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return json.load(response)
+
+          # The audited current cohort has at least 21,353 legacy rows.  At the
+          # bounded 64-receipt worker batch and one-second backlog cadence,
+          # scheduling alone needs 334 cycles (>5.5 minutes).  Forty-five
+          # minutes gives that known cohort material headroom; it is not a
+          # latency guarantee because every child remains independently bounded
+          # by its wall timeout.  Expiry still fails safe in maintenance.
+          observed_bootstrap_rows = 21_353
+          conservative_records_per_cycle = 64
+          backlog_interval_seconds = 1
+          bootstrap_timeout_seconds = 45 * 60
+          minimum_cycles = (
+              observed_bootstrap_rows + conservative_records_per_cycle - 1
+          ) // conservative_records_per_cycle
+          if bootstrap_timeout_seconds < minimum_cycles * backlog_interval_seconds:
+              raise SystemExit("configured bootstrap timeout cannot cover audited scheduling floor")
+          deadline = time.monotonic() + bootstrap_timeout_seconds
+          last = None
+          # The preceding postdeploy boundary is already paused.  Reassert it
+          # once, then observe read-only status so this gate cannot create a
+          # repeated persistent-config write/fsync loop.
+          call("/api/pause", {})
+          while time.monotonic() < deadline:
+              # The lifecycle owner is independent of paper execution and
+              # continues bounded subprocess cycles while the pause remains.
+              status = call("/api/status")
+              last = status
+              pipeline = status.get("lifecycle_pipeline") or {}
+              bootstrap = pipeline.get("receipt_bootstrap") or {}
+              progress = status.get("strategy_progress") or {}
+              safe = (
+                  str(status.get("source_git_rev") or "").lower() == expected
+                  and status.get("force_paper_mode") is True
+                  and status.get("bitfinex_live_enabled") is False
+                  and status.get("live_armed") is False
+                  and status.get("execution_paused") is True
+                  and status.get("manual_admin_pause") is True
+                  and int(progress.get("open_positions") or 0) == 0
+                  and int(progress.get("pending_orders") or 0) == 0
+              )
+              if not safe:
+                  raise SystemExit("receipt bootstrap lost exact-revision flat maintenance")
+              if not (
+                  pipeline.get("owner") is True
+                  and pipeline.get("running") is True
+                  and pipeline.get("source_revision_match") is True
+              ):
+                  raise SystemExit(
+                      "receipt bootstrap worker is not running on the exact revision: "
+                      + json.dumps(pipeline, sort_keys=True)
+                  )
+              print(json.dumps({
+                  "receipt_bootstrap": bootstrap,
+                  "last_outcome": pipeline.get("last_outcome"),
+                  "revision": expected,
+              }, sort_keys=True), flush=True)
+              if bootstrap.get("blocked") is True or bootstrap.get("status") == "BLOCKED":
+                  raise SystemExit(
+                      "receipt bootstrap reported a fail-closed blocker: "
+                      + json.dumps(bootstrap, sort_keys=True)
+                  )
+              if (
+                  bootstrap.get("required") is True
+                  and bootstrap.get("status") == "COMPLETE"
+                  and bootstrap.get("complete") is True
+              ):
+                  print(f"Receipt bootstrap complete in maintenance on {expected}")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit(
+              "receipt bootstrap did not complete before bounded maintenance timeout: "
+              + json.dumps((last or {}).get("lifecycle_pipeline") or {}, sort_keys=True)
+          )
           PY
 
       - name: Resume paper execution after exact-revision acceptance

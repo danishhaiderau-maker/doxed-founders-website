@@ -36,7 +36,10 @@ class _Process:
         self.killed = True
 
 
-def _install_launch(monkeypatch, runtime, process, *, corrupt=False, pipeline=None, emergency_wal=None):
+def _install_launch(
+    monkeypatch, runtime, process, *, corrupt=False, pipeline=None,
+    emergency_wal=None, emergency_bootstrap=None,
+):
     def launch(command):
         request = Path(command[command.index("--request") + 1])
         result = Path(command[command.index("--result") + 1])
@@ -58,6 +61,7 @@ def _install_launch(monkeypatch, runtime, process, *, corrupt=False, pipeline=No
                 "hard_runtime_result_deadline_enforced": True,
                 "source_cleanup_authorized": False,
                 "emergency_wal": emergency_wal,
+                "emergency_idempotency_bootstrap": emergency_bootstrap,
             }
             payload["result_sha256"] = runtime_module.hashlib.sha256(
                 json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
@@ -173,6 +177,81 @@ def test_success_returns_to_normal_cadence_only_after_backlog_is_drained(
     status = runtime.status()
     assert status["next_run_unix"] == 2999.0
     assert status["last_result"]["backlog_pending"] is False
+
+
+def test_incomplete_idempotency_bootstrap_uses_prompt_bounded_worker_cadence(
+    tmp_path, monkeypatch,
+):
+    clock = lambda: 3000.0
+    runtime = LifecyclePipelineRuntime(
+        tmp_path, source_revision=REVISION, interval_sec=999,
+        wall_timeout_sec=2, clock=clock, epoch_id="epoch-test",
+    )
+    pipeline = {
+        "candidate_count": 0, "bundle_count": 0, "pressure_mode": False,
+        "scan": {"pending_dirty_lifecycles": 0, "caught_up": True},
+    }
+    _install_launch(
+        monkeypatch, runtime, _Process(), pipeline=pipeline,
+        emergency_bootstrap={
+            "ledger": "decision", "complete": False,
+            "records_indexed": 1, "cursor": 128,
+        },
+    )
+
+    assert runtime._run_once() is True
+    status = runtime.status()
+    assert status["next_run_unix"] == 3000.0 + runtime_module.BACKLOG_INTERVAL_SEC
+    assert status["last_result"]["backlog_pending"] is True
+    assert status["last_result"]["idempotency_bootstrap_pending"] is True
+    assert status["receipt_bootstrap"] == {
+        "required": True, "status": "PENDING", "complete": False,
+        "blocked": False, "ledger": "decision", "ledgers_checked": 0,
+        "records_indexed": 1, "bytes_indexed": 0, "cursor": 128,
+    }
+
+
+def test_complete_receipt_bootstrap_is_explicit_and_returns_to_normal_cadence(
+    tmp_path, monkeypatch,
+):
+    clock = lambda: 4000.0
+    runtime = LifecyclePipelineRuntime(
+        tmp_path, source_revision=REVISION, interval_sec=999,
+        wall_timeout_sec=2, clock=clock, epoch_id="epoch-test",
+    )
+    pipeline = {
+        "candidate_count": 0, "bundle_count": 0, "pressure_mode": False,
+        "scan": {"pending_dirty_lifecycles": 0, "caught_up": True},
+    }
+    _install_launch(
+        monkeypatch, runtime, _Process(), pipeline=pipeline,
+        emergency_bootstrap={
+            "ledger": "lifecycle", "complete": True, "all_complete": True,
+            "ledgers_checked": 8, "records_indexed": 3,
+            "bytes_indexed": 456, "cursor": 789,
+        },
+    )
+
+    assert runtime._run_once() is True
+    status = runtime.status()
+    assert status["next_run_unix"] == 4999.0
+    assert status["last_result"]["idempotency_bootstrap_pending"] is False
+    assert status["receipt_bootstrap"] == {
+        "required": True, "status": "COMPLETE", "complete": True,
+        "blocked": False, "ledger": "lifecycle", "ledgers_checked": 8,
+        "records_indexed": 3, "bytes_indexed": 456, "cursor": 789,
+    }
+
+
+def test_epoch_bound_runtime_starts_with_bootstrap_pending_without_scanning(tmp_path):
+    runtime = LifecyclePipelineRuntime(
+        tmp_path, source_revision=REVISION, epoch_id="epoch-test",
+    )
+    assert runtime.status()["receipt_bootstrap"] == {
+        "required": True, "status": "PENDING", "complete": False,
+        "blocked": False, "ledger": None, "ledgers_checked": 0,
+        "records_indexed": 0, "bytes_indexed": 0, "cursor": None,
+    }
 
 
 def test_timeout_terminates_child_and_backs_off(tmp_path, monkeypatch):
