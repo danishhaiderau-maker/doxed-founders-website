@@ -32,6 +32,7 @@ _MAX_MEMBERSHIP_EPISODE_ID_BYTES = 512
 _MAX_RECEIPT_RECORD_ID_BYTES = 1024
 _MAX_RECEIPT_ROW_BYTES = 8 * 1024 * 1024
 _BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
+_BOOTSTRAP_RECORDS_PER_STEP = 16
 
 
 def _first_present(*values: Any) -> Any:
@@ -1118,6 +1119,9 @@ class V3EvidenceStore:
     def _bootstrap_path(self, ledger: str) -> Path:
         return self.receipt_dir / "emergency_record_idempotency_v1" / ledger / "bootstrap.json"
 
+    def _bootstrap_round_robin_path(self) -> Path:
+        return self.receipt_dir / "emergency_record_idempotency_v1" / "round_robin.json"
+
     def _complete_generation(self, ledger: str, signature: tuple[int, int, int, int] | None) -> bool:
         try:
             receipt = json.loads(self._completeness_path(ledger).read_text("utf-8"))
@@ -1151,13 +1155,22 @@ class V3EvidenceStore:
         return receipt
 
     def advance_emergency_idempotency_bootstrap(
-        self, ledger: str, *, max_bytes: int = _BOOTSTRAP_BYTES_PER_STEP
+        self, ledger: str, *, max_bytes: int = _BOOTSTRAP_BYTES_PER_STEP,
+        max_records: int = _BOOTSTRAP_RECORDS_PER_STEP,
     ) -> dict[str, Any]:
-        """Cooperatively index a bounded ledger prefix outside pressure only."""
+        """Cooperatively index a bounded ledger prefix outside pressure only.
+
+        Bytes alone do not bound wall work: each historical row publishes and
+        fsyncs an individual idempotency receipt.  Bound receipt publications
+        too, so slow volume metadata cannot turn one caller into a whole-ledger
+        foreground migration.  A single receipt may still fail or be slow, but
+        every call performs at most ``max_records`` such durability barriers.
+        """
         path = self.ledger_path(ledger)
         if storage_blocks_new_nonessential_research(str(self.root)):
             return {"complete": False, "blocked": True, "reason": "STORAGE_EMERGENCY"}
         limit = max(1, min(int(max_bytes), _BOOTSTRAP_BYTES_PER_STEP))
+        record_limit = max(1, min(int(max_records), _BOOTSTRAP_RECORDS_PER_STEP))
         with self._exclusive(path):
             signature = _path_signature(path)
             if signature is None:
@@ -1189,11 +1202,15 @@ class V3EvidenceStore:
             cursor = int(state.get("cursor", 0)) if same_source else 0
             cursor_anchor = state.get("cursor_anchor") if same_source else None
             consumed = 0
+            records_indexed = 0
             try:
                 fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
                 with os.fdopen(fd, "rb") as handle:
                     handle.seek(cursor)
-                    while consumed < limit and cursor < signature[2]:
+                    while (
+                        consumed < limit and records_indexed < record_limit
+                        and cursor < signature[2]
+                    ):
                         offset = cursor
                         payload = handle.readline(_MAX_RECEIPT_ROW_BYTES + 1)
                         if not payload or len(payload) > _MAX_RECEIPT_ROW_BYTES or not payload.endswith(b"\n"):
@@ -1207,6 +1224,7 @@ class V3EvidenceStore:
                         )
                         cursor += len(payload)
                         consumed += len(payload)
+                        records_indexed += 1
                         cursor_anchor = {
                             "offset": offset, "length": len(payload),
                             "sha256": hashlib.sha256(payload).hexdigest(),
@@ -1228,7 +1246,48 @@ class V3EvidenceStore:
                     "ledger_signature": self._signature_payload(signature),
                     "tail_anchor": cursor_anchor,
                 })
-            return {"complete": complete, "bytes_indexed": consumed, "cursor": cursor}
+            return {
+                "complete": complete, "bytes_indexed": consumed,
+                "records_indexed": records_indexed, "cursor": cursor,
+            }
+
+    def advance_one_emergency_bootstrap_round_robin(self) -> dict[str, Any]:
+        """Advance one ledger row for the killable low-priority worker.
+
+        The cursor advances only after the selected bootstrap call returns, so
+        pressure, failure, or subprocess termination retries the same ledger.
+        Lifecycle processing invokes this after its primary work; bootstrap
+        can therefore never consume that work's time allotment first.
+        """
+        state_path = self._bootstrap_round_robin_path()
+        state: dict[str, Any] = {}
+        try:
+            state = json.loads(state_path.read_text("utf-8"))
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            pass
+        ledgers = tuple(LEDGER_NAMES)
+        try:
+            index = int(state.get("next_index", 0))
+        except (TypeError, ValueError):
+            index = 0
+        if (
+            state.get("schema") != "emergency_bootstrap_round_robin_v1"
+            or state.get("identity") != self._identity_binding()
+            or index < 0 or index >= len(ledgers)
+        ):
+            index = 0
+        ledger = ledgers[index]
+        result = self.advance_emergency_idempotency_bootstrap(
+            ledger, max_records=1,
+        )
+        if result.get("blocked") is not True:
+            self._atomic_json_receipt(state_path, {
+                "schema": "emergency_bootstrap_round_robin_v1",
+                "identity": self._identity_binding(),
+                "last_ledger": ledger,
+                "next_index": (index + 1) % len(ledgers),
+            })
+        return {"ledger": ledger, **result}
 
     def _bootstrap_empty_ledgers(self) -> None:
         """Fence absent/empty ledgers cheaply before an emergency transition."""
@@ -1470,10 +1529,11 @@ class V3EvidenceStore:
             material["baseline_schedule_snapshot"] = snapshot
             material["baseline_schedules"] = snapshot["schedules"]
         line = canonical_json(material) + "\n"
-        initial_emergency = storage_blocks_new_nonessential_research(str(self.root))
-        if not initial_emergency:
+        if not storage_blocks_new_nonessential_research(str(self.root)):
+            # Empty-ledger completeness is constant work and is required so a
+            # later emergency can safely continue an already-open lifecycle.
+            # Historical indexing is deliberately not advanced here.
             self._bootstrap_empty_ledgers()
-            self.advance_emergency_idempotency_bootstrap(ledger)
         with self._exclusive(path):
             # A durable PREPARED receipt proves the exact bounded row location.
             # Let its replay repair a membership publication that crashed after

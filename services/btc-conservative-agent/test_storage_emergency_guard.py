@@ -442,6 +442,112 @@ def test_historical_upgrade_bootstrap_is_bounded_and_publishes_exact_completenes
     })["written"] is True
 
 
+def test_foreground_append_never_waits_for_slow_historical_bootstrap_and_next_cycle_progresses(
+    tmp_path, monkeypatch,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    decision = store.ledger_path("decision")
+    decision.parent.mkdir(parents=True, exist_ok=True)
+    decision.write_text("".join(
+        json.dumps({
+            "record_id": f"decision:historical:{index}", "episode_id": "active",
+        }, separators=(",", ":")) + "\n"
+        for index in range(20)
+    ), "utf-8")
+    store._bootstrap_empty_ledgers()
+
+    original_publish = store._publish_record_receipt
+    historical_bootstrap_calls = []
+
+    def forbidden_historical_publish(ledger, record_id, **kwargs):
+        if record_id.startswith("decision:historical:"):
+            historical_bootstrap_calls.append(record_id)
+            raise OSError("slow historical bootstrap must not run in foreground")
+        return original_publish(ledger, record_id, **kwargs)
+
+    monkeypatch.setattr(
+        store, "_publish_record_receipt", forbidden_historical_publish,
+    )
+    first = store.append("decision", {
+        "record_id": "decision:cycle:1", "episode_id": "active",
+    })
+    assert first["written"] is True
+    assert historical_bootstrap_calls == []
+
+    second = store.append("decision", {
+        "record_id": "decision:cycle:2", "episode_id": "active",
+    })
+    assert second["written"] is True
+    assert historical_bootstrap_calls == []
+    rows = [json.loads(line) for line in decision.read_text("utf-8").splitlines()]
+    assert [row["record_id"] for row in rows[-2:]] == [
+        "decision:cycle:1", "decision:cycle:2",
+    ]
+
+    monkeypatch.setattr(store, "_publish_record_receipt", original_publish)
+    bounded = store.advance_emergency_idempotency_bootstrap(
+        "decision", max_records=1,
+    )
+    assert bounded["records_indexed"] == 1
+    assert bounded["complete"] is False
+
+
+def test_bootstrap_receipt_failure_returns_blocked_without_advancing_cursor(
+    tmp_path, monkeypatch,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    path = store.ledger_path("decision")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "record_id": "decision:historical:failure", "episode_id": "active",
+    }) + "\n", "utf-8")
+
+    monkeypatch.setattr(
+        store, "_publish_record_receipt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("slow volume failed")),
+    )
+    result = store.advance_emergency_idempotency_bootstrap(
+        "decision", max_records=1,
+    )
+    assert result == {
+        "complete": False, "blocked": True,
+        "reason": "slow volume failed", "cursor": 0,
+    }
+    assert not store._bootstrap_path("decision").exists()
+
+
+def test_low_priority_round_robin_bootstrap_converges_without_ledger_starvation(
+    tmp_path, monkeypatch,
+):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store._bootstrap_empty_ledgers()
+    for ledger in research_v3_store.LEDGER_NAMES:
+        path = store.ledger_path(ledger)
+        path.write_text(json.dumps({
+            "record_id": f"{ledger}:historical", "episode_id": "active",
+        }) + "\n", "utf-8")
+
+    observed = []
+    for _ in research_v3_store.LEDGER_NAMES:
+        step = store.advance_one_emergency_bootstrap_round_robin()
+        observed.append(step["ledger"])
+        assert step["records_indexed"] == 1
+        assert step["complete"] is True
+    assert observed == list(research_v3_store.LEDGER_NAMES)
+
+    _fraction(monkeypatch, 0.925)
+    blocked = store.advance_one_emergency_bootstrap_round_robin()
+    assert blocked["blocked"] is True
+    state = json.loads(store._bootstrap_round_robin_path().read_text("utf-8"))
+    assert state["next_index"] == 0
+
+
 def test_historical_completeness_rejects_replacement_and_truncation(tmp_path, monkeypatch):
     _mounted(monkeypatch, tmp_path)
     _fraction(monkeypatch, 0.50)

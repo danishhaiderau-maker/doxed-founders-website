@@ -75,6 +75,53 @@ def test_pressure_worker_returns_verified_bounded_success(tmp_path):
     assert receipt["source_cleanup_authorized"] is False
 
 
+def test_worker_runs_lifecycle_before_one_observable_bootstrap_step(tmp_path, monkeypatch):
+    work = tmp_path / "v3" / "lifecycle_worker"
+    work.mkdir(parents=True)
+    launch = worker.create_request(
+        tmp_path, work, source_revision=REVISION,
+        epoch_id="epoch-test", max_runtime_sec=5,
+    )
+    order = []
+
+    class FakeStore:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def replay_one_emergency_wal_record(self):
+            order.append("wal")
+            return {"replayed": False, "empty": True}
+
+        def emergency_wal_runtime_status(self):
+            return {"retained_count": 0}
+
+        def advance_one_emergency_bootstrap_round_robin(self):
+            order.append("bootstrap")
+            return {
+                "ledger": "decision", "complete": False,
+                "records_indexed": 1, "cursor": 42,
+            }
+
+    def lifecycle(*_args, **_kwargs):
+        order.append("lifecycle")
+        return {"processed": 1}
+
+    monkeypatch.setattr(worker, "V3EvidenceStore", FakeStore)
+    monkeypatch.setattr(worker, "process_incremental_lifecycle_pipeline", lifecycle)
+    assert worker.run(
+        launch["request_path"], launch["result_path"], launch["nonce"],
+    ) == 0
+    receipt = worker.verify_result(
+        launch["request_path"], launch["result_path"], launch["nonce"],
+    )
+    assert order == ["wal", "lifecycle", "bootstrap"]
+    assert receipt["pipeline"] == {"processed": 1}
+    assert receipt["emergency_idempotency_bootstrap"] == {
+        "ledger": "decision", "complete": False,
+        "records_indexed": 1, "cursor": 42,
+    }
+
+
 def test_pipeline_exception_writes_sanitized_hash_bound_failure(tmp_path, monkeypatch):
     work = tmp_path / "v3" / "lifecycle_worker"
     work.mkdir(parents=True)

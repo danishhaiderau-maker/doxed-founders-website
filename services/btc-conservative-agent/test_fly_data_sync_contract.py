@@ -4009,7 +4009,8 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
     tree = ast.parse(BOT)
     wanted = {
         "_data_sync_inventory_rows_sha256",
-        "_data_sync_file_sha256",
+            "_data_sync_file_sha256",
+            "_data_sync_validate_top_files",
         "_data_sync_validate_disk_inventory_generation",
         "_data_sync_manifest_cursor",
         "_data_sync_disk_page_descriptor",
@@ -4067,6 +4068,26 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
         ),
         encoding="utf-8",
     )
+    top_files = [
+        {"path": "c.json", "name": "c.json", "size": 3},
+        {"path": "b.json", "name": "b.json", "size": 2},
+        {"path": "a.json", "name": "a.json", "size": 1},
+    ]
+    generation_hasher = hashlib.sha256(b"fly_runtime_inventory_generation_v2\n")
+    for descriptor in descriptors:
+        generation_hasher.update(
+            f"{descriptor['page_index']}:{descriptor['file_count']}:"
+            f"{descriptor['total_bytes']}:{descriptor['page_sha256']}\n".encode("ascii")
+        )
+    generation_hasher.update(b"files:3\nbytes:6\n")
+    generation_hasher.update(
+        json.dumps(top_files, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    )
+    generation_id = generation_hasher.hexdigest()
+    renamed_generation_dir = generation_dir.with_name(generation_id)
+    generation_dir.rename(renamed_generation_dir)
+    generation_dir = renamed_generation_dir
+    index_path = generation_dir / "page-index.jsonl"
     result = {
         "generation_id": generation_id,
         "generation_dir": str(generation_dir),
@@ -4076,6 +4097,7 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
         "page_size": 2,
         "file_count": 3,
         "total_bytes": 6,
+        "top_files": top_files,
     }
     generation = namespace["_data_sync_validate_disk_inventory_generation"](result, work)
     assert "rows" not in generation

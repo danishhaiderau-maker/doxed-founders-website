@@ -29594,6 +29594,7 @@ __ADMIN_ACCESS_CONTROLS__
         <span id="dataSizeFlyMb" style="font-size:1.5rem;font-weight:700;color:#58a6ff;">-</span>
         <span style="color:#8b949e;font-size:0.85em;">MB of <span id="dataSizeVolumeTotal">1024</span> MB volume</span>
       </div>
+      <div id="dataSizeInventoryStatus" style="color:#8b949e;font-size:0.74em;margin-top:3px;">Inventory: unavailable</div>
       <div style="background:#21262d;border-radius:6px;height:12px;overflow:hidden;margin:8px 0 4px 0;border:1px solid #30363d;">
         <div id="dataSizeVolumeBar" style="height:100%;width:0%;background:#3fb950;transition:width 0.4s ease, background 0.4s ease;"></div>
       </div>
@@ -30670,7 +30671,14 @@ DASHBOARD_JS = """(function () {
         const totalEl = document.getElementById('dataSizeVolumeTotal');
         const pathEl = document.getElementById('dataSizeRuntimePath');
         const lastEl = document.getElementById('dataSizeLastCheck');
+        const inventoryStatus = String(body.runtime_size_status || 'UNAVAILABLE').toUpperCase();
+        const inventoryCurrent = inventoryStatus === 'CURRENT';
+        const inventoryStatusEl = document.getElementById('dataSizeInventoryStatus');
         if (mbEl) mbEl.textContent = body.runtime_size_mb == null ? '-' : Number(body.runtime_size_mb).toFixed(1);
+        if (inventoryStatusEl) {
+          inventoryStatusEl.textContent = 'Inventory: ' + inventoryStatus.toLowerCase().replaceAll('_', ' ');
+          inventoryStatusEl.style.color = inventoryCurrent ? '#3fb950' : (inventoryStatus.includes('STALE') ? '#d29922' : '#ef4444');
+        }
         if (pctEl) pctEl.textContent = body.volume_pct == null ? '-' : Number(body.volume_pct).toFixed(1);
         if (totalEl && body.volume_total_mb != null) totalEl.textContent = String(body.volume_total_mb);
         if (pathEl) pathEl.textContent = body.runtime_path ? ('path: ' + body.runtime_path) : '';
@@ -30687,8 +30695,10 @@ DASHBOARD_JS = """(function () {
         const tbody = document.querySelector('#dataSizeTopFiles tbody');
         if (tbody) {
           const files = Array.isArray(body.top_files) ? body.top_files : [];
-          if (!files.length) {
-            tbody.innerHTML = '<tr><td colspan="3" style="padding:4px;color:#6e7681;">No files</td></tr>';
+          if (!inventoryCurrent) {
+            tbody.innerHTML = '<tr><td colspan="3" style="padding:4px;color:#d29922;">Inventory ' + inventoryStatus.toLowerCase().replaceAll('_', ' ') + '; ranking withheld</td></tr>';
+          } else if (!files.length) {
+            tbody.innerHTML = '<tr><td colspan="3" style="padding:4px;color:#6e7681;">No transferable files</td></tr>';
           } else {
             tbody.innerHTML = files.map(function (f) {
               const lc = body.line_counts && body.line_counts[f.name] != null ? body.line_counts[f.name].toLocaleString() : '-';
@@ -37263,178 +37273,126 @@ def api_fresh_epoch_reset():
         "fresh_collection_mode": True if result.get("ok") else bool(state.get("fresh_collection_mode")),
     }), status
 
+def _data_size_cached_inventory_summary() -> dict:
+    """Copy only fixed-size, worker-validated inventory telemetry."""
+    with _data_sync_inventory_cache_condition:
+        status = str(_data_sync_async_inventory.get("status") or "EMPTY").upper()
+        generation = _data_sync_async_inventory.get("generation")
+        generation = generation if isinstance(generation, dict) else {}
+        return {
+            "status": status,
+            "generated_at": _data_sync_async_inventory.get("generated_at"),
+            "expires_at": _data_sync_async_inventory.get("expires_at"),
+            "generation_id": _data_sync_async_inventory.get("generation_id"),
+            "error": _data_sync_async_inventory.get("error"),
+            "refreshing": bool(_data_sync_async_inventory.get("refreshing")),
+            "file_count": generation.get("file_count"),
+            "total_bytes": generation.get("total_bytes"),
+            "top_files": [
+                dict(row) for row in (generation.get("top_files") or [])[:5]
+                if isinstance(row, dict)
+            ],
+        }
+
+
 @app.get("/api/data_size")
 def api_data_size():
-    """Report Fly volume data size for the dashboard cleanup panel.
-
-    Returns the total size of the runtime data directory (``/app/data/runtime``
-    on Fly, or wherever ``BOT_DATA_DIR`` points), the percentage of the 1GB
-    Fly volume in use, the top-5 largest files, and line counts for the key
-    research evidence files. Local mirror size is reported by the desktop
-    sync loop into ``_size_report.json`` — this endpoint intentionally only
-    reports Fly-side numbers so the dashboard never confuses the two.
-    """
+    """Serve fixed-cost storage telemetry without traversing the Fly volume."""
     if not _admin_authed_strict():
-        return jsonify({
-            "status": "error",
-            "message": "admin token required",
-        }), 401
+        return jsonify({"status": "error", "message": "admin token required"}), 401
 
     runtime_root = _data_sync_volume_root()
-    volume_total_mb = 1024.0
+    volume_total_mb = None
+    filesystem_used_mb = None
+    filesystem_free_mb = None
     try:
         usage = shutil.disk_usage(runtime_root)
         volume_total_mb = round(float(usage.total) / (1024.0 * 1024.0), 2)
+        filesystem_used_mb = round(float(usage.used) / (1024.0 * 1024.0), 2)
+        filesystem_free_mb = round(float(usage.free) / (1024.0 * 1024.0), 2)
     except OSError:
         env_mb = os.getenv("FLY_VOLUME_MB", "").strip()
-        if env_mb:
-            try:
-                volume_total_mb = float(env_mb)
-            except ValueError:
-                pass
-    runtime_path = str(runtime_root)
-
-    def _run(cmd, timeout=10):
         try:
-            out = subprocess.run(
-                cmd,
-                cwd=runtime_path,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-            if out.returncode != 0:
-                return ""
-            return (out.stdout or "").strip()
-        except Exception as exc:
-            logger.warning("[DATA SIZE] cmd %r failed: %s", cmd, exc)
-            return ""
-
-    def _run_bytes(cmd, timeout=10):
-        try:
-            out = subprocess.run(
-                cmd,
-                cwd=runtime_path,
-                capture_output=True,
-                timeout=timeout,
-            )
-            if out.returncode != 0:
-                return b""
-            return out.stdout or b""
-        except Exception as exc:
-            logger.warning("[DATA SIZE] byte cmd %r failed: %s", cmd, exc)
-            return b""
-
-    # Total MB of the runtime dir via du -sm. du is present in the Fly image
-    # (Debian) and on the home analyzer host. Fallback to os.walk if missing.
-    total_mb = None
-    du_total = _run(["du", "-sm", runtime_path])
-    if du_total:
-        # Output: "<mb>	<path>"
-        first = du_total.splitlines()[0].split("	")[0].strip()
-        try:
-            total_mb = float(first)
+            volume_total_mb = float(env_mb) if env_mb else None
         except ValueError:
-            total_mb = None
-    if total_mb is None:
-        try:
-            bytes_total = 0
-            for dirpath, _dirs, files in os.walk(runtime_root):
-                for name in files:
-                    try:
-                        bytes_total += os.path.getsize(os.path.join(dirpath, name))
-                    except OSError:
-                        continue
-            total_mb = round(bytes_total / (1024.0 * 1024.0), 2)
-        except Exception as exc:
-            logger.warning("[DATA SIZE] os.walk size failed: %s", exc)
-            total_mb = None
+            volume_total_mb = None
 
-    # Top-5 largest files via Python walk (reliable). Avoid `du path/*` — without
-    # shell expansion that argv is a literal `*` and silently returns nothing,
-    # which left the dashboard "Top files" table looking frozen.
-    top_files = []
+    inventory = _data_size_cached_inventory_summary()
+    raw_inventory_status = inventory["status"]
     try:
-        sized = []
-        for dirpath, _dirs, files in os.walk(runtime_root):
-            for name in files:
-                fp = os.path.join(dirpath, name)
-                try:
-                    sized.append((os.path.getsize(fp), fp))
-                except OSError:
-                    continue
-        sized.sort(key=lambda r: r[0], reverse=True)
-        for bytes_size, fp in sized[:5]:
+        inventory_unexpired = time.monotonic() < float(inventory["expires_at"] or 0.0)
+    except (TypeError, ValueError):
+        inventory_unexpired = False
+    has_inventory_generation = bool(inventory["generation_id"] and inventory["total_bytes"] is not None)
+    current = raw_inventory_status == "CURRENT" and inventory_unexpired and has_inventory_generation
+    try:
+        transferable_bytes = int(inventory["total_bytes"])
+    except (TypeError, ValueError):
+        transferable_bytes = None
+    transferable_mb = (
+        round(transferable_bytes / (1024.0 * 1024.0), 2)
+        if transferable_bytes is not None else None
+    )
+    top_files = []
+    if current:
+        for row in inventory["top_files"]:
+            try:
+                size = int(row["size"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            path = str(row.get("path") or "")
             top_files.append({
-                "name": os.path.basename(fp),
-                "path": fp,
-                "size_mb": round(bytes_size / (1024.0 * 1024.0), 2),
+                "name": str(row.get("name") or Path(path).name),
+                "path": path,
+                "size_mb": round(size / (1024.0 * 1024.0), 2),
             })
-    except Exception as exc:
-        logger.warning("[DATA SIZE] os.walk top-files failed: %s", exc)
-
-    # Line counts for the key research evidence files. Use wc -l when present,
-    # fall back to Python counting so the endpoint still works on hosts
-    # without coreutils.
-    key_files = ["trades_3factor.csv", "ai_reason_research.jsonl", "signal_replay.jsonl"]
-    line_counts = {}
-    wc_out = _run_bytes(["wc", "-l"] + [os.path.join(runtime_path, f) for f in key_files])
-    wc_parsed = {}
-    if wc_out:
-        try:
-            text = wc_out.decode("utf-8", errors="replace")
-            for line in text.splitlines():
-                parts = line.split(None, 1)
-                if len(parts) != 2:
-                    continue
-                try:
-                    count = int(parts[0].strip())
-                except ValueError:
-                    continue
-                fname = os.path.basename(parts[1].strip())
-                wc_parsed[fname] = count
-        except Exception as exc:
-            logger.warning("[DATA SIZE] wc parse failed: %s", exc)
-    for fname in key_files:
-        if fname in wc_parsed:
-            line_counts[fname] = wc_parsed[fname]
-            continue
-        # Fallback line counter.
-        fpath = runtime_root / fname
-        count = None
-        try:
-            if fpath.exists() and fpath.is_file():
-                with open(fpath, "rb") as fh:
-                    count = sum(1 for _ in fh)
-        except OSError as exc:
-            logger.warning("[DATA SIZE] count %s failed: %s", fname, exc)
-        line_counts[fname] = count
 
     volume_pct = None
-    if total_mb is not None:
-        volume_pct = round((total_mb / volume_total_mb) * 100.0, 1)
-
-    cleanup_status = "ok"
+    if filesystem_used_mb is not None and volume_total_mb:
+        volume_pct = round(filesystem_used_mb / volume_total_mb * 100.0, 1)
+    cleanup_status = "unknown"
     if volume_pct is not None:
-        if volume_pct > 80.0:
-            cleanup_status = "critical"
-        elif volume_pct > 60.0:
-            cleanup_status = "warn"
-
-    storage_payload = {}
-    capacity_payload = {}
-    try:
-        storage_payload = storage_state(str(runtime_root))
-        capacity_payload = project_capacity(data_dir=str(runtime_root))
-    except Exception as exc:
-        logger.warning("[DATA SIZE] storage/capacity probe failed: %s", exc)
-
+        cleanup_status = (
+            "critical" if volume_pct > 80.0 else "warn" if volume_pct > 60.0 else "ok"
+        )
+    used_fraction = None if volume_pct is None else round(volume_pct / 100.0, 6)
+    storage_payload = {
+        "schema": "collector_storage_v1_read_only_projection",
+        "used_fraction": used_fraction,
+        "pressure": bool(used_fraction is not None and used_fraction >= STORAGE_PRESSURE_THRESHOLD),
+        "emergency": bool(used_fraction is not None and used_fraction >= 0.90),
+        "threshold": STORAGE_PRESSURE_THRESHOLD,
+        "emergency_threshold": 0.90,
+        "observation_only": True,
+    }
+    capacity_payload = {
+        "schema": "capacity_projection_v1_read_only",
+        "total_bytes": None if volume_total_mb is None else int(volume_total_mb * 1024 * 1024),
+        "used_bytes": None if filesystem_used_mb is None else int(filesystem_used_mb * 1024 * 1024),
+        "free_bytes": None if filesystem_free_mb is None else int(filesystem_free_mb * 1024 * 1024),
+        "used_fraction": used_fraction,
+        "observation_only": True,
+    }
+    key_files = ["trades_3factor.csv", "ai_reason_research.jsonl", "signal_replay.jsonl"]
+    if current:
+        size_status = "CURRENT"
+    elif has_inventory_generation and raw_inventory_status == "BUILDING":
+        size_status = "STALE_REVALIDATING"
+    elif has_inventory_generation and raw_inventory_status in {"CURRENT", "STALE", "FAILED"}:
+        size_status = "STALE"
+    else:
+        size_status = "UNAVAILABLE"
     return jsonify({
         "status": "ok",
         "source": "fly" if os.path.exists("/.dockerenv") or os.path.exists("/app/fly-entrypoint.sh") else "local",
-        "runtime_path": runtime_path,
+        "runtime_path": str(runtime_root),
         "volume_total_mb": volume_total_mb,
-        "runtime_size_mb": total_mb,
+        "filesystem_used_mb": filesystem_used_mb,
+        "filesystem_free_mb": filesystem_free_mb,
+        "filesystem_usage_status": "CURRENT" if filesystem_used_mb is not None else "UNAVAILABLE",
+        "runtime_size_mb": transferable_mb,
+        "inventory_transferable_mb": transferable_mb,
+        "runtime_size_status": size_status,
         "volume_pct": volume_pct,
         "capacity_status": cleanup_status,
         "cleanup_status": cleanup_status,
@@ -37442,9 +37400,15 @@ def api_data_size():
         "source_cleanup_authorized": False,
         "source_reclaimed_bytes": 0,
         "top_files": top_files,
-        "line_counts": line_counts,
+        "line_counts": {name: None for name in key_files},
+        "line_count_status": "UNAVAILABLE",
         "key_files": key_files,
         "computed_at": int(time.time()),
+        "inventory_generated_at": inventory["generated_at"],
+        "inventory_generation_id": inventory["generation_id"],
+        "inventory_file_count": inventory["file_count"],
+        "inventory_refreshing": inventory["refreshing"],
+        "inventory_error": inventory["error"],
         "collector_version": COLLECTOR_V31_VERSION,
         "legacy_collector_version": COLLECTOR_V22_VERSION,
         "storage_state": storage_payload,
@@ -39438,6 +39402,36 @@ def _data_sync_file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _data_sync_validate_top_files(raw, total_bytes: int) -> list:
+    """Validate the worker's bounded deterministic largest-file summary."""
+    if not isinstance(raw, list) or len(raw) > 5:
+        raise RuntimeError("inventory top-files summary is invalid")
+    validated = []
+    previous_key = None
+    seen = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RuntimeError("inventory top-files row is invalid")
+        path = str(item.get("path") or "")
+        name = str(item.get("name") or "")
+        try:
+            size = int(item.get("size"))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("inventory top-files size is invalid") from exc
+        if (
+            not path or path in seen or Path(path).name != name
+            or size < 0 or size > total_bytes
+        ):
+            raise RuntimeError("inventory top-files identity is invalid")
+        key = (-size, path)
+        if previous_key is not None and key < previous_key:
+            raise RuntimeError("inventory top-files order is invalid")
+        previous_key = key
+        seen.add(path)
+        validated.append({"path": path, "name": name, "size": size})
+    return validated
+
+
 def _data_sync_validate_disk_inventory_generation(
     result: dict, work_root: Path
 ) -> dict:
@@ -39480,6 +39474,7 @@ def _data_sync_validate_disk_inventory_generation(
     indexed_files = 0
     indexed_bytes = 0
     descriptors_seen = 0
+    generation_hasher = hashlib.sha256(b"fly_runtime_inventory_generation_v2\n")
     with index_path.open("r", encoding="utf-8") as handle:
         for line in handle:
             if descriptors_seen >= _DATA_SYNC_INVENTORY_INDEX_DESCRIPTOR_MAX:
@@ -39507,6 +39502,9 @@ def _data_sync_validate_disk_inventory_generation(
                 raise RuntimeError("inventory page artifact is unavailable or oversized")
             indexed_files += page_files
             indexed_bytes += page_bytes
+            generation_hasher.update(
+                f"{page_index}:{page_files}:{page_bytes}:{page_sha256}\n".encode("ascii")
+            )
             descriptors_seen += 1
     if (
         descriptors_seen != page_count
@@ -39514,6 +39512,15 @@ def _data_sync_validate_disk_inventory_generation(
         or indexed_bytes != total_bytes
     ):
         raise RuntimeError("inventory page index is incomplete")
+    top_files = _data_sync_validate_top_files(result.get("top_files"), total_bytes)
+    generation_hasher.update(f"files:{file_count}\nbytes:{total_bytes}\n".encode("ascii"))
+    generation_hasher.update(
+        json.dumps(
+            top_files, separators=(",", ":"), sort_keys=True, ensure_ascii=True,
+        ).encode("utf-8") + b"\n"
+    )
+    if not hmac.compare_digest(generation_hasher.hexdigest(), generation_id):
+        raise RuntimeError("inventory generation identity does not bind top-files summary")
     return {
         "storage": "disk_pages_v2",
         "generation_id": generation_id,
@@ -39524,6 +39531,7 @@ def _data_sync_validate_disk_inventory_generation(
         "page_size": page_size,
         "file_count": file_count,
         "total_bytes": total_bytes,
+        "top_files": top_files,
     }
 
 
@@ -39905,7 +39913,7 @@ def _data_sync_persist_disk_inventory_snapshot(
             for key in (
                 "storage", "generation_id", "generation_dir", "page_index_path",
                 "page_index_sha256", "page_count", "page_size", "file_count",
-                "total_bytes",
+                "total_bytes", "top_files",
             )
         },
     }

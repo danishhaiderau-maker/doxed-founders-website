@@ -466,6 +466,10 @@ def _open_database(path: Path, fingerprint: str) -> sqlite3.Connection:
             "path TEXT PRIMARY KEY, row_json TEXT NOT NULL, transferable_bytes INTEGER NOT NULL)"
         )
         connection.execute(
+            "CREATE INDEX IF NOT EXISTS rows_largest_first "
+            "ON rows(transferable_bytes DESC, path ASC)"
+        )
+        connection.execute(
             "CREATE TABLE IF NOT EXISTS pages (page_index INTEGER PRIMARY KEY, descriptor_json TEXT NOT NULL)"
         )
         existing = connection.execute(
@@ -675,7 +679,26 @@ def _publish_generation(
         ).fetchone()
         if indexed_files != int(database_files) or indexed_bytes != int(database_bytes):
             raise CheckpointError("inventory page index does not cover the complete database")
+        top_files = []
+        for path, row_json, transferable_bytes in connection.execute(
+            "SELECT path, row_json, transferable_bytes FROM rows "
+            "ORDER BY transferable_bytes DESC, path ASC LIMIT 5"
+        ):
+            row = json.loads(row_json)
+            if str(row.get("path") or "") != str(path):
+                raise CheckpointError("inventory top-file row identity mismatch")
+            top_files.append({
+                "path": str(path),
+                "name": Path(str(path)).name,
+                "size": int(transferable_bytes),
+            })
         generation_hasher.update(f"files:{indexed_files}\nbytes:{indexed_bytes}\n".encode("ascii"))
+        generation_hasher.update(
+            json.dumps(
+                top_files, separators=(",", ":"), sort_keys=True,
+                ensure_ascii=True,
+            ).encode("utf-8") + b"\n"
+        )
         generation_id = generation_hasher.hexdigest()
         generation_root = work_root / "inventory-generations"
         generation_root.mkdir(parents=True, exist_ok=True)
@@ -734,6 +757,7 @@ def _publish_generation(
             "page_count": page_count,
             "file_count": indexed_files,
             "total_bytes": indexed_bytes,
+            "top_files": top_files,
         }
     finally:
         index_temporary.unlink(missing_ok=True)
@@ -986,6 +1010,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             "generation_id": generation["generation_id"],
             "file_count": generation["file_count"],
             "total_bytes": generation["total_bytes"],
+            "top_files": generation["top_files"],
             "page_size": worker_receipt["page_rows"],
             "page_count": generation["page_count"],
             "generation_dir": generation["generation_dir"],

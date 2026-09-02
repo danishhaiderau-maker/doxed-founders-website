@@ -26,7 +26,10 @@ def _load_worker():
 
 def _parent_validate_generation(result: dict, work_root: Path) -> dict:
     tree = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
-    wanted = {"_data_sync_file_sha256", "_data_sync_validate_disk_inventory_generation"}
+    wanted = {
+        "_data_sync_file_sha256", "_data_sync_validate_top_files",
+        "_data_sync_validate_disk_inventory_generation",
+    }
     nodes = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
@@ -122,9 +125,24 @@ def test_worker_nonce_identity_containment_and_atomic_result(tmp_path):
     rows = _generation_rows(result)
     assert result["file_count"] == len(rows) == 1
     assert rows[0]["size"] == len(b'{"a":1}\n')
+    assert result["top_files"] == [{
+        "path": rows[0]["path"],
+        "name": "events.jsonl",
+        "size": rows[0]["size"],
+    }]
     validated = _parent_validate_generation(result, result_path.parent)
     assert validated["storage"] == "disk_pages_v2"
     assert validated["generation_id"] == result["generation_id"]
+    assert validated["top_files"] == result["top_files"]
+    tampered = {**result, "top_files": [{
+        "path": rows[0]["path"], "name": "events.jsonl", "size": rows[0]["size"] + 1,
+    }]}
+    with pytest.raises(RuntimeError, match="top-files identity"):
+        _parent_validate_generation(tampered, result_path.parent)
+    missing_summary = dict(result)
+    missing_summary.pop("top_files")
+    with pytest.raises(RuntimeError, match="top-files summary"):
+        _parent_validate_generation(missing_summary, result_path.parent)
     assert not list(result_path.parent.glob("*.tmp"))
 
     escaped_result = tmp_path / f"inventory-result-{nonce}.json"
@@ -459,6 +477,15 @@ def test_resumable_worker_never_publishes_a_partial_inventory(tmp_path):
     rows = _generation_rows(result)
     assert result["file_count"] == len(rows) == 44
     assert len({row["path"] for row in rows}) == 44
+    expected_top = sorted(rows, key=lambda row: (-int(row["size"]), row["path"]))[:5]
+    assert result["top_files"] == [
+        {"path": row["path"], "name": Path(row["path"]).name, "size": row["size"]}
+        for row in expected_top
+    ]
+    assert _parent_validate_generation(result, result_path.parent)["top_files"] == result["top_files"]
+    out_of_order = {**result, "top_files": list(reversed(result["top_files"]))}
+    with pytest.raises(RuntimeError, match="top-files order"):
+        _parent_validate_generation(out_of_order, result_path.parent)
     receipt = result["worker_receipt"]
     assert receipt["complete"] is True
     assert receipt["files_seen"] == 44

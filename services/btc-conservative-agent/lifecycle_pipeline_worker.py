@@ -394,6 +394,15 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             max_runtime_sec=request["_runtime"], pressure_mode=request["_pressure"],
             emergency_closure_mode=request["_emergency_closure"],
         )
+        # Historical receipt preparation is deliberately last and advances at
+        # most one row. The parent hard-kills this low-priority subprocess at
+        # the declared deadline, so a slow volume fsync cannot wedge AI cycles
+        # or starve lifecycle/WAL work on the next invocation.
+        emergency_bootstrap = None
+        if request.get("_epoch_id"):
+            emergency_bootstrap = (
+                evidence_store.advance_one_emergency_bootstrap_round_robin()
+            )
         # A caller must still terminate the subprocess at the same deadline to
         # cap wall time while a filesystem syscall is in flight.  Independently
         # refuse to publish a success receipt once the declared deadline has
@@ -412,6 +421,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             "request_sha256": request["_request_sha256"],
             "pipeline": pipeline,
             "emergency_wal": emergency_wal,
+            "emergency_idempotency_bootstrap": emergency_bootstrap,
             "hard_runtime_result_deadline_enforced": True,
             "source_cleanup_authorized": False,
         }
