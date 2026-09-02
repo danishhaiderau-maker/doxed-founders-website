@@ -110,6 +110,16 @@ def _promote_due_retries(connection, *, now: float, maximum: int) -> int:
             connection.execute(
                 "INSERT OR IGNORE INTO dirty_lifecycle VALUES (?, ?, ?, ?)", tuple(row)
             )
+            # Claim the retry in the same transaction as its durable dirty
+            # work token.  A path that still needs another attempt explicitly
+            # enqueues a new retry after evaluation.  Leaving this due row in
+            # place would promote the same oldest identity on every bounded
+            # cycle and could starve the historical dirty backlog.
+            connection.execute("""
+                DELETE FROM qualification_retry
+                WHERE collection_epoch_id=? AND episode_id=?
+                  AND policy_signature=? AND research_lane=?
+            """, tuple(row))
     return len(due)
 
 

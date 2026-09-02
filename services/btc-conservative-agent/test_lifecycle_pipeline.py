@@ -68,6 +68,17 @@ def _patch_provenance(monkeypatch):
     monkeypatch.setattr(research_v3_store, "_collection_provenance", lambda: dict(PROV))
 
 
+def _queue_retry(root: Path, key: LifecycleKey, *, retry_at: float = NOW):
+    connection = lifecycle_pipeline._open_incremental_index(root)
+    try:
+        lifecycle_pipeline._ensure_retry_queue(connection)
+        lifecycle_pipeline._enqueue_retry(
+            connection, key, retry_at=retry_at, reason="TEST_RETRY", now=retry_at,
+        )
+    finally:
+        connection.close()
+
+
 def _run_until(root: Path, predicate, **kwargs):
     for _attempt in range(2 * len(lifecycle_pipeline.LEDGER_NAMES)):
         report = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
@@ -159,6 +170,104 @@ def test_immature_terminal_is_durably_deferred_and_promoted_at_maturity(tmp_path
     assert due["candidate_count"] == 1
     assert due["scan"]["promoted_qualification_retries"] == 1
     assert due["results"][0]["stage"] == "QUALIFICATION_EVIDENCE_RETRY_QUEUED"
+
+    # The mature attempt explicitly scheduled its own later retry.  The
+    # consumed maturity retry must not remain immediately due.
+    again = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=20_050.0,
+    )
+    assert again["scan"]["promoted_qualification_retries"] == 0
+
+
+def test_due_retry_without_terminal_candidate_is_claimed_once(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    row = _row("lifecycle", "nonterminal", terminal=False)
+    _append(tmp_path, row)
+    _run_until(tmp_path, lambda report: report["scan"]["caught_up"], now=NOW)
+    _queue_retry(tmp_path, KEY)
+
+    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    assert first["scan"]["promoted_qualification_retries"] == 1
+    assert first["candidate_count"] == 1
+    assert first["results"][0]["stage"] == "QUALIFICATION_INCOMPLETE"
+    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    assert second["scan"]["promoted_qualification_retries"] == 0
+    assert second["candidate_count"] == 0
+    _queue_retry(tmp_path, KEY)
+    third = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    assert third["scan"]["promoted_qualification_retries"] == 1
+    assert third["candidate_count"] == 1
+
+
+def test_due_retry_with_post_observation_is_claimed_once(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    row = _row("market_segment", "post-only", context_role="POST_EXIT_PATH")
+    _append(tmp_path, row)
+    _run_until(tmp_path, lambda report: report["scan"]["caught_up"], now=NOW)
+    _queue_retry(tmp_path, KEY)
+
+    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    assert first["scan"]["promoted_qualification_retries"] == 1
+    assert first["candidate_count"] == 1
+    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path, now=NOW)
+    assert second["scan"]["promoted_qualification_retries"] == 0
+    assert second["candidate_count"] == 0
+
+
+def test_retry_promotion_rollback_preserves_retry_without_dirty_token(tmp_path):
+    connection = lifecycle_pipeline._open_incremental_index(tmp_path)
+    try:
+        lifecycle_pipeline._ensure_retry_queue(connection)
+        lifecycle_pipeline._enqueue_retry(
+            connection, KEY, retry_at=NOW, reason="TEST_RETRY", now=NOW,
+        )
+        connection.execute("""
+            CREATE TRIGGER reject_retry_claim BEFORE DELETE ON qualification_retry
+            BEGIN SELECT RAISE(ABORT, 'claim rejected'); END
+        """)
+        try:
+            lifecycle_pipeline._promote_due_retries(connection, now=NOW, maximum=1)
+        except Exception as exc:
+            assert "claim rejected" in str(exc)
+        else:
+            raise AssertionError("promotion unexpectedly bypassed rollback trigger")
+        assert connection.execute("SELECT COUNT(*) FROM qualification_retry").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM dirty_lifecycle").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_claimed_retry_cannot_starve_large_dirty_backlog(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    connection = lifecycle_pipeline._open_incremental_index(tmp_path)
+    try:
+        lifecycle_pipeline._ensure_retry_queue(connection)
+        rows = [
+            ("epoch-1", f"episode-{number:04d}", "policy-1", "CONTINUOUS")
+            for number in range(4_877)
+        ]
+        with connection:
+            connection.executemany(
+                "INSERT INTO dirty_lifecycle VALUES (?, ?, ?, ?)", rows,
+            )
+        retry_key = LifecycleKey(*rows[0])
+        lifecycle_pipeline._enqueue_retry(
+            connection, retry_key, retry_at=NOW, reason="TEST_RETRY", now=NOW,
+        )
+    finally:
+        connection.close()
+
+    first = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, max_lifecycles=5,
+    )
+    second = lifecycle_pipeline.process_incremental_lifecycle_pipeline(
+        tmp_path, now=NOW, max_lifecycles=5,
+    )
+    assert first["scan"]["promoted_qualification_retries"] == 1
+    assert second["scan"]["promoted_qualification_retries"] == 0
+    assert first["candidate_count"] == second["candidate_count"] == 5
+    assert first["scan"]["pending_dirty_lifecycles"] == 4_872
+    assert second["scan"]["pending_dirty_lifecycles"] == 4_867
 
 
 def test_complete_indexed_horizon_obeys_reindex_before_completion(tmp_path, monkeypatch):
