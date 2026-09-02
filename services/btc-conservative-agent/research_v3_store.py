@@ -394,6 +394,26 @@ class V3EvidenceStore:
             raise ValueError(f"unknown V3 ledger: {name}")
         return self.ledger_dir / f"{name}.jsonl"
 
+    def _active_ledger_generation(self, ledger: str) -> dict[str, Any]:
+        """Stable identity for the pre-rotation active generation.
+
+        Readers accept an absent value only as this ACTIVE generation. Future
+        rotation may publish SEALED numeric generations without reinterpreting
+        legacy receipts or their byte offsets.
+        """
+        path = self.ledger_path(ledger)
+        return {
+            "schema": "v3_ledger_generation_ref_v1",
+            "state": "ACTIVE",
+            "ledger": ledger,
+            "generation": 0,
+            "relative_path": path.relative_to(self.root).as_posix(),
+        }
+
+    def _receipt_targets_active_generation(self, ledger: str, receipt: dict[str, Any]) -> bool:
+        generation = receipt.get("ledger_generation")
+        return generation is None or generation == self._active_ledger_generation(ledger)
+
     @property
     def _lifecycle_membership_dir(self) -> Path:
         return self.receipt_dir / "lifecycle_membership_v1"
@@ -502,6 +522,7 @@ class V3EvidenceStore:
             "identity": self._identity_binding(),
             "lifecycle_ledger": self._signature_payload(signature),
             "tail_anchor": anchor,
+            "ledger_generation": self._active_ledger_generation("lifecycle"),
         })
 
     def _episode_has_lifecycle_receipt(self, episode_id: str) -> bool:
@@ -526,6 +547,7 @@ class V3EvidenceStore:
             and isinstance(binding.get("generation_id"), str)
             and bool(binding.get("generation_id"))
             and binding.get("identity") == self._identity_binding()
+            and self._receipt_targets_active_generation("lifecycle", binding)
             and binding.get("lifecycle_ledger") == self._signature_payload(before)
             and self._anchor_valid(ledger, binding.get("tail_anchor"))
             and marker.get("schema") == "lifecycle_episode_membership_v1"
@@ -582,6 +604,7 @@ class V3EvidenceStore:
             receipt.get("schema") == "emergency_record_index_complete_v1"
             and receipt.get("identity") == self._identity_binding()
             and receipt.get("ledger") == ledger
+            and self._receipt_targets_active_generation(ledger, receipt)
             and receipt.get("ledger_signature") == (
                 None if signature is None else self._signature_payload(signature)
             )
@@ -599,6 +622,7 @@ class V3EvidenceStore:
             "ledger": ledger, "record_id": record_id,
             "row_sha256": hashlib.sha256(payload).hexdigest(),
             "offset": int(offset), "length": len(payload), "identity": self._identity_binding(),
+            "ledger_generation": self._active_ledger_generation(ledger),
         }
         self._atomic_json_receipt(self._record_receipt_path(ledger, record_id), receipt)
         return receipt
@@ -617,6 +641,7 @@ class V3EvidenceStore:
                 self._atomic_json_receipt(self._completeness_path(ledger), {
                     "schema": "emergency_record_index_complete_v1", "ledger": ledger,
                     "identity": self._identity_binding(), "ledger_signature": None,
+                    "ledger_generation": self._active_ledger_generation(ledger),
                     "tail_anchor": None,
                 })
                 return {"complete": True, "bytes_indexed": 0, "cursor": 0}
@@ -676,6 +701,7 @@ class V3EvidenceStore:
                 self._atomic_json_receipt(self._completeness_path(ledger), {
                     "schema": "emergency_record_index_complete_v1", "ledger": ledger,
                     "identity": self._identity_binding(),
+                    "ledger_generation": self._active_ledger_generation(ledger),
                     "ledger_signature": self._signature_payload(signature),
                     "tail_anchor": cursor_anchor,
                 })
@@ -722,6 +748,7 @@ class V3EvidenceStore:
                 and receipt.get("ledger") == ledger
                 and receipt.get("record_id") == record_id
                 and receipt.get("identity") == expected_identity
+                and self._receipt_targets_active_generation(ledger, receipt)
             )
             exact_prepared = (
                 structurally_valid and receipt.get("state") == "PREPARED"
@@ -772,6 +799,7 @@ class V3EvidenceStore:
                     self._atomic_json_receipt(self._completeness_path(ledger), {
                         "schema": "emergency_record_index_complete_v1", "ledger": ledger,
                         "identity": self._identity_binding(),
+                        "ledger_generation": self._active_ledger_generation(ledger),
                         "ledger_signature": self._signature_payload(final_signature),
                         "tail_anchor": anchor,
                     })
@@ -824,6 +852,7 @@ class V3EvidenceStore:
                 "schema": "emergency_record_idempotency_v1", "state": "DEFERRED",
                 "ledger": ledger, "record_id": record_id, "row_sha256": row_sha,
                 "length": len(payload), "identity": expected_identity,
+                "ledger_generation": self._active_ledger_generation(ledger),
                 "row_payload_utf8": line,
             }
             self._atomic_json_receipt(receipt_path, deferred)
@@ -853,6 +882,7 @@ class V3EvidenceStore:
             self._atomic_json_receipt(self._completeness_path(ledger), {
                 "schema": "emergency_record_index_complete_v1", "ledger": ledger,
                 "identity": self._identity_binding(),
+                "ledger_generation": self._active_ledger_generation(ledger),
                 "ledger_signature": self._signature_payload(final_signature),
                 "tail_anchor": anchor,
             })
@@ -987,6 +1017,7 @@ class V3EvidenceStore:
                 self._atomic_json_receipt(self._completeness_path(ledger), {
                     "schema": "emergency_record_index_complete_v1", "ledger": ledger,
                     "identity": self._identity_binding(),
+                    "ledger_generation": self._active_ledger_generation(ledger),
                     "ledger_signature": self._signature_payload(final_signature),
                     "tail_anchor": anchor if ledger == "lifecycle" else {
                         "offset": offset, "length": len(payload),

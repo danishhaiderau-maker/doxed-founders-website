@@ -523,3 +523,58 @@ def test_mandatory_row_defers_until_historical_index_complete_then_appends_once(
     duplicate = store.append("execution", row)
     assert duplicate["duplicate"] is True
     assert execution.stat().st_size == after
+
+
+def test_new_record_and_completeness_receipts_bind_active_generation_path(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    result = store.append("decision", {
+        "record_id": "decision:generation-bound", "episode_id": "active",
+    })
+    assert result["written"] is True
+    receipt = json.loads(store._record_receipt_path(
+        "decision", "decision:generation-bound",
+    ).read_text("utf-8"))
+    expected = store._active_ledger_generation("decision")
+    assert receipt["ledger_generation"] == expected
+    while not store.advance_emergency_idempotency_bootstrap("decision")["complete"]:
+        pass
+    complete = json.loads(store._completeness_path("decision").read_text("utf-8"))
+    assert complete["ledger_generation"] == expected
+
+
+def test_legacy_generationless_receipt_remains_active_only_compatible(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store.append("decision", {"record_id": "decision:legacy", "episode_id": "active"})
+    while not store.advance_emergency_idempotency_bootstrap("decision")["complete"]:
+        pass
+    path = store._completeness_path("decision")
+    receipt = json.loads(path.read_text("utf-8"))
+    receipt.pop("ledger_generation")
+    store._atomic_json_receipt(path, receipt)
+    signature = research_v3_store._path_signature(store.ledger_path("decision"))
+    assert store._complete_generation("decision", signature) is True
+    receipt["ledger_generation"] = {
+        **store._active_ledger_generation("decision"), "state": "SEALED", "generation": 1,
+    }
+    store._atomic_json_receipt(path, receipt)
+    assert store._complete_generation("decision", signature) is False
+
+
+def test_lifecycle_membership_binding_is_generation_aware(tmp_path, monkeypatch):
+    _mounted(monkeypatch, tmp_path)
+    _fraction(monkeypatch, 0.50)
+    store = V3EvidenceStore(tmp_path, epoch_id="epoch-1")
+    store.append("lifecycle", {
+        "record_id": "lifecycle:generation:terminal", "episode_id": "episode-generation",
+        "terminal": True, "outcome_state": "NO_FILL",
+    })
+    current = json.loads((store._lifecycle_membership_dir / "current.json").read_text("utf-8"))
+    assert current["ledger_generation"] == store._active_ledger_generation("lifecycle")
+    assert store._episode_has_lifecycle_receipt("episode-generation") is True
+    current["ledger_generation"] = {**current["ledger_generation"], "state": "SEALED", "generation": 1}
+    store._atomic_json_receipt(store._lifecycle_membership_dir / "current.json", current)
+    assert store._episode_has_lifecycle_receipt("episode-generation") is False
