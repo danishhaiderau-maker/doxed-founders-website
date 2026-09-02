@@ -65,7 +65,6 @@ def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailab
     assert 'sys.argv[2].replace("Z", "+00:00")' in recovery
     assert 'runtime_revision = os.getenv("SOURCE_GIT_REV", "").lower()' in recovery
     assert 'RECOVERY_RUNTIME_REVISION_MISMATCH:' in recovery
-    assert 'os.getenv("FORCE_PAPER_MODE", "").lower() != "true"' in recovery
     assert 'lifecycle_path.stat().st_mtime >= threshold' in recovery
     assert 'lifecycle.get("paper_only") is True and lifecycle.get("live_armed") is False' in recovery
     assert 'lifecycle.get("positions") == [] and lifecycle.get("pending_orders") == []' in recovery
@@ -80,7 +79,9 @@ def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailab
     assert 'guest_output="$(flyctl machine exec' in recovery
     assert "'${EXPECTED_UNREADY_REVISION}' '${FAILED_DEPLOY_COMPLETED_AT}'" in recovery
     assert 'assert len(rows)==1' in recovery
-    assert 'RECOVERY_FORCE_PAPER_MODE_NOT_PROVEN' in recovery
+    assert 'File "/app/btc_conservative_agent.py", line 195' in recovery
+    wrapper = (ROOT / "services" / "btc-conservative-agent" / "btc_conservative_agent.py").read_text(encoding="utf-8")
+    assert wrapper.index('os.getenv("FORCE_PAPER_MODE")') < wrapper.index("import bot as signal_engine")
     assert 'b"ModuleNotFoundError" in log' in recovery
     assert 'b"research.mirror_generation_lease" in log' in recovery
     assert 'run.get("name") != "Deploy Fly BTC bot"' in recovery
