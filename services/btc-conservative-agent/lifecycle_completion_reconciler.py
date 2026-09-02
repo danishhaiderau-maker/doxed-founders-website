@@ -95,11 +95,6 @@ def evaluate_lifecycle_completion(
     provenance, provenance_blockers = _provenance(material)
     blockers.extend(provenance_blockers)
 
-    event_ids = {str(row.get("event_id") or "").strip() for row in material}
-    event_ids.discard("")
-    if len(event_ids) != 1:
-        blockers.append("EVENT_ID_MISSING_OR_AMBIGUOUS")
-
     schedules = _unique(material, lambda row: (
         row.get("ledger") == "order_intent"
         and row.get("intent_kind") == "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL"
@@ -138,6 +133,62 @@ def evaluate_lifecycle_completion(
         and str(row.get("entry_outcome") or "").upper() == "UNKNOWN"
         and bool(str(row.get("unknown_reason") or "").strip())
     ))
+    fill_lifecycle = _unique(material, lambda row: (
+        row.get("ledger") == "lifecycle"
+        and row.get("observation_status") == "PAPER_POSITION_OPEN"
+        and str(row.get("outcome_state") or "").upper() in {"FULL_FILL", "PARTIAL_FILL"}
+    ))
+
+    # Decision and lane-entry rows intentionally use lane-scoped audit IDs
+    # (``lane-decision:*`` / ``lane-entry:*``).  They share the composite
+    # lifecycle identity and AI call, but are not execution event IDs.  Only
+    # rows which can prove the terminal execution lifecycle select the one
+    # canonical event ID used by the completion receipt.
+    canonical_event_rows = [
+        *schedules, *fill_rows, *close_rows, *fill_lifecycle,
+        *closed_lifecycle, *no_fill_rows, *explicit_unknown,
+    ]
+    event_ids = {
+        str(row.get("event_id") or "").strip()
+        for row in canonical_event_rows
+        if str(row.get("event_id") or "").strip()
+    }
+    if len(event_ids) != 1 or any(
+        not str(row.get("event_id") or "").strip()
+        for row in canonical_event_rows
+    ):
+        blockers.append("EVENT_ID_MISSING_OR_AMBIGUOUS")
+
+    audit_rows = _unique(material, lambda row: (
+        str(row.get("event_id") or "").startswith(("lane-decision:", "lane-entry:"))
+        or "LANE_POLICY_VERDICT" in str(row.get("record_id") or "")
+        or ":lane-entry:" in str(row.get("record_id") or "")
+    ))
+    if audit_rows:
+        audit_call_ids = {
+            str(row.get("shared_ai_call_id") or "").strip() for row in audit_rows
+        }
+        canonical_call_ids = {
+            str(row.get("shared_ai_call_id") or "").strip()
+            for row in canonical_event_rows
+        }
+        if "" in audit_call_ids or "" in canonical_call_ids or (
+            len(audit_call_ids | canonical_call_ids) != 1
+        ):
+            blockers.append("SHARED_AI_CALL_ID_MISSING_OR_AMBIGUOUS")
+        for row in audit_rows:
+            supplied = (
+                row.get("collection_epoch_id") or row.get("epoch_id"),
+                row.get("episode_id"),
+                row.get("policy_signature"), row.get("research_lane"),
+            )
+            expected = (
+                key.collection_epoch_id, key.episode_id,
+                key.policy_signature, key.research_lane,
+            )
+            if supplied != expected:
+                blockers.append("LANE_AUDIT_COMPOSITE_BINDING_MISMATCH")
+                break
 
     proof: dict[str, Any] = {
         "terminal_schedule": {
@@ -153,11 +204,6 @@ def evaluate_lifecycle_completion(
     if fill_rows or close_rows or closed_lifecycle:
         if len(fill_rows) != 1 or len(close_rows) != 1 or len(closed_lifecycle) != 1:
             blockers.append("UNIQUE_FILLED_LIFECYCLE_NOT_PROVEN")
-        fill_lifecycle = _unique(material, lambda row: (
-            row.get("ledger") == "lifecycle"
-            and row.get("observation_status") == "PAPER_POSITION_OPEN"
-            and str(row.get("outcome_state") or "").upper() in {"FULL_FILL", "PARTIAL_FILL"}
-        ))
         if len(fill_lifecycle) != 1:
             blockers.append("UNIQUE_ENTRY_OUTCOME_NOT_PROVEN")
             outcome = "UNKNOWN"
