@@ -33,6 +33,7 @@
     ["POST", "/api/toggle_research_lane", "toggle_research_lane"],
     ["POST", "/api/toggle_continuous_ai_direct", "toggle_continuous_ai_direct"],
     ["POST", "/api/toggle_debug", "toggle_debug"],
+    ["POST", "/api/research/repair-execution-funnel", "api_repair_execution_funnel_jsonl"],
     ["POST", "/api/reset", "api_reset_showcase"],
     ["POST", "/api/toggle_fresh_collection", "toggle_fresh_collection"],
     ["POST", "/api/wipe_fly_only", "wipe_fly_only"],
