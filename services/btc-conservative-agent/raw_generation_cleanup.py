@@ -55,6 +55,24 @@ def _material_hash(value: Mapping[str, Any], field: str) -> str:
     return hashlib.sha256(_canonical(material)).hexdigest()
 
 
+def _has_symlink_component(path: Path, boundary: Path) -> bool:
+    """Check lexical components before resolution can erase symlink evidence."""
+    candidate = Path(os.path.abspath(path))
+    root = Path(os.path.abspath(boundary))
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return True
+    current = root
+    if current.is_symlink():
+        return True
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return True
+    return False
+
+
 def _write_once(path: Path, value: Mapping[str, Any]) -> None:
     encoded = _canonical(value) + b"\n"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,8 +106,11 @@ def verify_generation(
     qualified.
     """
     reasons: list[str] = []
-    root = source_root.resolve(strict=True)
-    if root.is_symlink() or manifest.get("schema") != MANIFEST_SCHEMA:
+    lexical_root = Path(os.path.abspath(source_root))
+    if _has_symlink_component(lexical_root, lexical_root.parent):
+        raise RawGenerationCleanupRejected(["SOURCE_REPARSE_POINT"])
+    root = lexical_root.resolve(strict=True)
+    if manifest.get("schema") != MANIFEST_SCHEMA:
         reasons.append("MANIFEST_OR_ROOT_INVALID")
     kind = str(manifest.get("generation_kind") or "")
     generation = manifest.get("generation")
@@ -120,7 +141,10 @@ def verify_generation(
     for member in members:
         relative = str((member or {}).get("path") or "").replace("\\", "/")
         try:
-            path = (root / relative).resolve(strict=True)
+            lexical_path = root / relative
+            if _has_symlink_component(lexical_path, root):
+                raise ValueError("symlink member")
+            path = lexical_path.resolve(strict=True)
             path.relative_to(root)
         except (OSError, ValueError):
             reasons.append("GENERATION_MEMBER_UNSAFE_OR_MISSING")
@@ -191,6 +215,9 @@ def verify_generation(
         "manifest_sha256": manifest_hash, "identity": identity,
         "member_count": len(declared), "lifecycle_count": len(lifecycle_ids),
         "source_bytes": exact_bytes,
+        "members": [{"path": str(row["path"]), "size": int(row["size"]),
+                     "sha256": str(row["sha256"])}
+                    for row in sorted(members, key=lambda value: str(value["path"]))],
     }
     proof["proof_sha256"] = _material_hash(proof, "proof_sha256")
     return proof
@@ -226,7 +253,8 @@ class RawGenerationCleanupTransaction:
         prepared = {"schema": TX_SCHEMA, "state": "PREPARED", "generation_id": generation_id,
                     "source": source.relative_to(self.root).as_posix(),
                     "quarantine": destination.relative_to(self.root).as_posix(),
-                    "proof_sha256": proof.get("proof_sha256"), "source_bytes": proof.get("source_bytes")}
+                    "proof_sha256": proof.get("proof_sha256"), "source_bytes": proof.get("source_bytes"),
+                    "members": proof.get("members")}
         _write_once(tx / "PREPARED.json", prepared)
         if failpoint == "AFTER_PREPARED":
             raise RuntimeError("FAILPOINT_AFTER_PREPARED")
@@ -253,7 +281,31 @@ class RawGenerationCleanupTransaction:
         if not committed_path.is_file() or not quarantine.is_dir():
             raise RawGenerationCleanupRejected(["COMMITTED_QUARANTINE_REQUIRED"])
         committed = json.loads(committed_path.read_text("utf-8"))
-        exact_bytes = sum(path.stat().st_size for path in quarantine.rglob("*") if path.is_file())
+        declared = committed.get("members")
+        if not isinstance(declared, list) or not declared:
+            raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_PROOF_MISSING"])
+        actual_paths: set[str] = set()
+        exact_bytes = 0
+        for row in declared:
+            relative = str((row or {}).get("path") or "").replace("\\", "/")
+            lexical = quarantine / relative
+            if _has_symlink_component(lexical, quarantine):
+                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_SYMLINK"])
+            try:
+                member = lexical.resolve(strict=True)
+                member.relative_to(quarantine.resolve())
+            except (OSError, ValueError):
+                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_UNSAFE_OR_MISSING"])
+            if not member.is_file():
+                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_INVALID"])
+            size = member.stat().st_size
+            exact_bytes += size
+            actual_paths.add(relative)
+            if size != row.get("size") or not hmac.compare_digest(_digest(member), str(row.get("sha256") or "")):
+                raise RawGenerationCleanupRejected(["QUARANTINE_MEMBER_HASH_OR_SIZE_DRIFT"])
+        on_disk = {path.relative_to(quarantine).as_posix() for path in quarantine.rglob("*") if path.is_file()}
+        if on_disk != actual_paths:
+            raise RawGenerationCleanupRejected(["QUARANTINE_CONTENT_SET_DRIFT"])
         if exact_bytes != committed.get("source_bytes"):
             raise RawGenerationCleanupRejected(["QUARANTINE_BYTE_COUNT_DRIFT"])
         if dry_run or not self.enabled:

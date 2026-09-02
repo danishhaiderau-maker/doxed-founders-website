@@ -108,3 +108,29 @@ def test_quarantine_restart_reconcile_and_exact_purge_receipt(tmp_path):
                                      "freed_bytes": proof["source_bytes"]}]
     receipt = json.loads(next(tx.tx_root.glob("*/PURGED.json")).read_text("utf-8"))
     assert receipt["state"] == "PURGED" and receipt["freed_bytes"] == proof["source_bytes"]
+
+
+def test_same_size_substitution_is_rejected_before_purge(tmp_path):
+    source, manifest, ack, identity = fixture(tmp_path)
+    proof = verify_generation(source, manifest, ack, current_identity=identity,
+                              active_leases={"reader": [], "sync": [], "analyzer": []})
+    tx = RawGenerationCleanupTransaction(tmp_path, enabled=True)
+    tx.quarantine(source, proof, dry_run=False, revalidate=lambda: proof)
+    quarantined = next(tx.quarantine_root.glob("*/decision.jsonl.1"))
+    original = quarantined.read_bytes()
+    quarantined.write_bytes(b"X" * len(original))
+    with pytest.raises(RawGenerationCleanupRejected) as caught:
+        tx.purge("V3:1", dry_run=False)
+    assert "QUARANTINE_MEMBER_HASH_OR_SIZE_DRIFT" in caught.value.reasons
+    assert quarantined.exists()
+
+
+def test_symlink_member_is_rejected_lexically(tmp_path, monkeypatch):
+    source, manifest, ack, identity = fixture(tmp_path)
+    payload = source / "decision.jsonl.1"
+    original = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda self: True if self == payload else original(self))
+    with pytest.raises(RawGenerationCleanupRejected) as caught:
+        verify_generation(source, manifest, ack, current_identity=identity,
+                          active_leases={"reader": [], "sync": [], "analyzer": []})
+    assert "GENERATION_MEMBER_UNSAFE_OR_MISSING" in caught.value.reasons
