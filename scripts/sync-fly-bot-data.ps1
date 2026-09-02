@@ -1043,7 +1043,11 @@ foreach ($row in $selectedFiles) {
         }
       }
       try {
-        Test-MirrorCandidate -Path $candidate -RelativePath $rel
+        Test-MirrorCandidate `
+          -Path $candidate `
+          -RelativePath $rel `
+          -ExpectedSize $remoteSize `
+          -ExpectedSha256 ([string]$row.sha256)
         break
       } catch {
         # Same-inode JSONL/CSV rewrites (signal_snapshot patches) keep st_ino

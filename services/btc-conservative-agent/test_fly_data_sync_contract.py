@@ -2077,7 +2077,8 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
 
 def test_local_mirror_download_is_validated_then_atomically_published():
     assert '. (Join-Path $scriptDir "fly-mirror-atomic.ps1")' in SYNC_SCRIPT
-    assert "Test-MirrorCandidate -Path $candidate" in SYNC_SCRIPT
+    assert "Test-MirrorCandidate `" in SYNC_SCRIPT
+    assert "-Path $candidate `" in SYNC_SCRIPT
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
     assert "[System.IO.File]::Copy($local, $candidate, $true)" in SYNC_SCRIPT
     assert "if (-not ($sameGeneration -and $localSize -eq $remoteSize))" in SYNC_SCRIPT
@@ -2135,6 +2136,84 @@ def test_invalid_jsonl_candidate_preserves_previous_mirror_and_valid_candidate_r
         "before": '{"trade_id":"old"}\n',
         "failed": True,
     }
+
+
+def test_corrupt_quarantine_jsonl_is_opaque_only_with_exact_manifest_size_and_hash():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        candidate = root / "quarantine.download"
+        candidate.write_bytes(b'{"valid":true}\n{"incomplete":')
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        relative = "corrupt_evidence_quarantine/repair-1/execution_funnel.jsonl"
+        command = (
+            f". '{ATOMIC_HELPER}'; "
+            f"Test-MirrorCandidate -Path '{candidate}' -RelativePath '{relative}' "
+            f"-ExpectedSize {candidate.stat().st_size} -ExpectedSha256 '{digest}'"
+        )
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+def test_same_incomplete_jsonl_outside_corrupt_quarantine_is_rejected():
+    with tempfile.TemporaryDirectory() as tmp:
+        candidate = Path(tmp) / "active.download"
+        candidate.write_bytes(b'{"valid":true}\n{"incomplete":')
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        command = (
+            f". '{ATOMIC_HELPER}'; $failed=$false; try {{ "
+            f"Test-MirrorCandidate -Path '{candidate}' -RelativePath 'execution_funnel.jsonl' "
+            f"-ExpectedSize {candidate.stat().st_size} -ExpectedSha256 '{digest}' "
+            "} catch { $failed=$true }; if(-not $failed){ exit 9 }"
+        )
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+@pytest.mark.parametrize("defect", ["size", "hash", "missing_hash", "traversal"])
+def test_corrupt_quarantine_opaque_admission_rejects_manifest_or_path_defects(defect):
+    with tempfile.TemporaryDirectory() as tmp:
+        candidate = Path(tmp) / "quarantine.download"
+        candidate.write_bytes(b'{"incomplete":')
+        size = candidate.stat().st_size
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        relative = "corrupt_evidence_quarantine/repair-1/raw.jsonl"
+        if defect == "size":
+            size += 1
+        elif defect == "hash":
+            digest = "0" * 64
+        elif defect == "missing_hash":
+            digest = ""
+        elif defect == "traversal":
+            relative = "corrupt_evidence_quarantine/../raw.jsonl"
+        command = (
+            f". '{ATOMIC_HELPER}'; $failed=$false; try {{ "
+            f"Test-MirrorCandidate -Path '{candidate}' -RelativePath '{relative}' "
+            f"-ExpectedSize {size} -ExpectedSha256 '{digest}' "
+            "} catch { $failed=$true }; if(-not $failed){ exit 9 }"
+        )
+        subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+def test_quarantine_candidate_validation_precedes_publish_and_ack():
+    validation = SYNC_SCRIPT.index("Test-MirrorCandidate")
+    publication = SYNC_SCRIPT.index("Publish-MirrorCandidate", validation)
+    acknowledgement = SYNC_SCRIPT.index('$ackSessionId = [guid]::NewGuid()', publication)
+    assert validation < publication < acknowledgement
+    assert "-ExpectedSize $remoteSize" in SYNC_SCRIPT
+    assert "-ExpectedSha256 ([string]$row.sha256)" in SYNC_SCRIPT
 
 
 def test_legacy_crash_dump_json_is_validated_as_jsonl():

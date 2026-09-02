@@ -1,9 +1,47 @@
 function Test-MirrorCandidate {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
-    [Parameter(Mandatory = $true)][string]$RelativePath
+    [Parameter(Mandatory = $true)][string]$RelativePath,
+    [Nullable[Int64]]$ExpectedSize = $null,
+    [string]$ExpectedSha256 = $null
   )
-  $name = $RelativePath.ToLowerInvariant()
+  $normalizedRelativePath = $RelativePath.Replace("\", "/").Trim("/")
+  $relativeParts = @($normalizedRelativePath.Split("/"))
+  if (
+    [string]::IsNullOrWhiteSpace($normalizedRelativePath) -or
+    @($relativeParts | Where-Object { $_ -in @("", ".", "..") }).Count -gt 0
+  ) {
+    throw "Downloaded candidate has an invalid relative path: $RelativePath."
+  }
+  $name = $normalizedRelativePath.ToLowerInvariant()
+  $opaqueCorruptEvidence = $name.StartsWith(
+    "corrupt_evidence_quarantine/",
+    [System.StringComparison]::Ordinal
+  )
+  if ($opaqueCorruptEvidence) {
+    if ($relativeParts.Count -lt 2) {
+      throw "Downloaded quarantine candidate has an invalid relative path: $RelativePath."
+    }
+    if ($null -eq $ExpectedSize -or [int64]$ExpectedSize -lt 0) {
+      throw "Quarantine evidence manifest size is unavailable for $RelativePath."
+    }
+    $expectedHash = [string]$ExpectedSha256
+    if ($expectedHash -notmatch '^[0-9a-fA-F]{64}$') {
+      throw "Quarantine evidence manifest SHA-256 is unavailable for $RelativePath."
+    }
+    $candidateSize = [int64](Get-Item -LiteralPath $Path).Length
+    if ($candidateSize -ne [int64]$ExpectedSize) {
+      throw "Quarantine evidence manifest size mismatch for $RelativePath."
+    }
+    $candidateHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    if (-not $candidateHash.Equals($expectedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "Quarantine evidence manifest SHA-256 mismatch for $RelativePath."
+    }
+    # These are immutable forensic bytes. A corrupt or truncated JSONL payload
+    # is the evidence being preserved, so semantic parsing would destroy the
+    # quarantine contract. Size/hash binding above is the admission gate.
+    return
+  }
   # This legacy filename is an append-only newline-delimited crash journal,
   # not one JSON document. Validating the whole file as JSON stalls the mirror
   # as soon as a second crash record is appended.
