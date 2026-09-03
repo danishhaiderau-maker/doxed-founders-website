@@ -25,6 +25,7 @@ import {
   fetchExchangeProviders,
   fetchTradingAgent,
   hireTradingAgent,
+  refreshPausedTradingAgentCredentials,
 } from '@/lib/api';
 
 type Step = 'exchange' | 'credentials' | 'risk';
@@ -34,6 +35,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const token = session?.accessToken;
+  const refreshMode = searchParams.get('mode') === 'refresh-paused';
 
   const [step, setStep] = useState<Step>('exchange');
   const [providers, setProviders] = useState<ExchangeProviderOption[]>([]);
@@ -63,13 +65,13 @@ export default function AgentHireClient({ slug }: { slug: string }) {
       setCostWeek(agent.costDdollarWeek ?? agent.costDdollarDay ?? 2000);
       setProviders(ex);
       setDdollarBalance(overview?.reputation.reputationPoints ?? null);
-      if (agent.hired && agent.instanceMode === 'live') {
+      if (agent.hired && agent.instanceMode === 'live' && !refreshMode) {
         router.replace(`/agent-hub/${slug}`);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load agent');
     }
-  }, [slug, token, router]);
+  }, [slug, token, router, refreshMode]);
 
   useEffect(() => {
     if (status === 'loading') return;
@@ -95,19 +97,22 @@ export default function AgentHireClient({ slug }: { slug: string }) {
     setBusy(true);
     setError(null);
     try {
-      const result = await hireTradingAgent(
-        agentId,
-        {
+      const payload = {
           exchangeProvider: exchange,
           apiKey,
           apiSecret,
           passphrase: passphrase.trim() || undefined,
           testnet,
-          aiMode: 'platform',
-        },
-        token,
-      );
-      router.push(result.dashboardUrl ?? `/agent-hub/${slug}`);
+        };
+      if (refreshMode) {
+        await refreshPausedTradingAgentCredentials(slug, payload, token);
+        router.push(`/agent-hub/${slug}/my-dashboard`);
+      } else {
+        const result = await hireTradingAgent(
+          agentId, { ...payload, aiMode: 'platform' }, token,
+        );
+        router.push(result.dashboardUrl ?? `/agent-hub/${slug}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Activation failed');
     } finally {
@@ -151,20 +156,25 @@ export default function AgentHireClient({ slug }: { slug: string }) {
 
       <div className="mx-auto max-w-3xl px-6 py-10">
         <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-emerald-400">
-          Connect Bitfinex · real copy relay
+          {refreshMode ? 'Repair Bitfinex API · relay stays paused' : 'Connect Bitfinex · real copy relay'}
         </p>
         <h1 className="mt-1 text-2xl font-bold">{agentName || 'Agent'}</h1>
         <p className="mt-2 text-sm text-zinc-400">
-          Link your Bitfinex Derivatives API — the platform mirrors admin showcase signals on your account
-          with $20 virtual lots, Scenario C exits, and full order transparency. No AI key required.
+          {refreshMode
+            ? 'Replace credentials and run a read-only account audit. This does not renew, charge, transfer funds, resume, or arm the relay.'
+            : 'Link your Bitfinex Derivatives API — the platform mirrors admin showcase signals on your account with $20 virtual lots, Scenario C exits, and full order transparency. No AI key required.'}
         </p>
 
         <div className="mt-4 rounded-xl border border-sky-500/25 bg-sky-950/15 px-4 py-3 text-sm text-sky-100/90">
-          After connecting you can run <strong>live relay</strong> (real orders) or{' '}
-          <strong>relay simulation</strong> (paper book, real prices) from the agent profile — test reconcile
-          before risking capital.
+          {refreshMode ? (
+            <>The relay must already be paused. Successful validation leaves it paused and publishes only a fresh account audit.</>
+          ) : (
+            <>After connecting you can run <strong>live relay</strong> (real orders) or{' '}
+            <strong>relay simulation</strong> (paper book, real prices) from the agent profile — test reconcile
+            before risking capital.</>
+          )}
         </div>
-        {costWeek > 0 && (
+        {!refreshMode && costWeek > 0 && (
           <div className="mt-3 space-y-2 text-sm text-zinc-300">
             <p>
               Hiring fee:{' '}
@@ -396,7 +406,10 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               <p><span className="text-zinc-500">Agent:</span> {agentName}</p>
               <p><span className="text-zinc-500">Exchange:</span> {selectedProvider?.label ?? exchange}</p>
               <p><span className="text-zinc-500">AI:</span> Admin DeepSeek (platform copy — no key needed)</p>
-              <p><span className="text-zinc-500">Hiring fee:</span> {costWeek.toLocaleString()} DDollar for 1 week</p>
+              <p>
+                <span className="text-zinc-500">{refreshMode ? 'Charge:' : 'Hiring fee:'}</span>{' '}
+                {refreshMode ? '0 DDollar — existing rental unchanged' : `${costWeek.toLocaleString()} DDollar for 1 week`}
+              </p>
             </div>
             <label className="flex items-start gap-3 text-sm text-zinc-300">
               <input
@@ -406,7 +419,9 @@ export default function AgentHireClient({ slug }: { slug: string }) {
                 className="mt-1"
                 required
               />
-              {AGENT_BETA_RISK_COPY.checkboxLabel}
+              {refreshMode
+                ? 'I understand this replaces the stored API credentials and performs read-only wallet, order, and position checks while the relay remains paused.'
+                : AGENT_BETA_RISK_COPY.checkboxLabel}
             </label>
             <div className="flex gap-2">
               <button type="button" onClick={() => setStep('credentials')} className="rounded-lg border border-zinc-700 px-4 py-2 text-sm">
@@ -414,10 +429,13 @@ export default function AgentHireClient({ slug }: { slug: string }) {
               </button>
               <button
                 type="submit"
-                disabled={busy || !riskAccepted || !canAffordHire}
+                disabled={busy || !riskAccepted || (!refreshMode && !canAffordHire)}
                 className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold hover:bg-violet-500 disabled:opacity-50"
               >
-                {busy ? 'Activating…' : canAffordHire ? 'Activate live copy trading' : 'Insufficient DDollar'}
+                {busy
+                  ? refreshMode ? 'Validating…' : 'Activating…'
+                  : refreshMode ? 'Replace credentials & verify flat'
+                  : canAffordHire ? 'Activate live copy trading' : 'Insufficient DDollar'}
               </button>
             </div>
           </form>

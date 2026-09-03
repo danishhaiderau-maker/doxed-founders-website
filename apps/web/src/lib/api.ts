@@ -4682,6 +4682,34 @@ export function hireTradingAgent(
   }, token);
 }
 
+export interface PausedCredentialRefreshResult {
+  ok: true;
+  status: 'PAUSED';
+  armed: false;
+  resumed: false;
+  chargedDdollar: 0;
+  marginTransferRequested: false;
+  authenticatedAudit: { known: boolean; flat: boolean; observedAt: string };
+}
+
+export function refreshPausedTradingAgentCredentials(
+  slug: string,
+  body: {
+    exchangeProvider: string;
+    apiKey: string;
+    apiSecret: string;
+    passphrase?: string;
+    testnet?: boolean;
+  },
+  token: string,
+) {
+  return apiFetch<PausedCredentialRefreshResult>(
+    `/trading-agents/${slug}/credentials/refresh-paused`,
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
 export interface PrivateAgentDashboard {
   kind: 'copy' | 'live';
   agent: { id: string; slug: string; name: string; assetSymbol: string };

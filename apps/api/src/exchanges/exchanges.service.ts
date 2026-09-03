@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { Prisma } from '@prisma/client';
 import {
   EXCHANGE_PROVIDER_LABELS,
   exchangeCredentialProvider,
@@ -25,6 +26,14 @@ export type ExchangeCredentialResolutionCode =
 export type ExchangeCredentialResolution =
   | { ok: true; code: 'OK'; credentials: ExchangeCredentials }
   | { ok: false; code: Exclude<ExchangeCredentialResolutionCode, 'OK'>; credentials: null };
+
+export type PreparedExchangeConnection = {
+  provider: string;
+  providerKey: string;
+  encryptedToken: string;
+  metadata: Prisma.InputJsonObject;
+  message: string;
+};
 
 export function bitfinexCredentialFingerprint(creds: ExchangeCredentials): string {
   return createHash('sha256')
@@ -76,6 +85,37 @@ export class ExchangesService {
     provider: string,
     creds: ExchangeCredentials,
   ) {
+    const prepared = await this.prepareUserExchangeConnection(provider, creds);
+    const row = await this.prisma.integrationCredential.upsert({
+      where: { userId_provider: { userId, provider: prepared.providerKey } },
+      create: {
+        userId,
+        provider: prepared.providerKey,
+        token: prepared.encryptedToken,
+        metadata: prepared.metadata,
+        verifiedAt: new Date(),
+      },
+      update: {
+        token: prepared.encryptedToken,
+        metadata: prepared.metadata,
+        verifiedAt: new Date(),
+      },
+    });
+
+    return {
+      credentialId: row.id,
+      provider,
+      label: EXCHANGE_PROVIDER_LABELS[provider as ExchangeProvider],
+      connected: true,
+      message: prepared.message,
+    };
+  }
+
+  /** Validate and encrypt a candidate without changing the credential store. */
+  async prepareUserExchangeConnection(
+    provider: string,
+    creds: ExchangeCredentials,
+  ): Promise<PreparedExchangeConnection> {
     const adapter = this.registry.get(provider);
     if (!adapter) throw new BadRequestException(`Unsupported exchange: ${provider}`);
 
@@ -96,40 +136,34 @@ export class ExchangesService {
     const credentialFingerprint = provider === 'bitfinex'
       ? bitfinexCredentialFingerprint(creds)
       : undefined;
-
-    const row = await this.prisma.integrationCredential.upsert({
-      where: { userId_provider: { userId, provider: providerKey } },
-      create: {
-        userId,
-        provider: providerKey,
-        token: payload,
-        metadata: {
-          exchange: provider,
-          accountLabel: validation.accountLabel,
-          permissions: validation.permissions,
-          ...(credentialFingerprint ? { accountCredentialFingerprint: credentialFingerprint } : {}),
-        },
-        verifiedAt: new Date(),
-      },
-      update: {
-        token: payload,
-        metadata: {
-          exchange: provider,
-          accountLabel: validation.accountLabel,
-          permissions: validation.permissions,
-          ...(credentialFingerprint ? { accountCredentialFingerprint: credentialFingerprint } : {}),
-        },
-        verifiedAt: new Date(),
-      },
-    });
+    const configuredExpected = process.env.BITFINEX_EXPECTED_CREDENTIAL_FINGERPRINT?.trim() ?? '';
+    if (
+      credentialFingerprint
+      && configuredExpected
+      && !credentialFingerprintMatches(credentialFingerprint, configuredExpected)
+    ) {
+      throw new BadRequestException(
+        'Bitfinex credentials do not match the configured account identity',
+      );
+    }
 
     return {
-      credentialId: row.id,
       provider,
-      label: EXCHANGE_PROVIDER_LABELS[provider as ExchangeProvider],
-      connected: true,
+      providerKey,
+      encryptedToken: payload,
+      metadata: {
+        exchange: provider,
+        accountLabel: validation.accountLabel,
+        permissions: validation.permissions,
+        ...(credentialFingerprint ? { accountCredentialFingerprint: credentialFingerprint } : {}),
+      },
       message: validation.message,
     };
+  }
+
+  /** Authenticated candidate-only read; never consults or updates stored credentials. */
+  async readBitfinexCandidateSnapshot(creds: ExchangeCredentials) {
+    return readBitfinexExchangeSnapshot(this.bitfinex, creds);
   }
 
   async getUserExchangeStatus(userId: string, provider: string) {
