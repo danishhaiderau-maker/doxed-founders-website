@@ -215,7 +215,11 @@ export default function AgentHireClient({ slug }: { slug: string }) {
                 step === s ? 'bg-violet-600 text-white' : 'bg-zinc-900 text-zinc-500'
               }`}
             >
-              {i + 1}. {s === 'exchange' ? 'Exchange' : s === 'credentials' ? 'API keys' : 'Risk & activate'}
+              {i + 1}. {s === 'exchange'
+                ? 'Exchange'
+                : s === 'credentials'
+                  ? 'API keys'
+                  : refreshMode ? 'Review & audit' : 'Risk & activate'}
             </li>
           ))}
         </ol>
@@ -394,7 +398,9 @@ export default function AgentHireClient({ slug }: { slug: string }) {
 
         {step === 'risk' && (
           <form className="mt-8 space-y-4" onSubmit={handleActivate}>
-            <h2 className="font-semibold">{AGENT_BETA_RISK_COPY.title}</h2>
+            <h2 className="font-semibold">
+              {refreshMode ? 'Review paused credential repair' : AGENT_BETA_RISK_COPY.title}
+            </h2>
             <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-4">
               <ul className="space-y-2 text-sm text-amber-100/90">
                 {AGENT_BETA_RISK_COPY.bullets.map((b) => (
@@ -433,8 +439,8 @@ export default function AgentHireClient({ slug }: { slug: string }) {
                 className="rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold hover:bg-violet-500 disabled:opacity-50"
               >
                 {busy
-                  ? refreshMode ? 'Validating…' : 'Activating…'
-                  : refreshMode ? 'Replace credentials & verify flat'
+                  ? refreshMode ? 'Validating & auditing…' : 'Activating…'
+                  : refreshMode ? 'Replace credentials & audit account'
                   : canAffordHire ? 'Activate live copy trading' : 'Insufficient DDollar'}
               </button>
             </div>
