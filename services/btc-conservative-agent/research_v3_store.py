@@ -39,6 +39,13 @@ def _first_present(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), None)
 
 
+def _unwrap_feature_value(value: Any) -> Any:
+    """Accept plain scalars or {value, observed_ts} causal observations."""
+    if isinstance(value, dict) and "value" in value:
+        return value.get("value")
+    return value
+
+
 def project_opportunity_causal_identity(row: dict[str, Any]) -> dict[str, Any]:
     """Project one truthful, immutable identity for a shared opportunity.
 
@@ -98,31 +105,33 @@ def project_opportunity_causal_identity(row: dict[str, Any]) -> dict[str, Any]:
         "direction": direction,
         "policy_identity_scope": "SHARED_OPPORTUNITY_MULTI_POLICY",
         "regime_volatility": {
-            "market_regime": str(_first_present(
+            "market_regime": str(_unwrap_feature_value(_first_present(
                 row.get("market_regime"), row.get("regime"), feature.get("market_regime"),
-                feature.get("regime"), source_features.get("entry_regime"),
-                source_features.get("regime"), market_context.get("regime_label"),
+                feature.get("regime"), feature.get("regime_label"),
+                source_features.get("entry_regime"),
+                source_features.get("regime"), source_features.get("regime_label"),
+                market_context.get("regime_label"),
                 market_context.get("regime"),
-            ) or "UNKNOWN").upper(),
-            "atr14_pct_3m": _first_present(
+            )) or "UNKNOWN").upper(),
+            "atr14_pct_3m": _unwrap_feature_value(_first_present(
                 row.get("atr14_pct_3m"), feature.get("atr14_pct_3m"),
                 cycle.get("atr14_pct_3m"), market_context.get("atr14_pct_3m"),
-            ),
-            "realized_volatility": _first_present(
+            )),
+            "realized_volatility": _unwrap_feature_value(_first_present(
                 row.get("realized_volatility"), feature.get("realized_volatility"),
                 feature.get("realized_volatility_pct"), cycle.get("realized_volatility"),
                 cycle.get("realized_volatility_pct"), cycle.get("realized_volatility_30m_pct"),
                 market_context.get("realized_volatility"),
-            ),
-            "volatility_of_volatility": _first_present(
+            )),
+            "volatility_of_volatility": _unwrap_feature_value(_first_present(
                 row.get("volatility_of_volatility"), feature.get("volatility_of_volatility"),
                 cycle.get("volatility_of_volatility"), cycle.get("volatility_of_volatility_30m_pct"),
                 market_context.get("volatility_of_volatility"),
-            ),
-            "adx": _first_present(
+            )),
+            "adx": _unwrap_feature_value(_first_present(
                 row.get("adx"), feature.get("adx"), cycle.get("adx14"),
                 cycle.get("adx"), market_context.get("adx"),
-            ),
+            )),
         },
     }
     required_paths = {

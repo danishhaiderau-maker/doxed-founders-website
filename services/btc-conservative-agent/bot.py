@@ -12781,6 +12781,7 @@ _touch_grid_book = {}
 _compressed_shadow_chase_book = {}
 _compressed_shadow_seen_call_ids = set()
 _compressed_shadow_recovery_attempted = False
+_discovery_touch_grid_seen_call_ids = set()
 _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
@@ -13044,6 +13045,7 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
             _compressed_shadow_chase_book.clear()
             _compressed_shadow_seen_call_ids.clear()
             _compressed_shadow_recovery_attempted = True
+        _discovery_touch_grid_seen_call_ids.clear()
         _order_multiverse_state.clear()
         _order_multiverse_pending_src.clear()
         _order_multiverse_path_complete.clear()
@@ -13081,9 +13083,8 @@ def _arm_chase_offset_touch_grid(signal: dict):
     if not isinstance(signal, dict):
         return
     if is_patient_chase_lane(signal.get("research_lane")):
-        # This generic 0.01–0.30% research grid labels one 0.10% anchor as the
-        # live/original order. OFFSET_029 has its own exact 0.29% paper anchor
-        # and lifecycle, so mixing the schemas would falsify its evidence.
+        # Family tiles keep their exact paper anchors. Discovery grid is armed
+        # once per shared AI call via `_arm_shared_discovery_touch_grid`.
         return
     try:
         price = float(
@@ -15447,6 +15448,74 @@ def _record_compressed_shadow_arm_result(
     )
 
 
+def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
+    """Arm one shadow-only 0.01–0.30% touch grid per shared AI APPROVE.
+
+    Family tiles skip the per-lane grid so their paper anchors stay pure.
+    Discovery still needs the full offset grid joined by ``shared_ai_call_id``.
+    Never places paper or live orders.
+    """
+    if not ai_decision_should_execute(ai):
+        return False
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx).strip()
+    raw_direction = str(
+        (ai or {}).get("candidate_direction")
+        or (ai or {}).get("direction")
+        or (ai or {}).get("raw_direction")
+        or ""
+    ).upper()
+    if not call_id or raw_direction not in ("LONG", "SHORT"):
+        return False
+    direction = raw_direction
+    if invert_signal_active():
+        direction = "SHORT" if raw_direction == "LONG" else "LONG"
+    if call_id in _discovery_touch_grid_seen_call_ids:
+        return False
+    raw_ts = (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts")
+    try:
+        signal_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        signal_ts = time.time()
+    signal_price = float(
+        (ctx or {}).get("price")
+        or ((ctx or {}).get("market_context") or {}).get("price")
+        or state.get("rest_price")
+        or state.get("last_trade_price")
+        or state.get("price")
+        or 0
+    )
+    if signal_price <= 0:
+        return False
+    trade_id = "discovery-grid-" + hashlib.sha256(
+        f"{call_id}|discovery_touch_grid_v1".encode("utf-8")
+    ).hexdigest()[:20]
+    ttl_sec = 1800.0
+    rows = arm_touch_grid_rows(
+        trade_id=trade_id,
+        direction=direction,
+        signal_price=signal_price,
+        signal_ts=signal_ts,
+        ttl_sec=ttl_sec,
+        # No tile paper anchor is claimed as live_orig for discovery rows.
+        live_offset_pct=-1.0,
+        invert_on=invert_signal_active(),
+    )
+    for row in rows:
+        row["places_live_order"] = False
+        row["discovery_shadow_only"] = True
+        row["shared_ai_call_id"] = call_id
+        row["note"] = "discovery path-touch only; no paper/live order"
+        _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+    _touch_grid_book[trade_id] = new_grid_state(rows)
+    _discovery_touch_grid_seen_call_ids.add(call_id)
+    logger.info(
+        f"[TOUCH GRID] discovery armed shared_ai_call_id={call_id} "
+        f"trade_id={trade_id} offsets=0.01-0.30 shadow_only "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return True
+
+
 def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     """Arm one non-executable compressed schedule per executable AI call."""
     if not ai_decision_should_execute(ai):
@@ -16634,6 +16703,25 @@ def _enrich_combo_lane_features(features: dict = None, ctx: dict = None) -> dict
     return out
 
 
+def _causal_feature_observation(value, observed_ts: float):
+    """Stamp one pre-decision observation; keep missing values explicit."""
+    return {"value": value, "observed_ts": float(observed_ts)}
+
+
+def _atr_pct_bucket(atr_pct) -> str | None:
+    """Bucket ATR% using the same HIGH/MED/LOW/FLAT labels as vol."""
+    if atr_pct is None:
+        return None
+    # Field is percent units (0.55 => 0.55%); volatility helper wants fraction.
+    return _volatility_bucket(float(atr_pct) / 100.0)
+
+
+def _realized_vol_pct_bucket(vol_pct) -> str | None:
+    if vol_pct is None:
+        return None
+    return _volatility_bucket(float(vol_pct) / 100.0)
+
+
 def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = None) -> dict:
     """Freeze one lane-independent, pre-decision market snapshot.
 
@@ -16652,19 +16740,64 @@ def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = No
         or {}
     )
     trend = market_context.get("trend_strength") or {}
-    source["market_context"] = market_context
-    source["cycle_3m_universe"] = cycle
-    source["regime"] = (
+    raw_observed = (
+        context.get("shared_ai_call_ts_epoch")
+        or context.get("signal_ts")
+        or context.get("created_ts_ts")
+        or source.get("observed_ts")
+        or source.get("signal_ts")
+    )
+    try:
+        observed_ts = float(raw_observed)
+    except (TypeError, ValueError):
+        observed_ts = 0.0
+    if observed_ts <= 0:
+        observed_ts = time.time()
+    regime = (
         context.get("regime")
         or market_context.get("regime_label")
         or market_context.get("regime")
         or "UNKNOWN"
     )
-    source["atr14_pct_3m"] = cycle.get("atr14_pct_3m")
-    source["realized_volatility"] = cycle.get("realized_volatility_30m_pct")
-    source["volatility_of_volatility"] = cycle.get("volatility_of_volatility_30m_pct")
-    source["adx"] = cycle.get("adx14") if cycle.get("adx14") is not None else trend.get("adx")
+    if isinstance(regime, dict):
+        regime = regime.get("value") or "UNKNOWN"
+    regime = str(regime or "UNKNOWN").upper()
+    atr14 = cycle.get("atr14_pct_3m")
+    realized_vol = cycle.get("realized_volatility_30m_pct")
+    vov = cycle.get("volatility_of_volatility_30m_pct")
+    adx = cycle.get("adx14") if cycle.get("adx14") is not None else trend.get("adx")
+    direction = (
+        context.get("direction")
+        or context.get("final_direction")
+        or source.get("direction")
+        or source.get("final_direction")
+    )
+    if isinstance(direction, dict):
+        direction = direction.get("value")
+    source["market_context"] = market_context
+    source["cycle_3m_universe"] = cycle
+    # Scalar aliases for identity / dashboard joins.
+    source["regime_label"] = regime
+    source["atr14_pct_3m"] = atr14
+    source["realized_volatility"] = realized_vol
+    source["volatility_of_volatility"] = vov
+    source["adx"] = adx
     source["causal_snapshot_phase"] = "PRE_AI_DECISION"
+    source["observed_ts"] = observed_ts
+    # Analyzer dynamic-policy contract: named features are {value, observed_ts}.
+    source["atr_bucket"] = _causal_feature_observation(_atr_pct_bucket(atr14), observed_ts)
+    source["realized_volatility_bucket"] = _causal_feature_observation(
+        _realized_vol_pct_bucket(realized_vol), observed_ts,
+    )
+    source["trend_strength_bucket"] = _causal_feature_observation(
+        None if adx is None else _adx_bucket(float(adx)), observed_ts,
+    )
+    source["adx_bucket"] = _causal_feature_observation(
+        None if adx is None else _adx_bucket(float(adx)), observed_ts,
+    )
+    source["regime"] = _causal_feature_observation(regime, observed_ts)
+    if direction is not None:
+        source["direction"] = _causal_feature_observation(str(direction).upper(), observed_ts)
     return source
 
 
@@ -22648,6 +22781,10 @@ def process_signal(event: dict):
                     # One correlated shadow schedule belongs to the paid
                     # shared call, never to each independently evaluated tile.
                     _arm_shared_compressed_shadow_chase(ctx, ai)
+                    # Family tiles skip per-lane touch grids. Arm one discovery
+                    # grid here so offset×chase research still runs when tiles
+                    # are ON, without placing extra paper orders.
+                    _arm_shared_discovery_touch_grid(ctx, ai)
                     # Fan out five independent paper-only family lifecycles
                     # and the Continuous benchmark directly from the completed
                     # shared-AI result.  Continuous owns an independent verdict,
@@ -36490,6 +36627,17 @@ def status():
             "alt_sl": ["atr_k_stop", "structure_stop"],
             "live_exits_unchanged": True,
             "live_thesis_cut": -12.0,
+            "research_coverage": {
+                "schema": "research_dashboard_coverage_v1",
+                "discovery_touch_grid_shared_calls": len(_discovery_touch_grid_seen_call_ids),
+                "touch_grid_books_inflight": len(_touch_grid_book),
+                "compressed_shadow_books_inflight": len(_compressed_shadow_chase_book),
+                "order_multiverse_pending": len(_order_multiverse_pending_src),
+                "order_multiverse_written": len(_order_multiverse_written),
+                "cleanup_enabled": False,
+                "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
+                "family_tiles_arm_discovery_grid": True,
+            },
             "hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper")),
             "writers_hooked": True,
         },

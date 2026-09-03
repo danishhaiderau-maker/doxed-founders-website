@@ -433,11 +433,21 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
 
 
 def test_shared_causal_snapshot_is_pre_ai_complete_and_lane_independent():
-    namespace = {"copy": copy}
-    freeze = load_function("_freeze_shared_causal_feature_snapshot", namespace)
+    namespace = {"copy": copy, "time": __import__("time")}
+    for name in (
+        "_volatility_bucket",
+        "_adx_bucket",
+        "_causal_feature_observation",
+        "_atr_pct_bucket",
+        "_realized_vol_pct_bucket",
+        "_freeze_shared_causal_feature_snapshot",
+    ):
+        load_function(name, namespace)
+    freeze = namespace["_freeze_shared_causal_feature_snapshot"]
     original = {"price": 100.0, "policy_only": "base"}
     ctx = {
         "regime": "BEAR",
+        "shared_ai_call_ts_epoch": 1_700_000_000.0,
         "market_context": {
             "market": "BITFINEX", "symbol": "BTCUSD",
             "trend_strength": {"adx": 31.0},
@@ -454,12 +464,18 @@ def test_shared_causal_snapshot_is_pre_ai_complete_and_lane_independent():
     ctx["regime"] = "BULL"
     ctx["cycle_3m_universe"]["atr14_pct_3m"] = 9.9
 
-    assert frozen["regime"] == "BEAR"
+    assert frozen["regime"]["value"] == "BEAR"
+    assert frozen["regime"]["observed_ts"] == 1_700_000_000.0
+    assert frozen["regime_label"] == "BEAR"
     assert frozen["atr14_pct_3m"] == 0.55
     assert frozen["realized_volatility"] == 0.09
     assert frozen["volatility_of_volatility"] == 0.02
     assert frozen["adx"] == 30.0
     assert frozen["causal_snapshot_phase"] == "PRE_AI_DECISION"
+    assert frozen["atr_bucket"]["value"] == "LOW"
+    assert frozen["realized_volatility_bucket"]["value"] == "FLAT"
+    assert frozen["trend_strength_bucket"]["value"] == "STRONG"
+    assert frozen["adx_bucket"]["value"] == "STRONG"
     assert original == {"price": 100.0, "policy_only": "base"}
 
 
