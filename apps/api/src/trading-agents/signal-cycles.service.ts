@@ -101,6 +101,8 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
   private pollingIntents = false;
   private runningBackstop = false;
   private activeCycleBackstop = false;
+  private wakeGeneration = 0;
+  private closureTail: Promise<void> = Promise.resolve();
   private backstopEnabled = false;
   private backstopTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly scheduleTimeout = (callback: () => void, delayMs: number) => {
@@ -145,26 +147,35 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Durable missed-event/crash recovery. Signed showcase events are the latency
-   * path; Neon is read at the 2s cadence only while a cycle actually needs
-   * closure reconciliation. An idle service performs one bounded 5m recovery
-   * probe instead of two independent reads every 2s.
+   * Snapshot recovery for a showcase webhook that never reached the platform.
+   * Accepted signed events are already durably applied to SignalCycle and
+   * SignalCycleEvent by ShowcaseRelayEventsService before its direct wake; the
+   * isolated executor consumes that durable cycle state. This slower snapshot
+   * probe is deliberately not described as an event cursor/replay. Its 5m idle
+   * bound remains below the canonical 30m subscriber intent TTL, while Neon is
+   * read at the 2s cadence whenever a cycle needs closure reconciliation.
    */
   private async runBackstop() {
     if (this.runningBackstop) return;
     this.runningBackstop = true;
+    const generation = this.wakeGeneration;
     try {
       await this.pollBotForIntents();
-      this.activeCycleBackstop = await this.syncShowcaseCycleClosures();
+      const active = await this.syncShowcaseCycleClosures();
+      // A signed wake that arrived during the snapshot owns newer knowledge.
+      // Never let this older read overwrite its active cadence decision.
+      if (generation === this.wakeGeneration) this.activeCycleBackstop = active;
     } catch (err) {
       this.logger.warn(
         `Signal-cycle recovery backstop failed: ${err instanceof Error ? err.message : err}`,
       );
     } finally {
       this.runningBackstop = false;
-      this.scheduleBackstop(
-        this.activeCycleBackstop ? SIGNAL_POLL_MS : SIGNAL_IDLE_RECOVERY_POLL_MS,
-      );
+      if (generation === this.wakeGeneration) {
+        this.scheduleBackstop(
+          this.activeCycleBackstop ? SIGNAL_POLL_MS : SIGNAL_IDLE_RECOVERY_POLL_MS,
+        );
+      }
     }
   }
 
@@ -399,23 +410,49 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
   async wakeFromShowcase(opts?: { intents?: boolean; closures?: boolean }) {
     const intents = opts?.intents !== false;
     const closures = opts?.closures !== false;
+    const generation = ++this.wakeGeneration;
     let created = false;
-    if (intents) {
-      created = await this.pollBotForIntents();
-    }
-    if (closures) {
-      this.activeCycleBackstop = await this.syncShowcaseCycleClosures(true);
-    }
     // ORDER_PLACED proves a cycle may now need fast closure reconciliation even
     // when this wake intentionally skipped the closures query.
-    if (created || (intents && !closures)) this.activeCycleBackstop = true;
-    this.scheduleBackstop(
-      this.activeCycleBackstop ? SIGNAL_POLL_MS : SIGNAL_IDLE_RECOVERY_POLL_MS,
-    );
-    return created;
+    if (intents && !closures) this.activeCycleBackstop = true;
+    try {
+      if (intents) {
+        created = await this.pollBotForIntents();
+      }
+      if (closures) {
+        const active = await this.syncShowcaseCycleClosures(true);
+        if (generation === this.wakeGeneration) this.activeCycleBackstop = active;
+      }
+      if (generation === this.wakeGeneration && created) this.activeCycleBackstop = true;
+      return created;
+    } finally {
+      if (generation === this.wakeGeneration) {
+        this.scheduleBackstop(
+          this.activeCycleBackstop ? SIGNAL_POLL_MS : SIGNAL_IDLE_RECOVERY_POLL_MS,
+        );
+      }
+    }
   }
 
   async syncShowcaseCycleClosures(force = false): Promise<boolean> {
+    let release!: () => void;
+    // Some recovery harnesses construct the service from its prototype to
+    // inject exact state; default defensively without weakening serialization
+    // in normal Nest lifecycle construction.
+    const predecessor = this.closureTail ?? Promise.resolve();
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tail = predecessor.then(() => gate);
+    this.closureTail = tail;
+    await predecessor;
+    try {
+      return await this.syncShowcaseCycleClosuresInner(force);
+    } finally {
+      release();
+      if (this.closureTail === tail) this.closureTail = Promise.resolve();
+    }
+  }
+
+  private async syncShowcaseCycleClosuresInner(force = false): Promise<boolean> {
     if (!this.botBridge.isEnabled()) return false;
     const agent = await this.prisma.tradingAgent.findUnique({
       where: { slug: 'conservative-btc' },
@@ -423,20 +460,33 @@ export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
     });
     if (!agent) return false;
 
-    const openCycles = await this.prisma.signalCycle.findMany({
-      where: {
-        agentId: agent.id,
-        status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
-      },
-      take: 200,
-      select: {
-        id: true,
-        tradeId: true,
-        status: true,
-        expiresAt: true,
-        intentEnvelope: true,
-      },
-    });
+    const openCycles: Array<{
+      id: string;
+      tradeId: string;
+      status: SignalCycleStatus;
+      expiresAt: Date | null;
+    }> = [];
+    let cursor: string | undefined;
+    for (;;) {
+      const page = await this.prisma.signalCycle.findMany({
+        where: {
+          agentId: agent.id,
+          status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
+        },
+        orderBy: { id: 'asc' },
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        take: 200,
+        select: {
+          id: true,
+          tradeId: true,
+          status: true,
+          expiresAt: true,
+        },
+      });
+      openCycles.push(...page);
+      if (page.length < 200) break;
+      cursor = page[page.length - 1].id;
+    }
     if (!openCycles.length) return false;
 
     const bot = await this.botBridge.fetchStateForExecution(force);
