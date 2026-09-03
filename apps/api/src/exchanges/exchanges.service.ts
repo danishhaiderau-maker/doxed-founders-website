@@ -11,6 +11,21 @@ import type { ExchangeCredentials } from './exchange-adapter.interface';
 import { ExchangeAdapterRegistry } from './exchange-adapter.registry';
 import { BitfinexTradingClient } from './bitfinex-api.client';
 
+export type ExchangeCredentialResolutionCode =
+  | 'OK'
+  | 'ROW_MISSING'
+  | 'TOKEN_MISSING'
+  | 'DECRYPT_FAILED'
+  | 'JSON_INVALID'
+  | 'FIELDS_MISSING'
+  | 'STORED_FINGERPRINT_MISMATCH'
+  | 'CONFIGURED_FINGERPRINT_MISMATCH'
+  | 'FINGERPRINT_REQUIRED_MISSING';
+
+export type ExchangeCredentialResolution =
+  | { ok: true; code: 'OK'; credentials: ExchangeCredentials }
+  | { ok: false; code: Exclude<ExchangeCredentialResolutionCode, 'OK'>; credentials: null };
+
 export function bitfinexCredentialFingerprint(creds: ExchangeCredentials): string {
   return createHash('sha256')
     .update(`${creds.apiKey}\0${creds.apiSecret}`)
@@ -206,40 +221,86 @@ export class ExchangesService {
     userId: string,
     provider: string,
   ): Promise<ExchangeCredentials | null> {
+    const resolution = await this.resolveUserCredentials(userId, provider);
+    return resolution.credentials;
+  }
+
+  /**
+   * Resolve exchange credentials while retaining a non-secret failure class.
+   * Callers must never serialize the successful result because it contains the
+   * decrypted key material; only the `code` is safe for logs/dashboard state.
+   */
+  async resolveUserCredentials(
+    userId: string,
+    provider: string,
+  ): Promise<ExchangeCredentialResolution> {
     const providerKey = exchangeCredentialProvider(provider as ExchangeProvider);
     const row = await this.prisma.integrationCredential.findUnique({
       where: { userId_provider: { userId, provider: providerKey } },
     });
-    if (!row?.token) return null;
+    if (!row) return { ok: false, code: 'ROW_MISSING', credentials: null };
+    if (!row.token?.trim()) return { ok: false, code: 'TOKEN_MISSING', credentials: null };
+
+    let decrypted: string;
     try {
-      const parsed = JSON.parse(this.crypto.decrypt(row.token)) as ExchangeCredentials;
-      if (!parsed.apiKey || !parsed.apiSecret) return null;
-      if (providerKey === exchangeCredentialProvider('bitfinex')) {
-        const actual = bitfinexCredentialFingerprint(parsed);
-        const metadata = row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
-          ? row.metadata as Record<string, unknown>
-          : null;
-        const storedExpected = typeof metadata?.accountCredentialFingerprint === 'string'
-          ? metadata.accountCredentialFingerprint.trim()
-          : '';
-        const configuredExpected = process.env.BITFINEX_EXPECTED_CREDENTIAL_FINGERPRINT?.trim() ?? '';
-        // Executor money paths must never silently switch accounts after a
-        // partial credential rotation. The metadata fingerprint is written in
-        // the same DB update as the encrypted token; an optional deployment
-        // fingerprint pins the intended live key across database restores.
-        if (
-          (storedExpected && !credentialFingerprintMatches(actual, storedExpected))
-          || (configuredExpected && !credentialFingerprintMatches(actual, configuredExpected))
-          || (
-            process.env.SUBSCRIBER_EXECUTION_ENABLED === 'true'
-            && !storedExpected
-            && !configuredExpected
-          )
-        ) return null;
-      }
-      return parsed;
+      decrypted = this.crypto.decrypt(row.token);
     } catch {
-      return null;
+      return { ok: false, code: 'DECRYPT_FAILED', credentials: null };
     }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(decrypted);
+    } catch {
+      return { ok: false, code: 'JSON_INVALID', credentials: null };
+    }
+    if (
+      parsed == null
+      || typeof parsed !== 'object'
+      || Array.isArray(parsed)
+    ) {
+      return { ok: false, code: 'FIELDS_MISSING', credentials: null };
+    }
+    const parsedRecord = parsed as Record<string, unknown>;
+    const apiKey = parsedRecord.apiKey;
+    const apiSecret = parsedRecord.apiSecret;
+    if (
+      typeof apiKey !== 'string'
+      || !apiKey.trim()
+      || typeof apiSecret !== 'string'
+      || !apiSecret.trim()
+    ) {
+      return { ok: false, code: 'FIELDS_MISSING', credentials: null };
+    }
+
+    const credentials = parsed as ExchangeCredentials;
+    if (providerKey === exchangeCredentialProvider('bitfinex')) {
+      const actual = bitfinexCredentialFingerprint(credentials);
+      const metadata = row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+        ? row.metadata as Record<string, unknown>
+        : null;
+      const storedExpected = typeof metadata?.accountCredentialFingerprint === 'string'
+        ? metadata.accountCredentialFingerprint.trim()
+        : '';
+      const configuredExpected = process.env.BITFINEX_EXPECTED_CREDENTIAL_FINGERPRINT?.trim() ?? '';
+      // Executor money paths must never silently switch accounts after a
+      // partial credential rotation. The metadata fingerprint is written in
+      // the same DB update as the encrypted token; an optional deployment
+      // fingerprint pins the intended live key across database restores.
+      if (storedExpected && !credentialFingerprintMatches(actual, storedExpected)) {
+        return { ok: false, code: 'STORED_FINGERPRINT_MISMATCH', credentials: null };
+      }
+      if (configuredExpected && !credentialFingerprintMatches(actual, configuredExpected)) {
+        return { ok: false, code: 'CONFIGURED_FINGERPRINT_MISMATCH', credentials: null };
+      }
+      if (
+        process.env.SUBSCRIBER_EXECUTION_ENABLED === 'true'
+        && !storedExpected
+        && !configuredExpected
+      ) {
+        return { ok: false, code: 'FINGERPRINT_REQUIRED_MISSING', credentials: null };
+      }
+    }
+    return { ok: true, code: 'OK', credentials };
   }
 }

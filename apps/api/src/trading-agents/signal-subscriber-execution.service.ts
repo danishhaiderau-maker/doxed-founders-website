@@ -6206,8 +6206,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const participantSince =
       simState?.startedAt != null ? { createdAt: { gte: new Date(simState.startedAt) } } : {};
     this.currentStage = 'LOAD_CREDENTIALS';
-    const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
-    if (!creds) {
+    const credentialResolution = await this.exchanges.resolveUserCredentials(
+      instance.userId,
+      instance.exchangeProvider,
+    );
+    if (!credentialResolution.ok) {
       if (!simActive) {
         await this.resetLiveFidelityGuardWithoutEvidence(
           instance,
@@ -6218,10 +6221,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
-        data: { lastError: 'Exchange credentials missing — re-hire with API keys' },
+        data: {
+          // Keep the diagnostic on the scalar error column. Replacing the
+          // complete dashboard JSON here could erase a concurrent reconcile,
+          // order audit, arm transition, or safety pause.
+          lastError:
+            `Exchange credentials unavailable (${credentialResolution.code})`
+            + ' — re-hire with API keys',
+        },
       });
+      this.logger.warn(
+        `Exchange credential resolution unavailable user=${instance.userId} `
+          + `provider=${instance.exchangeProvider} code=${credentialResolution.code}`,
+      );
       return;
     }
+    const creds = credentialResolution.credentials;
 
     // Never place new live money until the private trade stream is authenticated.
     // Existing OPEN risk continues through the ordinary reconciliation path;

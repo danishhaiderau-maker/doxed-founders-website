@@ -7,6 +7,7 @@ import {
   hasFullOwnerOrderState,
   isCompleteStoredExchangeOrderAuditFlat,
   isCompleteStoredRawFlatReconcileSnapshot,
+  isCredentialResolutionUnavailableError,
   isNeverArmedUncredentialedRelay,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
@@ -15,6 +16,21 @@ import {
   ownerFetchErrorChain,
   refreshPausedRelayAudit,
 } from './check-relay-flat.mjs';
+
+test('credential resolver receipt accepts only the legacy text or an allowlisted exact code', () => {
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials missing — re-hire with API keys',
+  ), true);
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials unavailable (FINGERPRINT_REQUIRED_MISSING) — re-hire with API keys',
+  ), true);
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials unavailable (OK) — re-hire with API keys',
+  ), false);
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials unavailable (DECRYPT_FAILED) — re-hire with API keys secret=oops',
+  ), false);
+});
 
 const inertUncredentialedRelay = {
   credentialConfigured: false,

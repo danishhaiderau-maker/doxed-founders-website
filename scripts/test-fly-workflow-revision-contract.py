@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = (ROOT / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
 MONITOR = (ROOT / ".github/workflows/fly-bot-monitor.yml").read_text(encoding="utf-8")
 BOOTSTRAP_HELPER = (ROOT / "scripts/fly_resume_bootstrap.py").read_text(encoding="utf-8")
+PREDEPLOY_ABORT_HELPER = (ROOT / "scripts/fly_resume_predeploy_abort.py").read_text(encoding="utf-8")
 TEST_PATH = "services/btc-conservative-agent/test*.py"
 
 
@@ -150,6 +151,19 @@ def test_bootstrap_status_observation_retries_only_transient_transport_failures(
 
 def test_bootstrap_continuation_program_is_valid_python():
     compile(BOOTSTRAP_HELPER, "fly_resume_bootstrap.py", "exec")
+
+
+def test_predeploy_abort_resume_is_separate_proof_bound_and_non_deploying():
+    block = DEPLOY[DEPLOY.index("  resume-predeploy-abort:"):DEPLOY.index("  repair-execution-tail:")]
+    assert "inputs.mode == 'resume-predeploy-abort'" in block
+    assert "fly_resume_predeploy_abort.py validate-proof" in block
+    assert "fly_resume_predeploy_abort.py resume" in block
+    assert "fly_resume_predeploy_abort.py preserve-maintenance" in block
+    assert "flyctl deploy" not in block and "machines restart" not in block
+    assert PREDEPLOY_ABORT_HELPER.count('request_json("/api/resume", {})') == 1
+    assert '"Deploy the exact source revision",' in PREDEPLOY_ABORT_HELPER
+    assert '"skipped"' in PREDEPLOY_ABORT_HELPER
+    compile(PREDEPLOY_ABORT_HELPER, "fly_resume_predeploy_abort.py", "exec")
 
 
 def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailable():

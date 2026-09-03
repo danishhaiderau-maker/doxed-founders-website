@@ -342,6 +342,25 @@ export function isRelayPausedAndDisarmed(row) {
   );
 }
 
+const CREDENTIAL_RESOLUTION_FAILURE_CODES = new Set([
+  'ROW_MISSING',
+  'TOKEN_MISSING',
+  'DECRYPT_FAILED',
+  'JSON_INVALID',
+  'FIELDS_MISSING',
+  'STORED_FINGERPRINT_MISMATCH',
+  'CONFIGURED_FINGERPRINT_MISMATCH',
+  'FINGERPRINT_REQUIRED_MISSING',
+]);
+
+export function isCredentialResolutionUnavailableError(value) {
+  if (value === 'Exchange credentials missing — re-hire with API keys') return true;
+  const match = /^Exchange credentials unavailable \(([A-Z_]+)\) — re-hire with API keys$/.exec(
+    String(value ?? ''),
+  );
+  return match != null && CREDENTIAL_RESOLUTION_FAILURE_CODES.has(match[1]);
+}
+
 export function isNeverArmedUncredentialedRelay(
   row,
   allowDurableExemption = durableOnlyRecovery,
@@ -357,7 +376,7 @@ export function isNeverArmedUncredentialedRelay(
     && typeof row?.providerCredentialId === 'string'
     && row.providerCredentialId.length > 0
     && row?.instanceCredentialId === row.providerCredentialId
-    && row?.lastError === 'Exchange credentials missing — re-hire with API keys'
+    && isCredentialResolutionUnavailableError(row?.lastError)
     && guard?.status === 'IDLE'
     && guard?.lastResetReason === 'EXCHANGE_CREDENTIALS_MISSING'
     && Number.isFinite(observedAtMs)

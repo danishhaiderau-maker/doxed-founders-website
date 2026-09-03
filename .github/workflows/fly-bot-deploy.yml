@@ -29,6 +29,7 @@ on:
           - recover-unready
           - recover-stalled-runtime
           - resume-bootstrap
+          - resume-predeploy-abort
           - restart-only
           - inspect-runtime
           - repair-execution-funnel
@@ -56,6 +57,18 @@ on:
         type: string
       bootstrap_failed_run_id:
         description: Failed guarded deploy run whose bootstrap gate may be continued without deployment
+        required: false
+        type: string
+      expected_incumbent_revision:
+        description: Exact unchanged 12-character Fly revision permitted for predeploy-abort paper resume
+        required: false
+        type: string
+      expected_candidate_sha:
+        description: Exact 40-character candidate SHA of the failed predeploy run
+        required: false
+        type: string
+      predeploy_failed_run_id:
+        description: Failed guarded run that entered maintenance but skipped deployment and acceptance
         required: false
         type: string
       expected_execution_funnel_sha256:
@@ -140,6 +153,45 @@ jobs:
         run: >-
           python scripts/fly_resume_bootstrap.py preserve-maintenance
           --expected "$EXPECTED_BOOTSTRAP_REVISION"
+  resume-predeploy-abort:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-predeploy-abort'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate exact predeploy-abort topology
+        env:
+          EXPECTED_INCUMBENT_REVISION: ${{ inputs.expected_incumbent_revision }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+          PREDEPLOY_FAILED_RUN_ID: ${{ inputs.predeploy_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python scripts/fly_resume_predeploy_abort.py validate-proof
+          --incumbent "$EXPECTED_INCUMBENT_REVISION"
+          --candidate "$EXPECTED_CANDIDATE_SHA"
+          --run-id "$PREDEPLOY_FAILED_RUN_ID"
+      - name: Resume unchanged incumbent paper execution once
+        id: resume-incumbent
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_INCUMBENT_REVISION: ${{ inputs.expected_incumbent_revision }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        run: >-
+          python scripts/fly_resume_predeploy_abort.py resume
+          --incumbent "$EXPECTED_INCUMBENT_REVISION"
+          --candidate "$EXPECTED_CANDIDATE_SHA"
+      - name: Best-effort preserve incumbent maintenance after failed resume
+        if: failure() && steps.resume-incumbent.outcome == 'failure'
+        continue-on-error: true
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_INCUMBENT_REVISION: ${{ inputs.expected_incumbent_revision }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        run: >-
+          python scripts/fly_resume_predeploy_abort.py preserve-maintenance
+          --incumbent "$EXPECTED_INCUMBENT_REVISION"
+          --candidate "$EXPECTED_CANDIDATE_SHA"
   repair-execution-tail:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail'
     runs-on: ubuntu-latest

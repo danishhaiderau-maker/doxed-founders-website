@@ -1008,7 +1008,13 @@ test('processInstance restart recovers a stale INTENT exact CID before any recla
   let deleted = 0;
   let placed = 0;
   service.logger = { log() {}, warn() {}, error() {} };
-  service.exchanges = { getUserCredentials: async () => ({ apiKey: 'k', apiSecret: 's' }) };
+  service.exchanges = {
+    resolveUserCredentials: async () => ({
+      ok: true,
+      code: 'OK',
+      credentials: { apiKey: 'k', apiSecret: 's' },
+    }),
+  };
   service.prisma = {
     platformSettings: { findUnique: async () => null },
     tradingAgentInstance: {
