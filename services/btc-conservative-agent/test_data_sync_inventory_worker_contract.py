@@ -249,6 +249,7 @@ def test_parent_contract_handles_missing_nonzero_timeout_and_cleans_unique_trans
     assert "transient.unlink(missing_ok=True)" in source
     assert 'work_root / f"inventory-request-{nonce}.json"' in source
     assert 'work_root / f"inventory-result-{nonce}.json"' in source
+    assert 'result.get("failure_code")' in source
 
 
 def test_parent_limits_each_resumable_inventory_slice_to_one_manifest_page():
@@ -434,6 +435,18 @@ def _run_generation(worker, volume: Path, ordinal: int, payload: dict):
     return worker.run(request_path, result_path, nonce), result_path
 
 
+def _run_subprocess_generation(volume: Path, ordinal: int, payload: dict):
+    nonce = f"{ordinal:032x}"
+    request_path, result_path = _paths(volume, nonce)
+    request_path.write_text(json.dumps(dict(payload, nonce=nonce)), encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, str(WORKER_PATH), "--request", str(request_path),
+         "--result", str(result_path), "--nonce", nonce],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    return completed.returncode, result_path
+
+
 def _generation_rows(result: dict) -> list[dict]:
     index_path = Path(result["page_index_path"])
     assert hashlib.sha256(index_path.read_bytes()).hexdigest() == result["page_index_sha256"]
@@ -508,6 +521,337 @@ def test_resumable_worker_never_publishes_a_partial_inventory(tmp_path):
     work = volume / ".data-sync-snapshots"
     assert not list(work.glob("*.checkpoint.json"))
     assert not list(work.glob("*.sqlite3"))
+
+
+def test_directory_snapshot_excludes_lexically_lower_and_higher_arrivals(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["inventory_file_budget"] = 1
+    payload["inventory_directory_budget"] = 10
+    for name in ("alpha.json", "middle.json", "zulu.json"):
+        (runtime / name).write_text("{}", encoding="utf-8")
+
+    code, first_path = _run_generation(worker, volume, 801, payload)
+    assert code == 75
+    first = json.loads(first_path.read_text(encoding="utf-8"))
+    assert first["scan_units_completed"] > 0
+    assert first["directories_frozen"] == 1
+    assert first["directory_entries_frozen"] == 3
+    assert first["pending_directories"] >= 1
+    assert first["current_directory_files_remaining"] == 2
+    assert first["generation_directory_limit"] >= 1
+    assert first["generation_entry_limit"] >= 3
+    assert 0 < first["spool_bytes_used"] <= first["generation_spool_bytes"]
+    # Both names would have defeated an after-name cursor: the lower name was
+    # silently omitted and the higher name extended a live generation.
+    (runtime / "00-arrived-later.json").write_text("{}", encoding="utf-8")
+    (runtime / "zz-arrived-later.json").write_text("{}", encoding="utf-8")
+
+    result = None
+    for ordinal in range(802, 820):
+        code, result_path = _run_generation(_load_worker(), volume, ordinal, payload)
+        current = json.loads(result_path.read_text(encoding="utf-8"))
+        if code == 0:
+            result = current
+            break
+        assert code == 75 and current["status"] == "BUILDING"
+
+    assert result is not None
+    assert [row["path"] for row in _generation_rows(result)] == [
+        "alpha.json", "middle.json", "zulu.json",
+    ]
+
+
+def test_large_directory_is_enumerated_once_and_resumes_without_duplicates(tmp_path, monkeypatch):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["inventory_file_budget"] = 7
+    payload["inventory_directory_budget"] = 10
+    for index in range(257):
+        (runtime / f"evidence-{index:04d}.json").write_text("{}", encoding="utf-8")
+
+    real_scandir = worker.os.scandir
+    calls = []
+
+    def counted_scandir(path):
+        calls.append(Path(path).resolve())
+        return real_scandir(path)
+
+    monkeypatch.setattr(worker.os, "scandir", counted_scandir)
+    progress = []
+    result = None
+    for ordinal in range(901, 1000):
+        code, result_path = _run_generation(worker, volume, ordinal, payload)
+        current = json.loads(result_path.read_text(encoding="utf-8"))
+        receipt = current["worker_receipt"]
+        progress.append(receipt)
+        if code == 0:
+            result = current
+            break
+        assert code == 75 and current["status"] == "BUILDING"
+
+    assert result is not None
+    rows = _generation_rows(result)
+    assert len(rows) == len({row["path"] for row in rows}) == 257
+    assert calls.count(runtime.resolve()) == 1
+    assert [row["scan_units_completed"] for row in progress] == sorted(
+        row["scan_units_completed"] for row in progress
+    )
+    assert all(row["directories_frozen"] == 1 for row in progress)
+    assert all(row["directory_entries_frozen"] == 257 for row in progress)
+    remaining = [
+        row["current_directory_files_remaining"] for row in progress
+        if row["phase"] == "SCAN"
+    ]
+    assert remaining == sorted(remaining, reverse=True)
+    assert progress[-1]["pending_directories"] == 0
+
+
+def test_true_subprocess_restarts_resume_without_duplicates(tmp_path):
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["inventory_file_budget"] = 3
+    for index in range(13):
+        (runtime / f"restart-{index:03d}.json").write_text("{}", encoding="utf-8")
+
+    result = None
+    for ordinal in range(1101, 1120):
+        code, result_path = _run_subprocess_generation(volume, ordinal, payload)
+        current = json.loads(result_path.read_text(encoding="utf-8"))
+        if code == 0:
+            result = current
+            break
+        assert code == 75 and current["status"] == "BUILDING"
+    assert result is not None
+    rows = _generation_rows(result)
+    assert len(rows) == len({row["path"] for row in rows}) == 13
+
+
+def test_nested_arrival_is_bounded_by_generation_directory_ceiling(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    child = runtime / "child"
+    child.mkdir(parents=True)
+    payload = _request(volume, "0" * 32)
+    payload["inventory_directory_budget"] = 1
+    payload["inventory_generation_directory_limit"] = 2
+
+    code, _ = _run_generation(worker, volume, 1201, payload)
+    assert code == 75
+    (child / "nested-arrival").mkdir()
+    code, result_path = _run_generation(_load_worker(), volume, 1202, payload)
+    assert code == 1
+    failed = json.loads(result_path.read_text(encoding="utf-8"))
+    assert failed["status"] == "FAILED"
+    assert failed["failure_code"] == "GENERATION_DIRECTORY_LIMIT_EXCEEDED"
+
+
+def test_generation_entry_ceiling_classifies_growth_fail_closed(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["inventory_generation_entry_limit"] = 5
+    for index in range(6):
+        (runtime / f"growth-{index}.json").write_text("{}", encoding="utf-8")
+    code, result_path = _run_generation(worker, volume, 1301, payload)
+    assert code == 1
+    failed = json.loads(result_path.read_text(encoding="utf-8"))
+    assert failed["failure_code"] == "GENERATION_ENTRY_LIMIT_EXCEEDED"
+
+
+def test_generation_sqlite_spool_has_a_hard_byte_ceiling(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["inventory_generation_spool_bytes"] = 64 * 1024
+    payload["inventory_generation_entry_limit"] = 5000
+    for index in range(1200):
+        (runtime / f"spool-{index:04d}-{'x' * 32}.json").write_text("{}", encoding="utf-8")
+    code, result_path = _run_generation(worker, volume, 1351, payload)
+    assert code == 1
+    failed = json.loads(result_path.read_text(encoding="utf-8"))
+    assert failed["failure_code"] == "GENERATION_SPOOL_LIMIT_EXCEEDED"
+
+
+def test_transient_scandir_error_is_classified_and_never_frozen_empty(tmp_path, monkeypatch):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    payload = _request(volume, "0" * 32)
+
+    def unavailable(_path):
+        raise OSError("transient I/O")
+
+    monkeypatch.setattr(worker.os, "scandir", unavailable)
+    code, result_path = _run_generation(worker, volume, 1401, payload)
+    assert code == 1
+    failed = json.loads(result_path.read_text(encoding="utf-8"))
+    assert failed["failure_code"] == "DIRECTORY_SCAN_FAILED"
+    monkeypatch.undo()
+    database = next((volume / ".data-sync-snapshots").glob("*.sqlite3.corrupt-*"))
+    connection = __import__("sqlite3").connect(database)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM directory_snapshots").fetchone()[0] == 0
+    finally:
+        connection.close()
+
+
+def test_per_entry_metadata_error_is_classified_not_silently_omitted(tmp_path, monkeypatch):
+    worker = _load_worker()
+
+    class BrokenEntry:
+        name = "broken.json"
+        path = str(tmp_path / "broken.json")
+
+        def is_dir(self, **_kwargs):
+            raise OSError("metadata unavailable")
+
+        def is_file(self, **_kwargs):
+            return True
+
+    class Scan:
+        def __enter__(self):
+            return iter([BrokenEntry()])
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(worker.os, "scandir", lambda _path: Scan())
+    with pytest.raises(worker.InventoryWorkerError) as raised:
+        worker._bounded_directory_entries(tmp_path)
+    assert raised.value.code == "DIRECTORY_SCAN_FAILED"
+
+
+def test_corrupt_snapshot_entry_count_fails_closed_on_resume(tmp_path):
+    import sqlite3
+
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    payload = _request(volume, "0" * 32)
+    payload["inventory_file_budget"] = 1
+    preserved = volume / ".data-sync-snapshots" / "inventory-generations" / "prior-valid"
+    preserved.mkdir(parents=True)
+    (preserved / "page-index.jsonl").write_text("prior", encoding="utf-8")
+    for index in range(3):
+        (runtime / f"integrity-{index}.json").write_text("{}", encoding="utf-8")
+    code, _ = _run_generation(worker, volume, 1501, payload)
+    assert code == 75
+    database = next((volume / ".data-sync-snapshots").glob("*.sqlite3"))
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute("DELETE FROM directory_entries WHERE name = 'integrity-2.json'")
+        connection.commit()
+    finally:
+        connection.close()
+    code, result_path = _run_generation(_load_worker(), volume, 1502, payload)
+    assert code == 1
+    assert json.loads(result_path.read_text(encoding="utf-8"))[
+        "failure_code"
+    ] == "SNAPSHOT_INTEGRITY_FAILED"
+    assert (preserved / "page-index.jsonl").read_text(encoding="utf-8") == "prior"
+    code, recovered_path = _run_generation(_load_worker(), volume, 1503, payload)
+    for ordinal in range(1504, 1515):
+        if code == 0:
+            break
+        assert code == 75
+        code, recovered_path = _run_generation(_load_worker(), volume, ordinal, payload)
+    assert code == 0
+    assert len(_generation_rows(json.loads(recovered_path.read_text("utf-8")))) == 3
+
+
+def test_concurrent_subprocess_owner_blocks_second_worker(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    nonce = f"{1601:032x}"
+    request_path, result_path = _paths(volume, nonce)
+    payload = _request(volume, nonce)
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    loaded = worker._load_request(request_path, result_path, nonce)
+    fingerprint = worker._request_fingerprint(loaded)
+    lease = worker._generation_lease_path(request_path.parent, fingerprint)
+    holder_nonce = "f" * 32
+    holder_source = (
+        "import importlib.util,time;"
+        f"s=importlib.util.spec_from_file_location('w',r'{WORKER_PATH}');"
+        "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+        f"p=m.Path(r'{lease}');m._acquire_generation_lease(p,'{holder_nonce}');"
+        "print('READY',flush=True);time.sleep(10)"
+    )
+    holder = subprocess.Popen(
+        [sys.executable, "-c", holder_source], stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "READY"
+        assert worker.run(request_path, result_path, nonce) == 1
+        failed = json.loads(result_path.read_text(encoding="utf-8"))
+        assert failed["failure_code"] == "GENERATION_LEASE_ACTIVE"
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+
+
+def test_stale_dead_generation_lease_is_recovered(tmp_path):
+    worker = _load_worker()
+    lease = tmp_path / "generation.lease.json"
+    lease.write_text(json.dumps({
+        "schema": "fly_runtime_inventory_generation_lease_v1",
+        "nonce": "a" * 32,
+        "pid": 2147483647,
+        "acquired_unix": 1.0,
+    }), encoding="utf-8")
+    nonce = "b" * 32
+    worker._acquire_generation_lease(lease, nonce)
+    try:
+        current = json.loads(lease.read_text(encoding="utf-8"))
+        assert current["nonce"] == nonce
+        assert current["pid"] == os.getpid()
+    finally:
+        worker._release_generation_lease(lease, nonce)
+    assert not lease.exists()
+
+
+@pytest.mark.parametrize("raw", [b"", b'{"schema":'])
+def test_stale_empty_or_partial_lease_from_abrupt_crash_is_recovered(tmp_path, raw):
+    worker = _load_worker()
+    lease = tmp_path / "generation.lease.json"
+    lease.write_bytes(raw)
+    os.utime(lease, (1, 1))
+    nonce = "c" * 32
+    worker._acquire_generation_lease(lease, nonce)
+    try:
+        assert json.loads(lease.read_text("utf-8"))["nonce"] == nonce
+    finally:
+        worker._release_generation_lease(lease, nonce)
+
+
+def test_abrupt_death_before_atomic_lease_publication_leaves_no_active_lease(tmp_path):
+    worker = _load_worker()
+    lease = tmp_path / "generation.lease.json"
+    nonce = "d" * 32
+    child_source = (
+        "import importlib.util;"
+        f"s=importlib.util.spec_from_file_location('w',r'{WORKER_PATH}');"
+        "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+        "m.os.link=lambda *_args: m.os._exit(91);"
+        f"m._acquire_generation_lease(m.Path(r'{lease}'),'{nonce}')"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", child_source], timeout=10, check=False,
+    )
+    assert completed.returncode == 91
+    assert not lease.exists()
+    assert list(tmp_path.glob(f"{lease.name}.*.{nonce}.tmp"))
+    worker._acquire_generation_lease(lease, "e" * 32)
+    worker._release_generation_lease(lease, "e" * 32)
 
 
 def test_legacy_max_rows_is_a_slice_budget_not_a_silent_5000_cap(tmp_path):
@@ -609,7 +953,7 @@ def test_single_directory_has_a_hard_fail_closed_entry_bound(monkeypatch, tmp_pa
             return False
 
     monkeypatch.setattr(worker.os, "scandir", lambda _: Scan())
-    with pytest.raises(worker.CheckpointError, match="directory entry hard limit exceeded"):
+    with pytest.raises(worker.InventoryWorkerError, match="directory entry hard limit exceeded"):
         worker._bounded_directory_entries(tmp_path)
 
 

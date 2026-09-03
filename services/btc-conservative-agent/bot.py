@@ -37879,6 +37879,17 @@ _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2 = "fly_runtime_inventory_snapshot_v2"
 _DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"
 _DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA = "fly_runtime_inventory_worker_request_v1"
 _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v2"
+_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES = frozenset({
+    "DIRECTORY_ENTRY_LIMIT_EXCEEDED",
+    "DIRECTORY_SCAN_FAILED",
+    "GENERATION_DIRECTORY_LIMIT_EXCEEDED",
+    "GENERATION_ENTRY_LIMIT_EXCEEDED",
+    "GENERATION_LEASE_ACTIVE",
+    "GENERATION_SPOOL_LIMIT_EXCEEDED",
+    "INVENTORY_SQLITE_FAILED",
+    "INVENTORY_WORKER_FAILED",
+    "SNAPSHOT_INTEGRITY_FAILED",
+})
 _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS = 300
 # The worker is resumable, so short slices preserve completeness while yielding
 # the single Fly CPU and publishing progress well inside the desktop client's
@@ -37921,6 +37932,9 @@ _data_sync_async_inventory = {
     "refresh_completed_at": None,
     "last_failure_at": None,
     "error": None,
+    "worker_failure_code": None,
+    "last_worker_failure_code": None,
+    "last_worker_failure_at": None,
     "worker_invocations": 0,
     "worker_pages_written": 0,
     "worker_pages_total": None,
@@ -40197,6 +40211,7 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
     nonce = None
     request_path = None
     result_path = None
+    worker_failure_code = None
     try:
         nonce = uuid.uuid4().hex
         launched_unix = time.time()
@@ -40306,6 +40321,19 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                     result.get("retry_after_seconds") or 5
                 )))
                 with _data_sync_inventory_cache_condition:
+                    prior_scan_units = int(
+                        _data_sync_async_inventory.get("worker_scan_units_completed") or 0
+                    )
+                    prior_pages = int(
+                        _data_sync_async_inventory.get("worker_pages_written") or 0
+                    )
+                    new_scan_units = int(result.get("scan_units_completed") or 0)
+                    new_pages = int(result.get("pages_written") or 0)
+                    advanced = bool(
+                        int(result.get("invocation_files_seen") or 0) > 0
+                        or int(result.get("invocation_dirs_seen") or 0) > 0
+                        or new_pages > prior_pages
+                    )
                     _data_sync_async_inventory.update({
                         "status": "BUILDING",
                         "refreshing": True,
@@ -40317,16 +40345,45 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                         "worker_invocations": result.get("invocations"),
                         "worker_pages_written": result.get("pages_written"),
                         "worker_pages_total": result.get("pages_total"),
+                        "worker_scan_units_completed": new_scan_units,
+                        "worker_directories_frozen": result.get("directories_frozen"),
+                        "worker_directory_entries_frozen": result.get("directory_entries_frozen"),
+                        "worker_pending_directories": result.get("pending_directories"),
+                        "worker_current_directory_files_remaining": result.get(
+                            "current_directory_files_remaining"
+                        ),
+                        "worker_generation_directory_limit": result.get(
+                            "generation_directory_limit"
+                        ),
+                        "worker_generation_entry_limit": result.get("generation_entry_limit"),
+                        "worker_generation_spool_bytes": result.get("generation_spool_bytes"),
+                        "worker_spool_bytes_used": result.get("spool_bytes_used"),
                         "retry_after_seconds": retry_after,
                         "error": None,
+                        "worker_failure_code": (
+                            None if advanced else _data_sync_async_inventory.get("worker_failure_code")
+                        ),
+                        "last_worker_failure_code": (
+                            None if advanced else _data_sync_async_inventory.get("last_worker_failure_code")
+                        ),
+                        "last_worker_failure_at": (
+                            None if advanced else _data_sync_async_inventory.get("last_worker_failure_at")
+                        ),
                         "worker_active": False,
                     })
                     _data_sync_inventory_cache_condition.notify_all()
                 time.sleep(retry_after)
                 continue
             if completed.returncode != 0 or result.get("status") != "COMPLETE":
-                failure = str(result.get("failure_kind") or completed.returncode)
-                raise RuntimeError(f"inventory subprocess failed: {failure}")
+                candidate_failure_code = str(result.get("failure_code") or "")
+                worker_failure_code = (
+                    candidate_failure_code
+                    if candidate_failure_code in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
+                    else "INVENTORY_WORKER_FAILED"
+                )
+                raise RuntimeError(
+                    f"inventory subprocess failed: {worker_failure_code}"
+                )
             break
         generated_at = str(result.get("generated_at") or "")
         if not generated_at:
@@ -40380,8 +40437,34 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 ),
                 "worker_pages_written": int(result.get("page_count") or 0),
                 "worker_pages_total": int(result.get("page_count") or 0),
+                "worker_scan_units_completed": int(
+                    (result.get("worker_receipt") or {}).get("scan_units_completed") or 0
+                ),
+                "worker_directories_frozen": int(
+                    (result.get("worker_receipt") or {}).get("directories_frozen") or 0
+                ),
+                "worker_directory_entries_frozen": int(
+                    (result.get("worker_receipt") or {}).get("directory_entries_frozen") or 0
+                ),
+                "worker_pending_directories": 0,
+                "worker_current_directory_files_remaining": 0,
+                "worker_generation_directory_limit": (
+                    (result.get("worker_receipt") or {}).get("generation_directory_limit")
+                ),
+                "worker_generation_entry_limit": (
+                    (result.get("worker_receipt") or {}).get("generation_entry_limit")
+                ),
+                "worker_generation_spool_bytes": (
+                    (result.get("worker_receipt") or {}).get("generation_spool_bytes")
+                ),
+                "worker_spool_bytes_used": (
+                    (result.get("worker_receipt") or {}).get("spool_bytes_used")
+                ),
                 "retry_after_seconds": 0,
                 "error": None,
+                "worker_failure_code": None,
+                "last_worker_failure_code": None,
+                "last_worker_failure_at": None,
             })
             _data_sync_inventory_cache_condition.notify_all()
         threading.Thread(
@@ -40392,6 +40475,12 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
         ).start()
     except BaseException as exc:
         logger.error(f"data-sync inventory background refresh failed: {exc}")
+        persisted_worker_failure_code = (
+            worker_failure_code
+            if worker_failure_code in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
+            else "INVENTORY_WORKER_FAILED"
+        )
+        worker_failure_at = utc_iso()
         with _data_sync_inventory_cache_condition:
             _data_sync_async_inventory.update({
                 "status": (
@@ -40402,8 +40491,11 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 ),
                 "refreshing": False,
                 "active_refresh_nonce": None,
-                "last_failure_at": utc_iso(),
+                "last_failure_at": worker_failure_at,
                 "error": type(exc).__name__,
+                "worker_failure_code": persisted_worker_failure_code,
+                "last_worker_failure_code": persisted_worker_failure_code,
+                "last_worker_failure_at": worker_failure_at,
                 "expires_at": 0.0,
             })
             _data_sync_inventory_cache_condition.notify_all()
@@ -40530,6 +40622,18 @@ def _data_sync_request_async_inventory(
                 "worker_invocations": _data_sync_async_inventory.get("worker_invocations"),
                 "worker_pages_written": _data_sync_async_inventory.get("worker_pages_written"),
                 "worker_pages_total": _data_sync_async_inventory.get("worker_pages_total"),
+                "worker_failure_code": _data_sync_async_inventory.get("worker_failure_code"),
+                "last_worker_failure_code": _data_sync_async_inventory.get("last_worker_failure_code"),
+                "last_worker_failure_at": _data_sync_async_inventory.get("last_worker_failure_at"),
+                "worker_scan_units_completed": _data_sync_async_inventory.get("worker_scan_units_completed"),
+                "worker_directories_frozen": _data_sync_async_inventory.get("worker_directories_frozen"),
+                "worker_directory_entries_frozen": _data_sync_async_inventory.get("worker_directory_entries_frozen"),
+                "worker_pending_directories": _data_sync_async_inventory.get("worker_pending_directories"),
+                "worker_current_directory_files_remaining": _data_sync_async_inventory.get("worker_current_directory_files_remaining"),
+                "worker_generation_directory_limit": _data_sync_async_inventory.get("worker_generation_directory_limit"),
+                "worker_generation_entry_limit": _data_sync_async_inventory.get("worker_generation_entry_limit"),
+                "worker_generation_spool_bytes": _data_sync_async_inventory.get("worker_generation_spool_bytes"),
+                "worker_spool_bytes_used": _data_sync_async_inventory.get("worker_spool_bytes_used"),
                 "error": None,
             }
         if not _data_sync_async_inventory.get("refreshing"):
@@ -40575,6 +40679,18 @@ def _data_sync_request_async_inventory(
             "worker_invocations": _data_sync_async_inventory.get("worker_invocations"),
             "worker_pages_written": _data_sync_async_inventory.get("worker_pages_written"),
             "worker_pages_total": _data_sync_async_inventory.get("worker_pages_total"),
+            "worker_failure_code": _data_sync_async_inventory.get("worker_failure_code"),
+            "last_worker_failure_code": _data_sync_async_inventory.get("last_worker_failure_code"),
+            "last_worker_failure_at": _data_sync_async_inventory.get("last_worker_failure_at"),
+            "worker_scan_units_completed": _data_sync_async_inventory.get("worker_scan_units_completed"),
+            "worker_directories_frozen": _data_sync_async_inventory.get("worker_directories_frozen"),
+            "worker_directory_entries_frozen": _data_sync_async_inventory.get("worker_directory_entries_frozen"),
+            "worker_pending_directories": _data_sync_async_inventory.get("worker_pending_directories"),
+            "worker_current_directory_files_remaining": _data_sync_async_inventory.get("worker_current_directory_files_remaining"),
+            "worker_generation_directory_limit": _data_sync_async_inventory.get("worker_generation_directory_limit"),
+            "worker_generation_entry_limit": _data_sync_async_inventory.get("worker_generation_entry_limit"),
+            "worker_generation_spool_bytes": _data_sync_async_inventory.get("worker_generation_spool_bytes"),
+            "worker_spool_bytes_used": _data_sync_async_inventory.get("worker_spool_bytes_used"),
             "retry_after_seconds": _data_sync_async_inventory.get("retry_after_seconds") or 2,
             "error": _data_sync_async_inventory.get("error"),
         }
@@ -41500,6 +41616,22 @@ def api_data_sync_manifest():
             "invocations": inventory_state.get("worker_invocations"),
             "pages_written": inventory_state.get("worker_pages_written"),
             "pages_total": inventory_state.get("worker_pages_total"),
+            "failure_code": inventory_state.get("worker_failure_code"),
+            "last_failure_code": inventory_state.get("last_worker_failure_code"),
+            "last_failure_code_at": inventory_state.get("last_worker_failure_at"),
+            "scan_units_completed": inventory_state.get("worker_scan_units_completed"),
+            "directories_frozen": inventory_state.get("worker_directories_frozen"),
+            "directory_entries_frozen": inventory_state.get("worker_directory_entries_frozen"),
+            "pending_directories": inventory_state.get("worker_pending_directories"),
+            "current_directory_files_remaining": inventory_state.get(
+                "worker_current_directory_files_remaining"
+            ),
+            "generation_directory_limit": inventory_state.get(
+                "worker_generation_directory_limit"
+            ),
+            "generation_entry_limit": inventory_state.get("worker_generation_entry_limit"),
+            "generation_spool_bytes": inventory_state.get("worker_generation_spool_bytes"),
+            "spool_bytes_used": inventory_state.get("worker_spool_bytes_used"),
             "bootstrap_ledger": inventory_state.get("worker_bootstrap_ledger"),
             "bootstrap_ledgers_checked": inventory_state.get("worker_bootstrap_ledgers_checked"),
             "bootstrap_records_indexed": inventory_state.get("worker_bootstrap_records_indexed"),

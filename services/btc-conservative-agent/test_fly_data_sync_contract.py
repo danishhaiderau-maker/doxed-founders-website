@@ -8,6 +8,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -4028,6 +4029,185 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
     stale = request_inventory()
     assert stale["status"] == "STALE_REVALIDATING"
     assert stale["rows"] == [{"path": "prior.json", "size": 1}]
+
+
+def test_async_inventory_exposes_exact_allowlisted_worker_failure_code():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    state = {
+        "status": "EMPTY", "rows": None, "generation": None,
+        "generated_at": None, "expires_at": 0.0,
+        "served_since_refresh": False, "refreshing": True,
+        "active_refresh_nonce": "a" * 32,
+        "worker_failure_code": "DIRECTORY_SCAN_FAILED",
+        "error": "RuntimeError",
+    }
+    namespace = {
+        "time": time, "threading": SimpleNamespace(Thread=None),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_inventory_refresh_worker": lambda *args: None,
+        "hmac": hmac, "uuid": uuid,
+        "utc_iso": lambda: "2026-09-03T00:00:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    result = namespace["_data_sync_request_async_inventory"]()
+    assert result["status"] == "BUILDING"
+    assert result["worker_failure_code"] == "DIRECTORY_SCAN_FAILED"
+    assert '"failure_code": inventory_state.get("worker_failure_code")' in BOT
+
+
+def test_async_inventory_retry_preserves_last_failure_until_worker_advances():
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_request_async_inventory"
+    )
+    started = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            started.append(self.kwargs)
+
+    state = {
+        "status": "EMPTY", "rows": None, "generation": None,
+        "generated_at": None, "expires_at": 0.0,
+        "served_since_refresh": False, "refreshing": False,
+        "active_refresh_nonce": None,
+        "worker_failure_code": "DIRECTORY_SCAN_FAILED",
+        "last_worker_failure_code": "DIRECTORY_SCAN_FAILED",
+        "last_worker_failure_at": "2026-09-03T00:01:02Z",
+        "error": "RuntimeError",
+        "worker_scan_units_completed": 41,
+        "worker_directories_frozen": 3,
+        "worker_directory_entries_frozen": 40,
+        "worker_pending_directories": 2,
+        "worker_current_directory_files_remaining": 7,
+        "worker_generation_directory_limit": 50000,
+        "worker_generation_entry_limit": 250000,
+        "worker_generation_spool_bytes": 268435456,
+        "worker_spool_bytes_used": 65536,
+    }
+    namespace = {
+        "time": time, "threading": SimpleNamespace(Thread=FakeThread),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_load_persisted_inventory_snapshot": lambda: None,
+        "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
+        "_data_sync_inventory_refresh_worker": lambda *args: None,
+        "hmac": hmac, "uuid": uuid,
+        "utc_iso": lambda: "2026-09-03T00:02:00Z",
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    result = namespace["_data_sync_request_async_inventory"]()
+    assert result["status"] == "BUILDING"
+    assert result["refreshing"] is True
+    assert result["worker_failure_code"] == "DIRECTORY_SCAN_FAILED"
+    assert result["last_worker_failure_code"] == "DIRECTORY_SCAN_FAILED"
+    assert result["last_worker_failure_at"] == "2026-09-03T00:01:02Z"
+    assert result["worker_scan_units_completed"] == 41
+    assert result["worker_pending_directories"] == 2
+    assert result["worker_spool_bytes_used"] == 65536
+    assert len(started) == 1
+    manifest_block = BOT[
+        BOT.index("def api_data_sync_manifest"):
+        BOT.index("def _data_sync_resolve_lifecycle_bundle_manifest")
+    ]
+    assert '"last_failure_code": inventory_state.get("last_worker_failure_code")' in manifest_block
+    assert '"scan_units_completed": inventory_state.get("worker_scan_units_completed")' in manifest_block
+
+
+def _exercise_parent_inventory_worker_failure(tmp_path, run_subprocess):
+    tree = ast.parse(BOT)
+    node = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_inventory_refresh_worker"
+    )
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    work = volume / ".data-sync-snapshots"
+    runtime.mkdir(parents=True)
+    work.mkdir()
+    state = {
+        "status": "EMPTY", "rows": None, "generation": None,
+        "refreshing": True, "worker_active": False,
+    }
+    logged = []
+    namespace = {
+        "__file__": str(ROOT / "bot.py"),
+        "Path": Path, "os": os, "json": json, "sys": sys, "time": time,
+        "uuid": uuid, "hmac": hmac, "threading": threading,
+        "subprocess": SimpleNamespace(
+            run=run_subprocess, DEVNULL=subprocess.DEVNULL,
+        ),
+        "logger": SimpleNamespace(error=lambda message: logged.append(str(message))),
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_async_inventory": state,
+        "_data_sync_inventory_work_root": lambda: work,
+        "_data_sync_cleanup_inventory_worker_orphans": lambda *_args: 0,
+        "_data_sync_volume_root": lambda: volume,
+        "_data_sync_runtime_root": lambda: runtime,
+        "_data_sync_allowed_roots": lambda: [runtime],
+        "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_runtime_git_rev": lambda: "a" * 40,
+        "active_tile_registry_signature": lambda: "b" * 64,
+        "utc_iso": lambda: "2026-09-03T01:02:03Z",
+        "_DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA": "fly_runtime_inventory_worker_request_v1",
+        "_DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA": "fly_runtime_inventory_worker_result_v2",
+        "_DATA_SYNC_INVENTORY_WORKER_NAME": "data_sync_inventory_worker.py",
+        "_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS": 300,
+        "_DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS": 15.0,
+        "_DATA_SYNC_MANIFEST_PAGE_DEFAULT": 250,
+        "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
+        "_DATA_SYNC_EXTENSIONS": frozenset({".json"}),
+        "_DATA_SYNC_EXCLUDED_NAMES": frozenset(),
+        "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({".data-sync-snapshots"}),
+        "_DATA_SYNC_APPEND_PREFIX_NAMES": frozenset(),
+        "_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES": frozenset({
+            "INVENTORY_WORKER_FAILED", "DIRECTORY_SCAN_FAILED",
+        }),
+    }
+    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
+    namespace["_data_sync_inventory_refresh_worker"]("c" * 32)
+    state["_logged"] = logged
+    return state
+
+
+def test_parent_timeout_exposes_generic_current_and_last_worker_failure(tmp_path):
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("inventory-worker", 300)
+
+    state = _exercise_parent_inventory_worker_failure(tmp_path, timeout)
+    assert state["refreshing"] is False
+    assert state["error"] == "TimeoutExpired", state["_logged"]
+    assert state["worker_failure_code"] == "INVENTORY_WORKER_FAILED"
+    assert state["last_worker_failure_code"] == "INVENTORY_WORKER_FAILED"
+    assert state["last_worker_failure_at"] == "2026-09-03T01:02:03Z"
+
+
+def test_parent_malformed_result_exposes_generic_current_and_last_worker_failure(tmp_path):
+    def malformed(command, **_kwargs):
+        result_path = Path(command[command.index("--result") + 1])
+        result_path.write_text("{malformed", encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    state = _exercise_parent_inventory_worker_failure(tmp_path, malformed)
+    assert state["refreshing"] is False
+    assert state["error"] == "JSONDecodeError", state["_logged"]
+    assert state["worker_failure_code"] == "INVENTORY_WORKER_FAILED"
+    assert state["last_worker_failure_code"] == "INVENTORY_WORKER_FAILED"
+    assert state["last_worker_failure_at"] == "2026-09-03T01:02:03Z"
 
 
 def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl():
