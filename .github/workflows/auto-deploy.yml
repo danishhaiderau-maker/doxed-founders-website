@@ -58,6 +58,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: https://doxed-founders-website-production.up.railway.app/api
           REQUIRE_BOT_ADMIN_TOKEN: YES
           REQUIRE_CANONICAL_FLY_OWNER: YES
           SHOWCASE_OWNER_URL: https://doxed-btc-bot.fly.dev
@@ -131,6 +132,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: https://doxed-founders-website-production.up.railway.app/api
           REQUIRE_BOT_ADMIN_TOKEN: YES
           REQUIRE_CANONICAL_FLY_OWNER: YES
           SHOWCASE_OWNER_URL: https://doxed-btc-bot.fly.dev

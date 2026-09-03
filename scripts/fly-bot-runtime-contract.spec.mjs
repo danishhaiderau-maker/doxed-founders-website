@@ -110,6 +110,14 @@ test('flat-boundary proof targets the canonical Fly owner', async () => {
     workflow,
     /SHOWCASE_OWNER_URL:\s*https:\/\/bot\.doxxedcrypto\.digital/,
   );
+  assert.equal(
+    workflow.match(
+      /PLATFORM_API_URL:\s*https:\/\/doxed-founders-website-production\.up\.railway\.app\/api/g,
+    )?.length,
+    2,
+    'both the read-only flat check and deploy boundary must refresh user-scoped relay audits',
+  );
+  assert.doesNotMatch(workflow, /RELAY_EXECUTOR_WAKE_URL|BOT_CONTROL_SECRET/);
 });
 
 test('manual Fly deployment is pinned to the BTC service context and flat boundary', async () => {
@@ -410,7 +418,7 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   );
   assert.match(
     syncLoop,
-    /\$forceByRevision = \[bool\]\$observedSourceRevision[\s\S]*-not \(\$forceByTime -or \$forceByGrowth -or \$forceFresh -or \$forceByRevision\)[\s\S]*\$relayEvidencePath = Invoke-OptionalRelayEvidenceSync/,
+    /\$needsFullInventory = \$forceByTime -or \$forceFresh -or \$forceByRevision -or \$forceByGrowth[\s\S]*-not \$needsFullInventory[\s\S]*\$relayEvidencePath = Invoke-OptionalRelayEvidenceSync/,
   );
   assert.match(
     syncLoop,
@@ -426,7 +434,7 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   );
   assert.match(
     syncLoop,
-    /\$lastSyncedSourceRevision = \$\(if \(\$result\.SourceRevision\)[\s\S]*lastSyncedSourceRevision = \$lastSyncedSourceRevision/,
+    /\$childSourceRevision = \[string\]\$result\.SourceRevision[\s\S]*\$childSourceRevision -notmatch '\^\[0-9a-fA-F\]\{7,64\}\$'[\s\S]*\$lastSyncedSourceRevision = \$childSourceRevision[\s\S]*lastSyncedSourceRevision = \$lastSyncedSourceRevision/,
   );
   assert.match(
     syncLoop,
