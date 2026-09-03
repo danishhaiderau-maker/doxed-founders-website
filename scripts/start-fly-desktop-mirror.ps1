@@ -256,8 +256,18 @@ if ($ReloadFailedSyncOwner) {
   if ($LASTEXITCODE -ne 0 -or $actualRevision -cne $ExpectedClientRevision.ToLowerInvariant()) {
     throw "Sync reload refused: checkout revision does not match the authorized client revision."
   }
-  if ($actualRevision -cne $ExpectedDeployedRevision.ToLowerInvariant()) {
-    throw "Sync reload refused: local client/analyzer HEAD does not equal the deployed revision."
+  # The sync client may legitimately contain a newer, tested transport repair
+  # than the still-running Fly owner.  Keep those identities distinct: HEAD is
+  # executable/client provenance, while the authenticated bootstrap receipt
+  # and every mirror heartbeat remain bound to the observed Fly revision.
+  # "Ahead" is accepted only when the exact deployed commit is an ancestor of
+  # the exact clean client HEAD; unrelated histories and unavailable objects
+  # fail closed.
+  & git -C $repoRoot merge-base --is-ancestor `
+    $ExpectedDeployedRevision.ToLowerInvariant() `
+    $ExpectedClientRevision.ToLowerInvariant() 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    throw "Sync reload refused: deployed revision is not an ancestor of the authorized client revision."
   }
   & git -C $repoRoot diff --quiet -- 2>$null
   if ($LASTEXITCODE -ne 0) {

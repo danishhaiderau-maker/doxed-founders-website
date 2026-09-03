@@ -42,7 +42,8 @@ def test_reload_requires_exact_revision_pid_and_terminal_heartbeat_identity():
     assert "bootstrap.blocked -eq $true" in text
     assert "pending_orders -ne 0" in text
     assert "open_positions -ne 0" in text
-    assert "local client/analyzer HEAD does not equal the deployed revision" in text
+    assert "merge-base --is-ancestor" in text
+    assert "deployed revision is not an ancestor of the authorized client revision" in text
     assert "tracked working tree is dirty; analyzer provenance would be false" in text
 
 
@@ -194,7 +195,17 @@ def test_sandboxed_mock_takeover_binds_spawned_pid_and_writes_immutable_receipts
     subprocess.run(["git", "config", "user.name", "Sandbox"], cwd=sandbox, check=True)
     subprocess.run(["git", "add", "."], cwd=sandbox, check=True)
     subprocess.run(["git", "commit", "-qm", "sandbox"], cwd=sandbox, check=True)
-    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=sandbox, text=True).strip()
+    deployed_revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=sandbox, text=True
+    ).strip()
+    # Exercise the intended production boundary: the clean sync client is one
+    # tested commit ahead while Fly still owns the deployed ancestor revision.
+    (sandbox / "client-provenance.txt").write_text("newer sync client\n", encoding="utf-8")
+    subprocess.run(["git", "add", "client-provenance.txt"], cwd=sandbox, check=True)
+    subprocess.run(["git", "commit", "-qm", "newer client"], cwd=sandbox, check=True)
+    client_revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=sandbox, text=True
+    ).strip()
     tree_lines = []
     for relative in runtime_paths:
         digest = hashlib.sha256((sandbox / relative).read_bytes()).hexdigest()
@@ -221,7 +232,7 @@ def test_sandboxed_mock_takeover_binds_spawned_pid_and_writes_immutable_receipts
         "schema": "fly_sync_reload_bootstrap_authorization_v1",
         "captured_at": now.isoformat().replace("+00:00", "Z"),
         "workflow_run_id": "sandbox-run",
-        "source_revision": revision,
+        "source_revision": deployed_revision,
         "epoch_id": "epoch-sandbox",
         "config_signature": "config-sandbox",
         "inventory_status": "CURRENT",
@@ -282,8 +293,8 @@ function global:Start-Process {{
 & '{q(script_path)}' -ReloadFailedSyncOwner `
   -ExpectedSyncPid 41001 -ExpectedSyncCreationUtc '{created_ps}' `
   -ExpectedHeartbeatSha256 '{heartbeat_hash}' -ExpectedPollFailedAt '{failed_ps}' `
-  -ExpectedClientRevision '{revision}' -ExpectedBootstrapReceiptPath '{q(bootstrap_path)}' `
-  -ExpectedBootstrapReceiptSha256 '{bootstrap_hash}' -ExpectedDeployedRevision '{revision}' `
+  -ExpectedClientRevision '{client_revision}' -ExpectedBootstrapReceiptPath '{q(bootstrap_path)}' `
+  -ExpectedBootstrapReceiptSha256 '{bootstrap_hash}' -ExpectedDeployedRevision '{deployed_revision}' `
   -ExpectedEpochId 'epoch-sandbox' -ExpectedConfigSignature 'config-sandbox' `
   -ExpectedRuntimeTreeSha256 '{tree_hash}'
 """,
@@ -305,6 +316,9 @@ function global:Start-Process {{
     assert reload_receipt["terminal_heartbeat_sha256"] == heartbeat_hash
     assert reload_receipt["runtime_tree_sha256"] == tree_hash
     assert reload_receipt["bootstrap_receipt_sha256"] == bootstrap_hash
+    assert reload_receipt["client_revision"] == client_revision
+    assert reload_receipt["deployed_revision"] == deployed_revision
+    assert client_revision != deployed_revision
     assert (sandbox / ".fly-data-sync-loop.lock").read_text() == "42002"
     assert hashlib.sha256(next(receipts.glob("terminal-*.json")).read_bytes()).hexdigest() == heartbeat_hash
 
