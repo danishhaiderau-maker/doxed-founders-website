@@ -75,6 +75,99 @@ def test_same_generation_contains_resulting_state_and_pending_event(tmp_path):
     assert RelayEventOutbox(path).pending_count() == 1
 
 
+def test_prepare_is_not_deliverable_until_target_and_event_commit_together(tmp_path):
+    path = tmp_path / "paper_lifecycle_v1.json"
+    box = RelayEventOutbox(path)
+    box._persist(state_payload={**lifecycle(), "pending_orders": []})
+    target = lifecycle()
+    record = box.prepare_transition(
+        target,
+        {"event": "ORDER_PLACED", "trade_id": "trade", "ts": "now"},
+    )
+    prepared = json.loads(path.read_text())
+    assert prepared["pending_orders"] == []
+    assert prepared["relay_events"]["pending"] == []
+    assert prepared["transition_wal"]["transition_id"] == record["event_id"]
+    assert box.due() == []
+
+    box.commit_prepared(record["event_id"])
+    committed = json.loads(path.read_text())
+    assert committed["transition_wal"] is None
+    assert committed["pending_orders"][0]["trade_id"] == "trade"
+    assert committed["relay_events"]["pending"][0]["event_id"] == record["event_id"]
+
+
+def test_restart_finishes_prepared_target_and_event_exactly_once(tmp_path):
+    path = tmp_path / "paper_lifecycle_v1.json"
+    box = RelayEventOutbox(path)
+    box._persist(state_payload={**lifecycle(), "pending_orders": []})
+    record = box.prepare_transition(
+        lifecycle(),
+        {"event": "ORDER_PLACED", "trade_id": "trade", "ts": "now"},
+    )
+
+    restarted = RelayEventOutbox(path)
+    committed = json.loads(path.read_text())
+    assert restarted.healthy is True
+    assert restarted.pending_count() == 1
+    assert [row["event_id"] for row in restarted.due()] == [record["event_id"]]
+    assert committed["transition_wal"] is None
+    assert committed["pending_orders"][0]["trade_id"] == "trade"
+
+
+def test_abrupt_process_after_prepare_recovers_target_and_event(tmp_path):
+    path = tmp_path / "paper_lifecycle_v1.json"
+    module_dir = str(Path(__file__).parent)
+    script = r'''
+import os, sys
+sys.path.insert(0, sys.argv[2])
+from relay_event_outbox import RelayEventOutbox
+b = RelayEventOutbox(sys.argv[1])
+base = {"schema":"paper_lifecycle_v1","paper_only":True,"live_armed":False,
+        "positions":[],"pending_orders":[],"awaiting_signals":[]}
+b._persist(state_payload=base)
+target = dict(base)
+target["pending_orders"] = [{"trade_id":"trade","status":"PENDING"}]
+b.prepare_transition(target, {"event":"ORDER_PLACED","trade_id":"trade","ts":"now"})
+os._exit(23)
+'''
+    result = subprocess.run([sys.executable, "-c", script, str(path), module_dir])
+    assert result.returncode == 23
+    restarted = RelayEventOutbox(path)
+    assert restarted.healthy is True
+    assert restarted.pending_count() == 1
+    assert json.loads(path.read_text())["pending_orders"][0]["trade_id"] == "trade"
+
+
+def test_tampered_prepared_target_fails_closed_without_publishing(tmp_path):
+    path = tmp_path / "paper_lifecycle_v1.json"
+    box = RelayEventOutbox(path)
+    box._persist(state_payload={**lifecycle(), "pending_orders": []})
+    box.prepare_transition(
+        lifecycle(),
+        {"event": "ORDER_PLACED", "trade_id": "trade", "ts": "now"},
+    )
+    prepared = json.loads(path.read_text())
+    prepared["transition_wal"]["target"]["pending_orders"] = []
+    path.write_text(json.dumps(prepared))
+    restarted = RelayEventOutbox(path)
+    assert restarted.healthy is False
+    assert restarted.pending_count() == 0
+    assert "target hash mismatch" in restarted.recovery_error
+
+
+def test_ordinary_persist_refuses_to_overwrite_unresolved_prepare(tmp_path):
+    path = tmp_path / "paper_lifecycle_v1.json"
+    box = RelayEventOutbox(path)
+    box._persist(state_payload={**lifecycle(), "pending_orders": []})
+    box.prepare_transition(
+        lifecycle(),
+        {"event": "ORDER_PLACED", "trade_id": "trade", "ts": "now"},
+    )
+    with pytest.raises(RuntimeError, match="WAL is unresolved"):
+        box._persist(state_payload={**lifecycle(), "pending_orders": []})
+
+
 def test_terminal_tombstone_survives_until_exact_ack(tmp_path):
     path = tmp_path / "paper_lifecycle_v1.json"
     box = RelayEventOutbox(path)
@@ -120,6 +213,16 @@ def test_corrupt_generation_is_quarantined_and_fails_closed_without_loop(tmp_pat
     assert RelayEventOutbox(path).healthy is True
 
 
+@pytest.mark.parametrize("value", [[], {"schema": "unknown"}])
+def test_valid_json_with_invalid_root_or_schema_is_quarantined(tmp_path, value):
+    path = tmp_path / "paper_lifecycle_v1.json"
+    path.write_text(json.dumps(value))
+    box = RelayEventOutbox(path)
+    assert box.healthy is False
+    assert box.due() == []
+    assert list(tmp_path.glob("paper_lifecycle_v1.json.corrupt-*"))
+
+
 def test_ack_replace_interruption_keeps_event_pending_in_memory_and_on_restart(tmp_path, monkeypatch):
     path = tmp_path / "paper_lifecycle_v1.json"
     box = RelayEventOutbox(path)
@@ -146,6 +249,55 @@ def test_enqueue_replace_interruption_does_not_publish_memory_only_event(tmp_pat
             state_payload=lifecycle(),
         )
     assert box.pending_count() == 0
+
+
+def test_market_ack_and_next_event_share_one_generation_lock(tmp_path):
+    path = tmp_path / "paper_lifecycle_v1.json"
+    shared = threading.RLock()
+    box = RelayEventOutbox(path, shared_lock=shared)
+    first = box.enqueue_next(
+        {"event": "LIMIT_UPDATED", "trade_id": "trade", "ts": "one"},
+        state_payload={**lifecycle(), "generation": 1},
+    )
+    ack_entered = threading.Event()
+    permit_ack = threading.Event()
+
+    def finalize_and_ack():
+        with shared:
+            # This represents source finalization plus construction of the ACK
+            # lifecycle generation in _deliver_relay_outbox_record.
+            ack_entered.set()
+            assert permit_ack.wait(timeout=5)
+            state = json.loads(path.read_text())
+            state["generation"] = 2
+            state["pending_orders"][0]["limit_price"] = 101.0
+            assert box.acknowledge(first["event_id"], ack(first), state_payload=state)
+
+    def commit_next_event():
+        assert ack_entered.wait(timeout=5)
+        with shared:
+            state = json.loads(path.read_text())
+            state["generation"] = 3
+            box.enqueue_next(
+                {"event": "POSITION_OPENED", "trade_id": "peer", "ts": "two"},
+                state_payload=state,
+            )
+
+    ack_thread = threading.Thread(target=finalize_and_ack)
+    next_thread = threading.Thread(target=commit_next_event)
+    ack_thread.start()
+    next_thread.start()
+    assert ack_entered.wait(timeout=5)
+    time.sleep(0.03)
+    assert next_thread.is_alive()  # blocked behind the uninterrupted ACK generation
+    permit_ack.set()
+    ack_thread.join(timeout=5)
+    next_thread.join(timeout=5)
+    assert not ack_thread.is_alive() and not next_thread.is_alive()
+    committed = json.loads(path.read_text())
+    assert committed["generation"] == 3
+    assert committed["pending_orders"][0]["limit_price"] == 101.0
+    assert [row["event_type"] for row in committed["relay_events"]["pending"]] == ["POSITION_OPENED"]
 
 
 def payload(event_id="trade:ORDER_PLACED:0:t", event="ORDER_PLACED", seq=0):

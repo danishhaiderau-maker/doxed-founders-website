@@ -1117,7 +1117,8 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         self.assertIn("_commit_relay_limit_chase(", chase)
         commit = function_source("_commit_relay_limit_chase")
         self.assertIn("with trade_lock:", commit)
-        self.assertIn('order["limit_price"] = new_limit', commit)
+        self.assertIn('row["limit_price"] = new_limit', commit)
+        self.assertIn("_commit_paper_lifecycle_transition(", commit)
         self.assertLess(
             chase.index('order.get("bitfinex_order_id")'),
             chase.index("_commit_relay_limit_chase("),

@@ -18,6 +18,7 @@ from pathlib import Path
 
 class RelayEventOutbox:
     SCHEMA = "relay_event_outbox_v1"
+    WAL_SCHEMA = "paper_lifecycle_transition_wal_v1"
 
     def __init__(self, path: str | os.PathLike[str], ack_limit: int = 512, shared_lock=None):
         self.path = Path(path)
@@ -63,8 +64,31 @@ class RelayEventOutbox:
             )
             return
         with self._lock:
-            if value.get("schema") not in (self.SCHEMA, "paper_lifecycle_v1"):
-                raise ValueError("unsupported relay outbox schema")
+            if not isinstance(value, dict) or value.get("schema") not in (
+                self.SCHEMA, "paper_lifecycle_v1"
+            ):
+                quarantine = self.path.with_name(
+                    f"{self.path.name}.corrupt-{int(time.time() * 1000)}"
+                )
+                try:
+                    os.replace(self.path, quarantine)
+                    self._fsync_parent()
+                except OSError:
+                    quarantine = None
+                self.healthy = False
+                self.recovery_error = (
+                    "unsupported relay lifecycle generation; "
+                    f"quarantined={quarantine}"
+                )
+                return
+            if value.get("schema") == "paper_lifecycle_v1" and value.get("transition_wal"):
+                try:
+                    value = self._recover_prepared_value(value)
+                    self._atomic_write(value)
+                except (OSError, ValueError) as exc:
+                    self.healthy = False
+                    self.recovery_error = f"relay lifecycle WAL recovery failed: {exc}"
+                    return
             source = value.get("relay_events") if value.get("schema") == "paper_lifecycle_v1" else value
             source = source if isinstance(source, dict) else {}
             for row in source.get("pending") or []:
@@ -85,8 +109,44 @@ class RelayEventOutbox:
             if self._pending:
                 self._wake.set()
 
-    def _persist(self, state_payload: dict | None = None) -> None:
+    def _atomic_write(self, value: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(value, handle, separators=(",", ":"), sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(name, self.path)
+            self._fsync_parent()
+        finally:
+            try:
+                os.unlink(name)
+            except FileNotFoundError:
+                pass
+
+    @classmethod
+    def _state_sha256(cls, value: dict) -> str:
+        return hashlib.sha256(cls.canonical_body(value)).hexdigest()
+
+    def _relay_value(self, *, pending=None, acks=None, highwater=None) -> dict:
+        return {
+            "schema": self.SCHEMA,
+            "saved_at_unix": time.time(),
+            "pending": copy.deepcopy(list(self._pending.values()) if pending is None else pending),
+            "acks": copy.deepcopy(self._acks[-self.ack_limit:] if acks is None else acks),
+            "sequence_highwater": copy.deepcopy(self._highwater if highwater is None else highwater),
+        }
+
+    def _persist(self, state_payload: dict | None = None) -> None:
+        if self.path.exists():
+            try:
+                with self.path.open("r", encoding="utf-8") as existing:
+                    disk_value = json.load(existing)
+                if isinstance(disk_value, dict) and disk_value.get("transition_wal"):
+                    raise RuntimeError("paper lifecycle transition WAL is unresolved")
+            except (OSError, ValueError, json.JSONDecodeError):
+                pass
         relay_value = {
             "schema": self.SCHEMA,
             "saved_at_unix": time.time(),
@@ -106,21 +166,112 @@ class RelayEventOutbox:
         if isinstance(value, dict) and value.get("schema") == "paper_lifecycle_v1":
             value = copy.deepcopy(value)
             value["relay_events"] = relay_value
+            value.setdefault("generation", 0)
+            value.setdefault("transition_wal", None)
         else:
             value = relay_value
-        fd, name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(value, handle, separators=(",", ":"), sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(name, self.path)
-            self._fsync_parent()
-        finally:
-            try:
-                os.unlink(name)
-            except FileNotFoundError:
-                pass
+        self._atomic_write(value)
+
+    def _recover_prepared_value(self, prepared: dict) -> dict:
+        wal = prepared.get("transition_wal")
+        if not isinstance(wal, dict) or wal.get("schema") != self.WAL_SCHEMA:
+            raise ValueError("unsupported paper lifecycle transition WAL")
+        preimage = copy.deepcopy(prepared)
+        preimage["transition_wal"] = None
+        if self._state_sha256(preimage) != wal.get("preimage_sha256"):
+            raise ValueError("paper lifecycle transition preimage hash mismatch")
+        target = wal.get("target")
+        record = wal.get("event_record")
+        if not isinstance(target, dict) or target.get("schema") != "paper_lifecycle_v1":
+            raise ValueError("paper lifecycle transition target is invalid")
+        if self._state_sha256(target) != wal.get("target_sha256"):
+            raise ValueError("paper lifecycle transition target hash mismatch")
+        if not isinstance(record, dict) or self.payload_sha256(record.get("payload") or {}) != record.get("payload_sha256"):
+            raise ValueError("paper lifecycle transition event hash mismatch")
+        relay = copy.deepcopy(target.get("relay_events") or prepared.get("relay_events") or self._relay_value())
+        pending = [row for row in relay.get("pending") or [] if row.get("event_id") != record.get("event_id")]
+        pending.append(copy.deepcopy(record))
+        relay["pending"] = pending
+        highwater = relay.setdefault("sequence_highwater", {})
+        highwater[str(record["trade_id"])] = max(
+            int(highwater.get(str(record["trade_id"]), -1)), int(record["event_seq"])
+        )
+        target = copy.deepcopy(target)
+        target["generation"] = max(
+            int(prepared.get("generation") or 0) + 1,
+            int(target.get("generation") or 0),
+        )
+        target["relay_events"] = relay
+        target["transition_wal"] = None
+        return target
+
+    def prepare_transition(
+        self, target_payload: dict, payload: dict, suggested: int | None = None
+    ) -> dict:
+        """Durably PREPARE a full target snapshot without exposing its event."""
+        if not self.healthy:
+            raise ValueError(self.recovery_error or "relay lifecycle unavailable")
+        trade_id = str(payload.get("trade_id") or "").strip()
+        event_type = str(payload.get("event") or "").strip()
+        if not trade_id or not event_type:
+            raise ValueError("relay event requires trade and type")
+        with self._lock:
+            if not self.path.exists():
+                raise ValueError("paper lifecycle preimage is missing")
+            with self.path.open("r", encoding="utf-8") as handle:
+                preimage = json.load(handle)
+            if not isinstance(preimage, dict) or preimage.get("schema") != "paper_lifecycle_v1":
+                raise ValueError("paper lifecycle preimage is invalid")
+            if preimage.get("transition_wal"):
+                raise RuntimeError("paper lifecycle transition WAL is unresolved")
+            floor = self._highwater.get(trade_id, -1) + 1
+            sequence = max(floor, int(suggested)) if suggested is not None else floor
+            stamped = copy.deepcopy(payload)
+            stamped["event_seq"] = sequence
+            stamped["event_id"] = str(stamped.get("event_id") or f"{trade_id}:{event_type}:{sequence}:{stamped.get('ts') or time.time_ns()}")
+            if event_type == "POSITION_REDUCED":
+                stamped["reduction_id"] = stamped["event_id"]
+            record = {
+                "event_id": stamped["event_id"], "trade_id": trade_id,
+                "event_type": event_type, "event_seq": sequence,
+                "payload_sha256": self.payload_sha256(stamped), "payload": stamped,
+                "created_at_unix": time.time(), "attempts": 0,
+                "next_attempt_at_unix": 0.0, "last_error": None,
+            }
+            clean_preimage = copy.deepcopy(preimage)
+            clean_preimage["transition_wal"] = None
+            target = copy.deepcopy(target_payload)
+            target["schema"] = "paper_lifecycle_v1"
+            target["generation"] = int(preimage.get("generation") or 0) + 1
+            target["transition_wal"] = None
+            target.setdefault("relay_events", copy.deepcopy(preimage.get("relay_events") or self._relay_value()))
+            prepared = copy.deepcopy(clean_preimage)
+            prepared["transition_wal"] = {
+                "schema": self.WAL_SCHEMA,
+                "transition_id": stamped["event_id"],
+                "preimage_sha256": self._state_sha256(clean_preimage),
+                "target_sha256": self._state_sha256(target),
+                "target": target,
+                "event_record": record,
+            }
+            self._atomic_write(prepared)
+            return copy.deepcopy(record)
+
+    def commit_prepared(self, event_id: str) -> dict:
+        """Publish PREPARED target plus PENDING event in one durable generation."""
+        with self._lock:
+            with self.path.open("r", encoding="utf-8") as handle:
+                prepared = json.load(handle)
+            wal = prepared.get("transition_wal") if isinstance(prepared, dict) else None
+            if not isinstance(wal, dict) or wal.get("transition_id") != event_id:
+                raise ValueError("paper lifecycle prepared transition mismatch")
+            committed = self._recover_prepared_value(prepared)
+            self._atomic_write(committed)
+            record = copy.deepcopy(wal["event_record"])
+            self._pending[event_id] = record
+            self._highwater[str(record["trade_id"])] = int(record["event_seq"])
+            self._wake.set()
+            return record
 
     def _fsync_parent(self) -> None:
         """Durably publish a rename where directory fsync is supported."""
@@ -280,7 +431,17 @@ class RelayEventOutbox:
     def decorate_lifecycle(self, payload: dict) -> dict:
         """Bind delivery state into the same canonical lifecycle generation."""
         with self._lock:
+            prior_generation = -1
+            if self.path.exists():
+                with self.path.open("r", encoding="utf-8") as handle:
+                    current = json.load(handle)
+                if isinstance(current, dict) and current.get("transition_wal"):
+                    raise RuntimeError("paper lifecycle transition WAL is unresolved")
+                if isinstance(current, dict):
+                    prior_generation = int(current.get("generation") or 0)
             value = copy.deepcopy(payload)
+            value["generation"] = prior_generation + 1
+            value["transition_wal"] = None
             value["relay_events"] = {
                 "schema": self.SCHEMA,
                 "saved_at_unix": time.time(),

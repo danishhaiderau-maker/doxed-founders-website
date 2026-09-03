@@ -173,8 +173,8 @@ def test_pending_signal_snapshot_exhaustion_is_bounded_and_explicit():
         raise AssertionError("persistent mutation must exhaust the bounded snapshot retries")
 
 
-def test_order_placement_does_not_hold_trade_lock_across_registration_hydration():
-    """Slow collector/schedule hydration must not starve WS/API snapshots."""
+def test_order_placement_enriches_before_atomic_transition():
+    """Slow enrichment finishes before PREPARE and canonical state stays hidden."""
     tree = ast.parse(BOT_SOURCE)
     fn = next(
         node
@@ -182,26 +182,15 @@ def test_order_placement_does_not_hold_trade_lock_across_registration_hydration(
         if isinstance(node, ast.FunctionDef)
         and node.name == "_place_simulated_limit_order"
     )
-    parents = {}
-    for node in ast.walk(fn):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
-    call = next(
-        node
-        for node in ast.walk(fn)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "lane_register_pending_order"
+    source = ast.get_source_segment(BOT_SOURCE, fn)
+    assert source.index("_prepare_initial_pending_order_evidence(") < source.index(
+        "_commit_paper_lifecycle_transition("
     )
-    current = call
-    while current is not fn:
-        current = parents[current]
-        if isinstance(current, ast.With):
-            assert not any(
-                isinstance(item.context_expr, ast.Name)
-                and item.context_expr.id == "trade_lock"
-                for item in current.items
-            )
+    live = next(node for node in fn.body if isinstance(node, ast.FunctionDef) and node.name == "live_mutator")
+    live_source = ast.get_source_segment(BOT_SOURCE, live)
+    assert "pending_orders.append(order)" in live_source
+    assert 'target_signal["status"] = "ORDERED"' not in source
+    assert '"order_placed": True' in source
 
 
 def test_registration_releases_trade_lock_before_slow_schedule_hydration():
@@ -504,7 +493,7 @@ def test_stale_cleanup_respects_promotion_grace_before_no_exposure_terminalizati
 
 
 def test_waiting_chase_is_not_reported_as_an_order():
-    assert "def _account_registered_order_submission(signal: dict, ai: dict = None)" in BOT_SOURCE
+    assert "def _account_registered_order_submission(" in BOT_SOURCE
     assert 'signal["_order_submission_accounted"] = True' in BOT_SOURCE
     assert '"CHASE_BUCKET_WAIT",' in BOT_SOURCE
     assert "_account_registered_order_submission(signal, ai)" in BOT_SOURCE
@@ -524,7 +513,10 @@ def test_waiting_chase_is_not_reported_as_an_order():
         "increment_pipeline_funnel": lambda stage: events.append(("funnel", stage)),
         "log_lane_opportunity_event": lambda *args, **_kwargs: events.append(("lane", args[1])),
         "relay_publishes_approve_outcome": lambda _lane: True,
-        "record_approve_outcome": lambda *args, **_kwargs: events.append(("relay", args[1])),
+        "record_approve_outcome": lambda *args, **kwargs: (
+            events.append(("relay", args[1]))
+            if kwargs.get("publish_relay", True) else None
+        ),
     }
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<submission-test>", "exec"), namespace)
     account = namespace["_account_registered_order_submission"]
@@ -546,6 +538,11 @@ def test_waiting_chase_is_not_reported_as_an_order():
     ]
     assert account(signal, {"win_prob": None}) is False
     assert len(events) == 3
+
+    other = {"trade_id": "no-duplicate-relay", "research_lane": "CONTINUOUS", "final_direction": "LONG"}
+    namespace["pending_orders"].append({"trade_id": "no-duplicate-relay", "status": "PENDING"})
+    assert account(other, {"win_prob": None}, publish_relay=False) is True
+    assert events[-2:] == [("funnel", "ORDER_SUBMITTED"), ("lane", "ORDER_SUBMITTED")]
 
 
 def test_specific_gate_failure_is_not_overwritten_by_order_failed():
@@ -1368,7 +1365,7 @@ def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
     place_source = ast.get_source_segment(BOT_SOURCE, place)
     assert 'smart_meta.get("preserve_original_limit")' in place_source
     assert '"original_limit_price": original_limit_price' in place_source
-    assert 'signal["original_limit_price"] = original_limit_price' in place_source
+    assert 'target_signal["original_limit_price"] = original_limit_price' in place_source
 
 
 def test_active_shared_lanes_do_not_shift_the_qualified_structural_limit():

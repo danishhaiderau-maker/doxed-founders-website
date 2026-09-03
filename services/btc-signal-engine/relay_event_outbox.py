@@ -63,8 +63,23 @@ class RelayEventOutbox:
             )
             return
         with self._lock:
-            if value.get("schema") not in (self.SCHEMA, "paper_lifecycle_v1"):
-                raise ValueError("unsupported relay outbox schema")
+            if not isinstance(value, dict) or value.get("schema") not in (
+                self.SCHEMA, "paper_lifecycle_v1"
+            ):
+                quarantine = self.path.with_name(
+                    f"{self.path.name}.corrupt-{int(time.time() * 1000)}"
+                )
+                try:
+                    os.replace(self.path, quarantine)
+                    self._fsync_parent()
+                except OSError:
+                    quarantine = None
+                self.healthy = False
+                self.recovery_error = (
+                    "unsupported relay lifecycle generation; "
+                    f"quarantined={quarantine}"
+                )
+                return
             source = value.get("relay_events") if value.get("schema") == "paper_lifecycle_v1" else value
             source = source if isinstance(source, dict) else {}
             for row in source.get("pending") or []:

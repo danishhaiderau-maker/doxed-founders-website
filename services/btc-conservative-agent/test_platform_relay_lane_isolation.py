@@ -119,7 +119,7 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     assert "_platform_relay_lane_for_event" in emit_source
     assert "_build_paper_lifecycle_payload" in emit_source
     assert "state_payload=lifecycle" in emit_source
-    assert '"research_lane": (' in close_source
+    assert '"research_lane": pos.get("research_lane")' in close_source
     assert 'pos.get("research_lane")' in close_source
     pushed = {
         call.args[0].value
@@ -129,10 +129,34 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
         and call.func.id == "_push_showcase_relay_event"
         and call.args and isinstance(call.args[0], ast.Constant)
     }
-    assert {"LIMIT_UPDATED", "POSITION_OPENED", "POSITION_REDUCED", "POSITION_CLOSED"} <= pushed
+    assert {"LIMIT_UPDATED", "POSITION_REDUCED"} <= pushed
+    assert '"POSITION_CLOSED"' in close_source
+    assert "_commit_paper_lifecycle_transition(" in close_source
+    fill_source = ast.get_source_segment(BOT_SOURCE, _function("fill_order"))
+    assert '"POSITION_OPENED"' in fill_source
+    assert "_commit_paper_lifecycle_transition(" in fill_source
     assert 'emit_signal_webhook("ORDER_PLACED"' in BOT_SOURCE
     assert 'relay_terminal_event = (' in BOT_SOURCE
     assert '"ORDER_EXPIRED"' in BOT_SOURCE and '"ORDER_CANCELLED"' in BOT_SOURCE
+
+    deliver = _function("_deliver_relay_outbox_record")
+    parents = {}
+    for parent in ast.walk(deliver):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    acknowledge_calls = [
+        node for node in ast.walk(deliver)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "acknowledge"
+        and any(keyword.arg == "state_payload" for keyword in node.keywords)
+    ]
+    assert len(acknowledge_calls) == 1
+    ancestor = parents.get(acknowledge_calls[0])
+    while ancestor is not None and not isinstance(ancestor, ast.With):
+        ancestor = parents.get(ancestor)
+    assert isinstance(ancestor, ast.With), "prebuilt ACK state must not cross a released lifecycle lock"
+
     fill_source = ast.get_source_segment(BOT_SOURCE, _function("fill_order"))
     finalize_source = ast.get_source_segment(
         BOT_SOURCE,
@@ -143,10 +167,11 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
         _function("_commit_position_open_lifecycle"),
     )
     assert "_finalize_position_open_lifecycle(" in fill_source
-    assert '_push_showcase_relay_event(' in finalize_source
+    assert '_push_showcase_relay_event(' not in finalize_source
+    assert '_commit_paper_lifecycle_transition(' in fill_source
     assert '"POSITION_OPENED"' in finalize_source
     assert '"fill_price": fill_px' in finalize_source
-    assert '"ts": opened_ts' in finalize_source
+    assert '"ts": position_opened_relay_ts' in fill_source
     assert "with position_close_lock:" in commit_source
     assert "_position_open_relay_allowed(pos, master)" in commit_source
 
@@ -295,7 +320,8 @@ def test_terminal_close_wins_the_actual_open_commit_barrier() -> None:
     )
     assert snapshot["status"] == "FILLED"
     assert snapshot["_persist_ts"] == "2026-08-11T00:00:01Z"
-    assert any(call[0] == "push" and call[3]["ts"] == "2026-08-11T00:00:01Z" for call in calls)
+    assert not any(call[0] == "push" for call in calls)
+    assert any(call[0] == "mirror" for call in calls)
     assert any(call[0] == "mirror" for call in calls)
 
 
@@ -308,11 +334,22 @@ def test_limit_chase_never_emits_after_the_same_trade_is_open() -> None:
     signal = {"research_lane": "CONTINUOUS"}
     pending = [order]
     positions: list[dict] = []
+    committed_targets = []
+
+    def commit_transition(_event, _trade_id, _extra, *, target_mutator, live_mutator, **_kwargs):
+        target = {"pending_orders": [copy.deepcopy(order)]}
+        target_mutator(target)
+        live_mutator()
+        committed_targets.append(target)
+        return True
+
     namespace = {
+        "copy": copy,
         "trade_lock": lock,
         "pending_orders": pending,
         "open_positions": positions,
         "_resolve_fill_model": lambda _signal, _order: "SIM_LIMIT",
+        "_commit_paper_lifecycle_transition": commit_transition,
         "utc_iso": lambda: "2026-08-11T19:50:32.000Z",
     }
     commit = _compile_function("_commit_relay_limit_chase", namespace)
@@ -324,6 +361,7 @@ def test_limit_chase_never_emits_after_the_same_trade_is_open() -> None:
     assert event["ts"] == "2026-08-11T19:50:32.000Z"
     assert event["event_seq"] == 2
     assert order["limit_price"] == 64_090.0
+    assert committed_targets[0]["pending_orders"][0]["limit_price"] == 64_090.0
 
     positions.append({"trade_id": "cont-chase-open-race", "status": "OPEN"})
     rejected = commit(
@@ -357,6 +395,61 @@ def test_relay_worker_has_no_idle_network_polling() -> None:
     assert "_relay_http_session.post(" not in loop_source
     assert "_drain_relay_event_outbox_once()" in loop_source
     assert "pending_count() else 30.0" in loop_source
+
+
+def test_saver_and_transition_lock_order_cannot_deadlock_or_publish_state_only() -> None:
+    lifecycle_lock = threading.RLock()
+    trade = threading.RLock()
+    transition = threading.RLock()
+    saver_holds_lifecycle = threading.Event()
+    allow_saver = threading.Event()
+    state = {"orders": []}
+    generations = []
+
+    class FakeOutbox:
+        def prepare_transition(self, target, payload, suggested):
+            generations.append(("PREPARE", copy.deepcopy(state), copy.deepcopy(target), payload))
+            return {"event_id": "evt"}
+
+        def commit_prepared(self, event_id):
+            generations.append(("COMMIT", copy.deepcopy(state), event_id))
+
+    namespace = {
+        "paper_lifecycle_transition_lock": transition,
+        "paper_lifecycle_file_lock": lifecycle_lock,
+        "trade_lock": trade,
+        "PAPER_LIFECYCLE_FILE": "present",
+        "os": type("OS", (), {"path": type("Path", (), {"exists": staticmethod(lambda _p: True)})}),
+        "_relay_event_outbox": FakeOutbox(),
+        "_build_showcase_relay_event_payload": lambda event, tid, extra: {"event": event, "trade_id": tid, **extra},
+        "_build_paper_lifecycle_payload": lambda reason: {"schema": "paper_lifecycle_v1", "orders": copy.deepcopy(state["orders"])},
+        "set_execution_paused": lambda _reason: None,
+    }
+    commit = _compile_function("_commit_paper_lifecycle_transition", namespace)
+
+    def saver():
+        with lifecycle_lock:
+            saver_holds_lifecycle.set()
+            assert allow_saver.wait(5)
+            with trade:
+                generations.append(("SAVE", copy.deepcopy(state)))
+
+    save_thread = threading.Thread(target=saver)
+    save_thread.start()
+    assert saver_holds_lifecycle.wait(5)
+    tx_thread = threading.Thread(target=lambda: commit(
+        "ORDER_PLACED", "trade", {},
+        target_mutator=lambda target: target["orders"].append("trade"),
+        live_mutator=lambda: state["orders"].append("trade"),
+    ))
+    tx_thread.start()
+    time.sleep(0.03)
+    allow_saver.set()
+    save_thread.join(5)
+    tx_thread.join(5)
+    assert not save_thread.is_alive() and not tx_thread.is_alive()
+    assert [row[0] for row in generations] == ["SAVE", "PREPARE", "COMMIT"]
+    assert generations[-1][1]["orders"] == ["trade"]
 
 
 if __name__ == "__main__":

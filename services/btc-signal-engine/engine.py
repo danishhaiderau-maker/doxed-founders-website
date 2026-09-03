@@ -60,6 +60,35 @@ from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGener
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
+
+
+class RelayLifecycleCommitError(RuntimeError):
+    """A canonical paper transition could not be durably committed."""
+
+
+def _paper_lifecycle_transaction(function):
+    """Serialize mutation with lifecycle commit and restore exact preimage on failure."""
+    @functools.wraps(function)
+    def wrapped(*args, **kwargs):
+        lifecycle_lock = globals().get("paper_lifecycle_file_lock")
+        mutation_lock = globals().get("trade_lock")
+        if lifecycle_lock is None or mutation_lock is None:
+            return function(*args, **kwargs)
+        with lifecycle_lock:
+            with mutation_lock:
+                before_positions = copy.deepcopy(globals().get("open_positions", []))
+                before_orders = copy.deepcopy(globals().get("pending_orders", []))
+                before_trades_map = copy.deepcopy(globals().get("trades_map", {}))
+            try:
+                return function(*args, **kwargs)
+            except RelayLifecycleCommitError:
+                with mutation_lock:
+                    open_positions[:] = before_positions
+                    pending_orders[:] = before_orders
+                    trades_map.clear()
+                    trades_map.update(before_trades_map)
+                raise
+    return wrapped
 from position_registry import (
     PositionCloseClaimScope,
     finalize_position_close,
@@ -4661,6 +4690,7 @@ def _log_ladder_exit_audit(pos: dict, price: float, unreal_pct: float, peak: flo
         f"unreal={unreal_pct:.2f}% crossed={crossed} [PIPELINE ENFORCEMENT]"
     )
 
+@_paper_lifecycle_transaction
 def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     """Apply the active registry-owned tile policy and persist partial receipts."""
     lane = str(pos.get("research_lane") or "").upper()
@@ -9050,6 +9080,8 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     if legacy_secret:
         headers["X-Bot-Control-Secret"] = legacy_secret
     started = time.perf_counter()
+    source_preimage = None
+    source_commit_attempted = False
     try:
         response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
         response.raise_for_status()
@@ -9061,14 +9093,23 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
             commit_before_ack = lambda: _commit_marketable_relay_payload(payload)
         if callable(commit_before_ack):
             with paper_lifecycle_file_lock:
+                with trade_lock:
+                    source_preimage = (
+                        copy.deepcopy(open_positions), copy.deepcopy(pending_orders),
+                        copy.deepcopy(trades_map),
+                    )
+                source_commit_attempted = True
                 if commit_before_ack() is not True:
                     raise RuntimeError("relay source finalization rejected")
                 ack_state = _build_paper_lifecycle_payload(
                     reason=f"relay_ack:{payload.get('event')}"
                 )
-        if not _relay_event_outbox.acknowledge(
-            event_id, receipt, state_payload=ack_state
-        ):
+                acknowledged = _relay_event_outbox.acknowledge(
+                    event_id, receipt, state_payload=ack_state
+                )
+        else:
+            acknowledged = _relay_event_outbox.acknowledge(event_id, receipt)
+        if not acknowledged:
             raise RuntimeError("relay outbox acknowledgement mismatch")
         _relay_push_state.update({
             "seq": int(_relay_push_state.get("seq") or 0) + 1,
@@ -9079,6 +9120,16 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
         })
         return True
     except Exception as exc:
+        if source_commit_attempted and source_preimage is not None:
+            with paper_lifecycle_file_lock, trade_lock:
+                open_positions[:] = source_preimage[0]
+                pending_orders[:] = source_preimage[1]
+                trades_map.clear()
+                trades_map.update(source_preimage[2])
+            set_execution_paused("RELAY_LIFECYCLE_ACK_COMMIT_FAILED")
+            raise RelayLifecycleCommitError(
+                "relay source/ACK generation did not commit atomically"
+            ) from exc
         _relay_event_outbox.fail(event_id, exc)
         _relay_push_state.update({
             "last_ts": time.time(), "last_event": payload.get("event"),
@@ -9384,7 +9435,7 @@ def _push_showcase_relay_event(
             "ORDER_CANCELLED",
         }:
             set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
-            raise RuntimeError(
+            raise RelayLifecycleCommitError(
                 f"canonical relay lifecycle commit failed for {event}"
             ) from exc
         return False
@@ -9604,7 +9655,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         logger.error(f"[INTENT WEBHOOK] durable enqueue failed trade={trade_id}: {exc}")
         if event == "ORDER_PLACED":
             set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
-            raise RuntimeError("canonical ORDER_PLACED commit failed") from exc
+            raise RelayLifecycleCommitError("canonical ORDER_PLACED commit failed") from exc
 
 
 def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None, signal: dict = None):
@@ -11692,6 +11743,7 @@ def _commit_position_open_lifecycle(pos, master, signal, order, fill_px, opened_
         return snapshot
 
 
+@_paper_lifecycle_transaction
 def _finalize_position_open_lifecycle(pos, master, signal, order, fill_px, opened_ts):
     """Publish only after OPEN won the terminal-state commit race.
 
@@ -19771,6 +19823,7 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
     return True
 
 
+@_paper_lifecycle_transaction
 def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str, smart_meta: dict = None) -> bool:
     """Create a pending limit order after micro structure is confirmed."""
     if _manual_pause_block_entry(signal, "SIM_LIMIT_CREATE"):
@@ -20305,6 +20358,7 @@ def _promote_signal_to_limit_order_claimed(signal: dict, skip_virtual_defer: boo
     return _place_simulated_limit_order(signal, limit_price, entry_mode, smart_meta=smart_meta)
 
 
+@_paper_lifecycle_transaction
 def _account_registered_order_submission(signal: dict, ai: dict = None) -> bool:
     """Publish ORDER_SUBMITTED/ORDER_PLACED exactly once, after a local order exists."""
     if not isinstance(signal, dict):
@@ -20855,6 +20909,7 @@ def _commit_relay_limit_chase(
 
 
 
+@_paper_lifecycle_transaction
 def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> bool:
     if not can_progress_new_entry(now)[0]:
         return False
@@ -20949,6 +21004,7 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
     return True
 
 
+@_paper_lifecycle_transaction
 def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, now: float) -> bool:
     """After patient chase, set marketable limit at ask/bid when structure still valid."""
     if order.get("status") != "PENDING":
@@ -23280,6 +23336,7 @@ def _process_ws_ticker_update(payload) -> bool:
     return True
 
 
+@_paper_lifecycle_transaction
 def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
     """Apply the registry-selected family tile chase schedule."""
     if not is_patient_chase_lane(order.get("research_lane")):
@@ -24492,6 +24549,7 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
     )
 
 
+@_paper_lifecycle_transaction
 def _record_expired_order(source: dict, reason: str):
     """Append one expired row to in-memory registry + CSV (orders or pre-order signals)."""
     if source.get("bitfinex_order_id"):
@@ -25368,6 +25426,7 @@ def _paper_terminal_cost_evidence(
     }
 
 
+@_paper_lifecycle_transaction
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
     if not validate_state():
@@ -36551,6 +36610,7 @@ PHANTOM_CANCEL_MAX_BODY_LEN = 4096
 
 
 @app.route('/api/reconcile/phantom-cancel', methods=['POST'])
+@_paper_lifecycle_transaction
 def api_reconcile_phantom_cancel():
     """Cancel a phantom paper position left behind by a MISSED_SHOWCASE_FILL.
 
