@@ -31,6 +31,8 @@ const mirrorLeaseAgent = join(root, 'services/btc-conservative-agent/research/mi
 const mirrorLeaseEngine = join(root, 'services/btc-signal-engine/research/mirror_generation_lease.py');
 const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
 const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
+const relayOutboxAgent = join(root, 'services/btc-conservative-agent/relay_event_outbox.py');
+const relayOutboxEngine = join(root, 'services/btc-signal-engine/relay_event_outbox.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
@@ -128,6 +130,7 @@ for (const [canonical, mirror, label] of [
   [rawCleanupAgent, rawCleanupEngine, 'raw generation cleanup transaction'],
   [rawCleanupOwnerAgent, rawCleanupOwnerEngine, 'raw generation cleanup owner'],
   [mirrorLeaseAgent, mirrorLeaseEngine, 'mirror generation lease'],
+  [relayOutboxAgent, relayOutboxEngine, 'durable relay event outbox'],
 ]) {
   if (!existsSync(canonical) || !existsSync(mirror)) fail(`Missing ${label} dependency`);
   const canonicalHash = sha256(canonical);

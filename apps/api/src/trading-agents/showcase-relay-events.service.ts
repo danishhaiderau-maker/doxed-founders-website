@@ -7,7 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { SignalCycleStatus, TradingAgentInstanceStatus } from '@prisma/client';
 import type { Prisma } from '@prisma/client';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
@@ -32,6 +32,7 @@ export type ShowcaseRelayEventType =
   | 'POSITION_REDUCED'
   | 'POSITION_CLOSED'
   | 'ORDER_EXPIRED'
+  | 'ORDER_CANCELLED'
   | 'LIMIT_UPDATED';
 
 export type ShowcaseRelayEventBody = {
@@ -169,7 +170,19 @@ type RelayPersistenceReceipt = {
 
 type CanonicalRelayPersistenceReceipt = RelayPersistenceReceipt & {
   cycleId?: string;
+  signalCycleEventId?: string;
+  replayed?: boolean;
 };
+
+export function exactSourceRelayReplayMatches(
+  existing: { cycleId: string; eventType: string; sourcePayloadSha256: string | null; sourceEventSeq: number | null },
+  incoming: { cycleId: string; eventType: string; payloadSha256: string; eventSeq: number | null | undefined },
+): boolean {
+  return existing.cycleId === incoming.cycleId
+    && existing.eventType === incoming.eventType
+    && existing.sourcePayloadSha256 === incoming.payloadSha256
+    && existing.sourceEventSeq === (Number.isInteger(incoming.eventSeq) ? incoming.eventSeq : null);
+}
 
 export const SIGNED_SHOWCASE_MAX_MARGIN_USD = 0.25;
 const SIGNED_SHOWCASE_LEVERAGE = 100;
@@ -704,6 +717,9 @@ export class ShowcaseRelayEventsService {
       context?.signatureHeader,
       body,
     );
+    const sourcePayloadSha256 = verifiedSignedPayload && context?.rawBody
+      ? createHash('sha256').update(context.rawBody).digest('hex')
+      : undefined;
     this.assertActiveDashboardOwner(body);
 
     const tradeId = (body.trade_id ?? '').trim();
@@ -756,11 +772,10 @@ export class ShowcaseRelayEventsService {
         );
       }
       const receivedMs = Date.parse(String(persistBody.platform_received_at));
-      if (receivedMs < evidence.sourceEventAt.getTime() - 5_000
-        || receivedMs - evidence.sourceEventAt.getTime() > 5 * 60_000) {
-        throw new BadRequestException('Position reduction evidence is stale or future-dated');
+      if (receivedMs < evidence.sourceEventAt.getTime() - 5_000) {
+        throw new BadRequestException('Position reduction evidence is future-dated');
       }
-      const receipt = await this.persistRelayEvent(slug, persistBody);
+      const receipt = await this.persistRelayEvent(slug, persistBody, undefined, sourcePayloadSha256);
       let subscribersProcessed = 0;
       if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true') {
         const processed = await this.execution.processAuditedPositionReductionEvent(
@@ -787,6 +802,7 @@ export class ShowcaseRelayEventsService {
         subscribers_processed: subscribersProcessed,
         intentCreated: false,
         platform_received_at: persistBody.platform_received_at ?? null,
+        durable_ack: this.durableAck(persistBody, receipt, sourcePayloadSha256),
         ingest_ms: Date.now() - ingestStartedAt,
       };
     }
@@ -913,8 +929,17 @@ export class ShowcaseRelayEventsService {
       && signedExpiryEvidence.eventId.length <= 255
       && ORDER_EXPIRED_FLATTEN_REASONS.has(signedExpiryEvidence.reason),
     );
+    const signedCancelEvidence = event === 'ORDER_CANCELLED' && signedLifecycleEvent
+      && body.ts && Number.isFinite(Date.parse(body.ts))
+      && typeof body.event_id === 'string' && Boolean(body.event_id.trim())
+      && typeof body.event_seq === 'number' && Number.isInteger(body.event_seq) && body.event_seq >= 0
+      && typeof body.limit_price === 'number' && Number.isFinite(body.limit_price) && body.limit_price > 0
+      && typeof body.reason === 'string' && Boolean(body.reason.trim());
+    if (event === 'ORDER_CANCELLED' && !signedCancelEvidence) {
+      throw new BadRequestException('Signed order cancellation requires exact source order evidence');
+    }
     if (event === 'ORDER_EXPIRED' && signedLifecycleEvent && !expiryFlattenable) {
-      await this.persistRelayEvent('conservative-btc', persistBody);
+      const expiryReceipt = await this.persistRelayEvent('conservative-btc', persistBody, undefined, sourcePayloadSha256);
       return {
         ok: true,
         accepted: true,
@@ -926,6 +951,7 @@ export class ShowcaseRelayEventsService {
         intentCreated: false,
         persisted: true,
         platform_received_at: persistBody.platform_received_at ?? null,
+        durable_ack: this.durableAck(persistBody, expiryReceipt, sourcePayloadSha256),
         ingest_ms: Date.now() - ingestStartedAt,
       };
     }
@@ -942,7 +968,7 @@ export class ShowcaseRelayEventsService {
     if (
       !noCopyClose
       && signedLifecycleEvent
-      && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED' || event === 'ORDER_EXPIRED')
+      && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED' || event === 'ORDER_EXPIRED' || event === 'ORDER_CANCELLED')
     ) {
       this.execution.requestExecutorPreWake?.(
         event,
@@ -967,6 +993,7 @@ export class ShowcaseRelayEventsService {
     let persisted = false;
     let canonicalRevisionApplied = false;
     let executionWakeQueued = false;
+    let persistenceReceipt: CanonicalRelayPersistenceReceipt = { persisted: false, intentApplied: false };
     try {
       const receipt = await this.persistRelayEvent(slug, persistBody, () => {
         // Canonical signed state is committed before this callback. Start the
@@ -981,9 +1008,10 @@ export class ShowcaseRelayEventsService {
           );
           executionWakeQueued = true;
         }
-      });
+      }, sourcePayloadSha256);
       persisted = receipt.persisted;
       canonicalRevisionApplied = receipt.intentApplied;
+      persistenceReceipt = receipt;
     } catch (err) {
       this.logger.error(
         `Showcase relay persist failed: ${err instanceof Error ? err.message : err}`,
@@ -1028,6 +1056,7 @@ export class ShowcaseRelayEventsService {
           persisted: noCopyAck.persisted || persisted,
           negative_evidence: 'SHOWCASE_ONLY_RELAY_PAUSED',
           platform_received_at: persistBody.platform_received_at ?? null,
+          durable_ack: this.durableAck(persistBody, persistenceReceipt, sourcePayloadSha256),
           ingest_ms: Date.now() - ingestStartedAt,
         };
       }
@@ -1046,7 +1075,26 @@ export class ShowcaseRelayEventsService {
         canonicalRevisionApplied ? persistBody.limit_price ?? null : null,
       canonical_trade_id: canonicalRevisionApplied ? persistBody.trade_id ?? null : null,
       platform_received_at: persistBody.platform_received_at ?? null,
+      durable_ack: this.durableAck(persistBody, persistenceReceipt, sourcePayloadSha256),
       ingest_ms: Date.now() - ingestStartedAt,
+    };
+  }
+
+  private durableAck(
+    body: ShowcaseRelayEventBody,
+    receipt: CanonicalRelayPersistenceReceipt,
+    payloadSha256?: string,
+  ) {
+    if (!receipt.persisted || !receipt.signalCycleEventId || !payloadSha256) return null;
+    return {
+      event_id: body.event_id ?? null,
+      event_type: body.event,
+      trade_id: body.trade_id ?? null,
+      event_seq: body.event_seq ?? null,
+      payload_sha256: payloadSha256,
+      signal_cycle_event_id: receipt.signalCycleEventId,
+      platform_received_at: body.platform_received_at ?? null,
+      replayed: Boolean(receipt.replayed),
     };
   }
 
@@ -1227,7 +1275,8 @@ export class ShowcaseRelayEventsService {
     slug: string,
     body: ShowcaseRelayEventBody,
     onCanonicalPersisted?: (receipt: CanonicalRelayPersistenceReceipt) => void,
-  ): Promise<RelayPersistenceReceipt> {
+    sourcePayloadSha256?: string,
+  ): Promise<CanonicalRelayPersistenceReceipt> {
     const tradeId = (body.trade_id ?? '').trim();
     if (!tradeId) return { persisted: false, intentApplied: false };
     const eventId =
@@ -1278,6 +1327,30 @@ export class ShowcaseRelayEventsService {
         if (!cycleReceipt) return { persisted: false, intentApplied: false };
         const { cycleId, intentApplied } = cycleReceipt;
 
+        const existingSourceEvent = sourcePayloadSha256
+          ? await (typeof tx.signalCycleEvent.findUnique === 'function'
+            ? tx.signalCycleEvent.findUnique({
+              where: { sourceEventId: eventId },
+              select: {
+                id: true, cycleId: true, eventType: true,
+                sourcePayloadSha256: true, sourceEventSeq: true,
+              },
+            })
+            : Promise.resolve(null))
+          : null;
+        if (existingSourceEvent) {
+          if (!exactSourceRelayReplayMatches(existingSourceEvent, {
+            cycleId, eventType: eventBody.event, payloadSha256: sourcePayloadSha256!,
+            eventSeq: eventBody.event_seq,
+          })) {
+            throw new BadRequestException('Conflicting signed relay event replay');
+          }
+          return {
+            persisted: true, intentApplied, cycleId,
+            signalCycleEventId: existingSourceEvent.id, replayed: true,
+          };
+        }
+
         if (eventBody.event === 'POSITION_REDUCED') {
           const reduction = positionReducedEvidence(eventBody);
           if (!reduction) throw new BadRequestException('Invalid position reduction evidence');
@@ -1321,23 +1394,36 @@ export class ShowcaseRelayEventsService {
         // Bitfinex has accepted its own order.
         if (eventBody.event === 'POSITION_CLOSED') {
           const cycle = await tx.signalCycle.findUnique({ where: { id: cycleId } });
-          if (!cycle || cycle.status === SignalCycleStatus.CLOSED) {
-            return { persisted: true, intentApplied, cycleId };
+          if (cycle && cycle.status !== SignalCycleStatus.CLOSED) {
+            await tx.signalCycle.update({
+              where: { id: cycleId },
+              data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
+            });
           }
-          await tx.signalCycle.update({
-            where: { id: cycleId },
-            data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
-          });
         }
 
-        return { persisted: true, intentApplied, cycleId };
+        let signalCycleEventId: string | undefined;
+        if (sourcePayloadSha256) {
+          const audit = await tx.signalCycleEvent.create({ data: {
+            cycleId,
+            eventType: eventBody.event,
+            payload: eventBody as unknown as Prisma.InputJsonValue,
+            sourceEventId: eventId,
+            sourcePayloadSha256,
+            sourceEventSeq: Number.isInteger(eventBody.event_seq) ? eventBody.event_seq : null,
+            platformReceivedAt: eventBody.platform_received_at
+              ? new Date(eventBody.platform_received_at) : null,
+          }, select: { id: true } });
+          signalCycleEventId = audit.id || eventId;
+        }
+        return { persisted: true, intentApplied, cycleId, signalCycleEventId, replayed: false };
       }),
     );
     if (!canonical.persisted || !canonical.cycleId) return canonical;
 
     onCanonicalPersisted?.(canonical);
 
-    await this.withRelayPersistenceLock(lockKey, () =>
+    if (!sourcePayloadSha256) await this.withRelayPersistenceLock(lockKey, () =>
       this.prisma.$transaction(async (tx) => {
         await tx.$executeRaw`
           SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))
@@ -1361,7 +1447,12 @@ export class ShowcaseRelayEventsService {
         }
       }),
     );
-    return { persisted: true, intentApplied: canonical.intentApplied };
+    return {
+      persisted: true, intentApplied: canonical.intentApplied,
+      cycleId: canonical.cycleId,
+      signalCycleEventId: canonical.signalCycleEventId,
+      replayed: canonical.replayed,
+    };
   }
 
   private async withRelayPersistenceLock<T>(
@@ -1456,6 +1547,9 @@ export class ShowcaseRelayEventsService {
         body?.event === 'ORDER_EXPIRED'
         && Boolean(body.platform_received_at)
         && Boolean(body.source_expires_at);
+      const carriesSignedCancel =
+        body?.event === 'ORDER_CANCELLED'
+        && Boolean(body.platform_received_at);
       const applyExactLimit =
         carriesExactLimit
         && existing.status !== SignalCycleStatus.CLOSED
@@ -1465,7 +1559,7 @@ export class ShowcaseRelayEventsService {
       );
       if (
         signedIntent
-        && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose || carriesSignedExpiry)
+        && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose || carriesSignedExpiry || carriesSignedCancel)
       ) {
         const incoming = relayIntentEnvelope(existing.id, tradeId, body) as Record<
           string,
@@ -1475,7 +1569,7 @@ export class ShowcaseRelayEventsService {
           context?: Record<string, unknown>;
         };
         const intentEnvelope =
-          current?.action === 'ENTER' && (applyExactLimit || carriesSignedClose || carriesSignedExpiry)
+          current?.action === 'ENTER' && (applyExactLimit || carriesSignedClose || carriesSignedExpiry || carriesSignedCancel)
             ? {
                 ...current,
                 direction: incoming.direction,

@@ -2350,7 +2350,7 @@ export function hireExpiryRequiresExitOnlyProcessing(
 const RELAY_EXECUTOR_WAKE_KEY = 'relayExecutorWake';
 
 export type RelayExecutorWakeRequest = {
-  trigger: 'POSITION_CLOSED' | 'POSITION_REDUCED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
+  trigger: 'POSITION_CLOSED' | 'POSITION_REDUCED' | 'ORDER_EXPIRED' | 'ORDER_CANCELLED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
   at: string;
   tradeId?: string | null;
   /** HMAC-verified close evidence carried by the latency-only private prewake. */
@@ -4453,7 +4453,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * crash/restart backstop.
    */
   requestExecutorPreWake(
-    trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED' | 'ORDER_EXPIRED',
+    trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'ORDER_CANCELLED',
     tradeId?: string | null,
     receivedAt?: string,
     signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'] | RelayExecutorWakeRequest['signedOpen'],

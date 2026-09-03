@@ -2769,6 +2769,10 @@ model SignalCycleEvent {
   participantId String?
   eventType     String
   payload       Json?
+  sourceEventId String?  @unique
+  sourcePayloadSha256 String?
+  sourceEventSeq Int?
+  platformReceivedAt DateTime?
   createdAt     DateTime @default(now())
 
   cycle       SignalCycle             @relation(fields: [cycleId], references: [id], onDelete: Cascade)

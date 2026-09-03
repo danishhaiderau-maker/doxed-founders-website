@@ -775,8 +775,10 @@ def test_marketable_fallback_requires_full_visible_depth_at_hard_limit():
 
 
 def test_durable_relay_receipt_requires_persistence_and_platform_timestamp():
-    receipt_ok = _compile_function("_relay_response_has_durable_receipt", {})
+    from relay_event_outbox import RelayEventOutbox
+    receipt_ok = _compile_function("_relay_response_has_durable_receipt", {"RelayEventOutbox": RelayEventOutbox})
     expected = {
+        "event": "LIMIT_UPDATED",
         "event_id": "cont-settle:LIMIT_UPDATED:4:token",
         "event_seq": 4,
         "trade_id": "cont-settle",
@@ -784,20 +786,19 @@ def test_durable_relay_receipt_requires_persistence_and_platform_timestamp():
     }
     good = {
         "persisted": True,
-        "intentCreated": True,
-        "canonical_revision_applied": True,
-        "canonical_event_id": expected["event_id"],
-        "canonical_event_seq": 4,
-        "canonical_trade_id": "cont-settle",
-        "canonical_limit_price": 63167.0,
-        "platform_received_at": "2026-08-02T13:05:00Z",
+        "durable_ack": {
+            "event_id": expected["event_id"], "event_type": "LIMIT_UPDATED",
+            "event_seq": 4, "trade_id": "cont-settle",
+            "payload_sha256": RelayEventOutbox.payload_sha256(expected),
+            "signal_cycle_event_id": "db-event-1",
+            "platform_received_at": "2026-08-02T13:05:00Z",
+        },
     }
     assert receipt_ok(good, expected) is True
-    assert receipt_ok({**good, "canonical_limit_price": 63166.0}, expected) is False
-    assert receipt_ok({**good, "canonical_revision_applied": False}, expected) is False
-    assert receipt_ok({**good, "intentCreated": False}, expected) is False
+    assert receipt_ok({**good, "durable_ack": {**good["durable_ack"], "payload_sha256": "0" * 64}}, expected) is False
+    assert receipt_ok({**good, "durable_ack": {**good["durable_ack"], "event_type": "POSITION_CLOSED"}}, expected) is False
     assert receipt_ok({**good, "persisted": False}, expected) is False
-    assert receipt_ok({**good, "platform_received_at": None}, expected) is False
+    assert receipt_ok({**good, "durable_ack": {**good["durable_ack"], "platform_received_at": None}}, expected) is False
     assert receipt_ok(None) is False
 
 
@@ -850,7 +851,8 @@ def test_marketable_fallback_waits_for_relay_settlement_and_is_terminal():
         and node.name == "_apply_marketable_limit_fallback"
     )
     fallback_source = ast.get_source_segment(BOT_SOURCE, fallback)
-    assert 'order.get("marketable_fallback") or order.get("marketable_fallback_inflight")' in fallback_source
+    assert 'if order.get("marketable_fallback_inflight")' in fallback_source
+    assert "_drain_relay_event_outbox_once" in fallback_source
     assert "wait_for_durable_receipt=True" in fallback_source
     assert 'order["relay_event_durable_ack"] = True' in fallback_source
     assert 'signal["relay_settle_not_before_ts"] = order["relay_settle_not_before_ts"]' in fallback_source
@@ -874,11 +876,22 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
     delivery_entered = threading.Event()
     delivery_release = threading.Event()
 
-    def push(event, trade_id, extra, *, wait_for_durable_receipt=False):
+    def push(
+        event, trade_id, extra, *, wait_for_durable_receipt=False,
+        commit_before_ack=None,
+    ):
         deliveries.append((event, trade_id, dict(extra), wait_for_durable_receipt))
         if block_delivery["value"]:
             delivery_entered.set()
             assert delivery_release.wait(timeout=5)
+        if delivery_ok["value"] and callable(commit_before_ack):
+            assert commit_before_ack() is True
+        elif delivery_ok["value"]:
+            order.update({
+                "limit_price": extra["limit_price"],
+                "limit_chase_count": extra["event_seq"],
+                "marketable_fallback": True,
+            })
         return delivery_ok["value"]
 
     class Logger:
@@ -913,7 +926,23 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
             "chase_bucket_allowed": lambda bucket: bucket == 4,
             "chase_count_bucket": lambda count: f"{count}_chases",
             "_cancel_pending_for_chase_gate": lambda *_args: None,
-            "_push_showcase_relay_event": push,
+                "_push_showcase_relay_event": push,
+                "_drain_relay_event_outbox_once": lambda _event_id: (
+                    order.update({
+                        "limit_price": deliveries[-1][2]["limit_price"],
+                        "limit_chase_count": deliveries[-1][2]["event_seq"],
+                        "marketable_fallback": delivery_ok["value"],
+                        "relay_event_durable_ack": delivery_ok["value"],
+                        "relay_settle_not_before_ts": 115.0,
+                    }) or signal.update({
+                        "limit_price": deliveries[-1][2]["limit_price"],
+                        "limit_chase_count": deliveries[-1][2]["event_seq"],
+                        "marketable_fallback": delivery_ok["value"],
+                        "relay_event_durable_ack": delivery_ok["value"],
+                        "relay_settle_not_before_ts": 115.0,
+                    }) or order.pop("marketable_fallback_inflight", None)
+                    or {"acked": int(delivery_ok["value"])}
+                ),
             "_resolve_fill_model": lambda *_args: "AI_DIRECT_CHASE",
             "datetime": datetime,
             "timezone": timezone,
@@ -1082,7 +1111,9 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
     failed_worker.join(timeout=5)
     assert not failed_worker.is_alive()
     assert failed_results == [False]
-    assert "marketable_fallback_inflight" not in failed_order
+    # The durable event owns this in-flight marker until retry ACK; clearing it
+    # here would strand a source event that later replays after restart.
+    assert failed_order.get("marketable_fallback_inflight")
     assert "marketable_fallback" not in failed_order
     assert (
         pending_limit_ready_for_fill(
@@ -1092,9 +1123,9 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
             ask=63235.8,
             now=100.5,
         )
-        is True
+        is False
     )
-    assert touch_checks == [True]
+    assert touch_checks == []
 
     cancelled_order = {
         **concurrent_order,

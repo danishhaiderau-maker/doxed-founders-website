@@ -30,6 +30,8 @@ const mirrorLeaseAgent = join(root, 'services/btc-conservative-agent/research/mi
 const mirrorLeaseEngine = join(root, 'services/btc-signal-engine/research/mirror_generation_lease.py');
 const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
 const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
+const relayOutboxAgent = join(root, 'services/btc-conservative-agent/relay_event_outbox.py');
+const relayOutboxEngine = join(root, 'services/btc-signal-engine/relay_event_outbox.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
 const engineDir = join(root, 'services/btc-signal-engine');
@@ -114,6 +116,12 @@ if (!existsSync(rotationAgent)) {
 }
 copyFileSync(rotationAgent, rotationEngine);
 console.log(`Mirrored production rotation orchestrator (${sha256(readFileSync(rotationAgent, 'utf8'))})`);
+
+if (!existsSync(relayOutboxAgent)) {
+  throw new Error('Missing durable relay event outbox dependency');
+}
+copyFileSync(relayOutboxAgent, relayOutboxEngine);
+console.log(`Mirrored durable relay event outbox (${sha256(readFileSync(relayOutboxAgent, 'utf8'))})`);
 
 // Registry-owned policy dependencies are part of the executable mirror. Copy
 // only the active family modules plus their common implementation and remove

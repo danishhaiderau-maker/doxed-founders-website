@@ -59,6 +59,7 @@ from raw_generation_cleanup_owner import RawGenerationCleanupOwner
 from research.mirror_generation_lease import (MirrorGenerationLease, MirrorGenerationLeaseTimeout,
                                               mirror_generation_lease_held)
 from emergency_evidence_wal import EmergencyEvidenceWal
+from relay_event_outbox import RelayEventOutbox
 from position_registry import (
     PositionCloseClaimScope,
     finalize_position_close,
@@ -4723,7 +4724,14 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
             pos["path_end_mark_price"] = float(price)
         close_position(pos, reason)
         return True
+    prior_qty = float(pos.get("qty") or 0)
     pos["qty"] = original_qty * remaining_after
+    _push_showcase_relay_event("POSITION_REDUCED", pos.get("trade_id"), {
+        "direction": pos.get("dir"),
+        "prior_qty": prior_qty, "reduced_qty": close_qty,
+        "remaining_qty": pos["qty"], "fill_price": float(price),
+        "reduce_only": True, "research_lane": pos.get("research_lane"),
+    })
     _emit_genome_execution_event("PARTIAL_EXIT", {"trade_id": pos.get("trade_id"), **receipt})
     save_paper_lifecycle(reason=f"partial_exit:{reason}")
     return False
@@ -8887,6 +8895,8 @@ _relay_http_adapter = requests.adapters.HTTPAdapter(
 )
 _relay_http_session.mount("https://", _relay_http_adapter)
 _relay_http_session.mount("http://", _relay_http_adapter)
+_relay_event_outbox = None  # initialized with the canonical lifecycle lock below
+_relay_event_drain_lock = threading.Lock()
 
 
 def _platform_relay_keepalive_url() -> str:
@@ -8902,25 +8912,14 @@ def _platform_relay_keepalive_url() -> str:
 
 
 def _platform_relay_connection_keepalive_loop():
-    """Keep Fly -> platform DNS/TLS/HTTP transport warm without mutations."""
-    url = _platform_relay_keepalive_url()
-    if not url:
-        return
+    """Event-driven relay drain with a bounded local crash-recovery tick."""
     while not shutdown_event.is_set():
+        _drain_relay_event_outbox_once()
         _drain_partial_reduction_outbox_once()
-        try:
-            response = _relay_http_session.get(
-                url,
-                headers={"Accept": "application/json"},
-                timeout=1.5,
-            )
-            response.close()
-        except Exception:
-            # Relay POST durability and retries remain authoritative. Warm-up
-            # failure is intentionally silent and never changes bot state.
-            pass
-        if shutdown_event.wait(3.0):
-            return
+        # Enqueue wakes this lane immediately. The timeout is only bounded
+        # crash/missed-wake recovery and performs no idle HTTP/DB call itself.
+        delay = 1.0 if _relay_event_outbox.pending_count() else 30.0
+        _relay_event_outbox.consume_wake(delay)
 
 
 def _relay_delivery_lag_ms(source_ts, platform_received_at):
@@ -8962,35 +8961,147 @@ def _record_relay_delivery(
 
 
 def _relay_response_has_durable_receipt(response_payload, expected_payload=None) -> bool:
-    """True only after Railway confirms durable lifecycle persistence."""
-    base_ok = bool(
-        isinstance(response_payload, dict)
-        and response_payload.get("persisted") is True
-        and response_payload.get("intentCreated") is True
-        and response_payload.get("canonical_revision_applied") is True
-        and response_payload.get("platform_received_at")
-    )
-    if not base_ok or not expected_payload:
-        return base_ok
-    try:
-        return bool(
-            response_payload.get("canonical_event_id") == expected_payload.get("event_id")
-            and int(response_payload.get("canonical_event_seq"))
-            == int(expected_payload.get("event_seq"))
-            and response_payload.get("canonical_trade_id") == expected_payload.get("trade_id")
-            and abs(
-                float(response_payload.get("canonical_limit_price"))
-                - float(expected_payload.get("limit_price"))
-            )
-            < 0.005
-        )
-    except (TypeError, ValueError):
+    """Validate an event-specific DB receipt, never an entry-only side effect."""
+    if not isinstance(response_payload, dict) or not isinstance(expected_payload, dict):
         return False
+    ack = response_payload.get("durable_ack")
+    if not isinstance(ack, dict):
+        return False
+    return bool(
+        response_payload.get("persisted") is True
+        and ack.get("event_id") == expected_payload.get("event_id")
+        and ack.get("event_type") == expected_payload.get("event")
+        and ack.get("trade_id") == expected_payload.get("trade_id")
+        and ack.get("event_seq") == expected_payload.get("event_seq")
+        and ack.get("payload_sha256")
+        == RelayEventOutbox.payload_sha256(expected_payload)
+        and ack.get("signal_cycle_event_id")
+        and ack.get("platform_received_at")
+    )
 
 
 def _relay_delivery_history_snapshot(limit=10):
     with _relay_push_history_lock:
         return list(_relay_push_history)[-max(1, int(limit)):]
+
+
+def _commit_marketable_relay_payload(payload: dict) -> bool:
+    """Idempotently apply a durable marketable reprice before source ACK."""
+    if not payload.get("marketable_fallback"):
+        return True
+    trade_id = str(payload.get("trade_id") or "")
+    event_id = str(payload.get("event_id") or "")
+    new_limit = float(payload.get("limit_price") or 0)
+    sequence = int(payload.get("event_seq") or 0)
+    with trade_lock:
+        order = next((row for row in pending_orders if str(row.get("trade_id") or "") == trade_id), None)
+        if not order or order.get("status") != "PENDING" or new_limit <= 0:
+            return False
+        if order.get("marketable_fallback"):
+            return bool(
+                abs(float(order.get("limit_price") or 0) - new_limit) < 0.005
+                and int(order.get("limit_chase_count") or 0) == sequence
+            )
+        if order.get("marketable_fallback_inflight") != event_id:
+            return False
+        order.pop("marketable_fallback_inflight", None)
+        signal = trades_map.get(trade_id, {}).get("signal_ref")
+        order.update({
+            "limit_price": new_limit,
+            "limit_chase_count": sequence,
+            "last_chase_ts": time.time(),
+            "marketable_fallback": True,
+            "relay_settle_not_before_ts": datetime.fromisoformat(
+                str(payload.get("relay_settle_not_before_ts")).replace("Z", "+00:00")
+            ).timestamp(),
+            "relay_event_durable_ack": True,
+            "relay_event_ack_at_ts": time.time(),
+            "marketable_fallback_depth_qty": payload.get("marketable_fallback_depth_qty"),
+        })
+        order["fill_model"] = _resolve_fill_model(signal, order)
+        if isinstance(signal, dict):
+            for key in (
+                "limit_price", "limit_chase_count", "last_chase_ts",
+                "marketable_fallback", "relay_settle_not_before_ts",
+                "relay_event_durable_ack", "relay_event_ack_at_ts",
+            ):
+                signal[key] = order.get(key)
+            signal["submitted_order_event_seq"] = sequence
+            signal["submitted_order_limit_price"] = new_limit
+        return True
+
+
+def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
+    """POST one already-durable event and remove it only on an exact DB ACK."""
+    payload = record.get("payload") or {}
+    event_id = str(record.get("event_id") or "")
+    url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
+    webhook_secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
+    if not url or not webhook_secret:
+        _relay_event_outbox.fail(event_id, "relay URL or HMAC secret missing")
+        return False
+    body = RelayEventOutbox.canonical_body(payload)
+    signature = hmac.new(webhook_secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    headers = {
+        "Content-Type": "application/json", "Accept": "application/json",
+        "X-Showcase-Signature": f"sha256={signature}",
+    }
+    legacy_secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
+    if legacy_secret:
+        headers["X-Bot-Control-Secret"] = legacy_secret
+    started = time.perf_counter()
+    try:
+        response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
+        response.raise_for_status()
+        receipt = response.json() if response.content else {}
+        if not _relay_response_has_durable_receipt(receipt, payload):
+            raise RuntimeError("relay durable receipt identity mismatch")
+        ack_state = None
+        if payload.get("marketable_fallback"):
+            commit_before_ack = lambda: _commit_marketable_relay_payload(payload)
+        if callable(commit_before_ack):
+            with paper_lifecycle_file_lock:
+                if commit_before_ack() is not True:
+                    raise RuntimeError("relay source finalization rejected")
+                ack_state = _build_paper_lifecycle_payload(
+                    reason=f"relay_ack:{payload.get('event')}"
+                )
+        if not _relay_event_outbox.acknowledge(
+            event_id, receipt, state_payload=ack_state
+        ):
+            raise RuntimeError("relay outbox acknowledgement mismatch")
+        _relay_push_state.update({
+            "seq": int(_relay_push_state.get("seq") or 0) + 1,
+            "last_ts": time.time(), "last_event": payload.get("event"),
+            "last_ok": True, "last_error": None,
+            "last_latency_ms": round((time.perf_counter() - started) * 1000, 1),
+            "last_platform_received_at": (receipt.get("durable_ack") or {}).get("platform_received_at"),
+        })
+        return True
+    except Exception as exc:
+        _relay_event_outbox.fail(event_id, exc)
+        _relay_push_state.update({
+            "last_ts": time.time(), "last_event": payload.get("event"),
+            "last_ok": False, "last_error": str(exc)[:240],
+            "last_latency_ms": round((time.perf_counter() - started) * 1000, 1),
+        })
+        return False
+
+
+def _drain_relay_event_outbox_once(event_id: str | None = None, commit_before_ack=None) -> dict:
+    if not _relay_event_drain_lock.acquire(blocking=False):
+        return {"attempted": 0, "acked": 0, "busy": True}
+    try:
+        rows = _relay_event_outbox.due(limit=100)
+        if event_id:
+            rows = [row for row in rows if row.get("event_id") == event_id]
+        acked = sum(
+            1 for row in rows
+            if _deliver_relay_outbox_record(row, commit_before_ack=commit_before_ack)
+        )
+        return {"attempted": len(rows), "acked": acked, "busy": False}
+    finally:
+        _relay_event_drain_lock.release()
 
 # Prefer explicit env; when SHOWCASE_AGENT is on, fall back to the production
 # adoption endpoint so Fly deploys cannot silently drop the landing chart feed.
@@ -9165,6 +9276,7 @@ def _push_showcase_relay_event(
     extra: dict = None,
     *,
     wait_for_durable_receipt: bool = False,
+    commit_before_ack=None,
 ) -> bool:
     """Push a lifecycle event, optionally waiting for Railway durability.
 
@@ -9179,16 +9291,8 @@ def _push_showcase_relay_event(
         logger.warning(f"[RELAY PUSH] blocked non-owner process event={event} trade={trade_id}")
         return False
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
-    if not url:
-        return False
     secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
     webhook_secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
-    if wait_for_durable_receipt and not webhook_secret:
-        logger.warning(
-            f"[RELAY PUSH] durable receipt blocked without HMAC secret "
-            f"event={event} trade={trade_id}"
-        )
-        return False
     payload = {
         "event": event,
         "trade_id": trade_id,
@@ -9197,7 +9301,7 @@ def _push_showcase_relay_event(
     }
     if extra and isinstance(extra, dict):
         payload.update(extra)
-    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED"):
+    if event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "ORDER_CANCELLED", "POSITION_REDUCED"):
         evidence_only = event == "POSITION_REDUCED"
         relay_lane = (
             _platform_relay_evidence_lane_for_event
@@ -9215,18 +9319,11 @@ def _push_showcase_relay_event(
             )
             return False
         payload["research_lane"] = relay_lane
-    payload["event_id"] = str(
-        payload.get("event_id")
-        or (
-            f"{trade_id or 'none'}:{event}:"
-            f"{payload.get('event_seq', 'na')}:{payload['ts']}"
-        )
-    )
+    suggested_seq = payload.get("event_seq") if isinstance(payload.get("event_seq"), int) else None
     # Exact chase updates are safe to consume without waiting for a platform callback
     # only when this canonical owner also HMAC-signs the payload.
     if (
-        webhook_secret
-        and event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED")
+        event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "ORDER_CANCELLED", "POSITION_REDUCED")
         and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
         and (
             (
@@ -9250,11 +9347,12 @@ def _push_showcase_relay_event(
                 and isinstance(payload.get("source_expires_at"), str)
             )
             or (
+                event == "ORDER_CANCELLED"
+                and isinstance(payload.get("reason"), str)
+                and isinstance(payload.get("limit_price"), (int, float))
+            )
+            or (
                 event == "POSITION_REDUCED"
-                and isinstance(payload.get("event_id"), str)
-                and isinstance(payload.get("reduction_id"), str)
-                and isinstance(payload.get("event_seq"), int)
-                and int(payload.get("event_seq") or 0) > 0
                 and isinstance(payload.get("prior_qty"), (int, float))
                 and isinstance(payload.get("reduced_qty"), (int, float))
                 and isinstance(payload.get("remaining_qty"), (int, float))
@@ -9268,86 +9366,33 @@ def _push_showcase_relay_event(
         )
     ):
         payload["schema"] = "dcf-showcase-intent-v1"
-    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-    def _post() -> bool:
-        started = time.perf_counter()
-        # POSITION_CLOSED must not drop on a 2.5s Railway blip — exits are
-        # latency-critical and the poll backstop is slower. Allow a longer
-        # client timeout plus a couple of tight retries for that event only.
-        durable_events = ("POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED")
-        post_timeout = 8.0 if event in durable_events else 2.5
-        attempts = 3 if event in durable_events else 1
-        last_exc: Exception | None = None
-        for attempt in range(attempts):
-            try:
-                headers = {"Content-Type": "application/json", "Accept": "application/json"}
-                if secret:
-                    headers["X-Bot-Control-Secret"] = secret
-                if webhook_secret:
-                    signature = hmac.new(
-                        webhook_secret.encode("utf-8"),
-                        body,
-                        hashlib.sha256,
-                    ).hexdigest()
-                    headers["X-Showcase-Signature"] = f"sha256={signature}"
-                response = _relay_http_session.post(
-                    url, data=body, headers=headers, timeout=post_timeout
-                )
-                response.raise_for_status()
-                response_payload = response.json() if response.content else {}
-                if wait_for_durable_receipt and not _relay_response_has_durable_receipt(
-                    response_payload, payload
-                ):
-                    raise RuntimeError("relay event was not durably acknowledged")
-                _relay_push_state["seq"] += 1
-                _relay_push_state["last_ts"] = time.time()
-                _relay_push_state["last_event"] = event
-                _relay_push_state["last_ok"] = True
-                _relay_push_state["last_error"] = None
-                _relay_push_state["last_latency_ms"] = round(
-                    (time.perf_counter() - started) * 1000, 1
-                )
-                _relay_push_state["last_platform_received_at"] = (
-                    response_payload.get("platform_received_at")
-                    if isinstance(response_payload, dict)
-                    else None
-                )
-                _record_relay_delivery(
-                    event,
-                    trade_id,
-                    payload.get("ts"),
-                    ok=True,
-                    http_latency_ms=_relay_push_state["last_latency_ms"],
-                    platform_received_at=_relay_push_state["last_platform_received_at"],
-                )
-                return True
-            except Exception as exc:
-                last_exc = exc
-                if attempt + 1 < attempts:
-                    time.sleep(0.35 * (attempt + 1))
-                    continue
-        _relay_push_state["last_ts"] = time.time()
-        _relay_push_state["last_event"] = event
-        _relay_push_state["last_ok"] = False
-        _relay_push_state["last_error"] = str(last_exc)[:240] if last_exc else "unknown"
-        _relay_push_state["last_latency_ms"] = round(
-            (time.perf_counter() - started) * 1000, 1
-        )
-        _record_relay_delivery(
-            event,
-            trade_id,
-            payload.get("ts"),
-            ok=False,
-            http_latency_ms=_relay_push_state["last_latency_ms"],
-            error=last_exc,
-        )
-        logger.warning(f"[RELAY PUSH] {event} trade={trade_id} failed: {last_exc}")
+    try:
+        # The committed lifecycle generation is the source of truth: resulting
+        # paper state and its PENDING relay transition are one durable replace.
+        with paper_lifecycle_file_lock:
+            lifecycle = _build_paper_lifecycle_payload(
+                reason=f"relay_transition:{event}"
+            )
+            record = _relay_event_outbox.enqueue_next(
+                payload, suggested_seq, state_payload=lifecycle
+            )
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.error(f"[RELAY OUTBOX] enqueue failed event={event} trade={trade_id}: {exc}")
+        if event in {
+            "ORDER_PLACED", "LIMIT_UPDATED", "POSITION_OPENED",
+            "POSITION_REDUCED", "POSITION_CLOSED", "ORDER_EXPIRED",
+            "ORDER_CANCELLED",
+        }:
+            set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
+            raise RuntimeError(
+                f"canonical relay lifecycle commit failed for {event}"
+            ) from exc
         return False
-
     if wait_for_durable_receipt:
-        return _post()
-    threading.Thread(target=_post, daemon=True).start()
+        result = _drain_relay_event_outbox_once(
+            record["event_id"], commit_before_ack=commit_before_ack
+        )
+        return result.get("acked") == 1
     return True
 
 
@@ -9433,14 +9478,6 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         return
     url = (os.getenv("SHOWCASE_RELAY_WEBHOOK_URL") or "").strip()
     secret = (os.getenv("SHOWCASE_WEBHOOK_SECRET") or "").strip()
-    if not url:
-        return
-    if not secret:
-        _relay_push_state["last_ts"] = time.time()
-        _relay_push_state["last_event"] = f"INTENT_{event}"
-        _relay_push_state["last_ok"] = False
-        _relay_push_state["last_error"] = "SHOWCASE_WEBHOOK_SECRET_MISSING"
-        return
 
     sig = signal or {}
     ai_dict = ai or {}
@@ -9555,71 +9592,19 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         "strategy_mode": strategy_mode,
         **_dashboard_owner_metadata(),
     }
-
     try:
-        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    except Exception as exc:
-        logger.debug(f"[INTENT WEBHOOK] sign failed trade={trade_id}: {exc}")
-        return
-
-    def _post():
-        started = time.perf_counter()
-        try:
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "X-Showcase-Signature": f"sha256={signature}",
-            }
-            # Legacy bearer secret stays (G13) for backward compat during rollout.
-            legacy_secret = (os.getenv("BOT_CONTROL_SECRET") or "").strip()
-            if legacy_secret:
-                headers["X-Bot-Control-Secret"] = legacy_secret
-            response = _relay_http_session.post(
-                url, data=body, headers=headers, timeout=2.5
+        with paper_lifecycle_file_lock:
+            lifecycle = _build_paper_lifecycle_payload(
+                reason=f"relay_transition:{event}"
             )
-            response.raise_for_status()
-            response_payload = response.json() if response.content else {}
-            _relay_push_state["seq"] += 1
-            _relay_push_state["last_ts"] = time.time()
-            _relay_push_state["last_event"] = f"INTENT_{event}"
-            _relay_push_state["last_ok"] = True
-            _relay_push_state["last_error"] = None
-            _relay_push_state["last_latency_ms"] = round(
-                (time.perf_counter() - started) * 1000, 1
+            _relay_event_outbox.enqueue_next(
+                payload, payload["event_seq"], state_payload=lifecycle
             )
-            _relay_push_state["last_platform_received_at"] = (
-                response_payload.get("platform_received_at")
-                if isinstance(response_payload, dict)
-                else None
-            )
-            _record_relay_delivery(
-                f"INTENT_{event}",
-                trade_id,
-                payload.get("ts"),
-                ok=True,
-                http_latency_ms=_relay_push_state["last_latency_ms"],
-                platform_received_at=_relay_push_state["last_platform_received_at"],
-            )
-        except Exception as exc:
-            _relay_push_state["last_ts"] = time.time()
-            _relay_push_state["last_event"] = f"INTENT_{event}"
-            _relay_push_state["last_ok"] = False
-            _relay_push_state["last_error"] = str(exc)[:240]
-            _relay_push_state["last_latency_ms"] = round(
-                (time.perf_counter() - started) * 1000, 1
-            )
-            _record_relay_delivery(
-                f"INTENT_{event}",
-                trade_id,
-                payload.get("ts"),
-                ok=False,
-                http_latency_ms=_relay_push_state["last_latency_ms"],
-                error=exc,
-            )
-            logger.warning(f"[INTENT WEBHOOK] {event} trade={trade_id} failed: {exc}")
-
-    threading.Thread(target=_post, daemon=True).start()
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.error(f"[INTENT WEBHOOK] durable enqueue failed trade={trade_id}: {exc}")
+        if event == "ORDER_PLACED":
+            set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
+            raise RuntimeError("canonical ORDER_PLACED commit failed") from exc
 
 
 def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None, signal: dict = None):
@@ -20968,10 +20953,13 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     """After patient chase, set marketable limit at ask/bid when structure still valid."""
     if order.get("status") != "PENDING":
         return False
-    if order.get("marketable_fallback") or order.get("marketable_fallback_inflight"):
+    if order.get("marketable_fallback"):
         # Terminal reprice: do not consume another chase bucket or cancel the
         # order while its relay settlement dwell is in progress.
         return False
+    if order.get("marketable_fallback_inflight"):
+        _drain_relay_event_outbox_once(order.get("marketable_fallback_inflight"))
+        return bool(order.get("marketable_fallback"))
     if _is_static_no_chase_order(order):
         return False
     created = float(order.get("created_ts") or 0)
@@ -21051,6 +21039,7 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
                 "event_seq": chase_count,
                 "executable": True,
                 "marketable_fallback": True,
+                "marketable_fallback_depth_qty": available_qty,
                 "relay_settle_not_before_ts": settle_not_before_iso,
             },
             wait_for_durable_receipt=True,
@@ -21063,7 +21052,6 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
     if not relay_acked:
         with trade_lock:
             if order.get("marketable_fallback_inflight") == transition_id:
-                order.pop("marketable_fallback_inflight", None)
                 order["marketable_fallback_last_delivery_failed_ts"] = now
         logger.warning(
             f"[SIM] MARKETABLE_LIMIT deferred trade_id={order.get('trade_id')} "
@@ -21071,7 +21059,13 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         )
         return False
     with trade_lock:
-        transition_still_current = (
+        transition_already_committed = (
+            order.get("status") == "PENDING"
+            and order.get("marketable_fallback") is True
+            and abs(float(order.get("limit_price") or 0) - new_limit) < 0.005
+            and int(order.get("limit_chase_count") or 0) == chase_count
+        )
+        transition_still_current = transition_already_committed or (
             order.get("status") == "PENDING"
             and order.get("marketable_fallback_inflight") == transition_id
             and not order.get("marketable_fallback")
@@ -21091,7 +21085,7 @@ def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, no
         order["marketable_fallback"] = True
         order["relay_settle_not_before_ts"] = settle_not_before_ts
         order["relay_event_durable_ack"] = True
-        order["relay_event_ack_at_ts"] = time.time()
+        order["relay_event_ack_at_ts"] = order.get("relay_event_ack_at_ts") or time.time()
         order["marketable_fallback_depth_qty"] = available_qty
         order["fill_model"] = _resolve_fill_model(signal, order)
         if signal:
@@ -24628,8 +24622,19 @@ def _record_expired_order(source: dict, reason: str):
         {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
         source_ts=float(now),
     )
+    relay_terminal_event = (
+        "ORDER_EXPIRED"
+        if str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
+        else "ORDER_CANCELLED"
+    )
+    executable_terminal = _is_executable_order_expiry(source, reason, limit_price) or bool(
+        relay_terminal_event == "ORDER_CANCELLED"
+        and str(source.get("entry_type") or "").upper() in ("LIMIT", "SIM_LIMIT")
+        and source.get("created_ts")
+        and isinstance(limit_price, (int, float)) and limit_price > 0
+    )
     if (
-        _is_executable_order_expiry(source, reason, limit_price)
+        executable_terminal
         and _platform_relay_lane_for_event(tid, row.get("research_lane"))
         in PLATFORM_RELAY_ELIGIBLE_LANES
     ):
@@ -24637,10 +24642,10 @@ def _record_expired_order(source: dict, reason: str):
         # newer master/signal revision and pair it with this older limit.
         generation = int(source.get("event_seq") or source.get("limit_chase_count") or 0)
         _push_showcase_relay_event(
-            "ORDER_EXPIRED", tid, {
+            relay_terminal_event, tid, {
                 "direction": row.get("dir"), "reason": reason,
                 "event_seq": generation, "limit_price": limit_price,
-                "event_id": f"{tid}:ORDER_EXPIRED:{generation}:{row['time']}",
+                "event_id": f"{tid}:{relay_terminal_event}:{generation}:{row['time']}",
                 "source_created_at": datetime.fromtimestamp(created, timezone.utc).isoformat() if created else None,
                 "source_expires_at": row["time"],
                 "research_lane": row.get("research_lane"),
@@ -25850,7 +25855,9 @@ def close_position(pos: dict, exit_reason: str):
         path_complete=False,
     )
 
-    save_positions()
+    # The following POSITION_CLOSED event commits this terminal state and its
+    # tombstone as one paper-lifecycle generation.
+    save_positions(persist_lifecycle=False)
     save_persistent_config()
     if not validate_state():
         logger.error("State corrupted after closing position")
@@ -26582,6 +26589,10 @@ MAX_REST_FAILURES = 5
 POSITIONS_FILE = "open_positions.json"
 PAPER_LIFECYCLE_FILE = "paper_lifecycle_v1.json"
 paper_lifecycle_file_lock = threading.RLock()
+_relay_event_outbox = RelayEventOutbox(
+    PAPER_LIFECYCLE_FILE,
+    shared_lock=paper_lifecycle_file_lock,
+)
 api_key = os.getenv("BITFINEX_API_KEY", "").strip()
 api_secret = os.getenv("BITFINEX_API_SECRET", "").strip()
 bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
@@ -36775,7 +36786,9 @@ def api_reconcile_phantom_cancel():
         },
         path_complete=False,
     )
-    save_positions()
+    # The following POSITION_CLOSED event commits this terminal state and its
+    # tombstone as one paper-lifecycle generation.
+    save_positions(persist_lifecycle=False)
     save_persistent_config()
 
     # Refresh the cached /api/state snapshot so Railway's next /api/state
@@ -44434,8 +44447,8 @@ def _load_v3_order_intent_identities() -> tuple[set[tuple[str, str]], bool]:
     return identities, True
 
 
-def save_paper_lifecycle(reason: str = "mutation") -> bool:
-    """Atomically persist every paper lane's executable lifecycle."""
+def _build_paper_lifecycle_payload(reason: str = "mutation") -> dict:
+    """Capture one internally consistent canonical paper-state generation."""
     try:
         with trade_lock:
             positions = [_canonicalize_paper_position_snapshot(row) for row in open_positions
@@ -44459,24 +44472,33 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
                 and not (row.get("signal_ref") or {}).get("order_placed")
                 and not (row.get("signal_ref") or {}).get("bitfinex_order_id")
             ]
-    except RuntimeError as exc:
-        # Keep the prior atomic file rather than killing the position manager or
-        # publishing a partial lifecycle.  The next tick retries naturally.
-        logger.warning(
-            f"[PAPER_LIFECYCLE] snapshot deferred reason={reason} error={exc} "
-            "[PIPELINE ENFORCEMENT]"
-        )
-        return False
-    payload = {
+    except RuntimeError:
+        raise
+    return {
         "schema": "paper_lifecycle_v1", "saved_at": utc_iso(),
         "git_rev": _runtime_git_rev_exact(),
         "reason": reason, "paper_only": bool(_force_paper_mode_active()),
         "live_armed": bool(state.get("live_armed")), "positions": positions,
         "pending_orders": orders, "awaiting_signals": awaiting_signals,
     }
-    return _atomic_file_replace(PAPER_LIFECYCLE_FILE,
-        lambda f: json.dump(payload, f, default=str, sort_keys=True),
-        paper_lifecycle_file_lock, "PAPER_LIFECYCLE")
+
+
+def save_paper_lifecycle(reason: str = "mutation") -> bool:
+    """Atomically persist paper state plus pending relay transitions."""
+    try:
+        with paper_lifecycle_file_lock:
+            payload = _relay_event_outbox.decorate_lifecycle(
+                _build_paper_lifecycle_payload(reason)
+            )
+            return _atomic_file_replace(PAPER_LIFECYCLE_FILE,
+                lambda f: json.dump(payload, f, default=str, sort_keys=True),
+                paper_lifecycle_file_lock, "PAPER_LIFECYCLE")
+    except RuntimeError as exc:
+        logger.warning(
+            f"[PAPER_LIFECYCLE] snapshot deferred reason={reason} error={exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return False
 
 
 def load_paper_lifecycle() -> dict:
@@ -44484,6 +44506,14 @@ def load_paper_lifecycle() -> dict:
     result = {"positions": 0, "pending_orders": 0, "awaiting_signals": 0,
               "overdue_reconciled": 0, "intent_conflicts": 0,
               "duplicates": 0, "invalid": 0}
+    if not _relay_event_outbox.healthy:
+        logger.error(
+            "[PAPER_LIFECYCLE] fail-closed corrupt generation: %s",
+            _relay_event_outbox.recovery_error,
+        )
+        result["invalid"] += 1
+        result["relay_recovery_error"] = _relay_event_outbox.recovery_error
+        return result
     if not os.path.exists(PAPER_LIFECYCLE_FILE):
         return result
     with paper_lifecycle_file_lock:
@@ -44666,7 +44696,7 @@ def capture_emergency_paper_lifecycle_snapshot() -> dict:
                          paper_lifecycle_file_lock, "PAPER_LIFECYCLE_EMERGENCY")
     return {"path": target, "sha256": digest, "bytes": len(raw)}
 
-def save_positions():
+def save_positions(*, persist_lifecycle: bool = True):
     with state_lock:
         snapshot = copy.deepcopy(open_positions)
     _atomic_file_replace(
@@ -44675,7 +44705,8 @@ def save_positions():
         positions_file_lock,
         "POSITIONS",
     )
-    save_paper_lifecycle(reason="positions_saved")
+    if persist_lifecycle:
+        save_paper_lifecycle(reason="positions_saved")
 
 def validate_state():
     # prune_signals takes trade_lock — never call it under state_lock (deadlocks with
@@ -49173,7 +49204,9 @@ def main():
     if str(os.environ.get("EXECUTION_PAUSED", "")).strip().lower() == "true":
         set_execution_paused("SIMULATION_ONLY")
     load_positions()
-    load_paper_lifecycle()
+    lifecycle_restore = load_paper_lifecycle()
+    if lifecycle_restore.get("relay_recovery_error"):
+        set_execution_paused("PAPER_LIFECYCLE_CORRUPT")
     _reconcile_overdue_v3_expected_orders(force=True)
     rebuild_state_from_snapshots()
     reconcile_restored_paper_terminal_conflicts()

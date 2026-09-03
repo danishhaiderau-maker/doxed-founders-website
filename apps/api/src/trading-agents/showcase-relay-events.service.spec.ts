@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import test from 'node:test';
 import {
   ShowcaseRelayEventsService,
   canClaimExpiredCycleForCurrentGeneration,
   exactLifecycleRevisionMatches,
+  exactSourceRelayReplayMatches,
   relayIntentEnvelope,
   resolveSignedShowcaseSizing,
   positionReducedEvidence,
@@ -13,6 +14,22 @@ import {
   isReductionSequenceStale,
   shouldApplyExactLifecycleUpdate,
 } from './showcase-relay-events.service';
+
+test('signed source replay is exact and conflicting identity or hash fails closed', () => {
+  const existing = {
+    cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED',
+    sourcePayloadSha256: 'a'.repeat(64), sourceEventSeq: 4,
+  };
+  assert.equal(exactSourceRelayReplayMatches(existing, {
+    cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED', payloadSha256: 'a'.repeat(64), eventSeq: 4,
+  }), true);
+  for (const incoming of [
+    { cycleId: 'cycle-2', eventType: 'LIMIT_UPDATED', payloadSha256: 'a'.repeat(64), eventSeq: 4 },
+    { cycleId: 'cycle-1', eventType: 'POSITION_CLOSED', payloadSha256: 'a'.repeat(64), eventSeq: 4 },
+    { cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED', payloadSha256: 'b'.repeat(64), eventSeq: 4 },
+    { cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED', payloadSha256: 'a'.repeat(64), eventSeq: 3 },
+  ]) assert.equal(exactSourceRelayReplayMatches(existing, incoming), false);
+});
 
 test('POSITION_REDUCED accepts only reconciled reduce-only evidence', () => {
   const valid = positionReducedEvidence({
@@ -892,6 +909,13 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
 
   assert.equal(result.ok, true);
   assert.equal(result.persisted, true);
+  const ack = result.durable_ack as Record<string, unknown>;
+  assert.equal(ack.event_id, body.event_id);
+  assert.equal(ack.event_type, body.event);
+  assert.equal(ack.trade_id, body.trade_id);
+  assert.equal(ack.event_seq, body.event_seq);
+  assert.equal(ack.payload_sha256, createHash('sha256').update(rawBody).digest('hex'));
+  assert.equal(Boolean(ack.signal_cycle_event_id), true);
   assert.deepEqual(trace, ['prewake', 'persist', 'execution']);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(trace, ['prewake', 'persist', 'execution', 'canonical']);

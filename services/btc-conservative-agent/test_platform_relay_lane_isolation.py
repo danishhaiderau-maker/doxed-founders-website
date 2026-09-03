@@ -107,15 +107,32 @@ def test_every_relay_lifecycle_path_is_wired_to_lane_metadata() -> None:
     close_source = ast.get_source_segment(BOT_SOURCE, _function("close_position"))
 
     assert (
-        'event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "POSITION_REDUCED")'
+        'event in ("LIMIT_UPDATED", "POSITION_OPENED", "POSITION_CLOSED", "ORDER_EXPIRED", "ORDER_CANCELLED", "POSITION_REDUCED")'
         in push_source
     )
     assert "_platform_relay_lane_for_event" in push_source
     assert 'payload["research_lane"] = relay_lane' in push_source
+    assert "_build_paper_lifecycle_payload" in push_source
+    assert "state_payload=lifecycle" in push_source
+    assert "enqueue_next" in push_source
     assert 'isinstance(payload.get("qty"), (int, float))' in push_source
     assert "_platform_relay_lane_for_event" in emit_source
+    assert "_build_paper_lifecycle_payload" in emit_source
+    assert "state_payload=lifecycle" in emit_source
     assert '"research_lane": (' in close_source
     assert 'pos.get("research_lane")' in close_source
+    pushed = {
+        call.args[0].value
+        for call in ast.walk(BOT_TREE)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_push_showcase_relay_event"
+        and call.args and isinstance(call.args[0], ast.Constant)
+    }
+    assert {"LIMIT_UPDATED", "POSITION_OPENED", "POSITION_REDUCED", "POSITION_CLOSED"} <= pushed
+    assert 'emit_signal_webhook("ORDER_PLACED"' in BOT_SOURCE
+    assert 'relay_terminal_event = (' in BOT_SOURCE
+    assert '"ORDER_EXPIRED"' in BOT_SOURCE and '"ORDER_CANCELLED"' in BOT_SOURCE
     fill_source = ast.get_source_segment(BOT_SOURCE, _function("fill_order"))
     finalize_source = ast.get_source_segment(
         BOT_SOURCE,
@@ -318,7 +335,7 @@ def test_limit_chase_never_emits_after_the_same_trade_is_open() -> None:
     assert order["limit_chase_count"] == 2
 
 
-def test_relay_keepalive_is_health_only_on_the_exact_webhook_origin() -> None:
+def test_relay_worker_has_no_idle_network_polling() -> None:
     class FakeEnvironment:
         @staticmethod
         def getenv(name: str) -> str:
@@ -336,8 +353,10 @@ def test_relay_keepalive_is_health_only_on_the_exact_webhook_origin() -> None:
         BOT_SOURCE,
         _function("_platform_relay_connection_keepalive_loop"),
     )
-    assert "_relay_http_session.get(" in loop_source
+    assert "_relay_http_session.get(" not in loop_source
     assert "_relay_http_session.post(" not in loop_source
+    assert "_drain_relay_event_outbox_once()" in loop_source
+    assert "pending_count() else 30.0" in loop_source
 
 
 if __name__ == "__main__":
@@ -346,5 +365,5 @@ if __name__ == "__main__":
     test_every_relay_lifecycle_path_is_wired_to_lane_metadata()
     test_terminal_close_dominates_a_late_fill_thread()
     test_terminal_close_wins_the_actual_open_commit_barrier()
-    test_relay_keepalive_is_health_only_on_the_exact_webhook_origin()
+    test_relay_worker_has_no_idle_network_polling()
     print("Platform relay lane isolation checks passed")
