@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -56,6 +57,8 @@ import {
 
 const DDOLLAR_PER_USD = 100;
 const SIGNAL_POLL_MS = resolveSignalCyclePollMs();
+const SIGNAL_IDLE_RECOVERY_POLL_MS = 5 * 60_000;
+const SIGNAL_STARTUP_RECOVERY_DELAY_MS = 1_000;
 const BARE_UUID_TRADE_ID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -92,10 +95,19 @@ export type SignalApiKeyContext = {
 };
 
 @Injectable()
-export class SignalCyclesService implements OnModuleInit {
+export class SignalCyclesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SignalCyclesService.name);
   private lastSeenTradeId: string | null = null;
   private pollingIntents = false;
+  private runningBackstop = false;
+  private activeCycleBackstop = false;
+  private backstopEnabled = false;
+  private backstopTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly scheduleTimeout = (callback: () => void, delayMs: number) => {
+    const timer = setTimeout(callback, delayMs);
+    timer.unref();
+    return timer;
+  };
 
   constructor(
     private readonly prisma: PrismaService,
@@ -109,16 +121,57 @@ export class SignalCyclesService implements OnModuleInit {
       this.logger.log('Signal-cycle ingress disabled in isolated executor worker');
       return;
     }
+    this.backstopEnabled = true;
     void this.bootstrapLastTradeId();
-    this.logger.log(`Signal cycle bridge polling every ${SIGNAL_POLL_MS / 1000}s`);
-    setInterval(() => void this.pollBotForIntents(), SIGNAL_POLL_MS);
-    setInterval(() => void this.syncShowcaseCycleClosures(), SIGNAL_POLL_MS);
-    setTimeout(() => void this.pollBotForIntents(), 1_000);
+    this.logger.log(
+      `Signal cycle bridge uses signed direct wakes; backstop=${SIGNAL_POLL_MS / 1000}s active, ${SIGNAL_IDLE_RECOVERY_POLL_MS / 1000}s idle`,
+    );
+    this.scheduleBackstop(SIGNAL_STARTUP_RECOVERY_DELAY_MS);
+  }
+
+  onModuleDestroy() {
+    this.backstopEnabled = false;
+    if (this.backstopTimer) clearTimeout(this.backstopTimer);
+    this.backstopTimer = null;
+  }
+
+  private scheduleBackstop(delayMs: number) {
+    if (!this.backstopEnabled) return;
+    if (this.backstopTimer) clearTimeout(this.backstopTimer);
+    this.backstopTimer = this.scheduleTimeout(() => {
+      this.backstopTimer = null;
+      void this.runBackstop();
+    }, delayMs);
+  }
+
+  /**
+   * Durable missed-event/crash recovery. Signed showcase events are the latency
+   * path; Neon is read at the 2s cadence only while a cycle actually needs
+   * closure reconciliation. An idle service performs one bounded 5m recovery
+   * probe instead of two independent reads every 2s.
+   */
+  private async runBackstop() {
+    if (this.runningBackstop) return;
+    this.runningBackstop = true;
+    try {
+      await this.pollBotForIntents();
+      this.activeCycleBackstop = await this.syncShowcaseCycleClosures();
+    } catch (err) {
+      this.logger.warn(
+        `Signal-cycle recovery backstop failed: ${err instanceof Error ? err.message : err}`,
+      );
+    } finally {
+      this.runningBackstop = false;
+      this.scheduleBackstop(
+        this.activeCycleBackstop ? SIGNAL_POLL_MS : SIGNAL_IDLE_RECOVERY_POLL_MS,
+      );
+    }
   }
 
   private async bootstrapLastTradeId() {
     const agent = await this.prisma.tradingAgent.findUnique({
       where: { slug: 'conservative-btc' },
+      select: { id: true },
     });
     if (!agent) return;
     const latest = await this.prisma.signalCycle.findFirst({
@@ -223,6 +276,7 @@ export class SignalCyclesService implements OnModuleInit {
     if (!this.botBridge.isEnabled()) return false;
     const agent = await this.prisma.tradingAgent.findUnique({
       where: { slug: 'conservative-btc' },
+      select: { id: true },
     });
     if (!agent) return false;
 
@@ -350,17 +404,24 @@ export class SignalCyclesService implements OnModuleInit {
       created = await this.pollBotForIntents();
     }
     if (closures) {
-      await this.syncShowcaseCycleClosures(true);
+      this.activeCycleBackstop = await this.syncShowcaseCycleClosures(true);
     }
+    // ORDER_PLACED proves a cycle may now need fast closure reconciliation even
+    // when this wake intentionally skipped the closures query.
+    if (created || (intents && !closures)) this.activeCycleBackstop = true;
+    this.scheduleBackstop(
+      this.activeCycleBackstop ? SIGNAL_POLL_MS : SIGNAL_IDLE_RECOVERY_POLL_MS,
+    );
     return created;
   }
 
-  async syncShowcaseCycleClosures(force = false) {
-    if (!this.botBridge.isEnabled()) return;
+  async syncShowcaseCycleClosures(force = false): Promise<boolean> {
+    if (!this.botBridge.isEnabled()) return false;
     const agent = await this.prisma.tradingAgent.findUnique({
       where: { slug: 'conservative-btc' },
+      select: { id: true },
     });
-    if (!agent) return;
+    if (!agent) return false;
 
     const openCycles = await this.prisma.signalCycle.findMany({
       where: {
@@ -368,11 +429,18 @@ export class SignalCyclesService implements OnModuleInit {
         status: { in: [SignalCycleStatus.INTENT, SignalCycleStatus.PENDING_ENTRY, SignalCycleStatus.OPEN] },
       },
       take: 200,
+      select: {
+        id: true,
+        tradeId: true,
+        status: true,
+        expiresAt: true,
+        intentEnvelope: true,
+      },
     });
-    if (!openCycles.length) return;
+    if (!openCycles.length) return false;
 
     const bot = await this.botBridge.fetchStateForExecution(force);
-    if (!bot) return;
+    if (!bot) return true;
 
     const trades = normalizeBotSessionTrades(bot);
     const tradesMap = bot.trades_map ?? {};
@@ -435,6 +503,7 @@ export class SignalCyclesService implements OnModuleInit {
         });
       }
     }
+    return true;
   }
 
   async getLatest(slug: string, apiCtx: SignalApiKeyContext | null) {

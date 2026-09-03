@@ -40,6 +40,102 @@ function terminalEventService(prisma: any) {
   return new SignalCyclesService(prisma, {} as never, {} as never, {} as never);
 }
 
+function schedulingService() {
+  const service = new SignalCyclesService(
+    {
+      tradingAgent: { findUnique: async () => null },
+      signalCycle: { findFirst: async () => null },
+    } as never,
+    { isEnabled: () => true } as never,
+    {} as never,
+    {} as never,
+  ) as any;
+  const delays: number[] = [];
+  service.backstopEnabled = true;
+  service.scheduleTimeout = (_callback: () => void, delayMs: number) => {
+    delays.push(delayMs);
+    return { unref() {} };
+  };
+  return { service, delays };
+}
+
+test('signal-cycle scheduler performs one bounded startup recovery wake', () => {
+  const { service, delays } = schedulingService();
+  service.backstopEnabled = false;
+  service.onModuleInit();
+  assert.deepEqual(delays, [1_000]);
+  service.onModuleDestroy();
+});
+
+test('idle signal-cycle recovery schedules one five-minute probe instead of recurring 2s reads', async () => {
+  const { service, delays } = schedulingService();
+  let intentReads = 0;
+  let closureReads = 0;
+  service.pollBotForIntents = async () => {
+    intentReads += 1;
+    return false;
+  };
+  service.syncShowcaseCycleClosures = async () => {
+    closureReads += 1;
+    return false;
+  };
+
+  await service.runBackstop();
+
+  assert.equal(intentReads, 1);
+  assert.equal(closureReads, 1);
+  assert.deepEqual(delays, [5 * 60_000]);
+});
+
+test('active signal cycle preserves the two-second reconciliation cadence', async () => {
+  const { service, delays } = schedulingService();
+  service.pollBotForIntents = async () => false;
+  service.syncShowcaseCycleClosures = async () => true;
+
+  await service.runBackstop();
+
+  assert.deepEqual(delays, [2_000]);
+});
+
+test('signed ORDER_PLACED wake bypasses idle delay and restores active cadence', async () => {
+  const { service, delays } = schedulingService();
+  let directWakeReads = 0;
+  service.pollBotForIntents = async () => {
+    directWakeReads += 1;
+    return false;
+  };
+  service.syncShowcaseCycleClosures = async () => {
+    assert.fail('ORDER_PLACED wake intentionally skips the closure query');
+  };
+
+  await service.wakeFromShowcase({ intents: true, closures: false });
+
+  assert.equal(directWakeReads, 1);
+  assert.deepEqual(delays, [2_000]);
+});
+
+test('closure recovery reports idle without fetching Fly when Neon has no active cycles', async () => {
+  let flyReads = 0;
+  const service = new SignalCyclesService(
+    {
+      tradingAgent: { findUnique: async () => ({ id: 'agent-1' }) },
+      signalCycle: { findMany: async () => [] },
+    } as never,
+    {
+      isEnabled: () => true,
+      fetchStateForExecution: async () => {
+        flyReads += 1;
+        return {};
+      },
+    } as never,
+    {} as never,
+    {} as never,
+  );
+
+  assert.equal(await service.syncShowcaseCycleClosures(), false);
+  assert.equal(flyReads, 0);
+});
+
 const authenticatedObservedExit = {
   venue: 'bitfinex',
   pnl_usd: 1,
