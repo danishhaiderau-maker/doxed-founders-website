@@ -21,8 +21,8 @@ from pathlib import Path
 
 REQUEST_SCHEMA = "fly_runtime_inventory_worker_request_v1"
 RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v2"
-CHECKPOINT_SCHEMA = "fly_runtime_inventory_worker_checkpoint_v2"
-PROGRESS_SCHEMA = "fly_runtime_inventory_worker_progress_v2"
+CHECKPOINT_SCHEMA = "fly_runtime_inventory_worker_checkpoint_v3"
+PROGRESS_SCHEMA = "fly_runtime_inventory_worker_progress_v3"
 
 DEFAULT_FILE_BUDGET = 5000
 DEFAULT_DIRECTORY_BUDGET = 1000
@@ -31,12 +31,27 @@ MAX_ELAPSED_BUDGET_SECONDS = 270.0
 MAX_FILE_BUDGET = 5000
 MAX_DIRECTORY_BUDGET = 1000
 MAX_DIRECTORY_ENTRIES = 10000
+DEFAULT_GENERATION_DIRECTORY_LIMIT = 50000
+MAX_GENERATION_DIRECTORY_LIMIT = 50000
+DEFAULT_GENERATION_ENTRY_LIMIT = 250000
+MAX_GENERATION_ENTRY_LIMIT = 1000000
+DEFAULT_GENERATION_SPOOL_BYTES = 256 * 1024 * 1024
+MAX_GENERATION_SPOOL_BYTES = 1024 * 1024 * 1024
+GENERATION_LEASE_STALE_SECONDS = 600.0
 DEFAULT_PAGE_ROWS = 250
 MAX_PAGE_ROWS = 1000
 
 
 class CheckpointError(ValueError):
     """The durable traversal state cannot be trusted."""
+
+
+class InventoryWorkerError(ValueError):
+    """A classified, fail-closed inventory construction failure."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 def _within(candidate: Path, root: Path) -> bool:
@@ -292,6 +307,13 @@ def _stable_request(request: dict) -> dict:
         "serialized_append_targets", "rewrite_targets", "v3_runtime_identity",
     )
     stable = {key: request.get(key) for key in keys}
+    # A traversal contract change must start a distinct durable generation;
+    # never try to interpret an older cursor using newer snapshot semantics.
+    stable["worker_snapshot_contract"] = CHECKPOINT_SCHEMA
+    directories, entries, spool_bytes = _generation_limits(request)
+    stable["generation_directory_limit"] = directories
+    stable["generation_entry_limit"] = entries
+    stable["generation_spool_bytes"] = spool_bytes
     stable["inventory_page_rows"] = min(MAX_PAGE_ROWS, max(
         1, int(request.get("inventory_page_rows") or DEFAULT_PAGE_ROWS),
     ))
@@ -351,6 +373,99 @@ def _state_paths(work_root: Path, fingerprint: str) -> tuple[Path, Path, Path, P
     )
 
 
+def _generation_lease_path(work_root: Path, fingerprint: str) -> Path:
+    return work_root / f"inventory-worker-v3-{fingerprint[:32]}.lease.json"
+
+
+def _process_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _acquire_generation_lease(path: Path, nonce: str) -> None:
+    payload = {
+        "schema": "fly_runtime_inventory_generation_lease_v1",
+        "nonce": nonce,
+        "pid": os.getpid(),
+        "acquired_unix": time.time(),
+    }
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    temporary = path.with_name(f"{path.name}.{os.getpid()}.{nonce}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        os.write(descriptor, raw)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        for _attempt in range(2):
+            try:
+                # Publishing a hard link makes the lease visible only after
+                # its complete JSON bytes have been flushed. A crash before
+                # this point leaves an irrelevant nonce-bound temporary file.
+                os.link(temporary, path)
+                return
+            except FileExistsError:
+                try:
+                    stat = path.lstat()
+                    fallback_age = max(0.0, time.time() - float(stat.st_mtime))
+                except OSError:
+                    fallback_age = 0.0
+                owner_known = False
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                    age = max(0.0, time.time() - float(existing.get("acquired_unix") or 0.0))
+                    owner_pid = int(existing.get("pid") or 0)
+                    owner_known = bool(
+                        existing.get("schema") == "fly_runtime_inventory_generation_lease_v1"
+                        and isinstance(existing.get("nonce"), str)
+                        and len(existing["nonce"]) == 32
+                        and owner_pid > 0
+                    )
+                except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                    age, owner_pid = fallback_age, 0
+                # Atomic publication means malformed files are never emitted
+                # by this worker. A stale malformed legacy/crash artifact can
+                # therefore be reclaimed by lstat age; a fresh unknown owner
+                # remains fail-closed.
+                reclaim = bool(
+                    age > GENERATION_LEASE_STALE_SECONDS
+                    and ((owner_known and not _process_alive(owner_pid)) or not owner_known)
+                )
+                if reclaim:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                raise InventoryWorkerError(
+                    "GENERATION_LEASE_ACTIVE",
+                    "another inventory invocation owns this generation",
+                )
+        raise InventoryWorkerError(
+            "GENERATION_LEASE_ACTIVE", "inventory generation lease could not be acquired",
+        )
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _release_generation_lease(path: Path, nonce: str) -> None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("nonce") == nonce and int(payload.get("pid") or 0) == os.getpid():
+            path.unlink(missing_ok=True)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        # Never unlink an unverified lease owned by another invocation.
+        pass
+
+
 def _remove_database(path: Path) -> None:
     for suffix in ("", "-journal", "-wal", "-shm"):
         path.with_name(f"{path.name}{suffix}").unlink(missing_ok=True)
@@ -385,6 +500,8 @@ def _initial_checkpoint(request: dict, fingerprint: str, database_name: str) -> 
         "files_seen": 0,
         "dirs_seen": 0,
         "rows_written": 0,
+        "directories_frozen": 0,
+        "directory_entries_frozen": 0,
         "database_name": database_name,
         "elapsed_seconds": 0.0,
         "invocations": 0,
@@ -414,7 +531,10 @@ def _load_checkpoint(path: Path, request: dict, fingerprint: str, database_path:
             raise CheckpointError("checkpoint roots mismatch")
         if payload.get("phase") not in {"SCAN", "FINALIZE"}:
             raise CheckpointError("checkpoint phase is invalid")
-        for key in ("files_seen", "dirs_seen", "rows_written", "invocations"):
+        for key in (
+            "files_seen", "dirs_seen", "rows_written", "invocations",
+            "directories_frozen", "directory_entries_frozen",
+        ):
             if not isinstance(payload.get(key), int) or payload[key] < 0:
                 raise CheckpointError(f"checkpoint {key} is invalid")
         if not isinstance(payload.get("pending_dirs"), list):
@@ -448,18 +568,26 @@ def _load_checkpoint(path: Path, request: dict, fingerprint: str, database_path:
             if current.get("after_file") is not None and not isinstance(current["after_file"], str):
                 raise CheckpointError("checkpoint file cursor is invalid")
         return payload
-    except CheckpointError:
+    except (CheckpointError, InventoryWorkerError):
         raise
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise CheckpointError(f"checkpoint cannot be decoded: {type(exc).__name__}") from exc
 
 
-def _open_database(path: Path, fingerprint: str) -> sqlite3.Connection:
+def _open_database(path: Path, fingerprint: str, spool_limit_bytes: int) -> sqlite3.Connection:
     connection = None
     try:
         connection = sqlite3.connect(path, timeout=5.0)
         connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("PRAGMA synchronous=FULL")
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        max_pages = max(1, int(spool_limit_bytes) // page_size)
+        connection.execute(f"PRAGMA max_page_count={max_pages}")
+        if int(connection.execute("PRAGMA page_count").fetchone()[0]) > max_pages:
+            raise InventoryWorkerError(
+                "GENERATION_SPOOL_LIMIT_EXCEEDED",
+                "inventory spool already exceeds its generation byte ceiling",
+            )
         connection.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         connection.execute(
             "CREATE TABLE IF NOT EXISTS rows ("
@@ -472,6 +600,22 @@ def _open_database(path: Path, fingerprint: str) -> sqlite3.Connection:
         connection.execute(
             "CREATE TABLE IF NOT EXISTS pages (page_index INTEGER PRIMARY KEY, descriptor_json TEXT NOT NULL)"
         )
+        # Freeze each directory's lexical entry set exactly once. The old
+        # after_file cursor re-ran scandir() on every slice, so a hot directory
+        # could consume O(n * slices) work and lexically-later arrivals could
+        # prevent one inventory generation from ever terminating.
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS directory_snapshots ("
+            "root_index INTEGER NOT NULL, relative TEXT NOT NULL, "
+            "entry_count INTEGER NOT NULL, "
+            "PRIMARY KEY(root_index, relative))"
+        )
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS directory_entries ("
+            "root_index INTEGER NOT NULL, relative TEXT NOT NULL, "
+            "name TEXT NOT NULL, entry_kind TEXT NOT NULL, "
+            "PRIMARY KEY(root_index, relative, name))"
+        )
         existing = connection.execute(
             "SELECT value FROM meta WHERE key = 'request_fingerprint'"
         ).fetchone()
@@ -480,11 +624,17 @@ def _open_database(path: Path, fingerprint: str) -> sqlite3.Connection:
                 "INSERT INTO meta(key, value) VALUES('request_fingerprint', ?)",
                 (fingerprint,),
             )
+            connection.execute(
+                "INSERT INTO meta(key, value) VALUES('directories_frozen', '0')"
+            )
+            connection.execute(
+                "INSERT INTO meta(key, value) VALUES('directory_entries_frozen', '0')"
+            )
             connection.commit()
         elif existing[0] != fingerprint:
             raise CheckpointError("inventory database identity mismatch")
         return connection
-    except CheckpointError:
+    except (CheckpointError, InventoryWorkerError):
         if connection is not None:
             connection.close()
         raise
@@ -559,14 +709,31 @@ def _budgets(request: dict) -> tuple[int, int, float]:
     return file_budget, directory_budget, elapsed_budget
 
 
+def _generation_limits(request: dict) -> tuple[int, int, int]:
+    directories = min(MAX_GENERATION_DIRECTORY_LIMIT, max(1, int(
+        request.get("inventory_generation_directory_limit")
+        or DEFAULT_GENERATION_DIRECTORY_LIMIT
+    )))
+    entries = min(MAX_GENERATION_ENTRY_LIMIT, max(1, int(
+        request.get("inventory_generation_entry_limit")
+        or DEFAULT_GENERATION_ENTRY_LIMIT
+    )))
+    spool_bytes = min(MAX_GENERATION_SPOOL_BYTES, max(64 * 1024, int(
+        request.get("inventory_generation_spool_bytes")
+        or DEFAULT_GENERATION_SPOOL_BYTES
+    )))
+    return directories, entries, spool_bytes
+
+
 def _bounded_directory_entries(directory: Path) -> list[tuple[str, str, bool, bool]]:
     entries = []
     try:
         with os.scandir(directory) as iterator:
             for entry in iterator:
                 if len(entries) >= MAX_DIRECTORY_ENTRIES:
-                    raise CheckpointError(
-                        f"directory entry hard limit exceeded: {directory}"
+                    raise InventoryWorkerError(
+                        "DIRECTORY_ENTRY_LIMIT_EXCEEDED",
+                        "directory entry hard limit exceeded",
                     )
                 try:
                     entries.append((
@@ -575,14 +742,133 @@ def _bounded_directory_entries(directory: Path) -> list[tuple[str, str, bool, bo
                         entry.is_dir(follow_symlinks=False),
                         entry.is_file(follow_symlinks=False),
                     ))
-                except OSError:
-                    continue
+                except OSError as exc:
+                    raise InventoryWorkerError(
+                        "DIRECTORY_SCAN_FAILED",
+                        f"directory entry classification failed: {type(exc).__name__}",
+                    ) from exc
     except CheckpointError:
         raise
-    except OSError:
-        return []
+    except OSError as exc:
+        raise InventoryWorkerError(
+            "DIRECTORY_SCAN_FAILED",
+            f"directory scan failed: {type(exc).__name__}",
+        ) from exc
     entries.sort(key=lambda item: item[0])
     return entries
+
+
+def _freeze_directory_entries(
+    connection: sqlite3.Connection,
+    root_index: int,
+    relative: str,
+    directory: Path,
+    directory_limit: int,
+    entry_limit: int,
+) -> tuple[int, int]:
+    """Persist one immutable directory-name snapshot under a SQLite commit."""
+    frozen = connection.execute(
+        "SELECT entry_count FROM directory_snapshots "
+        "WHERE root_index = ? AND relative = ?",
+        (root_index, relative),
+    ).fetchone()
+    if frozen is not None:
+        actual = int(connection.execute(
+            "SELECT COUNT(*) FROM directory_entries "
+            "WHERE root_index = ? AND relative = ?",
+            (root_index, relative),
+        ).fetchone()[0])
+        if actual != int(frozen[0]):
+            raise InventoryWorkerError(
+                "SNAPSHOT_INTEGRITY_FAILED",
+                "frozen directory entry count does not match its receipt",
+            )
+        return _spool_counters(connection)
+    entries = _bounded_directory_entries(directory)
+    directories_frozen, entries_frozen = _spool_counters(connection)
+    if directories_frozen >= directory_limit:
+        raise InventoryWorkerError(
+            "GENERATION_DIRECTORY_LIMIT_EXCEEDED",
+            "inventory generation directory ceiling exceeded",
+        )
+    if entries_frozen + len(entries) > entry_limit:
+        raise InventoryWorkerError(
+            "GENERATION_ENTRY_LIMIT_EXCEEDED",
+            "inventory generation entry ceiling exceeded",
+        )
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for name, _raw_path, is_directory, is_file in entries:
+            kind = "DIRECTORY" if is_directory else "FILE" if is_file else "OTHER"
+            connection.execute(
+                "INSERT OR IGNORE INTO directory_entries"
+                "(root_index, relative, name, entry_kind) VALUES(?, ?, ?, ?)",
+                (root_index, relative, name, kind),
+            )
+        connection.execute(
+            "INSERT OR IGNORE INTO directory_snapshots"
+            "(root_index, relative, entry_count) VALUES(?, ?, ?)",
+            (root_index, relative, len(entries)),
+        )
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'directories_frozen'",
+            (str(directories_frozen + 1),),
+        )
+        connection.execute(
+            "UPDATE meta SET value = ? WHERE key = 'directory_entries_frozen'",
+            (str(entries_frozen + len(entries)),),
+        )
+        connection.commit()
+    except sqlite3.OperationalError as exc:
+        connection.rollback()
+        if "full" in str(exc).lower():
+            raise InventoryWorkerError(
+                "GENERATION_SPOOL_LIMIT_EXCEEDED",
+                "inventory generation SQLite spool reached its byte ceiling",
+            ) from exc
+        raise
+    except BaseException:
+        connection.rollback()
+        raise
+    return directories_frozen + 1, entries_frozen + len(entries)
+
+
+def _spool_counters(connection: sqlite3.Connection) -> tuple[int, int]:
+    values = dict(connection.execute(
+        "SELECT key, value FROM meta WHERE key IN "
+        "('directories_frozen', 'directory_entries_frozen')"
+    ).fetchall())
+    try:
+        directories = int(values["directories_frozen"])
+        entries = int(values["directory_entries_frozen"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise InventoryWorkerError(
+            "SNAPSHOT_INTEGRITY_FAILED", "inventory spool counters are invalid",
+        ) from exc
+    if directories < 0 or entries < 0:
+        raise InventoryWorkerError(
+            "SNAPSHOT_INTEGRITY_FAILED", "inventory spool counters are negative",
+        )
+    return directories, entries
+
+
+def _validate_spool_snapshot_integrity(connection: sqlite3.Connection) -> None:
+    directories, entries = _spool_counters(connection)
+    snapshot_directories, snapshot_entries = connection.execute(
+        "SELECT COUNT(*), COALESCE(SUM(entry_count), 0) FROM directory_snapshots"
+    ).fetchone()
+    actual_entries = int(connection.execute(
+        "SELECT COUNT(*) FROM directory_entries"
+    ).fetchone()[0])
+    if (
+        int(snapshot_directories) != directories
+        or int(snapshot_entries) != entries
+        or actual_entries != entries
+    ):
+        raise InventoryWorkerError(
+            "SNAPSHOT_INTEGRITY_FAILED",
+            "inventory directory snapshots do not match monotonic spool counters",
+        )
 
 
 def _write_page(staging: Path, page_index: int, rows: list[dict]) -> dict:
@@ -766,20 +1052,36 @@ def _publish_generation(
 def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]:
     fingerprint = _request_fingerprint(request)
     checkpoint_path, progress_path, database_path, staging = _state_paths(work_root, fingerprint)
+    generation_directory_limit, generation_entry_limit, generation_spool_bytes = (
+        _generation_limits(request)
+    )
     try:
         checkpoint = _load_checkpoint(checkpoint_path, request, fingerprint, database_path)
         if checkpoint["invocations"] == 0 and staging.exists():
             shutil.rmtree(staging)
-        connection = _open_database(database_path, fingerprint)
+        connection = _open_database(database_path, fingerprint, generation_spool_bytes)
         database_rows = int(connection.execute("SELECT COUNT(*) FROM rows").fetchone()[0])
         if database_rows < checkpoint["rows_written"]:
             raise CheckpointError("inventory database lost checkpointed rows")
         checkpoint["rows_written"] = database_rows
+        spool_directories, spool_entries = _spool_counters(connection)
+        if (
+            spool_directories < checkpoint["directories_frozen"]
+            or spool_entries < checkpoint["directory_entries_frozen"]
+        ):
+            raise CheckpointError("inventory spool lost checkpointed directory entries")
+        checkpoint["directories_frozen"] = spool_directories
+        checkpoint["directory_entries_frozen"] = spool_entries
+        if spool_directories > generation_directory_limit or spool_entries > generation_entry_limit:
+            raise InventoryWorkerError(
+                "SNAPSHOT_INTEGRITY_FAILED",
+                "inventory spool counters exceed the bound request identity",
+            )
         page_count = int(connection.execute("SELECT COUNT(*) FROM pages").fetchone()[0])
         if checkpoint["phase"] == "SCAN" and page_count:
             raise CheckpointError("inventory database has premature pages")
-    except CheckpointError:
-        _quarantine((checkpoint_path, database_path))
+    except (CheckpointError, InventoryWorkerError):
+        _quarantine((checkpoint_path, database_path, staging))
         raise
     file_budget, directory_budget, elapsed_budget = _budgets(request)
     page_rows = min(MAX_PAGE_ROWS, max(1, int(
@@ -833,41 +1135,65 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                     checkpoint["current_dir"] = current
                 root_index = int(current["root_index"])
                 directory = roots[root_index] / current["relative"]
-                entries = _bounded_directory_entries(directory)
+                frozen_directories, frozen_entries = _freeze_directory_entries(
+                    connection, root_index, str(current["relative"]), directory,
+                    generation_directory_limit, generation_entry_limit,
+                )
+                checkpoint["directories_frozen"] = frozen_directories
+                checkpoint["directory_entries_frozen"] = frozen_entries
                 if not current["children_enqueued"]:
                     children = []
-                    for name, raw_path, is_directory, _ in entries:
-                        path = Path(raw_path)
+                    child_rows = connection.execute(
+                        "SELECT name FROM directory_entries "
+                        "WHERE root_index = ? AND relative = ? AND entry_kind = 'DIRECTORY' "
+                        "ORDER BY name",
+                        (root_index, str(current["relative"])),
+                    ).fetchall()
+                    for (name,) in child_rows:
+                        path = directory / str(name)
                         if (
-                            is_directory
-                            and name.lower() not in excluded_dirs
+                            str(name).lower() not in excluded_dirs
                             and not _linked_directory(path)
                         ):
                             children.append({
                                 "root_index": root_index,
                                 "relative": path.relative_to(roots[root_index]).as_posix(),
                             })
-                    if len(checkpoint["pending_dirs"]) + len(children) > 50000:
-                        raise CheckpointError("pending directory hard limit exceeded")
+                    if (
+                        checkpoint["directories_frozen"]
+                        + len(checkpoint["pending_dirs"])
+                        + len(children)
+                        > generation_directory_limit
+                    ):
+                        raise InventoryWorkerError(
+                            "GENERATION_DIRECTORY_LIMIT_EXCEEDED",
+                            "inventory generation directory ceiling exceeded",
+                        )
                     checkpoint["pending_dirs"].extend(reversed(children))
                     current["children_enqueued"] = True
                     checkpoint["dirs_seen"] += 1
                     invocation_dirs += 1
                 after_file = current.get("after_file")
-                files = [
-                    (name, raw_path) for name, raw_path, _, is_file in entries
-                    if is_file and (after_file is None or name > after_file)
-                ]
-                for name, raw_path in files:
+                remaining_file_budget = max(0, file_budget - invocation_files)
+                files = connection.execute(
+                    "SELECT name FROM directory_entries "
+                    "WHERE root_index = ? AND relative = ? AND entry_kind = 'FILE' "
+                    "AND name > ? ORDER BY name LIMIT ?",
+                    (
+                        root_index, str(current["relative"]),
+                        str(after_file or ""), remaining_file_budget + 1,
+                    ),
+                ).fetchall()
+                for (name,) in files[:remaining_file_budget]:
                     if budget_exhausted():
                         break
-                    row = _row(Path(raw_path), request)
+                    row = _row(directory / str(name), request)
                     invocation_files += 1
                     checkpoint["files_seen"] += 1
-                    current["after_file"] = name
+                    current["after_file"] = str(name)
                     if row is not None:
                         batch_rows.append(row)
-                else:
+                if not budget_exhausted() and len(files) <= remaining_file_budget:
                     checkpoint["current_dir"] = None
 
             checkpoint["rows_written"] = _store_rows(connection, batch_rows)
@@ -877,6 +1203,9 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 and not checkpoint["pending_dirs"]
             )
             if scan_complete:
+                # One terminal verification is allowed; progress slices use
+                # O(1) meta counters and never rescan the whole spool.
+                _validate_spool_snapshot_integrity(connection)
                 checkpoint["phase"] = "FINALIZE"
 
         if checkpoint["phase"] == "FINALIZE" and not budget_exhausted():
@@ -930,6 +1259,18 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             pages_total = max(
                 1, pages_written + ((remaining_rows + page_rows - 1) // page_rows)
             )
+        current_directory_files_remaining = 0
+        current = checkpoint.get("current_dir")
+        if current is not None:
+            current_directory_files_remaining = int(connection.execute(
+                "SELECT COUNT(*) FROM directory_entries "
+                "WHERE root_index = ? AND relative = ? AND entry_kind = 'FILE' "
+                "AND name > ?",
+                (
+                    int(current["root_index"]), str(current["relative"]),
+                    str(current.get("after_file") or ""),
+                ),
+            ).fetchone()[0])
         checkpoint["elapsed_seconds"] = float(checkpoint.get("elapsed_seconds") or 0.0) + elapsed
         checkpoint["invocations"] += 1
         receipt = {
@@ -954,6 +1295,17 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             "directory_budget": directory_budget,
             "elapsed_budget_seconds": elapsed_budget,
             "page_rows": page_rows,
+            "scan_units_completed": checkpoint["files_seen"] + checkpoint["dirs_seen"],
+            "directories_frozen": checkpoint["directories_frozen"],
+            "directory_entries_frozen": checkpoint["directory_entries_frozen"],
+            "generation_directory_limit": generation_directory_limit,
+            "generation_entry_limit": generation_entry_limit,
+            "generation_spool_bytes": generation_spool_bytes,
+            "spool_bytes_used": int(database_path.stat().st_size),
+            "pending_directories": len(checkpoint["pending_dirs"]) + (
+                1 if checkpoint.get("current_dir") is not None else 0
+            ),
+            "current_directory_files_remaining": current_directory_files_remaining,
             "checkpoint_path": str(checkpoint_path.resolve()),
             "database_path": str(database_path.resolve()),
         }
@@ -962,7 +1314,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             checkpoint["checkpoint_sha256"] = _checkpoint_digest(checkpoint)
             _atomic_json(checkpoint_path, checkpoint)
         return generation, receipt
-    except (CheckpointError, sqlite3.DatabaseError):
+    except (CheckpointError, InventoryWorkerError, sqlite3.DatabaseError):
         connection.close()
         _quarantine((checkpoint_path, database_path, staging))
         raise
@@ -987,6 +1339,7 @@ def _rows_sha256(rows: list[dict]) -> str:
 
 def run(request_path: Path, result_path: Path, nonce: str) -> int:
     request = None
+    lease_path = None
     try:
         if hasattr(os, "nice"):
             try:
@@ -994,7 +1347,13 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             except OSError:
                 pass
         request = _load_request(request_path, result_path, nonce)
-        generation, worker_receipt = _build_resumable(request, request_path.parent)
+        fingerprint = _request_fingerprint(request)
+        lease_path = _generation_lease_path(request_path.parent, fingerprint)
+        _acquire_generation_lease(lease_path, nonce)
+        try:
+            generation, worker_receipt = _build_resumable(request, request_path.parent)
+        finally:
+            _release_generation_lease(lease_path, nonce)
         generated_unix = time.time()
         base = {
             "schema": RESULT_SCHEMA,
@@ -1020,6 +1379,19 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                 "invocations": worker_receipt["invocations"],
                 "pages_written": worker_receipt["pages_written"],
                 "pages_total": worker_receipt["pages_total"],
+                "scan_units_completed": worker_receipt["scan_units_completed"],
+                "directories_frozen": worker_receipt["directories_frozen"],
+                "directory_entries_frozen": worker_receipt["directory_entries_frozen"],
+                "pending_directories": worker_receipt["pending_directories"],
+                "current_directory_files_remaining": worker_receipt[
+                    "current_directory_files_remaining"
+                ],
+                "generation_directory_limit": worker_receipt["generation_directory_limit"],
+                "generation_entry_limit": worker_receipt["generation_entry_limit"],
+                "generation_spool_bytes": worker_receipt["generation_spool_bytes"],
+                "spool_bytes_used": worker_receipt["spool_bytes_used"],
+                "invocation_files_seen": worker_receipt["invocation_files_seen"],
+                "invocation_dirs_seen": worker_receipt["invocation_dirs_seen"],
                 "retry_after_seconds": 5,
             }
             _atomic_json(result_path, payload)
@@ -1043,6 +1415,13 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
     except BaseException as exc:
         if request is not None:
             try:
+                failure_code = getattr(exc, "code", None)
+                if failure_code is None and isinstance(exc, sqlite3.DatabaseError):
+                    failure_code = (
+                        "GENERATION_SPOOL_LIMIT_EXCEEDED"
+                        if "full" in str(exc).lower()
+                        else "INVENTORY_SQLITE_FAILED"
+                    )
                 _atomic_json(result_path, {
                     "schema": RESULT_SCHEMA,
                     "status": "FAILED",
@@ -1052,6 +1431,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                     "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     "generated_unix": time.time(),
                     "failure_kind": type(exc).__name__,
+                    "failure_code": failure_code or "INVENTORY_WORKER_FAILED",
                     "failure_reason": str(exc)[:500],
                     "retry_after_seconds": 30,
                 })
