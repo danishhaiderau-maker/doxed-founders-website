@@ -140,6 +140,41 @@ def test_ambiguous_resume_is_never_retried():
     assert calls.count("/api/resume") == 1
 
 
+def test_transient_fresh_relay_failure_retries_observation_only():
+    clock = Clock(); calls = []; relay_attempts = 0
+    statuses = [status(), status(paused=False)]
+    def request(path, payload):
+        nonlocal relay_attempts
+        calls.append(path)
+        if path == "/api/status": return statuses.pop(0)
+        if path == "/api/relay-execution-state?fresh=1":
+            relay_attempts += 1
+            if relay_attempts == 1:
+                raise urllib.error.HTTPError(path, 503, "temporary", {}, None)
+            return {"money_state_generation": 1, "orders": [], "positions": []}
+        return {"status": "resumed", "execution_paused": False}
+    result = resume_incumbent(
+        INCUMBENT, CANDIDATE, request, monotonic=clock.monotonic, sleep=clock.sleep,
+    )
+    assert result["execution_paused"] is False
+    assert calls.count("/api/relay-execution-state?fresh=1") == 2
+    assert calls.count("/api/resume") == 1
+
+
+def test_nontransient_fresh_relay_failure_is_not_retried():
+    calls = []
+    def request(path, payload):
+        calls.append(path)
+        if path == "/api/status": return status()
+        raise urllib.error.HTTPError(path, 401, "unauthorized", {}, None)
+    with pytest.raises(urllib.error.HTTPError):
+        resume_incumbent(
+            INCUMBENT, CANDIDATE, request, monotonic=Clock().monotonic, sleep=lambda _: None,
+        )
+    assert calls.count("/api/relay-execution-state?fresh=1") == 1
+    assert "/api/resume" not in calls
+
+
 def test_post_resume_revision_or_safety_drift_fails_without_second_resume():
     calls = []; statuses = [status(), status(paused=False, revision="2" * 12)]
     def request(path, payload):

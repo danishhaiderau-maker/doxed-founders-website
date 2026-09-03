@@ -7,7 +7,7 @@ import json
 import os
 import re
 
-from fly_resume_bootstrap import _http_clients, observe_status, preserve_maintenance
+from fly_resume_bootstrap import _http_clients, _transient, observe_status, preserve_maintenance
 
 
 WORKFLOW_NAME = "Deploy Fly BTC bot"
@@ -127,6 +127,29 @@ def _require_status(status: dict, incumbent: str, *, paused: bool) -> None:
         raise RuntimeError("unsafe predeploy-abort status: " + json.dumps({"failed_predicates": failed}, sort_keys=True))
 
 
+def observe_fresh_relay_state(request_json, *, until, monotonic, sleep) -> dict:
+    attempt = 0
+    last = None
+    while monotonic() < until:
+        attempt += 1
+        try:
+            return request_json("/api/relay-execution-state?fresh=1", None)
+        except Exception as exc:
+            if not _transient(exc):
+                raise
+            last = exc
+        delay = min(2 ** min(attempt - 1, 4), max(0.0, until - monotonic()))
+        print(
+            f"transient fresh relay observation attempt={attempt} error={type(last).__name__}",
+            flush=True,
+        )
+        if delay:
+            sleep(delay)
+    raise RuntimeError(
+        f"bounded fresh relay observation unavailable: {type(last).__name__}"
+    )
+
+
 def resume_incumbent(incumbent: str, candidate: str, request_json, *, monotonic, sleep, timeout=120) -> dict:
     incumbent = _revision12(incumbent, "resume-predeploy-abort incumbent")
     candidate = _sha40(candidate, "resume-predeploy-abort candidate")
@@ -135,7 +158,12 @@ def resume_incumbent(incumbent: str, candidate: str, request_json, *, monotonic,
     deadline = monotonic() + timeout
     before = observe_status(request_json, until=deadline, monotonic=monotonic, sleep=sleep)
     _require_status(before, incumbent, paused=True)
-    relay = request_json("/api/relay-execution-state?fresh=1", None)
+    relay = observe_fresh_relay_state(
+        request_json,
+        until=deadline,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
     generation = relay.get("money_state_generation")
     if (
         type(generation) is not int or generation < 0
