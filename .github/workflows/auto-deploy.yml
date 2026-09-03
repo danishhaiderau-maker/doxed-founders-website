@@ -124,10 +124,14 @@ jobs:
           node -e "const x=require('./topology.json'); console.log(JSON.stringify({apiStatus:x.apiStatus,executorStatus:x.executorStatus,executorDeploymentId:x.executorDeploymentId}))"
 
       - name: Deploy exact revision to API control plane only
+        id: api_deploy
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
-        run: node scripts/deploy-paused-credential-api.mjs deploy
+        run: |
+          node scripts/deploy-paused-credential-api.mjs deploy > api-deployment.json
+          node -e "const x=require('./api-deployment.json'); require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'deployment_id='+x.deploymentId+'\n')"
+          node -e "const x=require('./api-deployment.json'); console.log(JSON.stringify({ok:x.ok,deploymentId:x.deploymentId,service:x.service,commitSha:x.commitSha}))"
 
       - name: Verify exact API revision, route, and untouched executor
         env:
@@ -135,6 +139,7 @@ jobs:
           TARGET_INSTANCE_ID: ${{ inputs.target_instance_id }}
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+          EXPECTED_API_DEPLOYMENT_ID: ${{ steps.api_deploy.outputs.deployment_id }}
           EXPECTED_EXECUTOR_DEPLOYMENT_ID: ${{ steps.before.outputs.executor_deployment_id }}
         run: |
           node scripts/deploy-paused-credential-api.mjs verify

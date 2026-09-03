@@ -148,7 +148,7 @@ async function deploy(token, expectedSha) {
   console.log(JSON.stringify({ ok: true, deploymentId, service: API_SERVICE, commitSha: expectedSha }));
 }
 
-async function verify(token, expectedSha, expectedExecutorDeploymentId) {
+async function verify(token, expectedSha, expectedApiDeploymentId, expectedExecutorDeploymentId) {
   const deadline = Date.now() + Number(process.env.DEPLOY_TIMEOUT_MS ?? 12 * 60_000);
   let observed;
   while (Date.now() < deadline) {
@@ -165,13 +165,19 @@ async function verify(token, expectedSha, expectedExecutorDeploymentId) {
     if (executorDeployment.id !== expectedExecutorDeploymentId) {
       throw new Error('Isolated relay-executor deployment changed during API-only rollout');
     }
+    if (apiDeployment.id !== expectedApiDeploymentId) {
+      throw new Error('Latest API deployment does not match the exact deployment returned by the commit-bound mutation');
+    }
     if (TERMINAL_FAILURES.has(apiDeployment.status)) {
       throw new Error(`API deployment reached terminal failure ${apiDeployment.status}`);
     }
-    if (apiDeployment.status === 'SUCCESS' && observed.apiCommitSha === expectedSha) break;
+    if (apiDeployment.status === 'SUCCESS'
+      && (!observed.apiCommitSha || observed.apiCommitSha === expectedSha)) break;
     await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
-  if (observed?.apiStatus !== 'SUCCESS' || observed.apiCommitSha !== expectedSha) {
+  if (observed?.apiStatus !== 'SUCCESS'
+      || observed.apiDeploymentId !== expectedApiDeploymentId
+      || (observed.apiCommitSha && observed.apiCommitSha !== expectedSha)) {
     throw new Error(`Exact API revision did not become current: ${JSON.stringify(observed)}`);
   }
   const health = await fetch(`${API_URL}/api/health/live`, { signal: AbortSignal.timeout(15_000) });
@@ -197,9 +203,11 @@ async function main() {
   const expectedSha = assertExactSha(process.env.EXPECTED_COMMIT_SHA);
   if (command === 'deploy') return deploy(token, expectedSha);
   if (command === 'verify') {
+    const apiId = process.env.EXPECTED_API_DEPLOYMENT_ID?.trim();
     const executorId = process.env.EXPECTED_EXECUTOR_DEPLOYMENT_ID?.trim();
+    if (!apiId) throw new Error('EXPECTED_API_DEPLOYMENT_ID is required');
     if (!executorId) throw new Error('EXPECTED_EXECUTOR_DEPLOYMENT_ID is required');
-    return verify(token, expectedSha, executorId);
+    return verify(token, expectedSha, apiId, executorId);
   }
   throw new Error('Usage: deploy-paused-credential-api.mjs prove-paused|snapshot|deploy|verify');
 }

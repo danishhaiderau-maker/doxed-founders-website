@@ -40,6 +40,8 @@ test('workflow isolates API deployment and proves executor deployment identity i
   assert.match(section, /deploy-paused-credential-api\.mjs deploy/);
   assert.match(section, /deploy-paused-credential-api\.mjs verify/);
   assert.match(section, /EXPECTED_EXECUTOR_DEPLOYMENT_ID/);
+  assert.match(section, /EXPECTED_API_DEPLOYMENT_ID/);
+  assert.match(section, /steps\.api_deploy\.outputs\.deployment_id/);
   assert.match(section, /merge-base --is-ancestor 3cdefa4f0dfead539c78de08a75c8ee817c6170b/);
   assert.doesNotMatch(section, /ci-railway-redeploy|verify-relay-executor-revision|check-relay-flat/);
 });
@@ -51,6 +53,7 @@ test('deploy script targets only API and fails if executor deployment changes', 
   assert.match(mutation, /topology\.api\.id/);
   assert.doesNotMatch(mutation, /topology\.executor\.id/);
   assert.match(source, /Isolated relay-executor deployment changed during API-only rollout/);
+  assert.match(source, /exact deployment returned by the commit-bound mutation/);
 });
 
 test('direct CLI execution invokes the guarded main entrypoint on this platform', () => {
