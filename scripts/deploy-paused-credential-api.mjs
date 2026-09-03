@@ -7,6 +7,8 @@
  * the pre-deploy executor deployment id and prove it did not change.
  */
 import { PrismaClient } from '@prisma/client';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const GQL = 'https://backboard.railway.com/graphql/v2';
 const API_SERVICE = 'doxed-founders-website';
@@ -202,7 +204,7 @@ async function main() {
   throw new Error('Usage: deploy-paused-credential-api.mjs prove-paused|snapshot|deploy|verify');
 }
 
-if (process.argv[1] && import.meta.url === new URL(`file:///${process.argv[1].replace(/\\/g, '/')}`).href) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   main().catch((error) => {
     console.error(`API-only credential rollout failed: ${error.message}`);
     process.exitCode = 1;

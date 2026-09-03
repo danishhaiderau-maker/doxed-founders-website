@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { assertExactSha, pausedAndDisarmed } from './deploy-paused-credential-api.mjs';
 
@@ -49,4 +51,13 @@ test('deploy script targets only API and fails if executor deployment changes', 
   assert.match(mutation, /topology\.api\.id/);
   assert.doesNotMatch(mutation, /topology\.executor\.id/);
   assert.match(source, /Isolated relay-executor deployment changed during API-only rollout/);
+});
+
+test('direct CLI execution invokes the guarded main entrypoint on this platform', () => {
+  const result = spawnSync(process.execPath, [
+    fileURLToPath(new URL('./deploy-paused-credential-api.mjs', import.meta.url)),
+    'snapshot',
+  ], { encoding: 'utf8', env: { ...process.env, RAILWAY_TOKEN: '' } });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /RAILWAY_TOKEN is required/);
 });
