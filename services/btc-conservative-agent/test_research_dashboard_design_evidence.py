@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from research import research_dashboard as dashboard
 
 
@@ -71,3 +73,42 @@ def test_research_design_navigation_and_non_fabrication_labels_render():
     assert "Definitions and coverage never create fills, PnL, profitability, qualification" in html
     assert "Observed / unknown regime dimensions" in html
     assert "loadResearchDesign" in html
+
+
+def test_research_design_client_failure_is_visible_and_fail_closed():
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    assert "if (!r.ok) throw new Error(`HTTP ${r.status}`)" in source
+    assert "RESEARCH_DESIGN_LOAD_FAILED" in source
+    assert "signed baseline definitions and outcomes remain UNKNOWN" in source
+    assert "regime feature coverage remains UNKNOWN" in source
+    assert "['Qualification', 'DISABLED']" in source
+
+
+def test_stale_header_and_forensic_export_provenance_are_unambiguous():
+    dashboard._API_RESPONSE_CACHE.clear()
+    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    assert "STALE SAVED ANALYZER GENERATION · READ-ONLY" in html
+    assert 'id="bundle-provenance"' in html
+    assert "ZIP checksums prove captured bytes; they do not prove" in html
+    assert "Download Forensic Research Evidence Bundle" in html
+    assert "inspect MANIFEST.json generation_current and provenance before use" in html
+    assert "Show exact parity and freshness receipts" in html
+    assert "Wait for the verified Fly mirror and its single owner analyzer publication" in html
+    assert "do not start a duplicate analyzer" in html
+    assert "python analyzer_research_engine_v62.py" not in html
+    assert "Show exact integrity receipts" in html
+
+
+def test_report_explorer_and_archives_fail_closed_without_duplicate_run_advice():
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    assert "REPORT_MANIFEST_LOAD_FAILED" in source
+    assert "Report inventory is unavailable. No report content was inferred." in source
+    assert "No reports are declared by the current verified manifest." in source
+    assert "No archives are declared by the current verified manifest." in source
+    assert "li.setAttribute('role', 'status')" in source
+    explorer = source.split("async function loadExplorer()", 1)[1].split(
+        "async function loadArchives()", 1
+    )[0]
+    assert "if (!r.ok) throw new Error(`HTTP ${r.status}`)" in explorer
+    assert "try {" in explorer and "catch (error)" in explorer
+    assert "run analyzer once" not in explorer.lower()

@@ -6353,6 +6353,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .note { max-width: 100%; overflow-wrap: anywhere; color: var(--muted); font-size: 0.8rem; }
   .empty-state { min-width: 0; max-width: 100%; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
   .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; overflow-wrap: anywhere; word-break: break-word; }
+  .receipt-details { margin-top: 8px; }
+  .receipt-details summary { cursor: pointer; font-weight: 600; }
+  .receipt-details pre { margin: 8px 0 0; max-height: 220px; overflow: auto; color: inherit; background: rgba(0,0,0,.18); }
 </style></head><body>
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
 <div id="stale-banner" class="stale-banner" style="display:none;"></div>
@@ -6708,8 +6711,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       analyzer are deterministic and out-of-process; they never call an AI
       provider. DeepSeek is reserved for the bot's trading-direction decision.
     </div>
-    <p><b>Complete Research Evidence Bundle</b> — one verified ZIP containing the current Fly mirror, immutable relay lifecycle evidence, counterfactual and cohort data, current and historical reports, Genome/DNA artifacts, preserved sessions, source audit, and a SHA-256 manifest.</p>
-    <a class="btn" href="/download/everything" id="dl-everything" style="background:#7b4cc9">⬇ Download Complete Research Evidence Bundle</a>
+    <p><b>Complete Research Evidence Bundle</b> — a forensic ZIP containing the available Fly mirror, immutable relay lifecycle evidence, counterfactual and cohort data, current and historical reports, Genome/DNA artifacts, preserved sessions, source audit, and a SHA-256 manifest. ZIP checksums prove captured bytes; they do not prove that the analyzer generation is current or qualification-ready.</p>
+    <div class="stale-banner" id="bundle-provenance" style="display:block">Loading export provenance…</div>
+    <a class="btn" href="/download/everything" id="dl-everything" style="background:#7b4cc9">⬇ Download Forensic Research Evidence Bundle</a>
     <p class="note">Older specialized download routes remain available for compatibility, but are intentionally hidden here so there is one authoritative export.</p>
     <pre id="bundle-list"></pre>
   </section>
@@ -6721,6 +6725,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </main>
 <script>
 const NAV_GROUPS = {{ nav_groups_json|safe }};
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[ch]));
+}
 function ensureScrollableTables(root = document) {
   root.querySelectorAll('main table').forEach(table => {
     if (table.parentElement && table.parentElement.classList.contains('table-scroll')) return;
@@ -6902,10 +6911,17 @@ async function loadSummary() {
       const integrityValue = value => (
         value && typeof value === 'object' ? JSON.stringify(value) : String(value)
       );
-      const fails = (integrity.failed_checks || []).map(c => (
+      const failedChecks = integrity.failed_checks || [];
+      const fails = failedChecks.map(c => (
         `${c.check}: expected ${integrityValue(c.expected)}, found ${integrityValue(c.found)}`
-      )).join(' · ');
-      iBanner.innerHTML = '<strong>' + (integrity.banner || '⚠ REPORT INVALID') + '</strong> ' + fails;
+      ));
+      const concise = failedChecks.length
+        ? `${failedChecks.length} integrity check${failedChecks.length === 1 ? '' : 's'} failed. Qualification remains disabled.`
+        : 'Report integrity is invalid. Qualification remains disabled.';
+      iBanner.innerHTML = '<strong>' + escapeHtml(integrity.banner || '⚠ REPORT INVALID') + '</strong> '
+        + escapeHtml(concise)
+        + '<details class="receipt-details"><summary>Show exact integrity receipts</summary><pre>'
+        + escapeHtml(fails.join('\n')) + '</pre></details>';
     } else {
       iBanner.style.display = 'none';
     }
@@ -6914,13 +6930,14 @@ async function loadSummary() {
   const banner = document.getElementById('stale-banner');
   if (banner) {
     if (stale.stale) {
-      const reasons = (stale.reasons || []).join(' · ');
+      const reasonList = stale.reasons || [];
+      const reasons = reasonList.join('\n');
       banner.style.display = 'block';
-      banner.innerHTML = '<strong>⚠ Stale report — not current session data.</strong> '
-        + reasons
-        + '<br>Dashboard reads saved JSON files; it does not re-run the analyzer. '
-        + 'Run: <code>python analyzer_research_engine_v62.py</code> from Final Bots '
-        + '(runs now, then every 30 min).';
+      banner.innerHTML = '<strong>⚠ Stale saved analyzer generation — read-only.</strong> '
+        + escapeHtml(`${reasonList.length || 'One or more'} parity/freshness receipt${reasonList.length === 1 ? '' : 's'} are not green. `)
+        + 'Wait for the verified Fly mirror and its single owner analyzer publication; do not start a duplicate analyzer.'
+        + '<details class="receipt-details"><summary>Show exact parity and freshness receipts</summary><pre>'
+        + escapeHtml(reasons || 'No machine-readable reason was published.') + '</pre></details>';
     } else if (d.all_data_fallback_active) {
       banner.style.display = 'block';
       banner.style.background = '#1f2d3d';
@@ -6932,10 +6949,26 @@ async function loadSummary() {
       banner.style.display = 'none';
     }
   }
-  const scopeLabel = d.all_data_fallback_active
-    ? 'FRESH COLLECTION · reports/all_data fallback'
-    : (d.scope || 'ALL-DATA') + ' · ' + (d.data_scope || '').toUpperCase();
+  const scopeLabel = stale.stale
+    ? 'STALE SAVED ANALYZER GENERATION · READ-ONLY'
+    : d.all_data_fallback_active
+      ? 'FRESH COLLECTION · reports/all_data fallback'
+      : (d.scope || 'ALL-DATA') + ' · ' + (d.data_scope || '').toUpperCase();
   document.getElementById('scope').textContent = scopeLabel;
+  const bundleProvenance = document.getElementById('bundle-provenance');
+  if (bundleProvenance) {
+    const generated = d.generated_at || 'UNKNOWN';
+    const reasons = (stale.reasons || []).join(' · ');
+    bundleProvenance.style.background = stale.stale ? '#3d2a1f' : '#153526';
+    bundleProvenance.style.borderColor = stale.stale ? '#d29922' : '#3dd68c';
+    bundleProvenance.style.color = stale.stale ? '#f8e3a1' : '#9df0c8';
+    bundleProvenance.textContent = stale.stale
+      ? `FORENSIC EXPORT · STALE SAVED ANALYZER GENERATION · report ${generated}`
+        + `${reasons ? ' · ' + reasons : ''}`
+        + ' · inspect MANIFEST.json generation_current and provenance before use'
+      : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
+        + ' · current does not mean qualified; inspect MANIFEST.json';
+  }
   document.getElementById('updated').textContent = d.generated_at ? d.generated_at.slice(0, 19) : 'no run yet';
   document.getElementById('exec-text').textContent = d.executive_text || '(Run analyzer first)';
   const kpis = [
@@ -7618,39 +7651,57 @@ async function loadFeatures() {
 }
 
 async function loadResearchDesign() {
-  const r = await fetch('/api/research-design');
-  const d = await r.json();
   const escape = value => String(value == null ? '' : value)
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
   const banner = document.getElementById('research-design-banner');
-  const current = d.status === 'CURRENT';
-  banner.style.background = current ? '#153526' : '#3d2a1f';
-  banner.style.borderColor = current ? '#3dd68c' : '#d29922';
-  banner.style.color = current ? '#9df0c8' : '#f8e3a1';
-  banner.textContent = current
-    ? 'Current declared generation · qualification disabled · profitability not calculated'
-    : `${d.status || 'UNAVAILABLE'} · ${d.reason || 'current evaluator coverage unavailable'} · qualification disabled`;
-  const coverage = d.regime_feature_coverage || {};
-  document.getElementById('research-design-kpis').innerHTML = cards([
-    ['Signed baselines', (d.entry_baselines || []).length],
-    ['Same-opportunity replay N', (d.entry_baseline_replay || {}).same_opportunity_count ?? 0],
-    ['Evaluator rows', coverage.row_count ?? 0],
-    ['Qualification', d.qualification_allowed ? 'ALLOWED' : 'DISABLED'],
-    ['Profitability', d.profitability_calculated ? 'CALCULATED' : 'NOT CALCULATED'],
-  ]);
-  document.getElementById('research-baseline-body').innerHTML = (d.entry_baselines || []).map(row =>
-    `<tr><td>${escape(row.baseline_id)}<br><small>${escape(row.policy_signature)}</small></td>` +
-    `<td>${escape(row.entry_type)}</td><td>${escape(row.timing)}</td>` +
-    `<td>${escape((row.required_evidence || []).join(', '))}</td>` +
-    `<td>RESEARCH ONLY · relay ${row.relay_eligible ? 'eligible' : 'disabled'} · places order ${row.places_order ? 'yes' : 'no'}</td>` +
-    `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}<br><small>` +
-    `N ${row.replay_summary?.opportunities ?? 0} · full ${row.replay_summary?.full_fills ?? 0} · partial ${row.replay_summary?.partial_fills ?? 0} · no-fill ${row.replay_summary?.no_fills ?? 0} · UNKNOWN ${row.replay_summary?.unknown ?? 0}</small></td></tr>`
-  ).join('') || '<tr><td colspan="6">No signed baseline definitions are available.</td></tr>';
-  document.getElementById('research-regime-coverage-body').innerHTML = (coverage.dimensions || []).map(row =>
-    `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 0}</td><td>${row.unknown_rows ?? 0}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`
-  ).join('') || '<tr><td colspan="4">Current generation has no published evaluator feature coverage; every regime dimension remains UNKNOWN.</td></tr>';
+  const baselineBody = document.getElementById('research-baseline-body');
+  const coverageBody = document.getElementById('research-regime-coverage-body');
+  try {
+    const r = await fetch('/api/research-design');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const d = await r.json();
+    const current = d.status === 'CURRENT';
+    banner.style.background = current ? '#153526' : '#3d2a1f';
+    banner.style.borderColor = current ? '#3dd68c' : '#d29922';
+    banner.style.color = current ? '#9df0c8' : '#f8e3a1';
+    banner.textContent = current
+      ? 'Current declared generation · qualification disabled · profitability not calculated'
+      : `${d.status || 'UNAVAILABLE'} · ${d.reason || 'current evaluator coverage unavailable'} · qualification disabled`;
+    const coverage = d.regime_feature_coverage || {};
+    document.getElementById('research-design-kpis').innerHTML = cards([
+      ['Signed baselines', (d.entry_baselines || []).length],
+      ['Same-opportunity replay N', (d.entry_baseline_replay || {}).same_opportunity_count ?? 0],
+      ['Evaluator rows', coverage.row_count ?? 0],
+      ['Qualification', d.qualification_allowed ? 'ALLOWED' : 'DISABLED'],
+      ['Profitability', d.profitability_calculated ? 'CALCULATED' : 'NOT CALCULATED'],
+    ]);
+    baselineBody.innerHTML = (d.entry_baselines || []).map(row =>
+      `<tr><td>${escape(row.baseline_id)}<br><small>${escape(row.policy_signature)}</small></td>` +
+      `<td>${escape(row.entry_type)}</td><td>${escape(row.timing)}</td>` +
+      `<td>${escape((row.required_evidence || []).join(', '))}</td>` +
+      `<td>RESEARCH ONLY · relay ${row.relay_eligible ? 'eligible' : 'disabled'} · places order ${row.places_order ? 'yes' : 'no'}</td>` +
+      `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}<br><small>` +
+      `N ${row.replay_summary?.opportunities ?? 0} · full ${row.replay_summary?.full_fills ?? 0} · partial ${row.replay_summary?.partial_fills ?? 0} · no-fill ${row.replay_summary?.no_fills ?? 0} · UNKNOWN ${row.replay_summary?.unknown ?? 0}</small></td></tr>`
+    ).join('') || '<tr><td colspan="6">No signed baseline definitions are available; baseline outcomes remain UNKNOWN.</td></tr>';
+    coverageBody.innerHTML = (coverage.dimensions || []).map(row =>
+      `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 0}</td><td>${row.unknown_rows ?? 0}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`
+    ).join('') || '<tr><td colspan="4">Current generation has no published evaluator feature coverage; every regime dimension remains UNKNOWN.</td></tr>';
+  } catch (error) {
+    const detail = escape(error?.message || 'unknown response error');
+    banner.style.background = '#3d1f1f';
+    banner.style.borderColor = '#f85149';
+    banner.style.color = '#ffb4b4';
+    banner.textContent = `UNAVAILABLE · RESEARCH_DESIGN_LOAD_FAILED · ${detail} · qualification disabled`;
+    document.getElementById('research-design-kpis').innerHTML = cards([
+      ['Signed baselines', 'UNKNOWN'], ['Same-opportunity replay N', 'UNKNOWN'],
+      ['Evaluator rows', 'UNKNOWN'], ['Qualification', 'DISABLED'],
+      ['Profitability', 'NOT CALCULATED'],
+    ]);
+    baselineBody.innerHTML = '<tr><td colspan="6">Research-design response unavailable; signed baseline definitions and outcomes remain UNKNOWN.</td></tr>';
+    coverageBody.innerHTML = '<tr><td colspan="4">Research-design response unavailable; regime feature coverage remains UNKNOWN.</td></tr>';
+  }
 }
 
 async function loadEvidenceCoverage() {
@@ -7892,11 +7943,34 @@ async function loadAI() {
 }
 
 async function loadExplorer() {
-  const r = await fetch('/api/manifest');
-  const d = await r.json();
-  document.getElementById('sync').textContent = d.analyzer_sync_id || 'no manifest';
   const list = document.getElementById('report-list');
   list.innerHTML = '';
+  const output = document.getElementById('report-json');
+  let d;
+  try {
+    const r = await fetch('/api/manifest');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    d = await r.json();
+  } catch (error) {
+    document.getElementById('sync').textContent = 'manifest unavailable';
+    const li = document.createElement('li');
+    li.className = 'empty-state';
+    li.setAttribute('role', 'status');
+    li.textContent = `REPORT_MANIFEST_LOAD_FAILED: ${error.message || error}`;
+    list.appendChild(li);
+    output.textContent = 'Report inventory is unavailable. No report content was inferred.';
+    return;
+  }
+  document.getElementById('sync').textContent = d.analyzer_sync_id || 'no manifest';
+  if (!(d.reports || []).length) {
+    const li = document.createElement('li');
+    li.className = 'empty-state';
+    li.setAttribute('role', 'status');
+    li.textContent = 'No reports are declared by the current verified manifest.';
+    list.appendChild(li);
+    output.textContent = 'No selectable report is available in the current verified manifest.';
+    return;
+  }
   (d.reports||[]).forEach((entry, i) => {
     const file = entry.file || entry;
     const title = entry.title || file;
@@ -7911,7 +7985,6 @@ async function loadExplorer() {
       });
       button.classList.add('sel');
       button.setAttribute('aria-current', 'true');
-      const output = document.getElementById('report-json');
       output.textContent = `Loading ${title}…`;
       try {
         const rr = await fetch('/api/report/' + encodeURIComponent(file));
@@ -7937,7 +8010,7 @@ async function loadArchives() {
   document.getElementById('archive-body').innerHTML = (d.sessions||[]).map(s => {
     const sid = s.id || s.session_id || '';
     return `<tr><td>${sid}</td><td>${(s.generated_at||'').slice(0,19)}</td><td>${s.trades??'n/a'}</td><td>$${fmtUsd(s.net_pnl_usd)}</td><td><a href="/download/archive/${encodeURIComponent(sid)}">ZIP</a></td></tr>`;
-  }).join('') || '<tr><td colspan="5">No archives yet — run analyzer once.</td></tr>';
+  }).join('') || '<tr><td colspan="5">No archives are declared by the current verified manifest.</td></tr>';
   document.getElementById('past-analysis-body').innerHTML = (past.analyses||[]).map(a => {
     const id = a.archive_id || '';
     const perf = a.performance || {};

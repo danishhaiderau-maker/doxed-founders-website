@@ -1,0 +1,81 @@
+# BTC V3.1 execution goal — 5 September 2026
+
+## Outcome
+
+Make the canonical script technically ready to place protected Bitfinex live limit orders using a strategy selected from trustworthy data. Compare the best supported static policy with a dynamic policy and report which has stronger net out-of-sample expectancy and acceptable risk. Profitability is a measured acceptance criterion, not a guarantee that future trades will win. Keep the relay disarmed until all gates pass and Danish separately authorizes live arming.
+
+This plan incorporates Cursor's handoff and the current independent code, operations and analyzer audits. Older revision/PID/inventory snapshots are history; recheck them before acting. Preserve the detailed standing requirements in the original goal-objective.md attachment.
+
+## Ownership and execution rules
+
+- Codex owns integration, sync ownership, commits, deployments and the final verdict. Cursor remains hands-off unless Danish reopens its work.
+- Use multiple agents for independent bounded audits and, when explicitly assigned, disjoint implementation work. Record path ownership. Audits are read-only by default.
+- Capture a classified failure, repair its demonstrated cause, run relevant executable tests, and verify the next receipt. Repeating unchanged probes or creating more checkpoints does not close a gate.
+- A failed sync plus captured task/process/lock evidence and a safely parked owner permits repair. Do not wait for successful transfer before repairing a failed transfer.
+- Preserve unrelated dirty changes and all unacknowledged research evidence. No wholesale commit, discard, aggressive purge, duplicate sync/analyzer, or edits to scripts while they are being consumed.
+- Deploy only reviewed exact-source changes through the authorized guarded paper recovery path. Existing authorization permits normal-accounting paper recovery; it does not permit real-exchange changes or weaker evidence gates.
+
+## Ordered work and acceptance
+
+1. **Close sync ownership and inventory admission.** Record terminal success or failed-transfer/park evidence. Require authenticated CURRENT inventory, SHA, revision, generation ID and authoritative ACK eligibility. Distinguish increasing scan/finalization counters from a stalled worker. Keep pinned immutable-generation service distinct from latest-source freshness; do not call a two-hour-old generation current merely to avoid scanning.
+2. **Repair and restart one reviewed sync.** Preserve Cursor's original patch. Reject bare-503-as-BUILDING and retry amplification. Bound each JSON operation with a monotonic elapsed deadline while preserving structured BUILDING, one snapshot request identity, pressure backoff and generation checks. Test against committed source separately from unrelated dirty server experiments. Run through the existing singleton owner, with terminal success/failure receipts.
+3. **Complete transfer, parity and ACK.** Download all eligible evidence directly from Fly to the canonical laptop library. Prove byte/hash/count checks, exact deployed data revision, epoch and configuration, atomic promotion, immutable ACK and interruption recovery. Prior verified data remains available until promotion; no analyzer may read an incomplete candidate. Capture the transfer watermark and distinguish later source growth from failure of the completed generation.
+4. **Publish and audit the analyzer.** Produce one atomic generation on that verified mirror, retaining separate analyzer-code and collected-data revisions. Audit every navigation section, selectors, detail views, charts, downloads and their source data. Perform desktop and mobile visual QA, error/stale states, accessibility and download hash/manifest checks. Publish an explicit coverage matrix of tested and untested controls.
+5. **Explain and repair the paper-order funnel.** Reconcile ADMIN_MANUAL ownership before resuming intended paper operation. Measure independent opportunities, raw AI verdicts, family eligibility, tile/chase eligibility, actual order intents, pending/expired/cancelled orders, fills and exits. AI APPROVE is not automatically an order. Reconcile every approved-but-unsubmitted case to a reason. Audit pause cancellation separately from TTL or policy cancellation; any change to pause semantics needs tests and must preserve maintenance safety. Prove consecutive advancing collection, AI and evaluation cycles after resume.
+6. **Close lifecycle and execution evidence.** Join immutable identities through signal, revisions/epoch/config, pre-entry features, BBO/depth/trades, original quantity, authoritative schedule, chase/reprice events, partial reductions, executions, exit and post-exit horizon. Distinguish TRANSFER_READY from QUALIFICATION_READY. Verify terminal completion, fee/funding/slippage/latency evidence, MFE/MAE and reconciled net PnL. Publish FULL_FILL, PARTIAL_FILL, NO_FILL and UNKNOWN with cohort denominators. Missing evidence stays UNKNOWN. Audit what historical raw data can recover without inventing observations.
+7. **Deliver static-versus-dynamic policy results and frequency research.** Compare identical independent opportunities for the registered controls, relevant 0.07/0.08/0.09/0.27/0.30 offsets, market/no-chase baselines, chase schedules, Fixed Target, MFE and other supported exits. Use frozen pre-entry volatility/liquidity/direction/regime features. Account for correlated lanes, costs, missed entries and avoided losses. Use purged walk-forward, fold-local selection and a sealed holdout. Report descriptive, execution-supported and fully qualified tiers with named policies where supported, sample sizes and blockers. Test whether more limit orders can be obtained without material degradation in win rate, net expectancy or drawdown; quantify uncertainty and reject unsupported improvements. A dynamic rule must outperform a simpler static control enough to justify complexity.
+8. **Prove storage, operations and final live readiness.** Start/resume transfer under soft pressure; reserve emergency headroom. Cleanup depends on terminal lifecycle, all segments transferred, checksums, immutable laptop ACK, recoverable local copies and absence of active references. No fixed 50 MB deletion rule; a download alone does not authorize deleting Fly data. Verify actual volume/free bytes and transfer watermark. Measure Neon usage separately from Fly storage. Complete restart/rollback/duplicate-order/partial-fill/protection/reconciliation tests, sustained latency/progress soak and independent final audits. Validate the user's exact allocation against actual Bitfinex minimums/protection without rounding up. Report READY only when mandatory receipts pass; then request separate live-arm authorization.
+
+## Current observations and open defects
+
+- The active goal is set. At Danish's request the old `btc-v3-1-integrity-monitor` recurring automation was deleted on 5 September; it must not be recreated unless requested. The separate Windows Fly-download task remains the transfer owner.
+- Client repair cc55e68f8904aff0b525aa40f0dd9d39a4c8d24c is committed and pushed. The isolated committed-source suite passed 154 tests in 75.78s. Exactly one sync owner PID 16576 was started through DoxxedFlyMirrorSync; a fresh receipt at 2026-09-04T23:37:19Z reached research.db, file 3/34433, 10,485,760/17,756,160 bytes. Transfer is advancing; canonical parity remains MISMATCH until terminal promotion.
+- Authenticated Fly storage sample: 3,996.78 MB capacity, 2,692.3 MB used (67.4%), 1,116.48 MB free, pressure=false, emergency=false; source cleanup unauthorized and reclaimed bytes zero. These are observed volume figures, distinct from transferable evidence size.
+- Read-only authenticated Neon console audit for September 1–October 1: charges so far $4.99 ($4.98 compute, $0.01 storage); 47.5 CU-hours, 54.28 GB transfer, 0.14 GB storage, 0.14 GB history. Console shows 500 GB included transfer and an active project. Verify deployed polling revision and same-duration usage before attributing savings; full-month savings remain unproven. Direct Fly-to-laptop research sync already bypasses Neon. Source includes tiny coordination projection and paused/idle polling suppression; actual remaining workload must be measured.
+
+- Fly reports df45887e1526, force-paper true, Bitfinex false, live_armed false, ADMIN_MANUAL paused. Its scheduled AI cycle explicitly reports ADMIN_MANUAL_PAUSE. Healthy status while paused does not prove new AI or order generation.
+- Failed laptop transfer last recorded file 5/34399, 1,048,576 bytes of qualification_horizon_index.sqlite3, parity UNKNOWN. Scheduled task was disabled, no sync owner observed, root lock absent; old completion was not inferred.
+- Inventory advanced through SCAN and FINALIZE to authenticated CURRENT at 2026-09-04T23:29:09.498796Z: 34,433 files, 2,190,350,017 transferable bytes; inventory SHA 3644466306ab96e5193bca2a977d726b8b73efa525babfc0e1a8fb441710709d; authoritative and ACK-eligible true. This is an inventory receipt, not a download or cleanup receipt.
+- Independent review found the dirty retry proposal could amplify ambiguous failures into hours of work. The original patch is retained in diagnostics/sync-client-before-reviewed-recovery-20260905.patch. The reviewed client restores the two-strike circuit and adds a per-operation deadline. Separate cleanup proposals are retained in that patch for later review.
+- The broad mixed-working-tree sync suite has 150 passes and four failures in separate uncommitted bootstrap/freshness/worker changes. Those changes are not accepted by this client repair. The isolated committed-source suite is the required client acceptance check.
+- Current bounded incident history contains ten application records, including four restart requests with exit 75; the latest displayed request is 2026-09-04T10:14:32.787919Z. Platform-event history is unavailable. These receipts do not prove a current platform crash or its resource cause.
+- Analyzer navigation audit covered 25 subtab views across Overview, Lanes/AI, Chase/Exits and Genome/Reports. It shows the September 2 generation 9b588c0, current=false. Mobile, selector variants, detail links and download contents still require verification.
+
+## Analyzer presentation corrections to verify after publication
+
+- Put source watermark, analyzer publication time, exact provenance and current/stale status on every KPI and download.
+- Replace misleading fresh-session and verified-ZIP language when the current generation is unavailable or mixed.
+- Render explicit unavailable rows instead of empty table bodies; make Report Explorer keyboard-accessible.
+- Distinguish store-integrity checks from whole-pipeline readiness; measured zero costs from default/missing costs; archived results from current qualification.
+- Show UNKNOWN reason breakdowns, evidence recovery coverage and which new collection fields the analyzer actually consumes.
+- Explain APPROVE → virtual candidate → eligible chase → actual resting limit → fill/expiry/cancel transitions.
+- Summarize incident counts, current resolved/active state and unavailable platform causes; show storage measurement timestamps separately from report dates.
+- Keep descriptive findings visible with sample size, costs and limitations, while supported/qualified verdicts remain independent.
+
+## Reporting
+
+## Continuous QA and workspace hygiene
+
+- After each repair, run focused executable tests, relevant integration/regression tests and visual QA for affected user journeys. Independently review high-risk changes. Record failures separately from passes and update this goal with new evidence-backed blockers.
+- Keep one canonical working repository, verified data library and owner per service. Maintain a concise source/evidence map so people and agents do not mistake copied repositories, staging files or old receipts for current authority.
+- Audit obsolete build outputs, abandoned temporary test worktrees, redundant generated bundles, logs and caches. Check exact paths, active process/task references, Git ownership, uniqueness, retention obligations and recoverability before removal. Coordinate cleanup ownership with other agents.
+- Remove only proven disposable or safely retained duplicate artifacts; prefer recoverable deletion when practical. Preserve user edits, source history, immutable receipts, sole copies, incomplete transfers and unacknowledged research evidence. Older research is not automatically obsolete.
+- Never make free-space claims from an inventory listing alone. Record before/after free bytes, exact removed paths, reason and recovery route. Exclude legacy/generated trees from routine source searches only after verifying they are not canonical dependencies.
+- Treat low storage as an operational risk to diagnose with measured capacity, growth and promotion headroom. Lifecycle-aware Fly cleanup still requires verified transfer and ACK; do not replace it with blind size-based deletion.
+
+## Paper and shadow research parity acceptance
+
+- Both sources have equal research eligibility; neither an actual paper order nor an AI rejection is the admission requirement for the common causal opportunity universe. Keep actual paper outcomes, ideal-touch diagnostics and conservative replay worlds explicitly identified rather than pooling their PnL.
+- Materialize and count the supported frozen entry/TTL/chase/exit candidate matrix for every eligible opportunity, including candidates absent from active tiles. A theoretical search-space count is not evidence that those combinations were evaluated.
+- Compare matched episode and policy sets with identical schedule, original quantity, market-path, configuration and cost-model signatures. Report unmatched IDs and duplicates. A label saying equal does not establish equality.
+- Preserve valid individual pre-entry observations from partial receipts, but keep missing dimensions and aggregate qualification UNKNOWN. Reject ambiguous identity and post-signal leakage. Distinguish bucket features from raw ATR, realized volatility, ADX, spread and depth measurements.
+- Use explicitly declared simulated cost receipts for shadow simulation and measured receipts for actual paper accounting. Do not copy an unrelated execution's costs onto an alternative strategy or claim queue certainty from public depth.
+
+## Visual QA and simplification acceptance
+
+- Audit both the local analyzer and canonical main-bot dashboard at desktop and narrow-screen sizes; restore temporary viewport changes. Do not exercise trading or destructive controls merely to test navigation.
+- Retain the four primary analyzer groups initially. Make freshness and actionable results concise; put machine JSON and legacy/forensic detail behind clearly labeled disclosures rather than deleting underlying evidence.
+- Every data section must show populated results with cohort/time/provenance, or an explicit empty/UNKNOWN/error explanation and next requirement. Never manufacture values to make a panel look complete.
+- Record which tabs, filters, selectors, detail links and downloads were actually exercised. A source test is not a visual pass; a saved stale report is not current strategy evidence.
+
+Every material update states what changed, why, exact test/result receipt, deployed versus local state, the next open gate and any external access dependency. Do not use readiness percentages or completion dates as evidence. Do not promise a guaranteed winner or claim all possible market scenarios are observable from historical BBO/depth.

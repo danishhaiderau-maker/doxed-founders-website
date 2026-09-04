@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import math
 import os
 import tempfile
 from collections import Counter
@@ -270,6 +271,90 @@ def _first_feature(*candidates: tuple[Any, str]) -> dict[str, Any]:
     return _observed_feature(None, "")
 
 
+_NORMALIZED_PRE_ENTRY_FEATURES = (
+    "atr_bucket", "realized_volatility_bucket", "spread_bucket",
+    "depth_bucket", "liquidity_bucket", "regime", "direction",
+    "trend_strength_bucket",
+)
+_PARTIAL_PRE_ENTRY_BLOCKER_PREFIXES = (
+    "MISSING_PRE_ENTRY_FEATURE:",
+    "FEATURE_TIMESTAMP_MISSING:",
+    "POST_ENTRY_FEATURE_LEAKAGE:",
+)
+
+
+def _validated_pre_entry_features(
+    opportunity: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Return only join-validated, finite, pre-signal observations.
+
+    ``research_v3_report.join_pre_entry_feature_receipts`` owns receipt
+    identity and ambiguity validation.  The evaluator consumes its normalized
+    projection only when that join completed without blockers, and repeats the
+    temporal/finite checks so a hand-crafted analyzer input cannot bypass the
+    fail-closed boundary.
+    """
+    status = opportunity.get("pre_entry_feature_status")
+    blockers = opportunity.get("pre_entry_feature_blockers")
+    if status not in {"COMPLETE", "UNKNOWN"} or not isinstance(blockers, list):
+        return {}
+    if status == "COMPLETE" and blockers:
+        return {}
+    if status == "UNKNOWN" and (
+        not blockers
+        or any(
+            not isinstance(blocker, str)
+            or not blocker.startswith(_PARTIAL_PRE_ENTRY_BLOCKER_PREFIXES)
+            for blocker in blockers
+        )
+    ):
+        return {}
+    source = opportunity.get("pre_entry_features")
+    if not isinstance(source, Mapping):
+        return {}
+    if isinstance(opportunity.get("signal_ts"), bool):
+        return {}
+    try:
+        signal_ts = float(opportunity.get("signal_ts"))
+    except (TypeError, ValueError):
+        return {}
+    if not math.isfinite(signal_ts):
+        return {}
+
+    observed: dict[str, dict[str, Any]] = {}
+    for name in _NORMALIZED_PRE_ENTRY_FEATURES:
+        item = source.get(name)
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("value")
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if isinstance(value, str) and value.strip().upper() in {
+            "NAN", "INFINITY", "+INFINITY", "-INFINITY", "INF", "+INF", "-INF",
+        }:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if not math.isfinite(float(value)):
+                continue
+        if isinstance(item.get("observed_ts"), bool):
+            continue
+        try:
+            observed_ts = float(item.get("observed_ts"))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(observed_ts) or observed_ts > signal_ts:
+            continue
+        observed[name] = {
+            "status": "OBSERVED",
+            "value": value,
+            "source": f"opportunity.pre_entry_features.{name}",
+            "observed_ts": observed_ts,
+        }
+    return observed
+
+
 def _regime_features_at_signal(
     opportunity: Mapping[str, Any], feature_snapshot: Mapping[str, Any]
 ) -> dict[str, dict[str, Any]]:
@@ -305,7 +390,15 @@ def _regime_features_at_signal(
         feature_snapshot.get("order_book")
         if isinstance(feature_snapshot.get("order_book"), Mapping) else {}
     )
-    return {
+    pre_entry = _validated_pre_entry_features(opportunity)
+    features = {
+        # Keep bucket observations under their canonical names.  In particular,
+        # a spread bucket is not a measured spread in bps and a depth bucket is
+        # not top-of-book bid/ask quantity.
+        name: pre_entry.get(name, _observed_feature(None, ""))
+        for name in _NORMALIZED_PRE_ENTRY_FEATURES
+    }
+    features.update({
         "realized_volatility": _first_feature(
             (feature_snapshot.get("realized_volatility"), "feature_snapshot.realized_volatility"),
             (source_features.get("realized_volatility"), "feature_snapshot.source_features.realized_volatility"),
@@ -348,7 +441,7 @@ def _regime_features_at_signal(
             (structure.get("structure_score"), "feature_snapshot.market_context.market_structure.structure_score"),
             (feature_snapshot.get("market_structure"), "feature_snapshot.market_structure"),
         ),
-        "regime": _first_feature(
+        "regime": pre_entry.get("regime") or _first_feature(
             (cycle.get("regime"), "feature_snapshot.cycle_3m_universe.regime"),
             (market_context.get("regime_label"), "feature_snapshot.market_context.regime_label"),
             (source_features.get("regime"), "feature_snapshot.source_features.regime"),
@@ -365,7 +458,8 @@ def _regime_features_at_signal(
             (opportunity.get("shared_ai_call_ts_epoch"), "opportunity.shared_ai_call_ts_epoch"),
             (opportunity.get("timestamp"), "opportunity.timestamp"),
         ),
-    }
+    })
+    return features
 
 
 def build_phase7_support_qualification(

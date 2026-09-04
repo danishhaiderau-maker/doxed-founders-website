@@ -8,6 +8,7 @@ import pytest
 
 from research.policy_evidence_evaluator import (
     PHASE7_SUPPORT_GATE_V1,
+    _regime_features_at_signal,
     build_phase7_support_qualification, build_v3_conservative_results,
     persist_v3_conservative_results,
 )
@@ -17,6 +18,7 @@ from research.quantity_execution import build_signed_quantity_constraints
 from lifecycle_bundles import LifecycleKey, materialize_bundle
 from lifecycle_completion_reconciler import evaluate_lifecycle_completion
 from lifecycle_completion_receipts import build_evidence_collected_receipt
+from research.research_v3_report import join_pre_entry_feature_receipts
 
 
 def _write(path: Path, rows):
@@ -104,7 +106,8 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
         _write(v3 / f"ledgers/{name}.jsonl", [])
     key = LifecycleKey("epoch-1", "ep-1", "sig-1", "CONTINUOUS")
     provenance = {"source_revision": "a" * 40, "deployed_revision": "a" * 40,
-                  "tile_config_signature": "b" * 64}
+                  "tile_config_signature": "b" * 64,
+                  "config_signature": "c" * 64}
     def lifecycle_row(ledger, record_id, **extra):
         return {**key.as_dict(), **provenance, "ledger": ledger, "record_id": record_id,
                 "event_id": "decision-1", "observed_ts": 10_000.0, **extra}
@@ -335,6 +338,143 @@ def test_regime_features_preserve_observed_sources_and_unknown_dimensions(tmp_pa
     assert "REQUIRED_PHASE7_FEATURES_UNKNOWN_OR_INCONSISTENT" in support["reason_codes"]
     assert support["profitability_qualified"] is False
     assert support["live_trading_authorized"] is False
+
+
+def test_joined_pre_entry_buckets_are_consumed_without_relabelling_measurements(tmp_path):
+    opportunity = {
+        "episode_id": "ep-1", "opportunity_id": "opp-1",
+        "feature_snapshot_at_signal": {},
+    }
+    opportunity["signal_ts"] = 100.0
+    receipt = {
+        "episode_id": opportunity["episode_id"],
+        "opportunity_id": opportunity["opportunity_id"],
+        "availability_boundary": "PRE_DECISION_ONLY",
+        "captured_at_ts": 99.0,
+        "features": {
+            "atr_bucket": "ATR_HIGH",
+            "realized_volatility_bucket": "RV_HIGH",
+            "spread_bucket": "SPREAD_TIGHT",
+            "depth_bucket": "DEPTH_THICK",
+            "liquidity_bucket": "LIQUID",
+            "regime": "TRENDING",
+            "direction": "LONG",
+            "trend_strength_bucket": "STRONG",
+        },
+    }
+    joined, coverage = join_pre_entry_feature_receipts([opportunity], [receipt])
+    assert coverage["dynamic_schema_complete_opportunities"] == 1
+    features = _regime_features_at_signal(joined[0], {})
+    assert features["spread_bucket"] == {
+        "status": "OBSERVED", "value": "SPREAD_TIGHT",
+        "source": "opportunity.pre_entry_features.spread_bucket",
+        "observed_ts": 99.0,
+    }
+    assert features["depth_bucket"]["value"] == "DEPTH_THICK"
+    assert features["regime"]["value"] == "TRENDING"
+    assert features["market_spread_bps"]["status"] == "UNKNOWN"
+    assert features["bid_depth_qty"]["status"] == "UNKNOWN"
+    assert features["ask_depth_qty"]["status"] == "UNKNOWN"
+
+
+def test_partial_pre_entry_receipt_preserves_valid_dimensions_but_not_qualification():
+    opportunity = {
+        "episode_id": "ep-1", "opportunity_id": "opp-1", "signal_ts": 100.0,
+        "feature_snapshot_at_signal": {},
+    }
+    receipt = {
+        "episode_id": "ep-1", "opportunity_id": "opp-1",
+        "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 99.0,
+        "features": {
+            "atr_bucket": "ATR_HIGH", "spread_bucket": "SPREAD_TIGHT",
+            "depth_bucket": "DEPTH_THICK", "liquidity_bucket": "LIQUID",
+            "regime": "TRENDING", "direction": "LONG",
+            "trend_strength_bucket": "STRONG",
+        },
+    }
+    joined, coverage = join_pre_entry_feature_receipts([opportunity], [receipt])
+    assert coverage["dynamic_schema_complete_opportunities"] == 0
+    assert joined[0]["pre_entry_feature_status"] == "UNKNOWN"
+    assert joined[0]["pre_entry_feature_blockers"] == [
+        "MISSING_PRE_ENTRY_FEATURE:realized_volatility_bucket"
+    ]
+    features = _regime_features_at_signal(joined[0], {})
+    assert features["atr_bucket"]["status"] == "OBSERVED"
+    assert features["spread_bucket"]["status"] == "OBSERVED"
+    assert features["realized_volatility_bucket"]["status"] == "UNKNOWN"
+    support = build_phase7_support_qualification([
+        {"comparison_cohort_key": "cohort-1", "regime_features_at_signal": features}
+    ])
+    assert support["qualification_allowed"] is False
+    assert support["profitability_qualified"] is False
+    assert support["live_trading_authorized"] is False
+
+
+@pytest.mark.parametrize("defect", [
+    "absent_status", "invalid_status", "fatal_blocker", "boolean_signal_ts",
+    "boolean_observed_ts", "string_nonfinite_value",
+])
+def test_handcrafted_pre_entry_projection_fails_closed(defect):
+    opportunity = {
+        "signal_ts": 100.0,
+        "pre_entry_feature_status": "COMPLETE",
+        "pre_entry_feature_blockers": [],
+        "pre_entry_features": {
+            "atr_bucket": {"value": "ATR_HIGH", "observed_ts": 99.0},
+        },
+    }
+    if defect == "absent_status":
+        opportunity.pop("pre_entry_feature_status")
+    elif defect == "invalid_status":
+        opportunity["pre_entry_feature_status"] = "INVALID"
+    elif defect == "fatal_blocker":
+        opportunity["pre_entry_feature_status"] = "UNKNOWN"
+        opportunity["pre_entry_feature_blockers"] = [
+            "PRE_ENTRY_OPPORTUNITY_ID_MISMATCH"
+        ]
+    elif defect == "boolean_signal_ts":
+        opportunity["signal_ts"] = True
+    elif defect == "boolean_observed_ts":
+        opportunity["pre_entry_features"]["atr_bucket"]["observed_ts"] = True
+    else:
+        opportunity["pre_entry_features"]["atr_bucket"]["value"] = "NaN"
+    features = _regime_features_at_signal(opportunity, {})
+    assert features["atr_bucket"]["status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("defect", ["late", "nonfinite", "malformed", "ambiguous", "mismatched"])
+def test_invalid_pre_entry_receipts_never_become_observed(tmp_path, defect):
+    opportunity = {
+        "episode_id": "ep-1", "opportunity_id": "opp-1",
+        "feature_snapshot_at_signal": {},
+    }
+    opportunity["signal_ts"] = 100.0
+    receipt = {
+        "episode_id": opportunity["episode_id"],
+        "opportunity_id": opportunity["opportunity_id"],
+        "availability_boundary": "PRE_DECISION_ONLY",
+        "captured_at_ts": 101.0 if defect == "late" else 99.0,
+        "features": {
+            "atr_bucket": (
+                float("inf") if defect == "nonfinite"
+                else {"unexpected": "container"} if defect == "malformed"
+                else "ATR_HIGH"
+            ),
+            "realized_volatility_bucket": "RV_HIGH", "spread_bucket": "SPREAD_TIGHT",
+            "depth_bucket": "DEPTH_THICK", "liquidity_bucket": "LIQUID",
+            "regime": "TRENDING", "direction": "LONG",
+            "trend_strength_bucket": "STRONG",
+        },
+    }
+    if defect == "mismatched":
+        receipt["opportunity_id"] = "other-opportunity"
+    receipts = [receipt, dict(receipt)] if defect == "ambiguous" else [receipt]
+    joined, _ = join_pre_entry_feature_receipts([opportunity], receipts)
+    features = _regime_features_at_signal(joined[0], {})
+    assert features["atr_bucket"]["status"] == "UNKNOWN"
+    assert features["spread_bucket"]["status"] == (
+        "OBSERVED" if defect in {"nonfinite", "malformed"} else "UNKNOWN"
+    )
 
 
 def _phase7_result(cohort, regime, direction, *, missing=None, source=True):
