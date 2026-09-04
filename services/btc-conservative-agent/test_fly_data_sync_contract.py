@@ -179,7 +179,7 @@ def test_sync_transport_retries_are_bounded_and_report_the_failed_stage():
     assert "Publish-MirrorCandidate -Candidate $candidate -Destination $local" in SYNC_SCRIPT
 
 
-def _run_sqlite_lease_retry_sequence(sequence):
+def _run_sqlite_lease_retry_sequence(sequence, *, budget_seconds=300, response_delay_ms=0):
     function_body = SYNC_SCRIPT[
         SYNC_SCRIPT.index("function Invoke-DataSyncJsonRequest"):
         SYNC_SCRIPT.index("function New-DataSyncManifestUri")
@@ -194,10 +194,14 @@ $script:responses = ConvertFrom-Json @'
 {encoded}
 '@
 $script:index = 0
+$script:timeouts = @()
 function Start-Sleep {{ param([int]$Seconds) }}
 function Test-DataSyncResourcePressureError {{ param([string]$Message) return $true }}
 function Get-DataSyncRetryDelaySec {{ param([int]$Attempt, [bool]$ResourcePressure) return 0 }}
 function Invoke-RestMethod {{
+  param($Uri, $Method, $Headers, [int]$TimeoutSec)
+  $script:timeouts += $TimeoutSec
+  if ({response_delay_ms} -gt 0) {{ [System.Threading.Thread]::Sleep({response_delay_ms}) }}
   $response = [string]$script:responses[$script:index]
   $script:index += 1
   if ($response -eq "CURRENT") {{ return @{{ snapshot_status = "CURRENT" }} }}
@@ -217,10 +221,10 @@ function Invoke-RestMethod {{
 }}
 {function_body}
 try {{
-  $result = Invoke-DataSyncJsonRequest -Stage "sqlite_snapshot_lease" -Uri "https://invalid.test" -MaxAttempts 35
+  $result = Invoke-DataSyncJsonRequest -Stage "sqlite_snapshot_lease" -Uri "https://invalid.test" -MaxAttempts 35 -TimeoutSec 90 -MaxElapsedSec {budget_seconds}
   @{{ ok = $true; calls = $script:index; status = $result.snapshot_status }} | ConvertTo-Json -Compress
 }} catch {{
-  @{{ ok = $false; calls = $script:index; error = $_.Exception.Message }} | ConvertTo-Json -Compress
+  @{{ ok = $false; calls = $script:index; error = $_.Exception.Message; timeouts = @($script:timeouts) }} | ConvertTo-Json -Compress
 }}
 '''
     completed = subprocess.run(
@@ -252,6 +256,32 @@ def test_sqlite_lease_retry_stops_immediately_on_terminal_expiry():
     assert result["ok"] is False
     assert result["calls"] == 1
     assert "terminal snapshot lease attempt(s)" in result["error"]
+
+
+def test_sqlite_bare_pressure_never_mints_another_flight():
+    result = _run_sqlite_lease_retry_sequence(["BUSY", "BUSY", "CURRENT"])
+    assert result["ok"] is False
+    assert result["calls"] == 2
+    assert "2/2 consecutive pressure" in result["error"]
+
+
+def test_sqlite_request_deadline_rejects_late_success_and_clamps_timeout():
+    result = _run_sqlite_lease_retry_sequence(
+        ["CURRENT"], budget_seconds=2, response_delay_ms=2100
+    )
+    assert result["ok"] is False
+    assert result["calls"] == 1
+    assert "REQUEST_DEADLINE_EXCEEDED" in result["error"]
+    assert 0 < result["timeouts"][0] <= 2
+
+
+def test_sqlite_request_deadline_stops_building_retry():
+    result = _run_sqlite_lease_retry_sequence(
+        ["BUILDING", "CURRENT"], budget_seconds=2, response_delay_ms=2100
+    )
+    assert result["ok"] is False
+    assert result["calls"] == 1
+    assert "REQUEST_DEADLINE_EXCEEDED" in result["error"]
 
 
 def test_successful_slow_chunks_increase_throttle_instead_of_masking_pressure():

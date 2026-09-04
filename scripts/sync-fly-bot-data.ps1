@@ -82,23 +82,31 @@ function Invoke-DataSyncJsonRequest {
     [ValidateSet("Get", "Post")][string]$Method = "Get",
     [int]$TimeoutSec = $manifestTimeoutSec,
     [int]$MaxAttempts = $transportAttempts,
+    [ValidateRange(1, 900)][int]$MaxElapsedSec = 300,
     [string]$Body = ""
   )
   $requestWatch = [System.Diagnostics.Stopwatch]::StartNew()
   $consecutiveNonBuildingPressureFailures = 0
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    $remainingSeconds = [Math]::Floor($MaxElapsedSec - $requestWatch.Elapsed.TotalSeconds)
+    if ($remainingSeconds -lt 1) {
+      throw "Fly data-sync stage=$Stage failed: REQUEST_DEADLINE_EXCEEDED."
+    }
     try {
       $parameters = @{
         Uri = $Uri
         Method = $Method
         Headers = $headers
-        TimeoutSec = $TimeoutSec
+        TimeoutSec = [int][Math]::Min($TimeoutSec, $remainingSeconds)
       }
       if ($Method -eq "Post") {
         $parameters.ContentType = "application/json"
         $parameters.Body = $Body
       }
       $result = Invoke-RestMethod @parameters
+      if ($requestWatch.Elapsed.TotalSeconds -ge $MaxElapsedSec) {
+        throw "Fly data-sync stage=$Stage failed: REQUEST_DEADLINE_EXCEEDED."
+      }
       Write-Host (
         "[FLY SYNC] stage=$Stage attempt=$attempt/$MaxAttempts " +
         "elapsed_ms=$([Math]::Round($requestWatch.Elapsed.TotalMilliseconds)) status=success"
@@ -106,6 +114,10 @@ function Invoke-DataSyncJsonRequest {
       $consecutiveNonBuildingPressureFailures = 0
       return $result
     } catch {
+      $remainingSeconds = [Math]::Floor($MaxElapsedSec - $requestWatch.Elapsed.TotalSeconds)
+      if ($remainingSeconds -lt 1 -or $_.Exception.Message -match 'REQUEST_DEADLINE_EXCEEDED') {
+        throw "Fly data-sync stage=$Stage failed: REQUEST_DEADLINE_EXCEEDED."
+      }
       $structuredSnapshotBuilding = (
         $Stage -eq "sqlite_snapshot_lease" -and
         [string]$_.ErrorDetails.Message -match '"snapshot_status"\s*:\s*"BUILDING"'
@@ -150,13 +162,14 @@ function Invoke-DataSyncJsonRequest {
         # The server proves that this is the same single-flight background
         # build, so joining it cannot start duplicate SQLite work. Keep raw or
         # proxy 503s on the two-strike pressure circuit below.
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds ([Math]::Min(2, $remainingSeconds))
         continue
       }
       $resourcePressure = Test-DataSyncResourcePressureError -Message $_.Exception.Message
-      Start-Sleep -Seconds (Get-DataSyncRetryDelaySec `
+      $retryDelaySec = Get-DataSyncRetryDelaySec `
         -Attempt $attempt `
-        -ResourcePressure $resourcePressure)
+        -ResourcePressure $resourcePressure
+      Start-Sleep -Seconds ([Math]::Min($retryDelaySec, $remainingSeconds))
     }
   }
 }
