@@ -146,3 +146,77 @@ def test_reparse_ancestor_blocks_scan(tmp_path, monkeypatch):
     result = audit(tmp_path)
     assert not result["complete"] and not result["safe_for_reset_recovery_scope"]
     assert "UNSAFE_LINK_OR_REPARSE" in {r["code"] for r in result["blockers"]}
+
+
+def retirement_fixture(tmp_path, monkeypatch, failpoint=None):
+    store = store_fixture(tmp_path, monkeypatch)
+    store.rotate_ledger("decision")
+    pointer = store._generation_root("decision") / "ACTIVE.json"
+    digest = hashlib.sha256(pointer.read_bytes()).hexdigest()
+    # Simulate the separate authorized payload deleter inside this test fixture.
+    (store.ledger_dir / "decision.jsonl.1").unlink()
+    proof = {"schema": "research_reset_boundary_proof_v1", "runtime_root": str(tmp_path),
+        "retired_epoch_id": IDENTITY["epoch_id"], "new_epoch_id": "epoch-fresh",
+        "source_revision": IDENTITY["source_revision"], "recovery_receipt_sha256": "c" * 64,
+        "writers_quiesced": True, "paper_only": True, "live_disarmed": True, "epoch_retired": True,
+        "pending_paper_orders": 0, "open_paper_positions": 0, "pending_wal_records": 0, "pending_recovery_records": 0}
+    args = {"expected_pointer_sha256": digest, "boundary_proof": proof}
+    if failpoint:
+        with pytest.raises(RuntimeError, match="FAILPOINT"):
+            store.retire_empty_epoch_authority("decision", **args, failpoint=failpoint)
+    else:
+        store.retire_empty_epoch_authority("decision", **args)
+    return store, digest, args
+
+
+def test_actual_rotation_retirement_then_fresh_epoch_audit(tmp_path, monkeypatch):
+    store, digest, _ = retirement_fixture(tmp_path, monkeypatch)
+    fresh_identity = {**IDENTITY, "epoch_id": "epoch-fresh"}
+    fresh = V3EvidenceStore(tmp_path, epoch_id="epoch-fresh")
+    fresh._read_identity_override = fresh_identity
+    fresh.initialize_ledger_generation_authority("decision")
+    fresh.append("decision", {"record_id": "decision:new", "episode_id": "new"})
+    fresh.rotate_ledger("decision")
+    before = snapshot(tmp_path)
+    result = audit_research_reset_recovery(tmp_path, expected_identity=fresh_identity)
+    assert result["safe_for_reset_recovery_scope"], result["blockers"]
+    assert result["completed_epoch_retirements"][0]["pointer_sha256"] == digest
+    assert len(result["completed_rotations"]) == 1
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("failpoint", ["AFTER_RETIREMENT_RECEIPT", "AFTER_FIRST_METADATA"])
+def test_interrupted_retirement_audit_blocks_and_actual_writer_can_resume(tmp_path, monkeypatch, failpoint):
+    store, _, args = retirement_fixture(tmp_path, monkeypatch, failpoint)
+    result = audit(tmp_path)
+    pending = [row for row in result["blockers"] if row["code"] == "EPOCH_RETIREMENT_INCOMPLETE_OR_ORPHANED"]
+    assert pending and pending[0]["path"].endswith(".PREPARED.json")
+    assert not result["safe_for_reset_recovery_scope"]
+    store.retire_empty_epoch_authority("decision", **args)
+    assert audit(tmp_path)["safe_for_reset_recovery_scope"]
+
+
+@pytest.mark.parametrize("variant", ["archive_bytes", "completed_binding", "missing_archive", "extra_archive", "active_old_journals"])
+def test_retired_metadata_does_not_bypass_exact_proof(tmp_path, monkeypatch, variant):
+    store, digest, _ = retirement_fixture(tmp_path, monkeypatch)
+    receipt_root = store.receipt_dir / "epoch_authority_retirements_v1"
+    archive = receipt_root / digest
+    member = next(archive.glob("*.json"))
+    if variant == "archive_bytes":
+        member.write_text("{}")
+    elif variant == "completed_binding":
+        path = receipt_root / (digest + ".COMPLETED.json")
+        row = json.loads(path.read_text())
+        row["binding_sha256"] = "f" * 64
+        path.write_text(canonical_json(row))
+    elif variant == "missing_archive":
+        member.unlink()
+    elif variant == "extra_archive":
+        (archive / "extra.json").write_text("{}")
+    else:
+        # A valid retirement receipt never authorizes stale identity on active paths.
+        for source in archive.glob("*.json"):
+            (store._generation_root("decision") / "rotations" / source.name).write_bytes(source.read_bytes())
+    fresh_identity = {**IDENTITY, "epoch_id": "epoch-fresh"}
+    result = audit_research_reset_recovery(tmp_path, expected_identity=fresh_identity)
+    assert not result["safe_for_reset_recovery_scope"]

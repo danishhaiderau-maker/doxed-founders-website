@@ -15,7 +15,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 from combo_pathway_config import active_tile_registry_signature
@@ -526,6 +526,113 @@ class V3EvidenceStore:
             self._atomic_json_receipt(pointer, self._active_generation_pointer(ledger, 1))
             _fsync_directory(path.parent)
             return self._active_ledger_generation(ledger)
+
+    def retire_empty_epoch_authority(self, ledger: str, *, expected_pointer_sha256: str,
+            boundary_proof: Mapping[str, Any], failpoint: str | None = None) -> dict[str, Any]:
+        """Retire exactly one old empty ACTIVE pointer after recovery quiescence.
+
+        Caller must hold the runtime-wide writer boundary. This method holds the
+        ledger lock, independently audits recovery journals, and never deletes
+        payloads, WAL, append heads, or historical generation receipts.
+        """
+        from research_reset_inventory import _proof_valid
+        from research_reset_recovery_audit import audit_research_reset_recovery
+        if (not _proof_valid(self.root, boundary_proof)
+                or boundary_proof.get("retired_epoch_id") != self.epoch_id
+                or boundary_proof.get("source_revision") != self._identity_binding()["source_revision"]
+                or not re.fullmatch(r"[0-9a-f]{64}", str(expected_pointer_sha256))):
+            raise ValueError("EPOCH_AUTHORITY_RETIREMENT_BOUNDARY_INVALID")
+        pointer = self._generation_root(ledger) / "ACTIVE.json"
+        retirement_root = self.receipt_dir / "epoch_authority_retirements_v1"
+        receipt_path = retirement_root / (expected_pointer_sha256 + ".PREPARED.json")
+        completed_path = retirement_root / (expected_pointer_sha256 + ".COMPLETED.json")
+        path = self.ledger_path(ledger)
+        with self._exclusive(path):
+            def guard(target):
+                import stat
+                if not target.absolute().is_relative_to(self.root):
+                    raise RuntimeError("EPOCH_AUTHORITY_RETIREMENT_PATH_ESCAPE")
+                for candidate in (target, *target.parents):
+                    if candidate.is_symlink() or (candidate.exists() and
+                            getattr(candidate.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                        raise RuntimeError("EPOCH_AUTHORITY_RETIREMENT_SYMLINK")
+            for target in (pointer, path, receipt_path, completed_path): guard(target)
+            if path.exists() and (not path.is_file() or path.stat().st_size != 0):
+                raise RuntimeError("EPOCH_AUTHORITY_ACTIVE_PAYLOAD_NOT_EMPTY")
+            if any((self.receipt_dir / "emergency_record_idempotency_v1" / "append_heads").glob("*.json")):
+                raise RuntimeError("EPOCH_AUTHORITY_RECOVERY_NOT_CLEAR")
+            if any(self.ledger_dir.glob(ledger + ".jsonl.*")):
+                raise RuntimeError("EPOCH_AUTHORITY_SEALED_PAYLOAD_NOT_RETIRED")
+            base = {"schema": "empty_epoch_authority_retirement_v2", "ledger": ledger,
+                "old_identity": self._identity_binding(), "new_epoch_id": boundary_proof["new_epoch_id"],
+                "pointer_sha256": expected_pointer_sha256,
+                "relative_pointer": pointer.relative_to(self.root).as_posix(),
+                "boundary_proof_sha256": hashlib.sha256(canonical_json(dict(boundary_proof)).encode()).hexdigest()}
+            if receipt_path.exists():
+                material = json.loads(receipt_path.read_text("utf-8"))
+                unsigned = dict(material); binding = unsigned.pop("binding_sha256", None)
+                if (any(material.get(k) != v for k, v in base.items()) or material.get("state") != "PREPARED"
+                        or binding != hashlib.sha256(canonical_json(unsigned).encode()).hexdigest()):
+                    raise RuntimeError("EPOCH_AUTHORITY_RETIREMENT_RECEIPT_INVALID")
+                audit = audit_research_reset_recovery(self.root, expected_identity=self._identity_binding())
+                resume_paths = {item["source_relative"] for item in material["metadata"]}
+                resume_paths.add(receipt_path.relative_to(self.root).as_posix())
+                if (not audit.get("complete") or any(blocker.get("path") not in resume_paths
+                        for blocker in audit.get("blockers", []))):
+                    raise RuntimeError("EPOCH_AUTHORITY_OTHER_RECOVERY_NOT_CLEAR")
+            else:
+                audit = audit_research_reset_recovery(self.root, expected_identity=self._identity_binding())
+                if not audit.get("complete") or not audit.get("safe_for_reset_recovery_scope"):
+                    raise RuntimeError("EPOCH_AUTHORITY_RECOVERY_NOT_CLEAR")
+                if not pointer.exists(): raise RuntimeError("EPOCH_AUTHORITY_RETIREMENT_RECEIPT_MISSING")
+                self._active_ledger_generation(ledger)
+                if hashlib.sha256(pointer.read_bytes()).hexdigest() != expected_pointer_sha256:
+                    raise RuntimeError("EPOCH_AUTHORITY_POINTER_CHANGED")
+                metadata = []
+                candidates = sorted((self._generation_root(ledger) / "rotations").glob("*.json"))
+                legacy = self._legacy_migration_path(ledger)
+                if legacy.exists():
+                    self._load_legacy_migration(ledger)
+                    candidates.append(legacy)
+                for source in candidates:
+                    guard(source)
+                    destination = retirement_root / expected_pointer_sha256 / source.name
+                    metadata.append({"source_relative": source.relative_to(self.root).as_posix(),
+                        "destination_relative": destination.relative_to(self.root).as_posix(),
+                        "sha256": hashlib.sha256(source.read_bytes()).hexdigest()})
+                material = {**base, "state": "PREPARED", "metadata": metadata}
+                material["binding_sha256"] = hashlib.sha256(canonical_json(material).encode()).hexdigest()
+                self._write_immutable_receipt(receipt_path, material)
+            if failpoint == "AFTER_RETIREMENT_RECEIPT":
+                raise RuntimeError("FAILPOINT_AFTER_RETIREMENT_RECEIPT")
+            for index, item in enumerate(material["metadata"]):
+                source, destination = (self.root / item[k] for k in ("source_relative", "destination_relative"))
+                guard(source); guard(destination)
+                if (source.parent not in {self._generation_root(ledger), self._generation_root(ledger) / "rotations"}
+                        or destination.parent != retirement_root / expected_pointer_sha256
+                        or source.name != destination.name):
+                    raise RuntimeError("EPOCH_AUTHORITY_METADATA_PATH_INVALID")
+                if not source.exists() and not destination.exists():
+                    raise RuntimeError("EPOCH_AUTHORITY_METADATA_MISSING")
+                for member in (source, destination):
+                    if member.exists() and hashlib.sha256(member.read_bytes()).hexdigest() != item["sha256"]:
+                        raise RuntimeError("EPOCH_AUTHORITY_METADATA_CHANGED")
+                if source.exists():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, destination)
+                    _fsync_directory(source.parent); _fsync_directory(destination.parent)
+                if failpoint == "AFTER_FIRST_METADATA" and index == 0:
+                    raise RuntimeError("FAILPOINT_AFTER_FIRST_METADATA")
+            already = not pointer.exists()
+            if pointer.exists():
+                if hashlib.sha256(pointer.read_bytes()).hexdigest() != expected_pointer_sha256:
+                    raise RuntimeError("EPOCH_AUTHORITY_POINTER_CHANGED")
+                pointer.unlink()
+            _fsync_directory(pointer.parent)
+            completed = {**material, "state": "COMPLETED"}; completed.pop("binding_sha256")
+            completed["binding_sha256"] = hashlib.sha256(canonical_json(completed).encode()).hexdigest()
+            self._write_immutable_receipt(completed_path, completed)
+            return {**completed, "retired": True, "already_retired": already}
 
     def _legacy_migration_path(self, ledger: str) -> Path:
         return self._generation_root(ledger) / "LEGACY-0-TO-1.json"

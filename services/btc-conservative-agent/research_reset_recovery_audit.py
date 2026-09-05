@@ -45,7 +45,7 @@ def audit_research_reset_recovery(runtime_root, *, expected_identity,
             raise ValueError("UNSAFE_RUNTIME_ROOT")
     if not root.is_dir():
         raise ValueError("RUNTIME_ROOT_NOT_DIRECTORY")
-    blockers, retained, completed = [], [], []
+    blockers, retained, completed, retired = [], [], [], []
     seen, consumed, complete = 0, 0, True
 
     def block(code, path=None):
@@ -128,6 +128,114 @@ def audit_research_reset_recovery(runtime_root, *, expected_identity,
             block(code, path)
             retained.append({"path": path.relative_to(root).as_posix(), "reason": "UNKNOWN_RECOVERY_RETAINED"})
             return None, None
+
+    # Retired metadata is not active evidence. Exact completed relocation plans
+    # permit its continued retention without accepting old identity in ACTIVE
+    # rotation namespaces. An unfinished relocation is still pending recovery.
+    retirement_root = root / "v3/receipts/epoch_authority_retirements_v1"
+    retirement_groups, retirement_dirs = {}, {}
+    for path in entries(retirement_root):
+        match = re.fullmatch(r"([0-9a-f]{64})\.(PREPARED|COMPLETED)\.json", path.name)
+        if match:
+            retirement_groups.setdefault(match[1], {})[match[2]] = path
+        elif re.fullmatch(r"[0-9a-f]{64}", path.name):
+            retirement_dirs[path.name] = path
+        else:
+            block("UNKNOWN_EPOCH_RETIREMENT_PATH", path)
+            retained.append({"path": path.relative_to(root).as_posix(), "reason": "UNKNOWN_RECOVERY_RETAINED"})
+    for pointer_sha in sorted(set(retirement_groups) | set(retirement_dirs)):
+        paths = retirement_groups.get(pointer_sha, {})
+        rows = {state: read(path)[0] for state, path in paths.items()}
+        archive_paths = entries(retirement_dirs[pointer_sha]) if pointer_sha in retirement_dirs else []
+        if set(paths) != {"PREPARED", "COMPLETED"}:
+            block("EPOCH_RETIREMENT_INCOMPLETE_OR_ORPHANED", next(iter(paths.values()), retirement_dirs.get(pointer_sha)))
+            retained.extend({"path": path.relative_to(root).as_posix(), "reason": "INCOMPLETE_RETIREMENT_METADATA_RETAINED"}
+                            for path in archive_paths)
+            continue
+        prepared, final = rows["PREPARED"], rows["COMPLETED"]
+        if prepared is None or final is None:
+            continue
+        plan = {k: v for k, v in prepared.items() if k not in {"binding_sha256", "state"}}
+        valid = (_signed(prepared) and _signed(final) and prepared.get("state") == "PREPARED"
+                 and final.get("state") == "COMPLETED" and plan == {
+                     k: v for k, v in final.items() if k not in {"binding_sha256", "state"}})
+        old = plan.get("old_identity")
+        ledger = plan.get("ledger")
+        new_epoch = plan.get("new_epoch_id")
+        valid = valid and plan.get("schema") == "empty_epoch_authority_retirement_v2"
+        valid = valid and ledger in LEDGER_NAMES and plan.get("pointer_sha256") == pointer_sha
+        valid = valid and isinstance(old, dict) and set(old) == keys and all(
+            isinstance(v, str) and v.strip() and v.upper() not in {"UNKNOWN", "UNAVAILABLE", "NOT_DEPLOYED_LOCAL"}
+            for v in old.values())
+        valid = valid and isinstance(new_epoch, str) and new_epoch.strip() and new_epoch.upper() not in {"UNKNOWN", "UNAVAILABLE"}
+        valid = valid and new_epoch != (old or {}).get("epoch_id")
+        valid = valid and plan.get("relative_pointer") == f"v3/receipts/ledger_generations_v1/{ledger}/ACTIVE.json"
+        valid = valid and isinstance(plan.get("boundary_proof_sha256"), str) and bool(re.fullmatch(r"[0-9a-f]{64}", plan["boundary_proof_sha256"]))
+        metadata = plan.get("metadata")
+        valid = valid and isinstance(metadata, list) and len(metadata) <= max_entries
+        expected_destinations = set()
+        expected_sources = set()
+        archived_rotations = {}
+        if valid:
+            for item in metadata:
+                if not isinstance(item, dict) or set(item) != {"source_relative", "destination_relative", "sha256"}:
+                    valid = False
+                    break
+                source, destination, digest = (item.get(k) for k in ("source_relative", "destination_relative", "sha256"))
+                if not all(isinstance(v, str) for v in (source, destination, digest)):
+                    valid = False
+                    break
+                basename = source.rsplit("/", 1)[-1]
+                permitted_source = (source == f"v3/receipts/ledger_generations_v1/{ledger}/LEGACY-0-TO-1.json"
+                    or bool(re.fullmatch(re.escape(f"v3/receipts/ledger_generations_v1/{ledger}/rotations/")
+                        + r"[0-9]{20}\.(PREPARED|SEALED|COMMITTED)\.json", source)))
+                permitted_destination = retirement_root.relative_to(root).as_posix() + f"/{pointer_sha}/{basename}"
+                if (not permitted_source or destination != permitted_destination or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                        or destination in expected_destinations or source in expected_sources):
+                    valid = False
+                    break
+                expected_destinations.add(destination)
+                expected_sources.add(source)
+                archived, raw = read(root / destination)
+                if (archived is None or hashlib.sha256(raw).hexdigest() != digest or not _signed(archived)
+                        or archived.get("identity") != old or archived.get("ledger") != ledger):
+                    valid = False
+                    break
+                schema = archived.get("schema")
+                if basename == "LEGACY-0-TO-1.json":
+                    valid = schema == "v3_ledger_legacy_generation_migration_v1"
+                elif basename.endswith(".SEALED.json"):
+                    valid = schema == "v3_ledger_rotation_seal_v1"
+                else:
+                    valid = schema == "v3_ledger_rotation_transaction_v1" and archived.get("state") == basename.split(".")[1]
+                if basename != "LEGACY-0-TO-1.json":
+                    generation_text, stage, _ = basename.split(".")
+                    generation = int(generation_text)
+                    valid = valid and generation > 0 and type(archived.get("generation")) is int and archived["generation"] == generation
+                    archived_rotations.setdefault(generation, {})[stage] = (archived, raw)
+                if not valid:
+                    break
+        if valid:
+            for stages in archived_rotations.values():
+                if set(stages) != {"PREPARED", "SEALED", "COMMITTED"}:
+                    valid = False
+                    break
+                first, seal, last = (stages[s][0] for s in ("PREPARED", "SEALED", "COMMITTED"))
+                reconstructed = {k: v for k, v in last.items() if k not in {"binding_sha256", "seal_sha256"}}
+                reconstructed["state"] = "PREPARED"
+                valid = reconstructed == {k: v for k, v in first.items() if k != "binding_sha256"}
+                valid = valid and last.get("seal_sha256") == hashlib.sha256(stages["SEALED"][1]).hexdigest()
+                valid = valid and all(first.get(k) == seal.get(k) for k in ("active_ref", "sealed_ref", "successor_ref"))
+                if not valid:
+                    break
+        actual_destinations = {path.relative_to(root).as_posix() for path in archive_paths}
+        valid = valid and actual_destinations == expected_destinations
+        if valid:
+            retired.append({"ledger": ledger, "pointer_sha256": pointer_sha,
+                            "old_epoch_id": old["epoch_id"], "new_epoch_id": new_epoch,
+                            "status": "EXACT_COMPLETED_RETIREMENT_METADATA_VERIFIED"})
+        else:
+            block("EPOCH_RETIREMENT_RECEIPT_OR_METADATA_INVALID", paths["COMPLETED"])
 
     heads = root / "v3/receipts/emergency_record_idempotency_v1/append_heads"
     for path in entries(heads):
@@ -222,6 +330,7 @@ def audit_research_reset_recovery(runtime_root, *, expected_identity,
               "requires_caller_exclusive_barriers": True, "ledger_payload_integrity_verified": False,
               "pending_or_unknown_count": len(blockers) if complete else None,
               "scanned_entries": seen, "metadata_bytes_read": consumed,
-              "blockers": blockers, "retained_paths": retained, "completed_rotations": completed}
+              "blockers": blockers, "retained_paths": retained, "completed_rotations": completed,
+              "completed_epoch_retirements": retired}
     result["receipt_sha256"] = hashlib.sha256(canonical_json(result).encode()).hexdigest()
     return result
