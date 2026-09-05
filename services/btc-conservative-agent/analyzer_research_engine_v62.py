@@ -19943,7 +19943,9 @@ def _write_conservative_shadow_report(
     return report, mirrored
 
 
-def _write_discovery_scorecard_report(canonical_root, conservative_status, baseline_report):
+def _write_discovery_scorecard_report(
+    canonical_root, conservative_status, baseline_report, shadow_terminal_report=None,
+):
     """Stage one fresh scorecard for the existing atomic manifest publisher."""
     from research.discovery_scorecard_publication import build_discovery_scorecard_publication
 
@@ -19952,6 +19954,7 @@ def _write_discovery_scorecard_report(canonical_root, conservative_status, basel
         expected_generation=(conservative_status or {}).get("generation") or {},
         evaluator_status=conservative_status or {},
         baseline_report=baseline_report or {},
+        shadow_terminal_report=shadow_terminal_report,
     )
     target = Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
     temporary = target.with_suffix(target.suffix + ".tmp")
@@ -20228,6 +20231,7 @@ def write_report_manifest(
         if evidence_coverage_triage_error is None:
             evidence_coverage_triage_error = policy_evidence_library_error
     shadow_terminal_error = None
+    shadow_terminal = None
     try:
         shadow_terminal, shadow_terminal_mirror = _write_conservative_shadow_report(
             policy_data_dir, policy_report_dir,
@@ -20255,6 +20259,7 @@ def write_report_manifest(
         scorecard, scorecard_mirror = _write_discovery_scorecard_report(
             policy_data_dir, conservative_evaluator_status,
             None if baseline_replay_error else baseline_replay,
+            shadow_terminal_report={} if shadow_terminal_error else shadow_terminal,
         )
         reports.append({
             "title": "Matched Paper and Shadow Research",

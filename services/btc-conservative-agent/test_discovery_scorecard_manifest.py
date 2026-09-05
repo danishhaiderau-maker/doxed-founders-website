@@ -54,6 +54,10 @@ def test_manifest_builds_scorecard_after_current_evaluator_and_before_final_mani
     final_manifest = source.index('manifest = {\n        "schema": "report_manifest_v1"')
 
     assert evaluator < scorecard < final_manifest
+    shadow = source.index("shadow_terminal, shadow_terminal_mirror = _write_conservative_shadow_report(")
+    assert evaluator < shadow < scorecard
+    assert "shadow_terminal = None" in source
+    assert "shadow_terminal_report={} if shadow_terminal_error else shadow_terminal" in source
     assert '"file": DISCOVERY_COHORT_SCORECARD_REPORT_FILE' in source
     assert 'DISCOVERY_COHORT_SCORECARD_REPORT_FILE: {' in source
     assert '"generation_error": discovery_scorecard_error' in source
@@ -127,3 +131,24 @@ def test_generation_mismatch_fails_closed_before_artifact_read(tmp_path):
     assert result["input_artifacts"] == {}
     assert result["scorecard"] is None
     assert result["live_qualification"] is False
+
+
+def test_atomic_helper_passes_this_invocation_shadow_object(tmp_path, monkeypatch):
+    analyzer = _load_analyzer("discovery_shadow_atomic_integration")
+    monkeypatch.chdir(tmp_path)
+    import research.discovery_scorecard_publication as publication
+    captured = {}
+    current_shadow = {"generation": _generation("current"), "results": []}
+
+    def build(_root, **kwargs):
+        captured.update(kwargs)
+        return {"schema": SCHEMA, "status": "UNKNOWN", "winner": None}
+
+    monkeypatch.setattr(publication, "build_discovery_scorecard_publication", build)
+    target = tmp_path / analyzer.DISCOVERY_COHORT_SCORECARD_REPORT_FILE
+    monkeypatch.setattr(analyzer, "_atomic_mirror_analyzer_report", lambda _name: target)
+    analyzer._write_discovery_scorecard_report(
+        tmp_path, {"generation": _generation("current")}, {}, current_shadow,
+    )
+    assert captured["shadow_terminal_report"] is current_shadow
+    assert json.loads(target.read_text())["winner"] is None

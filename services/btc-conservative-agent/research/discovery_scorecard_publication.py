@@ -9,11 +9,13 @@ import gzip
 import hashlib
 import io
 import json
+import math
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping
 
 from discovery_cohort_scorecard import build_episode_matched_scorecard
+from research.policy_evidence_schema import canonical_json
 
 SCHEMA = "generation_bound_discovery_scorecard_publication_v1"
 GENERATION_FIELDS = (
@@ -111,6 +113,90 @@ def _feature(row: Mapping[str, Any], name: str) -> Any:
     return item.get("value") if isinstance(item, Mapping) and item.get("status") == "OBSERVED" else None
 
 
+def _receipt_sha(value: Mapping[str, Any]) -> str:
+    material = {key: item for key, item in value.items() if key != "receipt_sha256"}
+    return hashlib.sha256(canonical_json(material).encode()).hexdigest()
+
+
+def _observed_regime_feature(receipt: Mapping[str, Any], name: str) -> Any:
+    features = receipt.get("regime_features_at_signal")
+    item = features.get(name) if isinstance(features, Mapping) else None
+    return item.get("value") if isinstance(item, Mapping) and item.get("status") == "OBSERVED" else None
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _shadow_aggregate(report: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    raw_blockers = report.get("blockers", [])
+    if not isinstance(raw_blockers, list) or any(
+        not isinstance(item, str) or not item.strip() for item in raw_blockers
+    ):
+        return {}, ["SHADOW_TERMINAL_AGGREGATE_INVALID:blockers"]
+    results = report.get("results")
+    results = results if isinstance(results, list) else []
+    fields = ("candidate_replay_count", "complete_replay_count", "unknown_replay_count", "results_total")
+    supplied = any(field in report for field in fields)
+    if report.get("status") == "UNKNOWN" and not results and not supplied:
+        return {
+            "status": "UNKNOWN", "upstream_blockers": list(report.get("blockers") or []),
+            "counts_available": False, "candidate_replay_count": 0,
+            "complete_replay_count": 0, "unknown_replay_count": 0,
+            "results_total": 0, "results_returned_count": 0,
+            "results_truncated": False, "reason_counts": {},
+        }, []
+    defects, counts = [], {}
+    for field in fields:
+        raw = report.get(field)
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            defects.append(f"SHADOW_TERMINAL_AGGREGATE_INVALID:{field}")
+        else:
+            counts[field] = raw
+    reasons = report.get("reason_counts")
+    if not isinstance(reasons, Mapping):
+        defects.append("SHADOW_TERMINAL_AGGREGATE_INVALID:reason_counts")
+        reasons = {}
+    normalized_reasons = {}
+    for key, raw in reasons.items():
+        if not str(key).strip() or isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+            defects.append("SHADOW_TERMINAL_AGGREGATE_INVALID:reason_counts")
+        else:
+            normalized_reasons[str(key)] = raw
+    truncated = report.get("results_truncated")
+    if not isinstance(truncated, bool):
+        defects.append("SHADOW_TERMINAL_AGGREGATE_INVALID:results_truncated")
+        truncated = False
+    if not defects:
+        if any(count > counts["unknown_replay_count"] for count in normalized_reasons.values()):
+            defects.append("SHADOW_TERMINAL_REASON_COUNT_EXCEEDS_UNKNOWN_REPLAYS")
+        if counts["candidate_replay_count"] != counts["complete_replay_count"] + counts["unknown_replay_count"]:
+            defects.append("SHADOW_TERMINAL_AGGREGATE_COUNT_MISMATCH")
+        if counts["results_total"] != counts["candidate_replay_count"]:
+            defects.append("SHADOW_TERMINAL_RESULTS_TOTAL_MISMATCH")
+        if ((not truncated and len(results) != counts["results_total"])
+                or (truncated and len(results) >= counts["results_total"])):
+            defects.append("SHADOW_TERMINAL_RETURNED_RESULTS_MISMATCH")
+        returned_complete = sum(
+            isinstance(item, Mapping) and item.get("status") == "COMPLETE"
+            for item in results
+        )
+        if returned_complete != counts["complete_replay_count"]:
+            defects.append("SHADOW_TERMINAL_COMPLETE_RESULTS_OMITTED_OR_MISMATCHED")
+    return {
+        "status": report.get("status"), "upstream_blockers": list(report.get("blockers") or []),
+        "counts_available": True, **counts,
+        "results_returned_count": len(results), "results_truncated": truncated,
+        "reason_counts": dict(sorted(normalized_reasons.items())),
+    }, sorted(set(defects))
+
+
 def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
     receipt = row.get("evaluator_receipt") if isinstance(row.get("evaluator_receipt"), Mapping) else {}
     return {
@@ -170,6 +256,7 @@ def _missing(row: Mapping[str, Any]) -> list[str]:
 def build_discovery_scorecard_publication(
     canonical_root: str | Path, *, expected_generation: Mapping[str, Any],
     evaluator_status: Mapping[str, Any], baseline_report: Mapping[str, Any],
+    shadow_terminal_report: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a fresh report from two explicitly same-generation inputs."""
     expected, blockers = _generation(expected_generation, "EXPECTED")
@@ -187,10 +274,28 @@ def build_discovery_scorecard_publication(
         blockers.append("EVALUATOR_SUMMARY_SCHEMA_INVALID")
     if not isinstance(baseline_report, Mapping) or baseline_report.get("schema") != "entry_baseline_same_opportunity_replay_v1":
         blockers.append("BASELINE_REPORT_SCHEMA_INVALID")
-    if not blockers and (evaluator != expected or baseline != expected):
+    shadow_generation = None
+    if shadow_terminal_report is not None:
+        shadow_generation, defects = _generation(
+            shadow_terminal_report.get("generation")
+            if isinstance(shadow_terminal_report, Mapping) else None,
+            "SHADOW_TERMINAL",
+        )
+        blockers.extend(defects)
+        if (not isinstance(shadow_terminal_report, Mapping)
+                or shadow_terminal_report.get("schema")
+                != "generation_bound_conservative_shadow_report_v1"):
+            blockers.append("SHADOW_TERMINAL_REPORT_SCHEMA_INVALID")
+    if not blockers and (evaluator != expected or baseline != expected
+                         or (shadow_terminal_report is not None and shadow_generation != expected)):
         blockers.append("INPUT_GENERATION_MISMATCH")
     if blockers:
         return _unknown(expected, blockers)
+    shadow_aggregate = None
+    if shadow_terminal_report is not None:
+        shadow_aggregate, defects = _shadow_aggregate(shadow_terminal_report)
+        if defects:
+            return _unknown(expected, defects, shadow_terminal_aggregate=shadow_aggregate)
     rows, artifact, defects = _artifact(Path(canonical_root), evaluator_status)
     if defects:
         return _unknown(expected, defects, input_artifacts={"evaluator": artifact})
@@ -245,6 +350,8 @@ def build_discovery_scorecard_publication(
                                       "declared_baseline_episode_receipts": declared_baseline_count,
                                       "valid_baseline_episode_receipts": len(receipts)},
                         unjoinable_counts={"baseline_invalid_receipt": invalid_receipts})
+    baseline_index: dict[tuple[str, str, str], tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+    ambiguous_baseline_keys: set[tuple[str, str, str]] = set()
     for receipt in receipts:
         defects = _row_generation_defects(receipt, expected)
         if defects:
@@ -254,6 +361,17 @@ def build_discovery_scorecard_publication(
         results = receipt.get("results") if isinstance(receipt.get("results"), list) else []
         for result in sorted((item for item in results if isinstance(item, Mapping)),
                              key=lambda item: (str(item.get("baseline_id") or ""), str(item.get("policy_signature") or ""))):
+            baseline_key = (str(receipt.get("episode_id") or ""),
+                            str(receipt.get("opportunity_id") or ""),
+                            str(result.get("baseline_id") or ""))
+            if baseline_key in baseline_index:
+                unknown_counts["baseline_duplicate_entry_identity"] += 1
+                ambiguous_baseline_keys.add(baseline_key)
+                baseline_index.pop(baseline_key, None)
+            elif baseline_key in ambiguous_baseline_keys:
+                unknown_counts["baseline_duplicate_entry_identity"] += 1
+            else:
+                baseline_index[baseline_key] = (receipt, result)
             conservative_receipt = result.get("conservative_receipt")
             conservative_receipt = conservative_receipt if isinstance(conservative_receipt, Mapping) else {}
             baseline_row = {
@@ -280,13 +398,164 @@ def build_discovery_scorecard_publication(
                 for reason in result.get("rejection_codes") or []:
                     unknown_counts[f"baseline_reason:{reason}"] += 1
 
+    shadow_exact_duplicates = shadow_conflicting_duplicates = 0
+    shadow_rows_added = 0
+    shadow_provenance = []
+    if shadow_terminal_report is not None:
+        shadow_results = shadow_terminal_report.get("results")
+        if not isinstance(shadow_results, list):
+            return _unknown(expected, ["SHADOW_TERMINAL_RESULTS_MISSING"],
+                            input_artifacts={"evaluator": artifact})
+        grouped_shadow: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
+        for source in shadow_results:
+            if not isinstance(source, Mapping):
+                unknown_counts["shadow_terminal_invalid_result"] += 1
+                continue
+            key = (str(source.get("episode_id") or ""), str(source.get("opportunity_id") or ""),
+                   str(source.get("baseline_id") or ""),
+                   str(source.get("composite_policy_signature") or source.get("policy_signature") or ""))
+            grouped_shadow.setdefault(key, []).append(source)
+        for key in sorted(grouped_shadow):
+            variants = grouped_shadow[key]
+            canonical_variants = {
+                canonical_json({
+                    "terminal": item.get("terminal"),
+                    "policy_signature": item.get("policy_signature"),
+                    "composite_policy_signature": item.get("composite_policy_signature"),
+                    "entry_baseline_signature": item.get("entry_baseline_signature"),
+                    "exit_policy_signature": item.get("exit_policy_signature"),
+                    "evaluated_scope": item.get("evaluated_scope"),
+                    "portfolio_competition_status": item.get("portfolio_competition_status"),
+                }) for item in variants
+            }
+            if len(canonical_variants) == 1:
+                shadow_exact_duplicates += len(variants) - 1
+                source = variants[0]
+            else:
+                shadow_conflicting_duplicates += 1
+                unknown_counts["shadow_terminal_conflicting_duplicate"] += 1
+                continue
+            episode, entry_result = baseline_index.get(key[:3], ({}, {}))
+            terminal = source.get("terminal")
+            reasons = []
+            if source.get("status") != "COMPLETE":
+                # Exact UNKNOWN totals and reason counts are carried once by
+                # shadow_terminal_aggregate; sampled rows must not double-count them.
+                continue
+            if not episode:
+                reasons.append("BASELINE_ENTRY_JOIN_MISSING")
+            if key[:3] in ambiguous_baseline_keys:
+                reasons.append("BASELINE_ENTRY_JOIN_AMBIGUOUS")
+            if not isinstance(terminal, Mapping):
+                reasons.append("TERMINAL_RECEIPT_MISSING")
+                terminal = {}
+            composite_signature = key[3]
+            for field in ("entry_baseline_signature", "exit_policy_signature",
+                          "source_candidate_policy_signature"):
+                if not str(source.get(field) or "").strip():
+                    reasons.append(f"COMPOSITE_PROVENANCE_MISSING:{field}")
+            if (source.get("evaluated_scope") != "ENTRY_PLUS_SINGLE_POSITION_EXIT"
+                    or source.get("portfolio_competition_status") != "NOT_SIMULATED"):
+                reasons.append("COMPOSITE_EVALUATION_SCOPE_INVALID")
+            if terminal.get("status") != "COMPLETE":
+                reasons.append("SHADOW_TERMINAL_NOT_COMPLETE")
+            if (terminal.get("schema") != "generation_bound_conservative_shadow_terminal_v1"
+                    or terminal.get("generation") != expected):
+                reasons.append("TERMINAL_RECEIPT_GENERATION_OR_SCHEMA_INVALID")
+            if (terminal.get("receipt_sha256") != _receipt_sha(terminal)):
+                reasons.append("TERMINAL_RECEIPT_SHA256_INVALID")
+            if (terminal.get("profitability_supported") is not True
+                    or terminal.get("execution_support_status")
+                    != "SUPPORTED_CONSERVATIVE_SHADOW_ONLY"):
+                reasons.append("TERMINAL_EXECUTION_SUPPORT_INVALID")
+            if (terminal.get("policy_signature") != composite_signature
+                    or source.get("policy_signature") != composite_signature):
+                reasons.append("COMPOSITE_POLICY_SIGNATURE_MISMATCH")
+            baseline_signature = source.get("entry_baseline_signature")
+            if entry_result.get("policy_signature") != baseline_signature:
+                reasons.append("ENTRY_BASELINE_SIGNATURE_MISMATCH")
+            conservative_receipt = entry_result.get("conservative_receipt")
+            conservative_receipt = conservative_receipt if isinstance(conservative_receipt, Mapping) else {}
+            if (entry_result.get("supported") is not True
+                    or entry_result.get("outcome_state") not in {"FULL_FILL", "PARTIAL_FILL"}):
+                reasons.append("ENTRY_BASELINE_NOT_SUPPORTED_FILL")
+            if terminal.get("entry_receipt_sha256") != hashlib.sha256(
+                    canonical_json(conservative_receipt).encode()).hexdigest():
+                reasons.append("ENTRY_RECEIPT_BINDING_MISMATCH")
+            pnl = _finite(terminal.get("net_pnl_usd"))
+            if pnl is None:
+                reasons.append("TERMINAL_NET_PNL_MISSING_OR_NONFINITE")
+            if reasons:
+                for reason in sorted(set(reasons)):
+                    unknown_counts[f"shadow_terminal:{reason}"] += 1
+                continue
+            baseline_spec = entry_result.get("baseline_spec")
+            baseline_spec = baseline_spec if isinstance(baseline_spec, Mapping) else {}
+            shadow_row = {
+                "evidence_world": "CONSERVATIVE_BBO", "episode_id": key[0],
+                "opportunity_id": key[1], "epoch_id": episode.get("dataset_epoch"),
+                "source_revision": episode.get("source_revision"),
+                "deployed_revision": episode.get("deployed_revision"),
+                "direction": episode.get("direction"),
+                "adx_bucket": episode.get("adx_bucket") or _observed_regime_feature(episode, "adx_bucket"),
+                "offset_pct": baseline_spec.get("initial_offset_pct")
+                if baseline_spec.get("initial_offset_pct") is not None else 0.0
+                if baseline_spec.get("entry_type") == "MARKET_ENTRY" else None,
+                "chase_policy": baseline_spec.get("chase_policy_id") or key[2],
+                "exit_family": source.get("exit_policy_signature"),
+                "policy_id": composite_signature, "policy_signature": composite_signature,
+                "schedule_sha256": conservative_receipt.get("schedule_sha256"),
+                "original_requested_qty": conservative_receipt.get("requested_qty"),
+                "tape_hashes": conservative_receipt.get("tape_hashes"),
+                "tape_ids": conservative_receipt.get("tape_ids"),
+                "tile_config_signature": episode.get("tile_config_signature"),
+                "config_signature": episode.get("config_signature"),
+                "cost_model_id": terminal.get("cost_model_id"),
+                "simulation_model": terminal.get("simulation_model"),
+                "net_pnl_usd": pnl,
+                "composite_policy_signature": composite_signature,
+                "entry_baseline_signature": baseline_signature,
+                "exit_policy_signature": source.get("exit_policy_signature"),
+                "source_candidate_policy_signature": source.get("source_candidate_policy_signature"),
+                "source_candidate_policy_signatures": sorted(set(
+                    str(item.get("source_candidate_policy_signature") or "")
+                    for item in variants if str(item.get("source_candidate_policy_signature") or ""))),
+                "evaluation_scope": source.get("evaluated_scope"),
+                "portfolio_competition_status": source.get("portfolio_competition_status"),
+            }
+            adapted.append(shadow_row)
+            shadow_rows_added += 1
+            shadow_provenance.append({
+                "episode_id": key[0], "opportunity_id": key[1], "baseline_id": key[2],
+                "composite_policy_signature": composite_signature,
+                "terminal_receipt_sha256": terminal.get("receipt_sha256"),
+                "cost_model_id": terminal.get("cost_model_id"),
+                "cost_model_signature": terminal.get("cost_model_signature"),
+                "position_context_signature": terminal.get("position_context_signature"),
+                "coverage_policy_signature": terminal.get("coverage_policy_signature"),
+                "costs": {field: terminal.get(field) for field in (
+                    "trading_fees_usd", "funding_usd", "latency_cost_usd", "total_cost_usd")},
+            })
+            for field in _missing(shadow_row):
+                missing[f"shadow_terminal:{field}"] += 1
+
     scorecard = build_episode_matched_scorecard(adapted)
     has_exact_matched_cohort = any(
         item.get("cohort_equality_proven") is True
         for item in scorecard.get("matched_comparisons") or []
     )
+    shadow_aggregate_complete = (
+        shadow_terminal_report is None
+        or (shadow_aggregate.get("status") == "BUILT"
+            and not shadow_aggregate.get("upstream_blockers")
+            and shadow_aggregate.get("unknown_replay_count") == 0
+            and shadow_aggregate.get("complete_replay_count")
+            == shadow_aggregate.get("candidate_replay_count")
+            and shadow_aggregate.get("results_truncated") is False)
+    )
     complete_inputs = bool(adapted) and has_exact_matched_cohort and not missing \
         and not any(unknown_counts.values()) and not scorecard.get("blockers")
+    complete_inputs = complete_inputs and shadow_aggregate_complete
     complete_matched_outcomes = any(
         item.get("complete_matched_pnl_evidence") is True
         for item in scorecard.get("matched_comparisons") or []
@@ -296,16 +565,31 @@ def build_discovery_scorecard_publication(
         "status": "BUILT_INCOMPLETE" if not complete_inputs else "BUILT",
         "generation": expected,
         "blockers": sorted(scorecard.get("blockers") or []),
-        "input_artifacts": {"evaluator": artifact},
+        "input_artifacts": {
+            "evaluator": artifact,
+            "baseline": {"canonical_sha256": hashlib.sha256(canonical_json(baseline_report).encode()).hexdigest(),
+                         "generation": expected, "episode_receipt_count": len(receipts)},
+            "shadow_terminal": None if shadow_terminal_report is None else {
+                "canonical_sha256": hashlib.sha256(canonical_json(shadow_terminal_report).encode()).hexdigest(),
+                "generation": expected,
+            },
+        },
+        "shadow_terminal_provenance": shadow_provenance,
+        "shadow_candidate_count_basis": "UPSTREAM_PARAMETER_REPLAYS_NOT_INDEPENDENT_TRADES",
         "input_counts": {"evaluator_rows": len(rows), "baseline_episode_receipts": len(receipts),
+                         "shadow_terminal_rows_added": shadow_rows_added,
+                         "shadow_terminal_exact_duplicates_deduplicated": shadow_exact_duplicates,
+                         "shadow_terminal_conflicting_duplicate_groups": shadow_conflicting_duplicates,
                          "adapted_rows": len(adapted)},
         "alias_basis": {
             "CONSERVATIVE_BBO": ["CONSERVATIVE_BBO", "entry_baseline conservative_receipt"],
+            "CONSERVATIVE_SHADOW_TERMINAL": ["generation-bound composite entry+single-position exit only"],
             "OBSERVED_PAPER": ["REALIZED_COST_COMPLETE and profitability_supported=true only"],
             "IDEAL_TOUCH": [],
         },
         "missing_field_diagnostics": dict(sorted(missing.items())),
         "unjoinable_counts": dict(sorted((key, value) for key, value in unknown_counts.items() if value)),
+        "shadow_terminal_aggregate": shadow_aggregate,
         "scorecard": scorecard,
         "input_identity_complete": complete_inputs,
         "profitability_evidence_by_world": {

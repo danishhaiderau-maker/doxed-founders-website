@@ -28,3 +28,18 @@ passes (150 deselected). No dirty server changes are included in this activation
 The client pacing tests include actual PowerShell execution and source parsing.
 Post-restart progress must be recorded separately; no measured speed or
 completion claim is made here.
+
+After commit 08b0255, root enabled and started the same Scheduled Task once.
+Exactly one new loop owner was observed: PID 10172, started
+2026-09-05T01:08:30Z. Three startup quiet probes passed in 747, 274, and 271 ms.
+The last inspected file-progress heartbeat still belonged to the interrupted
+owner (01:05:09Z, index 2544). Therefore new-owner file-transfer throughput and
+terminal parity are NOT YET VERIFIED. Repeated focused pacing tests: 5 passed.
+
+Verified subsequent progress: PID10172 published new chunk receipts at
+01:11:49Z (research.db 4,194,304/17,846,272 bytes) and 01:12:49Z
+(12,582,912/17,846,272 bytes). File index is 3/34433 in the re-enumerated manifest;
+this proves current transfer, not discarded checkpoints or tiny-file throughput.
+An authenticated Fly /ready probe at 01:12:51Z responded in 857ms with
+system_ready=true, pending/open paper 0/0, scheduled AI completed_ts
+1788570620.8171742 and stage IDLE. Mirror parity still MISMATCH; no terminal ACK.

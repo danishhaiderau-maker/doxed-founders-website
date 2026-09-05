@@ -75,6 +75,34 @@ This plan incorporates Cursor's handoff and the current independent code, operat
 
 ## Reporting
 
+### September 5 implementation checkpoint (not deployed readiness)
+
+- Sync pacing activation is committed as 08b0255. One new owner PID10172 was
+  observed after the authorized handoff. New chunk receipts prove transfer
+  resumed; the updated SQLite snapshot differs from the previous checkpoint,
+  while 2,552 prior per-file checkpoints remain available for exact-identity
+  reuse. File index restarts with manifest enumeration; it is not a new-download
+  counter. Whole-generation ACK and tiny-file speed improvement are unproven.
+- Atomic discovery publication now consumes this invocation's shadow terminal
+  report. The adapter retains composite entry/exit identity, source candidate
+  provenance, simulation-world separation and correlated-outcome deduplication.
+  It preserves exact upstream UNKNOWN totals even when diagnostic rows are capped.
+  The combined replay, fill, evaluator, scorecard and publication suite passed
+  163 tests after independent-review fixes. Exact baseline/shadow input hashes,
+  terminal receipt and cost/position/coverage signatures are exposed. Parameter
+  replay counts are explicitly not independent trades. Source/test receipt is
+  not a fresh production/analyzer publication.
+- The batch transport core and resumable worker are separate work in progress.
+  Required activation path remains worker -> authenticated immutable package API
+  -> verified client extraction -> unchanged per-member manifest ACK -> canary.
+  Do not claim batching active from isolated package tests. Do not edit PID10172's
+  consumed client; future activation requires another controlled owner boundary.
+- The execution-model audit in diagnostics/shadow-execution-model-gaps-20260905.md
+  identifies missing sizing/quantity, funding, fee-schedule, causal fill ATR and
+  timing provenance. Declared simulated cost models may support explicitly labeled
+  research; assumptions must never be relabeled measured venue observations or
+  used as proof of live readiness. A current validated model producer is still open.
+
 ## Continuous QA and workspace hygiene
 
 - QA and workspace hygiene are mandatory completion gates, not optional finishing work. After each audit, record each actionable finding with affected paths/journeys, an owner, evidence, the next bounded repair and a verification receipt. Mark findings OPEN, FIXED_IN_SOURCE, VERIFIED_IN_RUNTIME or BLOCKED; never treat an audit recommendation or a passing unit test as a deployed fix.
