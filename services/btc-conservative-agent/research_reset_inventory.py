@@ -17,6 +17,7 @@ import re
 import stat
 
 from research_v3_contract import LEDGER_NAMES
+from research_reset_paths import io_path, logical_path, resolved_path
 
 SCHEMA = "research_reset_inventory_v1"
 PROOF_SCHEMA = "research_reset_boundary_proof_v1"
@@ -100,15 +101,15 @@ def _managed_fly_alias(root, path):
         return None
     expected = root.parent / path.name
     try:
-        raw_target = Path(os.readlink(path))
+        raw_target = logical_path(os.readlink(io_path(path)))
         lexical = Path(os.path.abspath(raw_target if raw_target.is_absolute() else path.parent / raw_target))
         if lexical != expected:
             return None
         for ancestor in (expected, *expected.parents):
-            info = ancestor.lstat()
+            info = io_path(ancestor).lstat()
             if _link(info):
                 return None
-        if not expected.is_dir() or path.resolve(strict=True) != expected:
+        if not io_path(expected).is_dir() or resolved_path(path, strict=True) != expected:
             return None
         return expected
     except (OSError, ValueError):
@@ -206,10 +207,10 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
     if not Path(runtime_root).is_absolute() or root == Path(root.anchor) or root == Path.home():
         raise ValueError("explicit non-broad runtime root required")
     for parent in (root, *root.parents):
-        st = parent.lstat()
+        st = io_path(parent).lstat()
         if _link(st):
             raise ValueError("symlink/reparse runtime root or ancestor")
-    if not root.is_dir():
+    if not io_path(root).is_dir():
         raise ValueError("runtime root must exist")
     proof_root = root
     proof_ok = _proof_valid(proof_root, proof)
@@ -218,12 +219,12 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
         if scope_name not in {"research", "research_accumulator", "research_archive"}:
             raise ValueError("unknown physical research scope")
         alias = proof_root / scope_name
-        if not _link(alias.lstat()):
+        if not _link(io_path(alias).lstat()):
             raise ValueError("physical scope requires exact managed Fly alias")
         physical = _managed_fly_alias(proof_root, alias)
         if physical is None:
             raise ValueError("physical scope alias mismatch")
-        alias_info, target_info = alias.lstat(), physical.lstat()
+        alias_info, target_info = io_path(alias).lstat(), io_path(physical).lstat()
         scope_binding = {"runtime_root": str(proof_root), "scope_name": scope_name,
                          "scope_root": str(physical), "alias_path": str(alias),
                          "alias_inode": alias_info.st_ino, "alias_device": alias_info.st_dev,
@@ -235,18 +236,18 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
     while stack and not errors:
         directory, depth = stack.pop()
         try:
-            with os.scandir(directory) as items:
+            with os.scandir(io_path(directory)) as items:
                 for item in items:
                     scanned += 1
                     if scanned > max_entries:
                         errors.append("ENTRY_BUDGET_EXCEEDED")
                         break
-                    path = Path(item.path)
+                    path = logical_path(item.path)
                     local_relative = path.relative_to(root).as_posix()
                     relative = f"{scope_name}/{local_relative}" if scope_name else local_relative
                     # Windows DirEntry.stat may omit inode/link counts. lstat
                     # gives the identity needed by the exact-path handoff.
-                    st = path.lstat()
+                    st = io_path(path).lstat()
                     record = {"path": relative, "absolute_path": str(path), "size_bytes": st.st_size,
                               "mtime_ns": st.st_mtime_ns, "device": st.st_dev, "inode": st.st_ino,
                               "link_count": st.st_nlink, "hardlinked": st.st_nlink > 1}
@@ -281,17 +282,17 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
     for relative, record in metadata.items():
         try:
             path = Path(record["absolute_path"])
-            before = path.lstat()
+            before = io_path(path).lstat()
             if (_link(before) or before.st_size > metadata_remaining
                     or before.st_ino != record["inode"] or before.st_mtime_ns != record["mtime_ns"]):
                 continue
-            with path.open("rb") as handle:
+            with io_path(path).open("rb") as handle:
                 opened = os.fstat(handle.fileno())
                 if opened.st_ino != before.st_ino or opened.st_dev != before.st_dev:
                     continue
                 raw = handle.read(metadata_remaining + 1)
             metadata_remaining -= len(raw)
-            after = path.lstat()
+            after = io_path(path).lstat()
             if metadata_remaining < 0 or _link(after) or after.st_ino != before.st_ino or after.st_mtime_ns != record["mtime_ns"]:
                 continue
             meta = json.loads(raw)
@@ -317,7 +318,7 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
         reason = unsafe or _essential(relative)
         category = None
         if (relative == "research_accumulator/research_trades_v983.db"
-                and any(Path(record["absolute_path"] + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))):
+                and any(io_path(record["absolute_path"] + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))):
             reason = "ACCUMULATOR_SQLITE_SIDECARS_REQUIRE_OWNER_RESET"
         if not reason and relative in origins:
             binding = origins[relative]

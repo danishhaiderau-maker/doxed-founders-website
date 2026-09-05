@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import stat
 from typing import Mapping
+from research_reset_paths import io_path, resolved_path
 
 
 class ResearchDeletionRejected(ValueError):
@@ -19,26 +20,26 @@ def _checked_path(raw, root: Path) -> Path:
     if path == root or root not in path.parents:
         raise ResearchDeletionRejected("PATH_OUTSIDE_EXPLICIT_ROOT")
     for part in (path, *path.parents):
-        if part.exists() or part.is_symlink():
-            info = part.lstat()
+        if io_path(part).exists() or io_path(part).is_symlink():
+            info = io_path(part).lstat()
             if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                 raise ResearchDeletionRejected("SYMLINK_OR_REPARSE_POINT")
         if part == root:
             break
-    if path.resolve() != path:
+    if resolved_path(path) != path:
         raise ResearchDeletionRejected("PATH_RESOLUTION_CHANGED")
     return path
 
 
 def _fingerprint(path: Path) -> dict:
-    info = path.lstat()
+    info = io_path(path).lstat()
     if not stat.S_ISREG(info.st_mode):
         raise ResearchDeletionRejected("TARGET_NOT_REGULAR_FILE")
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with io_path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    after = path.lstat()
+    after = io_path(path).lstat()
     if (info.st_size, info.st_mtime_ns, info.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
         raise ResearchDeletionRejected("TARGET_CHANGED_WHILE_HASHING")
     return {"path": str(path), "bytes": info.st_size, "sha256": digest.hexdigest()}
@@ -47,17 +48,17 @@ def _fingerprint(path: Path) -> dict:
 def _write_receipt(path: Path, payload: dict, *, first: bool = False) -> None:
     encoded = json.dumps(payload, sort_keys=True, indent=2).encode("utf-8")
     if first:
-        with path.open("xb") as handle:
+        with io_path(path).open("xb") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
         return
     temporary = path.with_name(path.name + ".updating")
-    with temporary.open("xb") as handle:
+    with io_path(temporary).open("xb") as handle:
         handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    os.replace(io_path(temporary), io_path(path))
 
 
 def _progress_seed(*, root: Path, receipt_path: Path, inventory: list, context=None) -> str:
@@ -72,7 +73,7 @@ def _append_progress(path: Path, *, index: int, phase: str, previous: str) -> st
     row = {"index": index, "phase": phase, "previous_sha256": previous}
     digest = hashlib.sha256(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     row["sha256"] = digest
-    with path.open("ab") as handle:
+    with io_path(path).open("ab") as handle:
         handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")).encode() + b"\n")
         handle.flush()
         os.fsync(handle.fileno())
@@ -87,9 +88,9 @@ def reconcile_research_deletion(receipt_path) -> dict:
     No deletion, retry, or receipt mutation is performed by this helper.
     """
     receipt_path = Path(receipt_path)
-    if receipt_path.stat().st_size > 64 * 1024**2:
+    if io_path(receipt_path).stat().st_size > 64 * 1024**2:
         raise ResearchDeletionRejected("RECEIPT_LIMIT_EXCEEDED")
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt = json.loads(io_path(receipt_path).read_text(encoding="utf-8"))
     root = Path(receipt["root"])
     receipt_path = _checked_path(receipt_path, root)
     if receipt.get("receipt_path") != str(receipt_path):
@@ -105,8 +106,8 @@ def reconcile_research_deletion(receipt_path) -> dict:
                               context=receipt.get("context"))
     if receipt.get("progress_seed_sha256") != previous:
         raise ResearchDeletionRejected("JOURNAL_SEED_MISMATCH")
-    if journal.exists():
-        with journal.open("rb") as handle:
+    if io_path(journal).exists():
+        with io_path(journal).open("rb") as handle:
             for sequence in range(2 * len(inventory) + 1):
                 line = handle.readline(4097)
                 if not line:
@@ -128,7 +129,7 @@ def reconcile_research_deletion(receipt_path) -> dict:
     for index, row in enumerate(inventory):
         path = _checked_path(row["path"], root)
         phase = phases.get(index)
-        if not path.exists():
+        if not io_path(path).exists():
             status = "UNLINKED_CONFIRMED" if phase == "UNLINKED" else "ABSENT_AFTER_INTENT" if phase == "INTENT" else "UNEXPECTED_ABSENCE"
         elif _fingerprint(path) == row:
             status = "RETAINED" if phase != "UNLINKED" else "REAPPEARED_AFTER_UNLINK"
@@ -186,11 +187,11 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
             raise ResearchDeletionRejected("RECEIPT_CONTEXT_LIMIT_EXCEEDED")
         context = json.loads(encoded_context)
     root = Path(os.path.abspath(os.fspath(root)))
-    if not root.is_dir() or root.parent == root:
+    if not io_path(root).is_dir() or root.parent == root:
         raise ResearchDeletionRejected("UNSAFE_ROOT")
     # Validate root and its ancestors too, including Windows junctions.
     for part in (root, *root.parents):
-        info = part.lstat()
+        info = io_path(part).lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise ResearchDeletionRejected("ROOT_SYMLINK_OR_REPARSE_POINT")
     if not isinstance(max_files, int) or isinstance(max_files, bool) or not 0 < max_files <= 100000:
@@ -214,10 +215,10 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
         protected.add(_checked_path(raw, root))
     paths = sorted(set(bounded))
     receipt = _checked_path(receipt_path, root)
-    if receipt in paths or receipt in allowed or receipt.exists() or not receipt.parent.is_dir():
+    if receipt in paths or receipt in allowed or io_path(receipt).exists() or not io_path(receipt.parent).is_dir():
         raise ResearchDeletionRejected("UNSAFE_RECEIPT_PATH")
     journal = _checked_path(str(receipt) + ".progress.jsonl", root)
-    if journal in paths or journal in allowed or journal.exists():
+    if journal in paths or journal in allowed or io_path(journal).exists():
         raise ResearchDeletionRejected("UNSAFE_PROGRESS_PATH")
     forbidden_suffixes = {".py", ".ps1", ".js", ".mjs", ".ts", ".toml", ".yaml", ".yml", ".pem", ".key", ".exe", ".dll"}
     for path in paths:
@@ -231,7 +232,7 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
                 or any(part in {".git", "locks", "owner"} for part in parts)
                 or path.suffix.lower() == ".lock"):
             raise ResearchDeletionRejected("PROTECTED_SOURCE_OR_RECOVERY")
-    if sum(path.lstat().st_size for path in paths) > max_total_bytes:
+    if sum(io_path(path).lstat().st_size for path in paths) > max_total_bytes:
         raise ResearchDeletionRejected("BYTE_LIMIT_EXCEEDED")
     inventory = [_fingerprint(path) for path in paths]
     expected_hashes = {}
@@ -257,7 +258,7 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
               "context": context}
     result["progress_seed_sha256"] = _progress_seed(root=root, receipt_path=receipt, inventory=inventory, context=context)
     _write_receipt(receipt, result, first=True)
-    with journal.open("xb") as handle:
+    with io_path(journal).open("xb") as handle:
         handle.flush()
         os.fsync(handle.fileno())
     previous_progress = result["progress_seed_sha256"]
@@ -272,7 +273,7 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
             if _fingerprint(path) != row:
                 raise ResearchDeletionRejected("TARGET_CHANGED_BEFORE_DELETE")
             previous_progress = _append_progress(journal, index=index, phase="INTENT", previous=previous_progress)
-            path.unlink()
+            io_path(path).unlink()
             result["deleted"].append(row["path"])
             result["deleted_bytes"] += row["bytes"]
             previous_progress = _append_progress(journal, index=index, phase="UNLINKED", previous=previous_progress)

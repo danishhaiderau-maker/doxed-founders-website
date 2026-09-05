@@ -14,6 +14,7 @@ from research_exact_deletion import (
     ResearchDeletionRejected, _checked_path, _fingerprint, delete_exact_research_files,
 )
 from research_reset_inventory import plan_research_reset, _managed_fly_alias
+from research_reset_paths import io_path
 
 
 def execute_research_reset(*, runtime_root, proof, quiescent: bool,
@@ -61,13 +62,13 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
     paths, expected = [], {}
     for row in targets:
         path = _checked_path(row["absolute_path"], root)
-        info = path.lstat()
+        info = io_path(path).lstat()
         observed = (info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino, info.st_nlink)
         recorded = tuple(row[key] for key in ("size_bytes", "mtime_ns", "device", "inode", "link_count"))
         if observed != recorded:
             raise ResearchDeletionRejected("RESET_TARGET_CHANGED_AFTER_PLAN")
         actual = _fingerprint(path)
-        after = path.lstat()
+        after = io_path(path).lstat()
         if (after.st_size, after.st_mtime_ns, after.st_dev, after.st_ino, after.st_nlink) != recorded:
             raise ResearchDeletionRejected("RESET_TARGET_CHANGED_DURING_VALIDATION")
         digest = row.get("expected_sha256")
@@ -86,7 +87,7 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         current = _managed_fly_alias(runtime, alias)
         if current != root:
             raise ResearchDeletionRejected("RESET_PHYSICAL_SCOPE_CHANGED")
-        alias_info, target_info = alias.lstat(), root.lstat()
+        alias_info, target_info = io_path(alias).lstat(), io_path(root).lstat()
         if (alias_info.st_ino, alias_info.st_dev, target_info.st_ino, target_info.st_dev) != (
                 binding["alias_inode"], binding["alias_device"], binding["target_inode"], binding["target_device"]):
             raise ResearchDeletionRejected("RESET_PHYSICAL_SCOPE_CHANGED")
