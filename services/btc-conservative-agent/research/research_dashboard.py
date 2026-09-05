@@ -1047,6 +1047,51 @@ def _identity_matches(left, right) -> bool:
     return bool(left and right and (left.startswith(right) or right.startswith(left)))
 
 
+_SYNC_ACTIVITY_RECEIPT_MAX_AGE_SEC = 600
+
+
+def _mirror_sync_activity_meta(receipt: dict, *, now_ts: float | None = None) -> dict:
+    """Receipt recency is not process ownership or measured transfer progress.
+
+    This bounded projection deliberately performs no process/task scan. Preserve
+    the historical in-progress flag separately as a fail-closed gate; an expired
+    activity claim cannot be upgraded to proof that synchronization completed.
+    """
+    stamp = next((receipt[key] for key in ("updatedAt", "updated_at", "syncedAt", "synced_at")
+                  if key in receipt), None)
+    age = None
+    freshness = "MISSING_TIMESTAMP"
+    if stamp not in (None, ""):
+        try:
+            if not isinstance(stamp, str):
+                raise ValueError("timestamp must be an explicit timezone-aware string")
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("timestamp timezone missing")
+            age = (time.time() if now_ts is None else now_ts) - parsed.timestamp()
+            freshness = ("FUTURE_TIMESTAMP" if age < 0 else "STALE"
+                         if age > _SYNC_ACTIVITY_RECEIPT_MAX_AGE_SEC else "FRESH")
+        except (ValueError, TypeError, OverflowError, OSError):
+            freshness = "INVALID_TIMESTAMP"
+            age = None
+    in_progress = receipt.get("inProgress", receipt.get("in_progress"))
+    if freshness != "FRESH":
+        status = "UNKNOWN_" + freshness
+    elif type(in_progress) is not bool:
+        status = "UNKNOWN_ACTIVITY_FLAG"
+    else:
+        status = "REPORTED_IN_PROGRESS_OWNER_UNVERIFIED" if in_progress else "REPORTED_IDLE_OWNER_UNVERIFIED"
+    return {
+        "mirror_sync_activity_status": status,
+        "mirror_sync_receipt_freshness": freshness,
+        "mirror_sync_receipt_timestamp": stamp,
+        "mirror_sync_receipt_age_seconds": round(age, 3) if age is not None else None,
+        "mirror_sync_activity_receipt_max_age_seconds": _SYNC_ACTIVITY_RECEIPT_MAX_AGE_SEC,
+        "mirror_sync_owner_verified": False,
+        "mirror_sync_activity_basis": "SAVED_RECEIPT_ONLY_NOT_PROCESS_OR_PROGRESS_PROOF",
+    }
+
+
 def _generation_freshness_meta(manifest: dict | None = None) -> dict:
     """Fail closed unless the published generation matches mirror revision and epoch.
 
@@ -1069,6 +1114,7 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
     sync_in_progress = bool(
         sync_receipt.get("inProgress") or sync_receipt.get("in_progress")
     )
+    sync_activity = _mirror_sync_activity_meta(sync_receipt)
     sync_revision_parity = str(
         sync_receipt.get("revisionParity")
         or sync_receipt.get("revision_parity")
@@ -1106,7 +1152,18 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
             else "Analyzer or mirror epoch identity is unavailable"
         )
     if sync_in_progress:
-        reasons.append("Canonical Fly mirror synchronization is in progress")
+        receipt_freshness = sync_activity["mirror_sync_receipt_freshness"]
+        if sync_activity["mirror_sync_activity_status"] == "UNKNOWN_ACTIVITY_FLAG":
+            reasons.append("Saved mirror sync activity flag is invalid; current downloader activity is unknown")
+        else:
+            reasons.append(
+                "Fresh receipt reports canonical Fly mirror synchronization is in progress; "
+                "downloader ownership and current transfer progress are not verified"
+                if receipt_freshness == "FRESH" else
+                "Saved receipt reports canonical Fly mirror synchronization is in progress, "
+                f"but its timestamp status is {receipt_freshness}; current downloader activity is unknown. "
+                "This is not a current running-download or completion receipt"
+            )
     if not sync_receipt_ok:
         reasons.append(
             "Canonical Fly mirror synchronization receipt is failed or unavailable"
@@ -1143,6 +1200,7 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         "revision_parity": revision_parity,
         "epoch_parity": epoch_parity,
         "mirror_sync_in_progress": sync_in_progress,
+        **sync_activity,
         "mirror_sync_receipt_ok": sync_receipt_ok,
         "mirror_sync_poll_ok": sync_poll_ok,
         "mirror_sync_revision_parity": sync_revision_parity,
