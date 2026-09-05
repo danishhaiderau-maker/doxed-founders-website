@@ -15840,6 +15840,8 @@ def _write_v3_shared_lane_decision(
                 "short_score": short_score,
                 "score_gap": score_gap,
                 "feature_snapshot_at_signal": copy.deepcopy(features or {}),
+                "research_baseline_context_declaration": copy.deepcopy((ai or {}).get("research_baseline_context_declaration")),
+                "research_baseline_context_status": copy.deepcopy((ai or {}).get("research_baseline_context_status")),
             }
         failure_source = {**source, **lane_policy}
         receipt = dual_write_lane_decision(
@@ -17618,6 +17620,24 @@ def evaluate_signal_with_ai(
         if not ok:
             logger.warning(f"[AI] Feature validation failed: {reason} - reject without API call [PIPELINE ENFORCEMENT]")
             return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": f"FEATURE_VALIDATION:{reason}", "ai_error": True, "factors": {}, "source": "VALIDATION", "approved": False, "trade_id": raw_context.get("trade_id")}
+        # One bounded declaration for every AI outcome; no order is required.
+        # Capture before the API call so downstream signal timestamps cannot
+        # accidentally backdate current quantity/ATR observations.
+        from research.runtime_baseline_declaration import build_runtime_baseline_declaration
+        try:
+            research_quantity_capture = _capture_runtime_quantity_constraints(
+                evidence_symbol=str(BITFINEX_WS_SYMBOL).upper(), source_revision=_runtime_git_rev_exact())
+            research_maker_fee, research_taker_fee = get_trading_fee_rates()
+            research_context_capture = build_runtime_baseline_declaration(
+                context=ctx, quantity_capture=research_quantity_capture,
+                symbol=str(BITFINEX_WS_SYMBOL).upper(), source_revision=_runtime_git_rev_exact(),
+                captured_at_ts=time.time(), margin_usd=FIXED_MARGIN_USDT,
+                leverage=_state_leverage(), maker_fee_rate=research_maker_fee,
+                taker_fee_rate=research_taker_fee,
+            )
+        except Exception as research_context_error:
+            research_context_capture = {"status": "UNSUPPORTED", "declaration": None,
+                "reasons": ["RUNTIME_CONTEXT_CAPTURE_FAILED:" + type(research_context_error).__name__]}
         global LAST_AI_PAYLOAD, LAST_AI_TIMESTAMP
         logger.info(f"[AI PAYLOAD SNAPSHOT] lane={research_lane} {ctx} [PIPELINE ENFORCEMENT]")
         temperature = research_ai_temperature()
@@ -17706,6 +17726,10 @@ def evaluate_signal_with_ai(
             "deepseek_model": _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
         }
+        ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
+        ai_result["research_baseline_context_status"] = research_context_capture
+        ai_result["shared_ai_call_ts"] = utc_iso()
+        ai_result["original_context_signal_ts"] = ctx.get("signal_ts") or ctx.get("created_ts_ts")
         ai_result = apply_trend_hierarchy_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
         # Stage 1 Fix #3: hard-reject counter-structure directions before lane
@@ -44616,15 +44640,15 @@ def export_csv():
     zip_buffer.seek(0)
     return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='3factor_logs.zip')
 
-def _capture_runtime_quantity_constraints() -> dict:
+def _capture_runtime_quantity_constraints(*, evidence_symbol=None, source_revision=None) -> dict:
     """Capture exact venue metadata for evidence; never invent constraints."""
     try:
         return capture_quantity_constraints(
             bitfinex_public,
             ccxt_symbol=SYMBOL_CCXT,
-            evidence_symbol=BITFINEX_WS_SYMBOL,
+            evidence_symbol=evidence_symbol or BITFINEX_WS_SYMBOL,
             captured_at=utc_iso(),
-            source_revision=_runtime_git_rev(),
+            source_revision=source_revision or _runtime_git_rev(),
         )
     except Exception as exc:
         logger.warning(
