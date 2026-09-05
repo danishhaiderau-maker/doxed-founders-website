@@ -125,13 +125,18 @@ export class ShowcaseSnapshotService {
       );
     }
     const snapshot = rawSnapshot as Prisma.InputJsonValue;
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: { showcaseRelaySnapshotSeq: true },
+    });
     const prev = row?.showcaseRelaySnapshotSeq ?? BigInt(0);
     if (seq <= prev) {
       return { ok: true, skipped: true, snapshot_seq: Number(prev) };
     }
     await this.prisma.platformSettings.upsert({
       where: { id: 'default' },
+      // The result is unused; avoid returning the snapshot and unrelated settings.
+      select: { id: true },
       create: {
         id: 'default',
         showcaseRelaySnapshot: snapshot,
@@ -153,7 +158,14 @@ export class ShowcaseSnapshotService {
     snapshot_seq: number;
     at: Date | null;
   }> {
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: {
+        showcaseRelaySnapshot: true,
+        showcaseRelaySnapshotSeq: true,
+        showcaseRelaySnapshotAt: true,
+      },
+    });
     const raw = row?.showcaseRelaySnapshot;
     const snapshot =
       raw && typeof raw === 'object' && !Array.isArray(raw)
