@@ -1,0 +1,32 @@
+{
+  "schema": "retained_local_evaluator_diagnostic_v1",
+  "analyzer_source_revision": "461c54e",
+  "scope": "PARTIAL_HISTORICAL_LOCAL_DATA_NOT_CURRENT_MIRROR",
+  "read_only": true,
+  "publication_performed": false,
+  "checkpoint_metadata": {
+    "entries": 3334,
+    "present": 3334,
+    "missing": 0,
+    "size_mismatches": 0,
+    "physical_bytes": 2169140751,
+    "hash_or_generation_verified": false
+  },
+  "evaluator": {
+    "row_count": 9587,
+    "classification_counts": {"FULL_FILL": 0, "PARTIAL_FILL": 0, "NO_FILL": 0, "UNKNOWN": 9587},
+    "terminal_outcome_counts": {"REALIZED_COST_COMPLETE": 0, "NOT_APPLICABLE_NO_FILL": 0, "UNKNOWN": 9587},
+    "results_sha256": "c0205843f16f8b7f1c9a419d21c751d4c7e3b53f920afdc5f1d837981ba2fc40",
+    "qualification_allowed": false,
+    "profitability_calculated": false
+  },
+  "after_pre_entry_join_repair": {
+    "results_sha256": "c7534d2d491e538ff2d55ad1d2c4a574e0223f70e1b9f7e2faded2dc466a1148",
+    "row_count": 9587,
+    "classification_counts": {"FULL_FILL": 0, "PARTIAL_FILL": 0, "NO_FILL": 0, "UNKNOWN": 9587},
+    "newly_observed_bucket_rows": {"atr_bucket": 1433, "realized_volatility_bucket": 1433, "trend_strength_bucket": 1433},
+    "focused_tests_passed": 60,
+    "publication_performed": false
+  },
+  "limitation": "Rows are candidate evaluations, not independent completed trades. The join repair recovers real separate feature receipts, not missing fill or cost evidence. The full current download is not complete."
+}

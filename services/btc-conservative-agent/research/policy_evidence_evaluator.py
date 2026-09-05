@@ -953,6 +953,7 @@ def build_v3_conservative_results(
 ) -> dict[str, Any]:
     """Evaluate exactly-bound decisions and retain every UNKNOWN explicitly."""
     from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex
+    from research.research_v3_report import join_pre_entry_feature_receipts
     incident_input = incident_input if incident_input is not None else load_incident_input()
     incident_index = IncidentEpisodeIndex(incident_input)
     root = Path(v3_root).resolve()
@@ -960,7 +961,7 @@ def build_v3_conservative_results(
         raise ValueError("V3_EVALUATOR_ROOT_MUST_BE_V3")
     ledgers = {
         name: _read_jsonl(root / "ledgers" / f"{name}.jsonl")
-        for name in ("decision", "opportunity", "order_intent", "market_segment", "execution", "lifecycle")
+        for name in ("decision", "opportunity", "order_intent", "market_segment", "execution", "lifecycle", "pre_entry_features")
     }
     recovery_segments = _read_jsonl(
         root / "recovery_ledgers" / "market_segment.jsonl"
@@ -968,6 +969,33 @@ def build_v3_conservative_results(
     ledgers["market_segment"].extend(recovery_segments)
     for rows in ledgers.values():
         incident_index.add(rows)
+    # The collector stores causal features separately from opportunities. Join
+    # only the exact epoch/opportunity/episode, before projecting evaluator
+    # features. The shared normalizer retains real observation timestamps and
+    # rejects duplicate, missing, or post-signal receipts; raw ledgers stay intact.
+    feature_receipts: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for receipt in ledgers["pre_entry_features"]:
+        identity = _identity(receipt)
+        if all(identity):
+            feature_receipts.setdefault(identity, []).append(receipt)
+    joined_opportunities = []
+    for opportunity in ledgers["opportunity"]:
+        identity = _identity(opportunity)
+        matches = feature_receipts.get(identity, []) if all(identity) else []
+        provenance_conflict = any(
+            str(opportunity.get(field) or "").strip()
+            and str(receipt.get(field) or "").strip()
+            and str(opportunity[field]).strip() != str(receipt[field]).strip()
+            for receipt in matches
+            for field in ("source_revision", "deployed_revision", "tile_config_signature", "config_signature")
+        )
+        joined, _ = join_pre_entry_feature_receipts(
+            [opportunity], [] if provenance_conflict else matches,
+        )
+        if provenance_conflict:
+            joined[0]["pre_entry_feature_blockers"] = ["PRE_ENTRY_CAUSAL_PROVENANCE_MISMATCH"]
+        joined_opportunities.extend(joined)
+    ledgers["opportunity"] = joined_opportunities
     bindings = build_v3_binding_index(root)["bindings"]
     decisions = {str(row.get("event_id") or ""): row for row in ledgers["decision"]}
     opportunities = {_identity(row): row for row in ledgers["opportunity"]}
