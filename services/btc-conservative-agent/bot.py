@@ -28179,7 +28179,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         with state_lock:
             state["execution_paused"] = True
         if boundary is not None and operation_path is not None:
-            operation.update(stage="FAILED", failed_stage=stage, error=type(exc).__name__)
+            from research_reset_failure_detail import reset_failure_fields
+            operation.update(stage="FAILED", failed_stage=stage, **reset_failure_fields(exc))
             try:
                 boundary["store"]._atomic_json_receipt(operation_path, operation)
             except Exception:

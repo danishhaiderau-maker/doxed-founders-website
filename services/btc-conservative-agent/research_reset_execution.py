@@ -7,11 +7,13 @@ from file existence, a paused display, or a structurally valid proof alone.
 from __future__ import annotations
 
 import os
+from itertools import islice
 from pathlib import Path
 from typing import Mapping
 
 from research_exact_deletion import (
     ResearchDeletionRejected, _checked_path, _fingerprint, delete_exact_research_files,
+    validate_exact_research_deletion,
 )
 from research_reset_inventory import plan_research_reset, _managed_fly_alias
 from research_reset_paths import io_path
@@ -40,6 +42,9 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         raise ResearchDeletionRejected("QUIESCENCE_NOT_PROVEN")
     if type(validate_only) is not bool:
         raise ResearchDeletionRejected("VALIDATE_ONLY_REQUIRES_BOOLEAN")
+    protected_paths = tuple(islice(iter(protected_paths), 100001))
+    if len(protected_paths) > 100000:
+        raise ResearchDeletionRejected("PROTECTED_LIST_LIMIT_EXCEEDED")
     if not isinstance(recovery_states, Mapping) or not recovery_states or any(
             not isinstance(key, str) or not key.strip() or value not in
             {"EMPTY", "REPLAYED", "RECONCILED", "NOT_PRESENT"}
@@ -60,6 +65,21 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
     if len(targets) > max_files or plan["target_bytes"] > max_total_bytes:
         raise ResearchDeletionRejected("RESET_TARGET_BUDGET_EXCEEDED")
     paths, expected = [], {}
+    context = {
+        "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
+        "retained": [{key: row[key] for key in
+                      ("path", "absolute_path", "reason", "category", "size_bytes", "hardlinked", "verified_sibling_target") if key in row}
+                     for row in plan["retained"]],
+        "bytes_basis": plan["bytes_basis"], "hardlinked_target_count": plan["hardlinked_target_count"],
+    }
+    # Admission is metadata-only and shared with the final deleter. Run it
+    # before hashing gigabytes, including for prospective preflight receipts.
+    candidate_paths = [row["absolute_path"] for row in targets]
+    validate_exact_research_deletion(
+        root=root, targets=candidate_paths, allowed_paths=candidate_paths,
+        receipt_path=receipt_path, quiescent=quiescent, recovery_states=recovery_states,
+        protected_paths=protected_paths, max_files=max_files, max_total_bytes=max_total_bytes,
+        receipt_context=context, prospective_receipt_parent=validate_only)
     for row in targets:
         path = _checked_path(row["absolute_path"], root)
         info = io_path(path).lstat()
@@ -105,13 +125,7 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         quiescent=quiescent, recovery_states=recovery_states,
         protected_paths=protected_paths, max_files=max_files, max_total_bytes=max_total_bytes,
         expected_sha256_by_path=expected,
-        receipt_context={
-            "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
-            "retained": [{key: row[key] for key in
-                          ("path", "absolute_path", "reason", "category", "size_bytes", "hardlinked", "verified_sibling_target") if key in row}
-                         for row in plan["retained"]],
-            "bytes_basis": plan["bytes_basis"], "hardlinked_target_count": plan["hardlinked_target_count"],
-        },
+        receipt_context=context,
     )
     return {"schema": "research_reset_execution_v1", "status": receipt["status"],
             "scope_root": str(root), "scope_name": scope_name,

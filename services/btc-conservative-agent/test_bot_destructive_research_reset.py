@@ -133,6 +133,38 @@ def test_existing_real_empty_wal_is_rebound_only_after_deletion(runtime):
     assert status["records"] == []
 
 
+def test_payload_rejection_persists_exact_code_and_retains_paused_old_state(runtime, monkeypatch):
+    import research_reset_execution
+    from research_exact_deletion import ResearchDeletionRejected
+
+    calls = []
+    payload_before = runtime["payload"].read_bytes()
+    session_before = runtime["session"].read_bytes()
+    accounting_before = runtime["accounting"].read_bytes()
+
+    def reject_exact_deletion(**kwargs):
+        calls.append(kwargs["receipt_path"])
+        raise ResearchDeletionRejected("PROTECTED_SOURCE_OR_RECOVERY")
+
+    monkeypatch.setattr(research_reset_execution, "delete_exact_research_files", reject_exact_deletion)
+    result = run(runtime, send_local_signal=False)
+    assert len(calls) == 1  # Real preflight passed; failure is at actual deletion admission.
+    assert result["ok"] is False
+    assert result["failed_stage"] == "PAYLOAD_DELETION"
+    assert result["payload_deletion_completed"] is False
+    operation = json.loads(Path(result["operation_receipt"]).read_text())
+    assert operation["stage"] == "FAILED"
+    assert operation["failed_stage"] == "PAYLOAD_DELETION"
+    assert operation["error"] == "ResearchDeletionRejected"
+    assert operation["rejection_code"] == "PROTECTED_SOURCE_OR_RECOVERY"
+    assert not Path(calls[0]).exists()
+    assert runtime["payload"].read_bytes() == payload_before
+    assert runtime["session"].read_bytes() == session_before
+    assert runtime["accounting"].read_bytes() == accounting_before
+    assert runtime["state"]["execution_paused"] is True
+    assert runtime["state"]["live_armed"] is False
+
+
 def test_actual_genome_database_resets_and_rebinds_without_copying_old_payload(runtime):
     from research_genome.bridge import GenomeBridge
     bridge = GenomeBridge(str(runtime["root"]), dataset_epoch="epoch-old",

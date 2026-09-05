@@ -142,20 +142,24 @@ def reconcile_research_deletion(receipt_path) -> dict:
             "deletion_performed": False}
 
 
-def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
+def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_path,
                                 quiescent: bool, recovery_states: Mapping[str, str],
                                 protected_paths=(), max_files: int = 100000,
                                 max_total_bytes: int = 64 * 1024**3,
                                 expected_sha256_by_path: Mapping[str, str] | None = None,
-                                receipt_context: Mapping | None = None) -> dict:
-    """Delete exact files only while the caller holds all writer/reader barriers.
+                                receipt_context: Mapping | None = None,
+                                prospective_receipt_parent: bool = False) -> dict:
+    """Shared non-hashing admission checks; never create receipts or delete.
 
     ``recovery_states`` must be authoritative caller observations, not assumed
     empty because execution is paused. Unknown/PREPARED/DEFERRED blocks deletion.
     Integration must supply explicit relevant proof keys (lifecycle owner,
     emergency WAL, sync/readers); this leaf cannot obtain runtime ownership.
-    Failures after unlink retain a PARTIAL receipt; they are never success.
+    Prospective parents are permitted only for preflight: all existing ancestors
+    must already be ordinary directories. Actual deletion requires the parent.
     """
+    if type(prospective_receipt_parent) is not bool:
+        raise ResearchDeletionRejected("UNSAFE_RECEIPT_PATH")
     if quiescent is not True:
         raise ResearchDeletionRejected("QUIESCENCE_NOT_PROVEN")
     if not isinstance(recovery_states, Mapping) or not 0 < len(recovery_states) <= 32 or any(
@@ -215,7 +219,10 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
         protected.add(_checked_path(raw, root))
     paths = sorted(set(bounded))
     receipt = _checked_path(receipt_path, root)
-    if receipt in paths or receipt in allowed or io_path(receipt).exists() or not io_path(receipt.parent).is_dir():
+    if (receipt in paths or receipt in allowed or io_path(receipt).exists()
+            or (not prospective_receipt_parent and not io_path(receipt.parent).is_dir())
+            or any(io_path(parent).exists() and not io_path(parent).is_dir()
+                   for parent in receipt.parents if parent == root or root in parent.parents)):
         raise ResearchDeletionRejected("UNSAFE_RECEIPT_PATH")
     journal = _checked_path(str(receipt) + ".progress.jsonl", root)
     if journal in paths or journal in allowed or io_path(journal).exists():
@@ -232,9 +239,11 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
                 or any(part in {".git", "locks", "owner"} for part in parts)
                 or path.suffix.lower() == ".lock"):
             raise ResearchDeletionRejected("PROTECTED_SOURCE_OR_RECOVERY")
-    if sum(io_path(path).lstat().st_size for path in paths) > max_total_bytes:
+    target_stats = [io_path(path).lstat() for path in paths]
+    if any(not stat.S_ISREG(info.st_mode) for info in target_stats):
+        raise ResearchDeletionRejected("TARGET_NOT_REGULAR_FILE")
+    if sum(info.st_size for info in target_stats) > max_total_bytes:
         raise ResearchDeletionRejected("BYTE_LIMIT_EXCEEDED")
-    inventory = [_fingerprint(path) for path in paths]
     expected_hashes = {}
     if expected_sha256_by_path is not None:
         if not isinstance(expected_sha256_by_path, Mapping) or len(expected_sha256_by_path) > max_files:
@@ -247,9 +256,28 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
             if str(path) in expected_hashes and expected_hashes[str(path)] != digest:
                 raise ResearchDeletionRejected("AMBIGUOUS_EXPECTED_HASH_BINDING")
             expected_hashes[str(path)] = digest
-        if any(row["path"] in expected_hashes and row["sha256"] != expected_hashes[row["path"]]
-               for row in inventory):
-            raise ResearchDeletionRejected("EXPECTED_SHA256_MISMATCH")
+    return {"root": root, "paths": paths, "receipt": receipt, "journal": journal,
+            "context": context, "expected_hashes": expected_hashes}
+
+
+def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
+                                quiescent: bool, recovery_states: Mapping[str, str],
+                                protected_paths=(), max_files: int = 100000,
+                                max_total_bytes: int = 64 * 1024**3,
+                                expected_sha256_by_path: Mapping[str, str] | None = None,
+                                receipt_context: Mapping | None = None) -> dict:
+    """Revalidate admission, hash and journal exact deletions under caller leases."""
+    admission = validate_exact_research_deletion(
+        root=root, targets=targets, allowed_paths=allowed_paths, receipt_path=receipt_path,
+        quiescent=quiescent, recovery_states=recovery_states, protected_paths=protected_paths,
+        max_files=max_files, max_total_bytes=max_total_bytes,
+        expected_sha256_by_path=expected_sha256_by_path, receipt_context=receipt_context)
+    root, paths, receipt, journal, context, expected_hashes = (
+        admission[key] for key in ("root", "paths", "receipt", "journal", "context", "expected_hashes"))
+    inventory = [_fingerprint(path) for path in paths]
+    if any(row["path"] in expected_hashes and row["sha256"] != expected_hashes[row["path"]]
+           for row in inventory):
+        raise ResearchDeletionRejected("EXPECTED_SHA256_MISMATCH")
     result = {"schema": "research_exact_deletion_v1", "status": "PREPARED", "root": str(root),
               "raw_payloads_retained": False, "payload_copy_performed": False,
               "recovery_states": dict(recovery_states), "inventory": inventory,
