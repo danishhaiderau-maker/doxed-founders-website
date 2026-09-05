@@ -40326,7 +40326,7 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
                     "generation_id", "page_index_sha256", "source_git_rev",
                     "collection_epoch_id", "tile_registry_signature"))
             publish(run_managed_generation(
-                generation, _data_sync_volume_root(), work / "transport-bundles",
+                generation, _data_sync_runtime_root(), work / "transport-bundles",
                 pressure_probe=pressure, generation_available=retained, publish=publish))
         except Exception:
             publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED"})
