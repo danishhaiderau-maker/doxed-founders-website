@@ -170,6 +170,52 @@ def test_buy_sell_touch_and_trade_through_are_full_fills(tmp_path, direction, ro
     }
 
 
+def test_evaluator_preserves_collected_causal_provenance_without_generation_stamping(tmp_path):
+    v3 = _fixture(tmp_path)
+    provenance = {
+        "source_revision": "source-original",
+        "deployed_revision": "deployed-original",
+        "tile_config_signature": "tile-original",
+        "config_signature": "config-original",
+    }
+    for name in ("opportunity", "decision"):
+        path = v3 / f"ledgers/{name}.jsonl"
+        row = json.loads(path.read_text().strip())
+        _write(path, [{**row, **provenance}])
+
+    row = build_v3_conservative_results(v3)["results"][0]
+
+    assert {field: row[field] for field in provenance} == provenance
+    assert row["causal_provenance"] == {
+        "status": "COMPLETE",
+        "originals": {"opportunity": provenance, "decision": provenance},
+        "conflicts": {},
+        "analyzer_generation_substitution": False,
+    }
+
+
+def test_evaluator_keeps_provenance_conflict_visible_and_unknown(tmp_path):
+    v3 = _fixture(tmp_path)
+    opportunity_path = v3 / "ledgers/opportunity.jsonl"
+    opportunity = json.loads(opportunity_path.read_text().strip())
+    _write(opportunity_path, [{**opportunity, "source_revision": "source-opportunity"}])
+    decision_path = v3 / "ledgers/decision.jsonl"
+    decision = json.loads(decision_path.read_text().strip())
+    _write(decision_path, [{**decision, "source_revision": "source-decision"}])
+
+    row = build_v3_conservative_results(v3)["results"][0]
+
+    assert row["classification"] == "UNKNOWN"
+    assert row["supported"] is False
+    assert row["source_revision"] is None
+    assert row["causal_provenance"]["status"] == "CONFLICT"
+    assert row["causal_provenance"]["conflicts"]["source_revision"] == {
+        "opportunity": "source-opportunity",
+        "decision": "source-decision",
+    }
+    assert "UNKNOWN_CAUSAL_PROVENANCE_CONFLICT:source_revision" in row["unknown_reason_codes"]
+
+
 def test_missing_lifecycle_receipt_blocks_episode_before_ranking(tmp_path):
     v3 = _fixture(tmp_path)
     for manifest in (v3 / "lifecycle_bundles").glob("*/*/manifest.json"):
@@ -223,6 +269,8 @@ def test_realized_terminal_outcome_requires_complete_measured_costs(tmp_path):
         "entry_slippage_usd": 0.0, "exit_slippage_usd": 0.25,
         "filled_qty": 1.0, "net_pnl_usd": 4.0,
         "exit_price": 105, "exit_reason": "TARGET",
+        "execution_model": "OBSERVED_PAPER_MATCHES",
+        "cost_model_id": "BITFINEX_PAPER_COSTS_V1",
     }])
     _write(v3 / "ledgers/lifecycle.jsonl", [{
         **identity, "terminal": True, "outcome_state": "PAPER_REALIZED",
@@ -233,6 +281,8 @@ def test_realized_terminal_outcome_requires_complete_measured_costs(tmp_path):
     assert row["profitability_supported"] is True
     assert row["slippage_usd"] == 0.25
     assert row["net_pnl_usd"] == 4.0
+    assert row["observed_execution_model"] == "OBSERVED_PAPER_MATCHES"
+    assert row["observed_cost_model_id"] == "BITFINEX_PAPER_COSTS_V1"
     assert build_v3_conservative_results(v3)["terminal_outcome_counts"] == {
         "REALIZED_COST_COMPLETE": 1, "NOT_APPLICABLE_NO_FILL": 0, "UNKNOWN": 0,
     }

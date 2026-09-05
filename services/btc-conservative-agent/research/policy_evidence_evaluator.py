@@ -37,6 +37,9 @@ from combo_pathway_config import (
 
 SCHEMA = "v3_conservative_policy_evidence_v1"
 EVIDENCE_WORLD = "CONSERVATIVE_BBO_DEPTH_TAPE"
+CAUSAL_PROVENANCE_FIELDS = (
+    "source_revision", "deployed_revision", "tile_config_signature", "config_signature",
+)
 
 # This is an explicit research-support floor, not a profitability threshold.
 # It prevents a Phase-7 segmented result from being described as supported from
@@ -694,6 +697,44 @@ def _schedule(intent: Mapping[str, Any]) -> list[dict[str, Any]] | None:
     return result
 
 
+def _causal_provenance(
+    opportunity: Mapping[str, Any], decision: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Preserve collected identity without replacing it with analyzer identity."""
+    originals = {
+        "opportunity": {field: opportunity.get(field) for field in CAUSAL_PROVENANCE_FIELDS},
+        "decision": {field: decision.get(field) for field in CAUSAL_PROVENANCE_FIELDS},
+    }
+    resolved: dict[str, Any] = {}
+    conflicts: dict[str, dict[str, Any]] = {}
+    for field in CAUSAL_PROVENANCE_FIELDS:
+        observed = {
+            source: values[field]
+            for source, values in originals.items()
+            if values[field] not in (None, "")
+        }
+        unique = {str(value) for value in observed.values()}
+        if len(unique) > 1:
+            resolved[field] = None
+            conflicts[field] = observed
+        else:
+            resolved[field] = next(iter(observed.values()), None)
+    status = "CONFLICT" if conflicts else (
+        "COMPLETE" if all(resolved.values()) else "PARTIAL"
+    )
+    projection = {
+        **resolved,
+        "causal_provenance": {
+            "status": status,
+            "originals": originals,
+            "conflicts": conflicts,
+            "analyzer_generation_substitution": False,
+        },
+    }
+    reasons = [f"UNKNOWN_CAUSAL_PROVENANCE_CONFLICT:{field}" for field in sorted(conflicts)]
+    return projection, reasons
+
+
 def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
              opportunity: Mapping[str, Any], reasons: list[str]) -> dict[str, Any]:
     tape_ids = sorted(binding.get("tape_ids") or [])
@@ -749,6 +790,7 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
             key for key, item in regime_features.items() if item["status"] == "UNKNOWN"
         ),
     }
+    provenance, provenance_reasons = _causal_provenance(opportunity, decision)
     return {
         "schema": SCHEMA,
         "epoch_id": binding.get("epoch_id"),
@@ -784,7 +826,8 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
         "short_score": decision.get("short_score"),
         "score_gap": decision.get("score_gap"),
         "classification": "UNKNOWN", "supported": False,
-        "unknown_reason_codes": sorted(set(reasons)),
+        "unknown_reason_codes": sorted(set(reasons + provenance_reasons)),
+        **provenance,
         "requested_qty": None, "available_qty": None, "raw_partial_qty": None,
         "rounded_executable_qty": None, "accumulated_qty": None, "filled_qty": None,
         "minimum_lot_decision": "UNKNOWN", "minimum_notional_decision": "UNKNOWN",
@@ -842,6 +885,16 @@ def _bind_terminal_outcome(
         return {"terminal_outcome_status": "UNKNOWN", "terminal_outcome_reason_codes": reasons,
                 "profitability_supported": False, "net_pnl_usd": None}
     execution = terminal[0]
+    observed_execution_model = (
+        execution.get("observed_execution_model")
+        or execution.get("execution_model")
+        or execution.get("simulation_model")
+    )
+    observed_cost_model_id = (
+        execution.get("observed_cost_model_id")
+        or execution.get("cost_model_id")
+        or execution.get("cost_model")
+    )
     gross = _number(execution.get("gross_pnl_usd"))
     trading = _number(execution.get("trading_fees_usd"))
     funding = _number(execution.get("funding_fees_usd"))
@@ -863,13 +916,17 @@ def _bind_terminal_outcome(
         return {"terminal_outcome_status": "UNKNOWN", "terminal_outcome_reason_codes": reasons,
                 "profitability_supported": False, "gross_pnl_usd": gross,
                 "fees_usd": trading, "funding_usd": funding,
-                "slippage_usd": None, "net_pnl_usd": None}
+                "slippage_usd": None, "net_pnl_usd": None,
+                "observed_execution_model": observed_execution_model,
+                "observed_cost_model_id": observed_cost_model_id}
     if evaluated_qty is None or abs(float(observed_qty) - float(evaluated_qty)) > 1e-9:
         return {"terminal_outcome_status": "UNKNOWN",
                 "terminal_outcome_reason_codes": ["UNKNOWN_TERMINAL_QUANTITY_MISMATCH"],
                 "profitability_supported": False, "gross_pnl_usd": gross,
                 "fees_usd": trading, "funding_usd": funding,
-                "slippage_usd": None, "net_pnl_usd": None}
+                "slippage_usd": None, "net_pnl_usd": None,
+                "observed_execution_model": observed_execution_model,
+                "observed_cost_model_id": observed_cost_model_id}
     total_slippage = float(entry_slippage) + float(exit_slippage)
     reconciled_net = float(gross) - float(trading) - float(funding) - total_slippage
     if abs(float(observed_net) - reconciled_net) > 1e-8:
@@ -877,13 +934,17 @@ def _bind_terminal_outcome(
                 "terminal_outcome_reason_codes": ["UNKNOWN_TERMINAL_COST_RECONCILIATION_MISMATCH"],
                 "profitability_supported": False, "gross_pnl_usd": gross,
                 "fees_usd": trading, "funding_usd": funding,
-                "slippage_usd": total_slippage, "net_pnl_usd": None}
+                "slippage_usd": total_slippage, "net_pnl_usd": None,
+                "observed_execution_model": observed_execution_model,
+                "observed_cost_model_id": observed_cost_model_id}
     return {"terminal_outcome_status": "REALIZED_COST_COMPLETE",
             "terminal_outcome_reason_codes": [], "profitability_supported": True,
             "gross_pnl_usd": gross, "fees_usd": trading, "funding_usd": funding,
             "slippage_usd": total_slippage, "net_pnl_usd": observed_net,
             "exit_price": execution.get("exit_price"), "close_ts": execution.get("close_ts"),
-            "exit_reason": execution.get("exit_reason")}
+            "exit_reason": execution.get("exit_reason"),
+            "observed_execution_model": observed_execution_model,
+            "observed_cost_model_id": observed_cost_model_id}
 
 
 def build_v3_conservative_results(
@@ -938,6 +999,10 @@ def build_v3_conservative_results(
         decision = decisions.get(str(binding.get("event_id") or ""), {})
         identity = _identity(binding)
         reasons = list(binding.get("unknown_reason_codes") or [])
+        _provenance, provenance_reasons = _causal_provenance(
+            opportunities.get(identity, {}), decision,
+        )
+        reasons.extend(provenance_reasons)
         lifecycle_evidence = join_lifecycle_evidence(lifecycle_evidence_index, binding)
         if lifecycle_evidence["status"] != "VERIFIED":
             reasons.extend(lifecycle_evidence["reason_codes"])

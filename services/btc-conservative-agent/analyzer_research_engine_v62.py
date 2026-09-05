@@ -104,6 +104,7 @@ RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 ENTRY_BASELINE_REPLAY_REPORT_FILE = "entry_baseline_replay_report.json"
+DISCOVERY_COHORT_SCORECARD_REPORT_FILE = "discovery_cohort_scorecard_report.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 SAFE_POLICY_EXHAUSTIVE_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
@@ -19886,6 +19887,24 @@ def _lifecycle_inventory_analysis_provenance():
     }
 
 
+def _write_discovery_scorecard_report(canonical_root, conservative_status, baseline_report):
+    """Stage one fresh scorecard for the existing atomic manifest publisher."""
+    from research.discovery_scorecard_publication import build_discovery_scorecard_publication
+
+    report = build_discovery_scorecard_publication(
+        canonical_root,
+        expected_generation=(conservative_status or {}).get("generation") or {},
+        evaluator_status=conservative_status or {},
+        baseline_report=baseline_report or {},
+    )
+    target = Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    os.replace(temporary, target)
+    mirrored = _atomic_mirror_analyzer_report(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
+    return report, mirrored
+
+
 def write_report_manifest(
     payload=None, *, analysis_provenance=None,
     lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
@@ -19973,9 +19992,21 @@ def write_report_manifest(
     except Exception as exc:
         dynamic_policy_error = f"{type(exc).__name__}: {exc}"
     baseline_replay_error = None
+    baseline_replay = None
     try:
         from research.entry_baseline_replay import materialize_v3_opportunity_replay
+        from research.policy_evidence_schema import generation_identity
+
+        baseline_manifest_path = Path(policy_data_dir) / "canonical_dataset_current.json"
+        baseline_manifest_bytes = baseline_manifest_path.read_bytes()
+        baseline_generation = generation_identity(
+            json.loads(baseline_manifest_bytes.decode("utf-8-sig")),
+            analyzer_revision=str(generation_revision),
+        )
         baseline_replay = materialize_v3_opportunity_replay(policy_data_dir)
+        if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
+            raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
+        baseline_replay["generation"] = baseline_generation
         baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
         baseline_replay["generation_revision"] = str(generation_revision)
         target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
@@ -20058,6 +20089,7 @@ def write_report_manifest(
     # Publish derived-library status only after binding it to the current
     # canonical manifest. This does not evaluate or ingest policy rows.
     policy_evidence_library_error = None
+    conservative_evaluator_status = None
     evidence_coverage_triage_error = None
     try:
         from research.policy_evidence_bindings import persist_v3_binding_index
@@ -20138,6 +20170,27 @@ def write_report_manifest(
         policy_evidence_library_error = f"{type(exc).__name__}: {exc}"
         if evidence_coverage_triage_error is None:
             evidence_coverage_triage_error = policy_evidence_library_error
+    discovery_scorecard_error = None
+    try:
+        # Use only this invocation's replay objects, never a prior saved report.
+        scorecard, scorecard_mirror = _write_discovery_scorecard_report(
+            policy_data_dir, conservative_evaluator_status,
+            None if baseline_replay_error else baseline_replay,
+        )
+        reports.append({
+            "title": "Matched Paper and Shadow Research",
+            "file": DISCOVERY_COHORT_SCORECARD_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": "Exact-generation simulation cohorts, unmatched evidence and model differences",
+            "size_bytes": scorecard_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE).stat().st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "scorecard_status": scorecard.get("status"),
+        })
+    except Exception as exc:
+        discovery_scorecard_error = f"{type(exc).__name__}: {exc}"
     # The exhaustive policy grid is intentionally separate from the bounded
     # dashboard JSON. It is compressed, immutable for this generation, and is
     # copied without JSON stamping so its manifest checksum remains verifiable.
@@ -20243,6 +20296,12 @@ def write_report_manifest(
             "kind": analysis_provenance["fresh_epoch_kind"],
         },
         "required_report_status": {
+            DISCOVERY_COHORT_SCORECARD_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == DISCOVERY_COHORT_SCORECARD_REPORT_FILE for row in reports
+                ),
+                "generation_error": discovery_scorecard_error,
+            },
             ENTRY_BASELINE_REPLAY_REPORT_FILE: {
                 "available_in_generation": any(
                     row.get("file") == ENTRY_BASELINE_REPLAY_REPORT_FILE for row in reports
