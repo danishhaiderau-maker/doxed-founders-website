@@ -4,6 +4,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import math
 import os
 import csv
 from collections import Counter
@@ -94,9 +95,13 @@ def normalize_pre_entry_feature_receipt(
     if not isinstance(features, dict):
         return {}, ["PRE_ENTRY_FEATURE_PAYLOAD_INVALID"]
     try:
+        if isinstance(receipt.get("captured_at_ts"), bool) or isinstance(signal_ts, bool):
+            raise ValueError("boolean timestamp")
         captured_at = float(receipt.get("captured_at_ts"))
         signal_at = float(signal_ts)
-    except (TypeError, ValueError):
+        if not math.isfinite(captured_at) or not math.isfinite(signal_at):
+            raise ValueError("nonfinite timestamp")
+    except (TypeError, ValueError, OverflowError):
         return {}, ["PRE_ENTRY_CAPTURE_TIMESTAMP_INVALID"]
     if captured_at > signal_at:
         return {}, ["PRE_ENTRY_CAPTURE_AFTER_SIGNAL"]
@@ -111,14 +116,28 @@ def normalize_pre_entry_feature_receipt(
         if isinstance(value, dict) and "value" in value:
             observation = value.get("value")
             try:
+                if isinstance(value.get("observed_ts"), bool):
+                    raise ValueError("boolean timestamp")
                 observed_at = float(value.get("observed_ts"))
-            except (TypeError, ValueError):
+                if not math.isfinite(observed_at):
+                    raise ValueError("nonfinite timestamp")
+            except (TypeError, ValueError, OverflowError):
                 blockers.append(f"FEATURE_TIMESTAMP_MISSING:{name}")
                 continue
         else:
             observation = value
             observed_at = captured_at
-        if observation in (None, ""):
+        valid_scalar = isinstance(observation, (str, int, float)) and not isinstance(observation, bool)
+        if isinstance(observation, str):
+            valid_scalar = bool(observation.strip()) and observation.strip().lower() not in {
+                "nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity",
+            }
+        elif valid_scalar:
+            try:
+                valid_scalar = math.isfinite(float(observation))
+            except OverflowError:
+                valid_scalar = False
+        if not valid_scalar:
             blockers.append(f"MISSING_PRE_ENTRY_FEATURE:{name}")
             continue
         if observed_at > signal_at:
@@ -143,7 +162,10 @@ def join_pre_entry_feature_receipts(
         matches = by_episode.get(episode_id, [])
         blockers: list[str]
         normalized: dict[str, dict[str, Any]] = {}
-        if len(matches) == 0:
+        opportunity_id = str(row.get("opportunity_id") or row.get("record_id") or "").strip()
+        if not episode_id.strip() or not opportunity_id:
+            blockers = ["PRE_ENTRY_OPPORTUNITY_IDENTITY_MISSING"]
+        elif len(matches) == 0:
             blockers = ["PRE_ENTRY_FEATURE_RECEIPT_MISSING"]
         elif len(matches) != 1:
             blockers = ["PRE_ENTRY_FEATURE_RECEIPT_AMBIGUOUS"]

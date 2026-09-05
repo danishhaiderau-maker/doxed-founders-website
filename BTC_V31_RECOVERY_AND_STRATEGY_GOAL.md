@@ -28,6 +28,11 @@ This plan incorporates Cursor's handoff and the current independent code, operat
 
 ## Current observations and open defects
 
+- Analyzer receipt/UI repair 209f170 is committed locally: valid partial pre-entry dimensions are retained without upgrading qualification; stale/export/error displays are clearer. The 80 focused tests passed. Dashboard-only reload was rejected by execution policy before execution, so PID13804 still serves old UI; post-change browser QA remains open.
+- Current common-research gap is structural: the terminal execution candidate loader requires order-intent/lifecycle admission, while the independent shadow baseline adapter can consume every opportunity's signed baseline schedule. Integrate both through one exact-generation report without inventing policy, schedule, tape or cost signatures. A theoretical candidate-space count is not an evaluated strategy matrix.
+- The scorecard must not equate schedule IDs with schedule hashes or aggregate repeated episode variants. Require generation, causal opportunity, direction and explicit model identity; separate simulation-model differences as calibration rather than declaring equality.
+- Cleanup audit found approximately 26.1 MiB of ignored Python/test caches and less than 0.3 MiB of unique diagnostic records. No deletion was performed. Prioritize measured growth and lifecycle-ACK cleanup over erasing small forensic receipts.
+
 - The active goal is set. At Danish's request the old `btc-v3-1-integrity-monitor` recurring automation was deleted on 5 September; it must not be recreated unless requested. The separate Windows Fly-download task remains the transfer owner.
 - Client repair cc55e68f8904aff0b525aa40f0dd9d39a4c8d24c is committed and pushed. The isolated committed-source suite passed 154 tests in 75.78s. Exactly one sync owner PID 16576 was started through DoxxedFlyMirrorSync; a fresh receipt at 2026-09-04T23:37:19Z reached research.db, file 3/34433, 10,485,760/17,756,160 bytes. Transfer is advancing; canonical parity remains MISMATCH until terminal promotion.
 - Authenticated Fly storage sample: 3,996.78 MB capacity, 2,692.3 MB used (67.4%), 1,116.48 MB free, pressure=false, emergency=false; source cleanup unauthorized and reclaimed bytes zero. These are observed volume figures, distinct from transferable evidence size.

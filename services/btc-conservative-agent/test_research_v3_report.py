@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 import json
+import pytest
 from pathlib import Path
 
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
@@ -12,6 +13,57 @@ from research.research_v3_report import (
 from research import research_dashboard as dashboard
 from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES, _causal_feature_key
 from research_v3_store import V3EvidenceStore
+
+
+def _causal_join_input():
+    return (
+        {"episode_id": "e1", "opportunity_id": "o1", "signal_ts": 100},
+        {"episode_id": "e1", "opportunity_id": "o1",
+         "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 99,
+         "features": {name: "OBSERVED_BUCKET" for name in DEFAULT_CAUSAL_FEATURES}},
+    )
+
+
+@pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), "-Infinity", None])
+@pytest.mark.parametrize("field", ["signal_ts", "captured_at_ts", "observed_ts"])
+def test_causal_join_rejects_invalid_timestamps(invalid, field):
+    opportunity, receipt = _causal_join_input()
+    if field == "signal_ts":
+        opportunity[field] = invalid
+    elif field == "captured_at_ts":
+        receipt[field] = invalid
+    else:
+        receipt["features"]["atr_bucket"] = {"value": "HIGH", field: invalid}
+    joined, coverage = join_pre_entry_feature_receipts([opportunity], [receipt])
+    assert joined[0]["pre_entry_feature_status"] == "UNKNOWN"
+    assert "atr_bucket" not in joined[0]["pre_entry_features"]
+    assert coverage["dynamic_schema_complete_opportunities"] == 0
+    if field == "observed_ts":
+        assert "depth_bucket" in joined[0]["pre_entry_features"]
+    else:
+        assert joined[0]["pre_entry_features"] == {}
+
+
+@pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), "NaN", " ", {}, []])
+def test_causal_join_preserves_other_dimensions_when_one_value_invalid(invalid):
+    opportunity, receipt = _causal_join_input()
+    receipt["features"]["atr_bucket"] = invalid
+    joined, coverage = join_pre_entry_feature_receipts([opportunity], [receipt])
+    assert joined[0]["pre_entry_feature_status"] == "UNKNOWN"
+    assert "atr_bucket" not in joined[0]["pre_entry_features"]
+    assert joined[0]["pre_entry_features"]["depth_bucket"]["value"] == "OBSERVED_BUCKET"
+    assert coverage["dynamic_schema_complete_opportunities"] == 0
+
+
+def test_causal_join_missing_identities_cannot_match_empty_strings():
+    opportunity, receipt = _causal_join_input()
+    for row in (opportunity, receipt):
+        row.pop("episode_id")
+        row.pop("opportunity_id")
+    joined, coverage = join_pre_entry_feature_receipts([opportunity], [receipt])
+    assert joined[0]["pre_entry_features"] == {}
+    assert joined[0]["pre_entry_feature_blockers"] == ["PRE_ENTRY_OPPORTUNITY_IDENTITY_MISSING"]
+    assert coverage["dynamic_schema_complete_opportunities"] == 0
 
 
 class V3ReportTests(unittest.TestCase):
@@ -398,6 +450,10 @@ class V3ReportTests(unittest.TestCase):
             old = V3EvidenceStore(data, epoch_id="epoch-old")
             old.append("opportunity", {"record_id": "o-old", "episode_id": "episode-old", "signal_ts": 900})
             current = V3EvidenceStore(data, epoch_id="epoch-current")
+            # A second store instance must finish the existing-ledger index
+            # handshake before it can append; rejected writes are not fixtures.
+            bootstrap = current.advance_emergency_idempotency_bootstrap("opportunity")
+            self.assertTrue(bootstrap["complete"], bootstrap)
             current.append("opportunity", {"record_id": "o-rebuilt", "episode_id": "episode-rebuilt", "signal_ts": 950})
             current.append("opportunity", {"record_id": "o-fresh", "episode_id": "episode-fresh", "signal_ts": 1100})
             current.append("decision", {"record_id": "d-rebuilt", "episode_id": "episode-rebuilt", "primary_outcome": "REJECTED"})
