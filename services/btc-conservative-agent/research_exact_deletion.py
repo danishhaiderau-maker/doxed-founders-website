@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import Mapping
 
@@ -59,9 +60,11 @@ def _write_receipt(path: Path, payload: dict, *, first: bool = False) -> None:
     os.replace(temporary, path)
 
 
-def _progress_seed(*, root: Path, receipt_path: Path, inventory: list) -> str:
+def _progress_seed(*, root: Path, receipt_path: Path, inventory: list, context=None) -> str:
     identity = {"schema": "research_exact_deletion_progress_binding_v1",
                 "root": str(root), "receipt_path": str(receipt_path), "inventory": inventory}
+    if context is not None:
+        identity["context"] = context
     return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -98,7 +101,8 @@ def reconcile_research_deletion(receipt_path) -> dict:
     if receipt.get("progress_journal") != str(journal):
         raise ResearchDeletionRejected("JOURNAL_IDENTITY_MISMATCH")
     phases = {}
-    previous = _progress_seed(root=root, receipt_path=receipt_path, inventory=inventory)
+    previous = _progress_seed(root=root, receipt_path=receipt_path, inventory=inventory,
+                              context=receipt.get("context"))
     if receipt.get("progress_seed_sha256") != previous:
         raise ResearchDeletionRejected("JOURNAL_SEED_MISMATCH")
     if journal.exists():
@@ -140,7 +144,9 @@ def reconcile_research_deletion(receipt_path) -> dict:
 def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
                                 quiescent: bool, recovery_states: Mapping[str, str],
                                 protected_paths=(), max_files: int = 100000,
-                                max_total_bytes: int = 64 * 1024**3) -> dict:
+                                max_total_bytes: int = 64 * 1024**3,
+                                expected_sha256_by_path: Mapping[str, str] | None = None,
+                                receipt_context: Mapping | None = None) -> dict:
     """Delete exact files only while the caller holds all writer/reader barriers.
 
     ``recovery_states`` must be authoritative caller observations, not assumed
@@ -157,6 +163,23 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
         raise ResearchDeletionRejected("RECOVERY_NOT_RECONCILED")
     if any(not isinstance(key, str) or not key.strip() or len(key) > 128 for key in recovery_states):
         raise ResearchDeletionRejected("RECOVERY_PROOF_KEY_INVALID")
+    context = None
+    if receipt_context is not None:
+        keys = {"proof_sha256", "plan_sha256", "retained", "bytes_basis", "hardlinked_target_count"}
+        if not isinstance(receipt_context, Mapping) or set(receipt_context) != keys:
+            raise ResearchDeletionRejected("INVALID_RECEIPT_CONTEXT")
+        if any(not isinstance(receipt_context.get(key), str) or not re.fullmatch(r"[0-9a-f]{64}", receipt_context[key])
+               for key in ("proof_sha256", "plan_sha256")):
+            raise ResearchDeletionRejected("INVALID_RECEIPT_CONTEXT_IDENTITY")
+        retained = receipt_context.get("retained")
+        allowed_row_keys = {"path", "absolute_path", "reason", "category", "size_bytes", "hardlinked"}
+        if not isinstance(retained, list) or len(retained) > 200000 or any(
+                not isinstance(row, dict) or set(row) - allowed_row_keys for row in retained):
+            raise ResearchDeletionRejected("INVALID_RETAINED_METADATA")
+        encoded_context = json.dumps(dict(receipt_context), sort_keys=True, allow_nan=False)
+        if len(encoded_context.encode()) > 32 * 1024**2:
+            raise ResearchDeletionRejected("RECEIPT_CONTEXT_LIMIT_EXCEEDED")
+        context = json.loads(encoded_context)
     root = Path(os.path.abspath(os.fspath(root)))
     if not root.is_dir() or root.parent == root:
         raise ResearchDeletionRejected("UNSAFE_ROOT")
@@ -206,12 +229,28 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
     if sum(path.lstat().st_size for path in paths) > max_total_bytes:
         raise ResearchDeletionRejected("BYTE_LIMIT_EXCEEDED")
     inventory = [_fingerprint(path) for path in paths]
+    expected_hashes = {}
+    if expected_sha256_by_path is not None:
+        if not isinstance(expected_sha256_by_path, Mapping) or len(expected_sha256_by_path) > max_files:
+            raise ResearchDeletionRejected("INVALID_EXPECTED_HASH_MAP")
+        target_set = set(paths)
+        for raw, digest in expected_sha256_by_path.items():
+            path = _checked_path(raw, root)
+            if path not in target_set or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ResearchDeletionRejected("INVALID_EXPECTED_HASH_BINDING")
+            if str(path) in expected_hashes and expected_hashes[str(path)] != digest:
+                raise ResearchDeletionRejected("AMBIGUOUS_EXPECTED_HASH_BINDING")
+            expected_hashes[str(path)] = digest
+        if any(row["path"] in expected_hashes and row["sha256"] != expected_hashes[row["path"]]
+               for row in inventory):
+            raise ResearchDeletionRejected("EXPECTED_SHA256_MISMATCH")
     result = {"schema": "research_exact_deletion_v1", "status": "PREPARED", "root": str(root),
               "raw_payloads_retained": False, "payload_copy_performed": False,
               "recovery_states": dict(recovery_states), "inventory": inventory,
               "deleted": [], "deleted_bytes": 0, "receipt_path": str(receipt),
-              "progress_journal": str(journal)}
-    result["progress_seed_sha256"] = _progress_seed(root=root, receipt_path=receipt, inventory=inventory)
+              "progress_journal": str(journal), "expected_sha256_by_path": expected_hashes,
+              "context": context}
+    result["progress_seed_sha256"] = _progress_seed(root=root, receipt_path=receipt, inventory=inventory, context=context)
     _write_receipt(receipt, result, first=True)
     with journal.open("xb") as handle:
         handle.flush()

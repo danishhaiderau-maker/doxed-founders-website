@@ -269,3 +269,16 @@ def test_initial_progress_is_bound_to_stored_receipt_seed(tmp_path):
     journal_first = json.loads(Path(receipt["progress_journal"]).read_text().splitlines()[0])
     assert journal_first["previous_sha256"] == receipt["progress_seed_sha256"]
     assert len(receipt["progress_seed_sha256"]) == 64
+
+
+@pytest.mark.parametrize("case", ["mismatch", "invalid", "outside_target"])
+def test_optional_expected_sha_is_checked_before_any_unlink(tmp_path, case):
+    args = setup(tmp_path)
+    path = args["targets"][0]
+    args["expected_sha256_by_path"] = {str(path): "f" * 64}
+    if case == "invalid": args["expected_sha256_by_path"] = {str(path): "invalid"}
+    if case == "outside_target": args["expected_sha256_by_path"] = {str(args["root"] / "missing.json"): "f" * 64}
+    with pytest.raises(deletion.ResearchDeletionRejected):
+        deletion.delete_exact_research_files(**args)
+    assert path.exists()
+    assert not args["receipt_path"].exists()
