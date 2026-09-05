@@ -12830,9 +12830,10 @@ def _collector_cached_candles_1m(limit: int = 2000) -> list:
     bucket = _mtf_cache.get("1m") or {}
     cached = bucket.get("candles") or []
     if not cached:
-        # latest_candles is maintained by the independent OHLCV worker and is
-        # safe to snapshot without holding a network or collector lock.
-        cached = latest_candles or []
+        # latest_candles is a 15m execution cache, not a 1m source. Borrowing
+        # it silently corrupts resampled research horizons and indicators.
+        # Preserve the missing-data signal; never fetch on this owner path.
+        return []
     rows = list(cached)
     return rows[-requested:] if requested else rows
 

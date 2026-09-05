@@ -32,10 +32,20 @@ def test_collector_uses_cached_candles_without_network_dependency():
     assert helper(2) is not cached
 
 
-def test_collector_falls_back_to_independent_ohlcv_worker_snapshot():
+def test_collector_missing_1m_cache_never_borrows_15m_worker_snapshot():
     helper = _load_helper({"1m": {"candles": []}}, [[7], [8], [9]])
 
-    assert helper(2) == [[8], [9]]
+    assert helper(2) == []
+
+
+def test_collector_no_1m_source_does_not_read_other_timeframe_or_network():
+    class WrongTimeframe:
+        def __bool__(self):
+            raise AssertionError("15m cache accessed")
+    helper = _load_helper({}, WrongTimeframe())
+    assert helper() == []
+    # The extracted real function runs with no network functions in globals.
+    assert not any("fetch" in name for name in helper.__code__.co_names)
 
 
 def test_collector_sync_paths_do_not_call_network_candle_fetch():

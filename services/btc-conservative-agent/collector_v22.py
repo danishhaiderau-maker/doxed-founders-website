@@ -145,13 +145,20 @@ def build_pre_signal_context(
     *,
     signal_ts: float,
 ) -> dict:
-    """Multi-TF lookback: 1m/24h, 5m/7d, 15m/30d, 1h/90d."""
+    """Closed-candle lookback, with signal time in UTC Unix seconds.
+
+    Input OHLCV timestamps are bar-open times (seconds or milliseconds as
+    normalized by candle_ts_sec). A maturation write may receive today's
+    cache for an older signal: never relabel those future bars as pre-signal.
+    Closed market time alone does not prove collector availability or coverage.
+    """
     series = {}
     for tf, spec in PRE_SIGNAL_HORIZONS.items():
         start = float(signal_ts) - float(spec["seconds"])
         clipped = [
             row for row in (candles_1m or [])
-            if (t := candle_ts_sec(row)) is not None and t >= start - 1e-9
+            if (t := candle_ts_sec(row)) is not None
+            and t >= start - 1e-9 and t + 60.0 <= float(signal_ts) + 1e-9
         ]
         if tf == "1m":
             bars = clipped[-int(spec["bars"]):]
@@ -161,15 +168,22 @@ def build_pre_signal_context(
             bars = resample_candles(clipped, bar_sec=900.0, end_ts=signal_ts, max_bars=int(spec["bars"]))
         else:
             bars = resample_candles(clipped, bar_sec=3600.0, end_ts=signal_ts, max_bars=int(spec["bars"]))
+        bar_seconds = {"1m": 60.0, "5m": 300.0, "15m": 900.0, "1h": 3600.0}[tf]
+        bars = [row for row in bars if (t := candle_ts_sec(row)) is not None
+                and t + bar_seconds <= float(signal_ts) + 1e-9]
         series[tf] = {
             "horizon": spec["label"],
             "bars": len(bars),
             "candles": [[float(row[i]) if i < len(row) else None for i in range(min(6, len(row)))] for row in bars],
+            "temporal_status": "CLOSED_CANDLES_PRESENT_COVERAGE_UNVERIFIED" if bars else "UNKNOWN_NO_CLOSED_CAUSAL_CANDLES",
+            "coverage_complete": False,
         }
     return {
         "schema": PRE_SIGNAL_CONTEXT_SCHEMA,
         "horizon_id": "PRE_SIGNAL_V1",
         "signal_ts": float(signal_ts),
+        "temporal_basis": "BAR_OPEN_PLUS_INTERVAL_LE_SIGNAL_UTC_SECONDS",
+        "availability_time_verified": False,
         "series": series,
     }
 
