@@ -29,7 +29,9 @@ Completed and evidenced in this work window:
 - Committed source: 91582deb2e8530db97f9774f3c6fe2aa507e8f82 integrates
   bounded package preparation, authenticated retrieval, verified client extraction,
   existing atomic promotion/checkpointing and unchanged original-manifest ACK.
-  Both activation flags remain OFF. This commit is not pushed or deployed.
+  Follow-up 194f40b includes parity/activation gates and is pushed. Deployment
+  run 33940188490 failed in predeploy tests; production remains df45887e1526.
+  Both batch activation flags remain OFF.
 - Executable verification: 146 passed, 1 host-dependent skip in the focused
   integration suite; PowerShell parsing and Python compilation passed. A fixture
   transferred 384 small objects in 3 packages through 7 HTTP requests with exact
@@ -57,9 +59,14 @@ Immediate delivery sequence (no further roadmap expansion before these receipts)
 
 1. Full-backlog fixture is complete; retain the terminal receipt and move on.
    Integration is committed; do not repeat finished component work as progress.
-2. Complete clean-candidate regression for repaired signal parity, focused batch
-   tests and explicit opt-in activation in the guarded workflow. Verify a clean exact
-   candidate, push it, and check the dispatched workflow's full head SHA. Never
+2. Clean-candidate regression passed 325 tests/1 skip and full parity; first
+   guarded CI exposed a real paused-fill handoff orphan and stale lock baseline.
+   Repair the exact failures, plus the proven canonical manifest field mismatch
+   and bounded same-generation package wait. The failed workflow's unconditional
+   pause handler also paused the unchanged incumbent; authenticated readiness
+   was checked and paper operation restored on df45887e1526, disarmed/flat.
+   Gate that handler on an actually attempted maintenance/deploy step. Verify a
+   clean exact candidate, push it, and check the dispatched workflow's full head SHA. Never
    build or deploy the mixed working tree or enable a second downloader owner.
 3. Guarded exact-source deployment, backend package canary, and then one controlled
    download restart with the laptop flag set in its actual owner; measure

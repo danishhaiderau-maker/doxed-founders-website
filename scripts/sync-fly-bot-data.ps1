@@ -746,7 +746,7 @@ if ($env:FLY_SYNC_TRANSPORT_BUNDLES -eq '1') {
     -AdminToken $AdminToken -TargetRoot $targetRoot `
     -ClientScript (Join-Path $scriptDir 'fly-sync-bundle-client.py') `
     -SyncState $syncState -SaveCheckpoint { Save-SyncState } `
-    -Progress { param($files) Write-Host "[FLY SYNC] stage=bundle_verified files=$files ack=pending" }
+    -Progress { param($files, $phase) Write-Host "[FLY SYNC] stage=$phase files=$files ack=pending" }
   Write-Host "[FLY SYNC] stage=bundle_complete files=$($bundleResult.Files) original_manifest_ack=pending"
 }
 foreach ($row in $selectedFiles) {

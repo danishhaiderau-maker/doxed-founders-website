@@ -18,6 +18,14 @@ if manifest.get("fixture_defect") == "hash":
     members[0]["sha256"] = "0" * 64
 identity = {key: manifest[key] for key in ("inventory_generation_id", "inventory_sha256",
             "source_git_rev", "collection_epoch_id", "tile_registry_signature")}
+if manifest.get("fixture_defect") in {"waiting", "foreign-wait", "late-wait"}:
+    waiting_identity = dict(identity)
+    if manifest["fixture_defect"] == "foreign-wait":
+        waiting_identity["inventory_generation_id"] = "f" * 64
+    print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "INDEX_WAITING",
+                      "generation": waiting_identity,
+                      "elapsed_seconds": 601 if manifest["fixture_defect"] == "late-wait" else 5,
+                      "next_retry_seconds": 10}), flush=True)
 print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "PACKAGE_VERIFIED",
                   "generation": identity, "members": members}), flush=True)
 print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "COMPLETE",

@@ -22051,29 +22051,25 @@ def fill_order(order):
             order.pop("fill_handoff_in_progress", None)
 
     if manual_admin_pause_active():
-        paused_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
-        schedule_close = globals().get("close_research_order_schedule")
-        if callable(schedule_close):
-            schedule_close(
-                order,
-                paused_signal if isinstance(paused_signal, dict) else None,
-                now=time.time(),
-                reason="ADMIN_MANUAL_PAUSE",
+        # Touch detection retains PENDING until the durable OPEN transition.
+        # A pause can win that handoff: cancel through the normal confirmed,
+        # recorded path instead of publishing expiry while leaving an orphan
+        # in the executable books. An exchange fill or unconfirmed cancel must
+        # remain tracked; never relabel either as a successful cancellation.
+        try:
+            cancellation = _cancel_pending_order_confirmed(
+                order, "ADMIN_MANUAL_PAUSE",
+                record_expired=True, expire_signal=True,
             )
-        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-        if callable(collector_refresh):
-            collector_refresh(
-                order, paused_signal if isinstance(paused_signal, dict) else None,
-                lifecycle_final=True,
+            logger.warning(
+                f"[ADMIN PAUSE] suppressed raced fill trade_id={order.get('trade_id')} "
+                f"cancel_finalized={cancellation.get('finalized') is True} "
+                f"reason={cancellation.get('failure_reason') or 'CONFIRMED'} "
+                f"[PIPELINE ENFORCEMENT]"
             )
-        _record_expired_order(order, "ADMIN_MANUAL_PAUSE")
-        expire_signal_for_order(order, "ADMIN_MANUAL_PAUSE")
-        logger.warning(
-            f"[ADMIN PAUSE] suppressed raced fill trade_id={order.get('trade_id')} "
-            f"[PIPELINE ENFORCEMENT]"
-        )
-        clear_fill_handoff()
-        pipeline_state_sync()
+        finally:
+            clear_fill_handoff()
+            pipeline_state_sync()
         return None
     direction = _normalize_order_side_to_dir(
         order.get("signal_dir") or order.get("dir") or order.get("side")

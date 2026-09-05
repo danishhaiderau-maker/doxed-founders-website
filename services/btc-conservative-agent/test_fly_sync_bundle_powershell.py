@@ -10,13 +10,15 @@ PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependen
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
-@pytest.mark.parametrize("defect", [None, "hash"])
+@pytest.mark.parametrize("defect", [None, "hash", "waiting", "foreign-wait", "late-wait"])
 def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, defect):
     payload = '{"sample":1}'
     relative = "v3/market_segments/11/" + "1" * 64 + ".json"
     manifest = {"inventory_generation_id": "a" * 64, "inventory_sha256": "a" * 64,
                 "source_git_rev": "source", "collection_epoch_id": "epoch",
-                "tile_registry_signature": "tile", "ack_eligible": True,
+                "tile_registry_signature": "tile", "schema": "fly_runtime_incremental_sync_v1",
+                "inventory_status": "CURRENT", "inventory_authoritative": True,
+                "inventory_ack_eligible": True,
                 "fixture_defect": defect,
                 "files": [{"path": relative, "size": len(payload), "inode": 123,
                            "mtime_ns": 456, "consistency_mode": "strict_generation_v1",
@@ -30,15 +32,18 @@ $ErrorActionPreference='Stop'
 $manifest=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))|ConvertFrom-Json
 $state=@{{}}
 $script:saves=0
+$script:phases=@()
 try {{
- $result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{ROOT.as_posix()}/scripts/test-support/bundle-staging-fixture.py' -SyncState $state -SaveCheckpoint {{$script:saves+=1}} -Progress {{param($n)}}
- @{{result=$result;state=$state;saves=$script:saves}}|ConvertTo-Json -Depth 10 -Compress
+ $result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{ROOT.as_posix()}/scripts/test-support/bundle-staging-fixture.py' -SyncState $state -SaveCheckpoint {{$script:saves+=1}} -Progress {{param($n,$phase) $script:phases+=@{{files=$n;phase=$phase}}}}
+ @{{result=$result;state=$state;saves=$script:saves;phases=$script:phases}}|ConvertTo-Json -Depth 10 -Compress
 }} catch {{ Write-Output $_.Exception.Message; exit 7 }}
 """
     completed = subprocess.run([str(PWSH), "-NoProfile", "-Command", script],
                                capture_output=True, text=True, timeout=30)
-    if defect:
-        assert completed.returncode == 7 and "BUNDLE_STAGE_HASH_MISMATCH" in completed.stdout
+    if defect in {"hash", "foreign-wait", "late-wait"}:
+        code = {"hash": "BUNDLE_STAGE_HASH_MISMATCH", "foreign-wait": "BUNDLE_RECEIPT_IDENTITY",
+                "late-wait": "BUNDLE_INDEX_WAIT_INVALID"}[defect]
+        assert completed.returncode == 7 and code in completed.stdout
         assert not (target / relative).exists()
     else:
         assert completed.returncode == 0, completed.stdout + completed.stderr
@@ -49,3 +54,6 @@ try {{
         assert result["state"][relative]["size"] == len(payload)
         assert result["state"][relative]["mtime_ns"] == 456
         assert (target / relative).read_text() == payload
+        if defect == "waiting":
+            assert result["phases"][0] == {"files": 0, "phase": "bundle_index_wait"}
+            assert result["phases"][1] == {"files": 1, "phase": "bundle_verified"}

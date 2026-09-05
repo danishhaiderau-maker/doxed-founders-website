@@ -3,6 +3,8 @@
 These tests verify wiring only, not Actions execution or production recovery.
 """
 from pathlib import Path
+import itertools
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,3 +56,19 @@ def test_existing_safety_and_exact_revision_gates_remain_in_order():
     assert 'and status.get("live_armed") is False' in WORKFLOW
     assert 'and status.get("bitfinex_live_enabled") is False' in WORKFLOW
     assert 'and status.get("force_paper_mode") is True' in WORKFLOW
+
+
+@pytest.mark.parametrize("maintenance,deploy", list(itertools.product(("", "skipped", "success", "failure"), repeat=2)))
+def test_failure_cleanup_only_runs_after_mutation_started(maintenance, deploy):
+    block = WORKFLOW.split("      - name: Best-effort preserve safe paper maintenance after failed guarded deploy\n", 1)[1]
+    expression = next(line.strip()[4:] for line in block.splitlines() if line.strip().startswith("if: "))
+    expected = ("failure() && (steps.paper_maintenance.outcome == 'success' || "
+                "steps.paper_maintenance.outcome == 'failure' || "
+                "steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure')")
+    assert expression == expected
+    evaluated = expression.replace("failure()", "True").replace("&&", "and").replace("||", "or")
+    evaluated = evaluated.replace("steps.paper_maintenance.outcome", repr(maintenance))
+    evaluated = evaluated.replace("steps.deploy_source.outcome", repr(deploy))
+    assert eval(evaluated, {"__builtins__": {}}) == (maintenance in {"success", "failure"} or deploy in {"success", "failure"})
+    assert "id: paper_maintenance" in WORKFLOW.split("      - name: Enter durable authenticated paper maintenance boundary\n", 1)[1].split("      - name:", 1)[0]
+    assert "id: deploy_source" in WORKFLOW.split("      - name: Deploy the exact source revision\n", 1)[1].split("      - name:", 1)[0]

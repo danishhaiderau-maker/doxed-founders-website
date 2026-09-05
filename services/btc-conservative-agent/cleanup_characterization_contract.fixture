@@ -180,6 +180,9 @@
   "known_nested_lock_exception": [
     ["_adopt_from_rebuild", "trade_lock", "state_lock"],
     ["_arm_live_control", "_live_control_lock", "state_lock"],
+    ["_commit_paper_lifecycle_transition", "paper_lifecycle_transition_lock", "paper_lifecycle_file_lock"],
+    ["_commit_paper_lifecycle_transition", "paper_lifecycle_transition_lock", "trade_lock"],
+    ["_commit_paper_lifecycle_transition", "paper_lifecycle_file_lock", "trade_lock"],
     ["_disarm_live_control", "_live_control_lock", "state_lock"],
     ["_reset_collector_epoch_state", "_collector_epoch_lock", "_compressed_shadow_lock"],
     ["_reset_collector_epoch_state", "_collector_epoch_lock", "_cycle_3m_bucket_lock"],

@@ -183,7 +183,9 @@ with bot.state_lock:
 raced = {
     "trade_id": "pause-raced-fill-1",
     "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
-    "status": "FILLED",
+    # The real touch detector retains PENDING until durable OPEN commit.
+    "status": "PENDING",
+    "fill_handoff_in_progress": True,
     "side": "sell",
     "signal_dir": "SHORT",
     "limit_price": 64_000.0,
@@ -191,10 +193,13 @@ raced = {
     "qty": 0.01,
 }
 bot.lane_register_pending_order(raced)
+bot.fill_handoff_trade_ids.add(raced["trade_id"])
 bot.fill_order(raced)
 check("raced order removed", raced not in bot.pending_orders)
 check("raced order cancelled", raced.get("status") == "CANCELLED")
 check("raced fill creates no position", not bot.open_positions)
+check("raced cancellation recorded once", expired == [("pause-raced-fill-1", "ADMIN_MANUAL_PAUSE")])
+check("raced handoff released", raced["trade_id"] not in bot.fill_handoff_trade_ids and "fill_handoff_in_progress" not in raced)
 
 
 print("\n[5] Existing positions continue through normal exit management")

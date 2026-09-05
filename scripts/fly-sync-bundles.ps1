@@ -52,6 +52,7 @@ function Receive-FlyTransportBundles {
   $complete = $false
   $started = $false
   $files = 0
+  $lastIndexWait = -1.0
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
     if (-not $process.Start()) { throw 'BUNDLE_CHILD_START_FAILED' }
@@ -68,11 +69,28 @@ function Receive-FlyTransportBundles {
         if ($clock.Elapsed.TotalSeconds -gt 1900) { throw 'BUNDLE_CLIENT_WALL_TIMEOUT' }
       }
       $line = $lineTask.Result
+      if ($clock.Elapsed.TotalSeconds -gt 1900) { throw 'BUNDLE_CLIENT_WALL_TIMEOUT' }
       if ($null -eq $line) { break }
       if ($line.Length -gt 2097152) { throw 'BUNDLE_RECEIPT_LIMIT' }
       $receipt = $line | ConvertFrom-Json
       if ($receipt.schema -cne 'fly_bundle_staging_receipt_v1') { throw 'BUNDLE_RECEIPT_SCHEMA' }
       if ($receipt.status -ceq 'FAILED') { throw ('BUNDLE_TRANSFER_FAILED: ' + [string]$receipt.error) }
+      if ($receipt.status -ceq 'INDEX_WAITING') {
+        if ($complete -or $files -ne 0) { throw 'BUNDLE_RECEIPT_SEQUENCE' }
+        foreach ($field in @('inventory_generation_id','inventory_sha256','source_git_rev','collection_epoch_id','tile_registry_signature')) {
+          if ([string]$receipt.generation.$field -cne [string]$Manifest.$field) { throw 'BUNDLE_RECEIPT_IDENTITY' }
+        }
+        $elapsed = [double]$receipt.elapsed_seconds
+        $retry = [double]$receipt.next_retry_seconds
+        if ([double]::IsNaN($elapsed) -or [double]::IsInfinity($elapsed) -or
+            $elapsed -lt 0 -or $elapsed -gt 600 -or $elapsed -lt $lastIndexWait -or
+            [double]::IsNaN($retry) -or [double]::IsInfinity($retry) -or $retry -le 0 -or $retry -gt 30) {
+          throw 'BUNDLE_INDEX_WAIT_INVALID'
+        }
+        $lastIndexWait = $elapsed
+        & $Progress 0 'bundle_index_wait'
+        continue
+      }
       if ($receipt.status -ceq 'COMPLETE') {
         if ($complete -or [int64]$receipt.files -ne $files -or $receipt.ack_sent -ne $false) { throw 'BUNDLE_TERMINAL_COUNTS_MISMATCH' }
         $complete = $true; continue
@@ -133,7 +151,7 @@ function Receive-FlyTransportBundles {
         if (-not $package.StartsWith($stagePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'BUNDLE_PACKAGE_ESCAPE' }
         Remove-Item -LiteralPath $package -Force -ErrorAction Stop
       }
-      & $Progress $files
+      & $Progress $files 'bundle_verified'
     }
     if (-not $process.WaitForExit(5000)) { throw 'BUNDLE_CHILD_EXIT_TIMEOUT' }
     if ($process.ExitCode -ne 0 -or -not $complete) { throw 'BUNDLE_TERMINAL_RECEIPT_MISSING' }

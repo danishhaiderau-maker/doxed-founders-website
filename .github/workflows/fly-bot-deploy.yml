@@ -878,8 +878,10 @@ jobs:
           python -m pytest test_chase_exact_bucket_controls.py -q
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q
           python test_manual_pause_entry_gate.py
+          python -m pytest test_manual_pause_fill_handoff.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
+          python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py -q
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
           python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py -q
@@ -916,6 +918,7 @@ jobs:
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Enter durable authenticated paper maintenance boundary
+        id: paper_maintenance
         if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'
         working-directory: ${{ github.workspace }}
         env:
@@ -1348,6 +1351,7 @@ jobs:
           PY
 
       - name: Deploy the exact source revision
+        id: deploy_source
         run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}" --env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=${TRANSPORT_BUNDLES_ENABLED}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
@@ -1748,7 +1752,9 @@ jobs:
           PY
 
       - name: Best-effort preserve safe paper maintenance after failed guarded deploy
-        if: failure()
+        # Source/test failure must not pause an unchanged healthy incumbent.
+        # Preserve maintenance once either mutation step actually starts.
+        if: failure() && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure')
         continue-on-error: true
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
