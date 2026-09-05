@@ -28103,6 +28103,9 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 dataset_epoch=boundary["new_epoch"], deployed_revision=boundary["deployed_revision"],
                 tile_config_signature=active_tile_registry_signature(),
             )
+        # Preserve prior settings periods and start a fresh one only after
+        # deletion, authority retirement and new-epoch publication succeeded.
+        _record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)
         _cached_pathway_scorecard = {}
         _cached_pathway_lane_specs = {}
         _last_fresh_maintain_ts = reset_anchor
