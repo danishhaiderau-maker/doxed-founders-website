@@ -114,6 +114,7 @@ def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: 
         raise ValueError("SIGNAL_SNAPSHOT_LIFECYCLE_SOURCE_LIMIT")
     for relative in ("chase_offset_touch_grid.jsonl", "chase_offset_touch_grid.jsonl.1",
                      "v3/ledgers/baseline_execution_context.jsonl", "v3/ledgers/opportunity.jsonl",
+                     "v3/ledgers/pre_entry_features.jsonl",
                      "v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl",
                      *lifecycle_sources):
         if relative not in pins:
@@ -127,6 +128,57 @@ def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: 
         except (OSError, ValueError, UnicodeError, TypeError, RecursionError) as exc:
             statuses.append({"source_id": relative, "status": "UNKNOWN", "reason": str(exc)})
     return statuses
+
+
+def _causal_feature_projection(opportunity: Mapping, index: VerifiedLedgerRowIndex | None) -> dict:
+    """Join immutable pre-decision features only through the pinned row index."""
+    from research.research_v3_report import join_pre_entry_feature_receipts
+    from research.policy_evidence_evaluator import _regime_features_at_signal
+
+    source = "v3/ledgers/pre_entry_features.jsonl"
+    identity = tuple(str(opportunity.get(field) or "") for field in (
+        "epoch_id", "opportunity_id", "episode_id"))
+    proofs = []
+    blocker = None
+    opportunity_proof = None
+    if index is None or source not in index.sources:
+        blocker = "PRE_ENTRY_FEATURE_SOURCE_NOT_VERIFIED"
+    else:
+        opportunity_proof = index.envelope("v3/ledgers/opportunity.jsonl", opportunity)
+        if opportunity_proof is None or not all(identity):
+            blocker = "PRE_ENTRY_OPPORTUNITY_MEMBERSHIP_NOT_VERIFIED"
+        else:
+            proofs = index.pre_entry_feature_envelopes(*identity)
+            if any(
+                str(opportunity.get(field) or "").strip()
+                and str(proof["row"].get(field) or "").strip()
+                and str(opportunity[field]).strip() != str(proof["row"][field]).strip()
+                for proof in proofs
+                for field in ("source_revision", "deployed_revision", "tile_config_signature", "config_signature")
+            ):
+                blocker = "PRE_ENTRY_CAUSAL_PROVENANCE_MISMATCH"
+    joined, _ = join_pre_entry_feature_receipts(
+        [dict(opportunity)], [] if blocker else [proof["row"] for proof in proofs],
+    )
+    row = joined[0]
+    if blocker:
+        row["pre_entry_feature_blockers"] = [blocker]
+    snapshot = opportunity.get("feature_snapshot_at_signal")
+    return {
+        "pre_entry_features": row["pre_entry_features"],
+        "pre_entry_feature_status": row["pre_entry_feature_status"],
+        "pre_entry_feature_blockers": row["pre_entry_feature_blockers"],
+        "regime_features_at_signal": _regime_features_at_signal(
+            row, snapshot if isinstance(snapshot, Mapping) else {}),
+        "pre_entry_feature_evidence": {
+            "source_id": source, "source_sha256": index.sources.get(source) if index else None,
+            "opportunity_row_sha256": opportunity_proof["row_sha256"] if opportunity_proof else None,
+            "receipt_row_sha256": proofs[0]["row_sha256"] if len(proofs) == 1 else None,
+            "matching_receipts_ambiguous": len(proofs) > 1,
+            "status": row["pre_entry_feature_status"],
+            "reason_codes": row["pre_entry_feature_blockers"],
+        },
+    }
 
 
 def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
@@ -531,8 +583,13 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         "direction": episode.get("direction"),
         "market": episode.get("market"),
         "symbol": episode.get("symbol"),
+        "signal_ts": episode.get("signal_ts"),
         "regime": episode.get("regime") or episode.get("market_regime"),
         "regime_features_at_signal": episode.get("regime_features_at_signal"),
+        "pre_entry_features": episode.get("pre_entry_features"),
+        "pre_entry_feature_status": episode.get("pre_entry_feature_status"),
+        "pre_entry_feature_blockers": episode.get("pre_entry_feature_blockers"),
+        "pre_entry_feature_evidence": episode.get("pre_entry_feature_evidence"),
         "causal_identity": episode.get("causal_identity"),
         "market_tape_hashes": sorted(set(episode.get("market_tape_hashes") or [])),
         "market_tape_ids": sorted(set(episode.get("market_tape_ids") or [])),
@@ -805,6 +862,7 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                         episode_context_reasons.append(str(exc))
                 episodes.append({
                     **dict(row),
+                    **_causal_feature_projection(row, context_index),
                     "opportunity_id": row.get("opportunity_id") or row.get("record_id"),
                     "dataset_epoch": dataset_epoch,
                     "source_revision": source_revision,

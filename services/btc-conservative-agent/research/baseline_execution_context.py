@@ -184,6 +184,20 @@ class VerifiedLedgerRowIndex:
             results.append(self._envelope(row))
         return results
 
+    def pre_entry_feature_envelopes(self, epoch: str, opportunity: str, episode: str) -> list[dict]:
+        """Return zero/one receipt or an ambiguity witness from a verified source.
+
+        Two matches already prove ambiguity; no caller may treat this bounded
+        result as a complete receipt collection or choose one of the duplicates.
+        """
+        source = "v3/ledgers/pre_entry_features.jsonl"
+        if source not in self.sources or not all((epoch, opportunity, episode)):
+            return []
+        cursor = self._connection.execute("""SELECT source_id,row_sha,payload,byte_offset,line_number
+            FROM evidence_rows WHERE source_id=? AND epoch=? AND opportunity=? AND episode=?
+            ORDER BY line_number LIMIT 2""", (source, epoch, opportunity, episode))
+        return [self._envelope(row) for row in cursor]
+
     def lifecycle_envelopes(self, epoch: str, episode: str) -> list[dict]:
         """Return all bounded per-event lifecycle rows, never a sampled prefix."""
         cursor = self._connection.execute("""SELECT source_id,row_sha,payload,byte_offset,line_number
