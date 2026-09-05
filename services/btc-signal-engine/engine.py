@@ -27652,13 +27652,45 @@ def _seal_past_analysis_with_fallback(reason: str) -> dict:
 _FRESH_RESET_LIFECYCLE_RESTART_PENDING = False
 
 
+def _fresh_reset_confirm_paused() -> bool:
+    """Bound failure cleanup; unavailable ownership is not confirmed pause."""
+    if not state_lock.acquire(timeout=2.0):
+        return False
+    try:
+        state["execution_paused"] = True
+        return True
+    finally:
+        state_lock.release()
+
+
 def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
     """Quiesce all known research owners before archive/deletion/epoch rebinding."""
     global _FRESH_RESET_LIFECYCLE_RESTART_PENDING
-    with state_lock:
+    from research_reset_preflight_diagnostics import write_reset_preflight_diagnostic
+    from uuid import uuid4
+    attempt_id = uuid4().hex
+    if not state_lock.acquire(timeout=2.0):
+        diagnostic = write_reset_preflight_diagnostic(
+            _data_sync_runtime_root(), attempt_id=attempt_id, stage="STATE_LOCK",
+            status="REFUSED", error=TimeoutError())
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_state_lock_timeout", **diagnostic,
+                "summary": "Reset admission could not read pause state; no reset work started"}
+    try:
         safe_state = bool(state.get("execution_paused", False)) and not bool(state.get("live_armed", False))
-    with trade_lock:
+    finally:
+        state_lock.release()
+    if not trade_lock.acquire(timeout=2.0):
+        diagnostic = write_reset_preflight_diagnostic(
+            _data_sync_runtime_root(), attempt_id=attempt_id, stage="TRADE_LOCK",
+            status="REFUSED", error=TimeoutError())
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_trade_lock_timeout", **diagnostic,
+                "summary": "Reset admission could not read paper books; no reset work started"}
+    try:
         safe_books = not pending_orders and not open_positions
+    finally:
+        trade_lock.release()
     if not safe_state or not safe_books:
         return {"ok": False, "wipe_aborted": True,
                 "error": "fresh_collection_requires_paused_disarmed_flat_boundary",
@@ -27683,35 +27715,40 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         # inventory/snapshot work must not start between the check and deletion.
         for condition in (_data_sync_inventory_cache_condition, _data_sync_sqlite_snapshot_condition):
             if not condition.acquire(blocking=False):
-                return {"ok": False, "wipe_aborted": True,
+                result = {"ok": False, "wipe_aborted": True,
                         "error": "fresh_collection_sync_scheduler_busy",
                         "summary": "Reset aborted before archive: sync scheduler is busy"}
+                return result
             acquired_conditions.append(condition)
         if (_data_sync_inventory_cache.get("refreshing")
                 or _data_sync_async_inventory.get("refreshing")
                 or _data_sync_async_inventory.get("worker_active")
                 or any(isinstance(item, dict) and item.get("status") == "BUILDING"
                        for item in _data_sync_sqlite_snapshot_states.values())):
-            return {"ok": False, "wipe_aborted": True,
+            result = {"ok": False, "wipe_aborted": True,
                     "error": "fresh_collection_sync_builder_active",
                     "summary": "Reset aborted before archive: inventory or snapshot builder is active"}
+            return result
         cleanup_acquired = _raw_generation_cleanup_gate_acquire()
         if not cleanup_acquired:
-            return {"ok": False, "wipe_aborted": True,
+            result = {"ok": False, "wipe_aborted": True,
                     "error": "fresh_collection_cleanup_lease_busy",
                     "summary": "Reset aborted before archive: research generation is leased"}
+            return result
         # Collector writers acquire epoch before research. Keep that order and
         # reject contention rather than waiting while holding sync schedulers.
         epoch_acquired = _collector_epoch_lock.acquire(blocking=False)
         if not epoch_acquired:
-            return {"ok": False, "wipe_aborted": True,
+            result = {"ok": False, "wipe_aborted": True,
                     "error": "fresh_collection_epoch_writer_busy",
                     "summary": "Reset aborted before archive: epoch collector is active"}
+            return result
         research_acquired = _research_write_gate.acquire(blocking=False)
         if not research_acquired:
-            return {"ok": False, "wipe_aborted": True,
+            result = {"ok": False, "wipe_aborted": True,
                     "error": "fresh_collection_research_writer_busy",
                     "summary": "Reset aborted before archive: research writer is active"}
+            return result
         result = _perform_fresh_collection_reset_quiesced(send_local_signal=send_local_signal)
     finally:
         if research_acquired:
@@ -27725,16 +27762,22 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         if not isinstance(result, dict) or result.get("ok") is not True or result.get("wipe_aborted"):
             # A failed reset cannot restart an owner against a possibly changed
             # identity. Keep execution paused until the incident is reconciled.
-            with state_lock:
-                state["execution_paused"] = True
+            pause_confirmed = _fresh_reset_confirm_paused()
+            if isinstance(result, dict):
+                result["pause_state_confirmed"] = pause_confirmed
+                if not pause_confirmed:
+                    result["pause_state_blocker"] = "RESET_PAUSE_STATE_UNVERIFIED"
+                    result["summary"] = "Research reset failed; pause state could not be re-confirmed because its lock is busy"
 
     if result.get("ok") is True and not result.get("wipe_aborted") and _FRESH_RESET_LIFECYCLE_RESTART_PENDING:
         if not _start_lifecycle_pipeline_runtime():
-            with state_lock:
-                state["execution_paused"] = True
+            pause_confirmed = _fresh_reset_confirm_paused()
             return {**result, "ok": False, "reset_completed": True,
                     "error": "fresh_collection_lifecycle_restart_failed",
-                    "summary": "Research reset completed; lifecycle restart failed and execution remains paused"}
+                    "pause_state_confirmed": pause_confirmed,
+                    "pause_state_blocker": None if pause_confirmed else "RESET_PAUSE_STATE_UNVERIFIED",
+                    "summary": ("Research reset completed; lifecycle restart failed and execution remains paused"
+                                if pause_confirmed else "Research reset completed; lifecycle restart failed and pause state is unverified")}
         _FRESH_RESET_LIFECYCLE_RESTART_PENDING = False
         result = {**result, "lifecycle_restarted_on_new_epoch": True}
     return result
@@ -27748,11 +27791,19 @@ def _fresh_research_reset_assert_quiesced() -> None:
                 _research_write_gate, _collector_epoch_lock,
                 _data_sync_inventory_cache_condition, _data_sync_sqlite_snapshot_condition))):
         raise RuntimeError("RESET_EXCLUSIVE_BARRIERS_NOT_PROVEN")
-    with state_lock:
+    if not state_lock.acquire(timeout=2.0):
+        raise RuntimeError("RESET_STATE_LOCK_TIMEOUT")
+    try:
         paused = state.get("execution_paused") is True
         disarmed = state.get("live_armed") is False
-    with trade_lock:
+    finally:
+        state_lock.release()
+    if not trade_lock.acquire(timeout=2.0):
+        raise RuntimeError("RESET_TRADE_LOCK_TIMEOUT")
+    try:
         pending_count, open_count = len(pending_orders), len(open_positions)
+    finally:
+        trade_lock.release()
     paper_only = _force_paper_mode_active() is True
     if not paused or not disarmed or not paper_only or pending_count or open_count:
         raise RuntimeError("RESET_PAUSED_PAPER_DISARMED_FLAT_NOT_PROVEN")
@@ -27988,6 +28039,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     from emergency_evidence_wal import EmergencyEvidenceWal
     from research_reset_execution import execute_research_reset
     from research_reset_inventory import _managed_fly_alias
+    from research_reset_preflight_diagnostics import write_reset_preflight_diagnostic
+    from uuid import uuid4
 
     global _last_fresh_maintain_ts, _cached_pathway_scorecard, _cached_pathway_lane_specs
     reset_anchor = time.time()
@@ -27996,6 +28049,10 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     result = None
     operation_path = None
     operation = {}
+    diagnostic_attempt_id = uuid4().hex
+    diagnostic_root = _data_sync_runtime_root()
+    write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
+                                    stage=stage, status="STARTED")
     _pause_agent_debug_writes()
     try:
         resume = _fresh_research_reset_resume()
@@ -28019,6 +28076,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         preflights = []
         if not resume:
             stage = "ALL_SCOPES_PREFLIGHT"
+            write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
+                                            stage=stage, status="STARTED")
             for name in [None, *physical_scopes]:
                 scope_root = root if name is None else _managed_fly_alias(root, root / name)
                 if scope_root is None:
@@ -28032,6 +28091,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 preflights.append({key: preflight[key] for key in
                     ("scope_root", "scope_name", "scope_binding", "scope_binding_sha256",
                      "plan_sha256", "proof_sha256", "target_count", "target_bytes")})
+            write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
+                                            stage=stage, status="PASSED")
         receipt_dir.mkdir(parents=True, exist_ok=bool(resume))
         operation_path = receipt_dir / "operation.json"
         operation = resume["operation"] if resume else {"schema": "bot_destructive_research_reset_v1", "stage": stage,
@@ -28176,8 +28237,15 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 "fresh_collection_signal_ts": signal_ts, "local_mirror_will_wipe": False,
                 "local_mirror_will_quarantine": bool(send_local_signal)}
     except Exception as exc:
-        with state_lock:
-            state["execution_paused"] = True
+        if operation_path is None:
+            diagnostic = write_reset_preflight_diagnostic(
+                diagnostic_root, attempt_id=diagnostic_attempt_id, stage=stage,
+                status="FAILED", error=exc)
+            logger.error("[RESEARCH RESET] preflight attempt=%s stage=%s receipt_written=%s code=%s",
+                         diagnostic_attempt_id, stage, diagnostic["diagnostic_written"],
+                         diagnostic["diagnostic"].get("rejection_code") or
+                         diagnostic["diagnostic"].get("error"))
+        pause_confirmed = _fresh_reset_confirm_paused()
         if boundary is not None and operation_path is not None:
             from research_reset_failure_detail import reset_failure_fields
             operation.update(stage="FAILED", failed_stage=stage, **reset_failure_fields(exc))
@@ -28187,8 +28255,11 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 logger.error("[RESEARCH RESET] failure receipt unavailable; retain existing operation journal")
         return {"ok": False, "wipe_aborted": True, "failed_stage": stage,
                 "error": str(exc), "operation_receipt": str(operation_path) if operation_path else None,
+                "pause_state_confirmed": pause_confirmed,
+                "pause_state_blocker": None if pause_confirmed else "RESET_PAUSE_STATE_UNVERIFIED",
                 "payload_deletion_completed": bool(result and result.get("status") == "COMPLETE"),
-                "summary": "Research reset stopped; execution remains paused and receipts require reconciliation"}
+                "summary": ("Research reset stopped; execution remains paused and receipts require reconciliation"
+                            if pause_confirmed else "Research reset stopped; pause state is unverified and receipts require reconciliation")}
     finally:
         _resume_agent_debug_writes()
 
