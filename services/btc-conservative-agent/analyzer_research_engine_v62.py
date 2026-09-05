@@ -105,6 +105,7 @@ DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
 ENTRY_BASELINE_REPLAY_REPORT_FILE = "entry_baseline_replay_report.json"
 DISCOVERY_COHORT_SCORECARD_REPORT_FILE = "discovery_cohort_scorecard_report.json"
+CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE = "conservative_shadow_terminal_report.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
 SAFE_POLICY_EXHAUSTIVE_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
@@ -19887,6 +19888,61 @@ def _lifecycle_inventory_analysis_provenance():
     }
 
 
+def _write_conservative_shadow_report(
+    canonical_root, policy_report_dir, baseline_report, *,
+    policy_cycle_succeeded, research_model=None,
+):
+    """Stage current-input terminal research, never reuse an older outcome file."""
+    from research.conservative_shadow_report import (
+        SCHEMA, build_conservative_shadow_report, load_current_policy_candidates,
+    )
+    from research.policy_evidence_schema import generation_identity
+
+    generation = (baseline_report or {}).get("generation") or {}
+    try:
+        if not policy_cycle_succeeded:
+            raise ValueError("POLICY_CYCLE_NOT_SUCCESSFUL")
+        manifest_path = Path(canonical_root) / "canonical_dataset_current.json"
+        manifest_bytes = manifest_path.read_bytes()
+        current_generation = generation_identity(
+            json.loads(manifest_bytes.decode("utf-8-sig")),
+            analyzer_revision=str(generation.get("analyzer_revision") or ""),
+            evaluator_version=str(generation.get("evaluator_version") or ""),
+        )
+        if current_generation != generation:
+            raise ValueError("SHADOW_CANONICAL_GENERATION_MISMATCH")
+        candidates, candidate_receipt = load_current_policy_candidates(
+            policy_report_dir, generation, policy_cycle_succeeded=policy_cycle_succeeded,
+        )
+        report = build_conservative_shadow_report(
+            canonical_root, expected_generation=generation,
+            baseline_report=baseline_report or {}, policy_candidates=candidates,
+            policy_artifact_receipt=candidate_receipt, research_model=research_model,
+        )
+        if manifest_path.read_bytes() != manifest_bytes:
+            raise ValueError("SHADOW_CANONICAL_GENERATION_CHANGED_DURING_REPLAY")
+    except Exception as exc:
+        # Publish an explicit current-generation failure instead of an old leader.
+        code = str(exc).split(":", 1)[0]
+        if not isinstance(exc, ValueError) or not code or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789" for character in code
+        ):
+            code = "SHADOW_REPORT_BUILD_FAILED"
+        report = {
+            "schema": SCHEMA, "generation": generation, "status": "UNKNOWN",
+            "blockers": [code],
+            "failure_class": type(exc).__name__,
+            "profitability_supported": False, "ranking_eligible": False,
+            "live_qualification": False, "results": [],
+        }
+    target = Path(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    os.replace(temporary, target)
+    mirrored = _atomic_mirror_analyzer_report(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE)
+    return report, mirrored
+
+
 def _write_discovery_scorecard_report(canonical_root, conservative_status, baseline_report):
     """Stage one fresh scorecard for the existing atomic manifest publisher."""
     from research.discovery_scorecard_publication import build_discovery_scorecard_publication
@@ -19908,6 +19964,7 @@ def _write_discovery_scorecard_report(canonical_root, conservative_status, basel
 def write_report_manifest(
     payload=None, *, analysis_provenance=None,
     lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
+    shadow_research_model=None,
 ):
     manifest_started_at = datetime.now(timezone.utc)
     current_run_cutoff = float(
@@ -20170,6 +20227,28 @@ def write_report_manifest(
         policy_evidence_library_error = f"{type(exc).__name__}: {exc}"
         if evidence_coverage_triage_error is None:
             evidence_coverage_triage_error = policy_evidence_library_error
+    shadow_terminal_error = None
+    try:
+        shadow_terminal, shadow_terminal_mirror = _write_conservative_shadow_report(
+            policy_data_dir, policy_report_dir,
+            None if baseline_replay_error else baseline_replay,
+            policy_cycle_succeeded=policy_cycle_error is None,
+            research_model=shadow_research_model,
+        )
+        reports.append({
+            "title": "Conservative Shadow Terminal Outcomes",
+            "file": CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": "Current-generation exit/cost replay; explicit missing model and coverage blockers",
+            "size_bytes": shadow_terminal_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                Path(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE).stat().st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "shadow_terminal_status": shadow_terminal.get("status"),
+        })
+    except Exception as exc:
+        shadow_terminal_error = f"{type(exc).__name__}: {exc}"
     discovery_scorecard_error = None
     try:
         # Use only this invocation's replay objects, never a prior saved report.
@@ -20296,6 +20375,12 @@ def write_report_manifest(
             "kind": analysis_provenance["fresh_epoch_kind"],
         },
         "required_report_status": {
+            CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE for row in reports
+                ),
+                "generation_error": shadow_terminal_error,
+            },
             DISCOVERY_COHORT_SCORECARD_REPORT_FILE: {
                 "available_in_generation": any(
                     row.get("file") == DISCOVERY_COHORT_SCORECARD_REPORT_FILE for row in reports
