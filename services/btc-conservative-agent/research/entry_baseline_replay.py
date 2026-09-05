@@ -163,8 +163,28 @@ def _causal_feature_projection(opportunity: Mapping, index: VerifiedLedgerRowInd
     row = joined[0]
     if blocker:
         row["pre_entry_feature_blockers"] = [blocker]
+    taxonomy = {name: None for name in (
+        "bucket_definition_signature", "bucket_definition_schema", "bucket_definition_version")}
+    taxonomy_blockers = []
+    if blocker or len(proofs) != 1 or row["pre_entry_feature_status"] != "COMPLETE":
+        taxonomy_blockers.append("PRE_ENTRY_BUCKET_RECEIPT_NOT_UNIQUE_VERIFIED_CAUSAL")
+    else:
+        receipt = proofs[0]["row"]
+        signature = receipt.get("bucket_definition_signature")
+        if (not isinstance(signature, str) or not signature.strip()
+                or signature.strip().upper() in {"UNKNOWN", "UNAVAILABLE", "NONE", "NULL", "MISSING"}):
+            taxonomy_blockers.append("PRE_ENTRY_BUCKET_SIGNATURE_MISSING_OR_INVALID")
+        elif any(opportunity.get(name) not in (None, "") and opportunity[name] != receipt.get(name)
+                 for name in taxonomy):
+            taxonomy_blockers.append("PRE_ENTRY_BUCKET_DEFINITION_CONFLICT")
+        else:
+            # Preserve the exact historical definition identity, never today's registry.
+            taxonomy = {name: receipt.get(name) for name in taxonomy}
     snapshot = opportunity.get("feature_snapshot_at_signal")
     return {
+        **taxonomy,
+        "bucket_definition_status": "VERIFIED" if not taxonomy_blockers else "UNKNOWN",
+        "bucket_definition_blockers": taxonomy_blockers,
         "pre_entry_features": row["pre_entry_features"],
         "pre_entry_feature_status": row["pre_entry_feature_status"],
         "pre_entry_feature_blockers": row["pre_entry_feature_blockers"],
@@ -177,6 +197,9 @@ def _causal_feature_projection(opportunity: Mapping, index: VerifiedLedgerRowInd
             "matching_receipts_ambiguous": len(proofs) > 1,
             "status": row["pre_entry_feature_status"],
             "reason_codes": row["pre_entry_feature_blockers"],
+            "bucket_definition_signature": taxonomy["bucket_definition_signature"],
+            "bucket_definition_status": "VERIFIED" if not taxonomy_blockers else "UNKNOWN",
+            "bucket_definition_blockers": taxonomy_blockers,
         },
     }
 
@@ -590,6 +613,11 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         "pre_entry_feature_status": episode.get("pre_entry_feature_status"),
         "pre_entry_feature_blockers": episode.get("pre_entry_feature_blockers"),
         "pre_entry_feature_evidence": episode.get("pre_entry_feature_evidence"),
+        "bucket_definition_signature": episode.get("bucket_definition_signature"),
+        "bucket_definition_schema": episode.get("bucket_definition_schema"),
+        "bucket_definition_version": episode.get("bucket_definition_version"),
+        "bucket_definition_status": episode.get("bucket_definition_status"),
+        "bucket_definition_blockers": episode.get("bucket_definition_blockers"),
         "causal_identity": episode.get("causal_identity"),
         "market_tape_hashes": sorted(set(episode.get("market_tape_hashes") or [])),
         "market_tape_ids": sorted(set(episode.get("market_tape_ids") or [])),

@@ -41,6 +41,9 @@ def _fixture(root):
         "epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
         "receipt_schema": "pre_entry_features_v1", "availability_boundary": "PRE_DECISION_ONLY",
         "captured_at_ts": 99.0,
+        "bucket_definition_signature": "collected-historical-taxonomy-42",
+        "bucket_definition_schema": "test-collector-search-schema",
+        "bucket_definition_version": "42",
         "features": {name: {"value": "LOW", "observed_ts": 98.0} for name in DEFAULT_CAUSAL_FEATURES},
     }
     receipt["features"]["regime"]["value"] = "BULL"
@@ -62,6 +65,9 @@ def test_shadow_only_opportunity_gets_pinned_features_and_original_signal(tmp_pa
     row = _run(tmp_path, generation, manifest)
     assert row["signal_ts"] == 100
     assert row["pre_entry_feature_status"] == "COMPLETE"
+    assert row["bucket_definition_signature"] == "collected-historical-taxonomy-42"
+    assert row["bucket_definition_status"] == "VERIFIED"
+    assert row["pre_entry_feature_evidence"]["bucket_definition_signature"] == row["bucket_definition_signature"]
     for name in DEFAULT_CAUSAL_FEATURES:
         assert row["pre_entry_features"][name]["observed_ts"] == 98.0
         assert row["regime_features_at_signal"][name]["observed_ts"] == 98.0
@@ -152,3 +158,68 @@ def test_without_generation_does_not_trust_available_feature_file(tmp_path):
     _fixture(tmp_path)
     row = replay.materialize_v3_opportunity_replay(tmp_path)["episode_receipts"][0]
     assert row["pre_entry_feature_blockers"] == ["PRE_ENTRY_FEATURE_SOURCE_NOT_VERIFIED"]
+    assert row["bucket_definition_signature"] is None
+
+
+@pytest.mark.parametrize("signature", [None, "", True, "UNKNOWN"])
+def test_missing_taxonomy_never_falls_back_to_current_registry(tmp_path, signature):
+    receipt, _, _ = _fixture(tmp_path)
+    receipt["bucket_definition_signature"] = signature
+    _write_rows(tmp_path / SOURCE, [receipt])
+    generation, manifest = _repin(tmp_path)
+    row = _run(tmp_path, generation, manifest)
+    assert row["pre_entry_feature_status"] == "COMPLETE"
+    assert row["bucket_definition_signature"] is None
+    assert row["bucket_definition_blockers"] == ["PRE_ENTRY_BUCKET_SIGNATURE_MISSING_OR_INVALID"]
+
+
+@pytest.mark.parametrize("field", ["bucket_definition_signature", "bucket_definition_schema", "bucket_definition_version"])
+def test_conflicting_opportunity_taxonomy_is_not_relabelled(tmp_path, field):
+    _, _, _ = _fixture(tmp_path)
+    path = tmp_path / "v3/ledgers/opportunity.jsonl"
+    opportunity = json.loads(path.read_text().strip())
+    opportunity[field] = "different"
+    _write_rows(path, [opportunity])
+    generation, manifest = _repin(tmp_path)
+    row = _run(tmp_path, generation, manifest)
+    assert row["bucket_definition_signature"] is None
+    assert row["bucket_definition_blockers"] == ["PRE_ENTRY_BUCKET_DEFINITION_CONFLICT"]
+
+
+def test_ambiguous_receipts_cannot_choose_a_taxonomy(tmp_path):
+    receipt, _, _ = _fixture(tmp_path)
+    _write_rows(tmp_path / SOURCE, [receipt, {**receipt, "bucket_definition_signature": "other"}])
+    generation, manifest = _repin(tmp_path)
+    row = _run(tmp_path, generation, manifest)
+    assert row["bucket_definition_signature"] is None
+    assert row["bucket_definition_blockers"] == ["PRE_ENTRY_BUCKET_RECEIPT_NOT_UNIQUE_VERIFIED_CAUSAL"]
+
+
+def test_actual_materializer_taxonomy_reaches_same_publication_adapter(tmp_path, monkeypatch):
+    import gzip
+    from research import dynamic_cohort_adapter
+    from research.discovery_scorecard_publication import build_discovery_scorecard_publication
+    receipt, generation, manifest = _fixture(tmp_path)
+    baseline = replay.materialize_v3_opportunity_replay(tmp_path, generation=generation, canonical_manifest=manifest)
+    artifact = tmp_path / "evaluator.jsonl.gz"
+    with gzip.open(artifact, "wb") as handle:
+        handle.write(b"")
+    evaluator = {"schema": "v3_conservative_policy_evidence_v1", "generation": generation,
+                 "relative_path": artifact.name, "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                 "row_count": 0}
+    actual_adapter = dynamic_cohort_adapter.adapt_dynamic_cohorts
+    consumed = []
+    def inspect_then_adapt(rows, **kwargs):
+        values = list(rows)
+        consumed.extend(values)
+        return actual_adapter(values, **kwargs)
+    monkeypatch.setattr(dynamic_cohort_adapter, "adapt_dynamic_cohorts", inspect_then_adapt)
+    report = build_discovery_scorecard_publication(tmp_path, expected_generation=generation,
+        evaluator_status=evaluator, baseline_report=baseline)
+    assert consumed
+    assert all(row["bucket_definition_signature"] == receipt["bucket_definition_signature"] for row in consumed)
+    assert all(row["signal_ts"] == 100 for row in consumed)
+    assert all(row["pre_entry_features"]["regime"]["observed_ts"] == 98 for row in consumed)
+    # Entry-only evidence has no terminal economics/horizon: carrying taxonomy is not a made-up outcome.
+    assert report["dynamic_cohorts"]["status"] == "UNAVAILABLE"
+    assert report["dynamic_cohorts"]["counts"]["supported_outcomes"] == 0
