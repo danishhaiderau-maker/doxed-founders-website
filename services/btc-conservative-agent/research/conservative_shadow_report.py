@@ -423,8 +423,18 @@ def build_conservative_shadow_report(
                 eligible_entries.append((episode, entry))
     if model_blocker == "RESEARCH_MODEL_MISSING":
         replay_count = len(eligible_entries) * len(candidates)
-        diagnostic_limit = 100
+        diagnostic_limit = max_diagnostic_results
         diagnostic_results = []
+        if result_sink is not None:
+            for episode, entry in eligible_entries:
+                if candidates:
+                    result_sink({"schema": "shadow_unknown_candidate_range_v1",
+                        "episode_id": str(episode.get("episode_id") or ""),
+                        "opportunity_id": str(episode.get("opportunity_id") or ""),
+                        "baseline_id": str(entry.get("baseline_id") or ""),
+                        "candidate_count": len(candidates),
+                        "candidate_artifact_sha256": policy_artifact_receipt.get("candidates_sha256"),
+                        "status": "UNKNOWN", "blockers": [model_blocker]})
         for episode, entry in eligible_entries:
             for candidate in candidates:
                 if len(diagnostic_results) >= diagnostic_limit:
@@ -445,6 +455,7 @@ def build_conservative_shadow_report(
             "independent_episode_count": len([key for key in episode_counts if key]) - len(duplicate_episodes),
             "duplicate_episode_ids": duplicate_episodes, "candidate_policy_count": len(candidates),
             "candidate_replay_count": replay_count, "complete_replay_count": 0,
+            "candidate_artifact_sha256": policy_artifact_receipt.get("candidates_sha256"),
             "unknown_replay_count": replay_count,
             "reason_counts": {model_blocker: replay_count}, "results": diagnostic_results,
             "results_total": replay_count, "results_truncated": replay_count > len(diagnostic_results),
@@ -613,6 +624,7 @@ def build_conservative_shadow_report(
         "independent_episode_count": len([key for key in episode_counts if key]) - len(duplicate_episodes),
         "duplicate_episode_ids": duplicate_episodes, "candidate_policy_count": len(candidates),
         "candidate_replay_count": replay_count, "complete_replay_count": complete,
+        "candidate_artifact_sha256": policy_artifact_receipt.get("candidates_sha256"),
         "candidate_replay_count_basis": "FULL_CANDIDATE_CARTESIAN_COUNT_WITH_ARITHMETIC_UNKNOWN_RANGES",
         "terminal_evaluated_count": terminal_evaluated_count,
         "evaluated_composite_policy_count": len(evaluated_composite_signatures),

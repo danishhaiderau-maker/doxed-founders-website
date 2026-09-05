@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import io
 import json
 import math
+import sqlite3
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Mapping
 
-from discovery_cohort_scorecard import build_episode_matched_scorecard
+from discovery_cohort_scorecard import build_episode_matched_scorecard, build_disk_episode_matched_scorecard
 from research.policy_evidence_schema import canonical_json
 
 SCHEMA = "generation_bound_discovery_scorecard_publication_v1"
@@ -62,7 +63,9 @@ def _generation(value: Any, label: str) -> tuple[dict[str, str], list[str]]:
     return normalized, blockers
 
 
-def _artifact(root: Path, status: Mapping[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+def _artifact(root: Path, status: Mapping[str, Any], *, resources,
+              index_max_bytes, max_bytes=2 * 1024 * 1024 * 1024):
+    from research.shadow_result_stream import DiskRows, MAX_LINE
     relative = status.get("relative_path")
     expected_hash = str(status.get("artifact_sha256") or "").strip().lower()
     if not isinstance(relative, str) or not relative.strip():
@@ -77,32 +80,66 @@ def _artifact(root: Path, status: Mapping[str, Any]) -> tuple[list[dict[str, Any
         return [], {}, ["EVALUATOR_ARTIFACT_OUTSIDE_CANONICAL_ROOT"]
     if not path.is_file():
         return [], {}, ["EVALUATOR_ARTIFACT_MISSING"]
-    compressed = path.read_bytes()
-    digest = hashlib.sha256(compressed).hexdigest()
-    if digest != expected_hash:
-        return [], {"relative_path": relative, "actual_sha256": digest}, ["EVALUATOR_ARTIFACT_SHA256_MISMATCH"]
-    rows: list[dict[str, Any]] = []
+    expected_rows = status.get("row_count")
+    if type(expected_rows) is not int or expected_rows < 0:
+        return [], {}, ["EVALUATOR_ROW_COUNT_INVALID"]
+    limit = int(max_bytes)
+    def compressed_hash():
+        if path.stat().st_size > limit:
+            raise ValueError("EVALUATOR_COMPRESSED_BYTE_BUDGET_EXCEEDED")
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                size += len(chunk)
+                if size > limit:
+                    raise ValueError("EVALUATOR_COMPRESSED_BYTE_BUDGET_EXCEEDED")
+                digest.update(chunk)
+        return digest.hexdigest(), size
     try:
-        with gzip.open(io.BytesIO(compressed), "rt", encoding="utf-8") as handle:
-            for line_number, line in enumerate(handle, 1):
+        digest, compressed_size = compressed_hash()
+        if digest != expected_hash:
+            return [], {"relative_path": relative, "actual_sha256": digest}, ["EVALUATOR_ARTIFACT_SHA256_MISMATCH"]
+        rows = resources.enter_context(DiskRows(max_bytes=index_max_bytes))
+        total = line_number = 0
+        with gzip.open(path, "rb") as handle:
+            while True:
+                line = handle.readline(MAX_LINE + 1)
+                if not line:
+                    break
+                total += len(line)
+                line_number += 1
+                if total > limit:
+                    raise ValueError("EVALUATOR_DECOMPRESSED_BYTE_BUDGET_EXCEEDED")
+                if len(line) > MAX_LINE:
+                    raise ValueError("EVALUATOR_LINE_BYTE_BUDGET_EXCEEDED")
+                if not line.endswith(b"\n"):
+                    raise ValueError("EVALUATOR_TRUNCATED_JSONL_LINE")
                 if not line.strip():
                     continue
-                row = json.loads(line)
+                row = json.loads(line.decode("utf-8"))
                 if not isinstance(row, Mapping):
                     return [], {}, [f"EVALUATOR_ARTIFACT_ROW_NOT_OBJECT:{line_number}"]
-                rows.append(dict(row))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                rows.append(row)
+                if len(rows) > expected_rows:
+                    return [], {}, ["EVALUATOR_ROW_COUNT_MISMATCH"]
+        if compressed_hash() != (digest, compressed_size):
+            return [], {}, ["EVALUATOR_ARTIFACT_CHANGED_DURING_READ"]
+    except ValueError as exc:
+        code = str(exc)
+        if code.startswith(("EVALUATOR_", "SHADOW_STREAM_INDEX_")):
+            return [], {}, [code]
         return [], {}, [f"EVALUATOR_ARTIFACT_INVALID:{type(exc).__name__}"]
-    try:
-        expected_rows = int(status.get("row_count"))
-    except (TypeError, ValueError, OverflowError):
-        return [], {}, ["EVALUATOR_ROW_COUNT_INVALID"]
-    if expected_rows < 0 or len(rows) != expected_rows:
+    except (OSError, EOFError, UnicodeError, sqlite3.Error) as exc:
+        return [], {}, [f"EVALUATOR_ARTIFACT_INVALID:{type(exc).__name__}"]
+    if len(rows) != expected_rows:
         return [], {}, ["EVALUATOR_ROW_COUNT_MISMATCH"]
     return rows, {
         "relative_path": relative,
         "artifact_sha256": digest,
-        "compressed_size_bytes": len(compressed),
+        "compressed_size_bytes": compressed_size,
+        "decompressed_size_bytes": total,
+        "consumption_mode": "FULL_VERIFIED_DISK_STREAM",
         "verified_row_count": len(rows),
     }, []
 
@@ -134,7 +171,7 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _shadow_aggregate(report: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def _shadow_aggregate(report: Mapping[str, Any], verified_stream=None) -> tuple[dict[str, Any], list[str]]:
     raw_blockers = report.get("blockers", [])
     if not isinstance(raw_blockers, list) or any(
         not isinstance(item, str) or not item.strip() for item in raw_blockers
@@ -187,12 +224,20 @@ def _shadow_aggregate(report: Mapping[str, Any]) -> tuple[dict[str, Any], list[s
             isinstance(item, Mapping) and item.get("status") == "COMPLETE"
             for item in results
         )
-        if returned_complete != counts["complete_replay_count"]:
+        if returned_complete != counts["complete_replay_count"] and verified_stream is None:
             defects.append("SHADOW_TERMINAL_COMPLETE_RESULTS_OMITTED_OR_MISMATCHED")
+    effective_blockers = list(report.get("blockers") or [])
+    effective_status = report.get("status")
+    if verified_stream is not None:
+        effective_blockers = [item for item in effective_blockers if item not in {
+            "RESULT_STREAM_CONSUMER_NOT_BOUND", "RESULTS_TRUNCATED_WITHOUT_STREAM"}]
+        if not effective_blockers and counts.get("unknown_replay_count") == 0 and counts.get("candidate_replay_count", 0) > 0:
+            effective_status = "BUILT"
     return {
-        "status": report.get("status"), "upstream_blockers": list(report.get("blockers") or []),
+        "status": effective_status, "upstream_blockers": effective_blockers,
         "counts_available": True, **counts,
         "results_returned_count": len(results), "results_truncated": truncated,
+        "full_result_stream_verified": verified_stream is not None,
         "reason_counts": dict(sorted(normalized_reasons.items())),
     }, sorted(set(defects))
 
@@ -223,6 +268,8 @@ def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "config_signature": row.get("config_signature"),
         "cost_model_id": row.get("cost_model_id") or receipt.get("cost_model_id"),
         "simulation_model": row.get("simulation_model") or receipt.get("simulation_model") or receipt.get("evaluator_version"),
+        "economics_evidence_basis": row.get("economics_evidence_basis") or receipt.get("economics_evidence_basis"),
+        "declared_contract_sha256": row.get("declared_contract_sha256") or receipt.get("declared_contract_sha256"),
     }
 
 
@@ -257,7 +304,36 @@ def build_discovery_scorecard_publication(
     canonical_root: str | Path, *, expected_generation: Mapping[str, Any],
     evaluator_status: Mapping[str, Any], baseline_report: Mapping[str, Any],
     shadow_terminal_report: Mapping[str, Any] | None = None,
+    stream_artifact_root: str | Path | None = None,
+    index_budget_bytes: int = 2 * 1024 * 1024 * 1024,
+    evaluator_max_bytes: int = 2 * 1024 * 1024 * 1024,
 ) -> dict[str, Any]:
+    from research.shadow_result_stream import DiskRows, verify_result_stream
+    try:
+        # Four simultaneous indexes: evaluator, verified shadow, adapted, cell.
+        # Legacy no-stream callers also use bounded disk-backed adaptation.
+        index_share = int(index_budget_bytes) // 4
+        with ExitStack() as resources:
+            stream = None
+            if isinstance(shadow_terminal_report, Mapping) and shadow_terminal_report.get("result_stream") is not None:
+                stream = resources.enter_context(verify_result_stream(stream_artifact_root if stream_artifact_root is not None else canonical_root,
+                                      shadow_terminal_report, expected_generation,
+                                      index_max_bytes=index_share))
+            adapted = resources.enter_context(DiskRows(max_bytes=index_share))
+            return _build_discovery_scorecard_publication(canonical_root,
+                    expected_generation=expected_generation, evaluator_status=evaluator_status,
+                    baseline_report=baseline_report, shadow_terminal_report=shadow_terminal_report,
+                    _stream=stream, _adapted=adapted, _index_max_bytes=index_share,
+                    _resources=resources, _evaluator_max_bytes=evaluator_max_bytes)
+    except (ValueError, OSError, EOFError, sqlite3.Error, json.JSONDecodeError) as exc:
+        return _unknown(expected_generation, [f"SHADOW_STREAM_VERIFICATION_FAILED:{exc}"])
+
+
+def _build_discovery_scorecard_publication(
+    canonical_root, *, expected_generation, evaluator_status, baseline_report,
+    shadow_terminal_report=None, _stream=None, _adapted=None, _index_max_bytes=None,
+    _resources=None, _evaluator_max_bytes=2 * 1024 * 1024 * 1024,
+):
     """Build a fresh report from two explicitly same-generation inputs."""
     expected, blockers = _generation(expected_generation, "EXPECTED")
     evaluator, defects = _generation(
@@ -293,16 +369,17 @@ def build_discovery_scorecard_publication(
         return _unknown(expected, blockers)
     shadow_aggregate = None
     if shadow_terminal_report is not None:
-        shadow_aggregate, defects = _shadow_aggregate(shadow_terminal_report)
+        shadow_aggregate, defects = _shadow_aggregate(shadow_terminal_report, _stream)
         if defects:
             return _unknown(expected, defects, shadow_terminal_aggregate=shadow_aggregate)
-    rows, artifact, defects = _artifact(Path(canonical_root), evaluator_status)
+    rows, artifact, defects = _artifact(Path(canonical_root), evaluator_status,
+        resources=_resources, index_max_bytes=_index_max_bytes, max_bytes=_evaluator_max_bytes)
     if defects:
         return _unknown(expected, defects, input_artifacts={"evaluator": artifact})
     if not isinstance(baseline_report, Mapping) or not isinstance(baseline_report.get("episode_receipts"), list):
         return _unknown(expected, ["BASELINE_EPISODE_RECEIPTS_MISSING"], input_artifacts={"evaluator": artifact})
 
-    adapted: list[dict[str, Any]] = []
+    adapted = _adapted if _adapted is not None else []
     missing = Counter()
     unknown_counts = Counter()
     for source in rows:
@@ -389,6 +466,8 @@ def build_discovery_scorecard_publication(
                 "config_signature": receipt.get("config_signature"),
                 "cost_model_id": conservative_receipt.get("cost_model_id"),
                 "simulation_model": conservative_receipt.get("simulation_model"), "net_pnl_usd": None,
+                "economics_evidence_basis": conservative_receipt.get("economics_evidence_basis"),
+                "declared_contract_sha256": conservative_receipt.get("declared_contract_sha256"),
             }
             adapted.append(baseline_row)
             for field in _missing(baseline_row):
@@ -407,7 +486,7 @@ def build_discovery_scorecard_publication(
             return _unknown(expected, ["SHADOW_TERMINAL_RESULTS_MISSING"],
                             input_artifacts={"evaluator": artifact})
         grouped_shadow: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
-        for source in shadow_results:
+        for source in shadow_results if _stream is None else ():
             if not isinstance(source, Mapping):
                 unknown_counts["shadow_terminal_invalid_result"] += 1
                 continue
@@ -415,8 +494,9 @@ def build_discovery_scorecard_publication(
                    str(source.get("baseline_id") or ""),
                    str(source.get("composite_policy_signature") or source.get("policy_signature") or ""))
             grouped_shadow.setdefault(key, []).append(source)
-        for key in sorted(grouped_shadow):
-            variants = grouped_shadow[key]
+        groups = ((key, grouped_shadow[key]) for key in sorted(grouped_shadow)) if _stream is None else (
+            (tuple(json.loads(key)), variants) for key, variants in _stream.groups())
+        for key, variants in groups:
             canonical_variants = {
                 canonical_json({
                     "terminal": item.get("terminal"),
@@ -512,6 +592,8 @@ def build_discovery_scorecard_publication(
                 "config_signature": episode.get("config_signature"),
                 "cost_model_id": terminal.get("cost_model_id"),
                 "simulation_model": terminal.get("simulation_model"),
+                "economics_evidence_basis": terminal.get("economics_evidence_basis"),
+                "declared_contract_sha256": terminal.get("declared_contract_sha256"),
                 "net_pnl_usd": pnl,
                 "composite_policy_signature": composite_signature,
                 "entry_baseline_signature": baseline_signature,
@@ -525,21 +607,25 @@ def build_discovery_scorecard_publication(
             }
             adapted.append(shadow_row)
             shadow_rows_added += 1
-            shadow_provenance.append({
+            provenance = {
                 "episode_id": key[0], "opportunity_id": key[1], "baseline_id": key[2],
                 "composite_policy_signature": composite_signature,
                 "terminal_receipt_sha256": terminal.get("receipt_sha256"),
                 "cost_model_id": terminal.get("cost_model_id"),
                 "cost_model_signature": terminal.get("cost_model_signature"),
+                "economics_evidence_basis": terminal.get("economics_evidence_basis"),
+                "declared_contract_sha256": terminal.get("declared_contract_sha256"),
                 "position_context_signature": terminal.get("position_context_signature"),
                 "coverage_policy_signature": terminal.get("coverage_policy_signature"),
                 "costs": {field: terminal.get(field) for field in (
                     "trading_fees_usd", "funding_usd", "latency_cost_usd", "total_cost_usd")},
-            })
+            }
+            if _stream is None or len(shadow_provenance) < 100:
+                shadow_provenance.append(provenance)
             for field in _missing(shadow_row):
                 missing[f"shadow_terminal:{field}"] += 1
 
-    scorecard = build_episode_matched_scorecard(adapted)
+    scorecard = build_disk_episode_matched_scorecard(adapted, index_max_bytes=_index_max_bytes)
     has_exact_matched_cohort = any(
         item.get("cohort_equality_proven") is True
         for item in scorecard.get("matched_comparisons") or []
@@ -551,7 +637,8 @@ def build_discovery_scorecard_publication(
             and shadow_aggregate.get("unknown_replay_count") == 0
             and shadow_aggregate.get("complete_replay_count")
             == shadow_aggregate.get("candidate_replay_count")
-            and shadow_aggregate.get("results_truncated") is False)
+            and (shadow_aggregate.get("results_truncated") is False
+                 or shadow_aggregate.get("full_result_stream_verified") is True))
     )
     complete_inputs = bool(adapted) and has_exact_matched_cohort and not missing \
         and not any(unknown_counts.values()) and not scorecard.get("blockers")
@@ -565,6 +652,7 @@ def build_discovery_scorecard_publication(
         "status": "BUILT_INCOMPLETE" if not complete_inputs else "BUILT",
         "generation": expected,
         "blockers": sorted(scorecard.get("blockers") or []),
+        "warnings": sorted(scorecard.get("warnings") or []),
         "input_artifacts": {
             "evaluator": artifact,
             "baseline": {"canonical_sha256": hashlib.sha256(canonical_json(baseline_report).encode()).hexdigest(),
@@ -575,6 +663,9 @@ def build_discovery_scorecard_publication(
             },
         },
         "shadow_terminal_provenance": shadow_provenance,
+        "shadow_terminal_provenance_truncated": len(shadow_provenance) < shadow_rows_added,
+        "shadow_terminal_verified_stream": None if _stream is None else {
+            **_stream.verified_summary, "receipt": shadow_terminal_report["result_stream"]},
         "shadow_candidate_count_basis": "UPSTREAM_PARAMETER_REPLAYS_NOT_INDEPENDENT_TRADES",
         "input_counts": {"evaluator_rows": len(rows), "baseline_episode_receipts": len(receipts),
                          "shadow_terminal_rows_added": shadow_rows_added,

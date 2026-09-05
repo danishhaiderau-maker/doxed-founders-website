@@ -9,6 +9,7 @@ latency, or fee input produces UNKNOWN rather than NO_FILL.
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import nullcontext
 from typing import Any, Iterable, Mapping
 
 try:
@@ -32,9 +33,122 @@ from pathlib import Path
 import hashlib
 import json
 
+from research.baseline_execution_context import (
+    build_baseline_execution_context, IDENTITY_FIELDS, VerifiedLedgerRowIndex,
+)
+from research.policy_evidence_schema import canonical_json, generation_identity
+
 
 REPLAY_SCHEMA = "entry_baseline_same_opportunity_replay_v1"
 EPISODE_RECEIPT_SCHEMA = "entry_baseline_episode_receipt_v1"
+
+
+def _context_source_pins(root: Path, generation: Mapping, manifest: Mapping | None):
+    """Bind selected raw sources to the promoted whole-dataset checksum."""
+    manifest_path = root / "canonical_dataset_current.json"
+    state_path = root / ".fly-sync-state.json"
+    try:
+        if manifest_path.stat().st_size > 1024 * 1024 or state_path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("BASELINE_CONTEXT_MANIFEST_SIZE_LIMIT")
+        with manifest_path.open("rb") as handle:
+            manifest_bytes = handle.read(1024 * 1024 + 1)
+        if len(manifest_bytes) > 1024 * 1024:
+            raise ValueError("BASELINE_CONTEXT_MANIFEST_SIZE_LIMIT")
+        actual_manifest = json.loads(manifest_bytes.decode("utf-8-sig"))
+        unhashed_manifest = {key: value for key, value in actual_manifest.items() if key != "entry_hash"}
+        if hashlib.sha256(canonical_json(unhashed_manifest).encode()).hexdigest() != actual_manifest.get("entry_hash"):
+            raise ValueError("BASELINE_CONTEXT_MANIFEST_ENTRY_HASH_MISMATCH")
+        if manifest is not None and actual_manifest != manifest:
+            raise ValueError("BASELINE_CONTEXT_MANIFEST_CHANGED")
+        expected = generation_identity(actual_manifest,
+            analyzer_revision=generation.get("analyzer_revision"),
+            evaluator_version=generation.get("evaluator_version"))
+        if expected != generation:
+            raise ValueError("BASELINE_CONTEXT_MANIFEST_GENERATION_MISMATCH")
+        with state_path.open("rb") as handle:
+            state_bytes = handle.read(32 * 1024 * 1024 + 1)
+        if len(state_bytes) > 32 * 1024 * 1024:
+            raise ValueError("BASELINE_CONTEXT_MANIFEST_SIZE_LIMIT")
+        state = json.loads(state_bytes.decode("utf-8-sig"))
+        if not isinstance(state, dict) or len(state) > 100_000:
+            raise ValueError("BASELINE_CONTEXT_STATE_SHAPE_OR_LIMIT")
+        normalized = {}
+        for name, record in sorted(state.items()):
+            relative = str(name).replace("\\", "/")
+            if not isinstance(record, dict) or relative in normalized:
+                raise ValueError("BASELINE_CONTEXT_STATE_INVALID_OR_DUPLICATE")
+            candidate = root / relative
+            if Path(relative).is_absolute() or ".." in Path(relative).parts:
+                raise ValueError("BASELINE_CONTEXT_STATE_PATH_UNSAFE")
+            candidate.resolve().relative_to(root.resolve())
+            normalized[relative] = record
+        material = {"revision": generation["source_revision"], "epoch": generation["epoch_id"], "files": normalized}
+        digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if digest != actual_manifest.get("dataset_checksum"):
+            raise ValueError("BASELINE_CONTEXT_DATASET_CHECKSUM_MISMATCH")
+        pins = {name: str(record.get("sha256") or "").lower() for name, record in normalized.items()}
+        return pins, normalized, [], (manifest_bytes, state_bytes)
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError) as exc:
+        code = str(exc) if isinstance(exc, ValueError) and str(exc).startswith("BASELINE_CONTEXT_") else "BASELINE_CONTEXT_PINNED_MANIFEST_UNAVAILABLE"
+        return {}, {}, [code], None
+
+
+def _context_envelope(relative: str, raw: bytes, row: Mapping) -> dict:
+    return {"source_id": relative, "raw_bytes": raw, "row": dict(row),
+            "row_sha256": hashlib.sha256(canonical_json(row).encode()).hexdigest()}
+
+
+def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: VerifiedLedgerRowIndex):
+    """Read exact known ledgers once, never recursively search runtime data.
+
+    The stage-zero producer already writes the first two paths. The optional
+    context ledger is an explicit contract for collected baseline-specific
+    authorizations/observations; its absence is reported, never synthesized.
+    """
+    statuses = []
+    for relative in ("chase_offset_touch_grid.jsonl", "chase_offset_touch_grid.jsonl.1",
+                     "v3/ledgers/baseline_execution_context.jsonl", "v3/ledgers/opportunity.jsonl",
+                     "v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl"):
+        if relative not in pins:
+            statuses.append({"source_id": relative, "status": "UNAVAILABLE", "reason": "SOURCE_NOT_IN_PINNED_DATASET"})
+            continue
+        try:
+            count = index.add_source(root, relative, expected_sha=pins[relative],
+                expected_size=records[relative].get("size"), stage_only=relative.startswith("chase_offset_touch_grid.jsonl"))
+            statuses.append({"source_id": relative, "status": "VERIFIED", "sha256": pins[relative],
+                "selected_rows": count, "verification_basis": "VERIFIED_FULL_LEDGER_SHA256_STREAM_V1"})
+        except (OSError, ValueError, UnicodeError, TypeError, RecursionError) as exc:
+            statuses.append({"source_id": relative, "status": "UNKNOWN", "reason": str(exc)})
+    return statuses
+
+
+def _execution_context(episode: Mapping, result: Mapping, generation: Mapping) -> dict:
+    identity = {field: episode.get(field) for field in IDENTITY_FIELDS}
+    identity["epoch_id"] = episode.get("epoch_id") or episode.get("dataset_epoch")
+    identity.update(direction=episode.get("direction"), symbol=episode.get("symbol"),
+                    baseline_id=result["baseline_id"], baseline_policy_signature=result["policy_signature"])
+    sources = episode.get("_baseline_context_sources") or []
+    stages = [item for item in sources if item["row"].get("schema") == "compressed_chase_shadow_v1"]
+    sizing = [item for item in sources if item["row"].get("schema") == "baseline_sizing_authorization_v1"
+              and item["row"].get("baseline_id") == result["baseline_id"]]
+    atr = [item for item in sources if item["row"].get("schema") == "baseline_fill_atr_observation_v1"
+           and item["row"].get("observed_ts") == result["conservative_receipt"].get("trigger_bucket_ts")]
+    coverage = episode.get("_baseline_context_coverage") or []
+    reasons = list(episode.get("_baseline_context_pin_reasons") or [])
+    if episode.get("_baseline_context_opportunity") is None:
+        reasons.append("BASELINE_CONTEXT_OPPORTUNITY_ROW_MEMBERSHIP_MISSING")
+    for name, values in (("STAGE_ZERO", stages), ("SIZING_AUTHORIZATION", sizing), ("EXACT_FILL_ATR", atr), ("COVERAGE", coverage)):
+        if not values:
+            reasons.append("BASELINE_CONTEXT_" + name + "_MISSING")
+        elif name != "STAGE_ZERO" and len(values) != 1:
+            reasons.append("BASELINE_CONTEXT_" + name + "_AMBIGUOUS")
+    if reasons:
+        return {"status": "UNKNOWN", "context": None, "reason_codes": sorted(set(reasons))}
+    return build_baseline_execution_context(generation=generation, identity=identity,
+        entry_receipt=result["conservative_receipt"], pinned_sources=episode.get("_baseline_context_pins") or {},
+        stage_zero_evidence=stages, sizing_authorization=sizing[0], atr_evidence=atr[0],
+        coverage_evidence=coverage[0]["object"], coverage_binding=coverage[0].get("binding"),
+        opportunity_binding=episode.get("_baseline_context_opportunity"))
 
 
 def _baseline_rows() -> tuple[dict[str, Any], ...]:
@@ -192,7 +306,7 @@ def _evidence_projection(
     }
 
 
-def replay_episode(episode: Mapping[str, Any]) -> dict[str, Any]:
+def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = None) -> dict[str, Any]:
     """Replay all registered baselines against one causal opportunity."""
     episode_id = str(episode.get("episode_id") or "")
     opportunity_id = str(episode.get("opportunity_id") or "")
@@ -288,6 +402,15 @@ def replay_episode(episode: Mapping[str, Any]) -> dict[str, Any]:
         receipt["market_evidence_provenance"] = list(
             episode.get("market_evidence_provenance") or []
         )
+        if generation is not None and terminal in {"FULL_FILL", "PARTIAL_FILL"}:
+            # The evaluator validates this exact symbol against every tape
+            # row/lot receipt, but does not project it in its base envelope.
+            receipt["symbol"] = str(episode.get("symbol") or "")
+            projection = _execution_context(episode, results[-1], generation)
+            results[-1]["model_context_status"] = projection["status"]
+            results[-1]["model_context_blockers"] = projection["reason_codes"]
+            if projection["context"] is not None:
+                results[-1]["execution_model_context"] = projection["context"]
     material = {
         "schema": EPISODE_RECEIPT_SCHEMA,
         "episode_id": episode_id,
@@ -312,15 +435,19 @@ def replay_episode(episode: Mapping[str, Any]) -> dict[str, Any]:
         "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
         "results": results,
     }
+    if generation is not None:
+        material["generation"] = dict(generation)
+        material["model_context_source_resolution"] = episode.get("_baseline_context_source_resolution") or []
     material["receipt_id"] = canonical_hash("entry-baseline-episode", material)
     return material
 
 
 def materialize_same_opportunity_replay(
     episodes: Iterable[Mapping[str, Any]],
+    *, generation: Mapping | None = None,
 ) -> dict[str, Any]:
     """Return deterministic episode receipts plus comparable outcome counts."""
-    receipts = [replay_episode(episode) for episode in episodes]
+    receipts = [replay_episode(episode, generation=generation) for episode in episodes]
     receipts.sort(key=lambda row: (str(row["opportunity_id"]), str(row["episode_id"])))
     expected = [row["baseline_id"] for row in _baseline_rows()]
     summaries = {}
@@ -350,11 +477,22 @@ def materialize_same_opportunity_replay(
         "profitability_blocker": "BASELINE_EXIT_AND_COST_COMPLETE_TERMINAL_RECEIPT_NOT_IMPLEMENTED",
         "relay_eligible": False,
     }
+    if generation is not None:
+        material["generation"] = dict(generation)
     material["report_id"] = canonical_hash("entry-baseline-replay", material)
     return material
 
 
-def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=None) -> dict[str, Any]:
+def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=None,
+        generation: Mapping | None = None, canonical_manifest: Mapping | None = None) -> dict[str, Any]:
+    with VerifiedLedgerRowIndex() if generation is not None else nullcontext(None) as context_index:
+        return _materialize_v3_opportunity_replay(data_dir, incident_input=incident_input,
+            generation=generation, canonical_manifest=canonical_manifest, context_index=context_index)
+
+
+def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=None,
+        generation: Mapping | None = None, canonical_manifest: Mapping | None = None,
+        context_index: VerifiedLedgerRowIndex | None = None) -> dict[str, Any]:
     """Materialize the canonical opportunity cohort through this replay engine.
 
     Missing joins remain explicit UNKNOWN results; no schedule or market data is
@@ -364,6 +502,14 @@ def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=No
     incident_input = incident_input if incident_input is not None else load_incident_input()
     incident_index = IncidentEpisodeIndex(incident_input)
     v3_root = Path(data_dir) / "v3"
+    context_pins, context_records, context_pin_reasons, context_snapshot = ({}, {}, [], None)
+    context_source_resolution = []
+    if generation is not None:
+        context_pins, context_records, context_pin_reasons, context_snapshot = _context_source_pins(
+            Path(data_dir), generation, canonical_manifest)
+        context_source_resolution = _context_ledger_sources(Path(data_dir), context_pins, context_records, context_index)
+        if "v3/ledgers/opportunity.jsonl" not in context_index.sources:
+            context_pin_reasons.append("BASELINE_CONTEXT_OPPORTUNITY_SOURCE_NOT_VERIFIED")
     if incident_input.enabled:
         # Include all policy variants and terminal evidence, not just the
         # selected entry tape. Unresolvable linked rows fail closed.
@@ -455,6 +601,7 @@ def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=No
                 tape_ids: list[str] = []
                 evidence_provenance: list[dict[str, Any]] = []
                 evidence_reasons: list[str] = []
+                context_coverage = []
                 selected, history = authoritative_future_path_segments(
                     v3_root, segment_rows.get(key, [])
                 )
@@ -512,6 +659,21 @@ def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=No
                         })
                         continue
                     market_rows.extend(dict(item) for item in evidence_rows if isinstance(item, Mapping))
+                    if generation is not None:
+                        # Object identity is established by the separately
+                        # pinned ledger binding, never injected into its bytes.
+                        relative = str(ref["relative_path"])
+                        for binding_relative in ("v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl"):
+                            if binding_relative not in context_pins:
+                                continue
+                            binding_proof = context_index.envelope(binding_relative, segment)
+                            if binding_proof is None:
+                                continue
+                            if context_pins.get(relative) != digest:
+                                continue
+                            context_coverage.append({"object": _context_envelope(relative, object_bytes, envelope),
+                                "binding": binding_proof})
+                            break
                     tape_hashes.append(digest)
                     tape_ids.append(str(segment.get("record_id") or ""))
                     evidence_provenance.append({
@@ -521,6 +683,14 @@ def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=No
                     })
                 if not tape_hashes:
                     evidence_reasons.append("NO_MATCHING_VERIFIED_MARKET_SEGMENT")
+                episode_context_sources = []
+                episode_context_reasons = list(context_pin_reasons)
+                if context_index:
+                    try:
+                        episode_context_sources = context_index.identity_envelopes(tuple(str(row.get(field) or (
+                            dataset_epoch if field == "epoch_id" else "")) for field in IDENTITY_FIELDS))
+                    except ValueError as exc:
+                        episode_context_reasons.append(str(exc))
                 episodes.append({
                     **dict(row),
                     "opportunity_id": row.get("opportunity_id") or row.get("record_id"),
@@ -542,6 +712,12 @@ def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=No
                         if any(incident_input.affected(item) for item in market_rows) else []
                     ))),
                     "future_path_selection": history,
+                    "_baseline_context_sources": episode_context_sources,
+                    "_baseline_context_pins": context_pins,
+                    "_baseline_context_pin_reasons": episode_context_reasons,
+                    "_baseline_context_coverage": context_coverage,
+                    "_baseline_context_source_resolution": context_source_resolution,
+                    "_baseline_context_opportunity": context_index.envelope("v3/ledgers/opportunity.jsonl", row) if context_index else None,
                 })
     for episode in episodes:
         if "UNKNOWN_DEPLOYED_SOURCE_IDENTITY_INCIDENT" in episode.get("materialization_reason_codes", []):
@@ -550,7 +726,7 @@ def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=No
         episode["materialization_reason_codes"] = sorted(set(
             episode.get("materialization_reason_codes", []) + incident_index.reasons(episode)
         ))
-    report = materialize_same_opportunity_replay(episodes)
+    report = materialize_same_opportunity_replay(episodes, generation=generation)
     if incident_input.enabled:
         report["runtime_identity_incident_input"] = incident_input.provenance()
         report["runtime_identity_incident_coverage"] = incident_index.coverage()
@@ -558,4 +734,11 @@ def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=No
             key: value for key, value in report.items() if key != "report_id"
         })
     incident_input.assert_unchanged()
+    if context_index is not None:
+        context_index.assert_sources_unchanged()
+    if context_snapshot is not None and (
+        (Path(data_dir) / "canonical_dataset_current.json").read_bytes() != context_snapshot[0]
+        or (Path(data_dir) / ".fly-sync-state.json").read_bytes() != context_snapshot[1]
+    ):
+        raise ValueError("BASELINE_CONTEXT_PINNED_GENERATION_CHANGED_DURING_REPLAY")
     return report

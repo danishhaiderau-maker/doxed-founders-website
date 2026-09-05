@@ -19923,8 +19923,10 @@ def _write_conservative_shadow_report(
         SCHEMA, build_conservative_shadow_report, load_current_policy_candidates,
     )
     from research.policy_evidence_schema import generation_identity
+    from research.shadow_result_stream import ShadowResultStreamWriter, digest as stream_digest
 
     generation = (baseline_report or {}).get("generation") or {}
+    stream_temporary = None
     try:
         if not policy_cycle_succeeded:
             raise ValueError("POLICY_CYCLE_NOT_SUCCESSFUL")
@@ -19940,13 +19942,27 @@ def _write_conservative_shadow_report(
         candidates, candidate_receipt = load_current_policy_candidates(
             policy_report_dir, generation, policy_cycle_succeeded=policy_cycle_succeeded,
         )
-        report = build_conservative_shadow_report(
-            canonical_root, expected_generation=generation,
-            baseline_report=baseline_report or {}, policy_candidates=candidates,
-            policy_artifact_receipt=candidate_receipt, research_model=research_model,
-        )
+        stream_temporary = Path(f".shadow-results-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp")
+        with ShadowResultStreamWriter(Path.cwd(), str(stream_temporary), generation) as sink:
+            report = build_conservative_shadow_report(
+                canonical_root, expected_generation=generation,
+                baseline_report=baseline_report or {}, policy_candidates=candidates,
+                policy_artifact_receipt=candidate_receipt, research_model=research_model,
+                result_sink=sink,
+            )
+            stream_receipt = sink.finalize(report)
         if manifest_path.read_bytes() != manifest_bytes:
             raise ValueError("SHADOW_CANONICAL_GENERATION_CHANGED_DURING_REPLAY")
+        # Working files are replaced just like the other analyzer artifacts;
+        # the visible generation retains its separate immutable copy. Never
+        # accumulate one potentially large source stream per analyzer cycle.
+        stream_target = Path("conservative_shadow_results.jsonl.gz")
+        os.replace(stream_temporary, stream_target)
+        stream_receipt["relative_path"] = stream_target.name
+        stream_receipt["receipt_sha256"] = stream_digest({
+            key: value for key, value in stream_receipt.items() if key != "receipt_sha256"
+        })
+        report["result_stream"] = stream_receipt
     except Exception as exc:
         # Publish an explicit current-generation failure instead of an old leader.
         code = str(exc).split(":", 1)[0]
@@ -19961,6 +19977,9 @@ def _write_conservative_shadow_report(
             "profitability_supported": False, "ranking_eligible": False,
             "live_qualification": False, "results": [],
         }
+    finally:
+        if stream_temporary is not None:
+            stream_temporary.unlink(missing_ok=True)
     target = Path(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
@@ -19981,6 +20000,7 @@ def _write_discovery_scorecard_report(
         evaluator_status=conservative_status or {},
         baseline_report=baseline_report or {},
         shadow_terminal_report=shadow_terminal_report,
+        stream_artifact_root=Path.cwd(),
     )
     target = Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
     temporary = target.with_suffix(target.suffix + ".tmp")
@@ -19996,7 +20016,9 @@ def write_report_manifest(
     shadow_research_model=None,
 ):
     from research.runtime_identity_incidents import load_incident_input
+    from research.shadow_model_input import load_shadow_model_input
     incident_input = load_incident_input()
+    shadow_model_input = load_shadow_model_input(shadow_research_model)
     manifest_started_at = datetime.now(timezone.utc)
     current_run_cutoff = float(
         globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
@@ -20056,6 +20078,9 @@ def write_report_manifest(
     if incident_input.enabled:
         analysis_provenance = dict(analysis_provenance)
         analysis_provenance["runtime_identity_incident_input"] = incident_input.provenance()
+    if shadow_model_input.enabled:
+        analysis_provenance = dict(analysis_provenance)
+        analysis_provenance["shadow_model_input"] = shadow_model_input.provenance()
     generation_revision = analysis_provenance["generation_revision"]
     # This grid must belong to this run or be explicitly absent. A stale file
     # from an earlier revision must never appear current merely because it is
@@ -20090,12 +20115,14 @@ def write_report_manifest(
 
         baseline_manifest_path = Path(policy_data_dir) / "canonical_dataset_current.json"
         baseline_manifest_bytes = baseline_manifest_path.read_bytes()
+        baseline_manifest = json.loads(baseline_manifest_bytes.decode("utf-8-sig"))
         baseline_generation = generation_identity(
-            json.loads(baseline_manifest_bytes.decode("utf-8-sig")),
+            baseline_manifest,
             analyzer_revision=str(generation_revision),
         )
         baseline_replay = materialize_v3_opportunity_replay(
             policy_data_dir, incident_input=incident_input,
+            generation=baseline_generation, canonical_manifest=baseline_manifest,
         )
         if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
             raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
@@ -20271,7 +20298,7 @@ def write_report_manifest(
             policy_data_dir, policy_report_dir,
             None if baseline_replay_error else baseline_replay,
             policy_cycle_succeeded=policy_cycle_error is None,
-            research_model=shadow_research_model,
+            research_model=shadow_model_input.resolve((baseline_replay or {}).get("generation") or {}),
         )
         reports.append({
             "title": "Conservative Shadow Terminal Outcomes",
@@ -20285,6 +20312,18 @@ def write_report_manifest(
             "analysis_provenance": analysis_provenance,
             "shadow_terminal_status": shadow_terminal.get("status"),
         })
+        stream_receipt = shadow_terminal.get("result_stream")
+        if stream_receipt:
+            reports.append({
+                "title": "Complete Conservative Shadow Results",
+                "file": stream_receipt["relative_path"],
+                "category": "Genome & Reports",
+                "description": "Complete generation-bound compressed results and explicit UNKNOWN ranges; not a sample",
+                "size_bytes": stream_receipt["compressed_bytes"],
+                "artifact_sha256": stream_receipt["artifact_sha256"],
+                "stream_receipt_sha256": stream_receipt["receipt_sha256"],
+                "analysis_provenance": analysis_provenance,
+            })
     except Exception as exc:
         shadow_terminal_error = f"{type(exc).__name__}: {exc}"
     discovery_scorecard_error = None
@@ -20512,6 +20551,8 @@ def write_report_manifest(
                 "fresh_epoch": manifest["fresh_epoch"].get("epoch_id"),
                 **({"runtime_identity_incident_input": analysis_provenance["runtime_identity_incident_input"]}
                    if "runtime_identity_incident_input" in analysis_provenance else {}),
+                **({"shadow_model_input": analysis_provenance["shadow_model_input"]}
+                   if "shadow_model_input" in analysis_provenance else {}),
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -20557,6 +20598,7 @@ def write_report_manifest(
             )
     try:
         incident_input.assert_unchanged()
+        shadow_model_input.assert_unchanged()
         _publish_completed_report_generation(manifest)
     except Exception as exc:
         print(f"  ⚠️ Could not write {REPORT_MANIFEST_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -20581,7 +20623,9 @@ def _publish_completed_report_generation(manifest):
     from research.mirror_coherence import assert_mirror_coherent
 
     from research.runtime_identity_incidents import assert_publication_incident_input
+    from research.shadow_model_input import assert_publication_shadow_model_input
     assert_publication_incident_input(manifest)
+    assert_publication_shadow_model_input(manifest)
 
     assert_mirror_coherent(
         repo_root=Path(__file__).resolve().parents[2],
@@ -20609,14 +20653,36 @@ def _publish_completed_report_generation(manifest):
         )
         for name in sorted(names):
             source = Path(name)
+            destination = staging / name
+            # Validate before copy: checking only the copied binary afterward
+            # would allow a malformed manifest name to write outside staging.
+            if (source.is_absolute() or ".." in source.parts
+                    or not source.resolve().is_relative_to(Path.cwd().resolve())
+                    or not destination.resolve().is_relative_to(staging.resolve())):
+                raise ValueError("ANALYZER_ARTIFACT_PATH_INVALID")
             if source.is_file():
-                destination = staging / name
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
         (staging / REPORT_MANIFEST_FILE).write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
+        # Large binary result streams must be present and match the immutable
+        # receipt after copying, before the visible generation can be replaced.
+        for row in manifest.get("reports") or []:
+            expected_hash = row.get("artifact_sha256") if isinstance(row, dict) else None
+            if not expected_hash:
+                continue
+            artifact = (staging / row["file"]).resolve()
+            if not artifact.is_relative_to(staging.resolve()):
+                raise ValueError("ANALYZER_ARTIFACT_PATH_INVALID")
+            actual_hash = hashlib.sha256()
+            with artifact.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    actual_hash.update(chunk)
+            if actual_hash.hexdigest() != expected_hash or artifact.stat().st_size != row["size_bytes"]:
+                raise ValueError("ANALYZER_ARTIFACT_COPY_HASH_MISMATCH")
         assert_publication_incident_input(manifest)
+        assert_publication_shadow_model_input(manifest)
         if published.exists():
             os.replace(published, backup)
         try:

@@ -13,6 +13,76 @@ GENERATION = {
 }
 
 
+def test_declared_terminal_economics_reaches_discovery_provenance_and_leader(tmp_path):
+    from research.shadow_result_stream import digest
+    root, evaluator, _ = inputs(tmp_path)
+    baseline, shadow = shadow_inputs(root)
+    terminal = shadow["results"][0]["terminal"]
+    terminal.update(economics_evidence_basis="DECLARED_SIMULATION", declared_contract_sha256="d" * 64)
+    terminal["receipt_sha256"] = digest({k: v for k, v in terminal.items() if k != "receipt_sha256"})
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=shadow)
+    provenance = report["shadow_terminal_provenance"][0]
+    leader = report["profitability_evidence_by_world"]["CONSERVATIVE_BBO"]["descriptive_leader"]
+    for item in (provenance, leader):
+        assert item["economics_evidence_basis"] == "DECLARED_SIMULATION"
+        assert item["declared_contract_sha256"] == "d" * 64
+    assert "DECLARED_SIMULATION_NOT_OBSERVED_ECONOMICS" in report["warnings"]
+
+
+def test_full_evaluator_over_100_rows_matches_reference_without_read_bytes(tmp_path, monkeypatch):
+    from pathlib import Path
+    from discovery_cohort_scorecard import build_episode_matched_scorecard
+    from research.discovery_scorecard_publication import _base_row
+    rows = [evaluator_row(episode_id=f"e{i}", opportunity_id=f"o{i}",
+             terminal_outcome_status="REALIZED_COST_COMPLETE", profitability_supported=True,
+             observed_cost_model_id="cost-v1", observed_execution_model="CONSERVATIVE_BBO_DEPTH_TAPE",
+             net_pnl_usd=i - 60) for i in range(121)]
+    root, status, baseline = inputs(tmp_path, rows)
+    artifact = root / status["relative_path"]
+    original = Path.read_bytes
+    def disallow_whole_artifact(path):
+        assert path != artifact, "evaluator artifact must never be read wholesale"
+        return original(path)
+    monkeypatch.setattr(Path, "read_bytes", disallow_whole_artifact)
+    result = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+        evaluator_status=status, baseline_report=baseline)
+    adapted = []
+    for value in rows:
+        adapted.extend([{**_base_row(value), "evidence_world": "CONSERVATIVE_BBO", "net_pnl_usd": None},
+                        {**_base_row(value), "evidence_world": "OBSERVED_PAPER", "net_pnl_usd": value["net_pnl_usd"]}])
+    assert result["scorecard"] == build_episode_matched_scorecard(adapted)
+    assert result["input_counts"]["evaluator_rows"] == 121
+    assert result["input_counts"]["adapted_rows"] == 242
+    assert result["input_artifacts"]["evaluator"]["consumption_mode"] == "FULL_VERIFIED_DISK_STREAM"
+
+
+def test_high_compression_evaluator_fails_decompression_ceiling_not_sampling(tmp_path):
+    rows = [evaluator_row(episode_id=f"e{i}", padding="x" * 16000) for i in range(121)]
+    root, status, baseline = inputs(tmp_path, rows)
+    assert (root / status["relative_path"]).stat().st_size < 32768
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+        evaluator_status=status, baseline_report=baseline, evaluator_max_bytes=32768)
+    assert report["status"] == "UNKNOWN" and report["scorecard"] is None
+    assert "EVALUATOR_DECOMPRESSED_BYTE_BUDGET_EXCEEDED" in report["blockers"]
+
+
+def test_evaluator_oversized_line_refused_before_unbounded_json_parse(tmp_path):
+    root, status, baseline = inputs(tmp_path, [evaluator_row(padding="x" * (5 * 1024 * 1024))])
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+        evaluator_status=status, baseline_report=baseline)
+    assert report["status"] == "UNKNOWN" and report["scorecard"] is None
+    assert "EVALUATOR_LINE_BYTE_BUDGET_EXCEEDED" in report["blockers"]
+
+
+def test_evaluator_index_allocation_has_explicit_shared_ceiling(tmp_path):
+    root, status, baseline = inputs(tmp_path, [evaluator_row(episode_id=f"e{i}") for i in range(121)])
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+        evaluator_status=status, baseline_report=baseline, index_budget_bytes=4 * 65536)
+    assert report["status"] == "UNKNOWN" and report["scorecard"] is None
+    assert any("INDEX_BUDGET_EXCEEDED" in reason for reason in report["blockers"])
+
+
 def evaluator_row(**extra):
     row = {
         "episode_id": "e1", "opportunity_id": "o1", "epoch_id": "epoch-1",

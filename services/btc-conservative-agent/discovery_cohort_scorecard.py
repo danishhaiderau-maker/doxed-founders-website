@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from itertools import combinations
 from typing import Any, Iterable, Mapping
@@ -32,7 +33,9 @@ _REQUIRED_SCALAR_IDENTITIES = {
     "cost_model": ("cost_model_id", "cost_model"),
     "simulation_model": ("simulation_model", "fill_model", "execution_model", "execution_world"),
 }
-_OPTIONAL_SCALAR_IDENTITIES = {"schedule_id": ("schedule_id",)}
+_OPTIONAL_SCALAR_IDENTITIES = {"schedule_id": ("schedule_id",),
+    "economics_evidence_basis": ("economics_evidence_basis",),
+    "declared_contract_sha256": ("declared_contract_sha256",)}
 _SEQUENCE_IDENTITIES = {
     "tape_hashes": ("tape_sha256", "tape_hashes", "market_segment_sha256", "market_segment_hashes"),
     "tape_ids": ("tape_id", "tape_ids", "market_segment_id", "market_segment_ids"),
@@ -68,6 +71,10 @@ def _identity(row: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
         if any(value != values[0] for value in values[1:]):
             blockers.append(f"CONFLICTING_IDENTITY_ALIASES:{name}"); continue
         result[name] = values[0]
+    if "declared_contract_sha256" in result and not re.fullmatch(r"[0-9a-f]{64}", result["declared_contract_sha256"]):
+        blockers.append("INVALID_IDENTITY:declared_contract_sha256")
+    if result.get("economics_evidence_basis") == "DECLARED_SIMULATION" and "declared_contract_sha256" not in result:
+        blockers.append("MISSING_IDENTITY:declared_contract_sha256")
     for name, aliases in _SEQUENCE_IDENTITIES.items():
         values = []
         for alias in aliases:
@@ -106,7 +113,7 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
         group_key = (cell_key, identity.get("policy_id"), identity.get("policy_signature"))
         item = {"episode_id": episode, "cell": dict(zip(axes, cell_key)), "net_pnl_usd": pnl,
                 "identity": identity, "identity_blockers": sorted(set(defects)),
-                "pnl_status": "OBSERVED" if pnl is not None else "UNKNOWN_MISSING_OR_NONFINITE",
+                "pnl_status": "PROVIDED_IN_EVIDENCE_WORLD" if pnl is not None else "UNKNOWN_MISSING_OR_NONFINITE",
                 "world_provenance": {"original": original, "normalized": world}}
         grouped[world].setdefault(group_key, {}).setdefault(episode, []).append(item)
 
@@ -123,16 +130,36 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
             identity_blocker_counts = Counter(
                 defect for item in unique for defect in item["identity_blockers"]
             )
+            all_items = [item for variants in episodes.values() for item in variants]
+            model_keys = {tuple(item["identity"].get(field) for field in (
+                "cost_model", "simulation_model", "economics_evidence_basis", "declared_contract_sha256"))
+                for item in all_items}
+            model_mismatch = len(model_keys) > 1
+            bases = {item["identity"].get("economics_evidence_basis") for item in all_items}
+            contracts = {item["identity"].get("declared_contract_sha256") for item in all_items}
+            warnings = []
+            if "DECLARED_SIMULATION" in bases:
+                warnings.append("DECLARED_SIMULATION_NOT_OBSERVED_ECONOMICS")
+            if None in bases:
+                warnings.append("ECONOMICS_EVIDENCE_BASIS_UNSPECIFIED")
+            if model_mismatch:
+                warnings.append("MODEL_MISMATCH")
+                identity_blocker_counts["MODEL_MISMATCH"] += len(all_items)
+                blockers.append(f"MODEL_MISMATCH:{world}:{policy_id}:{policy_signature}")
             reports.append({"cell": dict(zip(axes, cell_key)), "policy_id": policy_id,
                             "policy_signature": policy_signature, "independent_episode_count": len(episodes),
-                            "comparable_episode_count": sum(not item["identity_blockers"] for item in unique),
+                            "comparable_episode_count": 0 if model_mismatch else sum(not item["identity_blockers"] for item in unique),
+                            "economics_evidence_basis": next(iter(bases)) or "UNSPECIFIED" if len(bases) == 1 else "MIXED",
+                            "declared_contract_sha256": next(iter(contracts)) if len(contracts) == 1 else None,
+                            "economics_model_comparable": not model_mismatch,
+                            "warnings": warnings,
                             "pnl_observed_episode_count": len(pnls), "missing_or_nonfinite_pnl_count": len(unique)-len(pnls),
                             "duplicate_episode_ids": duplicates, "episodes": sorted(episodes),
                             "identity_blocker_counts": dict(sorted(identity_blocker_counts.items())),
                             "complete_pnl_evidence": bool(unique) and not duplicates
                             and not identity_blocker_counts and len(pnls) == len(unique),
-                            "net_pnl_usd_sum": sum(pnls) if pnls else None,
-                            "mean_net_pnl_usd": sum(pnls)/len(pnls) if pnls else None})
+                            "net_pnl_usd_sum": sum(pnls) if pnls and not model_mismatch else None,
+                            "mean_net_pnl_usd": sum(pnls)/len(pnls) if pnls and not model_mismatch else None})
         reports.sort(key=lambda x: (x["mean_net_pnl_usd"] is None, -(x["mean_net_pnl_usd"] or 0), -x["independent_episode_count"]))
         eligible = [cell for cell in reports if cell["complete_pnl_evidence"]]
         descriptive_leader = None
@@ -142,6 +169,7 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
                 key: leader[key] for key in (
                     "policy_id", "policy_signature", "cell", "independent_episode_count",
                     "net_pnl_usd_sum", "mean_net_pnl_usd",
+                    "economics_evidence_basis", "declared_contract_sha256", "warnings",
                 )
             }
             descriptive_leader.update({
@@ -165,6 +193,9 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
             left, right = grouped[left_world].get(group_key, {}), grouped[right_world].get(group_key, {})
             left_ids, right_ids = set(left), set(right); intersection = sorted(left_ids & right_ids)
             matched, deltas, defects = 0, [], []
+            mixed_models = any(len({tuple(item["identity"].get(field) for field in (
+                "cost_model", "simulation_model", "economics_evidence_basis", "declared_contract_sha256"))
+                for variants in side.values() for item in variants}) > 1 for side in (left, right))
             for episode in intersection:
                 if len(left[episode]) != 1 or len(right[episode]) != 1:
                     defects.append(f"DUPLICATE_MATCH:{episode}"); continue
@@ -174,10 +205,14 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
                 ai = {k:v for k,v in a["identity"].items() if k != "original_fields"}; bi = {k:v for k,v in b["identity"].items() if k != "original_fields"}
                 mismatches = sorted(k for k in _IDENTITY_KEYS if ai.get(k) != bi.get(k))
                 if mismatches:
-                    prefix = "MODEL_DIFFERENCE_CALIBRATION_ONLY" if "simulation_model" in mismatches else "IDENTITY_MISMATCH"
+                    prefix = "MODEL_DIFFERENCE_CALIBRATION_ONLY" if any(k in mismatches for k in (
+                        "simulation_model", "cost_model", "economics_evidence_basis", "declared_contract_sha256")) else "IDENTITY_MISMATCH"
                     defects.append(f"{prefix}:{episode}:{','.join(mismatches)}"); continue
                 matched += 1
                 if a["net_pnl_usd"] is not None and b["net_pnl_usd"] is not None: deltas.append(b["net_pnl_usd"]-a["net_pnl_usd"])
+            if mixed_models:
+                matched, deltas = 0, []
+                defects.append("MODEL_DIFFERENCE_CALIBRATION_ONLY:CELL_MODEL_MISMATCH")
             equal = bool(intersection) and matched == len(intersection) and left_ids == right_ids
             comparisons.append({"cell": dict(zip(axes, cell_key)), "policy_id": policy_id,
                                 "policy_signature": policy_signature, "left_world": left_world, "right_world": right_world,
@@ -190,6 +225,81 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
                                 "matched_pnl_delta_count": len(deltas), "mean_right_minus_left_pnl_usd": sum(deltas)/len(deltas) if deltas else None,
                                 "blockers": sorted(set(defects))})
     return {"schema": SCORECARD_SCHEMA, "axes": list(axes), "worlds": world_reports, "matched_comparisons": comparisons,
+            "warnings": sorted({warning for world in world_reports.values() for cell in world["cells"] for warning in cell["warnings"]}),
             "pnl_sum_across_worlds": False, "discovery_shadow_equals_paper": False, "blockers": sorted(set(blockers)),
             "status": "BUILT" if any(world_reports[w]["independent_episode_count"] for w in WORLDS) else "UNKNOWN",
             "relay_eligible": False, "live_policy_change_allowed": False, "upstream_input_wiring_complete": False}
+
+
+def build_disk_episode_matched_scorecard(rows, *, axes=("adx_bucket", "offset_pct", "chase_policy", "exit_family"),
+                                       max_output_bytes=32 * 1024 * 1024,
+                                       index_max_bytes=None):
+    """Exact legacy semantics per policy/cell, bounded by explicit publication budgets.
+
+No input rows are dropped. If even one cell or the complete output exceeds the
+budget, publication fails closed instead of promoting a partial scorecard.
+"""
+    from research.shadow_result_stream import DiskRows, DEFAULT_INDEX_BYTES
+    from research.policy_evidence_schema import canonical_json
+    with DiskRows(max_bytes=DEFAULT_INDEX_BYTES if index_max_bytes is None else index_max_bytes) as index:
+        index.db.execute("create table world_order(world text, key text, first_seq integer, primary key(world,key))")
+        for row in rows:
+            identity, _ = _identity(row)
+            key = canonical_json([*[row.get(axis) for axis in axes], identity.get("policy_id"),
+                                  identity.get("policy_signature")])
+            index.append(row, key)
+            original = str(row.get("evidence_world") or row.get("world") or "").strip().upper()
+            world = _WORLD_ALIASES.get(original)
+            if world:
+                index.db.execute("insert or ignore into world_order values(?,?,?)", (world, key, index.count))
+        result = build_episode_matched_scorecard([], axes=axes)
+        index.db.execute("create table episodes(world text, episode text, primary key(world,episode))")
+        blockers = set()
+        used = 0
+        for _, sources in index.groups(insertion_order=True):
+            part = build_episode_matched_scorecard(sources, axes=axes)
+            used += len(canonical_json(part).encode())
+            if used > max_output_bytes:
+                raise ValueError("DISCOVERY_FULL_OUTPUT_BUDGET_EXCEEDED")
+            blockers.update(part["blockers"])
+            result["matched_comparisons"].extend(part["matched_comparisons"])
+            for world in WORLDS:
+                target, source = result["worlds"][world], part["worlds"][world]
+                target["cells"].extend(source["cells"])
+                aliases = Counter(target["world_alias_provenance"])
+                aliases.update(source["world_alias_provenance"])
+                target["world_alias_provenance"] = dict(sorted(aliases.items()))
+                for cell in source["cells"]:
+                    index.db.executemany("insert or ignore into episodes values(?,?)",
+                                         ((world, episode) for episode in cell["episodes"]))
+        for world in WORLDS:
+            target = result["worlds"][world]
+            target["independent_episode_count"] = index.db.execute(
+                "select count(*) from episodes where world=?", (world,)).fetchone()[0]
+            target["status"] = "AVAILABLE" if target["independent_episode_count"] else "EMPTY"
+            target["cells"].sort(key=lambda x: (x["mean_net_pnl_usd"] is None,
+                -(x["mean_net_pnl_usd"] or 0), -x["independent_episode_count"],
+                index.db.execute("select first_seq from world_order where world=? and key=?",
+                    (world, canonical_json([*[x["cell"].get(axis) for axis in axes], x["policy_id"],
+                                             x["policy_signature"]]))).fetchone()[0]))
+            eligible = [cell for cell in target["cells"] if cell["complete_pnl_evidence"]]
+            target["complete_pnl_cell_count"] = len(eligible)
+            target["profitability_evidence_available"] = bool(eligible)
+            if eligible:
+                leader = eligible[0]
+                target["descriptive_leader"] = {key: leader[key] for key in (
+                    "policy_id", "policy_signature", "cell", "independent_episode_count",
+                    "net_pnl_usd_sum", "mean_net_pnl_usd", "economics_evidence_basis",
+                    "declared_contract_sha256", "warnings")}
+                target["descriptive_leader"].update({"tier": "DESCRIPTIVE_ONLY",
+                    "ranking_basis": "mean net PnL within this evidence world; policy cohorts may differ",
+                    "positive_mean": leader["mean_net_pnl_usd"] > 0, "out_of_sample_qualified": False})
+        result["blockers"] = sorted(blockers)
+        result["warnings"] = sorted({warning for world in result["worlds"].values()
+                                     for cell in world["cells"] for warning in cell["warnings"]})
+        pair_order = {pair: i for i, pair in enumerate(combinations(WORLDS, 2))}
+        result["matched_comparisons"].sort(key=lambda item: (
+            str((tuple(item["cell"].get(axis) for axis in axes), item["policy_id"], item["policy_signature"])),
+            pair_order[(item["left_world"], item["right_world"])]))
+        result["status"] = "BUILT" if any(result["worlds"][w]["independent_episode_count"] for w in WORLDS) else "UNKNOWN"
+        return result

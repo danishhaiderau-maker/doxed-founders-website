@@ -1,6 +1,51 @@
 from discovery_cohort_scorecard import build_episode_matched_scorecard
 
 
+def test_declared_economics_survives_cell_and_leader_without_observed_claim():
+    value = row("CONSERVATIVE_BBO", economics_evidence_basis="DECLARED_SIMULATION",
+                declared_contract_sha256="a" * 64)
+    report = build_episode_matched_scorecard([value])
+    world = report["worlds"]["CONSERVATIVE_BBO"]
+    for item in (world["cells"][0], world["descriptive_leader"]):
+        assert item["economics_evidence_basis"] == "DECLARED_SIMULATION"
+        assert item["declared_contract_sha256"] == "a" * 64
+        assert "DECLARED_SIMULATION_NOT_OBSERVED_ECONOMICS" in item["warnings"]
+
+
+def test_mixed_declared_contracts_never_pool_profitability_or_matched_delta():
+    rows = [row(world, episode=f"e{i}", pnl=i + 1,
+                economics_evidence_basis="DECLARED_SIMULATION", declared_contract_sha256=letter * 64)
+            for world in ("IDEAL_TOUCH", "CONSERVATIVE_BBO")
+            for i, letter in enumerate(("a", "b"))]
+    report = build_episode_matched_scorecard(rows)
+    for world in ("IDEAL_TOUCH", "CONSERVATIVE_BBO"):
+        cell = report["worlds"][world]["cells"][0]
+        assert cell["net_pnl_usd_sum"] is None
+        assert cell["mean_net_pnl_usd"] is None
+        assert cell["complete_pnl_evidence"] is False
+        assert "MODEL_MISMATCH" in cell["warnings"]
+        assert report["worlds"][world]["descriptive_leader"] is None
+    assert comparison(report, "IDEAL_TOUCH", "CONSERVATIVE_BBO")["matched_pnl_delta_count"] == 0
+
+
+def test_unspecified_legacy_economics_are_not_assigned_observed_basis():
+    report = build_episode_matched_scorecard([row("CONSERVATIVE_BBO")])
+    leader = report["worlds"]["CONSERVATIVE_BBO"]["descriptive_leader"]
+    assert leader["economics_evidence_basis"] == "UNSPECIFIED"
+    assert leader["declared_contract_sha256"] is None
+    assert "ECONOMICS_EVIDENCE_BASIS_UNSPECIFIED" in report["warnings"]
+
+
+def test_declared_missing_hash_and_declared_vs_unspecified_fail_closed():
+    report = build_episode_matched_scorecard([
+        row("CONSERVATIVE_BBO", "e1", economics_evidence_basis="DECLARED_SIMULATION"),
+        row("CONSERVATIVE_BBO", "e2")])
+    cell = report["worlds"]["CONSERVATIVE_BBO"]["cells"][0]
+    assert "MISSING_IDENTITY:declared_contract_sha256" in cell["identity_blocker_counts"]
+    assert cell["complete_pnl_evidence"] is False
+    assert cell["mean_net_pnl_usd"] is None
+
+
 def row(world, episode="e1", pnl=1.0, **extra):
     value = {"evidence_world": world, "episode_id": episode, "adx_bucket": "STRONG", "offset_pct": .3,
              "chase_policy": "w234", "exit_family": "ATR_TRAIL", "policy_id": "p1", "policy_signature": "ps",
