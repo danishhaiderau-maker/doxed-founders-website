@@ -48,6 +48,35 @@ DERIVED_INDEXES = frozenset({
     "research_events_v22.index.json", "research_events_v22.index.sqlite3",
     "v3/qualification_horizon_index.sqlite3",
 })
+POLICY_CACHE_FILES = frozenset({"results.sqlite", "binding-index.jsonl.gz",
+    "binding-index-summary.json", "conservative-results.jsonl.gz"})
+# Explicit producer outputs, parity-tested against the engine's authoritative
+# ANALYZER_JSON_REPORT_FILES tuple without importing its executable pipeline.
+ANALYZER_REPORT_FILES = frozenset("""
+ai_calibration_report.json ai_funnel_report.json ai_decision_fingerprint_report.json
+approve_outcome_confidence_direction.json benchmark_relative_scorecard.json
+benchmark_vs_lanes_report.json chase_attribution_report.json chase_effectiveness_report.json
+qualified_chase_policy_report.json confidence_band_report.json direction_report.json
+edge_incremental_value_report.json edge_predictiveness_report.json edge_score_decile_report.json
+fast_cut_survivor_report.json qualified_exit_policy_grid_report.json fill_quality_report.json
+first_15m_outcome_report.json horizon_counterfactual_report.json horizon_profitability_report.json
+lane_opportunity_capture.json collector_v21_opportunity_capture.json missed_opportunity_heatmap.json
+missed_opportunity_proof_report.json chase_policy_lab_report.json pathway_survival_report.json
+real_edge_summary.json scenario_c_capture_ratio.json scenario_c_leakage_report.json
+ai_direction_bias_report.json research_compact_summary.json top_leakage_report.json
+exit_leakage_by_reason_report.json exit_ladder_simulator_report.json correlated_price_cluster_report.json
+feature_importance_report.json chase_profit_report.json confidence_band_cross_report.json
+edge_validation_report.json benchmark_contribution_report.json lane_overlap_report.json
+fast_cut_sweep_report.json top_combinations_report.json chase_efficiency_matrix_report.json
+chase_threshold_report.json chase_delay_report.json exit_combinations_report.json regime_leaderboard.json
+paused_shadow_research_report.json showcase_strategy_outcomes_report.json
+bitfinex_copy_fidelity_lifecycles_report.json correlated_cluster_blocked_counterfactual_report.json
+copy_only_exchange_fills_report.json real_copy_parameter_optimisation_report.json
+showcase_losing_cluster_descriptive.json research_horizon_maturity_report.json
+best_policy_research_report.json safe_policy_genome_v3_report.json
+conservative_fill_descriptive_report.json cross_world_evidence_report.json
+fill_time_guard_counterfactual_report.json policy_search_manifest.json roster_policy.json
+""".split())
 ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
 GENOME_MIRROR_FILES = frozenset({"environment_genome.jsonl", "market_genome.jsonl",
     "decision_genome.jsonl", "execution_genome.jsonl", "lifecycle_genome.jsonl", "trade_genome.jsonl"})
@@ -137,6 +166,12 @@ def _essential(relative):
 
 def _base_class(relative):
     parts = PurePosixPath(relative).parts
+    if (len(parts) == 4 and parts[:2] == ("derived", "policy-evidence")
+            and re.fullmatch(r"generation-[0-9a-f]{64}", parts[2])
+            and parts[3] in POLICY_CACHE_FILES):
+        return "RETIRED_POLICY_EVIDENCE_DERIVED_ARTIFACT"
+    if len(parts) == 2 and parts[0] == "analyzer" and parts[1] in ANALYZER_REPORT_FILES:
+        return "RETIRED_ANALYZER_DECLARED_REPORT"
     if len(parts) == 2 and parts[0] == "research_accumulator" and parts[1] in ACCUMULATOR_FILES:
         return "RETIRED_RESEARCH_ACCUMULATOR"
     if len(parts) == 3 and parts[:2] == ("research", "genome") and parts[2] in GENOME_MIRROR_FILES:
@@ -320,6 +355,11 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
         if (relative == "research_accumulator/research_trades_v983.db"
                 and any(io_path(record["absolute_path"] + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))):
             reason = "ACCUMULATOR_SQLITE_SIDECARS_REQUIRE_OWNER_RESET"
+        if (_base_class(relative) == "RETIRED_POLICY_EVIDENCE_DERIVED_ARTIFACT"
+                and relative.endswith("/results.sqlite")
+                and any(io_path(record["absolute_path"] + suffix).exists()
+                        for suffix in ("-wal", "-shm", "-journal"))):
+            reason = "POLICY_CACHE_SQLITE_SIDECARS_REQUIRE_OWNER_RESET"
         if not reason and relative in origins:
             binding = origins[relative]
             if binding:
