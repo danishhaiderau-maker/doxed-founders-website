@@ -242,9 +242,80 @@ def _shadow_aggregate(report: Mapping[str, Any], verified_stream=None) -> tuple[
     }, sorted(set(defects))
 
 
+def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep raw AI, family verdict and failures distinct; no order-based inference.
+
+    The evaluator's ai_decision is explicitly projected from raw_ai_decision.
+    Missing family/error fields are not recoverable by relabelling that alias.
+    """
+    def label(value):
+        return value.strip().upper() if isinstance(value, str) and value.strip() else "UNKNOWN"
+    raw = label(row.get("raw_ai_decision"))
+    projected = label(row.get("ai_decision"))
+    blockers = []
+    if raw != "UNKNOWN" and projected != "UNKNOWN" and raw != projected:
+        decision = "UNKNOWN"
+        blockers.append("RAW_AI_DECISION_ALIAS_CONFLICT")
+    else:
+        decision = raw if raw != "UNKNOWN" else projected
+    category = ("APPROVE" if decision in {"APPROVE", "STRONG_APPROVE", "SOFT_APPROVE"}
+                else "REJECT" if decision in {"REJECT", "SOFT_REJECT"}
+                else "ERROR" if decision in {"AI_ERROR", "ERROR"} else "UNKNOWN")
+    direction = label(row.get("raw_ai_direction"))
+    alias_direction = label(row.get("ai_direction"))
+    if direction != "UNKNOWN" and alias_direction != "UNKNOWN" and direction != alias_direction:
+        direction = "UNKNOWN"
+        blockers.append("RAW_AI_DIRECTION_ALIAS_CONFLICT")
+    elif direction == "UNKNOWN":
+        direction = alias_direction
+    error_type = label(row.get("ai_error_type") if "ai_error_type" in row else row.get("error_type"))
+    error_status = ("ERROR" if category == "ERROR" or row.get("ai_error") is True
+                    or error_type not in {"UNKNOWN", "NONE", "NULL"} else
+                    "EXPLICIT_NO_ERROR" if row.get("ai_error") is False else "UNKNOWN")
+    if category in {"APPROVE", "REJECT"} and error_status == "ERROR":
+        category = "UNKNOWN"
+        blockers.append("AI_VERDICT_ERROR_CONFLICT")
+    if decision == "UNKNOWN":
+        blockers.append("RAW_AI_DECISION_UNAVAILABLE")
+    return {
+        "raw_ai_decision": decision, "raw_ai_direction": direction,
+        "ai_verdict_class": category,
+        "family_policy_decision": label(row.get("family_policy_decision")
+                                        if "family_policy_decision" in row else row.get("policy_decision")),
+        "execution_disposition": label(row.get("execution_disposition")),
+        "ai_error_status": error_status, "ai_error_type": error_type,
+        "ai_verdict_blockers": blockers,
+        "ai_verdict_provenance": {
+            "raw_decision_field": "raw_ai_decision" if raw != "UNKNOWN" else
+                                  "ai_decision" if projected != "UNKNOWN" else None,
+            "decision_id": row.get("decision_id"),
+            "basis": "VERIFIED_INPUT_EXPLICIT_FIELDS_ONLY_NOT_ORDER_OR_FILL_INFERENCE",
+        },
+    }
+
+
+def _ai_verdict_coverage(adapted, unknown_shadow):
+    from itertools import chain
+    classes = Counter({name: 0 for name in ("APPROVE", "REJECT", "ERROR", "UNKNOWN")})
+    errors = Counter({name: 0 for name in ("ERROR", "EXPLICIT_NO_ERROR", "UNKNOWN")})
+    missing_family = blocked = 0
+    for row in chain(adapted, unknown_shadow):
+        classes[row.get("ai_verdict_class", "UNKNOWN")] += 1
+        errors[row.get("ai_error_status", "UNKNOWN")] += 1
+        missing_family += row.get("family_policy_decision", "UNKNOWN") == "UNKNOWN"
+        blocked += bool(row.get("ai_verdict_blockers"))
+    return {"schema": "discovery_ai_verdict_coverage_v1", "raw_verdict_row_counts": dict(classes),
+            "ai_error_row_counts": dict(errors), "missing_family_verdict_rows": missing_family,
+            "rows_with_verdict_blockers": blocked,
+            "count_basis": "ADAPTED_RESEARCH_ROWS_NOT_INDEPENDENT_OPPORTUNITIES_OR_TRADES",
+            "comparison_status": "NOT_EVALUATED", "profitability_supported": False,
+            "blockers": ["AI_FILTER_MATCHED_COUNTERFACTUAL_COMPARISON_NOT_IMPLEMENTED"]}
+
+
 def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
     receipt = row.get("evaluator_receipt") if isinstance(row.get("evaluator_receipt"), Mapping) else {}
     return {
+        **_ai_verdict_projection(row),
         "episode_id": row.get("episode_id"),
         "opportunity_id": row.get("opportunity_id"),
         "epoch_id": row.get("epoch_id"),
@@ -278,6 +349,7 @@ def _dynamic_projection(source: Mapping[str, Any], generation: Mapping[str, Any]
     """Project only explicit receipt fields; never derive a causal timestamp/bucket."""
     terminal = terminal if isinstance(terminal, Mapping) else {}
     return {
+        **_ai_verdict_projection(source),
         "generation": dict(generation), "market": source.get("market"), "symbol": source.get("symbol"),
         "signal_ts": source.get("signal_ts"),
         "required_end_ts": terminal.get("required_horizon_end_ts")
@@ -767,6 +839,7 @@ def _build_discovery_scorecard_publication(
 
     dynamic_cohorts = _dynamic_cohort_publication(adapted, _dynamic_unknown, expected, shadow_aggregate,
         _dynamic_feature_names, _dynamic_protocol, _dynamic_limits)
+    ai_verdict_coverage = _ai_verdict_coverage(adapted, _dynamic_unknown)
     scorecard = build_disk_episode_matched_scorecard(adapted, index_max_bytes=_index_max_bytes)
     has_exact_matched_cohort = any(
         item.get("cohort_equality_proven") is True
@@ -825,6 +898,7 @@ def _build_discovery_scorecard_publication(
         "shadow_terminal_aggregate": shadow_aggregate,
         "scorecard": scorecard,
         "dynamic_cohorts": dynamic_cohorts,
+        "ai_verdict_coverage": ai_verdict_coverage,
         "input_identity_complete": complete_inputs,
         "profitability_evidence_by_world": {
             world: {

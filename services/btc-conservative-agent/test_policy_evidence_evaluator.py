@@ -832,6 +832,8 @@ def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
         decision.pop(field, None)
     decision.update({
         "executed_direction": "LONG", "raw_ai_decision": "APPROVE",
+        "policy_decision": "REJECT", "execution_disposition": "NO_ORDER",
+        "exact_reason": "TEST_FAMILY_FILTER", "ai_error": False,
         "long_score": 78, "short_score": 22, "score_gap": 56,
         "paper_policy_spec": {
             "schema": "paper_policy_identity_spec_v3",
@@ -870,6 +872,12 @@ def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
     assert stored["long_score"] == 78
     assert stored["short_score"] == 22
     assert stored["score_gap"] == 56
+    assert stored["raw_ai_decision"] == "APPROVE"
+    assert stored["policy_decision"] == "REJECT"
+    assert stored["execution_disposition"] == "NO_ORDER"
+    assert stored["exact_reason"] == "TEST_FAMILY_FILTER"
+    assert stored["ai_error"] is False
+    assert stored["ai_error_type"] is None
 
 
 def test_missing_opportunity_identity_remains_unknown_in_artifact_and_is_explicitly_skipped_from_cache(tmp_path):
