@@ -1,9 +1,12 @@
 import copy
+import ast
+import hmac
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -75,6 +78,7 @@ def test_actual_existing_child_one_slice(tmp_path):
     assert result['managed_coordinator_started'] is False
     assert result['ack_performed'] is result['cleanup_performed'] is False
     assert all(url == '/api/status' or '?paged=1&generation_id=' in url for url in calls)
+    assert all('page_size=' not in url for url in calls)
     assert (tmp_path / 'runtime/v3/market_segments/11' / ('1' * 64 + '.json')).read_bytes() == b'sample'
 
 
@@ -167,3 +171,58 @@ def test_source_has_no_mutating_api_or_coordinator():
     assert 'import bot' not in text
     assert '127.0.0.1:7002' in text
     assert 'os.scandir' not in text
+
+
+def test_actual_api_immutable_250_page_shape_and_generation_totals(tmp_path):
+    """Execute actual bot paging branch/functions without importing the bot."""
+    tree = ast.parse((HERE.parent / 'services/btc-conservative-agent/bot.py').read_text(encoding='utf-8'))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    api = functions['api_data_sync_manifest']
+    # The enclosing branch may contain earlier conditions; select its exact body
+    # starting with the deployed immutable-page validation assignment.
+    candidates = [node for node in ast.walk(api) if isinstance(node, ast.If)
+                  and node.body and isinstance(node.body[0], ast.Assign)
+                  and ast.unparse(node.body[0]).startswith('requested_page_size =')]
+    assert len(candidates) == 1
+    page_branch = candidates[0]
+    payload = next(node.value for node in api.body if isinstance(node, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == 'payload' for t in node.targets))
+    assert isinstance(payload, ast.Dict)
+    projections = {key.value: value for key, value in zip(payload.keys, payload.values)
+                   if isinstance(key, ast.Constant) and key.value in ('file_count', 'total_bytes',
+                       'manifest_page_file_count', 'manifest_page_total_bytes')}
+    assert set(projections) == {'file_count', 'total_bytes', 'manifest_page_file_count', 'manifest_page_total_bytes'}
+    rows = [{'path': f'item-{n}.json', 'size': 6} for n in range(250)]
+    page_payload = {'schema': 'fly_runtime_inventory_page_v1', 'page_index': 0,
+                    'file_count': 250, 'total_bytes': 1500, 'rows': rows,
+                    'rows_sha256': hashlib.sha256(canonical(rows)).hexdigest()}
+    raw = canonical(page_payload)
+    sha = hashlib.sha256(raw).hexdigest()
+    filename = 'p00000000-' + sha[:24] + '.json'
+    (tmp_path / filename).write_bytes(raw)
+    generation = {'generation_id': 'a' * 64, 'generation_dir': str(tmp_path),
+                  'page_count': 2, 'page_size': 250, 'file_count': 251, 'total_bytes': 1506}
+    descriptor = {'file_name': filename, 'page_sha256': sha, 'file_count': 250, 'total_bytes': 1500}
+    env = {'Path': Path, 'json': json, 'hashlib': hashlib, 'hmac': hmac, 're': c.re,
+           '_data_sync_disk_page_descriptor': lambda g, i: descriptor,
+           '_data_sync_inventory_rows_sha256': lambda r: hashlib.sha256(canonical(r)).hexdigest(),
+           'jsonify': lambda value: value, 'disk_generation': generation,
+           'inventory_generation_id': 'a' * 64, 'raw_cursor': '', 'all_files': []}
+    module = ast.Module(body=[functions['_data_sync_disk_manifest_page'],
+                              functions['_data_sync_manifest_cursor'],
+                              ast.FunctionDef(name='page_request', args=ast.arguments(posonlyargs=[], args=[],
+                                  kwonlyargs=[], kw_defaults=[], defaults=[]),
+                                  body=page_branch.body + [ast.Return(value=ast.Name(id='page', ctx=ast.Load()))],
+                                  decorator_list=[])], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(module), '<actual-bot-manifest-page>', 'exec'), env)
+    env['request'] = SimpleNamespace(args={'page_size': '1'})
+    failed = env['page_request']()
+    assert failed[1] == 400 and failed[0]['inventory_status'] == 'INVALID_CURSOR'
+    env['request'] = SimpleNamespace(args={'paged': '1', 'generation_id': 'a' * 64})
+    page = env['page_request']()
+    assert len(page['rows']) == 250 and page['page_size'] == 250
+    env['page'] = page
+    result = {key: eval(compile(ast.Expression(value), '<actual-manifest-total>', 'eval'), env)
+              for key, value in projections.items()}
+    assert result == {'file_count': 251, 'total_bytes': 1506,
+                      'manifest_page_file_count': 250, 'manifest_page_total_bytes': 1500}

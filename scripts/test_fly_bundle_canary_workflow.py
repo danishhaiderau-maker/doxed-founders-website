@@ -75,3 +75,24 @@ def test_ambiguous_remote_timeout_is_not_retried(monkeypatch):
     with pytest.raises(subprocess.TimeoutExpired):
         dispatch.main()
     assert len(calls) == 2 and calls[1][1:3] == ["machine", "exec"]
+
+
+@pytest.mark.parametrize("raw", [b"", b"Unhandled rejection: Rejection([PayloadTooLarge])", b"{}"])
+def test_zero_cli_exit_without_remote_receipt_is_not_success(raw):
+    with pytest.raises(ValueError, match="NO_UNIQUE_REMOTE_TERMINAL_RECEIPT"):
+        dispatch.verified_terminal_receipt(raw, "a" * 12, "b" * 64, "1")
+
+
+def test_terminal_receipt_must_bind_revision_generation_and_inspection():
+    value = {"schema": "fly_bundle_canary_inspection_v1", "status": "INSPECTED",
+             "runtime_env_revision": "a" * 40, "requested_generation_id": "b" * 64,
+             "slice_invoked": False}
+    assert dispatch.verified_terminal_receipt(json.dumps(value).encode(), "a" * 12, "b" * 64, "1") == value
+    wrapper = {"stdout": json.dumps(value), "exit_code": 0}
+    assert dispatch.verified_terminal_receipt(json.dumps(wrapper, indent=2).encode(), "a" * 12, "b" * 64, "1") == value
+    with pytest.raises(ValueError, match="REMOTE_EXECUTION_FAILED"):
+        dispatch.verified_terminal_receipt(json.dumps({**wrapper, "exit_code": 1}).encode(), "a" * 12, "b" * 64, "1")
+    for key, bad in [("slice_invoked", True), ("runtime_env_revision", "c" * 40),
+                     ("requested_generation_id", "c" * 64), ("status", "BLOCKED")]:
+        with pytest.raises(ValueError):
+            dispatch.verified_terminal_receipt(json.dumps({**value, key: bad}).encode(), "a" * 12, "b" * 64, "1")

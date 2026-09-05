@@ -152,7 +152,8 @@ def run_canary(revision, generation_id, request_json, slice_runner, local_admiss
     require(isinstance(generation_id, str) and re.fullmatch('[0-9a-f]{64}', generation_id), 'GENERATION_REQUIRED')
     started = monotonic()
     validate_status(request_json('/api/status'), revision)
-    pinned_url = '/api/data-sync/manifest?paged=1&generation_id=' + generation_id + '&page_size=1'
+    # disk_pages_v2 page size is immutable; never request a smaller page.
+    pinned_url = '/api/data-sync/manifest?paged=1&generation_id=' + generation_id
     manifest = request_json(pinned_url)
     digest = validate_manifest(manifest, revision)
     require(digest == generation_id, 'REQUESTED_GENERATION_MISMATCH')
