@@ -623,17 +623,23 @@ $selectedFiles = @(
 # before ordinary files so a large revision refresh cannot consume the lease
 # while validating hundreds of unrelated hot documents.
 
+# Local retirement is separate from downloading. Default to retaining every
+# existing raw file; only explicit laptop opt-in enables archive-first removal.
+# This flag never grants Fly source-cleanup authority.
+$localRetirementEnabled = $env:FLY_SYNC_LOCAL_RETIREMENT_ENABLED -ceq '1'
+$localRetirementStatus = if ($localRetirementEnabled) { 'ENABLED_NO_ELIGIBLE_FILES' } else { 'DISABLED_SOURCE_RETAINED' }
+$staleRotationFiles = 0
+$staleRotationBytes = [int64]0
+if ($localRetirementEnabled) {
 # Fly is the authoritative owner of raw research streams. A top-level raw file
-# absent from its authenticated manifest is retired locally, but cleanup is
-# archive-first and recoverable. Nothing is directly deleted here.
+# absent from its authenticated manifest may be retired locally only after
+# archive-first verification below.
 $manifestPaths = [System.Collections.Generic.HashSet[string]]::new(
   [System.StringComparer]::OrdinalIgnoreCase
 )
 foreach ($manifestRow in @($manifest.files)) {
   [void]$manifestPaths.Add(([string]$manifestRow.path).Replace("\", "/"))
 }
-$staleRotationFiles = 0
-$staleRotationBytes = [int64]0
 $staleArchiveRoot = Join-Path $targetRoot "archive\sync-retired"
 $canonicalLocalFiles = [System.Collections.Generic.HashSet[string]]::new(
   [System.StringComparer]::OrdinalIgnoreCase
@@ -699,12 +705,15 @@ foreach ($candidate in @(Get-ChildItem -LiteralPath $targetRoot -File -Force -Er
   $staleRotationFiles += 1
 }
 if ($staleRotationFiles -gt 0) {
+  $localRetirementStatus = 'ARCHIVED_AND_VERIFIED'
   Write-Host (
     "Archived $staleRotationFiles stale local Fly research file(s), " +
     "$staleRotationBytes byte(s), absent from the authenticated manifest."
   )
   Save-SyncState
 }
+}
+Write-Host "[FLY SYNC] stage=local_retirement status=$localRetirementStatus files=$staleRotationFiles bytes=$staleRotationBytes"
 if ($IncludePath.Count -gt 0) {
   $selectedFiles = @(
     $selectedFiles | Where-Object { [string]$_.path -in $IncludePath }
@@ -1672,6 +1681,9 @@ if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   LifecycleAcknowledged = $lifecycleAckCount
   LifecycleTransferAcknowledged = $lifecycleTransferAckCount
   PrunedRotations = @($ack.removed_acknowledged_rotations).Count
+  LocalRetirementStatus = $localRetirementStatus
+  LocalRetirementFiles = $staleRotationFiles
+  LocalRetirementBytes = $staleRotationBytes
   AnalyzerPublished = [bool]$analyzerPublished
   AnalyzerPublishErrorCode = $analyzerPublishErrorCode
 }
