@@ -28,6 +28,10 @@ export type AnalyzerMirrorHealth = {
   status: 'online' | 'stale' | 'unreachable';
   uploadedAt?: string | null;
   ageSec?: number | null;
+  analyzerGeneratedAt?: string | null;
+  generationAgeSec?: number | null;
+  sourceRevision?: string | null;
+  revisionMatched?: boolean | null;
   size?: number | null;
   source?: string;
 };
@@ -40,6 +44,7 @@ export function summarizeAnalyzerMirrorHealth(
   summary: Record<string, unknown> | null,
   nowMs = Date.now(),
   maxAgeSec = ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
+  expectedSourceRevision?: string | null,
 ): AnalyzerMirrorHealth {
   if (!summary) {
     return { available: false, fresh: false, status: 'unreachable' };
@@ -59,7 +64,20 @@ export function summarizeAnalyzerMirrorHealth(
         : null;
   const sizeRaw = mirrorStatus?.size ?? summary.size;
   const size = typeof sizeRaw === 'number' && Number.isFinite(sizeRaw) ? sizeRaw : null;
+  const analyzerGeneratedAt =
+    typeof mirrorStatus?.analyzer_generated_at === 'string'
+      ? mirrorStatus.analyzer_generated_at
+      : typeof summary.analyzer_generated_at === 'string'
+        ? summary.analyzer_generated_at
+        : null;
+  const sourceRevision =
+    typeof mirrorStatus?.source_data_revision === 'string'
+      ? mirrorStatus.source_data_revision
+      : typeof summary.source_data_revision === 'string'
+        ? summary.source_data_revision
+        : null;
   const available =
+    summary.available === true ||
     summary.mirror_available === true ||
     (typeof size === 'number' && size > 0) ||
     Boolean(uploadedAt);
@@ -71,6 +89,10 @@ export function summarizeAnalyzerMirrorHealth(
       status: 'unreachable',
       uploadedAt,
       ageSec: null,
+      analyzerGeneratedAt,
+      generationAgeSec: null,
+      sourceRevision,
+      revisionMatched: null,
       size,
       source:
         typeof summary.source === 'string'
@@ -79,18 +101,42 @@ export function summarizeAnalyzerMirrorHealth(
     };
   }
 
-  const uploadedMs = uploadedAt ? Date.parse(uploadedAt) : Number.NaN;
-  const ageSec = Number.isFinite(uploadedMs)
-    ? Math.max(0, (nowMs - uploadedMs) / 1_000)
-    : null;
-  const fresh = ageSec != null && ageSec < maxAgeSec;
+  const timestampAgeSec = (value: string | null): number | null => {
+    const parsed = value ? Date.parse(value) : Number.NaN;
+    if (!Number.isFinite(parsed) || parsed > nowMs) return null;
+    return (nowMs - parsed) / 1_000;
+  };
+  const ageSec = timestampAgeSec(uploadedAt);
+  const generationAgeSec = timestampAgeSec(analyzerGeneratedAt);
+  const normalizeRevision = (value: string | null | undefined): string | null => {
+    const normalized = value?.trim().toLowerCase() ?? '';
+    return /^[0-9a-f]{12,64}$/.test(normalized) ? normalized : null;
+  };
+  const expectedRevision = normalizeRevision(expectedSourceRevision);
+  const observedRevision = normalizeRevision(sourceRevision);
+  const revisionMatched = expectedSourceRevision == null
+    ? null
+    : expectedRevision != null && observedRevision != null &&
+      (expectedRevision === observedRevision ||
+        expectedRevision.startsWith(observedRevision) ||
+        observedRevision.startsWith(expectedRevision));
+  const fresh =
+    ageSec != null && ageSec < maxAgeSec &&
+    generationAgeSec != null && generationAgeSec < maxAgeSec &&
+    (expectedSourceRevision == null || revisionMatched === true);
 
   return {
     available: true,
     fresh,
-    status: fresh ? 'online' : ageSec != null ? 'stale' : 'unreachable',
+    // Presence with invalid/missing timestamps is stale/unknown evidence, not
+    // an unreachable mirror. `unreachable` is reserved for no mirror at all.
+    status: fresh ? 'online' : 'stale',
     uploadedAt,
     ageSec: ageSec != null ? Math.round(ageSec) : null,
+    analyzerGeneratedAt,
+    generationAgeSec: generationAgeSec != null ? Math.round(generationAgeSec) : null,
+    sourceRevision,
+    revisionMatched,
     size,
     source:
       typeof summary.source === 'string'

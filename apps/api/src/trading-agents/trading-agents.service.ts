@@ -57,6 +57,7 @@ import {
   probePublicBotHealth,
   summarizeAnalyzerMirrorHealth,
   summarizeCanonicalBotHealth,
+  ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
   type CanonicalBotHealth,
 } from './public-bot-health-probe';
 import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
@@ -909,7 +910,10 @@ export class TradingAgentsService implements OnModuleInit {
       mirrorReceipt && mirrorReceipt.available === true ? mirrorReceipt : analyzerSummary;
     return {
       ...summarizeCanonicalBotHealth(flyProbe, canonical),
-      analyzerMirror: summarizeAnalyzerMirrorHealth(mirrorInput),
+      analyzerMirror: summarizeAnalyzerMirrorHealth(
+        mirrorInput, Date.now(), ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
+        canonical?.source_git_rev ?? null,
+      ),
     };
   }
 
