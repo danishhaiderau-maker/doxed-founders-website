@@ -13,6 +13,7 @@ import math
 import os
 from pathlib import Path
 import re
+import stat
 import time
 import uuid
 from collections.abc import Mapping
@@ -72,9 +73,83 @@ def _root(raw):
     return root
 
 
+def _verified_local_members(raw_root, selected, check_deadline):
+    """Read-only reuse check; no directory creation, promotion or ACK authority."""
+    root = Path(os.path.abspath(raw_root))
+
+    def unlinked(path):
+        # Check every existing component, including ancestors of the supplied
+        # root. Never resolve a junction/symlink into another evidence store.
+        current = Path(path.anchor)
+        for part in path.parts[1:]:
+            current /= part
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                return False
+            if stat.S_ISLNK(info.st_mode) or int(getattr(info, "st_file_attributes", 0) or 0) & 0x400:
+                raise BundleClientError("LOCAL_REUSE_LINK_REJECTED")
+        return True
+
+    signature = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                               value.st_mtime_ns, value.st_ctime_ns)
+    try:
+        if not unlinked(root) or not root.is_dir() or root.resolve(strict=True) != root:
+            return None
+        verified = []
+        signatures = []
+        for relative, member in selected.items():
+            check_deadline()
+            path = root.joinpath(*relative.split("/"))
+            # Selected paths have already passed the transport allowlist, but
+            # retain an independent containment check at the local IO boundary.
+            try:
+                Path(os.path.abspath(path)).relative_to(root)
+            except ValueError as exc:
+                raise BundleClientError("LOCAL_REUSE_PATH_ESCAPE") from exc
+            if not unlinked(path):
+                return None
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_size != member["size"]:
+                return None
+            checksum = hashlib.sha256()
+            remaining = member["size"]
+            with path.open("rb") as handle:
+                if signature(os.fstat(handle.fileno())) != signature(before):
+                    return None
+                while remaining:
+                    check_deadline()
+                    chunk = handle.read(min(MAX_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        return None
+                    checksum.update(chunk)
+                    remaining -= len(chunk)
+                if (handle.read(1)
+                        or signature(os.fstat(handle.fileno())) != signature(before)):
+                    return None
+            if (checksum.hexdigest() != member["sha256"] or not unlinked(path)
+                    or signature(path.lstat()) != signature(before)):
+                return None
+            signatures.append((path, signature(before)))
+            verified.append({**member, "staged_path": str(path)})
+        # A change to an early member while later members were hashed also
+        # invalidates the whole package reuse decision. Owner must rehash at
+        # its publication boundary, just as it does downloaded staged files.
+        for path, before in signatures:
+            check_deadline()
+            if not unlinked(path) or signature(path.lstat()) != before:
+                return None
+        return verified
+    except OSError:
+        # A missing/unreadable local derivative is not evidence of a bad remote
+        # package. Fall through to normal bounded download without altering it.
+        return None
+
+
 def fetch_verified_package(index_entry, generation, original_manifest_rows, staging_root,
                            fetch, *, max_attempts=3, timeout_sec=15.0,
-                           deadline_sec=120.0, clock=time.monotonic, sleep=time.sleep):
+                           deadline_sec=120.0, clock=time.monotonic, sleep=time.sleep,
+                           verified_local_root=None):
     """Download one bounded package and return verified, isolated staged members.
 
     Original manifest rows, not the transport descriptor, remain ACK authority.
@@ -82,6 +157,10 @@ def fetch_verified_package(index_entry, generation, original_manifest_rows, stag
     connection errors, 429/502/503/504; corruption and identity drift fail once.
     Deadline is cooperative around adapter calls; its timeout must be enforced
     by the injected adapter. A successful package file is retained for the owner.
+    An explicit ``verified_local_root`` permits reuse only when every member
+    already matches the current descriptor and original manifest. Local files
+    are read-only and rehashed; missing/mismatched members use normal download.
+    Reused receipts explicitly identify canonical local paths, not new staging.
     """
     if (not _integer(max_attempts, 1, 5)
             or type(timeout_sec) not in (float, int) or not math.isfinite(timeout_sec)
@@ -201,6 +280,11 @@ def fetch_verified_package(index_entry, generation, original_manifest_rows, stag
     if matched != set(selected):
         raise BundleClientError("MANIFEST_MEMBER_MISSING")
     check_deadline()
+    if verified_local_root is not None:
+        reused = _verified_local_members(verified_local_root, selected, check_deadline)
+        if reused is not None:
+            return {"staging_path": None, "members": reused, "descriptor": descriptor,
+                    "ack_authority": "ORIGINAL_MANIFEST_ROWS_ONLY", "reused_local": True}
     root = _root(staging_root)
     package = root / f"p-{uuid.uuid4().hex[:12]}.tar"
     try:

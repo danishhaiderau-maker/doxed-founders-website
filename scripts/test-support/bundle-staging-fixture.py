@@ -11,7 +11,13 @@ members = []
 for number, row in enumerate(manifest["files"]):
     raw = row["fixture_payload"].encode()
     path = root / (str(number) + ".json")
-    path.write_bytes(raw)
+    if manifest.get("fixture_defect") in {"reuse", "reuse-escape", "reuse-flag", "reuse-size"}:
+        path = Path(request["verified_local_root"]) / row["path"]
+        if manifest["fixture_defect"] == "reuse-escape":
+            path = Path(request["verified_local_root"]) / "wrong.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if manifest.get("fixture_defect") not in {"reuse", "reuse-size"}:
+        path.write_bytes(raw)
     members.append({**{key: row[key] for key in ("path", "size", "mtime_ns", "inode", "consistency_mode")},
                     "staged_path": str(path), "sha256": hashlib.sha256(raw).hexdigest()})
 if manifest.get("fixture_defect") == "hash":
@@ -27,6 +33,7 @@ if manifest.get("fixture_defect") in {"waiting", "foreign-wait", "late-wait"}:
                       "elapsed_seconds": 601 if manifest["fixture_defect"] == "late-wait" else 5,
                       "next_retry_seconds": 10}), flush=True)
 print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "PACKAGE_VERIFIED",
-                  "generation": identity, "members": members}), flush=True)
+                  "generation": identity, "members": members,
+                  "reused_local": "true" if manifest.get("fixture_defect") == "reuse-flag" else manifest.get("fixture_defect") in {"reuse", "reuse-escape", "reuse-size"}}), flush=True)
 print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "COMPLETE",
                   "files": len(members), "ack_sent": False}), flush=True)

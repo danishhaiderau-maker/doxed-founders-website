@@ -10,7 +10,7 @@ PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependen
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
-@pytest.mark.parametrize("defect", [None, "hash", "waiting", "foreign-wait", "late-wait"])
+@pytest.mark.parametrize("defect", [None, "hash", "waiting", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size"])
 def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, defect):
     payload = '{"sample":1}'
     relative = "v3/market_segments/11/" + "1" * 64 + ".json"
@@ -23,12 +23,19 @@ def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, 
                 "files": [{"path": relative, "size": len(payload), "inode": 123,
                            "mtime_ns": 456, "consistency_mode": "strict_generation_v1",
                            "fixture_payload": payload}]}
+    if defect == "reuse-size":
+        manifest["files"][0]["size"] += 1
     encoded = base64.b64encode(json.dumps(manifest).encode()).decode()
     target = tmp_path / "mirror"
+    if defect in {"reuse", "reuse-size"}:
+        (target / relative).parent.mkdir(parents=True)
+        (target / relative).write_text(payload)
+    no_publish = "function Publish-MirrorCandidate { throw 'REUSE_MUST_NOT_PUBLISH' }" if defect in {"reuse", "reuse-size"} else ""
     script = f"""
 $ErrorActionPreference='Stop'
 . '{ROOT.as_posix()}/scripts/fly-mirror-atomic.ps1'
 . '{ROOT.as_posix()}/scripts/fly-sync-bundles.ps1'
+{no_publish}
 $manifest=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))|ConvertFrom-Json
 $state=@{{}}
 $script:saves=0
@@ -40,11 +47,13 @@ try {{
 """
     completed = subprocess.run([str(PWSH), "-NoProfile", "-Command", script],
                                capture_output=True, text=True, timeout=30)
-    if defect in {"hash", "foreign-wait", "late-wait"}:
+    if defect in {"hash", "foreign-wait", "late-wait", "reuse-escape", "reuse-flag", "reuse-size"}:
         code = {"hash": "BUNDLE_STAGE_HASH_MISMATCH", "foreign-wait": "BUNDLE_RECEIPT_IDENTITY",
-                "late-wait": "BUNDLE_INDEX_WAIT_INVALID"}[defect]
+                "late-wait": "BUNDLE_INDEX_WAIT_INVALID", "reuse-escape": "BUNDLE_REUSE_PATH_MISMATCH",
+                "reuse-flag": "BUNDLE_REUSE_FLAG_INVALID", "reuse-size": "BUNDLE_STAGE_SIZE_MISMATCH"}[defect]
         assert completed.returncode == 7 and code in completed.stdout
-        assert not (target / relative).exists()
+        if defect not in {"reuse-flag", "reuse-size"}:
+            assert not (target / relative).exists()
     else:
         assert completed.returncode == 0, completed.stdout + completed.stderr
         result = json.loads(completed.stdout)

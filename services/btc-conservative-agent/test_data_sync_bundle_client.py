@@ -51,6 +51,146 @@ def test_worker_api_client_full_roundtrip_stages_not_promotes_or_acks(tmp_path):
     assert "offset=1048576" in calls[-1]
 
 
+def _local_members(tmp_path, rows):
+    local = tmp_path / "canonical"
+    for row in rows:
+        target = local / row["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((tmp_path / "src" / row["path"]).read_bytes())
+    return local
+
+
+def test_verified_local_members_skip_chunks_without_staging_or_mutation(tmp_path):
+    index, gen, rows, fetch, calls = fixture(tmp_path, large=True)
+    local = _local_members(tmp_path, rows)
+    signatures = {row["path"]: (local / row["path"]).stat() for row in rows}
+    stage = tmp_path / "not-created"
+    result = mod.fetch_verified_package(index, gen, rows, stage, fetch, verified_local_root=local)
+    assert result["reused_local"] is True and result["staging_path"] is None
+    assert "package_path" not in result
+    assert result["ack_authority"] == "ORIGINAL_MANIFEST_ROWS_ONLY"
+    assert len(calls) == 1 and "descriptor=1" in calls[0]
+    assert not stage.exists()
+    for row, member in zip(rows, result["members"]):
+        path = local / row["path"]
+        assert member["staged_path"] == str(path)
+        assert {key: member[key] for key in mod.ROW_FIELDS} == row
+        assert path.stat().st_mtime_ns == signatures[row["path"]].st_mtime_ns
+        assert path.read_bytes() == (tmp_path / "src" / row["path"]).read_bytes()
+
+
+@pytest.mark.parametrize("kind", ["missing", "size", "same_size_hash", "root_missing"])
+def test_incomplete_local_package_downloads_normally_without_changing_local(tmp_path, kind):
+    index, gen, rows, fetch, calls = fixture(tmp_path)
+    local = _local_members(tmp_path, rows)
+    damaged = local / rows[0]["path"]
+    if kind == "missing":
+        damaged.unlink()
+    elif kind == "size":
+        damaged.write_bytes(b"short")
+    elif kind == "same_size_hash":
+        damaged.write_bytes(b"z" * damaged.stat().st_size)
+    else:
+        local = tmp_path / "absent-local-root"
+        damaged = local / rows[0]["path"]
+    before = damaged.read_bytes() if damaged.exists() else None
+    result = mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch,
+                                        verified_local_root=local)
+    assert result.get("reused_local") is not True
+    assert len(calls) > 1 and "package_path" in result
+    assert (damaged.read_bytes() if damaged.exists() else None) == before
+    if kind == "root_missing":
+        assert not local.exists()
+
+
+@pytest.mark.parametrize("field", ["source_git_rev", "collection_epoch_id", "tile_registry_signature"])
+def test_local_reuse_cannot_bypass_current_generation(tmp_path, field):
+    index, gen, rows, fetch, calls = fixture(tmp_path)
+    local = _local_members(tmp_path, rows)
+    gen[field] = "other-generation"
+    with pytest.raises(mod.BundleClientError, match="DESCRIPTOR_GENERATION_MISMATCH"):
+        mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch,
+                                   verified_local_root=local)
+    assert len(calls) == 1
+    assert not (tmp_path / "stage").exists()
+
+
+def test_local_reuse_cannot_bypass_original_manifest_or_descriptor(tmp_path):
+    index, gen, rows, fetch, calls = fixture(tmp_path)
+    local = _local_members(tmp_path, rows)
+    rows[0]["inode"] += 1
+    with pytest.raises(mod.BundleClientError, match="MANIFEST_MEMBER_MISMATCH"):
+        mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch,
+                                   verified_local_root=local)
+    assert len(calls) == 1
+    rows[0]["inode"] -= 1
+    index["descriptor_sha256"] = "0" * 64
+    with pytest.raises(mod.BundleClientError, match="DESCRIPTOR_HASH_MISMATCH"):
+        mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch,
+                                   verified_local_root=local)
+    assert len(calls) == 2
+
+
+def test_local_reuse_rejects_root_reparse_without_reading_members(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    index, gen, rows, fetch, calls = fixture(tmp_path)
+    local = _local_members(tmp_path, rows)
+    original = Path.lstat
+    def reparse(path, *args, **kwargs):
+        actual = original(path, *args, **kwargs)
+        if path == local:
+            return SimpleNamespace(st_mode=actual.st_mode, st_file_attributes=0x400)
+        return actual
+    monkeypatch.setattr(Path, "lstat", reparse)
+    with pytest.raises(mod.BundleClientError, match="LOCAL_REUSE_LINK_REJECTED"):
+        mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch,
+                                   verified_local_root=local)
+    assert len(calls) == 1 and not (tmp_path / "stage").exists()
+
+
+def test_local_reuse_rejects_member_symlink_metadata(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import stat
+    index, gen, rows, fetch, calls = fixture(tmp_path)
+    local = _local_members(tmp_path, rows)
+    member = local / rows[0]["path"]
+    original = Path.lstat
+    def linked(path, *args, **kwargs):
+        if path == member:
+            return SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "lstat", linked)
+    with pytest.raises(mod.BundleClientError, match="LOCAL_REUSE_LINK_REJECTED"):
+        mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch,
+                                   verified_local_root=local)
+    assert len(calls) == 1
+
+
+def test_local_reuse_detects_early_member_changed_while_later_members_verified(tmp_path):
+    index, gen, rows, fetch, _ = fixture(tmp_path)
+    local = _local_members(tmp_path, rows)
+    normal = mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch)
+    selected = {row["path"]: row for row in normal["descriptor"]["members"]}
+    checks = [0]
+    def change_early():
+        checks[0] += 1
+        if checks[0] == 3:  # second member begins after first was hashed
+            (local / rows[0]["path"]).write_bytes(b"z" * rows[0]["size"])
+    assert mod._verified_local_members(local, selected, change_early) is None
+
+
+def test_local_reuse_honors_deadline_without_mutating_evidence(tmp_path):
+    index, gen, rows, fetch, _ = fixture(tmp_path)
+    local = _local_members(tmp_path, rows)
+    normal = mod.fetch_verified_package(index, gen, rows, tmp_path / "stage", fetch)
+    selected = {row["path"]: row for row in normal["descriptor"]["members"]}
+    def expired():
+        raise mod.BundleClientError("PACKAGE_DEADLINE_EXCEEDED")
+    with pytest.raises(mod.BundleClientError, match="PACKAGE_DEADLINE_EXCEEDED"):
+        mod._verified_local_members(local, selected, expired)
+    assert (local / rows[0]["path"]).read_bytes() == (tmp_path / "src" / rows[0]["path"]).read_bytes()
+
+
 @pytest.mark.parametrize("field", ["source_git_rev", "collection_epoch_id", "tile_registry_signature"])
 def test_full_identity_mismatch_before_package_download(tmp_path, field):
     index, gen, rows, fetch, calls = fixture(tmp_path)

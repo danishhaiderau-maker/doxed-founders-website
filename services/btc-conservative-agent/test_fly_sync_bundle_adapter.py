@@ -70,6 +70,17 @@ def test_many_small_files_keep_exact_original_ack_rows(tmp_path):
         assert Path(member["staged_path"]).read_bytes() == (source / member["path"]).read_bytes()
 
 
+def test_existing_verified_members_avoid_payload_network(tmp_path):
+    request, fetch, calls, source = build(tmp_path, 384)
+    request["verified_local_root"] = str(source)
+    emitted = []
+    adapter.run(request, emit=emitted.append, fetch=fetch, sleep=lambda _: None)
+    assert emitted[-1]["files"] == 384
+    assert len(calls) == 4  # index + three current descriptors, no payload
+    assert all(item["reused_local"] is True for item in emitted[:-1])
+    assert all("offset=" not in call for call in calls)
+
+
 @pytest.mark.parametrize("defect", ["foreign", "duplicate-package", "oversized", "unavailable"])
 def test_bad_index_never_downloads_a_package(tmp_path, defect):
     request, fetch, calls, _ = build(tmp_path)

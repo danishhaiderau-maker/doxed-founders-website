@@ -132,7 +132,8 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
             raise ValueError("BUNDLE_TRANSFER_DEADLINE")
         seen_packages.add(entry.get("package_sha256"))
         staged = fetch_verified_package(entry, generation, original, request["staging_root"], fetch,
-                                        deadline_sec=min(120, remaining), clock=clock, sleep=sleep)
+                                        deadline_sec=min(120, remaining), clock=clock, sleep=sleep,
+                                        verified_local_root=request.get("verified_local_root"))
         for member in staged["members"]:
             if member["path"] in seen_paths:
                 raise ValueError("BUNDLE_MEMBER_REPEATED_ACROSS_PACKAGES")

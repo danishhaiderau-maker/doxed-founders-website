@@ -59,7 +59,7 @@ function Receive-FlyTransportBundles {
     $started = $true
     $stderr = $process.StandardError.ReadToEndAsync()
     # Credential goes through a private pipe, never process arguments or disk.
-    $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage }
+    $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage; verified_local_root=$mirror }
     $inputTask = $process.StandardInput.WriteAsync(($request | ConvertTo-Json -Depth 40 -Compress))
     if (-not $inputTask.Wait(30000)) { throw 'BUNDLE_CHILD_INPUT_TIMEOUT' }
     $process.StandardInput.Close()
@@ -100,6 +100,11 @@ function Receive-FlyTransportBundles {
         if ([string]$receipt.generation.$field -cne [string]$Manifest.$field) { throw 'BUNDLE_RECEIPT_IDENTITY' }
       }
       if (@($receipt.members).Count -gt 256) { throw 'BUNDLE_MEMBER_LIMIT' }
+      $reusedLocal = $false
+      if ($receipt.PSObject.Properties.Name -contains 'reused_local') {
+        if ($receipt.reused_local -isnot [bool]) { throw 'BUNDLE_REUSE_FLAG_INVALID' }
+        $reusedLocal = $receipt.reused_local
+      }
       foreach ($member in @($receipt.members)) {
         $rel = [string]$member.path
         if (-not $rows.ContainsKey($rel)) { throw 'BUNDLE_MEMBER_NOT_IN_MANIFEST' }
@@ -108,13 +113,17 @@ function Receive-FlyTransportBundles {
           if ([string]$row.$field -cne [string]$member.$field) { throw 'BUNDLE_MEMBER_IDENTITY' }
         }
         $staged = [IO.Path]::GetFullPath([string]$member.staged_path)
-        if (-not $staged.StartsWith($stagePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'BUNDLE_STAGE_ESCAPE' }
+        if (-not $reusedLocal -and -not $staged.StartsWith($stagePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'BUNDLE_STAGE_ESCAPE' }
         $destination = [IO.Path]::GetFullPath((Join-Path $mirror ($rel.Replace('/', '\'))))
         if (-not $destination.StartsWith(($mirror + '\'), [StringComparison]::OrdinalIgnoreCase)) { throw 'BUNDLE_DESTINATION_ESCAPE' }
+        if ($reusedLocal -and -not $staged.Equals($destination, [StringComparison]::OrdinalIgnoreCase)) { throw 'BUNDLE_REUSE_PATH_MISMATCH' }
         if ([string]$member.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'BUNDLE_MEMBER_HASH_MISSING' }
         Assert-FlyBundleUnlinkedPath -Path $staged
         Assert-FlyBundleUnlinkedPath -Path $destination
+        if ((Get-Item -LiteralPath $staged -Force).Length -ne [int64]$row.size) { throw 'BUNDLE_STAGE_SIZE_MISMATCH' }
         if ((Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$member.sha256) { throw 'BUNDLE_STAGE_HASH_MISMATCH' }
+        Test-MirrorCandidate -Path $staged -RelativePath $rel -ExpectedSize ([int64]$row.size)
+        if (-not $reusedLocal) {
         $parent = Split-Path -Parent $destination
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
         $candidate = $destination + '.' + [guid]::NewGuid().ToString('N') + '.download'
@@ -126,6 +135,7 @@ function Receive-FlyTransportBundles {
         } finally {
           if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Force }
         }
+        }
         $SyncState[$rel] = [ordered]@{ inode=[int64]$row.inode; size=[int64]$row.size;
           mtime_ns=[int64]$row.mtime_ns; synced_at=[DateTimeOffset]::UtcNow.ToString('o');
           full_sha256=[string]$member.sha256; transport='GENERATION_BOUND_BUNDLE' }
@@ -134,6 +144,7 @@ function Receive-FlyTransportBundles {
       & $SaveCheckpoint
       # These are transport scratch copies, not Fly evidence or the canonical
       # mirror. Reclaim only this verified package after durable checkpointing.
+      if (-not $reusedLocal) {
       foreach ($member in @($receipt.members)) {
         $staged = [IO.Path]::GetFullPath([string]$member.staged_path)
         Assert-FlyBundleUnlinkedPath -Path $staged
@@ -150,6 +161,7 @@ function Receive-FlyTransportBundles {
         Assert-FlyBundleUnlinkedPath -Path $package
         if (-not $package.StartsWith($stagePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'BUNDLE_PACKAGE_ESCAPE' }
         Remove-Item -LiteralPath $package -Force -ErrorAction Stop
+      }
       }
       & $Progress $files 'bundle_verified'
     }
