@@ -235,3 +235,37 @@ def test_progress_target_overlap_is_rejected(tmp_path):
     args["allowed_paths"].append(journal)
     with pytest.raises(deletion.ResearchDeletionRejected, match="PROGRESS"):
         deletion.delete_exact_research_files(**args)
+
+
+def test_same_length_journal_from_another_receipt_is_rejected(tmp_path):
+    args = setup(tmp_path, ("a.jsonl", "b.jsonl"))
+    first = {**args, "targets": [args["targets"][0]], "allowed_paths": [args["targets"][0]]}
+    second = {**args, "targets": [args["targets"][1]], "allowed_paths": [args["targets"][1]],
+              "receipt_path": args["receipt_path"].with_name("second.json")}
+    deletion.delete_exact_research_files(**first)
+    deletion.delete_exact_research_files(**second)
+    first_journal = Path(str(first["receipt_path"]) + ".progress.jsonl")
+    second_journal = Path(str(second["receipt_path"]) + ".progress.jsonl")
+    assert len(first_journal.read_bytes()) == len(second_journal.read_bytes())
+    second_journal.write_bytes(first_journal.read_bytes())
+    with pytest.raises(deletion.ResearchDeletionRejected, match="JOURNAL_HASH_MISMATCH"):
+        deletion.reconcile_research_deletion(second["receipt_path"])
+
+
+def test_seed_recomputed_from_inventory_rejects_receipt_mutation(tmp_path):
+    args = setup(tmp_path)
+    deletion.delete_exact_research_files(**args)
+    receipt = json.loads(args["receipt_path"].read_text())
+    receipt["inventory"][0]["bytes"] += 1
+    args["receipt_path"].write_text(json.dumps(receipt))
+    with pytest.raises(deletion.ResearchDeletionRejected, match="JOURNAL_SEED_MISMATCH"):
+        deletion.reconcile_research_deletion(args["receipt_path"])
+
+
+def test_initial_progress_is_bound_to_stored_receipt_seed(tmp_path):
+    args = setup(tmp_path)
+    deletion.delete_exact_research_files(**args)
+    receipt = json.loads(args["receipt_path"].read_text())
+    journal_first = json.loads(Path(receipt["progress_journal"]).read_text().splitlines()[0])
+    assert journal_first["previous_sha256"] == receipt["progress_seed_sha256"]
+    assert len(receipt["progress_seed_sha256"]) == 64

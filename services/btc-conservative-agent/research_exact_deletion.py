@@ -59,6 +59,12 @@ def _write_receipt(path: Path, payload: dict, *, first: bool = False) -> None:
     os.replace(temporary, path)
 
 
+def _progress_seed(*, root: Path, receipt_path: Path, inventory: list) -> str:
+    identity = {"schema": "research_exact_deletion_progress_binding_v1",
+                "root": str(root), "receipt_path": str(receipt_path), "inventory": inventory}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _append_progress(path: Path, *, index: int, phase: str, previous: str) -> str:
     row = {"index": index, "phase": phase, "previous_sha256": previous}
     digest = hashlib.sha256(json.dumps(row, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -82,7 +88,9 @@ def reconcile_research_deletion(receipt_path) -> dict:
         raise ResearchDeletionRejected("RECEIPT_LIMIT_EXCEEDED")
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     root = Path(receipt["root"])
-    _checked_path(receipt_path, root)
+    receipt_path = _checked_path(receipt_path, root)
+    if receipt.get("receipt_path") != str(receipt_path):
+        raise ResearchDeletionRejected("RECEIPT_PATH_IDENTITY_MISMATCH")
     inventory = receipt.get("inventory")
     if not isinstance(inventory, list) or len(inventory) > 100000:
         raise ResearchDeletionRejected("INVALID_RECEIPT_INVENTORY")
@@ -90,7 +98,9 @@ def reconcile_research_deletion(receipt_path) -> dict:
     if receipt.get("progress_journal") != str(journal):
         raise ResearchDeletionRejected("JOURNAL_IDENTITY_MISMATCH")
     phases = {}
-    previous = ""
+    previous = _progress_seed(root=root, receipt_path=receipt_path, inventory=inventory)
+    if receipt.get("progress_seed_sha256") != previous:
+        raise ResearchDeletionRejected("JOURNAL_SEED_MISMATCH")
     if journal.exists():
         with journal.open("rb") as handle:
             for sequence in range(2 * len(inventory) + 1):
@@ -201,11 +211,12 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
               "recovery_states": dict(recovery_states), "inventory": inventory,
               "deleted": [], "deleted_bytes": 0, "receipt_path": str(receipt),
               "progress_journal": str(journal)}
+    result["progress_seed_sha256"] = _progress_seed(root=root, receipt_path=receipt, inventory=inventory)
     _write_receipt(receipt, result, first=True)
     with journal.open("xb") as handle:
         handle.flush()
         os.fsync(handle.fileno())
-    previous_progress = ""
+    previous_progress = result["progress_seed_sha256"]
     try:
         # Recheck the complete set before the first unlink, and each exact file
         # again immediately before removal. No glob/tree expansion occurs here.
