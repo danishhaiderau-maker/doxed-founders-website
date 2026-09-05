@@ -1,0 +1,40 @@
+{
+  "schema": "sync_authorized_pacing_handoff_v1",
+  "at": "2026-09-05T01:01:42.6733422Z",
+  "phase": "PRE_STOP",
+  "user_authority": "Explicit stop download to repair pacing and resume; preserve evidence",
+  "task_state": "Running",
+  "task_enabled": true,
+  "pid": 16576,
+  "cpu": 187.75,
+  "process_started": "2026-09-04T23:33:37.8570139Z",
+  "heartbeat": {
+    "ok": true,
+    "inProgress": true,
+    "phase": "chunk_complete",
+    "updatedAt": "2026-09-05T11:01:41.9126641+10:00",
+    "syncedAt": "2026-09-05T11:01:41.9126706+10:00",
+    "source": "https://doxed-btc-bot.fly.dev",
+    "sourceRevision": "9b588c0b5f79",
+    "observedSourceRevision": "df45887e1526",
+    "deployedRevision": "df45887e1526",
+    "mirroredSourceRevision": "9b588c0b5f79",
+    "revisionParity": "MISMATCH",
+    "tileRegistrySignature": "87ec52b3df04d50580e8fcd632de2a5996f253c0ae55bbe5be2eb12945dabafd",
+    "currentFile": "v3/receipts/emergency_record_idempotency_v1/decision/10109db56875bd1f1b3102b6a8a7f63fd790f8344f8c2b91c4eede089c61b50a.json",
+    "fileIndex": 2447,
+    "fileCount": 34433,
+    "fileBytes": 731,
+    "remoteBytes": 731,
+    "relayEvidence": {
+      "ok": null,
+      "errorCode": "DEFERRED_REQUIRED_SYNC",
+      "lastSuccessAt": "2026-09-02T10:20:57.5466565Z"
+    }
+  },
+  "checkpoint_path": "C:\\DoxxedCrypto\\btc-v31-current\\services\\btc-conservative-agent\\canonical-research-data\\.fly-sync-state.json",
+  "checkpoint_bytes": 583468,
+  "checkpoint_sha256": "5C7E10B4D60D5814D53DB1E4C3408752C6FA3D789E086CD0589713C799740B10",
+  "client_sha256": "235399461E185CD407C73208DD76FA35D83BACC4A905D24654C4BB870ACC8EEB",
+  "loop_sha256": "EC84F4BD055ACEEB6B96F11925B39DD37CE42A9226AE9258D24513FE8031BC93"
+}

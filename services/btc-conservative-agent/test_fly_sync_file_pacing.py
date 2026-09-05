@@ -60,25 +60,27 @@ def test_helper_cannot_mutate_or_start_a_transfer():
         assert forbidden not in source
 
 
-def test_review_patch_applies_cleanly_and_candidate_parses_without_execution():
+def test_active_client_matches_review_patch_and_parses_without_execution():
     patch = ROOT / "diagnostics" / "sync-small-file-pacing-review.patch"
-    checked = subprocess.run(["git", "apply", "--check", str(patch)], cwd=ROOT,
+    checked = subprocess.run(["git", "apply", "--reverse", "--check", str(patch)], cwd=ROOT,
                              capture_output=True, text=True, timeout=20)
     assert checked.returncode == 0, checked.stderr
     source = (ROOT / "scripts" / "sync-fly-bot-data.ps1").read_text(encoding="utf-8-sig")
     old_import = '. (Join-Path $scriptDir "fly-sync-backoff.ps1")'
     old_delay = '$fileThrottleMs = [Math]::Max($baseInterFileThrottleMs, $adaptiveThrottleMs)'
-    assert source.count(old_import) == source.count(old_delay) == 1
-    candidate = source.replace(old_import, old_import + '\n. (Join-Path $scriptDir "fly-sync-file-pacing.ps1")')
-    candidate = candidate.replace(old_delay,
+    assert source.count(old_import) == 1
+    assert old_delay not in source
+    assert source.count('. (Join-Path $scriptDir "fly-sync-file-pacing.ps1")') == 1
+    expected_call = (
         '$fileThrottleMs = Get-FlySyncInterFileDelayMs `\n'
         '      -FileBytes $remoteSize `\n'
         '      -RequestElapsedMs $chunkRequestElapsedMs `\n'
         '      -AdaptiveThrottleMs $adaptiveThrottleMs `\n'
         '      -BaseInterFileThrottleMs $baseInterFileThrottleMs `\n'
         '      -BaseInterChunkThrottleMs $baseInterChunkThrottleMs')
+    assert source.count(expected_call) == 1
     result = _run("$source=[Console]::In.ReadToEnd(); "
                   "$parseTokens=$null; $parseErrors=$null; "
                   "[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$parseTokens,[ref]$parseErrors) | Out-Null; "
-                  "ConvertTo-Json -InputObject @($parseErrors | ForEach-Object Message) -Compress", candidate)
+                  "ConvertTo-Json -InputObject @($parseErrors | ForEach-Object Message) -Compress", source)
     assert result == []

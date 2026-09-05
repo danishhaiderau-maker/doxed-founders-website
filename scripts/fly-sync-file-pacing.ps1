@@ -1,5 +1,5 @@
 # Pure pacing policy. This helper does not perform IO or change sync ownership.
-# It is not active until a reviewed client imports it at a safe owner boundary.
+# Imported by the sync client after the authorized stopped-owner handoff.
 function Get-FlySyncInterFileDelayMs {
   param(
     [Parameter(Mandatory = $true)][long]$FileBytes,

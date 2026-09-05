@@ -19,6 +19,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 . (Join-Path $scriptDir "fly-mirror-atomic.ps1")
 . (Join-Path $scriptDir "fly-sync-backoff.ps1")
+. (Join-Path $scriptDir "fly-sync-file-pacing.ps1")
 . (Join-Path $scriptDir "fly-lifecycle-bundle-copy.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
@@ -1204,7 +1205,12 @@ foreach ($row in $selectedFiles) {
   # changes only copy pacing; resumability, hashes and final acknowledgement
   # remain authoritative.
   if ($downloadedGeneration -and $selectedFileIndex -lt $selectedFileCount) {
-    $fileThrottleMs = [Math]::Max($baseInterFileThrottleMs, $adaptiveThrottleMs)
+    $fileThrottleMs = Get-FlySyncInterFileDelayMs `
+      -FileBytes $remoteSize `
+      -RequestElapsedMs $chunkRequestElapsedMs `
+      -AdaptiveThrottleMs $adaptiveThrottleMs `
+      -BaseInterFileThrottleMs $baseInterFileThrottleMs `
+      -BaseInterChunkThrottleMs $baseInterChunkThrottleMs
     Start-Sleep -Milliseconds $fileThrottleMs
   }
 }
