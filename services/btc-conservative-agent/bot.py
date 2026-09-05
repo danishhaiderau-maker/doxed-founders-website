@@ -43579,7 +43579,11 @@ def _audit_lifecycle_purge_recovery() -> list:
     if not root.is_dir():
         return []
     rows = []
-    for transaction_dir in sorted(root.iterdir())[:128]:
+    from itertools import islice
+    sampled = list(islice(root.iterdir(), 129))
+    if len(sampled) > 128:
+        rows.append({"status": "RECOVERY_AUDIT_INCOMPLETE", "limit": 128})
+    for transaction_dir in sampled[:128]:
         if not transaction_dir.is_dir():
             continue
         if (transaction_dir / "PREPARED.json").is_file() and not (
