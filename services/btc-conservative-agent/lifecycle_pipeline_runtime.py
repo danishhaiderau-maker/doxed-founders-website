@@ -669,24 +669,48 @@ class LifecyclePipelineRuntime:
             return True
 
     def stop(self, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        remaining = lambda: max(0.0, deadline - time.monotonic())
         self._stop_event.set()
-        with self._lock:
+        if not self._lock.acquire(timeout=remaining()):
+            return False
+        try:
             process = self._process
             thread = self._thread
+        finally:
+            self._lock.release()
         if process is not None:
-            self._terminate(process)
+            try:
+                process.terminate()
+                try:
+                    process.wait(timeout=min(2.0, remaining()))
+                except subprocess.TimeoutExpired:
+                    if remaining() <= 0:
+                        return False
+                    process.kill()
+                    process.wait(timeout=remaining())
+            except (OSError, subprocess.TimeoutExpired):
+                return False
         if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=max(0.0, float(timeout)))
+            thread.join(timeout=remaining())
         stopped = thread is None or not thread.is_alive()
         if stopped:
-            self._release_owner()
-            with self._lock:
+            if not self._lock.acquire(timeout=remaining()):
+                return False
+            try:
+                self._release_owner()
                 self._status.update({"running": False, "owner": False, "active": False})
+            finally:
+                self._lock.release()
         return stopped
 
-    def status(self) -> dict[str, Any]:
-        with self._lock:
+    def status(self, timeout: float = 0.25) -> dict[str, Any]:
+        if not self._lock.acquire(timeout=max(0.0, float(timeout))):
+            raise TimeoutError("LIFECYCLE_STATUS_LOCK_TIMEOUT")
+        try:
             return json.loads(json.dumps(self._status))
+        finally:
+            self._lock.release()
 
     def acquire_cleanup_lease(self, timeout: float = 0.0) -> bool:
         """Exclude worker cycles across the cleanup proof/move/ACK window."""
@@ -717,21 +741,29 @@ def start(data_root: str | Path, **kwargs: Any) -> bool:
 
 def stop(timeout: float = 5.0) -> bool:
     global _default_runtime
-    with _default_lock:
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    if not _default_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        return False
+    try:
         runtime = _default_runtime
-    if runtime is None:
-        return True
-    stopped = runtime.stop(timeout)
-    if stopped:
-        with _default_lock:
-            if _default_runtime is runtime:
-                _default_runtime = None
-    return stopped
+        if runtime is None:
+            return True
+        stopped = runtime.stop(max(0.0, deadline - time.monotonic()))
+        if stopped and _default_runtime is runtime:
+            _default_runtime = None
+        return stopped
+    finally:
+        _default_lock.release()
 
 
-def status() -> dict[str, Any]:
-    with _default_lock:
+def status(timeout: float = 0.25) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    if not _default_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+        raise TimeoutError("LIFECYCLE_STATUS_OWNER_LOCK_TIMEOUT")
+    try:
         runtime = _default_runtime
+    finally:
+        _default_lock.release()
     if runtime is None:
         return {
             "schema": RUNTIME_SCHEMA, "running": False, "owner": False,
@@ -739,7 +771,7 @@ def status() -> dict[str, Any]:
             "source_revision": None,
             "source_cleanup_authorized": False,
         }
-    return runtime.status()
+    return runtime.status(timeout=max(0.0, deadline - time.monotonic()))
 
 
 def acquire_cleanup_lease(timeout: float = 0.0) -> bool:
