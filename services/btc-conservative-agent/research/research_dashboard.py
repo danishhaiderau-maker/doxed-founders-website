@@ -6437,8 +6437,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section id="sec-summary" class="active">
     <h2>Executive Summary</h2>
     <div class="empty-state" id="collection-status">
-      <b>Collection ON:</b> raw signal, feature, order, fill, lifecycle,
-      MFE/MAE and generic shadow evidence continue independently of analysis.
+      <b>Collection status unverified here:</b> this cached, read-only dashboard
+      cannot confirm that Fly collection is running. Signal, feature, order, fill,
+      lifecycle, MFE/MAE and shadow evidence require current collector receipts.
+      Analysis runs separately; saved reports do not prove collection progress.
       Dashboard reports are cached and deterministic. AI egress is reserved for
       the trading-direction pipeline only.
     </div>
