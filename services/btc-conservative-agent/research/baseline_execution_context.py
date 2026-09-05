@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 from pathlib import Path
 import shutil
 import sqlite3
@@ -259,6 +260,53 @@ def _source_generation_matches(row: Mapping[str, Any], generation: Mapping[str, 
     )
 
 
+def accepted_fill_position(entry_receipt: Mapping[str, Any]) -> dict[str, Any]:
+    """Resolve the position from accepted fills, never the last limit price.
+
+    Exact Decimal event quantities must close to the receipt's filled total.
+    The normalized VWAP uses the same float operations/order as the terminal
+    evaluator, whose venue-lot check converts that price back to Decimal.
+    Exact Decimal notional is retained separately rather than presented as a
+    distinct entry price. Rejected attempts are not executions.
+    """
+    filled = _decimal(entry_receipt.get("filled_qty"), positive=True)
+    # Terminal validation still requires valid top-level compatibility fields
+    # before it replaces their values with the accepted-event aggregate.
+    _decimal(entry_receipt.get("fill_price"), positive=True)
+    _decimal(entry_receipt.get("trigger_bucket_ts"), positive=True)
+    attempts = entry_receipt.get("quantity_attempts")
+    if not isinstance(attempts, (list, tuple)) or len(attempts) > 4096:
+        raise ValueError("BASELINE_CONTEXT_ACCEPTED_FILL_EVENTS_MISSING_OR_LIMIT")
+    events = []
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping) or attempt.get("accepted") is not True:
+            continue
+        try:
+            quantity = _decimal(attempt.get("rounded_executable_quantity"), positive=True)
+            price = _decimal(attempt.get("execution_price"), positive=True)
+            timestamp = _decimal(attempt.get("trigger_bucket_ts"), positive=True)
+            if timestamp != int(timestamp):
+                raise ValueError("NONINTEGER_EVENT_TIMESTAMP")
+            if not all(math.isfinite(float(value)) and float(value) > 0 for value in (quantity, price, timestamp)):
+                raise ValueError("NONFINITE_EVENT_FLOAT_PROJECTION")
+        except (ValueError, ArithmeticError, OverflowError) as exc:
+            raise ValueError("BASELINE_CONTEXT_ACCEPTED_FILL_EVENT_INVALID") from exc
+        events.append((timestamp, price, quantity))
+    if not events:
+        raise ValueError("BASELINE_CONTEXT_ACCEPTED_FILL_EVENTS_MISSING_OR_LIMIT")
+    if sum((event[2] for event in events), Decimal(0)) != filled:
+        raise ValueError("BASELINE_CONTEXT_ACCEPTED_FILL_QUANTITY_MISMATCH")
+    quantity_total = sum(float(event[2]) for event in events)
+    vwap = sum(float(price) * float(quantity) for _timestamp, price, quantity in events) / quantity_total
+    if not math.isfinite(vwap) or vwap <= 0:
+        raise ValueError("BASELINE_CONTEXT_ACCEPTED_FILL_EVENT_INVALID")
+    return {"filled_qty": filled, "fill_price": Decimal(str(vwap)),
+            "completion_ts": max(event[0] for event in events), "first_fill_ts": min(event[0] for event in events),
+            "accepted_event_count": len(events),
+            "exact_entry_notional": sum((price * quantity for _timestamp, price, quantity in events), Decimal(0)),
+            "basis": "ACCEPTED_FILL_EVENTS_TERMINAL_VWAP_AND_COMPLETION"}
+
+
 def build_baseline_execution_context(
     *, generation: Mapping[str, Any], identity: Mapping[str, Any],
     entry_receipt: Mapping[str, Any], pinned_sources: Mapping[str, str],
@@ -287,9 +335,10 @@ def build_baseline_execution_context(
         ):
             raise ValueError("BASELINE_CONTEXT_SUPPORTED_FILL_REQUIRED")
         requested = _decimal(entry_receipt.get("requested_qty"), positive=True)
-        filled = _decimal(entry_receipt.get("filled_qty"), positive=True)
-        fill_ts = _decimal(entry_receipt.get("trigger_bucket_ts"), positive=True)
-        fill_price = _decimal(entry_receipt.get("fill_price"), positive=True)
+        accepted_position = accepted_fill_position(entry_receipt)
+        filled = accepted_position["filled_qty"]
+        fill_ts = accepted_position["completion_ts"]
+        fill_price = accepted_position["fill_price"]
         if filled > requested:
             raise ValueError("BASELINE_CONTEXT_QUANTITY_INCONSISTENT")
         if (identity.get("direction") not in {"LONG", "SHORT"}
@@ -346,7 +395,8 @@ def build_baseline_execution_context(
                 or not str(stage.get("policy_signature") or "")):
             raise ValueError("BASELINE_CONTEXT_SIZING_AUTHORIZATION_INVALID")
         signal_ts = _decimal(stage.get("signal_ts"), positive=True)
-        if _decimal(sizing.get("declared_at_ts")) > signal_ts or signal_ts > fill_ts:
+        if (_decimal(sizing.get("declared_at_ts")) > signal_ts
+                or signal_ts > accepted_position["first_fill_ts"]):
             raise ValueError("BASELINE_CONTEXT_SIZING_NOT_CAUSAL")
         leverage = _decimal(stage.get("leverage"), positive=True)
         original_margin = _decimal(stage.get("requested_margin_usd"), positive=True)
@@ -455,6 +505,10 @@ def build_baseline_execution_context(
                 "timing_basis": "BASELINE_EXECUTION_TIMESTAMPS_UNCHANGED",
                 "latency_provenance": "CONSERVATIVE_RECEIPT_TRIGGER_BUCKET_AND_SCHEDULE_UNCHANGED",
                 "entry_trigger_bucket_ts": str(fill_ts),
+                "accepted_fill_vwap": str(fill_price),
+                "accepted_fill_event_count": accepted_position["accepted_event_count"],
+                "accepted_fill_exact_notional": str(accepted_position["exact_entry_notional"]),
+                "accepted_fill_position_basis": accepted_position["basis"],
                 "sampling_interval_sec": int(interval), "first_sample_offset_sec": int(offset),
                 "required_horizon_end_ts": float(horizon),
                 "path_start_basis": "FIRST_COMPLETE_SAMPLE_AFTER_ENTRY_FILL",

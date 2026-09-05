@@ -30,6 +30,8 @@ def _fixture(*, partial=True, mode="FIXED_QUANTITY"):
     entry = {**values["entry_receipt"], "requested_qty": 1, "schedule_sha256": "a" * 64,
              "filled_qty": .4 if partial else 1,
              "final_classification": "PARTIAL_FILL" if partial else "FULL_FILL"}
+    entry["quantity_attempts"] = [{**values["entry_receipt"]["quantity_attempts"][0],
+                                  "rounded_executable_quantity": entry["filled_qty"]}]
     stage = {**identity, "schema": "compressed_chase_shadow_v1", "event": "STAGE", "stage_index": 0,
              "identity_complete": True, "missing_identity_fields": [],
              "policy_signature": "source-compressed-policy", "signal_ts": 9, "observed_ts": 9,
@@ -192,6 +194,99 @@ def test_partial_context_margin_is_accepted_by_existing_terminal_quantity_accoun
     _rebind(terminal)
     result = evaluate_shadow_terminal(**terminal)
     assert result["status"] == "COMPLETE", result
+
+
+def _multi_fill_inputs():
+    values = _fixture(partial=True)
+    values["entry_receipt"].update(fill_price=110, trigger_bucket_ts=9,
+        quantity_attempts=[
+            {"accepted": True, "rounded_executable_quantity": .2, "execution_price": 100, "trigger_bucket_ts": 9},
+            {"accepted": True, "rounded_executable_quantity": .2, "execution_price": 110, "trigger_bucket_ts": 10},
+        ])
+    return values
+
+
+def test_multi_fill_reprice_context_uses_accepted_vwap_and_last_fill_time():
+    from test_conservative_shadow_terminal import _inputs, _rebind
+    from research.conservative_shadow_terminal import evaluate_shadow_terminal
+    values = _multi_fill_inputs()
+    before = deepcopy(values["entry_receipt"])
+    result = build_baseline_execution_context(**values)
+    assert result["status"] == "SUPPORTED", result
+    context = result["context"]
+    assert context["accepted_fill_vwap"] == "105.0"
+    assert context["entry_trigger_bucket_ts"] == "10"
+    assert context["accepted_fill_event_count"] == 2
+    assert float(context["margin_usd"]) == 4.2
+    assert float(context["accepted_fill_exact_notional"]) == 42
+    assert values["entry_receipt"] == before
+    terminal = _inputs()
+    terminal["entry_receipt"] = values["entry_receipt"]
+    for field in ("position_context_id", "atr_pct_at_fill", "leverage", "margin_usd"):
+        terminal["position_context"][field] = context[field]
+    _rebind(terminal)
+    outcome = evaluate_shadow_terminal(**terminal)
+    assert outcome["status"] == "COMPLETE", outcome
+
+
+@pytest.mark.parametrize("field,value", [
+    ("rounded_executable_quantity", 0), ("rounded_executable_quantity", -1),
+    ("rounded_executable_quantity", float("nan")), ("rounded_executable_quantity", True),
+    ("execution_price", 0), ("execution_price", float("inf")),
+    ("trigger_bucket_ts", 10.5), ("trigger_bucket_ts", None),
+])
+def test_invalid_accepted_fill_cannot_be_ignored_by_context(field, value):
+    values = _multi_fill_inputs()
+    values["entry_receipt"]["quantity_attempts"][1][field] = value
+    assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_ACCEPTED_FILL_EVENT_INVALID"]
+
+
+def test_mismatched_accepted_quantity_is_unknown_without_absolute_tolerance():
+    values = _multi_fill_inputs()
+    values["entry_receipt"]["quantity_attempts"][1]["rounded_executable_quantity"] = "0.20000000000001"
+    assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_ACCEPTED_FILL_QUANTITY_MISMATCH"]
+
+
+def test_missing_accepted_fills_do_not_fall_back_to_top_level_price():
+    values = _multi_fill_inputs()
+    values["entry_receipt"]["quantity_attempts"] = [{"accepted": False, "execution_price": 110}]
+    assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_ACCEPTED_FILL_EVENTS_MISSING_OR_LIMIT"]
+
+
+def test_rejected_bad_attempt_does_not_change_accepted_position():
+    values = _multi_fill_inputs()
+    values["entry_receipt"]["quantity_attempts"].append({"accepted": False, "execution_price": None})
+    assert build_baseline_execution_context(**values)["context"]["accepted_fill_vwap"] == "105.0"
+
+
+def test_observed_atr_at_first_fill_cannot_replace_completion_atr():
+    values = _multi_fill_inputs()
+    _replace(values, "atr_evidence", lambda row: row.update(observed_ts=9, available_at_ts=9))
+    assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_ATR_NOT_EXACT_CAUSAL_FILL"]
+
+
+def test_first_accepted_fill_cannot_precede_signal_even_when_completion_is_later():
+    values = _multi_fill_inputs()
+    values["entry_receipt"]["quantity_attempts"][0]["trigger_bucket_ts"] = 8
+    assert build_baseline_execution_context(**values)["reason_codes"] == ["BASELINE_CONTEXT_SIZING_NOT_CAUSAL"]
+
+
+def test_nonterminating_vwap_matches_terminal_normalization_without_losing_a_lot():
+    from test_conservative_shadow_terminal import _inputs, _rebind
+    from research.conservative_shadow_terminal import evaluate_shadow_terminal
+    values = _multi_fill_inputs()
+    values["entry_receipt"].update(filled_qty=.3, quantity_attempts=[
+        {"accepted": True, "rounded_executable_quantity": .1, "execution_price": price, "trigger_bucket_ts": ts}
+        for price, ts in [(100, 9), (101, 9), (101, 10)]])
+    result = build_baseline_execution_context(**values)
+    assert result["status"] == "SUPPORTED", result
+    terminal = _inputs()
+    terminal["entry_receipt"] = values["entry_receipt"]
+    for field in ("position_context_id", "atr_pct_at_fill", "leverage", "margin_usd"):
+        terminal["position_context"][field] = result["context"][field]
+    _rebind(terminal)
+    evaluated = evaluate_shadow_terminal(**terminal)
+    assert evaluated["status"] == "COMPLETE", evaluated
 
 
 def test_missing_envelope_or_source_limit_is_explicit_unknown():

@@ -75,6 +75,52 @@ def _market_result(report):
     return next(row for row in report["episode_receipts"][0]["results"] if row["baseline_id"] == "MARKET_ENTRY_AT_SIGNAL")
 
 
+def test_context_selection_uses_accepted_completion_not_top_level_trigger(monkeypatch):
+    from copy import deepcopy
+    from research import entry_baseline_replay as replay
+    from test_baseline_execution_context import _fixture
+    values = _fixture()
+    receipt = deepcopy(values["entry_receipt"])
+    attempt = receipt["quantity_attempts"][0]
+    receipt["quantity_attempts"] = [
+        {**attempt, "rounded_executable_quantity": .2, "execution_price": 100, "trigger_bucket_ts": 10},
+        {**attempt, "rounded_executable_quantity": .2, "execution_price": 104, "trigger_bucket_ts": 12},
+    ]
+    late_atr = deepcopy(values["atr_evidence"])
+    late_atr["row"].update(observed_ts="12", available_at_ts=12)
+    episode = {**values["identity"],
+        "_baseline_context_sources": [*values["stage_zero_evidence"], values["sizing_authorization"],
+                                      values["atr_evidence"], late_atr],
+        "_baseline_context_coverage": [{"object": values["coverage_evidence"]}],
+        "_baseline_context_opportunity": {"selection_test_only": True}}
+    selected = {}
+    def capture(**kwargs):
+        selected.update(kwargs)
+        return {"status": "SELECTION_TEST_ONLY", "context": None, "reason_codes": []}
+    monkeypatch.setattr(replay, "build_baseline_execution_context", capture)
+    before = deepcopy(receipt)
+    result = replay._execution_context(episode, {
+        "baseline_id": values["identity"]["baseline_id"],
+        "policy_signature": values["identity"]["baseline_policy_signature"],
+        "conservative_receipt": receipt}, values["generation"])
+    assert result["status"] == "SELECTION_TEST_ONLY"
+    assert selected["atr_evidence"] is late_atr
+    assert receipt == before
+
+
+def test_context_selection_rejects_invalid_accepted_quantity_without_trigger_fallback():
+    from research.entry_baseline_replay import _execution_context
+    from test_baseline_execution_context import _fixture
+    values = _fixture()
+    values["entry_receipt"]["quantity_attempts"][0]["rounded_executable_quantity"] = .1
+    result = _execution_context(values["identity"], {
+        "baseline_id": values["identity"]["baseline_id"],
+        "policy_signature": values["identity"]["baseline_policy_signature"],
+        "conservative_receipt": values["entry_receipt"]}, values["generation"])
+    assert result["status"] == "UNKNOWN"
+    assert result["reason_codes"] == ["BASELINE_CONTEXT_ACCEPTED_FILL_QUANTITY_MISMATCH"]
+
+
 def test_normal_disk_materializer_builds_signed_context_before_episode_hash(tmp_path):
     generation, manifest, files = _dataset(tmp_path)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation, canonical_manifest=manifest)

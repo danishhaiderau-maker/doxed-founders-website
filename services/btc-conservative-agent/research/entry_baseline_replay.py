@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import nullcontext
+from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
 try:
@@ -34,7 +35,7 @@ import hashlib
 import json
 
 from research.baseline_execution_context import (
-    build_baseline_execution_context, IDENTITY_FIELDS, VerifiedLedgerRowIndex,
+    build_baseline_execution_context, accepted_fill_position, IDENTITY_FIELDS, VerifiedLedgerRowIndex,
 )
 from research.policy_evidence_schema import canonical_json, generation_identity
 
@@ -131,8 +132,14 @@ def _execution_context(episode: Mapping, result: Mapping, generation: Mapping) -
     stages = [item for item in sources if item["row"].get("schema") == "compressed_chase_shadow_v1"]
     sizing = [item for item in sources if item["row"].get("schema") == "baseline_sizing_authorization_v1"
               and item["row"].get("baseline_id") == result["baseline_id"]]
-    atr = [item for item in sources if item["row"].get("schema") == "baseline_fill_atr_observation_v1"
-           and item["row"].get("observed_ts") == result["conservative_receipt"].get("trigger_bucket_ts")]
+    try:
+        completion_ts = accepted_fill_position(result["conservative_receipt"])["completion_ts"]
+        atr = [item for item in sources if item["row"].get("schema") == "baseline_fill_atr_observation_v1"
+               and not isinstance(item["row"].get("observed_ts"), bool)
+               and Decimal(str(item["row"].get("observed_ts"))) == completion_ts]
+    except (ValueError, InvalidOperation, TypeError, KeyError) as exc:
+        code = str(exc) if isinstance(exc, ValueError) else "BASELINE_CONTEXT_FILL_TIME_INPUT_INVALID"
+        return {"status": "UNKNOWN", "context": None, "reason_codes": [code]}
     coverage = episode.get("_baseline_context_coverage") or []
     reasons = list(episode.get("_baseline_context_pin_reasons") or [])
     if episode.get("_baseline_context_opportunity") is None:
