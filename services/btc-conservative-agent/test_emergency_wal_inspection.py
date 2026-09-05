@@ -1,4 +1,5 @@
 import hashlib
+import json
 import pytest
 from emergency_evidence_wal import EmergencyEvidenceWal
 
@@ -44,6 +45,28 @@ def test_missing_is_not_provisioned(tmp_path):
     with pytest.raises(FileNotFoundError):
         EmergencyEvidenceWal.inspect_existing(root, identity=IDENTITY, extents=1)
     assert not root.exists()
+
+
+def test_replayed_record_is_still_retained_until_ack(tmp_path):
+    root = tmp_path / "v3/emergency_evidence_wal_v2"
+    wal = EmergencyEvidenceWal(root, identity=IDENTITY, extents=1)
+    payload = b'{"record_id":"terminal:1"}\n'
+    row = wal.defer(ledger="lifecycle", record_id="terminal:1", payload=payload)
+    ledger = tmp_path / "v3/ledgers/lifecycle.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_bytes(payload)
+    receipt = tmp_path / "v3/receipts/terminal.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(json.dumps({"schema": "emergency_record_idempotency_v1",
+        "state": "COMMITTED", "ledger": "lifecycle", "record_id": "terminal:1",
+        "row_sha256": hashlib.sha256(payload).hexdigest(), "offset": 0,
+        "length": len(payload), "identity": IDENTITY}), encoding="utf-8")
+    wal.mark_replayed(row["generation"], canonical_ledger=ledger, canonical_receipt=receipt)
+    before = hashes(root)
+    status = EmergencyEvidenceWal.inspect_existing(root, identity=IDENTITY, extents=1)
+    assert status["deferred_count"] == 1
+    assert status["records"][0]["state"] == "REPLAYED"
+    assert hashes(root) == before
 
 @pytest.mark.parametrize("attribute", ["data_path", "header_path"])
 def test_truncated_empty_reserve_is_not_empty_proof(tmp_path, attribute):
