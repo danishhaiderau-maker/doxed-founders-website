@@ -29830,9 +29830,13 @@ def dump_system_state(*, trigger="UNSPECIFIED", progress=None, incident=None, re
         snapshot = {
             "time": utc_iso(),
             "edge_score": state.get("last_edge", 0.0),
-            "edge_threshold": get_edge_threshold(),
+            "edge_threshold": state.get("edge_threshold"),
             "last_pipeline_stage": state.get("last_pipeline_stage"),
-            "active_signals": get_active_signal_count(),
+            # Crash collection must not reconcile ledgers or acquire business
+            # locks. These unlocked observations are advisory, not exposure proof.
+            "active_signals": None,
+            "active_signals_status": "UNAVAILABLE_NONMUTATING_CRASH_SNAPSHOT",
+            "snapshot_consistency": "ADVISORY_UNLOCKED",
             "open_positions": len(open_positions),
             "pending_orders": len(pending_orders),
             "last_ai_call_ts": state.get("last_ai_call_ts", 0),
