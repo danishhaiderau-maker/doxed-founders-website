@@ -33,6 +33,7 @@ from research.policy_evidence_bindings import (
 from pathlib import Path
 import hashlib
 import json
+import re
 
 from research.baseline_execution_context import (
     build_baseline_execution_context, accepted_fill_position, IDENTITY_FIELDS, VerifiedLedgerRowIndex,
@@ -107,9 +108,14 @@ def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: 
     authorizations/observations; its absence is reported, never synthesized.
     """
     statuses = []
+    lifecycle_sources = sorted(name for name in pins
+        if re.fullmatch(r"v3/ledgers/lifecycle\.jsonl(?:\.[1-9][0-9]*)?", name))
+    if len(lifecycle_sources) > 1024:
+        raise ValueError("SIGNAL_SNAPSHOT_LIFECYCLE_SOURCE_LIMIT")
     for relative in ("chase_offset_touch_grid.jsonl", "chase_offset_touch_grid.jsonl.1",
                      "v3/ledgers/baseline_execution_context.jsonl", "v3/ledgers/opportunity.jsonl",
-                     "v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl"):
+                     "v3/ledgers/market_segment.jsonl", "v3/recovery_ledgers/market_segment.jsonl",
+                     *lifecycle_sources):
         if relative not in pins:
             statuses.append({"source_id": relative, "status": "UNAVAILABLE", "reason": "SOURCE_NOT_IN_PINNED_DATASET"})
             continue
@@ -121,6 +127,86 @@ def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: 
         except (OSError, ValueError, UnicodeError, TypeError, RecursionError) as exc:
             statuses.append({"source_id": relative, "status": "UNKNOWN", "reason": str(exc)})
     return statuses
+
+
+def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
+                                index: VerifiedLedgerRowIndex | None, *, epoch: str, episode: str) -> dict:
+    """Expose event-scoped first-capture evidence without rewriting opportunity truth."""
+    result = {"schema": "verified_signal_snapshot_projection_v1", "status": "UNAVAILABLE",
+              "contexts": [], "reason_codes": [], "observed_at_signal_claim": False,
+              "fill_atr_authority": False, "qualification_allowed": False}
+    if index is None:
+        result["reason_codes"] = ["SIGNAL_SNAPSHOT_PINNED_GENERATION_UNAVAILABLE"]
+        return result
+    lifecycle_sources = [name for name in pins
+        if re.fullmatch(r"v3/ledgers/lifecycle\.jsonl(?:\.[1-9][0-9]*)?", name)]
+    if not lifecycle_sources:
+        result["reason_codes"] = ["SIGNAL_SNAPSHOT_LIFECYCLE_SOURCE_UNAVAILABLE"]
+        return result
+    if any(name not in index.sources for name in lifecycle_sources):
+        result.update(status="UNKNOWN", reason_codes=["SIGNAL_SNAPSHOT_LIFECYCLE_SOURCE_NOT_VERIFIED"])
+        return result
+    try:
+        envelopes = index.lifecycle_envelopes(epoch, episode)
+    except ValueError as exc:
+        result.update(status="UNKNOWN", reason_codes=[str(exc)])
+        return result
+    groups = {}
+    projection_bytes = 0
+    from collector_signal_snapshot import load_signal_snapshot, MAX_SNAPSHOT_BYTES
+    for envelope in envelopes:
+        row = envelope["row"]
+        ref = row.get("research_signal_snapshot_ref")
+        if ref is None:
+            continue
+        event_id = row.get("event_id")
+        key = (str(event_id), canonical_json({"reference": ref, "signal_ts": row.get("signal_ts")}))
+        membership = {"source_id": envelope["source_id"], "source_sha256": index.sources[envelope["source_id"]],
+                      "record_id": row.get("record_id"), "row_sha256": envelope["row_sha256"]}
+        if key in groups:
+            groups[key]["source_lifecycle_rows"].append(membership)
+            continue
+        projected = {"event_id": event_id, "epoch_id": epoch, "signal_ts": row.get("signal_ts"),
+                     "reference": ref, "status": "UNKNOWN", "reason_codes": [],
+                     "source_lifecycle_rows": [membership], "observed_at_signal_claim": False}
+        groups[key] = projected
+        try:
+            if not isinstance(ref, Mapping):
+                raise ValueError("SIGNAL_SNAPSHOT_REFERENCE_INVALID")
+            relative = ref.get("relative_path")
+            if not isinstance(relative, str) or relative not in pins:
+                raise ValueError("SIGNAL_SNAPSHOT_NOT_IN_PINNED_DATASET")
+            if pins[relative] != ref.get("sha256") or records[relative].get("size") != ref.get("bytes"):
+                raise ValueError("SIGNAL_SNAPSHOT_MANIFEST_REFERENCE_MISMATCH")
+            index.read_pinned_object(root, relative, expected_sha=pins[relative],
+                                     expected_size=records[relative].get("size"), max_bytes=MAX_SNAPSHOT_BYTES)
+            snapshot = load_signal_snapshot(ref, data_dir=root, event_id=event_id,
+                                             epoch_id=epoch, signal_ts=row.get("signal_ts"))
+            if snapshot.get("capture_basis") != "FIRST_COLLECTOR_CAPTURE":
+                raise ValueError("SIGNAL_SNAPSHOT_CAPTURE_BASIS_INVALID")
+            projection_bytes += len(canonical_json(snapshot["evidence"]).encode())
+            if projection_bytes > 8 * 1024 * 1024:
+                raise ValueError("SIGNAL_SNAPSHOT_PROJECTION_GROUP_LIMIT")
+            projected.update(status="VERIFIED_FIRST_COLLECTOR_CAPTURE", fields=snapshot["evidence"],
+                             captured_at=snapshot.get("captured_at"), capture_basis=snapshot.get("capture_basis"),
+                             availability_at_signal_verified=False)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            reason = str(exc) if isinstance(exc, ValueError) else "SIGNAL_SNAPSHOT_OBJECT_UNAVAILABLE"
+            if reason == "SIGNAL_SNAPSHOT_PROJECTION_GROUP_LIMIT":
+                result.update(status="UNKNOWN", contexts=[], reason_codes=[reason])
+                return result
+            projected["reason_codes"] = [reason]
+    events = Counter(key[0] for key in groups)
+    for (event, _), projected in groups.items():
+        if events[event] > 1:
+            projected.update(status="UNKNOWN", reason_codes=sorted(set(projected["reason_codes"] + ["SIGNAL_SNAPSHOT_EVENT_REFERENCE_CONFLICT"])))
+    result["contexts"] = list(groups.values())
+    result["status"] = ("UNKNOWN" if any(row["status"] == "UNKNOWN" for row in groups.values())
+                        else "VERIFIED_FIRST_COLLECTOR_CAPTURE" if groups else "UNAVAILABLE")
+    result["reason_codes"] = sorted({code for row in groups.values() for code in row["reason_codes"]})
+    if not groups:
+        result["reason_codes"] = ["SIGNAL_SNAPSHOT_NO_DECLARED_REFERENCE"]
+    return result
 
 
 def _execution_context(episode: Mapping, result: Mapping, generation: Mapping) -> dict:
@@ -439,6 +525,7 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         "market_evidence_reason_codes": list(episode.get("market_evidence_reason_codes") or []),
         "materialization_reason_codes": list(episode.get("materialization_reason_codes") or []),
         "future_path_selection": episode.get("future_path_selection"),
+        "signal_snapshot_evidence": episode.get("signal_snapshot_evidence"),
         "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
         "results": results,
     }
@@ -483,6 +570,9 @@ def materialize_same_opportunity_replay(
         "profitability_supported": False,
         "profitability_blocker": "BASELINE_EXIT_AND_COST_COMPLETE_TERMINAL_RECEIPT_NOT_IMPLEMENTED",
         "relay_eligible": False,
+        "signal_snapshot_coverage": dict(Counter(
+            (receipt.get("signal_snapshot_evidence") or {}).get("status", "UNAVAILABLE") for receipt in receipts
+        )),
     }
     if generation is not None:
         material["generation"] = dict(generation)
@@ -719,6 +809,10 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                         if any(incident_input.affected(item) for item in market_rows) else []
                     ))),
                     "future_path_selection": history,
+                    "signal_snapshot_evidence": _signal_snapshot_projection(
+                        Path(data_dir), context_pins, context_records, context_index,
+                        epoch=str(dataset_epoch or ""), episode=str(row.get("episode_id") or ""),
+                    ),
                     "_baseline_context_sources": episode_context_sources,
                     "_baseline_context_pins": context_pins,
                     "_baseline_context_pin_reasons": episode_context_reasons,

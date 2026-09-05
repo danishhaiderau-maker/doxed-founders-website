@@ -24,6 +24,7 @@ _PRESERVE_NONEMPTY_SOURCE_FIELDS = (
     "created_ts_ts",
     "signal_ts",
     "research_feature_snapshot",
+    "research_signal_snapshot_ref",
 )
 
 

@@ -66,6 +66,7 @@ class VerifiedLedgerRowIndex:
             epoch TEXT, opportunity TEXT, episode TEXT, shared TEXT, event TEXT, schema_name TEXT)""")
         self._connection.execute("CREATE INDEX by_row ON evidence_rows(source_id,row_sha)")
         self._connection.execute("CREATE INDEX by_identity ON evidence_rows(epoch,opportunity,episode,shared,event)")
+        self._connection.execute("CREATE INDEX by_episode_event ON evidence_rows(epoch,episode,event)")
         self.sources: dict[str, str] = {}
         self._source_snapshots: dict[str, tuple[Path, tuple]] = {}
 
@@ -182,6 +183,44 @@ class VerifiedLedgerRowIndex:
                 raise ValueError("BASELINE_CONTEXT_IDENTITY_CANDIDATE_LIMIT")
             results.append(self._envelope(row))
         return results
+
+    def lifecycle_envelopes(self, epoch: str, episode: str) -> list[dict]:
+        """Return all bounded per-event lifecycle rows, never a sampled prefix."""
+        cursor = self._connection.execute("""SELECT source_id,row_sha,payload,byte_offset,line_number
+            FROM evidence_rows WHERE epoch=? AND episode=?
+            AND source_id GLOB 'v3/ledgers/lifecycle.jsonl*'
+            ORDER BY event,source_id,line_number LIMIT 129""", (epoch, episode))
+        result = []
+        size = 0
+        for row in cursor:
+            size += len(row[2])
+            if len(result) >= 128 or size > 8 * 1024 * 1024:
+                raise ValueError("SIGNAL_SNAPSHOT_LIFECYCLE_GROUP_LIMIT")
+            result.append(self._envelope(row))
+        return result
+
+    def read_pinned_object(self, root: Path, relative: str, *, expected_sha: str,
+                           expected_size: int, max_bytes: int) -> bytes:
+        """Verify one bounded dependency and fence it until report completion."""
+        path = root / relative
+        path.resolve().relative_to(root.resolve())
+        if (not _hash(expected_sha) or type(expected_size) is not int
+                or not 0 < expected_size <= max_bytes):
+            raise ValueError("SIGNAL_SNAPSHOT_SOURCE_PIN_INVALID")
+        if any(part.is_symlink() or (getattr(part.stat(), "st_file_attributes", 0) & 0x400)
+               for part in (path, *path.parents)):
+            raise ValueError("SOURCE_LINK_FORBIDDEN")
+        before = self._file_identity(path)
+        with path.open("rb") as handle:
+            raw = handle.read(max_bytes + 1)
+        if (len(raw) != expected_size or hashlib.sha256(raw).hexdigest() != expected_sha
+                or self._file_identity(path) != before):
+            raise ValueError("SIGNAL_SNAPSHOT_PINNED_OBJECT_MISMATCH")
+        previous = self._source_snapshots.get(relative)
+        if previous is not None and previous != (path, before):
+            raise ValueError("SIGNAL_SNAPSHOT_SOURCE_CHANGED_DURING_REPLAY")
+        self._source_snapshots[relative] = (path, before)
+        return raw
 
 
 def _sha(value: Any) -> str:

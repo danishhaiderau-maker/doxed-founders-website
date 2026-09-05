@@ -12918,19 +12918,21 @@ def _merge_collector_v22_provisionals(*, reason: str) -> int:
     """Self-heal from the journal without monopolising the epoch lock."""
     epoch_id = _collector_v22_epoch_id()
     restored = 0
-    for event_id, source in load_provisional_events(epoch_id=epoch_id).items():
+    for event_id, source in load_provisional_events(
+        epoch_id=epoch_id, data_dir=str(_data_sync_runtime_root()),
+    ).items():
         # A fresh-epoch boundary invalidates the loaded snapshot.  Check it at
         # each short mutation boundary instead of holding the epoch lock while
         # reading and validating the whole durable journal.
         with _collector_epoch_lock:
             if _collector_v22_epoch_id() != epoch_id:
                 return restored
-        if event_already_written(event_id):
+        if event_already_written(event_id, data_dir=str(_data_sync_runtime_root())):
             # Reconcile a crash after final commit but before journal cleanup.
             with _collector_epoch_lock:
                 if _collector_v22_epoch_id() != epoch_id:
                     return restored
-                remove_provisional_event(event_id)
+                remove_provisional_event(event_id, data_dir=str(_data_sync_runtime_root()))
                 _order_multiverse_written.add(event_id)
             continue
         with _collector_epoch_lock:
@@ -13402,6 +13404,16 @@ def _maybe_complete_pending_order_multiverse():
         )
 
 
+def _collector_frozen_signal_ref(source: dict, trade_id: str):
+    """Prefer the original recovery reference; conflicting identities fail closed."""
+    previous = _order_multiverse_pending_src.get(trade_id)
+    saved = previous.get("research_signal_snapshot_ref") if isinstance(previous, dict) else None
+    incoming = source.get("research_signal_snapshot_ref")
+    if saved is not None and incoming is not None and saved != incoming:
+        raise ValueError("SIGNAL_SNAPSHOT_REFERENCE_CONFLICT")
+    return saved if saved is not None else incoming
+
+
 @_collector_epoch_serialized
 def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
     """v2.2: write-once immutable research event per event_id (~210 KB)."""
@@ -13415,7 +13427,8 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
         )
         return None
     if storage_blocks_new_events() and not event_already_written(
-        str(source.get("trade_id") or source.get("canonical_trade_id") or "")
+        str(source.get("trade_id") or source.get("canonical_trade_id") or ""),
+        data_dir=str(_data_sync_runtime_root()),
     ):
         logger.warning("[COLLECTOR_V22] STORAGE_PRESSURE — skipping new research event [PIPELINE ENFORCEMENT]")
         return None
@@ -13550,6 +13563,12 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             signed_quantity_constraints=source.get("signed_quantity_constraints"),
             chase_schedule=source.get("research_chase_schedule") or source.get("chase_schedule"),
             chase_schedule_authoritative=bool(source.get("chase_schedule_authoritative")),
+            frozen_signal_snapshot_ref=_collector_frozen_signal_ref(source, tid),
+            snapshot_data_dir=str(_data_sync_runtime_root()),
+        )
+        from collector_signal_snapshot import freeze_signal_snapshot
+        record["research_signal_snapshot_ref"] = freeze_signal_snapshot(
+            record, data_dir=_data_sync_runtime_root(), captured_at=time.time(),
         )
         obs = str(record.get("observation_status") or "")
         keep_collecting = not terminal_observation(obs)
@@ -13578,18 +13597,20 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "quantity_constraints_status": copy.deepcopy(source.get("quantity_constraints_status")),
             "research_chase_schedule": source.get("research_chase_schedule") or source.get("chase_schedule"),
             "chase_schedule_authoritative": bool(source.get("chase_schedule_authoritative")),
-            "research_feature_snapshot": feature_snapshot,
+            "research_feature_snapshot": copy.deepcopy(record["feature_snapshot_at_signal"]),
+            "research_signal_snapshot_ref": record["research_signal_snapshot_ref"],
         }
         if keep_collecting:
             _order_multiverse_pending_src[tid] = pending_payload
             _order_multiverse_state[tid] = obs or "PENDING"
             pending_payload["observation_status"] = obs or "PENDING"
-            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id())
+            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id(),
+                                     data_dir=str(_data_sync_runtime_root()))
             return record
         _order_multiverse_pending_src.pop(tid, None)
-        written, reason = write_research_event_once(record)
+        written, reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
         if written:
-            remove_provisional_event(tid)
+            remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
             compact = dict(record)
             compact["event"] = obs
@@ -13692,7 +13713,8 @@ def _refresh_collector_v22_registered_order_evidence(
     refreshed["research_chase_schedule"] = copy.deepcopy(schedule)
     refreshed["chase_schedule_authoritative"] = True
     _order_multiverse_pending_src[tid] = refreshed
-    upsert_provisional_event(tid, refreshed, epoch_id=_collector_v22_epoch_id())
+    upsert_provisional_event(tid, refreshed, epoch_id=_collector_v22_epoch_id(),
+                             data_dir=str(_data_sync_runtime_root()))
     # V3 submit receipts are immutable. Once the existing recorder closes the
     # schedule, append its final exact version for conservative replay. This is
     # evidence-only and cannot affect order execution.
@@ -13805,6 +13827,12 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             signed_quantity_constraints=signal.get("signed_quantity_constraints"),
             chase_schedule=signal.get("research_chase_schedule") or signal.get("chase_schedule"),
             chase_schedule_authoritative=bool(signal.get("chase_schedule_authoritative")),
+            frozen_signal_snapshot_ref=_collector_frozen_signal_ref(signal, tid),
+            snapshot_data_dir=str(_data_sync_runtime_root()),
+        )
+        from collector_signal_snapshot import freeze_signal_snapshot
+        record["research_signal_snapshot_ref"] = freeze_signal_snapshot(
+            record, data_dir=_data_sync_runtime_root(), captured_at=time.time(),
         )
         if would_block_only:
             record["would_block_only"] = True
@@ -13835,7 +13863,8 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 "collector_rejected": True,
                 "collector_reject_reason": reason,
                 "collector_would_block_only": bool(would_block_only),
-                "research_feature_snapshot": feature_snapshot,
+                "research_feature_snapshot": copy.deepcopy(record["feature_snapshot_at_signal"]),
+                "research_signal_snapshot_ref": record["research_signal_snapshot_ref"],
                 "collector_ai": dict(ai or {}),
                 "qty": signal.get("qty"),
                 "signed_quantity_constraints": copy.deepcopy(signal.get("signed_quantity_constraints")),
@@ -13846,16 +13875,17 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             _order_multiverse_pending_src[tid] = pending_payload
             _order_multiverse_state[tid] = obs
             pending_payload["observation_status"] = obs
-            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id())
+            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id(),
+                                     data_dir=str(_data_sync_runtime_root()))
             logger.info(
                 f"[COLLECTOR_V22] REJECTED provisional trade_id={tid} obs={obs}; awaiting complete tape "
                 f"[PIPELINE ENFORCEMENT]"
             )
             return record
-        written, _reason = write_research_event_once(record)
+        written, _reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
         if written:
             _order_multiverse_pending_src.pop(tid, None)
-            remove_provisional_event(tid)
+            remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
             _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
         logger.info(

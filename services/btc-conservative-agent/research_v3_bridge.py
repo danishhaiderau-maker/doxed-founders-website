@@ -1688,6 +1688,19 @@ def dual_write_lifecycle_qualification_horizon(
     }
 
 
+def _validated_signal_snapshot_fields(
+    source: Mapping[str, Any], *, event_id: str, epoch_id: str, signal_ts: float, data_dir: str,
+) -> dict[str, Any]:
+    """Carry only verified immutable dependencies; never reconstruct missing evidence."""
+    reference = source.get("research_signal_snapshot_ref")
+    if reference is None:
+        return {}
+    from collector_signal_snapshot import load_signal_snapshot
+    load_signal_snapshot(reference, data_dir=data_dir, event_id=event_id,
+                         epoch_id=epoch_id, signal_ts=signal_ts)
+    return {"research_signal_snapshot_ref": copy.deepcopy(reference), "signal_ts": float(signal_ts)}
+
+
 def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
     """Record the causal opportunity immediately, before its long path matures."""
     signal_ts = float(_first(source.get("created_ts_ts"), source.get("signal_ts"), 0) or 0)
@@ -1714,6 +1727,9 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
     else:
         episode_id = stable_episode_id
         grouping_basis = "STABLE_EVENT_EPISODE"
+    snapshot_fields = _validated_signal_snapshot_fields(
+        source, event_id=event_id, epoch_id=epoch_id, signal_ts=signal_ts, data_dir=data_dir,
+    )
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{episode_id}",
@@ -1732,6 +1748,7 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:opened",
+        **snapshot_fields,
         "episode_id": episode_id,
         "event_id": str(event_id),
         "observation_status": str(source.get("observation_status") or "PENDING"),
@@ -1809,6 +1826,10 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         episode_id = stable_episode_id
     if not epoch_id or not event_id or not episode_id:
         raise ValueError("V3_IDENTITY_INCOMPLETE")
+    signal_ts = float(_first(envelope.get("signal_ts"), record.get("signal_ts"), 0) or 0)
+    snapshot_fields = _validated_signal_snapshot_fields(
+        record, event_id=event_id, epoch_id=epoch_id, signal_ts=signal_ts, data_dir=data_dir,
+    )
     store = V3EvidenceStore(data_dir, epoch_id=epoch_id)
     tape = record.get("canonical_tape") if isinstance(record.get("canonical_tape"), Mapping) else {}
     path_1m = tape.get("path_1m") if isinstance(tape.get("path_1m"), list) else []
@@ -1904,6 +1925,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     )
     writes.append(store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:terminal",
+        **snapshot_fields,
         "episode_id": episode_id,
         "event_id": event_id,
         "observation_status": record.get("observation_status"),

@@ -570,6 +570,8 @@ def build_research_event(
     chase_schedule: Optional[Sequence[Mapping[str, Any]]] = None,
     chase_schedule_authoritative: bool = False,
     signed_quantity_constraints: Optional[Mapping[str, Any]] = None,
+    frozen_signal_snapshot_ref: Optional[Mapping[str, Any]] = None,
+    snapshot_data_dir: Optional[str] = None,
 ) -> dict:
     """Single immutable v2.2 event envelope + canonical 1m tape."""
     direction_u = str(direction or "SHORT").upper()
@@ -577,6 +579,20 @@ def build_research_event(
         "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
     ) if invert_on else direction_u
     event_id = make_event_id(trade_id, signal_ts)
+    frozen_evidence = None
+    if frozen_signal_snapshot_ref is not None:
+        from collector_signal_snapshot import load_signal_snapshot
+        frozen = load_signal_snapshot(
+            frozen_signal_snapshot_ref, data_dir=snapshot_data_dir or os.getcwd(),
+            event_id=event_id, epoch_id=epoch_id, signal_ts=signal_ts,
+        )
+        frozen_evidence = frozen["evidence"]
+        feature_snapshot = frozen_evidence["feature_snapshot_at_signal"]
+        decision_tree = frozen_evidence["decision_tree_snapshot"]
+        rsi_at_signal = frozen_evidence["rsi_at_signal"]
+        would_block = frozen_evidence["would_block"]
+        would_block_reason = frozen_evidence["would_block_reason"]
+        atr14_pct = frozen_evidence["atr14_pct"]
     episode = make_event_episode(
         signal_ts=signal_ts,
         # Episode identity belongs to the causal signal. Inversion is a policy
@@ -604,7 +620,8 @@ def build_research_event(
         actual_fill_ts=live_fill_ts,
     )
     path_1m = slice_canonical_tape_1m(candles_1m, tape_start=tape_start, tape_end=tape_end)
-    pre_signal = build_pre_signal_context(candles_1m, signal_ts=signal_ts)
+    pre_signal = (frozen_evidence["pre_signal_context"] if frozen_evidence is not None
+                  else build_pre_signal_context(candles_1m, signal_ts=signal_ts))
     live_filled = live_fill_ts is not None
     if live_filled and not ticket_closed:
         entry_outcome = "FILLED"
@@ -786,6 +803,7 @@ def build_research_event(
         "envelope": envelope,
         "decision_tree_snapshot": tree,
         "pre_signal_context": pre_signal,
+        "research_signal_snapshot_ref": dict(frozen_signal_snapshot_ref) if frozen_signal_snapshot_ref is not None else None,
         "feature_snapshot_at_signal": dict(feature_snapshot or {}),
         "research_horizon": dict(RESEARCH_HORIZON_V1),
         "canonical_tape": {

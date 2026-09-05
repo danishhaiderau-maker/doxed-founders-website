@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -21,6 +22,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from research_v3_contract import LEDGER_NAMES, canonical_json
+from collector_signal_snapshot import (
+    SCHEMA as SIGNAL_SNAPSHOT_SCHEMA, REF_SCHEMA as SIGNAL_SNAPSHOT_REF_SCHEMA,
+    MAX_SNAPSHOT_BYTES, decode_signal_snapshot,
+)
 
 
 BUNDLE_SCHEMA = "research_lifecycle_bundle_v1"
@@ -615,6 +620,140 @@ def _referenced_market_segments(root: Path, rows: Iterable[dict[str, Any]]) -> l
     return sorted(paths)
 
 
+def _valid_snapshot_timestamp(value: Any) -> bool:
+    try:
+        return (type(value) in (int, float) and math.isfinite(value) and value > 0
+                and _utc_iso(value) is not None)
+    except (OverflowError, ValueError):
+        return False
+
+
+def _signal_snapshot_references(rows: Iterable[dict[str, Any]], *, epoch_id: str) -> list[dict[str, Any]]:
+    """Legacy absence is valid; an explicit malformed dependency is not."""
+    references: dict[str, dict[str, Any]] = {}
+    event_refs: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if "research_signal_snapshot_ref" not in row:
+            continue
+        ref = row["research_signal_snapshot_ref"]
+        identity = ref.get("identity") if isinstance(ref, dict) else None
+        digest = ref.get("sha256") if isinstance(ref, dict) else None
+        if (not isinstance(ref, dict) or ref.get("schema") != SIGNAL_SNAPSHOT_REF_SCHEMA
+                or not isinstance(identity, dict)
+                or set(identity) != {"event_id", "epoch_id", "signal_ts"}
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)
+                or ref.get("relative_path") != f"v3/signal_snapshots_v1/{digest}.json"
+                or type(ref.get("bytes")) is not int or not 0 < ref["bytes"] <= MAX_SNAPSHOT_BYTES):
+            raise ValueError("SIGNAL_SNAPSHOT_REFERENCE_INVALID")
+        for field in ("event_id", "epoch_id"):
+            value = identity[field]
+            if (not isinstance(value, str) or not value.strip() or value != value.strip()
+                    or row.get(field) != value):
+                raise ValueError("SIGNAL_SNAPSHOT_EVENT_IDENTITY_MISMATCH")
+        if identity["epoch_id"] != epoch_id:
+            raise ValueError("SIGNAL_SNAPSHOT_BUNDLE_EPOCH_MISMATCH")
+        signal_ts = identity["signal_ts"]
+        if not _valid_snapshot_timestamp(signal_ts):
+            raise ValueError("SIGNAL_SNAPSHOT_SIGNAL_TIME_INVALID")
+        # New per-event bridge rows carry this independently of the reference.
+        # Never substitute an observed/terminal timestamp or infer it from ref.
+        if "signal_ts" not in row or isinstance(row["signal_ts"], bool) or row["signal_ts"] != signal_ts:
+            raise ValueError("SIGNAL_SNAPSHOT_SIGNAL_TIME_MISMATCH")
+        event = (identity["epoch_id"], identity["event_id"])
+        if event in event_refs and event_refs[event] != digest:
+            raise ValueError("SIGNAL_SNAPSHOT_EVENT_REFERENCE_CONFLICT")
+        event_refs[event] = digest
+        relative = ref["relative_path"]
+        if relative in references and references[relative] != ref:
+            raise ValueError("SIGNAL_SNAPSHOT_REFERENCE_CONFLICT")
+        references[relative] = dict(ref)
+    return [references[key] for key in sorted(references)]
+
+
+def _snapshot_member_path(ref: dict[str, Any]) -> str:
+    return f"signal_snapshots/{ref['sha256']}.json"
+
+
+def _read_signal_snapshot(path: Path, ref: dict[str, Any], *, root: Path) -> dict[str, Any]:
+    # Reject links before resolve; the dependency must be an ordinary file
+    # inside the exact source/bundle root, including on Windows junctions.
+    lexical = path.absolute()
+    try:
+        lexical.relative_to(root)
+        path.resolve().relative_to(root)
+    except ValueError as exc:
+        raise ValueError("SIGNAL_SNAPSHOT_PATH_OUTSIDE_ROOT") from exc
+    for part in (lexical, *lexical.parents):
+        if (part.is_symlink() or (hasattr(part, "is_junction") and part.is_junction())
+                or (part.exists() and getattr(os.lstat(part), "st_file_attributes", 0) & 0x400)):
+            raise ValueError("SIGNAL_SNAPSHOT_LINK_REFUSED")
+        if part == root:
+            break
+    with open(_io_path(path), "rb") as handle:
+        raw = handle.read(MAX_SNAPSHOT_BYTES + 1)
+    if len(raw) != ref["bytes"] or hashlib.sha256(raw).hexdigest() != ref["sha256"]:
+        raise ValueError("SIGNAL_SNAPSHOT_HASH_OR_SIZE_MISMATCH")
+    return decode_signal_snapshot(raw, identity=ref["identity"])
+
+
+def _copy_signal_snapshots(root: Path, target: Path, refs: list[dict[str, Any]], *, transfer: bool) -> list[dict[str, Any]]:
+    receipts = []
+    for ref in refs:
+        source = root / ref["relative_path"]
+        _read_signal_snapshot(source, ref, root=root)
+        relative = _snapshot_member_path(ref)
+        destination = target / relative
+        os.makedirs(_io_path(destination.parent), exist_ok=True)
+        shutil.copyfile(_io_path(source), _io_path(destination))
+        # Windows FlushFileBuffers requires a writable handle; this is our
+        # newly owned staging copy, never the immutable source.
+        with open(_io_path(destination), "r+b") as handle:
+            os.fsync(handle.fileno())
+        _fsync_dir(destination.parent)
+        # Reverify against the pinned ref, not the possibly changed source.
+        payload = _read_signal_snapshot(destination, ref, root=target)
+        receipts.append(_file_receipt(
+            destination, relative,
+            role="TRANSFER_SIGNAL_SNAPSHOT" if transfer else "SIGNAL_SNAPSHOT", row_count=1,
+            first_timestamp=_utc_iso(ref["identity"]["signal_ts"]),
+            last_timestamp=_utc_iso(payload["captured_at"]),
+        ))
+        receipts[-1]["source_relative_path"] = ref["relative_path"]
+        receipts[-1]["snapshot_identity"] = dict(ref["identity"])
+    return receipts
+
+
+def _verify_signal_snapshot_members(bundle: Path, refs: list[dict[str, Any]], files: list[dict[str, Any]], *, transfer: bool) -> None:
+    expected = {_snapshot_member_path(ref): ref for ref in refs}
+    actual = {}
+    roles = {"SIGNAL_SNAPSHOT", "TRANSFER_SIGNAL_SNAPSHOT"}
+    for receipt in files:
+        path = str(receipt.get("path") or "")
+        if receipt.get("role") in roles or path.startswith("signal_snapshots/"):
+            if path in actual:
+                raise ValueError("SIGNAL_SNAPSHOT_DUPLICATE_MEMBER")
+            actual[path] = receipt
+    if set(actual) != set(expected):
+        raise ValueError("SIGNAL_SNAPSHOT_DEPENDENCY_SET_MISMATCH")
+    snapshot_directory = bundle / "signal_snapshots"
+    if snapshot_directory.exists():
+        if {path.name for path in snapshot_directory.iterdir()} != {Path(path).name for path in expected}:
+            raise ValueError("SIGNAL_SNAPSHOT_UNLISTED_MEMBER")
+    for relative, ref in expected.items():
+        receipt = actual[relative]
+        role = "TRANSFER_SIGNAL_SNAPSHOT" if transfer else "SIGNAL_SNAPSHOT"
+        if (receipt.get("role") != role or receipt.get("source_relative_path") != ref["relative_path"]
+                or receipt.get("sha256") != ref["sha256"] or type(receipt.get("size")) is not int
+                or receipt["size"] != ref["bytes"] or type(receipt.get("row_count")) is not int
+                or receipt["row_count"] != 1 or receipt.get("snapshot_identity") != ref["identity"]):
+            raise ValueError("SIGNAL_SNAPSHOT_MEMBER_BINDING_MISMATCH")
+        payload = _read_signal_snapshot(bundle / relative, ref, root=bundle)
+        if (receipt.get("first_timestamp") != _utc_iso(ref["identity"]["signal_ts"])
+                or receipt.get("last_timestamp") != _utc_iso(payload["captured_at"])):
+            raise ValueError("SIGNAL_SNAPSHOT_MEMBER_TIME_MISMATCH")
+
+
 def _file_receipt(
     path: Path, relative: str, *, role: str, row_count: int,
     first_timestamp: str, last_timestamp: str,
@@ -662,7 +801,7 @@ def _consistent_provenance(rows: Iterable[dict[str, Any]]) -> dict[str, str]:
 
 def _bundle_content_id(
     key: LifecycleKey, rows: Iterable[dict[str, Any]], completion: dict[str, Any],
-    segments: Iterable[Path], *, prefix: str = "lifecycle-",
+    segments: Iterable[Path], *, prefix: str = "lifecycle-", snapshots: Iterable[dict[str, Any]] = (),
 ) -> str:
     material = {
         "identity": key.as_dict(),
@@ -674,6 +813,14 @@ def _bundle_content_id(
             {"name": path.name, "sha256": _sha256_file(path)} for path in segments
         ],
     }
+    snapshot_refs = list(snapshots)
+    if snapshot_refs:
+        # Absent in legacy IDs; new dependencies bind original path + bytes,
+        # not only a copied basename. Events also bind the complete reference.
+        material["signal_snapshots"] = [{
+            "source_relative_path": ref["relative_path"], "sha256": ref["sha256"],
+            "bytes": ref["bytes"], "identity": ref["identity"],
+        } for ref in snapshot_refs]
     return prefix + hashlib.sha256(canonical_json(material).encode("utf-8")).hexdigest()
 
 
@@ -710,7 +857,10 @@ def materialize_bundle(
             "maturity": "QUALIFICATION_PENDING",
         }
     segments = _referenced_market_segments(root, frozen)
-    bundle_id = _bundle_content_id(key, frozen, completion, segments)
+    snapshots = _signal_snapshot_references(frozen, epoch_id=key.collection_epoch_id)
+    for ref in snapshots:
+        _read_signal_snapshot(root / ref["relative_path"], ref, root=root)
+    bundle_id = _bundle_content_id(key, frozen, completion, segments, snapshots=snapshots)
     bundle_root = root / "v3" / "lifecycle_bundles"
     target = bundle_root / bundle_id[-64:-62] / bundle_id
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -763,6 +913,7 @@ def materialize_bundle(
                 last_timestamp=end_iso,
             ))
             receipts[-1]["source_relative_path"] = relative
+        receipts.extend(_copy_signal_snapshots(root, temporary, snapshots, transfer=False))
         manifest = {
             "schema": BUNDLE_SCHEMA,
             "bundle_id": bundle_id,
@@ -935,8 +1086,11 @@ def materialize_transfer_bundle(
         ),
     )
     segments = _referenced_market_segments(root, frozen)
+    snapshots = _signal_snapshot_references(frozen, epoch_id=key.collection_epoch_id)
+    for ref in snapshots:
+        _read_signal_snapshot(root / ref["relative_path"], ref, root=root)
     bundle_id = _bundle_content_id(
-        key, frozen, receipt, segments, prefix="transfer-",
+        key, frozen, receipt, segments, prefix="transfer-", snapshots=snapshots,
     )
     target = bundle_root / bundle_id[-64:-62] / bundle_id
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1002,6 +1156,7 @@ def materialize_transfer_bundle(
                 first_timestamp=start_iso, last_timestamp=end_iso,
             ))
             files[-1]["source_relative_path"] = relative
+        files.extend(_copy_signal_snapshots(root, temporary, snapshots, transfer=True))
         manifest = {
             "schema": TRANSFER_BUNDLE_SCHEMA,
             "bundle_id": bundle_id,
@@ -1118,16 +1273,20 @@ def verify_bundle(bundle_path: str | Path) -> dict[str, Any]:
             evidence = {}
             prefix = "invalid-"
             defects.append("BUNDLE_SCHEMA_INVALID")
+        snapshots = _signal_snapshot_references(events, epoch_id=key.collection_epoch_id)
+        _verify_signal_snapshot_members(bundle, snapshots, manifest.get("files") or [], transfer=schema == TRANSFER_BUNDLE_SCHEMA)
         expected_id = _bundle_content_id(
-            key, events, evidence, segment_paths, prefix=prefix,
+            key, events, evidence, segment_paths, prefix=prefix, snapshots=snapshots,
         )
         if (
             manifest.get("bundle_id") != expected_id or bundle.name != expected_id
             or manifest.get("lifecycle_identity_id") != key.identity_id
         ):
             defects.append("BUNDLE_IDENTITY_MISMATCH")
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OSError) as exc:
         defects.append("BUNDLE_IDENTITY_INVALID")
+        if "SIGNAL_SNAPSHOT" in str(exc):
+            defects.append(str(exc))
     for receipt in manifest.get("files") or []:
         relative = str(receipt.get("path") or "")
         candidate = (bundle / relative).resolve()
@@ -1145,7 +1304,14 @@ def verify_bundle(bundle_path: str | Path) -> dict[str, Any]:
         if _sha256_file(candidate) != str(receipt.get("sha256") or ""):
             defects.append(f"FILE_SHA256_MISMATCH:{relative}")
         if receipt.get("row_count") is not None:
-            if receipt.get("role") in ("MARKET_SEGMENT", "TRANSFER_MARKET_SEGMENT"):
+            if receipt.get("role") in ("SIGNAL_SNAPSHOT", "TRANSFER_SIGNAL_SNAPSHOT"):
+                try:
+                    with open(io_candidate, "r", encoding="utf-8") as handle:
+                        payload = json.load(handle)
+                    rows = 1 if isinstance(payload, dict) and payload.get("schema") == SIGNAL_SNAPSHOT_SCHEMA else -1
+                except (OSError, ValueError, TypeError):
+                    rows = -1
+            elif receipt.get("role") in ("MARKET_SEGMENT", "TRANSFER_MARKET_SEGMENT"):
                 try:
                     with open(io_candidate, "r", encoding="utf-8") as handle:
                         payload = json.load(handle)

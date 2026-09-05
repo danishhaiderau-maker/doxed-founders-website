@@ -28,6 +28,7 @@ MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 MAX_PACKAGE_BYTES = MAX_PAYLOAD_BYTES + (MAX_MEMBERS * 1024) + tarfile.RECORDSIZE
 _GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEGMENT_RE = re.compile(r"^v3/market_segments/[0-9a-f]{2}/[0-9a-f]{64}\.json$")
+_SIGNAL_SNAPSHOT_RE = re.compile(r"^v3/signal_snapshots_v1/([0-9a-f]{64})\.json$")
 _IDEMPOTENCY_RE = re.compile(
     r"^v3/receipts/emergency_record_idempotency_v1/"
     r"[a-z][a-z0-9_]{0,63}/[0-9a-f]{64}\.json$"
@@ -67,7 +68,8 @@ def is_bundle_eligible_path(raw: object) -> bool:
         value = _safe_member_path(raw)
     except BundleTransportError:
         return False
-    return bool(_SEGMENT_RE.fullmatch(value) or _IDEMPOTENCY_RE.fullmatch(value))
+    return bool(_SEGMENT_RE.fullmatch(value) or _IDEMPOTENCY_RE.fullmatch(value)
+                or _SIGNAL_SNAPSHOT_RE.fullmatch(value))
 
 
 def _manifest_identity(row: Mapping[str, object]) -> tuple[int, int, int]:
@@ -149,6 +151,23 @@ def _validate_committed_receipt(rel: str, payload: bytes) -> None:
         raise BundleTransportError("idempotency receipt is not COMMITTED")
 
 
+def _validate_signal_snapshot(rel: str, payload: bytes) -> None:
+    match = _SIGNAL_SNAPSHOT_RE.fullmatch(rel)
+    if not match:
+        return
+    from collector_signal_snapshot import SCHEMA as SNAPSHOT_SCHEMA, MAX_SNAPSHOT_BYTES
+    if len(payload) > MAX_SNAPSHOT_BYTES:
+        raise BundleTransportError("signal snapshot exceeds hard limit")
+    if hashlib.sha256(payload).hexdigest() != match.group(1):
+        raise BundleTransportError("signal snapshot filename checksum mismatch")
+    try:
+        snapshot = json.loads(payload)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise BundleTransportError("signal snapshot is not valid JSON") from exc
+    if not isinstance(snapshot, dict) or snapshot.get("schema") != SNAPSHOT_SCHEMA:
+        raise BundleTransportError("signal snapshot schema mismatch")
+
+
 def _validate_generation(generation: Mapping[str, object]) -> str:
     generation_id = str(generation.get("inventory_generation_id") or "").lower()
     inventory_sha = str(generation.get("inventory_sha256") or generation_id).lower()
@@ -214,6 +233,7 @@ def build_bundle(
         source = _resolve_regular_source(root, rel)
         payload = _read_fenced(source, expected)
         _validate_committed_receipt(rel, payload)
+        _validate_signal_snapshot(rel, payload)
         total += len(payload)
         if total > max_payload_bytes:
             raise BundleTransportError("payload budget exceeded")
@@ -387,6 +407,7 @@ def extract_verified_bundle(
                     raise BundleTransportError("extracted payload exceeds hard limit")
                 if hashlib.sha256(payload).hexdigest() != str(expected.get("sha256") or ""):
                     raise BundleTransportError("archive member checksum mismatch")
+                _validate_signal_snapshot(rel, payload)
                 target = (stage / Path(*PurePosixPath(rel).parts)).resolve()
                 try:
                     target.relative_to(stage)

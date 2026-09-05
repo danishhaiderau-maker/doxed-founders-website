@@ -49,7 +49,8 @@ def _load_refresh(pending, upserts, terminal_writes=None):
         and item.name == "_refresh_collector_v22_registered_order_evidence"
     )
 
-    def upsert(event_id, source, *, epoch_id):
+    def upsert(event_id, source, *, epoch_id, data_dir):
+        assert data_dir == "C:/canonical"
         upserts.append((event_id, copy.deepcopy(source), epoch_id))
 
     namespace = {
@@ -59,6 +60,7 @@ def _load_refresh(pending, upserts, terminal_writes=None):
         "_collector_epoch_serialized": lambda fn: fn,
         "_order_multiverse_pending_src": pending,
         "_collector_v22_epoch_id": lambda: "epoch-1",
+        "_data_sync_runtime_root": lambda: "C:/canonical",
         "upsert_provisional_event": upsert,
         "dual_write_terminal_paper_schedule": lambda order, signal, **kwargs: (
             terminal_writes.append((copy.deepcopy(order), copy.deepcopy(signal), kwargs))
