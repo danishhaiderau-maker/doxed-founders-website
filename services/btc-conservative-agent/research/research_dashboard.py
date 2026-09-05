@@ -6401,7 +6401,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="table-scroll" tabindex="0"><table><thead><tr><th>Gate</th><th>Status</th><th>Evidence / receipt</th><th>Precise blocker</th></tr></thead><tbody id="qualification-gate-body"><tr><td colspan="4">Loading qualification gates…</td></tr></tbody></table></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>
-    <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code>. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
+    <p class="note">Active tab refreshes every 3 minutes. Canonical workspace: <code>C:\DoxxedCrypto\btc-v31-current</code>. Use the existing single-owner analyzer workflow; do not launch a duplicate analyzer or use retired laptop folders. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
   </section>
   <section id="sec-findings">
     <h2>Research Findings</h2>
@@ -6745,7 +6745,7 @@ function ensureScrollableTables(root = document) {
 }
 ensureScrollableTables();
 const EVIDENCE_SCOPES = {
-  summary: ['MIXED — CURRENT POLICY + LEGACY EXECUTED', 'Best-policy evidence is current/pinned; compact executed results and preserved history use separate older cohorts.'],
+  summary: ['FRESHNESS UNVERIFIED — READ-ONLY', 'Waiting for exact-generation freshness receipts. Saved policy and historical executed evidence remain separate and are not qualification proof.'],
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current signed V3.1 counterfactual policy grid.'],
   regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
   lanes: ['CURRENT CANONICAL TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
@@ -6867,14 +6867,42 @@ if (showAllEl) {
     loadLanes();
   });
 }
-function fmtUsd(v) {
-  if (v == null) return 'n/a';
+function metricNumber(v) {
+  if (v == null || typeof v === 'boolean' || !['number', 'string'].includes(typeof v)
+      || (typeof v === 'string' && !v.trim())) return null;
   const value = Number(v);
-  if (!Number.isFinite(value)) return 'n/a';
+  return Number.isFinite(value) ? value : null;
+}
+function fmtUsd(v) {
+  const value = metricNumber(v);
+  if (value == null) return 'UNAVAILABLE';
   if (Math.abs(value) < 0.005) return '0.00';
   return (value > 0 ? '+' : '') + value.toFixed(2);
 }
-function fmtExecutionUsd(v) { return v == null ? 'UNAVAILABLE' : '$' + fmtUsd(v); }
+function fmtExecutionUsd(v) { return metricNumber(v) == null ? 'UNAVAILABLE' : '$' + fmtUsd(v); }
+function fmtPct(v) { const value = metricNumber(v); return value == null ? 'UNAVAILABLE' : value + '%'; }
+function summaryEvidenceScope(data) {
+  const stale = data?.stale || {};
+  const freshness = stale.generation_freshness || {};
+  if (stale.stale === true || freshness.current === false) return [
+    'STALE SAVED POLICY + SEPARATE HISTORICAL EXECUTED — READ-ONLY',
+    'Saved policy evidence is not current session data. Freshness/parity must recover before qualification; historical executed results remain a separate cohort.'
+  ];
+  if (stale.stale === false && freshness.current === true && data?.integrity?.valid === true
+      && data.integrity.report_status === 'VALID') return [
+    'CURRENT PINNED POLICY + SEPARATE HISTORICAL EXECUTED',
+    'Exact-generation freshness is verified for policy reports. Current does not mean qualified; compact executed results and preserved history use separate cohorts.'
+  ];
+  return ['FRESHNESS UNVERIFIED — READ-ONLY',
+    'No complete freshness receipt is available. Do not treat saved policy or historical executed results as current qualified evidence.'];
+}
+function formatExecutiveText(raw) {
+  if (!raw) return 'Awaiting the existing single-owner analyzer publication; do not start a duplicate analyzer.';
+  return String(raw).split('\n').map(line => /final[ -]?bots?/i.test(line)
+      && /(?:\bcd\b|set-location|pushd|python|powershell|pwsh|run:|[a-z]:[\\/])/i.test(line)
+    ? '[Retired launch instruction omitted. Use the existing analyzer owner in C:\\DoxxedCrypto\\btc-v31-current; do not start a duplicate.]'
+    : line).join('\n');
+}
 function fmtAdxBucket(v) {
   const key = String(v || '').toLowerCase();
   if (['adx_low', 'adx<18', 'adx_lt_18'].includes(key)) return 'ADX <18';
@@ -6927,6 +6955,8 @@ async function loadSummary() {
     }
   }
   const stale = d.stale || {};
+  EVIDENCE_SCOPES.summary = summaryEvidenceScope(d);
+  setEvidenceScope('summary', ...EVIDENCE_SCOPES.summary);
   const banner = document.getElementById('stale-banner');
   if (banner) {
     if (stale.stale) {
@@ -6970,10 +7000,10 @@ async function loadSummary() {
         + ' · current does not mean qualified; inspect MANIFEST.json';
   }
   document.getElementById('updated').textContent = d.generated_at ? d.generated_at.slice(0, 19) : 'no run yet';
-  document.getElementById('exec-text').textContent = d.executive_text || '(Run analyzer first)';
+  document.getElementById('exec-text').textContent = formatExecutiveText(d.executive_text);
   const kpis = [
-    ['Net PnL', '$' + fmtUsd(p.net_pnl_usd)],
-    ['Win Rate', (p.win_rate_pct ?? 'n/a') + '%'],
+    ['Net PnL', fmtExecutionUsd(p.net_pnl_usd)],
+    ['Win Rate', fmtPct(p.win_rate_pct)],
     ['Fresh executed', p.trades ?? 0],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
     ['Storage cleanup', retention.status === 'COMPLETED'
@@ -7006,10 +7036,10 @@ async function loadSummary() {
         ? (Number(category.mb || 0).toFixed(3) + ' MB · OBSERVED')
         : 'UNKNOWN · lifecycle classification unavailable'
     ]),
-    ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
-    ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
-    ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],
-    ['Gate Damage', '$' + fmtUsd(re.gate_damage_usd)],
+    ['EV/trade', fmtExecutionUsd(p.expectancy_usd)],
+    ['MFE Capture', fmtPct(p.mfe_capture_pct)],
+    ['APPROVE→Fill', fmtPct(d.approve_to_fill_pct)],
+    ['Gate Damage', fmtExecutionUsd(re.gate_damage_usd)],
     ['Sample', d.coverage_status || 'n/a'],
   ];
   document.getElementById('kpis').innerHTML = kpis.map(([l,v]) =>
@@ -7156,8 +7186,8 @@ async function loadLanes() {
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
     `<tr><td>${row.lane || row.research_lane || ''}</td><td>${currentAvailable ? (row.status || row.pathway_status || 'COLLECTING') : 'STALE / UNAVAILABLE'}</td>`
     + `<td>${row.approves || 0}</td><td>${currentAvailable ? (row.executed_closes || 0) : '—'}</td>`
-    + `<td>${currentAvailable ? `$${fmtUsd(row.pnl || 0)}` : '—'}</td><td>${currentAvailable ? `$${fmtUsd(row.ev || 0)}` : '—'}</td>`
-    + `<td>${currentAvailable ? (row.counterfactual_closes || 0) : '—'}</td><td>${currentAvailable ? `$${fmtUsd(row.counterfactual_pnl || 0)}` : '—'}</td></tr>`
+    + `<td>${currentAvailable ? fmtExecutionUsd(row.pnl) : '—'}</td><td>${currentAvailable ? fmtExecutionUsd(row.ev) : '—'}</td>`
+    + `<td>${currentAvailable ? (row.counterfactual_closes || 0) : '—'}</td><td>${currentAvailable ? fmtExecutionUsd(row.counterfactual_pnl) : '—'}</td></tr>`
   ).join('') || '<tr><td colspan="8">No current-lane evidence yet.</td></tr>';
   return;
 }async function loadChase() {
@@ -7178,7 +7208,7 @@ async function loadLanes() {
     return ['0', '1', '2', '3', '4', '5+'].map(bucket => {
       const b = byBucket.get(bucket) || {bucket, trades: 0};
       const hasEvidence = Number(b.trades || 0) > 0;
-      return `<tr><td>${bucket}</td><td>${b.trades||0}</td><td>${hasEvidence ? `${b.win_rate_pct??'n/a'}%` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(b.sum_pnl_usd??b.pnl_usd??0)}` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(b.ev_usd??b.ev??0)}` : '—'}</td><td>${hasEvidence ? (b.avg_hold_min??'—') : 'NO TERMINAL EVIDENCE'}</td></tr>`;
+      return `<tr><td>${bucket}</td><td>${b.trades||0}</td><td>${hasEvidence ? fmtPct(b.win_rate_pct) : '—'}</td><td>${hasEvidence ? fmtExecutionUsd(b.sum_pnl_usd??b.pnl_usd) : '—'}</td><td>${hasEvidence ? fmtExecutionUsd(b.ev_usd??b.ev) : '—'}</td><td>${hasEvidence ? (b.avg_hold_min??'—') : 'NO TERMINAL EVIDENCE'}</td></tr>`;
     }).join('');
   };
   document.getElementById('chase-body').innerHTML = renderChaseBuckets(d.executed_buckets || d.buckets || []);
@@ -7200,7 +7230,7 @@ async function loadCombos() {
   document.getElementById('combos-body').innerHTML = legacyRows.map(c => {
     const cls = (c.ev_usd ?? 0) >= 2 ? 'green' : '';
     const combo = `${fmtAdxBucket(c.adx_bucket)} + gap ${c.spread_bucket||''} + ${c.entry_mode||''} + ${c.lane||''}`;
-    return `<tr class="${cls}"><td>${combo}</td><td>${fmtAdxBucket(c.adx_bucket)}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`;
+    return `<tr class="${cls}"><td>${combo}</td><td>${fmtAdxBucket(c.adx_bucket)}</td><td>${c.spread_bucket||''}</td><td>${c.entry_mode||''}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${fmtPct(c.wr_pct)}</td><td>${fmtExecutionUsd(c.pnl_usd)}</td><td>${fmtExecutionUsd(c.ev_usd)}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No eligible legacy executed-lane combinations exist in the current cohort.</td></tr>';
   const pg = d.policy_grid || {};
   const pe = pg.evidence || {};
@@ -7267,7 +7297,7 @@ async function loadSpreadPerf() {
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('spread-perf-body').innerHTML = (d.buckets||[]).map(b => {
     const cls = (b.pnl_usd ?? 0) >= 0 ? 'green' : 'red';
-    return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td><td>${b.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(b.pnl_usd)}</td><td>$${fmtUsd(b.ev_usd)}</td></tr>`;
+    return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td><td>${fmtPct(b.wr_pct)}</td><td>${fmtExecutionUsd(b.pnl_usd)}</td><td>${fmtExecutionUsd(b.ev_usd)}</td></tr>`;
   }).join('') || '<tr><td colspan="5">No legacy spread-performance evidence exists in the current cohort.</td></tr>';
 }
 
@@ -7289,11 +7319,11 @@ async function loadChaseThreshold() {
   };
   const renderThresholdRows = rows => completeThresholdBuckets(rows).map(t => {
     const hasEvidence = Number(t.trades || 0) > 0;
-    const wr = t.win_rate_pct ?? t.wr_pct ?? t.wr ?? 'n/a';
-    const ev = t.ev_usd ?? t.ev ?? 'n/a';
-    const pnl = t.sum_pnl_usd ?? t.pnl_usd ?? t.pnl ?? 0;
+    const wr = t.win_rate_pct ?? t.wr_pct ?? t.wr;
+    const ev = t.ev_usd ?? t.ev;
+    const pnl = t.sum_pnl_usd ?? t.pnl_usd ?? t.pnl;
     const cls = (Number(ev) >= 0.8) ? 'green' : '';
-    return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${hasEvidence ? `${wr}%` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(pnl)}` : '—'}</td><td>${hasEvidence ? `$${fmtUsd(ev)}` : '—'}</td><td>${hasEvidence ? (t.avg_hold_min??'—') : 'NO TERMINAL EVIDENCE'}</td></tr>`;
+    return `<tr class="${cls}"><td>${t.threshold||''}</td><td>${t.trades||0}</td><td>${hasEvidence ? fmtPct(wr) : '—'}</td><td>${hasEvidence ? fmtExecutionUsd(pnl) : '—'}</td><td>${hasEvidence ? fmtExecutionUsd(ev) : '—'}</td><td>${hasEvidence ? (t.avg_hold_min??'—') : 'NO TERMINAL EVIDENCE'}</td></tr>`;
   }).join('');
   document.getElementById('chase-threshold-body').innerHTML = renderThresholdRows(d.executed_thresholds || d.thresholds || []);
   document.getElementById('chase-threshold-shadow-body').innerHTML = renderThresholdRows(d.shadow_thresholds || []);
@@ -7328,9 +7358,9 @@ async function loadChasePolicyLab() {
     const fillRate = row.fill_rate_pct == null ? 'UNAVAILABLE' : `${Number(row.fill_rate_pct).toFixed(2)}%`;
     return `<tr><td>${index+1}</td><td><strong>${row.policy_id||'UNKNOWN'}</strong><br><small>${(row.checkpoint_seconds||[]).join('/')}s · expire ${row.terminal_expiry_sec ?? '—'}s</small></td>`
       + `<td>${row.independent_opportunities||0}</td><td>${row.supported||0}</td><td>${row.full_fills||0} / ${row.partial_fills||0} / ${row.no_fills||0} / ${row.unsupported||0}</td>`
-      + `<td>${fillRate}</td><td>shadow net ${shadow.net_pnl_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.net_pnl_usd)} / EV ${shadow.ev_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.ev_usd)}<br><small>return ${shadow.net_return_pct ?? 'UNAVAILABLE'}% / ${shadow.ev_return_pct ?? 'UNAVAILABLE'}% · executed ${(row.executed||{}).pnl_usd ?? 'UNAVAILABLE'} / ${(row.executed||{}).ev_usd ?? 'UNAVAILABLE'}</small></td>`
-      + `<td>${shadow.max_drawdown_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.max_drawdown_usd)} / ${shadow.tail_loss_usd == null ? 'UNAVAILABLE USD' : '$'+fmtUsd(shadow.tail_loss_usd)}<br><small>${shadow.max_drawdown_pct ?? 'UNAVAILABLE'}% / ${shadow.tail_loss_pct ?? 'UNAVAILABLE'}%</small></td><td>${shadow.avg_mfe_pct ?? 'UNAVAILABLE'}% / ${shadow.avg_mae_pct ?? 'UNAVAILABLE'}%</td>`
-      + `<td>${row.coverage_pct ?? 'UNAVAILABLE'}% / ${confidence.label||'INSUFFICIENT'} / ${confidence.fill_rate_wilson_lower_95_pct ?? 'UNAVAILABLE'}%</td>`
+      + `<td>${fillRate}</td><td>shadow net ${shadow.net_pnl_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.net_pnl_usd)} / EV ${shadow.ev_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.ev_usd)}<br><small>return ${fmtPct(shadow.net_return_pct)} / ${fmtPct(shadow.ev_return_pct)} · executed ${(row.executed||{}).pnl_usd ?? 'UNAVAILABLE'} / ${(row.executed||{}).ev_usd ?? 'UNAVAILABLE'}</small></td>`
+      + `<td>${shadow.max_drawdown_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.max_drawdown_usd)} / ${shadow.tail_loss_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.tail_loss_usd)}<br><small>${fmtPct(shadow.max_drawdown_pct)} / ${fmtPct(shadow.tail_loss_pct)}</small></td><td>${fmtPct(shadow.avg_mfe_pct)} / ${fmtPct(shadow.avg_mae_pct)}</td>`
+      + `<td>${fmtPct(row.coverage_pct)} / ${confidence.label||'INSUFFICIENT'} / ${fmtPct(confidence.fill_rate_wilson_lower_95_pct)}</td>`
       + `<td>${(row.regimes||[]).join(', ')||'UNAVAILABLE'}</td><td class="bad">${row.evidence_status||'INSUFFICIENT_EVIDENCE'}<br>${row.qualification_status||'NOT ELIGIBLE'}</td></tr>`;
   }).join('') || '<tr><td colspan="12">No signed compressed shadow schedule evidence is available in this generation.</td></tr>';
   const proofs = proof.proofs || [];
@@ -7345,8 +7375,8 @@ async function loadChasePolicyLab() {
   document.getElementById('missed-proof-body').innerHTML = proofs.slice(0, 100).map(row => {
     const coverage = row.coverage || {};
     return `<tr><td><strong>${row.classification}</strong></td><td>${row.episode_id||'—'}<br><small>${row.policy_id||'—'}</small></td><td>${row.direction||'—'}</td>`
-      + `<td>${row.conservative_touch ? 'TOUCHED' : 'NO TOUCH'} / net ${row.net_terminal_return_pct == null ? 'UNAVAILABLE' : row.net_terminal_return_pct+'%'} / USD ${row.net_pnl_usd == null ? 'UNAVAILABLE' : '$'+fmtUsd(row.net_pnl_usd)}</td>`
-      + `<td>${row.mfe_pct ?? 'UNAVAILABLE'}% / ${row.mae_pct ?? 'UNAVAILABLE'}%</td><td>${coverage.status||'INSUFFICIENT'} (stages ${coverage.stage_ratio ?? 0}; tape ${coverage.tape_status||'UNAVAILABLE'}; missing seconds ${coverage.missing_seconds ?? 'UNAVAILABLE'})</td>`
+      + `<td>${row.conservative_touch ? 'TOUCHED' : 'NO TOUCH'} / net ${row.net_terminal_return_pct == null ? 'UNAVAILABLE' : row.net_terminal_return_pct+'%'} / USD ${row.net_pnl_usd == null ? 'UNAVAILABLE' : fmtExecutionUsd(row.net_pnl_usd)}</td>`
+      + `<td>${fmtPct(row.mfe_pct)} / ${fmtPct(row.mae_pct)}</td><td>${coverage.status||'INSUFFICIENT'} (stages ${coverage.stage_ratio ?? 0}; tape ${coverage.tape_status||'UNAVAILABLE'}; missing seconds ${coverage.missing_seconds ?? 'UNAVAILABLE'})</td>`
       + `<td>${row.regime||'UNAVAILABLE'} / ${row.adx ?? 'UNAVAILABLE'}</td><td>${(row.contraindications||[]).join('; ')||'none recorded'}</td></tr>`;
   }).join('') || `<tr><td colspan="8">${proof.empty_reason || 'No proof rows exist.'}</td></tr>`;
 }
@@ -7360,21 +7390,21 @@ async function loadChaseDelay() {
   document.getElementById('chase-delay-kpis').innerHTML = [
     ['Verdict', d.verdict || 'n/a'],
     ['Δ EV/appr', fmtUsd(delta.ev_per_approve)],
-    ['Δ PnL', '$' + fmtUsd(delta.pnl_usd)],
+    ['Δ PnL', fmtExecutionUsd(delta.pnl_usd)],
     ['Δ fill%', (delta.fill_pct ?? 'n/a') + (delta.fill_pct != null ? '%' : '')],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('chase-delay-body').innerHTML = (d.lanes||[]).map(row => {
     const lane = row.lane || '';
     const cls = lane === (d.benchmark_lane || '') ? 'amber' : (lane === (d.direct_reference_lane || '') ? 'green' : '');
     const label = row.label ? `${lane} · ${row.label}` : lane;
-    return `<tr class="${cls}"><td>${label}</td><td>${row.approves ?? 0}</td><td>${row.fills ?? 0}</td><td>${row.fill_pct ?? 'n/a'}%</td><td>${row.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(row.pnl_usd)}</td><td>$${fmtUsd(row.ev_per_approve)}</td><td>$${fmtUsd(row.ev_usd)}</td><td>${row.avg_signal_age_sec ?? 'n/a'}</td></tr>`;
+    return `<tr class="${cls}"><td>${label}</td><td>${row.approves ?? 0}</td><td>${row.fills ?? 0}</td><td>${fmtPct(row.fill_pct)}</td><td>${fmtPct(row.wr_pct)}</td><td>${fmtExecutionUsd(row.pnl_usd)}</td><td>${fmtExecutionUsd(row.ev_per_approve)}</td><td>${fmtExecutionUsd(row.ev_usd)}</td><td>${row.avg_signal_age_sec ?? 'n/a'}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No delay report data.</td></tr>';
 }
 
 async function loadExitCombos() {
   const r = await fetch('/api/exit-combos');
   const d = await r.json();
-  const money = value => value == null ? 'n/a' : '$' + fmtUsd(value);
+  const money = value => value == null ? 'n/a' : fmtExecutionUsd(value);
   document.getElementById('exit-combos-kpis').innerHTML = [
     ['Total combos', d.total_combos ?? 0],
     ['Left on table', money(d.overall_left_on_table_usd)],
@@ -7406,7 +7436,7 @@ async function loadExitCombos() {
     causalWorlds.forEach(([label, world]) => {
       const view = ((world.causal_combination_views||{})[key]||{});
       (view.rows||[]).forEach(row => rows.push(
-        `<tr><td>${label}</td><td>${row.combination||'—'}</td><td>${row.trades??0}</td><td>${row.wr_pct??'n/a'}%</td><td>${money(row.pnl_usd)}</td><td>${money(row.ev_usd)}</td><td>${row.identity_status||row.evidence_status||'DESCRIPTIVE'} · NOT QUALIFIED</td></tr>`
+        `<tr><td>${label}</td><td>${row.combination||'—'}</td><td>${row.trades??0}</td><td>${fmtPct(row.wr_pct)}</td><td>${money(row.pnl_usd)}</td><td>${money(row.ev_usd)}</td><td>${row.identity_status||row.evidence_status||'DESCRIPTIVE'} · NOT QUALIFIED</td></tr>`
       ));
       if (!(view.rows||[]).length) {
         const sourceRows = view.source_terminal_rows ?? 0;
@@ -7441,9 +7471,9 @@ async function loadExitCombos() {
   document.getElementById('exit-causal-liquidity-body').innerHTML = renderCausalView('liquidity_at_exit');
   document.getElementById('exit-causal-cost-drag-body').innerHTML = renderCausalView('cost_drag');
   document.getElementById('exit-combos-body').innerHTML = (d.top||[]).map(c =>
-    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${c.wr_pct??'n/a'}%</td><td>$${fmtUsd(c.pnl_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Analyzer completed: no current-epoch terminal exit paths exist yet, so exit-combo EV is unavailable.</td></tr>';
+    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.ai_bucket||''}</td><td>${c.spread_bucket||''}</td><td>${c.peak_mfe_bucket||''}</td><td>${c.time_in_trade_bucket||''}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${c.lane||''}</td><td>${c.trades||0}</td><td>${fmtPct(c.wr_pct)}</td><td>${fmtExecutionUsd(c.pnl_usd)}</td><td>${fmtExecutionUsd(c.ev_usd)}</td><td class="red">${fmtExecutionUsd(c.left_on_table_usd)}</td></tr>`).join('') || '<tr><td colspan="13">Analyzer completed: no current-epoch terminal exit paths exist yet, so exit-combo EV is unavailable.</td></tr>';
   document.getElementById('exit-leak-body').innerHTML = (d.worst_leakage||[]).map(c =>
-    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td class="red">$${fmtUsd(c.left_on_table_usd)}</td><td>$${fmtUsd(c.avg_left_usd)}</td><td>$${fmtUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No current-epoch terminal exits exist yet; peak-to-close leakage is unavailable.</td></tr>';
+    `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td class="red">${fmtExecutionUsd(c.left_on_table_usd)}</td><td>${fmtExecutionUsd(c.avg_left_usd)}</td><td>${fmtExecutionUsd(c.ev_usd)}</td></tr>`).join('') || '<tr><td colspan="6">No current-epoch terminal exits exist yet; peak-to-close leakage is unavailable.</td></tr>';
   document.getElementById('exit-shadow-combos-body').innerHTML = (shadow.top||[]).map(c =>
     `<tr><td>${c.combo||''}</td><td>${c.exit_reason||''}</td><td>${c.trades||0}</td><td>${c.sample_status||'DESCRIPTIVE'}</td><td>${money(c.pnl_usd)}</td><td>${money(c.ev_usd)}</td></tr>`).join('') || `<tr><td colspan="6">${shadow.empty_reason||'No explicit shadow/lab terminal exit evidence in this epoch.'}</td></tr>`;
   const renderReplayCombos = (world, fallback) => (world.top||[]).map(c =>
@@ -7455,7 +7485,7 @@ async function loadExitCombos() {
 async function loadExitReasonLeak() {
   const r = await fetch('/api/exit-reason-leak');
   const d = await r.json();
-  const money = value => value == null ? 'n/a' : '$' + fmtUsd(value);
+  const money = value => value == null ? 'n/a' : fmtExecutionUsd(value);
   document.getElementById('exit-reason-kpis').innerHTML = [
     ['Hindsight gap', money(d.overall_left_usd)],
     ['Booked', money(d.overall_booked_usd)],
@@ -7464,7 +7494,7 @@ async function loadExitReasonLeak() {
     ['Replay reviews', (d.recommendations||[]).length],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('exit-reason-body').innerHTML = (d.reasons||[]).map(r =>
-    `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td class="red">$${fmtUsd(r.left_on_table_usd)}</td><td>$${fmtUsd(r.avg_left_usd)}</td><td>${r.avg_mfe_margin_pct??'n/a'}%</td><td>${r.avg_realized_margin_pct??'n/a'}%</td><td class="red">${r.avg_leakage_margin_pct??'n/a'}%</td><td>${r.capture_ratio_pct??'n/a'}%</td></tr>`
+    `<tr><td>${r.exit_reason||''}</td><td>${r.trades||0}</td><td class="red">${fmtExecutionUsd(r.left_on_table_usd)}</td><td>${fmtExecutionUsd(r.avg_left_usd)}</td><td>${fmtPct(r.avg_mfe_margin_pct)}</td><td>${fmtPct(r.avg_realized_margin_pct)}</td><td class="red">${fmtPct(r.avg_leakage_margin_pct)}</td><td>${fmtPct(r.capture_ratio_pct)}</td></tr>`
   ).join('') || '<tr><td colspan="8">Analyzer completed: no current-epoch terminal exits exist yet, so exit-reason leakage is unavailable.</td></tr>';
   const shadow = ((d.evidence_classes||{}).shadow_lab||{});
   const conservative = ((d.evidence_classes||{}).conservative_bbo_depth||{});
@@ -7496,9 +7526,9 @@ async function loadLadderSim() {
     disc.style.display = (noComparableProfiles || d.disclaimer) ? '' : 'none';
   }
   document.getElementById('ladder-sim-kpis').innerHTML = [
-    ['Full-session actual', '$' + fmtUsd(d.actual_realized_usd)],
+    ['Full-session actual', fmtExecutionUsd(d.actual_realized_usd)],
     ['Full-session trades', d.actual_trades ?? 0],
-    ['Matched-cohort actual', '$' + fmtUsd(d.matched_actual_realized_usd)],
+    ['Matched-cohort actual', fmtExecutionUsd(d.matched_actual_realized_usd)],
     ['Matched replays', d.replays_matched_executed ?? 0],
     ['Replays on disk', d.raw_replays_available ?? d.replays_available ?? 0],
     ['Best profile', noComparableProfiles ? 'n/a' : (d.best_profile_id || 'n/a')],
@@ -7513,7 +7543,7 @@ async function loadLadderSim() {
     const delta = p.delta_vs_matched_actual_usd ?? p.delta_vs_actual_usd;
     const cls = p.unrealistic_vs_actual ? 'red' : (delta != null && delta > 50 ? 'amber' : '');
     const unreal = p.unrealistic_vs_actual ? ' UNREALISTIC' : '';
-    return `<tr class="${cls}"><td>${p.profile_id||''}${unreal}</td><td>${(p.ladder||[]).map(r=>r.join('\u2192')).join(' · ')||p.label||''}</td><td>${p.trades_simulated||0}</td><td>$${fmtUsd(p.sum_pnl_usd)}</td><td>$${fmtUsd(p.avg_pnl_usd)}</td><td>${p.wr_pct??'n/a'}%</td><td>${p.ladder_exit_pct??'n/a'}%</td><td>${delta!=null?'$'+fmtUsd(delta):'n/a'}</td></tr>`;
+    return `<tr class="${cls}"><td>${p.profile_id||''}${unreal}</td><td>${(p.ladder||[]).map(r=>r.join('\u2192')).join(' · ')||p.label||''}</td><td>${p.trades_simulated||0}</td><td>${fmtExecutionUsd(p.sum_pnl_usd)}</td><td>${fmtExecutionUsd(p.avg_pnl_usd)}</td><td>${fmtPct(p.wr_pct)}</td><td>${fmtPct(p.ladder_exit_pct)}</td><td>${delta!=null?fmtExecutionUsd(delta):'n/a'}</td></tr>`;
   }).join('') || '<tr><td colspan="8">No ladder sim data — need executed-trade tick replays.</td></tr>';
 }
 
@@ -7589,14 +7619,14 @@ async function loadHorizon() {
   }
   const row = h => {
     const rate = h.conclusion_allowed === false || h.recovery_rate_pct == null ? 'n/a' : `${h.recovery_rate_pct}%`;
-    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${h.unknown||0}</td><td>${h.coverage_pct ?? 'n/a'}%</td><td>${rate}</td></tr>`;
+    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${h.unknown||0}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
   };
   document.getElementById('horizon-body').innerHTML = (d.horizons||[]).map(row).join('') ||
     '<tr><td colspan="6">Run analyzer — needs losing trades + post-exit replay ticks</td></tr>';
   const fc = d.fast_cut_recovery_summary || [];
   document.getElementById('horizon-fc-body').innerHTML = fc.map(h => {
     const rate = h.conclusion_allowed === false || h.recovery_rate_pct == null ? 'n/a' : `${h.recovery_rate_pct}%`;
-    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${h.coverage_pct ?? 'n/a'}%</td><td>${rate}</td></tr>`;
+    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
   }).join('') || '<tr><td colspan="5">No Fast Cut recovery data yet</td></tr>';
 }
 
@@ -7604,11 +7634,11 @@ async function loadLeakage() {
   const r = await fetch('/api/leakage');
   const d = await r.json();
   document.getElementById('leak-kpis').innerHTML = [
-    ['Left on table', '$' + fmtUsd(d.overall_left_usd)],
+    ['Left on table', fmtExecutionUsd(d.overall_left_usd)],
     ['Top trades shown', (d.trades||[]).length],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('leak-body').innerHTML = (d.trades||[]).slice(0,100).map(t =>
-    `<tr><td>${(t.trade_id||'').slice(0,12)}</td><td>${t.lane||''}</td><td>${t.exit_reason||''}</td><td>${t.mfe_margin_pct??'n/a'}%</td><td>${t.realized_margin_pct??'n/a'}%</td><td class="red">${t.leakage_margin_pct??'n/a'}%</td><td>$${fmtUsd(t.realized_usd)}</td><td>$${fmtUsd(t.peak_profit_usd)}</td><td class="red">$${fmtUsd(t.left_on_table_usd)}</td></tr>`).join('')
+    `<tr><td>${(t.trade_id||'').slice(0,12)}</td><td>${t.lane||''}</td><td>${t.exit_reason||''}</td><td>${fmtPct(t.mfe_margin_pct)}</td><td>${fmtPct(t.realized_margin_pct)}</td><td class="red">${fmtPct(t.leakage_margin_pct)}</td><td>${fmtExecutionUsd(t.realized_usd)}</td><td>${fmtExecutionUsd(t.peak_profit_usd)}</td><td class="red">${fmtExecutionUsd(t.left_on_table_usd)}</td></tr>`).join('')
     || '<tr><td colspan="9">No legacy hindsight exit-leakage evidence exists in the current cohort.</td></tr>';
 }
 
@@ -7629,7 +7659,7 @@ async function loadRegime() {
   document.getElementById('regime-body').innerHTML = (d.regimes||[]).map(r => {
     const ok = r.conclusion_allowed ? 'yes' : 'no';
     const cls = r.conclusion_allowed ? 'green' : 'amber';
-    return `<tr><td>${r.regime}</td><td>${r.total_trades}</td><td>${r.best_lane||'—'}</td><td>$${fmtUsd(r.best_ev_usd)}</td><td>${r.second_lane||'—'}</td><td class="${cls}">${ok}</td></tr>`;
+    return `<tr><td>${r.regime}</td><td>${r.total_trades}</td><td>${r.best_lane||'—'}</td><td>${fmtExecutionUsd(r.best_ev_usd)}</td><td>${r.second_lane||'—'}</td><td class="${cls}">${ok}</td></tr>`;
   }).join('');
   document.getElementById('roster-policy-json').textContent = JSON.stringify(pol, null, 2);
   if (pol.collection_progress) {
@@ -7849,7 +7879,7 @@ async function loadGenome() {
     }, null, 2);
     document.getElementById('genome-replay').textContent = JSON.stringify({integrity:d.integrity, safe_policy_ranking:d.safe_policy_ranking}, null, 2);
     document.getElementById('genome-discoveries').innerHTML = rows.length ? rows.slice(0, 20).map(row =>
-      `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 0} · OOS=${row.oos_episodes ?? 0} · diagnostic net $${fmtUsd(row.diagnostic_replay_net_pnl_usd)} · diagnostic max DD $${fmtUsd(row.diagnostic_replay_max_drawdown_usd)} · ${row.metric_evidence || 'IDEAL_TOUCH_DIAGNOSTIC_ONLY'} · ${row.qualification_eligibility || 'NOT QUALIFICATION ELIGIBLE'} · blockers=${(row.descriptive_blockers || []).join(', ') || 'none reported'}</div></div>`
+      `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 0} · OOS=${row.oos_episodes ?? 0} · diagnostic net ${fmtExecutionUsd(row.diagnostic_replay_net_pnl_usd)} · diagnostic max DD ${fmtExecutionUsd(row.diagnostic_replay_max_drawdown_usd)} · ${row.metric_evidence || 'IDEAL_TOUCH_DIAGNOSTIC_ONLY'} · ${row.qualification_eligibility || 'NOT QUALIFICATION ELIGIBLE'} · blockers=${(row.descriptive_blockers || []).join(', ') || 'none reported'}</div></div>`
     ).join('') : '<p class="note">No matured V3.1 policy rows yet. See the blockers above.</p>';
     return;
   }
@@ -7860,7 +7890,7 @@ async function loadGenome() {
     ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
     ['Sample', dq.sample_size ?? 0],
-    ['EV/trade', '$' + fmtUsd(dq.ev)],
+    ['EV/trade', fmtExecutionUsd(dq.ev)],
     ['Confidence', dq.research_confidence || 'LOW'],
     ['Genomes (persistent)', tax.persistent_genomes ?? (d.genome_memory || {}).persistent_genomes ?? 0],
     ['Validated clusters', tax.validated_clusters ?? 0],
@@ -7897,13 +7927,13 @@ async function loadGenome() {
     const ci = se.confidence_interval_95 || m.confidence_interval_95 || {};
     const stab = disc.stability || {};
     const ledger = (disc.evidence_ledger || []).slice(-4).map(h =>
-      `${h.period_key || (h.ts || '').slice(0,10)}: WR ${((h.win_rate||0)*100).toFixed(0)}% EV $${fmtUsd(h.ev_usd)}`
+      `${h.period_key || (h.ts || '').slice(0,10)}: WR ${((h.win_rate||0)*100).toFixed(0)}% EV ${fmtExecutionUsd(h.ev_usd)}`
     ).join(' → ');
     const explDisc = disc.explanation || {};
     return `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px">`
       + `<div class="lbl"><strong>${disc.identity || disc.discovery_id || ''}</strong> · ${disc.status || ''} · ${disc.research_confidence || ''}</div>`
       + `<div class="note">${fp.session || ''} · ADX ${fp.adx_bucket || ''} · spread ${fp.spread_bucket || ''} · ${fp.direction || ''}</div>`
-      + `<div class="note">n=${se.sample_size ?? disc.observed_trades ?? 0} · EV $${fmtUsd(se.expected_value_usd ?? m.ev_usd)} · CI [$${fmtUsd(ci.low)}–$${fmtUsd(ci.high)}] · DNA ${se.dna_quality ?? m.dna_quality ?? 'n/a'}%</div>`
+      + `<div class="note">n=${se.sample_size ?? disc.observed_trades ?? 0} · EV ${fmtExecutionUsd(se.expected_value_usd ?? m.ev_usd)} · CI [${fmtExecutionUsd(ci.low)}–${fmtExecutionUsd(ci.high)}] · DNA ${fmtPct(se.dna_quality ?? m.dna_quality)}</div>`
       + `<div class="note">p=${se.p_value_ev_gt_zero ?? 'n/a'} · sig=${se.statistically_significant ? 'yes' : 'no'} · trend ${stab.trend || 'n/a'} · stable=${stab.stable ? 'yes' : 'no'}</div>`
       + (ledger ? `<div class="note">Ledger: ${ledger}</div>` : '')
       + (explDisc.why ? `<div class="note">${explDisc.why}</div>` : '')
@@ -7924,7 +7954,7 @@ async function loadAI() {
   if (modeNote) modeNote.textContent = d.mode_note || `AI evidence mode: ${status}`;
 
   if (showConfidence) {
-    const row = b => `<tr><td>${b.bucket}</td><td>${b.trades}</td><td>${b.win_rate_pct}%</td><td>$${fmtUsd(b.sum_pnl_usd)}</td></tr>`;
+    const row = b => `<tr><td>${b.bucket}</td><td>${b.trades}</td><td>${b.win_rate_pct}%</td><td>${fmtExecutionUsd(b.sum_pnl_usd)}</td></tr>`;
     document.getElementById('ai-cal-body').innerHTML = (d.calibration_buckets||[]).filter(b=>b.trades).map(row).join('')
       || '<tr><td colspan="4">No probability-calibration outcomes yet.</td></tr>';
     document.getElementById('ai-conf-body').innerHTML = (d.confidence_bands||[]).filter(b=>b.trades).map(row).join('')
@@ -7938,7 +7968,7 @@ async function loadAI() {
   document.getElementById('ai-gap-body').innerHTML = (d.normalized_gap_buckets||[]).map(b => {
     const cls = Number(b.pnl_usd || 0) >= 0 ? 'green' : 'red';
     return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td>`
-      + `<td>${b.wr_pct ?? 'n/a'}%</td><td>$${fmtUsd(b.pnl_usd)}</td><td>$${fmtUsd(b.ev_usd)}</td></tr>`;
+      + `<td>${fmtPct(b.wr_pct)}</td><td>${fmtExecutionUsd(b.pnl_usd)}</td><td>${fmtExecutionUsd(b.ev_usd)}</td></tr>`;
   }).join('') || '<tr><td colspan="5">No normalized score-gap outcomes yet.</td></tr>';
 }
 
@@ -8009,12 +8039,12 @@ async function loadArchives() {
   const past = await pastResponse.json();
   document.getElementById('archive-body').innerHTML = (d.sessions||[]).map(s => {
     const sid = s.id || s.session_id || '';
-    return `<tr><td>${sid}</td><td>${(s.generated_at||'').slice(0,19)}</td><td>${s.trades??'n/a'}</td><td>$${fmtUsd(s.net_pnl_usd)}</td><td><a href="/download/archive/${encodeURIComponent(sid)}">ZIP</a></td></tr>`;
+    return `<tr><td>${sid}</td><td>${(s.generated_at||'').slice(0,19)}</td><td>${s.trades??'n/a'}</td><td>${fmtExecutionUsd(s.net_pnl_usd)}</td><td><a href="/download/archive/${encodeURIComponent(sid)}">ZIP</a></td></tr>`;
   }).join('') || '<tr><td colspan="5">No archives are declared by the current verified manifest.</td></tr>';
   document.getElementById('past-analysis-body').innerHTML = (past.analyses||[]).map(a => {
     const id = a.archive_id || '';
     const perf = a.performance || {};
-    return `<tr><td>${id}</td><td>${(a.created_at||'').slice(0,19)}</td><td>${perf.trades??'n/a'}</td><td>$${fmtUsd(perf.net_pnl_usd)}</td><td><a href="/download/past-analysis/${encodeURIComponent(id)}">ZIP</a></td></tr>`;
+    return `<tr><td>${id}</td><td>${(a.created_at||'').slice(0,19)}</td><td>${perf.trades??'n/a'}</td><td>${fmtExecutionUsd(perf.net_pnl_usd)}</td><td><a href="/download/past-analysis/${encodeURIComponent(id)}">ZIP</a></td></tr>`;
   }).join('') || '<tr><td colspan="5">No preserved analysis yet. Fresh Collection creates one only after a completed analyzer run.</td></tr>';
   const pastButton = document.getElementById('dl-past-analysis');
   if (pastButton && !(past.analyses||[]).length) {
