@@ -129,6 +129,8 @@ def test_raw_ai_and_executed_side_remain_distinct_without_opposite_limit_anchor(
     limits = {side: capture["schedules"]["NO_CHASE_LIMIT"]["schedule"][0]["limit_price"]
               for side, capture in by_side.items()}
     assert limits == {"LONG": 99.9, "SHORT": 100.1}
+    assert all(capture["schedules"]["NO_CHASE_LIMIT"]["schedule"][0]["reference_price_basis"]
+               == "RECORDED_SIGNAL_REFERENCE" for capture in by_side.values())
     report = materialize_same_opportunity_replay([row])
     assert all(item["original_ai_direction"] == "LONG" and item["source_execution_direction"] == "SHORT"
                for item in report["episode_receipts"])
@@ -150,6 +152,8 @@ def test_missing_neutral_reference_uses_same_captured_midpoint_for_both_limit_of
     limits = {side: capture["schedules"]["NO_CHASE_LIMIT"]["schedule"][0]["limit_price"]
               for side, capture in snapshot["directional_schedules"].items()}
     assert limits == {"LONG": 99.9, "SHORT": 100.1}
+    assert all(capture["schedules"]["NO_CHASE_LIMIT"]["schedule"][0]["reference_price_basis"]
+               == "DECLARED_SIGNAL_BBO_MIDPOINT" for capture in snapshot["directional_schedules"].values())
 
 
 def test_missing_raw_ai_direction_is_not_inferred_from_executed_side():

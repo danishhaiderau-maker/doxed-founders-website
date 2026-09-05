@@ -176,6 +176,8 @@ def materialize_signal_time_baseline_schedules(opportunity: Mapping[str, Any]) -
                 "opportunity_id": source_opportunity, "original_ai_direction": ai_direction,
                 "source_execution_direction": source_execution_direction,
                 "signal_ts": opportunity.get("signal_ts"), "schedules": schedules,
+                "symbol": opportunity.get("symbol"),
+                "research_context_declaration": deepcopy(opportunity.get("research_baseline_context_declaration")),
                 "source_revision": opportunity.get("source_revision"),
                 "deployed_revision": opportunity.get("deployed_revision"),
                 "epoch_id": opportunity.get("epoch_id") or opportunity.get("dataset_epoch"),
@@ -237,11 +239,14 @@ def _materialize_single_direction_baseline_schedules(
         bid_qty = float(first(bbo.get("bid_qty"), bbo.get("best_bid_qty")))
         ask_qty = float(first(bbo.get("ask_qty"), bbo.get("best_ask_qty")))
         side_quote = ask if direction == "LONG" else bid
-        reference = float(first(
+        recorded_reference = first(
             opportunity.get("signal_price"), features.get("signal_price"),
             source_features.get("signal_price"), market_context.get("signal_price"),
-            (bid + ask) / 2.0 if neutral_reference else side_quote,
-        ))
+        )
+        reference = float(recorded_reference if recorded_reference is not None
+                          else (bid + ask) / 2.0 if neutral_reference else side_quote)
+        reference_basis = ("RECORDED_SIGNAL_REFERENCE" if recorded_reference is not None
+                           else "DECLARED_SIGNAL_BBO_MIDPOINT" if neutral_reference else "SIGNAL_SIDE_BBO_QUOTE")
         inputs_complete = (
             signal_ts > 0 and direction in {"LONG", "SHORT"}
             and bid > 0 and ask > 0 and bid <= ask
@@ -261,6 +266,7 @@ def _materialize_single_direction_baseline_schedules(
             "bucket_id": f"signal-schedule:{index}", "start_ts": start,
             "end_ts": end, "limit_price": limit, "generation": index,
             "reference_basis": "PRE_SIGNAL_REFERENCE_AND_BBO_ONLY",
+            "reference_price": reference, "reference_price_basis": reference_basis,
         }
 
     def signed_schedule(baseline: Mapping[str, Any]) -> list[dict[str, Any]]:

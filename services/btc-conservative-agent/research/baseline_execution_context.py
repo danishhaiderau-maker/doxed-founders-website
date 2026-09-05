@@ -360,6 +360,198 @@ def accepted_fill_position(entry_receipt: Mapping[str, Any]) -> dict[str, Any]:
             "basis": "ACCEPTED_FILL_EVENTS_TERMINAL_VWAP_AND_COMPLETION"}
 
 
+def declared_directional_baseline_inputs(capture: Mapping, baseline: Mapping) -> dict:
+    """Project only an explicitly captured research scenario, never defaults."""
+    from research_v3_contract import canonical_hash
+    if (capture.get("capture_signature") != canonical_hash("directional-entry-capture",
+            {key: value for key, value in capture.items() if key != "capture_signature"}, length=64)
+            or capture.get("direction") not in {"LONG", "SHORT"}):
+        raise ValueError("DECLARED_BASELINE_CAPTURE_INVALID")
+    declaration = capture.get("research_context_declaration")
+    if not isinstance(declaration, Mapping) or declaration.get("schema") != "research_baseline_context_declaration_v1":
+        raise ValueError("DECLARED_BASELINE_CONTEXT_DECLARATION_MISSING")
+    if (declaration.get("evidence_basis") != "DECLARED_SIMULATION"
+            or not str(declaration.get("provenance") or "").strip()):
+        raise ValueError("DECLARED_BASELINE_PROVENANCE_REQUIRED")
+    signal_ts = _decimal(capture.get("signal_ts"), positive=True)
+    if _decimal(declaration.get("declared_at_ts"), positive=True) > signal_ts:
+        raise ValueError("DECLARED_BASELINE_POST_SIGNAL_DECLARATION")
+    envelope = (capture.get("schedules") or {}).get(baseline.get("baseline_id")) or {}
+    schedule = envelope.get("schedule") or []
+    if (not schedule or envelope.get("policy_signature") != baseline.get("policy_signature")
+            or envelope.get("episode_id") != capture.get("episode_id")):
+        raise ValueError("DECLARED_BASELINE_SCHEDULE_MISSING")
+    basis_price = _decimal(schedule[0].get("limit_price"), positive=True)
+    constraints, defects = validate_signed_quantity_constraints(declaration.get("signed_quantity_constraints"), symbol=capture.get("symbol"))
+    if defects or constraints is None or constraints.get("source_revision") != capture.get("source_revision"):
+        raise ValueError("DECLARED_BASELINE_QUANTITY_CONSTRAINTS_INVALID")
+    from datetime import datetime
+    try:
+        captured = datetime.fromisoformat(str(constraints["captured_at"]).replace("Z", "+00:00"))
+        if captured.tzinfo is None or _decimal(captured.timestamp(), positive=True) > signal_ts:
+            raise ValueError("DECLARED_BASELINE_QUANTITY_METADATA_NOT_CAUSAL")
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError("DECLARED_BASELINE_QUANTITY_METADATA_NOT_CAUSAL") from exc
+    leverage = _decimal(declaration.get("leverage"), positive=True)
+    step = Decimal(constraints["quantity_step"])
+    mode = declaration.get("sizing_mode")
+    if mode == "FIXED_MARGIN":
+        margin = _decimal(declaration.get("margin_usd"), positive=True)
+        quantity = (margin * leverage / basis_price / step).to_integral_value(rounding=ROUND_DOWN) * step
+    elif mode == "FIXED_QUANTITY":
+        quantity = _decimal(declaration.get("requested_qty"), positive=True)
+        if quantity % step:
+            raise ValueError("DECLARED_BASELINE_QUANTITY_STEP_MISMATCH")
+        margin = quantity * basis_price / leverage
+    else:
+        raise ValueError("DECLARED_BASELINE_SIZING_MODE_INVALID")
+    if quantity <= 0:
+        raise ValueError("DECLARED_BASELINE_QUANTITY_BELOW_STEP")
+    latency = _decimal(declaration.get("input_latency_sec"))
+    # Existing replay preserves its timestamps; nonzero added latency needs a
+    # separate timing treatment and cannot be asserted by a label alone.
+    if latency != 0:
+        raise ValueError("DECLARED_BASELINE_LATENCY_TREATMENT_UNSUPPORTED")
+    fees = _decimal(declaration.get("input_fee_assumption_usd"))
+    slippage = declaration.get("slippage_model")
+    if slippage != "EXECUTABLE_BBO_PRICES":
+        raise ValueError("DECLARED_BASELINE_SLIPPAGE_TREATMENT_UNSUPPORTED")
+    atr = declaration.get("atr") or {}
+    if (atr.get("basis") != "DECLARED_SIGNAL_ATR_HOLD_CONSTANT"
+            or not str(atr.get("provenance") or "").strip()
+            or _decimal(atr.get("observed_ts"), positive=True) > signal_ts
+            or _decimal(atr.get("observed_ts"), positive=True) > _decimal(atr.get("available_at_ts"), positive=True)
+            or _decimal(atr.get("available_at_ts"), positive=True) > signal_ts):
+        raise ValueError("DECLARED_BASELINE_SIGNAL_ATR_NOT_CAUSAL")
+    _decimal(atr.get("atr_pct"), positive=True)
+    coverage = declaration.get("coverage_policy") or {}
+    interval = _decimal(coverage.get("sampling_interval_sec"), positive=True)
+    offset = _decimal(coverage.get("first_sample_offset_sec"), positive=True)
+    horizon = _decimal(coverage.get("required_horizon_sec"), positive=True)
+    if interval not in (1, 2) or offset != int(offset) or offset > interval or horizon > MAX_SOURCE_ROWS * interval:
+        raise ValueError("DECLARED_BASELINE_COVERAGE_POLICY_INVALID")
+    return {"requested_qty": float(quantity), "signed_quantity_constraints": declaration["signed_quantity_constraints"],
+            "latency_sec": float(latency), "fees_usd": float(fees), "slippage_model": slippage,
+            "declaration": dict(declaration), "requested_margin_usd": str(margin),
+            "required_horizon_end_ts": float(signal_ts + horizon),
+            "quantity_basis_price": str(basis_price), "declaration_sha256": _sha(declaration)}
+
+
+def build_declared_directional_baseline_context(*, generation: Mapping, identity: Mapping,
+        entry_receipt: Mapping, capture: Mapping, baseline: Mapping, pinned_sources: Mapping,
+        opportunity_binding: Mapping, coverage_evidence: Mapping, coverage_binding: Mapping) -> dict:
+    """Verified public-tape position under a labelled signal-ATR scenario."""
+    try:
+        if any(not isinstance(generation.get(key), str) or not generation[key] for key in GENERATION_FIELDS):
+            raise ValueError("BASELINE_CONTEXT_GENERATION_MISSING")
+        inputs = declared_directional_baseline_inputs(capture, baseline)
+        declaration = inputs["declaration"]
+        if (any(capture.get(key) != generation.get(key) for key in
+                ("epoch_id", "source_revision", "deployed_revision", "tile_config_signature"))
+                or identity.get("epoch_id") != generation["epoch_id"]
+                or identity.get("direction") != capture.get("direction")
+                or identity.get("symbol") != capture.get("symbol")
+                or identity.get("baseline_id") != baseline.get("baseline_id")
+                or identity.get("baseline_policy_signature") != baseline.get("policy_signature")):
+            raise ValueError("DECLARED_BASELINE_GENERATION_IDENTITY_MISMATCH")
+        opportunity, opportunity_hash = _verified(opportunity_binding, pinned_sources)
+        if any(opportunity.get(key) != generation.get(key) for key in
+               ("epoch_id", "source_revision", "deployed_revision", "tile_config_signature")):
+            raise ValueError("DECLARED_BASELINE_SOURCE_GENERATION_MISMATCH")
+        stored = ((opportunity.get("baseline_schedule_snapshot") or {}).get("directional_schedules") or {}).get(identity.get("direction"))
+        if (stored != capture or capture.get("source_episode_id") != opportunity.get("episode_id")
+                or capture.get("opportunity_id") != (opportunity.get("opportunity_id") or opportunity.get("record_id"))
+                or capture.get("episode_id") != identity.get("episode_id")
+                or capture.get("direction") != entry_receipt.get("direction")
+                or capture.get("symbol") != entry_receipt.get("symbol")
+                or opportunity.get("research_baseline_context_declaration") != declaration):
+            raise ValueError("DECLARED_BASELINE_SOURCE_CAPTURE_MISMATCH")
+        if entry_receipt.get("supported") is not True or entry_receipt.get("final_classification") not in {"FULL_FILL", "PARTIAL_FILL"}:
+            raise ValueError("BASELINE_CONTEXT_SUPPORTED_FILL_REQUIRED")
+        from research.conservative_limit_fill import _normalise_schedule
+        schedule = capture["schedules"][baseline["baseline_id"]]["schedule"]
+        if _normalise_schedule(schedule)[1] != entry_receipt.get("schedule_sha256"):
+            raise ValueError("DECLARED_BASELINE_ENTRY_SCHEDULE_MISMATCH")
+        constraints, defects = validate_signed_quantity_constraints(entry_receipt.get("quantity_constraints"), symbol=capture.get("symbol"))
+        expected_constraints, _ = validate_signed_quantity_constraints(inputs["signed_quantity_constraints"], symbol=capture.get("symbol"))
+        if defects or constraints != expected_constraints or _decimal(entry_receipt.get("requested_qty")) != _decimal(inputs["requested_qty"]):
+            raise ValueError("DECLARED_BASELINE_ENTRY_QUANTITY_MISMATCH")
+        position = accepted_fill_position(entry_receipt)
+        fill_ts, filled, fill_price = position["completion_ts"], position["filled_qty"], position["fill_price"]
+        if fill_ts < _decimal(capture["signal_ts"]) or filled > _decimal(inputs["requested_qty"]):
+            raise ValueError("DECLARED_BASELINE_FILL_INVALID")
+        segment, segment_hash = _verified(coverage_evidence, pinned_sources)
+        binding, binding_hash = _verified(coverage_binding, pinned_sources)
+        parent_identity = {key: opportunity.get(key) for key in IDENTITY_FIELDS}
+        _identity(binding, parent_identity)
+        reference = binding.get("segment_ref") or {}
+        if (segment.get("schema") != "market_segment_v3" or segment.get("symbol") != capture.get("symbol")
+                or reference.get("sha256") != segment_hash
+                or reference.get("relative_path") != coverage_evidence.get("source_id")):
+            raise ValueError("DECLARED_BASELINE_COVERAGE_BINDING_MISMATCH")
+        policy = declaration["coverage_policy"]
+        interval, offset = int(policy["sampling_interval_sec"]), int(policy["first_sample_offset_sec"])
+        horizon = _decimal(inputs["required_horizon_end_ts"])
+        if horizon <= fill_ts:
+            raise ValueError("DECLARED_BASELINE_HORIZON_BEFORE_FILL")
+        rows = segment.get("rows")
+        if not isinstance(rows, list) or not 0 < len(rows) <= MAX_SOURCE_ROWS:
+            raise ValueError("BASELINE_CONTEXT_COVERAGE_ROWS_INVALID")
+        selected = {}
+        for row in rows:
+            ts = _decimal(row.get("bucket_ts"))
+            if not fill_ts + offset <= ts <= horizon:
+                continue
+            if (ts in selected or row.get("schema") != "market_microstructure_1s_v1"
+                    or row.get("symbol") != capture.get("symbol") or row.get("fresh") is not True
+                    or row.get("valid_bbo") is not True or _decimal(row.get("bid"), positive=True) > _decimal(row.get("ask"), positive=True)
+                    or _decimal(row.get("bid_qty"), positive=True) <= 0 or _decimal(row.get("ask_qty"), positive=True) <= 0):
+                raise ValueError("DECLARED_BASELINE_COVERAGE_ROW_INVALID")
+            for field in ("buy_qty", "sell_qty", "trade_count"):
+                _decimal(row.get(field))
+            selected[ts] = row
+        expected_times = list(range(int(fill_ts + offset), int(horizon) + 1, interval))
+        if fill_ts != int(fill_ts) or horizon != int(horizon) or sorted(selected) != [Decimal(ts) for ts in expected_times]:
+            raise ValueError("DECLARED_BASELINE_COVERAGE_GAP")
+        leverage = _decimal(declaration["leverage"], positive=True)
+        # Use the same accepted VWAP representation that the terminal quantity
+        # fence consumes; preserve exact event notional separately for audit.
+        margin = filled * fill_price / leverage
+        step = Decimal(constraints["quantity_step"])
+        if (margin * leverage / fill_price / step).to_integral_value(rounding=ROUND_DOWN) * step != filled:
+            raise ValueError("BASELINE_CONTEXT_FILLED_MARGIN_PRECISION_MISMATCH")
+        atr = declaration["atr"]
+        body = {"schema": SCHEMA, "generation": dict(generation), **dict(identity),
+                "source_episode_id": capture["source_episode_id"],
+                "entry_receipt_sha256": _sha(entry_receipt),
+                "position_context_id": stable_hash("declared-baseline-position", {
+                    "entry": _sha(entry_receipt), "capture": capture["capture_signature"], "baseline": baseline["policy_signature"]}),
+                "requested_qty": str(inputs["requested_qty"]), "filled_qty": str(filled),
+                "requested_margin_usd": inputs["requested_margin_usd"], "margin_usd": str(margin),
+                "accepted_fill_exact_notional": str(position["exact_entry_notional"]),
+                "leverage": str(leverage), "sizing_mode": declaration["sizing_mode"],
+                "sizing_provenance": "EXPLICIT_DECLARED_RESEARCH:" + inputs["declaration_sha256"],
+                "atr_pct_at_fill": str(atr["atr_pct"]), "atr_basis": "DECLARED_SIGNAL_ATR_HOLD_CONSTANT",
+                "atr_provenance": str(atr["provenance"]), "atr_observed_ts": atr["observed_ts"],
+                "atr_available_at_ts": atr["available_at_ts"], "measured_fill_atr": None,
+                "research_context_declaration_sha256": inputs["declaration_sha256"],
+                "directional_capture_signature": capture["capture_signature"],
+                "context_evidence_basis": "DECLARED_SIMULATION",
+                "timing_basis": "BASELINE_EXECUTION_TIMESTAMPS_UNCHANGED",
+                "latency_provenance": "DECLARED_ZERO_ADDITIONAL_LATENCY_PRESERVED_BASELINE_TIMING",
+                "sampling_interval_sec": interval, "first_sample_offset_sec": offset,
+                "required_horizon_end_ts": float(horizon), "path_start_basis": "FIRST_COMPLETE_SAMPLE_AFTER_ENTRY_FILL",
+                "path_end_basis": "DECLARED_REQUIRED_HORIZON", "row_schema": "market_microstructure_1s_v1",
+                "source_segment_schema": "market_segment_v3", "require_fresh_bbo": True, "require_trade_fields": True,
+                "coverage_provenance": "VERIFIED_TIMESTAMP_CONTINUITY:" + segment_hash,
+                "source_evidence_sha256": sorted({opportunity_hash, binding_hash, segment_hash}),
+                "live_arming_authorized": False, "qualification_eligible": False}
+        return {"status": "SUPPORTED", "context": {**body, "signature": stable_hash("baseline-execution-model-context", body)},
+                "reason_codes": [], "live_arming_authorized": False}
+    except (ValueError, TypeError, KeyError, ArithmeticError, AttributeError) as exc:
+        return {"status": "UNKNOWN", "context": None, "reason_codes": [str(exc) if isinstance(exc, ValueError) else "DECLARED_BASELINE_CONTEXT_INVALID"]}
+
+
 def build_baseline_execution_context(
     *, generation: Mapping[str, Any], identity: Mapping[str, Any],
     entry_receipt: Mapping[str, Any], pinned_sources: Mapping[str, str],

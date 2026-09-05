@@ -404,7 +404,11 @@ def evaluate_shadow_terminal(
         "position_context_id": context["position_context_id"],
         "position_context_signature": context["signature"],
         "cost_model_id": costs["cost_model_id"], "cost_model_signature": costs["signature"],
-        "simulation_model": SIMULATION_MODEL, "filled_qty": filled_qty,
+        # The same fee scenario does not make held signal ATR comparable to
+        # measured fill-time ATR. Existing cohort grouping uses this identity.
+        "simulation_model": (SIMULATION_MODEL + ":DECLARED_SIGNAL_ATR_HOLD_CONSTANT"
+                             if context.get("atr_basis") == "DECLARED_SIGNAL_ATR_HOLD_CONSTANT" else SIMULATION_MODEL),
+        "atr_treatment": context.get("atr_basis"), "filled_qty": filled_qty,
         "entry_fill_event_count": len(fill_events),
         "entry_vwap": round(fill_price, 12),
         "entry_complete_ts": fill_ts,

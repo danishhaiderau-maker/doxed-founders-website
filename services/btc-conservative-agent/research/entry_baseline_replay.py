@@ -300,6 +300,22 @@ def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
 
 
 def _execution_context(episode: Mapping, result: Mapping, generation: Mapping) -> dict:
+    capture = episode.get("directional_capture") or {}
+    if capture.get("research_context_declaration") is not None:
+        from research.baseline_execution_context import build_declared_directional_baseline_context
+        coverage = episode.get("_baseline_context_coverage") or []
+        if len(coverage) != 1 or episode.get("_baseline_context_pin_reasons"):
+            return {"status": "UNKNOWN", "context": None,
+                    "reason_codes": ["DECLARED_BASELINE_SINGLE_VERIFIED_COVERAGE_REQUIRED"]}
+        identity = {key: episode.get(key) for key in IDENTITY_FIELDS}
+        identity.update(epoch_id=episode.get("epoch_id") or episode.get("dataset_epoch"),
+                        direction=episode.get("direction"), symbol=episode.get("symbol"),
+                        baseline_id=result["baseline_id"], baseline_policy_signature=result["policy_signature"])
+        return build_declared_directional_baseline_context(generation=generation, identity=identity,
+            entry_receipt=result["conservative_receipt"], capture=capture, baseline=result["baseline_spec"],
+            pinned_sources=episode.get("_baseline_context_pins") or {},
+            opportunity_binding=episode.get("_baseline_context_opportunity"),
+            coverage_evidence=coverage[0]["object"], coverage_binding=coverage[0].get("binding"))
     if episode.get("counterfactual_direction") is True:
         return {"status": "UNKNOWN", "context": None,
                 "reason_codes": ["DIRECTION_SPECIFIC_BASELINE_EXECUTION_CONTEXT_REQUIRED"]}
@@ -518,7 +534,19 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         str(code) for code in episode.get("market_evidence_reason_codes") or []
     )
     results = []
+    source_episode = episode
     for baseline in _baseline_rows():
+        episode = source_episode
+        capture = episode.get("directional_capture") or {}
+        if capture.get("research_context_declaration") is not None:
+            from research.baseline_execution_context import declared_directional_baseline_inputs
+            try:
+                declared_inputs = declared_directional_baseline_inputs(capture, baseline)
+                episode = {**episode, **{key: declared_inputs[key] for key in (
+                    "requested_qty", "signed_quantity_constraints", "latency_sec", "fees_usd", "slippage_model")}}
+            except (ValueError, TypeError, KeyError, ArithmeticError, AttributeError) as exc:
+                results.append(_unknown(baseline, episode, str(exc)))
+                continue
         if canonical_identity_failures:
             results.append(_unknown(baseline, episode, *canonical_identity_failures))
             continue
@@ -559,6 +587,10 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         )
         receipt["declared_fees_usd"] = episode.get("fees_usd")
         receipt["measured_input_latency_sec"] = episode.get("latency_sec")
+        if capture.get("research_context_declaration") is not None:
+            receipt["declared_input_latency_sec"] = episode.get("latency_sec")
+            receipt["measured_input_latency_sec"] = None
+            receipt["input_assumption_basis"] = "DECLARED_SIMULATION"
         receipt["declared_slippage_model"] = episode.get("slippage_model")
         terminal = str(receipt.get("final_classification") or "").upper()
         if receipt.get("supported") is not True or terminal not in {
@@ -601,6 +633,7 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
             results[-1]["model_context_blockers"] = projection["reason_codes"]
             if projection["context"] is not None:
                 results[-1]["execution_model_context"] = projection["context"]
+    episode = source_episode
     material = {
         "schema": EPISODE_RECEIPT_SCHEMA,
         "episode_id": episode_id,

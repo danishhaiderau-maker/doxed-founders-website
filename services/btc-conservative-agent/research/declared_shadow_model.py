@@ -89,7 +89,14 @@ def _baseline_context(entry, generation):
     for key in ("atr_pct_at_fill", "leverage", "margin_usd"):
         if _number(context.get(key), minimum=0) <= 0: raise ValueError("BASELINE_POSITION_INPUT_MISSING")
     if context.get("atr_basis") != "EXPLICIT_AT_FILL_OBSERVATION":
-        raise ValueError("BASELINE_ATR_BASIS_UNSUPPORTED")
+        if (context.get("atr_basis") != "DECLARED_SIGNAL_ATR_HOLD_CONSTANT"
+                or context.get("context_evidence_basis") != "DECLARED_SIMULATION"
+                or context.get("measured_fill_atr") is not None
+                or not isinstance(context.get("research_context_declaration_sha256"), str)
+                or len(context["research_context_declaration_sha256"]) != 64
+                or not isinstance(context.get("directional_capture_signature"), str)
+                or not context["directional_capture_signature"].startswith("directional-entry-capture-")):
+            raise ValueError("BASELINE_ATR_BASIS_UNSUPPORTED")
     if (not isinstance(context.get("latency_provenance"), str) or not context["latency_provenance"].strip()
             or context.get("timing_basis") != "BASELINE_EXECUTION_TIMESTAMPS_UNCHANGED"):
         raise ValueError("BASELINE_LATENCY_COMPATIBILITY_MISSING")
