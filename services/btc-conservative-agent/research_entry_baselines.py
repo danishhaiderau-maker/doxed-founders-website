@@ -146,8 +146,50 @@ def build_entry_baseline_registry() -> dict[str, Any]:
 ENTRY_BASELINE_REGISTRY = build_entry_baseline_registry()
 
 
-def materialize_signal_time_baseline_schedules(
-    opportunity: Mapping[str, Any],
+def materialize_signal_time_baseline_schedules(opportunity: Mapping[str, Any]) -> dict[str, Any]:
+    """Capture both independent research sides; never change the AI/order side."""
+    original = _materialize_single_direction_baseline_schedules(opportunity, neutral_reference=True)
+    source_episode = str(opportunity.get("episode_id") or "")
+    source_opportunity = str(opportunity.get("opportunity_id") or opportunity.get("record_id") or "")
+    ai_direction = str(opportunity.get("raw_direction") or "UNKNOWN").upper()
+    source_execution_direction = str(opportunity.get("executed_direction") or opportunity.get("direction") or "UNKNOWN").upper()
+    source_schedule_direction = str(opportunity.get("direction") or opportunity.get("raw_direction") or "UNKNOWN").upper()
+    directions = {}
+    for side in ("LONG", "SHORT"):
+        same_side = side == source_schedule_direction
+        research_episode = source_episode if same_side else "counterfactual-" + canonical_hash(
+            "directional-research-episode", {"source_episode_id": source_episode,
+                "opportunity_id": source_opportunity, "epoch_id": opportunity.get("epoch_id"),
+                "direction": side, "registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"]})
+        if same_side:
+            schedules = deepcopy(original["schedules"])
+        else:
+            # An opposite actual-order schedule is not a research treatment.
+            # Calculate a new declared schedule from the same signal-time inputs.
+            projected = {key: opportunity[key] for key in (
+                "opportunity_id", "record_id", "signal_ts", "signal_price",
+                "signal_time_bbo", "feature_snapshot_at_signal") if key in opportunity}
+            projected.update(episode_id=research_episode, direction=side, baseline_schedules={})
+            schedules = _materialize_single_direction_baseline_schedules(projected, neutral_reference=True)["schedules"]
+        body = {"schema": "directional_entry_baseline_capture_v1", "direction": side,
+                "episode_id": research_episode, "source_episode_id": source_episode,
+                "opportunity_id": source_opportunity, "original_ai_direction": ai_direction,
+                "source_execution_direction": source_execution_direction,
+                "signal_ts": opportunity.get("signal_ts"), "schedules": schedules,
+                "source_revision": opportunity.get("source_revision"),
+                "deployed_revision": opportunity.get("deployed_revision"),
+                "epoch_id": opportunity.get("epoch_id") or opportunity.get("dataset_epoch"),
+                "tile_config_signature": opportunity.get("tile_config_signature"),
+                "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
+                "scope": "RESEARCH_COUNTERFACTUAL_NOT_ORDER_AUTHORIZATION"}
+        directions[side] = {**body, "capture_signature": canonical_hash("directional-entry-capture", body, length=64)}
+    return {**original, "directional_schedules": directions,
+            "directional_capture_schema": "both_direction_entry_baselines_v1",
+            "original_ai_direction": ai_direction, "source_execution_direction": source_execution_direction}
+
+
+def _materialize_single_direction_baseline_schedules(
+    opportunity: Mapping[str, Any], *, neutral_reference: bool = False,
 ) -> dict[str, Any]:
     """Freeze the baseline schedule evidence available at signal time.
 
@@ -198,7 +240,7 @@ def materialize_signal_time_baseline_schedules(
         reference = float(first(
             opportunity.get("signal_price"), features.get("signal_price"),
             source_features.get("signal_price"), market_context.get("signal_price"),
-            side_quote,
+            (bid + ask) / 2.0 if neutral_reference else side_quote,
         ))
         inputs_complete = (
             signal_ts > 0 and direction in {"LONG", "SHORT"}

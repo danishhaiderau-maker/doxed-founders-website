@@ -236,7 +236,8 @@ def test_v3_materializer_uses_existing_engine_and_missing_schedule_is_unknown(tm
     (ledgers / "opportunity.jsonl").write_text(json.dumps(opportunity) + "\n", encoding="utf-8")
     report = materialize_v3_opportunity_replay(tmp_path)
     assert report["same_opportunity_count"] == 1
-    assert all(row["unknown"] == 1 for row in report["summaries"].values())
+    assert report["directional_episode_count"] == 2
+    assert all(row["unknown"] == 2 for row in report["summaries"].values())
     assert all(row["no_fills"] == 0 for row in report["summaries"].values())
 
 

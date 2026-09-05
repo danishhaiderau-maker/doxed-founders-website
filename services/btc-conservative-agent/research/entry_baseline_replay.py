@@ -300,6 +300,9 @@ def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
 
 
 def _execution_context(episode: Mapping, result: Mapping, generation: Mapping) -> dict:
+    if episode.get("counterfactual_direction") is True:
+        return {"status": "UNKNOWN", "context": None,
+                "reason_codes": ["DIRECTION_SPECIFIC_BASELINE_EXECUTION_CONTEXT_REQUIRED"]}
     identity = {field: episode.get(field) for field in IDENTITY_FIELDS}
     identity["epoch_id"] = episode.get("epoch_id") or episode.get("dataset_epoch")
     identity.update(direction=episode.get("direction"), symbol=episode.get("symbol"),
@@ -365,6 +368,10 @@ def _schedule_envelope(
     if not isinstance(envelope, Mapping):
         return None, ["BASELINE_SCHEDULE_MISSING"]
     failures = []
+    if episode.get("directional_capture") is not None:
+        capture = episode["directional_capture"]
+        if capture.get("direction") != episode.get("direction") or capture.get("schedules") != schedules:
+            failures.append("DIRECTIONAL_BASELINE_SCHEDULE_BINDING_MISMATCH")
     for key in ("episode_id", "opportunity_id", "policy_signature"):
         expected = baseline["policy_signature"] if key == "policy_signature" else episode.get(key)
         if not expected or str(envelope.get(key) or "") != str(expected):
@@ -604,6 +611,12 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         "tile_config_signature": episode.get("tile_config_signature"),
         "config_signature": episode.get("config_signature"),
         "direction": episode.get("direction"),
+        "source_episode_id": episode.get("source_episode_id") or episode_id,
+        "original_ai_direction": episode.get("original_ai_direction") or episode.get("raw_direction") or episode.get("direction"),
+        "source_execution_direction": episode.get("source_execution_direction", "UNKNOWN"),
+        "counterfactual_direction": episode.get("counterfactual_direction") is True,
+        "directional_capture_signature": (episode.get("directional_capture") or {}).get("capture_signature"),
+        "directional_coverage": episode.get("directional_coverage", "LEGACY_SINGLE_SIDE_ONLY"),
         "market": episode.get("market"),
         "symbol": episode.get("symbol"),
         "signal_ts": episode.get("signal_ts"),
@@ -636,12 +649,55 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
     return material
 
 
+def _directional_episodes(episode: Mapping[str, Any]) -> list[dict[str, Any]]:
+    snapshot = episode.get("baseline_schedule_snapshot") or {}
+    captures = snapshot.get("directional_schedules")
+    if not isinstance(captures, Mapping):
+        return [{**episode, "directional_coverage": "LEGACY_SINGLE_SIDE_ONLY"}]
+    output = []
+    for side in ("LONG", "SHORT"):
+        capture = captures.get(side)
+        reasons = []
+        if not isinstance(capture, Mapping):
+            capture = {}
+            reasons.append("DIRECTIONAL_BASELINE_CAPTURE_MISSING")
+        body = {key: value for key, value in capture.items() if key != "capture_signature"}
+        if capture.get("capture_signature") != canonical_hash("directional-entry-capture", body, length=64):
+            reasons.append("DIRECTIONAL_BASELINE_CAPTURE_SIGNATURE_INVALID")
+        expected = {"source_episode_id": episode.get("episode_id"),
+                    "opportunity_id": episode.get("opportunity_id") or episode.get("record_id"),
+                    "signal_ts": episode.get("signal_ts"), "direction": side,
+                    "original_ai_direction": str(episode.get("raw_direction") or "UNKNOWN").upper(),
+                    "source_execution_direction": str(episode.get("source_execution_direction") or episode.get("executed_direction") or episode.get("direction") or "UNKNOWN").upper(),
+                    "epoch_id": episode.get("epoch_id") or episode.get("dataset_epoch"),
+                    "source_revision": episode.get("source_revision"),
+                    "deployed_revision": episode.get("deployed_revision"),
+                    "tile_config_signature": episode.get("tile_config_signature"),
+                    "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"]}
+        if any(capture.get(key) != value for key, value in expected.items()):
+            reasons.append("DIRECTIONAL_BASELINE_CAPTURE_IDENTITY_MISMATCH")
+        if not capture.get("episode_id"):
+            reasons.append("DIRECTIONAL_BASELINE_EPISODE_ID_MISSING")
+        source_episode = str(episode.get("episode_id") or "")
+        output.append({**episode, "source_episode_id": source_episode,
+            "episode_id": capture.get("episode_id") or f"unavailable:{source_episode}:{side}",
+            "direction": side, "original_ai_direction": capture.get("original_ai_direction", "UNKNOWN"),
+            "source_execution_direction": capture.get("source_execution_direction", "UNKNOWN"),
+            "counterfactual_direction": capture.get("episode_id") != source_episode,
+            "baseline_schedules": capture.get("schedules") or {}, "directional_capture": capture,
+            "directional_coverage": "BOTH_SIDES_CAPTURED" if not reasons else "DIRECTIONAL_CAPTURE_INVALID",
+            "materialization_reason_codes": list(episode.get("materialization_reason_codes") or []) + reasons})
+    return output
+
+
 def materialize_same_opportunity_replay(
     episodes: Iterable[Mapping[str, Any]],
     *, generation: Mapping | None = None,
 ) -> dict[str, Any]:
     """Return deterministic episode receipts plus comparable outcome counts."""
-    receipts = [replay_episode(episode, generation=generation) for episode in episodes]
+    sources = list(episodes)
+    receipts = [replay_episode(variant, generation=generation)
+                for episode in sources for variant in _directional_episodes(episode)]
     receipts.sort(key=lambda row: (str(row["opportunity_id"]), str(row["episode_id"])))
     expected = [row["baseline_id"] for row in _baseline_rows()]
     summaries = {}
@@ -652,7 +708,8 @@ def materialize_same_opportunity_replay(
             if result["baseline_id"] == baseline_id
         )
         summaries[baseline_id] = {
-            "opportunities": len(receipts),
+            "opportunities": len(sources),
+            "directional_evaluations": len(receipts),
             "full_fills": states["FULL_FILL"],
             "partial_fills": states["PARTIAL_FILL"],
             "no_fills": states["NO_FILL"],
@@ -661,7 +718,10 @@ def materialize_same_opportunity_replay(
     material = {
         "schema": REPLAY_SCHEMA,
         "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
-        "same_opportunity_count": len(receipts),
+        "same_opportunity_count": len(sources),
+        "directional_episode_count": len(receipts),
+        "independent_sample_basis": "SOURCE_OPPORTUNITY_NOT_DIRECTIONAL_VARIANTS",
+        "directional_coverage": dict(Counter(row["directional_coverage"] for row in receipts)),
         "baseline_ids": expected,
         "summaries": summaries,
         "episode_receipts": receipts,
@@ -783,9 +843,16 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                     "tile_config_signature", row.get("tile_config_signature"),
                     causal.get("tile_config_signature"),
                 )
-                direction = consistent(
-                    "direction", row.get("direction"), row.get("raw_direction"), causal.get("direction"),
-                )
+                if isinstance(snapshot, Mapping) and snapshot.get("directional_capture_schema") == "both_direction_entry_baselines_v1":
+                    # Store causal.direction denotes raw AI direction. An
+                    # explicitly different executed side is not a conflict.
+                    if row.get("raw_direction") not in (None, ""):
+                        consistent("raw_ai_direction", row.get("raw_direction"), causal.get("direction"))
+                    direction = row.get("direction") or row.get("raw_direction")
+                else:
+                    direction = consistent(
+                        "direction", row.get("direction"), row.get("raw_direction"), causal.get("direction"),
+                    )
                 market = consistent("market", row.get("market"), causal.get("market"))
                 symbol = consistent("symbol", row.get("symbol"), causal.get("symbol"))
                 key = tuple(str(value or "") for value in (
@@ -897,6 +964,7 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                     "deployed_revision": deployed_revision,
                     "tile_config_signature": tile_signature,
                     "direction": direction,
+                    "source_execution_direction": str(row.get("executed_direction") or row.get("direction") or "UNKNOWN").upper(),
                     "market": market,
                     "symbol": symbol,
                     "baseline_schedules": schedules,
