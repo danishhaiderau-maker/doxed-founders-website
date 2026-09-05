@@ -273,6 +273,86 @@ def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _dynamic_projection(source: Mapping[str, Any], generation: Mapping[str, Any],
+                        terminal: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Project only explicit receipt fields; never derive a causal timestamp/bucket."""
+    terminal = terminal if isinstance(terminal, Mapping) else {}
+    return {
+        "generation": dict(generation), "market": source.get("market"), "symbol": source.get("symbol"),
+        "signal_ts": source.get("signal_ts"),
+        "required_end_ts": terminal.get("required_horizon_end_ts")
+        if "required_horizon_end_ts" in terminal else source.get("required_end_ts"),
+        "pre_entry_features": source.get("pre_entry_features"),
+        "bucket_definition_signature": source.get("bucket_definition_signature"),
+        "declared_position_margin_usd": terminal.get("declared_position_margin_usd")
+        if "declared_position_margin_usd" in terminal else source.get("declared_position_margin_usd"),
+        "outcome_state": "UNKNOWN", "terminal_complete": False,
+    }
+
+
+def _unknown_dynamic_shadow(source, episode, entry_result, generation):
+    terminal = source.get("terminal")
+    terminal = terminal if isinstance(terminal, Mapping) else {}
+    receipt = entry_result.get("conservative_receipt")
+    receipt = receipt if isinstance(receipt, Mapping) else {}
+    signature = source.get("composite_policy_signature") or source.get("policy_signature")
+    return {
+        **_dynamic_projection(episode, generation, terminal),
+        "episode_id": source.get("episode_id"), "opportunity_id": source.get("opportunity_id"),
+        "evidence_world": "CONSERVATIVE_BBO", "direction": episode.get("direction"),
+        "policy_id": signature, "policy_signature": signature,
+        "original_requested_qty": receipt.get("requested_qty"),
+        "cost_model_id": terminal.get("cost_model_id"), "simulation_model": terminal.get("simulation_model"),
+        "economics_evidence_basis": terminal.get("economics_evidence_basis"),
+        "declared_contract_sha256": terminal.get("declared_contract_sha256"),
+        "net_pnl_usd": None,
+    }
+
+
+def _dynamic_cohort_publication(adapted, unknown_shadow, expected, shadow_aggregate,
+                                feature_names, protocol, limits):
+    """Consume both verified disk streams while their owning ExitStack is alive."""
+    from itertools import chain
+    from research.dynamic_cohort_adapter import adapt_dynamic_cohorts
+    from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES
+    universe = set()
+    options = dict(limits or {})
+    allowed = {"max_rows", "max_episodes", "max_groups", "max_candidates"}
+    try:
+        if set(options) - allowed:
+            raise ValueError("DYNAMIC_ADAPTER_LIMIT_OPTION_INVALID")
+        candidate_limit = options.get("max_candidates", 4096)
+        if type(candidate_limit) is not int or candidate_limit <= 0:
+            raise ValueError("INVALID_ADAPTER_LIMIT")
+        def inputs():
+            for row in chain(adapted, unknown_shadow):
+                policy, signature = row.get("policy_id"), row.get("policy_signature")
+                if isinstance(policy, str) and policy and isinstance(signature, str) and signature:
+                    universe.add((policy, signature))
+                    if len(universe) > candidate_limit:
+                        raise ValueError("DYNAMIC_ADAPTER_CANDIDATE_UNIVERSE_LIMIT")
+                yield row
+        result = adapt_dynamic_cohorts(inputs(), expected_generation=expected,
+            feature_names=DEFAULT_CAUSAL_FEATURES if feature_names is None else feature_names,
+            protocol={} if protocol is None else protocol, **options)
+        supported = result["counts"]["supported_outcomes"]
+        result.update(status="BUILT_INCOMPLETE_RESEARCH_ONLY" if supported else "UNAVAILABLE",
+                      blockers=sorted(set(result.get("blockers", []) +
+                          ([] if supported else ["NO_CAUSALLY_BOUND_COMPLETE_DYNAMIC_OUTCOMES"]))),
+                      candidate_universe=[{"policy_id": p, "policy_signature": s} for p, s in sorted(universe)],
+                      candidate_universe_basis="ALL_VERIFIED_INPUT_ROWS_BEFORE_CAUSAL_FILTERING_NOT_PREDECLARED_SEARCH_SPACE",
+                      comparison_complete=False, live_qualification=False,
+                      shadow_terminal_aggregate=shadow_aggregate)
+        # The adapter hash covers its own output; this hash binds publication metadata too.
+        result["publication_sha256"] = hashlib.sha256(canonical_json(result).encode()).hexdigest()
+        return result
+    except (ValueError, TypeError, OverflowError) as exc:
+        return {"schema": "same_publication_dynamic_cohorts_v1", "status": "UNAVAILABLE",
+                "generation": dict(expected), "blockers": [str(exc)], "groups": [],
+                "candidate_universe_complete": False, "comparison_complete": False,
+                "shadow_terminal_aggregate": shadow_aggregate, "live_qualification": False}
+
+
 def _row_generation_defects(row: Mapping[str, Any], generation: Mapping[str, str]) -> list[str]:
     aliases = {
         "epoch_id": ("epoch_id", "dataset_epoch"),
@@ -307,12 +387,13 @@ def build_discovery_scorecard_publication(
     stream_artifact_root: str | Path | None = None,
     index_budget_bytes: int = 2 * 1024 * 1024 * 1024,
     evaluator_max_bytes: int = 2 * 1024 * 1024 * 1024,
+    dynamic_feature_names=None, dynamic_protocol=None, dynamic_limits=None,
 ) -> dict[str, Any]:
     from research.shadow_result_stream import DiskRows, verify_result_stream
     try:
-        # Four simultaneous indexes: evaluator, verified shadow, adapted, cell.
+        # Five indexes: evaluator, verified shadow, adapted, unknown shadow, cell.
         # Legacy no-stream callers also use bounded disk-backed adaptation.
-        index_share = int(index_budget_bytes) // 4
+        index_share = int(index_budget_bytes) // 5
         with ExitStack() as resources:
             stream = None
             if isinstance(shadow_terminal_report, Mapping) and shadow_terminal_report.get("result_stream") is not None:
@@ -320,11 +401,14 @@ def build_discovery_scorecard_publication(
                                       shadow_terminal_report, expected_generation,
                                       index_max_bytes=index_share))
             adapted = resources.enter_context(DiskRows(max_bytes=index_share))
+            dynamic_unknown = resources.enter_context(DiskRows(max_bytes=index_share))
             return _build_discovery_scorecard_publication(canonical_root,
                     expected_generation=expected_generation, evaluator_status=evaluator_status,
                     baseline_report=baseline_report, shadow_terminal_report=shadow_terminal_report,
                     _stream=stream, _adapted=adapted, _index_max_bytes=index_share,
-                    _resources=resources, _evaluator_max_bytes=evaluator_max_bytes)
+                    _resources=resources, _evaluator_max_bytes=evaluator_max_bytes,
+                    _dynamic_unknown=dynamic_unknown, _dynamic_feature_names=dynamic_feature_names,
+                    _dynamic_protocol=dynamic_protocol, _dynamic_limits=dynamic_limits)
     except (ValueError, OSError, EOFError, sqlite3.Error, json.JSONDecodeError) as exc:
         return _unknown(expected_generation, [f"SHADOW_STREAM_VERIFICATION_FAILED:{exc}"])
 
@@ -333,6 +417,7 @@ def _build_discovery_scorecard_publication(
     canonical_root, *, expected_generation, evaluator_status, baseline_report,
     shadow_terminal_report=None, _stream=None, _adapted=None, _index_max_bytes=None,
     _resources=None, _evaluator_max_bytes=2 * 1024 * 1024 * 1024,
+    _dynamic_unknown=None, _dynamic_feature_names=None, _dynamic_protocol=None, _dynamic_limits=None,
 ):
     """Build a fresh report from two explicitly same-generation inputs."""
     expected, blockers = _generation(expected_generation, "EXPECTED")
@@ -388,7 +473,8 @@ def _build_discovery_scorecard_publication(
             for defect in defects:
                 unknown_counts[f"evaluator_row:{defect}"] += 1
             continue
-        conservative = {**_base_row(source), "evidence_world": "CONSERVATIVE_BBO", "net_pnl_usd": None}
+        conservative = {**_base_row(source), **_dynamic_projection(source, expected),
+                        "evidence_world": "CONSERVATIVE_BBO", "net_pnl_usd": None}
         adapted.append(conservative)
         for field in _missing(conservative):
             missing[f"evaluator_conservative:{field}"] += 1
@@ -398,7 +484,9 @@ def _build_discovery_scorecard_publication(
                 unknown_counts[f"evaluator_reason:{reason}"] += 1
         terminal = str(source.get("terminal_outcome_status") or "UNKNOWN")
         if terminal == "REALIZED_COST_COMPLETE" and source.get("profitability_supported") is True:
-            observed = {**_base_row(source), "evidence_world": "OBSERVED_PAPER",
+            observed = {**_base_row(source), **_dynamic_projection(source, expected),
+                        "evidence_world": "OBSERVED_PAPER", "terminal_complete": True,
+                        "outcome_state": source.get("classification"),
                         "cost_model_id": source.get("observed_cost_model_id"),
                         "simulation_model": source.get("observed_execution_model"),
                         "net_pnl_usd": source.get("net_pnl_usd")}
@@ -452,6 +540,7 @@ def _build_discovery_scorecard_publication(
             conservative_receipt = result.get("conservative_receipt")
             conservative_receipt = conservative_receipt if isinstance(conservative_receipt, Mapping) else {}
             baseline_row = {
+                **_dynamic_projection(receipt, expected),
                 "evidence_world": "CONSERVATIVE_BBO",
                 "episode_id": receipt.get("episode_id"), "opportunity_id": receipt.get("opportunity_id"),
                 "epoch_id": receipt.get("dataset_epoch"), "source_revision": receipt.get("source_revision"),
@@ -514,6 +603,9 @@ def _build_discovery_scorecard_publication(
             else:
                 shadow_conflicting_duplicates += 1
                 unknown_counts["shadow_terminal_conflicting_duplicate"] += 1
+                episode, entry_result = baseline_index.get(key[:3], ({}, {}))
+                for item in variants:
+                    _dynamic_unknown.append(_unknown_dynamic_shadow(item, episode, entry_result, expected))
                 continue
             episode, entry_result = baseline_index.get(key[:3], ({}, {}))
             terminal = source.get("terminal")
@@ -521,6 +613,7 @@ def _build_discovery_scorecard_publication(
             if source.get("status") != "COMPLETE":
                 # Exact UNKNOWN totals and reason counts are carried once by
                 # shadow_terminal_aggregate; sampled rows must not double-count them.
+                _dynamic_unknown.append(_unknown_dynamic_shadow(source, episode, entry_result, expected))
                 continue
             if not episode:
                 reasons.append("BASELINE_ENTRY_JOIN_MISSING")
@@ -568,10 +661,13 @@ def _build_discovery_scorecard_publication(
             if reasons:
                 for reason in sorted(set(reasons)):
                     unknown_counts[f"shadow_terminal:{reason}"] += 1
+                _dynamic_unknown.append(_unknown_dynamic_shadow(source, episode, entry_result, expected))
                 continue
             baseline_spec = entry_result.get("baseline_spec")
             baseline_spec = baseline_spec if isinstance(baseline_spec, Mapping) else {}
             shadow_row = {
+                **_dynamic_projection(episode, expected, terminal),
+                "outcome_state": entry_result.get("outcome_state"), "terminal_complete": True,
                 "evidence_world": "CONSERVATIVE_BBO", "episode_id": key[0],
                 "opportunity_id": key[1], "epoch_id": episode.get("dataset_epoch"),
                 "source_revision": episode.get("source_revision"),
@@ -625,6 +721,8 @@ def _build_discovery_scorecard_publication(
             for field in _missing(shadow_row):
                 missing[f"shadow_terminal:{field}"] += 1
 
+    dynamic_cohorts = _dynamic_cohort_publication(adapted, _dynamic_unknown, expected, shadow_aggregate,
+        _dynamic_feature_names, _dynamic_protocol, _dynamic_limits)
     scorecard = build_disk_episode_matched_scorecard(adapted, index_max_bytes=_index_max_bytes)
     has_exact_matched_cohort = any(
         item.get("cohort_equality_proven") is True
@@ -682,6 +780,7 @@ def _build_discovery_scorecard_publication(
         "unjoinable_counts": dict(sorted((key, value) for key, value in unknown_counts.items() if value)),
         "shadow_terminal_aggregate": shadow_aggregate,
         "scorecard": scorecard,
+        "dynamic_cohorts": dynamic_cohorts,
         "input_identity_complete": complete_inputs,
         "profitability_evidence_by_world": {
             world: {
