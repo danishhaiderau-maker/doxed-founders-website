@@ -145,6 +145,42 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _candidate_atr_projection(fill_execution, intent, feature, cycle_value):
+    """Keep numeric precedence; never manufacture fill-time provenance."""
+    for source, raw in (
+        ("execution.atr14_pct_at_fill", fill_execution.get("atr14_pct_at_fill")),
+        ("intent.atr14_pct_at_signal", intent.get("atr14_pct_at_signal")),
+        ("intent.atr14_pct", intent.get("atr14_pct")),
+        ("feature.atr14_pct_3m", feature.get("atr14_pct_3m")),
+        ("cycle.atr14_pct_3m", cycle_value),
+    ):
+        try:
+            value = _number(raw)
+        except OverflowError:
+            value = None
+        if isinstance(raw, bool) or value is None or not math.isfinite(value) or value <= 0:
+            continue
+        basis = "UNVERIFIED_TIMING_FALLBACK"
+        verified = False
+        if source.startswith("execution."):
+            if fill_execution.get("atr14_pct_basis") == "FILL_TIME_3M_ATR14":
+                from research_v3_bridge import _paper_fill_atr_evidence
+                proof = _paper_fill_atr_evidence(fill_execution, {}, fill_ts=fill_execution.get("fill_ts"),
+                                               event_id=fill_execution.get("event_id"))
+                verified = (fill_execution.get("atr14_fill_observation_verified") is True
+                            and proof.get("atr14_fill_observation_verified") is True)
+                if verified:
+                    basis = "FILL_TIME_3M_ATR14"
+            elif fill_execution.get("atr14_pct_basis") == "SIGNAL_TIME_3M_ATR14":
+                basis = "SIGNAL_TIME_3M_ATR14"
+        elif source.startswith("intent.") and intent.get("atr14_pct_basis") == "SIGNAL_TIME_3M_ATR14":
+            basis = "SIGNAL_TIME_3M_ATR14"
+        return {"atr14_pct": value, "atr14_pct_basis": basis,
+                "atr14_pct_source": source, "atr14_fill_observation_verified": verified}
+    return {"atr14_pct": None, "atr14_pct_basis": "UNAVAILABLE",
+            "atr14_pct_source": None, "atr14_fill_observation_verified": False}
+
+
 _RANKING_WEIGHTS = {
     "profit": 0.20,
     "drawdown": 0.15,
@@ -866,13 +902,7 @@ def load_candidate_inputs(
         ), {})
         terminal_executions = [row for row in executions if row.get("close_ts") is not None]
         terminal_execution = terminal_executions[0] if len(terminal_executions) == 1 else {}
-        atr14_pct = next((value for value in (
-            _number(fill_execution.get("atr14_pct_at_fill")),
-            _number(intent.get("atr14_pct_at_signal")),
-            _number(intent.get("atr14_pct")),
-            _number(feature.get("atr14_pct_3m")),
-            cycle_atr.get(event_id),
-        ) if value is not None and value > 0), None)
+        atr_projection = _candidate_atr_projection(fill_execution, intent, feature, cycle_atr.get(event_id))
         result.append({
             "epoch_id": next(iter(epoch_values)),
             "event_id": event_id,
@@ -908,12 +938,7 @@ def load_candidate_inputs(
                 or "UNKNOWN"
             ),
             "direction": intent.get("executed_direction"),
-            "atr14_pct": atr14_pct,
-            "atr14_pct_basis": (
-                "FILL_TIME_3M_ATR14" if _number(fill_execution.get("atr14_pct_at_fill")) is not None
-                else "SIGNAL_TIME_3M_ATR14" if atr14_pct is not None
-                else "UNAVAILABLE"
-            ),
+            **atr_projection,
             "leverage": intent.get("leverage") or 100.0,
             "margin_usd": intent.get("margin_usd") or 0.25,
             "requested_qty": (

@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Iterable, Iterator, Mapping
 import copy
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 import hashlib
 import json
@@ -249,9 +250,9 @@ def _positive_finite(value: Any) -> float | None:
     return number if math.isfinite(number) and number > 0 else None
 
 
-def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
-    """Read an explicitly observed 3-minute ATR receipt without inventing one."""
-    for source in sources:
+def _paper_atr14_selection(*sources: Mapping[str, Any]):
+    """Preserve legacy numeric precedence, without implying observation time."""
+    for source_index, source in enumerate(sources):
         if not isinstance(source, Mapping):
             continue
         context = source.get("context") if isinstance(source.get("context"), Mapping) else {}
@@ -273,21 +274,81 @@ def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
         )
         research = source.get("research_feature_snapshot") if isinstance(source.get("research_feature_snapshot"), Mapping) else {}
         market = research.get("market_context") if isinstance(research.get("market_context"), Mapping) else {}
-        for value in (
-            source.get("atr14_pct_at_fill"),
-            source.get("atr14_pct_3m"),
-            source.get("atr14_pct"),
-            cycle.get("atr14_pct_3m"),
-            research.get("atr14_pct_3m"),
-            market.get("atr14_pct_3m"),
+        cycle_path = "cycle_3m_universe" if isinstance(direct_cycle, Mapping) else "context.cycle_3m_universe" if isinstance(nested_cycle, Mapping) else "ai_input.cycle_3m_universe"
+        for path, value in (
+            ("atr14_pct_at_fill", source.get("atr14_pct_at_fill")),
+            ("atr14_pct_3m", source.get("atr14_pct_3m")),
+            ("atr14_pct", source.get("atr14_pct")),
+            (f"{cycle_path}.atr14_pct_3m", cycle.get("atr14_pct_3m")),
+            ("research_feature_snapshot.atr14_pct_3m", research.get("atr14_pct_3m")),
+            ("research_feature_snapshot.market_context.atr14_pct_3m", market.get("atr14_pct_3m")),
         ):
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                continue
-            if number > 0:
-                return number
-    return None
+            number = None if isinstance(value, bool) else _positive_finite(value)
+            if number is not None:
+                return number, source_index, path
+    return None, None, None
+
+
+def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
+    """Legacy ATR value reader; source selection is not fill-time proof."""
+    return _paper_atr14_selection(*sources)[0]
+
+
+def _exact_positive_time(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return result if result.is_finite() and result > 0 else None
+
+
+def _paper_fill_atr_evidence(position, order, *, fill_ts, event_id):
+    value, source_index, source_path = _paper_atr14_selection(position, order)
+    result = {"atr14_pct_at_fill": value,
+              "atr14_pct_basis": "UNVERIFIED_TIMING_FALLBACK" if value is not None else "UNAVAILABLE",
+              "atr14_pct_source": None if source_index is None else f"{('position', 'order')[source_index]}.{source_path}",
+              "atr14_fill_observation": None, "atr14_fill_observation_verified": False,
+              "atr14_provenance_blockers": ["FILL_TIME_ATR_OBSERVATION_MISSING"]}
+    if value is None:
+        return result
+    source = (position, order)[source_index]
+    observation = source.get("atr14_fill_observation")
+    if not isinstance(observation, Mapping):
+        return result
+    # A numeric field name, signal snapshot, or policy's atr_source label does
+    # not prove a measurement at the fill. Require the actual causal receipt.
+    defects = []
+    unsigned = {k: v for k, v in observation.items() if k != "receipt_sha256"}
+    if observation.get("receipt_sha256") != hashlib.sha256(canonical_json(unsigned).encode()).hexdigest():
+        defects.append("FILL_TIME_ATR_RECEIPT_HASH_INVALID")
+    if (observation.get("schema") != "paper_fill_atr_observation_v1"
+            or observation.get("atr_basis") != "EXPLICIT_AT_FILL_OBSERVATION"
+            or observation.get("timeframe_sec") != 180 or observation.get("period") != 14
+            or not isinstance(observation.get("provenance"), str) or not observation["provenance"].strip()
+            or not isinstance(event_id, str) or not event_id.strip()
+            or observation.get("event_id") != event_id):
+        defects.append("FILL_TIME_ATR_PROVENANCE_INVALID")
+    source_sha = observation.get("source_candles_sha256")
+    if not isinstance(source_sha, str) or len(source_sha) != 64 or any(c not in "0123456789abcdef" for c in source_sha):
+        defects.append("FILL_TIME_ATR_SOURCE_HASH_MISSING")
+    filled, observed, available, candle_end = (_exact_positive_time(item) for item in (
+        fill_ts, observation.get("observed_ts"), observation.get("available_at_ts"), observation.get("last_closed_candle_ts")))
+    if (filled is None or observed != filled or available is None or available > filled
+            or candle_end is None or candle_end > filled or available < candle_end
+            or filled - candle_end >= Decimal(180)):
+        defects.append("FILL_TIME_ATR_NOT_EXACT_CAUSAL_OBSERVATION")
+    observed_value = _positive_finite(observation.get("atr_pct"))
+    if (isinstance(observation.get("atr_pct"), bool) or observed_value != value
+            or _exact_positive_time(observation.get("atr_pct")) != Decimal(str(value))):
+        defects.append("FILL_TIME_ATR_VALUE_MISMATCH")
+    result["atr14_provenance_blockers"] = sorted(set(defects))
+    if not defects:
+        result.update(atr14_pct_basis="FILL_TIME_3M_ATR14",
+                      atr14_fill_observation=copy.deepcopy(dict(observation)),
+                      atr14_fill_observation_verified=True)
+    return result
 
 
 def _paper_fill_execution_receipt(
@@ -1311,15 +1372,15 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         **policy,
     }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
-    atr14_pct_at_fill = _paper_atr14_pct_3m(position, order)
+    fill_ts = _first(position.get("entry_ts"), order.get("fill_ts"))
+    atr_evidence = _paper_fill_atr_evidence(position, order, fill_ts=fill_ts, event_id=event_id)
     execution_receipt = _paper_fill_execution_receipt(order, position, signal)
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:primary-fill", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "fill_ts": _first(position.get("entry_ts"), order.get("fill_ts")),
         "fill_price": _first(position.get("entry"), order.get("fill_price")),
         "fill_model": _first(position.get("fill_model"), order.get("fill_model")),
-        "atr14_pct_at_fill": atr14_pct_at_fill,
-        "atr14_pct_basis": "FILL_TIME_3M_ATR14" if atr14_pct_at_fill is not None else "UNAVAILABLE",
+        **atr_evidence,
         "authenticated_exchange_actual": False, "paper_observation": True,
         "source_market_evidence_required_for_conservative_claim": True,
         **execution_receipt,
