@@ -1,0 +1,31 @@
+{
+  "schema": "btc_runtime_revision_incident_receipt_v1",
+  "incident_id": "fly-revision-override-33940814998",
+  "app": "doxed-btc-bot",
+  "status": "CLOSED",
+  "conservative_start_utc": "2026-09-05T03:07:36Z",
+  "verified_end_utc": "2026-09-05T03:25:14.709227+00:00",
+  "expected_source_revision": "cb7745e827e179f598b891bcefa136d47f00c8ee",
+  "observed_process_source_revision": "df45887e15264d5708b75c4ed48424171d3da1a0",
+  "observed_bot_normalized_sha12": "d4a2d6fdc45f",
+  "expected_bot_normalized_sha12": "d4a2d6fdc45f",
+  "cause": "Persisted Fly SOURCE_GIT_REV secret overrides the new image environment",
+  "prior_receipt_path": "diagnostics/revision-identity-incident-33940814998.json",
+  "prior_receipt_sha256": "3fb736821e3ab05d1b7a50f3beb9a242b3a117582f0bf69ad5954c7ee3a64855",
+  "closure_evidence": {
+    "guarded_run": 33941287379,
+    "remote_probe_utc": "2026-09-05T03:25:14.709227+00:00",
+    "remote_source_git_rev": "cb7745e827e179f598b891bcefa136d47f00c8ee",
+    "remote_bot_normalized_sha256": "d4a2d6fdc45fe1425185d7df706fa4cc30ebd116308369bf11eccff1c947e114",
+    "transport_enabled": "1",
+    "probe_json_received": true,
+    "fly_cli_exit_code": 1,
+    "fly_cli_post_output_error": "The handle is invalid.",
+    "whole_cli_clean_pass": false,
+    "workflow_terminal_success_claimed": false
+  },
+  "evidence_disposition": "Preserve original raw identity and the OPEN receipt. Conservatively exclude the full start-to-verification interval from qualification; closure does not certify affected data or a complete deployment.",
+  "analyzer_exclusion_enforced": false,
+  "qualification_allowed_from_affected_interval": false,
+  "live_arming_authorized": false
+}

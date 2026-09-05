@@ -1,0 +1,32 @@
+{
+  "schema": "btc_runtime_revision_incident_receipt_v1",
+  "incident_id": "fly-revision-override-33940814998",
+  "app": "doxed-btc-bot",
+  "status": "OPEN",
+  "conservative_start_utc": "2026-09-05T03:07:36Z",
+  "verified_end_utc": null,
+  "expected_source_revision": "cb7745e827e179f598b891bcefa136d47f00c8ee",
+  "observed_process_source_revision": "df45887e15264d5708b75c4ed48424171d3da1a0",
+  "observed_bot_normalized_sha12": "d4a2d6fdc45f",
+  "expected_bot_normalized_sha12": "d4a2d6fdc45f",
+  "cause": "Persisted Fly SOURCE_GIT_REV secret overrides the new image environment",
+  "evidence": {
+    "guarded_run": 33940814998,
+    "deploy_step_completed_utc": "2026-09-05T03:08:56Z",
+    "exact_revision_gate_failed_utc": "2026-09-05T03:13:00Z",
+    "public_status_reported_old_revision": true,
+    "ssh_probe_observed_new_code_old_environment": true,
+    "fly_secret_name_presence_confirmed": true,
+    "credential_values_exposed": false
+  },
+  "remediation": {
+    "only_source_revision_override_unset_staged": true,
+    "credential_and_trading_secrets_untouched": true,
+    "next_guarded_run": 33941287379,
+    "next_candidate_revision": "cb7745e827e179f598b891bcefa136d47f00c8ee"
+  },
+  "evidence_disposition": "Retain raw bytes and original identity; no relabeling. Affected qualification remains UNKNOWN until analyzer exclusion or a verified fresh qualification cohort is enforced.",
+  "analyzer_exclusion_enforced": false,
+  "qualification_allowed_from_affected_interval": false,
+  "live_arming_authorized": false
+}

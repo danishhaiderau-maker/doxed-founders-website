@@ -2494,8 +2494,20 @@ def _research_opportunity_universe():
 
 def _analysis_eligible_trade_ids(cohort=REAL_COPY_PARAMETER_OPTIMISATION):
     """Canonical cohort allow-list for research and policy optimizers."""
+    from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex, REASON
+    incident_input = load_incident_input()
     rows = _research_opportunity_universe()
     eligible, exclusions = _cohort_eligible_trade_ids(rows, cohort)
+    if incident_input.enabled:
+        incident_index = IncidentEpisodeIndex(incident_input)
+        incident_index.add(rows)
+        affected_ids = {str(row.get("trade_id") or "") for row in rows if incident_index.reasons(row)}
+        excluded = eligible & affected_ids
+        eligible = eligible - affected_ids
+        exclusions = dict(exclusions)
+        if excluded:
+            exclusions[REASON] = len(excluded)
+    incident_input.assert_unchanged()
     return eligible, exclusions, len(rows)
 
 
@@ -4231,6 +4243,8 @@ def qualified_exit_policy_grid_report():
     The physical hard stop is an invariant (30%), not an optimisation axis.
     Actual exchange results remain separate from counterfactual simulations.
     """
+    from research.runtime_identity_incidents import load_incident_input, REASON
+    incident_input = load_incident_input()
     all_replays = _load_jsonl_replays()
     cohort_assessments = {}
     for cohort_name in (
@@ -4267,6 +4281,15 @@ def qualified_exit_policy_grid_report():
     for trade_id in sorted(eligible_ids):
         replay = all_replays.get(trade_id)
         row = evidence.get(trade_id) or {}
+        if incident_input.enabled and (
+            incident_input.affected(row) or incident_input.affected({
+                key: value for key, value in (replay or {}).items() if key != "ticks"
+            })
+        ):
+            # Tick t values in this legacy replay are relative offsets, not
+            # absolute UTC proof. Missing absolute replay timing stays UNKNOWN.
+            local_exclusions[REASON] += 1
+            continue
         if not replay:
             local_exclusions["REPLAY_ROW_MISSING"] += 1
             continue
@@ -4437,6 +4460,9 @@ def qualified_exit_policy_grid_report():
         },
         "note": "Actual Bitfinex P&L is never overwritten by counterfactual outcomes. Missing replay, costs, horizons, or cohort evidence fails closed.",
     }
+    if incident_input.enabled:
+        report["runtime_identity_incident_input"] = incident_input.provenance()
+    incident_input.assert_unchanged()
     with open(analyzer_report_path(QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE), "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     return report
@@ -19969,6 +19995,8 @@ def write_report_manifest(
     lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
     shadow_research_model=None,
 ):
+    from research.runtime_identity_incidents import load_incident_input
+    incident_input = load_incident_input()
     manifest_started_at = datetime.now(timezone.utc)
     current_run_cutoff = float(
         globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
@@ -20025,6 +20053,9 @@ def write_report_manifest(
         print(f"  ⚠️ Cross-world evidence unavailable: {type(exc).__name__}: {exc}")
     if analysis_provenance is None:
         analysis_provenance = _lifecycle_inventory_analysis_provenance()
+    if incident_input.enabled:
+        analysis_provenance = dict(analysis_provenance)
+        analysis_provenance["runtime_identity_incident_input"] = incident_input.provenance()
     generation_revision = analysis_provenance["generation_revision"]
     # This grid must belong to this run or be explicitly absent. A stale file
     # from an earlier revision must never appear current merely because it is
@@ -20063,7 +20094,9 @@ def write_report_manifest(
             json.loads(baseline_manifest_bytes.decode("utf-8-sig")),
             analyzer_revision=str(generation_revision),
         )
-        baseline_replay = materialize_v3_opportunity_replay(policy_data_dir)
+        baseline_replay = materialize_v3_opportunity_replay(
+            policy_data_dir, incident_input=incident_input,
+        )
         if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
             raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
         baseline_replay["generation"] = baseline_generation
@@ -20179,6 +20212,7 @@ def write_report_manifest(
         conservative_evaluator_status = persist_v3_conservative_results(
             os.environ["BTC_AGENT_DATA_DIR"],
             analyzer_revision=str(generation_revision),
+            incident_input=incident_input,
         )
         library_status = build_library_manifest(
             os.environ["BTC_AGENT_DATA_DIR"],
@@ -20476,6 +20510,8 @@ def write_report_manifest(
                 "dataset_epoch": manifest["dataset_epoch"],
                 "config_signature": manifest["config_signature"],
                 "fresh_epoch": manifest["fresh_epoch"].get("epoch_id"),
+                **({"runtime_identity_incident_input": analysis_provenance["runtime_identity_incident_input"]}
+                   if "runtime_identity_incident_input" in analysis_provenance else {}),
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -20520,6 +20556,7 @@ def write_report_manifest(
                 f"{PIPELINE_ENFORCEMENT_TAG}"
             )
     try:
+        incident_input.assert_unchanged()
         _publish_completed_report_generation(manifest)
     except Exception as exc:
         print(f"  ⚠️ Could not write {REPORT_MANIFEST_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -20542,6 +20579,9 @@ def _publish_completed_report_generation(manifest):
     and is also replaced atomically only after publication succeeds.
     """
     from research.mirror_coherence import assert_mirror_coherent
+
+    from research.runtime_identity_incidents import assert_publication_incident_input
+    assert_publication_incident_input(manifest)
 
     assert_mirror_coherent(
         repo_root=Path(__file__).resolve().parents[2],
@@ -20576,6 +20616,7 @@ def _publish_completed_report_generation(manifest):
         (staging / REPORT_MANIFEST_FILE).write_text(
             json.dumps(manifest, indent=2), encoding="utf-8"
         )
+        assert_publication_incident_input(manifest)
         if published.exists():
             os.replace(published, backup)
         try:

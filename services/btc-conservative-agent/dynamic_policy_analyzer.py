@@ -75,6 +75,8 @@ def build_dynamic_policy_analysis_report(
     dataset_epoch: str | None, source_revision: str | None,
 ) -> dict[str, Any]:
     """Build one manifest-ready report, failing closed on every missing binding."""
+    from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex, REASON
+    incident_input = load_incident_input()
     payload, receipt = _load_verified_canonical_input(data_root)
     if payload is None:
         return _unknown(str(receipt.get("blocker") or "DYNAMIC_INPUT_UNKNOWN"), input_receipt=receipt)
@@ -91,10 +93,23 @@ def build_dynamic_policy_analysis_report(
     ]
     if mismatches:
         return _unknown(*mismatches, input_receipt=receipt)
+    training = list(payload.get("training_episodes") or [])
+    holdout = list(payload.get("sealed_holdout_episodes") or [])
+    incident_index = IncidentEpisodeIndex(incident_input)
+    incident_index.add(row for row in training + holdout if isinstance(row, Mapping))
+    excluded_training = [row for row in training if not isinstance(row, Mapping) or incident_index.reasons(row)]
+    excluded_holdout = [row for row in holdout if not isinstance(row, Mapping) or incident_index.reasons(row)]
+    if incident_input.enabled:
+        training = [row for row in training if isinstance(row, Mapping) and not incident_index.reasons(row)]
+        holdout = [row for row in holdout if isinstance(row, Mapping) and not incident_index.reasons(row)]
+        receipt = {**receipt, "runtime_identity_incident_input": incident_input.provenance(),
+                   "incident_excluded_training_episodes": len(excluded_training),
+                   "incident_excluded_holdout_episodes": len(excluded_holdout)}
+    changed_cohort = incident_input.enabled and bool(excluded_training or excluded_holdout)
     try:
         result = orchestrate_dynamic_policy_analysis(
-            list(payload.get("training_episodes") or []),
-            list(payload.get("sealed_holdout_episodes") or []),
+            training,
+            holdout,
             candidates=list(payload.get("candidates") or []),
             feature_names=list(payload.get("feature_names") or []),
             outer_folds=int(payload.get("outer_folds") or 0),
@@ -103,10 +118,18 @@ def build_dynamic_policy_analysis_report(
             embargo_sec=float(payload.get("embargo_sec") or 0),
             minimum_bucket_support=int(payload.get("minimum_bucket_support") or 0),
             protocol_run_id=str(payload.get("protocol_run_id") or ""),
-            sealed_holdout_evaluation=payload.get("sealed_holdout_evaluation"),
+            sealed_holdout_evaluation=None if changed_cohort else payload.get("sealed_holdout_evaluation"),
         )
     except (KeyError, TypeError, ValueError) as exc:
+        incident_input.assert_unchanged()
         return _unknown(f"DYNAMIC_ANALYSIS_INPUT_REJECTED:{type(exc).__name__}:{exc}", input_receipt=receipt)
+    incident_input.assert_unchanged()
+    if changed_cohort:
+        # A previously sealed result cannot be rebound to a filtered cohort.
+        # Keep the remaining-cohort diagnostic, but require a new sealed input.
+        return {**_unknown(REASON, "INCIDENT_FILTERED_COHORT_RESEAL_REQUIRED", input_receipt=receipt),
+                "descriptive_filtered_cohort": result,
+                "descriptive_filtered_cohort_qualification_allowed": False}
     result.update({
         "execution_class": "RESEARCH_ONLY", "relay_eligible": False,
         "live_policy_change_allowed": False, "input_receipt": receipt,

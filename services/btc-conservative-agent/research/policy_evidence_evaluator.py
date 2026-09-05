@@ -949,8 +949,12 @@ def _bind_terminal_outcome(
 
 def build_v3_conservative_results(
     v3_root: str | Path, *, phase7_config: Mapping[str, Any] | None = None,
+    incident_input=None,
 ) -> dict[str, Any]:
     """Evaluate exactly-bound decisions and retain every UNKNOWN explicitly."""
+    from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex
+    incident_input = incident_input if incident_input is not None else load_incident_input()
+    incident_index = IncidentEpisodeIndex(incident_input)
     root = Path(v3_root).resolve()
     if root.name != "v3":
         raise ValueError("V3_EVALUATOR_ROOT_MUST_BE_V3")
@@ -962,6 +966,8 @@ def build_v3_conservative_results(
         root / "recovery_ledgers" / "market_segment.jsonl"
     )
     ledgers["market_segment"].extend(recovery_segments)
+    for rows in ledgers.values():
+        incident_index.add(rows)
     bindings = build_v3_binding_index(root)["bindings"]
     decisions = {str(row.get("event_id") or ""): row for row in ledgers["decision"]}
     opportunities = {_identity(row): row for row in ledgers["opportunity"]}
@@ -994,6 +1000,20 @@ def build_v3_conservative_results(
         segments.setdefault(_identity(row), []).append(row)
 
     lifecycle_evidence_index = build_lifecycle_evidence_index(root)
+    if incident_input.enabled:
+        for key, matches in lifecycle_evidence_index.get("by_key", {}).items():
+            for match in matches:
+                incident_index.add([{"epoch_id": key[0], "episode_id": key[1],
+                                     "completion": match.get("completion"),
+                                     "receipt": match.get("receipt")}])
+        # Evaluate the entire linked tape cohort before any policy variant;
+        # a later variant must not escape an incident discovered by an earlier one.
+        for segment in ledgers["market_segment"]:
+            envelope, error = load_envelope_cached(segment)
+            if not error and isinstance(envelope, Mapping):
+                for tape_row in envelope.get("rows") or []:
+                    if isinstance(tape_row, Mapping) and incident_input.affected(tape_row):
+                        incident_index.add([{**segment, "timestamp": None}])
     results = []
     for binding in bindings:
         decision = decisions.get(str(binding.get("event_id") or ""), {})
@@ -1003,6 +1023,7 @@ def build_v3_conservative_results(
             opportunities.get(identity, {}), decision,
         )
         reasons.extend(provenance_reasons)
+        reasons.extend(incident_index.reasons(opportunities.get(identity, binding)))
         lifecycle_evidence = join_lifecycle_evidence(lifecycle_evidence_index, binding)
         if lifecycle_evidence["status"] != "VERIFIED":
             reasons.extend(lifecycle_evidence["reason_codes"])
@@ -1064,6 +1085,8 @@ def build_v3_conservative_results(
             if segment.get("record_id"):
                 segment_record_ids.append(str(segment["record_id"]))
 
+        if any(incident_input.affected(row) for row in tape_rows):
+            reasons.append("UNKNOWN_DEPLOYED_SOURCE_IDENTITY_INCIDENT")
         if reasons:
             unknown = _unknown(binding, decision, opportunities.get(identity, {}), reasons)
             unknown["lifecycle_evidence"] = lifecycle_evidence
@@ -1210,7 +1233,10 @@ def build_v3_conservative_results(
         "qualification_allowed": phase7_support["qualification_allowed"],
         "profitability_calculated": False,
     }
+    incident_input.assert_unchanged()
     return {"schema": SCHEMA, "row_count": len(results), "classification_counts": counts,
+            **({"runtime_identity_incident_input": incident_input.provenance(),
+                "runtime_identity_incident_coverage": incident_index.coverage()} if incident_input.enabled else {}),
             "terminal_outcome_counts": terminal_counts,
             "results_sha256": hashlib.sha256(canonical_json(results).encode()).hexdigest(),
             "regime_feature_coverage": regime_feature_coverage,
@@ -1219,7 +1245,10 @@ def build_v3_conservative_results(
             "results": results}
 
 
-def persist_v3_conservative_results(canonical_root: str | Path, *, analyzer_revision: str) -> dict[str, Any]:
+def persist_v3_conservative_results(canonical_root: str | Path, *, analyzer_revision: str,
+                                    incident_input=None) -> dict[str, Any]:
+    from research.runtime_identity_incidents import load_incident_input
+    incident_input = incident_input if incident_input is not None else load_incident_input()
     root = Path(canonical_root).resolve()
     if root.name != "canonical-research-data":
         raise ValueError("POLICY_EVALUATOR_ROOT_NOT_CANONICAL")
@@ -1228,7 +1257,8 @@ def persist_v3_conservative_results(canonical_root: str | Path, *, analyzer_revi
     phase7_config = {
         "eligible_cell_registry": build_signed_eligible_cell_registry(generation),
     }
-    report = build_v3_conservative_results(root / "v3", phase7_config=phase7_config)
+    report = build_v3_conservative_results(root / "v3", phase7_config=phase7_config,
+                                         incident_input=incident_input)
     # Populate the disposable generation cache from these evaluator-produced
     # rows. UNKNOWN rows are retained so coverage failures are queryable and
     # cannot silently disappear from fill-rate denominators.
@@ -1254,6 +1284,7 @@ def persist_v3_conservative_results(canonical_root: str | Path, *, analyzer_revi
                 cache_skip_reason_counts[key] = cache_skip_reason_counts.get(key, 0) + 1
             continue
         cache_rows.append(row)
+    incident_input.assert_unchanged()
     ingested = library.ingest(cache_rows)
     directory = root / "derived" / "policy-evidence" / generation["generation_key"]
     directory.mkdir(parents=True, exist_ok=True)
@@ -1267,6 +1298,7 @@ def persist_v3_conservative_results(canonical_root: str | Path, *, analyzer_revi
                 for row in report["results"]:
                     zipped.write((canonical_json(row) + "\n").encode())
             raw.flush(); os.fsync(raw.fileno())
+        incident_input.assert_unchanged()
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)

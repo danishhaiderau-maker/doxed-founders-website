@@ -273,6 +273,9 @@ def candidate_from_genome(genome: dict, cycle_snapshot: dict, microstructure_evi
         "order_intents": int((collection.get("ledger_counts") or {}).get("order_intent") or 0),
     }
     return {
+        **({"runtime_identity_incident_input": genome["runtime_identity_incident_input"],
+            "runtime_identity_incident_coverage": genome.get("runtime_identity_incident_coverage")}
+           if "runtime_identity_incident_input" in genome else {}),
         "schema": "policy_candidate_oos_v3_1_adapter_v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "epoch_id": genome.get("epoch_id"),

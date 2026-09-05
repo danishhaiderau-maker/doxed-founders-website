@@ -354,13 +354,29 @@ def materialize_same_opportunity_replay(
     return material
 
 
-def materialize_v3_opportunity_replay(data_dir: str | Path) -> dict[str, Any]:
+def materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=None) -> dict[str, Any]:
     """Materialize the canonical opportunity cohort through this replay engine.
 
     Missing joins remain explicit UNKNOWN results; no schedule or market data is
     reconstructed from later evidence.
     """
+    from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex
+    incident_input = incident_input if incident_input is not None else load_incident_input()
+    incident_index = IncidentEpisodeIndex(incident_input)
     v3_root = Path(data_dir) / "v3"
+    if incident_input.enabled:
+        # Include all policy variants and terminal evidence, not just the
+        # selected entry tape. Unresolvable linked rows fail closed.
+        for ledger in ("opportunity", "decision", "order_intent", "execution", "lifecycle"):
+            ledger_path = v3_root / "ledgers" / f"{ledger}.jsonl"
+            if ledger_path.is_file():
+                with ledger_path.open("r", encoding="utf-8-sig") as handle:
+                    for line in handle:
+                        if line.strip():
+                            linked = json.loads(line)
+                            if not isinstance(linked, Mapping):
+                                raise ValueError("IDENTITY_INCIDENT_LEDGER_ROW_INVALID")
+                            incident_index.add([linked])
     path = v3_root / "ledgers" / "opportunity.jsonl"
     segment_rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for segment_path in (
@@ -377,6 +393,7 @@ def materialize_v3_opportunity_replay(data_dir: str | Path) -> dict[str, Any]:
                     continue
                 if not isinstance(segment, dict):
                     continue
+                incident_index.add([segment])
                 key = tuple(str(segment.get(field) or "") for field in (
                     "epoch_id", "opportunity_id", "episode_id"
                 ))
@@ -520,7 +537,25 @@ def materialize_v3_opportunity_replay(data_dir: str | Path) -> dict[str, Any]:
                     "market_tape_ids": sorted(filter(None, set(tape_ids))),
                     "market_evidence_provenance": evidence_provenance,
                     "market_evidence_reason_codes": sorted(set(evidence_reasons)),
-                    "materialization_reason_codes": sorted(set(identity_reasons)),
+                    "materialization_reason_codes": sorted(set(identity_reasons + incident_index.reasons(row) + (
+                        ["UNKNOWN_DEPLOYED_SOURCE_IDENTITY_INCIDENT"]
+                        if any(incident_input.affected(item) for item in market_rows) else []
+                    ))),
                     "future_path_selection": history,
                 })
-    return materialize_same_opportunity_replay(episodes)
+    for episode in episodes:
+        if "UNKNOWN_DEPLOYED_SOURCE_IDENTITY_INCIDENT" in episode.get("materialization_reason_codes", []):
+            incident_index.add([{**episode, "timestamp": None}])
+    for episode in episodes:
+        episode["materialization_reason_codes"] = sorted(set(
+            episode.get("materialization_reason_codes", []) + incident_index.reasons(episode)
+        ))
+    report = materialize_same_opportunity_replay(episodes)
+    if incident_input.enabled:
+        report["runtime_identity_incident_input"] = incident_input.provenance()
+        report["runtime_identity_incident_coverage"] = incident_index.coverage()
+        report["report_id"] = canonical_hash("entry-baseline-replay", {
+            key: value for key, value in report.items() if key != "report_id"
+        })
+    incident_input.assert_unchanged()
+    return report

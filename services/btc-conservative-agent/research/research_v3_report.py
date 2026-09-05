@@ -583,6 +583,7 @@ def build_three_tier_strategy_leaders(
     execution_candidates = [
         row for row in rows
         if int(row.get("supported_conservative_episodes") or 0) > 0
+        and not row.get("runtime_identity_incident_reason_codes")
         and int(row.get("full_fills") or 0) + int(row.get("partial_fills") or 0) > 0
         and ((row.get("validation") or {}).get("risk") or {}).get("net_pnl_usd") is not None
     ]
@@ -759,6 +760,9 @@ def _shared_call_independence_clusters(
 
 
 def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidates=None) -> dict[str, Any]:
+    from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex, REASON
+    incident_input = load_incident_input()
+    incident_index = IncidentEpisodeIndex(incident_input)
     v3_root = Path(data_dir) / "v3"
     all_opportunities = _read_ledger(v3_root / "ledgers" / "opportunity.jsonl")
     cutoff = _fresh_cutoff(data_dir)
@@ -791,6 +795,9 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         row for row in scoped(_read_ledger(store.ledger_path("market_segment")))
         if str(row.get("episode_id") or "") in allowed_episodes
     ]
+    for incident_rows in (opportunities, decisions, order_intents, lifecycles, executions,
+                          market_segment_rows, pre_entry_feature_receipts):
+        incident_index.add(incident_rows)
     pre_signal_context_segments = [
         row for row in market_segment_rows
         if str(row.get("context_role") or "").upper() == "PRE_SIGNAL_ONLY"
@@ -1031,15 +1038,29 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
                 flush=True,
             )
 
+        candidate_inputs = load_candidate_inputs(
+            data_dir, epoch_id=selected_epoch, minimum_signal_ts=cutoff,
+        )
+        incident_index.add(candidate_inputs)
         candidate_screen = evaluate_protection_screen(
-            load_candidate_inputs(
-                data_dir,
-                epoch_id=selected_epoch,
-                minimum_signal_ts=cutoff,
-            ),
+            candidate_inputs,
             progress_callback=emit_candidate_progress,
         )
         candidates = candidate_screen["candidates"]
+    incident_episodes = sorted({str(row.get("episode_id") or "") for row in opportunities
+                                if incident_index.reasons(row)})
+    if incident_episodes:
+        # These aggregate candidates were assessed on this entire selected
+        # opportunity cohort. Preserve their descriptive statistics, but none
+        # may qualify using an affected or temporally unresolved episode.
+        candidates = [dict(row) for row in candidates or []]
+        for candidate in candidates:
+            candidate["gates"] = {**(candidate.get("gates") or {}),
+                                  "integrity_pass": False, "conservative_execution_pass": False}
+            candidate["runtime_identity_incident_reason_codes"] = [REASON]
+            candidate["qualification"] = "DESCRIPTIVE_ONLY"
+        if candidate_screen is not None:
+            candidate_screen["candidates"] = candidates
     ranking = rank_safe_policies(candidates or [])
     if not entry_resolution_integrity["passed"]:
         # Preserve descriptive rows, but never surface a qualified winner from
@@ -1102,7 +1123,8 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         or "UNKNOWN"
     )
     report_blockers = (
-        (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else [])
+        ([REASON] if incident_episodes else [])
+        + (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else [])
         + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else [])
         + (["PRE_ENTRY_FEATURE_EVIDENCE_INCOMPLETE"] if pre_entry_feature_coverage["unknown_opportunities"] else [])
         + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else [])
@@ -1193,5 +1215,13 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "blockers": report_blockers,
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
+    if incident_input.enabled:
+        report["runtime_identity_incident_input"] = incident_input.provenance()
+        report["runtime_identity_incident_coverage"] = {
+            **incident_index.coverage(), "affected_selected_episodes": len(incident_episodes),
+            "affected_episode_ids_preview": incident_episodes[:100],
+            "descriptive_statistics_preserved": True,
+        }
+    incident_input.assert_unchanged()
     _atomic_json(Path(report_dir) / REPORT_FILE, report)
     return report

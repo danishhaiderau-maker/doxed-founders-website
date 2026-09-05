@@ -156,6 +156,8 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
 
 def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_hook=None) -> dict:
     """Generate candidate then best from one pinned event tuple."""
+    from research.runtime_identity_incidents import load_incident_input
+    incident_input = load_incident_input()
     from research.policy_candidate_oos import build_policy_candidate_oos_report
     from research.best_policy_research import build_best_policy_research_report
     from research.conservative_fill_cohort import (
@@ -198,10 +200,14 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         "policy_epoch_id": snapshot["receipt"].get("policy_epoch_id"),
         "policy_signature": snapshot["receipt"].get("policy_signature"),
     })
+    if incident_input.enabled:
+        conservative_fill["runtime_identity_incident_input"] = incident_input.provenance()
+        conservative_fill["runtime_identity_incident_status"] = "DESCRIPTIVE_ONLY_NOT_QUALIFICATION_EVIDENCE"
     report_path = Path(report_dir) / CONSERVATIVE_FILL_REPORT_FILE
     report_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = report_path.with_suffix(report_path.suffix + ".tmp")
     temp_path.write_text(json.dumps(conservative_fill, indent=2), encoding="utf-8")
+    incident_input.assert_unchanged()
     temp_path.replace(report_path)
     return {
         "candidate": candidate, "best": best, "cycle_snapshot": snapshot["receipt"],
