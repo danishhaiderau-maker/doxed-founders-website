@@ -113,8 +113,16 @@ class ResearchStore:
             self._conn.executescript(DDL)
             self._conn.commit()
 
-    def reset(self) -> Dict[str, int]:
-        """Start an empty epoch while retaining the prior SQLite files."""
+    def reset(self, *, destructive: bool = False, deletion_receipt_path=None,
+              quiescent: bool = False, recovery_states=None) -> Dict[str, Any]:
+        """Start an empty epoch; payload retention is default, discard explicit."""
+        if destructive is not False and destructive is not True:
+            raise ValueError("destructive must be an explicit boolean")
+        if destructive:
+            return self._reset_destructive(
+                deletion_receipt_path=deletion_receipt_path,
+                quiescent=quiescent, recovery_states=recovery_states,
+            )
         removed_bytes = 0
         with self._lock:
             if self._conn is not None:
@@ -154,6 +162,32 @@ class ResearchStore:
             self._conn.executescript(DDL)
             self._conn.commit()
         return {"removed_bytes": removed_bytes, "tables": len(LAYER_TABLES) + 1}
+
+    def _reset_destructive(self, *, deletion_receipt_path, quiescent, recovery_states):
+        """Explicit old-research discard: close DB, delete exact files, recreate."""
+        from pathlib import Path
+        from research_exact_deletion import delete_exact_research_files, ResearchDeletionRejected
+        if quiescent is not True or not deletion_receipt_path:
+            raise ResearchDeletionRejected("EXPLICIT_QUIESCENCE_AND_RECEIPT_REQUIRED")
+        with self._lock:
+            if self._conn is not None:
+                self._conn.commit()
+                self._conn.close()
+                self._conn = None
+            candidates = [Path(self.db_path + suffix).absolute() for suffix in ("", "-wal", "-shm", "-journal")]
+            # Do not automatically reopen after failure: the caller must retain
+            # pause and reconcile the receipt before any new research writes.
+            receipt = delete_exact_research_files(
+                root=Path(self.base_dir).absolute(),
+                targets=[p for p in candidates if p.exists() or p.is_symlink()],
+                allowed_paths=candidates, receipt_path=deletion_receipt_path,
+                quiescent=quiescent, recovery_states=recovery_states,
+            )
+            self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._conn.executescript(DDL)
+            self._conn.commit()
+            return {"removed_bytes": receipt["deleted_bytes"], "tables": len(LAYER_TABLES) + 1,
+                    "raw_payloads_retained": False, "deletion_receipt": receipt}
 
     def close(self) -> None:
         with self._lock:

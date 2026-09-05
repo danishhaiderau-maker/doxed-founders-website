@@ -184,8 +184,15 @@ class GenomeBridge:
             **self.store.stats(),
         }
 
-    def reset_research_store(self) -> Dict[str, int]:
-        result = self.store.reset()
+    def reset_research_store(self, *, destructive: bool = False,
+                             deletion_receipt_path=None, quiescent: bool = False,
+                             recovery_states=None) -> Dict[str, Any]:
+        if destructive is not False and destructive is not True:
+            raise ValueError("destructive must be an explicit boolean")
+        result = (self.store.reset(
+            destructive=True, deletion_receipt_path=deletion_receipt_path,
+            quiescent=quiescent, recovery_states=recovery_states,
+        ) if destructive else self.store.reset())
         self._generation_identity = None
         self._current_env_id = None
         self._current_mkt_id = None
