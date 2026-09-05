@@ -8,12 +8,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import stat
 
 from research.declared_shadow_model import SCHEMA, validate_contract
+from research.declared_shadow_scenario_input import SCHEMA as SCENARIO_SCHEMA, bind_declared_shadow_scenario
 from research.policy_evidence_schema import canonical_json
 
 PATH_ENV = "BTC_ANALYZER_SHADOW_MODEL_FILE"
@@ -69,12 +71,19 @@ class ShadowModelInput:
                 "sha256": hashlib.sha256(self.raw).hexdigest(),
                 "evidence_basis": "DECLARED_SIMULATION"}
 
-    def resolve(self, generation):
+    def resolve(self, generation, *, first_signal_ts=None):
         if not self.enabled:
             return None
         value = _decode(self.raw)
         if value.get("schema") == SCHEMA:
             return validate_contract(value, generation)
+        if value.get("schema") == SCENARIO_SCHEMA:
+            binding = bind_declared_shadow_scenario(self.raw,
+                expected_sha256=hashlib.sha256(self.raw).hexdigest(),
+                expected_generation=generation, first_signal_ts=first_signal_ts)
+            if binding["status"] != "DECLARED_MODEL_READY":
+                raise ValueError(binding["reason_codes"][0])
+            return binding["contract"]
         # Existing explicit conservative research models retain their own
         # schema, generation and signature validation in the report builder.
         if self.path:
@@ -108,9 +117,31 @@ def load_shadow_model_input(explicit=None):
     if hashlib.sha256(raw).hexdigest() != pin:
         raise ValueError("SHADOW_MODEL_INPUT_HASH_MISMATCH")
     value = _decode(raw)
-    if value.get("schema") != SCHEMA:
+    if value.get("schema") not in {SCHEMA, SCENARIO_SCHEMA}:
         raise ValueError("SHADOW_MODEL_FILE_SCHEMA_UNSUPPORTED")
     return ShadowModelInput(raw, source)
+
+
+def first_signal_ts_from_baseline(baseline_report):
+    """All verified baseline episodes, not just filled or profitable survivors.
+
+    Missing/invalid time anywhere is unavailable; do not shrink the cohort to
+    obtain a favourable declaration-time check. No input rows are changed.
+    """
+    if not isinstance(baseline_report, dict):
+        return None
+    episodes = baseline_report.get("episode_receipts")
+    if not isinstance(episodes, list) or not 0 < len(episodes) <= 100000:
+        return None
+    earliest = None
+    for episode in episodes:
+        if not isinstance(episode, dict):
+            return None
+        value = episode.get("signal_ts")
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            return None
+        earliest = value if earliest is None else min(earliest, value)
+    return earliest
 
 
 def assert_publication_shadow_model_input(manifest):

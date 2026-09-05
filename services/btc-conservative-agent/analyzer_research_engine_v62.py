@@ -20389,11 +20389,13 @@ def write_report_manifest(
     shadow_terminal_error = None
     shadow_terminal = None
     try:
+        from research.shadow_model_input import first_signal_ts_from_baseline
         shadow_terminal, shadow_terminal_mirror = _write_conservative_shadow_report(
             policy_data_dir, policy_report_dir,
             None if baseline_replay_error else baseline_replay,
             policy_cycle_succeeded=policy_cycle_error is None,
-            research_model=shadow_model_input.resolve((baseline_replay or {}).get("generation") or {}),
+            research_model=shadow_model_input.resolve((baseline_replay or {}).get("generation") or {},
+                first_signal_ts=first_signal_ts_from_baseline(baseline_replay)),
         )
         reports.append({
             "title": "Conservative Shadow Terminal Outcomes",
