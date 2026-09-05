@@ -13,6 +13,8 @@ def reset_env(tmp_path):
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
               and node.name == "_perform_fresh_collection_reset_locked")
+    pause_helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                        and node.name == "_fresh_reset_confirm_paused")
     events = []
     env = {
         "_data_sync_runtime_root": lambda: tmp_path,
@@ -52,7 +54,7 @@ def reset_env(tmp_path):
 
     env["_perform_fresh_collection_reset_quiesced"] = Mock(side_effect=reset_body)
     env["_start_lifecycle_pipeline_runtime"] = Mock(side_effect=start)
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(path), "exec"), env)
+    exec(compile(ast.Module(body=[pause_helper, fn], type_ignores=[]), str(path), "exec"), env)
     env["events"] = events
     return env
 
@@ -234,3 +236,65 @@ def test_real_epoch_contention_aborts_without_waiting_or_research_acquire(reset_
         release.set()
         thread.join(2)
     assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("failure", ["result", "exception", "restart", "scheduler"])
+def test_failure_cleanup_cannot_hang_on_state_owner_or_write_unlocked(reset_env, failure):
+    import time
+    acquired, release = threading.Event(), threading.Event()
+    lock = reset_env["state_lock"]
+    class OwnedState(dict):
+        def __setitem__(self, key, value):
+            assert lock._is_owned(), "state mutation without ownership"
+            super().__setitem__(key, value)
+    reset_env["state"] = OwnedState(reset_env["state"])
+    def hold():
+        with lock:
+            acquired.set()
+            release.wait(10)
+    owner = threading.Thread(target=hold)
+    def begin_contention():
+        owner.start()
+        assert acquired.wait(1)
+    def failed_body(**kwargs):
+        begin_contention()
+        if failure == "exception":
+            raise RuntimeError("original reset failure")
+        return {"ok": False, "wipe_aborted": True, "error": "original reset failure"}
+    if failure == "restart":
+        def failed_restart():
+            begin_contention()
+            return False
+        reset_env["_start_lifecycle_pipeline_runtime"].side_effect = failed_restart
+    elif failure == "scheduler":
+        def scheduler_busy(**kwargs):
+            begin_contention()
+            return False
+        reset_env["_data_sync_sqlite_snapshot_condition"] = Mock()
+        reset_env["_data_sync_sqlite_snapshot_condition"].acquire.side_effect = scheduler_busy
+    else:
+        reset_env["_perform_fresh_collection_reset_quiesced"].side_effect = failed_body
+    try:
+        started = time.monotonic()
+        if failure == "exception":
+            with pytest.raises(RuntimeError, match="original reset failure"):
+                invoke(reset_env)
+        else:
+            result = invoke(reset_env)
+            assert result["ok"] is False
+            assert result["pause_state_confirmed"] is False
+            assert result["pause_state_blocker"] == "RESET_PAUSE_STATE_UNVERIFIED"
+            if failure == "restart":
+                assert result["reset_completed"] is True
+        assert time.monotonic() - started < 4
+        assert reset_env["state"]["execution_paused"] is True
+        assert not reset_env["_research_write_gate"]._is_owned()
+        assert not reset_env["_collector_epoch_lock"]._is_owned()
+        assert not reset_env["_data_sync_inventory_cache_condition"]._is_owned()
+        if failure != "restart":
+            reset_env["_start_lifecycle_pipeline_runtime"].assert_not_called()
+    finally:
+        release.set()
+        if owner.ident is not None:
+            owner.join(2)
+    assert not owner.is_alive()

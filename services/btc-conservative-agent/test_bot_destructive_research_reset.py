@@ -77,7 +77,7 @@ def runtime(tmp_path_factory, monkeypatch):
            "_order_multiverse_post_ttl_done": {}, "_order_multiverse_written": set()}
     path = Path(__file__).with_name("bot.py")
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
-    names = {"_fresh_research_reset_assert_quiesced", "_fresh_research_reset_resume",
+    names = {"_fresh_reset_confirm_paused", "_fresh_research_reset_assert_quiesced", "_fresh_research_reset_resume",
              "_fresh_research_reset_boundary", "_perform_fresh_collection_reset_quiesced",
              "_record_execution_settings_epoch", "_execution_settings_signature",
              "_write_research_session", "_reset_collector_epoch_state", "_collector_v22_epoch_id", "_utc_isoformat_ns"}
@@ -114,6 +114,39 @@ def test_preflight_failure_has_durable_diagnostic_without_reset_authority(runtim
     assert runtime["payload"].exists()
     assert runtime["accounting"].read_text() == "accounting-must-survive\n"
     assert json.loads(runtime["session"].read_text())["collector_v22_epoch_id"] == "epoch-old"
+
+
+@pytest.mark.parametrize("lock_name", ["state_lock", "trade_lock"])
+def test_postlease_boundary_contention_fails_before_deletion_and_cleanup_is_bounded(runtime, lock_name):
+    import time
+    acquired, release = threading.Event(), threading.Event()
+    def hold():
+        with runtime[lock_name]:
+            acquired.set()
+            release.wait(12)
+    owner = threading.Thread(target=hold)
+    owner.start()
+    assert acquired.wait(1)
+    before = runtime["payload"].read_bytes()
+    try:
+        started = time.monotonic()
+        result = run(runtime)
+        assert time.monotonic() - started < 6
+        assert result["ok"] is False
+        assert result["failed_stage"] == "BOUNDARY"
+        assert result["error"] == "RESET_" + lock_name.upper() + "_TIMEOUT"
+        assert result["pause_state_confirmed"] is (lock_name == "trade_lock")
+        assert runtime["payload"].read_bytes() == before
+        assert result["operation_receipt"] is None
+        assert not (runtime["root"] / "research_reset_receipts/ACTIVE_RESET.json").exists()
+        assert runtime["state"]["execution_paused"] is True
+        assert json.loads(runtime["session"].read_text())["collector_v22_epoch_id"] == "epoch-old"
+    finally:
+        release.set()
+        owner.join(2)
+    assert not owner.is_alive()
+    assert runtime["state_lock"].acquire(blocking=False)
+    runtime["state_lock"].release()
 
 
 @pytest.mark.parametrize("signal", [False, True])
