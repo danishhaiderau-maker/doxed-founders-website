@@ -174,12 +174,16 @@ def materialize_signal_time_baseline_schedules(
     market_context = market_context if isinstance(market_context, Mapping) else {}
     explicit_bbo = opportunity.get("signal_time_bbo")
     explicit_bbo = explicit_bbo if isinstance(explicit_bbo, Mapping) else {}
-    bbo = first(
+    # An absent explicit BBO is normalized to {}, which must not mask a
+    # captured nested BBO. Select the first non-empty mapping, not the first
+    # non-null object. A present but invalid BBO still fails validation below;
+    # do not hunt for a more favorable quote after an invalid explicit one.
+    bbo = next((candidate for candidate in (
         explicit_bbo,
         features.get("signal_time_bbo"), features.get("bbo"),
         source_features.get("signal_time_bbo"), source_features.get("bbo"),
         market_context.get("signal_time_bbo"), market_context.get("bbo"),
-    )
+    ) if isinstance(candidate, Mapping) and candidate), None)
     if not isinstance(bbo, Mapping) or not bbo:
         bbo = features
     bbo = bbo if isinstance(bbo, Mapping) else {}
