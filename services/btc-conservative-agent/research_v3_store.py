@@ -739,7 +739,7 @@ class V3EvidenceStore:
     def _write_immutable_receipt(self, path: Path, payload: dict[str, Any]) -> None:
         encoded = (canonical_json(payload) + "\n").encode("utf-8")
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        temporary = path.with_name(f".receipt-{uuid.uuid4().hex}.tmp")
         try:
             with temporary.open("xb") as handle:
                 handle.write(encoded); handle.flush(); os.fsync(handle.fileno())
@@ -1062,7 +1062,7 @@ class V3EvidenceStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         candidate: str | None = None
         try:
-            fd, candidate = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+            fd, candidate = tempfile.mkstemp(prefix=".receipt-", suffix=".tmp", dir=path.parent)
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(canonical_json(payload) + "\n")
                 handle.flush()
