@@ -27817,6 +27817,40 @@ def _fresh_research_reset_boundary(reset_anchor: float) -> dict:
         # NOT_PRESENT evidence; a corrupt or partial reserve never reaches here.
         wal = {"status": "NOT_PRESENT", "path": str(wal_root)}
         pending_wal = 0
+    orphan_preservation = {"status": "NOT_PRESENT"}
+    from lifecycle_orphan_head_repair import TEMP_NAME, SOURCE_SHA256, preserve_exact_orphan, completed_preservation
+    known_orphan = _checked_path(store._append_head_path("lifecycle").with_name(TEMP_NAME), root)
+    orphan_forensics = _checked_path(root / "v3/receipts/orphan_append_head_forensics_v1" / SOURCE_SHA256, root)
+    orphan_prepared = _checked_path(orphan_forensics / "PREPARED.json", root)
+    orphan_completed = _checked_path(orphan_forensics / "COMPLETED.json", root)
+    if not known_orphan.exists() and orphan_completed.exists():
+        # Completed forensic evidence remains retained across later epochs; do
+        # not reinterpret or replay this old incident under a new identity.
+        orphan_preservation = {"status": "PRIOR_COMPLETED_FORENSIC_RECEIPT_RETAINED",
+                               "receipt": completed_preservation(root)}
+    if known_orphan.exists() or (orphan_prepared.exists() and not orphan_completed.exists()):
+        def orphan_runtime_probe():
+            _fresh_research_reset_assert_quiesced()
+            mirror = getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None)
+            if (_collector_v22_epoch_id() != identity["epoch_id"]
+                    or str(os.getenv("SOURCE_GIT_REV") or "") != deployed_revision
+                    or mirror is None or not mirror.held):
+                raise RuntimeError("RESET_ORPHAN_BOUNDARY_CHANGED")
+            return {"identity": dict(identity), "observed_unix": time.time(),
+                "inventory_active": bool(_data_sync_inventory_cache.get("refreshing")
+                    or _data_sync_async_inventory.get("refreshing")
+                    or _data_sync_async_inventory.get("worker_active")),
+                "snapshot_active": any(isinstance(item, dict) and (item.get("status") == "BUILDING"
+                    or item.get("active_readers", 0) != 0)
+                    for item in _data_sync_sqlite_snapshot_states.values()),
+                "lifecycle_active": _LIFECYCLE_PIPELINE_RUNTIME is not None,
+                # Existing HTTP reads are not claimed drained: the real held
+                # volume lease excludes participating generation mutation/reset.
+                "generation_mutator_active": False,
+                "download_exclusion_scope": "HELD_VOLUME_GENERATION_LEASE_NOT_ALL_HTTP_READS"}
+        orphan_preservation = preserve_exact_orphan(root, expected_identity=identity,
+            runtime_probe=orphan_runtime_probe,
+            held_mirror_lease=getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None))
     recovery = audit_research_reset_recovery(root, expected_identity=identity)
     if (recovery.get("complete") is not True or recovery.get("safe_for_reset_recovery_scope") is not True
             or type(recovery.get("pending_or_unknown_count")) is not int
@@ -27836,7 +27870,8 @@ def _fresh_research_reset_boundary(reset_anchor: float) -> dict:
             store._active_ledger_generation(ledger)
             pointers.append({"ledger": ledger, "sha256": hashlib.sha256(pointer.read_bytes()).hexdigest()})
     evidence = {"old_identity": identity, "identity_basis": identity_basis, "deployed_revision": deployed_revision,
-                "wal": wal, "recovery": recovery, "auxiliary_cleanup": auxiliary, "active_pointers": pointers,
+                "wal": wal, "recovery": recovery, "orphan_preservation": orphan_preservation,
+                "auxiliary_cleanup": auxiliary, "active_pointers": pointers,
                 "pending_paper_orders": pending_count, "open_paper_positions": open_count}
     proof = {"schema": "research_reset_boundary_proof_v1", "runtime_root": str(root),
              "retired_epoch_id": old_epoch, "new_epoch_id": new_epoch,
