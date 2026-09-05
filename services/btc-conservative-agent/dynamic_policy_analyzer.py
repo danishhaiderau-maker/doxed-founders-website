@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -51,13 +52,28 @@ def _load_verified_canonical_input(data_root: str | os.PathLike[str]) -> tuple[d
     try:
         sync_state = json.loads((root / ".fly-sync-state.json").read_text(encoding="utf-8-sig"))
         record = sync_state.get(INPUT_FILE) or sync_state.get(INPUT_FILE.replace("/", "\\"))
-        if not isinstance(record, Mapping) or not str(record.get("sha256") or "").strip():
+        if not isinstance(record, Mapping):
             return None, {**receipt, "blocker": "DYNAMIC_INPUT_NOT_IN_VERIFIED_MIRROR_MANIFEST"}
+        # Batch checkpoints carry full_sha256; older verified inputs used
+        # sha256. Never ignore a malformed or contradictory populated digest.
+        digests = set()
+        for field in ("full_sha256", "sha256"):
+            value = record.get(field)
+            if value is None or isinstance(value, str) and not value.strip():
+                continue
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", value.strip()):
+                return None, {**receipt, "blocker": "DYNAMIC_INPUT_MANIFEST_CHECKSUM_INVALID"}
+            digests.add(value.strip().lower())
+        if not digests:
+            return None, {**receipt, "blocker": "DYNAMIC_INPUT_NOT_IN_VERIFIED_MIRROR_MANIFEST"}
+        if len(digests) != 1:
+            return None, {**receipt, "blocker": "DYNAMIC_INPUT_MANIFEST_CHECKSUM_CONFLICT"}
+        expected_digest = next(iter(digests))
         path = root / Path(INPUT_FILE)
         raw = path.read_bytes()
         digest = hashlib.sha256(raw).hexdigest()
         receipt.update({"sha256": digest, "size_bytes": len(raw)})
-        if digest.lower() != str(record["sha256"]).strip().lower():
+        if digest != expected_digest:
             return None, {**receipt, "blocker": "DYNAMIC_INPUT_CHECKSUM_MISMATCH"}
         payload = json.loads(raw.decode("utf-8-sig"))
         if not isinstance(payload, dict) or payload.get("schema") != INPUT_SCHEMA:

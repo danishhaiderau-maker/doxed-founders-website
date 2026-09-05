@@ -3,14 +3,67 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pytest
 
 from dynamic_policy_analyzer import (
     INPUT_FILE,
+    _load_verified_canonical_input,
     build_dynamic_policy_analysis_report,
 )
 
 
 AGENT = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("fields", ["full", "legacy", "both", "legacy_blank_full"])
+def test_dynamic_input_accepts_verified_checkpoint_digest_fields(tmp_path, fields):
+    root = tmp_path / "canonical-research-data"
+    target = root / INPUT_FILE
+    target.parent.mkdir(parents=True)
+    raw = b'{"schema":"dynamic_policy_analysis_input_v1","candidates":[]}'
+    target.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    record = {"size": len(raw), "inode": 1, "mtime_ns": 1}
+    if fields in {"full", "both"}:
+        record["full_sha256"] = digest
+    if fields in {"legacy", "both", "legacy_blank_full"}:
+        record["sha256"] = digest.upper()
+    if fields == "legacy_blank_full":
+        record["full_sha256"] = ""
+    (root / ".fly-sync-state.json").write_text(json.dumps({INPUT_FILE: record}), encoding="utf-8")
+    payload, receipt = _load_verified_canonical_input(root)
+    assert payload == json.loads(raw)
+    assert receipt["verification"] == "CHECKSUM_VERIFIED_CANONICAL_MIRROR"
+    assert receipt["sha256"] == digest
+
+
+@pytest.mark.parametrize("defect", ["conflict", "short", "nonhex", "bool", "corrupt_bytes"])
+def test_dynamic_input_rejects_bad_full_digest_without_legacy_fallback(tmp_path, defect):
+    root = tmp_path / "canonical-research-data"
+    target = root / INPUT_FILE
+    target.parent.mkdir(parents=True)
+    raw = b'{"schema":"dynamic_policy_analysis_input_v1"}'
+    digest = hashlib.sha256(raw).hexdigest()
+    record = {"full_sha256": digest, "sha256": digest}
+    if defect == "conflict":
+        record["full_sha256"] = "0" * 64
+    elif defect == "short":
+        record["full_sha256"] = digest[:12]
+    elif defect == "nonhex":
+        record["full_sha256"] = "z" * 64
+    elif defect == "bool":
+        record["full_sha256"] = True
+    elif defect == "corrupt_bytes":
+        raw += b" "
+    target.write_bytes(raw)
+    (root / ".fly-sync-state.json").write_text(json.dumps({INPUT_FILE: record}), encoding="utf-8")
+    payload, receipt = _load_verified_canonical_input(root)
+    assert payload is None
+    assert receipt["verification"] == "UNKNOWN"
+    expected = ("DYNAMIC_INPUT_MANIFEST_CHECKSUM_CONFLICT" if defect == "conflict"
+                else "DYNAMIC_INPUT_CHECKSUM_MISMATCH" if defect == "corrupt_bytes"
+                else "DYNAMIC_INPUT_MANIFEST_CHECKSUM_INVALID")
+    assert receipt["blocker"] == expected
 
 
 def _load(name, path):
