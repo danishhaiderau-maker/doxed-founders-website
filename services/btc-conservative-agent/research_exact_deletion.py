@@ -172,10 +172,15 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
                for key in ("proof_sha256", "plan_sha256")):
             raise ResearchDeletionRejected("INVALID_RECEIPT_CONTEXT_IDENTITY")
         retained = receipt_context.get("retained")
-        allowed_row_keys = {"path", "absolute_path", "reason", "category", "size_bytes", "hardlinked"}
+        allowed_row_keys = {"path", "absolute_path", "reason", "category", "size_bytes", "hardlinked", "verified_sibling_target"}
         if not isinstance(retained, list) or len(retained) > 200000 or any(
                 not isinstance(row, dict) or set(row) - allowed_row_keys for row in retained):
             raise ResearchDeletionRejected("INVALID_RETAINED_METADATA")
+        if any("verified_sibling_target" in row and (
+                not isinstance(row["verified_sibling_target"], str)
+                or not row["verified_sibling_target"] or len(row["verified_sibling_target"]) > 4096)
+                for row in retained):
+            raise ResearchDeletionRejected("INVALID_RETAINED_ALIAS_TARGET")
         encoded_context = json.dumps(dict(receipt_context), sort_keys=True, allow_nan=False)
         if len(encoded_context.encode()) > 32 * 1024**2:
             raise ResearchDeletionRejected("RECEIPT_CONTEXT_LIMIT_EXCEEDED")

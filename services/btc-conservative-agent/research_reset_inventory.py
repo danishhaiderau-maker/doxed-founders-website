@@ -85,6 +85,33 @@ def _link(st):
     return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
 
 
+def _managed_fly_alias(root, path):
+    """Recognize exactly fly-entrypoint.sh's three top-level mount aliases.
+
+    Return the independently safe sibling directory; never traverse the alias.
+    The caller opts in only for the Fly runtime layout. A nested, redirected,
+    missing or link-backed destination is not a managed alias.
+    """
+    if (root.name != "runtime" or path.parent != root
+            or path.name not in {"research", "research_accumulator", "research_archive"}):
+        return None
+    expected = root.parent / path.name
+    try:
+        raw_target = Path(os.readlink(path))
+        lexical = Path(os.path.abspath(raw_target if raw_target.is_absolute() else path.parent / raw_target))
+        if lexical != expected:
+            return None
+        for ancestor in (expected, *expected.parents):
+            info = ancestor.lstat()
+            if _link(info):
+                return None
+        if not expected.is_dir() or path.resolve(strict=True) != expected:
+            return None
+        return expected
+    except (OSError, ValueError):
+        return None
+
+
 def _essential(relative):
     parts = PurePosixPath(relative.lower()).parts
     name = parts[-1]
@@ -147,7 +174,7 @@ def _proof_valid(root, proof):
 
 
 def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_depth=12,
-                        max_metadata_bytes=4 * 1024 * 1024):
+                        max_metadata_bytes=4 * 1024 * 1024, allow_fly_runtime_aliases=False):
     """Inventory only; no side effects. Unsafe/incomplete scans return no targets.
 
     Proof is a caller assertion tied to an external recovery receipt digest, not
@@ -157,6 +184,8 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
     for value, ceiling in ((max_entries, 1_000_000), (max_depth, 32), (max_metadata_bytes, 16 * 1024 * 1024)):
         if type(value) is not int or not 0 < value <= ceiling:
             raise ValueError("invalid bounded inventory limit")
+    if type(allow_fly_runtime_aliases) is not bool:
+        raise ValueError("managed Fly aliases require explicit boolean")
     root = Path(os.path.abspath(os.fspath(runtime_root)))
     if not Path(runtime_root).is_absolute() or root == Path(root.anchor) or root == Path.home():
         raise ValueError("explicit non-broad runtime root required")
@@ -187,6 +216,11 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
                               "mtime_ns": st.st_mtime_ns, "device": st.st_dev, "inode": st.st_ino,
                               "link_count": st.st_nlink, "hardlinked": st.st_nlink > 1}
                     if _link(st):
+                        managed = _managed_fly_alias(root, path) if allow_fly_runtime_aliases else None
+                        if managed is not None:
+                            record["verified_sibling_target"] = str(managed)
+                            records.append((record, "RETAINED_MANAGED_FLY_ALIAS_NOT_TRAVERSED"))
+                            continue
                         records.append((record, "UNSAFE_SYMLINK_OR_REPARSE"))
                         errors.append("UNSAFE_LINK_PRESENT")
                         break
@@ -280,6 +314,7 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
     targets.sort(key=lambda r: r["path"])
     retained.sort(key=lambda r: r["path"])
     result = {"schema": SCHEMA, "runtime_root": str(root), "read_only": True,
+              "allow_fly_runtime_aliases": allow_fly_runtime_aliases,
               "complete": not errors, "errors": errors, "scanned_entries": scanned,
               "boundary_proof_structurally_valid": proof_ok,
               "proof_authentication": "CALLER_MUST_VERIFY_AUTHORITATIVE_RECEIPT",

@@ -20,7 +20,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
                            recovery_states: Mapping[str, str], receipt_path,
                            protected_paths=(), expected_plan_sha256=None,
                            max_entries=200000, max_depth=12, max_metadata_bytes=4 * 1024**2,
-                           max_files=100000, max_total_bytes=64 * 1024**3) -> dict:
+                           max_files=100000, max_total_bytes=64 * 1024**3,
+                           allow_fly_runtime_aliases=False) -> dict:
     """Re-plan while quiesced, validate all targets, then unlink exact paths.
 
     ``proof`` is caller-verified against its authoritative recovery receipt;
@@ -38,7 +39,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         raise ResearchDeletionRejected("RECOVERY_NOT_RECONCILED")
     root = Path(os.path.abspath(os.fspath(runtime_root)))
     plan = plan_research_reset(runtime_root, proof=proof, max_entries=max_entries,
-                               max_depth=max_depth, max_metadata_bytes=max_metadata_bytes)
+                               max_depth=max_depth, max_metadata_bytes=max_metadata_bytes,
+                               allow_fly_runtime_aliases=allow_fly_runtime_aliases)
     if plan.get("complete") is not True or plan.get("errors"):
         raise ResearchDeletionRejected("RESET_INVENTORY_INCOMPLETE")
     if plan.get("boundary_proof_structurally_valid") is not True:
@@ -77,7 +79,7 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         receipt_context={
             "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
             "retained": [{key: row[key] for key in
-                          ("path", "absolute_path", "reason", "category", "size_bytes", "hardlinked") if key in row}
+                          ("path", "absolute_path", "reason", "category", "size_bytes", "hardlinked", "verified_sibling_target") if key in row}
                          for row in plan["retained"]],
             "bytes_basis": plan["bytes_basis"], "hardlinked_target_count": plan["hardlinked_target_count"],
         },

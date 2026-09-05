@@ -221,3 +221,83 @@ def test_config_ancestor_never_passes_deleter_scope(tmp_path):
     result = plan_research_reset(tmp_path, proof=proof(tmp_path))
     assert not result["targets"]
     assert result["retained"][0]["reason"] == "ESSENTIAL_CONFIG_OR_CREDENTIAL"
+
+
+def fake_mount(tmp_path, monkeypatch, name="research", target_name=None, nested=False):
+    """Exercise the Windows junction branch without requiring symlink privilege."""
+    from types import SimpleNamespace
+    root = tmp_path / "runtime"
+    root.mkdir(exist_ok=True)
+    sibling = tmp_path / (target_name or name)
+    sibling.mkdir(exist_ok=True)
+    alias = root / ("nested/" + name if nested else name)
+    alias.mkdir(parents=True)
+    put(sibling, "signal_replay.jsonl", b"must-stay")
+    # A sentinel beneath the fake alias catches accidental traversal.
+    put(alias, "signal_replay.jsonl", b"must-not-traverse")
+    original_lstat, original_resolve, original_readlink = Path.lstat, Path.resolve, os.readlink
+
+    def inspect(path):
+        info = original_lstat(path)
+        if path == alias:
+            return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=0x400,
+                st_size=info.st_size, st_mtime_ns=info.st_mtime_ns, st_dev=info.st_dev,
+                st_ino=info.st_ino, st_nlink=info.st_nlink)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", inspect)
+    monkeypatch.setattr(Path, "resolve", lambda path, *args, **kwargs:
+        sibling if path == alias else original_resolve(path, *args, **kwargs))
+    monkeypatch.setattr(os, "readlink", lambda path, *args, **kwargs:
+        str(sibling) if Path(path) == alias else original_readlink(path, *args, **kwargs))
+    return root, alias, sibling
+
+
+@pytest.mark.parametrize("name", ["research", "research_accumulator", "research_archive"])
+def test_exact_managed_alias_retained_not_traversed(tmp_path, monkeypatch, name):
+    root, alias, sibling = fake_mount(tmp_path, monkeypatch, name)
+    put(root, "signal_replay.jsonl")
+    result = plan_research_reset(root, proof=proof(root), allow_fly_runtime_aliases=True)
+    assert result["complete"]
+    assert [r["path"] for r in result["targets"]] == ["signal_replay.jsonl"]
+    row = next(r for r in result["retained"] if r["path"] == name)
+    assert row["reason"] == "RETAINED_MANAGED_FLY_ALIAS_NOT_TRAVERSED"
+    assert row["verified_sibling_target"] == str(sibling)
+    assert (alias / "signal_replay.jsonl").read_bytes() == b"must-not-traverse"
+
+
+@pytest.mark.parametrize("variant", ["default_off", "wrong_target", "unknown_name", "nested"])
+def test_mismatched_managed_alias_fails_closed(tmp_path, monkeypatch, variant):
+    root, _, _ = fake_mount(tmp_path, monkeypatch,
+        name="unknown" if variant == "unknown_name" else "research",
+        target_name="elsewhere" if variant == "wrong_target" else None,
+        nested=variant == "nested")
+    result = plan_research_reset(root, proof=proof(root), allow_fly_runtime_aliases=variant != "default_off")
+    assert not result["complete"] and result["targets"] == []
+
+
+def test_managed_alias_executor_deletes_only_runtime_payload(tmp_path, monkeypatch):
+    from research_reset_execution import execute_research_reset
+    root, alias, sibling = fake_mount(tmp_path, monkeypatch)
+    target = put(root, "signal_replay.jsonl")
+    result = execute_research_reset(runtime_root=root, proof=proof(root), quiescent=True,
+        recovery_states={"wal": "EMPTY"}, receipt_path=root / "deletion.json",
+        allow_fly_runtime_aliases=True)
+    assert result["status"] == "COMPLETE" and not target.exists()
+    assert (sibling / "signal_replay.jsonl").read_bytes() == b"must-stay"
+    assert (alias / "signal_replay.jsonl").read_bytes() == b"must-not-traverse"
+    assert result["retained"][0]["verified_sibling_target"] == str(sibling)
+
+
+def test_real_managed_symlink_if_host_permits(tmp_path):
+    root, sibling = tmp_path / "runtime", tmp_path / "research"
+    root.mkdir()
+    sibling.mkdir()
+    put(sibling, "signal_replay.jsonl")
+    try:
+        (root / "research").symlink_to(sibling, target_is_directory=True)
+    except OSError:
+        pytest.skip("host does not permit symlink creation; deterministic reparse cases cover policy")
+    result = plan_research_reset(root, proof=proof(root), allow_fly_runtime_aliases=True)
+    assert result["complete"] and not result["targets"]
+    assert result["retained"][0]["verified_sibling_target"] == str(sibling)
