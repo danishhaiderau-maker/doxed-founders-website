@@ -18,7 +18,7 @@ from pathlib import Path
 from emergency_evidence_wal import EmergencyEvidenceWal
 from lifecycle_tail_repair import _exclusive_index_lock
 from research_v3_contract import canonical_json
-from research_v3_store import V3EvidenceStore, _fsync_directory
+from research_v3_store import V3EvidenceStore, _fsync_directory, _path_lock
 from research.mirror_generation_lease import MirrorGenerationLease
 
 TEMP_NAME = ".lifecycle.json.k89houml.tmp"
@@ -115,23 +115,53 @@ def _durable_mkdir(path):
     _checked(path)
 
 
+def completed_preservation(root):
+    """Validate a terminal receipt without applying its old identity anew."""
+    directory = _checked(Path(root) / "v3/receipts/orphan_append_head_forensics_v1" / SOURCE_SHA256)
+    artifact = _checked(directory / "unpublished-head.json")
+    prepared_path = _checked(directory / "PREPARED.json")
+    completed_path = _checked(directory / "COMPLETED.json")
+    if any(path.stat().st_size > 65536 for path in (artifact, prepared_path, completed_path)):
+        raise ValueError("ORPHAN_REPAIR_TERMINAL_RECEIPT_OVERSIZED")
+    raw = artifact.read_bytes()
+    prepared = json.loads(prepared_path.read_bytes())
+    completed = json.loads(completed_path.read_bytes())
+    if (len(raw) != SOURCE_SIZE or _sha(raw) != SOURCE_SHA256
+            or prepared.get("schema") != SCHEMA or prepared.get("state") != "PREPARED"
+            or prepared.get("sha256") != SOURCE_SHA256 or prepared.get("size") != SOURCE_SIZE
+            or prepared.get("root") != str(_checked(root))
+            or prepared.get("artifact") != str(artifact)
+            or completed != dict(prepared, state="COMPLETED", source_removed=True,
+                                 raw_payload_preserved=True, replay_performed=False)):
+        raise ValueError("ORPHAN_REPAIR_TERMINAL_RECEIPT_INVALID")
+    return completed
+
+
 def _probe(probe, identity):
     evidence = probe()
     if (not isinstance(evidence, dict) or evidence.get("identity") != identity
             or type(evidence.get("observed_unix")) not in (int, float)
             or not 0 <= time.time() - evidence["observed_unix"] <= 5
             or any(evidence.get(key) is not False for key in (
-                "inventory_active", "snapshot_active", "download_active", "lifecycle_active"))):
+                "inventory_active", "snapshot_active", "generation_mutator_active", "lifecycle_active"))):
         raise ValueError("ORPHAN_REPAIR_CURRENT_OWNERSHIP_NOT_PROVEN")
     return evidence
 
 
 @contextmanager
-def _runtime_boundary_lease(root, identity, probe):
+def _runtime_boundary_lease(root, identity, probe, held_mirror_lease=None):
     if root.name != "runtime":
         raise ValueError("ORPHAN_REPAIR_RUNTIME_LAYOUT_REQUIRED")
     volume = _checked(root.parent)
     _checked(volume / ".fly-mirror-generation.lease")
+    if held_mirror_lease is not None:
+        if (not isinstance(held_mirror_lease, MirrorGenerationLease)
+                or not held_mirror_lease.held
+                or _checked(held_mirror_lease.path) != volume / ".fly-mirror-generation.lease"):
+            raise ValueError("ORPHAN_REPAIR_HELD_VOLUME_LEASE_INVALID")
+        _probe(probe, identity)
+        yield identity
+        return  # The caller owns release; never reacquire its non-reentrant lock.
     lease = MirrorGenerationLease(volume, owner="exact-orphan-head-preservation")
     lease.acquire(timeout_seconds=0)
     try:
@@ -141,17 +171,53 @@ def _runtime_boundary_lease(root, identity, probe):
         lease.release()
 
 
-def preserve_exact_orphan(root, *, expected_identity, runtime_probe):
-    """Copy+fsync evidence before unlink, never replay; caller bounds process time.
+@contextmanager
+def _exclusive_ledger_nowait(store, ledger):
+    """Same in-process key and OS lock file as store._exclusive, no HTTP wait."""
+    local = _path_lock(ledger)
+    if not local.acquire(blocking=False):
+        raise ValueError("ORPHAN_REPAIR_LEDGER_BUSY")
+    handle = None
+    locked = False
+    try:
+        path = _checked(store._lock_path(ledger))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+b")
+        if os.name == "nt":
+            import msvcrt
+            if handle.tell() == 0:
+                handle.write(b"\0"); handle.flush(); os.fsync(handle.fileno())
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        locked = True
+        yield
+    except OSError as exc:
+        raise ValueError("ORPHAN_REPAIR_LEDGER_LOCK_FAILED") from exc
+    finally:
+        if handle is not None:
+            if locked:
+                if os.name == "nt":
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+        local.release()
+
+
+def preserve_exact_orphan(root, *, expected_identity, runtime_probe, held_mirror_lease=None):
+    """Copy+fsync evidence before unlink, never replay; all locks bounded.
 
     Probe must obtain current real worker/identity evidence, never constants.
-    Run under an outer process deadline because the existing ledger advisory
-    lock blocks. A killed process leaves either source or durable evidence intact.
+    A killed process leaves either source or durable evidence intact.
     """
     root = _checked(root)
     if not callable(runtime_probe):
         raise ValueError("ORPHAN_REPAIR_RUNTIME_PROBE_REQUIRED")
-    with _runtime_boundary_lease(root, expected_identity, runtime_probe) as guarded_identity:
+    with _runtime_boundary_lease(root, expected_identity, runtime_probe, held_mirror_lease) as guarded_identity:
         if guarded_identity != expected_identity or not isinstance(guarded_identity, dict):
             raise ValueError("ORPHAN_REPAIR_EPOCH_IDENTITY_CHANGED")
         if (expected_identity.get("epoch_id") != OLD_EPOCH
@@ -161,7 +227,7 @@ def preserve_exact_orphan(root, *, expected_identity, runtime_probe):
         ledger = _checked(store.ledger_path("lifecycle"))
         source = _checked(store._append_head_path("lifecycle").with_name(TEMP_NAME))
         destination = _checked(root / "v3/receipts/orphan_append_head_forensics_v1" / SOURCE_SHA256)
-        with _exclusive_index_lock(root), store._exclusive(ledger):
+        with _exclusive_index_lock(root), _exclusive_ledger_nowait(store, ledger):
             wal = EmergencyEvidenceWal.inspect_existing(
                 _checked(root / "v3/emergency_evidence_wal_v2"), identity=expected_identity)
             if wal.get("records") != [] or type(wal.get("deferred_count")) is not int or wal["deferred_count"] != 0 or wal.get("alarms") != []:

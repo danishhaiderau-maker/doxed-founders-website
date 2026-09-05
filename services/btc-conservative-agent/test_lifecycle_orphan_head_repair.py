@@ -43,7 +43,7 @@ def incident(tmp_path, monkeypatch):
     monkeypatch.setattr(repair, "SOURCE_MTIME_NS", source_stat.st_mtime_ns)
     def probe():
         return {"identity": identity, "observed_unix": time.time(), "inventory_active": False,
-                "snapshot_active": False, "download_active": False, "lifecycle_active": False}
+                "snapshot_active": False, "generation_mutator_active": False, "lifecycle_active": False}
     return root, identity, source, ledger, raw, probe
 
 
@@ -118,6 +118,15 @@ def test_volume_lease_contention_preserves_source(incident):
     root, _, source, _, _, _ = incident
     with repair.MirrorGenerationLease(root.parent):
         with pytest.raises(TimeoutError): run(incident)
+    assert source.exists()
+
+
+def test_existing_store_ledger_lock_contention_is_nonblocking(incident):
+    root, _, source, ledger, _, _ = incident
+    store = V3EvidenceStore.open_read_only(root)
+    with store._exclusive(ledger):
+        with pytest.raises(ValueError, match="LEDGER_LOCK_FAILED"):
+            run(incident)
     assert source.exists()
 
 
