@@ -105,6 +105,24 @@ def test_raw_adx_is_not_relabelled_as_adx_bucket(tmp_path):
     assert report["missing_field_diagnostics"]["evaluator_conservative:adx_bucket"] == 1
 
 
+def test_evaluator_version_and_separate_segment_ids_are_consumed(tmp_path):
+    root, status, baseline = inputs(tmp_path, [evaluator_row(
+        simulation_model=None, evaluator_receipt={"evaluator_version": "conservative-v1"},
+        tape_ids=["legacy-content-hash"], market_segment_ids=["record-1"],
+    )])
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+                                                   evaluator_status=status, baseline_report=baseline)
+    assert "evaluator_conservative:simulation_model" not in report["missing_field_diagnostics"]
+    assert "evaluator_conservative:tape_ids" not in report["missing_field_diagnostics"]
+
+
+def test_missing_explicit_segment_ids_do_not_fall_back_to_legacy_content_hash(tmp_path):
+    root, status, baseline = inputs(tmp_path, [evaluator_row(market_segment_ids=[])])
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+                                                   evaluator_status=status, baseline_report=baseline)
+    assert report["missing_field_diagnostics"]["evaluator_conservative:tape_ids"] == 1
+
+
 def test_row_generation_mismatch_is_unjoinable_not_relabelled(tmp_path):
     root, status, baseline = inputs(tmp_path, [evaluator_row(source_revision="stale")])
     report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
@@ -133,6 +151,35 @@ def test_empty_inputs_remain_incomplete(tmp_path):
     assert report["status"] == "BUILT_INCOMPLETE"
     assert report["input_counts"]["adapted_rows"] == 0
     assert report["profitability_supported"] is False
+
+
+def test_identity_complete_pair_is_not_profit_complete_without_replay_pnl(tmp_path):
+    root, status, baseline = inputs(tmp_path, [evaluator_row(
+        terminal_outcome_status="REALIZED_COST_COMPLETE", profitability_supported=True,
+        net_pnl_usd=2.0, observed_cost_model_id="cost-v1",
+        observed_execution_model="CONSERVATIVE_BBO_DEPTH_TAPE",
+    )])
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+                                                   evaluator_status=status, baseline_report=baseline)
+    assert report["input_identity_complete"] is True
+    assert report["profitability_supported"] is False
+    observed = report["profitability_evidence_by_world"]["OBSERVED_PAPER"]
+    assert observed["available"] is True
+    assert observed["descriptive_leader"]["policy_id"] == "p1"
+    assert report["profitability_evidence_by_world"]["CONSERVATIVE_BBO"]["available"] is False
+    assert report["winner"] is None
+
+
+def test_nonfinite_observed_pnl_cannot_populate_a_profitability_leader(tmp_path):
+    root, status, baseline = inputs(tmp_path, [evaluator_row(
+        terminal_outcome_status="REALIZED_COST_COMPLETE", profitability_supported=True,
+        net_pnl_usd=float("nan"), observed_cost_model_id="cost-v1",
+        observed_execution_model="CONSERVATIVE_BBO_DEPTH_TAPE",
+    )])
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+                                                   evaluator_status=status, baseline_report=baseline)
+    assert report["profitability_supported"] is False
+    assert report["profitability_evidence_by_world"]["OBSERVED_PAPER"]["available"] is False
 
 
 def test_invalid_baseline_receipt_reports_declared_and_valid_counts(tmp_path):

@@ -1032,6 +1032,7 @@ def build_v3_conservative_results(
 
         tape_rows: list[dict[str, Any]] = []
         tape_ids: list[str] = []
+        segment_record_ids: list[str] = []
         selected_segments, _future_history = authoritative_future_path_segments(
             root, segments.get(identity, []), verifier=verify_segment_cached,
         )
@@ -1060,6 +1061,8 @@ def build_v3_conservative_results(
                 continue
             tape_rows.extend(row for row in rows if isinstance(row, dict))
             tape_ids.append(str(segment["segment_ref"]["sha256"]))
+            if segment.get("record_id"):
+                segment_record_ids.append(str(segment["record_id"]))
 
         if reasons:
             unknown = _unknown(binding, decision, opportunities.get(identity, {}), reasons)
@@ -1112,6 +1115,10 @@ def build_v3_conservative_results(
             "schedule_sha256": binding.get("schedule_sha256"),
             "evaluated_schedule_sha256": receipt.get("schedule_sha256"),
             "tape_ids": sorted(tape_ids),
+            # Legacy tape_ids are content hashes. Keep compatibility while
+            # exposing actual ledger record IDs under their own field.
+            "tape_hashes": sorted(set(tape_ids)),
+            "market_segment_ids": sorted(set(segment_record_ids)),
             "fill_price": receipt.get("fill_price"), "evaluator_receipt": receipt,
             "fill_latency_sec": receipt.get("fill_latency_sec"),
             "price_concession_per_unit": receipt.get("price_concession_per_unit"),

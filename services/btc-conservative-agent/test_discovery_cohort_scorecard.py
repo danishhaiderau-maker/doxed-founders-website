@@ -97,6 +97,37 @@ def test_matched_identity_with_missing_pnl_has_no_invented_delta():
     assert found["cohort_equality_proven"] is True
     assert found["matched_pnl_delta_count"] == 0
     assert found["mean_right_minus_left_pnl_usd"] is None
+    assert found["complete_matched_pnl_evidence"] is False
+    assert report["worlds"]["CONSERVATIVE_BBO"]["profitability_evidence_available"] is False
+
+
+def test_descriptive_leader_requires_complete_identity_and_outcomes_not_other_worlds():
+    report = build_episode_matched_scorecard([
+        row("CONSERVATIVE_BBO", pnl=.5),
+        row("CONSERVATIVE_BBO", policy_id="unidentified", pnl=100, config_signature=None),
+        row("CONSERVATIVE_BBO", "e2", pnl=None, policy_id="missing-outcome"),
+    ])
+    world = report["worlds"]["CONSERVATIVE_BBO"]
+    assert world["complete_pnl_cell_count"] == 1
+    assert world["descriptive_leader"]["policy_id"] == "p1"
+    assert world["descriptive_leader"]["tier"] == "DESCRIPTIVE_ONLY"
+    assert world["descriptive_leader"]["out_of_sample_qualified"] is False
+    assert report["worlds"]["OBSERVED_PAPER"]["descriptive_leader"] is None
+
+
+def test_leader_does_not_turn_least_negative_mean_into_profitability_claim():
+    report = build_episode_matched_scorecard([row("OBSERVED_PAPER", pnl=-.5)])
+    leader = report["worlds"]["OBSERVED_PAPER"]["descriptive_leader"]
+    assert leader["positive_mean"] is False
+    assert leader["mean_net_pnl_usd"] == -.5
+
+
+def test_one_missing_outcome_or_duplicate_prevents_complete_cell_claim():
+    report = build_episode_matched_scorecard([
+        row("CONSERVATIVE_BBO", "e1", 2), row("CONSERVATIVE_BBO", "e2", None),
+        row("OBSERVED_PAPER", "e1", 2), row("OBSERVED_PAPER", "e1", 2),
+    ])
+    assert all(not world["profitability_evidence_available"] for world in report["worlds"].values())
 
 
 def test_conflicting_alias_and_missing_identity_block_equality():

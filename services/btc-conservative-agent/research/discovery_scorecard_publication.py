@@ -132,11 +132,11 @@ def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
         "original_requested_qty": row.get("requested_qty"),
         "tape_sha256": row.get("tape_sha256"),
         "tape_hashes": row.get("tape_hashes"),
-        "tape_ids": row.get("tape_ids"),
+        "tape_ids": row.get("market_segment_ids") if "market_segment_ids" in row else row.get("tape_ids"),
         "tile_config_signature": row.get("tile_config_signature"),
         "config_signature": row.get("config_signature"),
         "cost_model_id": row.get("cost_model_id") or receipt.get("cost_model_id"),
-        "simulation_model": row.get("simulation_model") or receipt.get("simulation_model"),
+        "simulation_model": row.get("simulation_model") or receipt.get("simulation_model") or receipt.get("evaluator_version"),
     }
 
 
@@ -287,6 +287,10 @@ def build_discovery_scorecard_publication(
     )
     complete_inputs = bool(adapted) and has_exact_matched_cohort and not missing \
         and not any(unknown_counts.values()) and not scorecard.get("blockers")
+    complete_matched_outcomes = any(
+        item.get("complete_matched_pnl_evidence") is True
+        for item in scorecard.get("matched_comparisons") or []
+    )
     return {
         "schema": SCHEMA,
         "status": "BUILT_INCOMPLETE" if not complete_inputs else "BUILT",
@@ -303,9 +307,15 @@ def build_discovery_scorecard_publication(
         "missing_field_diagnostics": dict(sorted(missing.items())),
         "unjoinable_counts": dict(sorted((key, value) for key, value in unknown_counts.items() if value)),
         "scorecard": scorecard,
-        "profitability_supported": complete_inputs and any(
-            world.get("independent_episode_count", 0) for world in [scorecard["worlds"]["OBSERVED_PAPER"]]
-        ),
+        "input_identity_complete": complete_inputs,
+        "profitability_evidence_by_world": {
+            world: {
+                "available": value["profitability_evidence_available"],
+                "complete_cell_count": value["complete_pnl_cell_count"],
+                "descriptive_leader": value["descriptive_leader"],
+            } for world, value in scorecard["worlds"].items()
+        },
+        "profitability_supported": complete_inputs and complete_matched_outcomes,
         "winner": None,
         "live_qualification": False,
     }

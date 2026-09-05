@@ -765,6 +765,8 @@ def test_recovery_overlay_supersedes_raw_unknown_for_evaluation(tmp_path):
     assert row["classification"] == "FULL_FILL"
     assert row["supported"] is True
     assert row["tape_ids"] == [future["segment_ref"]["sha256"]]
+    assert row["tape_hashes"] == [future["segment_ref"]["sha256"]]
+    assert row["market_segment_ids"] == [future["record_id"]]
 
 
 def test_incomplete_all_opportunity_future_tape_remains_unknown(tmp_path):

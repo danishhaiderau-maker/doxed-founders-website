@@ -21,7 +21,15 @@ from research_entry_baselines import (
     missing_baseline_evidence,
 )
 from research_v3_contract import canonical_hash
+from research.policy_evidence_bindings import (
+    ALL_OPPORTUNITY_FUTURE_ROLE,
+    _verify_segment,
+    authoritative_future_path_segments,
+    complete_conservative_future_path,
+    segment_role,
+)
 from pathlib import Path
+import hashlib
 import json
 
 
@@ -45,6 +53,8 @@ def _unknown(
         "supported": False,
         "rejection_codes": list(dict.fromkeys(str(code) for code in codes if code)),
         "conservative_receipt": None,
+        "baseline_spec": dict(baseline),
+        "schedule_provenance": None,
     }
 
 
@@ -197,6 +207,12 @@ def replay_episode(episode: Mapping[str, Any]) -> dict[str, Any]:
         )
         if not str(episode.get(name) or "").strip()
     ]
+    canonical_identity_failures.extend(
+        str(code) for code in episode.get("materialization_reason_codes") or []
+    )
+    canonical_identity_failures.extend(
+        str(code) for code in episode.get("market_evidence_reason_codes") or []
+    )
     results = []
     for baseline in _baseline_rows():
         if canonical_identity_failures:
@@ -258,14 +274,41 @@ def replay_episode(episode: Mapping[str, Any]) -> dict[str, Any]:
             "supported": True,
             "rejection_codes": [],
             "conservative_receipt": receipt,
+            "baseline_spec": dict(baseline),
+            "schedule_provenance": {
+                "capture_status": envelope.get("capture_status"),
+                "capture_basis": envelope.get("capture_basis"),
+                "evaluated_schedule_sha256": receipt.get("schedule_sha256"),
+            },
         })
+        receipt["simulation_model"] = receipt.get("evaluator_version")
+        receipt["cost_model_id"] = episode.get("cost_model_id")
+        receipt["tape_hashes"] = sorted(set(episode.get("market_tape_hashes") or []))
+        receipt["tape_ids"] = sorted(set(episode.get("market_tape_ids") or []))
+        receipt["market_evidence_provenance"] = list(
+            episode.get("market_evidence_provenance") or []
+        )
     material = {
         "schema": EPISODE_RECEIPT_SCHEMA,
         "episode_id": episode_id,
         "opportunity_id": opportunity_id,
         "dataset_epoch": episode.get("dataset_epoch"),
         "source_revision": episode.get("source_revision"),
+        "deployed_revision": episode.get("deployed_revision"),
         "tile_config_signature": episode.get("tile_config_signature"),
+        "config_signature": episode.get("config_signature"),
+        "direction": episode.get("direction"),
+        "market": episode.get("market"),
+        "symbol": episode.get("symbol"),
+        "regime": episode.get("regime") or episode.get("market_regime"),
+        "regime_features_at_signal": episode.get("regime_features_at_signal"),
+        "causal_identity": episode.get("causal_identity"),
+        "market_tape_hashes": sorted(set(episode.get("market_tape_hashes") or [])),
+        "market_tape_ids": sorted(set(episode.get("market_tape_ids") or [])),
+        "market_evidence_provenance": list(episode.get("market_evidence_provenance") or []),
+        "market_evidence_reason_codes": list(episode.get("market_evidence_reason_codes") or []),
+        "materialization_reason_codes": list(episode.get("materialization_reason_codes") or []),
+        "future_path_selection": episode.get("future_path_selection"),
         "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
         "results": results,
     }
@@ -301,6 +344,11 @@ def materialize_same_opportunity_replay(
         "baseline_ids": expected,
         "summaries": summaries,
         "episode_receipts": receipts,
+        "analysis_scope": "ENTRY_FILL_COUNTERFACTUAL_ONLY",
+        "terminal_exit_pnl_evaluated": False,
+        "profitability_supported": False,
+        "profitability_blocker": "BASELINE_EXIT_AND_COST_COMPLETE_TERMINAL_RECEIPT_NOT_IMPLEMENTED",
+        "relay_eligible": False,
     }
     material["report_id"] = canonical_hash("entry-baseline-replay", material)
     return material
@@ -312,7 +360,27 @@ def materialize_v3_opportunity_replay(data_dir: str | Path) -> dict[str, Any]:
     Missing joins remain explicit UNKNOWN results; no schedule or market data is
     reconstructed from later evidence.
     """
-    path = Path(data_dir) / "v3" / "ledgers" / "opportunity.jsonl"
+    v3_root = Path(data_dir) / "v3"
+    path = v3_root / "ledgers" / "opportunity.jsonl"
+    segment_rows: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for segment_path in (
+        v3_root / "ledgers" / "market_segment.jsonl",
+        v3_root / "recovery_ledgers" / "market_segment.jsonl",
+    ):
+        if not segment_path.is_file():
+            continue
+        with segment_path.open("r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                try:
+                    segment = json.loads(line)
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(segment, dict):
+                    continue
+                key = tuple(str(segment.get(field) or "") for field in (
+                    "epoch_id", "opportunity_id", "episode_id"
+                ))
+                segment_rows.setdefault(key, []).append(segment)
     episodes = []
     if path.is_file():
         with path.open("r", encoding="utf-8") as handle:
@@ -328,13 +396,131 @@ def materialize_v3_opportunity_replay(data_dir: str | Path) -> dict[str, Any]:
                     snapshot.get("schedules")
                     if isinstance(snapshot, Mapping) else row.get("baseline_schedules")
                 )
+                causal = row.get("causal_identity")
+                causal = causal if isinstance(causal, Mapping) else {}
+                identity_reasons: list[str] = []
+
+                def consistent(name: str, *values: Any) -> Any:
+                    present = [value for value in values if value not in (None, "")]
+                    normalized = {str(value).strip() for value in present}
+                    if len(normalized) > 1:
+                        identity_reasons.append(f"CONFLICTING_CAUSAL_IDENTITY:{name}")
+                        return None
+                    return present[0] if present else None
+
+                dataset_epoch = consistent(
+                    "dataset_epoch", row.get("dataset_epoch"), row.get("epoch_id"),
+                    causal.get("dataset_epoch"),
+                )
+                source_revision = consistent(
+                    "source_revision", row.get("source_revision"), row.get("source_git_rev"),
+                    causal.get("source_revision"),
+                )
+                deployed_revision = consistent(
+                    "deployed_revision", row.get("deployed_revision"), causal.get("deployed_revision"),
+                )
+                tile_signature = consistent(
+                    "tile_config_signature", row.get("tile_config_signature"),
+                    causal.get("tile_config_signature"),
+                )
+                direction = consistent(
+                    "direction", row.get("direction"), row.get("raw_direction"), causal.get("direction"),
+                )
+                market = consistent("market", row.get("market"), causal.get("market"))
+                symbol = consistent("symbol", row.get("symbol"), causal.get("symbol"))
+                key = tuple(str(value or "") for value in (
+                    row.get("epoch_id") or row.get("dataset_epoch"),
+                    row.get("opportunity_id") or row.get("record_id"),
+                    row.get("episode_id"),
+                ))
+                market_rows: list[dict[str, Any]] = []
+                tape_hashes: list[str] = []
+                tape_ids: list[str] = []
+                evidence_provenance: list[dict[str, Any]] = []
+                evidence_reasons: list[str] = []
+                selected, history = authoritative_future_path_segments(
+                    v3_root, segment_rows.get(key, [])
+                )
+                for segment in selected:
+                    role = segment_role(segment)
+                    coverage = segment.get("coverage") if isinstance(segment.get("coverage"), Mapping) else {}
+                    eligible = (
+                        role == ALL_OPPORTUNITY_FUTURE_ROLE
+                        and complete_conservative_future_path(segment)
+                    ) or (
+                        role in {"ENTRY_PATH", "ENTRY_AND_EXIT_PATH", "FULL_LIFECYCLE"}
+                        and coverage.get("conservative_bbo_depth_eligible") is True
+                    )
+                    if not eligible:
+                        continue
+                    digest, errors = _verify_segment(v3_root, segment)
+                    if errors or not digest:
+                        evidence_reasons.extend(errors)
+                        evidence_provenance.append({
+                            "segment_record_id": segment.get("record_id"),
+                            "declared_segment_ref": segment.get("segment_ref"),
+                            "status": "UNKNOWN", "reason_codes": errors,
+                        })
+                        continue
+                    ref = segment["segment_ref"]
+                    object_path = (v3_root.parent / str(ref["relative_path"])).resolve()
+                    try:
+                        object_bytes = object_path.read_bytes()
+                        if hashlib.sha256(object_bytes).hexdigest() != digest:
+                            raise ValueError("CHECKSUM_CHANGED_AFTER_VERIFICATION")
+                        envelope = json.loads(object_bytes.decode("utf-8-sig"))
+                    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                        evidence_reasons.append("UNKNOWN_TAPE_ENVELOPE_INVALID")
+                        evidence_provenance.append({
+                            "segment_record_id": segment.get("record_id"),
+                            "sha256": digest, "status": "UNKNOWN",
+                            "reason_codes": ["UNKNOWN_TAPE_ENVELOPE_INVALID"],
+                        })
+                        continue
+                    except ValueError as exc:
+                        evidence_reasons.append(str(exc))
+                        evidence_provenance.append({
+                            "segment_record_id": segment.get("record_id"),
+                            "sha256": digest, "relative_path": ref.get("relative_path"),
+                            "status": "UNKNOWN", "reason_codes": [str(exc)],
+                        })
+                        continue
+                    evidence_rows = envelope.get("rows") if isinstance(envelope, Mapping) else None
+                    if not isinstance(evidence_rows, list) or not evidence_rows:
+                        evidence_reasons.append("UNKNOWN_TAPE_ROWS_MISSING")
+                        evidence_provenance.append({
+                            "segment_record_id": segment.get("record_id"),
+                            "sha256": digest, "status": "UNKNOWN",
+                            "reason_codes": ["UNKNOWN_TAPE_ROWS_MISSING"],
+                        })
+                        continue
+                    market_rows.extend(dict(item) for item in evidence_rows if isinstance(item, Mapping))
+                    tape_hashes.append(digest)
+                    tape_ids.append(str(segment.get("record_id") or ""))
+                    evidence_provenance.append({
+                        "segment_record_id": segment.get("record_id"),
+                        "sha256": digest, "relative_path": ref.get("relative_path"),
+                        "context_role": role, "status": "VERIFIED",
+                    })
+                if not tape_hashes:
+                    evidence_reasons.append("NO_MATCHING_VERIFIED_MARKET_SEGMENT")
                 episodes.append({
                     **dict(row),
                     "opportunity_id": row.get("opportunity_id") or row.get("record_id"),
-                    "dataset_epoch": row.get("dataset_epoch") or row.get("epoch_id"),
-                    "source_revision": row.get("source_revision") or row.get("source_git_rev"),
-                    "tile_config_signature": row.get("tile_config_signature") or row.get("config_signature"),
-                    "direction": row.get("direction") or row.get("raw_direction"),
+                    "dataset_epoch": dataset_epoch,
+                    "source_revision": source_revision,
+                    "deployed_revision": deployed_revision,
+                    "tile_config_signature": tile_signature,
+                    "direction": direction,
+                    "market": market,
+                    "symbol": symbol,
                     "baseline_schedules": schedules,
+                    "market_microstructure_rows": market_rows,
+                    "market_tape_hashes": sorted(set(tape_hashes)),
+                    "market_tape_ids": sorted(filter(None, set(tape_ids))),
+                    "market_evidence_provenance": evidence_provenance,
+                    "market_evidence_reason_codes": sorted(set(evidence_reasons)),
+                    "materialization_reason_codes": sorted(set(identity_reasons)),
+                    "future_path_selection": history,
                 })
     return materialize_same_opportunity_replay(episodes)

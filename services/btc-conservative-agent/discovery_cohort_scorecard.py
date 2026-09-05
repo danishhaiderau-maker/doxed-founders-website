@@ -129,11 +129,32 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
                             "pnl_observed_episode_count": len(pnls), "missing_or_nonfinite_pnl_count": len(unique)-len(pnls),
                             "duplicate_episode_ids": duplicates, "episodes": sorted(episodes),
                             "identity_blocker_counts": dict(sorted(identity_blocker_counts.items())),
+                            "complete_pnl_evidence": bool(unique) and not duplicates
+                            and not identity_blocker_counts and len(pnls) == len(unique),
                             "net_pnl_usd_sum": sum(pnls) if pnls else None,
                             "mean_net_pnl_usd": sum(pnls)/len(pnls) if pnls else None})
         reports.sort(key=lambda x: (x["mean_net_pnl_usd"] is None, -(x["mean_net_pnl_usd"] or 0), -x["independent_episode_count"]))
+        eligible = [cell for cell in reports if cell["complete_pnl_evidence"]]
+        descriptive_leader = None
+        if eligible:
+            leader = eligible[0]
+            descriptive_leader = {
+                key: leader[key] for key in (
+                    "policy_id", "policy_signature", "cell", "independent_episode_count",
+                    "net_pnl_usd_sum", "mean_net_pnl_usd",
+                )
+            }
+            descriptive_leader.update({
+                "tier": "DESCRIPTIVE_ONLY",
+                "ranking_basis": "mean net PnL within this evidence world; policy cohorts may differ",
+                "positive_mean": leader["mean_net_pnl_usd"] > 0,
+                "out_of_sample_qualified": False,
+            })
         world_reports[world] = {"status": "AVAILABLE" if all_episodes else "EMPTY",
                                 "independent_episode_count": len(all_episodes), "cells": reports,
+                                "complete_pnl_cell_count": len(eligible),
+                                "profitability_evidence_available": bool(eligible),
+                                "descriptive_leader": descriptive_leader,
                                 "world_alias_provenance": dict(sorted(aliases.items())),
                                 "claim_label": "separate descriptive evidence; no cross-world equivalence implied"}
 
@@ -164,6 +185,7 @@ def build_episode_matched_scorecard(rows: Iterable[Mapping[str, Any]], *, axes=(
                                 "episode_intersection_count": len(intersection), "left_only_episode_ids": sorted(left_ids-right_ids),
                                 "right_only_episode_ids": sorted(right_ids-left_ids), "exact_identity_match_count": matched,
                                 "cohort_equality_proven": equal,
+                                "complete_matched_pnl_evidence": equal and len(deltas) == matched,
                                 "comparison_status": "EXACT_MATCHED_COHORT" if equal else "CALIBRATION_ONLY_MODEL_DIFFERENCE" if any(x.startswith("MODEL_DIFFERENCE_CALIBRATION_ONLY") for x in defects) else "NOT_COMPARABLE",
                                 "matched_pnl_delta_count": len(deltas), "mean_right_minus_left_pnl_usd": sum(deltas)/len(deltas) if deltas else None,
                                 "blockers": sorted(set(defects))})
