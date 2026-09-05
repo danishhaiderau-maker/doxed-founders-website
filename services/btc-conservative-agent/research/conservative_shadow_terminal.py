@@ -189,10 +189,20 @@ def evaluate_shadow_terminal(
     except (InvalidOperation, ArithmeticError, TypeError, ValueError):
         blockers.append("POSITION_CONTEXT_QUANTITY_MISMATCH")
     cost_fields = {}
-    for field in ("trading_fees_usd", "funding_usd", "latency_cost_usd"):
-        cost_fields[field] = _finite(costs.get(field))
-        if cost_fields[field] is None or (field != "funding_usd" and cost_fields[field] < 0):
-            blockers.append(f"COST_MODEL_FIELD_INVALID:{field}")
+    declared_rates = costs.get("calculation_mode") == "DECLARED_EXECUTION_RATE_MODEL_V1"
+    if declared_rates:
+        from research.declared_shadow_model import validate_contract
+        try:
+            validate_contract(costs.get("declared_contract"), normalized_generation)
+            if costs.get("cost_provenance") != "DECLARED_SIMULATION":
+                blockers.append("DECLARED_COST_PROVENANCE_INVALID")
+        except ValueError as exc:
+            blockers.append(str(exc))
+    else:
+        for field in ("trading_fees_usd", "funding_usd", "latency_cost_usd"):
+            cost_fields[field] = _finite(costs.get(field))
+            if cost_fields[field] is None or (field != "funding_usd" and cost_fields[field] < 0):
+                blockers.append(f"COST_MODEL_FIELD_INVALID:{field}")
     if not str(costs.get("cost_model_id") or ""):
         blockers.append("COST_MODEL_ID_MISSING")
     if costs.get("spread_slippage_basis") != "EMBEDDED_IN_ENTRY_AND_EXECUTABLE_EXIT_PRICES":
@@ -347,6 +357,14 @@ def evaluate_shadow_terminal(
         for event in trace.get("partial_exits") or []:
             depth_required[int(float(trace["ts"]))] += float(event["fraction"]) * filled_qty
     depth_required[int(float(replay["exit_ts"]))] += float(replay["remaining_fraction_at_terminal"]) * filled_qty
+    exact_exit_quantities = None
+    if declared_rates:
+        from research.declared_shadow_model import exact_replay_exit_quantities
+        try:
+            exact_exit_quantities = exact_replay_exit_quantities(replay, policy_spec, entry_receipt["filled_qty"])
+        except (ValueError, KeyError, InvalidOperation) as exc:
+            return _unknown(normalized_generation, [str(exc)])
+        depth_required = {ts: float(qty) for ts, qty in exact_exit_quantities.items()}
     visible = {int(row["ts"]): float(row["exit_visible_qty"]) for row in normalized_rows}
     if any(visible.get(ts, -1.0) + 1e-12 < qty for ts, qty in depth_required.items()):
         return _unknown(normalized_generation, ["EXIT_VISIBLE_DEPTH_INSUFFICIENT"],
@@ -356,6 +374,19 @@ def evaluate_shadow_terminal(
                         source_segment_hashes=sorted(set(segment_hashes)), policy_signature=policy_signature,
                         exit_depth_required_by_ts=dict(sorted(depth_required.items())))
 
+    declared_economics = {}
+    if declared_rates:
+        from research.declared_shadow_model import calculate_declared_costs
+        exit_prices = {int(row["ts"]): float(row["price"]) for row in normalized_rows}
+        exit_events = [(ts, exit_prices[ts], qty) for ts, qty in sorted(exact_exit_quantities.items()) if qty > 0]
+        try:
+            declared_economics = calculate_declared_costs(
+                costs["declared_contract"], generation=normalized_generation,
+                entry_events=fill_events, exit_events=exit_events, direction=direction)
+        except ValueError as exc:
+            return _unknown(normalized_generation, [str(exc)])
+        cost_fields = {key: declared_economics[key] for key in
+                       ("trading_fees_usd", "funding_usd", "latency_cost_usd")}
     total_cost = sum(float(value) for value in cost_fields.values())
     gross = float(replay["gross_pnl_usd"])
     body = {
@@ -390,6 +421,7 @@ def evaluate_shadow_terminal(
         "exit_reason": replay["exit_reason"], "partial_exit_count": replay["partial_exit_count"],
         "mfe_pct": replay["mfe_pct"], "mae_pct": replay["mae_pct"],
         "required_horizon_end_ts": horizon,
+        **declared_economics,
     }
     body["receipt_sha256"] = _sha(body)
     return body

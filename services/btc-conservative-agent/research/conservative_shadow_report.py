@@ -71,6 +71,9 @@ def _context_defects(context: Mapping[str, Any]) -> list[str]:
         "funding_usd", "latency_cost_usd", "sampling_interval_sec",
         "first_sample_offset_sec", "required_horizon_end_ts",
     )
+    if context.get("calculation_mode") == "DECLARED_EXECUTION_RATE_MODEL_V1":
+        numeric_fields = tuple(field for field in numeric_fields if field not in
+                               {"trading_fees_usd", "funding_usd", "latency_cost_usd"})
     defects = [field for field in text_fields if not isinstance(context.get(field), str)
                or not context[field].strip()]
     for field in numeric_fields:
@@ -301,7 +304,12 @@ def build_conservative_shadow_report(
     canonical_root: str | Path, *, expected_generation: Mapping[str, Any],
     baseline_report: Mapping[str, Any], policy_candidates: Sequence[Mapping[str, Any]],
     policy_artifact_receipt: Mapping[str, Any], research_model: Mapping[str, Any] | None = None,
+    result_sink=None, max_diagnostic_results: int = 100,
 ) -> dict[str, Any]:
+    if type(max_diagnostic_results) is not int or not 0 <= max_diagnostic_results <= 1000:
+        raise ValueError("SHADOW_DIAGNOSTIC_LIMIT_INVALID")
+    if result_sink is not None and not callable(result_sink):
+        raise ValueError("SHADOW_RESULT_SINK_INVALID")
     baseline_report = baseline_report if isinstance(baseline_report, Mapping) else {}
     policy_artifact_receipt = (
         policy_artifact_receipt if isinstance(policy_artifact_receipt, Mapping) else {}
@@ -365,7 +373,16 @@ def build_conservative_shadow_report(
     if len({str(item.get("policy_signature") or "") for item in candidates}) != len(candidates):
         blockers.append("DUPLICATE_POLICY_CANDIDATE_SIGNATURE")
 
-    model_contexts: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
+    if isinstance(research_model, Mapping) and research_model.get("schema") == "declared_shadow_model_v1":
+        from research.declared_shadow_model import build_declared_research_model
+        try:
+            research_model = build_declared_research_model(
+                research_model, baseline_report=baseline_report, policy_candidates=candidates,
+                expected_generation=generation)
+        except ValueError as exc:
+            return _unknown(generation, [str(exc)])
+    lazy_contexts = isinstance(research_model, Mapping) and research_model.get("context_binding_mode") == "PER_BASELINE_LAZY_COMPOSITE"
+    model_contexts: dict[tuple, Mapping[str, Any]] = {}
     if research_model is None:
         model_blocker = "RESEARCH_MODEL_MISSING"
     else:
@@ -381,9 +398,9 @@ def build_conservative_shadow_report(
         for context in contexts:
             if not isinstance(context, Mapping):
                 model_blocker = "RESEARCH_MODEL_CONTEXT_INVALID"; continue
-            key = tuple(str(context.get(field) or "") for field in (
-                "episode_id", "opportunity_id", "baseline_id", "composite_policy_signature"
-            ))
+            key_fields = ("episode_id", "opportunity_id", "baseline_id")
+            if not lazy_contexts: key_fields += ("composite_policy_signature",)
+            key = tuple(str(context.get(field) or "") for field in key_fields)
             if not all(key) or key in model_contexts:
                 model_blocker = "RESEARCH_MODEL_CONTEXT_IDENTITY_INVALID"; continue
             model_contexts[key] = context
@@ -437,7 +454,16 @@ def build_conservative_shadow_report(
         }
     reason_counts: Counter[str] = Counter()
     results = []
+    streamed_count = 0
+    def record_result(row):
+        nonlocal streamed_count
+        if result_sink is not None:
+            result_sink(row)
+            streamed_count += 1
+        if len(results) < max_diagnostic_results:
+            results.append(row)
     complete = unknown = replay_count = 0
+    terminal_evaluated_count = 0
     evaluated_composite_signatures: set[str] = set()
     for episode in sorted((item for item in receipts if isinstance(item, Mapping)),
                           key=lambda item: (str(item.get("opportunity_id") or ""), str(item.get("episode_id") or ""))):
@@ -445,13 +471,41 @@ def build_conservative_shadow_report(
         if episode_id in duplicate_episodes:
             reason_counts["DUPLICATE_BASELINE_EPISODE"] += 1
             continue
-        episode_path_rows, payloads, source_receipts, path_blockers = _load_paths(Path(canonical_root), episode, generation)
+        loaded_paths = None
         for entry in sorted((item for item in episode.get("results") or [] if isinstance(item, Mapping)),
                             key=lambda item: str(item.get("baseline_id") or "")):
             entry_receipt = entry.get("conservative_receipt")
             if not isinstance(entry_receipt, Mapping) or entry.get("supported") is not True \
                     or entry.get("outcome_state") not in {"FULL_FILL", "PARTIAL_FILL"}:
                 continue
+            lazy_context = model_contexts.get((episode_id, opportunity_id, str(entry.get("baseline_id") or ""))) if lazy_contexts else None
+            lazy_blockers = []
+            if lazy_contexts:
+                if model_blocker: lazy_blockers.append(model_blocker)
+                if lazy_context is None: lazy_blockers.append("RESEARCH_MODEL_CONTEXT_MISSING")
+                elif lazy_context.get("input_blockers"): lazy_blockers.extend(lazy_context["input_blockers"])
+                else: lazy_blockers.extend(f"RESEARCH_MODEL_CONTEXT_FIELD_INVALID:{field}" for field in _context_defects(lazy_context))
+            if lazy_blockers:
+                # Context absence invalidates the whole Cartesian fanout, not
+                # one sampled policy. Count exactly without hashing N policies
+                # or loading paths; retain bounded examples and one range row.
+                amount = len(candidates)
+                replay_count += amount; unknown += amount
+                for reason in set(lazy_blockers): reason_counts[reason] += amount
+                if result_sink is not None:
+                    result_sink({"schema": "shadow_unknown_candidate_range_v1", "episode_id": episode_id,
+                                 "opportunity_id": opportunity_id, "baseline_id": entry.get("baseline_id"),
+                                 "candidate_count": amount, "candidate_artifact_sha256": policy_artifact_receipt.get("candidates_sha256"),
+                                 "status": "UNKNOWN", "blockers": sorted(set(lazy_blockers))})
+                for candidate in candidates[:max(0, max_diagnostic_results-len(results))]:
+                    results.append({"episode_id": episode_id, "opportunity_id": opportunity_id,
+                                    "baseline_id": entry.get("baseline_id"), "policy_id": candidate.get("policy_id"),
+                                    "source_candidate_policy_signature": candidate.get("policy_signature"),
+                                    "status": "UNKNOWN", "blockers": sorted(set(lazy_blockers)), "net_pnl_usd": None})
+                continue
+            if loaded_paths is None:
+                loaded_paths = _load_paths(Path(canonical_root), episode, generation)
+            episode_path_rows, payloads, source_receipts, path_blockers = loaded_paths
             for candidate in candidates:
                 replay_count += 1
                 try:
@@ -464,18 +518,20 @@ def build_conservative_shadow_report(
                     policy_signature = ""
                     composite_blocker = str(exc)
                 key = (episode_id, opportunity_id, str(entry.get("baseline_id") or ""), policy_signature)
-                context = model_contexts.get(key)
+                context = lazy_context if lazy_contexts else model_contexts.get(key)
                 local_blockers = list(path_blockers)
                 if composite_blocker: local_blockers.append(composite_blocker)
                 if model_blocker: local_blockers.append(model_blocker)
                 if context is None: local_blockers.append("RESEARCH_MODEL_CONTEXT_MISSING")
+                elif context.get("input_blockers"):
+                    local_blockers.extend(str(reason) for reason in context["input_blockers"])
                 elif defects := _context_defects(context):
                     local_blockers.extend(
                         f"RESEARCH_MODEL_CONTEXT_FIELD_INVALID:{field}" for field in defects
                     )
                 if local_blockers:
                     reason_counts.update(local_blockers); unknown += 1
-                    results.append({"episode_id": episode_id, "opportunity_id": opportunity_id,
+                    record_result({"episode_id": episode_id, "opportunity_id": opportunity_id,
                                     "baseline_id": key[2], "policy_signature": policy_signature,
                                     **policy_identity,
                                     "source_candidate_policy_id": candidate.get("policy_id"),
@@ -509,6 +565,9 @@ def build_conservative_shadow_report(
                     "trading_fees_usd": context.get("trading_fees_usd"), "funding_usd": context.get("funding_usd"),
                     "latency_cost_usd": context.get("latency_cost_usd"), "cost_provenance": context.get("cost_provenance"),
                     "spread_slippage_basis": context.get("spread_slippage_basis"), **bindings,
+                    **({"calculation_mode": context["calculation_mode"],
+                        "declared_contract": context.get("declared_contract")}
+                       if context.get("calculation_mode") == "DECLARED_EXECUTION_RATE_MODEL_V1" else {}),
                 })
                 coverage = _signed("shadow-path-coverage-policy", {
                     "schema": "shadow_path_coverage_policy_v1",
@@ -521,6 +580,7 @@ def build_conservative_shadow_report(
                     "row_schema": context.get("row_schema"), "source_segment_schema": context.get("source_segment_schema"),
                     "coverage_provenance": context.get("coverage_provenance"), **bindings,
                 })
+                terminal_evaluated_count += 1
                 terminal = evaluate_shadow_terminal(
                     generation=generation, entry_receipt=entry_receipt, entry_receipt_sha256=entry_sha,
                     future_path_rows=path_rows, future_path_sha256=path_sha,
@@ -532,7 +592,7 @@ def build_conservative_shadow_report(
                 status = terminal.get("status")
                 complete += status == "COMPLETE"; unknown += status != "COMPLETE"
                 reason_counts.update(terminal.get("blockers") or [])
-                results.append({"episode_id": episode_id, "opportunity_id": opportunity_id,
+                record_result({"episode_id": episode_id, "opportunity_id": opportunity_id,
                                 "baseline_id": key[2], "policy_id": candidate.get("policy_id"),
                                 "policy_signature": policy_signature, **policy_identity,
                                 "source_candidate_policy_id": candidate.get("policy_id"),
@@ -540,20 +600,32 @@ def build_conservative_shadow_report(
                                 "portfolio_competition_status": "NOT_SIMULATED",
                                 "terminal": terminal,
                                 "status": status, "net_pnl_usd": terminal.get("net_pnl_usd")})
+    truncated = len(results) < replay_count
+    publication_blockers = (["DUPLICATE_BASELINE_EPISODE"] if duplicate_episodes else [])
+    if truncated:
+        publication_blockers.append("RESULT_STREAM_CONSUMER_NOT_BOUND" if result_sink is not None
+                                    else "RESULTS_TRUNCATED_WITHOUT_STREAM")
     return {
         "schema": SCHEMA,
-        "status": "BUILT" if replay_count and unknown == 0 and not duplicate_episodes
+        "status": "BUILT" if replay_count and unknown == 0 and not duplicate_episodes and not truncated
         else "BUILT_INCOMPLETE",
-        "generation": generation, "blockers": (["DUPLICATE_BASELINE_EPISODE"] if duplicate_episodes else []),
+        "generation": generation, "blockers": publication_blockers,
         "independent_episode_count": len([key for key in episode_counts if key]) - len(duplicate_episodes),
         "duplicate_episode_ids": duplicate_episodes, "candidate_policy_count": len(candidates),
         "candidate_replay_count": replay_count, "complete_replay_count": complete,
+        "candidate_replay_count_basis": "FULL_CANDIDATE_CARTESIAN_COUNT_WITH_ARITHMETIC_UNKNOWN_RANGES",
+        "terminal_evaluated_count": terminal_evaluated_count,
         "evaluated_composite_policy_count": len(evaluated_composite_signatures),
         "unknown_replay_count": unknown, "reason_counts": dict(sorted(reason_counts.items())),
-        "results": results, "results_total": len(results), "results_truncated": False,
-        "profitability_supported": complete > 0 and unknown == 0 and not duplicate_episodes,
+        "results": results, "results_total": replay_count, "results_truncated": len(results) < replay_count,
+        "individual_results_streamed": streamed_count,
+        "complete_result_stream_status": "CALLER_SINK_USED" if result_sink is not None else "NOT_REQUESTED",
+        "profitability_supported": complete > 0 and unknown == 0 and not duplicate_episodes and not truncated,
         "ranking_eligible": False, "live_qualification": False,
         "source_basis": "CURRENT_IN_MEMORY_INPUTS_AND_HASH_VERIFIED_CANONICAL_SEGMENTS",
         "evaluation_scope": "ENTRY_PLUS_SINGLE_POSITION_EXIT",
         "portfolio_competition_status": "NOT_SIMULATED",
+        "research_model_provenance": research_model.get("provenance") if isinstance(research_model, Mapping) else None,
+        "declared_contract_sha256": research_model.get("declared_contract_sha256") if isinstance(research_model, Mapping) else None,
+        "declared_contract": research_model.get("declared_contract") if isinstance(research_model, Mapping) else None,
     }
