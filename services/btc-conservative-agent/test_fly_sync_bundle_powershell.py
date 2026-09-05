@@ -1,0 +1,51 @@
+import base64
+import json
+from pathlib import Path
+import subprocess
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/powershell/pwsh.exe")
+
+
+@pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
+@pytest.mark.parametrize("defect", [None, "hash"])
+def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, defect):
+    payload = '{"sample":1}'
+    relative = "v3/market_segments/11/" + "1" * 64 + ".json"
+    manifest = {"inventory_generation_id": "a" * 64, "inventory_sha256": "a" * 64,
+                "source_git_rev": "source", "collection_epoch_id": "epoch",
+                "tile_registry_signature": "tile", "ack_eligible": True,
+                "fixture_defect": defect,
+                "files": [{"path": relative, "size": len(payload), "inode": 123,
+                           "mtime_ns": 456, "consistency_mode": "strict_generation_v1",
+                           "fixture_payload": payload}]}
+    encoded = base64.b64encode(json.dumps(manifest).encode()).decode()
+    target = tmp_path / "mirror"
+    script = f"""
+$ErrorActionPreference='Stop'
+. '{ROOT.as_posix()}/scripts/fly-mirror-atomic.ps1'
+. '{ROOT.as_posix()}/scripts/fly-sync-bundles.ps1'
+$manifest=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))|ConvertFrom-Json
+$state=@{{}}
+$script:saves=0
+try {{
+ $result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{ROOT.as_posix()}/scripts/test-support/bundle-staging-fixture.py' -SyncState $state -SaveCheckpoint {{$script:saves+=1}} -Progress {{param($n)}}
+ @{{result=$result;state=$state;saves=$script:saves}}|ConvertTo-Json -Depth 10 -Compress
+}} catch {{ Write-Output $_.Exception.Message; exit 7 }}
+"""
+    completed = subprocess.run([str(PWSH), "-NoProfile", "-Command", script],
+                               capture_output=True, text=True, timeout=30)
+    if defect:
+        assert completed.returncode == 7 and "BUNDLE_STAGE_HASH_MISMATCH" in completed.stdout
+        assert not (target / relative).exists()
+    else:
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        result = json.loads(completed.stdout)
+        assert result["result"]["Files"] == 1 and result["result"]["AckSent"] is False
+        assert result["saves"] == 1
+        assert not Path(result["result"]["StagingRoot"]).exists()
+        assert result["state"][relative]["size"] == len(payload)
+        assert result["state"][relative]["mtime_ns"] == 456
+        assert (target / relative).read_text() == payload

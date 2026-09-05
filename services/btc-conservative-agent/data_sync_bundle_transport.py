@@ -257,9 +257,11 @@ def build_bundle(
     }
     output.mkdir(parents=True, exist_ok=True)
     destination = output / f"{package_sha}.tar"
-    temporary = output / f".{package_sha}.{uuid.uuid4().hex}.tmp"
+    # The final name retains the full hash. Repeating it in a unique temporary
+    # name exceeds legacy Windows MAX_PATH in the persistent bundle namespace.
+    temporary = output / f".{uuid.uuid4().hex}.tmp"
     try:
-        with temporary.open("wb") as handle:
+        with temporary.open("xb") as handle:
             handle.write(package)
             handle.flush()
             os.fsync(handle.fileno())

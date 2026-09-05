@@ -40240,6 +40240,79 @@ def _data_sync_retain_disk_inventory_generation(
     return generation_id
 
 
+_DATA_SYNC_BUNDLE_COORDINATOR_LOCK = threading.Lock()
+_DATA_SYNC_BUNDLE_LAST_STATUS = {"status": "NOT_STARTED"}
+
+
+def _data_sync_bundle_authenticated() -> bool:
+    """Unlike dashboard auth, this never trusts an unauthenticated loopback."""
+    token = str(_BOT_ADMIN_TOKEN or "")
+    return bool(token) and any(
+        hmac.compare_digest(str(value or ""), token)
+        for value in (request.headers.get("X-Bot-Admin-Token"),
+                      request.cookies.get("bot_admin_token"))
+    )
+
+
+def _data_sync_bundle_generation(generation_id: str) -> dict | None:
+    generation = _data_sync_inventory_generation(generation_id)
+    if (not generation or generation.get("storage") != "disk_pages_v2"
+            or generation.get("ack_eligible") is not True
+            or not _data_sync_receipt_bootstrap_gate()["complete"]):
+        return None
+    identity = generation.get("bundle_identity")
+    if (not isinstance(identity, dict)
+            or set(identity) != {"source_git_rev", "collection_epoch_id", "tile_registry_signature"}
+            or any(not isinstance(value, str) or not value for value in identity.values())
+            or identity["source_git_rev"] != _runtime_git_rev()):
+        return None  # Never relabel an old inventory with current runtime identity.
+    return {**generation, **identity, "inventory_generation_id": generation_id,
+            "inventory_sha256": generation_id}
+
+
+def _start_data_sync_bundle_generation(generation_id: str) -> bool:
+    """Optional acceleration, isolated from HTTP and from trading's interpreter."""
+    if os.getenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "0") != "1":
+        return False
+    try:
+        generation = _data_sync_bundle_generation(generation_id)
+    except Exception:
+        return False  # Optional acceleration must not invalidate inventory.
+    if not generation or not _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False):
+        return False
+
+    def owner():
+        global _DATA_SYNC_BUNDLE_LAST_STATUS
+        def publish(receipt):
+            global _DATA_SYNC_BUNDLE_LAST_STATUS
+            _DATA_SYNC_BUNDLE_LAST_STATUS = {**receipt, "generation_id": generation_id,
+                                           "updated_at": utc_iso()}
+        try:
+            from data_sync_bundle_runtime import run_managed_generation
+            work = _data_sync_inventory_work_root()
+            def pressure():
+                return {**_lifecycle_pipeline_pressure_probe(),
+                        "overlap": bool(_lifecycle_pipeline_overlap_probe())}
+            def retained(expected):
+                current = _data_sync_bundle_generation(generation_id)
+                return current is not None and all(current.get(key) == expected.get(key) for key in (
+                    "generation_id", "page_index_sha256", "source_git_rev",
+                    "collection_epoch_id", "tile_registry_signature"))
+            publish(run_managed_generation(
+                generation, _data_sync_volume_root(), work / "transport-bundles",
+                pressure_probe=pressure, generation_available=retained, publish=publish))
+        except Exception:
+            publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED"})
+        finally:
+            _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+    try:
+        threading.Thread(target=owner, name="data-sync-bundle-coordinator", daemon=True).start()
+    except Exception:
+        _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+        return False
+    return True
+
+
 def _data_sync_gc_disk_inventory_generations(
     work_root: Path,
     *,
@@ -40575,6 +40648,8 @@ def _data_sync_persist_disk_inventory_snapshot(
             )
         },
     }
+    if isinstance(generation.get("bundle_identity"), dict):
+        payload["generation"]["bundle_identity"] = dict(generation["bundle_identity"])
     target = _data_sync_inventory_snapshot_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
@@ -40611,6 +40686,8 @@ def _data_sync_load_persisted_inventory_snapshot() -> dict | None:
                 },
                 _data_sync_inventory_work_root(),
             )
+            if isinstance(generation.get("bundle_identity"), dict):
+                validated["bundle_identity"] = dict(generation["bundle_identity"])
             return {
                 **payload,
                 "generation": validated,
@@ -40940,6 +41017,16 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
         disk_generation = _data_sync_validate_disk_inventory_generation(
             result, work_root
         )
+        # Freeze the admission identity, not whatever happens to be current at
+        # the later HTTP request. Epoch/config changes abort optional batching.
+        if (v3_runtime_identity["source_revision"] == _runtime_git_rev()
+                and v3_runtime_identity["epoch_id"] == _collector_v22_epoch_id()
+                and v3_runtime_identity["tile_config_signature"] == active_tile_registry_signature()):
+            disk_generation["bundle_identity"] = {
+                "source_git_rev": v3_runtime_identity["source_revision"],
+                "collection_epoch_id": v3_runtime_identity["epoch_id"],
+                "tile_registry_signature": v3_runtime_identity["tile_config_signature"],
+            }
         # Receipt bootstrap and the physical inventory run concurrently after
         # restart. Re-check at the publication boundary so a scan admitted
         # while COMPLETE cannot promote after bootstrap authority regresses.
@@ -41019,6 +41106,7 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             name="data-sync-inventory-generation-gc",
             daemon=True,
         ).start()
+        _start_data_sync_bundle_generation(inventory_generation_id)
     except BaseException as exc:
         logger.error(f"data-sync inventory background refresh failed: {exc}")
         persisted_worker_failure_code = (
@@ -50024,6 +50112,14 @@ def _require_fly_runtime_for_direct_start() -> None:
         "[PIPELINE ENFORCEMENT]"
     )
     raise SystemExit(78)
+
+
+from data_sync_bundle_api import register_bundle_routes as _register_data_sync_bundle_routes
+_register_data_sync_bundle_routes(
+    app, authenticated=_data_sync_bundle_authenticated,
+    generation_lookup=_data_sync_bundle_generation,
+    output_root=lambda: _data_sync_volume_root() / ".data-sync-snapshots" / "transport-bundles",
+)
 
 
 if __name__ == "__main__":

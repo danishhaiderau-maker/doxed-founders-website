@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ def test_index_and_chunks_bind_generation_and_do_not_expose_paths(tmp_path):
     assert index.status_code == 200
     assert index.json["status"] == "COMPLETE"
     assert index.json["ack_authority"] == "ORIGINAL_MANIFEST_ROWS_ONLY"
+    assert "descriptor_path" not in index.json["packages"][0]
     digest = result["package"]["package_sha256"]
     url = f"/api/data-sync/bundle?generation_id={GEN}&package_id={digest}"
     descriptor = client.get(url + "&descriptor=1", headers=headers)
@@ -70,7 +72,7 @@ def test_invalid_ranges_fail_closed(tmp_path, suffix):
 def test_tampered_descriptor_or_path_is_rejected(tmp_path):
     client, result, _, output = setup_api(tmp_path)
     digest = result["package"]["package_sha256"]
-    descriptor = output / f"g-{GEN[:16]}" / "descriptors" / f"{digest}.json"
+    descriptor = output / f"g-{GEN[:16]}" / "descriptors" / f"d-{digest[:20]}.json"
     descriptor.write_text('{}')
     response = client.get(f"/api/data-sync/bundle?generation_id={GEN}&package_id={digest}&descriptor=1", headers={"X-Test-Auth": "yes"})
     assert response.status_code == 409
@@ -90,6 +92,7 @@ def test_http_never_builds_or_hashes_whole_archive(tmp_path, monkeypatch):
         def __enter__(self): return self
         def __exit__(self, *args): self.handle.close()
         def seek(self, *args): return self.handle.seek(*args)
+        def fileno(self): return self.handle.fileno()
         def read(self, size=-1):
             assert 0 <= size <= 17
             return self.handle.read(size)
@@ -118,6 +121,102 @@ def test_duplicate_package_index_is_rejected(tmp_path):
     path.write_text(json.dumps(state))
     response = client.get(f"/api/data-sync/bundles?generation_id={GEN}", headers={"X-Test-Auth": "yes"})
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize("field", ["member_count", "payload_bytes"])
+def test_descriptor_counts_must_match_index(tmp_path, field):
+    client, result, _, output = setup_api(tmp_path)
+    digest = result["package"]["package_sha256"]
+    state_path = output / f"g-{GEN[:16]}" / "bundle-worker-state.json"
+    state = json.loads(state_path.read_text())
+    state["package_index"][0][field] += 1
+    state_path.write_text(json.dumps(state))
+    response = client.get(
+        f"/api/data-sync/bundle?generation_id={GEN}&package_id={digest}&descriptor=1",
+        headers={"X-Test-Auth": "yes"},
+    )
+    assert response.status_code == 409
+    assert response.json["error"] == "PACKAGE_DESCRIPTOR_INDEX_MISMATCH"
+
+
+def test_root_reparse_attribute_rejected_at_registration(tmp_path, monkeypatch):
+    output = tmp_path / "out"
+    output.mkdir()
+    original = Path.lstat
+
+    class ReparseStat:
+        st_file_attributes = 0x400
+
+    def marked(path):
+        if path == output:
+            return ReparseStat()
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", marked)
+    app = Flask(__name__)
+    with pytest.raises(api.BundleReadError, match="PACKAGE_ROOT_LINK_REJECTED"):
+        api.register_bundle_routes(
+            app, authenticated=lambda: True, generation_lookup=lambda _g: None,
+            output_root=output,
+        )
+
+
+def test_generation_directory_reparse_attribute_rejected(tmp_path, monkeypatch):
+    client, _, _, output = setup_api(tmp_path)
+    generation_dir = output / f"g-{GEN[:16]}"
+    original = Path.lstat
+
+    class ReparseStat:
+        st_file_attributes = 0x400
+
+    def marked(path):
+        if path == generation_dir:
+            return ReparseStat()
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", marked)
+    response = client.get(
+        f"/api/data-sync/bundles?generation_id={GEN}",
+        headers={"X-Test-Auth": "yes"},
+    )
+    assert response.status_code == 409
+    assert response.json["error"] == "PACKAGE_PATH_LINK_REJECTED"
+
+
+def test_chunk_growth_after_open_fails_generation_fence(tmp_path, monkeypatch):
+    client, result, _, _ = setup_api(tmp_path)
+    digest = result["package"]["package_sha256"]
+    package = Path(result["package"]["package_path"])
+    original = Path.open
+
+    class GrowingFile:
+        def __init__(self, path, *args, **kwargs):
+            self.path = path
+            self.handle = original(path, *args, **kwargs)
+        def __enter__(self): return self
+        def __exit__(self, *args): self.handle.close()
+        def seek(self, *args): return self.handle.seek(*args)
+        def fileno(self): return self.handle.fileno()
+        def read(self, size=-1):
+            payload = self.handle.read(size)
+            with original(self.path, "ab") as writer:
+                writer.write(b"growth")
+                writer.flush()
+                os.fsync(writer.fileno())
+            return payload
+
+    def growing_open(path, *args, **kwargs):
+        if path == package and args and args[0] == "rb":
+            return GrowingFile(path, *args, **kwargs)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", growing_open)
+    response = client.get(
+        f"/api/data-sync/bundle?generation_id={GEN}&package_id={digest}&limit=17",
+        headers={"X-Test-Auth": "yes"},
+    )
+    assert response.status_code == 409
+    assert response.json["error"] == "PACKAGE_GENERATION_CHANGED"
 
 
 def test_oversized_metadata_fails_before_open(tmp_path, monkeypatch):

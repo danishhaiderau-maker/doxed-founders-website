@@ -24,6 +24,7 @@ MAX_INDEX_BYTES = 16 * 1024 * 1024
 MAX_PAGE_BYTES = 8 * 1024 * 1024
 MAX_PACKAGE_INDEX_ENTRIES = 4096
 MAX_INDEX_LINE_BYTES = 16 * 1024
+BUNDLE_SNAPSHOT_RELATIVE_ROOT = Path(".data-sync-snapshots") / "transport-bundles"
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -41,7 +42,9 @@ def _sha(value: bytes) -> str:
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    # This worker also runs on Windows where deep generation paths still meet
+    # legacy MAX_PATH; the singleton lease permits a short unique temp suffix.
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex[:12]}.tmp")
     try:
         with temporary.open("wb") as handle:
             handle.write(_canonical(value))
@@ -56,6 +59,50 @@ def _stat_identity(path: Path) -> dict[str, int]:
     stat = path.stat()
     return {"size": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns),
             "inode": int(getattr(stat, "st_ino", 0) or 0)}
+
+
+def _is_link_or_reparse(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        attributes = int(getattr(path.stat(follow_symlinks=False), "st_file_attributes", 0) or 0)
+    except OSError:
+        return False
+    return bool(attributes & int(getattr(os, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)))
+
+
+def _reject_link_or_reparse_components(raw_path: str | Path, code: str) -> Path:
+    """Inspect the lexical path before resolve can erase a link boundary."""
+    candidate = Path(raw_path).absolute()
+    current = Path(candidate.anchor)
+    for part in candidate.parts[1:]:
+        current = current / part
+        if _is_link_or_reparse(current):
+            raise BundleWorkerError(code)
+    return candidate
+
+
+def _validate_output_root(source: Path, raw_output: str | Path) -> Path:
+    """Allow external output or exactly the inventory-excluded bundle root."""
+    candidate = _reject_link_or_reparse_components(
+        raw_output, "DERIVATIVE_OUTPUT_LINK_OR_REPARSE_FORBIDDEN")
+    resolved = candidate.resolve()
+    try:
+        candidate.relative_to(source)
+        lexically_inside = True
+    except ValueError:
+        lexically_inside = False
+    try:
+        resolved.relative_to(source)
+        resolved_inside = True
+    except ValueError:
+        resolved_inside = False
+    if lexically_inside or resolved_inside:
+        allowed = source / BUNDLE_SNAPSHOT_RELATIVE_ROOT
+        if (os.path.normcase(str(candidate)) != os.path.normcase(str(allowed))
+                or os.path.normcase(str(resolved)) != os.path.normcase(str(allowed.resolve()))):
+            raise BundleWorkerError("DERIVATIVE_OUTPUT_INSIDE_SOURCE_NOT_DEDICATED_SNAPSHOT_ROOT")
+    return resolved
 
 
 def _bounded_read(path: Path, limit: int, code: str) -> bytes:
@@ -187,7 +234,9 @@ def _page(index: Any, generation_dir: Path, expected_page: int,
             or any(char not in _HEX for char in digest)
             or name != f"p{page_index:08d}-{digest[:24]}.json"):
         raise BundleWorkerError("PAGE_INDEX_DESCRIPTOR_INVALID")
-    path = (generation_dir / name).resolve(strict=True)
+    raw_path = _reject_link_or_reparse_components(
+        generation_dir / name, "INVENTORY_PAGE_LINK_OR_REPARSE_FORBIDDEN")
+    path = raw_path.resolve(strict=True)
     try: path.relative_to(generation_dir)
     except ValueError as exc: raise BundleWorkerError("INVENTORY_PAGE_PATH_ESCAPE") from exc
     size = path.stat().st_size
@@ -238,23 +287,34 @@ def run_bundle_worker(
     if max_members > MAX_MEMBERS or max_payload_bytes > MAX_PAYLOAD_BYTES:
         raise BundleWorkerError("PACKAGE_HARD_BUDGET_EXCEEDED")
     source = Path(source_root).resolve(strict=True)
-    output = Path(output_root).resolve()
-    try:
-        output.relative_to(source)
-    except ValueError:
-        pass
-    else:
-        raise BundleWorkerError("DERIVATIVE_OUTPUT_MUST_BE_OUTSIDE_SOURCE_ROOT")
-    generation_dir = Path(generation["generation_dir"]).resolve(strict=True)
-    index_path = Path(generation["page_index_path"]).resolve(strict=True)
+    output = _validate_output_root(source, output_root)
+    raw_generation_dir = _reject_link_or_reparse_components(
+        generation["generation_dir"], "INVENTORY_GENERATION_LINK_OR_REPARSE_FORBIDDEN")
+    raw_index_path = _reject_link_or_reparse_components(
+        generation["page_index_path"], "PAGE_INDEX_LINK_OR_REPARSE_FORBIDDEN")
+    generation_dir = raw_generation_dir.resolve(strict=True)
+    index_path = raw_index_path.resolve(strict=True)
     try: index_path.relative_to(generation_dir)
     except ValueError as exc: raise BundleWorkerError("PAGE_INDEX_OUTSIDE_GENERATION") from exc
     # Keep content-addressed TAR temporary names below legacy Windows MAX_PATH;
     # the full generation identity remains inside every state/descriptor.
     generation_output = output / f"g-{generation['inventory_generation_id'][:16]}"
     state_path = generation_output / "bundle-worker-state.json"
+    lease_path = output / ".bundle-worker.lease"
+    _reject_link_or_reparse_components(
+        generation_output, "BUNDLE_WORKER_STATE_LINK_OR_REPARSE_FORBIDDEN")
+    _reject_link_or_reparse_components(
+        state_path, "BUNDLE_WORKER_STATE_LINK_OR_REPARSE_FORBIDDEN")
+    _reject_link_or_reparse_components(lease_path, "BUNDLE_WORKER_LEASE_LINK_OR_REPARSE_FORBIDDEN")
     started = time.monotonic()
-    with _singleton_lease(output / ".bundle-worker.lease"):
+    with _singleton_lease(lease_path):
+        output = _validate_output_root(source, output)
+        _reject_link_or_reparse_components(
+            generation_output, "BUNDLE_WORKER_STATE_LINK_OR_REPARSE_FORBIDDEN")
+        _reject_link_or_reparse_components(
+            state_path, "BUNDLE_WORKER_STATE_LINK_OR_REPARSE_FORBIDDEN")
+        _reject_link_or_reparse_components(
+            lease_path, "BUNDLE_WORKER_LEASE_LINK_OR_REPARSE_FORBIDDEN")
         state, reads = _load_state(state_path, generation, index_path, int(max_read_bytes))
         if state.get("completed") is True:
             return {"schema": SCHEMA, "status": "COMPLETE", "generation": generation,
@@ -323,9 +383,16 @@ def run_bundle_worker(
                 generation, selected, source, generation_output / "packages",
                 max_members=int(max_members), max_payload_bytes=int(max_payload_bytes),
             )
-            package_receipt_path = generation_output / "descriptors" / f"{package['package_sha256']}.json"
+            package_receipt_path = generation_output / "descriptors" / f"d-{package['package_sha256'][:20]}.json"
             public_descriptor = {key: value for key, value in package.items() if key != "package_path"}
-            _atomic_json(package_receipt_path, public_descriptor)
+            descriptor_bytes = _canonical(public_descriptor)
+            if package_receipt_path.exists():
+                existing_descriptor = _bounded_read(
+                    package_receipt_path, MAX_INDEX_LINE_BYTES, "PACKAGE_DESCRIPTOR_TOO_LARGE")
+                if existing_descriptor != descriptor_bytes:
+                    raise BundleWorkerError("PACKAGE_DESCRIPTOR_PREFIX_COLLISION")
+            else:
+                _atomic_json(package_receipt_path, public_descriptor)
             entry = {"package_sha256": package["package_sha256"],
                      "descriptor_sha256": _sha(_canonical(public_descriptor)),
                      "descriptor_path": str(package_receipt_path.relative_to(generation_output).as_posix()),

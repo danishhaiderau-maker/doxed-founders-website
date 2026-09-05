@@ -33,6 +33,7 @@ if (-not $AdminToken) {
   throw "AdminToken is required (parameter, vault home-bot.env, or BOT_ADMIN_TOKEN)."
 }
 
+. (Join-Path $scriptDir "fly-sync-bundles.ps1")
 $targetRoot = [System.IO.Path]::GetFullPath($TargetDir)
 New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
 if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
@@ -738,6 +739,16 @@ if (($currentMirrorBytes + $incomingGrowth) -gt $capBytes) {
 $selectedFileCount = @($selectedFiles).Count
 $selectedFileIndex = 0
 $pendingStateWrites = 0
+if ($env:FLY_SYNC_TRANSPORT_BUNDLES -eq '1') {
+  # Explicit canary opt-in. Failure is surfaced to the normal loop/backoff;
+  # never silently restart an hours-long serial transfer on a broken batch.
+  $bundleResult = Receive-FlyTransportBundles -Manifest $manifest -SourceUrl $SourceUrl `
+    -AdminToken $AdminToken -TargetRoot $targetRoot `
+    -ClientScript (Join-Path $scriptDir 'fly-sync-bundle-client.py') `
+    -SyncState $syncState -SaveCheckpoint { Save-SyncState } `
+    -Progress { param($files) Write-Host "[FLY SYNC] stage=bundle_verified files=$files ack=pending" }
+  Write-Host "[FLY SYNC] stage=bundle_complete files=$($bundleResult.Files) original_manifest_ack=pending"
+}
 foreach ($row in $selectedFiles) {
   $selectedFileIndex += 1
   $rel = [string]$row.path

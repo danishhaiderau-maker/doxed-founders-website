@@ -368,3 +368,6 @@ packages/founder-ide/upstream/*
 !packages/founder-ide/upstream/overlay/**
 packages/skycode-fork/
 vault/
+# Ephemeral verified bundle transport staging; never analyzer input or source.
+/.batch-transfer/
+/scripts/.batch-transfer/

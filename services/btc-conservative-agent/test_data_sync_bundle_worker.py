@@ -141,8 +141,86 @@ def test_derivative_output_cannot_pollute_source_inventory(tmp_path):
     source = tmp_path / "source"
     row = _row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"x")
     meta = _fixture(tmp_path, [row])
-    with pytest.raises(worker.BundleWorkerError, match="DERIVATIVE_OUTPUT_MUST_BE_OUTSIDE_SOURCE_ROOT"):
+    with pytest.raises(worker.BundleWorkerError, match="INSIDE_SOURCE_NOT_DEDICATED"):
         worker.run_bundle_worker(meta, source, source / "derived")
+
+
+def test_dedicated_snapshot_bundle_output_is_allowed_inside_source(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    row = _row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"x")
+    meta = _fixture(tmp_path, [row])
+    output = source / ".data-sync-snapshots" / "transport-bundles"
+    captured = {}
+    def fake_bundle(generation, selected, source_root, output_root, **_budgets):
+        captured["output_root"] = Path(output_root)
+        return {"schema": "fly_runtime_transport_bundle_v1", "package_sha256": "f" * 64,
+                "package_path": str(Path(output_root) / ("f" * 64 + ".tar")),
+                "member_count": 1, "payload_bytes": 1, "members": [dict(selected[0])]}
+    monkeypatch.setattr(worker, "build_bundle", fake_bundle)
+    result = worker.run_bundle_worker(meta, source, output)
+    assert result["status"] == "COMPLETE"
+    assert captured["output_root"].is_relative_to(output)
+
+
+def test_snapshot_output_rejects_nested_child_and_reparse_component(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    allowed = source / ".data-sync-snapshots" / "transport-bundles"
+    with pytest.raises(worker.BundleWorkerError, match="INSIDE_SOURCE_NOT_DEDICATED"):
+        worker._validate_output_root(source.resolve(), allowed / "extra")
+    allowed.mkdir(parents=True)
+    monkeypatch.setattr(worker, "_is_link_or_reparse",
+                        lambda path: path.name == ".data-sync-snapshots")
+    with pytest.raises(worker.BundleWorkerError, match="LINK_OR_REPARSE_FORBIDDEN"):
+        worker._validate_output_root(source.resolve(), allowed)
+
+
+@pytest.mark.parametrize(("target_kind", "error"), (
+    ("generation", "INVENTORY_GENERATION_LINK_OR_REPARSE_FORBIDDEN"),
+    ("index", "PAGE_INDEX_LINK_OR_REPARSE_FORBIDDEN"),
+    ("page", "INVENTORY_PAGE_LINK_OR_REPARSE_FORBIDDEN"),
+))
+def test_inventory_paths_reject_link_or_reparse_before_resolve(
+        tmp_path, monkeypatch, target_kind, error):
+    source = tmp_path / "source"
+    row = _row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"x")
+    meta = _fixture(tmp_path, [row])
+    generation_dir = Path(meta["generation_dir"])
+    targets = {
+        "generation": generation_dir,
+        "index": Path(meta["page_index_path"]),
+        "page": next(generation_dir.glob("p*.json")),
+    }
+    target = targets[target_kind].absolute()
+    monkeypatch.setattr(worker, "_is_link_or_reparse",
+                        lambda path: path.absolute() == target)
+    with pytest.raises(worker.BundleWorkerError, match=error):
+        worker.run_bundle_worker(meta, source, tmp_path / "out")
+
+
+@pytest.mark.parametrize(("target_kind", "error"), (
+    ("state", "BUNDLE_WORKER_STATE_LINK_OR_REPARSE_FORBIDDEN"),
+    ("lease", "BUNDLE_WORKER_LEASE_LINK_OR_REPARSE_FORBIDDEN"),
+))
+def test_resumed_state_and_lease_paths_reject_link_or_reparse(
+        tmp_path, monkeypatch, target_kind, error):
+    source = tmp_path / "source"
+    row = _row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"x")
+    meta = _fixture(tmp_path, [row])
+    output = tmp_path / "out"
+    generation_output = output / f"g-{GEN[:16]}"
+    generation_output.mkdir(parents=True)
+    targets = {
+        "state": generation_output / "bundle-worker-state.json",
+        "lease": output / ".bundle-worker.lease",
+    }
+    target = targets[target_kind]
+    target.write_bytes(b"{}" if target_kind == "state" else b"0")
+    absolute_target = target.absolute()
+    monkeypatch.setattr(worker, "_is_link_or_reparse",
+                        lambda path: path.absolute() == absolute_target)
+    with pytest.raises(worker.BundleWorkerError, match=error):
+        worker.run_bundle_worker(meta, source, output)
 
 
 def test_singleton_lease_rejects_second_owner(tmp_path):

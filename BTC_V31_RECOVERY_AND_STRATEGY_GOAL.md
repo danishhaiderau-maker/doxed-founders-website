@@ -17,6 +17,52 @@ This plan incorporates Cursor's handoff and the current independent code, operat
 
 ## Ordered work and acceptance
 
+### Reality-check checkpoint — 2026-09-05T02:09Z
+
+The end-to-end objective is NOT COMPLETE. Test pass percentages, source commits,
+manifest cursor percentages and time spent are not overall readiness percentages.
+
+Completed and evidenced in this work window:
+
+- Operational: user-authorized download park, scheduled task disabled, exact
+  PID10172 absent, downloaded bytes/checkpoint retained. Reconfirmed at02:09Z.
+- Committed source: f3cb831 bounded package transport,95b0d82 resumable package
+  worker,293a1ae prebuilt authenticated package API. These are not deployed.
+- Further local source: isolated subprocess coordinator and backend registration;
+  pressure/deadline/identity/authentication/path/chunk-replacement hardening.
+  These newer edits remain uncommitted pending integration review. Never deploy
+  the unrelated dirty worktree wholesale.
+- Executable verification:84 batch backend/core/API/runtime tests passed,1
+  host-dependent skip; separately85 targeted analyzer/shadow/scorecard tests
+  passed. These suites overlap earlier reported tests; do not add pass counts
+  across runs as if they represented unique coverage.
+
+Not delivered yet: faster production transfer, terminal mirror ACK, latest atomic
+analyzer publication, current static/dynamic winner, current-generation visual
+QA, completed storage cleanup, measured Neon savings or Bitfinex live readiness.
+
+Immediate delivery sequence (no further roadmap expansion before these receipts):
+
+1. Root integrates the batch client; disjoint agent owns only its pure client
+   module/tests. Prove bounded package retrieval, original-row identity/hash
+   equality, interrupted transfer recovery and unchanged per-path ACK semantics.
+2. Independent review plus large many-small-file fixture; selectively commit
+   reviewed owned changes. Resolve any exact new test defect without unrelated
+   refactoring. Compile/parse the exact PowerShell client before activation.
+3. Guarded exact-source deployment and one controlled download restart; measure
+   verified bytes/files per minute alongside trading endpoint latency and cycles.
+   If the new path fails, retain verified data, classify and repair; never silently
+   fall back to hours of serial transfers without reporting it.
+4. Finish manifest/ACK parity, publish current analyzer, then execute desktop/mobile
+   navigation/data/download QA and supported policy comparisons. Wiring tests are
+   not a substitute for these final user-visible results.
+
+Each goal continuation must change source/runtime toward this chain or produce
+new evidence that changes the next action. A status-only answer to a user remains
+a status answer, not an engineering milestone. No guarantee of winning trades.
+
+### Full acceptance sequence (unchanged)
+
 1. **Close sync ownership and inventory admission.** Record terminal success or failed-transfer/park evidence. Require authenticated CURRENT inventory, SHA, revision, generation ID and authoritative ACK eligibility. Distinguish increasing scan/finalization counters from a stalled worker. Keep pinned immutable-generation service distinct from latest-source freshness; do not call a two-hour-old generation current merely to avoid scanning.
 2. **Repair and restart one reviewed sync.** Preserve Cursor's original patch. Reject bare-503-as-BUILDING and retry amplification. Bound each JSON operation with a monotonic elapsed deadline while preserving structured BUILDING, one snapshot request identity, pressure backoff and generation checks. Test against committed source separately from unrelated dirty server experiments. Run through the existing singleton owner, with terminal success/failure receipts.
 3. **Complete transfer, parity and ACK.** Download all eligible evidence directly from Fly to the canonical laptop library. Prove byte/hash/count checks, exact deployed data revision, epoch and configuration, atomic promotion, immutable ACK and interruption recovery. Prior verified data remains available until promotion; no analyzer may read an incomplete candidate. Capture the transfer watermark and distinguish later source growth from failure of the completed generation.
@@ -28,6 +74,29 @@ This plan incorporates Cursor's handoff and the current independent code, operat
 
 ## Current observations and open defects
 
+- Batch client/server integration is now implemented locally, with146 tests
+  passed and1 host-dependent skip, including the selectively staged backend
+  source and real PowerShell child promotion. Fixture384 files used7 requests
+  with identical original ACK rows; this is not live throughput. Both activation
+  flags remain off. See diagnostics/batch-transfer-integration-qa-20260905.md.
+  Total derivative admission now caps512MiB/max4 generations, while successful
+  laptop scratch is reclaimed after checkpoint. Recurring derivative GC and
+  full-size/production canary remain open; do not conflate admission with cleanup.
+- User-authorized batch-upgrade park completed 2026-09-05T01:45:33Z: task
+  DoxxedFlyMirrorSync Disabled, PID10172 absent, zero canonical script owners.
+  Final heartbeat3322/34433; checkpoint3334 total entries, SHA recorded in
+  diagnostics/sync-authorized-batch-park-20260905.md. No downloaded/source data
+  deleted. This supersedes earlier live PID10172 observations. Do not restart the
+  old serial loop before reviewed batch client/server integration and canary.
+- Source batch backend now has bounded subprocess slices, sanitized environment,
+  hard deadlines, resource-pressure deferral, two-failure circuit, singleton
+  coordinator, explicit derivative storage budget and captured inventory identity.
+  API registration reads prebuilt artifacts only; token required even on loopback.
+  Worker/API link/reparse and chunk-replacement fences and Windows temporary path
+  handling were strengthened. Integration is OFF by default and NOT deployed.
+  Latest focused backend/core/API/runtime integration run:84 passed,1 host skip.
+  Client original-row matching, unchanged ACK integration, large-cohort equality,
+  exact-source deploy and measured production canary remain mandatory next gates.
 - Local source aa6beae wires a generation-fenced conservative shadow terminal report into the atomic analyzer manifest. It verifies real fill-event clocks/VWAP, independently scoped candidate paths, composite baseline-entry plus exit identities, market-segment hashes, explicit cost/ATR/sizing/coverage receipts and effective filled quantity. Missing model inputs produce exact aggregate UNKNOWN counts with bounded diagnostic samples, not millions of fabricated rows. Portfolio competition remains NOT_SIMULATED and no live/OOS qualification is inferred. The production research-model producer and matched scorecard integration for complete terminal results remain open; fixture success is not collected-data profitability.
 - Local source c509411 fixes the portal's upload-age-only freshness classifier: a recent upload cannot hide an old embedded analyzer generation, and supplied canonical revision is compared with mirror source-data revision. Nine focused API tests and TypeScript compilation passed. This change is not deployed and rendered portal QA remains pending.
 - Danish explicitly authorized stopping the download for repair. Root captured the checkpoint/owner receipt, disabled the scheduled task and stopped PID16576, verified it absent, then wired the reviewed small-file pacing helper. Healthy <=16KiB files use a 500ms request-start budget (maximum two serial requests/sec) with minimum yield; larger/slow/pressure-state requests retain protective pacing. Full client regression tests and a single-owner restart/progress canary remain required before claiming activation successful. Batch transport remains a separate follow-up; do not delete idempotency receipts or describe source tests as realized speed improvement.
@@ -95,8 +164,8 @@ This plan incorporates Cursor's handoff and the current independent code, operat
 - The batch transport core and resumable worker are separate work in progress.
   Required activation path remains worker -> authenticated immutable package API
   -> verified client extraction -> unchanged per-member manifest ACK -> canary.
-  Do not claim batching active from isolated package tests. Do not edit PID10172's
-  consumed client; future activation requires another controlled owner boundary.
+  Do not claim batching active from isolated package tests. PID10172 is now
+  authoritatively parked; keep the scheduled task disabled during client changes.
 - The execution-model audit in diagnostics/shadow-execution-model-gaps-20260905.md
   identifies missing sizing/quantity, funding, fee-schedule, causal fill ATR and
   timing provenance. Declared simulated cost models may support explicitly labeled
