@@ -1,7 +1,8 @@
 # Run the read-only desktop analyzer (30-min loop, or --Once) against the
 # canonical Fly data mirror. It binds to loopback and receives no trading,
 # exchange, Fly, Railway, or AI credentials.
-param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0)
+param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0,
+      [string]$ShadowScenarioConfig = '')
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir "home-stack-mode.ps1") -ErrorAction SilentlyContinue 2>$null
@@ -140,6 +141,20 @@ if (Test-Path -LiteralPath $vaultEnv) {
   }
 }
 
+# Explicit durable nonsecret opt-in; never load model economics from the vault.
+# An absent config preserves the disabled default or a validated inherited pin.
+. (Join-Path $scriptDir 'analyzer-scenario-launch-config.ps1')
+if (-not $ShadowScenarioConfig) {
+  $defaultScenarioConfig = Join-Path $repoRoot 'config\analyzer-shadow-scenario.launch.json'
+  if (Test-Path -LiteralPath $defaultScenarioConfig) { $ShadowScenarioConfig = $defaultScenarioConfig }
+}
+$scenarioLaunch = Get-AnalyzerScenarioLaunchConfig -ConfigPath $ShadowScenarioConfig `
+  -ModelFile ([string]$env:BTC_ANALYZER_SHADOW_MODEL_FILE) -ModelSha256 ([string]$env:BTC_ANALYZER_SHADOW_MODEL_SHA256)
+if ($scenarioLaunch.enabled) {
+  $env:BTC_ANALYZER_SHADOW_MODEL_FILE = [string]$scenarioLaunch.model_file
+  $env:BTC_ANALYZER_SHADOW_MODEL_SHA256 = [string]$scenarioLaunch.model_sha256
+}
+
 $env:RESEARCH_DASHBOARD_BIND_HOST = "127.0.0.1"
 $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://127.0.0.1:$AnalyzerPort/"
@@ -156,6 +171,8 @@ if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
 # under the clean HEAD marker.
 $analyzerProvenancePaths = @(
   "scripts/start-home-analyzer.ps1",
+  "scripts/analyzer-scenario-launch-config.ps1",
+  "scripts/analyzer-scenario-launch-config.py",
   "services/btc-conservative-agent/analyzer_research_engine_v62.py",
   "services/btc-conservative-agent/research_dashboard.py",
   "services/btc-conservative-agent/research_v3_store.py",
@@ -167,7 +184,7 @@ $dirtyAnalyzerSources = @(
   & git -C $repoRoot status --porcelain=v1 --untracked-files=all -- @analyzerProvenancePaths 2>$null |
     Where-Object {
       $path = ([string]$_).Substring([Math]::Min(3, ([string]$_).Length)).Trim('"')
-      $path -match '\.py$' -or $path -eq 'scripts/start-home-analyzer.ps1'
+      $path -match '\.py$' -or $path -eq 'scripts/start-home-analyzer.ps1' -or $path -eq 'scripts/analyzer-scenario-launch-config.ps1'
     }
 )
 if ($LASTEXITCODE -ne 0) {
@@ -230,6 +247,7 @@ if ($Restart -and $discoveredEnginePids.Count -eq 1 -and -not $Once) {
     throw "REFUSED: analyzer restart target does not match the owned port and source revision."
   }
   Write-Host "Restarting verified analyzer engine PID $incumbentPid; dashboard remains available." -ForegroundColor Yellow
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   Stop-Process -Id $incumbentPid -Force -ErrorAction Stop
   Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer.pid") -Force -ErrorAction SilentlyContinue
   $discoveredEnginePids = @()
@@ -242,6 +260,7 @@ if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
       "Analyzer engine PID $incumbentPid belongs to another or unproven source revision; " +
       "replacing the engine while preserving the independent dashboard."
     ) -ForegroundColor Yellow
+    Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
     Stop-Process -Id $incumbentPid -Force -ErrorAction SilentlyContinue
     $pidFile = Join-Path $repoRoot ".home-analyzer.pid"
     if (Test-Path -LiteralPath $pidFile) {
@@ -286,6 +305,7 @@ if (Test-PortOpen $AnalyzerPort) {
     if (Test-Path -LiteralPath $dashboardPidFile) {
       Remove-Item -LiteralPath $dashboardPidFile -Force -ErrorAction SilentlyContinue
     }
+    Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
     Stop-ListenPortFast $AnalyzerPort | Out-Null
     Start-Sleep -Seconds 2
   }
@@ -295,6 +315,7 @@ if (Test-PortOpen $AnalyzerPort) {
 # pandas/scikit imports can take several minutes when the bot is busy; making
 # Flask wait behind those imports caused blank pages and false watchdog kills.
 if (-not $Once -and -not (Test-PortOpen $AnalyzerPort)) {
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   $dashboardProc = Start-Process -FilePath "python" `
     -ArgumentList @("research_dashboard.py", "--standalone") `
     -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
@@ -326,6 +347,7 @@ $pyArgs += $expectedRevisionMarker
 
 if ($NoWait) {
   Write-Host "Starting analyzer detached on :$AnalyzerPort ..."
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
   # The retired analyzer-auto-restart monitor is intentionally not launched.
   # The explicit launcher/supervisor owns recovery; two independent restart
@@ -350,6 +372,7 @@ $exitCode = 0
 try {
   Write-Host "Starting analyzer in $agentDir ..."
   Write-Host ""
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   python @pyArgs
   if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
 } catch {
