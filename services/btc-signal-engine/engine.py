@@ -39135,9 +39135,10 @@ def _lifecycle_pipeline_runtime_status() -> dict:
     except BaseException as exc:
         return {
             "schema": "lifecycle_pipeline_runtime_status_v1",
-            "running": False,
-            "owner": False,
-            "active": False,
+            "available": False,
+            "running": None,
+            "owner": None,
+            "active": None,
             "last_outcome": "STATUS_UNAVAILABLE",
             "last_error": type(exc).__name__,
             "source_revision": None,
@@ -39392,9 +39393,10 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
         }
     return {
         "schema": "lifecycle_pipeline_public_status_v1",
-        "owner": bool(internal.get("owner")),
-        "running": bool(internal.get("running")),
-        "active": bool(internal.get("active")),
+        "available": internal.get("available") is not False,
+        "owner": bool(internal.get("owner")) if internal.get("available") is not False else None,
+        "running": bool(internal.get("running")) if internal.get("available") is not False else None,
+        "active": bool(internal.get("active")) if internal.get("available") is not False else None,
         "source_revision_match": bool(
             runtime_revision and exact_revision and runtime_revision == exact_revision
         ),
@@ -41230,6 +41232,10 @@ def _data_sync_cleanup_inventory_worker_orphans(
 def _data_sync_receipt_bootstrap_gate() -> dict:
     """Return the fail-closed lifecycle receipt-bootstrap admission state."""
     runtime = _lifecycle_pipeline_runtime_status()
+    if runtime.get("available") is False:
+        return {"required": True, "status": "BLOCKED", "complete": False,
+                "blocked": True, "error_code": "LIFECYCLE_STATUS_UNAVAILABLE",
+                "ledger": None, "ledgers_checked": 0, "records_indexed": 0, "bytes_indexed": 0}
     bootstrap = (
         runtime.get("receipt_bootstrap")
         if isinstance(runtime.get("receipt_bootstrap"), dict) else {}
