@@ -33,6 +33,14 @@ def runtime(tmp_path_factory, monkeypatch):
     session.write_text(json.dumps({"collector_v22_epoch_id": "epoch-old"}))
     accounting = root / "trades_3factor.csv"
     accounting.write_text("accounting-must-survive\n")
+    settings_history = root / "execution_settings_history.jsonl"
+    settings_history.write_text('{"reason":"PRIOR_SETTINGS","signature":"prior"}\n')
+    settings_observed_epochs = []
+    def append_settings(path, row, **kwargs):
+        settings_observed_epochs.append(json.loads(session.read_text())["collector_v22_epoch_id"])
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row) + "\n")
+        return True
     locks = {name: threading.RLock() for name in (
         "state_lock", "trade_lock", "_research_write_gate", "_collector_epoch_lock",
         "replay_lock", "_cycle_3m_bucket_lock", "_compressed_shadow_lock")}
@@ -56,6 +64,10 @@ def runtime(tmp_path_factory, monkeypatch):
            "COLLECTOR_V22_VERSION": "test", "_pause_agent_debug_writes": Mock(),
            "_resume_agent_debug_writes": Mock(), "get_genome_bridge": lambda: None,
            "active_tile_registry_signature": lambda: "d" * 64,
+           "_enabled_execution_settings": lambda: {"gap_buckets": ["small"], "chase_buckets": ["2", "3", "4"]},
+           "_execution_settings_history_lock": threading.RLock(), "_settings_breakdown_cache": {"key": "old"},
+           "EXECUTION_SETTINGS_HISTORY_FILE": str(settings_history), "utc_iso": lambda: "2026-09-05T00:00:00Z",
+           "_safe_append_jsonl": append_settings,
            "reset_provisional_events": Mock(), "save_persistent_config": Mock(),
            "_update_data_sync_identity_epoch_cache": Mock(), "bot_start_time": 100,
            "replay_buffers": {}, "_cycle_3m_written_buckets": {}, "_cycle_3m_inflight_buckets": set(),
@@ -67,11 +79,13 @@ def runtime(tmp_path_factory, monkeypatch):
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     names = {"_fresh_research_reset_assert_quiesced", "_fresh_research_reset_resume",
              "_fresh_research_reset_boundary", "_perform_fresh_collection_reset_quiesced",
+             "_record_execution_settings_epoch", "_execution_settings_signature",
              "_write_research_session", "_reset_collector_epoch_state", "_collector_v22_epoch_id", "_utc_isoformat_ns"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert len(nodes) == len(names)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), env)
-    env.update(root=root, store=store, old_identity=old, payload=payload, accounting=accounting, session=session)
+    env.update(root=root, store=store, old_identity=old, payload=payload, accounting=accounting, session=session,
+               settings_history=settings_history, settings_observed_epochs=settings_observed_epochs)
     yield env
     for name in reversed(guard_names): locks[name].release()
 
@@ -99,6 +113,12 @@ def test_actual_reset_deletes_research_retires_authority_and_writes_real_epoch(r
     assert not (runtime["root"] / "research_archive").exists()
     assert json.loads(Path(result["operation_receipt"]).read_text())["stage"] == "COMPLETE"
     assert bool(result["fresh_collection_signal_ts"]) is signal
+    history = [json.loads(line) for line in runtime["settings_history"].read_text().splitlines()]
+    assert history[0] == {"reason": "PRIOR_SETTINGS", "signature": "prior"}
+    assert history[1]["reason"] == "FRESH_COLLECTION_STARTED"
+    assert history[1]["signature"] == "gap=small|chase=2,3,4"
+    assert runtime["settings_observed_epochs"] == [result["new_epoch_id"]]
+    assert runtime["_settings_breakdown_cache"]["key"] is None
 
 
 def test_existing_real_empty_wal_is_rebound_only_after_deletion(runtime):
@@ -264,6 +284,8 @@ def test_authority_failure_does_not_publish_new_epoch(runtime, monkeypatch):
     assert result["failed_stage"] == "AUTHORITY_RETIREMENT"
     assert json.loads(runtime["session"].read_text())["collector_v22_epoch_id"] == "epoch-old"
     assert runtime["state"]["execution_paused"] is True
+    assert runtime["settings_observed_epochs"] == []
+    assert len(runtime["settings_history"].read_text().splitlines()) == 1
 
 
 @pytest.mark.parametrize("after_publish", [False, True])
