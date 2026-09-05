@@ -213,6 +213,18 @@ def _signal_time_baseline_inputs(*sources: Mapping[str, Any]) -> dict[str, Any]:
     for source in sources:
         if not isinstance(source, Mapping):
             continue
+        declaration = source.get("research_baseline_context_declaration")
+        if isinstance(declaration, Mapping):
+            key = "research_baseline_context_declaration"
+            if key not in result:
+                result[key] = copy.deepcopy(dict(declaration))
+            elif result[key] != declaration:
+                # Never silently select sizing/ATR assumptions from conflicting
+                # signal and order inputs. The consumer rejects this schema.
+                result[key] = {
+                    "schema": "research_baseline_context_conflict_v1",
+                    "reason": "CONFLICTING_RESEARCH_CONTEXT_DECLARATIONS",
+                }
         features = source.get("research_feature_snapshot")
         features = features if isinstance(features, Mapping) else source.get("feature_snapshot_at_signal")
         features = features if isinstance(features, Mapping) else {}
