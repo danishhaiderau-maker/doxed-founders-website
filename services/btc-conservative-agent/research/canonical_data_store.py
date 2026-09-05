@@ -113,9 +113,36 @@ def _read_current(root: Path) -> dict[str, Any] | None:
     path = root / CURRENT_MANIFEST
     if not path.is_file():
         return None
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    pointer_raw = path.read_bytes()
+    payload = json.loads(pointer_raw.decode("utf-8-sig"))
     if not isinstance(payload, dict):
         raise CanonicalStoreError("CURRENT_MANIFEST_INVALID")
+    marker = root / "canonical_generation_retired.json"
+    if marker.exists() or marker.is_symlink():
+        import stat
+        if marker.is_symlink() or getattr(marker.lstat(), "st_file_attributes", 0) & 0x400:
+            raise CanonicalStoreError("CANONICAL_RETIREMENT_MARKER_INVALID")
+        try:
+            if not stat.S_ISREG(marker.lstat().st_mode):
+                raise ValueError()
+            with marker.open("rb") as stream:
+                raw = stream.read(65537)
+            if len(raw) > 65536:
+                raise ValueError()
+            retirement = json.loads(raw)
+            if (not isinstance(retirement, dict)
+                    or retirement.get("schema") != "canonical_generation_retirement_v1"
+                    or retirement.get("generation_current") is not False
+                    or not isinstance(retirement.get("retired_epoch_id"), str)
+                    or not retirement["retired_epoch_id"].startswith("epoch-")
+                    or not isinstance(retirement.get("metadata_sha256"), dict)):
+                raise ValueError()
+        except (OSError, ValueError, TypeError) as exc:
+            raise CanonicalStoreError("CANONICAL_RETIREMENT_MARKER_INVALID") from exc
+        pointer_digest = hashlib.sha256(pointer_raw).hexdigest()
+        if (payload.get("dataset_epoch") == retirement["retired_epoch_id"]
+                or pointer_digest == retirement["metadata_sha256"].get(CURRENT_MANIFEST)):
+            raise CanonicalStoreError("CANONICAL_DATASET_RETIRED_AWAITING_FRESH_PROMOTION")
     return payload
 
 
