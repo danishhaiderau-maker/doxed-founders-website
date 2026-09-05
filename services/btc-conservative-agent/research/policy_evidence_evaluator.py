@@ -735,6 +735,51 @@ def _causal_provenance(
     return projection, reasons
 
 
+def _dynamic_causal_fields(opportunity: Mapping[str, Any], decision: Mapping[str, Any]) -> dict[str, Any]:
+    """Expose recorded dynamic inputs without replacing missing source evidence."""
+    causal = opportunity.get("causal_identity")
+    causal = causal if isinstance(causal, Mapping) else {}
+    blockers = []
+    fields = {}
+    for name in ("market", "symbol", "signal_ts", "required_end_ts"):
+        supplied = [item[name] for item in (opportunity, causal, decision)
+                    if item.get(name) not in (None, "")]
+        if not supplied:
+            fields[name] = None
+            continue
+        if name in {"signal_ts", "required_end_ts"}:
+            try:
+                normalized = [float(value) for value in supplied if not isinstance(value, bool)]
+                valid = len(normalized) == len(supplied) and all(math.isfinite(value) and value > 0 for value in normalized)
+            except (TypeError, ValueError, OverflowError):
+                normalized, valid = [], False
+        else:
+            normalized = [value.strip() for value in supplied if isinstance(value, str)]
+            valid = len(normalized) == len(supplied) and all(
+                value.upper() not in {"", "UNKNOWN", "UNAVAILABLE", "NONE", "NULL"} for value in normalized)
+        if not valid or len(set(normalized)) != 1:
+            fields[name] = None
+            blockers.append(f"DYNAMIC_RECORDED_FIELD_INVALID_OR_CONFLICTING:{name}")
+        else:
+            fields[name] = normalized[0]
+    if (fields["signal_ts"] is not None and fields["required_end_ts"] is not None
+            and fields["required_end_ts"] < fields["signal_ts"]):
+        fields["required_end_ts"] = None
+        blockers.append("DYNAMIC_RECORDED_FIELD_INVALID_OR_CONFLICTING:required_end_ts")
+    features = _validated_pre_entry_features(opportunity)
+    fields.update({
+        "pre_entry_features": {name: {"value": item["value"], "observed_ts": item["observed_ts"]}
+                               for name, item in features.items()},
+        "pre_entry_feature_status": opportunity.get("pre_entry_feature_status"),
+        "pre_entry_feature_blockers": opportunity.get("pre_entry_feature_blockers"),
+        "bucket_definition_signature": opportunity.get("_joined_bucket_definition_signature"),
+        "pre_entry_feature_receipt_sha256": opportunity.get("_joined_feature_receipt_sha256"),
+        "required_end_ts_basis": "RECORDED_REQUIRED_END_TS" if fields["required_end_ts"] is not None else None,
+        "dynamic_input_blockers": blockers,
+    })
+    return fields
+
+
 def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
              opportunity: Mapping[str, Any], reasons: list[str]) -> dict[str, Any]:
     tape_ids = sorted(binding.get("tape_ids") or [])
@@ -793,6 +838,7 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
     provenance, provenance_reasons = _causal_provenance(opportunity, decision)
     return {
         "schema": SCHEMA,
+        **_dynamic_causal_fields(opportunity, decision),
         "epoch_id": binding.get("epoch_id"),
         "opportunity_id": binding.get("opportunity_id"),
         "episode_id": binding.get("episode_id"),
@@ -994,6 +1040,18 @@ def build_v3_conservative_results(
         )
         if provenance_conflict:
             joined[0]["pre_entry_feature_blockers"] = ["PRE_ENTRY_CAUSAL_PROVENANCE_MISMATCH"]
+        joined[0]["_joined_bucket_definition_signature"] = None
+        joined[0]["_joined_feature_receipt_sha256"] = None
+        if (len(matches) == 1 and not provenance_conflict
+                and joined[0]["pre_entry_feature_status"] == "COMPLETE"):
+            signature = matches[0].get("bucket_definition_signature")
+            declared_signature = opportunity.get("bucket_definition_signature")
+            if (isinstance(signature, str) and signature.strip()
+                    and signature.strip().upper() not in {"UNKNOWN", "UNAVAILABLE", "NONE", "NULL"}
+                    and (declared_signature in (None, "") or declared_signature == signature)):
+                joined[0]["_joined_bucket_definition_signature"] = signature
+                joined[0]["_joined_feature_receipt_sha256"] = hashlib.sha256(
+                    canonical_json(matches[0]).encode()).hexdigest()
         joined_opportunities.extend(joined)
     ledgers["opportunity"] = joined_opportunities
     bindings = build_v3_binding_index(root)["bindings"]
@@ -1195,6 +1253,20 @@ def build_v3_conservative_results(
                 evaluated_filled_qty=receipt.get("filled_qty"),
             ))
         results.append(row)
+    for row in results:
+        evidence = row.get("lifecycle_evidence")
+        if isinstance(evidence, Mapping) and evidence.get("status") == "VERIFIED":
+            completion = evidence.get("completion")
+            horizon = completion.get("horizon_complete_ts") if isinstance(completion, Mapping) else None
+            if (isinstance(horizon, (int, float)) and not isinstance(horizon, bool)
+                    and math.isfinite(horizon) and horizon > 0
+                    and row.get("signal_ts") is not None and horizon >= row["signal_ts"]
+                    and "DYNAMIC_RECORDED_FIELD_INVALID_OR_CONFLICTING:required_end_ts"
+                    not in row.get("dynamic_input_blockers", [])):
+                recorded = row.get("required_end_ts")
+                if recorded is None or horizon >= recorded:
+                    row["required_end_ts"] = horizon
+                    row["required_end_ts_basis"] = "VERIFIED_LIFECYCLE_COMPLETION_HORIZON"
     results.sort(key=lambda row: tuple(str(row.get(field) or "") for field in (
         "opportunity_id", "episode_id", "decision_id", "policy_signature"
     )))

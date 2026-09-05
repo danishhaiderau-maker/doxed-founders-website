@@ -131,3 +131,88 @@ def test_explicit_capture_boundary_is_preserved_for_scalar_features(tmp_path):
     observed = build_v3_conservative_results(v3)["results"][0]["regime_features_at_signal"]["depth_bucket"]
     assert observed["value"] == "DEEP"
     assert observed["observed_ts"] == 9.0
+
+
+def test_observed_terminal_preserves_dynamic_fields_from_real_separate_receipt(tmp_path):
+    v3, receipt = _separate_receipt_fixture(tmp_path)
+    receipt["bucket_definition_signature"] = "recorded-taxonomy-v7"
+    _write(v3 / "ledgers/pre_entry_features.jsonl", [receipt])
+    path = v3 / "ledgers/opportunity.jsonl"
+    opportunity = json.loads(path.read_text().strip())
+    opportunity.update(market="BITFINEX", symbol="BTCUSD")
+    _write(path, [opportunity])
+    identity = {"epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
+                "policy_signature": "sig-1"}
+    _write(v3 / "ledgers/execution.jsonl", [{
+        **identity, "close_ts": 20, "gross_pnl_usd": 5.0,
+        "trading_fees_usd": .5, "funding_fees_usd": .25, "exit_slippage_usd": .25,
+        "filled_qty": 1.0, "net_pnl_usd": 4.0,
+        "execution_model": "OBSERVED_PAPER_MATCHES", "cost_model_id": "MEASURED_COSTS",
+    }])
+    _write(v3 / "ledgers/lifecycle.jsonl", [{**identity, "terminal": True}])
+    before = _ledger_hashes(v3)
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert _ledger_hashes(v3) == before
+    assert row["terminal_outcome_status"] == "REALIZED_COST_COMPLETE"
+    assert row["market"] == "BITFINEX" and row["symbol"] == "BTCUSD"
+    assert row["signal_ts"] == 10.0
+    assert row["required_end_ts"] == row["lifecycle_evidence"]["completion"]["horizon_complete_ts"] == 18000
+    assert row["required_end_ts_basis"] == "VERIFIED_LIFECYCLE_COMPLETION_HORIZON"
+    assert row["pre_entry_features"]["depth_bucket"] == {"value": "LOW", "observed_ts": 8.0}
+    assert row["bucket_definition_signature"] == "recorded-taxonomy-v7"
+    assert row["pre_entry_feature_receipt_sha256"]
+
+
+@pytest.mark.parametrize("defect", ["absent", "conflicting", "duplicate", "foreign_identity"])
+def test_taxonomy_is_never_replaced_by_current_or_opportunity_default(tmp_path, defect):
+    v3, receipt = _separate_receipt_fixture(tmp_path)
+    path = v3 / "ledgers/opportunity.jsonl"
+    opportunity = json.loads(path.read_text().strip())
+    opportunity["bucket_definition_signature"] = "opportunity-default"
+    _write(path, [opportunity])
+    rows = [receipt]
+    if defect != "absent":
+        receipt["bucket_definition_signature"] = "other-recorded-taxonomy"
+    if defect == "duplicate":
+        rows *= 2
+    if defect == "foreign_identity":
+        receipt["epoch_id"] = "foreign"
+    _write(v3 / "ledgers/pre_entry_features.jsonl", rows)
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["bucket_definition_signature"] is None
+
+
+@pytest.mark.parametrize("field,value", [("market", "OTHER"), ("symbol", "ETHUSD"), ("signal_ts", 11.0)])
+def test_conflicting_recorded_dynamic_identity_is_not_selected_last(tmp_path, field, value):
+    v3, _ = _separate_receipt_fixture(tmp_path)
+    path = v3 / "ledgers/opportunity.jsonl"
+    opportunity = json.loads(path.read_text().strip())
+    opportunity.update(market="BITFINEX", symbol="BTCUSD")
+    _write(path, [opportunity])
+    path = v3 / "ledgers/decision.jsonl"
+    decision = json.loads(path.read_text().strip())
+    decision[field] = value
+    _write(path, [decision])
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row[field] is None
+    assert f"DYNAMIC_RECORDED_FIELD_INVALID_OR_CONFLICTING:{field}" in row["dynamic_input_blockers"]
+
+
+def test_missing_horizon_is_not_fabricated_from_signal_or_two_hour_default(tmp_path, monkeypatch):
+    from research import policy_evidence_evaluator as evaluator
+    v3, _ = _separate_receipt_fixture(tmp_path)
+    monkeypatch.setattr(evaluator, "join_lifecycle_evidence", lambda *_: {"status": "UNKNOWN", "reason_codes": ["MISSING"]})
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert row["signal_ts"] == 10.0
+    assert row["required_end_ts"] is None and row["required_end_ts_basis"] is None
+
+
+def test_partial_feature_join_preserves_only_actual_valid_observations(tmp_path):
+    v3, receipt = _separate_receipt_fixture(tmp_path)
+    receipt["bucket_definition_signature"] = "recorded-taxonomy"
+    receipt["features"]["depth_bucket"]["observed_ts"] = 11
+    _write(v3 / "ledgers/pre_entry_features.jsonl", [receipt])
+    row = build_v3_conservative_results(v3)["results"][0]
+    assert "depth_bucket" not in row["pre_entry_features"]
+    assert row["pre_entry_features"]["regime"] == {"value": "BULL", "observed_ts": 8.0}
+    assert row["bucket_definition_signature"] is None
