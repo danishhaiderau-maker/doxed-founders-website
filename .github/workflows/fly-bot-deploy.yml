@@ -32,6 +32,7 @@ on:
           - resume-predeploy-abort
           - restart-only
           - inspect-runtime
+          - bundle-canary
           - repair-execution-funnel
           - repair-lifecycle-tail
           - repair-lifecycle-cursor
@@ -43,6 +44,23 @@ on:
         description: Opt in to bounded transport package generation for this normal deployment only
         required: false
         default: false
+        type: boolean
+      expected_bundle_revision:
+        description: Exact 12-character incumbent revision for derivative-only bundle inspection/canary
+        required: false
+        type: string
+      bundle_generation_id:
+        description: Exact 64-character inventory generation for inspection/canary
+        required: false
+        type: string
+      bundle_inventory_fingerprint:
+        description: Optional exact 64-character inventory worker fingerprint for bounded receipt inspection
+        required: false
+        type: string
+      bundle_inspect_only:
+        description: Inspect existing bounded receipts only; never run a transport slice
+        required: false
+        default: true
         type: boolean
       expected_unready_revision:
         description: Exact 12-character Fly revision permitted for recover-unready
@@ -122,6 +140,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  bundle-canary:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'bundle-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify bounded derivative-only helper
+        run: |
+          python -m pip install pytest
+          python -m pytest scripts/test_fly_bundle_canary.py scripts/test_fly_bundle_canary_workflow.py -q
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Inspect or run one existing exact-revision transport slice
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_BUNDLE_REVISION: ${{ inputs.expected_bundle_revision }}
+          BUNDLE_GENERATION_ID: ${{ inputs.bundle_generation_id }}
+          BUNDLE_INVENTORY_FINGERPRINT: ${{ inputs.bundle_inventory_fingerprint }}
+          BUNDLE_INSPECT_ONLY: ${{ inputs.bundle_inspect_only && '1' || '0' }}
+        run: python scripts/fly_bundle_canary_dispatch.py
   resume-bootstrap:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
     runs-on: ubuntu-latest
