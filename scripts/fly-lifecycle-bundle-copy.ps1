@@ -51,7 +51,10 @@ function Get-LifecycleTextSha256 {
 function Get-LifecycleHmacSha256 {
   param([Parameter(Mandatory = $true)][string]$Text, [Parameter(Mandatory = $true)][string]$Secret)
   $hmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($Secret))
-  try { return [Convert]::ToHexString($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))).ToLowerInvariant() }
+  try {
+    $hash = $hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))
+    return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+  }
   finally { $hmac.Dispose() }
 }
 
@@ -82,6 +85,53 @@ function Resolve-LifecycleContainedPath {
   return $candidate
 }
 
+function Test-LifecycleStrictBoolean {
+  param([AllowNull()]$Value, [bool]$Expected)
+  return ($Value -is [bool] -and $Value -eq $Expected)
+}
+
+function Assert-LifecycleQualificationEvidence {
+  param([Parameter(Mandatory = $true)]$Manifest)
+  $collection = $Manifest.evidence_collection
+  $receipt = $collection.receipt
+  $objectTypes = { param($Value) return ($Value -is [System.Collections.IDictionary] -or $Value -is [pscustomobject]) }
+  if (-not (
+    [string]$Manifest.maturity -ceq 'QUALIFICATION_READY' -and
+    (& $objectTypes $collection) -and (& $objectTypes $receipt) -and
+    (Test-LifecycleStrictBoolean $collection.ready $true) -and
+    (Test-LifecycleStrictBoolean $Manifest.source_cleanup_authorized $false) -and
+    $collection.blockers -is [System.Collections.IList] -and @($collection.blockers).Count -eq 0 -and
+    [string]$receipt.schema -ceq 'lifecycle_evidence_collected_v1' -and
+    [string]$receipt.evidence_collected_receipt_sha256 -cmatch '^[0-9a-f]{64}$' -and
+    (& $objectTypes $Manifest.identity) -and (& $objectTypes $Manifest.provenance) -and
+    (& $objectTypes $receipt.identity) -and (& $objectTypes $receipt.provenance)
+  )) { throw 'Qualification lifecycle bundle maturity/evidence invariant failed.' }
+  foreach ($field in @('collection_epoch_id', 'episode_id', 'policy_signature', 'research_lane')) {
+    if ([string]::IsNullOrWhiteSpace([string]$Manifest.identity.$field) -or
+        [string]$receipt.identity.$field -cne [string]$Manifest.identity.$field) {
+      throw 'Qualification lifecycle evidence identity mismatch.'
+    }
+  }
+  foreach ($field in @('source_revision', 'deployed_revision', 'tile_config_signature', 'config_signature')) {
+    if ([string]::IsNullOrWhiteSpace([string]$Manifest.provenance.$field) -or
+        [string]$receipt.provenance.$field -cne [string]$Manifest.provenance.$field) {
+      throw 'Qualification lifecycle evidence provenance mismatch.'
+    }
+  }
+  if ((ConvertTo-LifecycleCanonicalJson $receipt.identity) -cne (ConvertTo-LifecycleCanonicalJson $Manifest.identity) -or
+      (ConvertTo-LifecycleCanonicalJson $receipt.provenance) -cne (ConvertTo-LifecycleCanonicalJson $Manifest.provenance)) {
+    throw 'Qualification lifecycle evidence identity/provenance fields mismatch.'
+  }
+  # Use the same Python JSON canonicalization as Fly, including unicode escaping
+  # and float rendering. Only this public receipt enters stdin, never credentials.
+  $material = ConvertTo-LifecycleCanonicalJson $receipt
+  $actual = $material | & python -c 'import sys,json,hashlib; r=json.load(sys.stdin); r.pop("evidence_collected_receipt_sha256",None); print(hashlib.sha256(json.dumps(r,separators=(",",":"),sort_keys=True).encode("utf-8")).hexdigest())'
+  if ($LASTEXITCODE -ne 0 -or [string]$actual -cnotmatch '^[0-9a-f]{64}$' -or
+      [string]$actual -cne [string]$receipt.evidence_collected_receipt_sha256) {
+    throw 'Qualification lifecycle evidence receipt SHA-256 mismatch.'
+  }
+}
+
 function Resolve-LifecycleBundleContract {
   param(
     [Parameter(Mandatory = $true)][string]$BundleManifestRelativePath,
@@ -95,6 +145,7 @@ function Resolve-LifecycleBundleContract {
         $relative -cne "v3/lifecycle_bundles/$($bundleId.Substring(10, 2))/$bundleId/manifest.json") {
       throw "Qualification lifecycle bundle schema/path identity mismatch."
     }
+    Assert-LifecycleQualificationEvidence $Manifest
     return [pscustomobject]@{
       Kind = 'QUALIFICATION'
       ArchiveDirectory = 'lifecycle_bundles'
@@ -110,15 +161,15 @@ function Resolve-LifecycleBundleContract {
     }
     if (-not (
       [string]$Manifest.maturity -ceq 'TRANSFER_READY' -and
-      $Manifest.qualification_ready -eq $false -and
-      $Manifest.profitability_supported -eq $false -and
-      $Manifest.ranking_eligible -eq $false -and
-      $Manifest.source_cleanup_authorized -eq $false -and
+      (Test-LifecycleStrictBoolean $Manifest.qualification_ready $false) -and
+      (Test-LifecycleStrictBoolean $Manifest.profitability_supported $false) -and
+      (Test-LifecycleStrictBoolean $Manifest.ranking_eligible $false) -and
+      (Test-LifecycleStrictBoolean $Manifest.source_cleanup_authorized $false) -and
       $null -eq $Manifest.completion -and
       [string]$Manifest.transfer_receipt.schema -ceq 'lifecycle_bundle_transfer_ready_v1' -and
-      $Manifest.transfer_receipt.transfer_ready -eq $true -and
-      $Manifest.transfer_receipt.profitability_supported -eq $false -and
-      $Manifest.transfer_receipt.source_cleanup_authorized -eq $false
+      (Test-LifecycleStrictBoolean $Manifest.transfer_receipt.transfer_ready $true) -and
+      (Test-LifecycleStrictBoolean $Manifest.transfer_receipt.profitability_supported $false) -and
+      (Test-LifecycleStrictBoolean $Manifest.transfer_receipt.source_cleanup_authorized $false)
     )) {
       throw "Transfer lifecycle bundle invariant failed."
     }
@@ -147,17 +198,20 @@ function Test-LifecycleBundleCopy {
     throw "Unsupported lifecycle bundle schema."
   }
   if ([string]$Manifest.bundle_id -cne (Split-Path -Leaf $bundleFull)) { throw "Lifecycle bundle directory identity mismatch." }
-  if ($Manifest.source_cleanup_authorized -ne $false) { throw "Lifecycle bundle incorrectly authorizes source cleanup." }
+  if (-not (Test-LifecycleStrictBoolean $Manifest.source_cleanup_authorized $false)) { throw "Lifecycle bundle incorrectly authorizes source cleanup." }
+  if ([string]$Manifest.schema -ceq 'research_lifecycle_bundle_v1') {
+    Assert-LifecycleQualificationEvidence $Manifest
+  }
   if ([string]$Manifest.schema -ceq 'research_lifecycle_transfer_bundle_v1' -and -not (
       [string]$Manifest.maturity -ceq 'TRANSFER_READY' -and
-      $Manifest.qualification_ready -eq $false -and
-      $Manifest.profitability_supported -eq $false -and
-      $Manifest.ranking_eligible -eq $false -and
+      (Test-LifecycleStrictBoolean $Manifest.qualification_ready $false) -and
+      (Test-LifecycleStrictBoolean $Manifest.profitability_supported $false) -and
+      (Test-LifecycleStrictBoolean $Manifest.ranking_eligible $false) -and
       $null -eq $Manifest.completion -and
       [string]$Manifest.transfer_receipt.schema -ceq 'lifecycle_bundle_transfer_ready_v1' -and
-      $Manifest.transfer_receipt.transfer_ready -eq $true -and
-      $Manifest.transfer_receipt.profitability_supported -eq $false -and
-      $Manifest.transfer_receipt.source_cleanup_authorized -eq $false
+      (Test-LifecycleStrictBoolean $Manifest.transfer_receipt.transfer_ready $true) -and
+      (Test-LifecycleStrictBoolean $Manifest.transfer_receipt.profitability_supported $false) -and
+      (Test-LifecycleStrictBoolean $Manifest.transfer_receipt.source_cleanup_authorized $false)
     )) {
     throw "Transfer lifecycle bundle invariant failed."
   }
@@ -276,15 +330,15 @@ function Publish-LifecycleBundleCopyAndAck {
       [string]$savedIndex.manifest_sha256 -cne $canonicalProof.ManifestSha256 -or
       [string]$savedIndex.canonical_tree_sha256 -cne $canonicalProof.TreeSha256 -or
       [string]$savedIndex.archive_tree_sha256 -cne $archiveProof.TreeSha256 -or
-      $savedIndex.source_cleanup_authorized -ne $false) {
+      -not (Test-LifecycleStrictBoolean $savedIndex.source_cleanup_authorized $false)) {
     throw "Existing lifecycle bundle index conflicts with verified copies."
   }
   if ($contract.Kind -ceq 'TRANSFER' -and -not (
       [string]$savedIndex.schema -ceq [string]$contract.IndexSchema -and
       [string]$savedIndex.bundle_kind -ceq 'TRANSFER' -and
-      $savedIndex.qualification_ready -eq $false -and
-      $savedIndex.profitability_supported -eq $false -and
-      $savedIndex.ranking_eligible -eq $false
+      (Test-LifecycleStrictBoolean $savedIndex.qualification_ready $false) -and
+      (Test-LifecycleStrictBoolean $savedIndex.profitability_supported $false) -and
+      (Test-LifecycleStrictBoolean $savedIndex.ranking_eligible $false)
     )) {
     throw "Existing transfer lifecycle index violates qualification isolation."
   }
@@ -330,6 +384,25 @@ function Publish-LifecycleBundleCopyAndAck {
     $receipt['ranking_eligible'] = $false
     $receipt['source_cleanup_authorized'] = $false
   }
+  if ($contract.Kind -ceq 'QUALIFICATION') {
+    Assert-LifecycleQualificationEvidence $manifest
+    # Cleanup/ACK eligibility on Fly requires explicit maturity + evidence-collection
+    # bindings. Transfer-ready copies must never set these fields.
+    if ([string]$manifest.maturity -cne 'QUALIFICATION_READY') {
+      throw "Qualification lifecycle acknowledgement refused immature maturity."
+    }
+    $evidence = $manifest.evidence_collection
+    if ($null -eq $evidence -or -not (Test-LifecycleStrictBoolean $evidence.ready $true)) {
+      throw "Qualification lifecycle acknowledgement refused incomplete evidence collection."
+    }
+    $collectionSha = [string]$evidence.receipt.evidence_collected_receipt_sha256
+    if ($collectionSha -notmatch '^[0-9a-f]{64}$') {
+      throw "Qualification lifecycle acknowledgement missing evidence_collected_receipt_sha256."
+    }
+    $receipt['qualification_maturity'] = 'QUALIFICATION_READY'
+    $receipt['evidence_collection_ready'] = $true
+    $receipt['evidence_collected_receipt_sha256'] = $collectionSha.ToLowerInvariant()
+  }
   $identity = [ordered]@{
     bundle_id = $bundleId
     collection_epoch_id = [string]$receipt.collection_epoch_id
@@ -369,19 +442,19 @@ function Publish-LifecycleBundleCopyAndAck {
     }
   }
   $response = & $PostAcknowledgement $receipt
-  if ($null -eq $response -or $response.ok -ne $true -or
+  if ($null -eq $response -or -not (Test-LifecycleStrictBoolean $response.ok $true) -or
       [string]$response.status -cne 'ACKNOWLEDGED_SOURCE_RETAINED' -or
       [string]$response.bundle_id -cne $bundleId -or
-      $response.source_cleanup_authorized -ne $false) {
+      -not (Test-LifecycleStrictBoolean $response.source_cleanup_authorized $false)) {
     throw "Fly lifecycle acknowledgement was incomplete or unsafe for bundle $bundleId."
   }
   if ($contract.Kind -ceq 'TRANSFER' -and -not (
-      $response.profitability_supported -eq $false -and
-      $response.ranking_eligible -eq $false -and
-      $receipt.qualification_ready -eq $false -and
-      $receipt.profitability_supported -eq $false -and
-      $receipt.ranking_eligible -eq $false -and
-      $receipt.source_cleanup_authorized -eq $false
+      (Test-LifecycleStrictBoolean $response.profitability_supported $false) -and
+      (Test-LifecycleStrictBoolean $response.ranking_eligible $false) -and
+      (Test-LifecycleStrictBoolean $receipt.qualification_ready $false) -and
+      (Test-LifecycleStrictBoolean $receipt.profitability_supported $false) -and
+      (Test-LifecycleStrictBoolean $receipt.ranking_eligible $false) -and
+      (Test-LifecycleStrictBoolean $receipt.source_cleanup_authorized $false)
     )) {
     throw "Transfer lifecycle acknowledgement violates qualification isolation."
   }

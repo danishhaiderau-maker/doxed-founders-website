@@ -32,6 +32,20 @@ try {
     mtime_ns = $eventRow.mtime_ns; row_count = $eventRow.row_count
     first_timestamp = $eventRow.first_timestamp; last_timestamp = $eventRow.last_timestamp
   })
+  $evidenceReceipt = [ordered]@{
+    schema = 'lifecycle_evidence_collected_v1'
+    identity = [ordered]@{ collection_epoch_id = 'epoch-1'; episode_id = 'episode-1'; policy_signature = 'policy-1'; research_lane = 'FIXED' }
+    event_id = 'r1'
+    provenance = [ordered]@{ source_revision = ('b' * 40); deployed_revision = ('c' * 40); tile_config_signature = ('d' * 64); config_signature = ('f' * 64) }
+    completion_receipt_sha256 = ('e' * 64)
+    qualification_eligible_at = [double]1788228000.0
+    evidence_collected_at = [double]1788228001.0
+  }
+  $evidenceMaterial = [ordered]@{}
+  foreach ($name in @($evidenceReceipt.Keys | Sort-Object -CaseSensitive)) {
+    $evidenceMaterial[$name] = $evidenceReceipt[$name]
+  }
+  $evidenceReceipt['evidence_collected_receipt_sha256'] = Get-LifecycleTextSha256 (ConvertTo-LifecycleCanonicalJson $evidenceMaterial)
   $manifest = [ordered]@{
     schema = 'research_lifecycle_bundle_v1'
     bundle_id = $bundleId
@@ -39,7 +53,13 @@ try {
     lifecycle_id = 'episode-1|policy-1|FIXED'
     identity = [ordered]@{ collection_epoch_id = 'epoch-1'; episode_id = 'episode-1'; policy_signature = 'policy-1'; research_lane = 'FIXED' }
     provenance = [ordered]@{ source_revision = ('b' * 40); deployed_revision = ('c' * 40); tile_config_signature = ('d' * 64); config_signature = ('f' * 64) }
+    maturity = 'QUALIFICATION_READY'
     completion = [ordered]@{ ready = $true; classification = 'NO_FILL'; terminal_ts = [double]1788220800.0; horizon_complete_ts = [double]1788228000.0; blockers = @() }
+    evidence_collection = [ordered]@{
+      ready = $true
+      blockers = @()
+      receipt = $evidenceReceipt
+    }
     files = @($eventRow)
     source_cleanup_authorized = $false
     cleanup_manifest_sha256 = Get-LifecycleTextSha256 (ConvertTo-LifecycleCanonicalJson $cleanupMaterial)
@@ -65,9 +85,46 @@ try {
   Assert-True (Test-Path -LiteralPath (Join-Path $testRoot "archive/lifecycle_bundles/$bundleId/events.jsonl")) 'recoverable archive is published'
   Assert-True (Test-Path -LiteralPath (Join-Path $testRoot "v3/lifecycle_bundle_index/$bundleId.json")) 'durable index is published'
   Assert-True ($first.Receipt.source_cleanup_authorized -ne $true) 'receipt cannot authorize cleanup'
+  Assert-True ([string]$first.Receipt.qualification_maturity -ceq 'QUALIFICATION_READY') 'qualification ACK binds maturity'
+  Assert-True ($first.Receipt.evidence_collection_ready -eq $true) 'qualification ACK binds evidence collection ready'
+  Assert-True ([string]$first.Receipt.evidence_collected_receipt_sha256 -match '^[0-9a-f]{64}$') 'qualification ACK binds evidence receipt sha'
   Assert-True ([string]$first.Receipt.laptop_attestation.schema -ceq 'lifecycle_laptop_attestation_v1') 'laptop attestation is signed'
   Assert-True ([string]$first.Receipt.laptop_attestation.key_id -ceq 'test-laptop-1') 'laptop attestation key identity is explicit'
   Assert-True ([string]$first.Receipt.laptop_attestation.hmac_sha256 -match '^[0-9a-f]{64}$') 'laptop attestation HMAC is validly shaped'
+
+  $qualificationNegativeCases = @(
+    @{ Name = 'string-ready'; Change = { param($copy) $copy.evidence_collection.ready = 'true' } },
+    @{ Name = 'integer-ready'; Change = { param($copy) $copy.evidence_collection.ready = 1 } },
+    @{ Name = 'string-cleanup'; Change = { param($copy) $copy.source_cleanup_authorized = 'false' } },
+    @{ Name = 'integer-cleanup'; Change = { param($copy) $copy.source_cleanup_authorized = 0 } },
+    @{ Name = 'collection-blockers'; Change = { param($copy) $copy.evidence_collection.blockers = @('MISSING_EVIDENCE') } },
+    @{ Name = 'malformed-blockers'; Change = { param($copy) $copy.evidence_collection.blockers = '' } },
+    @{ Name = 'missing-blockers'; Change = { param($copy) $copy.evidence_collection.blockers = $null } },
+    @{ Name = 'collection-sha'; Change = { param($copy) $copy.evidence_collection.receipt.evidence_collected_receipt_sha256 = ('0' * 64) } },
+    @{ Name = 'tampered-collection'; Change = { param($copy) $copy.evidence_collection.receipt.event_id = 'different-event' } },
+    @{ Name = 'receipt-schema'; Change = { param($copy) $copy.evidence_collection.receipt.schema = 'other-schema' } },
+    @{ Name = 'identity'; Change = { param($copy) $copy.evidence_collection.receipt.identity.episode_id = 'other-episode' } },
+    @{ Name = 'provenance'; Change = { param($copy) $copy.evidence_collection.receipt.provenance.source_revision = ('9' * 40) } }
+  )
+  foreach ($case in $qualificationNegativeCases) {
+    $copy = ($manifest | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json
+    & $case.Change $copy
+    $failed = $false
+    try { [void](Resolve-LifecycleBundleContract -BundleManifestRelativePath $manifestRelative -Manifest $copy) }
+    catch { $failed = $_.Exception.Message -match 'Qualification lifecycle' }
+    Assert-True $failed "qualification rejects $($case.Name) before copy/ACK"
+  }
+  Assert-True ($receipts.Count -eq 2) 'invalid qualification manifests never post an ACK'
+  foreach ($wrongBool in @('true', 1)) {
+    $badPost = {
+      param($receipt)
+      return [pscustomobject]@{ ok = $wrongBool; status = 'ACKNOWLEDGED_SOURCE_RETAINED'; bundle_id = $receipt.bundle_id; source_cleanup_authorized = $false }
+    }
+    $failed = $false
+    try { [void](Publish-LifecycleBundleCopyAndAck -TargetRoot $testRoot -BundleManifestRelativePath $manifestRelative -PostAcknowledgement $badPost) }
+    catch { $failed = $_.Exception.Message -match 'incomplete or unsafe' }
+    Assert-True $failed 'string/integer acknowledgement truth cannot pass'
+  }
 
   $transferId = 'transfer-' + ('e' * 64)
   $transferRelative = "v3/lifecycle_transfer_bundles/ee/$transferId"
@@ -145,6 +202,14 @@ try {
   Assert-True ($transferFirst.Receipt.profitability_supported -eq $false) 'transfer acknowledgement is not profitability evidence'
   Assert-True ($transferFirst.Receipt.ranking_eligible -eq $false) 'transfer acknowledgement is not ranking evidence'
   Assert-True ($transferFirst.Receipt.source_cleanup_authorized -eq $false) 'transfer acknowledgement never authorizes cleanup'
+  foreach ($wrongBool in @('false', 0)) {
+    $copy = ($transferManifest | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json
+    $copy.qualification_ready = $wrongBool
+    $failed = $false
+    try { [void](Resolve-LifecycleBundleContract -BundleManifestRelativePath $transferManifestRelative -Manifest $copy) }
+    catch { $failed = $_.Exception.Message -match 'Transfer lifecycle bundle invariant failed' }
+    Assert-True $failed 'transfer isolation requires actual JSON booleans'
+  }
 
   $unsafeTransferPost = {
     param($receipt)
