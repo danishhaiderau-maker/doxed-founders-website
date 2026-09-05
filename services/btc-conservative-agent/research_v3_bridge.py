@@ -214,6 +214,9 @@ def _signal_time_baseline_inputs(*sources: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(source, Mapping):
             continue
         declaration = source.get("research_baseline_context_declaration")
+        for context_key in ("original_context_signal_ts", "research_baseline_context_status"):
+            if context_key in source and context_key not in result:
+                result[context_key] = copy.deepcopy(source[context_key])
         if isinstance(declaration, Mapping):
             key = "research_baseline_context_declaration"
             if key not in result:

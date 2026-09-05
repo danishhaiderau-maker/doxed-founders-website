@@ -27,6 +27,16 @@ def test_missing_declaration_is_not_synthesized():
     assert "research_baseline_context_declaration" not in project({"atr14_pct": 1})
 
 
+def test_original_time_and_missing_context_reason_survive():
+    source = {"original_context_signal_ts": 100,
+              "research_baseline_context_status": {"status": "UNSUPPORTED", "reasons": ["ATR_MISSING"]}}
+    result = project(source)
+    assert result == source
+    assert "signal_ts" not in result
+    result["research_baseline_context_status"]["reasons"].clear()
+    assert source["research_baseline_context_status"]["reasons"] == ["ATR_MISSING"]
+
+
 def test_conflicting_declarations_remain_unsupported_even_with_third_source():
     first = {"schema": "research_baseline_context_declaration_v1", "margin_usd": 10}
     second = {**first, "margin_usd": 20}

@@ -15842,6 +15842,7 @@ def _write_v3_shared_lane_decision(
                 "feature_snapshot_at_signal": copy.deepcopy(features or {}),
                 "research_baseline_context_declaration": copy.deepcopy((ai or {}).get("research_baseline_context_declaration")),
                 "research_baseline_context_status": copy.deepcopy((ai or {}).get("research_baseline_context_status")),
+                "original_context_signal_ts": copy.deepcopy((ai or {}).get("original_context_signal_ts")),
             }
         failure_source = {**source, **lane_policy}
         receipt = dual_write_lane_decision(
