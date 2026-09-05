@@ -231,20 +231,20 @@ _APPEND_PREFIX_SNAPSHOT_NAMES = frozenset({
     "ai_errors_3factor.csv",
     "trend_health.csv",
 })
-# The canonical source lives in ``agent/research`` but the supported launcher
-# runs ``agent/analyzer_research_engine_v62.py`` and writes its live reports in
-# the agent root.  Resolve the report root from an explicit override first,
-# then the launch cwd, and finally the data root.  This prevents :9001 from
-# silently serving an older duplicate report set from ``agent/research``.
-_REPORT_ROOT_ENV = _approved_non_onedrive_path(os.getenv("BTC_AGENT_REPORT_DIR", "").strip())
-if _REPORT_ROOT_ENV:
-    ROOT = _REPORT_ROOT_ENV
-elif (_CWD_ROOT / "analyzer_research_engine_v62.py").is_file():
-    ROOT = _CWD_ROOT
-elif (DATA_ROOT / "analyzer_research_engine_v62.py").is_file():
-    ROOT = DATA_ROOT
-else:
-    ROOT = _AGENT_ROOT
+def _select_report_root(data_root: Path, agent_root: Path, report_override=None) -> Path:
+    """Canonical data never implicitly revives reports from a source checkout.
+
+    An absent analyzer directory means no publication, not permission to read
+    old working-tree reports. Explicit separate diagnostic report roots remain
+    supported; the two source roots cannot be used as publication overrides.
+    """
+    configured = _approved_non_onedrive_path(report_override)
+    if configured in {agent_root.resolve(), (agent_root / "research").resolve()}:
+        raise RuntimeError("BTC_AGENT_REPORT_DIR cannot select an analyzer source root")
+    return configured if configured is not None else data_root / "analyzer"
+
+
+ROOT = _select_report_root(DATA_ROOT, _AGENT_ROOT, os.getenv("BTC_AGENT_REPORT_DIR", "").strip())
 _parent = ROOT.parent
 BIND_HOST = os.getenv("RESEARCH_DASHBOARD_BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.getenv("RESEARCH_DASHBOARD_PORT", "9001"))

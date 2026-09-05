@@ -151,7 +151,9 @@ checks = {
     ),
     "dashboard resolves reports from the active analyzer root": (
         "BTC_AGENT_REPORT_DIR" in source
-        and '_CWD_ROOT / "analyzer_research_engine_v62.py"' in source
+        and 'else data_root / "analyzer"' in source
+        and 'BTC_AGENT_REPORT_DIR cannot select an analyzer source root' in source
+        and '_CWD_ROOT / "analyzer_research_engine_v62.py"' not in source
     ),
     "lane aggregation stays stale-while-refreshed": (
         "prime_dashboard_caches" in source
