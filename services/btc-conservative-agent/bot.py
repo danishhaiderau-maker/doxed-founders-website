@@ -27624,7 +27624,98 @@ def _seal_past_analysis_with_fallback(reason: str) -> dict:
 
 # === END WIPE FIX: helper ===
 
+_FRESH_RESET_LIFECYCLE_RESTART_PENDING = False
+
+
 def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
+    """Quiesce all known research owners before archive/deletion/epoch rebinding."""
+    global _FRESH_RESET_LIFECYCLE_RESTART_PENDING
+    with state_lock:
+        safe_state = bool(state.get("execution_paused", False)) and not bool(state.get("live_armed", False))
+    with trade_lock:
+        safe_books = not pending_orders and not open_positions
+    if not safe_state or not safe_books:
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_requires_paused_disarmed_flat_boundary",
+                "summary": "Pause and disarm execution, then reach a flat order/position boundary"}
+
+    lifecycle_was_registered = _LIFECYCLE_PIPELINE_RUNTIME is not None
+    if not _stop_lifecycle_pipeline_runtime(timeout=5.0):
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_lifecycle_not_quiescent",
+                "summary": "Reset aborted before archive: lifecycle owner did not stop"}
+    _FRESH_RESET_LIFECYCLE_RESTART_PENDING = (
+        _FRESH_RESET_LIFECYCLE_RESTART_PENDING or lifecycle_was_registered
+    )
+
+    acquired_conditions = []
+    cleanup_acquired = False
+    epoch_acquired = False
+    research_acquired = False
+    result = None
+    try:
+        # These scheduling conditions must remain held, not merely sampled:
+        # inventory/snapshot work must not start between the check and deletion.
+        for condition in (_data_sync_inventory_cache_condition, _data_sync_sqlite_snapshot_condition):
+            if not condition.acquire(blocking=False):
+                return {"ok": False, "wipe_aborted": True,
+                        "error": "fresh_collection_sync_scheduler_busy",
+                        "summary": "Reset aborted before archive: sync scheduler is busy"}
+            acquired_conditions.append(condition)
+        if (_data_sync_inventory_cache.get("refreshing")
+                or _data_sync_async_inventory.get("refreshing")
+                or _data_sync_async_inventory.get("worker_active")
+                or any(isinstance(item, dict) and item.get("status") == "BUILDING"
+                       for item in _data_sync_sqlite_snapshot_states.values())):
+            return {"ok": False, "wipe_aborted": True,
+                    "error": "fresh_collection_sync_builder_active",
+                    "summary": "Reset aborted before archive: inventory or snapshot builder is active"}
+        cleanup_acquired = _raw_generation_cleanup_gate_acquire()
+        if not cleanup_acquired:
+            return {"ok": False, "wipe_aborted": True,
+                    "error": "fresh_collection_cleanup_lease_busy",
+                    "summary": "Reset aborted before archive: research generation is leased"}
+        # Collector writers acquire epoch before research. Keep that order and
+        # reject contention rather than waiting while holding sync schedulers.
+        epoch_acquired = _collector_epoch_lock.acquire(blocking=False)
+        if not epoch_acquired:
+            return {"ok": False, "wipe_aborted": True,
+                    "error": "fresh_collection_epoch_writer_busy",
+                    "summary": "Reset aborted before archive: epoch collector is active"}
+        research_acquired = _research_write_gate.acquire(blocking=False)
+        if not research_acquired:
+            return {"ok": False, "wipe_aborted": True,
+                    "error": "fresh_collection_research_writer_busy",
+                    "summary": "Reset aborted before archive: research writer is active"}
+        result = _perform_fresh_collection_reset_quiesced(send_local_signal=send_local_signal)
+    finally:
+        if research_acquired:
+            _research_write_gate.release()
+        if epoch_acquired:
+            _collector_epoch_lock.release()
+        if cleanup_acquired:
+            _raw_generation_cleanup_gate_release()
+        for condition in reversed(acquired_conditions):
+            condition.release()
+        if not isinstance(result, dict) or result.get("ok") is not True or result.get("wipe_aborted"):
+            # A failed reset cannot restart an owner against a possibly changed
+            # identity. Keep execution paused until the incident is reconciled.
+            with state_lock:
+                state["execution_paused"] = True
+
+    if result.get("ok") is True and not result.get("wipe_aborted") and _FRESH_RESET_LIFECYCLE_RESTART_PENDING:
+        if not _start_lifecycle_pipeline_runtime():
+            with state_lock:
+                state["execution_paused"] = True
+            return {**result, "ok": False, "reset_completed": True,
+                    "error": "fresh_collection_lifecycle_restart_failed",
+                    "summary": "Research reset completed; lifecycle restart failed and execution remains paused"}
+        _FRESH_RESET_LIFECYCLE_RESTART_PENDING = False
+        result = {**result, "lifecycle_restarted_on_new_epoch": True}
+    return result
+
+
+def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> dict:
     """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
     global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
     global _cached_pathway_lane_specs
@@ -27760,7 +27851,7 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     _cached_pathway_scorecard = {}
     _cached_pathway_lane_specs = {}
     _reset_runtime_log_handlers()
-    reset_runtime_state()
+    reset_runtime_state(preserve_execution_pause=True)
     reset_session_risk_state()
     bot_start_time = reset_anchor
     _last_fresh_maintain_ts = time.time()
@@ -44793,7 +44884,7 @@ def reset_session_risk_state():
         state["current_trading_day"] = datetime.now(timezone.utc).date()
     logger.info("[STARTUP] Session risk reset - daily PnL and loss streak cleared [PIPELINE ENFORCEMENT]")
 
-def reset_runtime_state():
+def reset_runtime_state(*, preserve_execution_pause: bool = False):
     global bot_start_time, trades, pending_orders, expired_orders, open_positions, trades_map
     logger.warning("[RESET] HARD RESET START - clearing all in-memory state for true clean slate")
     bot_start_time = time.time()
@@ -44821,9 +44912,9 @@ def reset_runtime_state():
             "last_block_time": 0.0,
             "last_setup_time": 0.0,
             "last_engine_error": "None",
-            "execution_paused": False,
-            "execution_reason": "",
-            "_pause_priority": 0,
+            "execution_paused": bool(state.get("execution_paused", False)) if preserve_execution_pause else False,
+            "execution_reason": str(state.get("execution_reason") or "") if preserve_execution_pause else "",
+            "_pause_priority": int(state.get("_pause_priority") or 0) if preserve_execution_pause else 0,
             "last_event_ts": 0.0,
             "bootstrap_done": False,
             "edge_prev": 0.0,
