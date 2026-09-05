@@ -29638,6 +29638,8 @@ last_ws_message_time = 0.0
 last_heartbeat = time.time()
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
+    from crash_exception_receipt import emit_original_exception_receipt
+    emit_original_exception_receipt(exc_type, exc_value, exc_traceback)
     logger.critical("=== GLOBAL CRASH DETECTED ===")
     logger.critical("Type: %s", exc_type)
     logger.critical("Value: %s", exc_value)

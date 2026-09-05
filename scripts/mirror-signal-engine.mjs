@@ -126,6 +126,7 @@ console.log(`Mirrored durable relay event outbox (${sha256(readFileSync(relayOut
 // Registry-owned policy dependencies are part of the executable mirror. Copy
 // only the active family modules plus their common implementation and remove
 // retired policy files so parity cannot pass with an orphan execution path.
+copyFileSync(join(agentDir, 'crash_exception_receipt.py'), join(engineDir, 'crash_exception_receipt.py'));
 const activePolicyFiles = [
   'family_policy_common.py',
   'paper_policy_family_atr_target.py',
