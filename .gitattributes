@@ -1,0 +1,3 @@
+# These raw-byte incident receipts are hash-pinned analysis inputs.
+/diagnostics/revision-identity-incident-33940814998.json -text
+/diagnostics/revision-identity-incident-33940814998-closure.json -text
