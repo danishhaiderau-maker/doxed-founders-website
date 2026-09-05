@@ -1,0 +1,80 @@
+{
+  "workflow_run_id": "33948196055",
+  "workflow_source_sha": "b9a16363756fcb7d531559eb05796d1200da2217",
+  "observed_at": "2026-09-05T05:49:58.7220512Z",
+  "receipt": {
+    "inspection_authority": "IDENTITY_AND_PROGRESS_ONLY_NOT_CURRENT_INVENTORY_OR_CANARY_PROOF",
+    "manifest_identity_only": {
+      "inventory_build_status": "BUILDING",
+      "inventory_error": null,
+      "inventory_generation_id": null,
+      "inventory_sha256": null,
+      "inventory_status": "IDENTITY_ONLY",
+      "source_git_rev": "cb7745e827e1"
+    },
+    "os_coordinator_ownership": "UNAVAILABLE_IN_PROCESS_LOCK_NOT_EXPORTED",
+    "pipeline": {
+      "active": true,
+      "emergency": false,
+      "last_outcome": "RUNNING",
+      "last_success_age_sec": 1171.5151982307434,
+      "overlap_code": null,
+      "owner": true,
+      "pressure": false,
+      "receipt_bootstrap": {
+        "blocked": false,
+        "bytes_indexed": 3016,
+        "complete": true,
+        "cursor": null,
+        "ledger": "market_segment",
+        "ledgers_checked": 8,
+        "records_indexed": 2,
+        "required": true,
+        "status": "COMPLETE"
+      },
+      "running": true,
+      "source_revision_match": true
+    },
+    "progress_receipts": [
+      {
+        "complete": false,
+        "cpu_seconds": 0.043476200000000007,
+        "current_directory_files_remaining": 3,
+        "dirs_seen": 307,
+        "elapsed_budget_seconds": 15,
+        "file_budget": 250,
+        "files_seen": 1884,
+        "invocation_dirs_seen": 5,
+        "invocation_elapsed_seconds": 18.380827783999848,
+        "invocation_files_seen": 49,
+        "invocations": 35,
+        "name": "inventory-worker-v2-9b7ef76cd7adf6d6c2c1ce87b2b231c2.progress.json",
+        "pages_total": null,
+        "pages_written": 0,
+        "peak_rss_bytes": 307019776,
+        "pending_directories": 21,
+        "phase": "SCAN",
+        "rows_written": 1745,
+        "sha256": "1a875b80270f9572259f863632520564a5663b8994d2c183028a4a0d6e7beb2c",
+        "spool_bytes_used": 1466368,
+        "total_elapsed_seconds": 576.9709489050083
+      }
+    ],
+    "progress_status": "READ",
+    "requested_generation_id": "3644466306ab96e5193bca2a977d726b8b73efa525babfc0e1a8fb441710709d",
+    "runtime": {
+      "bitfinex_live_enabled": false,
+      "bot_instance_id": "dashboard-7002-pid-662-72765911a337",
+      "dashboard_owner": true,
+      "dashboard_pid": 662,
+      "force_paper_mode": true,
+      "live_armed": false,
+      "process_alive": true,
+      "source_git_rev": "cb7745e827e1"
+    },
+    "runtime_env_revision": "cb7745e827e179f598b891bcefa136d47f00c8ee",
+    "schema": "fly_bundle_canary_inspection_v1",
+    "slice_invoked": false,
+    "status": "INSPECTED"
+  }
+}

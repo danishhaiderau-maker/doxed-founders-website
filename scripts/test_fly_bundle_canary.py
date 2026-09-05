@@ -112,9 +112,13 @@ def test_post_slice_snapshot_mutation_not_certified(tmp_path):
     def slice_(*a, **kw):
         (tmp_path / 'sync_inventory_current.json').write_bytes(b'{}')
         return {'status': 'BUILDING'}
-    with pytest.raises(c.Blocked, match='SNAPSHOT_CHANGED_AFTER_SLICE'):
+    with pytest.raises(c.Blocked, match='SNAPSHOT_CHANGED_AFTER_SLICE') as failure:
         c.run_canary(REV, digest, lambda u: status if u == '/api/status' else manifest,
                      slice_, lambda: None, volume=tmp_path)
+    blocked = c.blocked_receipt(failure.value)
+    assert blocked['slice_attempted'] is True
+    assert blocked['derivative_writes_possible'] is True
+    assert blocked['ack_performed'] is blocked['cleanup_performed'] is False
 
 
 def test_index_content_cannot_be_rebound_by_only_snapshot_hash(tmp_path):
@@ -171,6 +175,93 @@ def test_source_has_no_mutating_api_or_coordinator():
     assert 'import bot' not in text
     assert '127.0.0.1:7002' in text
     assert 'os.scandir' not in text
+
+
+def proc_fixture(root):
+    def write(relative, value):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(value.encode('ascii'))
+    def stat(pid):
+        return f'{pid} (redacted secret name) S ' + ' '.join(['0'] * 18 + ['991', '0'])
+    write('proc/123/stat', stat(123))
+    write('proc/123/task/123/children', '124 125')
+    write('proc/124/stat', stat(124))
+    write('proc/124/comm', 'python3\n')
+    write('proc/124/cmdline', 'python\x00/app/data_sync_inventory_worker.py\x00--token\x00TOP_SECRET\x00')
+    write('proc/124/status', 'Name: TOP_SECRET\nPid: 124\nPPid: 123\nVmRSS: 1234 kB\nVmHWM: 1500 kB\nThreads: 1\n')
+    write('proc/124/io', 'read_bytes: 888\nwrite_bytes: 999\nTOP_SECRET: 9\n')
+    write('proc/124/schedstat', '100 200 3\n')
+    write('proc/125/comm', 'python3\n')
+    write('proc/125/cmdline', 'python\x00/app/unknown_TOP_SECRET.py\x00')
+    for name in ('cpu', 'io', 'memory'):
+        write('cgroup/' + name + '.pressure', 'some avg10=1.5 avg60=2 avg300=3 total=444\nfull avg10=0 total=8\n')
+    write('cgroup/io.stat', '8:0 rbytes=888 wbytes=999 rios=2 wios=3 SECRET=1\n')
+    write('cgroup/cpu.stat', 'usage_usec 111\nnr_throttled 3\nthrottled_usec 44\nTOP_SECRET 12\n')
+    write('cgroup/memory.current', '123456\n')
+    write('cgroup/memory.max', 'max\n')
+    return write
+
+
+def test_fixed_proc_cgroup_snapshot_bounded_and_redacted(tmp_path, monkeypatch):
+    proc_fixture(tmp_path)
+    monkeypatch.setattr(c.os, 'scandir', lambda *a: pytest.fail('no directory enumeration'))
+    result = c.resource_snapshot({'dashboard_owner': True, 'process_alive': True, 'dashboard_pid': 123},
+                                 proc_root=tmp_path / 'proc', cgroup_root=tmp_path / 'cgroup')
+    assert 'TOP_SECRET' not in json.dumps(result)
+    assert 'cmdline' not in json.dumps(result) and 'redacted secret name' not in json.dumps(result)
+    assert result['cgroup']['cpu.stat']['throttled_usec'] == 44
+    assert result['cgroup']['io.pressure']['some']['total'] == 444
+    assert result['cgroup']['io.stat'][0]['rbytes'] == 888
+    assert result['cgroup']['memory.max'] == 'max'
+    assert len(result['inventory_workers']) == 1
+    worker = result['inventory_workers'][0]
+    assert worker['pid'] == 124 and worker['status']['PPid'] == 123
+    assert worker['io']['read_bytes'] == 888
+    assert worker['schedstat']['runqueue_wait_ns'] == 200
+    assert worker['status']['VmRSS'] == 1234
+    assert worker['start_ticks'] == 991
+
+
+@pytest.mark.parametrize('which,value,code', [
+    ('proc/123/task/123/children', ' '.join(str(i) for i in range(65)), 'CHILD_PID_LIMIT_OR_INVALID'),
+    ('proc/123/task/123/children', '1 ' * 2048, 'VIRTUAL_READ_LIMIT'),
+    ('proc/124/cmdline', 'SECRET' * 2000, 'VIRTUAL_READ_LIMIT'),
+    ('cgroup/io.stat', 'SECRET' * 2000, 'VIRTUAL_READ_LIMIT'),
+])
+def test_proc_and_cgroup_refuse_oversize_without_raw_echo(tmp_path, which, value, code):
+    write = proc_fixture(tmp_path)
+    write(which, value)
+    result = c.resource_snapshot({'dashboard_owner': True, 'process_alive': True, 'dashboard_pid': 123},
+                                 proc_root=tmp_path / 'proc', cgroup_root=tmp_path / 'cgroup')
+    assert code in result['unavailable'].values()
+    assert 'SECRET' not in json.dumps(result)
+
+
+def test_proc_ownership_rejected_and_missing_files_explicit(tmp_path):
+    write = proc_fixture(tmp_path)
+    write('proc/124/status', 'Pid: 124\nPPid: 999\n')
+    result = c.resource_snapshot({'dashboard_owner': True, 'process_alive': True, 'dashboard_pid': 123},
+                                 proc_root=tmp_path / 'proc', cgroup_root=tmp_path / 'missing')
+    assert result['inventory_workers'] == []
+    assert result['unavailable']['proc/124'] == 'CHILD_OWNERSHIP_CHANGED_OR_UNVERIFIED'
+    assert result['unavailable']['cgroup/cpu.pressure'] == 'FileNotFoundError'
+    unverified = c.resource_snapshot({'dashboard_owner': False, 'process_alive': True, 'dashboard_pid': 123},
+                                     proc_root=tmp_path / 'proc', cgroup_root=tmp_path / 'missing')
+    assert unverified['unavailable']['dashboard_children'] == 'DASHBOARD_PID_UNVERIFIED'
+
+
+def test_slice_exception_has_possible_writes_marker(tmp_path):
+    digest, manifest, status = fixture(tmp_path)
+    def failed(*args, **kwargs):
+        raise TimeoutError('private runtime error details')
+    with pytest.raises(TimeoutError) as failure:
+        c.run_canary(REV, digest, lambda u: status if u == '/api/status' else manifest,
+                     failed, lambda: None, volume=tmp_path)
+    receipt = c.blocked_receipt(failure.value)
+    assert receipt['slice_attempted'] is receipt['derivative_writes_possible'] is True
+    assert receipt['error'] == 'TimeoutError'
+    assert c.blocked_receipt(c.Blocked('BEFORE_SLICE'))['slice_attempted'] is False
 
 
 def test_actual_api_immutable_250_page_shape_and_generation_totals(tmp_path):

@@ -3,6 +3,9 @@
 Operational admission uses recent authenticated telemetry, not an atomic lease on
 the bot's in-process coordinator. The existing worker OS lease serializes actual
 package work. No ACK, cleanup, restart, trade mutation or metadata relabel occurs.
+The deployed pressure callback is storage/overlap admission, not a CPU, memory or
+I/O performance proof. Inspection counters below are a single cumulative sample;
+they do not prove a bottleneck or a rate without a separately timed second sample.
 """
 from __future__ import annotations
 
@@ -146,8 +149,8 @@ def bind_snapshot(raw, manifest, volume=VOLUME):
     return metadata, hashlib.sha256(index).hexdigest()
 
 
-def run_canary(revision, generation_id, request_json, slice_runner, local_admission,
-               *, volume=VOLUME, monotonic=time.monotonic):
+def _run_canary(revision, generation_id, request_json, slice_runner, local_admission,
+                *, volume=VOLUME, monotonic=time.monotonic, attempt):
     require(isinstance(revision, str) and re.fullmatch('[0-9a-f]{12}', revision), 'EXACT_REVISION_REQUIRED')
     require(isinstance(generation_id, str) and re.fullmatch('[0-9a-f]{64}', generation_id), 'GENERATION_REQUIRED')
     started = monotonic()
@@ -164,6 +167,7 @@ def run_canary(revision, generation_id, request_json, slice_runner, local_admiss
     local_admission()
     validate_status(request_json('/api/status'), revision)
     require(monotonic() - started <= 20, 'ADMISSION_DEADLINE')
+    attempt['slice_attempted'] = True
     receipt = slice_runner(metadata, volume / 'runtime',
                            volume / '.data-sync-snapshots/transport-bundles', timeout=12)
     if receipt.get('status') not in ('BUILDING', 'COMPLETE'):
@@ -179,10 +183,181 @@ def run_canary(revision, generation_id, request_json, slice_runner, local_admiss
             'deployed_revision': revision, 'inventory_generation_id': digest,
             'snapshot_sha256': hashlib.sha256(raw).hexdigest(), 'page_index_sha256': index_sha,
             'slice': receipt, 'ack_performed': False, 'cleanup_performed': False,
+            'slice_attempted': True, 'derivative_writes_possible': True,
             'managed_coordinator_started': False, 'admission_basis': 'RECENT_AUTHENTICATED_TELEMETRY'}
 
 
-def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, inventory_fingerprint=None):
+def run_canary(*args, **kwargs):
+    attempt = {'slice_attempted': False}
+    try:
+        return _run_canary(*args, **kwargs, attempt=attempt)
+    except Exception as exc:
+        exc.slice_attempted = attempt['slice_attempted']
+        raise
+
+
+def blocked_receipt(exc):
+    attempted = getattr(exc, 'slice_attempted', False) is True
+    return {'schema': 'fly_bundle_canary_receipt_v1', 'status': 'BLOCKED',
+            'error': str(exc) if isinstance(exc, Blocked) else type(exc).__name__,
+            'slice_attempted': attempted, 'derivative_writes_possible': attempted,
+            'ack_performed': False, 'cleanup_performed': False}
+
+
+def virtual_read(path, maximum=8192):
+    """Fixed proc/cgroup files report zero stat size; bound the actual read."""
+    try:
+        require(not path.is_symlink(), 'VIRTUAL_PATH_LINK')
+        with path.open('rb') as stream:
+            raw = stream.read(maximum + 1)
+        require(len(raw) <= maximum, 'VIRTUAL_READ_LIMIT')
+        return raw.decode('ascii', errors='strict'), None
+    except (OSError, UnicodeError, Blocked) as exc:
+        return None, str(exc) if isinstance(exc, Blocked) else type(exc).__name__
+
+
+def integer_fields(text, allowed=None):
+    result = {}
+    for line in text.splitlines():
+        fields = line.replace(':', ' ').split()
+        if len(fields) in (2, 3) and (allowed is None or fields[0] in allowed):
+            if fields[1].isdigit() and len(fields[1]) <= 24:
+                result[fields[0]] = int(fields[1])
+    return result
+
+
+def pressure_fields(text):
+    result = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] not in ('some', 'full'):
+            continue
+        row = {}
+        for item in fields[1:]:
+            key, sep, value = item.partition('=')
+            if sep and key in ('avg10', 'avg60', 'avg300', 'total'):
+                try:
+                    number_ = int(value) if key == 'total' else float(value)
+                except ValueError:
+                    continue
+                if number(number_) and number_ >= 0:
+                    row[key] = number_
+        result[fields[0]] = row
+    return result
+
+
+def resource_snapshot(status, *, proc_root=Path('/proc'), cgroup_root=Path('/sys/fs/cgroup')):
+    """No directory enumeration, raw argv, environment, logs or sleeps."""
+    result = {'schema': 'bounded_runtime_resource_snapshot_v1',
+              'basis': 'SINGLE_CUMULATIVE_SAMPLE_NOT_RATE_OR_CAUSE', 'cgroup': {},
+              'inventory_workers': [], 'unavailable': {},
+              'child_scope': 'VERIFIED_DASHBOARD_MAIN_THREAD_DIRECT_CHILDREN_ONLY'}
+    for name in ('io.pressure', 'cpu.pressure', 'memory.pressure', 'io.stat',
+                 'cpu.stat', 'memory.current', 'memory.max'):
+        text, error = virtual_read(cgroup_root / name)
+        if error:
+            result['unavailable']['cgroup/' + name] = error
+        elif name.endswith('.pressure'):
+            result['cgroup'][name] = pressure_fields(text)
+        elif name == 'cpu.stat':
+            result['cgroup'][name] = integer_fields(text, ('usage_usec', 'user_usec', 'system_usec',
+                'nr_periods', 'nr_throttled', 'throttled_usec', 'nr_bursts', 'burst_usec'))
+        elif name.startswith('memory.'):
+            value = text.strip()
+            if value == 'max' or value.isdigit() and len(value) <= 24:
+                result['cgroup'][name] = 'max' if value == 'max' else int(value)
+            else:
+                result['unavailable']['cgroup/' + name] = 'INVALID_NUMERIC_VALUE'
+        else:
+            devices = []
+            for line in text.splitlines()[:64]:
+                fields = line.split()
+                if not fields or not re.fullmatch('[0-9]{1,10}:[0-9]{1,10}', fields[0]):
+                    continue
+                row = {'device': fields[0]}
+                for item in fields[1:]:
+                    key, sep, value = item.partition('=')
+                    if key in ('rbytes', 'wbytes', 'rios', 'wios', 'dbytes', 'dios') and value.isdigit() and len(value) <= 24:
+                        row[key] = int(value)
+                devices.append(row)
+            result['cgroup'][name] = devices
+            if len(text.splitlines()) > 64:
+                result['unavailable']['cgroup/io.stat'] = 'DEVICE_LIMIT_PARTIAL'
+    pid = status.get('dashboard_pid')
+    if status.get('dashboard_owner') is not True or status.get('process_alive') is not True \
+            or type(pid) is not int or not 1 <= pid <= 2**31 - 1:
+        result['unavailable']['dashboard_children'] = 'DASHBOARD_PID_UNVERIFIED'
+        return result
+    parent = proc_root / str(pid)
+    parent_stat, error = virtual_read(parent / 'stat', 4096)
+    children, child_error = virtual_read(parent / 'task' / str(pid) / 'children', 2048)
+    if error or child_error:
+        result['unavailable']['dashboard_children'] = error or child_error
+        return result
+    def start_identity(text):
+        try:
+            return int(text.split(' ', 1)[0]), int(text.rsplit(') ', 1)[1].split()[19])
+        except (ValueError, IndexError):
+            return None
+    parent_identity = start_identity(parent_stat)
+    if parent_identity is None or parent_identity[0] != pid:
+        result['unavailable']['dashboard_children'] = 'PROC_IDENTITY_INVALID'
+        return result
+    ids = children.split()
+    if len(ids) > 64 or any(not re.fullmatch('[0-9]{1,10}', item) or not 1 <= int(item) <= 2**31 - 1 for item in ids):
+        result['unavailable']['dashboard_children'] = 'CHILD_PID_LIMIT_OR_INVALID'
+        return result
+    for child in dict.fromkeys(ids):
+        root = proc_root / child
+        comm, comm_error = virtual_read(root / 'comm', 128)
+        argv, argv_error = virtual_read(root / 'cmdline', 8192)
+        if comm_error or argv_error:
+            result['unavailable']['proc/' + child] = comm_error or argv_error
+            continue
+        args = argv.split('\x00')
+        script_index = 2 if len(args) > 1 and args[1] in ('-u', '-B') else 1
+        if not comm.strip().startswith('python') or len(args) <= script_index \
+                or args[script_index] != '/app/data_sync_inventory_worker.py':
+            continue  # Never publish comm, argv, unknown scripts or arguments.
+        row = {'pid': int(child), 'kind': 'DATA_SYNC_INVENTORY_WORKER'}
+        child_stat, stat_error = virtual_read(root / 'stat', 4096)
+        child_identity = start_identity(child_stat) if child_stat is not None else None
+        if stat_error or child_identity is None or child_identity[0] != int(child):
+            result['unavailable']['proc/' + child] = stat_error or 'PROC_IDENTITY_INVALID'
+            continue
+        for name in ('io', 'schedstat', 'status'):
+            text, error = virtual_read(root / name, 4096)
+            if error:
+                result['unavailable']['proc/' + child + '/' + name] = error
+            elif name == 'schedstat':
+                values = text.split()
+                if len(values) == 3 and all(value.isdigit() and len(value) <= 24 for value in values):
+                    row[name] = dict(zip(('run_ns', 'runqueue_wait_ns', 'timeslices'), map(int, values)))
+                else:
+                    result['unavailable']['proc/' + child + '/' + name] = 'INVALID_SCHEDSTAT'
+            else:
+                allowed = ('rchar', 'wchar', 'syscr', 'syscw', 'read_bytes', 'write_bytes', 'cancelled_write_bytes') if name == 'io' else (
+                    'Pid', 'PPid', 'VmRSS', 'VmHWM', 'VmSize', 'Threads', 'voluntary_ctxt_switches', 'nonvoluntary_ctxt_switches')
+                row[name] = integer_fields(text, allowed)
+        after, _ = virtual_read(root / 'stat', 4096)
+        if row.get('status', {}).get('PPid') != pid or after is None or start_identity(after) != child_identity:
+            result['unavailable']['proc/' + child] = 'CHILD_OWNERSHIP_CHANGED_OR_UNVERIFIED'
+            continue
+        row['start_ticks'] = child_identity[1]
+        row['status_memory_unit'] = 'KiB'
+        result['inventory_workers'].append(row)
+    after_parent, _ = virtual_read(parent / 'stat', 4096)
+    if after_parent is None or start_identity(after_parent) != parent_identity:
+        result['inventory_workers'] = []
+        result['unavailable']['dashboard_children'] = 'DASHBOARD_PID_IDENTITY_CHANGED'
+    else:
+        result['dashboard_pid'] = pid
+        result['dashboard_start_ticks'] = parent_identity[1]
+    return result
+
+
+def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, inventory_fingerprint=None,
+                 resource_probe=resource_snapshot):
     status = request_json('/api/status')
     require(status.get('source_git_rev') == revision, 'STATUS_REVISION_MISMATCH')
     # Identity-only is the explicit no-refresh/physical-inventory path.
@@ -220,6 +395,7 @@ def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, invent
                          'overlap_code', 'last_success_age_sec', 'receipt_bootstrap')},
             'progress_receipts': progress,
             'progress_status': 'READ' if progress else 'EXACT_RECEIPT_UNAVAILABLE',
+            'resources': resource_probe(status),
             'os_coordinator_ownership': 'UNAVAILABLE_IN_PROCESS_LOCK_NOT_EXPORTED'}
 
 
@@ -274,6 +450,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        code = str(exc) if isinstance(exc, Blocked) else type(exc).__name__
-        print(json.dumps({'schema': 'fly_bundle_canary_receipt_v1', 'status': 'BLOCKED', 'error': code}))
+        print(json.dumps(blocked_receipt(exc)))
         raise SystemExit(1)
