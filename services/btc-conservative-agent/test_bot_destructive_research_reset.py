@@ -94,6 +94,28 @@ def run(env, **kwargs):
     return env["_perform_fresh_collection_reset_quiesced"](**kwargs)
 
 
+def test_preflight_failure_has_durable_diagnostic_without_reset_authority(runtime, monkeypatch):
+    import research_reset_execution
+    from research_exact_deletion import ResearchDeletionRejected
+    def reject(**kwargs):
+        assert kwargs["validate_only"] is True
+        raise ResearchDeletionRejected("RESET_TARGET_CHANGED_AFTER_PLAN")
+    monkeypatch.setattr(research_reset_execution, "execute_research_reset", reject)
+    result = run(runtime)
+    assert result["ok"] is False
+    assert result["operation_receipt"] is None
+    receipt = runtime["root"] / "research_reset_receipts/_preflight/latest.json"
+    diagnostic = json.loads(receipt.read_text())
+    assert diagnostic["status"] == "FAILED"
+    assert diagnostic["stage"] == "ALL_SCOPES_PREFLIGHT"
+    assert diagnostic["rejection_code"] == "RESET_TARGET_CHANGED_AFTER_PLAN"
+    assert diagnostic["deletion_authority"] is False
+    assert not (receipt.parents[1] / "ACTIVE_RESET.json").exists()
+    assert runtime["payload"].exists()
+    assert runtime["accounting"].read_text() == "accounting-must-survive\n"
+    assert json.loads(runtime["session"].read_text())["collector_v22_epoch_id"] == "epoch-old"
+
+
 @pytest.mark.parametrize("signal", [False, True])
 def test_actual_reset_deletes_research_retires_authority_and_writes_real_epoch(runtime, signal):
     state_before = dict(runtime["state"])

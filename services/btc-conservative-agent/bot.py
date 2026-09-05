@@ -27655,10 +27655,31 @@ _FRESH_RESET_LIFECYCLE_RESTART_PENDING = False
 def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> dict:
     """Quiesce all known research owners before archive/deletion/epoch rebinding."""
     global _FRESH_RESET_LIFECYCLE_RESTART_PENDING
-    with state_lock:
+    from research_reset_preflight_diagnostics import write_reset_preflight_diagnostic
+    from uuid import uuid4
+    attempt_id = uuid4().hex
+    if not state_lock.acquire(timeout=2.0):
+        diagnostic = write_reset_preflight_diagnostic(
+            _data_sync_runtime_root(), attempt_id=attempt_id, stage="STATE_LOCK",
+            status="REFUSED", error=TimeoutError())
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_state_lock_timeout", **diagnostic,
+                "summary": "Reset admission could not read pause state; no reset work started"}
+    try:
         safe_state = bool(state.get("execution_paused", False)) and not bool(state.get("live_armed", False))
-    with trade_lock:
+    finally:
+        state_lock.release()
+    if not trade_lock.acquire(timeout=2.0):
+        diagnostic = write_reset_preflight_diagnostic(
+            _data_sync_runtime_root(), attempt_id=attempt_id, stage="TRADE_LOCK",
+            status="REFUSED", error=TimeoutError())
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_trade_lock_timeout", **diagnostic,
+                "summary": "Reset admission could not read paper books; no reset work started"}
+    try:
         safe_books = not pending_orders and not open_positions
+    finally:
+        trade_lock.release()
     if not safe_state or not safe_books:
         return {"ok": False, "wipe_aborted": True,
                 "error": "fresh_collection_requires_paused_disarmed_flat_boundary",
@@ -27988,6 +28009,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     from emergency_evidence_wal import EmergencyEvidenceWal
     from research_reset_execution import execute_research_reset
     from research_reset_inventory import _managed_fly_alias
+    from research_reset_preflight_diagnostics import write_reset_preflight_diagnostic
+    from uuid import uuid4
 
     global _last_fresh_maintain_ts, _cached_pathway_scorecard, _cached_pathway_lane_specs
     reset_anchor = time.time()
@@ -27996,6 +28019,10 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     result = None
     operation_path = None
     operation = {}
+    diagnostic_attempt_id = uuid4().hex
+    diagnostic_root = _data_sync_runtime_root()
+    write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
+                                    stage=stage, status="STARTED")
     _pause_agent_debug_writes()
     try:
         resume = _fresh_research_reset_resume()
@@ -28019,6 +28046,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         preflights = []
         if not resume:
             stage = "ALL_SCOPES_PREFLIGHT"
+            write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
+                                            stage=stage, status="STARTED")
             for name in [None, *physical_scopes]:
                 scope_root = root if name is None else _managed_fly_alias(root, root / name)
                 if scope_root is None:
@@ -28032,6 +28061,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 preflights.append({key: preflight[key] for key in
                     ("scope_root", "scope_name", "scope_binding", "scope_binding_sha256",
                      "plan_sha256", "proof_sha256", "target_count", "target_bytes")})
+            write_reset_preflight_diagnostic(diagnostic_root, attempt_id=diagnostic_attempt_id,
+                                            stage=stage, status="PASSED")
         receipt_dir.mkdir(parents=True, exist_ok=bool(resume))
         operation_path = receipt_dir / "operation.json"
         operation = resume["operation"] if resume else {"schema": "bot_destructive_research_reset_v1", "stage": stage,
@@ -28176,6 +28207,14 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 "fresh_collection_signal_ts": signal_ts, "local_mirror_will_wipe": False,
                 "local_mirror_will_quarantine": bool(send_local_signal)}
     except Exception as exc:
+        if operation_path is None:
+            diagnostic = write_reset_preflight_diagnostic(
+                diagnostic_root, attempt_id=diagnostic_attempt_id, stage=stage,
+                status="FAILED", error=exc)
+            logger.error("[RESEARCH RESET] preflight attempt=%s stage=%s receipt_written=%s code=%s",
+                         diagnostic_attempt_id, stage, diagnostic["diagnostic_written"],
+                         diagnostic["diagnostic"].get("rejection_code") or
+                         diagnostic["diagnostic"].get("error"))
         with state_lock:
             state["execution_paused"] = True
         if boundary is not None and operation_path is not None:

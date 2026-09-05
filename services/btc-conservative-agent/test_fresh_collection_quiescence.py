@@ -8,13 +8,14 @@ import pytest
 
 
 @pytest.fixture
-def reset_env():
+def reset_env(tmp_path):
     path = Path(__file__).with_name("bot.py")
     tree = ast.parse(path.read_text(encoding="utf-8-sig"))
     fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
               and node.name == "_perform_fresh_collection_reset_locked")
     events = []
     env = {
+        "_data_sync_runtime_root": lambda: tmp_path,
         "state_lock": threading.RLock(), "trade_lock": threading.RLock(),
         "state": {"execution_paused": True, "live_armed": False},
         "pending_orders": [], "open_positions": [],
@@ -58,6 +59,36 @@ def reset_env():
 
 def invoke(env, **kwargs):
     return env["_perform_fresh_collection_reset_locked"](**kwargs)
+
+
+@pytest.mark.parametrize("lock_name,stage", [("state_lock", "STATE_LOCK"), ("trade_lock", "TRADE_LOCK")])
+def test_contended_admission_is_bounded_without_starting_reset(reset_env, lock_name, stage):
+    import json
+    import time
+    acquired, release = threading.Event(), threading.Event()
+    lock = reset_env[lock_name]
+    def hold():
+        with lock:
+            acquired.set()
+            release.wait(8)
+    owner = threading.Thread(target=hold)
+    owner.start()
+    assert acquired.wait(1)
+    try:
+        started = time.monotonic()
+        result = invoke(reset_env)
+        assert time.monotonic() - started < 4
+        assert result["error"] == "fresh_collection_" + stage.lower() + "_timeout"
+        assert result["diagnostic_written"] is True
+        assert reset_env["events"] == []
+        receipt = reset_env["_data_sync_runtime_root"]() / "research_reset_receipts/_preflight/latest.json"
+        assert json.loads(receipt.read_text())["stage"] == stage
+        assert not (receipt.parents[1] / "ACTIVE_RESET.json").exists()
+    finally:
+        release.set()
+        owner.join(2)
+    assert reset_env["state_lock"].acquire(blocking=False)
+    reset_env["state_lock"].release()
 
 
 @pytest.mark.parametrize("send_local_signal", [True, False])
@@ -173,14 +204,14 @@ def test_runtime_reset_never_transiently_unpauses_when_requested(preserve):
     assert observations == [preserve]
     assert env["state"]["execution_reason"] == ("ADMIN_MANUAL" if preserve else "")
     assert env["state"]["_pause_priority"] == (8 if preserve else 0)
-    # Verify the actual fresh-reset body opts into the tested helper behavior.
+    # The research-only reset must not call the accounting-clearing runtime
+    # reset at all. Its actual preservation behavior is exercised separately
+    # in test_bot_destructive_research_reset.py.
     body = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                 and n.name == "_perform_fresh_collection_reset_quiesced")
     calls = [n for n in ast.walk(body) if isinstance(n, ast.Call)
              and isinstance(n.func, ast.Name) and n.func.id == "reset_runtime_state"]
-    assert len(calls) == 1
-    assert any(k.arg == "preserve_execution_pause" and isinstance(k.value, ast.Constant)
-               and k.value.value is True for k in calls[0].keywords)
+    assert calls == []
 
 
 def test_real_epoch_contention_aborts_without_waiting_or_research_acquire(reset_env):
