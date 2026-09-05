@@ -24,6 +24,16 @@ def put(root, path, data=b"record\n"):
     return target
 
 
+def test_actual_accounting_retained_at_research_reset(tmp_path):
+    for name in ("trades_3factor.csv", "expired_orders_3factor.csv"):
+        put(tmp_path, name)
+    result = plan_research_reset(tmp_path, proof=proof(tmp_path))
+    assert result["targets"] == []
+    assert len(result["retained"]) == 2
+    assert all(row["reason"] == "ESSENTIAL_ORDER_PAPER_OR_ACCOUNTING_STATE"
+               for row in result["retained"])
+
+
 def test_exact_allowlist_and_no_mutation(tmp_path):
     names = ["signal_replay.jsonl", "signal_replay.jsonl.2", "v3/ledgers/opportunity.jsonl",
              "v3/ledgers/lifecycle.jsonl.3", "v3/market_segments/aa/" + "a" * 64 + ".json"]

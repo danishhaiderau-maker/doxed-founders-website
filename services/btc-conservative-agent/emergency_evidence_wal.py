@@ -124,6 +124,59 @@ def _cross_process_lock(path: Path, *, timeout: float = 5.0, poll_interval: floa
             finally: fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 class EmergencyEvidenceWal:
+    @classmethod
+    def inspect_existing(cls, root, *, identity, extents=DEFAULT_EXTENTS, lock_timeout=5.0):
+        """Validate an existing reserve without provisioning, replay or repair.
+
+        Uses its existing lock. Missing or corrupt authorities are errors, never
+        an empty-reserve assertion. Even validation failures leave bytes intact.
+        """
+        import stat
+        instance = cls.__new__(cls)
+        instance.root = Path(root).absolute()
+        for path in (instance.root, *instance.root.parents):
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise RuntimeError("EMERGENCY_WAL_SYMLINK_REFUSED")
+        if type(extents) is not int or not 1 <= extents <= 64:
+            raise ValueError("EMERGENCY_WAL_CONFIGURATION_INVALID")
+        instance.extents, instance.lock_timeout = extents, lock_timeout
+        instance.identity = cls._validate_identity(identity)
+        instance.identity_sha256 = hashlib.sha256(json.dumps(instance.identity,
+            sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        for attribute, name in (("data_path", "mandatory-reserve.bin"),
+                ("header_path", "mandatory-reserve.headers"),
+                ("control_path", "mandatory-reserve.control"),
+                ("lock_path", "mandatory-reserve.lock")):
+            path = instance.root / name
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise RuntimeError("EMERGENCY_WAL_REGULAR_FILE_REQUIRED")
+            setattr(instance, attribute, path)
+        if os.name == "nt" and instance.lock_path.stat().st_size == 0:
+            raise RuntimeError("EMERGENCY_WAL_EXISTING_LOCK_INVALID")
+        with _cross_process_lock(instance.lock_path, timeout=lock_timeout):
+            for path, size in ((instance.data_path, extents * EXTENT_BYTES),
+                    (instance.header_path, extents * HEADER_BYTES),
+                    (instance.control_path, CONTROL_COPIES * CONTROL_SLOT_BYTES)):
+                if path.stat().st_size != size:
+                    raise RuntimeError("EMERGENCY_WAL_CAPACITY_MISMATCH")
+            with instance.header_path.open("rb") as handle:
+                headers = instance._read_headers(handle)
+            instance._validate_headers(headers)
+            with instance.data_path.open("rb") as data:
+                instance._validate_all_extents(data, headers)
+            controls, invalid = instance._controls()
+            if invalid or not controls:
+                raise RuntimeError("EMERGENCY_WAL_CONTROL_REDUNDANCY_LOST")
+            latest = max(controls, key=lambda row: int(row["version"]))
+            expected = {"identity_sha256": instance.identity_sha256,
+                "capacity_extents": extents, **instance._derived(headers)}
+            if any(latest.get(key) != value for key, value in expected.items()):
+                raise RuntimeError("EMERGENCY_WAL_CONTROL_HEADER_MISMATCH")
+            return {**latest, "identity": dict(instance.identity),
+                    "records": [dict(row) for row in headers if row]}
+
     def __init__(self, root: str | Path, *, identity: dict[str, str], extents: int = DEFAULT_EXTENTS,
                  lock_timeout: float = 5.0) -> None:
         raw_root = Path(root)

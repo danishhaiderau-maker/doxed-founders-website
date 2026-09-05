@@ -60,6 +60,7 @@ ARCHIVE_PREFIXES = (
     "research_epoch_quarantine", "epoch_quarantine", "research/genome/epoch_quarantine",
 )
 ESSENTIAL_NAMES = frozenset({
+    "trades_3factor.csv", "expired_orders_3factor.csv",
     "open_positions.json", "paper_lifecycle_v1.json", "positions.json", "orders.json",
     "pending_orders.json", "paper_state.json", "state.json", "research_session.json",
     "policy.json", "spread-gate.json", "pathway_lane_specs.json", "lane_pnl_ledger.json",
