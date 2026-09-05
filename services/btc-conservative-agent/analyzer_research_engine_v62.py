@@ -20010,6 +20010,101 @@ def _write_discovery_scorecard_report(
     return report, mirrored
 
 
+def _same_publication_dynamic_report(legacy_report, scorecard, expected_generation, analysis_provenance):
+    """Project verified discovery cohorts without copying their episode arrays.
+
+    The legacy builder is invoked in this run and verifies its own sealed input;
+    retain that result, if present, rather than demoting it to an unsealed cohort.
+    No previously published dynamic report is read here.
+    """
+    import hashlib
+    from research.policy_evidence_schema import canonical_json
+
+    report = dict(legacy_report or {})
+    if report.get("sealed_holdout") is not None or report.get("status") == "PASS":
+        identity_fields = ("source_revision", "dataset_epoch", "generation_revision")
+        known_current_identity = all(
+            isinstance(analysis_provenance.get(field), str)
+            and bool(analysis_provenance[field].strip())
+            and analysis_provenance[field].strip().upper() != "UNKNOWN"
+            and report.get(field) == analysis_provenance[field]
+            for field in identity_fields
+        )
+        receipt = report.get("input_receipt")
+        if (not known_current_identity or not isinstance(receipt, dict)
+                or receipt.get("verification") != "CHECKSUM_VERIFIED_CANONICAL_MIRROR"):
+            # Preserve the original experiment without rebinding its result to
+            # this publication. This runs before the discovery failure return.
+            historical = report
+            report = {
+                "schema": "dynamic_policy_analyzer_orchestration_v1", "status": "UNKNOWN",
+                "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE", "execution_class": "RESEARCH_ONLY",
+                "relay_eligible": False, "live_policy_change_allowed": False,
+                "live_qualification": False, "comparison_complete": False,
+                "sealed_holdout": None, "nested_protocol": None, "fold_local_taxonomy_bindings": [],
+                "input_receipt": {}, "blockers": ["LEGACY_SEALED_CURRENT_IDENTITY_UNVERIFIED"],
+                "historical_legacy_diagnostic": {
+                    "status": "HISTORICAL_UNVERIFIED_NOT_CURRENT", "current_generation_eligible": False,
+                    "qualification_eligible": False, "original_report": historical,
+                },
+            }
+    cohorts = (scorecard or {}).get("dynamic_cohorts") or {}
+    expected = dict(expected_generation or {})
+    fields = ("manifest_entry_hash", "epoch_id", "source_revision", "deployed_revision",
+              "tile_config_signature", "analyzer_revision", "evaluator_version", "generation_key")
+    valid = (all(expected.get(field) not in (None, "", "UNKNOWN") for field in fields)
+             and (scorecard or {}).get("generation") == expected
+             and cohorts.get("expected_generation") == expected
+             and cohorts.get("schema") == "same_publication_dynamic_cohorts_v1"
+             and expected.get("source_revision") == analysis_provenance.get("source_revision")
+             and expected.get("epoch_id") == analysis_provenance.get("dataset_epoch")
+             and expected.get("analyzer_revision") == str(analysis_provenance.get("generation_revision")))
+    digest_body = {key: value for key, value in cohorts.items() if key != "publication_sha256"}
+    valid = valid and cohorts.get("publication_sha256") == hashlib.sha256(
+        canonical_json(digest_body).encode()).hexdigest()
+    if not valid:
+        report["same_publication_diagnostic"] = {
+            "status": "UNKNOWN", "blockers": ["SAME_PUBLICATION_DYNAMIC_BINDING_UNAVAILABLE"],
+        }
+        return report
+    summary = {key: value for key, value in cohorts.items()
+               if key not in {"groups", "candidate_universe"}}
+    summary["groups"] = [
+        {key: value for key, value in group.items() if key not in {"episodes", "candidates"}}
+        for group in cohorts.get("groups") or []
+    ]
+    summary["candidate_universe_count"] = len(cohorts.get("candidate_universe") or [])
+    summary["detail_artifact"] = DISCOVERY_COHORT_SCORECARD_REPORT_FILE
+    summary["detail_artifact_canonical_sha256"] = hashlib.sha256(canonical_json(scorecard).encode()).hexdigest()
+    summary["episode_arrays_omitted"] = True
+    report["same_publication_diagnostic"] = summary
+    if report.get("sealed_holdout") is not None:
+        # Even an unsuccessful sealed experiment is a separate immutable claim.
+        return report
+    legacy_blockers = list(report.get("blockers") or [])
+    evaluations = cohorts.get("nested_research_evaluations") or []
+    report.update({
+        "schema": "dynamic_policy_analyzer_orchestration_v1",
+        "status": "RESEARCH_DIAGNOSTIC" if (cohorts.get("counts") or {}).get("supported_outcomes", 0) > 0 else "UNKNOWN",
+        "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE", "execution_class": "RESEARCH_ONLY",
+        "relay_eligible": False, "live_policy_change_allowed": False, "live_qualification": False,
+        "comparison_complete": False, "sealed_holdout": None,
+        "nested_protocol": evaluations[0].get("nested_protocol") if len(evaluations) == 1 else None,
+        "nested_protocol_scope": "SINGLE_AVAILABLE_COHORT_ONLY" if len(evaluations) == 1 else "SEPARATE_COHORTS_NO_AGGREGATE_WINNER",
+        "fold_local_taxonomy_bindings": [],
+        "generation_revision": analysis_provenance.get("generation_revision"),
+        "dataset_epoch": analysis_provenance.get("dataset_epoch"),
+        "source_revision": analysis_provenance.get("source_revision"),
+        "legacy_input_blockers": legacy_blockers,
+        "input_receipt": {"verification": "SAME_PUBLICATION_VERIFIED_DISCOVERY_INPUTS",
+                          "generation": expected, "publication_sha256": cohorts["publication_sha256"],
+                          "detail_artifact": DISCOVERY_COHORT_SCORECARD_REPORT_FILE},
+        "blockers": sorted(set(list(cohorts.get("blockers") or []) + [
+            "SEALED_HOLDOUT_EVIDENCE_MISSING", "CANDIDATE_UNIVERSE_COMPARISON_INCOMPLETE"])),
+    })
+    return report
+
+
 def write_report_manifest(
     payload=None, *, analysis_provenance=None,
     lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
@@ -20092,6 +20187,7 @@ def write_report_manifest(
         qualified_grid_error = f"{type(exc).__name__}: {exc}"
     reports = []
     dynamic_policy_error = None
+    dynamic_policy_report = None
     try:
         from dynamic_policy_analyzer import build_dynamic_policy_analysis_report
 
@@ -20101,10 +20197,6 @@ def write_report_manifest(
             dataset_epoch=analysis_provenance.get("dataset_epoch"),
             source_revision=analysis_provenance.get("source_revision"),
         )
-        target = Path(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE)
-        temporary = target.with_suffix(target.suffix + ".tmp")
-        temporary.write_text(json.dumps(dynamic_policy_report, indent=2), encoding="utf-8")
-        os.replace(temporary, target)
     except Exception as exc:
         dynamic_policy_error = f"{type(exc).__name__}: {exc}"
     baseline_replay_error = None
@@ -20183,6 +20275,9 @@ def write_report_manifest(
     except Exception as exc:
         lifecycle_bundle_inventory_error = f"{type(exc).__name__}: {exc}"
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
+        if fname == DYNAMIC_POLICY_ANALYSIS_REPORT_FILE:
+            # Built below from this invocation's discovery, never a stale file.
+            continue
         if fname == EXIT_REPORTS_VALIDATION_FILE:
             # This receipt is derived from the completed current manifest below;
             # never publish a leftover receipt from an earlier analyzer pass.
@@ -20327,6 +20422,7 @@ def write_report_manifest(
     except Exception as exc:
         shadow_terminal_error = f"{type(exc).__name__}: {exc}"
     discovery_scorecard_error = None
+    scorecard = None
     try:
         # Use only this invocation's replay objects, never a prior saved report.
         scorecard, scorecard_mirror = _write_discovery_scorecard_report(
@@ -20348,6 +20444,29 @@ def write_report_manifest(
         })
     except Exception as exc:
         discovery_scorecard_error = f"{type(exc).__name__}: {exc}"
+    try:
+        dynamic_policy_report = _same_publication_dynamic_report(
+            dynamic_policy_report, scorecard,
+            (conservative_evaluator_status or {}).get("generation"), analysis_provenance,
+        )
+        if not dynamic_policy_report.get("schema"):
+            raise ValueError("DYNAMIC_REPORT_CURRENT_INPUT_UNAVAILABLE")
+        target = Path(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(dynamic_policy_report, indent=2, allow_nan=False), encoding="utf-8")
+        os.replace(temporary, target)
+        _stamp_report_analysis_provenance(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE, analysis_provenance)
+        dynamic_mirror = _atomic_mirror_analyzer_report(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE)
+        reports.append({
+            "title": "Dynamic Policy Research", "file": DYNAMIC_POLICY_ANALYSIS_REPORT_FILE,
+            "category": "Genome & Reports", "description": "Same-publication static/dynamic research; sealed qualification remains separate",
+            "size_bytes": dynamic_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat(),
+            "analysis_provenance": analysis_provenance,
+        })
+        dynamic_policy_error = None
+    except Exception as exc:
+        dynamic_policy_error = f"{type(exc).__name__}: {exc}"
     # The exhaustive policy grid is intentionally separate from the bounded
     # dashboard JSON. It is compressed, immutable for this generation, and is
     # copied without JSON stamping so its manifest checksum remains verifiable.
