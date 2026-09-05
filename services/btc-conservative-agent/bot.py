@@ -27740,206 +27740,418 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
     return result
 
 
-def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> dict:
-    """Inner fresh-collection wipe (caller holds _fresh_collection_lock)."""
-    global bot_start_time, _last_fresh_maintain_ts, _cached_pathway_scorecard
-    global _cached_pathway_lane_specs
-    # A research epoch boundary must never become a money-path mutation. Read
-    # the authoritative in-memory books before archiving or clearing anything,
-    # and require the operator to have paused and disarmed the source first.
-    # The reset preserves that pause; it is not an implicit resume command.
+def _fresh_research_reset_assert_quiesced() -> None:
+    """Re-check the actual held barriers on both first execution and resume."""
+    if (not _fresh_collection_lock.locked() or _LIFECYCLE_PIPELINE_RUNTIME is not None
+            or getattr(_RAW_GENERATION_GATE_LOCAL, "mirror", None) is None
+            or any(not gate._is_owned() for gate in (
+                _research_write_gate, _collector_epoch_lock,
+                _data_sync_inventory_cache_condition, _data_sync_sqlite_snapshot_condition))):
+        raise RuntimeError("RESET_EXCLUSIVE_BARRIERS_NOT_PROVEN")
     with state_lock:
-        pre_reset_paused = bool(state.get("execution_paused", False))
-        pre_reset_reason = str(state.get("execution_reason") or "")
-        pre_reset_pause_priority = int(state.get("_pause_priority") or 0)
-        pre_reset_live_armed = bool(state.get("live_armed", False))
+        paused = state.get("execution_paused") is True
+        disarmed = state.get("live_armed") is False
     with trade_lock:
-        pending_count = len(pending_orders)
-        open_count = len(open_positions)
-    if pre_reset_live_armed or not pre_reset_paused or pending_count or open_count:
-        blockers = []
-        if pre_reset_live_armed:
-            blockers.append("LIVE_ARMED")
-        if not pre_reset_paused:
-            blockers.append("EXECUTION_NOT_PAUSED")
-        if pending_count:
-            blockers.append(f"PENDING_ORDERS:{pending_count}")
-        if open_count:
-            blockers.append(f"OPEN_POSITIONS:{open_count}")
-        logger.error(
-            f"[FRESH COLLECTION] ABORT WIPE — unsafe boundary ({','.join(blockers)}) "
-            "[PIPELINE ENFORCEMENT]"
-        )
-        return {
-            "ok": False,
-            "wipe_aborted": True,
-            "error": "fresh_collection_requires_paused_disarmed_flat_boundary",
-            "blockers": blockers,
-            "pending_order_count": pending_count,
-            "open_position_count": open_count,
-            "summary": "Pause and disarm execution, then reach a flat order/position boundary",
-        }
-    _research_write_gate.acquire()
+        pending_count, open_count = len(pending_orders), len(open_positions)
+    paper_only = _force_paper_mode_active() is True
+    if not paused or not disarmed or not paper_only or pending_count or open_count:
+        raise RuntimeError("RESET_PAUSED_PAPER_DISARMED_FLAT_NOT_PROVEN")
+
+
+def _fresh_research_reset_boundary(reset_anchor: float) -> dict:
+    """Measure the old generation under the reset wrapper's exclusive barriers."""
+    from emergency_evidence_wal import EmergencyEvidenceWal
+    from research_exact_deletion import _checked_path
+    from research_reset_recovery_audit import audit_research_reset_recovery
+    from research_reset_auxiliary_audit import audit_auxiliary_cleanup
+    from research_v3_contract import LEDGER_NAMES, canonical_json
+    from research_v3_store import V3EvidenceStore
+
+    _fresh_research_reset_assert_quiesced()
+    pending_count, open_count, paper_only = len(pending_orders), len(open_positions), _force_paper_mode_active() is True
+    root = _data_sync_runtime_root()
+    store = V3EvidenceStore.open_read_only(root)
+    identity = store._identity_binding()
+    old_epoch = _collector_v22_epoch_id()
+    deployed_revision = str(os.getenv("SOURCE_GIT_REV") or "")
+    if not re.fullmatch(r"[0-9a-f]{40}", deployed_revision):
+        raise RuntimeError("RESET_DEPLOYED_REVISION_UNAVAILABLE")
+    identity_basis = "VERIFIED_ACTIVE_AUTHORITY"
+    if not store.epoch_id:
+        # Legacy genesis can have a real persisted session but no ACTIVE
+        # generation. This is a reset-boundary binding, not historical market
+        # provenance. Any extant/malformed pointer or conflicting WAL rejects.
+        persisted_epoch = _load_research_session_meta().get("collector_v22_epoch_id")
+        config_signature = active_tile_registry_signature()
+        if (any((store.receipt_dir / "ledger_generations_v1").glob("*/ACTIVE.json"))
+                or not isinstance(persisted_epoch, str) or persisted_epoch != old_epoch
+                or persisted_epoch.strip().upper() in {"", "UNKNOWN", "UNAVAILABLE"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(config_signature))):
+            raise RuntimeError("RESET_OLD_IDENTITY_UNAVAILABLE_OR_MISMATCH")
+        identity = {"epoch_id": persisted_epoch, "source_revision": deployed_revision,
+                    "deployed_revision": deployed_revision, "tile_config_signature": config_signature}
+        store.epoch_id = persisted_epoch
+        store._read_identity_override = dict(identity)
+        identity_basis = "LEGACY_SESSION_RESET_BOUNDARY_NOT_HISTORICAL_PROVENANCE"
+    if (not store.epoch_id or identity.get("epoch_id") != old_epoch
+            or any(not isinstance(value, str) or value.strip().upper() in {"", "UNKNOWN", "UNAVAILABLE"}
+                   for value in identity.values())):
+        raise RuntimeError("RESET_OLD_IDENTITY_UNAVAILABLE_OR_MISMATCH")
+    cutoff = _utc_isoformat_ns(float(reset_anchor))
+    new_epoch = "epoch-" + hashlib.sha256(
+        f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{cutoff}".encode("utf-8")
+    ).hexdigest()[:24]
+    if new_epoch == old_epoch:
+        raise RuntimeError("RESET_EPOCH_NOT_ADVANCING")
+    wal_root = _checked_path(root / "v3" / "emergency_evidence_wal_v2", root)
+    wal_exists = wal_root.exists()
+    if wal_exists:
+        wal = EmergencyEvidenceWal.inspect_existing(wal_root, identity=identity)
+        if (not isinstance(wal.get("records"), list) or wal["records"]
+                or type(wal.get("deferred_count")) is not int or wal["deferred_count"] != 0
+                or wal.get("alarms") != []):
+            raise RuntimeError("RESET_WAL_NOT_PROVEN_EMPTY")
+        pending_wal = len(wal["records"])
+    else:
+        # An absent directory, checked without following links, is explicit
+        # NOT_PRESENT evidence; a corrupt or partial reserve never reaches here.
+        wal = {"status": "NOT_PRESENT", "path": str(wal_root)}
+        pending_wal = 0
+    recovery = audit_research_reset_recovery(root, expected_identity=identity)
+    if (recovery.get("complete") is not True or recovery.get("safe_for_reset_recovery_scope") is not True
+            or type(recovery.get("pending_or_unknown_count")) is not int
+            or recovery["pending_or_unknown_count"] != 0):
+        raise RuntimeError("RESET_RECOVERY_NOT_PROVEN_CLEAR")
+    auxiliary = [audit_auxiliary_cleanup(path) for path in
+                 ([root, root.parent] if root.name == "runtime" else [root])]
+    if any(row.get("complete") is not True or row.get("safe") is not True
+           or type(row.get("pending_or_unknown_count")) is not int
+           or row["pending_or_unknown_count"] != 0 for row in auxiliary):
+        raise RuntimeError("RESET_AUXILIARY_RECOVERY_NOT_PROVEN_CLEAR")
+    pointers = []
+    for ledger in LEDGER_NAMES:
+        pointer = store._generation_root(ledger) / "ACTIVE.json"
+        if pointer.exists():
+            _checked_path(pointer, root)
+            store._active_ledger_generation(ledger)
+            pointers.append({"ledger": ledger, "sha256": hashlib.sha256(pointer.read_bytes()).hexdigest()})
+    evidence = {"old_identity": identity, "identity_basis": identity_basis, "deployed_revision": deployed_revision,
+                "wal": wal, "recovery": recovery, "auxiliary_cleanup": auxiliary, "active_pointers": pointers,
+                "pending_paper_orders": pending_count, "open_paper_positions": open_count}
+    proof = {"schema": "research_reset_boundary_proof_v1", "runtime_root": str(root),
+             "retired_epoch_id": old_epoch, "new_epoch_id": new_epoch,
+             "source_revision": identity["source_revision"],
+             "recovery_receipt_sha256": hashlib.sha256(canonical_json(evidence).encode()).hexdigest(),
+             "writers_quiesced": True, "paper_only": paper_only, "live_disarmed": state.get("live_armed") is False,
+             # Retired here means old-epoch admissions are fenced; persisted
+             # ACTIVE authorities are retired only after payload deletion.
+             "epoch_retired": True, "pending_paper_orders": pending_count,
+             "open_paper_positions": open_count, "pending_wal_records": pending_wal,
+             "pending_recovery_records": recovery["pending_or_unknown_count"]}
+    return {"root": root, "store": store, "proof": proof, "evidence": evidence,
+            "wal_exists": wal_exists, "wal_root": wal_root, "new_epoch": new_epoch,
+            "deployed_revision": deployed_revision,
+            "recovery_states": {"lifecycle_owner": "RECONCILED", "sync_readers": "RECONCILED",
+                                "emergency_wal": "EMPTY" if wal_exists else "NOT_PRESENT",
+                                "append_rotation_recovery": "RECONCILED", "volume_cleanup": "RECONCILED"}}
+
+
+def _fresh_research_reset_resume() -> dict | None:
+    """Resume one hash-bound operation; never replace an incomplete reset anchor."""
+    from research_exact_deletion import _checked_path, reconcile_research_deletion
+    from research_reset_inventory import _proof_valid, _managed_fly_alias
+    from research_v3_contract import canonical_json
+    from research_v3_store import V3EvidenceStore
+
+    _fresh_research_reset_assert_quiesced()
+    root = _data_sync_runtime_root()
+    active = _checked_path(root / "research_reset_receipts" / "ACTIVE_RESET.json", root)
+    if not active.exists():
+        return None
+
+    def load(path):
+        _checked_path(path, root)
+        if path.stat().st_size > 16 * 1024 * 1024:
+            raise RuntimeError("RESET_RESUME_RECEIPT_TOO_LARGE")
+        return json.loads(path.read_text("utf-8"))
+
+    pointer = load(active)
+    reset_id = pointer.get("reset_id")
+    if not re.fullmatch(r"[0-9a-f]{24}", str(reset_id)):
+        raise RuntimeError("RESET_RESUME_POINTER_INVALID")
+    directory = _checked_path(active.parent / reset_id, root)
+    binding = load(directory / "binding.json")
+    if hashlib.sha256(canonical_json(binding).encode()).hexdigest() != pointer.get("binding_sha256"):
+        raise RuntimeError("RESET_RESUME_BINDING_CHANGED")
+    operation_path = directory / "operation.json"
+    operation = load(operation_path)
+    if operation.get("stage") == "COMPLETE":
+        return None
+    proof, evidence = binding["proof"], binding["boundary_evidence"]
+    anchor = binding["reset_anchor"]
+    expected_epoch = "epoch-" + hashlib.sha256(
+        f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{_utc_isoformat_ns(float(anchor))}".encode()
+    ).hexdigest()[:24]
+    if (not _proof_valid(root, proof) or operation.get("proof") != proof
+            or operation.get("boundary_evidence") != evidence
+            or proof["new_epoch_id"] != expected_epoch
+            or hashlib.sha256(canonical_json(evidence).encode()).hexdigest() != proof["recovery_receipt_sha256"]
+            or str(os.getenv("SOURCE_GIT_REV") or "") != evidence["deployed_revision"]
+            or active_tile_registry_signature() != binding["new_tile_config_signature"]
+            or _collector_v22_epoch_id() not in {proof["retired_epoch_id"], proof["new_epoch_id"]}):
+        raise RuntimeError("RESET_RESUME_IDENTITY_MISMATCH")
+    # An interrupted per-file deletion is reconciled separately; this path only
+    # resumes after the full durable payload receipt proves COMPLETE.
+    result = operation.get("deletion")
+    receipt = load(directory / "deletion.json")
+    reconciliation = reconcile_research_deletion(directory / "deletion.json")
+    if (not isinstance(result, dict) or result.get("status") != "COMPLETE"
+            or result.get("deletion_receipt") != receipt or receipt.get("status") != "COMPLETE"
+            or receipt.get("context", {}).get("proof_sha256") != hashlib.sha256(canonical_json(proof).encode()).hexdigest()
+            or len(reconciliation.get("rows", [])) != len(receipt.get("inventory", []))
+            or any(row.get("status") != "UNLINKED_CONFIRMED" for row in reconciliation.get("rows", []))):
+        raise RuntimeError("RESET_PARTIAL_DELETION_REQUIRES_RECONCILIATION")
+    if operation.get("genome_reset_completed") is not True:
+        raise RuntimeError("RESET_GENOME_STAGE_REQUIRES_RECONCILIATION")
+    scopes = operation.get("scope_deletions", {})
+    if set(scopes) != set(binding.get("physical_scopes", [])):
+        raise RuntimeError("RESET_SCOPE_DELETION_REQUIRES_RECONCILIATION")
+    for name, completed in scopes.items():
+        physical = _managed_fly_alias(root, root / name)
+        if physical is None:
+            raise RuntimeError("RESET_RESUME_SCOPE_ALIAS_CHANGED")
+        scope_receipt_path = _checked_path(physical / "research_reset_receipts" / reset_id / "deletion.json", physical)
+        if scope_receipt_path.stat().st_size > 64 * 1024 * 1024:
+            raise RuntimeError("RESET_RESUME_RECEIPT_TOO_LARGE")
+        scope_receipt = json.loads(scope_receipt_path.read_text("utf-8"))
+        scope_reconciliation = reconcile_research_deletion(scope_receipt_path)
+        if (completed.get("status") != "COMPLETE" or completed.get("deletion_receipt") != scope_receipt
+                or scope_receipt.get("status") != "COMPLETE"
+                or scope_receipt.get("context", {}).get("proof_sha256") != hashlib.sha256(canonical_json(proof).encode()).hexdigest()
+                or any(row["status"] != "UNLINKED_CONFIRMED" for row in scope_reconciliation["rows"])):
+            raise RuntimeError("RESET_SCOPE_DELETION_REQUIRES_RECONCILIATION")
+    store = V3EvidenceStore.open_read_only(root)
+    old_identity = evidence["old_identity"]
+    if store.epoch_id and store._identity_binding() != old_identity:
+        raise RuntimeError("RESET_RESUME_ACTIVE_IDENTITY_CONFLICT")
+    # The old identity comes from the durable pre-deletion proof, not today's
+    # revision. This is necessary when all old ACTIVE authorities were retired.
+    store.epoch_id = old_identity["epoch_id"]
+    store._read_identity_override = dict(old_identity)
+    wal_root = _checked_path(root / "v3" / "emergency_evidence_wal_v2", root)
+    return {"root": root, "store": store, "proof": proof, "evidence": evidence,
+            "wal_exists": binding["wal_exists"], "wal_root": wal_root,
+            "new_epoch": expected_epoch, "deployed_revision": evidence["deployed_revision"],
+            "recovery_states": binding["recovery_states"], "reset_anchor": anchor,
+            "receipt_dir": directory, "operation_path": operation_path, "operation": operation,
+            "send_local_signal": binding["send_local_signal"], "result": result,
+            "physical_scopes": binding.get("physical_scopes", [])}
+
+
+def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> dict:
+    """Explicit old-research discard; preserve accounting and all recovery evidence."""
+    from emergency_evidence_wal import EmergencyEvidenceWal
+    from research_reset_execution import execute_research_reset
+    from research_reset_inventory import _managed_fly_alias
+
+    global _last_fresh_maintain_ts, _cached_pathway_scorecard, _cached_pathway_lane_specs
+    reset_anchor = time.time()
+    stage = "BOUNDARY"
+    boundary = None
+    result = None
+    operation_path = None
+    operation = {}
     _pause_agent_debug_writes()
     try:
-        try:
-            # === WIPE FIX: callsite uses _seal_past_analysis_with_fallback ===
-            past_analysis = _seal_past_analysis_with_fallback(reason="fresh_collection_dashboard")
-            past_analysis_id = str(past_analysis.get("archive_id") or "")
-            planned_delete_paths = all_research_wipe_paths(
-                include_validation_artifacts=True, include_legacy_logs=True,
+        resume = _fresh_research_reset_resume()
+        boundary = resume or _fresh_research_reset_boundary(reset_anchor)
+        if resume:
+            reset_anchor, send_local_signal = resume["reset_anchor"], resume["send_local_signal"]
+        root, store, proof = boundary["root"], boundary["store"], boundary["proof"]
+        physical_scopes = resume["physical_scopes"] if resume else [
+            name for name in ("research", "research_accumulator", "research_archive")
+            if _managed_fly_alias(root, root / name) is not None]
+        reset_id = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()[:24]
+        receipt_dir = root / "research_reset_receipts" / reset_id
+        # Receipt roots must not redirect into any source or recovery target.
+        from research_exact_deletion import _checked_path
+        _checked_path(receipt_dir, root)
+        bridge = get_genome_bridge()
+        if bridge is not None:
+            # Default Genome DB belongs to runtime. An unreviewed external or
+            # alias-backed custom DB is not implicit deletion authorization.
+            _checked_path(Path(bridge.store.base_dir).absolute() / "research.db", root)
+        preflights = []
+        if not resume:
+            stage = "ALL_SCOPES_PREFLIGHT"
+            for name in [None, *physical_scopes]:
+                scope_root = root if name is None else _managed_fly_alias(root, root / name)
+                if scope_root is None:
+                    raise RuntimeError("RESET_SCOPE_ALIAS_CHANGED")
+                preflight = execute_research_reset(runtime_root=root, proof=proof, quiescent=True,
+                    recovery_states=boundary["recovery_states"],
+                    receipt_path=scope_root / "research_reset_receipts" / reset_id / "deletion.json",
+                    allow_fly_runtime_aliases=True, scope_name=name, validate_only=True)
+                if preflight.get("status") != "VALIDATED":
+                    raise RuntimeError("RESET_SCOPE_PREFLIGHT_FAILED")
+                preflights.append({key: preflight[key] for key in
+                    ("scope_root", "scope_name", "scope_binding", "scope_binding_sha256",
+                     "plan_sha256", "proof_sha256", "target_count", "target_bytes")})
+        receipt_dir.mkdir(parents=True, exist_ok=bool(resume))
+        operation_path = receipt_dir / "operation.json"
+        operation = resume["operation"] if resume else {"schema": "bot_destructive_research_reset_v1", "stage": stage,
+                     "proof": proof, "boundary_evidence": boundary["evidence"],
+                     "payload_copy_performed": False, "accounting_preserved": True}
+        if not resume:
+            from research_v3_contract import canonical_json
+            binding = {"proof": proof, "boundary_evidence": boundary["evidence"],
+                       "reset_anchor": reset_anchor, "send_local_signal": bool(send_local_signal),
+                       "wal_exists": boundary["wal_exists"], "recovery_states": boundary["recovery_states"],
+                       "physical_scopes": physical_scopes,
+                       "preflights": preflights,
+                       "new_tile_config_signature": active_tile_registry_signature()}
+            store._atomic_json_receipt(receipt_dir / "binding.json", binding)
+            store._atomic_json_receipt(operation_path, operation)
+            store._atomic_json_receipt(receipt_dir.parent / "ACTIVE_RESET.json", {
+                "reset_id": reset_id, "binding_sha256": hashlib.sha256(canonical_json(binding).encode()).hexdigest()})
+        stage = "PAYLOAD_DELETION"
+        result = resume["result"] if resume else execute_research_reset(
+            runtime_root=root, proof=proof, quiescent=True,
+            recovery_states=boundary["recovery_states"], receipt_path=receipt_dir / "deletion.json",
+            allow_fly_runtime_aliases=True,
+        )
+        if result.get("status") != "COMPLETE":
+            raise RuntimeError("RESET_DELETION_INCOMPLETE")
+        operation.update(stage="PAYLOAD_DELETION_COMPLETE", deletion=result)
+        store._atomic_json_receipt(operation_path, operation)
+        stage = "PHYSICAL_SCOPE_DELETION"
+        scope_deletions = operation.get("scope_deletions", {})
+        if not resume:
+            for name in physical_scopes:
+                physical = _managed_fly_alias(root, root / name)
+                if physical is None:
+                    raise RuntimeError("RESET_SCOPE_ALIAS_CHANGED")
+                scope_receipt_dir = _checked_path(physical / "research_reset_receipts" / reset_id, physical)
+                scope_receipt_dir.mkdir(parents=True, exist_ok=False)
+                scoped = execute_research_reset(runtime_root=root, proof=proof, quiescent=True,
+                    recovery_states=boundary["recovery_states"], receipt_path=scope_receipt_dir / "deletion.json",
+                    scope_name=name)
+                if scoped.get("status") != "COMPLETE":
+                    raise RuntimeError("RESET_SCOPE_DELETION_INCOMPLETE")
+                scope_deletions[name] = scoped
+                operation.update(scope_deletions=scope_deletions)
+                store._atomic_json_receipt(operation_path, operation)
+        stage = "GENOME_RESET"
+        genome_reset = operation.get("genome_reset", {})
+        if bridge is not None and not resume:
+            genome_root = Path(bridge.store.base_dir).absolute()
+            genome_receipt_dir = genome_root / "research_reset_receipts" / reset_id
+            _checked_path(genome_receipt_dir, genome_root)
+            genome_receipt_dir.mkdir(parents=True, exist_ok=True)
+            genome_reset = bridge.reset_research_store(
+                destructive=True, deletion_receipt_path=genome_receipt_dir / "genome-deletion.json",
+                quiescent=True, recovery_states=boundary["recovery_states"],
             )
-            archive_path = create_research_archive_receipt(
-                past_analysis,
-                reason="fresh_collection_dashboard",
-                source_paths=planned_delete_paths,
+        operation.update(genome_reset_completed=True, genome_reset=genome_reset)
+        store._atomic_json_receipt(operation_path, operation)
+        stage = "AUTHORITY_RETIREMENT"
+        retirements = []
+        for pointer in boundary["evidence"]["active_pointers"]:
+            retired = store.retire_empty_epoch_authority(
+                pointer["ledger"], expected_pointer_sha256=pointer["sha256"], boundary_proof=proof,
             )
-        except (ArchiveIntegrityError, ImportError, OSError, RuntimeError, ValueError) as exc:
-            logger.error(f"[FRESH COLLECTION] ABORT WIPE — preservation failed: {exc} [PIPELINE ENFORCEMENT]")
-            return {
-                "ok": False,
-                "wipe_aborted": True,
-                "error": str(exc),
-                "summary": "ABORT WIPE — final analysis preservation failed",
-            }
-        logger.warning(f"[FRESH COLLECTION] Reset requested - archived to {archive_path}, verifying deletion set")
-        try:
-            quarantine = reset_all_research_files(archive_path=archive_path)
-        except (ArchiveIntegrityError, OSError, RuntimeError, ValueError) as exc:
-            quarantine = {"wipe_aborted": True, "errors": [str(exc)], "deleted": []}
-        if quarantine.get("wipe_aborted") or quarantine.get("errors"):
-            errors = list(quarantine.get("errors") or [])
-            logger.error(f"[FRESH COLLECTION] ABORT WIPE — deletion verification failed: {errors} [PIPELINE ENFORCEMENT]")
-            return {
-                "ok": False, "wipe_aborted": True,
-                "error": "archive_or_deletion_verification_failed",
-                "errors": errors, "archive_path": archive_path,
-                "past_analysis_id": past_analysis_id,
-                "summary": "ABORT WIPE — exact deletion set was not verified",
-            }
-    finally:
-        _resume_agent_debug_writes()
-        _research_write_gate.release()
-    logger.warning(f"[FRESH COLLECTION] Verified archive and deletion; resetting session state")
-    genome_reset = {}
-    bridge = get_genome_bridge()
-    if bridge is not None:
-        try:
-            genome_reset = bridge.reset_research_store()
-        except Exception as exc:
-            logger.error(f"[FRESH COLLECTION] ABORT WIPE — research.db reset failed: {exc} [PIPELINE ENFORCEMENT]")
-            return {
-                "ok": False,
-                "wipe_aborted": True,
-                "error": str(exc),
-                "summary": "ABORT WIPE — research database reset failed",
-                "archive_path": archive_path,
-                "past_analysis_id": past_analysis_id,
-            }
-    # Bind the new causal generation before clearing recovery state. A racing
-    # maturation poll then either finishes wholly before this boundary or is
-    # refused by the new cutoff; it cannot recreate old V3 ledgers afterward.
-    reset_anchor = time.time()
-    _reset_collector_epoch_state(reset_anchor)
-    if bridge is not None:
-        try:
+            if retired.get("retired") is not True:
+                raise RuntimeError("RESET_AUTHORITY_NOT_RETIRED")
+            retirements.append(retired)
+        operation.update(stage="AUTHORITY_RETIREMENT_COMPLETE", authority_retirements=retirements,
+                         genome_reset=genome_reset)
+        store._atomic_json_receipt(operation_path, operation)
+        from research_reset_recovery_audit import audit_research_reset_recovery
+        from research_reset_auxiliary_audit import audit_auxiliary_cleanup
+        final_recovery = audit_research_reset_recovery(root, expected_identity=boundary["evidence"]["old_identity"])
+        final_auxiliary = [audit_auxiliary_cleanup(path) for path in
+                           ([root, root.parent] if root.name == "runtime" else [root])]
+        if (final_recovery.get("complete") is not True
+                or final_recovery.get("safe_for_reset_recovery_scope") is not True
+                or any(row.get("safe") is not True for row in final_auxiliary)):
+            raise RuntimeError("RESET_RECOVERY_CHANGED_BEFORE_NEW_EPOCH")
+        stage = "EMPTY_WAL_REBIND"
+        if boundary["wal_exists"]:
+            new_identity = {**boundary["evidence"]["old_identity"], "epoch_id": boundary["new_epoch"],
+                            "source_revision": boundary["deployed_revision"],
+                            "deployed_revision": boundary["deployed_revision"],
+                            "tile_config_signature": active_tile_registry_signature()}
+            # Validate retained records before a constructor can rebind empty
+            # storage; after a crash, either the old or exact planned identity
+            # may own an empty reserve, never an unrelated identity.
+            try:
+                retained_wal = EmergencyEvidenceWal.inspect_existing(boundary["wal_root"], identity=boundary["evidence"]["old_identity"])
+            except (ValueError, RuntimeError):
+                retained_wal = EmergencyEvidenceWal.inspect_existing(boundary["wal_root"], identity=new_identity)
+            if retained_wal.get("records") != [] or retained_wal.get("alarms") != []:
+                raise RuntimeError("RESET_RETAINED_WAL_NOT_EMPTY")
+            wal = EmergencyEvidenceWal(boundary["wal_root"], identity=new_identity)
+            wal_status = wal.status()
+            if wal_status.get("records") != [] or wal_status.get("alarms") != []:
+                raise RuntimeError("RESET_NEW_WAL_NOT_EMPTY")
+        stage = "PUBLISH_NEW_EPOCH"
+        _reset_collector_epoch_state(reset_anchor)
+        if _collector_v22_epoch_id() != boundary["new_epoch"]:
+            raise RuntimeError("RESET_NEW_EPOCH_IDENTITY_MISMATCH")
+        if bridge is not None:
             bridge.bind_generation_identity(
-                dataset_epoch=_collector_v22_epoch_id(),
-                deployed_revision=os.getenv("SOURCE_GIT_REV") or "",
+                dataset_epoch=boundary["new_epoch"], deployed_revision=boundary["deployed_revision"],
                 tile_config_signature=active_tile_registry_signature(),
             )
-        except Exception as exc:
-            set_execution_paused("GENOME_IDENTITY_INVALID")
-            logger.error(
-                f"[FRESH COLLECTION] ABORT WIPE — research.db generation identity failed: {exc} "
-                "[PIPELINE ENFORCEMENT]"
-            )
-            return {
-                "ok": False,
-                "wipe_aborted": True,
-                "error": str(exc),
-                "summary": "ABORT WIPE — research database generation identity failed",
-                "archive_path": archive_path,
-                "past_analysis_id": past_analysis_id,
-            }
-    with trade_lock:
-        pending_orders.clear()
-        expired_orders.clear()
-        open_positions.clear()
-        trades_map.clear()
-        trades.clear()
-        recent_trades.clear()
-        _canonical_source_order_market_evidence.clear()
-    moved, errors = quarantine.get("moved") or [], quarantine.get("errors") or []
-    deleted = list(quarantine.get("deleted") or [])
-    purged_trees = list(quarantine.get("purged_quarantine") or [])
-    _cached_pathway_scorecard = {}
-    _cached_pathway_lane_specs = {}
-    _reset_runtime_log_handlers()
-    reset_runtime_state(preserve_execution_pause=True)
-    reset_session_risk_state()
-    bot_start_time = reset_anchor
-    _last_fresh_maintain_ts = time.time()
-    _write_research_session(bot_start_time, fresh_collection_reset=True)
-    _record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)
-    load_session_trades_from_csv()
-    archive_compaction = {
-        "past_analysis_id": past_analysis_id,
-        "deleted_files": len(deleted),
-        "deleted_bytes": int((quarantine.get("deletion_receipt") or {}).get("deleted_bytes") or 0),
-        "raw_payloads_retained": True,
-        "quarantined_files": 0,
-        "quarantine_path": None,
-        "purged_quarantine": purged_trees,
-    }
-    summary = (
-        f"deleted {len(deleted)} live file(s), purged {len(purged_trees)} quarantine tree(s)"
-        + (f", {len(errors)} error(s)" if errors else "")
-    )
-    for err in errors:
-        logger.warning(f"[FRESH COLLECTION] delete skipped/failed: {err} [PIPELINE ENFORCEMENT]")
-    with state_lock:
-        state["last_fresh_reset_ts"] = time.time()
-        state["last_fresh_reset_summary"] = summary
-        if send_local_signal:
-            # Bump the local-sync-loop signal so the mirror is wiped on the
-            # next manifest poll. /api/wipe_fly_only passes False here.
-            state["fresh_collection_signal_ts"] = time.time()
-        state["execution_paused"] = pre_reset_paused
-        state["execution_reason"] = pre_reset_reason
-        state["_pause_priority"] = pre_reset_pause_priority
-    save_persistent_config()
-    logger.info(f"[FRESH COLLECTION] Reset complete - {summary} [PIPELINE ENFORCEMENT]")
-    with state_lock:
-        signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
-    _update_data_sync_identity_epoch_cache(
-        collection_epoch_id=_collector_v22_epoch_id(),
-        fresh_collection_signal_ts=signal_ts,
-    )
-    if send_local_signal:
-        logger.info(
-            f"[FRESH COLLECTION] Local-sync signal bumped to {signal_ts} "
-            f"— local mirror will be wiped on next manifest poll [PIPELINE ENFORCEMENT]"
+        _cached_pathway_scorecard = {}
+        _cached_pathway_lane_specs = {}
+        _last_fresh_maintain_ts = reset_anchor
+        deleted = list(result["deletion_receipt"]["deleted"])
+        retained = list(result["retained"])
+        for scoped in scope_deletions.values():
+            deleted.extend(scoped["deletion_receipt"]["deleted"])
+            retained.extend(scoped["retained"])
+        deleted.extend(genome_reset.get("deletion_receipt", {}).get("deleted", []))
+        deleted_set = set(deleted)
+        retained = [row for row in retained if row.get("absolute_path") not in deleted_set]
+        summary = f"deleted {len(deleted)} exact research file(s); accounting/recovery retained"
+        with state_lock:
+            state["last_fresh_reset_ts"] = reset_anchor
+            state["last_fresh_reset_summary"] = summary
+            state["execution_paused"] = True
+            if send_local_signal:
+                state["fresh_collection_signal_ts"] = reset_anchor
+            signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
+        save_persistent_config()
+        _update_data_sync_identity_epoch_cache(
+            collection_epoch_id=boundary["new_epoch"], fresh_collection_signal_ts=signal_ts,
         )
-    return {
-        "deleted": deleted,
-        "quarantined": [],
-        "quarantine_path": None,
-        "purged_quarantine": purged_trees,
-        "epoch_cutoff_utc": quarantine.get("cutoff_utc"),
-        "errors": errors,
-        "summary": summary,
-        "archive_path": archive_path,
-        "archive_compaction": archive_compaction,
-        "past_analysis_id": past_analysis_id,
-        "genome_reset": genome_reset,
-        "ts": utc_iso(),
-        "ok": True,
-        "wipe_aborted": False,
-        "fresh_collection_signal_ts": signal_ts,
-        "local_mirror_will_wipe": False,
-        "local_mirror_will_quarantine": bool(send_local_signal),
-    }
+        operation.update(stage="COMPLETE", new_epoch_id=boundary["new_epoch"], summary=summary,
+                         deleted=deleted, retained=retained)
+        store._atomic_json_receipt(operation_path, operation)
+        return {"ok": True, "wipe_aborted": False, "reset_mode": "DISCARD_OLD_RESEARCH",
+                "summary": summary, "deleted": deleted,
+                "retained": retained, "deletion_receipt": result["deletion_receipt"],
+                "scope_deletions": scope_deletions,
+                "operation_receipt": str(operation_path), "new_epoch_id": boundary["new_epoch"],
+                "raw_payload_copies_created": False, "accounting_preserved": True,
+                "fresh_collection_signal_ts": signal_ts, "local_mirror_will_wipe": False,
+                "local_mirror_will_quarantine": bool(send_local_signal)}
+    except Exception as exc:
+        with state_lock:
+            state["execution_paused"] = True
+        if boundary is not None and operation_path is not None:
+            operation.update(stage="FAILED", failed_stage=stage, error=type(exc).__name__)
+            try:
+                boundary["store"]._atomic_json_receipt(operation_path, operation)
+            except Exception:
+                logger.error("[RESEARCH RESET] failure receipt unavailable; retain existing operation journal")
+        return {"ok": False, "wipe_aborted": True, "failed_stage": stage,
+                "error": str(exc), "operation_receipt": str(operation_path) if operation_path else None,
+                "payload_deletion_completed": bool(result and result.get("status") == "COMPLETE"),
+                "summary": "Research reset stopped; execution remains paused and receipts require reconciliation"}
+    finally:
+        _resume_agent_debug_writes()
 
 replay_buffers: Dict[str, Dict] = {}
 MAX_REPLAY_BUFFERS = 100
