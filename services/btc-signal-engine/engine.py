@@ -29638,6 +29638,8 @@ last_ws_message_time = 0.0
 last_heartbeat = time.time()
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
+    from crash_exception_receipt import emit_original_exception_receipt
+    emit_original_exception_receipt(exc_type, exc_value, exc_traceback)
     logger.critical("=== GLOBAL CRASH DETECTED ===")
     logger.critical("Type: %s", exc_type)
     logger.critical("Value: %s", exc_value)
@@ -29830,9 +29832,13 @@ def dump_system_state(*, trigger="UNSPECIFIED", progress=None, incident=None, re
         snapshot = {
             "time": utc_iso(),
             "edge_score": state.get("last_edge", 0.0),
-            "edge_threshold": get_edge_threshold(),
+            "edge_threshold": state.get("edge_threshold"),
             "last_pipeline_stage": state.get("last_pipeline_stage"),
-            "active_signals": get_active_signal_count(),
+            # Crash collection must not reconcile ledgers or acquire business
+            # locks. These unlocked observations are advisory, not exposure proof.
+            "active_signals": None,
+            "active_signals_status": "UNAVAILABLE_NONMUTATING_CRASH_SNAPSHOT",
+            "snapshot_consistency": "ADVISORY_UNLOCKED",
             "open_positions": len(open_positions),
             "pending_orders": len(pending_orders),
             "last_ai_call_ts": state.get("last_ai_call_ts", 0),
