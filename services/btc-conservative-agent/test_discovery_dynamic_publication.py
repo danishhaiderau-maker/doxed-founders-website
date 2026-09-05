@@ -1,4 +1,5 @@
 from copy import deepcopy
+import pytest
 
 from research.discovery_scorecard_publication import build_discovery_scorecard_publication
 from research.shadow_result_stream import digest
@@ -32,6 +33,9 @@ def test_complete_shadow_same_publication_reaches_cohort_with_no_fly_input_json(
     assert cohort["counts"]["supported_outcomes"] == 1
     assert cohort["status"] == "BUILT_INCOMPLETE_RESEARCH_ONLY"
     assert cohort["comparison_complete"] is False and cohort["live_qualification"] is False
+    assert len(cohort["nested_research_evaluations"]) == 1
+    assert cohort["nested_research_evaluations"][0]["nested_protocol"]["passed"] is False
+    assert cohort["sealed_holdout"] is None
     assert "INPUT_ROWS_REJECTED_CANDIDATE_UNIVERSE_INCOMPLETE" in cohort["blockers"]
     episodes = [e for g in cohort["groups"] for e in g["episodes"] if e["policy_outcomes"]]
     assert episodes[0]["signal_ts"] == 9
@@ -88,3 +92,32 @@ def test_untrusted_terminal_horizon_change_stays_unknown(tmp_path):
     report = build(values)
     assert report["dynamic_cohorts"]["counts"]["supported_outcomes"] == 0
     assert report["unjoinable_counts"]["shadow_terminal:TERMINAL_RECEIPT_SHA256_INVALID"] == 1
+
+
+@pytest.mark.parametrize("settings", [{"purge_sec": -1}, {"embargo_sec": float("nan")},
+    {"outer_folds": 1000000}, {"inner_folds": True}])
+def test_invalid_nested_protocol_is_explicit_not_silent_leakage(tmp_path, settings):
+    root, evaluator, baseline, shadow = fixture(tmp_path)
+    report = build_discovery_scorecard_publication(root, expected_generation=GENERATION,
+        evaluator_status=evaluator, baseline_report=baseline, shadow_terminal_report=shadow,
+        dynamic_feature_names=("regime",), dynamic_protocol=settings)
+    assert report["dynamic_cohorts"]["status"] == "UNAVAILABLE"
+    assert report["scorecard"] is not None
+
+
+def test_nested_budget_retains_cohort_without_running_expensive_engine(monkeypatch):
+    from research.discovery_scorecard_publication import _dynamic_cohort_publication
+    import research.dynamic_cohort_adapter as adapter
+    import research_dynamic_entry_policy as engine
+    group = {"group_id": "large", "counts": {"supported_outcomes": 1},
+             "episodes": [{}] * 1001, "candidates": [{}] * 1000}
+    monkeypatch.setattr(adapter, "adapt_dynamic_cohorts", lambda *a, **k: {
+        "groups": [group], "counts": {"supported_outcomes": 1},
+        "feature_names": ["regime"], "blockers": []})
+    def forbidden(*a, **k):
+        pytest.fail("Over-budget cohort must not invoke nested engine")
+    monkeypatch.setattr(engine, "nested_purged_walk_forward_dynamic", forbidden)
+    result = _dynamic_cohort_publication([], [], GENERATION, {}, ("regime",), {}, {})
+    assert result["groups"] == [group]
+    assert result["nested_research_evaluations"][0]["blockers"] == ["NESTED_RESEARCH_WORK_BUDGET_EXCEEDED"]
+    assert result["comparison_complete"] is False

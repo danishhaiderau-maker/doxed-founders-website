@@ -343,6 +343,50 @@ def _dynamic_cohort_publication(adapted, unknown_shadow, expected, shadow_aggreg
                       candidate_universe_basis="ALL_VERIFIED_INPUT_ROWS_BEFORE_CAUSAL_FILTERING_NOT_PREDECLARED_SEARCH_SPACE",
                       comparison_complete=False, live_qualification=False,
                       shadow_terminal_aggregate=shadow_aggregate)
+        # Evaluate available cohorts without retroactively treating any data as
+        # a sealed holdout. The complete candidate search remains a separate gate.
+        from research_dynamic_entry_policy import nested_purged_walk_forward_dynamic
+        settings = {"outer_folds": 5, "inner_folds": 4, "purge_sec": 7200,
+                    "embargo_sec": 300, "minimum_bucket_support": 3}
+        supplied = dict(protocol or {})
+        if set(supplied) - set(settings):
+            raise ValueError("DYNAMIC_PROTOCOL_OPTION_INVALID")
+        settings.update(supplied)
+        for name in ("outer_folds", "inner_folds", "minimum_bucket_support"):
+            value = settings[name]
+            minimum = 1 if name == "minimum_bucket_support" else 2
+            if type(value) is not int or not minimum <= value <= 100:
+                raise ValueError("DYNAMIC_PROTOCOL_INTEGER_OUT_OF_BOUNDS:" + name)
+        for name in ("purge_sec", "embargo_sec"):
+            value = settings[name]
+            if isinstance(value, bool) or _finite(value) is None or value < 0:
+                raise ValueError("DYNAMIC_PROTOCOL_TIME_INVALID:" + name)
+        evaluations = []
+        work_remaining = 10_000_000
+        for group in result["groups"]:
+            if not group["counts"]["supported_outcomes"]:
+                continue
+            work = (len(group["episodes"]) * len(group["candidates"])
+                    * settings["outer_folds"] * settings["inner_folds"])
+            if work > work_remaining:
+                evaluations.append({"group_id": group["group_id"], "status": "UNKNOWN",
+                    "blockers": ["NESTED_RESEARCH_WORK_BUDGET_EXCEEDED"],
+                    "estimated_work_units": work})
+                continue
+            work_remaining -= work
+            try:
+                evaluation = nested_purged_walk_forward_dynamic(
+                    group["episodes"], candidates=group["candidates"],
+                    feature_names=result["feature_names"], **settings,
+                    protocol_run_id=group["cohort_sha256"])
+                evaluations.append({"group_id": group["group_id"],
+                    "status": "RESEARCH_DIAGNOSTIC", "nested_protocol": evaluation})
+            except (ValueError, TypeError, KeyError) as exc:
+                evaluations.append({"group_id": group["group_id"],
+                    "status": "UNKNOWN", "blockers": [str(exc)]})
+        result["nested_research_evaluations"] = evaluations
+        result["nested_research_protocol"] = settings
+        result["sealed_holdout"] = None
         # The adapter hash covers its own output; this hash binds publication metadata too.
         result["publication_sha256"] = hashlib.sha256(canonical_json(result).encode()).hexdigest()
         return result
