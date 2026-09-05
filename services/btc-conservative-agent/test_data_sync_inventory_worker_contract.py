@@ -957,6 +957,135 @@ def test_single_directory_has_a_hard_fail_closed_entry_bound(monkeypatch, tmp_pa
         worker._bounded_directory_entries(tmp_path)
 
 
+@pytest.fixture(params=["working_tree", "head_cap_only"])
+def directory_cap_worker(request):
+    """Exercise the cap independently of the unrelated dirty lease repair."""
+    if request.param == "working_tree":
+        return _load_worker()
+    import types
+
+    source = subprocess.run(
+        ["git", "show", "HEAD:services/btc-conservative-agent/data_sync_inventory_worker.py"],
+        cwd=ROOT, capture_output=True, text=True, check=True,
+    ).stdout
+    old = "MAX_DIRECTORY_ENTRIES = 10000\n"
+    new = "MAX_DIRECTORY_ENTRIES = 100000\n"
+    assert source.count(old) + source.count(new) == 1
+    candidate = source.replace(old, new)
+    before = ast.parse(source)
+    after = ast.parse(candidate)
+    lease = lambda tree: ast.dump(next(node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_acquire_generation_lease"))
+    assert lease(before) == lease(after)
+    module = types.ModuleType("isolated_head_cap_only_inventory_worker")
+    module.__file__ = str(WORKER_PATH)
+    exec(compile(candidate, "<HEAD-plus-directory-cap-only>", "exec"), module.__dict__)
+    return module
+
+
+def _directory_cap_scan(worker, monkeypatch, directory, count):
+    """Lazy DirEntry boundary double; real worker sorting and SQLite remain used."""
+    import types
+
+    seen = {"yielded": 0}
+
+    class Entry:
+        def __init__(self, index):
+            self.name = f"receipt-{index:06d}.json"
+            self.path = str(directory / self.name)
+
+        def is_dir(self, **_):
+            return False
+
+        def is_file(self, **_):
+            return True
+
+    class Scan:
+        def __enter__(self):
+            def entries():
+                for index in range(count - 1, -1, -1):
+                    seen["yielded"] += 1
+                    yield Entry(index)
+            return entries()
+
+        def __exit__(self, *_):
+            return False
+
+    proxy = types.SimpleNamespace(**{key: getattr(worker.os, key) for key in dir(worker.os)})
+    proxy.scandir = lambda _: Scan()
+    monkeypatch.setattr(worker, "os", proxy)
+    return seen
+
+
+def test_directory_cap_only_freezes_more_than_ten_thousand_exactly(
+        directory_cap_worker, monkeypatch, tmp_path):
+    worker = directory_cap_worker
+    assert worker.MAX_DIRECTORY_ENTRIES == 100000
+    seen = _directory_cap_scan(worker, monkeypatch, tmp_path, 10001)
+    connection = worker._open_database(tmp_path / "cap.sqlite3", "a" * 64, 16 * 1024 * 1024)
+    try:
+        assert worker._freeze_directory_entries(connection, 0, "", tmp_path, 50000, 250000) == (1, 10001)
+        assert seen["yielded"] == 10001
+        assert connection.execute("SELECT COUNT(*) FROM directory_entries").fetchone()[0] == 10001
+        assert connection.execute("SELECT entry_count FROM directory_snapshots").fetchone()[0] == 10001
+        worker._validate_spool_snapshot_integrity(connection)
+        assert worker._freeze_directory_entries(connection, 0, "", tmp_path, 50000, 250000) == (1, 10001)
+        assert seen["yielded"] == 10001  # resume uses frozen rows, not another scan
+    finally:
+        connection.close()
+
+
+def test_directory_cap_only_one_hundred_thousand_boundary(
+        directory_cap_worker, monkeypatch, tmp_path):
+    worker = directory_cap_worker
+    seen = _directory_cap_scan(worker, monkeypatch, tmp_path, 100000)
+    rows = worker._bounded_directory_entries(tmp_path)
+    assert len(rows) == seen["yielded"] == 100000
+    assert rows[0][0] == "receipt-000000.json" and rows[-1][0] == "receipt-099999.json"
+    del rows
+    seen = _directory_cap_scan(worker, monkeypatch, tmp_path, 100002)
+    with pytest.raises(worker.InventoryWorkerError) as raised:
+        worker._bounded_directory_entries(tmp_path)
+    assert raised.value.code == "DIRECTORY_ENTRY_LIMIT_EXCEEDED"
+    assert seen["yielded"] == 100001  # bounded: never consumes the rest
+
+
+def test_directory_cap_only_preserves_global_entry_ceiling(
+        directory_cap_worker, monkeypatch, tmp_path):
+    worker = directory_cap_worker
+    _directory_cap_scan(worker, monkeypatch, tmp_path, 10001)
+    connection = worker._open_database(tmp_path / "entries.sqlite3", "b" * 64, 16 * 1024 * 1024)
+    try:
+        with pytest.raises(worker.InventoryWorkerError) as raised:
+            worker._freeze_directory_entries(connection, 0, "", tmp_path, 50000, 10000)
+        assert raised.value.code == "GENERATION_ENTRY_LIMIT_EXCEEDED"
+        assert worker._spool_counters(connection) == (0, 0)
+        assert connection.execute("SELECT COUNT(*) FROM directory_entries").fetchone()[0] == 0
+    finally:
+        connection.close()
+    assert worker._generation_limits({}) == (50000, 250000, 256 * 1024 * 1024)
+    assert worker._generation_limits({"inventory_generation_entry_limit": 10**12,
+        "inventory_generation_spool_bytes": 10**12}) == (50000, 1000000, 1024 * 1024 * 1024)
+
+
+def test_directory_cap_only_preserves_spool_ceiling_and_atomic_rollback(
+        directory_cap_worker, monkeypatch, tmp_path):
+    worker = directory_cap_worker
+    _directory_cap_scan(worker, monkeypatch, tmp_path, 10001)
+    path = tmp_path / "bounded.sqlite3"
+    connection = worker._open_database(path, "c" * 64, 64 * 1024)
+    try:
+        with pytest.raises(worker.InventoryWorkerError) as raised:
+            worker._freeze_directory_entries(connection, 0, "", tmp_path, 50000, 250000)
+        assert raised.value.code == "GENERATION_SPOOL_LIMIT_EXCEEDED"
+        assert worker._spool_counters(connection) == (0, 0)
+        assert connection.execute("SELECT COUNT(*) FROM directory_snapshots").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM directory_entries").fetchone()[0] == 0
+        assert path.stat().st_size <= 64 * 1024
+    finally:
+        connection.close()
+
+
 def test_empty_inventory_publishes_one_valid_bounded_empty_page(tmp_path):
     worker = _load_worker()
     volume = tmp_path / "volume"

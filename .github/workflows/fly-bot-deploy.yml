@@ -931,6 +931,7 @@ jobs:
           python -m pytest test_lifecycle_pipeline_runtime.py test_lifecycle_public_status.py test_fly_inspect_runtime_bounded.py -q
           python -m pytest test_collector_v22_integrity.py test_compressed_shadow_chase.py test_paper_lifecycle_restart.py test_cleanup_characterization_contract.py test_v3_lane_entry_bot_wiring.py -q
           python -m pytest test_v31_overview_best_policy_counts.py -q
+          python -m pytest test_collector_signal_snapshot.py test_research_v3_signal_snapshot.py test_lifecycle_signal_snapshot_dependency.py test_analyzer_signal_snapshot_projection.py test_data_sync_signal_snapshot.py -q
 
       - name: Verify bounded transport package and original acknowledgment contracts
         # The laptop PowerShell promotion harness is Windows-only and is
@@ -939,6 +940,7 @@ jobs:
         run: |
           python -m pytest test_data_sync_bundle_transport.py test_data_sync_bundle_worker.py test_data_sync_bundle_runtime.py test_data_sync_bundle_storage.py test_data_sync_bundle_api.py test_data_sync_bundle_client.py test_data_sync_bundle_bot_integration.py test_fly_sync_bundle_adapter.py -q
           python -m pytest ../../scripts/test_fly_transport_bundle_workflow.py -q
+          python -m pytest test_data_sync_bundle_runtime_topology.py -q
 
       - uses: actions/setup-node@v4
         with:
