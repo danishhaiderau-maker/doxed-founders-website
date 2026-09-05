@@ -140,3 +140,78 @@ def test_lane_and_chase_preserve_observed_zero_money(name, field, target, row):
     rendered = render_loader(name, {"evidence_status": "CURRENT_GENERATION", field: [row]}, target)
     assert rendered.count("$0.00") >= 2
     assert "$+999" not in rendered
+
+
+def complete_touch_proof(touch=False, outcome="NO_FILL"):
+    return {"classification": "INSUFFICIENT_EVIDENCE", "conservative_touch": touch,
+            "conservative_fill_status": outcome, "execution_outcome": outcome,
+            "coverage": {"status": "COMPLETE", "stage_ratio": 1, "tape_status": "SUPPORTED",
+                         "missing_seconds": 0, "tape_receipt": "tape-join-sha256-fixture",
+                         "identity_missing": [], "rejection_codes": []}}
+
+
+@pytest.mark.parametrize("touch", [False, None, "false"])
+def test_missed_proof_missing_779_seconds_never_renders_no_touch(touch):
+    row = complete_touch_proof(touch)
+    row["coverage"].update(status="INSUFFICIENT", missing_seconds=779)
+    rendered = render_loader("loadChasePolicyLab", {"proofs": [row]}, "missed-proof-body")
+    assert "UNKNOWN — touch not established in available tape" in rendered
+    assert "missing seconds 779" in rendered
+    assert "NO TOUCH" not in rendered
+    assert "INSUFFICIENT_EVIDENCE" in rendered
+
+
+@pytest.mark.parametrize("field,value", [
+    ("status", "INSUFFICIENT"), ("stage_ratio", None), ("stage_ratio", 0.9),
+    ("tape_status", "UNAVAILABLE"), ("missing_seconds", None), ("missing_seconds", 1),
+    ("tape_receipt", None), ("identity_missing", ["episode_id"]),
+    ("identity_missing", None), ("rejection_codes", ["IDENTITY_INCOMPLETE"]),
+    ("rejection_codes", None),
+])
+def test_incomplete_or_inconsistent_coverage_never_renders_negative(field, value):
+    row = complete_touch_proof()
+    row["coverage"][field] = value
+    label = run_helpers("missedProofTouchLabel(" + json.dumps(row) + ")")
+    assert label.startswith("UNKNOWN")
+    assert "NO TOUCH" not in label
+
+
+def test_complete_no_fill_retains_observed_negative_without_inventing_profitability():
+    row = complete_touch_proof()
+    rendered = render_loader("loadChasePolicyLab", {"proofs": [row]}, "missed-proof-body")
+    assert "NO TOUCH — COMPLETE APPLICABLE TAPE" in rendered
+    # No-touch can still lack a profitable/avoided-loss counterfactual.
+    assert "INSUFFICIENT_EVIDENCE" in rendered
+    assert "net UNAVAILABLE" in rendered
+
+
+@pytest.mark.parametrize("outcome", ["FULL_FILL", "PARTIAL_FILL"])
+def test_complete_supported_touch_preserved(outcome):
+    row = complete_touch_proof(True, outcome)
+    rendered = render_loader("loadChasePolicyLab", {"proofs": [row]}, "missed-proof-body")
+    assert "TOUCH OBSERVED — CONSERVATIVE TAPE SUPPORTED" in rendered
+
+
+def test_checkpoint_only_touch_not_upgraded_to_supported_conservative_touch():
+    row = complete_touch_proof(True, "UNKNOWN")
+    row["coverage"].update(status="INSUFFICIENT", missing_seconds=779)
+    rendered = render_loader("loadChasePolicyLab", {"proofs": [row]}, "missed-proof-body")
+    assert "UNKNOWN — checkpoint touch reported" in rendered
+    assert "TOUCH OBSERVED" not in rendered
+
+
+@pytest.mark.parametrize("row", [{}, {"conservative_touch": False},
+    {**complete_touch_proof(), "execution_outcome": "UNKNOWN"},
+    {**complete_touch_proof(), "conservative_touch": None}])
+def test_missing_touch_or_conflicting_outcome_is_unknown(row):
+    assert run_helpers("missedProofTouchLabel(" + json.dumps(row) + ")").startswith("UNKNOWN")
+
+
+def test_compressed_panel_qualification_label_does_not_exclude_all_shadow_research():
+    source = html()
+    assert "Other shadow simulations are assessed separately by the conservative execution evaluator" in source
+    row = {"qualification_status": "NOT_QUALIFICATION_ELIGIBLE_SHADOW_ONLY"}
+    rendered = render_loader("loadChasePolicyLab", {"ranked_schedules": [row]}, "chase-policy-body")
+    assert "DESCRIPTIVE ONLY — THIS SIGNED-COMPRESSED PANEL" in rendered
+    assert "NOT_QUALIFICATION_ELIGIBLE_SHADOW_ONLY" not in rendered
+    assert run_helpers("compressedScheduleQualification('UNKNOWN_IDENTITY_INCIDENT')") == "UNKNOWN_IDENTITY_INCIDENT"

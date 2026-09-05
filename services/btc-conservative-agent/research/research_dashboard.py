@@ -6446,7 +6446,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-chase-policy-lab">
     <h2>Chase Policy Lab</h2>
-    <div class="stale-banner" style="display:block;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"><strong>SHADOW-ONLY DESCRIPTIVE EVIDENCE</strong> · Never mixed with executed PnL or qualification.</div>
+    <div class="stale-banner" style="display:block;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"><strong>SIGNED COMPRESSED SCHEDULES — DESCRIPTIVE ONLY</strong> · This panel does not establish qualification. Other shadow simulations are assessed separately by the conservative execution evaluator; simulation alone neither proves nor excludes eligibility.</div>
     <p class="note" id="chase-policy-lab-note">Signed compressed schedules are joined to causal identity and checkpoint tape evidence.</p>
     <h3 id="chase-policy-leader-label">INSUFFICIENT EVIDENCE</h3>
     <pre id="chase-policy-top">No signed schedule evidence.</pre>
@@ -6751,7 +6751,7 @@ const EVIDENCE_SCOPES = {
   lanes: ['CURRENT CANONICAL TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
   ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
   chase: ['EXECUTED + SHADOW, SEPARATED', 'All available terminal chase outcomes are shown with paper execution and shadow/lab evidence kept distinct.'],
-  'chase-policy-lab': ['SIGNED COMPRESSED SHADOW — NOT QUALIFICATION ELIGIBLE', 'Descriptive schedule and missed-opportunity proof evidence; executed outcomes remain separate and unavailable unless explicitly matched.'],
+  'chase-policy-lab': ['SIGNED COMPRESSED SCHEDULES — DESCRIPTIVE ONLY', 'This panel is not a qualification result. Other shadow simulations use the separate conservative execution evaluator; executed outcomes remain separate unless explicitly matched.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
   combos: ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
@@ -6881,6 +6881,32 @@ function fmtUsd(v) {
 }
 function fmtExecutionUsd(v) { return metricNumber(v) == null ? 'UNAVAILABLE' : '$' + fmtUsd(v); }
 function fmtPct(v) { const value = metricNumber(v); return value == null ? 'UNAVAILABLE' : value + '%'; }
+function compressedScheduleQualification(status) {
+  return !status || status === 'NOT_QUALIFICATION_ELIGIBLE_SHADOW_ONLY'
+    ? 'DESCRIPTIVE ONLY — THIS SIGNED-COMPRESSED PANEL' : status;
+}
+function missedProofTouchLabel(row) {
+  const coverage = row.coverage || {};
+  // A missing touch is not an observed negative. The producer can retain
+  // checkpoint touches even when the independent conservative tape is absent.
+  const complete = coverage.status === 'COMPLETE'
+    && metricNumber(coverage.stage_ratio) === 1
+    && ['COMPLETE', 'SUPPORTED'].includes(coverage.tape_status)
+    && metricNumber(coverage.missing_seconds) === 0
+    && typeof coverage.tape_receipt === 'string' && coverage.tape_receipt.length > 0
+    && Array.isArray(coverage.identity_missing) && coverage.identity_missing.length === 0
+    && Array.isArray(coverage.rejection_codes) && coverage.rejection_codes.length === 0;
+  if (complete && row.conservative_touch === false
+      && row.conservative_fill_status === 'NO_FILL' && row.execution_outcome === 'NO_FILL')
+    return 'NO TOUCH — COMPLETE APPLICABLE TAPE';
+  if (complete && row.conservative_touch === true
+      && ['FULL_FILL', 'PARTIAL_FILL'].includes(row.conservative_fill_status)
+      && row.execution_outcome === row.conservative_fill_status)
+    return 'TOUCH OBSERVED — CONSERVATIVE TAPE SUPPORTED';
+  return row.conservative_touch === true
+    ? 'UNKNOWN — checkpoint touch reported; conservative evidence incomplete or inconsistent'
+    : 'UNKNOWN — touch not established in available tape';
+}
 function summaryEvidenceScope(data) {
   const stale = data?.stale || {};
   const freshness = stale.generation_freshness || {};
@@ -7344,13 +7370,13 @@ async function loadChasePolicyLab() {
     ? `${lab.leader_label || 'INSUFFICIENT_EVIDENCE'} — ${top.policy_id || 'UNKNOWN'}`
     : 'INSUFFICIENT EVIDENCE — NO SIGNED SCHEDULE ROWS';
   document.getElementById('chase-policy-top').textContent = top
-    ? `Checkpoints: ${(top.checkpoint_seconds||[]).map(x=>x+'s').join(' → ')} · Expiry: ${top.terminal_expiry_sec ?? '—'}s\nExecuted evidence: ${(top.executed||{}).status || 'UNAVAILABLE'}\nQualification: ${top.qualification_status || 'NOT ELIGIBLE'}`
+    ? `Checkpoints: ${(top.checkpoint_seconds||[]).map(x=>x+'s').join(' → ')} · Expiry: ${top.terminal_expiry_sec ?? '—'}s\nExecuted evidence: ${(top.executed||{}).status || 'UNAVAILABLE'}\nQualification: ${compressedScheduleQualification(top.qualification_status)}`
     : (lab.empty_reason || 'SOURCE_EMPTY_OR_UNAVAILABLE');
   document.getElementById('chase-policy-kpis').innerHTML = [
     ['Schedules retained', lab.all_schedule_count ?? rows.length],
-    ['Evidence world', 'SHADOW ONLY'],
+    ['Evidence world', 'SIGNED COMPRESSED SHADOW'],
     ['Leader label', lab.leader_label || 'INSUFFICIENT_EVIDENCE'],
-    ['Qualification', 'NOT ELIGIBLE'],
+    ['Qualification', 'DESCRIPTIVE ONLY — THIS PANEL'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('chase-policy-body').innerHTML = rows.map((row, index) => {
     const shadow = row.shadow || {};
@@ -7361,7 +7387,7 @@ async function loadChasePolicyLab() {
       + `<td>${fillRate}</td><td>shadow net ${shadow.net_pnl_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.net_pnl_usd)} / EV ${shadow.ev_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.ev_usd)}<br><small>return ${fmtPct(shadow.net_return_pct)} / ${fmtPct(shadow.ev_return_pct)} · executed ${(row.executed||{}).pnl_usd ?? 'UNAVAILABLE'} / ${(row.executed||{}).ev_usd ?? 'UNAVAILABLE'}</small></td>`
       + `<td>${shadow.max_drawdown_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.max_drawdown_usd)} / ${shadow.tail_loss_usd == null ? 'UNAVAILABLE USD' : fmtExecutionUsd(shadow.tail_loss_usd)}<br><small>${fmtPct(shadow.max_drawdown_pct)} / ${fmtPct(shadow.tail_loss_pct)}</small></td><td>${fmtPct(shadow.avg_mfe_pct)} / ${fmtPct(shadow.avg_mae_pct)}</td>`
       + `<td>${fmtPct(row.coverage_pct)} / ${confidence.label||'INSUFFICIENT'} / ${fmtPct(confidence.fill_rate_wilson_lower_95_pct)}</td>`
-      + `<td>${(row.regimes||[]).join(', ')||'UNAVAILABLE'}</td><td class="bad">${row.evidence_status||'INSUFFICIENT_EVIDENCE'}<br>${row.qualification_status||'NOT ELIGIBLE'}</td></tr>`;
+      + `<td>${(row.regimes||[]).join(', ')||'UNAVAILABLE'}</td><td class="bad">${row.evidence_status||'INSUFFICIENT_EVIDENCE'}<br>${compressedScheduleQualification(row.qualification_status)}</td></tr>`;
   }).join('') || '<tr><td colspan="12">No signed compressed shadow schedule evidence is available in this generation.</td></tr>';
   const proofs = proof.proofs || [];
   const counts = proof.classification_counts || {};
@@ -7375,7 +7401,7 @@ async function loadChasePolicyLab() {
   document.getElementById('missed-proof-body').innerHTML = proofs.slice(0, 100).map(row => {
     const coverage = row.coverage || {};
     return `<tr><td><strong>${row.classification}</strong></td><td>${row.episode_id||'—'}<br><small>${row.policy_id||'—'}</small></td><td>${row.direction||'—'}</td>`
-      + `<td>${row.conservative_touch ? 'TOUCHED' : 'NO TOUCH'} / net ${row.net_terminal_return_pct == null ? 'UNAVAILABLE' : row.net_terminal_return_pct+'%'} / USD ${row.net_pnl_usd == null ? 'UNAVAILABLE' : fmtExecutionUsd(row.net_pnl_usd)}</td>`
+      + `<td>${missedProofTouchLabel(row)} / net ${row.net_terminal_return_pct == null ? 'UNAVAILABLE' : row.net_terminal_return_pct+'%'} / USD ${row.net_pnl_usd == null ? 'UNAVAILABLE' : fmtExecutionUsd(row.net_pnl_usd)}</td>`
       + `<td>${fmtPct(row.mfe_pct)} / ${fmtPct(row.mae_pct)}</td><td>${coverage.status||'INSUFFICIENT'} (stages ${coverage.stage_ratio ?? 0}; tape ${coverage.tape_status||'UNAVAILABLE'}; missing seconds ${coverage.missing_seconds ?? 'UNAVAILABLE'})</td>`
       + `<td>${row.regime||'UNAVAILABLE'} / ${row.adx ?? 'UNAVAILABLE'}</td><td>${(row.contraindications||[]).join('; ')||'none recorded'}</td></tr>`;
   }).join('') || `<tr><td colspan="8">${proof.empty_reason || 'No proof rows exist.'}</td></tr>`;
