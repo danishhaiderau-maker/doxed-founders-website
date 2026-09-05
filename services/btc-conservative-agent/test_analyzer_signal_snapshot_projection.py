@@ -156,3 +156,62 @@ def test_real_129_row_group_refuses_complete_projection(tmp_path):
     assert projection["status"] == "UNKNOWN"
     assert projection["contexts"] == []
     assert projection["reason_codes"] == ["SIGNAL_SNAPSHOT_LIFECYCLE_GROUP_LIMIT"]
+
+
+def test_unpinned_opportunity_cannot_borrow_valid_episode_snapshot(tmp_path):
+    generation, _, _, _ = make_dataset(tmp_path)
+    path = tmp_path / "v3/ledgers/opportunity.jsonl"
+    row = json.loads(path.read_text())
+    row["opportunity_id"] = "unbound-opportunity"
+    path.write_text(canonical_json(row) + "\n")
+    # Deliberately retain the previous generation/pin while the materializer
+    # sees the altered row with the original valid epoch/episode pair.
+    report = project(tmp_path, generation)
+    assert report["episode_receipts"][0]["opportunity_id"] == "unbound-opportunity"
+    projection = evidence(report)
+    assert projection["status"] == "UNKNOWN"
+    assert projection["contexts"] == []
+    assert projection["reason_codes"] == ["SIGNAL_SNAPSHOT_OPPORTUNITY_MEMBERSHIP_NOT_VERIFIED"]
+
+
+@pytest.mark.parametrize("valid_opened", [False, True])
+def test_explicit_null_reference_is_unknown_not_absent_legacy(tmp_path, valid_opened):
+    generation, relative, rows, _ = make_dataset(tmp_path, duplicate_terminal=valid_opened)
+    before = project(tmp_path, generation)
+    rows[-1]["research_signal_snapshot_ref"] = None
+    (tmp_path / relative).write_text("".join(canonical_json(row) + "\n" for row in rows))
+    report = project(tmp_path, _repin_dataset(tmp_path))
+    projection = evidence(report)
+    assert projection["status"] == "UNKNOWN"
+    assert "SIGNAL_SNAPSHOT_REFERENCE_INVALID" in projection["reason_codes"]
+    assert len(projection["contexts"]) == (2 if valid_opened else 1)
+    assert all(context["status"] == "UNKNOWN" for context in projection["contexts"])
+    if valid_opened:
+        assert "SIGNAL_SNAPSHOT_EVENT_REFERENCE_CONFLICT" in projection["reason_codes"]
+    assert before["summaries"] == report["summaries"]
+
+
+def test_projection_records_exact_verified_opportunity_membership(tmp_path):
+    generation, _, _, _ = make_dataset(tmp_path, events=2)
+    projection = evidence(project(tmp_path, generation))
+    provenance = projection["source_opportunity_row"]
+    state = json.loads((tmp_path / ".fly-sync-state.json").read_text())
+    assert provenance["source_id"] == "v3/ledgers/opportunity.jsonl"
+    assert provenance["source_sha256"] == state[provenance["source_id"]]["sha256"]
+    assert len(provenance["row_sha256"]) == 64
+    assert len(projection["contexts"]) == 2
+    assert projection["status"] == "VERIFIED_FIRST_COLLECTOR_CAPTURE"
+
+
+def test_bad_event_reference_retains_independent_verified_event_context(tmp_path):
+    _, relative, rows, _ = make_dataset(tmp_path, events=2)
+    rows.append({**rows[0], "record_id": "lifecycle:event-1:terminal", "research_signal_snapshot_ref": None})
+    (tmp_path / relative).write_text("".join(canonical_json(row) + "\n" for row in rows))
+    projection = evidence(project(tmp_path, _repin_dataset(tmp_path)))
+    assert projection["status"] == "UNKNOWN"
+    contexts = projection["contexts"]
+    assert all(context["status"] == "UNKNOWN" for context in contexts if context["event_id"] == "event-1")
+    independent = [context for context in contexts if context["event_id"] == "event-2"]
+    assert len(independent) == 1
+    assert independent[0]["status"] == "VERIFIED_FIRST_COLLECTOR_CAPTURE"
+    assert independent[0]["fields"]["rsi_at_signal"] == 43

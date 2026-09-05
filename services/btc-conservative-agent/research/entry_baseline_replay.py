@@ -130,7 +130,8 @@ def _context_ledger_sources(root: Path, pins: Mapping, records: Mapping, index: 
 
 
 def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
-                                index: VerifiedLedgerRowIndex | None, *, epoch: str, episode: str) -> dict:
+                                index: VerifiedLedgerRowIndex | None, *, epoch: str, episode: str,
+                                opportunity: Mapping) -> dict:
     """Expose event-scoped first-capture evidence without rewriting opportunity truth."""
     result = {"schema": "verified_signal_snapshot_projection_v1", "status": "UNAVAILABLE",
               "contexts": [], "reason_codes": [], "observed_at_signal_claim": False,
@@ -138,6 +139,20 @@ def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
     if index is None:
         result["reason_codes"] = ["SIGNAL_SNAPSHOT_PINNED_GENERATION_UNAVAILABLE"]
         return result
+    # The normal materializer rereads opportunities independently of this
+    # verified index. Never attach pinned event evidence to an unpinned row
+    # merely because that row happens to reuse a valid epoch/episode pair.
+    opportunity_source = "v3/ledgers/opportunity.jsonl"
+    opportunity_proof = (index.envelope(opportunity_source, opportunity)
+                         if opportunity_source in index.sources else None)
+    if (opportunity_proof is None or opportunity.get("epoch_id") != epoch
+            or opportunity.get("episode_id") != episode):
+        result.update(status="UNKNOWN", reason_codes=["SIGNAL_SNAPSHOT_OPPORTUNITY_MEMBERSHIP_NOT_VERIFIED"])
+        return result
+    result["source_opportunity_row"] = {
+        "source_id": opportunity_source, "source_sha256": index.sources[opportunity_source],
+        "record_id": opportunity.get("record_id"), "row_sha256": opportunity_proof["row_sha256"],
+    }
     lifecycle_sources = [name for name in pins
         if re.fullmatch(r"v3/ledgers/lifecycle\.jsonl(?:\.[1-9][0-9]*)?", name)]
     if not lifecycle_sources:
@@ -156,9 +171,9 @@ def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
     from collector_signal_snapshot import load_signal_snapshot, MAX_SNAPSHOT_BYTES
     for envelope in envelopes:
         row = envelope["row"]
-        ref = row.get("research_signal_snapshot_ref")
-        if ref is None:
+        if "research_signal_snapshot_ref" not in row:
             continue
+        ref = row["research_signal_snapshot_ref"]
         event_id = row.get("event_id")
         key = (str(event_id), canonical_json({"reference": ref, "signal_ts": row.get("signal_ts")}))
         membership = {"source_id": envelope["source_id"], "source_sha256": index.sources[envelope["source_id"]],
@@ -812,6 +827,7 @@ def _materialize_v3_opportunity_replay(data_dir: str | Path, *, incident_input=N
                     "signal_snapshot_evidence": _signal_snapshot_projection(
                         Path(data_dir), context_pins, context_records, context_index,
                         epoch=str(dataset_epoch or ""), episode=str(row.get("episode_id") or ""),
+                        opportunity=row,
                     ),
                     "_baseline_context_sources": episode_context_sources,
                     "_baseline_context_pins": context_pins,
