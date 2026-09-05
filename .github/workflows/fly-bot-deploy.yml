@@ -39,6 +39,11 @@ on:
           - expand-storage
           - close-paper-position
           - flatten-paper-exposure
+      transport_bundles:
+        description: Opt in to bounded transport package generation for this normal deployment only
+        required: false
+        default: false
+        type: boolean
       expected_unready_revision:
         description: Exact 12-character Fly revision permitted for recover-unready
         required: false
@@ -885,6 +890,14 @@ jobs:
           python -m pytest test_collector_v22_integrity.py test_compressed_shadow_chase.py test_paper_lifecycle_restart.py test_cleanup_characterization_contract.py test_v3_lane_entry_bot_wiring.py -q
           python -m pytest test_v31_overview_best_policy_counts.py -q
 
+      - name: Verify bounded transport package and original acknowledgment contracts
+        # The laptop PowerShell promotion harness is Windows-only and is
+        # verified separately before downloader handoff. These portable tests
+        # cover the deployed worker/API and the actual Python client adapter.
+        run: |
+          python -m pytest test_data_sync_bundle_transport.py test_data_sync_bundle_worker.py test_data_sync_bundle_runtime.py test_data_sync_bundle_storage.py test_data_sync_bundle_api.py test_data_sync_bundle_client.py test_data_sync_bundle_bot_integration.py test_fly_sync_bundle_adapter.py -q
+          python -m pytest ../../scripts/test_fly_transport_bundle_workflow.py -q
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -1335,9 +1348,12 @@ jobs:
           PY
 
       - name: Deploy the exact source revision
-        run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}"
+        run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}" --env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=${TRANSPORT_BUNDLES_ENABLED}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          # Only an explicit normal-deploy opt-in enables acceleration. Pushes,
+          # omitted inputs, and recovery modes deploy it disabled.
+          TRANSPORT_BUNDLES_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' && inputs.transport_bundles && '1' || '0' }}
 
       - name: Re-enter maintenance and flatten the exact deployed revision
         env:

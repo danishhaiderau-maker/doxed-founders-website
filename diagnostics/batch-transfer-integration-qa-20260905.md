@@ -62,8 +62,9 @@ only an empty unique directory may be removed without recursive deletion.
 
 ## Still required before activation / completion
 
-- Review/commit exact source without unrelated dirty changes; regression suites.
-- Full-size backlog fixture and pressure/latency canary on guarded exact deploy.
+- Integrated source committed as 91582de; clean-candidate regression and guarded
+  deployment remain separate receipts.
+- Production pressure/latency canary on guarded exact deploy.
 - Recurring derivative retention/reclamation, including diagnosis of interrupted
  orphan packages and failed laptop staging. Admission bounds are not GC receipts.
 - Verified complete mirror/ACK, current atomic analyzer, new-generation UI QA,
@@ -71,3 +72,29 @@ only an empty unique directory may be removed without recursive deletion.
 
 Passing these source tests does not establish profitable strategies, current
 production data, sustained faster sync, or permission to delete Fly evidence.
+
+## Full-backlog terminal fixture receipt
+
+The real subprocess worker, authenticated API test client, and verified download
+client completed all 34,433 synthetic small receipt files: 24,195,289 payload
+bytes, 138 inventory pages, 276 packages, 553 HTTP requests, 276 worker slices.
+Every member's bytes and every original ACK row matched exactly. Maximum child
+slice was 1.531 seconds; total local fixture time was 681.547 seconds. Conservative
+derivative admission estimate was 174,370,084 bytes. Temporary fixture cleanup
+completed; process exited 0. This is not Fly network throughput or a source ACK.
+
+Deployment preflight also found older canonical-to-engine drift, including the
+durable relay outbox. The reviewed index mirrors only committed canonical bot
+and outbox bytes; unrelated dirty engine edits remain 20 insertions/6 deletions.
+The clean exported candidate passed full signal parity, combo fixtures and
+research/showcase signal-flag equality. Explicit normal-deploy batching opt-in
+and portable package tests are now added to the workflow; default remains OFF.
+Clean exported candidate regression: 325 passed, 1 host-dependent skip in
+180.09 seconds across package integration, legacy sync/backoff/pacing, active
+registry/execution graph and workflow contracts. This resolves the mixed-tree
+test ambiguity above for the reviewed candidate only, not the remaining edits.
+
+Read-only pre-canary production sample at 2026-09-05T02:47:39-42Z: df45887e1526;
+/health 200/1129ms, /ready 200/344ms, /api/status 200/393ms; paper-only, unpaused,
+Bitfinex disabled, relay disarmed, pending 0/open 0. One started machine. Batching
+flag absent. This single snapshot is not proof of sustained cycle advancement.

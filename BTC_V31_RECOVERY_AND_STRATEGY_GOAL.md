@@ -17,7 +17,7 @@ This plan incorporates Cursor's handoff and the current independent code, operat
 
 ## Ordered work and acceptance
 
-### Reality-check checkpoint — 2026-09-05T02:09Z
+### Reality-check checkpoint — 2026-09-05, reviewed source 91582de
 
 The end-to-end objective is NOT COMPLETE. Test pass percentages, source commits,
 manifest cursor percentages and time spent are not overall readiness percentages.
@@ -26,16 +26,28 @@ Completed and evidenced in this work window:
 
 - Operational: user-authorized download park, scheduled task disabled, exact
   PID10172 absent, downloaded bytes/checkpoint retained. Reconfirmed at02:09Z.
-- Committed source: f3cb831 bounded package transport,95b0d82 resumable package
-  worker,293a1ae prebuilt authenticated package API. These are not deployed.
-- Further local source: isolated subprocess coordinator and backend registration;
-  pressure/deadline/identity/authentication/path/chunk-replacement hardening.
-  These newer edits remain uncommitted pending integration review. Never deploy
-  the unrelated dirty worktree wholesale.
-- Executable verification:84 batch backend/core/API/runtime tests passed,1
-  host-dependent skip; separately85 targeted analyzer/shadow/scorecard tests
-  passed. These suites overlap earlier reported tests; do not add pass counts
-  across runs as if they represented unique coverage.
+- Committed source: 91582deb2e8530db97f9774f3c6fe2aa507e8f82 integrates
+  bounded package preparation, authenticated retrieval, verified client extraction,
+  existing atomic promotion/checkpointing and unchanged original-manifest ACK.
+  Both activation flags remain OFF. This commit is not pushed or deployed.
+- Executable verification: 146 passed, 1 host-dependent skip in the focused
+  integration suite; PowerShell parsing and Python compilation passed. A fixture
+  transferred 384 small objects in 3 packages through 7 HTTP requests with exact
+  bytes and original ACK rows preserved. This is not production throughput.
+  Separately 85 analyzer/shadow/scorecard tests passed. Do not add overlapping
+  test runs together as unique coverage.
+- The 34,433-file full-backlog fixture PASSED: 276 packages, 553 HTTP requests,
+  every byte and original ACK row equal, 681.547 seconds total local fixture,
+  1.531 seconds maximum worker slice. Temporary fixture cleanup completed.
+  This is synthetic local evidence, not production throughput or mirror ACK.
+- Independent deployment preflight identified exact remaining activation work:
+  committed bot/engine/manifest signal parity fails; the guarded workflow omits
+  the new batch tests and has no explicit backend batching activation mechanism.
+  Clean exported candidate now passes full parity after mirroring committed bot
+  and relay outbox, preserving dirty engine edits. Workflow opt-in/tests are
+  implemented locally; they are not deployed. Do
+  not run the unrelated bybit_bot source importer. GitHub and stored Fly CLI
+  authentication work; missing authentication is not the current blocker.
 
 Not delivered yet: faster production transfer, terminal mirror ACK, latest atomic
 analyzer publication, current static/dynamic winner, current-generation visual
@@ -43,13 +55,14 @@ QA, completed storage cleanup, measured Neon savings or Bitfinex live readiness.
 
 Immediate delivery sequence (no further roadmap expansion before these receipts):
 
-1. Root integrates the batch client; disjoint agent owns only its pure client
-   module/tests. Prove bounded package retrieval, original-row identity/hash
-   equality, interrupted transfer recovery and unchanged per-path ACK semantics.
-2. Independent review plus large many-small-file fixture; selectively commit
-   reviewed owned changes. Resolve any exact new test defect without unrelated
-   refactoring. Compile/parse the exact PowerShell client before activation.
-3. Guarded exact-source deployment and one controlled download restart; measure
+1. Full-backlog fixture is complete; retain the terminal receipt and move on.
+   Integration is committed; do not repeat finished component work as progress.
+2. Complete clean-candidate regression for repaired signal parity, focused batch
+   tests and explicit opt-in activation in the guarded workflow. Verify a clean exact
+   candidate, push it, and check the dispatched workflow's full head SHA. Never
+   build or deploy the mixed working tree or enable a second downloader owner.
+3. Guarded exact-source deployment, backend package canary, and then one controlled
+   download restart with the laptop flag set in its actual owner; measure
    verified bytes/files per minute alongside trading endpoint latency and cycles.
    If the new path fails, retain verified data, classify and repair; never silently
    fall back to hours of serial transfers without reporting it.

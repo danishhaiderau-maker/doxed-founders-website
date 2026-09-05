@@ -62,33 +62,6 @@ from emergency_evidence_wal import EmergencyEvidenceWal
 from relay_event_outbox import RelayEventOutbox
 
 
-class RelayLifecycleCommitError(RuntimeError):
-    """A canonical paper transition could not be durably committed."""
-
-
-def _paper_lifecycle_transaction(function):
-    """Serialize mutation with lifecycle commit and restore exact preimage on failure."""
-    @functools.wraps(function)
-    def wrapped(*args, **kwargs):
-        lifecycle_lock = globals().get("paper_lifecycle_file_lock")
-        mutation_lock = globals().get("trade_lock")
-        if lifecycle_lock is None or mutation_lock is None:
-            return function(*args, **kwargs)
-        with lifecycle_lock:
-            with mutation_lock:
-                before_positions = copy.deepcopy(globals().get("open_positions", []))
-                before_orders = copy.deepcopy(globals().get("pending_orders", []))
-                before_trades_map = copy.deepcopy(globals().get("trades_map", {}))
-            try:
-                return function(*args, **kwargs)
-            except RelayLifecycleCommitError:
-                with mutation_lock:
-                    open_positions[:] = before_positions
-                    pending_orders[:] = before_orders
-                    trades_map.clear()
-                    trades_map.update(before_trades_map)
-                raise
-    return wrapped
 from position_registry import (
     PositionCloseClaimScope,
     finalize_position_close,
@@ -4690,9 +4663,10 @@ def _log_ladder_exit_audit(pos: dict, price: float, unreal_pct: float, peak: flo
         f"unreal={unreal_pct:.2f}% crossed={crossed} [PIPELINE ENFORCEMENT]"
     )
 
-@_paper_lifecycle_transaction
 def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     """Apply the active registry-owned tile policy and persist partial receipts."""
+    source_pos = pos
+    pos = copy.deepcopy(source_pos)
     lane = str(pos.get("research_lane") or "").upper()
     if lane not in COMBO_EXECUTION_LANES:
         return False
@@ -4715,6 +4689,8 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
         peak_price=current_peak,
     )
     if not action:
+        with trade_lock:
+            source_pos["policy_peak_price"] = current_peak
         return False
     pos["policy_peak_price"] = action.peak_price
     if action.partial_key is not None:
@@ -4752,18 +4728,40 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     if remaining_after <= 0:
         if reason == "PATH_END_120M":
             pos["path_end_mark_price"] = float(price)
-        close_position(pos, reason)
+        with trade_lock:
+            source_pos.clear()
+            source_pos.update(pos)
+        close_position(source_pos, reason)
         return True
     prior_qty = float(pos.get("qty") or 0)
     pos["qty"] = original_qty * remaining_after
-    _push_showcase_relay_event("POSITION_REDUCED", pos.get("trade_id"), {
-        "direction": pos.get("dir"),
-        "prior_qty": prior_qty, "reduced_qty": close_qty,
-        "remaining_qty": pos["qty"], "fill_price": float(price),
-        "reduce_only": True, "research_lane": pos.get("research_lane"),
-    })
+    trade_id = str(pos.get("trade_id") or "")
+
+    def target_mutator(target):
+        rows = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") == trade_id]
+        if len(rows) != 1:
+            raise RuntimeError("partial-reduction target identity mismatch")
+        rows[0].clear()
+        rows[0].update(_canonicalize_paper_position_snapshot(copy.deepcopy(pos)))
+
+    def live_mutator():
+        if source_pos not in open_positions or str(source_pos.get("status") or "").upper() == "CLOSED":
+            raise RuntimeError("partial-reduction source is no longer open")
+        source_pos.clear()
+        source_pos.update(copy.deepcopy(pos))
+
+    _commit_paper_lifecycle_transition(
+        "POSITION_REDUCED", trade_id,
+        {
+            "direction": pos.get("dir"), "prior_qty": prior_qty,
+            "reduced_qty": close_qty, "remaining_qty": pos["qty"],
+            "fill_price": float(price), "reduce_only": True,
+            "research_lane": pos.get("research_lane"),
+        },
+        target_mutator=target_mutator, live_mutator=live_mutator,
+        canonical_lock=position_close_lock,
+    )
     _emit_genome_execution_event("PARTIAL_EXIT", {"trade_id": pos.get("trade_id"), **receipt})
-    save_paper_lifecycle(reason=f"partial_exit:{reason}")
     return False
 
 
@@ -9080,8 +9078,6 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
     if legacy_secret:
         headers["X-Bot-Control-Secret"] = legacy_secret
     started = time.perf_counter()
-    source_preimage = None
-    source_commit_attempted = False
     try:
         response = _relay_http_session.post(url, data=body, headers=headers, timeout=8.0)
         response.raise_for_status()
@@ -9093,12 +9089,6 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
             commit_before_ack = lambda: _commit_marketable_relay_payload(payload)
         if callable(commit_before_ack):
             with paper_lifecycle_file_lock:
-                with trade_lock:
-                    source_preimage = (
-                        copy.deepcopy(open_positions), copy.deepcopy(pending_orders),
-                        copy.deepcopy(trades_map),
-                    )
-                source_commit_attempted = True
                 if commit_before_ack() is not True:
                     raise RuntimeError("relay source finalization rejected")
                 ack_state = _build_paper_lifecycle_payload(
@@ -9120,16 +9110,6 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
         })
         return True
     except Exception as exc:
-        if source_commit_attempted and source_preimage is not None:
-            with paper_lifecycle_file_lock, trade_lock:
-                open_positions[:] = source_preimage[0]
-                pending_orders[:] = source_preimage[1]
-                trades_map.clear()
-                trades_map.update(source_preimage[2])
-            set_execution_paused("RELAY_LIFECYCLE_ACK_COMMIT_FAILED")
-            raise RelayLifecycleCommitError(
-                "relay source/ACK generation did not commit atomically"
-            ) from exc
         _relay_event_outbox.fail(event_id, exc)
         _relay_push_state.update({
             "last_ts": time.time(), "last_event": payload.get("event"),
@@ -9321,6 +9301,122 @@ def _platform_relay_evidence_lane_for_event(
     return derived_lane
 
 
+RELAY_CANONICAL_TRANSITION_EVENTS = frozenset({
+    "ORDER_PLACED", "LIMIT_UPDATED", "POSITION_OPENED", "POSITION_REDUCED",
+    "POSITION_CLOSED", "ORDER_EXPIRED", "ORDER_CANCELLED",
+})
+paper_lifecycle_transition_lock = threading.RLock()
+
+
+def _build_showcase_relay_event_payload(event: str, trade_id: str, extra: dict = None):
+    """Build and validate the immutable source event before a lifecycle PREPARE."""
+    if not is_active_dashboard_owner():
+        return None
+    payload = {
+        "event": event, "trade_id": trade_id, "ts": utc_iso(),
+        **_dashboard_owner_metadata(),
+    }
+    if isinstance(extra, dict):
+        payload.update(copy.deepcopy(extra))
+    if event in RELAY_CANONICAL_TRANSITION_EVENTS - {"ORDER_PLACED"}:
+        evidence_only = event == "POSITION_REDUCED"
+        resolver = _platform_relay_evidence_lane_for_event if evidence_only else _platform_relay_lane_for_event
+        relay_lane = resolver(trade_id, payload.get("research_lane"))
+        allowed = PLATFORM_RELAY_CONFIGURED_LANES if evidence_only else PLATFORM_RELAY_ELIGIBLE_LANES
+        if relay_lane not in allowed:
+            return None
+        payload["research_lane"] = relay_lane
+    if (
+        event in RELAY_CANONICAL_TRANSITION_EVENTS - {"ORDER_PLACED"}
+        and str(payload.get("direction") or "").upper() in ("LONG", "SHORT")
+        and (
+            (event == "LIMIT_UPDATED" and isinstance(payload.get("limit_price"), (int, float))
+             and float(payload.get("qty") or 0) > 0
+             and payload.get("entry_limit_policy") in EXECUTABLE_ENTRY_POLICY_VERSIONS
+             and payload.get("executable") is True)
+            or (event == "POSITION_OPENED" and isinstance(payload.get("fill_price"), (int, float)))
+            or (event == "POSITION_CLOSED" and isinstance(payload.get("exit_price"), (int, float)))
+            or (event == "ORDER_EXPIRED" and isinstance(payload.get("source_expires_at"), str))
+            or (event == "ORDER_CANCELLED" and isinstance(payload.get("reason"), str)
+                and isinstance(payload.get("limit_price"), (int, float)))
+            or (event == "POSITION_REDUCED" and all(
+                isinstance(payload.get(key), (int, float))
+                for key in ("prior_qty", "reduced_qty", "remaining_qty", "fill_price")
+            ) and float(payload.get("prior_qty") or 0) > 0
+                and float(payload.get("reduced_qty") or 0) > 0
+                and float(payload.get("remaining_qty") or 0) > 0
+                and float(payload.get("fill_price") or 0) > 0
+                and abs(float(payload["prior_qty"]) - float(payload["reduced_qty"])
+                        - float(payload["remaining_qty"])) <= 0.00000001)
+        )
+    ):
+        payload["schema"] = "dcf-showcase-intent-v1"
+    return payload
+
+
+def _commit_paper_lifecycle_transition(
+    event: str,
+    trade_id: str,
+    extra: dict,
+    *,
+    target_mutator,
+    live_mutator,
+    canonical_lock=None,
+    wait_for_durable_receipt: bool = False,
+    commit_before_ack=None,
+):
+    """PREPARE target, swap live state, then publish target+event atomically.
+
+    All canonical readers/mutators participating in paper state use
+    ``trade_lock``. Holding it from snapshot construction through COMMIT means
+    no thread can observe or save the live target without its durable event.
+    A crash after PREPARE is completed from the full target by outbox startup;
+    a COMMIT error leaves the WAL intact and pauses execution for reconciliation.
+    """
+    payload = _build_showcase_relay_event_payload(event, trade_id, extra)
+    if payload is None:
+        raise RuntimeError(f"relay lifecycle event rejected for {event}")
+    suggested = payload.get("event_seq") if isinstance(payload.get("event_seq"), int) else None
+    record = None
+    try:
+        with paper_lifecycle_transition_lock:
+            if canonical_lock is not None:
+                canonical_lock.acquire()
+            try:
+                with paper_lifecycle_file_lock:
+                    with trade_lock:
+                        target = _build_paper_lifecycle_payload(
+                            reason=f"relay_transition:{event}"
+                        )
+                        target_mutator(target)
+                        # Bootstrap an explicit preimage when this is the first
+                        # lifecycle transition after a clean installation.
+                        if not os.path.exists(PAPER_LIFECYCLE_FILE):
+                            bootstrap = _relay_event_outbox.decorate_lifecycle(
+                                _build_paper_lifecycle_payload("transition_bootstrap")
+                            )
+                            _relay_event_outbox._atomic_write(bootstrap)
+                        record = _relay_event_outbox.prepare_transition(
+                            target, payload, suggested
+                        )
+                        live_mutator()
+                        _relay_event_outbox.commit_prepared(record["event_id"])
+            finally:
+                if canonical_lock is not None:
+                    canonical_lock.release()
+    except Exception as exc:
+        set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
+        raise RuntimeError(
+            f"canonical relay lifecycle transaction failed for {event}"
+        ) from exc
+    if wait_for_durable_receipt:
+        result = _drain_relay_event_outbox_once(
+            record["event_id"], commit_before_ack=commit_before_ack
+        )
+        return result.get("acked") == 1
+    return True
+
+
 def _push_showcase_relay_event(
     event: str,
     trade_id: str = None,
@@ -9435,7 +9531,7 @@ def _push_showcase_relay_event(
             "ORDER_CANCELLED",
         }:
             set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
-            raise RelayLifecycleCommitError(
+            raise RuntimeError(
                 f"canonical relay lifecycle commit failed for {event}"
             ) from exc
         return False
@@ -9655,10 +9751,10 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         logger.error(f"[INTENT WEBHOOK] durable enqueue failed trade={trade_id}: {exc}")
         if event == "ORDER_PLACED":
             set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
-            raise RelayLifecycleCommitError("canonical ORDER_PLACED commit failed") from exc
+            raise RuntimeError("canonical ORDER_PLACED commit failed") from exc
 
 
-def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None, signal: dict = None):
+def record_approve_outcome(status: str, reason: str = None, eff_thr: float = None, trade_id: str = None, edge: float = None, ai: dict = None, signal: dict = None, *, publish_relay: bool = True):
     with state_lock:
         state["last_approve_outcome"] = {
             "status": status,
@@ -9670,11 +9766,11 @@ def record_approve_outcome(status: str, reason: str = None, eff_thr: float = Non
             "win_prob": (ai or {}).get("win_prob") or state.get("last_ai", {}).get("win_prob"),
             "direction": (ai or {}).get("direction") or state.get("last_ai", {}).get("direction"),
         }
-    if status == "PENDING" and trade_id:
+    if publish_relay and status == "PENDING" and trade_id:
         # Visibility-only, signed exact-limit intent. It cannot authorize an
         # exchange order; the relay waits for ORDER_PLACED.
         emit_signal_webhook("APPROVE_PENDING", signal, ai)
-    elif status == "EXECUTED" and trade_id:
+    elif publish_relay and status == "EXECUTED" and trade_id:
         # Fail closed when signing is unavailable; never fall back to the old
         # percentage-derived unsigned money contract.
         emit_signal_webhook("ORDER_PLACED", signal, ai)
@@ -11743,7 +11839,6 @@ def _commit_position_open_lifecycle(pos, master, signal, order, fill_px, opened_
         return snapshot
 
 
-@_paper_lifecycle_transaction
 def _finalize_position_open_lifecycle(pos, master, signal, order, fill_px, opened_ts):
     """Publish only after OPEN won the terminal-state commit race.
 
@@ -11771,18 +11866,6 @@ def _finalize_position_open_lifecycle(pos, master, signal, order, fill_px, opene
         "research_lane": pos.get("research_lane"),
         "stop_loss": pos.get("sl"),
     })
-    _push_showcase_relay_event(
-        "POSITION_OPENED",
-        order.get("trade_id"),
-        {
-            "ts": opened_ts,
-            "direction": order.get("signal_dir"),
-            "fill_price": fill_px,
-            "qty": order.get("qty"),
-            "research_lane": (signal or {}).get("research_lane")
-            or order.get("research_lane"),
-        },
-    )
     _relay_mirror(
         "FILLED",
         {
@@ -12698,6 +12781,7 @@ _touch_grid_book = {}
 _compressed_shadow_chase_book = {}
 _compressed_shadow_seen_call_ids = set()
 _compressed_shadow_recovery_attempted = False
+_discovery_touch_grid_seen_call_ids = set()
 _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
@@ -12961,6 +13045,7 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
             _compressed_shadow_chase_book.clear()
             _compressed_shadow_seen_call_ids.clear()
             _compressed_shadow_recovery_attempted = True
+        _discovery_touch_grid_seen_call_ids.clear()
         _order_multiverse_state.clear()
         _order_multiverse_pending_src.clear()
         _order_multiverse_path_complete.clear()
@@ -12998,9 +13083,8 @@ def _arm_chase_offset_touch_grid(signal: dict):
     if not isinstance(signal, dict):
         return
     if is_patient_chase_lane(signal.get("research_lane")):
-        # This generic 0.01–0.30% research grid labels one 0.10% anchor as the
-        # live/original order. OFFSET_029 has its own exact 0.29% paper anchor
-        # and lifecycle, so mixing the schemas would falsify its evidence.
+        # Family tiles keep their exact paper anchors. Discovery grid is armed
+        # once per shared AI call via `_arm_shared_discovery_touch_grid`.
         return
     try:
         price = float(
@@ -15364,6 +15448,74 @@ def _record_compressed_shadow_arm_result(
     )
 
 
+def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
+    """Arm one shadow-only 0.01–0.30% touch grid per shared AI APPROVE.
+
+    Family tiles skip the per-lane grid so their paper anchors stay pure.
+    Discovery still needs the full offset grid joined by ``shared_ai_call_id``.
+    Never places paper or live orders.
+    """
+    if not ai_decision_should_execute(ai):
+        return False
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx).strip()
+    raw_direction = str(
+        (ai or {}).get("candidate_direction")
+        or (ai or {}).get("direction")
+        or (ai or {}).get("raw_direction")
+        or ""
+    ).upper()
+    if not call_id or raw_direction not in ("LONG", "SHORT"):
+        return False
+    direction = raw_direction
+    if invert_signal_active():
+        direction = "SHORT" if raw_direction == "LONG" else "LONG"
+    if call_id in _discovery_touch_grid_seen_call_ids:
+        return False
+    raw_ts = (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts")
+    try:
+        signal_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        signal_ts = time.time()
+    signal_price = float(
+        (ctx or {}).get("price")
+        or ((ctx or {}).get("market_context") or {}).get("price")
+        or state.get("rest_price")
+        or state.get("last_trade_price")
+        or state.get("price")
+        or 0
+    )
+    if signal_price <= 0:
+        return False
+    trade_id = "discovery-grid-" + hashlib.sha256(
+        f"{call_id}|discovery_touch_grid_v1".encode("utf-8")
+    ).hexdigest()[:20]
+    ttl_sec = 1800.0
+    rows = arm_touch_grid_rows(
+        trade_id=trade_id,
+        direction=direction,
+        signal_price=signal_price,
+        signal_ts=signal_ts,
+        ttl_sec=ttl_sec,
+        # No tile paper anchor is claimed as live_orig for discovery rows.
+        live_offset_pct=-1.0,
+        invert_on=invert_signal_active(),
+    )
+    for row in rows:
+        row["places_live_order"] = False
+        row["discovery_shadow_only"] = True
+        row["shared_ai_call_id"] = call_id
+        row["note"] = "discovery path-touch only; no paper/live order"
+        _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
+    _touch_grid_book[trade_id] = new_grid_state(rows)
+    _discovery_touch_grid_seen_call_ids.add(call_id)
+    logger.info(
+        f"[TOUCH GRID] discovery armed shared_ai_call_id={call_id} "
+        f"trade_id={trade_id} offsets=0.01-0.30 shadow_only "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+    return True
+
+
 def _arm_shared_compressed_shadow_chase(ctx: dict, ai: dict) -> bool:
     """Arm one non-executable compressed schedule per executable AI call."""
     if not ai_decision_should_execute(ai):
@@ -16551,6 +16703,25 @@ def _enrich_combo_lane_features(features: dict = None, ctx: dict = None) -> dict
     return out
 
 
+def _causal_feature_observation(value, observed_ts: float):
+    """Stamp one pre-decision observation; keep missing values explicit."""
+    return {"value": value, "observed_ts": float(observed_ts)}
+
+
+def _atr_pct_bucket(atr_pct) -> str | None:
+    """Bucket ATR% using the same HIGH/MED/LOW/FLAT labels as vol."""
+    if atr_pct is None:
+        return None
+    # Field is percent units (0.55 => 0.55%); volatility helper wants fraction.
+    return _volatility_bucket(float(atr_pct) / 100.0)
+
+
+def _realized_vol_pct_bucket(vol_pct) -> str | None:
+    if vol_pct is None:
+        return None
+    return _volatility_bucket(float(vol_pct) / 100.0)
+
+
 def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = None) -> dict:
     """Freeze one lane-independent, pre-decision market snapshot.
 
@@ -16569,19 +16740,64 @@ def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = No
         or {}
     )
     trend = market_context.get("trend_strength") or {}
-    source["market_context"] = market_context
-    source["cycle_3m_universe"] = cycle
-    source["regime"] = (
+    raw_observed = (
+        context.get("shared_ai_call_ts_epoch")
+        or context.get("signal_ts")
+        or context.get("created_ts_ts")
+        or source.get("observed_ts")
+        or source.get("signal_ts")
+    )
+    try:
+        observed_ts = float(raw_observed)
+    except (TypeError, ValueError):
+        observed_ts = 0.0
+    if observed_ts <= 0:
+        observed_ts = time.time()
+    regime = (
         context.get("regime")
         or market_context.get("regime_label")
         or market_context.get("regime")
         or "UNKNOWN"
     )
-    source["atr14_pct_3m"] = cycle.get("atr14_pct_3m")
-    source["realized_volatility"] = cycle.get("realized_volatility_30m_pct")
-    source["volatility_of_volatility"] = cycle.get("volatility_of_volatility_30m_pct")
-    source["adx"] = cycle.get("adx14") if cycle.get("adx14") is not None else trend.get("adx")
+    if isinstance(regime, dict):
+        regime = regime.get("value") or "UNKNOWN"
+    regime = str(regime or "UNKNOWN").upper()
+    atr14 = cycle.get("atr14_pct_3m")
+    realized_vol = cycle.get("realized_volatility_30m_pct")
+    vov = cycle.get("volatility_of_volatility_30m_pct")
+    adx = cycle.get("adx14") if cycle.get("adx14") is not None else trend.get("adx")
+    direction = (
+        context.get("direction")
+        or context.get("final_direction")
+        or source.get("direction")
+        or source.get("final_direction")
+    )
+    if isinstance(direction, dict):
+        direction = direction.get("value")
+    source["market_context"] = market_context
+    source["cycle_3m_universe"] = cycle
+    # Scalar aliases for identity / dashboard joins.
+    source["regime_label"] = regime
+    source["atr14_pct_3m"] = atr14
+    source["realized_volatility"] = realized_vol
+    source["volatility_of_volatility"] = vov
+    source["adx"] = adx
     source["causal_snapshot_phase"] = "PRE_AI_DECISION"
+    source["observed_ts"] = observed_ts
+    # Analyzer dynamic-policy contract: named features are {value, observed_ts}.
+    source["atr_bucket"] = _causal_feature_observation(_atr_pct_bucket(atr14), observed_ts)
+    source["realized_volatility_bucket"] = _causal_feature_observation(
+        _realized_vol_pct_bucket(realized_vol), observed_ts,
+    )
+    source["trend_strength_bucket"] = _causal_feature_observation(
+        None if adx is None else _adx_bucket(float(adx)), observed_ts,
+    )
+    source["adx_bucket"] = _causal_feature_observation(
+        None if adx is None else _adx_bucket(float(adx)), observed_ts,
+    )
+    source["regime"] = _causal_feature_observation(regime, observed_ts)
+    if direction is not None:
+        source["direction"] = _causal_feature_observation(str(direction).upper(), observed_ts)
     return source
 
 
@@ -19823,7 +20039,34 @@ def _reject_duplicate_limit_order(signal: dict, limit_price: float, entry_mode: 
     return True
 
 
-@_paper_lifecycle_transaction
+def _prepare_initial_pending_order_evidence(order: dict, signal_snapshot: dict) -> None:
+    """Complete potentially slow ORDER_PLACED enrichment before PREPARE."""
+    initialize_research_order_schedule(
+        order, signal_snapshot,
+        now=float(order.get("created_ts") or time.time()), registered=True,
+    )
+    order.update(copy.deepcopy(paper_policy_identity_for_sources(
+        _collector_v22_epoch_id(), order, signal_snapshot,
+    )))
+    captured = _capture_runtime_quantity_constraints()
+    order["signed_quantity_constraints"] = copy.deepcopy(captured.get("receipt"))
+    order["quantity_constraints_status"] = copy.deepcopy(captured)
+    receipt = captured.get("receipt")
+    order["market_microstructure_symbol"] = (
+        BITFINEX_WS_SYMBOL
+        or (receipt.get("symbol") if isinstance(receipt, dict) else None)
+    )
+    registered_ts = time.time()
+    dispatch_ts = float(order.pop("_initial_dispatch_start_ts", registered_ts))
+    _append_paper_action_receipt(
+        order, signal_snapshot, action_generation=0,
+        action_type="INITIAL_SUBMIT",
+        policy_due_ts=float(order.get("created_ts") or dispatch_ts),
+        eligibility_ts=float(order.get("created_ts") or dispatch_ts),
+        dispatch_start_ts=dispatch_ts, acknowledgement_ts=registered_ts,
+    )
+
+
 def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: str, smart_meta: dict = None) -> bool:
     """Create a pending limit order after micro structure is confirmed."""
     if _manual_pause_block_entry(signal, "SIM_LIMIT_CREATE"):
@@ -19995,54 +20238,108 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         order["immediate_chase"] = True
         order["chase_start_sec"] = 0
     order["fill_model"] = _resolve_fill_model(signal, order)
-    signal["limit_price"] = limit_price
-    signal["planned_limit_price"] = limit_price
-    signal["original_limit_price"] = original_limit_price
+    target_signal = copy.deepcopy(signal)
+    target_signal["limit_price"] = limit_price
+    target_signal["planned_limit_price"] = limit_price
+    target_signal["original_limit_price"] = original_limit_price
     if is_virtual_chase_entry_lane(lane):
-        lc = int(signal.get("limit_chase_count") or 0)
-        signal["limit_chase_count"] = lc
+        lc = int(target_signal.get("limit_chase_count") or 0)
+        target_signal["limit_chase_count"] = lc
         order["limit_chase_count"] = lc
         if lc == 0:
-            signal["visible_chase_since_ts"] = time.time()
-            signal["fill_phase"] = "CHASE0"
+            target_signal["visible_chase_since_ts"] = time.time()
+            target_signal["fill_phase"] = "CHASE0"
         elif lc >= 3:
-            signal["fill_phase"] = _virtual_chase_fill_phase(lc)
-        signal.pop("virtual_chase_state", None)
+            target_signal["fill_phase"] = _virtual_chase_fill_phase(lc)
+        target_signal.pop("virtual_chase_state", None)
     else:
-        signal["limit_chase_count"] = _signal_virtual_chase_count(signal)
-    signal["last_chase_ts"] = order_created_ts
-    signal["dashboard_exact_chase_managed"] = dashboard_exact_chase_managed
+        target_signal["limit_chase_count"] = _signal_virtual_chase_count(target_signal)
+    target_signal["last_chase_ts"] = order_created_ts
+    target_signal["dashboard_exact_chase_managed"] = dashboard_exact_chase_managed
     if smart_meta.get("immediate_chase") or fills_first_continuous_enabled(signal):
-        signal["immediate_chase"] = True
-        signal["chase_start_sec"] = 0
+        target_signal["immediate_chase"] = True
+        target_signal["chase_start_sec"] = 0
     if smart_meta.get("reanchored"):
-        signal["smart_submit_reanchored"] = True
-        signal["smart_submit_original_planned"] = smart_meta.get("original_planned")
-    signal["entry_mode"] = entry_mode
-    signal["qty"] = qty
-    signal["order_created_ts"] = order_created_ts
-    signal["status"] = "ORDERED"
-    signal["order_placed"] = True
-    signal["await_micro_confirm"] = False
-    signal["await_5m_confirm"] = False
-    signal.pop("awaiting_micro_since", None)
-    signal.pop("awaiting_5m_since", None)
-    signal.pop("awaiting_min_age_since", None)
-    # lane_register_pending_order owns the narrow list-mutation lock itself and
-    # intentionally performs schedule/evidence hydration after releasing it.
-    # An outer RLock here silently kept trade_lock held across that slow work,
-    # starving relay snapshots and eventually the WebSocket ping/pong loop.
+        target_signal["smart_submit_reanchored"] = True
+        target_signal["smart_submit_original_planned"] = smart_meta.get("original_planned")
+    target_signal.update({
+        "entry_mode": entry_mode, "qty": qty,
+        "order_created_ts": order_created_ts, "status": "ORDERED",
+        "order_placed": True, "await_micro_confirm": False,
+        "await_5m_confirm": False,
+    })
+    target_signal.pop("awaiting_micro_since", None)
+    target_signal.pop("awaiting_5m_since", None)
+    target_signal.pop("awaiting_min_age_since", None)
     order["_initial_dispatch_start_ts"] = time.time()
-    registered = lane_register_pending_order(order)
-    if not registered:
-        if order.get("registration_suppressed_reason") == "RETIRED_LIFECYCLE":
-            signal["status"] = "EXPIRED"
-            signal["outcome"] = "LATE_PROMOTION_SUPPRESSED"
-            signal["exit_reason"] = "LATE_PROMOTION_SUPPRESSED"
-            signal["order_placed"] = False
-        pipeline_state_sync()
-        return True
-    _account_registered_order_submission(signal, ai)
+    coordination_blocked, coordination_reason, coordination_state = executable_live_copy_entries_blocked()
+    if coordination_blocked and str(lane or "").upper() == "CONTINUOUS" and not order.get("coordination_shadow"):
+        signal["block_reason"] = coordination_reason
+        logger.warning(
+            f"[LIVE-COPY-COORD] blocking new CONTINUOUS pending trade={order.get('trade_id')} "
+            f"state={coordination_state} reason={coordination_reason} [PIPELINE ENFORCEMENT]"
+        )
+        return False
+    # Schedule, policy identity and venue constraints may perform filesystem or
+    # venue reads.  Finish them before taking the transition/state locks.
+    _prepare_initial_pending_order_evidence(order, target_signal)
+
+    def target_mutator(target):
+        trade_id = str(order.get("trade_id") or "")
+        if any(str(row.get("trade_id") or "") == trade_id for row in target.get("pending_orders") or []):
+            raise RuntimeError("pending-order target already exists")
+        if any(str(row.get("trade_id") or "") == trade_id for row in target.get("positions") or []):
+            raise RuntimeError("pending-order target conflicts with open position")
+        target.setdefault("pending_orders", []).append(
+            _canonicalize_paper_lifecycle_identity(copy.deepcopy(order))
+        )
+        target["awaiting_signals"] = [
+            row for row in (target.get("awaiting_signals") or [])
+            if str(row.get("trade_id") or "") != str(order.get("trade_id") or "")
+        ]
+
+    def live_mutator():
+        trade_id = str(order.get("trade_id") or "")
+        if any(str(row.get("trade_id") or "") == trade_id for row in pending_orders):
+            raise RuntimeError("pending-order live identity already exists")
+        if any(str(row.get("trade_id") or "") == trade_id and row.get("status") != "CLOSED" for row in open_positions):
+            raise RuntimeError("pending-order live identity is already open")
+        signal.clear()
+        signal.update(copy.deepcopy(target_signal))
+        pending_orders.append(order)
+        lane_rows = lane_pending_orders[_ensure_lane_bucket(order)]
+        if order not in lane_rows:
+            lane_rows.append(order)
+
+    relay_extra = {
+        "schema": "dcf-showcase-intent-v1", "event_seq": int(order.get("limit_chase_count") or 0),
+        "intent_source": "live" if bool(state.get("live_armed")) else "paper",
+        "direction": signal.get("final_direction"), "signal_price": signal_price,
+        "limit_price": limit_price, "qty": qty, "margin_usdt": margin_usdt,
+        "leverage": int(lev), "win_prob": ai.get("win_prob"),
+        "edge_score": signal.get("edge_score_at_entry"),
+        "effective_threshold": signal.get("effective_threshold_at_entry"),
+        "research_lane": lane, "entry_limit_policy": signal.get("entry_limit_policy"),
+        "entry_reason": signal.get("entry_reason"), "executable": True,
+        "bot_version": EXECUTION_FIX_VERSION,
+        "strategy_mode": str(state.get("strategy_mode") or "RESEARCH").upper(),
+    }
+    _commit_paper_lifecycle_transition(
+        "ORDER_PLACED", signal.get("trade_id"), relay_extra,
+        target_mutator=target_mutator, live_mutator=live_mutator,
+    )
+    # Derived ledgers and asynchronous enrichment happen only after the
+    # canonical state/event generation is durable.
+    _sync_canonical_source_pending_order(
+        _canonical_source_order_market_evidence, order,
+        chase_acked=False, observed_ts=order.get("last_chase_ts") or order.get("created_ts"),
+    )
+    _get_pending_order_evidence_worker().submit(
+        f"pending-order:{order.get('trade_id')}",
+        {"order": copy.deepcopy(order), "signal": copy.deepcopy(target_signal), "is_paper_entry": True},
+        source_ts=float(order.get("created_ts") or time.time()),
+    )
+    _account_registered_order_submission(signal, ai, publish_relay=False)
     logger.info(
         f"[SIM] ORDER CREATED trade_id={signal.get('trade_id')} signal_price={fmt(signal_price)} "
         f"limit_price={fmt(limit_price)} entry_mode={entry_mode} "
@@ -20358,8 +20655,9 @@ def _promote_signal_to_limit_order_claimed(signal: dict, skip_virtual_defer: boo
     return _place_simulated_limit_order(signal, limit_price, entry_mode, smart_meta=smart_meta)
 
 
-@_paper_lifecycle_transaction
-def _account_registered_order_submission(signal: dict, ai: dict = None) -> bool:
+def _account_registered_order_submission(
+    signal: dict, ai: dict = None, *, publish_relay: bool = True
+) -> bool:
     """Publish ORDER_SUBMITTED/ORDER_PLACED exactly once, after a local order exists."""
     if not isinstance(signal, dict):
         return False
@@ -20407,6 +20705,7 @@ def _account_registered_order_submission(signal: dict, ai: dict = None) -> bool:
             edge,
             ai or signal.get("ai") or {},
             signal,
+            publish_relay=publish_relay,
         )
     return True
 
@@ -20807,7 +21106,7 @@ def _compute_limit_chase_target(
     return round(new_limit, 2), "LIMIT_CHASE"
 
 
-def _commit_relay_limit_chase(
+def _commit_relay_limit_chase_legacy(
     order: dict,
     signal: dict,
     *,
@@ -20907,9 +21206,109 @@ def _commit_relay_limit_chase(
     return result
 
 
+def _commit_relay_limit_chase(
+    order: dict,
+    signal: dict,
+    *,
+    direction: str,
+    old_limit: float,
+    new_limit: float,
+    chase_count: int,
+    now: float,
+    tier: str = None,
+    urgent_marketable: bool = False,
+    reference_price: float = None,
+) -> dict | None:
+    """Commit pending-order reprice and its relay event as one generation."""
+    trade_id = str(order.get("trade_id") or "")
+    with trade_lock:
+        if (
+            order not in pending_orders or order.get("status") != "PENDING"
+            or not trade_id
+            or abs(float(order.get("limit_price") or 0) - old_limit) >= 0.005
+            or int(order.get("limit_chase_count") or 0) != chase_count - 1
+            or any(p.get("trade_id") == trade_id and p.get("status") != "CLOSED" for p in open_positions)
+        ):
+            return None
+
+    event = {
+        "ts": utc_iso(), "limit_price": new_limit,
+        "qty": float(order.get("qty") or 0), "direction": direction,
+        "entry_limit_policy": (signal or {}).get("entry_limit_policy") or order.get("entry_limit_policy"),
+        "entry_reason": (signal or {}).get("entry_reason") or order.get("entry_reason"),
+        "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+        "event_seq": chase_count, "executable": True,
+    }
+    resolved_fill_model = _resolve_fill_model(signal, {**order, "limit_price": new_limit})
+
+    def mutate_order(row):
+        row["limit_price"] = new_limit
+        row["limit_chase_count"] = chase_count
+        row["last_chase_ts"] = now
+        if tier:
+            row["urgent_chase_tier"] = tier
+        if urgent_marketable:
+            row["urgent_marketable_chase"] = True
+        row["fill_model"] = copy.deepcopy(resolved_fill_model)
+
+    def target_mutator(target):
+        rows = [row for row in target.get("pending_orders") or [] if str(row.get("trade_id") or "") == trade_id]
+        if len(rows) != 1:
+            raise RuntimeError("pending chase target identity mismatch")
+        mutate_order(rows[0])
+
+    def live_mutator():
+        if (
+            order not in pending_orders or order.get("status") != "PENDING"
+            or abs(float(order.get("limit_price") or 0) - old_limit) >= 0.005
+            or int(order.get("limit_chase_count") or 0) != chase_count - 1
+        ):
+            raise RuntimeError("pending chase changed before commit")
+        mutate_order(order)
+        if isinstance(signal, dict):
+            mutate_order(signal)
+            signal["submitted_order_event_seq"] = chase_count
+            signal["submitted_order_limit_price"] = new_limit
+            signal["fill_model"] = copy.deepcopy(resolved_fill_model)
+
+    _commit_paper_lifecycle_transition(
+        "LIMIT_UPDATED", trade_id, event,
+        target_mutator=target_mutator, live_mutator=live_mutator,
+    )
+
+    # Derived evidence follows the authoritative lifecycle COMMIT and is
+    # idempotently keyed by trade/chase generation.
+    sync_pending = globals().get("_sync_canonical_source_pending_order")
+    store = globals().get("_canonical_source_order_market_evidence")
+    summary_builder = globals().get("_source_market_evidence_summary")
+    if callable(sync_pending) and isinstance(store, dict):
+        if order.get("original_limit_price") is None and old_limit:
+            order["original_limit_price"] = float(old_limit)
+        canonical = sync_pending(store, order, chase_acked=True, observed_ts=now)
+        if callable(summary_builder) and canonical:
+            summary = summary_builder(canonical)
+            order["source_order_market_evidence"] = summary
+            master = trades_map.get(trade_id, {}).get("signal_ref")
+            if isinstance(master, dict):
+                master["source_order_market_evidence"] = copy.deepcopy(summary)
+                master["limit_price"] = new_limit
+                master["limit_chase_count"] = chase_count
+    schedule_reprice = globals().get("append_research_reprice_interval")
+    if callable(schedule_reprice):
+        schedule_reprice(
+            order, signal if isinstance(signal, dict) else None, now=now,
+            chase_step_index=chase_count, reference_price=reference_price or old_limit,
+            limit_price=new_limit,
+            reason="URGENT_MARKETABLE_CHASE" if urgent_marketable else "LIMIT_CHASE",
+        )
+    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+    if callable(collector_refresh):
+        collector_refresh(order, signal if isinstance(signal, dict) else None)
+    return event
 
 
-@_paper_lifecycle_transaction
+
+
 def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> bool:
     if not can_progress_new_entry(now)[0]:
         return False
@@ -20996,15 +21395,9 @@ def _apply_limit_chase(order: dict, signal: dict, price: float, now: float) -> b
         "direction": direction,
         "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
     })
-    _push_showcase_relay_event(
-        "LIMIT_UPDATED",
-        order.get("trade_id"),
-        relay_event,
-    )
     return True
 
 
-@_paper_lifecycle_transaction
 def _apply_marketable_limit_fallback(order: dict, signal: dict, price: float, now: float) -> bool:
     """After patient chase, set marketable limit at ask/bid when structure still valid."""
     if order.get("status") != "PENDING":
@@ -21600,7 +21993,6 @@ def process_pending_orders():
                 "context": copy.deepcopy(fill_context_for_revalidation),
             }
             if revalidation_reason:
-                order["status"] = "CANCELLED"
                 order["fill_revalidation_reason"] = revalidation_reason
                 cancelled_at_fill.append((order, fill_signal, revalidation_reason))
                 continue
@@ -21630,13 +22022,11 @@ def process_pending_orders():
                 continue
             order["fill_price"] = fill_px
             order["limit_price"] = fill_px
-            order["status"] = "FILLED"
             order["fill_handoff_in_progress"] = True
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
             fills.append((order, fill_signal))
     for order, fill_signal, reason in cancelled_at_fill:
-        lane_unregister_pending_order(order)
         schedule_close = globals().get("close_research_order_schedule")
         if callable(schedule_close):
             schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
@@ -21661,8 +22051,6 @@ def fill_order(order):
             order.pop("fill_handoff_in_progress", None)
 
     if manual_admin_pause_active():
-        lane_unregister_pending_order(order)
-        order["status"] = "CANCELLED"
         paused_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
         schedule_close = globals().get("close_research_order_schedule")
         if callable(schedule_close):
@@ -21734,39 +22122,61 @@ def fill_order(order):
         frozen_paper_identity["paper_policy_spec"].get("research_lane")
         or candidate_pos.get("research_lane")
     )
-    pos, registered = promote_pending_to_open(
-        order,
-        candidate_pos,
-        trade_lock=trade_lock,
-        pending_orders=pending_orders,
-        lane_pending_orders=lane_pending_orders,
-        open_positions=open_positions,
-        lane_open_positions=lane_open_positions,
-        lane=_normalize_lane_key(order),
-    )
-    if not registered:
-        logger.warning(
-            f"[FILL GUARD] Duplicate fill suppressed for trade_id={order.get('trade_id')} "
-            "— position already open"
-        )
-        clear_fill_handoff()
-        return
-    # Bind relay chronology to the atomic position registration, before any
-    # slower persistence/analytics callback below.
     position_opened_relay_ts = utc_iso()
     fill_lane = order.get("research_lane") or (signal or {}).get("research_lane")
+    fill_px = order.get("fill_price") or order.get("limit_price") or candidate_pos.get("entry")
+    master = trades_map.get(order["trade_id"], {}).get("signal_ref")
+    transition_result = {}
+
+    def target_mutator(target):
+        target["pending_orders"] = [
+            row for row in target.get("pending_orders") or []
+            if str(row.get("trade_id") or "") != str(order.get("trade_id") or "")
+        ]
+        if any(str(row.get("trade_id") or "") == str(order.get("trade_id") or "") for row in target.get("positions") or []):
+            raise RuntimeError("position-open target already exists")
+        target.setdefault("positions", []).append(
+            _canonicalize_paper_position_snapshot(copy.deepcopy(candidate_pos))
+        )
+
+    def live_mutator():
+        pos, registered = promote_pending_to_open(
+            order, candidate_pos, trade_lock=trade_lock,
+            pending_orders=pending_orders, lane_pending_orders=lane_pending_orders,
+            open_positions=open_positions, lane_open_positions=lane_open_positions,
+            lane=_normalize_lane_key(order),
+        )
+        if not registered:
+            raise RuntimeError("duplicate position-open transition")
+        order["status"] = "FILLED"
+        if isinstance(master, dict):
+            master.update({
+                "status": "FILLED", "filled_ts": time.time(),
+                "fill_price": fill_px,
+                "planned_limit_price": order.get("planned_limit_price"),
+                "outcome": "OPEN",
+            })
+        transition_result["pos"] = pos
+
+    _commit_paper_lifecycle_transition(
+        "POSITION_OPENED", str(order.get("trade_id") or ""),
+        {
+            "ts": position_opened_relay_ts,
+            "direction": order.get("signal_dir"), "fill_price": fill_px,
+            "qty": order.get("qty"),
+            "research_lane": (signal or {}).get("research_lane") or order.get("research_lane"),
+        },
+        target_mutator=target_mutator, live_mutator=live_mutator,
+        canonical_lock=position_close_lock,
+    )
+    pos = transition_result["pos"]
     if fill_lane:
         log_lane_opportunity_event(
-            fill_lane,
-            "FILLED",
-            order.get("trade_id"),
+            fill_lane, "FILLED", order.get("trade_id"),
             order.get("signal_dir") or order.get("dir"),
-            (ai or {}).get("win_prob"),
-            order.get("edge_score"),
+            (ai or {}).get("win_prob"), order.get("edge_score"),
             block_reason="PENDING_LIMIT_TOUCHED",
         )
-    fill_px = order.get("fill_price") or order.get("limit_price") or pos.get("entry")
-    master = trades_map.get(order["trade_id"], {}).get("signal_ref")
     fill_snapshot = _finalize_position_open_lifecycle(
         pos,
         master,
@@ -22371,6 +22781,10 @@ def process_signal(event: dict):
                     # One correlated shadow schedule belongs to the paid
                     # shared call, never to each independently evaluated tile.
                     _arm_shared_compressed_shadow_chase(ctx, ai)
+                    # Family tiles skip per-lane touch grids. Arm one discovery
+                    # grid here so offset×chase research still runs when tiles
+                    # are ON, without placing extra paper orders.
+                    _arm_shared_discovery_touch_grid(ctx, ai)
                     # Fan out five independent paper-only family lifecycles
                     # and the Continuous benchmark directly from the completed
                     # shared-AI result.  Continuous owns an independent verdict,
@@ -23336,7 +23750,6 @@ def _process_ws_ticker_update(payload) -> bool:
     return True
 
 
-@_paper_lifecycle_transaction
 def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: float) -> bool:
     """Apply the registry-selected family tile chase schedule."""
     if not is_patient_chase_lane(order.get("research_lane")):
@@ -23406,11 +23819,6 @@ def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: flo
     order["relay_eligible"] = relay_eligible
     if isinstance(signal, dict):
         signal["relay_eligible"] = relay_eligible
-    _push_showcase_relay_event(
-        "LIMIT_UPDATED",
-        order.get("trade_id"),
-        committed,
-    )
     try:
         from execution_funnel import funnel_on_limit_chase
         funnel_on_limit_chase(
@@ -24549,7 +24957,6 @@ def _is_executable_order_expiry(source: dict, reason: str, limit_price) -> bool:
     )
 
 
-@_paper_lifecycle_transaction
 def _record_expired_order(source: dict, reason: str):
     """Append one expired row to in-memory registry + CSV (orders or pre-order signals)."""
     if source.get("bitfinex_order_id"):
@@ -24671,15 +25078,6 @@ def _record_expired_order(source: dict, reason: str):
             )
         ),
     }
-    with trade_lock:
-        expired_orders.append(row)
-        if len(expired_orders) > MAX_EXPIRED_ORDERS:
-            expired_orders.pop(0)
-    _relay_mirror(
-        "EXPIRED",
-        {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
-        source_ts=float(now),
-    )
     relay_terminal_event = (
         "ORDER_EXPIRED"
         if str(reason or "").upper() in ("SIGNAL_TTL_EXPIRED", "TTL_EXPIRED")
@@ -24691,6 +25089,26 @@ def _record_expired_order(source: dict, reason: str):
         and source.get("created_ts")
         and isinstance(limit_price, (int, float)) and limit_price > 0
     )
+    with trade_lock:
+        matching_live_order = next((
+            item for item in pending_orders
+            if str(item.get("trade_id") or "") == str(tid or "")
+        ), None)
+    if (
+        isinstance(matching_live_order, dict)
+        and matching_live_order.get("bitfinex_order_id")
+        and not (
+            matching_live_order is source
+            and source.get("cancel_confirmed") is True
+        )
+    ):
+        # A signal TTL must never retire a tracked exchange order.  The caller
+        # will route that order through _cancel_pending_order_confirmed first.
+        logger.warning(
+            f"[BITFINEX LIVE] terminal recorder deferred until confirmed cancel "
+            f"trade_id={tid} reason={reason} [PIPELINE ENFORCEMENT]"
+        )
+        return None
     if (
         executable_terminal
         and _platform_relay_lane_for_event(tid, row.get("research_lane"))
@@ -24699,15 +25117,46 @@ def _record_expired_order(source: dict, reason: str):
         # The expired resting order itself is authoritative. Never borrow a
         # newer master/signal revision and pair it with this older limit.
         generation = int(source.get("event_seq") or source.get("limit_chase_count") or 0)
-        _push_showcase_relay_event(
-            relay_terminal_event, tid, {
+        terminal_extra = {
                 "direction": row.get("dir"), "reason": reason,
                 "event_seq": generation, "limit_price": limit_price,
                 "event_id": f"{tid}:{relay_terminal_event}:{generation}:{row['time']}",
                 "source_created_at": datetime.fromtimestamp(created, timezone.utc).isoformat() if created else None,
                 "source_expires_at": row["time"],
                 "research_lane": row.get("research_lane"),
-            },
+            }
+
+        def target_mutator(target):
+            target["pending_orders"] = [
+                item for item in (target.get("pending_orders") or [])
+                if str(item.get("trade_id") or "") != str(tid or "")
+            ]
+            target["awaiting_signals"] = [
+                item for item in (target.get("awaiting_signals") or [])
+                if str(item.get("trade_id") or "") != str(tid or "")
+            ]
+
+        def live_mutator():
+            source["status"] = (
+                "EXPIRED" if relay_terminal_event == "ORDER_EXPIRED" else "CANCELLED"
+            )
+            source["outcome"] = reason
+            source["exit_reason"] = reason
+            for item in list(pending_orders):
+                if str(item.get("trade_id") or "") == str(tid or ""):
+                    pending_orders.remove(item)
+                    bucket = lane_pending_orders.get(_normalize_lane_key(item), [])
+                    if item in bucket:
+                        bucket.remove(item)
+            master_live = trades_map.get(tid, {}).get("signal_ref") if tid else None
+            if isinstance(master_live, dict):
+                master_live["status"] = source["status"]
+                master_live["outcome"] = reason
+                master_live["exit_reason"] = reason
+
+        _commit_paper_lifecycle_transition(
+            relay_terminal_event, tid, terminal_extra,
+            target_mutator=target_mutator, live_mutator=live_mutator,
             # An expiry retires real exchange exposure.  Unlike a cosmetic
             # update, it must not be left on a daemon thread where the source
             # loop can continue and the relay has to discover it by polling.
@@ -24715,6 +25164,15 @@ def _record_expired_order(source: dict, reason: str):
             # path an explicit retry/failure signal.
             wait_for_durable_receipt=True,
         )
+    with trade_lock:
+        expired_orders.append(row)
+        if len(expired_orders) > MAX_EXPIRED_ORDERS:
+            expired_orders.pop(0)
+    _relay_mirror(
+        "EXPIRED",
+        {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
+        source_ts=float(now),
+    )
     log_expired_order(row)
     fq_row = {
         "schema": "fill_quality_v1",
@@ -24870,11 +25328,12 @@ def _cancel_pending_order_confirmed(
                 failure_reason="ORDER_ID_CHANGED",
             )
             return result
-        if order in pending_orders:
+        if order in pending_orders and not record_expired:
             lane_unregister_pending_order(order)
         if oid:
             order["bitfinex_order_id"] = None
-        order["status"] = str(final_status or "CANCELLED").upper()
+        if not record_expired:
+            order["status"] = str(final_status or "CANCELLED").upper()
         order["cancel_confirmed"] = True
         order["cancel_confirmed_reason"] = reason
         order["cancel_confirmed_ts"] = time.time()
@@ -24911,6 +25370,16 @@ def _cancel_pending_order_confirmed(
     result["finalized"] = True
     if record_expired:
         result["expired_row"] = _record_expired_order(order, reason)
+        # The executable recorder normally removes this inside its atomic live
+        # mutator.  Keep the helper contract for non-relay/test recorders, but
+        # only after the recorder has returned (never before PREPARE).
+        with trade_lock:
+            if order in pending_orders:
+                order["status"] = str(final_status or "CANCELLED").upper()
+                pending_orders.remove(order)
+                bucket = lane_pending_orders.get(_normalize_lane_key(order), [])
+                if order in bucket:
+                    bucket.remove(order)
     if expire_signal:
         result["signal_expired"] = bool(expire_signal_for_order(order, reason))
     return result
@@ -25426,9 +25895,9 @@ def _paper_terminal_cost_evidence(
     }
 
 
-@_paper_lifecycle_transaction
 def close_position(pos: dict, exit_reason: str):
     """Close sim position without starving global API snapshot locks."""
+    source_pos = pos
     if not validate_state():
         return
     if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
@@ -25451,18 +25920,21 @@ def close_position(pos: dict, exit_reason: str):
     # than holding state_lock/trade_lock across that slow work.
     close_claim_dispatch_ts = time.time()
     with PositionCloseClaimScope(
-        pos,
+        source_pos,
         position_close_lock=position_close_lock,
         open_positions=open_positions,
     ) as close_claimed:
         if not close_claimed:
             return
-        trade_id = pos.get("trade_id")
+        trade_id = source_pos.get("trade_id")
         if not trade_id:
             release_position_close_claim(
-                pos, position_close_lock=position_close_lock,
+                source_pos, position_close_lock=position_close_lock,
             )
             return
+        # All pricing/accounting preparation operates on a private copy. The
+        # authoritative open position remains unchanged until WAL PREPARE.
+        pos = copy.deepcopy(source_pos)
         close_claim_ts = time.time()
         close_claim_signal = trades_map.get(trade_id, {}).get("signal_ref", {})
         if not bool(
@@ -25516,7 +25988,7 @@ def close_position(pos: dict, exit_reason: str):
             # CRITICAL: clear the in-progress flag so this position is not frozen
             # OPEN forever (stop-loss/ladder exits must still be able to run on it).
             release_position_close_claim(
-                pos, position_close_lock=position_close_lock,
+                source_pos, position_close_lock=position_close_lock,
             )
             return
         requires_private_close = bool(
@@ -25526,7 +25998,7 @@ def close_position(pos: dict, exit_reason: str):
         )
         if requires_private_close and not _maybe_bitfinex_close(pos, exit_reason):
             release_position_close_claim(
-                pos, position_close_lock=position_close_lock,
+                source_pos, position_close_lock=position_close_lock,
             )
             _record_bitfinex_close_failure(trade_id, exit_reason)
             set_execution_paused("BITFINEX_CLOSE_FAILED")
@@ -25802,6 +26274,45 @@ def close_position(pos: dict, exit_reason: str):
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
             "exit_config_json": json.dumps(get_exit_config_snapshot(pos.get("research_lane"))),
         }
+    def target_mutator(target):
+        matches = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") == str(trade_id)]
+        if len(matches) != 1:
+            raise RuntimeError("position-close target identity mismatch")
+        target["positions"] = [
+            row for row in target.get("positions") or []
+            if str(row.get("trade_id") or "") != str(trade_id)
+        ]
+
+    def live_mutator():
+        if source_pos not in open_positions or not source_pos.get("_close_in_progress"):
+            raise RuntimeError("position-close claim no longer current")
+        source_pos.clear()
+        source_pos.update(copy.deepcopy(pos))
+        source_pos["_close_in_progress"] = True
+        if not finalize_position_close(
+            source_pos, position_close_lock=position_close_lock,
+            trade_lock=trade_lock, open_positions=open_positions,
+            lane_open_positions=lane_open_positions,
+            lane=_normalize_lane_key(source_pos),
+        ):
+            raise RuntimeError("position-close registry commit failed")
+        if isinstance(master, dict):
+            master.update({
+                "status": "CLOSED", "exit_reason": exit_reason,
+                "outcome": "WIN" if net_pnl > 0 else "LOSS",
+                "closed_ts": time.time(), "expires_ts": time.time() - 1,
+            })
+
+    _commit_paper_lifecycle_transition(
+        "POSITION_CLOSED", str(trade_id),
+        {
+            "exit_reason": exit_reason, "direction": pos.get("dir"),
+            "exit_price": price,
+            "research_lane": pos.get("research_lane") or (master or {}).get("research_lane"),
+        },
+        target_mutator=target_mutator, live_mutator=live_mutator,
+        canonical_lock=position_close_lock,
+    )
     if not bool(pos.get("bitfinex_order_id") or pos.get("bitfinex_position_id") or pos.get("bitfinex_live_entry")):
         try:
             close_identity_receipt = dual_write_paper_close(
@@ -25819,18 +26330,6 @@ def close_position(pos: dict, exit_reason: str):
                 f"[COLLECTOR_V3] paper close write failed "
                 f"trade_id={trade_id} error={exc} [PIPELINE ENFORCEMENT]"
             )
-    if not finalize_position_close(
-        pos,
-        position_close_lock=position_close_lock,
-        trade_lock=trade_lock,
-        open_positions=open_positions,
-        lane_open_positions=lane_open_positions,
-        lane=_normalize_lane_key(pos),
-    ):
-        logger.warning(
-            f"[CLOSE GUARD] terminal close commit already completed trade_id={trade_id}"
-        )
-        return
     begin_post_exit_replay(trade_id, pos, price)
     log_trade_outcome_jsonl(trade_row, pos)
     update_lane_pnl_ledger(
@@ -25892,11 +26391,6 @@ def close_position(pos: dict, exit_reason: str):
             bands[band_key]["wins"] += 1
         state["analytics"] = a
 
-    master = trades_map.get(trade_id, {}).get("signal_ref")
-    if master:
-        master.update({"status": "CLOSED","exit_reason": exit_reason,"outcome": "WIN" if net_pnl > 0 else "LOSS","closed_ts": time.time()})
-        master["expires_ts"] = time.time() - 1
-
     persist_signal_close(trade_id, "CLOSED")
     _execution_terminal_trade_ids.add(str(trade_id))
     _sync_order_multiverse(
@@ -25922,19 +26416,6 @@ def close_position(pos: dict, exit_reason: str):
         logger.error("State corrupted after closing position")
         set_execution_paused("ENGINE_FAILURE")
     logger.info(f"[CLOSE][{trade_id}] reason={exit_reason} net_pnl={fmt(net_pnl)} ai_source={state.get('last_ai',{}).get('source')} final_direction={pos.get('dir')} [PIPELINE ENFORCEMENT]")
-    _push_showcase_relay_event(
-        "POSITION_CLOSED",
-        trade_id,
-        {
-            "exit_reason": exit_reason,
-            "direction": pos.get("dir"),
-            "exit_price": price,
-            "research_lane": (
-                pos.get("research_lane")
-                or (master or {}).get("research_lane")
-            ),
-        },
-    )
     bridge = get_genome_bridge()
     if bridge:
         try:
@@ -36146,6 +36627,17 @@ def status():
             "alt_sl": ["atr_k_stop", "structure_stop"],
             "live_exits_unchanged": True,
             "live_thesis_cut": -12.0,
+            "research_coverage": {
+                "schema": "research_dashboard_coverage_v1",
+                "discovery_touch_grid_shared_calls": len(_discovery_touch_grid_seen_call_ids),
+                "touch_grid_books_inflight": len(_touch_grid_book),
+                "compressed_shadow_books_inflight": len(_compressed_shadow_chase_book),
+                "order_multiverse_pending": len(_order_multiverse_pending_src),
+                "order_multiverse_written": len(_order_multiverse_written),
+                "cleanup_enabled": False,
+                "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
+                "family_tiles_arm_discovery_grid": True,
+            },
             "hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper")),
             "writers_hooked": True,
         },
@@ -36610,7 +37102,6 @@ PHANTOM_CANCEL_MAX_BODY_LEN = 4096
 
 
 @app.route('/api/reconcile/phantom-cancel', methods=['POST'])
-@_paper_lifecycle_transaction
 def api_reconcile_phantom_cancel():
     """Cancel a phantom paper position left behind by a MISSED_SHOWCASE_FILL.
 
@@ -36749,29 +37240,9 @@ def api_reconcile_phantom_cancel():
     margin_usdt = float(pos.get("margin_usdt") or FIXED_MARGIN_USDT)
     research_lane = pos.get("research_lane")
 
-    with position_close_lock:
-        # Re-validate under the close lock — a concurrent close_position may
-        # have already terminalized this pos while we were waiting.
-        if pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
-            logger.info(
-                "[ADMIN] Phantom-cancel late skip trade_id=%s (closed under lock)",
-                trade_id,
-            )
-            cache_generation = _invalidate_relay_execution_snapshot()
-            return jsonify({
-                "ok": True,
-                "already_cancelled": True,
-                "cancelled_trade_id": trade_id,
-                "timestamp": cancel_iso,
-                "money_state_generation": cache_generation,
-            })
-        pos["_close_in_progress"] = True
-
-        # Zero-PnL synthetic outcome row. We deliberately do NOT call the
-        # full close_position() path because that path accrues funding, fees,
-        # and attempts a Bitfinex reduce-only close — none of which apply to
-        # a phantom paper position.
-        trade_row = {
+    # Zero-PnL synthetic outcome row. This is derived only after the canonical
+    # position removal and terminal relay event commit together.
+    trade_row = {
             "ts": cancel_iso,
             "close_ts": cancel_iso,
             "ts_melbourne": cancel_mel,
@@ -36801,24 +37272,26 @@ def api_reconcile_phantom_cancel():
             "final_direction": direction,
             "strategy": pos.get("strategy_birth", "PHANTOM"),
             "regime": pos.get("signal_regime", state.get("regime", "UNKNOWN")),
-        }
+    }
 
-        # Mark the position CLOSED and release lane capacity.
-        pos["status"] = "CLOSED"
-        pos["exit_reason"] = PHANTOM_CANCEL_REASON
-        pos["phantom_cancelled"] = True
-        pos["phantom_cancel_ts"] = cancel_iso
-        lane_unregister_open_position(pos)
+    def target_mutator(target):
+        matches = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") == str(trade_id)]
+        if len(matches) != 1:
+            raise RuntimeError("phantom-close target identity mismatch")
+        target["positions"] = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") != str(trade_id)]
 
-        # Append to trades list + persist.
-        trades.append(trade_row)
-        try:
-            log_trade_outcome_jsonl(trade_row, pos)
-        except Exception as exc:  # pragma: no cover — best-effort audit
-            logger.warning("[ADMIN] Phantom-cancel outcome jsonl failed trade_id=%s: %s", trade_id, exc)
-
-        # Update the master signal_ref so reconcile_stale_signals sees it as
-        # terminal (mirrors close_position's master.update block).
+    def live_mutator():
+        if pos not in open_positions or pos.get("status") == "CLOSED" or pos.get("_close_in_progress"):
+            raise RuntimeError("phantom-close source changed before commit")
+        pos.update({
+            "status": "CLOSED", "exit_reason": PHANTOM_CANCEL_REASON,
+            "phantom_cancelled": True, "phantom_cancel_ts": cancel_iso,
+        })
+        if pos in open_positions:
+            open_positions.remove(pos)
+        lane_rows = lane_open_positions.get(_normalize_lane_key(pos), [])
+        if pos in lane_rows:
+            lane_rows.remove(pos)
         master_entry = trades_map.get(trade_id)
         if master_entry:
             master = master_entry.get("signal_ref")
@@ -36830,6 +37303,22 @@ def api_reconcile_phantom_cancel():
                     "closed_ts": cancel_ts,
                     "expires_ts": cancel_ts - 1,
                 })
+
+    _commit_paper_lifecycle_transition(
+        "POSITION_CLOSED", str(trade_id),
+        {
+            "exit_reason": PHANTOM_CANCEL_REASON, "direction": direction,
+            "exit_price": entry_price, "research_lane": research_lane,
+            "phantom_cancel": True, "caller_reason": caller_reason or None,
+        },
+        target_mutator=target_mutator, live_mutator=live_mutator,
+        canonical_lock=position_close_lock,
+    )
+    trades.append(trade_row)
+    try:
+        log_trade_outcome_jsonl(trade_row, pos)
+    except Exception as exc:  # pragma: no cover — best-effort audit
+        logger.warning("[ADMIN] Phantom-cancel outcome jsonl failed trade_id=%s: %s", trade_id, exc)
 
     # ---- Outside the close lock: persistence + relay + audit -----------
     persist_signal_close(trade_id, "CLOSED")
@@ -36864,22 +37353,6 @@ def api_reconcile_phantom_cancel():
         trades=paper_trades,
     )
     cache_generation = _invalidate_relay_execution_snapshot()
-
-    # Emit a POSITION_CLOSED relay event so any downstream subscriber that
-    # mirrors Fly's paper state so the dashboard and current research learn the
-    # trade is no longer open. Use the same channel as close_position.
-    _push_showcase_relay_event(
-        "POSITION_CLOSED",
-        trade_id,
-        {
-            "exit_reason": PHANTOM_CANCEL_REASON,
-            "direction": direction,
-            "exit_price": entry_price,
-            "research_lane": research_lane,
-            "phantom_cancel": True,
-            "caller_reason": caller_reason or None,
-        },
-    )
 
     # Clear pending_trade_id if the phantom happened to be the active one.
     with state_lock:
@@ -39767,6 +40240,79 @@ def _data_sync_retain_disk_inventory_generation(
     return generation_id
 
 
+_DATA_SYNC_BUNDLE_COORDINATOR_LOCK = threading.Lock()
+_DATA_SYNC_BUNDLE_LAST_STATUS = {"status": "NOT_STARTED"}
+
+
+def _data_sync_bundle_authenticated() -> bool:
+    """Unlike dashboard auth, this never trusts an unauthenticated loopback."""
+    token = str(_BOT_ADMIN_TOKEN or "")
+    return bool(token) and any(
+        hmac.compare_digest(str(value or ""), token)
+        for value in (request.headers.get("X-Bot-Admin-Token"),
+                      request.cookies.get("bot_admin_token"))
+    )
+
+
+def _data_sync_bundle_generation(generation_id: str) -> dict | None:
+    generation = _data_sync_inventory_generation(generation_id)
+    if (not generation or generation.get("storage") != "disk_pages_v2"
+            or generation.get("ack_eligible") is not True
+            or not _data_sync_receipt_bootstrap_gate()["complete"]):
+        return None
+    identity = generation.get("bundle_identity")
+    if (not isinstance(identity, dict)
+            or set(identity) != {"source_git_rev", "collection_epoch_id", "tile_registry_signature"}
+            or any(not isinstance(value, str) or not value for value in identity.values())
+            or identity["source_git_rev"] != _runtime_git_rev()):
+        return None  # Never relabel an old inventory with current runtime identity.
+    return {**generation, **identity, "inventory_generation_id": generation_id,
+            "inventory_sha256": generation_id}
+
+
+def _start_data_sync_bundle_generation(generation_id: str) -> bool:
+    """Optional acceleration, isolated from HTTP and from trading's interpreter."""
+    if os.getenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "0") != "1":
+        return False
+    try:
+        generation = _data_sync_bundle_generation(generation_id)
+    except Exception:
+        return False  # Optional acceleration must not invalidate inventory.
+    if not generation or not _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False):
+        return False
+
+    def owner():
+        global _DATA_SYNC_BUNDLE_LAST_STATUS
+        def publish(receipt):
+            global _DATA_SYNC_BUNDLE_LAST_STATUS
+            _DATA_SYNC_BUNDLE_LAST_STATUS = {**receipt, "generation_id": generation_id,
+                                           "updated_at": utc_iso()}
+        try:
+            from data_sync_bundle_runtime import run_managed_generation
+            work = _data_sync_inventory_work_root()
+            def pressure():
+                return {**_lifecycle_pipeline_pressure_probe(),
+                        "overlap": bool(_lifecycle_pipeline_overlap_probe())}
+            def retained(expected):
+                current = _data_sync_bundle_generation(generation_id)
+                return current is not None and all(current.get(key) == expected.get(key) for key in (
+                    "generation_id", "page_index_sha256", "source_git_rev",
+                    "collection_epoch_id", "tile_registry_signature"))
+            publish(run_managed_generation(
+                generation, _data_sync_volume_root(), work / "transport-bundles",
+                pressure_probe=pressure, generation_available=retained, publish=publish))
+        except Exception:
+            publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED"})
+        finally:
+            _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+    try:
+        threading.Thread(target=owner, name="data-sync-bundle-coordinator", daemon=True).start()
+    except Exception:
+        _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+        return False
+    return True
+
+
 def _data_sync_gc_disk_inventory_generations(
     work_root: Path,
     *,
@@ -40102,6 +40648,8 @@ def _data_sync_persist_disk_inventory_snapshot(
             )
         },
     }
+    if isinstance(generation.get("bundle_identity"), dict):
+        payload["generation"]["bundle_identity"] = dict(generation["bundle_identity"])
     target = _data_sync_inventory_snapshot_path()
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
@@ -40138,6 +40686,8 @@ def _data_sync_load_persisted_inventory_snapshot() -> dict | None:
                 },
                 _data_sync_inventory_work_root(),
             )
+            if isinstance(generation.get("bundle_identity"), dict):
+                validated["bundle_identity"] = dict(generation["bundle_identity"])
             return {
                 **payload,
                 "generation": validated,
@@ -40467,6 +41017,16 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
         disk_generation = _data_sync_validate_disk_inventory_generation(
             result, work_root
         )
+        # Freeze the admission identity, not whatever happens to be current at
+        # the later HTTP request. Epoch/config changes abort optional batching.
+        if (v3_runtime_identity["source_revision"] == _runtime_git_rev()
+                and v3_runtime_identity["epoch_id"] == _collector_v22_epoch_id()
+                and v3_runtime_identity["tile_config_signature"] == active_tile_registry_signature()):
+            disk_generation["bundle_identity"] = {
+                "source_git_rev": v3_runtime_identity["source_revision"],
+                "collection_epoch_id": v3_runtime_identity["epoch_id"],
+                "tile_registry_signature": v3_runtime_identity["tile_config_signature"],
+            }
         # Receipt bootstrap and the physical inventory run concurrently after
         # restart. Re-check at the publication boundary so a scan admitted
         # while COMPLETE cannot promote after bootstrap authority regresses.
@@ -40546,6 +41106,7 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             name="data-sync-inventory-generation-gc",
             daemon=True,
         ).start()
+        _start_data_sync_bundle_generation(inventory_generation_id)
     except BaseException as exc:
         logger.error(f"data-sync inventory background refresh failed: {exc}")
         persisted_worker_failure_code = (
@@ -49551,6 +50112,14 @@ def _require_fly_runtime_for_direct_start() -> None:
         "[PIPELINE ENFORCEMENT]"
     )
     raise SystemExit(78)
+
+
+from data_sync_bundle_api import register_bundle_routes as _register_data_sync_bundle_routes
+_register_data_sync_bundle_routes(
+    app, authenticated=_data_sync_bundle_authenticated,
+    generation_lookup=_data_sync_bundle_generation,
+    output_root=lambda: _data_sync_volume_root() / ".data-sync-snapshots" / "transport-bundles",
+)
 
 
 if __name__ == "__main__":
