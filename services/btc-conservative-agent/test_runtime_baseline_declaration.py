@@ -104,6 +104,8 @@ class RuntimeDeclarationTests(unittest.TestCase):
         declaration = build_runtime_baseline_declaration(**args)["declaration"]
         with tempfile.TemporaryDirectory() as directory:
             dual_write_lane_decision({"shared_ai_call_id": "call", "shared_ai_call_ts_epoch": 120,
+                "original_context_signal_ts": 95,
+                "research_baseline_context_status": {"status": "DECLARED_DIAGNOSTIC"},
                 "symbol": "tBTCUSD", "source_revision": "rev", "deployed_revision": "rev",
                 "tile_config_signature": "tiles", "raw_ai_decision": "REJECT",
                 "raw_direction": "NO_TRADE", "signal_price": 100,
@@ -112,6 +114,9 @@ class RuntimeDeclarationTests(unittest.TestCase):
                 policy_decision="REJECT", execution_disposition="NO_ORDER", exact_reason="test",
                 epoch_id="epoch", data_dir=directory)
             row = json.loads((Path(directory) / "v3/ledgers/opportunity.jsonl").read_text().splitlines()[0])
+            self.assertEqual(row["original_context_signal_ts"], 95)
+            self.assertEqual(row["signal_ts"], 120)
+            self.assertEqual(row["research_baseline_context_status"]["status"], "DECLARED_DIAGNOSTIC")
             captures = row["baseline_schedule_snapshot"]["directional_schedules"]
             self.assertEqual(set(captures), {"LONG", "SHORT"})
             for capture in captures.values():
