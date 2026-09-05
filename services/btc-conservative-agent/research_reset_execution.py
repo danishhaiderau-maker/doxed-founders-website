@@ -13,7 +13,7 @@ from typing import Mapping
 from research_exact_deletion import (
     ResearchDeletionRejected, _checked_path, _fingerprint, delete_exact_research_files,
 )
-from research_reset_inventory import plan_research_reset
+from research_reset_inventory import plan_research_reset, _managed_fly_alias
 
 
 def execute_research_reset(*, runtime_root, proof, quiescent: bool,
@@ -21,7 +21,7 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
                            protected_paths=(), expected_plan_sha256=None,
                            max_entries=200000, max_depth=12, max_metadata_bytes=4 * 1024**2,
                            max_files=100000, max_total_bytes=64 * 1024**3,
-                           allow_fly_runtime_aliases=False) -> dict:
+                           allow_fly_runtime_aliases=False, scope_name=None, validate_only=False) -> dict:
     """Re-plan while quiesced, validate all targets, then unlink exact paths.
 
     ``proof`` is caller-verified against its authoritative recovery receipt;
@@ -29,9 +29,16 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
     ``recovery_states`` must name the actual recovery owners checked by caller.
     Archive expected hashes are passed into the deleter's own frozen inventory,
     not merely checked once here. Retained paths and hardlink caveats survive.
+    For a named Fly sibling scope, runtime_root/proof remain canonical runtime
+    bindings; receipt_path must be inside the separately validated scope_root.
+    validate_only performs the same actual fingerprint and archive hash checks
+    without creating receipts or unlinking; it is not authorization to execute
+    later without renewed validation under the same exclusive barriers.
     """
     if quiescent is not True:
         raise ResearchDeletionRejected("QUIESCENCE_NOT_PROVEN")
+    if type(validate_only) is not bool:
+        raise ResearchDeletionRejected("VALIDATE_ONLY_REQUIRES_BOOLEAN")
     if not isinstance(recovery_states, Mapping) or not recovery_states or any(
             not isinstance(key, str) or not key.strip() or value not in
             {"EMPTY", "REPLAYED", "RECONCILED", "NOT_PRESENT"}
@@ -40,7 +47,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
     root = Path(os.path.abspath(os.fspath(runtime_root)))
     plan = plan_research_reset(runtime_root, proof=proof, max_entries=max_entries,
                                max_depth=max_depth, max_metadata_bytes=max_metadata_bytes,
-                               allow_fly_runtime_aliases=allow_fly_runtime_aliases)
+                               allow_fly_runtime_aliases=allow_fly_runtime_aliases, scope_name=scope_name)
+    root = Path(plan["scope_root"])
     if plan.get("complete") is not True or plan.get("errors"):
         raise ResearchDeletionRejected("RESET_INVENTORY_INCOMPLETE")
     if plan.get("boundary_proof_structurally_valid") is not True:
@@ -71,6 +79,26 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         # additionally must agree with their original immutable metadata.
         expected[str(path)] = digest or actual["sha256"]
         paths.append(path)
+    if scope_name is not None:
+        binding = plan["scope_binding"]
+        runtime = Path(binding["runtime_root"])
+        alias = runtime / scope_name
+        current = _managed_fly_alias(runtime, alias)
+        if current != root:
+            raise ResearchDeletionRejected("RESET_PHYSICAL_SCOPE_CHANGED")
+        alias_info, target_info = alias.lstat(), root.lstat()
+        if (alias_info.st_ino, alias_info.st_dev, target_info.st_ino, target_info.st_dev) != (
+                binding["alias_inode"], binding["alias_device"], binding["target_inode"], binding["target_device"]):
+            raise ResearchDeletionRejected("RESET_PHYSICAL_SCOPE_CHANGED")
+    if validate_only:
+        return {"schema": "research_reset_preflight_v1", "status": "VALIDATED",
+                "scope_root": str(root), "scope_name": scope_name,
+                "scope_binding": plan["scope_binding"], "scope_binding_sha256": plan["scope_binding_sha256"],
+                "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
+                "retained": plan["retained"], "target_count": len(paths),
+                "expected_sha256_by_path": expected, "target_bytes": plan["target_bytes"],
+                "deletion_performed": False, "receipt_created": False,
+                "requires_fresh_validation_before_execution": True}
     receipt = delete_exact_research_files(
         root=root, targets=paths, allowed_paths=paths, receipt_path=receipt_path,
         quiescent=quiescent, recovery_states=recovery_states,
@@ -85,6 +113,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         },
     )
     return {"schema": "research_reset_execution_v1", "status": receipt["status"],
+            "scope_root": str(root), "scope_name": scope_name,
+            "scope_binding": plan["scope_binding"], "scope_binding_sha256": plan["scope_binding_sha256"],
             "plan_sha256": plan["plan_sha256"], "proof_sha256": plan["proof_sha256"],
             "deletion_receipt": receipt, "retained": plan["retained"],
             "hardlinked_target_count": plan["hardlinked_target_count"],

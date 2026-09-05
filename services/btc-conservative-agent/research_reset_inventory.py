@@ -47,6 +47,9 @@ DERIVED_INDEXES = frozenset({
     "research_events_v22.index.json", "research_events_v22.index.sqlite3",
     "v3/qualification_horizon_index.sqlite3",
 })
+ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
+GENOME_MIRROR_FILES = frozenset({"environment_genome.jsonl", "market_genome.jsonl",
+    "decision_genome.jsonl", "execution_genome.jsonl", "lifecycle_genome.jsonl", "trade_genome.jsonl"})
 PAST_FILES = frozenset("""
 executive_summary.txt research_highlights.txt research_findings.txt research_coverage.txt
 research_deep_dive_index.txt analysis_dashboard.html analyzer_run.log
@@ -132,6 +135,15 @@ def _essential(relative):
 
 
 def _base_class(relative):
+    parts = PurePosixPath(relative).parts
+    if len(parts) == 2 and parts[0] == "research_accumulator" and parts[1] in ACCUMULATOR_FILES:
+        return "RETIRED_RESEARCH_ACCUMULATOR"
+    if len(parts) == 3 and parts[:2] == ("research", "genome") and parts[2] in GENOME_MIRROR_FILES:
+        return "RETIRED_GENOME_JSONL_MIRROR"
+    if ((len(parts) == 2 and parts[0] == "research")
+            or (len(parts) == 3 and parts[:2] == ("research", "reports"))):
+        if parts[-1] in PAST_FILES - {"manifest.json"}:
+            return "RETIRED_RESEARCH_DERIVED_ARTIFACT"
     if relative in DERIVED_INDEXES:
         return "RETIRED_EPOCH_DERIVED_INDEX"
     if relative in RESEARCH_FILES:
@@ -174,12 +186,16 @@ def _proof_valid(root, proof):
 
 
 def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_depth=12,
-                        max_metadata_bytes=4 * 1024 * 1024, allow_fly_runtime_aliases=False):
+                        max_metadata_bytes=4 * 1024 * 1024, allow_fly_runtime_aliases=False,
+                        scope_name=None):
     """Inventory only; no side effects. Unsafe/incomplete scans return no targets.
 
     Proof is a caller assertion tied to an external recovery receipt digest, not
     an independently verified receipt. Never pass these paths to blanket rmtree.
     Directory removal is intentionally absent; retained children survive.
+    ``scope_name`` selects one of the three verified Fly sibling roots; proof
+    remains bound to runtime_root, while the plan binds physical root and alias
+    identities. Classification uses its original logical research prefix.
     """
     for value, ceiling in ((max_entries, 1_000_000), (max_depth, 32), (max_metadata_bytes, 16 * 1024 * 1024)):
         if type(value) is not int or not 0 < value <= ceiling:
@@ -195,7 +211,25 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
             raise ValueError("symlink/reparse runtime root or ancestor")
     if not root.is_dir():
         raise ValueError("runtime root must exist")
-    proof_ok = _proof_valid(root, proof)
+    proof_root = root
+    proof_ok = _proof_valid(proof_root, proof)
+    scope_binding = None
+    if scope_name is not None:
+        if scope_name not in {"research", "research_accumulator", "research_archive"}:
+            raise ValueError("unknown physical research scope")
+        alias = proof_root / scope_name
+        if not _link(alias.lstat()):
+            raise ValueError("physical scope requires exact managed Fly alias")
+        physical = _managed_fly_alias(proof_root, alias)
+        if physical is None:
+            raise ValueError("physical scope alias mismatch")
+        alias_info, target_info = alias.lstat(), physical.lstat()
+        scope_binding = {"runtime_root": str(proof_root), "scope_name": scope_name,
+                         "scope_root": str(physical), "alias_path": str(alias),
+                         "alias_inode": alias_info.st_ino, "alias_device": alias_info.st_dev,
+                         "target_inode": target_info.st_ino, "target_device": target_info.st_dev,
+                         "runtime_proof_sha256": _digest(proof) if proof_ok else None}
+        root = physical
     records, errors, metadata, scanned = [], [], {}, 0
     stack = [(root, 0)]
     while stack and not errors:
@@ -208,7 +242,8 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
                         errors.append("ENTRY_BUDGET_EXCEEDED")
                         break
                     path = Path(item.path)
-                    relative = path.relative_to(root).as_posix()
+                    local_relative = path.relative_to(root).as_posix()
+                    relative = f"{scope_name}/{local_relative}" if scope_name else local_relative
                     # Windows DirEntry.stat may omit inode/link counts. lstat
                     # gives the identity needed by the exact-path handoff.
                     st = path.lstat()
@@ -216,7 +251,7 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
                               "mtime_ns": st.st_mtime_ns, "device": st.st_dev, "inode": st.st_ino,
                               "link_count": st.st_nlink, "hardlinked": st.st_nlink > 1}
                     if _link(st):
-                        managed = _managed_fly_alias(root, path) if allow_fly_runtime_aliases else None
+                        managed = _managed_fly_alias(root, path) if allow_fly_runtime_aliases and scope_name is None else None
                         if managed is not None:
                             record["verified_sibling_target"] = str(managed)
                             records.append((record, "RETAINED_MANAGED_FLY_ALIAS_NOT_TRAVERSED"))
@@ -245,7 +280,7 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
     metadata_remaining = max_metadata_bytes
     for relative, record in metadata.items():
         try:
-            path = root / relative
+            path = Path(record["absolute_path"])
             before = path.lstat()
             if (_link(before) or before.st_size > metadata_remaining
                     or before.st_ino != record["inode"] or before.st_mtime_ns != record["mtime_ns"]):
@@ -281,6 +316,9 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
         relative = record["path"]
         reason = unsafe or _essential(relative)
         category = None
+        if (relative == "research_accumulator/research_trades_v983.db"
+                and any(Path(record["absolute_path"] + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))):
+            reason = "ACCUMULATOR_SQLITE_SIDECARS_REQUIRE_OWNER_RESET"
         if not reason and relative in origins:
             binding = origins[relative]
             if binding:
@@ -313,7 +351,10 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
         targets = []
     targets.sort(key=lambda r: r["path"])
     retained.sort(key=lambda r: r["path"])
-    result = {"schema": SCHEMA, "runtime_root": str(root), "read_only": True,
+    result = {"schema": SCHEMA, "runtime_root": str(proof_root), "scope_root": str(root),
+              "scope_name": scope_name, "scope_binding": scope_binding,
+              "scope_binding_sha256": _digest(scope_binding) if scope_binding else None,
+              "read_only": True,
               "allow_fly_runtime_aliases": allow_fly_runtime_aliases,
               "complete": not errors, "errors": errors, "scanned_entries": scanned,
               "boundary_proof_structurally_valid": proof_ok,
