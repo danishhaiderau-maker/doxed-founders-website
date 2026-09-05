@@ -178,7 +178,8 @@ def test_package_descriptor_hash_is_saved_for_bounded_api_verification(tmp_path)
     output = tmp_path / "out"
     result = worker.run_bundle_worker(meta, source, output)
     state = json.loads((output / f"g-{GEN[:16]}" / "bundle-worker-state.json").read_text())
-    assert state["package_index"][0]["descriptor_sha256"] == hashlib.sha256(_canonical(result["package"])).hexdigest()
+    public = {k: v for k, v in result["package"].items() if k != "package_path"}
+    assert state["package_index"][0]["descriptor_sha256"] == hashlib.sha256(_canonical(public)).hexdigest()
 
 
 def test_bounded_read_rejects_oversized_file_before_open(tmp_path, monkeypatch):

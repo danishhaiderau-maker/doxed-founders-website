@@ -324,9 +324,10 @@ def run_bundle_worker(
                 max_members=int(max_members), max_payload_bytes=int(max_payload_bytes),
             )
             package_receipt_path = generation_output / "descriptors" / f"{package['package_sha256']}.json"
-            _atomic_json(package_receipt_path, package)
+            public_descriptor = {key: value for key, value in package.items() if key != "package_path"}
+            _atomic_json(package_receipt_path, public_descriptor)
             entry = {"package_sha256": package["package_sha256"],
-                     "descriptor_sha256": _sha(_canonical(package)),
+                     "descriptor_sha256": _sha(_canonical(public_descriptor)),
                      "descriptor_path": str(package_receipt_path.relative_to(generation_output).as_posix()),
                      "member_count": package["member_count"], "payload_bytes": package["payload_bytes"]}
             if entry not in state["package_index"]:
