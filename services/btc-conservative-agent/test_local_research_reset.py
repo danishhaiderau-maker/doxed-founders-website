@@ -37,6 +37,19 @@ def test_unheld_lease_rejected(tmp_path):
         module.reset_local_research(**arguments(tmp_path))
 
 
+@pytest.mark.parametrize('case',['large','oversize','hash'])
+def test_fly_completion_large_bounded_receipt(tmp_path,case):
+    args=arguments(tmp_path)
+    args['fly_receipt_bytes']+=b' '*(64*1024**2 if case=='oversize' else 17*1024**2)
+    args['fly_receipt_sha256']=hashlib.sha256(args['fly_receipt_bytes']).hexdigest()
+    if case=='hash': args['fly_receipt_sha256']='0'*64
+    with args['lease']:
+        if case=='large':
+            assert module.reset_local_research(**args)['status']=='VALIDATED'
+        else:
+            with pytest.raises(ResearchDeletionRejected): module.reset_local_research(**args)
+
+
 def test_default_validation_does_not_delete(tmp_path):
     args = arguments(tmp_path)
     payload = tmp_path/'signal_replay.jsonl'

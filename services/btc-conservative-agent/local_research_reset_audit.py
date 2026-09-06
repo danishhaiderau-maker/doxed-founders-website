@@ -16,6 +16,7 @@ import time
 from emergency_evidence_wal import EmergencyEvidenceWal
 from research.canonical_data_store import current_analyzer_dataset_identity
 from research.canonical_generation_retirement import RETIRED_MARKER, metadata_snapshot
+from local_research_reset import FLY_COMPLETION_MAX_BYTES
 from research.mirror_generation_lease import MirrorGenerationLease, LEASE_FILE_NAME
 from research_exact_deletion import _checked_path, ResearchDeletionRejected
 from research_reset_auxiliary_audit import audit_auxiliary_cleanup
@@ -74,7 +75,7 @@ def make_local_reset_auditor(*, lease, fly_receipt_bytes, fly_receipt_sha256,
     the externally held lease. The snapshot is not an OS process-launch fence.
     """
     if (not callable(owner_snapshot_provider) or not isinstance(fly_receipt_bytes, bytes)
-            or len(fly_receipt_bytes) > 16 * 1024**2
+            or len(fly_receipt_bytes) > FLY_COMPLETION_MAX_BYTES
             or hashlib.sha256(fly_receipt_bytes).hexdigest() != fly_receipt_sha256):
         raise ResearchDeletionRejected('LOCAL_RESET_FLY_PIN_INVALID')
     fly = json.loads(fly_receipt_bytes)

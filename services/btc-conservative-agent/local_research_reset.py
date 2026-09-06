@@ -55,6 +55,9 @@ def _verify_raw_binding(receipt, journal):
         _reject('LOCAL_RESET_RAW_TARGET_BINDING_MISMATCH')
 
 
+FLY_COMPLETION_MAX_BYTES = 64 * 1024**2
+
+
 def reset_local_research(*, root, lease, fly_receipt_bytes, fly_receipt_sha256,
                          expected_new_epoch, expected_revision, audit_owners,
                          journal_path, validate_only=True):
@@ -75,7 +78,7 @@ def reset_local_research(*, root, lease, fly_receipt_bytes, fly_receipt_sha256,
     journal_path = _checked_path(journal_path, root)
     if journal_path.parent.parent != root / 'research_reset_receipts':
         _reject('LOCAL_RESET_JOURNAL_SCOPE_INVALID')
-    if (not isinstance(fly_receipt_bytes, bytes) or len(fly_receipt_bytes) > 16 * 1024**2
+    if (not isinstance(fly_receipt_bytes, bytes) or len(fly_receipt_bytes) > FLY_COMPLETION_MAX_BYTES
             or hashlib.sha256(fly_receipt_bytes).hexdigest() != fly_receipt_sha256):
         _reject('LOCAL_RESET_FLY_RECEIPT_HASH_MISMATCH')
     fly = json.loads(fly_receipt_bytes)

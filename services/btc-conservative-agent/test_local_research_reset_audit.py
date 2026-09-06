@@ -35,6 +35,17 @@ def test_real_empty_recovery_and_wal_absence(tmp_path, monkeypatch):
     assert hashlib.sha256(result['recovery_receipt_bytes']).hexdigest() == result['proof']['recovery_receipt_sha256']
 
 
+@pytest.mark.parametrize('case',['large','oversize','hash'])
+def test_adapter_fly_receipt_size_and_hash(tmp_path,monkeypatch,case):
+    args,_=setup(tmp_path,monkeypatch)
+    args['fly_receipt_bytes']+=b' '*(64*1024**2 if case=='oversize' else 17*1024**2)
+    args['fly_receipt_sha256']=hashlib.sha256(args['fly_receipt_bytes']).hexdigest()
+    if case=='hash': args['fly_receipt_sha256']='0'*64
+    if case=='large': assert callable(module.make_local_reset_auditor(**args))
+    else:
+        with pytest.raises(ResearchDeletionRejected): module.make_local_reset_auditor(**args)
+
+
 @pytest.mark.parametrize('field,value', [('process_ids',[42]), ('listeners',[{'port':9001}]),
                                       ('unknown_process_count',1), ('tasks',[])])
 def test_owner_uncertainty_rejected(tmp_path, monkeypatch, field, value):

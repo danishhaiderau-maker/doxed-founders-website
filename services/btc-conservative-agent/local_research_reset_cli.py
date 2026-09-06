@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import re
 
-from local_research_reset import reset_local_research
+from local_research_reset import reset_local_research, FLY_COMPLETION_MAX_BYTES
 from local_research_reset_audit import make_local_reset_auditor
 from research.mirror_generation_lease import MirrorGenerationLease
 from research_exact_deletion import _checked_path, ResearchDeletionRejected
@@ -45,7 +45,7 @@ def run(*, root, fly_receipt, fly_sha256, revision, new_epoch, reset_id, execute
             or not re.fullmatch(r'epoch-[0-9a-f]{24}', new_epoch)
             or not re.fullmatch(r'[0-9a-f]{24}', reset_id)):
         raise ValueError('LOCAL_RESET_ARGUMENT_IDENTITY_INVALID')
-    raw = _read_regular(Path(fly_receipt), 16 * 1024**2)
+    raw = _read_regular(Path(fly_receipt), FLY_COMPLETION_MAX_BYTES)
     if hashlib.sha256(raw).hexdigest() != fly_sha256:
         raise ValueError('LOCAL_RESET_FLY_PIN_MISMATCH')
     directory = _checked_path(root/'research_reset_receipts'/reset_id, root)
