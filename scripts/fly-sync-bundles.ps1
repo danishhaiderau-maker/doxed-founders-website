@@ -64,7 +64,7 @@ function Receive-FlyTransportBundles {
     $started = $true
     $stderr = $process.StandardError.ReadToEndAsync()
     # Credential goes through a private pipe, never process arguments or disk.
-    $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage; verified_local_root=$mirror }
+    $request = @{ source_url=$SourceUrl; admin_token=$AdminToken; manifest=$Manifest; staging_root=$stage; verified_local_root=$mirror; checkpoint_root=(Join-Path $workspace '.batch-transfer-descriptor-cache') }
     $inputTask = $process.StandardInput.WriteAsync(($request | ConvertTo-Json -Depth 40 -Compress))
     if (-not $inputTask.Wait(30000)) { throw 'BUNDLE_CHILD_INPUT_TIMEOUT' }
     $process.StandardInput.Close()

@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import stat
+import tempfile
 from pathlib import Path
 import re
 import sys
@@ -15,6 +19,101 @@ from data_sync_bundle_client import fetch_verified_package, BundleClientError, s
 
 MAX_INPUT = 32 * 1024 * 1024
 MAX_META = 2 * 1024 * 1024
+MAX_CACHE_BYTES = 32 * 1024 * 1024
+
+
+def cache_directory(raw):
+    if not raw:
+        return None
+    from data_sync_bundle_client import _root
+    try:
+        return _root(raw)
+    except OSError:
+        return None
+
+
+def cached_descriptor(root, entry, generation):
+    digest = entry.get("descriptor_sha256")
+    if root is None or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        return None
+    if cache_directory(root) is None:
+        return None
+    path = root / (digest + ".json")
+    signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or getattr(before, "st_file_attributes", 0) & 0x400:
+            return None
+        with path.open("rb") as handle:
+            if signature(os.fstat(handle.fileno())) != signature(before):
+                return None
+            raw = handle.read(MAX_META + 1)
+            if signature(os.fstat(handle.fileno())) != signature(before):
+                return None
+        if signature(path.lstat()) != signature(before) or len(raw) > MAX_META:
+            return None
+        value = json.loads(raw)
+        if value.get("generation") != generation or value.get("entry") != entry:
+            return None
+        descriptor = value["descriptor"]
+        body = json.dumps(descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
+        return body if hashlib.sha256(body).hexdigest() == digest else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def cache_budget(root):
+    total, count = 0, 0
+    if root is None:
+        return [MAX_CACHE_BYTES, 4096]
+    try:
+        for path in root.iterdir():
+            info = path.lstat()
+            count += 1
+            total += info.st_size
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or getattr(info, "st_file_attributes", 0) & 0x400
+                    or count >= 4096 or total >= MAX_CACHE_BYTES):
+                return [MAX_CACHE_BYTES, 4096]
+    except OSError:
+        return [MAX_CACHE_BYTES, 4096]
+    return [total, count]
+
+
+def save_descriptor(root, entry, generation, descriptor, budget):
+    if root is None:
+        return
+    if cache_directory(root) is None:
+        return
+    raw = json.dumps({"generation":generation, "entry":entry, "descriptor":descriptor},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
+    if len(raw) > min(MAX_META, MAX_CACHE_BYTES):
+        return
+    # Single-owner run accounts once, never walks every saved descriptor.
+    if budget[1] >= 4096 or budget[0] + len(raw) > MAX_CACHE_BYTES:
+        return
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=root)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if cache_directory(root) is None:
+            return
+        os.replace(temporary, root / (entry["descriptor_sha256"] + ".json"))
+        budget[0] += len(raw)
+        budget[1] += 1
+    except OSError:
+        # Non-authoritative optimization: ordinary disk errors do not discard
+        # verified transfer progress. Path/link violations remain exceptions.
+        budget[:] = [MAX_CACHE_BYTES, 4096]
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -101,6 +200,8 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
     accepted_prefix = []
     seen_paths = set()
     last_progress = started
+    checkpoint_root = cache_directory(request.get("checkpoint_root"))
+    checkpoint_budget = cache_budget(checkpoint_root)
     def remaining_budget():
         now = clock()
         if now - started >= 1800:
@@ -110,17 +211,35 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
         return min(1800 - (now-started), 600 - (now-last_progress))
     def consume(entry, building):
         remaining = remaining_budget()
-        staged = fetch_verified_package(entry, generation, original, request["staging_root"], fetch,
-            deadline_sec=min(120, remaining), clock=clock, sleep=sleep,
-            verified_local_root=request.get("verified_local_root"))
+        cached = cached_descriptor(checkpoint_root, entry, generation)
+        class LocalCacheMiss(Exception):
+            pass
+        def checkpoint_fetch(url, *, timeout):
+            if cached is not None and "descriptor=1" in url:
+                return 200, {}, cached
+            if cached is not None:
+                raise LocalCacheMiss()
+            return fetch(url, timeout=timeout)
+        try:
+            staged = fetch_verified_package(entry, generation, original, request["staging_root"], checkpoint_fetch,
+                deadline_sec=min(120, remaining), clock=clock, sleep=sleep,
+                verified_local_root=request.get("verified_local_root"))
+        except LocalCacheMiss:
+            cached = None
+            staged = fetch_verified_package(entry, generation, original, request["staging_root"], fetch,
+                deadline_sec=min(120, remaining_budget()), clock=clock, sleep=sleep,
+                verified_local_root=request.get("verified_local_root"))
         for member in staged["members"]:
             if member["path"] in seen_paths:
                 raise ValueError("BUNDLE_MEMBER_REPEATED_ACROSS_PACKAGES")
             seen_paths.add(member["path"])
         emit({"schema":"fly_bundle_staging_receipt_v1", "status":"PACKAGE_VERIFIED",
               "generation":generation, **staged})
+        if checkpoint_root is not None and cached is None:
+            save_descriptor(checkpoint_root, entry, generation, staged["descriptor"], checkpoint_budget)
         remaining = remaining_budget()
-        sleep(min(0.5, remaining))
+        if not (cached is not None and staged.get("reused_local") is True):
+            sleep(min(0.5, remaining))
     while True:
         elapsed = clock() - started
         remaining_budget()
