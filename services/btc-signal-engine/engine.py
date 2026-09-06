@@ -50231,6 +50231,56 @@ def apply_trade_pnl(trade_row):
                 f"[PIPELINE ENFORCEMENT]"
             )
 
+def _prepare_research_timing_at_startup():
+    """Forward-only pin switch after session restore, before evidence/AI workers.
+
+    Failure leaves explicit timing evidence unavailable; never supplies model
+    defaults or interferes with management of existing positions.
+    """
+    try:
+        from research_timing_capture import load_runtime_timing_config
+        from research_timing_startup import prepare_startup_timing_declaration, _directory
+        if not isinstance(load_runtime_timing_config(os.environ).get("research_timing_config"), dict):
+            raise ValueError("TIMING_STARTUP_PINNED_CONFIG_UNAVAILABLE")
+        root = _directory(Path.cwd())
+        output = root / "research-timing-declarations"
+        output.mkdir(exist_ok=True)
+        activated_at = time.time()  # Never use persisted session or signal time.
+        revision = _runtime_git_rev_exact()
+        epoch = _collector_v22_epoch_id()
+        signature = active_tile_registry_signature()
+        pins = prepare_startup_timing_declaration(
+            environ=dict(os.environ), source_revision=revision, epoch_id=epoch,
+            tile_config_signature=signature, output_directory=output,
+            startup_time=activated_at,
+        )
+        # No research/AI worker exists yet, so the pair cannot be observed mixed.
+        os.environ.update(pins)
+        receipt = {"status": "DECLARED_FORWARD_ONLY", "source_revision": revision,
+                   "epoch_id": epoch, "tile_config_signature": signature,
+                   "activated_at_ts": activated_at,
+                   "config_sha256": pins["BTC_RESEARCH_TIMING_CONFIG_SHA256"]}
+        logger.info("[RESEARCH TIMING STARTUP] declared forward-only config=%s", receipt["config_sha256"])
+    except Exception as exc:
+        # Exact known constants only: arbitrary exception text may contain paths.
+        safe_reasons = {
+            "TIMING_STARTUP_ABSOLUTE_DIRECTORY_REQUIRED",
+            "TIMING_STARTUP_DIRECTORY_UNTRUSTED",
+            "TIMING_STARTUP_IDENTITY_OR_TIME_INVALID",
+            "TIMING_STARTUP_PINNED_CONFIG_UNAVAILABLE",
+            "TIMING_STARTUP_CONFIG_INVALID_OR_FUTURE",
+            "TIMING_STARTUP_DIRECTORY_CHANGED",
+            "TIMING_STARTUP_PUBLICATION_FAILED",
+        }
+        reason = str(exc) if isinstance(exc, ValueError) and str(exc) in safe_reasons else "TIMING_STARTUP_REBIND_FAILED"
+        receipt = {"status": "UNAVAILABLE", "reason": reason,
+                   "error_type": type(exc).__name__}
+        logger.error("[RESEARCH TIMING STARTUP] unavailable; no defaults or backdating; reason=%s error_type=%s", reason, type(exc).__name__)
+    with state_lock:
+        state["research_timing_startup"] = receipt
+    return receipt
+
+
 def main():
     global bot_start_time, last_signal_create_global, last_console_update, last_ai_call_ts, last_signal_process_ts, last_context_hash, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_ws_message_time, last_pipeline_run, last_heartbeat, last_edge_compute
     global _PROCESS_SINGLETON, BOT_INSTANCE_ID, _DASHBOARD_BOOTSTRAP_COMPLETE
@@ -50354,6 +50404,7 @@ def main():
         "[PIPELINE ENFORCEMENT]"
     )
     _record_execution_settings_epoch("TRACKING_STARTED")
+    _prepare_research_timing_at_startup()
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
     try:
