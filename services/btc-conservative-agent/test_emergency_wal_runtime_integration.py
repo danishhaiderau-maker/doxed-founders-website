@@ -1,6 +1,7 @@
 import errno
 import os
 from pathlib import Path
+import pytest
 
 import collector_storage
 import research_v3_store
@@ -81,28 +82,94 @@ def test_low_space_optional_row_cannot_consume_wal(tmp_path, monkeypatch):
     assert store._emergency_wal().status()["deferred_count"] == 0
 
 
-def test_enospc_terminal_append_falls_back_to_preallocated_wal(tmp_path, monkeypatch):
+@pytest.mark.parametrize("phase", ["open", "partial_write", "fsync"])
+def test_enospc_terminal_append_falls_back_to_preallocated_wal(tmp_path, monkeypatch, phase):
     _production_identity(monkeypatch)
     _storage_fraction(monkeypatch, .50)
     store = _store(tmp_path, monkeypatch)
     ledger_path = store.ledger_path("lifecycle")
     original_open = Path.open
+    original_fsync = os.fsync
+    injected = []
+    descriptors = set()
+
+    class PartialWriter:
+        def __init__(self, handle): self.handle = handle
+        def __enter__(self): return self
+        def __exit__(self, *args): self.handle.close()
+        def write(self, payload):
+            self.handle.write(payload[:len(payload)//2])
+            self.handle.flush()
+            injected.append("partial_write")
+            raise OSError(errno.ENOSPC, "synthetic partial append")
+
+    def fail_fsync(fd):
+        if phase == "fsync" and fd in descriptors and not injected:
+            injected.append("fsync")
+            raise OSError(errno.ENOSPC, "synthetic fsync failure")
+        return original_fsync(fd)
 
     def fail_canonical_append(path, mode="r", *args, **kwargs):
-        if path == ledger_path and mode == "a":
-            raise OSError(errno.ENOSPC, "synthetic full filesystem")
+        if path == ledger_path and mode == "ab":
+            if phase == "open":
+                injected.append("open")
+                raise OSError(errno.ENOSPC, "synthetic full filesystem")
+            handle = original_open(path, mode, *args, **kwargs)
+            if phase == "partial_write": return PartialWriter(handle)
+            descriptors.add(handle.fileno())
+            return handle
         return original_open(path, mode, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", fail_canonical_append)
+    monkeypatch.setattr(os, "fsync", fail_fsync)
     result = store.append("lifecycle", {
         "record_id": "lifecycle:episode-2:terminal",
         "episode_id": "episode-2", "terminal": True,
         "outcome_state": "NO_FILL",
     })
 
+    assert injected == [phase]  # Prove the binary append fault actually fired.
     assert result["deferred"] is True
     assert result["reason"] == "MANDATORY_ROW_DURABLY_DEFERRED_TO_PREALLOCATED_WAL"
     assert store._emergency_wal().status()["deferred_count"] == 1
+    monkeypatch.setattr(Path, "open", original_open)
+    monkeypatch.setattr(os, "fsync", original_fsync)
+    if phase == "partial_write":
+        # A partial canonical tail stays fail-closed, not silently truncated or
+        # duplicated. The full row remains durable in WAL awaiting exact repair.
+        before = ledger_path.read_bytes()
+        with pytest.raises(RuntimeError, match="CANONICAL_REPLAY_BLOCKED"):
+            store.replay_one_emergency_wal_record()
+        assert ledger_path.read_bytes() == before
+        assert store._emergency_wal().status()["deferred_count"] == 1
+        assert store._append_head_path("lifecycle").exists()
+        return
+    replay = store.replay_one_emergency_wal_record()
+    assert replay["replayed"] is True
+    assert len(ledger_path.read_text(encoding="utf-8").splitlines()) == 1
+    again = store.replay_one_emergency_wal_record()
+    assert again["canonical_duplicate"] is True
+    assert len(ledger_path.read_text(encoding="utf-8").splitlines()) == 1
+
+
+@pytest.mark.parametrize("error,terminal", [(errno.EACCES, True), (errno.ENOSPC, False)])
+def test_append_error_not_eligible_for_wal_propagates(tmp_path, monkeypatch, error, terminal):
+    _production_identity(monkeypatch)
+    _storage_fraction(monkeypatch, .50)
+    store = _store(tmp_path, monkeypatch)
+    path = store.ledger_path("lifecycle")
+    original = Path.open
+    injected = []
+    def failing(p, mode="r", *args, **kwargs):
+        if p == path and mode == "ab":
+            injected.append(error)
+            raise OSError(error, "synthetic error")
+        return original(p, mode, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", failing)
+    with pytest.raises(OSError) as exc:
+        store.append("lifecycle", {"record_id": "test:row", "episode_id": "episode", "terminal": terminal})
+    assert exc.value.errno == error and injected == [error]
+    assert store._emergency_wal().status()["deferred_count"] == 0
 
 
 def test_replay_is_idempotent_across_interruption_and_restart(tmp_path, monkeypatch):
