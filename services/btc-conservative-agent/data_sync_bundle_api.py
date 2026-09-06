@@ -1,4 +1,4 @@
-"""Authenticated reads of already-built transport packages; no HTTP-path work."""
+"""Authenticated bounded package reads with durable download exclusion."""
 from __future__ import annotations
 
 import hashlib
@@ -9,7 +9,8 @@ import re
 
 from flask import Response, jsonify, request
 from data_sync_bundle_transport import MAX_PACKAGE_BYTES, SCHEMA as PACKAGE_SCHEMA
-from data_sync_bundle_worker import STATE_SCHEMA
+from data_sync_bundle_worker import STATE_SCHEMA, BundleWorkerError
+from data_sync_bundle_download_pins import DownloadProtection
 
 HEX = re.compile(r"^[0-9a-f]{64}$")
 MAX_METADATA_BYTES = 2 * 1024 * 1024
@@ -82,10 +83,10 @@ def register_bundle_routes(app, *, authenticated, generation_lookup, output_root
     # path provider must be read-only; validate it only after authentication.
     fixed_root = None if callable(output_root) else _validated_root(output_root)
 
-    def context():
+    def authority():
         if authenticated() is not True:
             raise BundleReadError("ADMIN_AUTH_REQUIRED", 401)
-        root = _validated_root(output_root()) if callable(output_root) else fixed_root
+        root = _validated_root(output_root() if callable(output_root) else fixed_root)
         generation_id = str(request.args.get("generation_id") or "")
         if not HEX.fullmatch(generation_id):
             raise BundleReadError("INVALID_GENERATION_ID", 400)
@@ -98,6 +99,10 @@ def register_bundle_routes(app, *, authenticated, generation_lookup, output_root
         expected["inventory_sha256"] = generation_id
         if any(not isinstance(value, str) or not value for value in expected.values()):
             raise BundleReadError("GENERATION_IDENTITY_INCOMPLETE")
+        return root, generation_id, expected
+
+    def context(access):
+        root, generation_id, expected = access
         directory = root / f"g-{generation_id[:16]}"
         state = _metadata(_regular_child(root, directory.name, "bundle-worker-state.json"))
         generation = state.get("generation")
@@ -130,18 +135,43 @@ def register_bundle_routes(app, *, authenticated, generation_lookup, output_root
     def guarded(fn):
         def call():
             try:
-                response = fn()
+                access = authority()  # No metadata mutation before authorization.
+                root, generation_id, _ = access
+                session = request.headers.get("X-Bundle-Download-Session")
+                if session is not None and not HEX.fullmatch(session):
+                    raise BundleReadError("INVALID_DOWNLOAD_SESSION", 400)
+                # Legacy clients require no new parameter/cookie. One shared
+                # generation pin protects their idle intervals between chunks.
+                session = session or hashlib.sha256(
+                    ("legacy-bundle-download:" + generation_id).encode()).hexdigest()
+                pin_root = root.parent / "transport-download-pins"
+                pin_root.mkdir(exist_ok=True)  # One bounded sibling, never raw evidence.
+                protection = DownloadProtection(pin_root, root / ".bundle-worker.lease")
+                protection.pin(generation_id, session, ttl_seconds=300)
+                with protection.read_chunk(generation_id, session):
+                    # Recheck retention under exclusion before any artifact read.
+                    if authority() != access:
+                        raise BundleReadError("GENERATION_AUTHORITY_CHANGED")
+                    response = fn(access)  # Fully materialized; no streaming handles.
             except BundleReadError as exc:
                 response = jsonify({"error": exc.code}), exc.status
+            except BundleWorkerError as exc:
+                if str(exc) == "BUNDLE_WORKER_LEASE_HELD":
+                    response = jsonify({"error": "BUNDLE_DOWNLOAD_BUSY"}), 503, {"Retry-After": "1"}
+                else:
+                    response = jsonify({"error": "PACKAGE_READ_INVALID"}), 409
             except FileNotFoundError:
                 response = jsonify({"error": "PACKAGE_NOT_BUILT_OR_RETAINED"}), 404
-            except (OSError, ValueError, TypeError, KeyError, OverflowError):
+            except ValueError as exc:
+                code = "BUNDLE_DOWNLOAD_RETIRING" if str(exc) == "BUNDLE_DOWNLOAD_RETIRING" else "PACKAGE_READ_INVALID"
+                response = jsonify({"error": code}), 409
+            except (OSError, TypeError, KeyError, OverflowError):
                 response = jsonify({"error": "PACKAGE_READ_INVALID"}), 409
             return response
         return call
 
-    def index():
-        generation_id, _, expected, state, entries = context()
+    def index(access):
+        generation_id, _, expected, state, entries = context(access)
         packages = [
             {k: entry[k] for k in (
                 "package_sha256", "descriptor_sha256", "member_count", "payload_bytes"
@@ -153,8 +183,8 @@ def register_bundle_routes(app, *, authenticated, generation_lookup, output_root
                         "status": "COMPLETE" if state.get("completed") is True else "BUILDING",
                         "packages": packages, "ack_authority": "ORIGINAL_MANIFEST_ROWS_ONLY"})
 
-    def package():
-        generation_id, directory, expected, _, entries = context()
+    def package(access):
+        generation_id, directory, expected, _, entries = context(access)
         root = directory.parent
         package_id = str(request.args.get("package_id") or "")
         if not HEX.fullmatch(package_id):
