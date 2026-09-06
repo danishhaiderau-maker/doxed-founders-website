@@ -25472,7 +25472,34 @@ def _log_shadow_vs_live_entry(signal: dict, live_limit_price: float, entry_mode:
     _safe_append_jsonl(SHADOW_VS_LIVE_ENTRY_FILE, row, label="SHADOW_VS_LIVE_ENTRY")
 
 
+def _run_reset_guarded_report(write):
+    from research.reset_writer_barrier import run_research_writer
+    def reset_active():
+        if _fresh_collection_lock.locked():
+            return True
+        try:
+            os.lstat(_data_sync_runtime_root() / "research_reset_receipts" / "ACTIVE_RESET.json")
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return None
+    outcome = run_research_writer(gate=_research_write_gate, reset_active=reset_active, write=write)
+    if outcome["status"] == "WRITTEN":
+        return outcome["result"]
+    return {"refresh_status": "SKIPPED", "reason_code": outcome["reason_code"]}
+
+
+def _refresh_execution_reports_guarded(cwd):
+    from execution_funnel import refresh_all_execution_reports
+    return _run_reset_guarded_report(lambda: refresh_all_execution_reports(cwd))
+
+
 def refresh_shadow_vs_live_entry_report(cwd: str = None) -> dict:
+    return _run_reset_guarded_report(lambda: _refresh_shadow_vs_live_entry_report_unlocked(cwd))
+
+
+def _refresh_shadow_vs_live_entry_report_unlocked(cwd: str = None) -> dict:
     """Aggregate shadow_vs_live_entry.jsonl into shadow_vs_live_entry_report.json."""
     cwd = cwd or os.getcwd()
     path = os.path.join(cwd, SHADOW_VS_LIVE_ENTRY_FILE)
@@ -47719,8 +47746,7 @@ def analytics_loop():
                     except Exception as ce:
                         logger.error(f"[CF_CATCHUP] analytics loop error: {ce}")
                 try:
-                    from execution_funnel import refresh_all_execution_reports
-                    rep = refresh_all_execution_reports(os.getcwd())
+                    rep = _refresh_execution_reports_guarded(os.getcwd())
                     fs = rep.get("funnel_summary") or {}
                     logger.info(
                         f"[FUNNEL] approves={fs.get('approve_count')} orders={fs.get('order_submitted_count')} "
