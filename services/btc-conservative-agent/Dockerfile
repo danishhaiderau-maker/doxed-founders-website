@@ -48,6 +48,9 @@ RUN python -m py_compile lifecycle_tail_repair.py lifecycle_tail_repair_verify.p
 # Quantity-aware conservative paper evidence is part of both the runtime
 # collector and analyzer path. Fail the image build if the whitelist omits it.
 RUN python -c "import research.conservative_fill_cohort, research.conservative_limit_fill, research.quantity_execution, research.venue_quantity_constraints"
+# This import executes before every AI API call, not just analyzer startup.
+RUN python -c "import research.runtime_baseline_declaration"
+RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data
