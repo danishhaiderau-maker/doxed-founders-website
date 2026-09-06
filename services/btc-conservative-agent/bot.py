@@ -30708,11 +30708,13 @@ __ADMIN_ACCESS_CONTROLS__
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
-      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Fly runtime data</div>
+      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Inventoried runtime files</div>
       <div style="display:flex;align-items:baseline;gap:10px;margin:4px 0 2px 0;">
         <span id="dataSizeFlyMb" style="font-size:1.5rem;font-weight:700;color:#58a6ff;">-</span>
-        <span style="color:#8b949e;font-size:0.85em;">MB of <span id="dataSizeVolumeTotal">1024</span> MB volume</span>
+        <span style="color:#8b949e;font-size:0.85em;">MB &middot; not the download backlog</span>
       </div>
+      <div style="color:#8b949e;font-size:0.85em;">Volume capacity: <span id="dataSizeVolumeTotal">-</span> MB &mdash; capacity does not shrink after a wipe.</div>
+      <div style="color:#8b949e;font-size:0.78em;">The usage bar measures the whole filesystem. Downloading copies files; only verified source deletion frees space. A dash means unavailable, not zero.</div>
       <div id="dataSizeInventoryStatus" style="color:#8b949e;font-size:0.74em;margin-top:3px;">Inventory: unavailable</div>
       <div style="background:#21262d;border-radius:6px;height:12px;overflow:hidden;margin:8px 0 4px 0;border:1px solid #30363d;">
         <div id="dataSizeVolumeBar" style="height:100%;width:0%;background:#3fb950;transition:width 0.4s ease, background 0.4s ease;"></div>
