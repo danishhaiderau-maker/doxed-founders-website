@@ -16,6 +16,22 @@ def test_exact_kernel_identity(tmp_path):
     assert _verify(tmp_path, 1788605000, FAILURE_MTIME, 100)["start_ticks"] == 106
 
 
+@pytest.mark.parametrize('defect', [None,'anchor','boot','restart','mtime'])
+def test_stat_incident_kernel_identity(tmp_path,defect):
+    fixture(tmp_path)
+    (tmp_path/'sys/kernel/random/boot_id').write_text('wrong' if defect=='boot' else '9c9968f7-0aa4-4bcc-89ee-d3545a9bf6c9')
+    (tmp_path/'stat').write_text('btime 1788656176\n')
+    if defect=='restart':
+        path=tmp_path/'663/stat'; path.write_text(path.read_text().replace('106','107'))
+    args=(tmp_path,1788656316.295562+(1 if defect=='anchor' else 0),
+          1788656918.6197128+(1 if defect=='mtime' else 0),100)
+    if defect:
+        with pytest.raises(ValueError):
+            _verify(*args,reset_id='718a9dbb42fdd90b7abbd226')
+    else:
+        assert _verify(*args,reset_id='718a9dbb42fdd90b7abbd226')['pid']==663
+
+
 @pytest.mark.parametrize('defect', [None, 'anchor', 'boot', 'restart'])
 def test_new_incident_kernel_identity(tmp_path, defect):
     (tmp_path/'661').mkdir()

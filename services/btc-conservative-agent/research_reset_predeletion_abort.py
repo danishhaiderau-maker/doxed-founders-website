@@ -15,6 +15,8 @@ REVIEWED_FAILED_DELETERS = {
         "47a23875125a393d77d48b14f0885e151dd508a113e1fc7b7bc680e9b031a916",
     '140350a464c8a36d590aeefc75a1722640469fa6':
         '200d3aa69b2c8b33636dc51c8b93c3f0d02d73b2755e9740327b99c546bf676b',
+    '85e1072af97cdb634594e2d87fb23681100d7482':
+        'a53b24ca9c8ae66c6d570c6238f704b314310818dd3e47529c5a9f3ce9f72fad',
 }
 REVIEWED_HANDLED_ATTEMPT = "66791b9ec3e200588082b1bc"
 REVIEWED_RECEIPT_HASHES = {
@@ -23,6 +25,15 @@ REVIEWED_RECEIPT_HASHES = {
     "operation": "8c13c2e579c2033f4642eae35ff08ed3582d77b2deb358338dd0f5f2f81308e1",
 }
 ADDITIONAL_REVIEWED_ATTEMPTS = {
+    '718a9dbb42fdd90b7abbd226': {
+        'revision': '85e1072af97cdb634594e2d87fb23681100d7482',
+        'rejection_code': 'RESET_TARGET_CHANGED_AFTER_PLAN',
+        'hashes': {
+            'active': '6e15dd033f96526dd6661c7a3edbead8e38f34b87d64e45eed8b23ab6da2ce22',
+            'binding': '66ed8d84a49b58d7ff4b46e4996d22b8864f9dfc64637f90d3a1344f49e05bc3',
+            'operation': '1aa20a2288531a67735fed10b8ca0a1b5afbe9bf9c1e5b3f741d460599e8f6db',
+        },
+    },
     '5e6bafa7ac6ee68f37024cbe': {
         'revision': '140350a464c8a36d590aeefc75a1722640469fa6',
         'rejection_code': 'EXPECTED_SHA256_MISMATCH',

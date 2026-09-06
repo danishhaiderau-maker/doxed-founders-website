@@ -12,10 +12,12 @@ def isolated_kernel_fixture(monkeypatch):
         lambda **kw: {"fixture_kernel": True})
 
 
-def fixture(root, new_incident=False, rejection='EXPECTED_SHA256_MISMATCH'):
+def fixture(root, new_incident=False, rejection='EXPECTED_SHA256_MISMATCH', stat_incident=False):
     volume = root
     root = volume / "runtime"; root.mkdir()
     reset_id = '5e6bafa7ac6ee68f37024cbe' if new_incident else REVIEWED_HANDLED_ATTEMPT
+    if stat_incident:
+        reset_id = '718a9dbb42fdd90b7abbd226'
     directory = root / "research_reset_receipts" / reset_id; directory.mkdir(parents=True)
     import pandas as pd
     import subprocess
@@ -25,6 +27,9 @@ def fixture(root, new_incident=False, rejection='EXPECTED_SHA256_MISMATCH'):
     revision, digest = next(iter(REVIEWED_FAILED_DELETERS.items()))
     if new_incident:
         revision = '140350a464c8a36d590aeefc75a1722640469fa6'
+        digest = REVIEWED_FAILED_DELETERS[revision]
+    if stat_incident:
+        revision = '85e1072af97cdb634594e2d87fb23681100d7482'
         digest = REVIEWED_FAILED_DELETERS[revision]
     blob = subprocess.check_output(["git", "show", revision + ":services/btc-conservative-agent/research_exact_deletion.py"], cwd=Path(__file__).parent)
     assert hashlib.sha256(blob).hexdigest() == digest
@@ -36,7 +41,7 @@ def fixture(root, new_incident=False, rejection='EXPECTED_SHA256_MISMATCH'):
         pending_paper_orders=0, open_paper_positions=0, pending_wal_records=0, pending_recovery_records=0)
     binding = {"proof": proof, "boundary_evidence": evidence, "physical_scopes": [], "reset_anchor":100}
     operation = {**binding, "stage": "FAILED", "failed_stage": "PAYLOAD_DELETION"}
-    if new_incident:
+    if new_incident or stat_incident:
         operation['rejection_code'] = rejection
     active = {"reset_id": reset_id, "binding_sha256": hashlib.sha256(canonical_json(binding).encode()).hexdigest()}
     paths = {"active": directory.parent / "ACTIVE_RESET.json", "binding": directory / "binding.json", "operation": directory / "operation.json"}
@@ -76,6 +81,34 @@ def test_exact_predeletion_abort_preserves_artifacts(tmp_path, monkeypatch):
     assert result["status"] == "PREDELETION_ABORTED"
     assert not (directory.parent / "ACTIVE_RESET.json").exists()
     assert (directory / "binding.json").exists() and (directory / "operation.json").exists()
+
+
+@pytest.mark.parametrize('defect',[None,'code','hash','revision'])
+def test_stat_incident_exact_binding(tmp_path,monkeypatch,defect):
+    import research_reset_predeletion_abort as module
+    args,directory=fixture(tmp_path,stat_incident=True,
+        rejection='OTHER' if defect=='code' else 'RESET_TARGET_CHANGED_AFTER_PLAN')
+    record=dict(module.ADDITIONAL_REVIEWED_ATTEMPTS[args['reset_id']])
+    record['hashes']=dict(args['expected_sha256'])
+    monkeypatch.setattr(module,'ADDITIONAL_REVIEWED_ATTEMPTS',{args['reset_id']:record})
+    if defect=='hash': args['expected_sha256']['active']='0'*64
+    if defect=='revision': args['failed_revision']='a'*40
+    with MirrorGenerationLease(tmp_path) as lease:
+        if defect:
+            with pytest.raises(ResearchDeletionRejected):
+                abort_predeletion_reset(**args,held_lease=lease)
+            assert (directory.parent/'ACTIVE_RESET.json').exists()
+        else:
+            assert abort_predeletion_reset(**args,held_lease=lease)['status']=='PREDELETION_ABORTED'
+
+
+def test_reviewed_stat_failure_precedes_deleter():
+    import subprocess
+    from pathlib import Path
+    source=subprocess.check_output(['git','show',
+        '85e1072af97cdb634594e2d87fb23681100d7482:services/btc-conservative-agent/research_reset_execution.py'],
+        cwd=Path(__file__).parent).decode()
+    assert source.index('raise ResearchDeletionRejected("RESET_TARGET_CHANGED_AFTER_PLAN")') < source.index('receipt = delete_exact_research_files(')
 
 
 @pytest.mark.parametrize("defect", ["receipt", "progress", "hash", "epoch", "lease", "source", "anchor", "revision", "alternate_source"])

@@ -8,6 +8,7 @@ BOOT_ID = "58b6ba0f-d181-4414-ac20-2934b7f34851"
 STARTED_AT = 1788604317.06
 FAILURE_MTIME = 1788605101.5145597
 NEW_ATTEMPT = '5e6bafa7ac6ee68f37024cbe'
+STAT_ATTEMPT = '718a9dbb42fdd90b7abbd226'
 
 
 def verify_handled_reset_kernel_continuity(*, reset_anchor, operation_mtime, reset_id=None):
@@ -16,13 +17,18 @@ def verify_handled_reset_kernel_continuity(*, reset_anchor, operation_mtime, res
 
 
 def _verify(proc, reset_anchor, operation_mtime, ticks_per_second, *, reset_id=None):
-    if reset_id not in (None, '66791b9ec3e200588082b1bc', NEW_ATTEMPT):
+    if reset_id not in (None, '66791b9ec3e200588082b1bc', NEW_ATTEMPT, STAT_ATTEMPT):
         raise ValueError('KERNEL_INCIDENT_NOT_REVIEWED')
     pid, ticks, boot_id, started_at, failed_at = PID, START_TICKS, BOOT_ID, STARTED_AT, FAILURE_MTIME
     if reset_id == NEW_ATTEMPT:
         pid, ticks, boot_id, started_at, failed_at = (661, 110,
             '7c3815de-0835-4170-b336-663ff9e2b364', 1788653515.1, 1788654844.2196946)
         if abs(float(reset_anchor) - 1788653646.5224369) > .00001:
+            raise ValueError('KERNEL_CONTINUITY_MISMATCH')
+    if reset_id == STAT_ATTEMPT:
+        pid, ticks, boot_id, started_at, failed_at = (663, 106,
+            '9c9968f7-0aa4-4bcc-89ee-d3545a9bf6c9', 1788656177.06, 1788656918.6197128)
+        if abs(float(reset_anchor) - 1788656316.295562) > .00001:
             raise ValueError('KERNEL_CONTINUITY_MISMATCH')
     def read(path, limit):
         with path.open("rb") as stream: data = stream.read(limit + 1)
