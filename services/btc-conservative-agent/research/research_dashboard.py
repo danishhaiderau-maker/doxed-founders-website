@@ -8005,6 +8005,8 @@ async function loadResearchDesign() {
     .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
   const banner = document.getElementById('research-design-banner');
+  const cards = rows => rows.map(([label, value]) =>
+    `<div class="kpi"><small>${escape(label)}</small><div>${escape(value)}</div></div>`).join('');
   const baselineBody = document.getElementById('research-baseline-body');
   const coverageBody = document.getElementById('research-regime-coverage-body');
   try {

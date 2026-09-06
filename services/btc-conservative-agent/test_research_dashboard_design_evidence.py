@@ -93,7 +93,8 @@ def test_stale_header_and_forensic_export_provenance_are_unambiguous():
     assert "Download Forensic Research Evidence Bundle" in html
     assert "inspect MANIFEST.json generation_current and provenance before use" in html
     assert "Show exact parity and freshness receipts" in html
-    assert "Wait for the verified Fly mirror and its single owner analyzer publication" in html
+    assert "repair the verified mirror/publication through the existing single-owner workflow" in html
+    assert "saved status does not prove a process is running" in html
     assert "do not start a duplicate analyzer" in html
     assert "python analyzer_research_engine_v62.py" not in html
     assert "Show exact integrity receipts" in html
