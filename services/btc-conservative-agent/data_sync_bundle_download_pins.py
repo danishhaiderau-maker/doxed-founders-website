@@ -3,6 +3,7 @@
 All participants must use the same existing bundle-worker lease. Provision the
 metadata directory outside both raw evidence and transport artifacts, under a
 trusted owner; this module never creates directories or deletes artifacts.
+Explicit maintenance may reclaim expired unfenced session metadata only.
 Readers pin before lookup/read, renew before each bounded chunk, and use
 read_chunk around all artifact access. A crashed reader's session expires;
 an in-flight chunk holds the OS lease even past expiry. Fences NEVER expire.
@@ -74,7 +75,8 @@ class DownloadProtection:
     methods while already holding that lease. The metadata root is a separate
     preprovisioned directory; it cannot be the derivative root or its child.
     The caller must also keep it outside source evidence. Capacity exhaustion
-    fails closed; archival of old metadata is deliberately not implemented.
+    fails closed; only expired unfenced metadata can be explicitly reclaimed.
+    Permanent fence archival is deliberately not implemented.
     """
     def __init__(self, metadata_root, lease_path, *, clock=time.time):
         self.root = _directory(metadata_root)
@@ -174,6 +176,55 @@ class DownloadProtection:
             state["sessions"] = active
             self._save(state, now)
             return {"generation_id": generation, "session_id": session, "expires_at": active[session]}
+
+    def reclaim_expired_unfenced(self):
+        """Explicit bounded metadata maintenance, never artifact/source cleanup.
+
+        Validate the whole bounded set before deleting anything. Fences and
+        active sessions survive. An interrupted pass is safely repeatable:
+        removed expired sessions cannot authorize reads without a fresh pin.
+        Staging files are preserved and require separate recovery.
+        """
+        with self._locked():
+            paths = []
+            with os.scandir(self.root) as entries:
+                for entry in entries:
+                    _require(len(paths) < MAX_GENERATIONS * 2, "GENERATION_LIMIT")
+                    _require(re.fullmatch(r"[0-9a-f]{64}\.json", entry.name) is not None,
+                             "UNEXPECTED_METADATA")
+                    path = self.root / entry.name
+                    info = _safe(path)
+                    paths.append((path, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)))
+            candidates = []
+            last_now = None
+            for path, identity in paths:
+                state = self._load(path.stem)
+                now = self._now(state)
+                _require(last_now is None or now >= last_now, "CLOCK_INVALID_OR_ROLLED_BACK")
+                last_now = now
+                if state["fence"] is None and not any(expiry > now for expiry in state["sessions"].values()):
+                    candidates.append((path, identity, state))
+            removed = []
+            for path, identity, state in candidates:
+                _directory(self.root)
+                info = _safe(path)
+                _require((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) == identity,
+                         "METADATA_CHANGED")
+                now = self._now(state)
+                _require(last_now is None or now >= last_now, "CLOCK_INVALID_OR_ROLLED_BACK")
+                last_now = now
+                _require(not any(expiry > now for expiry in state["sessions"].values()),
+                         "SESSION_ACTIVE")
+                path.unlink()
+                if os.name != "nt":
+                    descriptor = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                removed.append(path.stem)
+            return {"removed_generations": removed, "removed_count": len(removed),
+                    "source_deletion_authorized": False}
 
     def release(self, generation, session):
         """Caller releases only after all its concurrent chunk reads finish."""
