@@ -1,15 +1,8 @@
-"""Seal-past-analysis fallback contract for the Fly wipe path.
+"""Optional sealing helper, legacy archive integrity, and reset admission tests.
 
-Fly's .dockerignore excludes the optional ``research.past_analysis`` module
-from the container image while retaining runtime-safe research helpers. The
-wipe endpoint's ``from research.past_analysis import
-seal_past_analysis`` therefore raises ImportError, which the safety guard
-turns into HTTP 409 -- blocking every wipe on Fly.
-
-These tests pin the new contract: ``_seal_past_analysis_with_fallback``
-must (a) call the real seal when the package is importable, and (b)
-degrade to an in-memory archive dict when it isn't, so the wipe can
-proceed with an audit trail.
+The current reset uses its own exact deletion/receipt protocol. Successful
+optional sealing does not establish the exclusive reset boundary or authorize
+deletion. These tests do not claim complete destructive reset integration.
 """
 
 import os
@@ -17,6 +10,7 @@ import sys
 import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -142,48 +136,38 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
         # Session counters propagated.
         self.assertEqual(result["trade_count_session"], len(bot.trades))
 
-    # -- Test 3: end-to-end wipe path with import failing -> ok: True -------
-    def test_perform_fresh_collection_reset_ok_when_package_missing(self):
-        """End-to-end: with ``research.past_analysis`` unimportable, the
-        wipe pipeline must still return ``ok: True`` (no 409)."""
-        # Force ImportError on the inner import path inside the helper.
-        class _RaiseOnImport:
-            def find_spec(self, name, path=None, target=None):
-                if name == "research.past_analysis":
-                    raise ImportError("forced for test")
-                return None
-
-        for key in list(sys.modules.keys()):
-            if key == "research.past_analysis":
-                sys.modules.pop(key, None)
-
-        sys.meta_path.insert(0, _RaiseOnImport())
-        try:
-            with mock.patch.object(bot, "reset_all_research_files", return_value={
-                "moved": [], "errors": [], "path": "test-quarantine",
-                "cutoff_utc": "2026-08-16T00:00:00Z",
-            }):
-                result = bot._perform_fresh_collection_reset_locked(send_local_signal=False)
-        finally:
-            sys.meta_path.pop(0)
-
-        # Contract: the wipe must NOT abort just because the research package
-        # is missing on the Fly image.
-        self.assertTrue(result.get("ok"), f"expected ok=True, got: {result}")
-        self.assertFalse(result.get("wipe_aborted", False))
-        self.assertIn("past_analysis_id", result)
-        self.assertTrue(result["past_analysis_id"].startswith("degraded_"))
-        self.assertTrue(bot.state.get("execution_paused"))
-        self.assertEqual(bot.state.get("execution_reason"), "TEST_PAUSE")
+    def test_public_reset_wrapper_holds_exclusive_gate_and_releases_on_failure(self):
+        """Admission contract only; this does not claim a destructive reset passed."""
+        import threading
+        gate = threading.Lock()
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(bot, "_data_sync_runtime_root", return_value=Path(tmp)), \
+             mock.patch.object(bot, "_fresh_collection_lock", gate):
+            def admitted(*, send_local_signal):
+                self.assertFalse(send_local_signal)
+                self.assertTrue(gate.locked())
+                duplicate = bot.perform_fresh_collection_reset(send_local_signal=False)
+                self.assertEqual(duplicate["error"], "reset_already_in_progress")
+                self.assertTrue(duplicate["wipe_aborted"])
+                raise RuntimeError("fixture boundary failure")
+            with mock.patch.object(bot, "_perform_fresh_collection_reset_locked", side_effect=admitted) as body:
+                with self.assertRaisesRegex(RuntimeError, "fixture boundary failure"):
+                    bot.perform_fresh_collection_reset(send_local_signal=False)
+                body.assert_called_once_with(send_local_signal=False)
+            self.assertFalse(gate.locked())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_reset_aborts_before_archive_when_boundary_is_not_paused_and_flat(self):
         with bot.state_lock:
             bot.state["execution_paused"] = False
-        with mock.patch.object(bot, "_seal_past_analysis_with_fallback") as seal:
+        with mock.patch.object(bot, "_seal_past_analysis_with_fallback") as seal, \
+             mock.patch.object(bot, "_perform_fresh_collection_reset_quiesced") as quiesced:
             result = bot._perform_fresh_collection_reset_locked(send_local_signal=False)
         self.assertFalse(result.get("ok"))
-        self.assertIn("EXECUTION_NOT_PAUSED", result.get("blockers") or [])
+        self.assertEqual(result.get("error"), "fresh_collection_requires_paused_disarmed_flat_boundary")
+        self.assertTrue(result.get("wipe_aborted"))
         seal.assert_not_called()
+        quiesced.assert_not_called()
 
     def test_verified_archive_preserves_exact_deletion_set_and_truthful_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -264,11 +248,14 @@ class SealPastAnalysisFallbackTests(unittest.TestCase):
             bot.state["execution_paused"] = True
         with bot.trade_lock:
             bot.pending_orders.append({"trade_id": "live-pending"})
-        with mock.patch.object(bot, "_seal_past_analysis_with_fallback") as seal:
+        with mock.patch.object(bot, "_seal_past_analysis_with_fallback") as seal, \
+             mock.patch.object(bot, "_perform_fresh_collection_reset_quiesced") as quiesced:
             result = bot._perform_fresh_collection_reset_locked(send_local_signal=False)
         self.assertFalse(result.get("ok"))
-        self.assertIn("PENDING_ORDERS:1", result.get("blockers") or [])
+        self.assertEqual(result.get("error"), "fresh_collection_requires_paused_disarmed_flat_boundary")
+        self.assertTrue(result.get("wipe_aborted"))
         seal.assert_not_called()
+        quiesced.assert_not_called()
 
 
 if __name__ == "__main__":
