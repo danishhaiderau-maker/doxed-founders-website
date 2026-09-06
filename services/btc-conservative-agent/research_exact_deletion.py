@@ -260,12 +260,29 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
             "context": context, "expected_hashes": expected_hashes}
 
 
+def _notify_reset_progress(callback, phase, completed, total, fingerprinted_bytes):
+    """Advisory scalar progress only; callback output never grants authority.
+
+    Callbacks must be bounded/nonblocking. Sink failures do not change the
+    underlying validation, expected hashes, or deletion decisions.
+    """
+    if callback is None:
+        return
+    try:
+        callback({'schema': 'research_reset_progress_v1', 'phase': phase,
+                  'completed_targets': completed, 'total_targets': total,
+                  'fingerprinted_bytes': fingerprinted_bytes,
+                  'authority': 'ADVISORY_ONLY'})
+    except Exception:
+        pass
+
+
 def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
                                 quiescent: bool, recovery_states: Mapping[str, str],
                                 protected_paths=(), max_files: int = 100000,
                                 max_total_bytes: int = 64 * 1024**3,
                                 expected_sha256_by_path: Mapping[str, str] | None = None,
-                                receipt_context: Mapping | None = None) -> dict:
+                                receipt_context: Mapping | None = None, progress_callback=None) -> dict:
     """Revalidate admission, hash and journal exact deletions under caller leases."""
     admission = validate_exact_research_deletion(
         root=root, targets=targets, allowed_paths=allowed_paths, receipt_path=receipt_path,
@@ -274,7 +291,14 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
         expected_sha256_by_path=expected_sha256_by_path, receipt_context=receipt_context)
     root, paths, receipt, journal, context, expected_hashes = (
         admission[key] for key in ("root", "paths", "receipt", "journal", "context", "expected_hashes"))
-    inventory = [_fingerprint(path) for path in paths]
+    inventory = []
+    hashed_bytes = 0
+    _notify_reset_progress(progress_callback, 'DELETER_FINGERPRINT', 0, len(paths), 0)
+    for path in paths:
+        row = _fingerprint(path)
+        inventory.append(row)
+        hashed_bytes += row['bytes']
+        _notify_reset_progress(progress_callback, 'DELETER_FINGERPRINT', len(inventory), len(paths), hashed_bytes)
     mismatches = [row for row in inventory if row["path"] in expected_hashes
                   and row["sha256"] != expected_hashes[row["path"]]]
     if mismatches:
@@ -302,9 +326,13 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
     try:
         # Recheck the complete set before the first unlink, and each exact file
         # again immediately before removal. No glob/tree expansion occurs here.
-        for row in inventory:
+        hashed_bytes = 0
+        _notify_reset_progress(progress_callback, 'PRE_UNLINK_REVALIDATION', 0, len(inventory), 0)
+        for index, row in enumerate(inventory):
             if _fingerprint(_checked_path(row["path"], root)) != row:
                 raise ResearchDeletionRejected("TARGET_CHANGED_BEFORE_DELETE")
+            hashed_bytes += row['bytes']
+            _notify_reset_progress(progress_callback, 'PRE_UNLINK_REVALIDATION', index + 1, len(inventory), hashed_bytes)
         for index, row in enumerate(inventory):
             path = _checked_path(row["path"], root)
             if _fingerprint(path) != row:

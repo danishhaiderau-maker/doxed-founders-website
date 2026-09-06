@@ -28088,6 +28088,7 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
     from research_reset_execution import execute_research_reset
     from research_reset_inventory import _managed_fly_alias
     from research_reset_preflight_diagnostics import write_reset_preflight_diagnostic
+    from research_reset_progress import make_reset_progress_callback
     from uuid import uuid4
 
     global _last_fresh_maintain_ts, _cached_pathway_scorecard, _cached_pathway_lane_specs
@@ -28133,7 +28134,9 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 preflight = execute_research_reset(runtime_root=root, proof=proof, quiescent=True,
                     recovery_states=boundary["recovery_states"],
                     receipt_path=scope_root / "research_reset_receipts" / reset_id / "deletion.json",
-                    allow_fly_runtime_aliases=True, scope_name=name, validate_only=True)
+                    allow_fly_runtime_aliases=True, scope_name=name, validate_only=True,
+                    progress_callback=make_reset_progress_callback(root,
+                        attempt_id=diagnostic_attempt_id, reset_id=reset_id, scope_name=name))
                 if preflight.get("status") != "VALIDATED":
                     raise RuntimeError("RESET_SCOPE_PREFLIGHT_FAILED")
                 preflights.append({key: preflight[key] for key in
@@ -28165,6 +28168,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
             runtime_root=root, proof=proof, quiescent=True,
             recovery_states=boundary["recovery_states"], receipt_path=receipt_dir / "deletion.json",
             allow_fly_runtime_aliases=True,
+            progress_callback=make_reset_progress_callback(root,
+                attempt_id=diagnostic_attempt_id, reset_id=reset_id),
         )
         if result.get("status") != "COMPLETE":
             raise RuntimeError("RESET_DELETION_INCOMPLETE")
@@ -28181,7 +28186,9 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
                 scope_receipt_dir.mkdir(parents=True, exist_ok=False)
                 scoped = execute_research_reset(runtime_root=root, proof=proof, quiescent=True,
                     recovery_states=boundary["recovery_states"], receipt_path=scope_receipt_dir / "deletion.json",
-                    scope_name=name)
+                    scope_name=name,
+                    progress_callback=make_reset_progress_callback(root,
+                        attempt_id=diagnostic_attempt_id, reset_id=reset_id, scope_name=name))
                 if scoped.get("status") != "COMPLETE":
                     raise RuntimeError("RESET_SCOPE_DELETION_INCOMPLETE")
                 scope_deletions[name] = scoped

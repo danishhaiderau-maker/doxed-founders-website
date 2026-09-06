@@ -23,6 +23,24 @@ def setup(tmp_path, names=("old.jsonl",)):
             "recovery_states": {"emergency_wal": "EMPTY"}}
 
 
+def test_failed_progress_sink_cannot_bypass_expected_hash(tmp_path):
+    args=setup(tmp_path)
+    def broken(row):
+        raise OSError('progress sink failed')
+    with pytest.raises(deletion.ResearchDeletionRejected,match='EXPECTED_SHA256_MISMATCH'):
+        deletion.delete_exact_research_files(**args,progress_callback=broken,
+            expected_sha256_by_path={str(args['targets'][0]):'0'*64})
+    assert args['targets'][0].exists()
+    assert not args['receipt_path'].exists()
+
+
+def test_progress_sink_error_does_not_change_success(tmp_path):
+    args=setup(tmp_path)
+    def broken(row):
+        raise OSError('progress sink failed')
+    assert deletion.delete_exact_research_files(**args,progress_callback=broken)['status']=='COMPLETE'
+
+
 def test_exact_discard_retains_only_metadata_and_unrelated_file(tmp_path):
     args = setup(tmp_path, ("old.jsonl", "reports/old.json"))
     other = args["root"] / "keep.json"

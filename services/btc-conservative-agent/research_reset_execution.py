@@ -13,7 +13,7 @@ from typing import Mapping
 
 from research_exact_deletion import (
     ResearchDeletionRejected, _checked_path, _fingerprint, delete_exact_research_files,
-    validate_exact_research_deletion,
+    validate_exact_research_deletion, _notify_reset_progress,
 )
 from research_reset_inventory import plan_research_reset, _managed_fly_alias
 from research_reset_paths import io_path
@@ -24,7 +24,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
                            protected_paths=(), expected_plan_sha256=None, expected_target_sha256_by_path=None,
                            max_entries=200000, max_depth=12, max_metadata_bytes=4 * 1024**2,
                            max_files=100000, max_total_bytes=64 * 1024**3,
-                           allow_fly_runtime_aliases=False, scope_name=None, validate_only=False) -> dict:
+                           allow_fly_runtime_aliases=False, scope_name=None, validate_only=False,
+                           progress_callback=None) -> dict:
     """Re-plan while quiesced, validate all targets, then unlink exact paths.
 
     ``proof`` is caller-verified against its authoritative recovery receipt;
@@ -80,6 +81,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         receipt_path=receipt_path, quiescent=quiescent, recovery_states=recovery_states,
         protected_paths=protected_paths, max_files=max_files, max_total_bytes=max_total_bytes,
         receipt_context=context, prospective_receipt_parent=validate_only)
+    hashed_bytes = 0
+    _notify_reset_progress(progress_callback, 'EXECUTOR_FINGERPRINT', 0, len(targets), 0)
     for row in targets:
         path = _checked_path(row["absolute_path"], root)
         info = io_path(path).lstat()
@@ -100,6 +103,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         # additionally must agree with their original immutable metadata.
         expected[str(path)] = digest or actual["sha256"]
         paths.append(path)
+        hashed_bytes += actual['bytes']
+        _notify_reset_progress(progress_callback, 'EXECUTOR_FINGERPRINT', len(paths), len(targets), hashed_bytes)
     if expected_target_sha256_by_path is not None:
         if (not isinstance(expected_target_sha256_by_path, Mapping)
                 or dict(expected_target_sha256_by_path) != expected):
@@ -130,6 +135,7 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         protected_paths=protected_paths, max_files=max_files, max_total_bytes=max_total_bytes,
         expected_sha256_by_path=expected,
         receipt_context=context,
+        progress_callback=progress_callback,
     )
     return {"schema": "research_reset_execution_v1", "status": receipt["status"],
             "scope_root": str(root), "scope_name": scope_name,
