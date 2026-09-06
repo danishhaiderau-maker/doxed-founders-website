@@ -42,6 +42,33 @@ def test_summary_actual_payload_supplies_failed_attempt_to_banner(monkeypatch):
     assert 'Recovery required' in result.stdout and 'Wait for' not in result.stdout
 
 
+def test_lane_approvals_actual_endpoint_and_renderer_preserve_unknown_and_zero(monkeypatch):
+    helper = re.search(r"function laneApprovalCount\(current, row\) \{.*?\n\}", dashboard.DASHBOARD_HTML, re.S)
+    assert helper and '${laneApprovalCount(current, row)}' in dashboard.DASHBOARD_HTML
+    cases = []
+    lane = next(iter(dashboard.CURRENT_RESEARCH_LANES))
+    for status, current, count, expected in (
+        ('UNAVAILABLE', False, 0, 'UNAVAILABLE'),
+        ('CURRENT_GENERATION', False, 12, 'UNAVAILABLE'),
+        ('CURRENT_GENERATION', True, 0, 0),
+        ('CURRENT_GENERATION', True, 12, 12),
+        ('CURRENT_GENERATION', True, None, 'UNAVAILABLE'),
+    ):
+        monkeypatch.setattr(dashboard, '_lane_rows', lambda **kwargs: ([{'lane': lane, 'approves': count}], None, {'status': status}))
+        monkeypatch.setattr(dashboard, '_generation_freshness_meta', lambda: {'current': current, 'reasons': []})
+        dashboard._API_RESPONSE_CACHE.clear()
+        response = dashboard.app.test_client().get('/api/lanes')
+        assert response.status_code == 200
+        payload = response.get_json()
+        if not current: assert payload['lanes'][0]['approves'] is None
+        cases.append((payload, expected))
+    script = helper.group(0) + '\nconsole.log(JSON.stringify(' + json.dumps([p for p, _ in cases]) + '.map(p=>laneApprovalCount(p,p.lanes[0]))));'
+    result = subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True, timeout=15)
+    assert json.loads(result.stdout) == [e for _, e in cases]
+    assert 'Both paper and counterfactual evidence may support research qualification' in dashboard.DASHBOARD_HTML
+    assert 'Counterfactual results never count as fills, executed PnL, or strategy qualification' not in dashboard.DASHBOARD_HTML
+
+
 def test_every_dashboard_navigation_item_has_renderable_section_scope_and_loader():
     """Static visual contract: clicking a visible subtab must never blank the page."""
     source = dashboard.DASHBOARD_HTML

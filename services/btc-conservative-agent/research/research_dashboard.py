@@ -4466,6 +4466,8 @@ def api_lanes():
         })
     all_lanes = _wants_all_lanes()
     filtered = _filter_lane_rows(rows, all_lanes=all_lanes)
+    if evidence.get("status") != "CURRENT_GENERATION":
+        filtered = [{**row, "approves": None} for row in filtered]
     return jsonify({
         "lanes": filtered,
         "benchmark_pnl": bench_pnl,
@@ -6560,7 +6562,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Current Lane Analysis</h2>
     <p class="note" id="lanes-filter-note">Current lanes: {{ tile_lane_names }}. Archived lane names remain available only in quarantine artifacts.</p>
     <p class="note" id="lanes-evidence-note"></p>
-    <p class="note">Executed paper closes and counterfactual/lab terminals are separate evidence classes. Counterfactual results never count as fills, executed PnL, or strategy qualification.</p>
+    <p class="note">Executed paper closes and counterfactual/lab terminals are separate evidence classes. Counterfactual outcomes are not actual fills or executed PnL. Both paper and counterfactual evidence may support research qualification under the same completeness, execution-model and holdout gates; model-supported results do not prove live fills.</p>
     <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Executed closes</th><th>Executed net PnL</th><th>Executed EV / approval</th><th>Counterfactual terminals</th><th>Counterfactual PnL</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-regime">
@@ -7364,6 +7366,9 @@ async function loadFindings() {
   document.getElementById('findings-list').innerHTML = (d.findings||[]).map(f => `<li>${f}</li>`).join('') || `<li>${d.source_available === false ? missingResearchSource() : 'The saved report contains no findings.'}</li>`;
 }
 
+function laneApprovalCount(current, row) {
+  return current.evidence_status === 'CURRENT_GENERATION' ? (row.approves ?? 'UNAVAILABLE') : 'UNAVAILABLE';
+}
 async function loadLanes() {
   const rCurrent = await fetch('/api/lanes');
   const current = await rCurrent.json();
@@ -7385,7 +7390,7 @@ async function loadLanes() {
   }
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
     `<tr><td>${row.lane || row.research_lane || ''}</td><td>${currentAvailable ? (row.status || row.pathway_status || 'COLLECTING') : 'STALE / UNAVAILABLE'}</td>`
-    + `<td>${row.approves || 0}</td><td>${currentAvailable ? (row.executed_closes || 0) : '—'}</td>`
+    + `<td>${laneApprovalCount(current, row)}</td><td>${currentAvailable ? (row.executed_closes || 0) : '—'}</td>`
     + `<td>${currentAvailable ? fmtExecutionUsd(row.pnl) : '—'}</td><td>${currentAvailable ? fmtExecutionUsd(row.ev) : '—'}</td>`
     + `<td>${currentAvailable ? (row.counterfactual_closes || 0) : '—'}</td><td>${currentAvailable ? fmtExecutionUsd(row.counterfactual_pnl) : '—'}</td></tr>`
   ).join('') || '<tr><td colspan="8">No current-lane evidence yet.</td></tr>';
