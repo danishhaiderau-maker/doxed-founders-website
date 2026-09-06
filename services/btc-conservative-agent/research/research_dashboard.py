@@ -2566,9 +2566,28 @@ def _chase_bucket_stats_from_trades(rows):
     return buckets
 
 
+def _execution_panel_report(name):
+    report, source = _declared_atomic_generation_report(name)
+    manifest = source.get("manifest") or {}
+    identity = {"generated_at": manifest.get("generated_at"),
+                "source_revision": manifest.get("source_data_revision"),
+                "analyzer_revision": manifest.get("generation_revision"),
+                "epoch_id": (manifest.get("fresh_epoch") or {}).get("epoch_id")}
+    if report is None:
+        return {"source_available": False, "generation_identity": identity,
+                "empty_reason": "UNAVAILABLE — " + str(source.get("reason") or "REPORT_MISSING"),
+                "qualification_eligible": False}
+    return {**report, "source_available": True, "generation_identity": identity,
+            "qualification_eligible": False}
+
+
 def _chase_threshold_payload(lane: str = ""):
-    rep = _read_report("chase_threshold_report.json")
-    attr = _read_report("chase_attribution_report.json")
+    rep = _execution_panel_report("chase_threshold_report.json")
+    if not rep["source_available"]:
+        return rep
+    attr = _execution_panel_report("chase_attribution_report.json")
+    if lane and not attr["source_available"]:
+        return attr
     rows = []
     if lane:
         trades_attr = _filter_chase_attributions(attr.get("trades") or [], lane)
@@ -2589,6 +2608,8 @@ def _chase_threshold_payload(lane: str = ""):
         if int((block or {}).get("trades") or 0)
     ]
     return {
+        "source_available": True,
+        "generation_identity": rep["generation_identity"],
         **_nonqualifying_scope(
             "SEPARATED_EXECUTED_AND_SHADOW",
             rep.get("warning") or (
@@ -2637,13 +2658,17 @@ def _chase_delay_payload():
 
 
 def _exit_combos_payload():
-    rep = _read_report("exit_combinations_report.json")
+    rep = _execution_panel_report("exit_combinations_report.json")
+    if not rep["source_available"]:
+        return rep
     classes = rep.get("evidence_worlds") or rep.get("evidence_classes") or {}
     executed = classes.get("executed_paper") or {"top": rep.get("top") or [], "worst_leakage": rep.get("worst_leakage") or []}
     shadow = classes.get("shadow_lab") or {"top": [], "worst_leakage": []}
     top = list(executed.get("top_family_balanced") or executed.get("top") or [])
     worst = list(executed.get("worst_leakage") or [])
     return {
+        "source_available": True,
+        "generation_identity": rep["generation_identity"],
         **_nonqualifying_scope(
             "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
             "Terminal exit evidence is descriptive only. Executed-paper and shadow/lab rows are never merged or qualification eligible.",
@@ -4792,30 +4817,12 @@ def api_policy_evidence_library():
 
 @app.route("/api/chase-policy-lab")
 def api_chase_policy_lab():
-    path = _best_report_path("chase_policy_lab_report.json")
-    if path is None:
-        return jsonify({
-            "schema": "chase_policy_lab_v1",
-            "qualification_eligible": False,
-            "leader_label": "INSUFFICIENT_EVIDENCE",
-            "empty_reason": "SOURCE_EMPTY_OR_UNAVAILABLE",
-            "ranked_schedules": [],
-        })
-    return jsonify(_read_json(path))
+    return jsonify(_execution_panel_report("chase_policy_lab_report.json"))
 
 
 @app.route("/api/missed-opportunity-proof")
 def api_missed_opportunity_proof():
-    path = _best_report_path("missed_opportunity_proof_report.json")
-    if path is None:
-        return jsonify({
-            "schema": "missed_opportunity_proof_v1",
-            "qualification_eligible": False,
-            "empty_reason": "SOURCE_EMPTY_OR_UNAVAILABLE",
-            "proof_count": 0,
-            "proofs": [],
-        })
-    return jsonify(_read_json(path))
+    return jsonify(_execution_panel_report("missed_opportunity_proof_report.json"))
 
 
 @app.route("/api/report/<path:filename>")
@@ -7452,9 +7459,24 @@ async function loadSpreadPerf() {
   }).join('') || '<tr><td colspan="5">No legacy spread-performance evidence exists in the current cohort.</td></tr>';
 }
 
+function executionPanelSource(section, payload) {
+  const root = document.getElementById('sec-' + section);
+  if (payload.source_available === false) {
+    root.querySelectorAll('tbody').forEach(node => node.innerHTML = '<tr><td colspan="20">UNAVAILABLE — no declared atomic report. Historical artifacts remain in Report Explorer.</td></tr>');
+    root.querySelectorAll('.kpis').forEach(node => node.innerHTML = '<div class="kpi">UNAVAILABLE — no measured counts</div>');
+    root.querySelectorAll('.note').forEach(node => node.textContent = payload.empty_reason || 'UNAVAILABLE');
+    return false;
+  }
+  const identity = payload.generation_identity || {};
+  let provenance = root.querySelector('.execution-source-identity');
+  if (!provenance) { provenance = document.createElement('p'); provenance.className = 'execution-source-identity'; root.prepend(provenance); }
+  provenance.textContent = 'Saved atomic report identity: ' + JSON.stringify(identity) + ' · descriptive only; global freshness gates apply.';
+  return true;
+}
 async function loadChaseThreshold() {
   const r = await fetch('/api/chase-threshold' + chaseLaneQuery());
   const d = await r.json();
+  if (!executionPanelSource('chase-threshold', d)) return;
   const note = document.getElementById('chase-threshold-note');
   if (note) note.textContent = [d.warning, d.question, d.evidence_contract].filter(Boolean).join(' · ') || 'Executed and shadow chase evidence.';
   const coverage = d.coverage || {};
@@ -7487,10 +7509,17 @@ async function loadChasePolicyLab() {
   ]);
   const lab = await labResponse.json();
   const proof = await proofResponse.json();
+  if (lab.source_available === false) {
+    document.getElementById('chase-policy-kpis').innerHTML = 'UNAVAILABLE — no declared Lab report';
+    document.getElementById('chase-policy-body').innerHTML = '<tr><td colspan="12">UNAVAILABLE — no declared Lab report</td></tr>';
+    document.getElementById('chase-policy-leader-label').textContent = 'UNAVAILABLE';
+    document.getElementById('chase-policy-top').textContent = lab.empty_reason || 'UNAVAILABLE';
+    document.getElementById('chase-policy-lab-note').textContent = lab.empty_reason || 'UNAVAILABLE';
+  } else {
   const rows = lab.ranked_schedules || [];
   const top = lab.top_schedule || null;
   const note = document.getElementById('chase-policy-lab-note');
-  if (note) note.textContent = lab.empty_reason || lab.full_artifact_note || 'All schedule permutations are retained in the downloadable JSON artifact.';
+  if (note) note.textContent = 'Saved Lab identity: ' + JSON.stringify(lab.generation_identity || {}) + ' · ' + (lab.empty_reason || lab.full_artifact_note || 'Descriptive schedules; global freshness gates apply.');
   document.getElementById('chase-policy-leader-label').textContent = top
     ? `${lab.leader_label || 'INSUFFICIENT_EVIDENCE'} — ${top.policy_id || 'UNKNOWN'}`
     : 'INSUFFICIENT EVIDENCE — NO SIGNED SCHEDULE ROWS';
@@ -7514,9 +7543,16 @@ async function loadChasePolicyLab() {
       + `<td>${fmtPct(row.coverage_pct)} / ${confidence.label||'INSUFFICIENT'} / ${fmtPct(confidence.fill_rate_wilson_lower_95_pct)}</td>`
       + `<td>${(row.regimes||[]).join(', ')||'UNAVAILABLE'}</td><td class="bad">${row.evidence_status||'INSUFFICIENT_EVIDENCE'}<br>${compressedScheduleQualification(row.qualification_status)}</td></tr>`;
   }).join('') || '<tr><td colspan="12">No signed compressed shadow schedule evidence is available in this generation.</td></tr>';
+  }
+  if (proof.source_available === false) {
+    document.getElementById('missed-proof-kpis').innerHTML = 'UNAVAILABLE — no declared proof report';
+    document.getElementById('missed-proof-body').innerHTML = '<tr><td colspan="8">UNAVAILABLE — no declared proof report</td></tr>';
+    return;
+  }
   const proofs = proof.proofs || [];
   const counts = proof.classification_counts || {};
   document.getElementById('missed-proof-kpis').innerHTML = [
+    ['Proof source identity', JSON.stringify(proof.generation_identity || {})],
     ['Proof rows', proof.proof_count ?? proofs.length],
     ['Proven missed profit', counts.PROVEN_MISSED_PROFIT || 0],
     ['Proven avoided loss', counts.PROVEN_AVOIDED_LOSS || 0],
@@ -7555,6 +7591,7 @@ async function loadChaseDelay() {
 async function loadExitCombos() {
   const r = await fetch('/api/exit-combos');
   const d = await r.json();
+  if (!executionPanelSource('exit-combos', d)) return;
   const money = value => value == null ? 'n/a' : fmtExecutionUsd(value);
   document.getElementById('exit-combos-kpis').innerHTML = [
     ['Total combos', d.total_combos ?? 0],
