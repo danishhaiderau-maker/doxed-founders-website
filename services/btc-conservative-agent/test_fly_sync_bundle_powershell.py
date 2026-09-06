@@ -10,7 +10,7 @@ PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependen
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
-@pytest.mark.parametrize("defect", [None, "hash", "waiting", "interleaved", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size"])
+@pytest.mark.parametrize("defect", [None, "hash", "waiting", "interleaved", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size", "failed", "failed-extra", "failed-malformed"])
 def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, defect):
     payload = '{"sample":1}'
     relative = "v3/market_segments/11/" + "1" * 64 + ".json"
@@ -40,14 +40,25 @@ $manifest=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}
 $state=@{{}}
 $script:saves=0
 $script:phases=@()
+$script:details=@()
 try {{
- $result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{ROOT.as_posix()}/scripts/test-support/bundle-staging-fixture.py' -SyncState $state -SaveCheckpoint {{$script:saves+=1}} -Progress {{param($n,$phase) $script:phases+=@{{files=$n;phase=$phase}}}}
- @{{result=$result;state=$state;saves=$script:saves;phases=$script:phases}}|ConvertTo-Json -Depth 10 -Compress
-}} catch {{ Write-Output $_.Exception.Message; exit 7 }}
+ $result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{ROOT.as_posix()}/scripts/test-support/bundle-staging-fixture.py' -SyncState $state -SaveCheckpoint {{$script:saves+=1}} -Progress {{param($n,$phase,$detail) $script:phases+=@{{files=$n;phase=$phase}}; $script:details+=@{{detail=$detail;durableSaves=$script:saves}}}}
+ @{{result=$result;state=$state;saves=$script:saves;phases=$script:phases;details=$script:details}}|ConvertTo-Json -Depth 10 -Compress
+}} catch {{ Write-Output $_.Exception.Message; @{{phases=$script:phases;details=$script:details}}|ConvertTo-Json -Depth 10 -Compress; exit 7 }}
 """
     completed = subprocess.run([str(PWSH), "-NoProfile", "-Command", script],
                                capture_output=True, text=True, timeout=30)
-    if defect in {"hash", "foreign-wait", "late-wait", "reuse-escape", "reuse-flag", "reuse-size"}:
+    if str(defect).startswith('failed'):
+        assert completed.returncode == 7, completed.stdout + completed.stderr
+        result=json.loads(completed.stdout.splitlines()[-1])
+        assert result['phases'][-1] == {'files':1,'phase':'bundle_failed'}
+        detail=result['details'][-1]['detail']
+        assert detail['Failed'] is True and detail['VerifiedBytes'] == len(payload)
+        assert detail['ReusedBytes'] == 0
+        assert 'PRIVATE_SENTINEL' not in completed.stdout
+        assert ('failure_context=' in completed.stdout) is (defect == 'failed')
+        assert (target / relative).read_text() == payload
+    elif defect in {"hash", "foreign-wait", "late-wait", "reuse-escape", "reuse-flag", "reuse-size"}:
         code = {"hash": "BUNDLE_STAGE_HASH_MISMATCH", "foreign-wait": "BUNDLE_RECEIPT_IDENTITY",
                 "late-wait": "BUNDLE_INDEX_WAIT_INVALID", "reuse-escape": "BUNDLE_REUSE_PATH_MISMATCH",
                 "reuse-flag": "BUNDLE_REUSE_FLAG_INVALID", "reuse-size": "BUNDLE_STAGE_SIZE_MISMATCH"}[defect]
@@ -59,6 +70,9 @@ try {{
         result = json.loads(completed.stdout)
         assert result["result"]["Files"] == 1 and result["result"]["AckSent"] is False
         assert result["saves"] == 1
+        assert result["details"][-1]["durableSaves"] == 1
+        assert result["details"][-1]["detail"]["VerifiedBytes"] == len(payload)
+        assert result["details"][-1]["detail"]["ReusedBytes"] == (len(payload) if defect == "reuse" else 0)
         assert not Path(result["result"]["StagingRoot"]).exists()
         assert result["state"][relative]["size"] == len(payload)
         assert result["state"][relative]["mtime_ns"] == 456

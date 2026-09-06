@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
-from data_sync_bundle_client import BundleClientError, fetch_verified_package
+from data_sync_bundle_client import fetch_verified_package, BundleClientError, sanitize_diagnostic
 
 MAX_INPUT = 32 * 1024 * 1024
 MAX_META = 2 * 1024 * 1024
@@ -70,6 +70,10 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
             except HTTPError as error:
                 with error:
                     return error.code, dict(error.headers), b""  # Never echo response diagnostics.
+            except URLError as error:
+                if isinstance(error.reason, TimeoutError):
+                    raise TimeoutError("TRANSPORT_TIMEOUT") from None
+                raise ConnectionError("TRANSPORT_CONNECTION_ERROR") from None
             with response:
                 limit = MAX_META if ("descriptor=1" in relative or "/bundles?" in relative) else 1024 * 1024
                 return response.status, dict(response.headers), response.read(limit + 1)
@@ -171,8 +175,9 @@ def main():
         if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,95}", code):
             code = "BUNDLE_CLIENT_FAILED"
         receipt = {"schema": "fly_bundle_staging_receipt_v1", "status": "FAILED", "error": code}
-        if isinstance(error, BundleClientError) and error.diagnostic is not None:
-            receipt['diagnostic'] = error.diagnostic
+        diagnostic = sanitize_diagnostic(error.diagnostic) if isinstance(error, BundleClientError) else None
+        if diagnostic is not None:
+            receipt["diagnostic"] = diagnostic
         print(json.dumps(receipt), flush=True)
         return 1
 

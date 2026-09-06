@@ -469,7 +469,11 @@ function Write-SyncProgressHeartbeat {
   }
   $temporary = "$target.progress-$PID-$([Guid]::NewGuid().ToString('N'))"
   if ($null -ne $BundleProgress) {
-    $progress.inProgress = $true
+    $progress.inProgress = $BundleProgress.Failed -ne $true
+    if ($BundleProgress.Failed -eq $true) {
+      $progress.ok = $false
+      $progress['failureCode'] = if ([string]$BundleProgress.FailureCode -cmatch '^[A-Z][A-Z0-9_]{1,95}$') { [string]$BundleProgress.FailureCode } else { 'BUNDLE_TRANSFER_FAILED' }
+    }
     $progress['ackPending'] = $true
     $progress['completionAuthority'] = 'NONE_TRANSFER_PROGRESS_ONLY'
     $progress['revisionParityScope'] = 'REQUEST_VS_MANIFEST_NOT_MIRROR_COMPLETION'
@@ -478,7 +482,7 @@ function Write-SyncProgressHeartbeat {
     $progress['verifiedPayloadBytes'] = [int64]$BundleProgress.VerifiedBytes
     $progress['reusedLocalBytes'] = [int64]$BundleProgress.ReusedBytes
     $progress['newlyTransferredPayloadBytes'] = [int64]$BundleProgress.VerifiedBytes - [int64]$BundleProgress.ReusedBytes
-    $progress['networkBytes'] = $null
+    $progress['networkBytes'] = $null # Payload excludes TAR/protocol overhead; not measured wire traffic.
   }
   $backup = "$temporary.replace-backup"
   $encoding = New-Object System.Text.UTF8Encoding($false)

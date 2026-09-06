@@ -35,6 +35,12 @@ if manifest.get("fixture_defect") in {"waiting", "foreign-wait", "late-wait"}:
 print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "PACKAGE_VERIFIED",
                   "generation": identity, "members": members,
                   "reused_local": "true" if manifest.get("fixture_defect") == "reuse-flag" else manifest.get("fixture_defect") in {"reuse", "reuse-escape", "reuse-size"}}), flush=True)
+if str(manifest.get("fixture_defect")).startswith("failed"):
+    diagnostic=dict(generation_id=identity['inventory_generation_id'],package_sha256='b'*64,phase='CHUNK',offset=0,attempts=3,http_status=503,transport_error=None)
+    if manifest['fixture_defect']=='failed-extra': diagnostic['extra']='PRIVATE_SENTINEL'
+    if manifest['fixture_defect']=='failed-malformed': diagnostic['attempts']=True
+    print(json.dumps(dict(schema='fly_bundle_staging_receipt_v1',status='FAILED',error='PACKAGE_RETRY_EXHAUSTED',diagnostic=diagnostic)),flush=True)
+    sys.exit(1)
 if manifest.get("fixture_defect") == "interleaved":
     print(json.dumps({"schema":"fly_bundle_staging_receipt_v1","status":"INDEX_WAITING",
         "generation":identity,"elapsed_seconds":5,"next_retry_seconds":10}),flush=True)
