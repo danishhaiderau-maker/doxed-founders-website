@@ -903,6 +903,7 @@ jobs:
           python -m py_compile bot.py data_sync_inventory_worker.py btc_conservative_agent.py fly_relay_state_pusher.py platform_relay_evidence_worker.py platform_relay_streaming.py
           python -m pytest test_platform_relay_evidence_worker.py -q
           python -m pytest test_crash_journal_repair.py tests/test_crash_journal_writer.py test_crash_snapshot_nonmutating.py -q
+          python -m pytest test_lifecycle_index_recovery.py test_lifecycle_reset_index_recovery.py test_lifecycle_reset_recovery_startup.py test_lifecycle_pipeline_worker.py test_research_reset_inventory.py -q
           python -m pytest test_data_sync_inventory_worker_contract.py -q
           python -m pytest test_data_sync_cadence_throttle_contract.py -q
           python test_fly_startup_contract.py
