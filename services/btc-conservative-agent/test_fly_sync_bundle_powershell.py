@@ -10,7 +10,7 @@ PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependen
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
-@pytest.mark.parametrize("defect", [None, "hash", "waiting", "interleaved", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size", "failed", "failed-extra", "failed-malformed"])
+@pytest.mark.parametrize("defect", [None, "hash", "waiting", "interleaved", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size", "failed", "failed-extra", "failed-malformed", "failed-index", "failed-index-extra", "failed-index-malformed"])
 def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, defect):
     payload = '{"sample":1}'
     relative = "v3/market_segments/11/" + "1" * 64 + ".json"
@@ -56,7 +56,7 @@ try {{
         assert detail['Failed'] is True and detail['VerifiedBytes'] == len(payload)
         assert detail['ReusedBytes'] == 0
         assert 'PRIVATE_SENTINEL' not in completed.stdout
-        assert ('failure_context=' in completed.stdout) is (defect == 'failed')
+        assert ('failure_context=' in completed.stdout) is (defect in {'failed','failed-index'})
         assert (target / relative).read_text() == payload
     elif defect in {"hash", "foreign-wait", "late-wait", "reuse-escape", "reuse-flag", "reuse-size"}:
         code = {"hash": "BUNDLE_STAGE_HASH_MISMATCH", "foreign-wait": "BUNDLE_RECEIPT_IDENTITY",

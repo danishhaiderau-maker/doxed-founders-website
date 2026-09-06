@@ -36,6 +36,12 @@ print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "PACKAGE_
                   "generation": identity, "members": members,
                   "reused_local": "true" if manifest.get("fixture_defect") == "reuse-flag" else manifest.get("fixture_defect") in {"reuse", "reuse-escape", "reuse-size"}}), flush=True)
 if str(manifest.get("fixture_defect")).startswith("failed"):
+    if manifest['fixture_defect'].startswith('failed-index'):
+        diagnostic=dict(generation_id=identity['inventory_generation_id'],phase='INDEX',attempts=2,http_status=503,transport_error=None)
+        if manifest['fixture_defect']=='failed-index-extra': diagnostic['extra']='PRIVATE_SENTINEL'
+        if manifest['fixture_defect']=='failed-index-malformed': diagnostic['attempts']=True
+        print(json.dumps(dict(schema='fly_bundle_staging_receipt_v1',status='FAILED',error='BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN',index_diagnostic=diagnostic)),flush=True)
+        sys.exit(1)
     diagnostic=dict(generation_id=identity['inventory_generation_id'],package_sha256='b'*64,phase='CHUNK',offset=0,attempts=3,http_status=503,transport_error=None)
     if manifest['fixture_defect']=='failed-extra': diagnostic['extra']='PRIVATE_SENTINEL'
     if manifest['fixture_defect']=='failed-malformed': diagnostic['attempts']=True

@@ -90,6 +90,18 @@ function Receive-FlyTransportBundles {
              ($null -eq $d.http_status -and $d.transport_error -cin @('TIMEOUT','CONNECTION_ERROR')))) {
           Write-Host ('[FLY SYNC] failure_context=' + ($d | ConvertTo-Json -Compress))
         }
+        $ix = $receipt.index_diagnostic
+        $indexKeys = @('generation_id','phase','attempts','http_status','transport_error')
+        if ($code -ceq 'BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN' -and $null -ne $ix -and
+            @($ix.PSObject.Properties.Name).Count -eq 5 -and
+            @($ix.PSObject.Properties.Name | Where-Object { $_ -cnotin $indexKeys }).Count -eq 0 -and
+            $ix.generation_id -is [string] -and $ix.generation_id -cmatch '^[0-9a-f]{64}$' -and
+            $ix.generation_id -ceq $Manifest.inventory_generation_id -and $ix.phase -ceq 'INDEX' -and
+            $ix.attempts -is [long] -and $ix.attempts -eq 2 -and
+            (($null -eq $ix.transport_error -and $ix.http_status -is [long] -and $ix.http_status -in @(429,502,503,504)) -or
+             ($null -eq $ix.http_status -and $ix.transport_error -cin @('TIMEOUT','CONNECTION_ERROR')))) {
+          Write-Host ('[FLY SYNC] index_failure_context=' + ($ix | ConvertTo-Json -Compress))
+        }
         throw ('BUNDLE_TRANSFER_FAILED: ' + $code)
       }
       if ($receipt.status -ceq 'INDEX_WAITING') {

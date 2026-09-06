@@ -22,6 +22,24 @@ class NoRedirect(HTTPRedirectHandler):
         return None  # Never forward the admin credential to another URL.
 
 
+def sanitize_index_diagnostic(value):
+    if not isinstance(value, dict) or set(value) != {"generation_id", "phase", "attempts", "http_status", "transport_error"}:
+        return None
+    if (not isinstance(value["generation_id"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["generation_id"])
+            or value["phase"] != "INDEX" or type(value["attempts"]) is not int or value["attempts"] != 2
+            or (value["http_status"] is None) == (value["transport_error"] is None)
+            or (value["http_status"] is not None and (type(value["http_status"]) is not int or value["http_status"] not in (429,502,503,504)))
+            or value["transport_error"] not in (None, "TIMEOUT", "CONNECTION_ERROR")):
+        return None
+    return dict(value)
+
+
+class IndexPressureError(ValueError):
+    def __init__(self, diagnostic):
+        super().__init__("BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN")
+        self.diagnostic = sanitize_index_diagnostic(diagnostic)
+
+
 def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
     started = clock()
     if request.get("source_url", "").rstrip("/") != "https://doxed-btc-bot.fly.dev":
@@ -103,9 +121,12 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
         elapsed = clock() - started
         if elapsed >= 600:
             raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE")
+        transport_error = None
         try:
             status, headers, body = fetch(index_url, timeout=min(30, 600-elapsed))
-        except (TimeoutError, ConnectionError, URLError):
+        except (TimeoutError, ConnectionError, URLError) as error:
+            reason = error.reason if isinstance(error, URLError) else error
+            transport_error = "TIMEOUT" if isinstance(reason, TimeoutError) else "CONNECTION_ERROR"
             status, headers, body = 503, {}, b""
         elapsed = clock() - started
         if elapsed >= 600:
@@ -144,13 +165,17 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
         elif status in (429, 502, 503, 504):
             pressure_failures += 1
             if pressure_failures >= 2:
-                raise ValueError("BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN")
+                raise IndexPressureError({"generation_id":generation["inventory_generation_id"], "phase":"INDEX",
+                    "attempts":pressure_failures, "http_status":None if transport_error else status,
+                    "transport_error":transport_error})
         else:
             raise ValueError("BUNDLE_INDEX_UNAVAILABLE")
         elapsed = clock() - started
         if elapsed >= 600:
             raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE")
-        wait = min(delay, 600-elapsed)
+        retry_after = next((str(v) for k,v in headers.items() if str(k).lower() == "retry-after"), "") if hasattr(headers, "items") else ""
+        advertised = min(int(retry_after), 30) if retry_after.isascii() and retry_after.isdigit() and len(retry_after) <= 3 else 0
+        wait = min(max(delay, advertised), 600-elapsed)
         emit({"schema": "fly_bundle_staging_receipt_v1", "status": "INDEX_WAITING",
               "generation": generation, "elapsed_seconds": elapsed,
               "next_retry_seconds": wait, "packages": package_count, "ack_sent": False})
@@ -178,6 +203,9 @@ def main():
         diagnostic = sanitize_diagnostic(error.diagnostic) if isinstance(error, BundleClientError) else None
         if diagnostic is not None:
             receipt["diagnostic"] = diagnostic
+        index_diagnostic = sanitize_index_diagnostic(error.diagnostic) if isinstance(error, IndexPressureError) else None
+        if index_diagnostic is not None:
+            receipt["index_diagnostic"] = index_diagnostic
         print(json.dumps(receipt), flush=True)
         return 1
 
