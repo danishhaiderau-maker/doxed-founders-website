@@ -40,7 +40,7 @@ RUN python -c "import platform_relay_streaming, research.analysis_eligibility, r
 RUN python -c "import collector_v22, collector_v22_provisional, research_v3_contract, research_v3_store, research_v3_bridge"
 # The authenticated package routes are registered at bot import even while
 # acceleration is disabled. Prove their complete source chain is in the image.
-RUN python -c "import data_sync_bundle_api, data_sync_bundle_runtime, data_sync_bundle_worker, data_sync_bundle_storage, data_sync_bundle_transport"
+RUN python -c "import data_sync_bundle_api, data_sync_bundle_runtime, data_sync_bundle_worker, data_sync_bundle_storage, data_sync_bundle_transport, data_sync_bundle_maintenance, data_sync_bundle_reservations"
 # The exact lifecycle-tail recovery command is invoked only by its guarded
 # workflow, but must still be importable in the production image.
 RUN python -m py_compile lifecycle_tail_repair.py lifecycle_tail_repair_verify.py lifecycle_cursor_rebind.py lifecycle_cursor_rebind_verify.py execution_tail_repair.py execution_tail_repair_verify.py \

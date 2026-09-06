@@ -40577,6 +40577,8 @@ def _data_sync_retain_inventory_generation(
     digest = _data_sync_inventory_rows_sha256(copied)
     now = time.monotonic()
     with _data_sync_inventory_cache_condition:
+        if not _data_sync_bundle_retention_allowed_locked(digest):
+            raise RuntimeError("BUNDLE_GENERATION_PUBLICATION_RESERVED")
         previous = _data_sync_inventory_generations.get(digest) or {}
         _data_sync_inventory_generations[digest] = {
             "storage": "memory_v1",
@@ -40614,6 +40616,8 @@ def _data_sync_inventory_generation(generation_id: str) -> dict | None:
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         return None
     with _data_sync_inventory_cache_condition:
+        if not _data_sync_bundle_retention_allowed_locked(digest):
+            return None
         generation = _data_sync_inventory_generations.get(digest)
         if not isinstance(generation, dict):
             return None
@@ -40793,6 +40797,8 @@ def _data_sync_retain_disk_inventory_generation(
     generation_id = str(generation["generation_id"])
     now = time.monotonic()
     with _data_sync_inventory_cache_condition:
+        if not _data_sync_bundle_retention_allowed_locked(generation_id):
+            raise RuntimeError("BUNDLE_GENERATION_PUBLICATION_RESERVED")
         previous = _data_sync_inventory_generations.get(generation_id) or {}
         _data_sync_inventory_generations[generation_id] = {
             **generation,
@@ -40832,6 +40838,144 @@ def _data_sync_retain_disk_inventory_generation(
 
 _DATA_SYNC_BUNDLE_COORDINATOR_LOCK = threading.Lock()
 _DATA_SYNC_BUNDLE_LAST_STATUS = {"status": "NOT_STARTED"}
+_DATA_SYNC_BUNDLE_REGISTRY = None
+_DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK = threading.Lock()
+_DATA_SYNC_BUNDLE_REGISTRY_HYDRATING = False
+_DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT = 0.0
+_DATA_SYNC_BUNDLE_EXTERNAL_PROTECTED = frozenset()
+
+
+def _data_sync_bundle_retention_allowed_locked(generation_id: str) -> bool:
+    registry = _DATA_SYNC_BUNDLE_REGISTRY
+    return registry is not None and registry.publication_allowed_locked(generation_id)
+
+
+def _data_sync_bundle_current_identity_locked() -> dict:
+    """Called only by registry under inventory condition, never during hydration."""
+    generation_id = str(_data_sync_async_inventory.get("generation_id") or "")
+    generation = _data_sync_inventory_generations.get(generation_id) or {}
+    identity = generation.get("bundle_identity") or {}
+    if (_data_sync_async_inventory.get("status") != "CURRENT"
+            or generation.get("ack_eligible") is not True
+            or identity.get("source_git_rev") != _runtime_git_rev()):
+        raise ValueError("BUNDLE_MAINTENANCE_CURRENT_IDENTITY_UNAVAILABLE")
+    return {"inventory_generation_id": generation_id, **identity}
+
+
+def _data_sync_bundle_protected_locked() -> frozenset:
+    now = time.monotonic()
+    retained = set()
+    for generation_id, value in _data_sync_inventory_generations.items():
+        try:
+            age = now - float(value["retained_at"])
+        except (KeyError, TypeError, ValueError):
+            retained.add(generation_id)  # Ambiguous state cannot authorize retirement.
+            continue
+        if not age > _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS:
+            retained.add(generation_id)
+    return frozenset(retained) | _DATA_SYNC_BUNDLE_EXTERNAL_PROTECTED
+
+
+def _start_data_sync_bundle_reservation_hydration() -> None:
+    """Schedule bounded metadata hydration; never scan in HTTP/trading threads.
+
+    Hydration deliberately requires no CURRENT inventory identity, so it can
+    complete before startup snapshot restoration and first publication.
+    """
+    global _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING, _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT
+    with _DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK:
+        if (_DATA_SYNC_BUNDLE_REGISTRY_HYDRATING
+                or (_DATA_SYNC_BUNDLE_REGISTRY is not None and _DATA_SYNC_BUNDLE_REGISTRY.ready)
+                or time.monotonic() < _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT):
+            return
+        _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING = True
+    def hydrate():
+        global _DATA_SYNC_BUNDLE_REGISTRY, _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING, _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT
+        acquired = _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False)
+        try:
+            if not acquired:
+                return
+            from data_sync_bundle_download_pins import _directory
+            from data_sync_bundle_reservations import ReservationRegistry
+            work = _directory(_data_sync_inventory_work_root())
+            for name in ("transport-bundles", "transport-download-pins", "transport-maintenance-receipts"):
+                (work / name).mkdir(exist_ok=True)
+                _directory(work / name)
+            if _DATA_SYNC_BUNDLE_REGISTRY is None:
+                registry = ReservationRegistry(condition=_data_sync_inventory_cache_condition,
+                    source_root=_data_sync_runtime_root(), output_root=work / "transport-bundles",
+                    pin_root=work / "transport-download-pins", receipt_root=work / "transport-maintenance-receipts",
+                    current_identity=_data_sync_bundle_current_identity_locked,
+                    protected_generations=_data_sync_bundle_protected_locked)
+                with _data_sync_inventory_cache_condition:
+                    _DATA_SYNC_BUNDLE_REGISTRY = registry
+            _DATA_SYNC_BUNDLE_REGISTRY.hydrate()
+        except Exception as exc:
+            logger.warning("bundle reservation hydration deferred: %s", type(exc).__name__)
+        finally:
+            if acquired:
+                _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+            with _DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK:
+                _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING = False
+                _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT = time.monotonic() + 5
+    try:
+        threading.Thread(target=hydrate, name="data-sync-reservation-hydration", daemon=True).start()
+    except Exception:
+        with _DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK:
+            _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING = False
+            _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT = time.monotonic() + 5
+
+
+def _data_sync_bundle_maintain_capacity(generation: dict) -> dict:
+    """Coordinator-owned bounded protection snapshot and maintenance, never HTTP."""
+    global _DATA_SYNC_BUNDLE_EXTERNAL_PROTECTED
+    from data_sync_bundle_maintenance import maintain_capacity
+    from data_sync_bundle_download_pins import _directory, _safe
+    from data_sync_bundle_retirement import _stable_read
+    work = _directory(_data_sync_inventory_work_root())
+    protected = set()
+    cutoff = time.time() - _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS
+    session_count = 0
+    for name in ("inventory-served", "inventory-acks"):
+        root = work / name
+        if not root.exists():
+            continue
+        _directory(root)
+        for count, path in enumerate(root.iterdir()):
+            if count >= 1024:
+                raise ValueError("BUNDLE_MAINTENANCE_SESSION_SCAN_LIMIT")
+            info = _safe(path, directory=True)
+            if not re.fullmatch(r"[0-9a-f]{64}", path.name):
+                raise ValueError("BUNDLE_MAINTENANCE_SESSION_PATH_INVALID")
+            if info.st_mtime >= cutoff:
+                protected.add(path.name)
+            if name == "inventory-acks":
+                for session in path.iterdir():
+                    session_count += 1
+                    if session_count > 1024:
+                        raise ValueError("BUNDLE_MAINTENANCE_SESSION_SCAN_LIMIT")
+                    session_info = _safe(session, directory=True)
+                    if not re.fullmatch(r"[0-9a-f]{32}", session.name):
+                        raise ValueError("BUNDLE_MAINTENANCE_SESSION_PATH_INVALID")
+                    if session_info.st_mtime >= cutoff:
+                        protected.add(path.name)
+    snapshot = _data_sync_inventory_snapshot_path()
+    if snapshot.exists():
+        saved = json.loads(_stable_read(snapshot, 2 * 1024 * 1024))
+        persisted_id = str((saved.get("generation") or {}).get("generation_id") or saved.get("inventory_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", persisted_id):
+            raise ValueError("BUNDLE_MAINTENANCE_SNAPSHOT_IDENTITY_INVALID")
+        protected.add(persisted_id)
+    with _data_sync_inventory_cache_condition:
+        _DATA_SYNC_BUNDLE_EXTERNAL_PROTECTED = frozenset(protected)
+        current = _data_sync_bundle_current_identity_locked()
+        registry = _DATA_SYNC_BUNDLE_REGISTRY
+    if registry is None or not registry.ready:
+        raise ValueError("BUNDLE_RESERVATIONS_NOT_READY")
+    return maintain_capacity(source_root=_data_sync_runtime_root(), output_root=work / "transport-bundles",
+        pin_root=work / "transport-download-pins", receipt_root=work / "transport-maintenance-receipts",
+        current_identity=current, target_generation=generation["generation_id"],
+        protection_boundary=registry.protection_boundary)
 
 
 def _data_sync_bundle_authenticated() -> bool:
@@ -40888,6 +41032,10 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
                 return current is not None and all(current.get(key) == expected.get(key) for key in (
                     "generation_id", "page_index_sha256", "source_git_rev",
                     "collection_epoch_id", "tile_registry_signature"))
+            maintenance = _data_sync_bundle_maintain_capacity(generation)
+            if maintenance.get("status") != "ADMITTED":
+                publish({"status": "DEFERRED", "error": "BUNDLE_MAINTENANCE_DEFERRED"})
+                return
             publish(run_managed_generation(
                 generation, _data_sync_runtime_root(), work / "transport-bundles",
                 pressure_probe=pressure, generation_available=retained, publish=publish))
@@ -41134,6 +41282,8 @@ def _data_sync_register_served_ack_generation(
         return
     disk_generation = None
     with _data_sync_inventory_cache_condition:
+        if not _data_sync_bundle_retention_allowed_locked(digest):
+            return
         generation = _data_sync_inventory_generations.get(digest)
         if not isinstance(generation, dict):
             return
@@ -41752,11 +41902,21 @@ def _data_sync_request_async_inventory(
     refresh_nonce: str | None = None,
 ) -> dict:
     """Return a completed current inventory or start one non-blocking build."""
+    _start_data_sync_bundle_reservation_hydration()
     start_worker = False
     with _data_sync_inventory_cache_condition:
+        if _DATA_SYNC_BUNDLE_REGISTRY is None or not _DATA_SYNC_BUNDLE_REGISTRY.ready:
+            return {"status": "BUILDING", "rows": None, "generation": None,
+                    "error": "BUNDLE_RESERVATIONS_NOT_READY", "retry_after_seconds": 1}
         now = time.monotonic()
         if _data_sync_async_inventory.get("status") == "EMPTY":
             persisted = _data_sync_load_persisted_inventory_snapshot()
+            if persisted is not None:
+                restored_id = str((persisted.get("generation") or {}).get("generation_id") or "")
+                if not restored_id and isinstance(persisted.get("rows"), list):
+                    restored_id = _data_sync_inventory_rows_sha256(persisted["rows"])
+                if not _data_sync_bundle_retention_allowed_locked(restored_id):
+                    persisted = None  # Never restore a reserved generation as CURRENT.
             if persisted is not None:
                 if isinstance(persisted.get("generation"), dict):
                     stale_generation = persisted["generation"]
@@ -42019,6 +42179,8 @@ def _data_sync_validated_inventory_index(
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or not generated_at:
         return {}, generated_at or None, None
     with _data_sync_inventory_cache_condition:
+        if not _data_sync_bundle_retention_allowed_locked(digest):
+            return {}, generated_at, digest
         generation = _data_sync_inventory_generations.get(digest)
         if not isinstance(generation, dict):
             return {}, generated_at, digest
@@ -50405,6 +50567,7 @@ def main():
     )
     _record_execution_settings_epoch("TRACKING_STARTED")
     _prepare_research_timing_at_startup()
+    _start_data_sync_bundle_reservation_hydration()
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
     try:
