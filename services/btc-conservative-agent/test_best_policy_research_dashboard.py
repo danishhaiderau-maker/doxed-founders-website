@@ -66,7 +66,24 @@ def _write_fixture(tmp_path: Path, events, report):
     )
 
 
-def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monkeypatch):
+def _publish_atomic_fixture(tmp_path, monkeypatch, reports):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    dashboard._API_RESPONSE_CACHE.clear()
+    published = tmp_path / dashboard.PUBLISHED_REPORTS_DIR
+    published.mkdir(exist_ok=True)
+    manifest = {"generation_id": "fixture-generation", "generation_revision": "fixture-revision",
+                "source_data_revision": "fixture-source", "generated_at": "2026-08-26T00:00:00+00:00",
+                "fresh_epoch": {"epoch_id": "epoch-clean"},
+                "reports": [{"file": name} for name in reports], "text_artifacts": []}
+    (published / dashboard.REPORT_MANIFEST_FILE).write_text(json.dumps(manifest), encoding="utf-8")
+    for name, report in reports.items():
+        path = published / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(tmp_path, monkeypatch):
     reports = {
         "chase_threshold_report.json": {
             "generated_at": "2026-08-20T00:00:00+00:00",
@@ -82,7 +99,7 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
             "replays_available": 0,
         },
     }
-    monkeypatch.setattr(dashboard, "_read_report", lambda name: reports.get(name, {}))
+    _publish_atomic_fixture(tmp_path, monkeypatch, reports)
 
     payloads = [
         dashboard._chase_threshold_payload(),
@@ -103,7 +120,19 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
     assert payloads[3]["eligible_replays_available"] == 0
 
 
-def test_chase_surfaces_publish_executed_and_shadow_separately(monkeypatch):
+def test_execution_panels_keep_undeclared_artifacts_unavailable(tmp_path, monkeypatch):
+    _publish_atomic_fixture(tmp_path, monkeypatch, {})
+    for name in ("chase_threshold_report.json", "exit_combinations_report.json",
+                 "exit_leakage_by_reason_report.json"):
+        (tmp_path / name).write_text(json.dumps({"top": [{"trades": 9}]}), encoding="utf-8")
+    for payload in (dashboard._chase_threshold_payload(), dashboard._exit_combos_payload(),
+                    dashboard._exit_reason_leak_payload()):
+        assert payload["source_available"] is False
+        assert payload["qualification_eligible"] is False
+        assert "REPORT_NOT_IN_CURRENT_GENERATION" in payload["empty_reason"]
+
+
+def test_chase_surfaces_publish_executed_and_shadow_separately(tmp_path, monkeypatch):
     reports = {
         "chase_threshold_report.json": {
             "generated_at": "2026-08-26T00:00:00+00:00",
@@ -120,7 +149,7 @@ def test_chase_surfaces_publish_executed_and_shadow_separately(monkeypatch):
         "chase_effectiveness_report.json": {"buckets": {}},
         "chase_delay_report.json": {},
     }
-    monkeypatch.setattr(dashboard, "_read_report", lambda name: reports.get(name, {}))
+    _publish_atomic_fixture(tmp_path, monkeypatch, reports)
 
     threshold = dashboard._chase_threshold_payload()
     chase = dashboard._chase_payload()
@@ -842,6 +871,10 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
         "shadow_research": {"independent_episodes": 1, "profitable_policies": []},
     }
     (tmp_path / "policy_candidate_oos_report.json").write_text(json.dumps(detail), encoding="utf-8")
+    _publish_atomic_fixture(tmp_path, monkeypatch, {
+        "paused_shadow_research_report.json": {"overall": {"closed": 3}},
+        "real_edge_summary.json": {"executed_pnl_usd": -2.5},
+    })
     (tmp_path / "paused_shadow_research_report.json").write_text(json.dumps({"overall": {"closed": 3}}), encoding="utf-8")
     (tmp_path / "real_edge_summary.json").write_text(json.dumps({"executed_pnl_usd": -2.5}), encoding="utf-8")
     (tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE).write_text(

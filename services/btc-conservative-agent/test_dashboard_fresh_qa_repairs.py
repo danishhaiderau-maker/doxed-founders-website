@@ -1,4 +1,6 @@
 """Focused regressions for fresh analyzer-dashboard truthfulness fixes."""
+import json
+
 import pytest
 
 from research import research_dashboard as dashboard
@@ -38,14 +40,40 @@ def test_public_policy_row_normalizes_pass_gates_and_rejects_double_exit_identit
     assert dashboard._failed_gate_names(row["gates"]) == ["fills_pass"]
 
 
-def test_dynamic_leader_is_suppressed_when_ev_is_unavailable(monkeypatch):
+def test_dynamic_leader_is_suppressed_when_ev_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
     monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: _source({
         "BULL": [{"policy_id": "p-no-ev", "expectancy_lcb_usd": None, "sealed_oos_net_usd": None}],
     }))
     payload = dashboard.app.test_client().get("/api/dynamic-policy-research").get_json()
     assert payload["relative_leader_kind"] == "NONE"
-    assert payload["relative_leader_status"] == "UNAVAILABLE_EV_NOT_COMPUTABLE"
+    assert payload["relative_leader_status"] == "UNKNOWN"
     assert payload["regimes"] == []
+    assert payload["live_policy_change_allowed"] is False
+    assert payload["evidence_source"] == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
+    assert "INSUFFICIENT_OOS" in payload["blockers"]
+
+
+def test_completed_manifest_never_revives_legacy_dynamic_leaders(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    published = tmp_path / dashboard.PUBLISHED_REPORTS_DIR
+    published.mkdir()
+    (published / dashboard.REPORT_MANIFEST_FILE).write_text(json.dumps({
+        "generation_id": "completed-current", "fresh_epoch": {"epoch_id": "epoch-current"},
+        "reports": [], "text_artifacts": []}), encoding="utf-8")
+    stale = _source({"BULL": [{"policy_id": "stale-dynamic-leader",
+                               "expectancy_lcb_usd": 4, "sealed_oos_net_usd": 8}]})
+    (tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE).write_text(
+        json.dumps(stale["report"]), encoding="utf-8")
+    # A compatibility adapter cannot override an explicit completed manifest.
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: stale)
+    payload = dashboard.app.test_client().get("/api/dynamic-policy-research").get_json()
+    assert payload["relative_leader_kind"] == "NONE"
+    assert payload["regimes"] == []
+    assert payload["live_policy_change_allowed"] is False
+    assert payload["evidence_source"] == dashboard.DYNAMIC_POLICY_ANALYSIS_REPORT_FILE
 
 
 def test_shadow_api_declares_executed_and_counterfactual_as_separate(monkeypatch):

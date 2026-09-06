@@ -124,6 +124,8 @@ def test_static_and_shadow_counts_distinguish_missing_report_from_measured_zero(
     assert "d.independent_episodes??'UNAVAILABLE'" in static_html
     assert "(d.training_episodes??'UNAVAILABLE')+' / '+(d.oos_episodes??'UNAVAILABLE')" in static_html
     assert "d.status==='UNAVAILABLE_CURRENT_GENERATION'?'UNAVAILABLE'" in static_html
+    assert "Current analyzer publication unavailable." in static_html
+    assert "Waiting for sufficient current-epoch evidence." not in static_html
     assert "d.current_epoch_rejected??'UNAVAILABLE'" in client.get("/shadow-research").get_data(as_text=True)
     dashboard._API_RESPONSE_CACHE.clear()
 

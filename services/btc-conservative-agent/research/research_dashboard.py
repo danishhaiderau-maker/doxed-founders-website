@@ -3820,7 +3820,7 @@ def api_dynamic_policy_research():
     # Development/backward-compatible view only when no completed generation
     # exists. Once a manifest exists, an absent dynamic artifact is UNKNOWN and
     # an older safe-policy file must never be revived.
-    if not report:
+    if not report and not current_manifest:
         legacy_source = _safe_policy_v3_dashboard_source()
         for regime, policies in sorted(
             ((legacy_source.get("screen") or {}).get("dynamic_regime_leaders") or {}).items()
@@ -4030,7 +4030,8 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
   rows=rows.concat((s.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}<br><small>REJECTED V2.2 POLICY REPLAY</small></td><td>${x.independent_episodes}</td><td>${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.expectancy_usd)}</td><td class="bad">${x.qualification}</td></tr>`));
  }
  document.getElementById('kpis').innerHTML=cards.map(x=>`<div class="kpi"><small>${x[0]}</small><div>${x[1]??'—'}</div></div>`).join('');
- document.getElementById('body').innerHTML=rows.join('')||'<tr><td colspan="10">Waiting for sufficient current-epoch evidence.</td></tr>';
+ const emptyMessage=d.status==='UNAVAILABLE_CURRENT_GENERATION'?'Current analyzer publication unavailable. Complete verified mirror publication and analyzer generation before interpreting policy results.':'No policy rows available in this report. Review the evidence status and blockers above.';
+ document.getElementById('body').innerHTML=rows.join('')||'<tr><td colspan="10">'+emptyMessage+'</td></tr>';
 });
 </script></body></html>
 """, title=title, endpoint=endpoint, mode=mode)
