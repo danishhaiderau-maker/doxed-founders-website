@@ -27,8 +27,10 @@ class Buffer(io.StringIO):
         pass
 
 
-def test_snapshot_is_nonmutating_and_explicitly_unknown():
+def test_snapshot_is_nonmutating_and_explicitly_unknown(monkeypatch):
     output = Buffer()
+    monkeypatch.setattr('crash_journal_writer.append_crash_snapshot',
+                        lambda path, snapshot: output.write(json.dumps(snapshot)))
     env = load_snapshot(lambda *a: output)
     before = copy.deepcopy([env['state'], env['open_positions'], env['pending_orders']])
     env['dump_system_state']()
@@ -40,14 +42,17 @@ def test_snapshot_is_nonmutating_and_explicitly_unknown():
     assert before == [env['state'], env['open_positions'], env['pending_orders']]
 
 
-def test_disk_full_does_not_escape_or_reconcile():
+def test_disk_full_does_not_escape_or_reconcile(monkeypatch):
     def disk_full(*args):
         raise OSError(28, 'No space left on device')
+    monkeypatch.setattr('crash_journal_writer.append_crash_snapshot', disk_full)
     load_snapshot(disk_full)['dump_system_state']()
 
 
-def test_watchdog_context_is_preserved():
+def test_watchdog_context_is_preserved(monkeypatch):
     output = Buffer()
+    monkeypatch.setattr('crash_journal_writer.append_crash_snapshot',
+                        lambda path, snapshot: output.write(json.dumps(snapshot)))
     env = load_snapshot(lambda *a: output)
     env['dump_system_state'](trigger='WATCHDOG')
     assert json.loads(output.getvalue())['watchdog'] == {'trigger': 'WATCHDOG'}
