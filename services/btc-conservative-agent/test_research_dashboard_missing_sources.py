@@ -41,6 +41,35 @@ def test_overview_explicit_unknown_zero_is_preserved():
     assert '<td>0</td>' in elements['strategy-leader-tiers']['innerHTML']
 
 
+@pytest.mark.parametrize('present', [False, True])
+def test_overview_real_generation_loader_handles_synthetic_unavailable(monkeypatch, present):
+    monkeypatch.setattr(dashboard, '_API_RESPONSE_CACHE', {})
+    report = {'schema': 'safe_policy_genome_v3', 'generated_at': '2026-09-06T00:00:00Z',
+              'collection': {'independent_opportunities': 0}} if present else {}
+    monkeypatch.setattr(dashboard, '_read_report', lambda name, *a, **k:
+                        report if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE else {})
+    monkeypatch.setattr(dashboard, '_read_json', lambda *a, **k: {})
+    monkeypatch.setattr(dashboard, '_generation_freshness_meta', lambda: {
+        'current': False, 'stale': True, 'revision_parity': 'UNKNOWN',
+        'epoch_parity': 'UNKNOWN', 'reasons': [],
+    })
+    # Exercise the actual nonempty sentinel and source wrapper, not a {} stub.
+    loaded = dashboard._current_generation_report(dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE)
+    assert bool(loaded)
+    assert bool(loaded.get('report_unavailable')) is not present
+    payload = dashboard.app.test_client().get('/api/decision-readiness').get_json()
+    assert payload['source_available'] is present
+    tiers = payload['strategy_leaders']
+    for name in ('descriptive_ideal_touch', 'execution_supported', 'fully_qualified'):
+        assert (tiers[name]['status'] == 'UNAVAILABLE') is not present
+    elements = render_loader('loadDecisionReadiness', payload)
+    if not present:
+        assert 'NO_EVALUATED_DIAGNOSTIC_POLICY' not in elements['strategy-leader-tiers']['innerHTML']
+        assert 'Independent opportunities</div><div class="val ">UNAVAILABLE' in elements['decision-readiness']['innerHTML']
+    else:
+        assert 'Independent opportunities</div><div class="val ">0' in elements['decision-readiness']['innerHTML']
+
+
 def render_loader(name, payload, ok=True):
     page = dashboard.DASHBOARD_HTML
     helper = page[page.index('function missingResearchSource()'):page.index('async function loadFindings()')]

@@ -3554,6 +3554,7 @@ def _best_policy_research_v31_payload() -> dict:
     """Compatibility answer backed exclusively by canonical signed V3.1 data."""
     source = _safe_policy_v3_dashboard_source()
     report, screen, ranking = source["report"], source["screen"], source["ranking"]
+    report_available = bool(report) and not report.get("report_unavailable") and report.get("schema") != "current_generation_report_unavailable_v1"
     collection = report.get("collection") or {}
     compatibility = _read_report(BEST_POLICY_RESEARCH_REPORT_FILE, {}) or {}
     compatibility_evidence = compatibility.get("evidence") or {}
@@ -3636,7 +3637,7 @@ def _best_policy_research_v31_payload() -> dict:
     )
     return {
         "schema": "best_policy_research_v3_1",
-        "source_available": bool(report),
+        "source_available": report_available,
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
         "status": (
@@ -3662,18 +3663,18 @@ def _best_policy_research_v31_payload() -> dict:
             },
             "unknown_evidence": {"episode_count": None, "blocker_counts": {}},
             "descriptive_ideal_touch": {
-                "status": "UNAVAILABLE" if not report else ("AVAILABLE" if descriptive else "NO_EVALUATED_DIAGNOSTIC_POLICY"),
+                "status": "UNAVAILABLE" if not report_available else ("AVAILABLE" if descriptive else "NO_EVALUATED_DIAGNOSTIC_POLICY"),
                 "claim_label": "IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · DOES NOT SHOW THAT IT WORKS",
                 "leader": descriptive[0] if descriptive else None,
                 "blockers": source["blockers"],
             },
             "execution_supported": {
-                "status": "NO_EXECUTION_SUPPORTED_POLICY" if report else "UNAVAILABLE", "leader": None,
+                "status": "NO_EXECUTION_SUPPORTED_POLICY" if report_available else "UNAVAILABLE", "leader": None,
                 "claim_label": "EXECUTION-SUPPORTED OBSERVATION · NOT FULLY QUALIFIED · NOT LIVE READY",
                 "blockers": sorted(set(source["blockers"] + ["NO_SUPPORTED_CONSERVATIVE_FILL_POLICY"])),
             },
             "fully_qualified": {
-                "status": "UNAVAILABLE" if not report else ("AVAILABLE" if qualified else "NO_FULLY_QUALIFIED_POLICY"),
+                "status": "UNAVAILABLE" if not report_available else ("AVAILABLE" if qualified else "NO_FULLY_QUALIFIED_POLICY"),
                 "leader": ranking.get("number_one") if qualified else None,
                 "claim_label": "FULLY QUALIFIED RESEARCH POLICY · LIVE ARM STILL REQUIRES EXPLICIT AUTHORIZATION",
                 "blockers": [] if qualified else source["blockers"],
