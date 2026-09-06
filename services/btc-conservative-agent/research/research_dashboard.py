@@ -1833,12 +1833,14 @@ def _lane_rows(*, include_evidence: bool = False):
         all_time = m.get("all_time") or {}
         lab = lab_ledger.get(lane) or {}
         opp = opp_stats.get(lane) or {}
+        def first_supplied(*values):
+            return next((value for value in values if value is not None), 0)
         # Executed paper closes and lab/counterfactual terminals are different
         # evidence classes.  Never use the lab ledger as an executed-fill
         # fallback: doing so made an OFF benchmark appear to have paper fills.
-        fills = int(m.get("real_fills") or m.get("fills") or lb.get("closes") or 0)
+        fills = int(first_supplied(m.get("real_fills"), m.get("fills"), lb.get("closes")))
         counterfactual_closes = int(
-            m.get("lab_closes") or m.get("lab_rows") or lab.get("closes") or 0
+            first_supplied(m.get("lab_closes"), m.get("lab_rows"), lab.get("closes"))
         )
         approves = int(m.get("approves") or 0)
         opp_appr = int(opp.get("approves") or 0)
@@ -1857,7 +1859,7 @@ def _lane_rows(*, include_evidence: bool = False):
         shadow_fill_pct = float(m.get("shadow_fill_pct") or 0)
         costly_blocks = float(m.get("costly_blocks_usd") or 0)
         good_blocks_saved = float(m.get("good_blocks_saved_usd") or 0)
-        pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or lb.get("net_pnl_usd") or 0)
+        pnl = float(first_supplied(m.get("net_pnl_real"), m.get("net_pnl_usd"), lb.get("net_pnl_usd")))
         counterfactual_pnl = float(
             m.get("lab_net_pnl")
             if m.get("lab_net_pnl") is not None
@@ -1905,6 +1907,20 @@ def _lane_rows(*, include_evidence: bool = False):
             if spawn_lab:
                 bits.append(f"{spawn_lab} spawn_lab")
             coord_note = "Opportunity: " + ", ".join(bits) + " (no closed fills)"
+        def supplied(record, keys):
+            return any(key in record and record[key] is not None for key in keys)
+        benchmark_current = (bench_evidence.get("status") == "CURRENT_GENERATION"
+                             and bench.get("status") == "CURRENT_SESSION_EVIDENCE")
+        ledger_current = ledger_evidence.get("status") == "CURRENT_GENERATION"
+        lab_current = lab_evidence.get("status") == "CURRENT_GENERATION"
+        metric_available = {
+            "approves": benchmark_current and supplied(m, ("approves",)),
+            "executed_closes": (benchmark_current and supplied(m, ("real_fills", "fills"))) or (ledger_current and supplied(lb, ("closes",))),
+            "pnl": (benchmark_current and supplied(m, ("net_pnl_real", "net_pnl_usd"))) or (ledger_current and supplied(lb, ("net_pnl_usd",))),
+            "ev": benchmark_current and supplied(m, ("per_approve_ev",)),
+            "counterfactual_closes": (benchmark_current and supplied(m, ("lab_closes", "lab_rows"))) or (lab_current and supplied(lab, ("closes",))),
+            "counterfactual_pnl": (benchmark_current and supplied(m, ("lab_net_pnl",))) or (lab_current and supplied(lab, ("net_pnl_usd",))),
+        }
         rows.append({
             "lane": lane,
             "trades": fills,
@@ -1939,8 +1955,16 @@ def _lane_rows(*, include_evidence: bool = False):
             "pathway_status": pathway_status or status,
             "verdict": m.get("verdict") or "",
             "retired": is_retired,
+            "metric_available": metric_available,
         })
-    rows.sort(key=lambda x: (-(x["all_time_pnl"] if x["all_time_fills"] else x["pnl"]), x["lane"]))
+        if benchmark_current:
+            for field, available in metric_available.items():
+                if not available:
+                    rows[-1][field] = None
+            rows[-1]["trades"] = rows[-1]["executed_closes"]
+            if not m:
+                rows[-1]["status"] = "UNAVAILABLE"
+    rows.sort(key=lambda x: (-(x["all_time_pnl"] if x["all_time_fills"] else (x["pnl"] or 0)), x["lane"]))
     evidence = {
         "status": (
             "CURRENT_GENERATION"
@@ -7369,6 +7393,10 @@ async function loadFindings() {
 function laneApprovalCount(current, row) {
   return current.evidence_status === 'CURRENT_GENERATION' ? (row.approves ?? 'UNAVAILABLE') : 'UNAVAILABLE';
 }
+function laneEvidenceMetric(current, row, field, money=false) {
+  if (current.evidence_status !== 'CURRENT_GENERATION' || (row.metric_available || {})[field] !== true || row[field] == null) return 'UNAVAILABLE';
+  return money ? fmtExecutionUsd(row[field]) : row[field];
+}
 async function loadLanes() {
   const rCurrent = await fetch('/api/lanes');
   const current = await rCurrent.json();
@@ -7390,9 +7418,9 @@ async function loadLanes() {
   }
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
     `<tr><td>${row.lane || row.research_lane || ''}</td><td>${currentAvailable ? (row.status || row.pathway_status || 'COLLECTING') : 'STALE / UNAVAILABLE'}</td>`
-    + `<td>${laneApprovalCount(current, row)}</td><td>${currentAvailable ? (row.executed_closes || 0) : '—'}</td>`
-    + `<td>${currentAvailable ? fmtExecutionUsd(row.pnl) : '—'}</td><td>${currentAvailable ? fmtExecutionUsd(row.ev) : '—'}</td>`
-    + `<td>${currentAvailable ? (row.counterfactual_closes || 0) : '—'}</td><td>${currentAvailable ? fmtExecutionUsd(row.counterfactual_pnl) : '—'}</td></tr>`
+    + `<td>${laneApprovalCount(current, row)}</td><td>${laneEvidenceMetric(current, row, 'executed_closes')}</td>`
+    + `<td>${laneEvidenceMetric(current, row, 'pnl', true)}</td><td>${laneEvidenceMetric(current, row, 'ev', true)}</td>`
+    + `<td>${laneEvidenceMetric(current, row, 'counterfactual_closes')}</td><td>${laneEvidenceMetric(current, row, 'counterfactual_pnl', true)}</td></tr>`
   ).join('') || '<tr><td colspan="8">No current-lane evidence yet.</td></tr>';
   return;
 }async function loadChase() {

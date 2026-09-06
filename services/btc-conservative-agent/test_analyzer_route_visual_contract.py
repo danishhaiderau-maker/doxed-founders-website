@@ -69,6 +69,40 @@ def test_lane_approvals_actual_endpoint_and_renderer_preserve_unknown_and_zero(m
     assert 'Counterfactual results never count as fills, executed PnL, or strategy qualification' not in dashboard.DASHBOARD_HTML
 
 
+def test_current_lane_missing_fields_and_lab_source_are_independent(monkeypatch):
+    lane = next(iter(dashboard.CURRENT_RESEARCH_LANES))
+    monkeypatch.setattr(dashboard, '_opportunity_lane_stats', lambda: {})
+    monkeypatch.setattr(dashboard, '_generation_freshness_meta', lambda: {'current': True, 'reasons': []})
+    zero = {'approves': 0, 'real_fills': 0, 'net_pnl_real': 0, 'per_approve_ev': 0}
+    rendered_cases = []
+    for metrics, lab, lab_bound, expected in (
+        ({}, {}, False, ['UNAVAILABLE'] * 4),
+        (zero, {}, False, [0, 0, 'UNAVAILABLE', 'UNAVAILABLE']),
+        (zero, {'closes': 0, 'net_pnl_usd': 0}, True, [0, 0, 0, 0]),
+        (zero, {'closes': 8, 'net_pnl_usd': 12}, False, [0, 0, 'UNAVAILABLE', 'UNAVAILABLE']),
+        ({**zero, 'lab_closes': 0, 'lab_net_pnl': 0}, {'closes': 8, 'net_pnl_usd': 12}, True, [0, 0, 0, 0]),
+    ):
+        def artifact(name):
+            if name == 'benchmark_vs_lanes_report.json':
+                return {'status': 'CURRENT_SESSION_EVIDENCE', 'lanes': {lane: metrics} if metrics else {}}, {'status': 'CURRENT_GENERATION'}
+            if name == 'lane_lab_pnl_ledger.json' and lab_bound:
+                return {'lanes': {lane: lab}}, {'status': 'CURRENT_GENERATION'}
+            return {}, {'status': 'UNAVAILABLE_CURRENT_GENERATION'}
+        monkeypatch.setattr(dashboard, '_current_lane_artifact', artifact)
+        dashboard._API_RESPONSE_CACHE.clear()
+        payload = dashboard.app.test_client().get('/api/lanes').get_json()
+        row = next(r for r in payload['lanes'] if r['lane'] == lane)
+        assert row['trades'] == row['executed_closes']
+        if not metrics: assert row['status'] == 'UNAVAILABLE' and row['executed_closes'] is None
+        rendered_cases.append((payload, row, expected))
+    helper = re.search(r"function laneEvidenceMetric\(current, row, field, money=false\) \{.*?\n\}", dashboard.DASHBOARD_HTML, re.S)
+    assert helper
+    inputs = [[p, r] for p, r, _ in rendered_cases]
+    script = helper.group(0) + '\nconsole.log(JSON.stringify(' + json.dumps(inputs) + '.map(([p,r])=>["executed_closes","pnl","counterfactual_closes","counterfactual_pnl"].map(f=>laneEvidenceMetric(p,r,f)))));'
+    result = subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True, timeout=15)
+    assert json.loads(result.stdout) == [e for _, _, e in rendered_cases]
+
+
 def test_every_dashboard_navigation_item_has_renderable_section_scope_and_loader():
     """Static visual contract: clicking a visible subtab must never blank the page."""
     source = dashboard.DASHBOARD_HTML

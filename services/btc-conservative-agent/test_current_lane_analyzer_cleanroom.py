@@ -58,7 +58,7 @@ def test_current_lane_table_separates_executed_and_counterfactual_evidence():
     assert "lab.get(\"net_pnl_usd\") is not None and fills" not in DASHBOARD
     assert "<th>Executed closes</th>" in DASHBOARD
     assert "<th>Counterfactual terminals</th>" in DASHBOARD
-    assert "Counterfactual results never count as fills" in DASHBOARD
+    assert "Counterfactual outcomes are not actual fills or executed PnL" in DASHBOARD
 
 
 def test_lab_ledger_cannot_be_promoted_to_executed_lane_results(monkeypatch, tmp_path):
