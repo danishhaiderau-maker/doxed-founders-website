@@ -17587,6 +17587,21 @@ _lane_last_ts = {}  # {research_lane: last_emitted_epoch}
 
 
 
+def _record_unavailable_scan_coverage(raw_context, reason_code):
+    from research.scan_counterfactual_unavailable import record_scan_counterfactual_unavailable
+    try:
+        result = record_scan_counterfactual_unavailable(
+            context=raw_context, reason_code=reason_code, observed_at_ts=time.time(),
+            source_revision=_runtime_git_rev_exact(), epoch_id=_collector_v22_epoch_id(),
+            append_receipt=lambda row: _safe_append_jsonl(AI_INPUT_LOG_FILE, row, label="AI_INPUT"),
+        )
+    except Exception:
+        result = {"receipt": None, "write_status": "FAILED"}
+    if result["write_status"] != "ACCEPTED":
+        logger.warning("[RESEARCH] COUNTERFACTUAL_COVERAGE_WRITE_FAILED")
+    return result
+
+
 def evaluate_signal_with_ai(
     raw_context: dict,
     research_lane: str = RESEARCH_LANE_CONTINUOUS,
@@ -17594,6 +17609,7 @@ def evaluate_signal_with_ai(
     trigger_reason: str = "",
     research_entry_features: dict = None,
 ):
+    counterfactual_coverage = None
     try:
         logger.info(
             f"[AI] START lane={research_lane} shadow={shadow_only} "
@@ -17605,6 +17621,7 @@ def evaluate_signal_with_ai(
         with state_lock:
             price = state.get("price")
         if price is None or price <= 0:
+            counterfactual_coverage = _record_unavailable_scan_coverage(raw_context, "PRICE_UNAVAILABLE")
             logger.error("[AI CRITICAL] price missing - HARD FAIL [PIPELINE ENFORCEMENT]")
             full_pipeline_trace("[AI]", "HARD_FAIL_NO_PRICE", raw_context.get("trade_id"))
             trace("AI", "HARD_FAIL_NO_PRICE", raw_context.get("trade_id"))
@@ -17612,15 +17629,17 @@ def evaluate_signal_with_ai(
             raise RuntimeError("AI CALLED WITHOUT VALID PRICE - PIPELINE VIOLATION")
         ctx = copy.deepcopy(raw_context)
         if not ctx:
+            counterfactual_coverage = _record_unavailable_scan_coverage(raw_context, "CONTEXT_UNAVAILABLE")
             logger.warning("[AI] Context build failed - using fallback reject [PIPELINE ENFORCEMENT]")
-            return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": "CONTEXT_FALLBACK", "ai_error": True, "factors": {}, "source": "FALLBACK", "approved": False, "trade_id": raw_context.get("trade_id")}
+            return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": "CONTEXT_FALLBACK", "ai_error": True, "factors": {}, "source": "FALLBACK", "approved": False, "trade_id": raw_context.get("trade_id"), "counterfactual_coverage": counterfactual_coverage}
         if not ctx.get("ai_input_upgrade"):
             ctx = enrich_ai_context_upgrade(ctx)
         ctx = sanitize_ai_inputs(ctx)
         ok, reason = validate_ai_features(ctx)
         if not ok:
+            counterfactual_coverage = _record_unavailable_scan_coverage(raw_context, "FEATURE_VALIDATION_FAILED")
             logger.warning(f"[AI] Feature validation failed: {reason} - reject without API call [PIPELINE ENFORCEMENT]")
-            return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": f"FEATURE_VALIDATION:{reason}", "ai_error": True, "factors": {}, "source": "VALIDATION", "approved": False, "trade_id": raw_context.get("trade_id")}
+            return {"win_prob": 0, "direction": "NO_TRADE", "decision": "REJECT", "override": False, "comment": f"FEATURE_VALIDATION:{reason}", "ai_error": True, "factors": {}, "source": "VALIDATION", "approved": False, "trade_id": raw_context.get("trade_id"), "counterfactual_coverage": counterfactual_coverage}
         # One bounded declaration for every AI outcome; no order is required.
         # Capture before the API call so downstream signal timestamps cannot
         # accidentally backdate current quantity/ATR observations.
@@ -17817,6 +17836,8 @@ def evaluate_signal_with_ai(
     except Exception as e:
         logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
         ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
+        if counterfactual_coverage is not None:
+            ai_result["counterfactual_coverage"] = counterfactual_coverage
         ai_result["research_lane"] = research_lane
         ai_result["shadow_only"] = shadow_only
         ai_result["prompt_id"] = SHARED_DIRECTION_PROMPT_ID
