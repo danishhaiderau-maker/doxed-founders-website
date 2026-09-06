@@ -2217,6 +2217,15 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     """Expose canonical signed V3.1 candidates, never retired V2.2 leaders."""
     source = _safe_policy_v3_dashboard_source()
     report, screen = source["report"], source["screen"]
+    if not report or report.get("report_unavailable") or report.get("schema") == "current_generation_report_unavailable_v1":
+        return {
+            "schema": "current_policy_grid_v3_1", "source_available": False,
+            "status": "SOURCE_UNAVAILABLE", "rows": [], "diagnostic_rows": [],
+            "rows_available": None, "policy_search_statistics": None,
+            "policy_episode_split": None, "search_counts": None, "evidence": None,
+            "live_policy_change_allowed": False, "blockers": source["blockers"],
+            "warning": "UNAVAILABLE — no declared atomic policy report. Whether profitable policies exist has not been established.",
+        }
     rows = []
     all_candidates = list(screen.get("descriptive_top_100") or [])
     if "profitable_conservative_top_100" in screen:
@@ -2428,6 +2437,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     }
     return {
         "schema": "current_policy_grid_v3_1",
+        "source_available": True,
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
         "status": "PROFITABLE_CONSERVATIVE_POLICIES_AVAILABLE" if rows else "NO_PROFITABLE_CONSERVATIVE_POLICIES",
@@ -2480,7 +2490,7 @@ def _combos_payload():
         "schema": "top_combinations_dashboard_v3_1",
         "current_evidence_source": "safe_policy_genome_v3_report.json",
         "generated_at": (_safe_policy_v3_dashboard_source()["report"] or {}).get("generated_at"),
-        "total_combos": len(current_top),
+        "total_combos": len(current_top) if policy_grid["source_available"] else None,
         "min_trades": None,
         "dimensions": ["entry", "chase", "fill", "exit", "protection", "regime"],
         "filter_note": (
@@ -2489,7 +2499,7 @@ def _combos_payload():
         ),
         "top": current_top,
         "policy_grid": policy_grid,
-        "source_available": bool(_safe_policy_v3_dashboard_source()["report"]),
+        "source_available": policy_grid["source_available"],
         "legacy_executed_combos": {
             "source_available": bool(rep),
             "status": "DESCRIPTIVE_LEGACY_EXCLUDED_FROM_V3_1_QUALIFICATION",
@@ -7536,7 +7546,7 @@ async function loadCombos() {
     if (note) note.textContent = missingResearchSource();
     document.getElementById('combos-body').innerHTML = `<tr><td colspan="9">${missingResearchSource()}</td></tr>`;
   }
-  if (d.source_available === false) {
+  if (d.source_available === false || pg.source_available === false) {
     document.getElementById('policy-grid-kpis').innerHTML = '';
     if (pgNote) pgNote.textContent = missingResearchSource();
     document.getElementById('policy-grid-body').innerHTML = `<tr><td colspan="16">${missingResearchSource()}</td></tr>`;

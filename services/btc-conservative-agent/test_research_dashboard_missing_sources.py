@@ -147,7 +147,10 @@ def test_api_source_flags_do_not_depend_on_nonempty_result_rows(monkeypatch, pre
     monkeypatch.setattr(dashboard, '_read_json', lambda *args, **kwargs: report)
     monkeypatch.setattr(dashboard, '_read_report', lambda *args, **kwargs: report)
     monkeypatch.setattr(dashboard, '_integrity_payload', lambda: {})
-    monkeypatch.setattr(dashboard, '_current_policy_grid_rows', lambda **kwargs: {})
+    monkeypatch.setattr(dashboard, '_current_policy_grid_rows', lambda **kwargs: {'source_available': present})
+    monkeypatch.setattr(dashboard, '_execution_panel_report', lambda *_: {
+        **report, 'source_available': present, 'generation_identity': {},
+    })
     monkeypatch.setattr(dashboard, '_safe_policy_v3_dashboard_source', lambda: {'report': report})
     client = dashboard.app.test_client()
     for path in ('/api/findings', '/api/features', '/api/combos'):
