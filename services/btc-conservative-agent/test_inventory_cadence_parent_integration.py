@@ -29,7 +29,7 @@ def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,ex
     monkeypatch.setattr(module,'_acquire_generation_lease',lambda *a:None)
     monkeypatch.setattr(module,'_release_generation_lease',lambda *a:None)
     monkeypatch.delattr(module.os,'nice',raising=False)
-    sleeps=[]; codes=[]
+    sleeps=[]; codes=[]; errors=[]
     def run(command,**kwargs):
         path=lambda flag:Path(command[command.index(flag)+1])
         code=module.run(path('--request'),path('--result'),command[-1])
@@ -38,12 +38,12 @@ def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,ex
     def sleep(seconds):
         sleeps.append(seconds)
         raise RuntimeError('TEST_STOP_AFTER_OBSERVED_SLEEP')
-    bot=Path(__file__).with_name('bot.py')
+    bot=Path(os.environ.get('CADENCE_TEST_BOT_PATH') or Path(__file__).with_name('bot.py'))
     tree=ast.parse(bot.read_text(encoding='utf-8'))
     fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_data_sync_inventory_refresh_worker')
     ns=dict(Path=Path,os=os,sys=sys,uuid=uuid,json=json,hmac=hmac,__file__=str(bot),threading=threading,
             time=SimpleNamespace(time=time.time,sleep=sleep),
-            subprocess=SimpleNamespace(run=run,DEVNULL=-3),logger=SimpleNamespace(error=lambda *a:None),
+            subprocess=SimpleNamespace(run=run,DEVNULL=-3),logger=SimpleNamespace(error=lambda *a:errors.append(a)),
             utc_iso=lambda:'test',active_tile_registry_signature=lambda:'config',
             _collector_v22_epoch_id=lambda:'epoch-test',_runtime_git_rev=lambda:'a'*40,
             _data_sync_inventory_work_root=lambda:tmp_path,
@@ -57,9 +57,10 @@ def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,ex
     ns.update(_DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA='request',
               _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA=module.RESULT_SCHEMA,
               _DATA_SYNC_INVENTORY_WORKER_NAME='worker.py',_DATA_SYNC_MANIFEST_PAGE_DEFAULT=250,
+              _DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS=0.1,
               _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS=10,_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES=set())
     exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual-parent','exec'),ns)
     ns[fn.name]()
-    assert codes==[75]
+    assert codes==[75], errors
     assert sleeps==[expected]
     assert ns['_data_sync_async_inventory']['retry_after_seconds']==expected
