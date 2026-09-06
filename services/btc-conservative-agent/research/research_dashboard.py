@@ -7081,8 +7081,14 @@ function analyzerAttemptLabel(d) {
   }
   return generated || 'no run yet';
 }
-function formatExecutiveText(raw) {
-  if (!raw) return 'Awaiting the existing single-owner analyzer publication; do not start a duplicate analyzer.';
+function analyzerRecoveryGuidance(d) {
+  if (((d || {}).analysis_run || {}).phase === 'FAILED') {
+    return 'Latest analysis failed. Recovery required: inspect the failure receipt and repair the verified mirror/publication through the existing single-owner workflow. Do not start a duplicate analyzer.';
+  }
+  return 'Current publication is not verified. Check the existing single-owner workflow and its receipts; saved status does not prove a process is running. Do not start a duplicate analyzer.';
+}
+function formatExecutiveText(raw, d) {
+  if (!raw) return analyzerRecoveryGuidance(d);
   return String(raw).split('\n').map(line => /final[ -]?bots?/i.test(line)
       && /(?:\bcd\b|set-location|pushd|python|powershell|pwsh|run:|[a-z]:[\\/])/i.test(line)
     ? '[Retired launch instruction omitted. Use the existing analyzer owner in C:\\DoxxedCrypto\\btc-v31-current; do not start a duplicate.]'
@@ -7150,7 +7156,7 @@ async function loadSummary() {
       banner.style.display = 'block';
       banner.innerHTML = '<strong>⚠ Stale saved analyzer generation — read-only.</strong> '
         + escapeHtml(`${reasonList.length || 'One or more'} parity/freshness receipt${reasonList.length === 1 ? '' : 's'} are not green. `)
-        + 'Wait for the verified Fly mirror and its single owner analyzer publication; do not start a duplicate analyzer.'
+        + escapeHtml(analyzerRecoveryGuidance(d))
         + '<details class="receipt-details"><summary>Show exact parity and freshness receipts</summary><pre>'
         + escapeHtml(reasons || 'No machine-readable reason was published.') + '</pre></details>';
     } else if (d.all_data_fallback_active) {
@@ -7184,7 +7190,7 @@ async function loadSummary() {
       : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
         + ' · current does not mean qualified; inspect MANIFEST.json';
   }
-  document.getElementById('exec-text').textContent = formatExecutiveText(d.executive_text);
+  document.getElementById('exec-text').textContent = formatExecutiveText(d.executive_text, d);
   const kpis = [
     ['Net PnL', fmtExecutionUsd(p.net_pnl_usd)],
     ['Win Rate', fmtPct(p.win_rate_pct)],

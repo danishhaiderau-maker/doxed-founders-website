@@ -8,6 +8,23 @@ from datetime import datetime, timedelta, timezone
 from research import research_dashboard as dashboard
 
 
+def test_failed_publication_guidance_requires_recovery_not_waiting():
+    node = shutil.which("node")
+    assert node, "Node is required to execute failure guidance"
+    html = dashboard.DASHBOARD_HTML
+    helper = re.search(r"function analyzerRecoveryGuidance\(d\) \{.*?\n\}", html, re.S)
+    assert helper
+    cases = [{"analysis_run": {"phase": "FAILED"}}, {}, {"analysis_run": {"phase": "RUNNING"}}]
+    script = helper.group(0) + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(analyzerRecoveryGuidance)));"
+    result = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True, timeout=15)
+    rendered = json.loads(result.stdout)
+    assert "Recovery required" in rendered[0] and "failure receipt" in rendered[0]
+    assert "does not prove a process is running" in rendered[1]
+    assert all("Do not start a duplicate analyzer" in text and "Wait for" not in text for text in rendered)
+    assert "escapeHtml(analyzerRecoveryGuidance(d))" in html
+    assert "formatExecutiveText(d.executive_text, d)" in html
+
+
 def test_every_dashboard_navigation_item_has_renderable_section_scope_and_loader():
     """Static visual contract: clicking a visible subtab must never blank the page."""
     source = dashboard.DASHBOARD_HTML
