@@ -39,6 +39,21 @@ def test_complete_dashboard_javascript_parses():
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("payload,expected", [
+    ({}, "no run yet"),
+    ({"generated_at": "2026-09-06T12:00:00Z"}, "2026-09-06T12:00:00"),
+    ({"analysis_run": {"phase": "FAILED"}}, "Latest analysis attempt FAILED · no report published"),
+    ({"generated_at": "2026-09-06T12:00:00Z", "analysis_run": {"phase": "FAILED"}},
+     "Latest analysis attempt FAILED · saved report 2026-09-06T12:00:00 (not refreshed by this attempt)"),
+    ({"analysis_run": {"phase": "RUNNING"}}, "Analysis running · no report published yet"),
+    ({"generated_at": "2026-09-06T12:00:00Z", "analysis_run": {"phase": "RUNNING"}},
+     "Analysis running · saved report 2026-09-06T12:00:00"),
+])
+def test_header_distinguishes_attempt_from_publication(payload, expected):
+    assert run_helpers("analyzerAttemptLabel(" + json.dumps(payload) + ")") == expected
+    assert "document.getElementById('updated').textContent = analyzerAttemptLabel(d);" in html()
+
+
 @pytest.mark.parametrize("value", ["null", "undefined", "NaN", "Infinity", "-Infinity", "''", "'n/a'", "true", "false", "[]", "{}"])
 def test_missing_invalid_metrics_have_no_currency_or_percent_suffix(value):
     assert run_helpers(f"[fmtExecutionUsd({value}), fmtPct({value})]") == ["UNAVAILABLE", "UNAVAILABLE"]

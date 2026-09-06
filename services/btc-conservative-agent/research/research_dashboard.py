@@ -7005,6 +7005,20 @@ function summaryEvidenceScope(data) {
   return ['FRESHNESS UNVERIFIED — READ-ONLY',
     'No complete freshness receipt is available. Do not treat saved policy or historical executed results as current qualified evidence.'];
 }
+function analyzerAttemptLabel(d) {
+  const generated = typeof d.generated_at === 'string' && d.generated_at
+    ? d.generated_at.slice(0, 19) : null;
+  const phase = (d.analysis_run || {}).phase;
+  if (phase === 'FAILED') {
+    return 'Latest analysis attempt FAILED · ' + (generated
+      ? 'saved report ' + generated + ' (not refreshed by this attempt)'
+      : 'no report published');
+  }
+  if (phase === 'RUNNING') {
+    return 'Analysis running · ' + (generated ? 'saved report ' + generated : 'no report published yet');
+  }
+  return generated || 'no run yet';
+}
 function formatExecutiveText(raw) {
   if (!raw) return 'Awaiting the existing single-owner analyzer publication; do not start a duplicate analyzer.';
   return String(raw).split('\n').map(line => /final[ -]?bots?/i.test(line)
@@ -7108,7 +7122,7 @@ async function loadSummary() {
       : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
         + ' · current does not mean qualified; inspect MANIFEST.json';
   }
-  document.getElementById('updated').textContent = d.generated_at ? d.generated_at.slice(0, 19) : 'no run yet';
+  document.getElementById('updated').textContent = analyzerAttemptLabel(d);
   document.getElementById('exec-text').textContent = formatExecutiveText(d.executive_text);
   const kpis = [
     ['Net PnL', fmtExecutionUsd(p.net_pnl_usd)],
