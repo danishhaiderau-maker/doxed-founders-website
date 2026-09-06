@@ -4717,7 +4717,7 @@ def api_research_design():
     coverage_available = isinstance(coverage, dict)
     coverage = coverage if coverage_available else {
         "schema": "phase7_regime_feature_coverage_v1",
-        "row_count": 0,
+        "row_count": None,
         "dimensions": [],
         "status": "UNKNOWN_CURRENT_GENERATION",
         "qualification_allowed": False,
@@ -4738,8 +4738,8 @@ def api_research_design():
             )
         }
         row["replay_summary"] = replay_summaries.get(definition["baseline_id"]) or {
-            "opportunities": 0, "full_fills": 0, "partial_fills": 0,
-            "no_fills": 0, "unknown": 0,
+            "opportunities": None, "full_fills": None, "partial_fills": None,
+            "no_fills": None, "unknown": None,
         }
         baselines.append(row)
     available = (
@@ -4762,7 +4762,7 @@ def api_research_design():
         "entry_baselines": baselines,
         "entry_baseline_replay": baseline_replay or {
             "schema": "entry_baseline_same_opportunity_replay_v1",
-            "same_opportunity_count": 0,
+            "same_opportunity_count": None,
             "summaries": {},
             "status": "UNKNOWN_CURRENT_GENERATION",
             "reason": baseline_source.get("reason") or "REPORT_UNAVAILABLE",
@@ -8023,8 +8023,8 @@ async function loadResearchDesign() {
     const coverage = d.regime_feature_coverage || {};
     document.getElementById('research-design-kpis').innerHTML = cards([
       ['Signed baselines', (d.entry_baselines || []).length],
-      ['Same-opportunity replay N', (d.entry_baseline_replay || {}).same_opportunity_count ?? 0],
-      ['Evaluator rows', coverage.row_count ?? 0],
+      ['Same-opportunity replay N', (d.entry_baseline_replay || {}).same_opportunity_count ?? 'UNKNOWN'],
+      ['Evaluator rows', coverage.row_count ?? 'UNKNOWN'],
       ['Qualification', d.qualification_allowed ? 'ALLOWED' : 'DISABLED'],
       ['Profitability', d.profitability_calculated ? 'CALCULATED' : 'NOT CALCULATED'],
     ]);
@@ -8034,10 +8034,10 @@ async function loadResearchDesign() {
       `<td>${escape((row.required_evidence || []).join(', '))}</td>` +
       `<td>RESEARCH ONLY · relay ${row.relay_eligible ? 'eligible' : 'disabled'} · places order ${row.places_order ? 'yes' : 'no'}</td>` +
       `<td>${escape(row.missing_evidence_outcome || 'UNKNOWN')}<br><small>` +
-      `N ${row.replay_summary?.opportunities ?? 0} · full ${row.replay_summary?.full_fills ?? 0} · partial ${row.replay_summary?.partial_fills ?? 0} · no-fill ${row.replay_summary?.no_fills ?? 0} · UNKNOWN ${row.replay_summary?.unknown ?? 0}</small></td></tr>`
+      `N ${row.replay_summary?.opportunities ?? 'UNKNOWN'} · full ${row.replay_summary?.full_fills ?? 'UNKNOWN'} · partial ${row.replay_summary?.partial_fills ?? 'UNKNOWN'} · no-fill ${row.replay_summary?.no_fills ?? 'UNKNOWN'} · UNKNOWN ${row.replay_summary?.unknown ?? 'UNKNOWN'}</small></td></tr>`
     ).join('') || '<tr><td colspan="6">No signed baseline definitions are available; baseline outcomes remain UNKNOWN.</td></tr>';
     coverageBody.innerHTML = (coverage.dimensions || []).map(row =>
-      `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 0}</td><td>${row.unknown_rows ?? 0}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`
+      `<tr><td>${escape(row.name)}</td><td>${row.observed_rows ?? 'UNKNOWN'}</td><td>${row.unknown_rows ?? 'UNKNOWN'}</td><td>${escape(row.status || 'UNKNOWN')}</td></tr>`
     ).join('') || '<tr><td colspan="4">Current generation has no published evaluator feature coverage; every regime dimension remains UNKNOWN.</td></tr>';
   } catch (error) {
     const detail = escape(error?.message || 'unknown response error');
