@@ -31778,9 +31778,19 @@ DASHBOARD_JS = """(function () {
       }
     }
     let refreshInFlight = false;
+    function snapshotFailureLabel(error, stage) {
+      if (error && error.name === 'AbortError') return 'SNAPSHOT TIMEOUT';
+      if (error && error.snapshotWarming) return 'SNAPSHOT WARMING';
+      if (error && error.httpStatus) return 'SNAPSHOT API HTTP ' + error.httpStatus;
+      if (stage === 'fetch') return 'SNAPSHOT NETWORK FAILURE';
+      if (stage === 'parse') return 'SNAPSHOT RESPONSE INVALID';
+      if (stage === 'api') return 'SNAPSHOT API FAILURE';
+      return 'DASHBOARD RENDER FAILURE';
+    }
     async function refresh() {
       if (refreshInFlight) return;
       refreshInFlight = true;
+      let refreshStage = 'fetch';
       try {
         const controller = new AbortController();
         const fetchTimeout = setTimeout(function () { controller.abort(); }, 45000);
@@ -31796,12 +31806,19 @@ DASHBOARD_JS = """(function () {
           return;
         }
         if (!r.ok) {
-          throw new Error('API HTTP ' + r.status);
+          const error = new Error('Snapshot API failed');
+          error.httpStatus = r.status;
+          error.snapshotWarming = r.status === 503 && r.headers.get('X-Api-State-Cache') === 'warming';
+          throw error;
         }
+        refreshStage = 'parse';
         const d = await r.json();
+        if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('Invalid snapshot object');
+        refreshStage = 'api';
         if (d.api_state_error) {
-          throw new Error(d.api_state_error);
+          throw new Error('Snapshot API reported an error');
         }
+        refreshStage = 'render';
         safeText('collectorVersionBanner', d.collector_version || 'UNKNOWN');
         safeText('runtimeRevisionBanner', d.git_rev || d.source_git_rev || 'UNKNOWN');
         safeText('legacyCollectorVersionBanner', d.legacy_collector_version || 'none');
@@ -32664,21 +32681,17 @@ DASHBOARD_JS = """(function () {
       } catch(e) {
         console.error("Refresh failed:", e);
         const rs = document.getElementById('refreshStatus');
-        const isTimeout = (e && e.name === 'AbortError');
-        if (rs) rs.innerText = (isTimeout ? 'TIMEOUT — /api/state took >45s (bot may still be running)' : 'OFFLINE — refresh failed') + ' (' + formatMelbourneNow() + ')';
+        const failureLabel = snapshotFailureLabel(e, refreshStage);
+        if (rs) rs.innerText = failureLabel + ' (' + formatMelbourneNow() + ')';
         const sb = document.getElementById('serverBanner');
         if (sb) {
           sb.style.borderColor = '#f85149';
           sb.style.color = '#f85149';
-          if (isTimeout) {
-            sb.innerHTML = 'API SLOW — /api/state timed out. Bot may still be running; wait and click Refresh now. If this repeats, restart with <code>python 15minu_bot.py</code>.';
-          } else {
-            sb.innerHTML = 'BOT OFFLINE — nothing listening or network error. Use <strong>__DASHBOARD_URL__</strong> (not :5000 or old IPs). Start: <code>start_bot.ps1</code> · Stop: <code>stop_bot.ps1</code>';
-          }
+          sb.textContent = failureLabel + ' — displayed values may be stale or incomplete. This does not establish that the bot is offline. Retry Refresh now; persistent failures need diagnostics on the canonical Fly owner.';
         }
         const src = document.getElementById('dataSource');
         if (src) {
-          src.innerHTML = isTimeout ? 'API TIMEOUT — bot may still be running' : 'OFFLINE — start bot or fix URL';
+          src.textContent = failureLabel + ' — current snapshot unavailable';
           src.className = 'text-red-500 font-bold';
         }
       } finally {
