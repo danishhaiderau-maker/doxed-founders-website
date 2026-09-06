@@ -12,10 +12,10 @@ def isolated_kernel_fixture(monkeypatch):
         lambda **kw: {"fixture_kernel": True})
 
 
-def fixture(root):
+def fixture(root, new_incident=False, rejection='EXPECTED_SHA256_MISMATCH'):
     volume = root
     root = volume / "runtime"; root.mkdir()
-    reset_id = REVIEWED_HANDLED_ATTEMPT
+    reset_id = '5e6bafa7ac6ee68f37024cbe' if new_incident else REVIEWED_HANDLED_ATTEMPT
     directory = root / "research_reset_receipts" / reset_id; directory.mkdir(parents=True)
     import pandas as pd
     import subprocess
@@ -23,6 +23,9 @@ def fixture(root):
     new_epoch = "epoch-" + hashlib.sha256(
         f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{pd.to_datetime(100., unit='s', utc=True).isoformat()}".encode()).hexdigest()[:24]
     revision, digest = next(iter(REVIEWED_FAILED_DELETERS.items()))
+    if new_incident:
+        revision = '140350a464c8a36d590aeefc75a1722640469fa6'
+        digest = REVIEWED_FAILED_DELETERS[revision]
     blob = subprocess.check_output(["git", "show", revision + ":services/btc-conservative-agent/research_exact_deletion.py"], cwd=Path(__file__).parent)
     assert hashlib.sha256(blob).hexdigest() == digest
     artifact = root / "reviewed-deleter.py"; artifact.write_bytes(blob)
@@ -33,6 +36,8 @@ def fixture(root):
         pending_paper_orders=0, open_paper_positions=0, pending_wal_records=0, pending_recovery_records=0)
     binding = {"proof": proof, "boundary_evidence": evidence, "physical_scopes": [], "reset_anchor":100}
     operation = {**binding, "stage": "FAILED", "failed_stage": "PAYLOAD_DELETION"}
+    if new_incident:
+        operation['rejection_code'] = rejection
     active = {"reset_id": reset_id, "binding_sha256": hashlib.sha256(canonical_json(binding).encode()).hexdigest()}
     paths = {"active": directory.parent / "ACTIVE_RESET.json", "binding": directory / "binding.json", "operation": directory / "operation.json"}
     hashes = {}
@@ -44,6 +49,22 @@ def fixture(root):
     return dict(root=root, volume_root=volume, reset_id=reset_id, expected_sha256=hashes, old_epoch="epoch-old",
         failed_revision=revision, quiescence_probe=lambda: probe, expected_new_epoch=new_epoch,
         reviewed_deleter_sha256=digest, reviewed_source_artifact=artifact), directory
+
+
+@pytest.mark.parametrize('rejection', ['EXPECTED_SHA256_MISMATCH', 'OTHER', None])
+def test_additional_incident_requires_exact_failure(tmp_path, monkeypatch, rejection):
+    import research_reset_predeletion_abort as module
+    args, directory = fixture(tmp_path, new_incident=True, rejection=rejection)
+    record = dict(module.ADDITIONAL_REVIEWED_ATTEMPTS[args['reset_id']])
+    record['hashes'] = args['expected_sha256']
+    monkeypatch.setattr(module, 'ADDITIONAL_REVIEWED_ATTEMPTS', {args['reset_id']: record})
+    with MirrorGenerationLease(tmp_path) as lease:
+        if rejection == 'EXPECTED_SHA256_MISMATCH':
+            assert abort_predeletion_reset(**args, held_lease=lease)['status'] == 'PREDELETION_ABORTED'
+        else:
+            with pytest.raises(ResearchDeletionRejected, match='NOT_PROVED_PREDELETION'):
+                abort_predeletion_reset(**args, held_lease=lease)
+            assert (directory.parent/'ACTIVE_RESET.json').exists()
 
 
 def test_exact_predeletion_abort_preserves_artifacts(tmp_path, monkeypatch):

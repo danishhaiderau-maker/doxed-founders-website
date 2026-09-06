@@ -13,12 +13,25 @@ from research_v3_contract import canonical_json
 REVIEWED_FAILED_DELETERS = {
     "6d977a6d38d19a68efc7650625e830133ba33a8d":
         "47a23875125a393d77d48b14f0885e151dd508a113e1fc7b7bc680e9b031a916",
+    '140350a464c8a36d590aeefc75a1722640469fa6':
+        '200d3aa69b2c8b33636dc51c8b93c3f0d02d73b2755e9740327b99c546bf676b',
 }
 REVIEWED_HANDLED_ATTEMPT = "66791b9ec3e200588082b1bc"
 REVIEWED_RECEIPT_HASHES = {
     "active": "4e88456bcdb2d5037c852d1bfe9ea65ce93298d693bc2cfbbf43690b44fb24ec",
     "binding": "dc30eb23d5f87c93d1272bfd2863961b1909d8096eba00169ba698eba14a1260",
     "operation": "8c13c2e579c2033f4642eae35ff08ed3582d77b2deb358338dd0f5f2f81308e1",
+}
+ADDITIONAL_REVIEWED_ATTEMPTS = {
+    '5e6bafa7ac6ee68f37024cbe': {
+        'revision': '140350a464c8a36d590aeefc75a1722640469fa6',
+        'rejection_code': 'EXPECTED_SHA256_MISMATCH',
+        'hashes': {
+            'active': 'a498959abe36e322c0b47d385256fde0e2a99baaac722215ea35cc0e4b20bb23',
+            'binding': '0b6b45f6bcb92de2fe1803bf7d8b1b4b9f637e0d995240d9e1af0ab1285aded1',
+            'operation': 'c30d21f9e87185aa67d1f16bfbd1734dfba6218440771c2c23bd5bb16b86d511',
+        },
+    },
 }
 
 
@@ -39,9 +52,12 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
             or not re.fullmatch(r"[0-9a-f]{64}", str(reviewed_deleter_sha256))
             or hashlib.sha256(source.read_bytes()).hexdigest() != reviewed_deleter_sha256):
         raise ResearchDeletionRejected("ABORT_DELETER_SOURCE_NOT_REVIEWED")
-    if (reset_id != REVIEWED_HANDLED_ATTEMPT
+    incident = ADDITIONAL_REVIEWED_ATTEMPTS.get(reset_id)
+    reviewed_hashes = incident['hashes'] if incident else REVIEWED_RECEIPT_HASHES
+    if ((reset_id != REVIEWED_HANDLED_ATTEMPT and incident is None)
+            or (incident is not None and failed_revision != incident['revision'])
             or not re.fullmatch(r"[0-9a-f]{24}", str(reset_id))
-            or not isinstance(expected_sha256, dict) or expected_sha256 != REVIEWED_RECEIPT_HASHES
+            or not isinstance(expected_sha256, dict) or expected_sha256 != reviewed_hashes
             or set(expected_sha256) != {"active", "binding", "operation"}
             or any(not re.fullmatch(r"[0-9a-f]{64}", str(v)) for v in expected_sha256.values())):
         raise ResearchDeletionRejected("ABORT_IDENTITY_INVALID")
@@ -79,7 +95,7 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
         rows[key] = json.loads(raw[key])
     active, binding, operation = (rows[key] for key in ("active", "binding", "operation"))
     kernel = verify_handled_reset_kernel_continuity(reset_anchor=binding.get("reset_anchor"),
-        operation_mtime=paths["operation"].stat().st_mtime)
+        operation_mtime=paths["operation"].stat().st_mtime, reset_id=reset_id)
     proof = binding.get("proof") or {}
     evidence = binding.get("boundary_evidence") or {}
     import pandas as pd
@@ -94,6 +110,7 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
             or hashlib.sha256(canonical_json(evidence).encode()).hexdigest() != proof.get("recovery_receipt_sha256")
             or active.get("reset_id") != reset_id or active.get("binding_sha256") != hashlib.sha256(canonical_json(binding).encode()).hexdigest()
             or operation.get("stage") != "FAILED" or operation.get("failed_stage") != "PAYLOAD_DELETION"
+            or (incident is not None and operation.get('rejection_code') != incident['rejection_code'])
             or operation.get("proof") != proof or operation.get("boundary_evidence") != evidence
             or proof.get("retired_epoch_id") != old_epoch or evidence.get("deployed_revision") != failed_revision
             or operation.get("deletion") or operation.get("scope_deletions")
@@ -133,7 +150,7 @@ def abort_predeletion_reset(*, root, volume_root, reset_id, expected_sha256, old
     _fsync_directory(directory)
     if quiescence_probe() != probe: raise ResearchDeletionRejected("ABORT_BOUNDARY_CHANGED")
     if verify_handled_reset_kernel_continuity(reset_anchor=binding.get("reset_anchor"),
-            operation_mtime=paths["operation"].stat().st_mtime) != kernel:
+            operation_mtime=paths["operation"].stat().st_mtime, reset_id=reset_id) != kernel:
         raise ResearchDeletionRejected("ABORT_KERNEL_CHANGED")
     if any(read(path) != raw[key] for key, path in paths.items()):
         raise ResearchDeletionRejected("ABORT_POINTER_CHANGED")
