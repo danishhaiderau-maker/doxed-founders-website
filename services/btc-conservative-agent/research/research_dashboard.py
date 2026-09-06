@@ -4349,6 +4349,9 @@ def api_summary():
     )
     return jsonify({
         "scope": compact.get("session_scope"),
+        # Same bounded latest-attempt reader as /api/status. Do not infer an
+        # active/successful run from saved report presence or freshness alone.
+        "analysis_run": _analyzer_run_state(),
         "data_scope": compact.get("data_scope"),
         "generated_at": manifest.get("generated_at") or compact.get("generated_at"),
         "performance": p,

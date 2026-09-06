@@ -25,6 +25,23 @@ def test_failed_publication_guidance_requires_recovery_not_waiting():
     assert "formatExecutiveText(d.executive_text, d)" in html
 
 
+def test_summary_actual_payload_supplies_failed_attempt_to_banner(monkeypatch):
+    failed = {"phase": "FAILED", "in_progress": False, "updated_at": "2026-09-06T09:00:00Z"}
+    monkeypatch.setattr(dashboard, "_analyzer_run_state", lambda: failed)
+    monkeypatch.setattr(dashboard, "_read_json", lambda *args, **kwargs: {})
+    monkeypatch.setattr(dashboard, "_read_report", lambda *args, **kwargs: {})
+    monkeypatch.setattr(dashboard, "_read_text", lambda *args, **kwargs: "")
+    dashboard._API_RESPONSE_CACHE.clear()
+    response = dashboard.app.test_client().get('/api/summary')
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['analysis_run'] == failed
+    helper = re.search(r"function analyzerRecoveryGuidance\(d\) \{.*?\n\}", dashboard.DASHBOARD_HTML, re.S)
+    script = helper.group(0) + "\nconsole.log(analyzerRecoveryGuidance(" + json.dumps(payload) + "));"
+    result = subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True, timeout=15)
+    assert 'Recovery required' in result.stdout and 'Wait for' not in result.stdout
+
+
 def test_every_dashboard_navigation_item_has_renderable_section_scope_and_loader():
     """Static visual contract: clicking a visible subtab must never blank the page."""
     source = dashboard.DASHBOARD_HTML
