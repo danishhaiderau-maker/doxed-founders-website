@@ -6686,6 +6686,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Exit Combinations</h2>
     <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane.</p>
     <div class="kpis" id="exit-combos-kpis"></div>
+    <details id="exit-combos-detail-inventory" open>
+    <summary>Detailed exit-analysis tables and evidence labels</summary>
     <h3>Executed-paper exit-family scorecard</h3>
     <p class="note">Low-dimensional family comparison. EV is divided by independent shared opportunities, not correlated family children. Missing values remain missing.</p>
     <table><thead><tr><th>Exit family</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>EV / independent</th><th>Max DD</th><th>Missing identity / PnL / costs / slip</th><th>Evidence</th></tr></thead><tbody id="exit-family-scorecard-body"></tbody></table>
@@ -6770,6 +6772,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>Conservative PnL</th><th>EV</th></tr></thead><tbody id="exit-conservative-combos-body"></tbody></table>
     <h3>Ideal-touch diagnostic exits — not fill evidence</h3>
     <table><thead><tr><th>Combo</th><th>Exit</th><th>N</th><th>Sample</th><th>Diagnostic PnL</th><th>EV</th></tr></thead><tbody id="exit-ideal-touch-combos-body"></tbody></table>
+    </details>
   </section>
   <section id="sec-exit-reason-leak">
     <h2>Exit Peak-to-Close Gap (Combined Lanes)</h2>
@@ -7560,6 +7563,18 @@ async function loadSpreadPerf() {
 
 function executionPanelSource(section, payload) {
   const root = document.getElementById('sec-' + section);
+  if (section === 'exit-combos') {
+    const inventory = document.getElementById('exit-combos-detail-inventory');
+    if (inventory) inventory.open = payload.source_available !== false;
+    if (payload.source_available === false) {
+      document.getElementById('exit-combos-note').textContent = 'Exit analysis unavailable: ' + (payload.empty_reason || 'no declared atomic report') + '. No strategy or measured results can be shown until a valid atomic report is published. Detailed table labels remain below; historical artifacts remain in Report Explorer.';
+      root.querySelectorAll('tbody').forEach(node => node.innerHTML = '<tr><td colspan="20">UNAVAILABLE — no declared atomic report.</td></tr>');
+      root.querySelectorAll('.kpis').forEach(node => node.innerHTML = '');
+      const previous = root.querySelector('.execution-source-identity');
+      if (previous) previous.textContent = '';
+      return false;
+    }
+  }
   if (payload.source_available === false) {
     root.querySelectorAll('tbody').forEach(node => node.innerHTML = '<tr><td colspan="20">UNAVAILABLE — no declared atomic report. Historical artifacts remain in Report Explorer.</td></tr>');
     root.querySelectorAll('.kpis').forEach(node => node.innerHTML = '<div class="kpi">UNAVAILABLE — no measured counts</div>');
