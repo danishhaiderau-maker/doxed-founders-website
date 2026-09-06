@@ -102,9 +102,19 @@ def test_worker_is_stdlib_only_and_does_not_import_the_bot():
     }
     assert imported <= {
         "__future__", "argparse", "hashlib", "hmac", "json", "os", "time", "uuid",
-        "datetime", "pathlib", "resource", "shutil", "sqlite3",
+        "datetime", "pathlib", "resource", "shutil", "sqlite3", "data_sync_quarantine_receipt",
     }
     assert "bot" not in imported
+    # The one local helper must itself remain stdlib-only: do not turn this
+    # allowance into a hidden dependency on the bot or third-party packages.
+    helper = ast.parse(WORKER_PATH.with_name('data_sync_quarantine_receipt.py').read_text())
+    dependencies = set()
+    for node in ast.walk(helper):
+        if isinstance(node, ast.Import):
+            dependencies.update(alias.name.split('.')[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            dependencies.add((node.module or '').split('.')[0])
+    assert dependencies <= {'hashlib', 'json', 'os', 'pathlib', 're', 'stat', 'time'}
 
 
 def test_worker_nonce_identity_containment_and_atomic_result(tmp_path):

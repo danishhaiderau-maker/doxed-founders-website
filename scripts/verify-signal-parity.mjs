@@ -101,6 +101,11 @@ if (inventoryWorkerAgentHash !== inventoryWorkerEngineHash) {
   );
 }
 console.log(`OK  data-sync inventory worker matches (${inventoryWorkerAgentHash})`);
+const quarantineSource = join(root, 'services/btc-conservative-agent/data_sync_quarantine_receipt.py');
+const quarantineMirror = join(root, 'services/btc-signal-engine/data_sync_quarantine_receipt.py');
+if (!existsSync(quarantineSource) || !existsSync(quarantineMirror) || sha256(quarantineSource) !== sha256(quarantineMirror)) {
+  throw new Error('Quarantine receipt helper missing or differs from canonical source');
+}
 
 if (!existsSync(relayEvidenceWorkerAgent) || !existsSync(relayEvidenceWorkerEngine)) {
   fail('Missing isolated relay-evidence validation worker in canonical bot or signal engine');

@@ -39614,6 +39614,20 @@ def _data_sync_relpath(path: Path) -> str:
     raise ValueError("path is outside runtime data roots")
 
 
+def _data_sync_forensic_binding(path: Path):
+    """Metadata-only original-component contract; never perform SQLite backup."""
+    try:
+        rel = Path(os.path.abspath(path)).relative_to(
+            Path(os.path.abspath(_data_sync_runtime_root()))
+        ).as_posix()
+    except ValueError:
+        return None
+    if not rel.startswith("v3/lifecycle_bundle_index/recovery-quarantine/"):
+        return None
+    from data_sync_quarantine_receipt import original_component_binding
+    return original_component_binding(_data_sync_runtime_root(), rel)
+
+
 def _data_sync_path_allowed(path: Path) -> bool:
     try:
         # File symlinks are never evidence. Directory links are handled by the
@@ -39654,6 +39668,7 @@ def _data_sync_path_allowed(path: Path) -> bool:
     supported_type = (
         resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
         or _data_sync_rotation_parts(resolved.name) is not None
+        or _data_sync_forensic_binding(path) is not None
     )
     return resolved.is_file() and supported_type
 
@@ -39706,6 +39721,8 @@ def _data_sync_consistency_mode(path: Path) -> str:
     rewrite those files in place. Runtime .log files are logging-handler-owned
     append streams; rotation changes the inode and is therefore still fenced.
     """
+    if _data_sync_forensic_binding(path) is not None:
+        return "strict_generation_v1"
     if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
         return "sqlite_snapshot_v1"
     # Some ledgers use the serialized append helper for new rows but are also
@@ -40407,6 +40424,9 @@ def _data_sync_inventory_record(path: Path, *, include_sqlite_snapshot: bool = F
         "inode": int(getattr(stat, "st_ino", 0) or 0),
         "consistency_mode": _data_sync_consistency_mode(resolved),
     }
+    forensic = _data_sync_forensic_binding(resolved)
+    if forensic is not None:
+        row["forensic_component"] = forensic
     if row["consistency_mode"] == "sqlite_snapshot_v1" and include_sqlite_snapshot:
         snapshot = _data_sync_sqlite_snapshot(resolved)
         row.update(snapshot)

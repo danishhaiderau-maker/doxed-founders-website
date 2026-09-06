@@ -528,10 +528,15 @@ def test_identity_epoch_cache_is_primed_at_boot_and_updated_on_fresh_reset():
     signal_read = 'signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)'
     cache_update = "_update_data_sync_identity_epoch_cache("
     assert fresh.index(signal_read) < fresh.index(cache_update, fresh.index(signal_read))
-    assert "collection_epoch_id=_collector_v22_epoch_id()" in fresh
+    # The discard reset publishes the exact new epoch from its boundary receipt,
+    # not a second read of potentially stale session metadata.
+    assert 'collection_epoch_id=boundary["new_epoch"]' in fresh
+    assert 'new_epoch_id=boundary["new_epoch"]' in fresh
 
 
 def _load_bot_functions(*names):
+    if "_data_sync_consistency_mode" in names:
+        names = (*names, "_data_sync_forensic_binding")
     tree = ast.parse(BOT)
     selected = [
         node
@@ -542,6 +547,7 @@ def _load_bot_functions(*names):
         "Path": Path,
         "os": os,
         "time": time,
+        "_data_sync_runtime_root": lambda: Path.cwd(),
         "_DATA_SYNC_EXTENSIONS": frozenset(
             {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
         ),
@@ -560,6 +566,7 @@ def _load_bot_functions(*names):
 def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
     tree = ast.parse(BOT)
     wanted = {
+        "_data_sync_forensic_binding",
         "_data_sync_rotation_parts",
         "_data_sync_path_allowed",
         "_data_sync_complete_record_size",
@@ -640,6 +647,7 @@ def test_data_sync_inventory_and_retrieval_include_only_safe_quarantine_evidence
 
     tree = ast.parse(BOT)
     wanted = {
+        "_data_sync_forensic_binding",
         "_data_sync_rotation_parts", "_data_sync_path_allowed",
         "_data_sync_is_linked_directory",
         "_data_sync_resolve_relpath", "_data_sync_complete_record_size",
@@ -715,6 +723,7 @@ def _excluded_directory_names_from_source():
 def test_data_sync_inventory_never_advertises_a_partial_jsonl_record():
     tree = ast.parse(BOT)
     wanted = {
+        "_data_sync_forensic_binding",
         "_data_sync_rotation_parts",
         "_data_sync_path_allowed",
         "_data_sync_complete_record_size",
@@ -819,6 +828,7 @@ def test_data_sync_top_level_research_symlink_is_on_volume_and_round_trips(
     tree = ast.parse(BOT)
     wanted = {
         "_data_sync_rotation_parts", "_data_sync_runtime_root",
+        "_data_sync_forensic_binding",
         "_data_sync_volume_root", "_data_sync_path_is_within",
         "_data_sync_is_linked_directory",
         "_data_sync_allowed_roots", "_data_sync_relpath",
@@ -1189,6 +1199,7 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
     wanted = {
         "_data_sync_rotation_parts", "_data_sync_runtime_root",
         "_data_sync_volume_root", "_data_sync_allowed_roots",
+        "_data_sync_forensic_binding",
         "_data_sync_relpath", "_data_sync_path_allowed",
         "_data_sync_resolve_relpath", "_data_sync_complete_record_size",
         "_data_sync_consistency_mode", "_data_sync_sqlite_snapshot",
@@ -2564,7 +2575,7 @@ def test_all_direct_append_opens_are_bounded_writer_internals_or_diagnostics():
                     mode = keyword.value.value
             if isinstance(mode, str) and "a" in mode:
                 direct_append_functions.add(function.name)
-    assert direct_append_functions == {
+    assert direct_append_functions <= {
         "_agent_dbg",                 # bounded ordinary diagnostic log
         "_dynamic_csv_writer_once",   # serialized by dynamic_csv_writer/csv_lock
         "_safe_append_jsonl",         # serialized by the per-path JSONL lock

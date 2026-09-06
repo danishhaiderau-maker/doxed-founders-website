@@ -184,8 +184,30 @@ def _allowed(path: Path, request: dict) -> bool:
         return False
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
         return False
-    supported = resolved.suffix.lower() in extensions or _rotation_parts(resolved.name, extensions)
+    supported = (resolved.suffix.lower() in extensions or _rotation_parts(resolved.name, extensions)
+                 or _quarantine_binding(path, request) is not None)
     return bool(resolved.is_file() and supported)
+
+
+def _quarantine_binding(path: Path, request: dict) -> dict | None:
+    """Metadata-only original binding; never hash/open the database here."""
+    runtime = Path(request['_runtime'])
+    try:
+        relative = Path(os.path.abspath(path)).relative_to(runtime).as_posix()
+    except ValueError:
+        return None
+    parts = relative.split('/')
+    if (len(parts) != 5 or parts[:3] != ['v3', 'lifecycle_bundle_index', 'recovery-quarantine']
+            or parts[-1] not in {'lifecycle_index.sqlite3', 'lifecycle_index.sqlite3-wal',
+                                 'lifecycle_index.sqlite3-shm'}):
+        return None
+    from data_sync_quarantine_receipt import original_component_binding
+    try:
+        return original_component_binding(runtime, relative)
+    except (OSError, ValueError) as exc:
+        # A corrupt binding cannot disappear from an otherwise CURRENT inventory.
+        # RuntimeError intentionally escapes _row's ordinary vanished-file skip.
+        raise RuntimeError('QUARANTINE_COMPONENT_BINDING_INVALID') from exc
 
 
 def _linked_directory(path: Path) -> bool:
@@ -197,6 +219,8 @@ def _linked_directory(path: Path) -> bool:
 
 
 def _consistency_mode(path: Path, request: dict) -> str:
+    if _quarantine_binding(path, request) is not None:
+        return 'strict_generation_v1'
     if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
         return "sqlite_snapshot_v1"
     resolved = str(path.resolve())
@@ -303,6 +327,12 @@ def _row(path: Path, request: dict) -> dict | None:
             "inode": int(getattr(stat, "st_ino", 0) or 0),
             "consistency_mode": _consistency_mode(resolved, request),
         }
+        quarantine = _quarantine_binding(path, request)
+        if quarantine is not None:
+            if (quarantine['size'], quarantine['mtime_ns'], quarantine['inode']) != (
+                    row['physical_size'], row['mtime_ns'], row['inode']):
+                raise ValueError('QUARANTINE_COMPONENT_CHANGED')
+            row['forensic_component'] = quarantine
         generation = _v3_ledger_generation(resolved, request)
         parts = tuple(part.lower() for part in resolved.parts)
         is_v3_ledger_object = len(parts) >= 3 and parts[-3:-1] == ("v3", "ledgers") and (
@@ -329,6 +359,7 @@ def _stable_request(request: dict) -> dict:
     # A traversal contract change must start a distinct durable generation;
     # never try to interpret an older cursor using newer snapshot semantics.
     stable["worker_snapshot_contract"] = CHECKPOINT_SCHEMA
+    stable['quarantine_component_contract'] = 'receipt_bound_original_components_v1'
     directories, entries, spool_bytes = _generation_limits(request)
     stable["generation_directory_limit"] = directories
     stable["generation_entry_limit"] = entries

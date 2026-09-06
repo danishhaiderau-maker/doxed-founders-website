@@ -51,6 +51,7 @@ RUN python -c "import research.conservative_fill_cohort, research.conservative_l
 # This import executes before every AI API call, not just analyzer startup.
 RUN python -c "import research.runtime_baseline_declaration"
 RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
+RUN python -c "import data_sync_quarantine_receipt"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data

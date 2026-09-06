@@ -34,6 +34,7 @@ if (-not $AdminToken) {
 }
 
 . (Join-Path $scriptDir "fly-sync-bundles.ps1")
+. (Join-Path $scriptDir "fly-forensic-group-verify.ps1")
 $targetRoot = [System.IO.Path]::GetFullPath($TargetDir)
 New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
 if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
@@ -784,6 +785,13 @@ foreach ($row in $selectedFiles) {
   )
   $appendOnly = $extension -in @(".jsonl", ".csv", ".log", ".txt")
   $consistencyMode = [string]$(if ($row.consistency_mode) { $row.consistency_mode } else { "strict_generation_v1" })
+  $forensicOriginal = $null -ne $row.forensic_component
+  if ($rel -cmatch '^v3/lifecycle_bundle_index/recovery-quarantine/[0-9a-f]{16}/lifecycle_index\.sqlite3(?:-wal|-shm)?$' -and -not $forensicOriginal) {
+    throw "FORENSIC_BINDING_MISSING: $rel"
+  }
+  if ($forensicOriginal -and $consistencyMode -ne "strict_generation_v1") {
+    throw "FORENSIC_SNAPSHOT_SUBSTITUTION_FORBIDDEN: $rel"
+  }
   if ($consistencyMode -eq "sqlite_snapshot_v1") {
     # Acquire exactly one short-lived lease immediately before this DB is
     # compared/downloaded; ordinary manifest polling remains metadata-only.
@@ -826,6 +834,10 @@ foreach ($row in $selectedFiles) {
     }
   }
   $downloadedGeneration = $false
+  if ($forensicOriginal -and $sameGeneration -and $localSize -eq $remoteSize) {
+    try { Assert-FlyForensicPayload -Row $row -Path $local }
+    catch { $sameGeneration = $false }
+  }
   if (-not ($sameGeneration -and $localSize -eq $remoteSize)) {
   # Assemble and validate a complete same-directory candidate. Never append
   # directly to a file that the analyzer can read: doing so exposed a partial
@@ -1085,6 +1097,9 @@ foreach ($row in $selectedFiles) {
       if ($refreshGeneration) { break }
       }
       if ($refreshGeneration) {
+        if ($forensicOriginal) {
+          throw "FORENSIC_GENERATION_CHANGED: $rel"
+        }
         $generationRefreshCount += 1
         if ($consistencyMode -eq "sqlite_snapshot_v1") {
           Set-SqliteSnapshotLease -Row $row
@@ -1175,6 +1190,7 @@ foreach ($row in $selectedFiles) {
         )
       }
     }
+    if ($forensicOriginal) { Assert-FlyForensicPayload -Row $row -Path $candidate }
     Publish-MirrorCandidate -Candidate $candidate -Destination $local
     $downloadedGeneration = $true
   } finally {
@@ -1237,6 +1253,7 @@ foreach ($row in $selectedFiles) {
 
 Save-SyncState
 $downloadClient.Dispose()
+Assert-FlyForensicGroups -Rows @($selectedFiles) -Root $targetRoot
 
 # Do not acknowledge or publish canonical parity from a generation that
 # changed while this pass was copying files. This authenticated cache-bypassed
