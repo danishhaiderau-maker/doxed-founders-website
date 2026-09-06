@@ -91,3 +91,36 @@ def test_nonfinite_generation_is_unsupported(value):
 
 def test_unserializable_delay_fails_closed():
     assert adapt(schedule(),delay=10**5000)['status']=='UNSUPPORTED'
+
+
+def test_replay_identity_binds_all_inputs_not_only_schedule():
+    from copy import deepcopy
+    tape=[row(100),row(101),row(102)]
+    baseline=replay(tape)
+    changed_tape=deepcopy(tape)
+    changed_tape[1]['extra_observation']='different'
+    constraints=deepcopy(SIGNED_CONSTRAINTS)
+    constraints['extra_constraint']='different'
+    for changed in [replay(changed_tape),replay(tape,direction='SHORT'),
+                    replay(tape,requested_qty=2),replay(tape,quantity_constraints=constraints),
+                    replay(tape,symbol='OTHER')]:
+        assert changed['scenario_sha256']==baseline['scenario_sha256']
+        assert changed['replay_input_sha256']!=baseline['replay_input_sha256']
+    assert replay(tape)['replay_input_sha256']==baseline['replay_input_sha256']
+
+
+def test_replay_receipt_hash_binds_result_and_input_identity():
+    from research.latency_schedule_replay import _strict_sha256
+    result=replay([row(100),row(101),row(102)])
+    assert result['replay_receipt_sha256']==_strict_sha256({
+        k:v for k,v in result.items() if k!='replay_receipt_sha256'})
+    assert result['qualification_eligible'] is False
+
+
+def test_nonfinite_tape_metadata_cannot_produce_replay_identity():
+    tape=[row(100),row(101),row(102)]
+    tape[1]['extra_observation']=float('nan')
+    result=replay(tape)
+    assert result['status']=='UNKNOWN'
+    assert result['replay_input_sha256'] is None
+    assert result['entry_receipt'] is None

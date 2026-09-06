@@ -9,6 +9,14 @@ from research.conservative_limit_fill import _normalise_schedule, evaluate_limit
 TREATMENT = 'FIXED_EXPIRY_CANCEL_BEFORE_REPLACE'
 
 
+def _strict_sha256(value):
+    digest = hashlib.sha256()
+    for chunk in json.JSONEncoder(sort_keys=True, separators=(',', ':'),
+                                  allow_nan=False).iterencode(value):
+        digest.update(chunk.encode('utf-8'))
+    return digest.hexdigest()
+
+
 def delayed_submission_schedule(schedule, *, delay_sec, ordering_treatment):
     """Delay each submission, keeping explicit original interval ends fixed.
 
@@ -60,17 +68,31 @@ def replay_delayed_entry(*, schedule, delay_sec, ordering_treatment, tape,
             'evidence_basis':'DECLARED_SIMULATION','live_arming_authorized':False,
             'source_schedule_sha256':adapted.get('source_schedule_sha256'),
             'scenario_sha256':adapted.get('scenario_sha256'),
-            'evaluated_schedule_sha256':None,'entry_receipt':None}
+            'evaluated_schedule_sha256':None,'entry_receipt':None,
+            'replay_input_sha256':None,'replay_receipt_sha256':None}
     if adapted['status']!='READY':
         return {**output,'status':adapted['status'] if adapted['status']=='NO_ACTIVE_INTERVALS' else 'UNKNOWN',
                 'reason_codes':adapted['reason_codes'], 'timing_status':adapted['status']}
     _,evaluated_hash=_normalise_schedule(adapted['schedule'])
     output['evaluated_schedule_sha256']=evaluated_hash
     try:
+        # A schedule hash alone is not a replay identity: bind every evaluator
+        # input, including tape ordering and quantity constraints, separately.
+        output['replay_input_sha256'] = _strict_sha256({
+            'schema': 'declared_delayed_entry_inputs_v1',
+            'source_schedule': schedule, 'evaluated_schedule': adapted['schedule'],
+            'delay_sec': delay_sec, 'ordering_treatment': ordering_treatment,
+            'tape': tape, 'direction': direction, 'requested_qty': requested_qty,
+            'quantity_constraints': quantity_constraints, 'symbol': symbol,
+            'aggressor_window_sec': 1,
+        })
         receipt=evaluate_limit_fill(tape,direction=direction,requested_qty=requested_qty,
             chase_schedule=adapted['schedule'],quantity_constraints=quantity_constraints,
             symbol=symbol,aggressor_window_sec=1)
     except (ValueError,TypeError,KeyError,AttributeError,OverflowError):
         return {**output,'status':'UNKNOWN','reason_codes':['DELAYED_ENTRY_INPUT_UNSUPPORTED']}
-    return {**output,'status':'ENTRY_REPLAY_SUPPORTED' if receipt.get('supported') is True else 'UNKNOWN',
-            'reason_codes':list(receipt.get('negative_reasons') or []),'entry_receipt':receipt}
+    result = {**output,'status':'ENTRY_REPLAY_SUPPORTED' if receipt.get('supported') is True else 'UNKNOWN',
+              'reason_codes':list(receipt.get('negative_reasons') or []),'entry_receipt':receipt}
+    result['replay_receipt_sha256'] = _strict_sha256({
+        key: value for key, value in result.items() if key != 'replay_receipt_sha256'})
+    return result
