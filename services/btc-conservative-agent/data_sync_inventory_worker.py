@@ -46,6 +46,25 @@ class CheckpointError(ValueError):
     """The durable traversal state cannot be trusted."""
 
 
+def _building_retry_seconds(receipt: dict) -> int:
+    """Yield faster only after a measured, short finalization page advance.
+
+    Keep a positive yield for lifecycle scheduling and retain ordinary cadence
+    for scanning, absent telemetry, or slow work. This changes no slice limits.
+    """
+    if receipt.get("phase") != "FINALIZE":
+        return 5
+    pages = receipt.get("invocation_pages_written")
+    if isinstance(pages, bool) or not isinstance(pages, int) or pages <= 0:
+        return 5
+    for name in ("invocation_elapsed_seconds", "cpu_seconds"):
+        value = receipt.get(name)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not 0 <= value <= 0.1):
+            return 5
+    return 1
+
+
 class InventoryWorkerError(ValueError):
     """A classified, fail-closed inventory construction failure."""
 
@@ -1091,6 +1110,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
     cpu_started = time.process_time()
     invocation_files = 0
     invocation_dirs = 0
+    invocation_pages = 0
     batch_rows: list[dict] = []
     generation = None
 
@@ -1240,6 +1260,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 descriptor = _write_page(staging, page_index, rows)
                 _store_page(connection, descriptor)
                 invocation_files += len(rows)
+                invocation_pages += 1
                 page_index += 1
                 after_path = descriptor["last_path"]
 
@@ -1284,6 +1305,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             "rows_written": checkpoint["rows_written"],
             "invocations": checkpoint["invocations"],
             "pages_written": pages_written,
+            "invocation_pages_written": invocation_pages,
             "pages_total": pages_total,
             "invocation_files_seen": invocation_files,
             "invocation_dirs_seen": invocation_dirs,
@@ -1392,7 +1414,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                 "spool_bytes_used": worker_receipt["spool_bytes_used"],
                 "invocation_files_seen": worker_receipt["invocation_files_seen"],
                 "invocation_dirs_seen": worker_receipt["invocation_dirs_seen"],
-                "retry_after_seconds": 5,
+                "retry_after_seconds": _building_retry_seconds(worker_receipt),
             }
             _atomic_json(result_path, payload)
             return 75
