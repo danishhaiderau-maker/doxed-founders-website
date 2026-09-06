@@ -59,10 +59,13 @@ class RuntimeDeclarationTests(unittest.TestCase):
     def test_actual_pre_api_capture_block_and_failure_isolation(self):
         tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8-sig"))
         fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "evaluate_signal_with_ai")
-        body = fn.body[0].body
+        body = next(n.body for n in ast.walk(fn) if isinstance(n, ast.Try)
+            and any(isinstance(item, ast.ImportFrom) and item.module == "research.runtime_baseline_declaration"
+                    for item in n.body))
         start = next(i for i, n in enumerate(body) if isinstance(n, ast.ImportFrom)
             and n.module == "research.runtime_baseline_declaration")
-        block = body[start:start + 2]
+        end = next(i for i in range(start + 1, len(body)) if isinstance(body[i], ast.Try))
+        block = body[start:end + 1]
         api_lines = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Call)
             and isinstance(n.func, ast.Name) and n.func.id == "call_deepseek_api"]
         self.assertLess(block[-1].end_lineno, min(api_lines))

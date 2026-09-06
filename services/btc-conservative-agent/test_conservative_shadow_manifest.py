@@ -26,7 +26,8 @@ def test_terminal_report_is_before_atomic_manifest_and_registered():
     final = source.index('manifest = {\n        "schema": "report_manifest_v1"')
     assert baseline < terminal < final
     assert "policy_cycle_succeeded=policy_cycle_error is None" in source
-    assert "research_model=shadow_research_model" in source
+    assert "load_shadow_model_input(shadow_research_model)" in source
+    assert 'research_model=shadow_model_input.resolve((baseline_replay or {}).get("generation") or {}' in source
     assert 'CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE: {' in source
     assert '"generation_error": shadow_terminal_error' in source
 
