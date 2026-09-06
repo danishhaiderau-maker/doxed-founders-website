@@ -8,6 +8,39 @@ import pytest
 from research import research_dashboard as dashboard
 
 
+@pytest.mark.parametrize('present', [False, True])
+def test_overview_missing_report_is_not_measured_empty(monkeypatch, present):
+    report = {'generated_at': '2026-09-06T00:00:00Z', 'collection': {
+        'independent_opportunities': 0, 'execution_rows': 0,
+        'decision_outcomes': {'ACCEPTED_FILLED': 0, 'ACCEPTED_UNFILLED': 0, 'REJECTED': 0},
+    }} if present else {}
+    monkeypatch.setattr(dashboard, '_safe_policy_v3_dashboard_source', lambda: {
+        'report': report, 'screen': {}, 'ranking': {}, 'epoch_id': 'test',
+        'qualified': False, 'blockers': [],
+    })
+    monkeypatch.setattr(dashboard, '_read_report', lambda *a, **k: {})
+    monkeypatch.setattr(dashboard, '_read_json', lambda *a, **k: {})
+    payload = dashboard._decision_readiness_payload()
+    assert payload['source_available'] is present
+    elements = render_loader('loadDecisionReadiness', payload)
+    cards = elements['decision-readiness']['innerHTML']
+    tiers = elements['strategy-leader-tiers']['innerHTML']
+    import re
+    for label in ('Independent opportunities', 'Replay-eligible execution rows', 'Qualified OOS episodes'):
+        match = re.search(re.escape(label) + r'</div><div class="val [^"]*">([^<]+)', cards)
+        assert match and match.group(1) == ('0' if present else 'UNAVAILABLE')
+    assert ('NO_EVALUATED_DIAGNOSTIC_POLICY' in tiers) is present
+    assert payload['strategy_leaders']['unknown_evidence']['episode_count'] is None
+
+
+def test_overview_explicit_unknown_zero_is_preserved():
+    elements = render_loader('loadDecisionReadiness', {
+        'source_available': True,
+        'strategy_leaders': {'unknown_evidence': {'episode_count': 0}},
+    })
+    assert '<td>0</td>' in elements['strategy-leader-tiers']['innerHTML']
+
+
 def render_loader(name, payload, ok=True):
     page = dashboard.DASHBOARD_HTML
     helper = page[page.index('function missingResearchSource()'):page.index('async function loadFindings()')]

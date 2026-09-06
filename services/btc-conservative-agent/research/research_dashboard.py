@@ -3636,6 +3636,7 @@ def _best_policy_research_v31_payload() -> dict:
     )
     return {
         "schema": "best_policy_research_v3_1",
+        "source_available": bool(report),
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
         "status": (
@@ -3659,20 +3660,20 @@ def _best_policy_research_v31_payload() -> dict:
                 "dataset_epoch_id": source["epoch_id"],
                 "tile_config_signature": report.get("tile_config_signature"),
             },
-            "unknown_evidence": {"episode_count": 0, "blocker_counts": {}},
+            "unknown_evidence": {"episode_count": None, "blocker_counts": {}},
             "descriptive_ideal_touch": {
-                "status": "AVAILABLE" if descriptive else "NO_EVALUATED_DIAGNOSTIC_POLICY",
+                "status": "UNAVAILABLE" if not report else ("AVAILABLE" if descriptive else "NO_EVALUATED_DIAGNOSTIC_POLICY"),
                 "claim_label": "IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · DOES NOT SHOW THAT IT WORKS",
                 "leader": descriptive[0] if descriptive else None,
                 "blockers": source["blockers"],
             },
             "execution_supported": {
-                "status": "NO_EXECUTION_SUPPORTED_POLICY", "leader": None,
+                "status": "NO_EXECUTION_SUPPORTED_POLICY" if report else "UNAVAILABLE", "leader": None,
                 "claim_label": "EXECUTION-SUPPORTED OBSERVATION · NOT FULLY QUALIFIED · NOT LIVE READY",
                 "blockers": sorted(set(source["blockers"] + ["NO_SUPPORTED_CONSERVATIVE_FILL_POLICY"])),
             },
             "fully_qualified": {
-                "status": "AVAILABLE" if qualified else "NO_FULLY_QUALIFIED_POLICY",
+                "status": "UNAVAILABLE" if not report else ("AVAILABLE" if qualified else "NO_FULLY_QUALIFIED_POLICY"),
                 "leader": ranking.get("number_one") if qualified else None,
                 "claim_label": "FULLY QUALIFIED RESEARCH POLICY · LIVE ARM STILL REQUIRES EXPLICIT AUTHORIZATION",
                 "blockers": [] if qualified else source["blockers"],
@@ -7209,6 +7210,7 @@ async function loadDecisionReadiness() {
   const r = await fetch('/api/best-policy-research');
   const d = await r.json();
   const e = d.evidence || {};
+  const evidenceMetric = value => d.source_available === false ? 'UNAVAILABLE' : (value ?? 'UNAVAILABLE');
   const coverage = e.outcome_coverage || {};
   const candidate = d.current_candidate || {};
   const challenger = d.descriptive_challenger || {};
@@ -7228,12 +7230,12 @@ async function loadDecisionReadiness() {
     ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
     ['Candidate type', candidateKind, d.status === 'QUALIFIED' ? 'green' : ''],
     ['Policy design', dynamicSummary, ''],
-    ['Independent opportunities', e.current_epoch_events || e.independent_episode_count || 0, ''],
-    ['Replay-eligible execution rows', e.replay_eligible_execution_rows ?? e.completed_paths ?? 0, ''],
-    ['Filled / Unfilled / Rejected', `${coverage.ACCEPTED_FILLED || 0} / ${coverage.ACCEPTED_UNFILLED || 0} / ${coverage.REJECTED || 0}`, ''],
-    ['Qualified OOS episodes', e.qualified_oos_episodes || 0, ''],
-    ['Entry policies', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString(), ''],
-    ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString(), ''],
+    ['Independent opportunities', evidenceMetric(e.current_epoch_events ?? e.independent_episode_count), ''],
+    ['Replay-eligible execution rows', evidenceMetric(e.replay_eligible_execution_rows ?? e.completed_paths), ''],
+    ['Filled / Unfilled / Rejected', `${evidenceMetric(coverage.ACCEPTED_FILLED)} / ${evidenceMetric(coverage.ACCEPTED_UNFILLED)} / ${evidenceMetric(coverage.REJECTED)}`, ''],
+    ['Qualified OOS episodes', evidenceMetric(e.qualified_oos_episodes), ''],
+    ['Entry policies', evidenceMetric(searchCounts.entry_policy_cartesian), ''],
+    ['Hierarchical search space', evidenceMetric(searchCounts.naive_full_cartesian), ''],
     ['Static vs dynamic', (design.static_vs_dynamic || {}).required ? 'Required · OOS decides' : 'Manifest unavailable', ''],
     ['Profitable OOS winner', challenger.winner_kind === 'NONE' ? 'NONE — no profitable OOS candidate' : (challenger.winner_kind || 'Waiting for matured OOS'), ''],
     ['Relative leader only', challenger.relative_leader_kind || 'Unavailable', ''],
@@ -7251,9 +7253,9 @@ async function loadDecisionReadiness() {
   ];
   document.getElementById('strategy-leader-tiers').innerHTML = tierRows.map(([label, tier]) => {
     const leader = tier.leader || {};
-    const unknown = leader.unknown_evidence_count ?? unknownEvidence.episode_count ?? 0;
+    const unknown = evidenceMetric(leader.unknown_evidence_count ?? unknownEvidence.episode_count);
     return `<tr><td><strong>${label}</strong></td><td>${tier.status || 'UNAVAILABLE'}</td>`
-      + `<td>${leader.policy_id || 'NONE'}</td><td>${tier.claim_label || 'UNAVAILABLE'}</td>`
+      + `<td>${leader.policy_id || (d.source_available === false ? 'UNAVAILABLE' : 'NONE')}</td><td>${tier.claim_label || 'UNAVAILABLE'}</td>`
       + `<td>${unknown}</td><td>${(tier.blockers || []).join(', ') || 'none'}</td></tr>`;
   }).join('');
   const gateRows = d.qualification_gate_details || [];
