@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 SCHEMA = "fly_transport_bundle_slice_v1"
 MAX_REQUEST = 64 * 1024
@@ -77,7 +78,121 @@ def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subproce
     return receipt
 
 
+COORDINATOR_STATUS_FILE = "bundle-coordinator-status.json"
+COORDINATOR_ERRORS = frozenset({
+    "RESOURCE_PRESSURE", "GENERATION_AUTHORITY_UNAVAILABLE", "BUNDLE_ADMISSION_UNAVAILABLE",
+    "BUNDLE_COORDINATOR_BUDGET", "BUNDLE_COORDINATOR_SLICE_LIMIT", "BUNDLE_NO_CURSOR_PROGRESS",
+    "BUNDLE_CIRCUIT_OPEN", "BUNDLE_SLICE_TIMEOUT", "BUNDLE_SLICE_RESULT_LIMIT",
+    "BUNDLE_SLICE_RECEIPT_INVALID", "BUNDLE_GENERATION_STORAGE_BUDGET",
+    "BUNDLE_COORDINATOR_EXCEPTION", "BUNDLE_WORKER_FAILURE",
+    "BUNDLE_SLICE_FAILED", "BUNDLE_STATE_LIMIT", "BUNDLE_INDEX_LIMIT",
+    "INVOCATION_TIME_BUDGET_EXHAUSTED_BEFORE_BUILD", "PACKAGE_HARD_BUDGET_EXCEEDED",
+    "PACKAGE_INDEX_LIMIT_EXCEEDED", "PACKAGE_DESCRIPTOR_TOO_LARGE",
+    "PAGE_INDEX_CURSOR_OR_READ_BUDGET_INVALID", "INVENTORY_PAGE_ROW_CURSOR_INVALID",
+})
+
+
+def _persist_coordinator_status(metadata, source_root, output_root, receipt, *, started_at,
+                                terminal=False, prior_cursor=None):
+    """Best-effort atomic diagnostic only; never create generation directories.
+
+    A saved timestamp is not proof of a live owner. A hard process kill may leave
+    a nonterminal receipt; readers must retain that uncertainty.
+    """
+    temporary = None
+    try:
+        from data_sync_bundle_worker import _validate_output_root
+        identity = _identity(metadata)
+        generation_id = identity["generation_id"]
+        if not isinstance(generation_id, str) or not re.fullmatch(r"[0-9a-f]{64}", generation_id):
+            return False
+        if any(not isinstance(v, str) or not 1 <= len(v) <= 256 for v in identity.values()):
+            return False
+        source = Path(source_root)
+        _reject_links(source)
+        output = _validate_output_root(source.resolve(strict=True), output_root)
+        directory = output / f"g-{generation_id[:16]}"
+        _reject_links(directory)
+        if not directory.is_dir():
+            return False
+        state_path = directory / "bundle-worker-state.json"
+        _reject_links(state_path)
+        with state_path.open("rb") as stream:
+            raw = stream.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            return False
+        state = json.loads(raw)
+        generation = state.get("generation") or {}
+        if generation.get("inventory_generation_id") != generation_id or any(
+            generation.get(key) != identity[key] for key in IDENTITY if key != "generation_id"
+        ):
+            return False
+        status = receipt.get("status")
+        if status not in {"STARTING", "BUILDING", "COMPLETE", "FAILED", "DEFERRED", "STOPPED"}:
+            status = "FAILED"
+        cursor = receipt.get("cursor") or prior_cursor or state.get("cursor") or {}
+        safe_cursor = {key: cursor[key] for key in ("page_index", "page_row_index", "index_offset")
+                       if isinstance(cursor, dict) and type(cursor.get(key)) is int
+                       and 0 <= cursor[key] <= 2**63 - 1}
+        payload = {"schema": "fly_transport_bundle_coordinator_status_v1", "identity": identity,
+                   "status": status, "terminal": terminal, "cursor": safe_cursor,
+                   "started_at": started_at, "updated_at": datetime.now(timezone.utc).isoformat(),
+                   "authority": "DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY"}
+        for key in ("error", "last_error"):
+            if receipt.get(key) is not None:
+                payload[key] = receipt[key] if receipt[key] in COORDINATOR_ERRORS else "BUNDLE_WORKER_FAILURE"
+        for key in ("package_index_count", "inventory_rows_selected", "retry_seconds"):
+            if type(receipt.get(key)) is int and 0 <= receipt[key] <= 2**63 - 1:
+                payload[key] = receipt[key]
+        target = directory / COORDINATOR_STATUS_FILE
+        _reject_links(target)
+        temporary = directory / (".bundle-coordinator-status-" + uuid.uuid4().hex + ".tmp")
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(payload, stream, sort_keys=True, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        _reject_links(directory)
+        _reject_links(target)
+        os.replace(temporary, target)
+        return True
+    except Exception:
+        return False  # Diagnostics never change transfer/ACK or scheduling outcome.
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def run_managed_generation(metadata, source_root, output_root, *, pressure_probe,
+                           generation_available, stop_event=None, publish=lambda value: None,
+                           slice_runner=run_slice, max_slices=512, max_seconds=1800):
+    started_at = datetime.now(timezone.utc).isoformat()
+    prior_cursor = None
+    def persist(receipt, terminal=False):
+        nonlocal prior_cursor
+        if isinstance(receipt.get("cursor"), dict):
+            prior_cursor = receipt["cursor"]
+        _persist_coordinator_status(metadata, source_root, output_root, receipt,
+            started_at=started_at, terminal=terminal, prior_cursor=prior_cursor)
+    def observed(receipt):
+        persist(receipt)
+        publish(receipt)
+    persist({"status": "STARTING"})
+    try:
+        result = _run_managed_generation(metadata, source_root, output_root,
+            pressure_probe=pressure_probe, generation_available=generation_available,
+            stop_event=stop_event, publish=observed, slice_runner=slice_runner,
+            max_slices=max_slices, max_seconds=max_seconds)
+    except BaseException:
+        persist({"status": "FAILED", "error": "BUNDLE_COORDINATOR_EXCEPTION"}, terminal=True)
+        raise
+    persist(result, terminal=True)
+    return result
+
+
+def _run_managed_generation(metadata, source_root, output_root, *, pressure_probe,
                            generation_available, stop_event=None, publish=lambda value: None,
                            slice_runner=run_slice, max_slices=512, max_seconds=1800):
     """Run serial slices with pressure deferral; never admit a second owner here.

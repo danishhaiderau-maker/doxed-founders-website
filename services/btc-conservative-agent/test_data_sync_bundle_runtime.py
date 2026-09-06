@@ -113,3 +113,98 @@ def test_observed_tiny_receipt_backlog_fits_reserved_generation_budget():
     estimate = files * (732 + 4096) + packages * 32 * 1024
     assert estimate + MAX_PACKAGE_BYTES < runtime.MAX_GENERATION_BYTES
     assert runtime.MIN_FREE_BYTES >= 2 * runtime.MAX_GENERATION_BYTES
+
+
+def _status_fixture(tmp_path):
+    source = tmp_path / "source"
+    metadata = _fixture(tmp_path, [_row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"sample")])
+    output = tmp_path / "out"
+    assert runtime.run_slice(metadata, source, output)["status"] == "COMPLETE"
+    directory = output / f"g-{metadata['generation_id'][:16]}"
+    return metadata, source, output, directory
+
+
+@pytest.mark.parametrize("mode,error", [
+    ("complete", None), ("deferred", "GENERATION_AUTHORITY_UNAVAILABLE"),
+    ("failure", "BUNDLE_CIRCUIT_OPEN"), ("exception", "BUNDLE_COORDINATOR_EXCEPTION"),
+])
+def test_coordinator_persists_generation_bound_terminal_status(tmp_path, mode, error):
+    metadata, source, output, directory = _status_fixture(tmp_path)
+    before = (directory / "bundle-worker-state.json").read_bytes()
+    def slice_runner(*args):
+        if mode == "exception":
+            raise RuntimeError("SECRET_DO_NOT_PERSIST")
+        return {"status": "COMPLETE" if mode == "complete" else "FAILED",
+                "error": "SECRET_DO_NOT_PERSIST", "token": "SECRET_DO_NOT_PERSIST",
+                "cursor": {"page_index": 1, "secret": "SECRET_DO_NOT_PERSIST"}}
+    kwargs = dict(pressure_probe=lambda: {"pressure": False, "emergency": False},
+                  generation_available=lambda _: mode != "deferred", stop_event=Stop(),
+                  slice_runner=slice_runner)
+    if mode == "exception":
+        with pytest.raises(RuntimeError):
+            runtime.run_managed_generation(metadata, source, output, **kwargs)
+    else:
+        runtime.run_managed_generation(metadata, source, output, **kwargs)
+    raw = (directory / runtime.COORDINATOR_STATUS_FILE).read_text()
+    receipt = json.loads(raw)
+    assert receipt["terminal"] is True
+    assert receipt["identity"] == runtime._identity(metadata)
+    assert receipt["started_at"] <= receipt["updated_at"]
+    assert receipt["authority"] == "DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY"
+    if error:
+        assert receipt["error"] == error
+    assert "SECRET_DO_NOT_PERSIST" not in raw
+    assert (directory / "bundle-worker-state.json").read_bytes() == before
+
+
+def test_status_atomic_failure_keeps_prior_receipt_and_cleans_temp(tmp_path, monkeypatch):
+    metadata, source, output, directory = _status_fixture(tmp_path)
+    args = (metadata, source, output, {"status": "BUILDING", "cursor": {"page_index": 2}})
+    assert runtime._persist_coordinator_status(*args, started_at="fixed")
+    target = directory / runtime.COORDINATOR_STATUS_FILE
+    before = target.read_bytes()
+    def fail(*args): raise OSError("interrupted replace")
+    monkeypatch.setattr(runtime.os, "replace", fail)
+    assert not runtime._persist_coordinator_status(metadata, source, output,
+        {"status": "FAILED"}, started_at="fixed", terminal=True)
+    assert target.read_bytes() == before
+    assert not list(directory.glob(".bundle-coordinator-status-*.tmp"))
+
+
+def test_status_rejects_missing_directory_and_wrong_generation(tmp_path):
+    metadata, source, output, directory = _status_fixture(tmp_path)
+    wrong = {**metadata, "generation_id": metadata["generation_id"][:16] + "f" * 48}
+    assert not runtime._persist_coordinator_status(wrong, source, output,
+        {"status": "FAILED"}, started_at="fixed")
+    assert not runtime._persist_coordinator_status(metadata, source, tmp_path / "missing",
+        {"status": "FAILED"}, started_at="fixed")
+    assert not (tmp_path / "missing").exists()
+    assert not (directory / runtime.COORDINATOR_STATUS_FILE).exists()
+
+
+def test_pressure_receipt_marks_waiting_then_terminal_budget(tmp_path):
+    metadata, source, output, directory = _status_fixture(tmp_path)
+    observed = []
+    runtime.run_managed_generation(metadata, source, output,
+        pressure_probe=lambda: {"pressure": True, "emergency": False},
+        generation_available=lambda _: True, stop_event=Stop(), max_slices=1,
+        publish=lambda _: observed.append(json.loads((directory / runtime.COORDINATOR_STATUS_FILE).read_text())))
+    assert observed[0]["status"] == "DEFERRED"
+    assert observed[0]["terminal"] is False
+    assert observed[0]["retry_seconds"] == 3
+    terminal = json.loads((directory / runtime.COORDINATOR_STATUS_FILE).read_text())
+    assert terminal["terminal"] is True
+    assert terminal["error"] == "BUNDLE_COORDINATOR_SLICE_LIMIT"
+
+
+def test_status_rejects_link_target(tmp_path):
+    metadata, source, output, directory = _status_fixture(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text("preserve")
+    try:
+        (directory / runtime.COORDINATOR_STATUS_FILE).symlink_to(outside)
+    except OSError:
+        pytest.skip("symlink creation unavailable")
+    assert not runtime._persist_coordinator_status(metadata, source, output,
+        {"status": "FAILED"}, started_at="fixed")
+    assert outside.read_text() == "preserve"
