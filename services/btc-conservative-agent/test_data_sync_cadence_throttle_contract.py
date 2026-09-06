@@ -114,6 +114,8 @@ def _async_inventory_function(state, monotonic_value):
             starts[-1]["started"] = True
 
     namespace = {
+        "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "time": SimpleNamespace(monotonic=lambda: monotonic_value),
         "threading": SimpleNamespace(Thread=Thread),
         "_data_sync_inventory_cache_condition": threading.Condition(),
