@@ -7132,7 +7132,7 @@ async function loadSummary() {
   const kpis = [
     ['Net PnL', fmtExecutionUsd(p.net_pnl_usd)],
     ['Win Rate', fmtPct(p.win_rate_pct)],
-    ['Fresh executed', p.trades ?? 0],
+    ['Fresh executed', p.trades ?? 'UNAVAILABLE'],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
     ['Storage cleanup', retention.status === 'COMPLETED'
       ? ((retention.rotated_raw_deleted ?? 0) + ' rotations · '
@@ -7147,14 +7147,16 @@ async function loadSummary() {
       : 'Pending first retention measurement'],
     ['Local Fly mirror cache', storage.local_size_mb == null
       ? 'No size report'
-      : (Number(storage.local_size_mb).toFixed(1) + ' MB / 30 GB · '
-        + Number(storage.local_limit_pct || 0).toFixed(2) + '% · '
+      : (Number(storage.local_size_mb).toFixed(1) + ' MiB / '
+        + (storage.local_limit_mb == null ? 'cap unavailable' : Number(storage.local_limit_mb / 1024).toFixed(2) + ' GiB cap') + ' · '
+        + (storage.local_limit_pct == null ? 'usage unavailable' : Number(storage.local_limit_pct).toFixed(2) + '%') + ' · '
         + (storage.local_file_count ?? 0) + ' files')],
-    ['Fly runtime data', storage.fly_size_mb == null
+    ['Fly transferable runtime payload', storage.fly_size_mb == null
       ? 'No Fly size report'
-      : (Number(storage.fly_size_mb).toFixed(1) + ' MB / '
-        + Number(storage.fly_volume_total_mb || 1024).toFixed(0) + ' MB · '
-        + Number(storage.fly_volume_pct || 0).toFixed(1) + '%')],
+      : (Number(storage.fly_size_mb).toFixed(1) + ' MiB · excludes other volume usage')],
+    ['Fly whole-volume occupancy',
+      (storage.fly_volume_pct == null ? 'UNAVAILABLE' : Number(storage.fly_volume_pct).toFixed(1) + '% used')
+      + ' · ' + (storage.fly_volume_total_mb == null ? 'capacity unavailable' : Number(storage.fly_volume_total_mb).toFixed(1) + ' MiB capacity')],
     ['Mirror sync receipt', storage.sync_computed_at
       ? ('local cache refreshed ' + fmtMelb(storage.sync_computed_at))
       : 'No local mirror receipt'],
