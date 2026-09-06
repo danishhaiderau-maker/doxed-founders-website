@@ -55,6 +55,9 @@ function Receive-FlyTransportBundles {
   $verifiedBytes = [int64]0
   $reusedBytes = [int64]0
   $lastIndexWait = -1.0
+  $verifiedPackages = 0
+  $lastWaitPackages = 0
+  $lastIdleWait = -1.0
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
     if (-not $process.Start()) { throw 'BUNDLE_CHILD_START_FAILED' }
@@ -112,11 +115,21 @@ function Receive-FlyTransportBundles {
         $elapsed = [double]$receipt.elapsed_seconds
         $retry = [double]$receipt.next_retry_seconds
         if ([double]::IsNaN($elapsed) -or [double]::IsInfinity($elapsed) -or
-            $elapsed -lt 0 -or $elapsed -gt 600 -or $elapsed -lt $lastIndexWait -or
+            $elapsed -lt 0 -or $elapsed -ge 1800 -or $elapsed -lt $lastIndexWait -or
             [double]::IsNaN($retry) -or [double]::IsInfinity($retry) -or $retry -le 0 -or $retry -gt 30) {
           throw 'BUNDLE_INDEX_WAIT_INVALID'
         }
         $lastIndexWait = $elapsed
+        if ($receipt.PSObject.Properties.Name -contains 'idle_elapsed_seconds') {
+          $idle = $receipt.idle_elapsed_seconds
+          if (($idle -isnot [double] -and $idle -isnot [long]) -or [double]::IsNaN($idle) -or [double]::IsInfinity($idle) -or
+              $idle -lt 0 -or $idle -ge 600 -or $idle -gt $elapsed -or
+              $receipt.verified_packages -isnot [long] -or $receipt.verified_packages -ne $verifiedPackages -or
+              $retry -gt (600 - $idle) -or $retry -gt (1800 - $elapsed) -or
+              ($verifiedPackages -eq $lastWaitPackages -and $idle -lt $lastIdleWait)) { throw 'BUNDLE_INDEX_WAIT_INVALID' }
+          $lastIdleWait = $idle
+          $lastWaitPackages = $verifiedPackages
+        } elseif ($elapsed -gt 600) { throw 'BUNDLE_INDEX_WAIT_INVALID' }
         & $Progress $files 'bundle_index_wait' ([pscustomobject]@{ VerifiedBytes=$verifiedBytes; ReusedBytes=$reusedBytes })
         continue
       }
@@ -173,6 +186,7 @@ function Receive-FlyTransportBundles {
         if ($reusedLocal) { $reusedBytes += [int64]$row.size }
       }
       & $SaveCheckpoint
+      $verifiedPackages += 1
       # These are transport scratch copies, not Fly evidence or the canonical
       # mirror. Reclaim only this verified package after durable checkpointing.
       if (-not $reusedLocal) {

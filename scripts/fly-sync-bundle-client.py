@@ -100,10 +100,16 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
     delay, pressure_failures = 5, 0
     accepted_prefix = []
     seen_paths = set()
+    last_progress = started
+    def remaining_budget():
+        now = clock()
+        if now - started >= 1800:
+            raise ValueError('BUNDLE_TRANSFER_DEADLINE')
+        if now - last_progress >= 600:
+            raise ValueError('BUNDLE_INDEX_PREPARATION_DEADLINE')
+        return min(1800 - (now-started), 600 - (now-last_progress))
     def consume(entry, building):
-        remaining = (600 if building else 1800) - (clock() - started)
-        if remaining <= 0:
-            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE" if building else "BUNDLE_TRANSFER_DEADLINE")
+        remaining = remaining_budget()
         staged = fetch_verified_package(entry, generation, original, request["staging_root"], fetch,
             deadline_sec=min(120, remaining), clock=clock, sleep=sleep,
             verified_local_root=request.get("verified_local_root"))
@@ -113,24 +119,20 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
             seen_paths.add(member["path"])
         emit({"schema":"fly_bundle_staging_receipt_v1", "status":"PACKAGE_VERIFIED",
               "generation":generation, **staged})
-        remaining = (600 if building else 1800) - (clock() - started)
-        if remaining <= 0:
-            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE" if building else "BUNDLE_TRANSFER_DEADLINE")
+        remaining = remaining_budget()
         sleep(min(0.5, remaining))
     while True:
         elapsed = clock() - started
-        if elapsed >= 600:
-            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE")
+        remaining_budget()
         transport_error = None
         try:
-            status, headers, body = fetch(index_url, timeout=min(30, 600-elapsed))
+            status, headers, body = fetch(index_url, timeout=min(30, remaining_budget()))
         except (TimeoutError, ConnectionError, URLError) as error:
             reason = error.reason if isinstance(error, URLError) else error
             transport_error = "TIMEOUT" if isinstance(reason, TimeoutError) else "CONNECTION_ERROR"
             status, headers, body = 503, {}, b""
         elapsed = clock() - started
-        if elapsed >= 600:
-            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE")
+        remaining_budget()
         if not isinstance(body, bytes) or len(body) > MAX_META:
             raise ValueError("BUNDLE_INDEX_LIMIT")
         package_count = None
@@ -157,6 +159,7 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
             for entry in packages[len(accepted_prefix):]:
                 consume(entry, index["status"] == "BUILDING")
                 accepted_prefix.append(dict(entry))
+                last_progress = clock()
             pressure_failures = 0
             if index["status"] == "COMPLETE":
                 break
@@ -171,13 +174,13 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
         else:
             raise ValueError("BUNDLE_INDEX_UNAVAILABLE")
         elapsed = clock() - started
-        if elapsed >= 600:
-            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE")
+        remaining_budget()
         retry_after = next((str(v) for k,v in headers.items() if str(k).lower() == "retry-after"), "") if hasattr(headers, "items") else ""
         advertised = min(int(retry_after), 30) if retry_after.isascii() and retry_after.isdigit() and len(retry_after) <= 3 else 0
-        wait = min(max(delay, advertised), 600-elapsed)
+        wait = min(max(delay, advertised), remaining_budget())
         emit({"schema": "fly_bundle_staging_receipt_v1", "status": "INDEX_WAITING",
               "generation": generation, "elapsed_seconds": elapsed,
+              "idle_elapsed_seconds": clock() - last_progress, "verified_packages": len(accepted_prefix),
               "next_retry_seconds": wait, "packages": package_count, "ack_sent": False})
         sleep(wait)
         delay = min(delay * 2, 30)

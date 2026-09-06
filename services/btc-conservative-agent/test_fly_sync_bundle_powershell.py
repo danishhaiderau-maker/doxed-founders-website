@@ -10,7 +10,7 @@ PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependen
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
-@pytest.mark.parametrize("defect", [None, "hash", "waiting", "interleaved", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size", "failed", "failed-extra", "failed-malformed", "failed-index", "failed-index-extra", "failed-index-malformed"])
+@pytest.mark.parametrize("defect", [None, "hash", "waiting", "interleaved", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size", "failed", "failed-extra", "failed-malformed", "failed-index", "failed-index-extra", "failed-index-malformed", "dual", "dual-missing", "dual-overall", "dual-idle", "dual-count", "dual-reset", "dual-regress"])
 def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, defect):
     payload = '{"sample":1}'
     relative = "v3/market_segments/11/" + "1" * 64 + ".json"
@@ -48,7 +48,12 @@ try {{
 """
     completed = subprocess.run([str(PWSH), "-NoProfile", "-Command", script],
                                capture_output=True, text=True, timeout=30)
-    if str(defect).startswith('failed'):
+    if str(defect).startswith('dual-'):
+        assert completed.returncode==7 and 'BUNDLE_INDEX_WAIT_INVALID' in completed.stdout
+        result=json.loads(completed.stdout.splitlines()[-1])
+        assert result['phases'][-1]=={'files':1,'phase':'bundle_failed'}
+        assert (target/relative).read_text()==payload
+    elif str(defect).startswith('failed'):
         assert completed.returncode == 7, completed.stdout + completed.stderr
         result=json.loads(completed.stdout.splitlines()[-1])
         assert result['phases'][-1] == {'files':1,'phase':'bundle_failed'}

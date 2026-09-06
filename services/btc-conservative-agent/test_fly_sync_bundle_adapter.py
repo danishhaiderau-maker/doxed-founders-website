@@ -200,7 +200,7 @@ def test_missing_or_building_index_has_capped_prep_deadline(tmp_path, status):
     with pytest.raises(ValueError, match="PREPARATION_DEADLINE"):
         adapter.run(request, emit=emitted.append, fetch=pending,
                     clock=timing.clock, sleep=timing.sleep)
-    assert timing.now == 600 and max(timing.sleeps) == 30
+    assert timing.now == (600.5 if status == 200 else 600) and max(timing.sleeps) == 30
     assert len(calls) < 35
     assert not any(r["status"] == "COMPLETE" for r in emitted)
     assert sum(r["status"] == "PACKAGE_VERIFIED" for r in emitted) == (1 if status==200 else 0)
@@ -251,4 +251,4 @@ def test_preparation_time_is_inside_total_transfer_budget(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="TRANSFER_DEADLINE"):
         adapter.run(request, emit=lambda _: None, fetch=slow_index,
                     clock=timing.clock, sleep=timing.sleep)
-    assert observed == [120]
+    assert observed == [100]  # Remaining idle bound is stricter than package cap.
