@@ -124,9 +124,45 @@ def test_static_and_shadow_counts_distinguish_missing_report_from_measured_zero(
     assert "d.independent_episodes??'UNAVAILABLE'" in static_html
     assert "(d.training_episodes??'UNAVAILABLE')+' / '+(d.oos_episodes??'UNAVAILABLE')" in static_html
     assert "d.status==='UNAVAILABLE_CURRENT_GENERATION'?'UNAVAILABLE'" in static_html
+    assert 'class="empty-message" style="white-space:normal;overflow-wrap:anywhere;max-width:calc(100vw - 80px)"' in static_html
+    assert "font-size:13px;white-space:nowrap" in static_html  # Data rows remain unchanged.
     assert "Current analyzer publication unavailable." in static_html
     assert "Waiting for sufficient current-epoch evidence." not in static_html
     assert "d.current_epoch_rejected??'UNAVAILABLE'" in client.get("/shadow-research").get_data(as_text=True)
+    dashboard._API_RESPONSE_CACHE.clear()
+
+
+def test_maturity_rendering_distinguishes_unavailable_empty_zero_and_populated(monkeypatch):
+    node = shutil.which("node")
+    assert node, "Node is required to execute maturity rendering"
+    client = dashboard.app.test_client()
+    html = client.get("/evidence-maturity").get_data(as_text=True)
+    helper = re.search(r"function maturityCountCards\(d\) \{.*?\n\}", html, re.S)
+    assert helper and "cards=cards.concat(maturityCountCards(d));" in html
+    fields = ("independent_opportunities", "decision_branches", "execution_rows",
+              "provisional_lifecycles", "terminal_lifecycles", "market_segments")
+    populated = {"status": "DESCRIPTIVE", "collection": {key: 7 for key in fields},
+                 "candidate_screen": {"unique_policies_evaluated": 7},
+                 "qualified_policies": ["p"] * 7}
+    zero = {**populated, "collection": {key: 0 for key in fields},
+            "candidate_screen": {"unique_policies_evaluated": 0}, "qualified_policies": []}
+    reports = [{**populated, "status": "REPORT_NOT_IN_CURRENT_GENERATION"}, {}, zero, populated,
+               {"status": "DESCRIPTIVE", "collection": {}, "candidate_screen": {}}]
+    payloads = []
+    for report in reports:
+        monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: report)
+        dashboard._API_RESPONSE_CACHE.clear()
+        payload = client.get("/api/evidence-maturity").get_json()
+        assert payload["live_policy_change_allowed"] is False
+        payloads.append(payload)
+    for payload in payloads[:2]:
+        assert payload["status"] == "UNAVAILABLE_CURRENT_GENERATION"
+        assert payload["unique_policies_evaluated"] is payload["qualified_policies"] is None
+    script = helper.group(0) + "\nconsole.log(JSON.stringify(" + json.dumps(payloads) + ".map(maturityCountCards)));"
+    result = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True, timeout=15)
+    cards = json.loads(result.stdout)
+    assert [[value for _label, value in row] for row in cards] == [
+        ["UNAVAILABLE"] * 8, ["UNAVAILABLE"] * 8, [0] * 8, [7] * 8, ["UNAVAILABLE"] * 8]
     dashboard._API_RESPONSE_CACHE.clear()
 
 

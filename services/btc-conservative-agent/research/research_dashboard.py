@@ -4031,7 +4031,7 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
  }
  document.getElementById('kpis').innerHTML=cards.map(x=>`<div class="kpi"><small>${x[0]}</small><div>${x[1]??'—'}</div></div>`).join('');
  const emptyMessage=d.status==='UNAVAILABLE_CURRENT_GENERATION'?'Current analyzer publication unavailable. Complete verified mirror publication and analyzer generation before interpreting policy results.':'No policy rows available in this report. Review the evidence status and blockers above.';
- document.getElementById('body').innerHTML=rows.join('')||'<tr><td colspan="10">'+emptyMessage+'</td></tr>';
+ document.getElementById('body').innerHTML=rows.join('')||'<tr><td class="empty-message" style="white-space:normal;overflow-wrap:anywhere;max-width:calc(100vw - 80px)" colspan="10">'+emptyMessage+'</td></tr>';
 });
 </script></body></html>
 """, title=title, endpoint=endpoint, mode=mode)
@@ -4075,11 +4075,15 @@ def _v31_evidence_payload(kind: str) -> dict:
             "warning": "Chronological train/OOS rows remain blocked until sealed holdout, regime coverage, independence and minimum-episode gates pass.",
         }
     if kind == "maturity":
+        source_available = bool(report) and report.get("status") not in {
+            "REPORT_NOT_IN_CURRENT_GENERATION", "V3_REPORT_NOT_GENERATED"
+        }
         return {
             **base,
-            "collection": collection,
-            "unique_policies_evaluated": screen.get("unique_policies_evaluated") or 0,
-            "qualified_policies": len(report.get("qualified_policies") or []),
+            "status": base["status"] if source_available else "UNAVAILABLE_CURRENT_GENERATION",
+            "collection": collection if source_available else {},
+            "unique_policies_evaluated": screen.get("unique_policies_evaluated") if source_available else None,
+            "qualified_policies": len(report["qualified_policies"]) if source_available and isinstance(report.get("qualified_policies"), list) else None,
             "warning": "Opportunity counts, execution rows and terminal lifecycles are separate denominators; they must not be presented as interchangeable trades.",
         }
     _old_exit, old_meta = _read_contract_receipt("exit_reports_validation.json")
@@ -4109,7 +4113,23 @@ def _v31_evidence_page(title: str, endpoint: str, kind: str):
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }}</title>
 <style>*{box-sizing:border-box}html,body{width:100%;max-width:100%;overflow-x:hidden}body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24px}a{color:#58a6ff}.wrap{width:100%;max-width:1500px;min-width:0;margin:auto;overflow:hidden}.banner,.card{min-width:0;max-width:100%;overflow-wrap:anywhere;border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.banner{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));gap:10px}.scroll{display:block;width:100%;max-width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{padding:8px;border:1px solid #30363d;text-align:left;white-space:nowrap;font-size:13px}th{background:#21262d}pre{white-space:pre-wrap;overflow-wrap:anywhere}@media(max-width:600px){body{padding:12px}.grid{grid-template-columns:minmax(0,1fr)}h1{font-size:1.45rem}}</style></head>
 <body><div class="wrap"><p><a href="/">← Research Dashboard</a></p><h1>{{ title }}</h1><div id="banner" class="banner">Loading current signed V3.1 evidence…</div><div id="grid" class="grid"></div><div class="card"><div class="scroll"><table><thead id="head"></thead><tbody id="rows"></tbody></table></div><pre id="detail"></pre></div></div>
-<script>const kind={{ kind|tojson }};fetch({{ endpoint|tojson }}).then(r=>r.json()).then(d=>{document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · '+(d.warning||'');const c=d.collection||{};let cards=[['Epoch',d.epoch_id||'—'],['Generated',d.generated_at||'—'],['Live policy changes',d.live_policy_change_allowed?'YES':'NO']];let rows=[];if(kind==='maturity'){cards=cards.concat([['Independent opportunities',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Execution rows',c.execution_rows||0],['Provisional lifecycles',c.provisional_lifecycles||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Policies evaluated',d.unique_policies_evaluated||0],['Qualified policies',d.qualified_policies||0]]);document.getElementById('head').innerHTML='<tr><th>Evidence blocker</th></tr>';rows=(d.blockers||[]).map(x=>'<tr><td>'+x+'</td></tr>');}else if(kind==='partial_reduction'){cards=cards.concat([['Relay eligible',d.relay_eligible?'YES':'NO']]);document.getElementById('head').innerHTML='<tr><th>Safety gate</th><th>Passed</th></tr>';rows=Object.entries(d.gates||{}).map(([k,v])=>'<tr><td>'+k+'</td><td>'+ (v?'PASS':'NOT PROVEN')+'</td></tr>');}else{document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Family</th><th>Total episodes</th><th>OOS episodes</th><th>OOS net</th><th>Max drawdown</th><th>CVaR95</th><th>Failed gates</th></tr>';rows=(d.rows||[]).map(x=>'<tr><td>'+String(x.policy_id||'—')+'</td><td>'+String(x.policy_family||'—')+'</td><td>'+String(x.episodes_total??'—')+'</td><td>'+String(x.oos_episodes??'—')+'</td><td>'+String(x.sealed_oos_net_usd??'—')+'</td><td>'+String(x.max_drawdown_usd??'—')+'</td><td>'+String(x.cvar95_usd??'—')+'</td><td>'+Object.entries(x.gates||{}).filter(y=>y[1]!==true).map(y=>y[0]).join(', ')+'</td></tr>');}document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div>'+x[1]+'</div></div>').join('');document.getElementById('rows').innerHTML=rows.join('')||'<tr><td colspan="8">No current qualified evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,legacy_receipt:d.legacy_receipt,tiles:d.tiles},null,2);}).catch(e=>{document.getElementById('banner').textContent='LOAD FAILED · '+e;});</script></body></html>
+<script>
+function maturityCountCards(d) {
+  const c = d.collection || {};
+  const count = value => d.status === 'UNAVAILABLE_CURRENT_GENERATION' ? 'UNAVAILABLE' : (value ?? 'UNAVAILABLE');
+  return [
+    ['Independent opportunities', count(c.independent_opportunities)],
+    ['Decision branches', count(c.decision_branches)],
+    ['Execution rows', count(c.execution_rows)],
+    ['Provisional lifecycles', count(c.provisional_lifecycles)],
+    ['Terminal lifecycles', count(c.terminal_lifecycles)],
+    ['Market segments', count(c.market_segments)],
+    ['Policies evaluated', count(d.unique_policies_evaluated)],
+    ['Qualified policies', count(d.qualified_policies)],
+  ];
+}
+</script>
+<script>const kind={{ kind|tojson }};fetch({{ endpoint|tojson }}).then(r=>r.json()).then(d=>{document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · '+(d.warning||'');const c=d.collection||{};let cards=[['Epoch',d.epoch_id||'—'],['Generated',d.generated_at||'—'],['Live policy changes',d.live_policy_change_allowed?'YES':'NO']];let rows=[];if(kind==='maturity'){cards=cards.concat(maturityCountCards(d));document.getElementById('head').innerHTML='<tr><th>Evidence blocker</th></tr>';rows=(d.blockers||[]).map(x=>'<tr><td>'+x+'</td></tr>');}else if(kind==='partial_reduction'){cards=cards.concat([['Relay eligible',d.relay_eligible?'YES':'NO']]);document.getElementById('head').innerHTML='<tr><th>Safety gate</th><th>Passed</th></tr>';rows=Object.entries(d.gates||{}).map(([k,v])=>'<tr><td>'+k+'</td><td>'+ (v?'PASS':'NOT PROVEN')+'</td></tr>');}else{document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Family</th><th>Total episodes</th><th>OOS episodes</th><th>OOS net</th><th>Max drawdown</th><th>CVaR95</th><th>Failed gates</th></tr>';rows=(d.rows||[]).map(x=>'<tr><td>'+String(x.policy_id||'—')+'</td><td>'+String(x.policy_family||'—')+'</td><td>'+String(x.episodes_total??'—')+'</td><td>'+String(x.oos_episodes??'—')+'</td><td>'+String(x.sealed_oos_net_usd??'—')+'</td><td>'+String(x.max_drawdown_usd??'—')+'</td><td>'+String(x.cvar95_usd??'—')+'</td><td>'+Object.entries(x.gates||{}).filter(y=>y[1]!==true).map(y=>y[0]).join(', ')+'</td></tr>');}document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div>'+x[1]+'</div></div>').join('');document.getElementById('rows').innerHTML=rows.join('')||'<tr><td colspan="8">No current qualified evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,legacy_receipt:d.legacy_receipt,tiles:d.tiles},null,2);}).catch(e=>{document.getElementById('banner').textContent='LOAD FAILED · '+e;});</script></body></html>
 """, title=title, endpoint=endpoint, kind=kind)
 
 
