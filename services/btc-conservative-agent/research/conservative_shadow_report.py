@@ -568,6 +568,9 @@ def build_conservative_shadow_report(
                     "position_context_id": context.get("position_context_id"),
                     "atr_pct_at_fill": context.get("atr_pct_at_fill"),
                     "atr_basis": context.get("atr_basis"), "atr_provenance": context.get("atr_provenance"),
+                    "timing_basis": context.get("timing_basis"),
+                    "timing_declaration_sha256": context.get("timing_declaration_sha256"),
+                    "timing_model_sha256": context.get("timing_model_sha256"),
                     "leverage": context.get("leverage"), "margin_usd": context.get("margin_usd"),
                     "sizing_provenance": context.get("sizing_provenance"), **bindings,
                 })

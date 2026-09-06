@@ -407,7 +407,9 @@ def evaluate_shadow_terminal(
         # The same fee scenario does not make held signal ATR comparable to
         # measured fill-time ATR. Existing cohort grouping uses this identity.
         "simulation_model": (SIMULATION_MODEL + ":DECLARED_SIGNAL_ATR_HOLD_CONSTANT"
-                             if context.get("atr_basis") == "DECLARED_SIGNAL_ATR_HOLD_CONSTANT" else SIMULATION_MODEL),
+                             if context.get("atr_basis") == "DECLARED_SIGNAL_ATR_HOLD_CONSTANT" else SIMULATION_MODEL)
+                            + (":DECLARED_DELAYED_SUBMISSION:" + str(context.get('timing_model_sha256'))
+                               if context.get('timing_basis') == 'DECLARED_DELAYED_SUBMISSION_REPLAY' else ''),
         "atr_treatment": context.get("atr_basis"), "filled_qty": filled_qty,
         "entry_fill_event_count": len(fill_events),
         "entry_vwap": round(fill_price, 12),

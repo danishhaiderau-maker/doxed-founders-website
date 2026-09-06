@@ -97,8 +97,24 @@ def _baseline_context(entry, generation):
                 or not isinstance(context.get("directional_capture_signature"), str)
                 or not context["directional_capture_signature"].startswith("directional-entry-capture-")):
             raise ValueError("BASELINE_ATR_BASIS_UNSUPPORTED")
-    if (not isinstance(context.get("latency_provenance"), str) or not context["latency_provenance"].strip()
-            or context.get("timing_basis") != "BASELINE_EXECUTION_TIMESTAMPS_UNCHANGED"):
+    if context.get('timing_basis') == 'DECLARED_DELAYED_SUBMISSION_REPLAY':
+        from research.latency_schedule_replay import _strict_sha256
+        timing=context.get('timing_declaration')
+        replay=context.get('delayed_replay_receipt')
+        if (not isinstance(timing,Mapping) or not isinstance(replay,Mapping)
+                or context.get('timing_declaration_sha256') != sha(timing)
+                or context.get('timing_model_sha256') != sha({key:timing.get(key) for key in
+                    ('schema','delay_sec','ordering_treatment','evidence_basis')})
+                or replay.get('status') != 'ENTRY_REPLAY_SUPPORTED'
+                or context.get('delayed_replay_receipt_sha256') != replay.get('replay_receipt_sha256')
+                or replay.get('replay_receipt_sha256') != _strict_sha256({k:v for k,v in replay.items() if k!='replay_receipt_sha256'})
+                or context.get('delayed_replay_input_sha256') != replay.get('replay_input_sha256')
+                or context.get('derived_schedule_sha256') != receipt.get('schedule_sha256')
+                or {**(replay.get('entry_receipt') or {}),'symbol':receipt.get('symbol')} != receipt):
+            raise ValueError('BASELINE_DELAYED_REPLAY_BINDING_INVALID')
+    elif context.get('timing_basis') != 'BASELINE_EXECUTION_TIMESTAMPS_UNCHANGED':
+        raise ValueError('BASELINE_LATENCY_COMPATIBILITY_MISSING')
+    if not isinstance(context.get("latency_provenance"), str) or not context["latency_provenance"].strip():
         raise ValueError("BASELINE_LATENCY_COMPATIBILITY_MISSING")
     hashes = context.get("source_evidence_sha256")
     if (not isinstance(hashes, list) or not hashes

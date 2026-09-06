@@ -440,6 +440,28 @@ def declared_directional_baseline_inputs(capture: Mapping, baseline: Mapping) ->
 def build_declared_directional_baseline_context(*, generation: Mapping, identity: Mapping,
         entry_receipt: Mapping, capture: Mapping, baseline: Mapping, pinned_sources: Mapping,
         opportunity_binding: Mapping, coverage_evidence: Mapping, coverage_binding: Mapping) -> dict:
+    return _build_declared_context(generation=generation, identity=identity, entry_receipt=entry_receipt,
+        capture=capture, baseline=baseline, pinned_sources=pinned_sources,
+        opportunity_binding=opportunity_binding, coverage_evidence=coverage_evidence,
+        coverage_binding=coverage_binding)
+
+
+def build_declared_delayed_baseline_context(*, timing_declaration, tape, delayed_replay_receipt,
+        entry_evidence, entry_binding, **kwargs):
+    if (not isinstance(delayed_replay_receipt, Mapping)
+            or not isinstance(delayed_replay_receipt.get('entry_receipt'), Mapping)
+            or not isinstance(kwargs.get('capture'), Mapping)):
+        return {'status':'UNKNOWN','context':None,'reason_codes':['DELAYED_CONTEXT_INPUT_INVALID']}
+    return _build_declared_context(**kwargs, entry_receipt={**(delayed_replay_receipt.get('entry_receipt') or {}),
+        'symbol': kwargs.get('capture', {}).get('symbol')},
+        delayed={'timing': timing_declaration, 'tape': tape, 'replay': delayed_replay_receipt,
+                 'entry_evidence': entry_evidence, 'entry_binding': entry_binding})
+
+
+def _build_declared_context(*, generation: Mapping, identity: Mapping,
+        entry_receipt: Mapping, capture: Mapping, baseline: Mapping, pinned_sources: Mapping,
+        opportunity_binding: Mapping, coverage_evidence: Mapping, coverage_binding: Mapping,
+        delayed=None) -> dict:
     """Verified public-tape position under a labelled signal-ATR scenario."""
     try:
         if any(not isinstance(generation.get(key), str) or not generation[key] for key in GENERATION_FIELDS):
@@ -470,6 +492,37 @@ def build_declared_directional_baseline_context(*, generation: Mapping, identity
             raise ValueError("BASELINE_CONTEXT_SUPPORTED_FILL_REQUIRED")
         from research.conservative_limit_fill import _normalise_schedule
         schedule = capture["schedules"][baseline["baseline_id"]]["schedule"]
+        delayed_hashes = []
+        if delayed is not None:
+            from research.latency_schedule_replay import replay_delayed_entry, delayed_submission_schedule
+            timing = delayed['timing']
+            if (not isinstance(timing, Mapping) or timing.get('schema') != 'declared_submission_timing_v1'
+                    or timing.get('evidence_basis') != 'DECLARED_SIMULATION'
+                    or not isinstance(timing.get('provenance'), str) or not timing['provenance'].strip()
+                    or _decimal(timing.get('declared_at_ts'), positive=True) > _decimal(capture['signal_ts'])
+                    or timing.get('source_capture_signature') != capture['capture_signature']):
+                raise ValueError('DELAYED_CONTEXT_TIMING_DECLARATION_INVALID')
+            if timing not in (opportunity.get('research_timing_declarations') or []):
+                raise ValueError('DELAYED_CONTEXT_TIMING_SOURCE_UNBOUND')
+            entry_segment, entry_hash = _verified(delayed['entry_evidence'], pinned_sources)
+            entry_binding, entry_binding_hash = _verified(delayed['entry_binding'], pinned_sources)
+            _identity(entry_binding, {key: opportunity.get(key) for key in IDENTITY_FIELDS})
+            ref = entry_binding.get('segment_ref') or {}
+            if (entry_segment.get('schema') != 'market_segment_v3'
+                    or entry_segment.get('symbol') != capture['symbol']
+                    or delayed['tape'] != entry_segment.get('rows')
+                    or ref.get('sha256') != entry_hash
+                    or ref.get('relative_path') != delayed['entry_evidence'].get('source_id')):
+                raise ValueError('DELAYED_CONTEXT_ENTRY_TAPE_BINDING_MISMATCH')
+            recomputed = replay_delayed_entry(schedule=schedule, delay_sec=timing.get('delay_sec'),
+                ordering_treatment=timing.get('ordering_treatment'), tape=delayed['tape'],
+                direction=capture['direction'], requested_qty=inputs['requested_qty'],
+                quantity_constraints=inputs['signed_quantity_constraints'], symbol=capture['symbol'])
+            if recomputed.get('status') != 'ENTRY_REPLAY_SUPPORTED' or recomputed != delayed['replay']:
+                raise ValueError('DELAYED_CONTEXT_REPLAY_MISMATCH')
+            schedule = delayed_submission_schedule(schedule, delay_sec=timing['delay_sec'],
+                ordering_treatment=timing['ordering_treatment'])['schedule']
+            delayed_hashes = [entry_hash, entry_binding_hash]
         if _normalise_schedule(schedule)[1] != entry_receipt.get("schedule_sha256"):
             raise ValueError("DECLARED_BASELINE_ENTRY_SCHEDULE_MISMATCH")
         constraints, defects = validate_signed_quantity_constraints(entry_receipt.get("quantity_constraints"), symbol=capture.get("symbol"))
@@ -546,6 +599,18 @@ def build_declared_directional_baseline_context(*, generation: Mapping, identity
                 "coverage_provenance": "VERIFIED_TIMESTAMP_CONTINUITY:" + segment_hash,
                 "source_evidence_sha256": sorted({opportunity_hash, binding_hash, segment_hash}),
                 "live_arming_authorized": False, "qualification_eligible": False}
+        if delayed is not None:
+            body.update(timing_basis='DECLARED_DELAYED_SUBMISSION_REPLAY',
+                latency_provenance='PINNED_ENTRY_TAPE_FRESH_DELAYED_FILL_REPLAY',
+                timing_declaration_sha256=_sha(delayed['timing']),
+                timing_model_sha256=_sha({key: delayed['timing'].get(key) for key in
+                    ('schema','delay_sec','ordering_treatment','evidence_basis')}),
+                timing_declaration=dict(delayed['timing']),
+                delayed_replay_receipt=dict(delayed['replay']),
+                delayed_replay_input_sha256=delayed['replay']['replay_input_sha256'],
+                delayed_replay_receipt_sha256=delayed['replay']['replay_receipt_sha256'],
+                derived_schedule_sha256=delayed['replay']['evaluated_schedule_sha256'],
+                source_evidence_sha256=sorted(set(body['source_evidence_sha256'] + delayed_hashes)))
         return {"status": "SUPPORTED", "context": {**body, "signature": stable_hash("baseline-execution-model-context", body)},
                 "reason_codes": [], "live_arming_authorized": False}
     except (ValueError, TypeError, KeyError, ArithmeticError, AttributeError) as exc:
