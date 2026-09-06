@@ -408,7 +408,8 @@ function Write-SyncProgressHeartbeat {
     [int]$FileCount = 0,
     [int64]$FileBytes = 0,
     [int64]$RemoteBytes = 0,
-    [switch]$Completed
+    [switch]$Completed,
+    [object]$BundleProgress = $null
   )
   if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) { return }
   $target = [System.IO.Path]::GetFullPath($ProgressHeartbeatFile)
@@ -467,6 +468,18 @@ function Write-SyncProgressHeartbeat {
     relayEvidence = $relayEvidence
   }
   $temporary = "$target.progress-$PID-$([Guid]::NewGuid().ToString('N'))"
+  if ($null -ne $BundleProgress) {
+    $progress.inProgress = $true
+    $progress['ackPending'] = $true
+    $progress['completionAuthority'] = 'NONE_TRANSFER_PROGRESS_ONLY'
+    $progress['revisionParityScope'] = 'REQUEST_VS_MANIFEST_NOT_MIRROR_COMPLETION'
+    $progress['inventoryGenerationId'] = [string]$manifest.inventory_generation_id
+    $progress['collectionEpochId'] = [string]$manifest.collection_epoch_id
+    $progress['verifiedPayloadBytes'] = [int64]$BundleProgress.VerifiedBytes
+    $progress['reusedLocalBytes'] = [int64]$BundleProgress.ReusedBytes
+    $progress['newlyTransferredPayloadBytes'] = [int64]$BundleProgress.VerifiedBytes - [int64]$BundleProgress.ReusedBytes
+    $progress['networkBytes'] = $null
+  }
   $backup = "$temporary.replace-backup"
   $encoding = New-Object System.Text.UTF8Encoding($false)
   try {
@@ -756,7 +769,11 @@ if ($env:FLY_SYNC_TRANSPORT_BUNDLES -eq '1') {
     -AdminToken $AdminToken -TargetRoot $targetRoot `
     -ClientScript (Join-Path $scriptDir 'fly-sync-bundle-client.py') `
     -SyncState $syncState -SaveCheckpoint { Save-SyncState } `
-    -Progress { param($files, $phase) Write-Host "[FLY SYNC] stage=$phase files=$files ack=pending" }
+    -Progress { param($files, $phase, $details)
+      Write-Host "[FLY SYNC] stage=$phase files=$files ack=pending"
+      Write-SyncProgressHeartbeat -Phase $phase -FileIndex $files -FileCount $selectedFiles.Count `
+        -FileBytes ([int64]$details.VerifiedBytes) -BundleProgress $details
+    }
   Write-Host "[FLY SYNC] stage=bundle_complete files=$($bundleResult.Files) original_manifest_ack=pending"
 }
 foreach ($row in $selectedFiles) {

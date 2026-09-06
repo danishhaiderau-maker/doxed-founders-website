@@ -36,6 +36,10 @@ HEX = re.compile(r"^[0-9a-f]{64}$")
 class BundleClientError(ValueError):
     """Sanitized, deterministic client failure; no incomplete result is returned."""
 
+    def __init__(self, code, diagnostic=None):
+        super().__init__(code)
+        self.diagnostic = diagnostic
+
 
 def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -192,12 +196,14 @@ def fetch_verified_package(index_entry, generation, original_manifest_rows, stag
             raise BundleClientError("PACKAGE_DEADLINE_EXCEEDED")
         return remaining
 
-    def request(url, max_bytes):
+    def request(url, max_bytes, phase, offset=None):
         for attempt in range(max_attempts):
             remaining = check_deadline()
+            transport_error = None
             try:
                 status, headers, body = fetch(url, timeout=min(timeout_sec, remaining))
-            except (TimeoutError, ConnectionError):
+            except (TimeoutError, ConnectionError) as error:
+                transport_error = 'TIMEOUT' if isinstance(error, TimeoutError) else 'CONNECTION_ERROR'
                 status, headers, body = 503, {}, b""
             check_deadline()
             if type(status) is not int or not isinstance(headers, dict) and not hasattr(headers, "items"):
@@ -209,7 +215,13 @@ def fetch_verified_package(index_entry, generation, original_manifest_rows, stag
             if status not in (429, 502, 503, 504):
                 raise BundleClientError(f"PACKAGE_HTTP_{status}")
             if attempt + 1 == max_attempts:
-                raise BundleClientError("PACKAGE_RETRY_EXHAUSTED")
+                raise BundleClientError("PACKAGE_RETRY_EXHAUSTED", {
+                    'generation_id': generation['inventory_generation_id'],
+                    'package_sha256': index_entry['package_sha256'],
+                    'phase': phase, 'offset': offset, 'attempts': attempt + 1,
+                    'http_status': None if transport_error else status,
+                    'transport_error': transport_error,
+                })
             delay = min(0.25 * (2 ** attempt), check_deadline())
             sleep(delay)
         raise BundleClientError("PACKAGE_RETRY_EXHAUSTED")
@@ -217,7 +229,7 @@ def fetch_verified_package(index_entry, generation, original_manifest_rows, stag
     generation_id = generation["inventory_generation_id"]
     package_id = index_entry["package_sha256"]
     url = f"/api/data-sync/bundle?generation_id={generation_id}&package_id={package_id}"
-    _, body = request(url + "&descriptor=1", MAX_METADATA_BYTES)
+    _, body = request(url + "&descriptor=1", MAX_METADATA_BYTES, 'DESCRIPTOR')
     try:
         descriptor = json.loads(body, object_pairs_hook=_object_pairs,
                                 parse_constant=lambda _x: (_ for _ in ()).throw(ValueError()))
@@ -298,7 +310,7 @@ def fetch_verified_package(index_entry, generation, original_manifest_rows, stag
         with package.open("xb") as handle:
             while offset < size:
                 limit = min(MAX_CHUNK_BYTES, size - offset)
-                headers, chunk = request(url + f"&offset={offset}&limit={limit}", limit)
+                headers, chunk = request(url + f"&offset={offset}&limit={limit}", limit, 'CHUNK', offset)
                 expected = {
                     "x-inventory-generation": generation_id, "x-package-sha256": package_id,
                     "x-chunk-offset": str(offset), "x-package-size": str(size),

@@ -52,6 +52,8 @@ function Receive-FlyTransportBundles {
   $complete = $false
   $started = $false
   $files = 0
+  $verifiedBytes = [int64]0
+  $reusedBytes = [int64]0
   $lastIndexWait = -1.0
   $clock = [Diagnostics.Stopwatch]::StartNew()
   try {
@@ -74,7 +76,25 @@ function Receive-FlyTransportBundles {
       if ($line.Length -gt 2097152) { throw 'BUNDLE_RECEIPT_LIMIT' }
       $receipt = $line | ConvertFrom-Json
       if ($receipt.schema -cne 'fly_bundle_staging_receipt_v1') { throw 'BUNDLE_RECEIPT_SCHEMA' }
-      if ($receipt.status -ceq 'FAILED') { throw ('BUNDLE_TRANSFER_FAILED: ' + [string]$receipt.error) }
+      if ($receipt.status -ceq 'FAILED') {
+        $code = [string]$receipt.error
+        if ($code -cnotmatch '^[A-Z][A-Z0-9_]{1,95}$') { $code = 'BUNDLE_CLIENT_FAILED' }
+        $d = $receipt.diagnostic
+        if ($null -ne $d -and
+            [string]$d.generation_id -ceq [string]$Manifest.inventory_generation_id -and
+            [string]$d.package_sha256 -cmatch '^[0-9a-f]{64}$' -and
+            [string]$d.phase -cin @('DESCRIPTOR','CHUNK') -and
+            [string]$d.attempts -cmatch '^[1-5]$' -and
+            ($null -eq $d.offset -or [string]$d.offset -cmatch '^[0-9]{1,10}$') -and
+            ($null -eq $d.http_status -or [string]$d.http_status -cin @('429','502','503','504')) -and
+            ($null -eq $d.transport_error -or [string]$d.transport_error -cin @('TIMEOUT','CONNECTION_ERROR'))) {
+          $safe = [ordered]@{generation_id=[string]$d.generation_id;package_sha256=[string]$d.package_sha256;
+            phase=[string]$d.phase;attempts=[int]$d.attempts;offset=$d.offset;
+            http_status=$d.http_status;transport_error=$d.transport_error}
+          Write-Host ('[FLY SYNC] failure_context=' + ($safe | ConvertTo-Json -Compress))
+        }
+        throw ('BUNDLE_TRANSFER_FAILED: ' + $code)
+      }
       if ($receipt.status -ceq 'INDEX_WAITING') {
         if ($complete) { throw 'BUNDLE_RECEIPT_SEQUENCE' }
         foreach ($field in @('inventory_generation_id','inventory_sha256','source_git_rev','collection_epoch_id','tile_registry_signature')) {
@@ -88,7 +108,7 @@ function Receive-FlyTransportBundles {
           throw 'BUNDLE_INDEX_WAIT_INVALID'
         }
         $lastIndexWait = $elapsed
-        & $Progress $files 'bundle_index_wait'
+        & $Progress $files 'bundle_index_wait' ([pscustomobject]@{ VerifiedBytes=$verifiedBytes; ReusedBytes=$reusedBytes })
         continue
       }
       if ($receipt.status -ceq 'COMPLETE') {
@@ -140,6 +160,8 @@ function Receive-FlyTransportBundles {
           mtime_ns=[int64]$row.mtime_ns; synced_at=[DateTimeOffset]::UtcNow.ToString('o');
           full_sha256=[string]$member.sha256; transport='GENERATION_BOUND_BUNDLE' }
         $files += 1
+        $verifiedBytes += [int64]$row.size
+        if ($reusedLocal) { $reusedBytes += [int64]$row.size }
       }
       & $SaveCheckpoint
       # These are transport scratch copies, not Fly evidence or the canonical
@@ -163,7 +185,7 @@ function Receive-FlyTransportBundles {
         Remove-Item -LiteralPath $package -Force -ErrorAction Stop
       }
       }
-      & $Progress $files 'bundle_verified'
+      & $Progress $files 'bundle_verified' ([pscustomobject]@{ VerifiedBytes=$verifiedBytes; ReusedBytes=$reusedBytes })
     }
     if (-not $process.WaitForExit(5000)) { throw 'BUNDLE_CHILD_EXIT_TIMEOUT' }
     if ($process.ExitCode -ne 0 -or -not $complete) { throw 'BUNDLE_TERMINAL_RECEIPT_MISSING' }

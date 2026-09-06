@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, HTTPRedirectHandler, build_opener
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
-from data_sync_bundle_client import fetch_verified_package
+from data_sync_bundle_client import BundleClientError, fetch_verified_package
 
 MAX_INPUT = 32 * 1024 * 1024
 MAX_META = 2 * 1024 * 1024
@@ -170,7 +170,10 @@ def main():
         code = str(error)
         if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,95}", code):
             code = "BUNDLE_CLIENT_FAILED"
-        print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "FAILED", "error": code}), flush=True)
+        receipt = {"schema": "fly_bundle_staging_receipt_v1", "status": "FAILED", "error": code}
+        if isinstance(error, BundleClientError) and error.diagnostic is not None:
+            receipt['diagnostic'] = error.diagnostic
+        print(json.dumps(receipt), flush=True)
         return 1
 
 
