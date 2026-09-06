@@ -21,7 +21,7 @@ from research_reset_paths import io_path
 
 def execute_research_reset(*, runtime_root, proof, quiescent: bool,
                            recovery_states: Mapping[str, str], receipt_path,
-                           protected_paths=(), expected_plan_sha256=None,
+                           protected_paths=(), expected_plan_sha256=None, expected_target_sha256_by_path=None,
                            max_entries=200000, max_depth=12, max_metadata_bytes=4 * 1024**2,
                            max_files=100000, max_total_bytes=64 * 1024**3,
                            allow_fly_runtime_aliases=False, scope_name=None, validate_only=False) -> dict:
@@ -100,6 +100,10 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         # additionally must agree with their original immutable metadata.
         expected[str(path)] = digest or actual["sha256"]
         paths.append(path)
+    if expected_target_sha256_by_path is not None:
+        if (not isinstance(expected_target_sha256_by_path, Mapping)
+                or dict(expected_target_sha256_by_path) != expected):
+            raise ResearchDeletionRejected("RESET_EXPECTED_TARGET_MAP_CHANGED")
     if scope_name is not None:
         binding = plan["scope_binding"]
         runtime = Path(binding["runtime_root"])
