@@ -135,7 +135,7 @@ def test_old_launch_instruction_replaced_without_changing_findings():
     assert "do not start a duplicate" in display
     assert display.splitlines()[0] == raw.splitlines()[0]
     assert display.splitlines()[-1] == raw.splitlines()[-1]
-    assert "formatExecutiveText(d.executive_text)" in html()
+    assert "formatExecutiveText(d.executive_text, d)" in html()
 
 
 def test_no_direct_unavailable_currency_or_percentage_templates_remain():
@@ -149,15 +149,20 @@ def test_no_direct_unavailable_currency_or_percentage_templates_remain():
 def render_loader(name, payload, target):
     page = html()
     helpers = page[page.index("function metricNumber("):page.index("function fmtAdxBucket(")]
+    helpers += page[page.index("function laneApprovalCount("):page.index("async function loadLanes(")]
+    helpers += page[page.index("function executionPanelSource("):page.index("async function loadChaseThreshold(")]
     start = page.index("async function " + name + "(")
     end = page.index("async function ", start + 15)
     loader = page[start:end]
     fixture = """
 const elements = new Map();
+const element = () => ({innerHTML:'', textContent:'', children:[],
+  querySelector: function() { return this.children.find(node => node.className === 'execution-source-identity') || null; },
+  querySelectorAll: () => [], prepend: function(node) { this.children.unshift(node); }});
 const document = {getElementById: id => {
-  if (!elements.has(id)) elements.set(id, {innerHTML:'', textContent:''});
+  if (!elements.has(id)) elements.set(id, element());
   return elements.get(id);
-}};
+}, createElement: () => element()};
 function chaseLaneQuery() { return ''; }
 const fetch = async () => ({json: async () => (PAYLOAD)});
 """.replace("PAYLOAD", json.dumps(payload))
@@ -182,7 +187,8 @@ def test_lane_and_chase_render_missing_money_as_unavailable(name, field, target,
 
 @pytest.mark.parametrize("name,field,target,row", [
     ("loadLanes", "lanes", "lane-body", {"lane": "FIXED", "executed_closes": 1,
-        "pnl": 0, "ev": 0, "counterfactual_pnl": 0}),
+        "pnl": 0, "ev": 0, "counterfactual_pnl": 0,
+        "metric_available": {"executed_closes": True, "pnl": True, "ev": True, "counterfactual_pnl": True}}),
     ("loadChase", "executed_buckets", "chase-body", {"bucket": "1", "trades": 1,
         "sum_pnl_usd": 0, "pnl_usd": 999, "ev_usd": 0, "ev": 999}),
     ("loadChaseThreshold", "executed_thresholds", "chase-threshold-body", {"threshold": "1", "trades": 1,

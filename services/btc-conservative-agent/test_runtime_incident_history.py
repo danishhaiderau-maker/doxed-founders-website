@@ -24,6 +24,8 @@ def test_runtime_history_classifies_only_explicit_application_receipts(tmp_path)
         "APPLICATION_WATCHDOG_RESTART_REQUESTED", "APPLICATION_CRASH_DUMP_UNATTRIBUTED"
     ]
     assert result["application_incidents"][0]["exit_code"] == 75
+    assert result["application_incidents"][0]["restart_requested"] is True
+    assert result["application_incidents"][1]["restart_requested"] is None
     assert result["application_incidents"][0]["time"] == "2026-08-31T00:00:00Z"
     assert result["platform_events"] == []
     assert result["platform_history_status"] == "UNAVAILABLE_NO_AUTHORITATIVE_PLATFORM_EVENT_RECEIPTS"
@@ -54,6 +56,38 @@ def test_runtime_history_missing_file_is_honest(tmp_path):
     assert "not inferred" in result["platform_history_note"]
 
 
+def test_restart_flag_requires_explicit_boolean(tmp_path):
+    path = tmp_path / "crash.jsonl"
+    path.write_text("\n".join(json.dumps({"watchdog": {"restart_allowed": value}})
+                              for value in (False, None, "false", 1)), encoding="utf-8")
+    result = build_runtime_incident_history(path, current_started_at=None,
+        current_instance_id=None, current_revision=None)
+    assert [r["restart_requested"] for r in result["application_incidents"]] == [False, None, None, None]
+
+
+def test_both_dashboard_restart_labels_execute_without_truthy_coercion():
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).parent
+    for path, variable in ((root / "bot.py", "event"),
+                           (root / "research" / "research_dashboard.py", "row")):
+        source = path.read_text(encoding="utf-8")
+        expression = re.search(
+            rf"{variable}\.restart_requested\s*===\s*true\s*\?\s*'YES'\s*:\s*"
+            rf"{variable}\.restart_requested\s*===\s*false\s*\?\s*'NO'\s*:\s*'UNKNOWN'",
+            source)
+        assert expression, path
+        script = (f"console.log(JSON.stringify([true,false,null,undefined,'false',1].map(value=>{{"
+                  f"const {variable}={{restart_requested:value}}; return {expression.group(0)};}})));" )
+        result = subprocess.run([shutil.which('node'), '-e', script],
+                                capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == ['YES', 'NO', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN', 'UNKNOWN']
+
+
 def test_dashboard_wires_runtime_history_without_platform_inference():
     source = (__import__("pathlib").Path(__file__).with_name("bot.py")).read_text(encoding="utf-8")
     assert 'snapshot["runtime_incident_history"] = build_runtime_incident_history(' in source
@@ -61,6 +95,7 @@ def test_dashboard_wires_runtime_history_without_platform_inference():
     assert "No retained application incident receipts" in source
     assert "history.platform_history_status" in source
     assert "const incidentText = value =>" in source
+    assert "event.restart_requested === true ? 'YES' : event.restart_requested === false ? 'NO' : 'UNKNOWN'" in source
 
 
 def test_research_dashboard_exposes_read_only_runtime_incident_view():
@@ -70,3 +105,4 @@ def test_research_dashboard_exposes_read_only_runtime_incident_view():
     assert 'id="runtime-incidents-body"' in source
     assert "'runtime-incidents': [loadRuntimeIncidents]" in source
     assert "Fly platform and deployment causes remain unavailable" in source
+    assert "row.restart_requested===true?'YES':row.restart_requested===false?'NO':'UNKNOWN'" in source

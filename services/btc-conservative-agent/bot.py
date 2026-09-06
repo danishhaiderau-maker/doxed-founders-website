@@ -31968,7 +31968,7 @@ DASHBOARD_JS = """(function () {
             <td>${incidentText(event.time || 'UNKNOWN')}</td>
             <td>${incidentText(event.classification || 'UNKNOWN')}</td>
             <td>${incidentText(event.reason || '-')}</td>
-            <td>${event.restart_requested ? 'YES' : 'NO'}</td>
+            <td>${event.restart_requested === true ? 'YES' : event.restart_requested === false ? 'NO' : 'UNKNOWN'}</td>
             <td>${incidentText(event.exit_code == null ? '-' : event.exit_code)}</td>
             <td>${incidentText(event.evidence_source || '-')}</td>
           </tr>`).join('') : '<tr><td colspan="6" style="color:#8b949e;">No retained application incident receipts in the bounded crash-dump tail.</td></tr>');

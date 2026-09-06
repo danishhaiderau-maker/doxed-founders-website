@@ -6558,22 +6558,32 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       Dashboard reports are cached and deterministic. AI egress is reserved for
       the trading-direction pipeline only.
     </div>
+    <details id="overview-evidence-details">
+    <summary>Inspect performance, storage and lifecycle evidence</summary>
+    <p class="note">These receipts may be unavailable until a current mirror and analyzer generation are published. Downloaded bytes are not source cleanup.</p>
     <div class="kpis" id="kpis"></div>
     <h3>Lifecycle evidence bundles</h3>
     <div class="kpis" id="lifecycle-bundle-kpis"></div>
     <p class="note" id="lifecycle-bundle-note">Transfer-ready audit copies are audit-only and cannot rank, profitability-qualify, or authorize source cleanup.</p>
     <p class="note" id="cohort-note"></p>
+    </details>
     <h2>Best Policy Research</h2>
     <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
     <p class="note"><strong>V3.1 evidence:</strong> <a href="/safe-policy-genome-v3.1">Safe Policy Genome</a> · <a href="/cross-world-evidence">Cross-world evidence</a> · <a href="/static-policies">Static policies</a> · <a href="/dynamic-policies">Dynamic/regime</a> · <a href="/shadow-research">Shadow paths</a> · <a href="/risk-drawdown">Risk/drawdown</a> · <a href="/chronological-oos">Chronological OOS</a> · <a href="/evidence-maturity">Evidence maturity</a> · <a href="/partial-reduction">Partial-reduction reconciliation</a></p>
+    <details id="overview-candidate-details">
+    <summary>Inspect candidate and search-space details</summary>
     <div class="kpis" id="decision-readiness"></div>
+    </details>
     <h3>Three strategy truth tiers</h3>
     <p class="note">The descriptive tier remains visible when integrity or qualification fails. It is an ideal-touch diagnostic, not evidence that a strategy works.</p>
     <div class="table-scroll" tabindex="0"><table><thead><tr><th>Tier</th><th>Status</th><th>Leader</th><th>Evidence label</th><th>UNKNOWN</th><th>Blockers</th></tr></thead><tbody id="strategy-leader-tiers"><tr><td colspan="6">Loading current atomic generation…</td></tr></tbody></table></div>
+    <details id="overview-qualification-details">
+    <summary>Inspect mandatory Bitfinex qualification gates and provenance</summary>
     <h3>Mandatory Bitfinex qualification gates</h3>
     <p class="note">PASS requires current-generation evidence. FAIL is a measured failure, UNKNOWN means the evidence has not been supplied, and UNAVAILABLE means no exact current analyzer generation can be evaluated.</p>
     <div class="table-scroll" tabindex="0"><table><thead><tr><th>Gate</th><th>Status</th><th>Evidence / receipt</th><th>Precise blocker</th></tr></thead><tbody id="qualification-gate-body"><tr><td colspan="4">Loading qualification gates…</td></tr></tbody></table></div>
     <p class="note" id="decision-readiness-provenance"></p>
+    </details>
     <pre id="exec-text"></pre>
     <p class="note">Active tab refreshes every 3 minutes. Canonical workspace: <code>C:\DoxxedCrypto\btc-v31-current</code>. Use the existing single-owner analyzer workflow; do not launch a duplicate analyzer or use retired laptop folders. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
   </section>
@@ -8391,7 +8401,7 @@ async function loadRuntimeIncidents() {
     (d.platform_history_status || 'PLATFORM HISTORY STATUS UNKNOWN') + ' — ' +
     (d.platform_history_note || 'No platform history note.');
   document.getElementById('runtime-incidents-body').innerHTML = rows.map(row =>
-    `<tr><td>${text(row.time||'UNKNOWN')}</td><td>${text(row.classification||'UNKNOWN')}</td><td>${text(row.reason||'-')}</td><td>${row.restart_requested?'YES':'NO'}</td><td>${text(row.exit_code==null?'-':row.exit_code)}</td><td>${text(row.evidence_source||'-')}</td></tr>`
+    `<tr><td>${text(row.time||'UNKNOWN')}</td><td>${text(row.classification||'UNKNOWN')}</td><td>${text(row.reason||'-')}</td><td>${row.restart_requested===true?'YES':row.restart_requested===false?'NO':'UNKNOWN'}</td><td>${text(row.exit_code==null?'-':row.exit_code)}</td><td>${text(row.evidence_source||'-')}</td></tr>`
   ).join('') || '<tr><td colspan="6">No retained application incident receipts in the bounded crash-dump tail.</td></tr>';
 }
 

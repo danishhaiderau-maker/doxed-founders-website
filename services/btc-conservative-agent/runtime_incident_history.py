@@ -61,7 +61,8 @@ def build_runtime_incident_history(
             continue
         watchdog = receipt.get("watchdog")
         if isinstance(watchdog, dict):
-            requested = bool(watchdog.get("restart_allowed"))
+            requested = watchdog.get("restart_allowed")
+            requested = requested if type(requested) is bool else None
             classification = (
                 "APPLICATION_WATCHDOG_RESTART_REQUESTED"
                 if requested
@@ -73,6 +74,7 @@ def build_runtime_incident_history(
             instance_id = str(watchdog.get("bot_instance_id") or "")
             exit_code = watchdog.get("exit_code")
         else:
+            requested = None
             classification = "APPLICATION_CRASH_DUMP_UNATTRIBUTED"
             evidence = "legacy_crash_dump"
             reason = "No structured watchdog trigger was retained"
@@ -83,9 +85,7 @@ def build_runtime_incident_history(
             "time": _utc_timestamp(receipt.get("time")),
             "classification": classification,
             "reason": reason,
-            "restart_requested": bool(
-                classification == "APPLICATION_WATCHDOG_RESTART_REQUESTED"
-            ),
+            "restart_requested": requested,
             "exit_code": exit_code,
             "source_revision": revision or None,
             "bot_instance_id": instance_id or None,
