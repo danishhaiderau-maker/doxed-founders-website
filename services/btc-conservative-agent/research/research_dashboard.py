@@ -291,36 +291,38 @@ HISTORY_ROOT = (
 REPORT_NAV_GROUPS = (
     ("overview", "Overview", (
         ("summary", "Overview", None),
-        ("findings", "Findings", None),
-        ("regime", "Regime & ADX", "regime_leaderboard.json"),
-    )),
-    ("lanes-group", "Lanes & AI", (
+        ("evidence-coverage", "Evidence Coverage", EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE),
         ("lanes", "Current Lanes", "benchmark_vs_lanes_report.json"),
-        ("ai", "Direction & Gap", "ai_calibration_report.json"),
     )),
-    ("trading-group", "Chase & Exits", (
+    ("lanes-group", "Strategy Research", (
+        ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
+        ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
+        ("research-design", "Entry & Regime Evidence", POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE),
+    )),
+    ("trading-group", "Execution", (
         ("chase", "Attribution", "chase_attribution_report.json"),
         ("chase-policy-lab", "Chase Policy Lab", "chase_policy_lab_report.json"),
         ("chase-threshold", "Threshold", "chase_threshold_report.json"),
-        ("chase-delay", "Delay", "chase_delay_report.json"),
-        ("combos", "Top 100 Policy Combos", "top_combinations_report.json"),
-        ("spread-perf", "Legacy Gap Performance", "top_combinations_report.json"),
         ("exit-combos", "Exit Combos", "exit_combinations_report.json"),
         ("exit-reason-leak", "Exit Reason Leak", "exit_leakage_by_reason_report.json"),
-        ("ladder-sim", "Ladder Simulator", "exit_ladder_simulator_report.json"),
-        ("exits", "Historical Exit Leakage", "top_leakage_report.json"),
     )),
-    ("deep-group", "Genome & Reports", (
-        ("genome", "Safe Policy Genome V3.1", "genome/genome_analysis_report.json"),
-        ("research-design", "Entry & Regime Evidence", POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE),
-        ("evidence-coverage", "Evidence Coverage", EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE),
-        ("edge", "Edge & Features", "feature_importance_report.json"),
+    ("deep-group", "Diagnostics & Exports", (
         ("explorer", "Report Explorer", None),
-        ("archives", "Archives", None),
         ("download", "Downloads", None),
         ("runtime-incidents", "Runtime Incidents", None),
         ("pathway-audit", "Pathway Audit", "tile_independence_report.json"),
+    )),
+    ("historical-group", "Historical Research", (
+        ("findings", "Historical Findings", None),
+        ("regime", "Historical Regime & ADX", "regime_leaderboard.json"),
+        ("ai", "Historical AI Calibration", "ai_calibration_report.json"),
+        ("chase-delay", "Historical Delay", "chase_delay_report.json"),
+        ("spread-perf", "Legacy Gap Performance", "top_combinations_report.json"),
+        ("ladder-sim", "Historical Ladder Simulator", "exit_ladder_simulator_report.json"),
+        ("exits", "Historical Exit Leakage", "top_leakage_report.json"),
+        ("edge", "Historical Edge & Features", "feature_importance_report.json"),
         ("horizon", "Historical Recovery", "horizon_profitability_report.json"),
+        ("archives", "Archives", None),
     )),
 )
 
@@ -7229,7 +7231,7 @@ async function loadDecisionReadiness() {
     : (candidate.kind === 'STATIC' ? (candidate.policy_signature || 'signature missing') : '—');
   const cards = [
     ['Research result', d.status || 'NO QUALIFIED POLICY', d.status === 'QUALIFIED' ? 'green' : 'amber'],
-    ['Deployed policies collecting', deployed.policy_count || deployedPolicies.length || 0, 'amber'],
+    ['Registered policies (not collection proof)', deployed.policy_count ?? deployedPolicies.length, 'amber'],
     ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
     ['Candidate type', candidateKind, d.status === 'QUALIFIED' ? 'green' : ''],
     ['Policy design', dynamicSummary, ''],
@@ -7272,7 +7274,7 @@ async function loadDecisionReadiness() {
   document.getElementById('decision-readiness-provenance').textContent =
     `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || 'UNAVAILABLE'} · `
     + `Evidence policy: ${d.evidence_policy_signature || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
-    + `Collecting deployed identities (not qualified): ${deployedPolicies.map(x => `${x.policy_id} [${x.policy_signature}]`).join(' · ') || 'UNAVAILABLE'} · `
+    + `Registry identities (not collection or qualification proof): ${deployedPolicies.map(x => `${x.policy_id} [${x.policy_signature}]`).join(' · ') || 'UNAVAILABLE'} · `
     + `Generation: ${((tiers.currency || {}).generated_at) || d.last_analysis || 'UNAVAILABLE'} · `
     + `Revision: ${((tiers.currency || {}).source_revision) || 'UNAVAILABLE'} / analyzer ${((tiers.currency || {}).analyzer_revision) || 'UNAVAILABLE'} · `
     + `Config: ${((tiers.currency || {}).tile_config_signature) || 'UNAVAILABLE'} · `
