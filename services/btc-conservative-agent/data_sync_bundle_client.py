@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from data_sync_bundle_transport import (
     MAX_MEMBERS, MAX_PACKAGE_BYTES, MAX_PAYLOAD_BYTES, SCHEMA,
     extract_verified_bundle, is_bundle_eligible_path,
+    _validate_receipt_evidence, _IDEMPOTENCY_RE,
 )
 
 MAX_CHUNK_BYTES = 1024 * 1024
@@ -113,6 +114,7 @@ def _verified_local_members(raw_root, selected, check_deadline):
             if not stat.S_ISREG(before.st_mode) or before.st_size != member["size"]:
                 return None
             checksum = hashlib.sha256()
+            receipt_payload = [] if _IDEMPOTENCY_RE.fullmatch(relative) else None
             remaining = member["size"]
             with path.open("rb") as handle:
                 if signature(os.fstat(handle.fileno())) != signature(before):
@@ -123,6 +125,8 @@ def _verified_local_members(raw_root, selected, check_deadline):
                     if not chunk:
                         return None
                     checksum.update(chunk)
+                    if receipt_payload is not None:
+                        receipt_payload.append(chunk)
                     remaining -= len(chunk)
                 if (handle.read(1)
                         or signature(os.fstat(handle.fileno())) != signature(before)):
@@ -131,6 +135,7 @@ def _verified_local_members(raw_root, selected, check_deadline):
                     or signature(path.lstat()) != signature(before)):
                 return None
             signatures.append((path, signature(before)))
+            _validate_receipt_evidence(relative, b"".join(receipt_payload or []), member)
             verified.append({**member, "staged_path": str(path)})
         # A change to an early member while later members were hashed also
         # invalidates the whole package reuse decision. Owner must rehash at

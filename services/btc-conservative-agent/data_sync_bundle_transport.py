@@ -168,6 +168,35 @@ def _validate_signal_snapshot(rel: str, payload: bytes) -> None:
         raise BundleTransportError("signal snapshot schema mismatch")
 
 
+_RECEIPT_EVIDENCE_FIELDS = frozenset({"evidence_class", "receipt_state", "semantic_completion"})
+
+
+def _receipt_evidence(rel: str, payload: bytes) -> dict:
+    """Transport valid recovery records as bytes, never completed evidence.
+
+    Existing COMMITTED descriptors remain byte-for-byte unchanged. Unsupported
+    schemas/states and malformed JSON retain the strict original rejection.
+    """
+    if _IDEMPOTENCY_RE.fullmatch(rel):
+        try:
+            receipt = json.loads(payload)
+        except (ValueError, UnicodeDecodeError):
+            receipt = None
+        if (isinstance(receipt, dict) and receipt.get("schema") == "emergency_record_idempotency_v1"
+                and receipt.get("state") in {"PREPARED", "DEFERRED"}):
+            return {"evidence_class": "OPAQUE_UNCOMMITTED_IDEMPOTENCY_RECEIPT",
+                    "receipt_state": receipt["state"], "semantic_completion": False}
+    _validate_committed_receipt(rel, payload)
+    return {}
+
+
+def _validate_receipt_evidence(rel: str, payload: bytes, member: Mapping[str, object]) -> None:
+    expected = _receipt_evidence(rel, payload)
+    declared = {key: member[key] for key in _RECEIPT_EVIDENCE_FIELDS if key in member}
+    if declared != expected or (expected and member.get("semantic_completion") is not False):
+        raise BundleTransportError("receipt evidence classification mismatch")
+
+
 def _validate_generation(generation: Mapping[str, object]) -> str:
     generation_id = str(generation.get("inventory_generation_id") or "").lower()
     inventory_sha = str(generation.get("inventory_sha256") or generation_id).lower()
@@ -232,7 +261,7 @@ def build_bundle(
     for rel, row, expected in selected:
         source = _resolve_regular_source(root, rel)
         payload = _read_fenced(source, expected)
-        _validate_committed_receipt(rel, payload)
+        receipt_evidence = _receipt_evidence(rel, payload)
         _validate_signal_snapshot(rel, payload)
         total += len(payload)
         if total > max_payload_bytes:
@@ -244,6 +273,7 @@ def build_bundle(
             "inode": expected[2],
             "consistency_mode": "strict_generation_v1",
             "sha256": hashlib.sha256(payload).hexdigest(),
+            **receipt_evidence,
         }
         payloads.append((rel, payload, descriptor))
 
@@ -407,6 +437,7 @@ def extract_verified_bundle(
                     raise BundleTransportError("extracted payload exceeds hard limit")
                 if hashlib.sha256(payload).hexdigest() != str(expected.get("sha256") or ""):
                     raise BundleTransportError("archive member checksum mismatch")
+                _validate_receipt_evidence(rel, payload, expected)
                 _validate_signal_snapshot(rel, payload)
                 target = (stage / Path(*PurePosixPath(rel).parts)).resolve()
                 try:

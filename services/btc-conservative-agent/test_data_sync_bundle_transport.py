@@ -135,7 +135,7 @@ def test_rejects_hot_ledger_and_non_strict_rows(tmp_path):
         build(tmp_path, [row])
 
 
-def test_rejects_non_committed_idempotency_receipt(tmp_path):
+def test_semantic_committed_validator_still_rejects_prepared_receipt(tmp_path):
     source = tmp_path / "source"
     row = make_row(
         source,
@@ -143,7 +143,7 @@ def test_rejects_non_committed_idempotency_receipt(tmp_path):
         b'{"schema":"emergency_record_idempotency_v1","state":"PREPARED"}\n',
     )
     with pytest.raises(transport.BundleTransportError, match="not COMMITTED"):
-        build(tmp_path, [row])
+        transport._validate_committed_receipt(row["path"], (source / row["path"]).read_bytes())
 
 
 def test_generation_identity_and_ack_eligibility_fail_closed(tmp_path):
