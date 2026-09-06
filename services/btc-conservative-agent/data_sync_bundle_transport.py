@@ -218,12 +218,19 @@ def build_bundle(
     *,
     max_members: int = MAX_MEMBERS,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    deadline_check=None,
 ) -> dict:
     """Build one deterministic uncompressed TAR and return its descriptor.
 
     The destination filename is the SHA-256 of the complete TAR.  Publication
     uses an atomic rename; a failure never exposes a partial package.
+    Optional deadline_check raises before publication. Blocking I/O itself is
+    not interruptible; the caller must retain its outer subprocess deadline.
     """
+    def checkpoint():
+        if deadline_check is not None:
+            deadline_check()
+    checkpoint()
     generation_id = _validate_generation(generation)
     max_members = _strict_int(max_members, "member budget")
     max_payload_bytes = _strict_int(max_payload_bytes, "payload budget")
@@ -237,6 +244,7 @@ def build_bundle(
     seen: set[str] = set()
     declared_payload_bytes = 0
     for index, row in enumerate(rows):
+        checkpoint()
         if index >= max_members:
             raise BundleTransportError("member budget exceeded")
         if not isinstance(row, Mapping):
@@ -259,8 +267,10 @@ def build_bundle(
     payloads: list[tuple[str, bytes, dict]] = []
     total = 0
     for rel, row, expected in selected:
+        checkpoint()
         source = _resolve_regular_source(root, rel)
         payload = _read_fenced(source, expected)
+        checkpoint()
         receipt_evidence = _receipt_evidence(rel, payload)
         _validate_signal_snapshot(rel, payload)
         total += len(payload)
@@ -280,6 +290,7 @@ def build_bundle(
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w", format=tarfile.USTAR_FORMAT) as archive:
         for rel, payload, _ in payloads:
+            checkpoint()
             info = tarfile.TarInfo(rel)
             info.size = len(payload)
             info.mtime = 0
@@ -287,6 +298,7 @@ def build_bundle(
             info.uid = info.gid = 0
             info.uname = info.gname = ""
             archive.addfile(info, io.BytesIO(payload))
+            checkpoint()
     package = stream.getvalue()
     package_sha = hashlib.sha256(package).hexdigest()
     members = [item[2] for item in payloads]
@@ -305,6 +317,7 @@ def build_bundle(
         "payload_bytes": total,
         "members": members,
     }
+    checkpoint()
     output.mkdir(parents=True, exist_ok=True)
     destination = output / f"{package_sha}.tar"
     # The final name retains the full hash. Repeating it in a unique temporary
@@ -315,16 +328,20 @@ def build_bundle(
             handle.write(package)
             handle.flush()
             os.fsync(handle.fileno())
+        checkpoint()
         written = _read_package_bytes(temporary, len(package) + 1)
+        checkpoint()
         if len(written) != len(package) or hashlib.sha256(written).hexdigest() != package_sha:
             raise BundleTransportError("published package checksum mismatch")
         if destination.exists():
             if destination.stat().st_size != len(package):
                 raise BundleTransportError("content-addressed package collision")
             existing = _read_package_bytes(destination, len(package) + 1)
+            checkpoint()
             if len(existing) != len(package) or hashlib.sha256(existing).hexdigest() != package_sha:
                 raise BundleTransportError("content-addressed package collision")
         else:
+            checkpoint()
             os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)

@@ -42,13 +42,15 @@ def _reject_links(path):
                 raise ValueError("BUNDLE_LINK_REJECTED")
 
 
-def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subprocess.run):
+def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subprocess.run, max_members=128):
     """Hard-timeout subprocess, bounded protocol, no credential inheritance."""
     if not 1 <= timeout <= 30:
         raise ValueError("INVALID_SLICE_TIMEOUT")
+    if type(max_members) is not int or max_members not in (1, 2, 4, 8, 16, 32, 64, 128):
+        raise ValueError("INVALID_SLICE_MEMBER_LIMIT")
     nonce = uuid.uuid4().hex
     payload = {"schema": SCHEMA, "nonce": nonce, "generation": metadata,
-               "source_root": str(source_root), "output_root": str(output_root)}
+                "source_root": str(source_root), "output_root": str(output_root), "max_members": max_members}
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     if len(encoded) > MAX_REQUEST:
         raise ValueError("SLICE_REQUEST_LIMIT")
@@ -121,7 +123,7 @@ COORDINATOR_ERRORS = frozenset({
     "BUNDLE_CIRCUIT_OPEN", "BUNDLE_SLICE_TIMEOUT", "BUNDLE_SLICE_RESULT_LIMIT",
     "BUNDLE_SLICE_RECEIPT_INVALID", "BUNDLE_GENERATION_STORAGE_BUDGET",
     "BUNDLE_COORDINATOR_EXCEPTION", "BUNDLE_WORKER_FAILURE",
-    "BUNDLE_SLICE_FAILED", "BUNDLE_STATE_LIMIT", "BUNDLE_INDEX_LIMIT",
+    "BUNDLE_SLICE_FAILED", "BUNDLE_STATE_LIMIT", "BUNDLE_INDEX_LIMIT", "BUNDLE_BUILD_DEADLINE",
     "INVOCATION_TIME_BUDGET_EXHAUSTED_BEFORE_BUILD", "PACKAGE_HARD_BUDGET_EXCEEDED",
     "PACKAGE_INDEX_LIMIT_EXCEEDED", "PACKAGE_DESCRIPTOR_TOO_LARGE",
     "PAGE_INDEX_CURSOR_OR_READ_BUDGET_INVALID", "INVENTORY_PAGE_ROW_CURSOR_INVALID",
@@ -252,6 +254,7 @@ def _run_managed_generation(metadata, source_root, output_root, *, pressure_prob
     pressure_wait = 3
     prior_cursor = None
     stagnant = 0
+    member_limit = 128
     if not 1 <= max_slices <= 512 or not 1 <= max_seconds <= 1800:
         raise ValueError("INVALID_COORDINATOR_LIMIT")
     for _ in range(max_slices):
@@ -276,8 +279,15 @@ def _run_managed_generation(metadata, source_root, output_root, *, pressure_prob
             pressure_wait = min(30, pressure_wait * 2)
             continue
         pressure_wait = 3
-        receipt = slice_runner(metadata, source_root, output_root)
+        receipt = (slice_runner(metadata, source_root, output_root) if member_limit == 128 else
+                   slice_runner(metadata, source_root, output_root, max_members=member_limit))
         publish(receipt)
+        if receipt.get("status") == "FAILED" and receipt.get("error") == "BUNDLE_BUILD_DEADLINE":
+            if member_limit == 1:
+                return {"status": "FAILED", "error": "BUNDLE_BUILD_DEADLINE"}
+            member_limit //= 2
+            stop.wait(1)
+            continue
         if receipt.get("status") == "COMPLETE":
             return receipt
         if receipt.get("status") != "BUILDING":
@@ -326,8 +336,11 @@ def _child():
             if estimated + MAX_PACKAGE_BYTES >= MAX_GENERATION_BYTES:
                 raise ValueError("BUNDLE_GENERATION_STORAGE_BUDGET")
         check_derivative_admission(output, metadata["generation_id"], MAX_PACKAGE_BYTES)
+        member_limit = payload.get("max_members", 128)
+        if type(member_limit) is not int or member_limit not in (1, 2, 4, 8, 16, 32, 64, 128):
+            raise ValueError("INVALID_SLICE_MEMBER_LIMIT")
         result = run_bundle_worker(metadata, payload["source_root"], output,
-                                   max_pages=2, max_members=128, max_payload_bytes=8 * 1024 * 1024,
+                                   max_pages=2, max_members=member_limit, max_payload_bytes=8 * 1024 * 1024,
                                    max_read_bytes=32 * 1024 * 1024, max_elapsed_sec=5)
         receipt.update({key: result.get(key) for key in
                         ("status", "cursor", "package_index_count", "inventory_rows_selected")})

@@ -265,6 +265,11 @@ def _page(index: Any, generation_dir: Path, expected_page: int,
     return [dict(row) for row in rows], reads
 
 
+def _check_build_deadline(started, max_elapsed_sec):
+    if time.monotonic() - started >= max_elapsed_sec:
+        raise BundleWorkerError("BUNDLE_BUILD_DEADLINE")
+
+
 def run_bundle_worker(
     generation_metadata: Mapping[str, Any], source_root: str | Path,
     output_root: str | Path, *, max_pages: int = 2, max_members: int = 128,
@@ -316,6 +321,10 @@ def run_bundle_worker(
         _reject_link_or_reparse_components(
             lease_path, "BUNDLE_WORKER_LEASE_LINK_OR_REPARSE_FORBIDDEN")
         state, reads = _load_state(state_path, generation, index_path, int(max_read_bytes))
+        retained_limit = state.get("adaptive_member_limit", 128)
+        if type(retained_limit) is not int or retained_limit not in (1, 2, 4, 8, 16, 32, 64, 128):
+            raise BundleWorkerError("INVALID_SLICE_MEMBER_LIMIT")
+        max_members = min(max_members, retained_limit)
         if state.get("completed") is True:
             return {"schema": SCHEMA, "status": "COMPLETE", "generation": generation,
                     "cursor": state["cursor"], "package": None,
@@ -382,6 +391,7 @@ def run_bundle_worker(
             package = build_bundle(
                 generation, selected, source, generation_output / "packages",
                 max_members=int(max_members), max_payload_bytes=int(max_payload_bytes),
+                deadline_check=lambda: _check_build_deadline(started, float(max_elapsed_sec)),
             )
             package_receipt_path = generation_output / "descriptors" / f"d-{package['package_sha256'][:20]}.json"
             public_descriptor = {key: value for key, value in package.items() if key != "package_path"}
@@ -402,6 +412,8 @@ def run_bundle_worker(
                     raise BundleWorkerError("PACKAGE_INDEX_LIMIT_EXCEEDED")
                 state["package_index"].append(entry)
         state["cursor"] = cursor; state["skipped_counts"] = dict(sorted(skipped.items()))
+        if max_members in (1, 2, 4, 8, 16, 32, 64, 128):
+            state["adaptive_member_limit"] = max_members
         state["completed"] = cursor["page_index"] == generation["page_count"]
         if state["completed"]:
             if (int(state.get("completed_page_file_count", -1)) != generation["file_count"]
