@@ -29928,8 +29928,8 @@ def dump_system_state(*, trigger="UNSPECIFIED", progress=None, incident=None, re
                 trigger=trigger,
                 restart_allowed=restart_allowed,
             )
-        with open("crash_dump.json", "a") as f:
-            f.write(json.dumps(snapshot) + "\n")
+        from crash_journal_writer import append_crash_snapshot
+        append_crash_snapshot("crash_dump.json", snapshot)
         logger.critical("[CRASH DUMP] Written to crash_dump.json")
     except Exception as e:
         logger.error(f"[CRASH DUMP FAILED] {e}")
@@ -50218,6 +50218,11 @@ def main():
     except ProcessSingletonError as exc:
         logger.critical(f"[STARTUP] singleton refused: {exc}")
         raise SystemExit(73) from exc
+    # Run only under singleton ownership, before normal service threads. The
+    # repair is hash-bound to one preserved incident, never general cleanup.
+    from crash_journal_repair import repair_known_incident_at_startup
+    journal_repair_status = repair_known_incident_at_startup(Path.cwd())
+    logger.info("[STARTUP] crash journal repair: %s", journal_repair_status)
     BOT_INSTANCE_ID = (
         f"dashboard-{DASHBOARD_PORT}-pid-{os.getpid()}-{uuid.uuid4().hex[:12]}"
     )
