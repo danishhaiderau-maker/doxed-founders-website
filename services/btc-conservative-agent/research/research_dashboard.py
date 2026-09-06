@@ -3760,6 +3760,9 @@ def _best_policy_research_v31_payload() -> dict:
 def api_static_policy_research():
     source = _safe_policy_v3_dashboard_source()
     report, screen = source["report"], source["screen"]
+    source_available = bool(report) and report.get("status") not in {
+        "V3_REPORT_NOT_GENERATED", "REPORT_NOT_IN_CURRENT_GENERATION"
+    }
     all_rows = screen.get("descriptive_top_100") or []
     rows = [
         _public_policy_evidence_row(row)
@@ -3771,19 +3774,19 @@ def api_static_policy_research():
         "schema": "static_policy_dashboard_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
-        "status": "DESCRIPTIVE" if rows else "WAITING_FOR_EVIDENCE",
+        "status": ("DESCRIPTIVE" if rows else "WAITING_FOR_EVIDENCE") if source_available else "UNAVAILABLE_CURRENT_GENERATION",
         "qualification": "QUALIFIED" if source["qualified"] else "DESCRIPTIVE_ONLY",
         "live_policy_change_allowed": source["qualified"],
         "epoch_id": source["epoch_id"],
         "policy_epoch_id": None,
-        "independent_episodes": int(collection.get("independent_opportunities") or 0),
-        "training_episodes": int(screen.get("training_episodes") or 0),
-        "oos_episodes": int(screen.get("oos_episodes") or 0),
+        "independent_episodes": collection.get("independent_opportunities") if source_available else None,
+        "training_episodes": screen.get("training_episodes") if source_available else None,
+        "oos_episodes": screen.get("oos_episodes") if source_available else None,
         "profitable_policies": rows,
         "policy_search_statistics": {
-            "unique_policies_evaluated": int(screen.get("unique_policies_evaluated") or 0),
-            "rows_shown": len(rows),
-            "nominal_search_space": (report.get("search") or {}).get("nominal_full_cartesian"),
+            "unique_policies_evaluated": screen.get("unique_policies_evaluated") if source_available else None,
+            "rows_shown": len(rows) if source_available else None,
+            "nominal_search_space": (report.get("search") or {}).get("nominal_full_cartesian") if source_available else None,
         },
         "warning": screen.get("warning") or (
             "V3.1 evidence is descriptive until conservative execution and sealed chronological OOS gates pass."
@@ -3900,6 +3903,9 @@ def api_dynamic_policy_research():
 def api_shadow_policy_research():
     source = _safe_policy_v3_dashboard_source()
     report = source["report"]
+    source_available = bool(report) and report.get("status") not in {
+        "V3_REPORT_NOT_GENERATED", "REPORT_NOT_IN_CURRENT_GENERATION"
+    }
     collection = report.get("collection") or {}
     paused = _read_report("paused_shadow_research_report.json", {})
     real_edge = _read_report("real_edge_summary.json", {})
@@ -3956,10 +3962,10 @@ def api_shadow_policy_research():
         "schema": "shadow_policy_dashboard_v3_1",
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
-        "status": "DESCRIPTIVE_ONLY",
+        "status": "DESCRIPTIVE_ONLY" if source_available else "UNAVAILABLE_CURRENT_GENERATION",
         "live_policy_change_allowed": False,
         "epoch_id": source["epoch_id"],
-        "current_epoch_rejected": int((collection.get("decision_outcomes") or {}).get("REJECTED") or 0),
+        "current_epoch_rejected": (collection.get("decision_outcomes") or {}).get("REJECTED") if source_available else None,
         "current_v3_1_collection": collection,
         "evidence_classes": {
             "shadow_counterfactual": {
@@ -4008,7 +4014,7 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
  document.getElementById('note').textContent=(d.warning||'')+' Status: '+(d.status||'—')+' · Live policy changes: '+(d.live_policy_change_allowed?'YES':'NO');
  let cards=[]; let rows=[];
  if(mode==='static'){
-  cards=[['Epoch',d.epoch_id],['Independent episodes',d.independent_episodes],['Train / OOS',d.training_episodes+' / '+d.oos_episodes],['Profitable descriptive policies',(d.profitable_policies||[]).length]];
+  cards=[['Epoch',d.epoch_id],['Independent episodes',d.independent_episodes??'UNAVAILABLE'],['Train / OOS',(d.training_episodes??'UNAVAILABLE')+' / '+(d.oos_episodes??'UNAVAILABLE')],['Profitable descriptive policies',d.status==='UNAVAILABLE_CURRENT_GENERATION'?'UNAVAILABLE':(d.profitable_policies||[]).length]];
   document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Train N</th><th>Train WR</th><th>Train PnL</th><th>OOS N</th><th>OOS WR</th><th>OOS PnL</th><th>OOS EV</th><th>Drawdown</th><th>Status</th></tr>';
   rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>—</td><td>${x.oos_episodes??0}</td><td>—</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>${money(x.max_drawdown_usd)}</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`);
  } else if(mode==='dynamic'){

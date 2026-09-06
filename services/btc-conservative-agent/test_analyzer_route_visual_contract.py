@@ -90,6 +90,44 @@ def test_standalone_genome_missing_source_counters_are_unavailable_not_zero():
         assert [value for _label, value in rendered[index]] == [0] * 6
 
 
+def test_static_and_shadow_counts_distinguish_missing_report_from_measured_zero(monkeypatch):
+    monkeypatch.setattr(dashboard, "_read_report", lambda *args, **kwargs: {})
+    client = dashboard.app.test_client()
+    for status, value, available in (
+        ("REPORT_NOT_IN_CURRENT_GENERATION", 7, False),
+        ("V3_REPORT_NOT_GENERATED", 0, False),
+        ("DESCRIPTIVE", 0, True),
+        ("DESCRIPTIVE", 7, True),
+        ("STALE_GENERATION", 0, True),
+        (None, None, False),
+    ):
+        screen = {key: value for key in ("training_episodes", "oos_episodes", "unique_policies_evaluated")}
+        report = {"status": status, "collection": {
+            "independent_opportunities": value, "decision_outcomes": {"REJECTED": value}},
+            "search": {"nominal_full_cartesian": value}} if status else {}
+        source = {"report": report, "screen": screen, "qualified": False,
+                  "epoch_id": "epoch-test" if available else None, "blockers": []}
+        monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: source)
+        dashboard._API_RESPONSE_CACHE.clear()
+        static = client.get("/api/static-policy-research").get_json()
+        shadow = client.get("/api/shadow-policy-research").get_json()
+        expected = value if available else None
+        assert [static[key] for key in ("independent_episodes", "training_episodes", "oos_episodes")] == [expected] * 3
+        assert static["policy_search_statistics"] == {
+            "unique_policies_evaluated": expected, "rows_shown": 0 if available else None,
+            "nominal_search_space": expected}
+        assert shadow["current_epoch_rejected"] == expected
+        assert static["status"] == ("WAITING_FOR_EVIDENCE" if available else "UNAVAILABLE_CURRENT_GENERATION")
+        assert shadow["status"] == ("DESCRIPTIVE_ONLY" if available else "UNAVAILABLE_CURRENT_GENERATION")
+        assert static["live_policy_change_allowed"] is shadow["live_policy_change_allowed"] is False
+    static_html = client.get("/static-policies").get_data(as_text=True)
+    assert "d.independent_episodes??'UNAVAILABLE'" in static_html
+    assert "(d.training_episodes??'UNAVAILABLE')+' / '+(d.oos_episodes??'UNAVAILABLE')" in static_html
+    assert "d.status==='UNAVAILABLE_CURRENT_GENERATION'?'UNAVAILABLE'" in static_html
+    assert "d.current_epoch_rejected??'UNAVAILABLE'" in client.get("/shadow-research").get_data(as_text=True)
+    dashboard._API_RESPONSE_CACHE.clear()
+
+
 def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
     source = dashboard.DASHBOARD_HTML
     assert "html, body { width: 100%; max-width: 100%; overflow-x: hidden; }" in source
