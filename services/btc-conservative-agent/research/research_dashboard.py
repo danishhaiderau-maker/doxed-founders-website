@@ -7126,7 +7126,6 @@ async function loadSummary() {
       : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
         + ' · current does not mean qualified; inspect MANIFEST.json';
   }
-  document.getElementById('updated').textContent = analyzerAttemptLabel(d);
   document.getElementById('exec-text').textContent = formatExecutiveText(d.executive_text);
   const kpis = [
     ['Net PnL', fmtExecutionUsd(p.net_pnl_usd)],
@@ -8211,6 +8210,9 @@ async function loadArchives() {
 async function loadStatus() {
   const r = await fetch('/api/status');
   const d = await r.json();
+  // Runtime status owns both the latest attempt and its saved-report timestamp.
+  // A report-only summary refresh must never overwrite this global header.
+  document.getElementById('updated').textContent = analyzerAttemptLabel(d);
   const syncEl = document.getElementById('sync');
   if (syncEl && d.expected_analyzer_sync_id) {
     syncEl.textContent = d.expected_analyzer_sync_id + (d.analyzer_sync_match === true ? ' ✓' : (d.analyzer_sync_match === false ? ' ⚠' : ''));

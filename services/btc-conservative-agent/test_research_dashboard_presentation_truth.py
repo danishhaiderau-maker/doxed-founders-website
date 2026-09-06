@@ -54,6 +54,43 @@ def test_header_distinguishes_attempt_from_publication(payload, expected):
     assert "document.getElementById('updated').textContent = analyzerAttemptLabel(d);" in html()
 
 
+@pytest.mark.parametrize('order', ['summary-first', 'status-first'])
+@pytest.mark.parametrize('phase', ['FAILED', 'RUNNING', 'IDLE_BETWEEN_RUNS'])
+@pytest.mark.parametrize('generated', [None, '2026-09-06T12:00:00Z'])
+def test_actual_loaders_use_status_header_authority_in_either_completion_order(order, phase, generated):
+    page = html()
+    helpers = page[page.index('function metricNumber('):page.index('function fmtAdxBucket(')]
+    summary = page[page.index('async function loadSummary()'):page.index('async function loadDecisionReadiness()')]
+    status = page[page.index('async function loadStatus()'):page.index('async function loadGptAuditNote()')]
+    status_payload = {'analysis_run': {'phase': phase}, 'generated_at': generated}
+    # Summary deliberately has neither runtime phase nor the same publication
+    # timestamp. Its completion cannot replace the status endpoint's authority.
+    script = helpers + summary + status + """
+const elements = {};
+const document = {getElementById: id => elements[id] ||= {textContent:'',innerHTML:'',style:{}}};
+const EVIDENCE_SCOPES = {};
+const setEvidenceScope = () => {};
+const loadDecisionReadiness = async () => {};
+""" + f"const statusPayload = {json.dumps(status_payload)};\n" + """
+const pending = {};
+const fetch = url => new Promise(resolve => {pending[url] = () => resolve({json:async () =>
+    url === '/api/status' ? statusPayload : {generated_at:'old-summary-report'}});});
+(async () => {
+  const summaryJob = loadSummary(), statusJob = loadStatus();
+"""
+    if order == 'summary-first':
+        script += "pending['/api/summary'](); await summaryJob; pending['/api/status'](); await statusJob;"
+    else:
+        script += "pending['/api/status'](); await statusJob; pending['/api/summary'](); await summaryJob;"
+    script += "console.log(JSON.stringify(elements.updated.textContent)); })().catch(e => {console.error(e);process.exit(1);});"
+    result = subprocess.run([shutil.which('node'), '-e', script], text=True, encoding='utf-8', capture_output=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    actual = json.loads(result.stdout)
+    expected = run_helpers('analyzerAttemptLabel(' + json.dumps(status_payload) + ')')
+    assert actual == expected
+    assert 'old-summary-report' not in actual
+
+
 @pytest.mark.parametrize("value", ["null", "undefined", "NaN", "Infinity", "-Infinity", "''", "'n/a'", "true", "false", "[]", "{}"])
 def test_missing_invalid_metrics_have_no_currency_or_percent_suffix(value):
     assert run_helpers(f"[fmtExecutionUsd({value}), fmtPct({value})]") == ["UNAVAILABLE", "UNAVAILABLE"]
