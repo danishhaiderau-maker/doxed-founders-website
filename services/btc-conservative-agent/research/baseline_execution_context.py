@@ -437,6 +437,32 @@ def declared_directional_baseline_inputs(capture: Mapping, baseline: Mapping) ->
             "quantity_basis_price": str(basis_price), "declaration_sha256": _sha(declaration)}
 
 
+def verified_segment_rows(evidence, bindings, pins, parent_identity, symbol):
+    objects=evidence if isinstance(evidence,list) else [evidence]
+    links=bindings if isinstance(bindings,list) else [bindings]
+    if not 0<len(objects)<=256 or len(objects)!=len(links):
+        raise ValueError('DECLARED_SEGMENT_COUNT_INVALID')
+    rows={}; hashes=[]
+    for envelope,link in zip(objects,links):
+        segment,digest=_verified(envelope,pins)
+        binding,binding_hash=_verified(link,pins)
+        _identity(binding,parent_identity)
+        ref=binding.get('segment_ref') or {}
+        if (segment.get('schema')!='market_segment_v3' or segment.get('symbol')!=symbol
+                or ref.get('sha256')!=digest or ref.get('relative_path')!=envelope.get('source_id')
+                or not isinstance(segment.get('rows'),list)):
+            raise ValueError('DECLARED_BASELINE_COVERAGE_BINDING_MISMATCH')
+        hashes.extend([digest,binding_hash])
+        for row in segment['rows']:
+            ts=_decimal(row.get('bucket_ts'),positive=True)
+            if ts in rows and rows[ts]!=row:
+                raise ValueError('DECLARED_SEGMENT_TIMESTAMP_CONFLICT')
+            rows[ts]=row
+            if len(rows)>MAX_SOURCE_ROWS:
+                raise ValueError('BASELINE_CONTEXT_COVERAGE_ROWS_INVALID')
+    return [rows[ts] for ts in sorted(rows)],sorted(set(hashes))
+
+
 def build_declared_directional_baseline_context(*, generation: Mapping, identity: Mapping,
         entry_receipt: Mapping, capture: Mapping, baseline: Mapping, pinned_sources: Mapping,
         opportunity_binding: Mapping, coverage_evidence: Mapping, coverage_binding: Mapping) -> dict:
@@ -504,15 +530,9 @@ def _build_declared_context(*, generation: Mapping, identity: Mapping,
                 raise ValueError('DELAYED_CONTEXT_TIMING_DECLARATION_INVALID')
             if timing not in (opportunity.get('research_timing_declarations') or []):
                 raise ValueError('DELAYED_CONTEXT_TIMING_SOURCE_UNBOUND')
-            entry_segment, entry_hash = _verified(delayed['entry_evidence'], pinned_sources)
-            entry_binding, entry_binding_hash = _verified(delayed['entry_binding'], pinned_sources)
-            _identity(entry_binding, {key: opportunity.get(key) for key in IDENTITY_FIELDS})
-            ref = entry_binding.get('segment_ref') or {}
-            if (entry_segment.get('schema') != 'market_segment_v3'
-                    or entry_segment.get('symbol') != capture['symbol']
-                    or delayed['tape'] != entry_segment.get('rows')
-                    or ref.get('sha256') != entry_hash
-                    or ref.get('relative_path') != delayed['entry_evidence'].get('source_id')):
+            entry_rows, delayed_hashes = verified_segment_rows(delayed['entry_evidence'], delayed['entry_binding'],
+                pinned_sources,{key:opportunity.get(key) for key in IDENTITY_FIELDS},capture['symbol'])
+            if delayed['tape'] != entry_rows:
                 raise ValueError('DELAYED_CONTEXT_ENTRY_TAPE_BINDING_MISMATCH')
             recomputed = replay_delayed_entry(schedule=schedule, delay_sec=timing.get('delay_sec'),
                 ordering_treatment=timing.get('ordering_treatment'), tape=delayed['tape'],
@@ -522,7 +542,6 @@ def _build_declared_context(*, generation: Mapping, identity: Mapping,
                 raise ValueError('DELAYED_CONTEXT_REPLAY_MISMATCH')
             schedule = delayed_submission_schedule(schedule, delay_sec=timing['delay_sec'],
                 ordering_treatment=timing['ordering_treatment'])['schedule']
-            delayed_hashes = [entry_hash, entry_binding_hash]
         if _normalise_schedule(schedule)[1] != entry_receipt.get("schedule_sha256"):
             raise ValueError("DECLARED_BASELINE_ENTRY_SCHEDULE_MISMATCH")
         constraints, defects = validate_signed_quantity_constraints(entry_receipt.get("quantity_constraints"), symbol=capture.get("symbol"))
@@ -533,21 +552,15 @@ def _build_declared_context(*, generation: Mapping, identity: Mapping,
         fill_ts, filled, fill_price = position["completion_ts"], position["filled_qty"], position["fill_price"]
         if fill_ts < _decimal(capture["signal_ts"]) or filled > _decimal(inputs["requested_qty"]):
             raise ValueError("DECLARED_BASELINE_FILL_INVALID")
-        segment, segment_hash = _verified(coverage_evidence, pinned_sources)
-        binding, binding_hash = _verified(coverage_binding, pinned_sources)
         parent_identity = {key: opportunity.get(key) for key in IDENTITY_FIELDS}
-        _identity(binding, parent_identity)
-        reference = binding.get("segment_ref") or {}
-        if (segment.get("schema") != "market_segment_v3" or segment.get("symbol") != capture.get("symbol")
-                or reference.get("sha256") != segment_hash
-                or reference.get("relative_path") != coverage_evidence.get("source_id")):
-            raise ValueError("DECLARED_BASELINE_COVERAGE_BINDING_MISMATCH")
+        rows, coverage_hashes = verified_segment_rows(coverage_evidence,coverage_binding,pinned_sources,
+                                                     parent_identity,capture.get('symbol'))
+        segment_hash = _sha(coverage_hashes)
         policy = declaration["coverage_policy"]
         interval, offset = int(policy["sampling_interval_sec"]), int(policy["first_sample_offset_sec"])
         horizon = _decimal(inputs["required_horizon_end_ts"])
         if horizon <= fill_ts:
             raise ValueError("DECLARED_BASELINE_HORIZON_BEFORE_FILL")
-        rows = segment.get("rows")
         if not isinstance(rows, list) or not 0 < len(rows) <= MAX_SOURCE_ROWS:
             raise ValueError("BASELINE_CONTEXT_COVERAGE_ROWS_INVALID")
         selected = {}
@@ -597,7 +610,7 @@ def _build_declared_context(*, generation: Mapping, identity: Mapping,
                 "path_end_basis": "DECLARED_REQUIRED_HORIZON", "row_schema": "market_microstructure_1s_v1",
                 "source_segment_schema": "market_segment_v3", "require_fresh_bbo": True, "require_trade_fields": True,
                 "coverage_provenance": "VERIFIED_TIMESTAMP_CONTINUITY:" + segment_hash,
-                "source_evidence_sha256": sorted({opportunity_hash, binding_hash, segment_hash}),
+                "source_evidence_sha256": sorted(set([opportunity_hash] + coverage_hashes)),
                 "live_arming_authorized": False, "qualification_eligible": False}
         if delayed is not None:
             body.update(timing_basis='DECLARED_DELAYED_SUBMISSION_REPLAY',

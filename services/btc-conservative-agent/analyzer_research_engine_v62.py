@@ -19927,6 +19927,7 @@ def _write_conservative_shadow_report(
 
     generation = (baseline_report or {}).get("generation") or {}
     stream_temporary = None
+    variant_temporaries = []
     try:
         if not policy_cycle_succeeded:
             raise ValueError("POLICY_CYCLE_NOT_SUCCESSFUL")
@@ -19950,6 +19951,28 @@ def _write_conservative_shadow_report(
                 policy_artifact_receipt=candidate_receipt, research_model=research_model,
                 result_sink=sink,
             )
+            from research.entry_baseline_replay import delayed_variant_cohorts
+            report['delayed_variant_reports'] = []
+            for timing_hash, cohort in delayed_variant_cohorts(baseline_report or {}).items():
+                variant_temporary = Path(f'.shadow-variant-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp')
+                variant_temporaries.append(variant_temporary)
+                with ShadowResultStreamWriter(Path.cwd(), str(variant_temporary), generation) as variant_sink:
+                    variant_report = build_conservative_shadow_report(
+                        canonical_root, expected_generation=generation, baseline_report=cohort,
+                        policy_candidates=candidates, policy_artifact_receipt=candidate_receipt,
+                        research_model=research_model, result_sink=variant_sink)
+                    variant_receipt = variant_sink.finalize(variant_report)
+                variant_target = Path('shadow_variant_' + timing_hash[:12] + '_' +
+                                      variant_receipt['artifact_sha256'] + '.jsonl.gz')
+                os.replace(variant_temporary, variant_target)
+                _atomic_mirror_analyzer_report(variant_target.name)
+                variant_receipt['relative_path'] = variant_target.name
+                variant_receipt['receipt_sha256'] = stream_digest({
+                    key: value for key, value in variant_receipt.items() if key != 'receipt_sha256'})
+                variant_report['result_stream'] = variant_receipt
+                report['delayed_variant_reports'].append({
+                    'timing_model_sha256': timing_hash, 'report': variant_report,
+                    'qualification_eligible': False})
             stream_receipt = sink.finalize(report)
         if manifest_path.read_bytes() != manifest_bytes:
             raise ValueError("SHADOW_CANONICAL_GENERATION_CHANGED_DURING_REPLAY")
@@ -19963,6 +19986,7 @@ def _write_conservative_shadow_report(
             key: value for key, value in stream_receipt.items() if key != "receipt_sha256"
         })
         report["result_stream"] = stream_receipt
+        _atomic_mirror_analyzer_report(stream_target.name)
     except Exception as exc:
         # Publish an explicit current-generation failure instead of an old leader.
         code = str(exc).split(":", 1)[0]
@@ -19978,6 +20002,8 @@ def _write_conservative_shadow_report(
             "live_qualification": False, "results": [],
         }
     finally:
+        for variant_temporary in variant_temporaries:
+            variant_temporary.unlink(missing_ok=True)
         if stream_temporary is not None:
             stream_temporary.unlink(missing_ok=True)
     target = Path(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE)
@@ -20410,6 +20436,18 @@ def write_report_manifest(
             "shadow_terminal_status": shadow_terminal.get("status"),
         })
         stream_receipt = shadow_terminal.get("result_stream")
+        for variant in shadow_terminal.get("delayed_variant_reports", []):
+            variant_stream = variant["report"]["result_stream"]
+            reports.append({
+                "title": "Complete Delayed Shadow Results " + variant["timing_model_sha256"],
+                "file": variant_stream["relative_path"],
+                "category": "Genome & Reports",
+                "description": "Complete separate declared timing cohort; not a sample or live qualification",
+                "size_bytes": variant_stream["compressed_bytes"],
+                "artifact_sha256": variant_stream["artifact_sha256"],
+                "stream_receipt_sha256": variant_stream["receipt_sha256"],
+                "analysis_provenance": analysis_provenance,
+            })
         if stream_receipt:
             reports.append({
                 "title": "Complete Conservative Shadow Results",

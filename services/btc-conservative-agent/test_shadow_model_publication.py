@@ -160,3 +160,54 @@ def test_atomic_publisher_rejects_escape_before_copy(tmp_path, monkeypatch):
         analyzer._publish_completed_report_generation({"reports": [{"file": "../outside.gz"}]})
     assert copied == []
     assert not list(tmp_path.glob(".*.staging-*"))
+
+
+def test_variant_full_streams_bound_and_mirrored(tmp_path, monkeypatch):
+    import copy
+    import research.policy_evidence_schema as schema
+    import research.conservative_shadow_report as shadow
+    from research.shadow_result_stream import verify_result_stream
+    analyzer = _load_analyzer("variant_full_stream_publisher")
+    evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    baseline, candidates, artifact, model = _fixture(evidence)
+    (evidence / "canonical_dataset_current.json").write_text("{}")
+    episode = baseline["episode_receipts"][0]
+    episode["delayed_variants"] = [
+        {"timing_model_sha256": c * 64, "results": copy.deepcopy(episode["results"])}
+        for c in "ab"]
+    output = tmp_path / "output"
+    output.mkdir()
+    archive = tmp_path / "archive"
+    monkeypatch.chdir(output)
+    monkeypatch.setattr(analyzer, "REPORTS_DIR", str(archive))
+    monkeypatch.setattr(schema, "generation_identity", lambda *a, **k: GEN)
+    monkeypatch.setattr(shadow, "load_current_policy_candidates", lambda *a, **k: (candidates, artifact))
+    result, _ = analyzer._write_conservative_shadow_report(
+        evidence, output, baseline, policy_cycle_succeeded=True, research_model=model)
+    assert len(result.get("delayed_variant_reports", [])) == 2, result
+    for report in [result] + [v["report"] for v in result["delayed_variant_reports"]]:
+        for root in (output, archive):
+            with verify_result_stream(root, report, GEN) as index:
+                assert index.verified_summary["complete_replay_count"] == 1
+    assert len(list(archive.glob("*.jsonl.gz"))) == 3
+    original = shadow.build_conservative_shadow_report
+    calls = []
+    def fail_variant(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise ValueError("VARIANT_STREAM_FAILED")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(shadow, "build_conservative_shadow_report", fail_variant)
+    result, _ = analyzer._write_conservative_shadow_report(
+        evidence, output, baseline, policy_cycle_succeeded=True, research_model=model)
+    assert result["status"] == "UNKNOWN" and "result_stream" not in result
+    assert not list(output.glob(".shadow-*.tmp"))
+
+
+@pytest.mark.parametrize("key", ["../" + "a" * 61, "A" * 64, "g" * 64])
+def test_variant_cohort_rejects_hostile_hash(key):
+    from research.entry_baseline_replay import delayed_variant_cohorts
+    with pytest.raises(ValueError, match="DELAYED_VARIANT_IDENTITY_CONFLICT"):
+        delayed_variant_cohorts({"episode_receipts": [{"delayed_variants": [
+            {"timing_model_sha256": key, "results": []}]}]})

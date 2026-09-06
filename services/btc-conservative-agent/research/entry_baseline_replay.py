@@ -512,6 +512,92 @@ def _evidence_projection(
     }
 
 
+def delayed_variant_cohorts(report):
+    if not isinstance(report, Mapping) or not isinstance(report.get('episode_receipts', []), list):
+        raise ValueError('DELAYED_VARIANT_SHAPE_INVALID')
+    groups={}
+    for episode in report.get('episode_receipts') or []:
+        if not isinstance(episode, Mapping) or not isinstance(episode.get('delayed_variants', []), list):
+            raise ValueError('DELAYED_VARIANT_SHAPE_INVALID')
+        seen=set()
+        for variant in episode.get('delayed_variants') or []:
+            if not isinstance(variant, Mapping) or not isinstance(variant.get('results'), list):
+                raise ValueError('DELAYED_VARIANT_SHAPE_INVALID')
+            key=variant.get('timing_model_sha256')
+            if not isinstance(key,str) or len(key)!=64 or any(c not in '0123456789abcdef' for c in key) or key in seen:
+                raise ValueError('DELAYED_VARIANT_IDENTITY_CONFLICT')
+            seen.add(key)
+            groups.setdefault(key,[]).append({**episode,'results':variant['results'],'delayed_variants':[]})
+    return {key:{**report,'episode_receipts':episodes,'timing_model_sha256':key}
+            for key,episodes in sorted(groups.items())}
+
+
+def _declared_delayed_variants(episode, generation):
+    """Separate timing cohorts; never overwrite original baseline identities."""
+    from research.baseline_execution_context import (_verified, _sha,
+        declared_directional_baseline_inputs, build_declared_delayed_baseline_context, verified_segment_rows)
+    from research.latency_schedule_replay import replay_delayed_entry
+    if generation is None or not episode.get('directional_capture'):
+        return []
+    pins=episode.get('_baseline_context_pins') or {}
+    try:
+        opportunity,_=_verified(episode.get('_baseline_context_opportunity'),pins)
+    except (ValueError,TypeError,KeyError,AttributeError):
+        return []
+    capture=episode['directional_capture']
+    declarations=opportunity.get('research_timing_declarations') or []
+    if not isinstance(declarations,list) or len(declarations)>64:
+        return [{'status':'UNKNOWN','reason_codes':['TIMING_DECLARATION_LIST_INVALID'],'results':[]}]
+    variants=[]
+    for timing in declarations:
+        if not isinstance(timing,Mapping) or timing.get('source_capture_signature')!=capture.get('capture_signature'):
+            continue
+        try:
+            model_hash=_sha({key:timing.get(key) for key in ('schema','delay_sec','ordering_treatment','evidence_basis')})
+        except (TypeError,ValueError):
+            continue
+        variant={'timing_model_sha256':model_hash,'qualification_eligible':False,'results':[]}
+        coverage=episode.get('_baseline_context_coverage') or []
+        for baseline in _baseline_rows():
+            result=_unknown(baseline,episode,'DELAYED_ENTRY_SOURCE_UNAVAILABLE')
+            try:
+                if not coverage or episode.get('_baseline_context_pin_reasons'):
+                    raise ValueError('DELAYED_SINGLE_PINNED_SEGMENT_REQUIRED')
+                evidence=[item['object'] for item in coverage]
+                bindings=[item['binding'] for item in coverage]
+                tape,_=verified_segment_rows(evidence,bindings,pins,
+                    {key:opportunity.get(key) for key in IDENTITY_FIELDS},capture['symbol'])
+                inputs=declared_directional_baseline_inputs(capture,baseline)
+                replay=replay_delayed_entry(schedule=capture['schedules'][baseline['baseline_id']]['schedule'],
+                    delay_sec=timing.get('delay_sec'),ordering_treatment=timing.get('ordering_treatment'),
+                    tape=tape,direction=capture['direction'],requested_qty=inputs['requested_qty'],
+                    quantity_constraints=inputs['signed_quantity_constraints'],symbol=capture['symbol'])
+                if replay.get('status')!='ENTRY_REPLAY_SUPPORTED':
+                    raise ValueError('DELAYED_ENTRY_REPLAY_UNSUPPORTED')
+                receipt={**replay['entry_receipt'],'symbol':capture['symbol']}
+                identity={key:episode.get(key) for key in IDENTITY_FIELDS}
+                identity.update(epoch_id=generation['epoch_id'],direction=capture['direction'],symbol=capture['symbol'],
+                    baseline_id=baseline['baseline_id'],baseline_policy_signature=baseline['policy_signature'])
+                projection=build_declared_delayed_baseline_context(generation=generation,identity=identity,
+                    capture=capture,baseline=baseline,pinned_sources=pins,
+                    opportunity_binding=episode['_baseline_context_opportunity'],
+                    coverage_evidence=evidence,coverage_binding=bindings,
+                    entry_evidence=evidence,entry_binding=bindings,
+                    timing_declaration=timing,tape=tape,delayed_replay_receipt=replay)
+                result={'baseline_id':baseline['baseline_id'],'policy_signature':baseline['policy_signature'],
+                    'episode_id':episode['episode_id'],'opportunity_id':episode['opportunity_id'],
+                    'baseline_spec':dict(baseline),'conservative_receipt':receipt,
+                    'supported':True,'outcome_state':receipt['final_classification'],
+                    'model_context_status':projection['status'],'model_context_blockers':projection['reason_codes']}
+                if projection['context'] is not None:
+                    result['execution_model_context']=projection['context']
+            except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError):
+                pass
+            variant['results'].append(result)
+        variants.append(variant)
+    return variants
+
+
 def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = None) -> dict[str, Any]:
     """Replay all registered baselines against one causal opportunity."""
     episode_id = str(episode.get("episode_id") or "")
@@ -674,6 +760,7 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         "signal_snapshot_evidence": episode.get("signal_snapshot_evidence"),
         "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
         "results": results,
+        "delayed_variants": _declared_delayed_variants(source_episode, generation),
     }
     if generation is not None:
         material["generation"] = dict(generation)
