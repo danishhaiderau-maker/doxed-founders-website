@@ -2024,6 +2024,7 @@ def _chase_payload(lane: str = ""):
             ),
         ),
         "totals": totals,
+        "source_available": {"totals": bool(attr), "executed": bool(eff), "shadow": bool(threshold)},
         "buckets": bucket_rows,
         "executed_buckets": bucket_rows,
         "shadow_buckets": shadow_bucket_rows,
@@ -2461,7 +2462,9 @@ def _combos_payload():
         ),
         "top": current_top,
         "policy_grid": policy_grid,
+        "source_available": bool(_safe_policy_v3_dashboard_source()["report"]),
         "legacy_executed_combos": {
+            "source_available": bool(rep),
             "status": "DESCRIPTIVE_LEGACY_EXCLUDED_FROM_V3_1_QUALIFICATION",
             "generated_at": rep.get("generated_at"),
             "min_trades": rep.get("min_trades_per_combo"),
@@ -2861,11 +2864,12 @@ def _leakage_payload():
 def _feature_payload():
     rep = _read_json("feature_importance_report.json") or _read_json(str(Path(REPORTS_DIR) / "feature_importance_report.json"))
     payload = {
+        "source_available": bool(rep),
         "features": rep.get("features") or [],
         "weak_signals": rep.get("weak_signals") or [],
     }
     payload.update(_current_generation_identity())
-    if not payload["features"] and not payload["weak_signals"]:
+    if rep and not payload["features"] and not payload["weak_signals"]:
         payload["empty_reason"] = (
             "INSUFFICIENT_OUTCOME_FEATURE_EVIDENCE: no eligible terminal outcomes "
             "exist for feature attribution in the current generation"
@@ -2906,7 +2910,7 @@ def _findings_payload():
     compact = _read_json(COMPACT_SUMMARY_FILE)
     findings = compact.get("key_findings") or []
     hl = compact.get("highlights") or {}
-    return {"findings": findings, "highlights": hl, "coverage": compact.get("coverage") or {}}
+    return {"source_available": bool(compact), "findings": findings, "highlights": hl, "coverage": compact.get("coverage") or {}}
 
 
 def _normalize_archive_session(entry, folder_name=None):
@@ -7272,6 +7276,10 @@ async function loadDecisionReadiness() {
     + `Blockers: ${(d.blockers || []).join(', ') || 'none'} · ${d.note || ''}`;
 }
 
+function missingResearchSource() {
+  return 'SOURCE UNAVAILABLE — no readable analyzer report. Results are unknown, not measured zero. The existing analyzer owner must publish the report; do not start a duplicate analyzer.';
+}
+
 async function loadFindings() {
   const r = await fetch('/api/findings');
   const d = await r.json();
@@ -7284,7 +7292,7 @@ async function loadFindings() {
   ];
   document.getElementById('hl-kpis').innerHTML = hlk.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('findings-list').innerHTML = (d.findings||[]).map(f => `<li>${f}</li>`).join('') || '<li>Run analyzer to generate findings.</li>';
+  document.getElementById('findings-list').innerHTML = (d.findings||[]).map(f => `<li>${f}</li>`).join('') || `<li>${d.source_available === false ? missingResearchSource() : 'The saved report contains no findings.'}</li>`;
 }
 
 async function loadLanes() {
@@ -7317,6 +7325,7 @@ async function loadLanes() {
   const r = await fetch('/api/chase' + chaseLaneQuery());
   const d = await r.json();
   const t = d.totals || {};
+  const sources = d.source_available || {};
   const ck = [
     ['Assisted', (t.chase_assisted_fills||0) + '/' + (t.total_fills||0)],
     ['Saved', t.saved_fills_heuristic||0],
@@ -7324,7 +7333,7 @@ async function loadLanes() {
     ['Executed terminal', (d.coverage||{}).executed_terminal_outcomes ?? 0],
     ['Shadow terminal', (d.coverage||{}).shadow_terminal_outcomes ?? 0],
   ];
-  document.getElementById('chase-kpis').innerHTML = ck.map(([l,v]) =>
+  document.getElementById('chase-kpis').innerHTML = ck.map(([l,v], i) => [l, sources[i < 3 ? 'totals' : 'shadow'] === false ? 'UNAVAILABLE' : v]).map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   const renderChaseBuckets = rows => {
     const byBucket = new Map((rows || []).map(row => [String(row.bucket || row.threshold), row]));
@@ -7336,6 +7345,8 @@ async function loadLanes() {
   };
   document.getElementById('chase-body').innerHTML = renderChaseBuckets(d.executed_buckets || d.buckets || []);
   document.getElementById('chase-shadow-body').innerHTML = renderChaseBuckets(d.shadow_buckets || []);
+  if (sources.executed === false) document.getElementById('chase-body').innerHTML = `<tr><td colspan="6">${missingResearchSource()}</td></tr>`;
+  if (sources.shadow === false) document.getElementById('chase-shadow-body').innerHTML = `<tr><td colspan="6">${missingResearchSource()}</td></tr>`;
 }
 
 async function loadCombos() {
@@ -7405,6 +7416,17 @@ async function loadCombos() {
       + `<td>${fmtExecutionUsd(p.diagnostic_replay_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.diagnostic_replay_max_drawdown_usd)}</td>`
       + `<td class="bad">IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · NOT QUALIFICATION ELIGIBLE</td></tr>`;
   }).join('') || '<tr><td colspan="10">No positive ideal-touch diagnostic policy exists in the current rolling generation.</td></tr>';
+  if (legacy.source_available === false) {
+    document.getElementById('combos-kpis').innerHTML = '';
+    if (note) note.textContent = missingResearchSource();
+    document.getElementById('combos-body').innerHTML = `<tr><td colspan="9">${missingResearchSource()}</td></tr>`;
+  }
+  if (d.source_available === false) {
+    document.getElementById('policy-grid-kpis').innerHTML = '';
+    if (pgNote) pgNote.textContent = missingResearchSource();
+    document.getElementById('policy-grid-body').innerHTML = `<tr><td colspan="16">${missingResearchSource()}</td></tr>`;
+    document.getElementById('diagnostic-policy-grid-body').innerHTML = `<tr><td colspan="10">${missingResearchSource()}</td></tr>`;
+  }
 }
 
 async function loadSpreadPerf() {
@@ -7772,6 +7794,8 @@ async function loadRegime() {
   ]);
   const d = rr.ok ? await rr.json() : {};
   const pol = rp.ok ? await rp.json() : {};
+  const regimeAvailable = rr.ok && Object.keys(d).length > 0;
+  const policyAvailable = rp.ok && Object.keys(pol).length > 0;
   document.getElementById('regime-note').textContent = d.usage_note || document.getElementById('regime-note').textContent;
   document.getElementById('regime-kpis').innerHTML = [
     ['Total trades tagged', d.total_trades ?? 'n/a'],
@@ -7783,8 +7807,12 @@ async function loadRegime() {
     const ok = r.conclusion_allowed ? 'yes' : 'no';
     const cls = r.conclusion_allowed ? 'green' : 'amber';
     return `<tr><td>${r.regime}</td><td>${r.total_trades}</td><td>${r.best_lane||'—'}</td><td>${fmtExecutionUsd(r.best_ev_usd)}</td><td>${r.second_lane||'—'}</td><td class="${cls}">${ok}</td></tr>`;
-  }).join('');
-  document.getElementById('roster-policy-json').textContent = JSON.stringify(pol, null, 2);
+  }).join('') || `<tr><td colspan="6">${regimeAvailable ? 'The saved report contains no regime cells.' : missingResearchSource()}</td></tr>`;
+  if (!regimeAvailable) {
+    document.getElementById('regime-note').textContent = missingResearchSource();
+    document.getElementById('regime-kpis').innerHTML = '';
+  }
+  document.getElementById('roster-policy-json').textContent = policyAvailable ? JSON.stringify(pol, null, 2) : missingResearchSource();
   if (pol.collection_progress) {
     const cp = pol.collection_progress;
     document.getElementById('regime-kpis').innerHTML += [
@@ -7798,7 +7826,7 @@ async function loadFeatures() {
   const r = await fetch('/api/features');
   const d = await r.json();
   document.getElementById('feat-body').innerHTML = (d.features||[]).map(f =>
-    `<tr><td>${f.feature}</td><td>${f.abs_correlation}</td><td>${f.correlation_with_pnl>=0?'+':''}${f.correlation_with_pnl}</td><td>${f.n}</td></tr>`).join('');
+    `<tr><td>${f.feature}</td><td>${f.abs_correlation}</td><td>${f.correlation_with_pnl>=0?'+':''}${f.correlation_with_pnl}</td><td>${f.n}</td></tr>`).join('') || `<tr><td colspan="4">${d.source_available === false ? missingResearchSource() : 'The saved report contains no eligible feature-attribution rows.'}</td></tr>`;
   document.getElementById('weak-signals').textContent = d.weak_signals?.length ?
     'Weak signals (|r|<0.05): ' + d.weak_signals.join(', ') : '';
 }
