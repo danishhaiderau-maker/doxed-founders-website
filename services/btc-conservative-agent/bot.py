@@ -17612,6 +17612,8 @@ def evaluate_signal_with_ai(
     research_entry_features: dict = None,
 ):
     counterfactual_coverage = None
+    research_context_capture = None
+    research_timing_capture = {}
     try:
         logger.info(
             f"[AI] START lane={research_lane} shadow={shadow_only} "
@@ -17841,6 +17843,12 @@ def evaluate_signal_with_ai(
     except Exception as e:
         logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
         ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
+        # Preserve only evidence captured before the failed API/parsing stage.
+        # An AI failure does not invalidate the already observed market context.
+        if research_context_capture is not None:
+            ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
+            ai_result["research_baseline_context_status"] = research_context_capture
+        ai_result.update(research_timing_capture)
         if counterfactual_coverage is not None:
             ai_result["counterfactual_coverage"] = counterfactual_coverage
         ai_result["research_lane"] = research_lane

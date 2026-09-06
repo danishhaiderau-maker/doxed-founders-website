@@ -7,6 +7,33 @@ from research.quantity_execution import build_signed_quantity_constraints
 
 
 class RuntimeDeclarationTests(unittest.TestCase):
+    def test_ai_exception_preserves_existing_capture_without_inventing_one(self):
+        tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8-sig"))
+        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "evaluate_signal_with_ai")
+        outer = next(n for n in fn.body if isinstance(n, ast.Try))
+        handler = outer.handlers[0].body
+        start = next(i for i, n in enumerate(handler) if isinstance(n, ast.Assign)
+                     and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                     and n.value.func.id == "build_ai_error_result")
+        end = next(i for i in range(start, len(handler)) if isinstance(handler[i], ast.If)
+                   and "counterfactual_coverage" in ast.unparse(handler[i].test))
+        block = ast.Module(body=handler[start:end], type_ignores=[])
+        for captured in (None, {"declaration": {"observed": 123}, "status": "DECLARED_DIAGNOSTIC"}):
+            namespace = dict(e=ValueError("api"), raw_context={},
+                build_ai_error_result=lambda *args: {"decision": "REJECT", "ai_error": True},
+                research_context_capture=captured,
+                research_timing_capture={"research_timing_config_sha256": "pin"} if captured else {})
+            exec(compile(block, "bot.py", "exec"), namespace)
+            result = namespace["ai_result"]
+            self.assertEqual(result["decision"], "REJECT")
+            self.assertTrue(result["ai_error"])
+            if captured:
+                self.assertIs(result["research_baseline_context_declaration"], captured["declaration"])
+                self.assertEqual(result["research_timing_config_sha256"], "pin")
+            else:
+                self.assertNotIn("research_baseline_context_declaration", result)
+                self.assertNotIn("research_timing_config_sha256", result)
+
     def inputs(self):
         return dict(context={"cycle_3m_universe": {"atr14_pct_3m": .2, "captured_ts": 100}},
             quantity_capture={"receipt": build_signed_quantity_constraints(symbol="tBTCUSD",
