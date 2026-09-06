@@ -10,7 +10,7 @@ import threading
 import pytest
 
 from collector_signal_snapshot import freeze_signal_snapshot
-import data_sync_bundle_runtime as runtime_module
+import data_sync_bundle_resumption as runtime_module
 from data_sync_bundle_transport import build_bundle, extract_verified_bundle, is_bundle_eligible_path, MAX_PACKAGE_BYTES
 from data_sync_bundle_storage import check_derivative_admission
 from data_sync_bundle_worker import _validate_output_root
@@ -107,7 +107,7 @@ def test_real_coordinator_uses_inventory_runtime_root_not_parent_volume(tmp_path
         observed["descriptor"] = build_bundle(generation, [inventory_row], source_root, output_root)
         return {"status": "COMPLETE", "package_index_count": 1}
 
-    monkeypatch.setattr(runtime_module, "run_managed_generation", managed)
+    monkeypatch.setattr(runtime_module, "run_resumable_generation", managed)
     assert namespace["_start_data_sync_bundle_generation"](GEN) is True
     assert len(admissions) == 1 and admissions[0]["status"] == "ADMITTED"
     assert observed["source_root"] == runtime, "Inventory is runtime-relative, not volume-relative"
