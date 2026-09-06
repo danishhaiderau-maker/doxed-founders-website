@@ -10,7 +10,7 @@ PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependen
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
-@pytest.mark.parametrize("defect", [None, "hash", "waiting", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size"])
+@pytest.mark.parametrize("defect", [None, "hash", "waiting", "interleaved", "foreign-wait", "late-wait", "reuse", "reuse-escape", "reuse-flag", "reuse-size"])
 def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, defect):
     payload = '{"sample":1}'
     relative = "v3/market_segments/11/" + "1" * 64 + ".json"
@@ -66,3 +66,5 @@ try {{
         if defect == "waiting":
             assert result["phases"][0] == {"files": 0, "phase": "bundle_index_wait"}
             assert result["phases"][1] == {"files": 1, "phase": "bundle_verified"}
+        if defect == "interleaved":
+            assert result["phases"][:2] == [{"files":1,"phase":"bundle_verified"},{"files":1,"phase":"bundle_index_wait"}]

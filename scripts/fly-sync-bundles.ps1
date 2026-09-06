@@ -76,7 +76,7 @@ function Receive-FlyTransportBundles {
       if ($receipt.schema -cne 'fly_bundle_staging_receipt_v1') { throw 'BUNDLE_RECEIPT_SCHEMA' }
       if ($receipt.status -ceq 'FAILED') { throw ('BUNDLE_TRANSFER_FAILED: ' + [string]$receipt.error) }
       if ($receipt.status -ceq 'INDEX_WAITING') {
-        if ($complete -or $files -ne 0) { throw 'BUNDLE_RECEIPT_SEQUENCE' }
+        if ($complete) { throw 'BUNDLE_RECEIPT_SEQUENCE' }
         foreach ($field in @('inventory_generation_id','inventory_sha256','source_git_rev','collection_epoch_id','tile_registry_signature')) {
           if ([string]$receipt.generation.$field -cne [string]$Manifest.$field) { throw 'BUNDLE_RECEIPT_IDENTITY' }
         }
@@ -88,7 +88,7 @@ function Receive-FlyTransportBundles {
           throw 'BUNDLE_INDEX_WAIT_INVALID'
         }
         $lastIndexWait = $elapsed
-        & $Progress 0 'bundle_index_wait'
+        & $Progress $files 'bundle_index_wait'
         continue
       }
       if ($receipt.status -ceq 'COMPLETE') {

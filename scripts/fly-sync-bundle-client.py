@@ -76,6 +76,25 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
     index_url = "/api/data-sync/bundles?" + urlencode({
         "generation_id": generation["inventory_generation_id"]})
     delay, pressure_failures = 5, 0
+    accepted_prefix = []
+    seen_paths = set()
+    def consume(entry, building):
+        remaining = (600 if building else 1800) - (clock() - started)
+        if remaining <= 0:
+            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE" if building else "BUNDLE_TRANSFER_DEADLINE")
+        staged = fetch_verified_package(entry, generation, original, request["staging_root"], fetch,
+            deadline_sec=min(120, remaining), clock=clock, sleep=sleep,
+            verified_local_root=request.get("verified_local_root"))
+        for member in staged["members"]:
+            if member["path"] in seen_paths:
+                raise ValueError("BUNDLE_MEMBER_REPEATED_ACROSS_PACKAGES")
+            seen_paths.add(member["path"])
+        emit({"schema":"fly_bundle_staging_receipt_v1", "status":"PACKAGE_VERIFIED",
+              "generation":generation, **staged})
+        remaining = (600 if building else 1800) - (clock() - started)
+        if remaining <= 0:
+            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE" if building else "BUNDLE_TRANSFER_DEADLINE")
+        sleep(min(0.5, remaining))
     while True:
         elapsed = clock() - started
         if elapsed >= 600:
@@ -105,6 +124,14 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
             if not isinstance(packages, list) or len(packages) > 4096:
                 raise ValueError("BUNDLE_INDEX_LIMIT")
             package_count = len(packages)
+            digests = [entry.get("package_sha256") if isinstance(entry, dict) else None for entry in packages]
+            if any(not isinstance(d, str) for d in digests) or len(set(digests)) != len(digests):
+                raise ValueError("BUNDLE_INDEX_DUPLICATE")
+            if len(packages) < len(accepted_prefix) or packages[:len(accepted_prefix)] != accepted_prefix:
+                raise ValueError("BUNDLE_INDEX_PREFIX_CHANGED")
+            for entry in packages[len(accepted_prefix):]:
+                consume(entry, index["status"] == "BUILDING")
+                accepted_prefix.append(dict(entry))
             pressure_failures = 0
             if index["status"] == "COMPLETE":
                 break
@@ -116,38 +143,19 @@ def run(request, *, emit, fetch=None, sleep=time.sleep, clock=time.monotonic):
                 raise ValueError("BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN")
         else:
             raise ValueError("BUNDLE_INDEX_UNAVAILABLE")
+        elapsed = clock() - started
+        if elapsed >= 600:
+            raise ValueError("BUNDLE_INDEX_PREPARATION_DEADLINE")
         wait = min(delay, 600-elapsed)
         emit({"schema": "fly_bundle_staging_receipt_v1", "status": "INDEX_WAITING",
               "generation": generation, "elapsed_seconds": elapsed,
               "next_retry_seconds": wait, "packages": package_count, "ack_sent": False})
         sleep(wait)
         delay = min(delay * 2, 30)
-    seen_packages = set()
-    seen_paths = set()
-    for entry in packages:
-        if not isinstance(entry, dict) or entry.get("package_sha256") in seen_packages:
-            raise ValueError("BUNDLE_INDEX_DUPLICATE")
-        remaining = 1800 - (clock() - started)
-        if remaining <= 0:
-            raise ValueError("BUNDLE_TRANSFER_DEADLINE")
-        seen_packages.add(entry.get("package_sha256"))
-        staged = fetch_verified_package(entry, generation, original, request["staging_root"], fetch,
-                                        deadline_sec=min(120, remaining), clock=clock, sleep=sleep,
-                                        verified_local_root=request.get("verified_local_root"))
-        for member in staged["members"]:
-            if member["path"] in seen_paths:
-                raise ValueError("BUNDLE_MEMBER_REPEATED_ACROSS_PACKAGES")
-            seen_paths.add(member["path"])
-        emit({"schema": "fly_bundle_staging_receipt_v1", "status": "PACKAGE_VERIFIED",
-              "generation": generation, **staged})
-        remaining = 1800 - (clock() - started)
-        if remaining <= 0:
-            raise ValueError("BUNDLE_TRANSFER_DEADLINE")
-        sleep(min(0.5, remaining))  # Yield per package, not per tiny member.
     if clock() - started >= 1800:
         raise ValueError("BUNDLE_TRANSFER_DEADLINE")
     emit({"schema": "fly_bundle_staging_receipt_v1", "status": "COMPLETE",
-          "packages": len(seen_packages), "files": len(seen_paths), "ack_sent": False})
+          "packages": len(accepted_prefix), "files": len(seen_paths), "ack_sent": False})
 
 
 def main():

@@ -35,5 +35,8 @@ if manifest.get("fixture_defect") in {"waiting", "foreign-wait", "late-wait"}:
 print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "PACKAGE_VERIFIED",
                   "generation": identity, "members": members,
                   "reused_local": "true" if manifest.get("fixture_defect") == "reuse-flag" else manifest.get("fixture_defect") in {"reuse", "reuse-escape", "reuse-size"}}), flush=True)
+if manifest.get("fixture_defect") == "interleaved":
+    print(json.dumps({"schema":"fly_bundle_staging_receipt_v1","status":"INDEX_WAITING",
+        "generation":identity,"elapsed_seconds":5,"next_retry_seconds":10}),flush=True)
 print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "COMPLETE",
                   "files": len(members), "ack_sent": False}), flush=True)

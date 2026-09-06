@@ -177,9 +177,9 @@ def test_waits_only_same_generation_index_until_complete(tmp_path):
     adapter.run(request, emit=emitted.append, fetch=preparing,
                 clock=timing.clock, sleep=timing.sleep)
     assert len(set(polls)) == 1 and len(polls) == 3
-    assert timing.sleeps == [5, 10, 0.5]
-    assert [r["status"] for r in emitted] == ["INDEX_WAITING", "INDEX_WAITING", "PACKAGE_VERIFIED", "COMPLETE"]
-    assert emitted[0]["packages"] is None and emitted[1]["packages"] == 1
+    assert timing.sleeps == [5, 0.5, 10]
+    assert [r["status"] for r in emitted] == ["INDEX_WAITING", "PACKAGE_VERIFIED", "INDEX_WAITING", "COMPLETE"]
+    assert emitted[0]["packages"] is None and emitted[2]["packages"] == 1
     assert all("manifest" not in url for url in calls)
     assert emitted[0]["ack_sent"] is False
 
@@ -194,14 +194,16 @@ def test_missing_or_building_index_has_capped_prep_deadline(tmp_path, status):
             calls.append(url)
             return 404, {}, b""
         response_status, headers, body = fetch(url, **kwargs)
+        if "/bundles?" not in url: return response_status, headers, body
         index = json.loads(body); index["status"] = "BUILDING"
         return response_status, headers, json.dumps(index).encode()
     with pytest.raises(ValueError, match="PREPARATION_DEADLINE"):
         adapter.run(request, emit=emitted.append, fetch=pending,
                     clock=timing.clock, sleep=timing.sleep)
     assert timing.now == 600 and max(timing.sleeps) == 30
-    assert len(calls) < 30 and len(set(calls)) == 1
-    assert all(r["status"] == "INDEX_WAITING" for r in emitted)
+    assert len(calls) < 35
+    assert not any(r["status"] == "COMPLETE" for r in emitted)
+    assert sum(r["status"] == "PACKAGE_VERIFIED" for r in emitted) == (1 if status==200 else 0)
 
 
 @pytest.mark.parametrize("status", [503, 429, "timeout"])
