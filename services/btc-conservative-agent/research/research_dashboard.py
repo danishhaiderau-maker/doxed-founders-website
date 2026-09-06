@@ -451,11 +451,14 @@ def _analyzer_run_state() -> dict:
     tail = ""
     try:
         with path.open(encoding="utf-8", errors="replace") as handle:
-            header = handle.readline().strip()
+            header = handle.readline(4096).strip()
     except Exception:
         pass
     try:
-        tail = path.read_bytes()[-16_384:].decode("utf-8", errors="replace")
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - 16_384))
+            tail = handle.read(16_384).decode("utf-8", errors="replace")
     except Exception:
         pass
     match = re.search(r"\bsync=([^|\s]+)", header)
@@ -479,7 +482,26 @@ def _analyzer_run_state() -> dict:
     except Exception:
         updated_at = None
         age_seconds = None
-    completed = bool(re.search(r"Iteration\s+\d+\s+complete", tail, re.IGNORECASE))
+    # Read events in order: an old failure must not poison a newer pass, and
+    # the engine's 'complete (recovered from error)' means a failed pass ended,
+    # not that publication succeeded. Only the latest iteration is relevant.
+    completed = False
+    failed = False
+    iteration = None
+    for event in re.finditer(
+        r"\bITERATION\s+(\d+)\s+(START|FAILED:|complete)([^\r\n]*)",
+        tail, re.IGNORECASE,
+    ):
+        event_iteration = int(event.group(1))
+        kind = event.group(2).upper()
+        if event_iteration != iteration or kind == "START":
+            completed = failed = False
+            iteration = event_iteration
+        if kind == "FAILED:":
+            failed = True
+        elif kind == "COMPLETE":
+            failed = failed or "recovered from error" in event.group(3).lower()
+            completed = not failed
     # A full pass can take several minutes on the home PC. The engine rewrites
     # this log at the start of every pass, so a completion footer means the
     # analyzer is idle between runs, not still analysing for another 45 min.
@@ -488,10 +510,11 @@ def _analyzer_run_state() -> dict:
         and age_seconds is not None
         and age_seconds <= 45 * 60
         and not completed
+        and not failed
     )
     return {
         "in_progress": in_progress,
-        "phase": "RUNNING" if in_progress else ("IDLE_BETWEEN_RUNS" if completed else "IDLE"),
+        "phase": "FAILED" if failed else ("RUNNING" if in_progress else ("IDLE_BETWEEN_RUNS" if completed else "IDLE")),
         "sync_id": run_sync,
         "started_at": started_at,
         "updated_at": updated_at,
