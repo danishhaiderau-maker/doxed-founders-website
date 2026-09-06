@@ -253,6 +253,44 @@ class DownloadProtection:
             _require(state["sessions"].get(session, 0) > now, "SESSION_EXPIRED_OR_MISSING")
             yield
 
+    def fence_if_idle_unprotected(self, generation, *, fence_token, protected_generations):
+        """Atomic candidate admission only; never retirement/deletion authority.
+
+        Caller persists its token before calling. The callback returns exact
+        protected generation IDs under the worker lease and must fail closed
+        if its retention view is unavailable. Retention publishers must share
+        the caller's coordination boundary; the OS lease alone does not lock
+        an external in-memory inventory registry. No pin/fence is written for
+        active or protected candidates, including after an earlier idle fence.
+        """
+        _require(_hex(generation) and _hex(fence_token), "FENCE_TOKEN_INVALID")
+        _require(callable(protected_generations), "PROTECTION_UNAVAILABLE")
+        with self._locked():
+            state = self._load(generation)
+            now = self._now(state)
+            protected = protected_generations()
+            _require(isinstance(protected, (set, frozenset, list, tuple))
+                     and all(_hex(value) for value in protected), "PROTECTION_UNAVAILABLE")
+            after = self._now(state)
+            _require(after >= now, "CLOCK_INVALID_OR_ROLLED_BACK")
+            if generation in protected:
+                return {"status": "DEFERRED", "reason": "GENERATION_PROTECTED",
+                        "generation_id": generation, "ready": False, "deletion_authorized": False}
+            # Use the earlier time conservatively; callback latency must not
+            # turn an active session into an admitted candidate in this call.
+            if any(expiry > now for expiry in state["sessions"].values()):
+                return {"status": "DEFERRED", "reason": "SESSION_ACTIVE",
+                        "generation_id": generation, "ready": False, "deletion_authorized": False}
+            fence = state["fence"]
+            if fence is not None:
+                _require(fence["token"] == fence_token, "FENCE_TOKEN_MISMATCH")
+            else:
+                state["fence"] = {"token": fence_token, "created_at": after}
+                state["sessions"] = {}
+                self._save(state, after)
+            return {"status": "FENCED", "generation_id": generation, "fence_token": fence_token,
+                    "ready": True, "deletion_authorized": False}
+
     def retirement(self, generation, *, fence_token):
         """Fence new readers, then report whether existing bounded reads drained.
 
