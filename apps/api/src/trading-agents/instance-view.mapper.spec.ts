@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   activeLiveRelayArmForSessionReset,
+  buildFreshInstanceDashboardState,
   applyInstanceDashboardPatch,
   readInstanceScope,
   readRelayFidelitySessionStart,
@@ -63,8 +64,35 @@ test('fresh collection preserves an explicit ACTIVE live arm but never invents o
       relayExecutionMode: 'LIVE',
       relayArmedAt: armedAt,
     }),
-    {},
+    { relayExecutionMode: 'PAUSED', relayArmedAt: null, realTradingConfirmedAt: null },
   );
+});
+
+test('session reset preserves PAUSED disarm metadata in the replacement dashboard', () => {
+  for (const prior of [
+    {},
+    { relayExecutionMode: null },
+    { relayExecutionMode: 'PAUSED', relayArmedAt: null, realTradingConfirmedAt: null },
+    { relayExecutionMode: 'LIVE', relayArmedAt: '2026-09-06T00:00:00Z', realTradingConfirmedAt: '2026-09-06T00:00:00Z' },
+  ]) {
+    const original = { ...prior };
+    const replacement = {
+      ...buildFreshInstanceDashboardState('live', 500),
+      ...activeLiveRelayArmForSessionReset('PAUSED', prior),
+    };
+    assert.equal(replacement.relayExecutionMode, 'PAUSED');
+    assert.equal(replacement.relayArmedAt, null);
+    assert.equal(replacement.realTradingConfirmedAt, null);
+    assert.equal(replacement.startingBalanceUsd, 500);
+    assert.deepEqual(prior, original);
+  }
+});
+
+test('reset never manufactures a live arm from active status or unknown status', () => {
+  for (const status of ['ACTIVE', 'STOPPED', '']) {
+    assert.deepEqual(activeLiveRelayArmForSessionReset(status, {}), {});
+    assert.deepEqual(activeLiveRelayArmForSessionReset(status, { relayExecutionMode: 'PAUSED' }), {});
+  }
 });
 
 test('live fidelity has no epoch before explicit NEXT_FRESH_ONLY arm', () => {
