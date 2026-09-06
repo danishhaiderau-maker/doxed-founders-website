@@ -28111,6 +28111,8 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
             store._atomic_json_receipt(receipt_dir.parent / "ACTIVE_RESET.json", {
                 "reset_id": reset_id, "binding_sha256": hashlib.sha256(canonical_json(binding).encode()).hexdigest()})
         stage = "PAYLOAD_DELETION"
+        operation.update(stage=stage)
+        store._atomic_json_receipt(operation_path, operation)
         result = resume["result"] if resume else execute_research_reset(
             runtime_root=root, proof=proof, quiescent=True,
             recovery_states=boundary["recovery_states"], receipt_path=receipt_dir / "deletion.json",
