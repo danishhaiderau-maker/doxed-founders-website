@@ -3,7 +3,7 @@ import pytest
 from research import research_dashboard as d
 
 
-@pytest.mark.parametrize('endpoint,name', [('/api/chase-policy-lab','chase_policy_lab_report.json'),('/api/missed-opportunity-proof','missed_opportunity_proof_report.json'),('/api/chase-threshold','chase_threshold_report.json'),('/api/exit-combos','exit_combinations_report.json')])
+@pytest.mark.parametrize('endpoint,name', [('/api/chase-policy-lab','chase_policy_lab_report.json'),('/api/missed-opportunity-proof','missed_opportunity_proof_report.json'),('/api/chase-threshold','chase_threshold_report.json'),('/api/exit-combos','exit_combinations_report.json'),('/api/exit-reason-leak','exit_leakage_by_reason_report.json')])
 @pytest.mark.parametrize('published',[False,True])
 def test_current_execution_panels_refuse_loose_history(tmp_path,monkeypatch,endpoint,name,published):
     monkeypatch.setattr(d,'ROOT',tmp_path)
@@ -24,12 +24,28 @@ def test_current_execution_panels_refuse_loose_history(tmp_path,monkeypatch,endp
 
 def test_ui_stops_before_default_counts_when_source_missing():
     page=d.DASHBOARD_HTML
-    for section,loader in [('chase-threshold','loadChaseThreshold'),('exit-combos','loadExitCombos')]:
+    for section,loader in [('chase-threshold','loadChaseThreshold'),('exit-combos','loadExitCombos'),('exit-reason-leak','loadExitReasonLeak')]:
         start=page.index('async function '+loader+'()')
         end=page.index('\nasync function ',start+20)
         code=page[start:end]
         assert "if (!executionPanelSource('"+section in code
         assert 'return;' in code
+
+
+def test_chase_attribution_independent_atomic_sources(tmp_path,monkeypatch):
+    monkeypatch.setattr(d,'ROOT',tmp_path); monkeypatch.setattr(d,'DATA_ROOT',tmp_path)
+    monkeypatch.setattr(d,'_integrity_payload',lambda:{})
+    for name in ('chase_attribution_report.json','chase_effectiveness_report.json','chase_threshold_report.json'):
+        (tmp_path/name).write_text('{"totals":{"total_fills":118}}')
+    missing=d._chase_payload()
+    assert missing['source_available']==dict(totals=False,executed=False,shadow=False)
+    published=tmp_path/d.PUBLISHED_REPORTS_DIR; published.mkdir()
+    name='chase_attribution_report.json'
+    (published/name).write_text('{"totals":{"total_fills":0}}')
+    (published/d.REPORT_MANIFEST_FILE).write_text(json.dumps({'reports':[{'file':name}]}))
+    result=d._chase_payload()
+    assert result['source_available']==dict(totals=True,executed=False,shadow=False)
+    assert result['totals']['total_fills']==0
 
 
 @pytest.mark.parametrize('lab_present',[True,False])

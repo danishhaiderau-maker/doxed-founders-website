@@ -1989,9 +1989,9 @@ def _nonqualifying_scope(scope: str, warning: str) -> dict:
 
 def _chase_payload(lane: str = ""):
     integrity = _integrity_payload()
-    attr = _read_report("chase_attribution_report.json")
-    eff = _read_report("chase_effectiveness_report.json")
-    threshold = _read_report("chase_threshold_report.json")
+    attr = _execution_panel_report("chase_attribution_report.json")
+    eff = _execution_panel_report("chase_effectiveness_report.json")
+    threshold = _execution_panel_report("chase_threshold_report.json")
     delay = _read_report("chase_delay_report.json")
     totals = attr.get("overnight_watch") or attr.get("totals") or {}
     buckets = eff.get("buckets") or {}
@@ -2026,7 +2026,8 @@ def _chase_payload(lane: str = ""):
             ),
         ),
         "totals": totals,
-        "source_available": {"totals": bool(attr), "executed": bool(eff), "shadow": bool(threshold)},
+        "source_available": {"totals": attr["source_available"], "executed": eff["source_available"], "shadow": threshold["source_available"]},
+        "generation_identity": {"totals": attr["generation_identity"], "executed": eff["generation_identity"], "shadow": threshold["generation_identity"]},
         "buckets": bucket_rows,
         "executed_buckets": bucket_rows,
         "shadow_buckets": shadow_bucket_rows,
@@ -2695,11 +2696,15 @@ def _exit_combos_payload():
 
 
 def _exit_reason_leak_payload():
-    rep = _read_report("exit_leakage_by_reason_report.json")
+    rep = _execution_panel_report("exit_leakage_by_reason_report.json")
+    if not rep["source_available"]:
+        return rep
     classes = rep.get("evidence_worlds") or rep.get("evidence_classes") or {}
     executed = classes.get("executed_paper") or {"reasons": rep.get("reasons") or [], "recommendations": rep.get("recommendations") or []}
     shadow = classes.get("shadow_lab") or {"reasons": [], "recommendations": []}
     return {
+        "source_available": True,
+        "generation_identity": rep["generation_identity"],
         **_nonqualifying_scope(
             "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
             "Peak-to-close hindsight is descriptive only; executed-paper and shadow/lab rows are shown separately.",
@@ -7673,6 +7678,7 @@ async function loadExitCombos() {
 async function loadExitReasonLeak() {
   const r = await fetch('/api/exit-reason-leak');
   const d = await r.json();
+  if (!executionPanelSource('exit-reason-leak', d)) return;
   const money = value => value == null ? 'n/a' : fmtExecutionUsd(value);
   document.getElementById('exit-reason-kpis').innerHTML = [
     ['Hindsight gap', money(d.overall_left_usd)],
