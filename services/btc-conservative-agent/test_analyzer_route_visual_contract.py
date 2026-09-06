@@ -1,5 +1,8 @@
 import inspect
+import json
 import re
+import shutil
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 from research import research_dashboard as dashboard
@@ -53,6 +56,39 @@ def test_empty_safe_genome_state_is_truthful(monkeypatch):
     assert genome["live_policy_change_allowed"] is False
     assert genome["real_bitfinex_trading_allowed"] is False
     assert "V3_REPORT_NOT_GENERATED" in genome["blockers"]
+
+def test_standalone_genome_missing_source_counters_are_unavailable_not_zero():
+    node = shutil.which("node")
+    assert node, "Node is required to execute the standalone counter renderer"
+    pages = [dashboard.app.test_client().get(route).get_data(as_text=True)
+             for route in ("/safe-policy-genome-v3", "/safe-policy-genome-v3.1")]
+    assert pages[0] == pages[1]
+    html = pages[0]
+    helper = re.search(r"function standaloneGenomeCountCards\(d\) \{.*?\n\}", html, re.S)
+    assert helper
+    assert "const cards=standaloneGenomeCountCards(d);" in html
+    zero_report = {
+        "status": "AVAILABLE",
+        "collection": {key: 0 for key in (
+            "independent_opportunities", "decision_branches", "terminal_lifecycles", "market_segments")},
+        "candidate_screen": {"unique_policies_evaluated": 0},
+        "search_progress": {"unique_policies_evaluated": 99, "nominal_full_cartesian": 0},
+    }
+    cases = [
+        {"status": "V3_REPORT_NOT_GENERATED"},
+        {**zero_report, "status": "REPORT_NOT_IN_CURRENT_GENERATION"},
+        zero_report,
+        {**zero_report, "status": "STALE_GENERATION"},
+        {"status": "AVAILABLE"},
+    ]
+    script = helper.group(0) + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(standaloneGenomeCountCards)));"
+    result = subprocess.run([node, "-e", script], check=True, capture_output=True, text=True, timeout=15)
+    rendered = json.loads(result.stdout)
+    for index in (0, 1, 4):
+        assert [value for _label, value in rendered[index]] == ["UNAVAILABLE"] * 6
+    for index in (2, 3):
+        assert [value for _label, value in rendered[index]] == [0] * 6
+
 
 def test_analyzer_pages_keep_wide_evidence_inside_mobile_viewport():
     source = dashboard.DASHBOARD_HTML
