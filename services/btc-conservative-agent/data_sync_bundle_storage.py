@@ -181,13 +181,13 @@ def check_derivative_admission(outputroot, currentgeneration, reservepackagebyte
             except FileNotFoundError:
                 # Missing root/parents contain no derivatives. Never mkdir.
                 break
-        entries = _entries(root, max_generations + 2) if root.exists() else []
+        entries = _entries(root, max_generations + 3) if root.exists() else []
         generations, estimate, found_current = 0, 0, False
         for path in entries:
             if path.name == EARLY_DIAGNOSTIC_FILE:
                 estimate += _diagnostic_usage(path)
                 continue
-            if path.name == ".bundle-worker.lease":
+            if path.name in {".bundle-worker.lease", ".bundle-readers.lease"}:
                 if _stat(path).st_size > 4096:
                     _fail("BUNDLE_DERIVATIVE_LEASE_LIMIT")
                 estimate += 4096

@@ -1,6 +1,6 @@
 """Durable transport reader pins and retirement fences (not wired into HTTP).
 
-All participants must use the same existing bundle-worker lease. Provision the
+Readers and retirement share a dedicated lease, independent of production. Provision the
 metadata directory outside both raw evidence and transport artifacts, under a
 trusted owner; this module never creates directories or deletes artifacts.
 Explicit maintenance may reclaim expired unfenced session metadata only.
@@ -71,8 +71,11 @@ def _pairs(rows):
 class DownloadProtection:
     """A new object after restart observes the same pins/fence, not empty state.
 
-    lease_path must be the coordinator's exact .bundle-worker.lease. Do not call
-    methods while already holding that lease. The metadata root is a separate
+    lease_path identifies the coordinator's exact .bundle-worker.lease; the
+    protection lease is its .bundle-readers.lease sibling. Do not call methods
+    while holding the protection lease. Retirement takes worker then readers;
+    production takes worker only. Roll out with old protocol owners stopped.
+    The metadata root is a separate
     preprovisioned directory; it cannot be the derivative root or its child.
     The caller must also keep it outside source evidence. Capacity exhaustion
     fails closed; only expired unfenced metadata can be explicitly reclaimed.
@@ -80,8 +83,9 @@ class DownloadProtection:
     """
     def __init__(self, metadata_root, lease_path, *, clock=time.time):
         self.root = _directory(metadata_root)
-        self.lease = Path(lease_path)
-        _require(self.lease.is_absolute() and self.lease.name == ".bundle-worker.lease", "LEASE_PATH_INVALID")
+        worker_lease = Path(lease_path)
+        _require(worker_lease.is_absolute() and worker_lease.name == ".bundle-worker.lease", "LEASE_PATH_INVALID")
+        self.lease = worker_lease.with_name(".bundle-readers.lease")
         parent = _directory(self.lease.parent)
         _require(self.root != parent and parent not in self.root.parents
                  and self.root not in parent.parents, "METADATA_ROOT_NOT_SEPARATE")
@@ -238,7 +242,7 @@ class DownloadProtection:
 
     @contextmanager
     def read_chunk(self, generation, session):
-        """Hold shared worker exclusion across lookup, metadata, and chunk I/O.
+        """Hold retirement exclusion across lookup, metadata, and chunk I/O.
 
         The adapter must use this for every artifact read (including indexes
         and descriptors), not only TAR reads. Read bounded bytes into memory

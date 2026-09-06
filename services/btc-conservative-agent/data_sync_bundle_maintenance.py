@@ -99,7 +99,7 @@ def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
         owner.reclaim_expired_unfenced()
         # Validate bounded ownership before candidate selection. No volume walk.
         candidates = []
-        for path in sorted(_entries(output, 6)):
+        for path in sorted(_entries(output, 7)):
             remaining()
             if GEN.fullmatch(path.name):
                 _, generation = _generation_usage(path, target_generation)

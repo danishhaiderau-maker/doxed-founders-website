@@ -32,14 +32,14 @@ def test_legacy_index_descriptor_chunks_share_durable_session_unchanged_payload(
 
 
 @pytest.mark.parametrize("kind", ["index", "descriptor", "chunk"])
-def test_every_artifact_read_is_inside_worker_exclusion(tmp_path, monkeypatch, kind):
+def test_every_artifact_read_is_inside_retirement_exclusion(tmp_path, monkeypatch, kind):
     client, result, _, output = setup_api(tmp_path)
     original = Path.open
     observed = []
     def guarded(path, *args, **kwargs):
-        if output in path.parents and path.name != ".bundle-worker.lease":
+        if output in path.parents and path.name != ".bundle-readers.lease":
             with pytest.raises(BundleWorkerError, match="BUNDLE_WORKER_LEASE_HELD"):
-                with _singleton_lease(output / ".bundle-worker.lease"):
+                with _singleton_lease(output / ".bundle-readers.lease"):
                     pytest.fail("artifact read outside exclusion")
             observed.append(path)
         return original(path, *args, **kwargs)
@@ -55,7 +55,7 @@ def test_every_artifact_read_is_inside_worker_exclusion(tmp_path, monkeypatch, k
 def test_contention_retry_and_durable_fence_deny_reads(tmp_path):
     client, _, _, output = setup_api(tmp_path)
     url = f"/api/data-sync/bundles?generation_id={GEN}"
-    with _singleton_lease(output / ".bundle-worker.lease"):
+    with _singleton_lease(output / ".bundle-readers.lease"):
         response = client.get(url, headers=AUTH)
     assert response.status_code == 503 and response.json["error"] == "BUNDLE_DOWNLOAD_BUSY"
     assert response.headers["Retry-After"] == "1"
@@ -159,7 +159,7 @@ def test_existing_unmodified_clients_retry_busy_index_descriptor_and_chunk(tmp_p
         kind = "index" if "/bundles?" in url else "descriptor" if "descriptor=1" in url else "chunk"
         attempts[kind] = attempts.get(kind, 0) + 1
         if attempts[kind] == 1:
-            with _singleton_lease(output / ".bundle-worker.lease"):
+            with _singleton_lease(output / ".bundle-readers.lease"):
                 response = client.get(url, headers=AUTH)
             assert response.status_code == 503 and response.headers["Retry-After"] == "1"
         else:
@@ -171,4 +171,4 @@ def test_existing_unmodified_clients_retry_busy_index_descriptor_and_chunk(tmp_p
     assert attempts == {"index": 2, "descriptor": 2, "chunk": 2}
     assert receipts[-1]["status"] == "COMPLETE" and receipts[-1]["ack_sent"] is False
     assert any(row["status"] == "PACKAGE_VERIFIED" for row in receipts)
-    assert delays[:3] == [5, 0.25, 0.25]
+    assert delays[:3] == [5, 1, 1]

@@ -46,8 +46,10 @@ def retire_derivative_generation(source_root, output_root, generation_id, *,
         receipt_path, timeout_seconds=120, maximum_bytes=256 * 1024 * 1024):
     """Remove one exact reviewed generation; caller must park coordinator first.
 
-    protected_generations is evaluated inside the OS worker lease. It must
+    protected_generations is evaluated inside both OS leases. It must
     return all active/coordinator/download generation IDs, or fail closed.
+    It must not acquire either lease recursively (including via a bundle HTTP
+    request admitted to artifact access). Use a reservation-bound snapshot.
     """
     if (any(not isinstance(v, str) or not HEX.fullmatch(v) for v in
             (generation_id, current_generation, expected_state_sha256))
@@ -78,7 +80,13 @@ def retire_derivative_generation(source_root, output_root, generation_id, *,
             raise ValueError("DERIVATIVE_RETIRE_PROTECTION_UNAVAILABLE")
         if generation_id in ids:
             raise ValueError("DERIVATIVE_RETIRE_PROTECTED")
-    with _singleton_lease(lease):
+    # Fixed order: producer then reader/retirement. Readers never acquire the
+    # producer lease. Both are nonblocking, so a busy reader releases producer
+    # exclusion immediately. The reader lock remains held through all deletion.
+    reader_lease = output / ".bundle-readers.lease"
+    if reader_lease.exists() or reader_lease.is_symlink():
+        _stat(reader_lease)
+    with _singleton_lease(lease), _singleton_lease(reader_lease):
         protected()
         resume = receipt.exists() or receipt.is_symlink()
         if resume:

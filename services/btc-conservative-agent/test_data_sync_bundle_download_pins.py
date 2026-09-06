@@ -128,7 +128,7 @@ except Exception as exc:
     raise SystemExit(7)
 raise SystemExit(0)
 """
-    with _singleton_lease(lease):
+    with _singleton_lease(lease.with_name(".bundle-readers.lease")):
         result = subprocess.run([sys.executable, "-c", source, str(root), str(lease)],
                                 cwd=Path(__file__).parent, capture_output=True, text=True, timeout=10)
     assert result.returncode == 7 and "BUNDLE_WORKER_LEASE_HELD" in result.stdout

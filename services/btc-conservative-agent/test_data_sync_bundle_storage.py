@@ -111,10 +111,11 @@ def test_reparse_mock_on_root_or_package_rejected(tmp_path, monkeypatch):
         storage.check_derivative_admission(tmp_path, "1" * 64, 10)
 
 
-def test_lease_is_known_and_bounded(tmp_path):
-    (tmp_path / ".bundle-worker.lease").write_bytes(b"0")
+@pytest.mark.parametrize("name", [".bundle-worker.lease", ".bundle-readers.lease"])
+def test_lease_is_known_and_bounded(tmp_path, name):
+    (tmp_path / name).write_bytes(b"0")
     assert storage.check_derivative_admission(tmp_path, "1" * 64, 10)["estimated_bytes"] == 4096
-    (tmp_path / ".bundle-worker.lease").write_bytes(b"0" * 4097)
+    (tmp_path / name).write_bytes(b"0" * 4097)
     with pytest.raises(storage.DerivativeAdmissionError, match="LEASE_LIMIT"):
         storage.check_derivative_admission(tmp_path, "1" * 64, 10)
 
@@ -136,9 +137,9 @@ def test_directory_enumeration_is_bounded(tmp_path, monkeypatch):
         def __exit__(self, *args): pass
         def __iter__(self):
             for i in range(100000):
-                # Four generations, worker lease, one bounded early diagnostic,
+                # Four generations, two leases, one bounded early diagnostic,
                 # and one overflow entry are the complete admission bound.
-                if i > 6: raise AssertionError("unbounded enumeration")
+                if i > 7: raise AssertionError("unbounded enumeration")
                 yield SimpleNamespace(path=str(tmp_path / ("g-" + str(i) * 16)))
     monkeypatch.setattr(storage.os, "scandir", lambda _: Entries())
     with pytest.raises(storage.DerivativeAdmissionError, match="ENTRY_LIMIT"):
