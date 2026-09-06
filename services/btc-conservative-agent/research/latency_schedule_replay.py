@@ -25,6 +25,9 @@ def delayed_submission_schedule(schedule, *, delay_sec, ordering_treatment):
     if ordering_treatment != TREATMENT:
         return unsupported('CANCEL_REPLACE_ORDERING_UNSUPPORTED')
     try:
+        # Hashes must describe strict JSON, never NaN/Infinity or unserializable
+        # metadata. Validate before the normalizer can silently preserve it.
+        json.dumps({'schedule': schedule, 'delay_sec': delay_sec}, allow_nan=False)
         normalized, source_hash = _normalise_schedule(schedule)
     except (ValueError, TypeError, AttributeError, OverflowError):
         return unsupported('SOURCE_SCHEDULE_INVALID')
@@ -42,7 +45,7 @@ def delayed_submission_schedule(schedule, *, delay_sec, ordering_treatment):
           'expired_before_arrival_bucket_ids':expired,
           'evidence_basis':'DECLARED_SIMULATION','qualification_eligible':False,
           'requires_fresh_fill_replay':True}
-    signature=hashlib.sha256(json.dumps(body,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    signature=hashlib.sha256(json.dumps(body,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
     return {**body,'scenario_sha256':signature,
             'status':'READY' if delayed else 'NO_ACTIVE_INTERVALS', 'reason_codes':[]}
 

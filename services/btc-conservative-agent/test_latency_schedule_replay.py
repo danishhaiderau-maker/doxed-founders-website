@@ -80,3 +80,14 @@ def test_entry_missing_evidence_and_empty_intervals_never_claim_fill():
     assert empty['status']=='NO_ACTIVE_INTERVALS'
     assert empty['entry_receipt'] is None and empty['evaluated_schedule_sha256'] is None
     assert replay([],ordering_treatment='UNKNOWN')['status']=='UNKNOWN'
+
+
+@pytest.mark.parametrize('value',[float('nan'),float('inf'),float('-inf')])
+def test_nonfinite_generation_is_unsupported(value):
+    source=schedule()
+    source[0]['generation']=value
+    assert adapt(source)['status']=='UNSUPPORTED'
+
+
+def test_unserializable_delay_fails_closed():
+    assert adapt(schedule(),delay=10**5000)['status']=='UNSUPPORTED'
