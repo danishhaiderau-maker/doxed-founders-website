@@ -80,6 +80,27 @@ def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subproce
 
 COORDINATOR_STATUS_FILE = "bundle-coordinator-status.json"
 COORDINATOR_EARLY_STATUS_FILE = "bundle-coordinator-early-status.json"
+TRANSPORT_FAILURE_CODES = {
+    "source generation differs from inventory": "BUNDLE_SOURCE_GENERATION_MISMATCH",
+    "source generation changed while bundling": "BUNDLE_SOURCE_CHANGED_DURING_READ",
+    "idempotency receipt is not valid JSON": "BUNDLE_RECEIPT_JSON_INVALID",
+    "idempotency receipt is not COMMITTED": "BUNDLE_RECEIPT_NOT_COMMITTED",
+    "signal snapshot exceeds hard limit": "BUNDLE_SIGNAL_SNAPSHOT_TOO_LARGE",
+    "signal snapshot filename checksum mismatch": "BUNDLE_SIGNAL_SNAPSHOT_HASH_MISMATCH",
+    "signal snapshot is not valid JSON": "BUNDLE_SIGNAL_SNAPSHOT_JSON_INVALID",
+    "signal snapshot schema mismatch": "BUNDLE_SIGNAL_SNAPSHOT_SCHEMA_INVALID",
+}
+
+
+def _slice_failure_code(exc):
+    # Preserve known validation causes without exposing arbitrary messages/paths.
+    from data_sync_bundle_transport import BundleTransportError
+    code = str(exc)
+    if isinstance(exc, BundleTransportError) and code in TRANSPORT_FAILURE_CODES:
+        return TRANSPORT_FAILURE_CODES[code]
+    return code if re.fullmatch(r"[A-Z][A-Z0-9_]{1,95}", code) else "BUNDLE_SLICE_FAILED"
+
+
 COORDINATOR_ERRORS = frozenset({
     "RESOURCE_PRESSURE", "GENERATION_AUTHORITY_UNAVAILABLE", "BUNDLE_ADMISSION_UNAVAILABLE",
     "BUNDLE_COORDINATOR_BUDGET", "BUNDLE_COORDINATOR_SLICE_LIMIT", "BUNDLE_NO_CURSOR_PROGRESS",
@@ -90,7 +111,7 @@ COORDINATOR_ERRORS = frozenset({
     "INVOCATION_TIME_BUDGET_EXHAUSTED_BEFORE_BUILD", "PACKAGE_HARD_BUDGET_EXCEEDED",
     "PACKAGE_INDEX_LIMIT_EXCEEDED", "PACKAGE_DESCRIPTOR_TOO_LARGE",
     "PAGE_INDEX_CURSOR_OR_READ_BUDGET_INVALID", "INVENTORY_PAGE_ROW_CURSOR_INVALID",
-})
+}) | frozenset(TRANSPORT_FAILURE_CODES.values())
 
 
 def _persist_coordinator_status(metadata, source_root, output_root, receipt, *, started_at,
@@ -297,9 +318,7 @@ def _child():
         receipt.update({key: result.get(key) for key in
                         ("status", "cursor", "package_index_count", "inventory_rows_selected")})
     except Exception as exc:
-        code = str(exc)
-        receipt.update(status="FAILED", error=code if re.fullmatch(r"[A-Z][A-Z0-9_]{1,95}", code)
-                       else "BUNDLE_SLICE_FAILED")
+        receipt.update(status="FAILED", error=_slice_failure_code(exc))
     sys.stdout.write(json.dumps(receipt, separators=(",", ":"), sort_keys=True))
     return 1 if receipt["status"] == "FAILED" else 0
 
