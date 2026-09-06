@@ -1093,6 +1093,7 @@ def reconcile_overdue_expected_order_decisions(
     active_keys = {key(row) for row in active_rows if all(key(row))}
     now_ts = float(observed_ts if observed_ts is not None else time.time())
     result = {"expected": 0, "reconciled": 0, "duplicates": 0,
+              "deferred": 0, "blocked": 0, "unwritten": 0,
               "not_overdue": 0, "resolved_or_active": 0}
     for decision in rows("decision"):
         if (
@@ -1136,11 +1137,17 @@ def reconcile_overdue_expected_order_decisions(
             if field in decision:
                 row[field] = copy.deepcopy(decision[field])
         write = store.append("lifecycle", row)
-        if write.get("written"):
+        if write.get("deferred") is True:
+            result["deferred"] += 1
+        elif write.get("blocked") is True:
+            result["blocked"] += 1
+        elif write.get("written") is True:
             result["reconciled"] += 1
             terminal_keys.add(identity)
-        else:
+        elif write.get("duplicate") is True:
             result["duplicates"] += 1
+        else:
+            result["unwritten"] += 1
     return result
 
 
