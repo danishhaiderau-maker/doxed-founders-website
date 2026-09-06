@@ -115,7 +115,15 @@ def test_revision_mismatch_is_visible_and_blocks_every_decision_surface(monkeypa
     assert any("revision" in reason.lower() for reason in summary["stale"]["reasons"])
     assert integrity["valid"] is False
     assert integrity["report_status"] == "STALE_GENERATION"
-    assert "Stale report" in page and "stale-banner" in page
+    # The UI now distinguishes a stale saved generation from a current run;
+    # retain the visible fail-closed warning and expandable exact reasons.
+    assert 'id="stale-banner"' in page
+    stale_branch = page.split("if (stale.stale) {", 1)[1].split("} else if", 1)[0]
+    assert "banner.style.display = 'block'" in stale_branch
+    assert "Stale saved analyzer generation — read-only." in stale_branch
+    assert "do not start a duplicate analyzer" in stale_branch
+    assert "Show exact parity and freshness receipts" in stale_branch
+    assert "escapeHtml(reasons" in stale_branch
     for payload in (decision, best, safe):
         assert payload["live_policy_change_allowed"] is False
         assert payload.get("real_bitfinex_trading_allowed", False) is False
