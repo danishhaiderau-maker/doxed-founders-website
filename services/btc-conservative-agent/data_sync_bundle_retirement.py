@@ -181,6 +181,7 @@ def retire_derivative_generation(source_root, output_root, generation_id, *,
             payload = {"schema": "transport_derivative_retirement_v1", "status": "VERIFIED_RETIREMENT_INTENT",
             "generation_id": generation_id, "current_generation": current_generation,
             "state_sha256": expected_state_sha256, "artifacts": verified, "bytes": total,
+            "generation_identity": state["generation"],
             "source_root": str(source), "output_root": str(output), "directory_identities": directories,
             "raw_source_deleted": False, "reproducible_transport_only": True}
         payload = _seal(payload)
