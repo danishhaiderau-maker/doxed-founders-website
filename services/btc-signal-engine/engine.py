@@ -48048,16 +48048,27 @@ def all_opportunity_future_path_evidence_loop():
                 "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
             })
+            from future_path_attempt_receipt import run_attempt
+            invocation_epoch = _collector_v22_epoch_id()
+            invocation_now = time.time()
+            with state_lock:
+                prior = state.get("all_opportunity_future_path_evidence")
+                if isinstance(prior, dict):
+                    prior.update(is_latest_attempt=False, latest_attempt_status="RUNNING")
             try:
-                completed = subprocess.run(
+                outcome = run_attempt(
+                    receipt_root=result_path.parent, result_path=result_path,
+                    epoch_id=invocation_epoch, source_revision=_runtime_git_rev_exact(),
+                    expected_now_ts=invocation_now,
+                    invoke=lambda: subprocess.run(
                     [
                         sys.executable,
                         str(Path(__file__).resolve().with_name(
                             "research_v3_future_paths_worker.py"
                         )),
                         "--data-dir", os.getcwd(),
-                        "--epoch-id", _collector_v22_epoch_id(),
-                        "--now-ts", str(time.time()),
+                        "--epoch-id", invocation_epoch,
+                        "--now-ts", str(invocation_now),
                         "--max-batch", "64",
                         "--result", str(result_path),
                     ],
@@ -48066,15 +48077,36 @@ def all_opportunity_future_path_evidence_loop():
                     timeout=FUTURE_PATH_WORKER_WALL_TIMEOUT_SEC,
                     check=False,
                     env=worker_env,
+                    ),
                 )
-                if completed.returncode != 0:
-                    raise RuntimeError("future-path worker failed")
-                receipt = json.loads(result_path.read_text(encoding="utf-8"))
-                if receipt.get("schema") != "all_opportunity_future_path_worker_result_v1":
-                    raise RuntimeError("future-path worker result invalid")
+                receipt = outcome["worker_result"]
+                with state_lock:
+                    state["all_opportunity_future_path_attempt"] = copy.deepcopy(outcome["attempt"])
+                    current_epoch = _collector_v22_epoch_id() == invocation_epoch
+                    state["all_opportunity_future_path_attempt"]["is_current_epoch"] = current_epoch
+                    if not current_epoch:
+                        receipt = None
+                    prior = state.get("all_opportunity_future_path_evidence")
+                    if receipt is None and isinstance(prior, dict):
+                        prior["is_latest_attempt"] = False
+                        prior["latest_attempt_status"] = "FAILED"
+                if receipt is None:
+                    raise RuntimeError(outcome["attempt"]["failure_code"] or "FUTURE_PATH_EPOCH_CHANGED")
+            except Exception:
+                with state_lock:
+                    prior = state.get("all_opportunity_future_path_evidence")
+                    if isinstance(prior, dict):
+                        prior.update(is_latest_attempt=False, latest_attempt_status="FAILED")
+                raise
             finally:
                 result_path.unlink(missing_ok=True)
             with state_lock:
+                if _collector_v22_epoch_id() != invocation_epoch:
+                    state["all_opportunity_future_path_attempt"]["is_current_epoch"] = False
+                    prior = state.get("all_opportunity_future_path_evidence")
+                    if isinstance(prior, dict):
+                        prior.update(is_latest_attempt=False, latest_attempt_status="FAILED")
+                    raise RuntimeError("FUTURE_PATH_EPOCH_CHANGED")
                 state["all_opportunity_future_path_evidence"] = {
                     key: copy.deepcopy(receipt.get(key))
                     for key in (
@@ -48083,6 +48115,9 @@ def all_opportunity_future_path_evidence_loop():
                         "unknown_count", "source_tape_present",
                     )
                 }
+                state["all_opportunity_future_path_evidence"].update(
+                    is_latest_attempt=True, latest_attempt_status="SUCCESS",
+                )
             if receipt.get("complete_count") or receipt.get("unknown_count"):
                 logger.info(
                     "[COLLECTOR_V3] all-opportunity future paths "
