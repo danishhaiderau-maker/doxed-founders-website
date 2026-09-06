@@ -13,6 +13,7 @@ def _load(name, path):
     # selection: each test redirects ROOT/DATA_ROOT to its own isolated store
     # after import, and production containment remains enforced by the module.
     inherited_data_root = os.environ.pop("BTC_AGENT_DATA_DIR", None)
+    inherited_report_root = os.environ.pop("BTC_AGENT_REPORT_DIR", None)
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -21,6 +22,8 @@ def _load(name, path):
     finally:
         if inherited_data_root is not None:
             os.environ["BTC_AGENT_DATA_DIR"] = inherited_data_root
+        if inherited_report_root is not None:
+            os.environ["BTC_AGENT_REPORT_DIR"] = inherited_report_root
     return module
 
 
