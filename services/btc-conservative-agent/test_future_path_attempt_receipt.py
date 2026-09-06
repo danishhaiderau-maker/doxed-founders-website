@@ -63,3 +63,27 @@ def test_missing_revision_is_durable_without_invoking_worker(tmp_path, revision)
     assert saved["status"] == "FAILED"
     assert output["worker_result"] is None
     assert "private" not in (tmp_path / NAME).read_text()
+
+
+@pytest.mark.parametrize("mode", ["blocked", "deferred", "absent", "malformed", "partial", "bool", "zero"])
+def test_terminal_dispositions_are_additive_bounded_and_not_qualification(tmp_path, mode):
+    result = tmp_path / ("future-path-worker-" + "b"*32 + ".json")
+    value = {"schema":"all_opportunity_future_path_worker_result_v1", "epoch_id":"epoch-test",
+             **dict.fromkeys(COUNTS,0), "complete_count":1,"mature_selected":1,"source_tape_present":True}
+    if mode != "absent":
+        value["terminal_append_dispositions"] = dict.fromkeys(("written","duplicate","deferred","blocked","unknown"),0)
+        value["terminal_append_dispositions"][mode if mode in ("blocked","deferred") else "blocked"] = 1 if mode != "malformed" else "private"
+        value["terminal_append_authority"] = "APPEND_DISPOSITION_ONLY_NOT_QUALIFICATION"
+        value["terminal_append_attempted_count"] = 1
+        if mode == "partial": value["terminal_append_dispositions"]["blocked"] = 0
+        if mode == "bool": value["terminal_append_dispositions"]["blocked"] = True
+        if mode == "zero":
+            value.update(complete_count=0,mature_selected=0,terminal_append_attempted_count=0)
+            value["terminal_append_dispositions"]["blocked"] = 0
+    def invoke():
+        result.write_text(json.dumps(value)); return SimpleNamespace(returncode=0)
+    saved = run_attempt(receipt_root=tmp_path,result_path=result,epoch_id="epoch-test",source_revision="a"*40,invoke=invoke)["attempt"]
+    assert saved["status"] == "SUCCESS"
+    assert saved["terminal_append_dispositions_status"] == ("AVAILABLE" if mode in ("blocked","deferred","zero") else "UNAVAILABLE")
+    if mode in ("blocked","deferred"): assert saved["terminal_append_dispositions"][mode] == 1
+    assert "private" not in (tmp_path/NAME).read_text()

@@ -582,6 +582,11 @@ def mature_future_market_paths(
                 if start - pre_entry <= ts <= end:
                     selected_rows[key][ts] = row
     complete = unknown = 0
+    terminal_append_dispositions = dict.fromkeys(("written", "duplicate", "deferred", "blocked", "unknown"), 0)
+    def count_terminal_append(write):
+        flags = [key for key in ("written", "duplicate", "deferred", "blocked")
+                 if isinstance(write, dict) and write.get(key) is True]
+        terminal_append_dispositions[flags[0] if len(flags) == 1 else "unknown"] += 1
     writes: list[dict[str, Any]] = []
     # A shared opportunity commonly has one decision per paper family. Reuse
     # the identical immutable window calculation/object rather than hashing
@@ -604,6 +609,7 @@ def mature_future_market_paths(
             "segment_ref": None,
             "evidence_only": True,
         }))
+        count_terminal_append(writes[-1])
         unknown += 1
     for item in selected:
         start_ts, end_ts = windows[item["owner_key"]]
@@ -702,6 +708,7 @@ def mature_future_market_paths(
             "evidence_only": True,
         })
         writes.append(write)
+        count_terminal_append(write)
     _store_cursor(root, str(epoch_id), next_cursor)
     return {
         "schema": FUTURE_PATH_SCHEMA,
@@ -713,6 +720,9 @@ def mature_future_market_paths(
         "mature_selected": len(selected),
         "cursor": next_cursor,
         "complete_count": complete,
+        "terminal_append_dispositions": terminal_append_dispositions,
+        "terminal_append_attempted_count": sum(terminal_append_dispositions.values()),
+        "terminal_append_authority": "APPEND_DISPOSITION_ONLY_NOT_QUALIFICATION",
         "unknown_count": unknown,
         "source_tape_present": source_exists,
         "bounded_tape_read": tail_read,

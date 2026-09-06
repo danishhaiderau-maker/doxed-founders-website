@@ -75,6 +75,20 @@ def run_attempt(*, receipt_root, result_path, epoch_id, source_revision, invoke,
                     or type(value.get("source_tape_present")) is not bool):
                 raise ValueError("RESULT_INVALID")
             worker = value
+            dispositions = value.get("terminal_append_dispositions")
+            keys = {"written", "duplicate", "deferred", "blocked", "unknown"}
+            if (isinstance(dispositions, dict) and set(dispositions) == keys
+                    and all(type(v) is int and 0 <= v <= 2**63-1 for v in dispositions.values())
+                    and sum(dispositions.values()) == value["complete_count"] + value["unknown_count"]
+                    and type(value.get("terminal_append_attempted_count")) is int
+                    and value["terminal_append_attempted_count"] == sum(dispositions.values())
+                    and value.get("terminal_append_authority") == "APPEND_DISPOSITION_ONLY_NOT_QUALIFICATION"):
+                payload["terminal_append_dispositions"] = dict(dispositions)
+                payload["terminal_append_attempted_count"] = value["terminal_append_attempted_count"]
+                payload["terminal_append_dispositions_status"] = "AVAILABLE"
+            else:
+                payload["terminal_append_dispositions_status"] = "UNAVAILABLE"
+            payload["terminal_append_authority"] = "APPEND_DISPOSITION_ONLY_NOT_QUALIFICATION"
             payload.update(status="SUCCESS", failure_code=None,
                            counts={k: value[k] for k in COUNTS}, source_tape_present=value["source_tape_present"])
     except subprocess.TimeoutExpired:
