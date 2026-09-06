@@ -1,5 +1,6 @@
 """Bounded reset rejection codes; never publish exception text or filesystem paths."""
 from research_exact_deletion import ResearchDeletionRejected
+import re
 
 
 REJECTION_CODES = frozenset("""
@@ -29,4 +30,11 @@ def reset_failure_fields(error):
         code = error.args[0] if len(error.args) == 1 else None
         result["rejection_code"] = (code if isinstance(code, str) and code in REJECTION_CODES
                                     else "UNCLASSIFIED_RESEARCH_DELETION_REJECTION")
+        detail = getattr(error, 'hash_mismatch', None)
+        if code == 'EXPECTED_SHA256_MISMATCH' and isinstance(detail, dict):
+            keys = ('target_path_sha256', 'expected_sha256', 'observed_sha256')
+            if (all(isinstance(detail.get(k), str) and re.fullmatch(r'[0-9a-f]{64}', detail[k]) for k in keys)
+                    and type(detail.get('mismatch_count')) is int
+                    and 1 <= detail['mismatch_count'] <= 100000):
+                result['hash_mismatch'] = {k: detail[k] for k in (*keys, 'mismatch_count')}
     return result

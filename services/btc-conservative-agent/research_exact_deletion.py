@@ -275,9 +275,18 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
     root, paths, receipt, journal, context, expected_hashes = (
         admission[key] for key in ("root", "paths", "receipt", "journal", "context", "expected_hashes"))
     inventory = [_fingerprint(path) for path in paths]
-    if any(row["path"] in expected_hashes and row["sha256"] != expected_hashes[row["path"]]
-           for row in inventory):
-        raise ResearchDeletionRejected("EXPECTED_SHA256_MISMATCH")
+    mismatches = [row for row in inventory if row["path"] in expected_hashes
+                  and row["sha256"] != expected_hashes[row["path"]]]
+    if mismatches:
+        error = ResearchDeletionRejected("EXPECTED_SHA256_MISMATCH")
+        row = mismatches[0]
+        error.hash_mismatch = {
+            'target_path_sha256': hashlib.sha256(row['path'].encode('utf-8')).hexdigest(),
+            'expected_sha256': expected_hashes[row['path']],
+            'observed_sha256': row['sha256'],
+            'mismatch_count': len(mismatches),
+        }
+        raise error
     result = {"schema": "research_exact_deletion_v1", "status": "PREPARED", "root": str(root),
               "raw_payloads_retained": False, "payload_copy_performed": False,
               "recovery_states": dict(recovery_states), "inventory": inventory,
