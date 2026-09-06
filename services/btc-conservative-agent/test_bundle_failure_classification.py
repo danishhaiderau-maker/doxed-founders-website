@@ -28,3 +28,20 @@ def test_real_child_preserves_changed_source_failure(tmp_path):
     assert result["status"] == "FAILED"
     assert result["error"] == "BUNDLE_SOURCE_GENERATION_MISMATCH", result
     assert str(tmp_path) not in json.dumps(result)
+
+
+@pytest.mark.parametrize("code", sorted(runtime.DERIVATIVE_ADMISSION_CODES) + [
+    "BUNDLE_DERIVATIVE_SECRET_UNKNOWN", "private /secret/path"])
+def test_early_persist_preserves_only_static_derivative_codes(tmp_path, code):
+    source = tmp_path / "source"
+    source.mkdir()
+    metadata = _fixture(tmp_path, [])
+    output = tmp_path / "output"
+    assert runtime._persist_coordinator_status(metadata, source, output,
+        {"status": "FAILED", "error": "BUNDLE_CIRCUIT_OPEN", "last_error": code},
+        started_at="2026-09-06T00:00:00Z", terminal=True)
+    saved = json.loads((output / runtime.COORDINATOR_EARLY_STATUS_FILE).read_text())
+    assert saved["last_error"] == (code if code in runtime.DERIVATIVE_ADMISSION_CODES else "BUNDLE_WORKER_FAILURE")
+    assert saved["worker_state_present"] is False
+    assert saved["authority"] == "DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY"
+    assert not (output / ("g-" + metadata["generation_id"][:16])).exists()
