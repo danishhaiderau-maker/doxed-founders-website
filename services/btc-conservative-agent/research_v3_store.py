@@ -1998,6 +1998,10 @@ class V3EvidenceStore:
             snapshot = materialize_signal_time_baseline_schedules(material)
             material["baseline_schedule_snapshot"] = snapshot
             material["baseline_schedules"] = snapshot["schedules"]
+            from research_timing_capture import materialize_timing_declarations
+            timing = materialize_timing_declarations(material, snapshot)
+            material['research_timing_capture_status'] = timing
+            material['research_timing_declarations'] = timing['declarations']
         line = canonical_json(material) + "\n"
         if not storage_blocks_new_nonessential_research(str(self.root)):
             # Empty-ledger completeness is constant work and is required so a

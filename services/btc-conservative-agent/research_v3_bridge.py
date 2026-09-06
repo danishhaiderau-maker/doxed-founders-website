@@ -214,6 +214,13 @@ def _signal_time_baseline_inputs(*sources: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(source, Mapping):
             continue
         declaration = source.get("research_baseline_context_declaration")
+        for timing_key in ('research_timing_config', 'research_timing_config_sha256'):
+            if timing_key in source:
+                if timing_key not in result:
+                    result[timing_key] = copy.deepcopy(source[timing_key])
+                elif result[timing_key] != source[timing_key]:
+                    # A conflict must not silently select a timing assumption.
+                    result[timing_key] = None
         for context_key in ("original_context_signal_ts", "research_baseline_context_status"):
             if context_key in source and context_key not in result:
                 result[context_key] = copy.deepcopy(source[context_key])

@@ -15842,6 +15842,8 @@ def _write_v3_shared_lane_decision(
                 "feature_snapshot_at_signal": copy.deepcopy(features or {}),
                 "research_baseline_context_declaration": copy.deepcopy((ai or {}).get("research_baseline_context_declaration")),
                 "research_baseline_context_status": copy.deepcopy((ai or {}).get("research_baseline_context_status")),
+                "research_timing_config": copy.deepcopy((ai or {}).get("research_timing_config")),
+                "research_timing_config_sha256": (ai or {}).get("research_timing_config_sha256"),
                 "original_context_signal_ts": copy.deepcopy((ai or {}).get("original_context_signal_ts")),
             }
         failure_source = {**source, **lane_policy}
@@ -17644,6 +17646,8 @@ def evaluate_signal_with_ai(
         # Capture before the API call so downstream signal timestamps cannot
         # accidentally backdate current quantity/ATR observations.
         from research.runtime_baseline_declaration import build_runtime_baseline_declaration
+        from research_timing_capture import load_runtime_timing_config
+        research_timing_capture = load_runtime_timing_config()
         try:
             research_quantity_capture = _capture_runtime_quantity_constraints(
                 evidence_symbol=str(BITFINEX_WS_SYMBOL).upper(), source_revision=_runtime_git_rev_exact())
@@ -17747,6 +17751,7 @@ def evaluate_signal_with_ai(
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
         }
         ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
+        ai_result.update(research_timing_capture)
         ai_result["research_baseline_context_status"] = research_context_capture
         ai_result["shared_ai_call_ts"] = utc_iso()
         ai_result["original_context_signal_ts"] = ctx.get("signal_ts") or ctx.get("created_ts_ts")
