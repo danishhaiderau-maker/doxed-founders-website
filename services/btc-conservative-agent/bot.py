@@ -39149,6 +39149,18 @@ def _start_lifecycle_pipeline_runtime() -> bool:
         return False
     try:
         runtime_module = importlib.import_module("lifecycle_pipeline_runtime")
+        # Explicit incident recovery only; never infer reset authority from a
+        # truncated ledger. Run before the lifecycle owner exists.
+        from lifecycle_reset_recovery_startup import initialize_reset_recovery
+        initialize_reset_recovery(
+            root=_data_sync_runtime_root(),
+            operation_path=os.getenv("LIFECYCLE_RESET_OPERATION_PATH") or None,
+            operation_sha256=os.getenv("LIFECYCLE_RESET_OPERATION_SHA256") or None,
+            trigger=os.getenv("LIFECYCLE_RESET_RECOVERY_TRIGGER") or None,
+            epoch_provider=_collector_v22_epoch_id,
+            reset_lock=_fresh_collection_lock,
+            owner_quiescent=lambda: _LIFECYCLE_PIPELINE_RUNTIME is None,
+        )
         os_module = globals().get("os")
         rotation_enabled_raw = (
             os_module.getenv("V3_PRODUCTION_ROTATION_ENABLED", "")

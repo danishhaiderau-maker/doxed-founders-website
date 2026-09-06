@@ -53,6 +53,12 @@ _CLASSIFIED_FAILURE_CODES = frozenset({
     "LIFECYCLE_RECOVERY_STAGED_SOURCE_TAMPERED", "LIFECYCLE_RECOVERY_STATE_INVALID",
     "LIFECYCLE_RECOVERY_STATE_MISMATCH", "LIFECYCLE_RECOVERY_STATE_TAMPERED",
     "LIFECYCLE_RECOVERY_SWAP_FAILED", "LIFECYCLE_RECOVERY_TRIGGER_INVALID",
+    "LIFECYCLE_RECOVERY_COMPLETION_INVALID", "LIFECYCLE_RECOVERY_COMPLETION_TAMPERED",
+    "LIFECYCLE_RESET_RECEIPT_DUPLICATE_KEY", "LIFECYCLE_RESET_RECEIPT_NONFINITE",
+    "LIFECYCLE_RESET_RECEIPT_PATH_INVALID", "LIFECYCLE_RESET_RECEIPT_TOO_LARGE",
+    "LIFECYCLE_RESET_RECEIPT_HASH_MISMATCH", "LIFECYCLE_RESET_PROOF_INVALID",
+    "LIFECYCLE_RESET_CURSOR_MISMATCH_NOT_PROVEN",
+    "LIFECYCLE_RESET_CURRENT_PROOF_REQUIRED", "LIFECYCLE_RESET_PROOF_CHANGED",
 })
 
 
@@ -67,7 +73,7 @@ def _classified_failure(exc: BaseException) -> dict[str, Any]:
     if not isinstance(exc, ValueError):
         return generic
     recovery_match = re.fullmatch(
-        r"(LIFECYCLE_RECOVERY_[A-Z_]+)(?::([A-Za-z0-9_]+)\.jsonl)?", str(exc),
+        r"(LIFECYCLE_(?:RECOVERY|RESET)_[A-Z_]+)(?::([A-Za-z0-9_]+)\.jsonl)?", str(exc),
     )
     if recovery_match:
         code, ledger = recovery_match.groups()
@@ -332,7 +338,7 @@ def verify_result(
         if code == "WORKER_PIPELINE_FAILED":
             if set(failure) != {"error_class", "error_code"}:
                 raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
-        elif str(code).startswith("LIFECYCLE_RECOVERY_"):
+        elif str(code).startswith(("LIFECYCLE_RECOVERY_", "LIFECYCLE_RESET_")):
             if failure.get("error_class") != "ValueError":
                 raise ValueError("WORKER_FAILURE_RECEIPT_INVALID")
             if "ledger" in failure and failure.get("ledger") not in LEDGER_NAMES:
@@ -386,6 +392,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             }
         pipeline = process_incremental_lifecycle_pipeline(
             request["_data_root"], now=request["_now"],
+            current_epoch_id=request.get("_epoch_id"),
             max_lifecycles=request["_max_lifecycles"],
             max_scan_bytes=request["_max_scan_bytes"],
             max_scan_rows=request["_max_scan_rows"],

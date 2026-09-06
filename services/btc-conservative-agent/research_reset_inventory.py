@@ -47,6 +47,7 @@ lane_opportunity_capture.json
 DERIVED_INDEXES = frozenset({
     "research_events_v22.index.json", "research_events_v22.index.sqlite3",
     "v3/qualification_horizon_index.sqlite3",
+    "v3/lifecycle_bundle_index/lifecycle_index.sqlite3",
 })
 POLICY_CACHE_FILES = frozenset({"results.sqlite", "binding-index.jsonl.gz",
     "binding-index-summary.json", "conservative-results.jsonl.gz"})
@@ -352,6 +353,10 @@ def plan_research_reset(runtime_root, *, proof=None, max_entries=200_000, max_de
         relative = record["path"]
         reason = unsafe or _essential(relative)
         category = None
+        if (relative == "v3/lifecycle_bundle_index/lifecycle_index.sqlite3"
+                and any(io_path(record["absolute_path"] + suffix).exists()
+                        for suffix in ("-wal", "-shm", "-journal"))):
+            reason = "LIFECYCLE_SQLITE_SIDECARS_REQUIRE_OWNER_RESET"
         if (relative == "research_accumulator/research_trades_v983.db"
                 and any(io_path(record["absolute_path"] + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))):
             reason = "ACCUMULATOR_SQLITE_SIDECARS_REQUIRE_OWNER_RESET"

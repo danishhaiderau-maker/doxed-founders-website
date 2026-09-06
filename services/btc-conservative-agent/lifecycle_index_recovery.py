@@ -23,6 +23,26 @@ RECEIPT_SCHEMA = "lifecycle_index_rotation_recovery_receipt_v1"
 COPY_BUDGET = 8 * 1024 * 1024
 REBUILD_BUDGET = 8 * 1024 * 1024
 HASH_TIMEOUT_SEC = 20
+MAX_RESET_RECEIPT_BYTES = 64 * 1024 * 1024
+
+
+def _strict_reset_json(raw):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("LIFECYCLE_RESET_RECEIPT_DUPLICATE_KEY")
+            result[key] = value
+        return result
+    def constant(value):
+        raise ValueError("LIFECYCLE_RESET_RECEIPT_NONFINITE")
+    def finite_float(value):
+        import math
+        number = float(value)
+        if not math.isfinite(number):
+            return constant(value)
+        return number
+    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite_float)
 
 
 def _directory_id(state: dict[str, Any]) -> str:
@@ -128,8 +148,9 @@ def _components(index_dir: Path) -> list[Path]:
     return [path for path in (base, Path(f"{base}-wal"), Path(f"{base}-shm")) if path.is_file()]
 
 
-def _initial(root: Path, trigger: str, index_dir: Path) -> dict[str, Any]:
-    if not re.fullmatch(r"SOURCE_LEDGER_ROTATED:[A-Za-z0-9_.-]+\.jsonl", trigger):
+def _initial(root: Path, trigger: str, index_dir: Path, reset_authorized=False) -> dict[str, Any]:
+    pattern = r"SOURCE_LEDGER_(?:ROTATED|TRUNCATED):[A-Za-z0-9_.-]+\.jsonl" if reset_authorized else r"SOURCE_LEDGER_ROTATED:[A-Za-z0-9_.-]+\.jsonl"
+    if not re.fullmatch(pattern, trigger):
         raise ValueError("LIFECYCLE_RECOVERY_TRIGGER_INVALID")
     sources = []
     ledger_root = (root / "v3" / "ledgers").resolve(strict=True)
@@ -363,11 +384,117 @@ def _swap(state: dict[str, Any], index_dir: Path, staging: Path) -> None:
     _atomic_json(quarantine / "completion.json", state)
 
 
-def recover_rotated_index(root: str | Path, trigger: str) -> dict[str, Any]:
+def _reset_binding(root, trigger, operation_path, expected_sha256, current_epoch_id):
+    path = Path(operation_path)
+    lexical = Path(os.path.abspath(path))
+    if path.is_symlink() or lexical.resolve() != lexical or not path.is_file():
+        raise ValueError("LIFECYCLE_RESET_RECEIPT_PATH_INVALID")
+    try: lexical.relative_to(root / "research_reset_receipts")
+    except ValueError as exc: raise ValueError("LIFECYCLE_RESET_RECEIPT_PATH_INVALID") from exc
+    if path.stat().st_size > MAX_RESET_RECEIPT_BYTES:
+        raise ValueError("LIFECYCLE_RESET_RECEIPT_TOO_LARGE")
+    with path.open("rb") as handle:
+        raw = handle.read(MAX_RESET_RECEIPT_BYTES + 1)
+    if len(raw) > MAX_RESET_RECEIPT_BYTES:
+        raise ValueError("LIFECYCLE_RESET_RECEIPT_TOO_LARGE")
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ValueError("LIFECYCLE_RESET_RECEIPT_HASH_MISMATCH")
+    operation = _strict_reset_json(raw)
+    _validate_reset_operation(root, trigger, operation, current_epoch_id)
+    return {"operation_path": str(lexical), "operation_sha256": expected_sha256,
+            "epoch_id": current_epoch_id, "source_revision": operation["proof"]["source_revision"]}
+
+
+def _validate_reset_operation(root, trigger, operation, current_epoch_id):
+    """Pure receipt comparisons; does not access or change the bound runtime."""
+    proof = operation.get("proof") or {}
+    from research_reset_inventory import _proof_valid
+    deletion = (operation.get("deletion") or {}).get("deletion_receipt") or {}
+    canonical = json.dumps(proof, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    ledger = trigger.removeprefix("SOURCE_LEDGER_TRUNCATED:").removesuffix(".jsonl")
+    target = str(root / "v3" / "ledgers" / f"{ledger}.jsonl")
+    if (not _proof_valid(root, proof)
+            or not trigger.startswith("SOURCE_LEDGER_TRUNCATED:") or ledger not in LEDGER_NAMES
+            or operation.get("schema") != "bot_destructive_research_reset_v1"
+            or operation.get("stage") != "COMPLETE" or operation.get("accounting_preserved") is not True
+            or proof.get("runtime_root") != str(root)
+            or not current_epoch_id or operation.get("new_epoch_id") != current_epoch_id
+            or proof.get("new_epoch_id") != current_epoch_id
+            or proof.get("retired_epoch_id") in (None, "", current_epoch_id)
+            or not proof.get("source_revision")
+            or deletion.get("status") != "COMPLETE" or deletion.get("root") != str(root)
+            or deletion.get("context", {}).get("proof_sha256") != hashlib.sha256(canonical.encode()).hexdigest()
+            or target not in deletion.get("deleted", []) or target not in operation.get("deleted", [])):
+        raise ValueError("LIFECYCLE_RESET_PROOF_INVALID")
+
+
+def recover_reset_index(root, trigger, *, operation_path, operation_sha256, current_epoch_id):
+    """Caller supplies a freshly authoritative epoch under its reset barrier.
+
+    This only repairs a derived index; it never mutates source ledgers.
+    """
+    root = Path(root).resolve()
+    # COMPLETE is a historical receipt, not a frozen hash of the mutable live
+    # index. Normal pipeline validation remains responsible for its sources.
+    state_path = root / "v3" / "lifecycle_bundle_index" / "recovery-state.json"
+    if state_path.is_file():
+        with _exclusive_index_lock(root):
+            state = _load_state(state_path)
+            if state.get("phase") == "COMPLETE" and state.get("completion_receipt_sha256"):
+                binding = state.get("reset_proof") or {}
+                if (state.get("schema") != SCHEMA or state.get("trigger") != trigger
+                        or binding.get("operation_path") != str(Path(os.path.abspath(operation_path)))
+                        or binding.get("operation_sha256") != operation_sha256
+                        or binding.get("epoch_id") != current_epoch_id):
+                    raise ValueError("LIFECYCLE_RESET_PROOF_INVALID")
+                index_dir = state_path.parent
+                completion = index_dir / "recovery-quarantine" / _directory_id(state) / "completion.json"
+                if completion.stat().st_size > 1024 * 1024:
+                    raise ValueError("LIFECYCLE_RECOVERY_COMPLETION_INVALID")
+                with completion.open("rb") as handle:
+                    raw = handle.read(1024 * 1024 + 1)
+                if (len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != state["completion_receipt_sha256"]):
+                    raise ValueError("LIFECYCLE_RECOVERY_COMPLETION_TAMPERED")
+                receipt = _strict_reset_json(raw)
+                if (receipt.get("recovery_id") != state.get("recovery_id")
+                        or receipt.get("reset_proof") != binding or receipt.get("phase") != "COMPLETE"
+                        or not (index_dir / "lifecycle_index.sqlite3").is_file()):
+                    raise ValueError("LIFECYCLE_RECOVERY_COMPLETION_INVALID")
+                return {"status": "COMPLETE", "complete": True, "recovery_id": state["recovery_id"]}
+    binding = _reset_binding(root, trigger, operation_path, operation_sha256, current_epoch_id)
+    return recover_rotated_index(root, trigger, _reset_proof=binding)
+
+
+def recover_rotated_index(root: str | Path, trigger: str, *, _reset_proof=None) -> dict[str, Any]:
     root = Path(root).resolve(); index_dir = root / "v3" / "lifecycle_bundle_index"
     state_path = index_dir / "recovery-state.json"
     with _exclusive_index_lock(root):
-        state = _load_state(state_path) if state_path.is_file() else _initial(root, trigger, index_dir)
+        if state_path.is_file():
+            state = _load_state(state_path)
+        else:
+            if _reset_proof is not None:
+                import sqlite3
+                ledger = trigger.split(":", 1)[1].removesuffix(".jsonl")
+                database = index_dir / "lifecycle_index.sqlite3"
+                connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+                try:
+                    cursor = connection.execute("SELECT byte_offset FROM ledger_cursor WHERE ledger=?", (ledger,)).fetchone()
+                finally:
+                    connection.close()
+                if cursor is None or int(cursor[0]) <= (root / "v3" / "ledgers" / f"{ledger}.jsonl").stat().st_size:
+                    raise ValueError("LIFECYCLE_RESET_CURSOR_MISMATCH_NOT_PROVEN")
+            state = _initial(root, trigger, index_dir, reset_authorized=_reset_proof is not None)
+            if _reset_proof is not None:
+                state["reset_proof"] = _reset_proof
+                state["recovery_id"] = hashlib.sha256(json.dumps(
+                    [state["recovery_id"], _reset_proof], sort_keys=True).encode()).hexdigest()
+        if state.get("reset_proof") != _reset_proof:
+            raise ValueError("LIFECYCLE_RESET_CURRENT_PROOF_REQUIRED")
+        if _reset_proof is not None:
+            actual = _reset_binding(root, trigger, _reset_proof["operation_path"],
+                                    _reset_proof["operation_sha256"], _reset_proof["epoch_id"])
+            if actual != _reset_proof:
+                raise ValueError("LIFECYCLE_RESET_PROOF_CHANGED")
         if state.get("schema") != SCHEMA or state.get("trigger") != trigger:
             raise ValueError("LIFECYCLE_RECOVERY_STATE_MISMATCH")
         staging = index_dir / "recovery-staging" / _directory_id(state)
@@ -381,17 +508,26 @@ def recover_rotated_index(root: str | Path, trigger: str) -> dict[str, Any]:
             elif phase == "VERIFY": _verify_step(state, staging)
             elif phase == "SWAP": _swap(state, index_dir, staging)
         else: raise ValueError("LIFECYCLE_RECOVERY_PHASE_INVALID")
+        if state["phase"] == "COMPLETE" and state.get("reset_proof"):
+            completion = index_dir / "recovery-quarantine" / _directory_id(state) / "completion.json"
+            state["completion_receipt_sha256"] = _sha(completion)
         _write_state(state_path, state)
         return {"status": state["phase"], "complete": state["phase"] == "COMPLETE",
                 "recovery_id": state["recovery_id"]}
 
 
-def resume_rotated_index_recovery(root: str | Path) -> dict[str, Any] | None:
+def resume_rotated_index_recovery(root: str | Path, *, current_epoch_id=None) -> dict[str, Any] | None:
     root = Path(root).resolve()
     state_path = root / "v3" / "lifecycle_bundle_index" / "recovery-state.json"
     if not state_path.is_file():
         return None
     state = _load_state(state_path)
+    if state.get("reset_proof"):
+        binding = state["reset_proof"]
+        return recover_reset_index(root, str(state.get("trigger") or ""),
+                                   operation_path=binding["operation_path"],
+                                   operation_sha256=binding["operation_sha256"],
+                                   current_epoch_id=current_epoch_id)
     return recover_rotated_index(root, str(state.get("trigger") or ""))
 
 

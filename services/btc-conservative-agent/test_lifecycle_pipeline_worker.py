@@ -103,6 +103,7 @@ def test_worker_runs_lifecycle_before_one_observable_bootstrap_step(tmp_path, mo
             }
 
     def lifecycle(*_args, **_kwargs):
+        assert _kwargs["current_epoch_id"] == "epoch-test"
         order.append("lifecycle")
         return {"processed": 1}
 
@@ -181,6 +182,21 @@ def test_known_lifecycle_failure_is_classified_without_free_form_text(
     receipt = worker.verify_result(launch["request_path"], launch["result_path"], launch["nonce"])
     assert receipt["failure"] == expected
     assert ".jsonl" not in json.dumps(receipt["failure"])
+
+
+@pytest.mark.parametrize("code", sorted(
+    code for code in worker._CLASSIFIED_FAILURE_CODES if code.startswith("LIFECYCLE_RESET_")
+))
+def test_reset_failure_survives_verified_worker_receipt(tmp_path, monkeypatch, code):
+    work = tmp_path / "v3" / "lifecycle_worker"; work.mkdir(parents=True)
+    launch = worker.create_request(tmp_path, work, source_revision=REVISION)
+    monkeypatch.setattr(
+        worker, "process_incremental_lifecycle_pipeline",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError(code)),
+    )
+    assert worker.run(launch["request_path"], launch["result_path"], launch["nonce"]) == 1
+    receipt = worker.verify_result(launch["request_path"], launch["result_path"], launch["nonce"])
+    assert receipt["failure"] == {"error_class": "ValueError", "error_code": code}
 
 
 def test_unknown_or_noncanonical_failure_remains_generic(tmp_path, monkeypatch):

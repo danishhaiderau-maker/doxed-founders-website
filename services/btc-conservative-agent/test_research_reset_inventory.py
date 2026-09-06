@@ -34,6 +34,25 @@ def test_actual_accounting_retained_at_research_reset(tmp_path):
                for row in result["retained"])
 
 
+def test_quiescent_lifecycle_derived_index_is_retired_without_mutation(tmp_path):
+    name = "v3/lifecycle_bundle_index/lifecycle_index.sqlite3"
+    target = put(tmp_path, name)
+    result = plan_research_reset(tmp_path, proof=proof(tmp_path))
+    assert [r["path"] for r in result["targets"]] == [name]
+    assert target.read_bytes() == b"record\n"
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_lifecycle_sqlite_sidecars_require_coordinated_owner_reset(tmp_path, suffix):
+    name = "v3/lifecycle_bundle_index/lifecycle_index.sqlite3"
+    put(tmp_path, name)
+    put(tmp_path, name + suffix)
+    result = plan_research_reset(tmp_path, proof=proof(tmp_path))
+    assert result["targets"] == []
+    base = next(r for r in result["retained"] if r["path"] == name)
+    assert base["reason"] == "LIFECYCLE_SQLITE_SIDECARS_REQUIRE_OWNER_RESET"
+
+
 def test_exact_allowlist_and_no_mutation(tmp_path):
     names = ["signal_replay.jsonl", "signal_replay.jsonl.2", "v3/ledgers/opportunity.jsonl",
              "v3/ledgers/lifecycle.jsonl.3", "v3/market_segments/aa/" + "a" * 64 + ".json"]

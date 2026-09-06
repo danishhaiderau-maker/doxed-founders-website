@@ -614,12 +614,12 @@ def _process_incremental_lifecycle_pipeline(
 
 
 def process_incremental_lifecycle_pipeline(
-    root: str | Path, **kwargs,
+    root: str | Path, *, current_epoch_id: str | None = None, **kwargs,
 ) -> dict[str, Any]:
     from lifecycle_index_recovery import (
         recover_rotated_index, resume_rotated_index_recovery,
     )
-    recovery = resume_rotated_index_recovery(root)
+    recovery = resume_rotated_index_recovery(root, current_epoch_id=current_epoch_id)
     try:
         if recovery is None or recovery.get("complete"):
             return _process_incremental_lifecycle_pipeline(root, **kwargs)
