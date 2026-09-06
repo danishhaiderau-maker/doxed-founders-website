@@ -1,7 +1,7 @@
 # Run the read-only desktop analyzer (30-min loop, or --Once) against the
 # canonical Fly data mirror. It binds to loopback and receives no trading,
 # exchange, Fly, Railway, or AI credentials.
-param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0,
+param([switch]$Once, [switch]$NoWait, [switch]$Restart, [switch]$DashboardOnly, [int]$Port = 0,
       [string]$ShadowScenarioConfig = '')
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -14,6 +14,7 @@ $AnalyzerPort = $Port
 
 $Host.UI.RawUI.WindowTitle = if ($Once) { "Doxed Analyzer (once)" } else { "Doxed Analyzer :$AnalyzerPort" }
 $ErrorActionPreference = "Stop"
+if ($DashboardOnly -and ($Once -or $Restart)) { throw 'DASHBOARD_ONLY_INCOMPATIBLE_MODE' }
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
@@ -210,6 +211,46 @@ $env:BTC_AGENT_REPORT_DIR = $analyzerReportDir
 
 . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
+
+function Restart-OwnedAnalyzerDashboard {
+  $receiptPath = Join-Path $repoRoot '.home-analyzer-dashboard.pid'
+  $owner = [int](Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop)
+  if ($owner -le 0) { throw 'DASHBOARD_OWNER_INVALID' }
+  $listeners = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction Stop)
+  if ($listeners.Count -eq 0 -or @($listeners | Where-Object {
+      [int]$_.OwningProcess -ne $owner -or $_.LocalAddress -notin @('127.0.0.1','::1')
+    }).Count -gt 0) { throw 'DASHBOARD_LISTENER_NOT_EXCLUSIVELY_OWNED_LOOPBACK' }
+  $command = [string](Get-ProcessCommandLineFast -ProcessId $owner)
+  if ($command -notmatch '(^|[\\/\s])research_dashboard\.py(["''\s]|$)' -or
+      $command -notmatch '(^|\s)--standalone(\s|$)' -or
+      $command -match 'analyzer_research_engine') { throw 'DASHBOARD_COMMAND_NOT_OWNED' }
+  $process = Get-Process -Id $owner -ErrorAction Stop
+  $start = $process.StartTime
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+  $again = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction Stop)
+  if ($again.Count -eq 0 -or @($again | Where-Object {
+      [int]$_.OwningProcess -ne $owner -or $_.LocalAddress -notin @('127.0.0.1','::1')
+    }).Count -gt 0 -or (Get-Process -Id $owner -ErrorAction Stop).StartTime -ne $start -or
+      [string](Get-ProcessCommandLineFast -ProcessId $owner) -cne $command) { throw 'DASHBOARD_OWNER_CHANGED' }
+  Stop-Process -Id $owner -Force -ErrorAction Stop
+  Wait-Process -Id $owner -Timeout 10 -ErrorAction SilentlyContinue
+  if (@(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction SilentlyContinue).Count -ne 0) {
+    throw 'DASHBOARD_PORT_NOT_RELEASED'
+  }
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+  $dashboard = Start-Process -FilePath 'python' -ArgumentList @('research_dashboard.py','--standalone') `
+    -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+  if ($null -eq $dashboard -or $dashboard.Id -le 0) { throw 'DASHBOARD_START_FAILED' }
+  Set-Content -LiteralPath $receiptPath -Value ([string]$dashboard.Id) -NoNewline -Encoding UTF8
+}
+
+if ($DashboardOnly) {
+  try { Restart-OwnedAnalyzerDashboard } finally {
+    if ($lockHandle) { $lockHandle.Dispose() }
+    Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+  }
+  exit 0
+}
 
 function Get-CanonicalAnalyzerEnginePids([int]$P) {
   $ownedMarker = "--owner-port=$P"

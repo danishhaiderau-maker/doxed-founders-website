@@ -103,7 +103,7 @@ def test_real_launcher_parses_and_validates_before_every_process_mutation():
     result = execute(script)
     assert result.returncode == 0 and "PASS" in result.stdout, result.stdout + result.stderr
     source = launcher.read_text(encoding="utf-8-sig")
-    assert source.count("Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch") == 6
+    assert source.count("Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch") == 8
     assert '"scripts/analyzer-scenario-launch-config.py"' in source
     assert '"scripts/analyzer-scenario-launch-config.ps1"' in source
 
