@@ -121,7 +121,9 @@ def test_revision_mismatch_is_visible_and_blocks_every_decision_surface(monkeypa
     stale_branch = page.split("if (stale.stale) {", 1)[1].split("} else if", 1)[0]
     assert "banner.style.display = 'block'" in stale_branch
     assert "Stale saved analyzer generation — read-only." in stale_branch
-    assert "do not start a duplicate analyzer" in stale_branch
+    assert "escapeHtml(analyzerRecoveryGuidance(d))" in stale_branch
+    guidance = page.split("function analyzerRecoveryGuidance", 1)[1].split("\n}", 1)[0]
+    assert "Do not start a duplicate analyzer." in guidance
     assert "Show exact parity and freshness receipts" in stale_branch
     assert "escapeHtml(reasons" in stale_branch
     for payload in (decision, best, safe):

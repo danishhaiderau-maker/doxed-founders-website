@@ -15,7 +15,11 @@ from test_declared_directional_context_integration import dataset, market_entrie
 
 
 @pytest.mark.parametrize("defect", [None, "missing", "late"])
-def test_actual_buckets_producer_worker_to_declared_bilateral_context(tmp_path, monkeypatch, defect):
+@pytest.mark.parametrize("ai_direction,verdict", [
+    ("NO_TRADE", "REJECTED"), ("LONG", "APPROVED"),
+    ("SHORT", "APPROVED"), ("LONG", "REJECTED"),
+])
+def test_actual_buckets_producer_worker_to_declared_bilateral_context(tmp_path, monkeypatch, defect, ai_direction, verdict):
     import research_v3_store as store_module
     revision = "a" * 40
     monkeypatch.setenv("SOURCE_GIT_REV", revision)
@@ -30,7 +34,7 @@ def test_actual_buckets_producer_worker_to_declared_bilateral_context(tmp_path, 
     opportunity["research_baseline_context_declaration"]["signed_quantity_constraints"] = build_signed_quantity_constraints(
         symbol="BTC",quantity_step="0.1",quantity_precision=1,min_lot="0.1",min_notional="1",
         captured_at="1970-01-01T00:01:39Z",source_revision=revision,source="SYNTHETIC_TEST")
-    opportunity.update(direction="NO_TRADE", raw_direction="NO_TRADE")
+    opportunity.update(direction=ai_direction, raw_direction=ai_direction)
     if defect == "missing": opportunity.pop("research_baseline_context_declaration")
     if defect == "late": opportunity["research_baseline_context_declaration"]["declared_at_ts"] = 101
     root = tmp_path / "actual"
@@ -38,7 +42,7 @@ def test_actual_buckets_producer_worker_to_declared_bilateral_context(tmp_path, 
     assert store.append("opportunity", opportunity)["written"]
     collected = json.loads((root/"v3/ledgers/opportunity.jsonl").read_text())
     assert store.append("decision", {"record_id":"decision:1", "episode_id":"ep-1",
-        "event_id":"event-1", "primary_outcome":"REJECTED"})["written"]
+        "event_id":"event-1", "primary_outcome":verdict})["written"]
     rows = [build_bucket(bucket_ts=ts, bid=99 if ts<=100 else 105,
         ask=101 if ts<=100 else 105.1, bid_qty=.4 if ts==100 else 10,
         ask_qty=.4 if ts==100 else 10,last=100 if ts<=100 else 105,
