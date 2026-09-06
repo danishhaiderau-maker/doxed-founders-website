@@ -19,6 +19,35 @@ MAX_PACKAGE_BYTES = 16 * 1024 * 1024 + 256 * 1024 + 10240
 STATE_SCHEMA = "fly_runtime_transport_bundle_worker_state_v1"
 HEX = re.compile(r"^[0-9a-f]{64}$")
 GEN = re.compile(r"^g-[0-9a-f]{16}$")
+DIAGNOSTIC_FILE = "bundle-coordinator-status.json"
+EARLY_DIAGNOSTIC_FILE = "bundle-coordinator-early-status.json"
+
+
+def _diagnostic_usage(path, identity=None):
+    """Only the bounded diagnostic schema; never arbitrary extra artifacts."""
+    before = _stat(path)
+    if not 0 < before.st_size <= 16384:
+        _fail("BUNDLE_DERIVATIVE_DIAGNOSTIC_INVALID")
+    with path.open("rb") as stream:
+        raw = stream.read(16385)
+    after = _stat(path)
+    if len(raw) != before.st_size or (before.st_ino, before.st_mtime_ns, before.st_size) != (after.st_ino, after.st_mtime_ns, after.st_size):
+        _fail("BUNDLE_DERIVATIVE_DIAGNOSTIC_INVALID")
+    value = json.loads(raw, object_pairs_hook=_pairs)
+    fields = {"generation_id", "page_index_sha256", "source_git_rev", "collection_epoch_id", "tile_registry_signature"}
+    bound = value.get("identity")
+    if (value.get("schema") != "fly_transport_bundle_coordinator_status_v1"
+            or value.get("authority") != "DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY"
+            or not isinstance(bound, dict) or set(bound) != fields
+            or any(not isinstance(v, str) or not 1 <= len(v) <= 256 for v in bound.values())
+            or not HEX.fullmatch(bound["generation_id"])
+            or not HEX.fullmatch(bound["page_index_sha256"])
+            or value.get("status") not in {"STARTING", "BUILDING", "COMPLETE", "FAILED", "DEFERRED", "STOPPED"}
+            or type(value.get("terminal")) is not bool):
+        _fail("BUNDLE_DERIVATIVE_DIAGNOSTIC_INVALID")
+    if identity is not None and any(bound[key] != identity.get("inventory_generation_id" if key == "generation_id" else key) for key in fields):
+        _fail("BUNDLE_DERIVATIVE_DIAGNOSTIC_IDENTITY")
+    return len(raw)
 
 
 class DerivativeAdmissionError(ValueError):
@@ -62,9 +91,9 @@ def _integer(value, low, high):
 
 
 def _generation_usage(directory, current):
-    children = {path.name: path for path in _entries(directory, 3)}
+    children = {path.name: path for path in _entries(directory, 4)}
     if "bundle-worker-state.json" not in children or set(children) - {
-            "bundle-worker-state.json", "packages", "descriptors"}:
+            "bundle-worker-state.json", "packages", "descriptors", DIAGNOSTIC_FILE}:
         _fail("BUNDLE_DERIVATIVE_ORPHAN_ARTIFACT")
     state_path = children["bundle-worker-state.json"]
     before = _stat(state_path)
@@ -127,7 +156,8 @@ def _generation_usage(directory, current):
             _fail("BUNDLE_DERIVATIVE_INDEXED_ARTIFACT_MISSING")
     if physical > conservative:
         _fail("BUNDLE_DERIVATIVE_ESTIMATE_UNDERSTATES_FILES")
-    return conservative + len(raw) + 3 * 4096, generation_id
+    diagnostic_bytes = _diagnostic_usage(children[DIAGNOSTIC_FILE], identity) if DIAGNOSTIC_FILE in children else 0
+    return conservative + len(raw) + diagnostic_bytes + 4 * 4096, generation_id
 
 
 def check_derivative_admission(outputroot, currentgeneration, reservepackagebytes,
@@ -151,9 +181,12 @@ def check_derivative_admission(outputroot, currentgeneration, reservepackagebyte
             except FileNotFoundError:
                 # Missing root/parents contain no derivatives. Never mkdir.
                 break
-        entries = _entries(root, max_generations + 1) if root.exists() else []
+        entries = _entries(root, max_generations + 2) if root.exists() else []
         generations, estimate, found_current = 0, 0, False
         for path in entries:
+            if path.name == EARLY_DIAGNOSTIC_FILE:
+                estimate += _diagnostic_usage(path)
+                continue
             if path.name == ".bundle-worker.lease":
                 if _stat(path).st_size > 4096:
                     _fail("BUNDLE_DERIVATIVE_LEASE_LIMIT")

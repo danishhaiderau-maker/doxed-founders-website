@@ -136,7 +136,9 @@ def test_directory_enumeration_is_bounded(tmp_path, monkeypatch):
         def __exit__(self, *args): pass
         def __iter__(self):
             for i in range(100000):
-                if i > 5: raise AssertionError("unbounded enumeration")
+                # Four generations, worker lease, one bounded early diagnostic,
+                # and one overflow entry are the complete admission bound.
+                if i > 6: raise AssertionError("unbounded enumeration")
                 yield SimpleNamespace(path=str(tmp_path / ("g-" + str(i) * 16)))
     monkeypatch.setattr(storage.os, "scandir", lambda _: Entries())
     with pytest.raises(storage.DerivativeAdmissionError, match="ENTRY_LIMIT"):

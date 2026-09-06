@@ -171,14 +171,15 @@ def test_status_atomic_failure_keeps_prior_receipt_and_cleans_temp(tmp_path, mon
     assert not list(directory.glob(".bundle-coordinator-status-*.tmp"))
 
 
-def test_status_rejects_missing_directory_and_wrong_generation(tmp_path):
+def test_status_rejects_wrong_generation_and_records_pre_state_failure(tmp_path):
     metadata, source, output, directory = _status_fixture(tmp_path)
     wrong = {**metadata, "generation_id": metadata["generation_id"][:16] + "f" * 48}
     assert not runtime._persist_coordinator_status(wrong, source, output,
         {"status": "FAILED"}, started_at="fixed")
-    assert not runtime._persist_coordinator_status(metadata, source, tmp_path / "missing",
+    assert runtime._persist_coordinator_status(metadata, source, tmp_path / "missing",
         {"status": "FAILED"}, started_at="fixed")
-    assert not (tmp_path / "missing").exists()
+    assert (tmp_path / "missing" / runtime.COORDINATOR_EARLY_STATUS_FILE).is_file()
+    assert not (tmp_path / "missing" / directory.name).exists()
     assert not (directory / runtime.COORDINATOR_STATUS_FILE).exists()
 
 
@@ -208,3 +209,62 @@ def test_status_rejects_link_target(tmp_path):
     assert not runtime._persist_coordinator_status(metadata, source, output,
         {"status": "FAILED"}, started_at="fixed")
     assert outside.read_text() == "preserve"
+
+
+@pytest.mark.parametrize("mode,error", [
+    ("admission", "BUNDLE_ADMISSION_UNAVAILABLE"),
+    ("authority", "GENERATION_AUTHORITY_UNAVAILABLE"),
+    ("pressure", "BUNDLE_COORDINATOR_SLICE_LIMIT"),
+    ("failure", "BUNDLE_CIRCUIT_OPEN"),
+])
+def test_early_status_without_worker_state(tmp_path, mode, error):
+    source = tmp_path / "source"
+    metadata = _fixture(tmp_path, [_row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"x")])
+    output = tmp_path / "out"
+    observed = []
+    def pressure():
+        if mode == "admission":
+            raise RuntimeError("private error")
+        return {"pressure": mode == "pressure", "emergency": False}
+    runtime.run_managed_generation(metadata, source, output,
+        pressure_probe=pressure, generation_available=lambda _: mode != "authority",
+        stop_event=Stop(), max_slices=2,
+        slice_runner=lambda *args: {"status": "FAILED", "error": "BUNDLE_SLICE_TIMEOUT"},
+        publish=lambda _: observed.append(json.loads((output / runtime.COORDINATOR_EARLY_STATUS_FILE).read_text())))
+    receipt = json.loads((output / runtime.COORDINATOR_EARLY_STATUS_FILE).read_text())
+    assert receipt["error"] == error and receipt["terminal"] is True
+    assert receipt["worker_state_present"] is False
+    assert receipt["identity"] == runtime._identity(metadata)
+    assert receipt["authority"] == "DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY"
+    assert not list(output.glob("g-*"))
+    if mode == "pressure":
+        assert observed[0]["error"] == "RESOURCE_PRESSURE"
+
+
+def test_early_status_rejects_unsafe_output_and_identity(tmp_path):
+    source = tmp_path / "source"
+    metadata = _fixture(tmp_path, [_row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"x")])
+    assert not runtime._persist_coordinator_status(metadata, source, source / "unsafe",
+        {"status": "FAILED"}, started_at="fixed")
+    assert not (source / "unsafe").exists()
+    assert not runtime._persist_coordinator_status({**metadata, "generation_id": "../escape"}, source,
+        tmp_path / "out", {"status": "FAILED"}, started_at="fixed")
+    assert not (tmp_path / "out").exists()
+
+
+def test_early_status_rejects_link_before_root_write(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    metadata = _fixture(tmp_path, [_row(source, "v3/market_segments/11/" + "1" * 64 + ".json", b"x")])
+    output = tmp_path / "out"
+    output.mkdir()
+    target = output / runtime.COORDINATOR_EARLY_STATUS_FILE
+    target.write_text("preserve")
+    original = runtime._reject_links
+    def reject(path):
+        if Path(path) == target:
+            raise ValueError("BUNDLE_LINK_REJECTED")
+        original(path)
+    monkeypatch.setattr(runtime, "_reject_links", reject)
+    assert not runtime._persist_coordinator_status(metadata, source, output,
+        {"status": "FAILED"}, started_at="fixed")
+    assert target.read_text() == "preserve"

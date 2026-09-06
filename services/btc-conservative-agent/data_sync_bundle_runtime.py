@@ -79,6 +79,7 @@ def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subproce
 
 
 COORDINATOR_STATUS_FILE = "bundle-coordinator-status.json"
+COORDINATOR_EARLY_STATUS_FILE = "bundle-coordinator-early-status.json"
 COORDINATOR_ERRORS = frozenset({
     "RESOURCE_PRESSURE", "GENERATION_AUTHORITY_UNAVAILABLE", "BUNDLE_ADMISSION_UNAVAILABLE",
     "BUNDLE_COORDINATOR_BUDGET", "BUNDLE_COORDINATOR_SLICE_LIMIT", "BUNDLE_NO_CURSOR_PROGRESS",
@@ -113,20 +114,27 @@ def _persist_coordinator_status(metadata, source_root, output_root, receipt, *, 
         output = _validate_output_root(source.resolve(strict=True), output_root)
         directory = output / f"g-{generation_id[:16]}"
         _reject_links(directory)
-        if not directory.is_dir():
-            return False
         state_path = directory / "bundle-worker-state.json"
         _reject_links(state_path)
-        with state_path.open("rb") as stream:
-            raw = stream.read(2 * 1024 * 1024 + 1)
-        if len(raw) > 2 * 1024 * 1024:
-            return False
-        state = json.loads(raw)
-        generation = state.get("generation") or {}
-        if generation.get("inventory_generation_id") != generation_id or any(
-            generation.get(key) != identity[key] for key in IDENTITY if key != "generation_id"
-        ):
-            return False
+        state = {}
+        early = not state_path.exists()
+        if not early:
+            with state_path.open("rb") as stream:
+                raw = stream.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                return False
+            state = json.loads(raw)
+            generation = state.get("generation") or {}
+            if generation.get("inventory_generation_id") != generation_id or any(
+                generation.get(key) != identity[key] for key in IDENTITY if key != "generation_id"
+            ):
+                return False
+        else:
+            # One bounded diagnostic slot, not a generation directory or lease.
+            # Admission can fail before the first worker invocation creates state.
+            output.mkdir(parents=True, exist_ok=True)
+            _reject_links(output)
+            directory = output
         status = receipt.get("status")
         if status not in {"STARTING", "BUILDING", "COMPLETE", "FAILED", "DEFERRED", "STOPPED"}:
             status = "FAILED"
@@ -144,7 +152,10 @@ def _persist_coordinator_status(metadata, source_root, output_root, receipt, *, 
         for key in ("package_index_count", "inventory_rows_selected", "retry_seconds"):
             if type(receipt.get(key)) is int and 0 <= receipt[key] <= 2**63 - 1:
                 payload[key] = receipt[key]
-        target = directory / COORDINATOR_STATUS_FILE
+        payload["worker_state_present"] = not early
+        if early and status == "COMPLETE":
+            return False  # No state means no completion evidence.
+        target = directory / (COORDINATOR_EARLY_STATUS_FILE if early else COORDINATOR_STATUS_FILE)
         _reject_links(target)
         temporary = directory / (".bundle-coordinator-status-" + uuid.uuid4().hex + ".tmp")
         with temporary.open("x", encoding="utf-8") as stream:
