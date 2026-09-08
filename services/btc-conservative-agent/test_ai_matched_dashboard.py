@@ -22,6 +22,7 @@ def test_declared_digest_verifies_original_bytes(tmp_path):
     fn=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.FunctionDef) and n.name=='_ai_payload')
     name='discovery_cohort_scorecard_report.json'
     report={'generation':{'source_revision':'s','analyzer_revision':'a','epoch_id':'e'},
+            'scan_census_observed_coverage':{'index_caught_up':True,'observed_joined_opportunity_rows':2,'qualification_eligible':False},
             'ai_verdict_coverage':{'raw_verdict_row_counts':{'AI_NOT_CALLED':3,'APPROVE':True,'REJECT':-1,'NO_TRADE':1.5},
                 'matched_selection_comparison':{'status':'DESCRIPTIVE_ONLY','groups':[]}}}
     raw=json.dumps(report,indent=3).encode()
@@ -36,11 +37,13 @@ def test_declared_digest_verifies_original_bytes(tmp_path):
     exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual-dashboard','exec'),ns)
     assert ns['_ai_payload']()['matched_selection_comparison']['binding_diagnostic']=='DECLARED_ARTIFACT_SHA256_VERIFIED'
     counts=ns['_ai_payload']()['ai_verdict_coverage']['counts']
+    assert ns['_ai_payload']()['scan_census_observed_coverage']['observed_joined_opportunity_rows']==2
     assert counts=={'AI_NOT_CALLED':3,'APPROVE':None,'REJECT':None,'NO_TRADE':None,'ERROR':None,'UNKNOWN':None}
     # Same parsed JSON, different bytes: a reserialization-based check would miss this.
     (tmp_path/name).write_bytes(json.dumps(report).encode())
     assert ns['_ai_payload']()['matched_selection_comparison']['status']=='UNKNOWN'
     assert ns['_ai_payload']()['ai_verdict_coverage']=={'status':'UNKNOWN','counts':{}}
+    assert ns['_ai_payload']()['scan_census_observed_coverage']=={'status':'UNKNOWN','qualification_eligible':False}
     (tmp_path/name).write_bytes(raw)
     manifest['reports'][0]['artifact_sha256']='0'*64
     path.write_text(json.dumps(manifest))
@@ -50,6 +53,7 @@ def test_declared_digest_verifies_original_bytes(tmp_path):
     assert ns['_ai_payload']()['matched_selection_comparison']['binding_diagnostic']=='CURRENT_GENERATION_ONLY_NO_CHECKSUM_BINDING'
     ns['_generation_freshness_meta']=lambda m:{'current':False}
     assert ns['_ai_payload']()['ai_verdict_coverage']=={'status':'UNKNOWN','counts':{}}
+    assert ns['_ai_payload']()['scan_census_observed_coverage']=={'status':'UNKNOWN','qualification_eligible':False}
 
 
 def test_coverage_renderer_safe_and_unavailable_not_zero():

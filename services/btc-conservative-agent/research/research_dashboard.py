@@ -3014,6 +3014,9 @@ def _ai_payload():
             binding_ok = False
     freshness = _generation_freshness_meta(manifest)
     coverage_source = (report or {}).get('ai_verdict_coverage')
+    scan_coverage = (report or {}).get('scan_census_observed_coverage')
+    if not freshness.get('current') or not binding_ok or not isinstance(scan_coverage,dict):
+        scan_coverage = {'status':'UNKNOWN','qualification_eligible':False}
     coverage = {'status':'UNKNOWN', 'counts':{}}
     if freshness.get('current') and binding_ok and isinstance(coverage_source,dict):
         raw_counts = coverage_source.get('raw_verdict_row_counts')
@@ -3032,6 +3035,7 @@ def _ai_payload():
     return {
         'matched_selection_comparison':comparison,
         'ai_verdict_coverage':coverage,
+        'scan_census_observed_coverage':scan_coverage,
         "calibration_status": calibration_status,
         "direction_only": not probability_mode,
         "mode_note": (
@@ -6949,6 +6953,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Current matched AI selection — descriptive only</h3>
     <p class="note">Conditional on supported, cost-complete filled paths only. NO_FILL and unsupported paths are excluded. Not full-opportunity expectancy, portfolio returns, entry rate, or qualification. The filter takes APPROVE only when direction matches; otherwise incremental trade PnL is zero.</p>
     <p class="note" id="ai-verdict-coverage">UNKNOWN — waiting for current coverage.</p>
+    <p class="note" id="scan-census-coverage">Observed scan coverage unavailable; exhaustive collection UNKNOWN.</p>
     <p class="note" id="ai-matched-status">UNKNOWN — waiting for current evidence.</p>
     <div style="max-width:100%;min-width:0;overflow-x:auto"><table><thead><tr><th>Policy / world</th><th>Independent N</th><th>Supported rows</th><th>Rejected positive / negative</th><th>Filter minus unfiltered USD</th></tr></thead><tbody id="ai-matched-body"></tbody></table></div>
     <h3>Historical direction / gap calibration — separate evidence</h3>
@@ -8469,6 +8474,9 @@ async function loadAI() {
   const d = await r.json();
   renderMatchedAI(d.matched_selection_comparison || {});
   renderAICoverage(d.ai_verdict_coverage || {});
+  const census=d.scan_census_observed_coverage || {};
+  const observed=census.observed_joined_opportunity_rows;
+  document.getElementById('scan-census-coverage').textContent = `Observed scan child rows: ${census.index_caught_up === true && Number.isSafeInteger(observed) && observed >= 0 ? observed : 'unavailable'} · index ${census.index_caught_up === true ? 'caught up' : 'incomplete or unavailable'} · exhaustive collection UNKNOWN; not qualification evidence.`;
   const status = String(d.calibration_status || 'NO_DATA').toUpperCase();
   const showConfidence = status === 'AVAILABLE';
   const confidenceView = document.getElementById('ai-confidence-view');

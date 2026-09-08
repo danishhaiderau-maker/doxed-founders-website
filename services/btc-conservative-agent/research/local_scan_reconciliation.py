@@ -36,7 +36,7 @@ def _verify_page_ref(root, ref, source, config):
 
 
 def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, now=None,
-                    max_bytes=1048576, reference_after=''):
+                    max_bytes=1048576, reference_after='', held_lease=None, expected_source=None):
     if not isinstance(reference_after,str) or len(reference_after)>256:
         raise ValueError('CENSUS_REFERENCE_CURSOR_INVALID')
     if type(max_bytes) is not int or not 1 <= max_bytes <= 2097152:
@@ -45,10 +45,16 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
         raise ValueError('CENSUS_CONFIG_REQUIRED')
     directory=_directory(repo_root,data_root).parent/'scan-reconciliation'
     directory.mkdir(parents=True,exist_ok=True)
-    lease=MirrorGenerationLease(data_root,owner='local-scan-reconciliation')
-    lease.acquire(timeout_seconds=0)
+    lease=held_lease or MirrorGenerationLease(data_root,owner='local-scan-reconciliation')
+    if held_lease is not None:
+        if (not isinstance(held_lease,MirrorGenerationLease) or not held_lease.held
+                or held_lease.path.resolve()!=MirrorGenerationLease(data_root).path.resolve()):
+            raise ValueError('CENSUS_HELD_LEASE_INVALID')
+    else: lease.acquire(timeout_seconds=0)
     try:
         source=_source(_check(repo_root,data_root,source_revision,now=now))
+        if expected_source is not None and source!=expected_source:
+            raise ValueError('CENSUS_EXPECTED_SOURCE_MISMATCH')
         binding={'source':source,'config_signature':config_signature}
         job=hashlib.sha256(_encoded(binding)).hexdigest()
         with sqlite3.connect(directory/'index.sqlite',timeout=1) as db:
@@ -122,7 +128,7 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
             _atomic_write_unlocked(directory/'current.json',result)
             return result
     finally:
-        lease.release()
+        if held_lease is None: lease.release()
 
 
 def main(argv=None):
