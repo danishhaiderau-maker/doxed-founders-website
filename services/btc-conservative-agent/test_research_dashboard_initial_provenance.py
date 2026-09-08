@@ -4,6 +4,13 @@ from pathlib import Path
 SOURCE = Path(__file__).parent / "research" / "research_dashboard.py"
 
 
+def test_mirror_revision_is_not_presented_as_live_fly_revision():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert "['Local mirror source revision (not live Fly)', currentSync.mirror_source_revision || 'n/a']" in source
+    assert "Local mirror source revision (not live Fly): ${d.mirror_source_revision || 'UNAVAILABLE'}" in source
+    assert "Fly/mirror source revision" not in source
+
+
 def test_genome_navigation_is_not_hard_coded_unavailable():
     source = SOURCE.read_text(encoding="utf-8")
 

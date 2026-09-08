@@ -7891,7 +7891,7 @@ async function loadPathwayAudit() {
     ['Exchange', d.expected_exchange || 'bitfinex'],
     ['Current analyzer↔registry', currentSync.status || 'CURRENT STATUS UNAVAILABLE'],
     ['Analyzer source revision', currentSync.analyzer_source_revision || currentSync.generation_revision || 'n/a'],
-    ['Fly/mirror source revision', currentSync.mirror_source_revision || 'n/a'],
+    ['Local mirror source revision (not live Fly)', currentSync.mirror_source_revision || 'n/a'],
     ['Current epoch', currentSync.epoch_id || 'n/a'],
     ['Analyzer integrity', ais.report_status || (ais.valid === true ? 'VALID' : 'n/a')],
     ['Tile independence', receiptLabel('tile_independence_report.json', ti)],
@@ -8392,7 +8392,7 @@ async function loadStatus() {
   if (revisionEl) {
     const revision = d.generation_revision || 'UNKNOWN';
     revisionEl.textContent = `analyzer rev ${revision.slice(0, 12)}`;
-    revisionEl.title = `Analyzer source revision: ${revision} · Fly/mirror source revision: ${d.mirror_source_revision || 'UNAVAILABLE'} · parity: ${d.source_revision_parity || 'UNAVAILABLE'}`;
+    revisionEl.title = `Analyzer source revision: ${revision} · Local mirror source revision (not live Fly): ${d.mirror_source_revision || 'UNAVAILABLE'} · parity: ${d.source_revision_parity || 'UNAVAILABLE'}`;
   }
   const epochEl = document.getElementById('epoch');
   if (epochEl) {
