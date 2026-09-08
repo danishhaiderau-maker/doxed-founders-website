@@ -847,6 +847,7 @@ def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
         decision.pop(field, None)
     decision.update({
         "executed_direction": "LONG", "raw_ai_decision": "APPROVE",
+        "ai_evaluated": True, "research_scan_id": "scan-census-fixture",
         "policy_decision": "REJECT", "execution_disposition": "NO_ORDER",
         "exact_reason": "TEST_FAMILY_FILTER", "ai_error": False,
         "long_score": 78, "short_score": 22, "score_gap": 56,
@@ -888,6 +889,8 @@ def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
     assert stored["short_score"] == 22
     assert stored["score_gap"] == 56
     assert stored["raw_ai_decision"] == "APPROVE"
+    assert stored["ai_evaluated"] is True
+    assert stored["research_scan_id"] == "scan-census-fixture"
     assert stored["policy_decision"] == "REJECT"
     assert stored["execution_disposition"] == "NO_ORDER"
     assert stored["exact_reason"] == "TEST_FAMILY_FILTER"
