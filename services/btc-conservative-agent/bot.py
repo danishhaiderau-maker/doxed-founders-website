@@ -5508,10 +5508,26 @@ def _record_microstructure_capture_observation(scheduling, expected_bucket):
                ("skipped_start_ts", "skipped_end_ts_exclusive", "skipped_bucket_count", "gap_reason")}
         gap["observed_at_ts"] = scheduling["observed_at_ts"]
     _microstructure_capture_observation = {
+        **previous,
         "skipped_buckets_this_process": previous["skipped_buckets_this_process"] + skipped,
         "last_gap": gap,
         "last_capture_lag_sec": max(0.0, scheduling["observed_at_ts"] - expected_bucket),
     }
+def _record_microstructure_capture_duration(phase, started):
+    """Latest/maximum monotonic durations only; no per-bucket log growth."""
+    global _microstructure_capture_observation
+    if phase not in {"quote_lock_wait", "trade_tape_lock_wait", "append_total"}:
+        return
+    duration = time.monotonic() - started
+    if not 0 <= duration < float("inf"):
+        return
+    previous = _microstructure_capture_observation
+    timings = dict(previous.get("timing_seconds") or {})
+    prior = timings.get(phase) or {}
+    timings[phase] = {"latest": duration, "maximum": max(duration, prior.get("maximum", 0.0))}
+    _microstructure_capture_observation = {**previous, "timing_seconds": timings}
+
+
 ret_1m_buffer = deque(maxlen=20)
 ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
@@ -24164,7 +24180,9 @@ def microstructure_capture_loop():
         wait = max(0.01, next_bucket - time.time())
         if shutdown_event.wait(wait):
             break
+        quote_lock_started = time.monotonic()
         with state_lock:
+            _record_microstructure_capture_duration("quote_lock_wait", quote_lock_started)
             bid = state.get("bid")
             ask = state.get("ask")
             bid_qty = state.get("bid_qty")
@@ -24190,7 +24208,9 @@ def microstructure_capture_loop():
         # into old buckets to catch up with wall time.
         if shutdown_event.wait(max(0.0, bucket + 1.0 - time.time())):
             break
+        tape_lock_started = time.monotonic()
         with venue_fill_trade_tape_lock:
+            _record_microstructure_capture_duration("trade_tape_lock_wait", tape_lock_started)
             retention = dict(venue_fill_trade_retention)
             bucket_trades = [
                 dict(row) for row in venue_fill_trade_tape
@@ -24215,11 +24235,16 @@ def microstructure_capture_loop():
         row["row_sha256"] = hashlib.sha256(json.dumps(
             row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
         append_outcome = {}
-        if _safe_append_jsonl(
-            MICROSTRUCTURE_TAPE_FILE, row,
-            label="MARKET_MICROSTRUCTURE_1S", fallback_on_error=False,
-            outcome=append_outcome,
-        ):
+        append_started = time.monotonic()
+        try:
+            appended = _safe_append_jsonl(
+                MICROSTRUCTURE_TAPE_FILE, row,
+                label="MARKET_MICROSTRUCTURE_1S", fallback_on_error=False,
+                outcome=append_outcome,
+            )
+        finally:
+            _record_microstructure_capture_duration("append_total", append_started)
+        if appended:
             _microstructure_last_bucket = bucket
             _microstructure_rows_written += 1
         else:
