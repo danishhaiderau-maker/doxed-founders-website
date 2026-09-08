@@ -208,6 +208,18 @@ def test_nested_lock_order_has_no_new_inversions():
     visitor = _NestedLockVisitor()
     visitor.visit(_tree())
     expected = {tuple(row) for row in _manifest()["known_nested_lock_exception"]}
+    # Paper-local durable dispatch uses exactly the already-reviewed relay
+    # transaction lock order, not a new inverse edge or relaxed global graph.
+    local_name = "_commit_local_paper_lifecycle_transition"
+    local_pairs = {
+        (local_name, "paper_lifecycle_transition_lock", "paper_lifecycle_file_lock"),
+        (local_name, "paper_lifecycle_transition_lock", "trade_lock"),
+        (local_name, "paper_lifecycle_file_lock", "trade_lock"),
+    }
+    relay_pairs = {(outer, inner) for function, outer, inner in expected
+                   if function == "_commit_paper_lifecycle_transition"}
+    assert {(outer, inner) for _, outer, inner in local_pairs} == relay_pairs
+    assert {row for row in visitor.pairs if row[0] == local_name} == local_pairs
     assert visitor.pairs == expected
 
 
