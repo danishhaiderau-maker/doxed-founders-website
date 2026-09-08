@@ -33,7 +33,7 @@ def _proof(root,ref):
 
 def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry,terminal,
                      path_rows,cost_contract,policy_id,source_segments,seal_request_id=None,clock=time.time,now=None,
-                     baseline_reference=None,replay_inputs=None,exit_candidate=None):
+                     baseline_reference=None,replay_inputs=None,exit_candidate=None,entry_source_segments=None):
     from research.declared_shadow_model import validate_contract
     from research_v3_contract import canonical_json
     base=_safe_path(Path(repo_root)/'local-derived')
@@ -126,6 +126,27 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             _,schedule_hash=_normalise_schedule(schedule['schedule'])
             if entry.get('schedule_sha256')!=schedule_hash:
                 raise ValueError('COUNTERFACTUAL_NORMALIZED_SCHEDULE_SOURCE_MISMATCH')
+            if not isinstance(entry_source_segments,list) or not 1<=len(entry_source_segments)<=8:
+                raise ValueError('COUNTERFACTUAL_ENTRY_TAPE_MISSING')
+            entry_rows=[]; remaining=2097152
+            for ref in entry_source_segments:
+                digest=ref.get('sha256')
+                if not isinstance(digest,str) or not re.fullmatch('[0-9a-f]{64}',digest):
+                    raise ValueError('COUNTERFACTUAL_ENTRY_TAPE_INVALID')
+                tape=_safe_path(Path(data_root)/'v3/market_segments'/digest[:2]/(digest+'.json'))
+                with tape.open('rb') as stream: raw=stream.read(remaining+1)
+                remaining-=len(raw)
+                if remaining<0 or hashlib.sha256(raw).hexdigest()!=digest:
+                    raise ValueError('COUNTERFACTUAL_ENTRY_TAPE_HASH')
+                entry_rows.extend(json.loads(raw)['rows'])
+            from research.entry_baseline_replay import materialize_same_opportunity_replay
+            material={**opportunity,'market_microstructure_rows':entry_rows}
+            replayed=materialize_same_opportunity_replay([material],generation=generation)
+            matches=[result.get('conservative_receipt') for episode in replayed['episode_receipts']
+                if episode.get('direction')==direction for result in episode.get('results',[])
+                if result.get('baseline_id')==baseline_id and result.get('supported') is True]
+            if len(matches)!=1 or matches[0]!=entry:
+                raise ValueError('COUNTERFACTUAL_ENTRY_SEMANTIC_MISMATCH')
             from research_entry_baselines import ENTRY_BASELINE_REGISTRY
             from research.conservative_shadow_report import build_composite_policy_identity
             from research_v3_contract import canonical_hash
@@ -149,7 +170,7 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
                     or dimensions.get('cost_model_id')!=terminal.get('cost_model_id')
                     or dimensions.get('direction')!=direction):
                 raise ValueError('COUNTERFACTUAL_SEALED_COST_MODEL_UNPROVEN')
-            scope='SEALED_POLICY_ENTRY_INTEGRITY_ONLY_NOT_QUALIFIED'; seal_hash=wrapper['receipt_sha256']
+            scope='SEALED_POLICY_REPLAY_PROOF_NOT_QUALIFIED'; seal_hash=wrapper['receipt_sha256']
         if _source(_check(repo_root,data_root,source_revision,now=now))!=source:
             raise ValueError('COUNTERFACTUAL_SOURCE_CHANGED')
         body={'schema':'local_counterfactual_completion_v1','source':source,'scope':scope,
@@ -159,10 +180,11 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             'source_segment_references':source_segments,
             'baseline_reference':baseline_reference,
             'exit_candidate':exit_candidate,
+            'entry_source_segments':entry_source_segments,
             'seal_receipt_sha256':seal_hash,'verified_at':verified,'qualification_allowed':False}
-        body['entry_semantic_replay_verified']=False
+        body['entry_semantic_replay_verified']=seal_request_id is not None
         body['terminal_semantic_replay_verified']=True
-        body['verification_blockers']=['ENTRY_SOURCE_REPLAY_NOT_RECOMPUTED']
+        body['verification_blockers']=[] if seal_request_id is not None else ['ENTRY_SOURCE_REPLAY_NOT_RECOMPUTED']
         digest=_hash(body); _write_once(base/'counterfactual-completions'/(digest+'.json'),body)
         return {'artifact_sha256':digest,'scope':scope,'qualification_allowed':False}
 

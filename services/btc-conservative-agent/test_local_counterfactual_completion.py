@@ -94,12 +94,25 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch):
     opts,mapping=prepared(tmp_path/'training'); generation=mapping['expected_generation']
     args=inputs(tmp_path/'proof',monkeypatch,generation=generation,shift=2000000)
     original=json.loads((args['data_root']/'v3/ledgers/opportunity.jsonl').read_bytes())
+    original.update(signal_ts=2000010.,expiry_ts=2001810.,requested_qty=.4,requested_remaining_qty=.4,
+        signed_quantity_constraints=args['entry']['quantity_constraints'],latency_sec=0,fees_usd=0,
+        slippage_model='DECLARED_LIMIT',authoritative_parent_expiry=True,direction='UNKNOWN',
+        dataset_epoch=generation['epoch_id'])
     original.update(episode_id='original',opportunity_id='opp',raw_direction='UNKNOWN',symbol='BTCUSD',
-        signal_time_bbo={'bid':100.,'ask':100.,'bid_qty':1.,'ask_qty':1.},signal_price=100.)
+        signal_time_bbo={'bid':100.,'ask':100.,'bid_qty':1.,'ask_qty':1.,'source_ts':2000010.,'observed_at_ts':2000010.},signal_price=100.)
     original['baseline_schedule_snapshot']=materialize_signal_time_baseline_schedules(original)
     capture=original['baseline_schedule_snapshot']['directional_schedules']['LONG']
     schedule=capture['schedules']['MARKET_ENTRY_AT_SIGNAL']['schedule']
-    args['entry']['schedule_sha256']=_normalise_schedule(schedule)[1]
+    from test_entry_baseline_replay import _row,_segment_object
+    from research.entry_baseline_replay import materialize_same_opportunity_replay
+    entry_rows=[{**_row(2000010,bid=100,ask=100),'symbol':'BTCUSD'}]
+    digest,_=_segment_object(args['data_root'],entry_rows)
+    args['entry_source_segments']=[{'sha256':digest}]
+    baseline=materialize_same_opportunity_replay([{**original,'market_microstructure_rows':entry_rows}],generation=generation)
+    entry=next(r['conservative_receipt'] for e in baseline['episode_receipts'] if e['direction']=='LONG'
+        for r in e['results'] if r['baseline_id']=='MARKET_ENTRY_AT_SIGNAL')
+    assert entry and entry['supported']
+    args['entry']=entry; args['replay_inputs']['entry_receipt']=entry
     from research_entry_baselines import ENTRY_BASELINE_REGISTRY
     from research.conservative_shadow_report import build_composite_policy_identity
     from research_v3_contract import canonical_hash
@@ -129,11 +142,11 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch):
         holdout_maturity_delay_sec=10000.,clock=lambda:2000000.)
     args.update(repo_root=opts['repo_root'],seal_request_id=_hash(sealed['binding']))
     result=module.write_completion(**args)
-    assert result['scope']=='SEALED_POLICY_ENTRY_INTEGRITY_ONLY_NOT_QUALIFIED'
+    assert result['scope']=='SEALED_POLICY_REPLAY_PROOF_NOT_QUALIFIED'
     assert result['qualification_allowed'] is False
     artifact=module.load_completion(args['repo_root'],result['artifact_sha256'])
-    assert artifact['entry_semantic_replay_verified'] is False
-    assert artifact['verification_blockers']==['ENTRY_SOURCE_REPLAY_NOT_RECOMPUTED']
+    assert artifact['entry_semantic_replay_verified'] is True
+    assert artifact['verification_blockers']==[]
     import copy
     for kind in ('opportunity','schedule','direction','forged_terminal'):
         altered=copy.deepcopy(args)
@@ -143,4 +156,15 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch):
         else:
             altered['terminal']['net_pnl_usd']=99999.
             altered['terminal']['receipt_sha256']=_hash({k:v for k,v in altered['terminal'].items() if k!='receipt_sha256'})
+        with pytest.raises(ValueError): module.write_completion(**altered)
+    for kind in ('favorable_fill','pre_signal_fill','opposite_same_price'):
+        altered=copy.deepcopy(args)
+        if kind=='favorable_fill':
+            altered['entry']['fill_price']=90.
+        elif kind=='pre_signal_fill':
+            altered['entry']['trigger_bucket_ts']=2000009.
+        else:
+            altered['entry']['direction']='SHORT'
+        _rebind(altered['replay_inputs'])
+        altered['terminal']=evaluate_shadow_terminal(**altered['replay_inputs'])
         with pytest.raises(ValueError): module.write_completion(**altered)
