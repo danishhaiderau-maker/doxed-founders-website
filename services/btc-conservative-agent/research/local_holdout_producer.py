@@ -1,6 +1,7 @@
 """Mirror-owned exact-lane holdout evidence; never seals or evaluates."""
 import hashlib
 import json
+import math
 from collections import Counter
 from pathlib import Path
 from dynamic_policy_analyzer import load_verified_local_dynamic_mapping
@@ -11,6 +12,24 @@ from research.holdout_causal_provenance import require_matching_causal_projectio
 from research_v3_sealed_holdout import _write_once
 from research.holdout_counterfactual_provenance import verify_counterfactual_provenance
 from research.holdout_candidate_identity import candidate_identity_matches
+
+_COUNTERFACTUAL_REASONS=frozenset({
+    'COUNTERFACTUAL_PROSPECTIVE_REPLAY_PROOF_MISSING','COUNTERFACTUAL_ARTIFACT_HASH',
+    'COUNTERFACTUAL_EXPECTED_IDENTITY_MISMATCH','COUNTERFACTUAL_CAUSAL_FEATURES_UNPROVEN',
+    'COUNTERFACTUAL_SOURCE_NOT_IN_PINNED_DATASET','COUNTERFACTUAL_SOURCE_INVENTORY_UNVERIFIED',
+    'COUNTERFACTUAL_OPPORTUNITY_OUTSIDE_VERIFIED_PREFIX','COUNTERFACTUAL_PINNED_SOURCE_HASH',
+    'COUNTERFACTUAL_SOURCE_VERIFICATION_BUDGET','COUNTERFACTUAL_SOURCE_MISMATCH',
+    'COUNTERFACTUAL_MODEL_NOT_AVAILABLE','COUNTERFACTUAL_SEAL_GENERATION_MISMATCH',
+    'COUNTERFACTUAL_ENTRY_SEMANTIC_MISMATCH','COUNTERFACTUAL_SEMANTIC_REPLAY_MISMATCH',
+    'COUNTERFACTUAL_COST_CONTRACT','COUNTERFACTUAL_SEALED_COST_MODEL_UNPROVEN',
+    'COUNTERFACTUAL_REVERIFICATION_MISMATCH','COUNTERFACTUAL_OPPORTUNITY_HASH',
+    'COUNTERFACTUAL_SEGMENT_HASH','COUNTERFACTUAL_OUTSIDE_WINDOW',
+    'HOLDOUT_CAUSAL_PROJECTION_IDENTITY_MISMATCH','HOLDOUT_CAUSAL_PROJECTION_FEATURE_MISMATCH'})
+
+
+def _counterfactual_reason(error):
+    code=str(error)
+    return code if isinstance(error,ValueError) and code in _COUNTERFACTUAL_REASONS else 'COUNTERFACTUAL_PROVENANCE_UNVERIFIED'
 
 
 def _read_manifest(path):
@@ -47,7 +66,7 @@ def produce_local_holdout(**options):
             identity=manifest.get('identity') or {}
             key=tuple(identity.get(k) for k in ('collection_epoch_id','episode_id','policy_signature','research_lane'))
             by_identity.setdefault(key,[]).append(path.parent)
-        excluded=Counter(); rows=[]; verified_count=0; counterfactual_count=0
+        excluded=Counter(); rows=[]; verified_count=0; revalidations=[]
         for original in mapping['training_episodes']:
             proofs={}; outcomes={}
             for candidate in mapping['candidates']:
@@ -55,9 +74,6 @@ def produce_local_holdout(**options):
                     excluded['MAPPED_CANDIDATE_OUTCOME_UNKNOWN']+=1
             for policy,outcome in original['policy_outcomes'].items():
                 if outcome.get('counterfactual_identity') or outcome.get('replay_proof_sha256'):
-                    counterfactual_count+=1
-                    if counterfactual_count>32:
-                        raise ValueError('HOLDOUT_COUNTERFACTUAL_RESUMABLE_VERIFICATION_REQUIRED')
                     identity=outcome.get('counterfactual_identity') or {}
                     candidates=[c for c in mapping['candidates'] if c['policy_id']==policy]
                     expected={'epoch_id':generation['epoch_id'],'source_episode_id':original.get('source_episode_id'),
@@ -66,13 +82,27 @@ def produce_local_holdout(**options):
                         'direction':original.get('direction'),'seal_request_id':identity.get('seal_request_id')}
                     if outcome.get('source_lifecycle_identity') or identity!=expected:
                         excluded['COUNTERFACTUAL_IDENTITY_MISMATCH']+=1; continue
+                    cache_key=hashlib.sha256(_encoded(['counterfactual-producer-v1',expected,original,outcome])).hexdigest()
+                    cache_path=_safe_path(cache/(cache_key[:32]+'.json'))
+                    cached=None
+                    if cache_path.exists():
+                        cached=_read_manifest(cache_path)
+                        if (cached.get('schema')!='trusted_local_counterfactual_producer_receipt_v1'
+                                or cached.get('job')!=job or cached.get('key')!=cache_key
+                                or cached.get('sha256')!=hashlib.sha256(_encoded({k:v for k,v in cached.items() if k!='sha256'})).hexdigest()):
+                            raise ValueError('HOLDOUT_COUNTERFACTUAL_PRODUCER_RECEIPT_INVALID')
+                        cached_count+=1
+                    else:
+                        if verified_count>=32:
+                            deferred+=1; continue
+                        verified_count+=1
                     try:
                         proof=verify_counterfactual_provenance(repo_root=options['repo_root'],data_root=root,
                             source_revision=options['source_revision'],artifact_sha256=outcome.get('replay_proof_sha256'),
                             expected_identity=expected,now=options.get('now'),held_lease=lease)
                         require_matching_causal_projection(original,proof['causal_provenance'])
-                    except (ValueError,OSError):
-                        excluded['COUNTERFACTUAL_PROVENANCE_UNVERIFIED']+=1; continue
+                    except (ValueError,OSError) as error:
+                        excluded[_counterfactual_reason(error)]+=1; continue
                     completion=proof['completion']; entry=completion['entry']; terminal=completion['terminal']
                     dimensions=mapping['selected_group']
                     if (not candidate_identity_matches(original,outcome,proof,policy=policy,
@@ -80,10 +110,32 @@ def produce_local_holdout(**options):
                             or entry.get('final_classification')!=outcome.get('outcome_state')
                             or terminal.get('net_pnl_usd')!=outcome.get('net_pnl_usd')
                             or terminal.get('status')!='COMPLETE'
+                            or original.get('required_end_ts')!=terminal.get('required_horizon_end_ts')
                             or dimensions.get('cost_model_id')!=terminal.get('cost_model_id')
                             or dimensions.get('simulation_model')!=terminal.get('simulation_model')
                             or (dimensions.get('sizing') or {}).get('contract_sha256')!=terminal.get('declared_contract_sha256')):
                         excluded['COUNTERFACTUAL_OUTCOME_COMPLETION_MISMATCH']+=1; continue
+                    # Fixed producer-owned state is trusted local append-only
+                    # state, not arbitrary caller-supplied evidence. Its hash is
+                    # corruption detection, not protection against an owner
+                    # rewriting the trusted journal and artifacts together.
+                    revalidations.append({'key':cache_key,'replay_proof_sha256':proof['replay_proof_sha256'],
+                        'currently_verified_at':proof['qualification_eligible_at']})
+                    if cached is not None:
+                        prior=cached.get('proof') or {}
+                        timekeys={'evidence_collected_at','qualification_eligible_at'}
+                        if ({k:v for k,v in prior.items() if k not in timekeys}!=
+                                {k:v for k,v in proof.items() if k not in timekeys}
+                                or any(type(prior.get(k)) not in (int,float) or not math.isfinite(prior[k])
+                                    or prior[k]<terminal['required_horizon_end_ts']
+                                    or prior[k]>proof[k] for k in timekeys)):
+                            raise ValueError('HOLDOUT_COUNTERFACTUAL_PRODUCER_RECEIPT_MISMATCH')
+                        proof=prior
+                    else:
+                        stored={'schema':'trusted_local_counterfactual_producer_receipt_v1',
+                            'job':job,'key':cache_key,'proof':proof}
+                        stored['sha256']=hashlib.sha256(_encoded(stored)).hexdigest()
+                        pending_cache.append((cache_path,stored))
                     proofs[policy]=proof; outcomes[policy]=outcome
                     continue
                 identity=outcome.get('source_lifecycle_identity') or {}
@@ -139,6 +191,12 @@ def produce_local_holdout(**options):
                 'evidence_collected_at':max(p['evidence_collected_at'] for p in proofs.values())})
         _check(options['repo_root'],root,options['source_revision'],previous=token,held_lease=lease,now=options.get('now'))
         for path,stored in pending_cache: _write_once(path,stored)
+        if revalidations:
+            validation={'schema':'counterfactual_producer_current_revalidation_v1','job':job,
+                'source_generation':source,'verified_proofs':revalidations,
+                'trust_boundary':'PRODUCER_OWNED_LOCAL_APPEND_ONLY_STATE_NOT_OWNER_TAMPER_PROOF'}
+            validation_sha=hashlib.sha256(_encoded(validation)).hexdigest()
+            _write_once(cache/('revalidation-'+validation_sha+'.json'),validation)
         if deferred:
             return {'status':'IN_PROGRESS','job_id':job,'new_proofs':verified_count,
                 'cached_proofs':cached_count,'pending_proofs':deferred,'qualification_allowed':False,

@@ -7,7 +7,7 @@ from research.policy_evidence_schema import canonical_json
 
 def pinned(tmp_path):
     root=tmp_path
-    raw=b'{"record_id":"opp"}\n'; tape=b'{"rows":[]}'
+    raw=b'{"record_id":"opp"}\n{"record_id":"other"}\n'; tape=b'{"rows":[]}'
     sha=lambda x:hashlib.sha256(x).hexdigest()
     digest=sha(tape)
     names={'v3/ledgers/opportunity.jsonl':raw,
@@ -27,6 +27,29 @@ def pinned(tmp_path):
 
 def test_actual_pinned_membership(tmp_path):
     verify_membership(**pinned(tmp_path))
+
+
+def test_lease_scoped_prefix_reuse_still_verifies_selected_raw_bytes(tmp_path):
+    from research.mirror_generation_lease import MirrorGenerationLease
+    args=pinned(tmp_path)
+    args['opportunity_ref']['row_length']=len(b'{"record_id":"opp"}\n')
+    lease=MirrorGenerationLease(tmp_path,owner='membership-test').acquire(timeout_seconds=0)
+    try:
+        verify_membership(**args,held_lease=lease)
+        cache=lease._counterfactual_verified_prefix
+        verify_membership(**args,held_lease=lease)
+        assert lease._counterfactual_verified_prefix is cache
+        path=tmp_path/'v3/ledgers/opportunity.jsonl'
+        first=path.read_bytes()[:args['opportunity_ref']['row_length']]
+        path.write_bytes(first+b'x'*(path.stat().st_size-len(first)))
+        # References prove membership in the earlier verified pinned prefix,
+        # not global current-file integrity after a noncooperating mutation.
+        assert verify_membership(**args,held_lease=lease) is None
+        path.write_bytes(b'x'*path.stat().st_size)
+        with pytest.raises(ValueError,match='PINNED_SOURCE_HASH'):
+            verify_membership(**args,held_lease=lease)
+        assert lease.held
+    finally: lease.release()
 
 
 @pytest.mark.parametrize('kind',['appended','segment','changed_prefix'])

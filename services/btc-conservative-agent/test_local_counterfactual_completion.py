@@ -194,7 +194,7 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
         clock=lambda:2000030.,now=args.get('now'))
     if authority=='component':
         import research.counterfactual_source_membership as membership
-        monkeypatch.setattr(membership,'verify_membership',lambda *a:None)
+        monkeypatch.setattr(membership,'verify_membership',lambda *a,**kw:None)
     before_files=set((args['repo_root']/'local-derived/counterfactual-completions').iterdir())
     proof=verify_counterfactual_provenance(**consumer_args)
     assert proof['counterfactual_identity']==identity
@@ -232,8 +232,9 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
         # Deterministic actual verification clock, not artifact-asserted time.
         actual_verify=verifier.verify_counterfactual_provenance
         import research.local_holdout_producer as producer
+        verification_clock=[2110001.]
         monkeypatch.setattr(producer,'verify_counterfactual_provenance',
-            lambda **kw:actual_verify(**kw,clock=lambda:2110001.))
+            lambda **kw:actual_verify(**kw,clock=lambda:verification_clock[0]))
         prospective=row(generation=generation,episode_id='original',opportunity_id='opp',policy_id='policy',
             policy_signature=args['terminal']['policy_signature'],cost_model_id=args['terminal']['cost_model_id'],
             simulation_model=args['terminal']['simulation_model'],declared_contract_sha256=_hash(args['cost_contract']),
@@ -252,6 +253,9 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
         evaluated=evaluate_local_frozen_holdout(**future_opts,seal_request_id=args['seal_request_id'],clock=lambda:2110002.)
         assert evaluated['comparison']['episodes_scored']==1
         assert evaluated['qualification_allowed'] is False
+        verification_clock[0]=2110010.
+        assert produce_local_holdout(**future_opts)['artifact_sha256']==holdout['artifact_sha256']
+        assert evaluate_local_frozen_holdout(**future_opts,seal_request_id=args['seal_request_id'],clock=lambda:2110011.)==evaluated
         for field,value in [('net_pnl_usd',999.),('cost_model_id','wrong-cost')]:
             badrow={**prospective,field:value}
             adapted_bad=adapt_dynamic_cohorts([badrow],expected_generation=generation,feature_names=['regime'],protocol=protocol)

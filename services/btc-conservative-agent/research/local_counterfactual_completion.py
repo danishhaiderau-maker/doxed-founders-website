@@ -52,7 +52,7 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
         if _verify_only:
             from research.counterfactual_source_membership import verify_membership
             verify_membership(data_root,source,opportunity_ref,
-                list(source_segments or [])+list(entry_source_segments or []))
+                list(source_segments or [])+list(entry_source_segments or []),held_lease=held_lease)
         opportunity=_proof(data_root,opportunity_ref)
         if not isinstance(source_segments,list) or not 1<=len(source_segments)<=8:
             raise ValueError('COUNTERFACTUAL_SEGMENTS_MISSING')
