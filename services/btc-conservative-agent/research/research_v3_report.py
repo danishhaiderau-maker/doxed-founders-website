@@ -1141,7 +1141,9 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         tile_config_signature=active_tile_registry_signature(),
         report_blockers=report_blockers,
     )
+    from research.shared_context_coverage import build_shared_context_coverage
     report = {
+        "shared_context_coverage": build_shared_context_coverage(data_dir, epoch_id, lifecycles),
         "schema": "safe_policy_genome_v3_1_report_v1",
         "extension": "ADAPTIVE_EXIT_AND_DRAWDOWN_LAB_V3_1",
         "data_scope": "FRESH-COLLECTION" if selected_epoch is not None else "SESSION",
