@@ -35,6 +35,20 @@ def main():
 
         dashboard.app.view_functions["api_research_design"] = synthetic_design
 
+        def synthetic_genome():
+            return jsonify(schema="SYNTHETIC_UI_FIXTURE", available=True,
+                collector_generation="V3.1", epoch_id="SYNTHETIC-EPOCH",
+                warning="SYNTHETIC UI ONLY — NOT MARKET EVIDENCE",
+                qualification="NOT_QUALIFIED", live_policy_change_allowed=False,
+                shared_context_coverage={
+                    "status": "CURRENT_EPOCH_EVIDENCE_ONLY",
+                    "eligible_lanes": 140, "cohort_evaluated_lanes": 128,
+                    "cohort_bound_lanes": 100, "cohort_pending_lanes": 12,
+                    "cohort_evaluation_complete": False,
+                    "page_lanes": 64, "bound_lanes": 50, "truncated": True})
+
+        dashboard.app.view_functions["api_genome"] = synthetic_genome
+
         @dashboard.app.after_request
         def label_fixture(response):
             if response.mimetype == "text/html":
