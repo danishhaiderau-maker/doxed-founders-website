@@ -9354,6 +9354,57 @@ def _build_showcase_relay_event_payload(event: str, trade_id: str, extra: dict =
     return payload
 
 
+def _commit_local_paper_lifecycle_transition(
+    event, trade_id, extra, *, target_mutator, live_mutator, canonical_lock=None,
+):
+    """Durable paper postimage without creating any relay delivery authority."""
+    lane = str(extra.get("research_lane") or "").upper()
+    spec = COMBO_LANE_SPECS.get(lane) or {}
+    if not (
+        event in RELAY_CANONICAL_TRANSITION_EVENTS
+        and is_active_dashboard_owner() and _force_paper_mode_active()
+        and state.get("live_armed") is not True
+        and state.get("bitfinex_live_enabled") is not True
+        and spec.get("paper_only") is True and not spec.get("platform_relay_eligible")
+        and lane not in PLATFORM_RELAY_ELIGIBLE_LANES
+        and str(trade_id).startswith(str(spec.get("id_prefix") or "INVALID") + "-")
+        and _relay_event_outbox.healthy
+    ):
+        raise RuntimeError("local paper lifecycle authority rejected")
+    try:
+        with paper_lifecycle_transition_lock:
+            if canonical_lock is not None:
+                canonical_lock.acquire()
+            try:
+                with paper_lifecycle_file_lock:
+                    with trade_lock:
+                        before = _build_paper_lifecycle_payload(f"local_paper_transition:{event}")
+                        target = copy.deepcopy(before)
+                        target_mutator(target)
+                        for snapshot in (before, target):
+                            if snapshot.get("paper_only") is not True or snapshot.get("live_armed") is not False:
+                                raise RuntimeError("paper lifecycle snapshot is not disarmed paper")
+                            for key in ("positions", "pending_orders", "awaiting_signals"):
+                                for row in snapshot.get(key) or []:
+                                    if str(row.get("trade_id") or "") == str(trade_id) and (
+                                        row.get("bitfinex_order_id") or row.get("bitfinex_position_id")
+                                        or row.get("bitfinex_live_entry")
+                                    ):
+                                        raise RuntimeError("local paper lifecycle has exchange identity")
+                        # Atomic postimage first: normal startup restores this
+                        # generation even if the process dies before live swap.
+                        target = _relay_event_outbox.decorate_lifecycle(target)
+                        _relay_event_outbox._atomic_write(target)
+                        live_mutator()
+            finally:
+                if canonical_lock is not None:
+                    canonical_lock.release()
+    except Exception as exc:
+        set_execution_paused("PAPER_LIFECYCLE_COMMIT_FAILED")
+        raise RuntimeError(f"local paper lifecycle commit failed for {event}") from exc
+    return True
+
+
 def _commit_paper_lifecycle_transition(
     event: str,
     trade_id: str,
@@ -9373,6 +9424,20 @@ def _commit_paper_lifecycle_transition(
     A crash after PREPARE is completed from the full target by outbox startup;
     a COMMIT error leaves the WAL intact and pauses execution for reconciliation.
     """
+    local_extra = extra if isinstance(extra, dict) else {}
+    explicit_spec = COMBO_LANE_SPECS.get(str(local_extra.get("research_lane") or "").upper()) or {}
+    prefix_is_paper = any(
+        spec.get("paper_only") is True
+        and str(trade_id).startswith(str(spec.get("id_prefix") or "INVALID") + "-")
+        for spec in COMBO_LANE_SPECS.values()
+    )
+    if explicit_spec.get("paper_only") is True or prefix_is_paper:
+        if commit_before_ack is not None:
+            raise RuntimeError("paper-local transition cannot bypass relay acknowledgement callback")
+        return _commit_local_paper_lifecycle_transition(
+            event, trade_id, local_extra, target_mutator=target_mutator,
+            live_mutator=live_mutator, canonical_lock=canonical_lock,
+        )
     payload = _build_showcase_relay_event_payload(event, trade_id, extra)
     if payload is None:
         raise RuntimeError(f"relay lifecycle event rejected for {event}")
@@ -21345,6 +21410,10 @@ def _commit_relay_limit_chase(
         rows = [row for row in target.get("pending_orders") or [] if str(row.get("trade_id") or "") == trade_id]
         if len(rows) != 1:
             raise RuntimeError("pending chase target identity mismatch")
+        if (rows[0].get("status") != "PENDING"
+                or abs(float(rows[0].get("limit_price") or 0) - old_limit) >= 0.005
+                or int(rows[0].get("limit_chase_count") or 0) != chase_count - 1):
+            raise RuntimeError("pending chase target generation changed")
         mutate_order(rows[0])
 
     def live_mutator():
