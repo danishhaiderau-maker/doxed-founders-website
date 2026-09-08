@@ -15,6 +15,7 @@ def load_snapshot(writer):
     env = dict(state={'edge_threshold': 3}, open_positions=[{'id': 'p'}],
                pending_orders=[{'id': 'o'}], latest_candles=[], utc_iso=lambda: 'now',
                time=SimpleNamespace(time=lambda: 1), json=json, open=writer,
+               os=SimpleNamespace(getenv=lambda key, default=None: default),
                get_active_signal_count=forbidden, get_edge_threshold=forbidden,
                logger=SimpleNamespace(critical=lambda *a: None, error=lambda *a: None),
                _watchdog_crash_context=lambda *a, **k: {'trigger': k['trigger']})
