@@ -10,8 +10,11 @@ from research_v3_store import V3EvidenceStore
 from research_v3_bridge import write_pre_ai_scan_opportunity
 
 
-@pytest.mark.parametrize('hook',['cooldown','pre_ai'])
-def test_actual_skip_branch_records_both_sides_without_ai_or_order(tmp_path,monkeypatch,hook):
+@pytest.mark.parametrize('hook,gate_reason',[
+    ('cooldown','RESEARCH_OBSERVATION_DISABLED'),
+    ('pre_ai','RESEARCH_OBSERVATION_DISABLED'),('pre_ai','RESEARCH_QUALITY_20'),
+    ('pre_ai','SECRET_DO_NOT_PERSIST')])
+def test_actual_skip_branch_records_both_sides_without_ai_or_order(tmp_path,monkeypatch,hook,gate_reason):
     tree=ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8'))
     helper=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_capture_pre_ai_skip_research')
     process=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='process_signal')
@@ -28,7 +31,7 @@ def test_actual_skip_branch_records_both_sides_without_ai_or_order(tmp_path,monk
         'is_valid_feature_set':lambda f:True,'validate_ai_features':lambda ctx:(True,None),
         'build_pure_ai_context':lambda *a:{'signal_ts':998.},'get_aggregated':lambda x:0.,
         'features':features,'ctx':{'signal_ts':998.},'trigger_ok':False,'invoke_ai':False,
-        'trigger_reason':'AI_COOLDOWN','ai_gate_reason':'TEST_GATE','edge_score':1.,'research_lane':'AI_SCAN',
+        'trigger_reason':'AI_COOLDOWN','ai_gate_reason':gate_reason,'edge_score':1.,'research_lane':'AI_SCAN',
         'state':{'debug_state':{}},'state_lock':nullcontext(),'logger':SimpleNamespace(info=noop,warning=lambda s:pytest.fail(s)),
         'increment_pipeline_funnel':noop,'log_no_signal_with_context':noop,'full_pipeline_trace':noop,
         'update_debug_state_always':noop,'_set_lane_pipeline_stage':noop,
@@ -45,6 +48,9 @@ def test_actual_skip_branch_records_both_sides_without_ai_or_order(tmp_path,monk
         clock=lambda:1000.,on_failure=lambda c:pytest.fail(c))
     run({})
     rows=[json.loads(line) for line in store.ledger_path('opportunity').read_text().splitlines()]
+    assert rows[0]['research_skip_reason'] == ('PRE_AI_GATE' if hook=='pre_ai' else 'AI_COOLDOWN')
+    assert rows[0]['research_skip_exact_reason'] == (
+        gate_reason if hook=='pre_ai' and gate_reason!='SECRET_DO_NOT_PERSIST' else None)
     assert len(rows)==1 and rows[0]['raw_ai_decision']=='AI_NOT_CALLED'
     assert rows[0]['raw_direction']=='UNKNOWN' and rows[0]['actual_ai_call_id'] is None
     assert not rows[0]['ai_evaluated']

@@ -850,6 +850,18 @@ def dual_write_lane_entry_resolution(
     }
 
 
+def _bounded_pre_ai_skip_reason(value):
+    """Only enumerated gate labels and bounded numeric gate measurements."""
+    import re
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    if value in {'RESEARCH_OBSERVATION_DISABLED', 'NO_PERIODIC_TRIGGER'}:
+        return value
+    if re.fullmatch(r'(?:AI_COOLDOWN_[0-9]{1,6}(?:\.[0-9]{1,6})?s|RESEARCH_QUALITY_-?[0-9]{1,6})', value):
+        return value
+    return None
+
+
 def write_pre_ai_scan_opportunity(source, *, epoch_id, data_dir):
     """Observed research scan, not an AI verdict or executable lane decision."""
     scan=str(source.get('research_scan_id') or '')
@@ -896,6 +908,7 @@ def write_pre_ai_scan_opportunity(source, *, epoch_id, data_dir):
         'signal_ts':signal_ts,'symbol':identity['symbol'],'market':_opportunity_market(material),
         'feature_snapshot_at_signal':features,'market_context_segment_refs':refs,
         'market_context_segment_coverage':coverage,'research_skip_reason':source.get('research_skip_reason'),
+        'research_skip_exact_reason':_bounded_pre_ai_skip_reason(source.get('research_skip_exact_reason')),
         **_signal_time_baseline_inputs(material)})
     from research_scan_census import observe_opportunity
     observe_opportunity(store,opportunity,'AI_NOT_CALLED')
