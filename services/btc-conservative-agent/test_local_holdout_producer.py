@@ -56,3 +56,49 @@ def test_missing_lineage_excluded_and_bad_mirror_rejected(tmp_path):
     data=json.loads(heartbeat.read_text()); data['ok']=False; heartbeat.write_text(json.dumps(data))
     from research.mirror_coherence import MirrorCoherenceError
     with pytest.raises(MirrorCoherenceError): produce_local_holdout(**args,input_sha256=written['input_sha256'])
+
+
+def test_bounded_resume_no_partial_export_and_cache_tamper(tmp_path,monkeypatch):
+    import json
+    from copy import deepcopy
+    from research import local_holdout_producer as module
+    from dynamic_policy_analyzer import load_verified_local_dynamic_mapping
+    args,mapping=prepared(tmp_path)
+    written=write_local_dynamic_input(**args,rows=mapping['training_episodes'],mapping_payload=mapping)
+    opts={**args,'input_sha256':written['input_sha256']}
+    mapping,receipt=load_verified_local_dynamic_mapping(**opts)
+    template=mapping['training_episodes'][0]; generation=mapping['expected_generation']
+    episodes=[]
+    for i in range(40):
+        episode=deepcopy(template); episode['episode_id']='derived-'+str(i); episode['source_episode_id']='source-'+str(i)
+        policy=next(iter(episode['policy_outcomes']))
+        identity=dict(collection_epoch_id=generation['epoch_id'],episode_id=episode['source_episode_id'],policy_signature='sig',research_lane='L')
+        episode['policy_outcomes'][policy]={'outcome_state':'NO_FILL','net_pnl_usd':0,'source_lifecycle_identity':identity,'source_config_signature':'cfg'}
+        path=args['data_root']/f'v3/lifecycle_bundles/e/b{i}/manifest.json'; path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({'identity':identity,'manifest_sha256':str(i),'provenance':{'config_signature':'cfg'}}))
+        episodes.append(episode)
+    mapping['training_episodes']=episodes
+    monkeypatch.setattr(module,'load_verified_local_dynamic_mapping',lambda **k:(mapping,receipt))
+    calls=[]
+    def proof(path,**k):
+        calls.append(k['source_episode_id'])
+        return {'completion':{'entry_outcome':'NO_FILL'},'evidence_collected_at':20000}
+    monkeypatch.setattr(module,'verify_collection_provenance',proof)
+    first=module.produce_local_holdout(**opts)
+    assert first['status']=='IN_PROGRESS' and first['pending_proofs']==8 and len(calls)==32
+    assert not (args['repo_root']/'local-derived/holdout-inputs').exists()
+    writer=module._write_once
+    def interrupted(path,body):
+        if body.get('schema')=='local_verified_holdout_input_v1': raise OSError('injected final publication failure')
+        return writer(path,body)
+    monkeypatch.setattr(module,'_write_once',interrupted)
+    with pytest.raises(OSError): module.produce_local_holdout(**opts)
+    assert len(calls)==40
+    assert not (args['repo_root']/'local-derived/holdout-inputs').exists()
+    monkeypatch.setattr(module,'_write_once',writer)
+    second=module.produce_local_holdout(**opts)
+    assert len(second['rows'])==40 and len(calls)==40
+    assert len(set(calls))==40
+    cache=next((args['repo_root']/'local-derived/holdout-progress').glob('*/*.json'))
+    cache.chmod(0o666); cache.write_text('{}')
+    with pytest.raises(ValueError,match='CACHE_INVALID'): module.produce_local_holdout(**opts)
