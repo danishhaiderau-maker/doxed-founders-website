@@ -29,8 +29,31 @@ def test_actual_analyzer_report_exports_verified_context_without_qualification(t
     assert not report['real_bitfinex_trading_allowed']
     stored_lane = json.loads((tmp_path/'v3/ledgers/lifecycle.jsonl').read_text())
     limited = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [stored_lane], max_bytes=1)
-    assert limited['truncated'] and limited['bound_lanes'] == 0
-    assert limited['lanes'][0]['references'] == []
+    assert not limited['truncated'] and limited['bound_lanes'] == 1
+    assert limited['rows_scanned'] == 0  # Reuse the complete derived cursor.
     assert (tmp_path/'v3/ledgers/opportunity.jsonl').read_bytes() == raw
     foreign = {**stored_lane, 'epoch_id':'old-epoch'}
     assert build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [foreign])['lanes'] == []
+
+
+def test_report_index_advances_past_two_mib_without_repeating_prefix(tmp_path):
+    lane = {**audit(), 'opportunity_id':'opportunity:' + KEY.episode_id}
+    directory = tmp_path/'v3/ledgers'
+    directory.mkdir(parents=True)
+    old = {'epoch_id':'old', 'episode_id':'old', 'payload':'x'*750000}
+    current = {**PROV, 'epoch_id':KEY.collection_epoch_id, 'episode_id':KEY.episode_id,
+               'shared_ai_call_id':lane['shared_ai_call_id'], 'record_id':lane['opportunity_id']}
+    with (directory/'opportunity.jsonl').open('w') as stream:
+        for row in [old,old,old,current]:
+            stream.write(json.dumps(row)+'\n')
+    first = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])
+    assert first['truncated'] and first['bound_lanes'] == 0 and first['rows_scanned'] == 2
+    second = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])
+    assert not second['truncated'] and second['bound_lanes'] == 1 and second['rows_scanned'] == 2
+    third = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])
+    assert third['rows_scanned'] == 0 and third['bound_lanes'] == 1
+    with (directory/'opportunity.jsonl').open('a') as stream:
+        stream.write('{"incomplete":true}')
+    broken = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])
+    assert broken['bound_lanes'] == 0
+    assert 'SHARED_CONTEXT_INDEX_OR_SOURCE_INVALID' in broken['lanes'][0]['blockers']
