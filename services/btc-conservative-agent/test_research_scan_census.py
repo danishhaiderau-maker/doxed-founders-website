@@ -131,7 +131,7 @@ def test_actual_bot_wrapper_admits_before_manual_pause_filter(tmp_path):
     import ast,copy,time
     from pathlib import Path
     from types import SimpleNamespace
-    tree=ast.parse(Path('bot.py').read_text(encoding='utf-8'))
+    tree=ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8'))
     function=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='process_signal')
     assignment=next(n for n in tree.body if isinstance(n,ast.Assign)
         and any(isinstance(t,ast.Name) and t.id=='process_signal' for t in n.targets))
