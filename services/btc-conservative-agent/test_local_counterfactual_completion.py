@@ -81,7 +81,8 @@ def test_completion_artifact_tamper_rejected(tmp_path,monkeypatch):
     with pytest.raises(ValueError,match='ARTIFACT_HASH'): module.load_completion(args['repo_root'],receipt['artifact_sha256'])
 
 
-def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch):
+@pytest.mark.parametrize('authority',['component','real_mirror','late_seal'])
+def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority):
     from test_local_dynamic_loader import prepared
     from test_dynamic_cohort_adapter import row
     from research.dynamic_cohort_adapter import adapt_dynamic_cohorts
@@ -91,6 +92,7 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch):
     from research.local_dynamic_seal import seal_historical_fit
     from research_entry_baselines import materialize_signal_time_baseline_schedules
     from research.conservative_limit_fill import _normalise_schedule
+    real_check,real_source=module._check,module._source
     opts,mapping=prepared(tmp_path/'training'); generation=mapping['expected_generation']
     args=inputs(tmp_path/'proof',monkeypatch,generation=generation,shift=2000000)
     original=json.loads((args['data_root']/'v3/ledgers/opportunity.jsonl').read_bytes())
@@ -141,6 +143,20 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch):
     sealed=seal_historical_fit(**opts,holdout_start_ts=2000001.,holdout_end_ts=2100000.,
         holdout_maturity_delay_sec=10000.,clock=lambda:2000000.)
     args.update(repo_root=opts['repo_root'],seal_request_id=_hash(sealed['binding']))
+    if authority=='late_seal':
+        original['signal_ts']=1999999.
+        raw=json.dumps(original).encode()
+        (args['data_root']/'v3/ledgers/opportunity.jsonl').write_bytes(raw)
+        args['opportunity_ref'].update(row_length=len(raw),row_sha256=hashlib.sha256(raw).hexdigest())
+        with pytest.raises(ValueError,match='COUNTERFACTUAL_MODEL_NOT_AVAILABLE'):
+            module.write_completion(**args)
+        return
+    if authority=='real_mirror':
+        import shutil
+        shutil.copytree(args['data_root']/'v3',opts['data_root']/'v3',dirs_exist_ok=True)
+        args.update(data_root=opts['data_root'],source_revision=opts['source_revision'],now=opts['now'])
+        monkeypatch.setattr(module,'_check',real_check)
+        monkeypatch.setattr(module,'_source',real_source)
     result=module.write_completion(**args)
     assert result['scope']=='SEALED_POLICY_REPLAY_PROOF_NOT_QUALIFIED'
     assert result['qualification_allowed'] is False
