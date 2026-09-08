@@ -178,6 +178,7 @@ def main(argv=None):
         parser.add_argument('--'+name,required=True)
     parser.add_argument('--max-bytes',type=int,default=1048576)
     parser.add_argument('--reference-after',default='')
+    parser.add_argument('--dispatch-after',default='')
     args=vars(parser.parse_args(argv))
     try:
         report=reconcile_scans(**args)
@@ -187,6 +188,9 @@ def main(argv=None):
             'verified_reference_page':report['sample_original_references'],
             'next_reference_cursor':report['next_reference_cursor'],
             'more_references':report['reference_sample_truncated'],
+            'observed_dispatch_page':report['observed_dispatch_page'],
+            'next_dispatch_cursor':report['next_dispatch_cursor'],
+            'more_dispatches':report['dispatch_page_truncated'],
             'exhaustive_collection_status':'UNKNOWN','qualification_eligible':False,
             'blockers':report['blockers']},allow_nan=False))
         return 0

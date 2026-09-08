@@ -15,6 +15,11 @@ def test_cli_actual_store_publishes_observed_only(tmp_path,monkeypatch,capsys):
     assert result['verified_reference_page'][0]['row_sha256']
     assert result['exhaustive_collection_status']=='UNKNOWN'
     assert not result['qualification_eligible']
+    assert result['observed_dispatch_page']==[]
+    assert result['next_dispatch_cursor'] is None and not result['more_dispatches']
+    assert module.main(cli+['--dispatch-after','x'*257])==1
+    invalid=json.loads(capsys.readouterr().out)
+    assert invalid['error']=='CENSUS_REFERENCE_CURSOR_INVALID'
 
 
 @pytest.mark.parametrize('error',[ValueError('private payload'),sqlite3.OperationalError('private path')])
