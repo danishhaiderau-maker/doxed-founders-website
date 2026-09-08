@@ -63,6 +63,21 @@ def prepared(tmp_path,monkeypatch,extra_signal=None):
     return {**args,'input_sha256':receipt['input_sha256'],'seal_request_id':_hash(seal['binding'])},seal
 
 
+@pytest.mark.parametrize('schema', [None, 'local_dynamic_prospective_seal_v3'])
+def test_unknown_seal_schema_rejected_before_outcome_read(tmp_path,monkeypatch,schema):
+    args,seal=prepared(tmp_path,monkeypatch)
+    path=args['repo_root']/'local-derived/dynamic-seals'/(args['seal_request_id']+'.json')
+    wrapper=json.loads(path.read_text())
+    wrapper['schema']=schema
+    wrapper['receipt_sha256']=_hash({k:v for k,v in wrapper.items() if k!='receipt_sha256'})
+    from research import local_dynamic_evaluation as module
+    reader=module._read
+    monkeypatch.setattr(module,'_read',lambda p:wrapper if p==path else reader(p))
+    monkeypatch.setattr(module,'produce_local_holdout',lambda **k:pytest.fail('read outcomes'))
+    with pytest.raises(ValueError,match='EVALUATION_SEAL_SCHEMA_UNSUPPORTED'):
+        evaluate_local_frozen_holdout(**args,clock=lambda:2_020_001.)
+
+
 def test_actual_prospective_producer_frozen_consumer_and_crash_retry(tmp_path,monkeypatch):
     args,seal=prepared(tmp_path,monkeypatch)
     from research import local_dynamic_fit as fit

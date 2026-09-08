@@ -24,6 +24,9 @@ def evaluate_local_frozen_holdout(*, seal_request_id, clock=time.time, **options
     base=_safe_path(Path(options['repo_root'])/'local-derived')
     sealroot=_safe_path(base/'dynamic-seals')
     wrapper=_read(sealroot/(seal_request_id+'.json'))
+    if wrapper.get('schema') not in {
+            'local_dynamic_prospective_seal_v1', 'local_dynamic_prospective_seal_v2'}:
+        raise ValueError('EVALUATION_SEAL_SCHEMA_UNSUPPORTED')
     binding=wrapper.get('binding') or {}; seal=wrapper.get('seal') or {}
     if (wrapper.get('receipt_sha256')!=_hash({k:v for k,v in wrapper.items() if k!='receipt_sha256'})
             or _hash(binding)!=seal_request_id or seal.get('cohort_signature')!=_hash(binding)
