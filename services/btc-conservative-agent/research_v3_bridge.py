@@ -89,8 +89,12 @@ def _pre_entry_features_receipt(
     row = {
         "record_id": f"pre-entry-features:{identity['episode_id']}",
         "receipt_schema": PRE_ENTRY_FEATURES_SCHEMA,
-        "captured_at_ts": float(signal_ts),
-        "captured_at_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "capture_schema": features.get("capture_schema"),
+        "captured_at_ts": features.get("captured_at_ts")
+        if features.get("capture_schema") == "measured_feature_capture_v1" else None,
+        "captured_at_timezone": "UTC"
+        if features.get("capture_schema") == "measured_feature_capture_v1" else "UNKNOWN",
+        "source_event_ts": float(signal_ts),
         "availability_boundary": "PRE_DECISION_ONLY",
         "episode_id": identity["episode_id"],
         "shared_ai_call_id": identity["shared_ai_call_id"],

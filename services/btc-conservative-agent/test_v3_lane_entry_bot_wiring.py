@@ -433,7 +433,8 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
 
 
 def test_shared_causal_snapshot_is_pre_ai_complete_and_lane_independent():
-    namespace = {"copy": copy, "time": __import__("time")}
+    from types import SimpleNamespace
+    namespace = {"copy": copy, "time": SimpleNamespace(time=lambda: 1_700_000_002.0)}
     for name in (
         "_volatility_bucket",
         "_adx_bucket",
@@ -465,7 +466,10 @@ def test_shared_causal_snapshot_is_pre_ai_complete_and_lane_independent():
     ctx["cycle_3m_universe"]["atr14_pct_3m"] = 9.9
 
     assert frozen["regime"]["value"] == "BEAR"
-    assert frozen["regime"]["observed_ts"] == 1_700_000_000.0
+    assert frozen["regime"]["observed_ts"] == 1_700_000_002.0
+    assert frozen["captured_at_ts"] == 1_700_000_002.0
+    assert frozen["source_event_ts"] == 1_700_000_000.0
+    assert frozen["capture_schema"] == "measured_feature_capture_v1"
     assert frozen["regime_label"] == "BEAR"
     assert frozen["atr14_pct_3m"] == 0.55
     assert frozen["realized_volatility"] == 0.09

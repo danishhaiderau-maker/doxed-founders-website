@@ -24,6 +24,38 @@ from research_order_schedule import initialize_order_schedule, close_order_sched
 from research.policy_evidence_bindings import authoritative_schedule_intents
 
 
+def test_lane_receipt_preserves_measured_capture_and_original_boundary(tmp_path):
+    from research.research_v3_report import normalize_pre_entry_feature_receipt
+    from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES
+    features = {name: "OBSERVED" for name in DEFAULT_CAUSAL_FEATURES}
+    features.update(capture_schema="measured_feature_capture_v1",
+                    captured_at_ts=1002.0, source_event_ts=998.0)
+    result = dual_write_lane_decision(
+        {"trade_id": "scan-measured", "shared_ai_call_id": "scan-measured",
+         "shared_ai_call_ts_epoch": 1000, "symbol": "BTCUSD",
+         "raw_direction": "LONG", "feature_snapshot_at_signal": features},
+        lane="CONTINUOUS", policy_decision="REJECT",
+        execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="REJECT",
+        epoch_id="epoch-measured", data_dir=str(tmp_path),
+        lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+    )
+    store = V3EvidenceStore(str(tmp_path), epoch_id="epoch-measured")
+    row = json.loads(store.ledger_path("pre_entry_features").read_text())
+    assert row["captured_at_ts"] == 1002.0
+    assert row["source_event_ts"] == 1000.0
+    assert row["features"]["source_event_ts"] == 998.0
+    assert row["episode_id"] == result["episode_id"]
+    assert row["source_evidence_refs"]["feature_snapshot_sha256"] == hashlib.sha256(
+        canonical_json(features).encode()).hexdigest()
+    assert normalize_pre_entry_feature_receipt(row, signal_ts=1000)[1] == [
+        "PRE_ENTRY_CAPTURE_AFTER_SIGNAL"]
+    # A genuine later decision can use the same already-available inputs;
+    # this does not change the original stored signal or capture timestamp.
+    normalized, blockers = normalize_pre_entry_feature_receipt(row, signal_ts=1003)
+    assert not blockers
+    assert normalized["atr_bucket"]["observed_ts"] == 1002.0
+
+
 def _event(event_id="cont-1", episode_id="episode-1"):
     return {
         "event_id": event_id,
@@ -801,7 +833,8 @@ class V3BridgeTests(unittest.TestCase):
                 )
                 search = compact_search_receipt()
                 self.assertEqual(row["receipt_schema"], "pre_entry_features_v1")
-                self.assertEqual(row["captured_at_ts"], 1000.0)
+                self.assertIsNone(row["captured_at_ts"])
+                self.assertEqual(row["source_event_ts"], 1000.0)
                 self.assertEqual(row["availability_boundary"], "PRE_DECISION_ONLY")
                 self.assertEqual(row["feature_schema_version"], "causal-features-v7")
                 self.assertEqual(row["bucket_definition_signature"], search["signature"])

@@ -19,9 +19,27 @@ def _causal_join_input():
     return (
         {"episode_id": "e1", "opportunity_id": "o1", "signal_ts": 100},
         {"episode_id": "e1", "opportunity_id": "o1",
+         "capture_schema": "measured_feature_capture_v1",
          "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 99,
          "features": {name: "OBSERVED_BUCKET" for name in DEFAULT_CAUSAL_FEATURES}},
     )
+
+
+def test_legacy_event_time_cannot_be_relabelled_as_measured_capture():
+    opportunity, receipt = _causal_join_input()
+    receipt.pop("capture_schema")
+    joined, _ = join_pre_entry_feature_receipts([opportunity], [receipt])
+    assert joined[0]["pre_entry_features"] == {}
+    assert joined[0]["pre_entry_feature_blockers"] == ["PRE_ENTRY_MEASURED_CAPTURE_MISSING"]
+
+
+def test_measured_capture_after_original_signal_stays_unknown():
+    opportunity, receipt = _causal_join_input()
+    receipt["captured_at_ts"] = 101
+    receipt["source_event_ts"] = 100
+    joined, _ = join_pre_entry_feature_receipts([opportunity], [receipt])
+    assert opportunity["signal_ts"] == 100
+    assert joined[0]["pre_entry_feature_blockers"] == ["PRE_ENTRY_CAPTURE_AFTER_SIGNAL"]
 
 
 @pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), "-Infinity", None])
@@ -95,6 +113,7 @@ class V3ReportTests(unittest.TestCase):
                     store.append("pre_entry_features", {
                         "record_id": f"pre-entry-features:{episode_id}",
                         "receipt_schema": "pre_entry_features_v1",
+                        "capture_schema": "measured_feature_capture_v1",
                         "availability_boundary": "PRE_DECISION_ONLY",
                         "captured_at_ts": 999 + index,
                         "episode_id": episode_id,
@@ -122,6 +141,7 @@ class V3ReportTests(unittest.TestCase):
             ]
             receipts = [
                 {"episode_id": "episode-1", "opportunity_id": "opportunity:episode-1",
+                 "capture_schema": "measured_feature_capture_v1",
                  "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 1000,
                  "features": features},
             ]
