@@ -31,7 +31,7 @@ def diagnostic_code(error):
 
 
 def _verify_page_ref(root, ref, source, config):
-    if ref.get('ledger') not in ('decision','opportunity'):
+    if ref.get('ledger') not in ('decision','opportunity','lifecycle'):
         raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
     ledger=ref['ledger']; offset=ref.get('byte_offset'); length=ref.get('row_length')
     if type(offset) is not int or offset<0 or type(length) is not int or not 0<length<=1048576:
@@ -57,7 +57,9 @@ def _verify_page_ref(root, ref, source, config):
 
 
 def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, now=None,
-                    max_bytes=1048576, reference_after='', held_lease=None, expected_source=None):
+                    max_bytes=1048576, reference_after='', held_lease=None, expected_source=None, dispatch_after=''):
+    if not isinstance(dispatch_after,str) or len(dispatch_after)>256:
+        raise ValueError('CENSUS_REFERENCE_CURSOR_INVALID')
     if not isinstance(reference_after,str) or len(reference_after)>256:
         raise ValueError('CENSUS_REFERENCE_CURSOR_INVALID')
     if type(max_bytes) is not int or not 1 <= max_bytes <= 2097152:
@@ -85,8 +87,11 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
             db.execute('CREATE TABLE IF NOT EXISTS refs(job TEXT,ledger TEXT,id TEXT,scan TEXT,digest TEXT,stage TEXT,reference TEXT, PRIMARY KEY(job,ledger,id))')
             db.execute('CREATE INDEX IF NOT EXISTS refs_scan_stage ON refs(job,scan,stage)')
             budget=max_bytes; complete=True
-            for ledger in ('decision','opportunity'):
+            for ledger in ('decision','opportunity','lifecycle'):
                 path=Path(data_root)/'v3/ledgers'/f'{ledger}.jsonl'
+                if not path.exists() and ledger=='lifecycle':
+                    db.execute('DELETE FROM refs WHERE job=? AND ledger=?',(job,ledger))
+                    continue
                 stat=path.stat(); fingerprint=json.dumps([stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns])
                 previous=db.execute('SELECT fingerprint,offset FROM cursors WHERE job=? AND ledger=?',(job,ledger)).fetchone()
                 offset=previous[1] if previous and previous[0]==fingerprint else 0
@@ -139,10 +144,22 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
                 original=_verify_page_ref(data_root,json.loads(admission[0][0]),source,config_signature)
                 if original.get('decision_stage')!='SCAN_ADMISSION' or original.get('scan_id')!=ref['scan_id']:
                     raise ValueError('CENSUS_ADMISSION_CONFLICT')
+            dispatches=[]
+            if complete:
+                from research.scan_dispatch_verification import verify_dispatch
+                plans=db.execute("SELECT reference,scan FROM refs WHERE job=? AND stage='SCAN_FANOUT_PLAN' AND id>? ORDER BY id LIMIT 9",(job,dispatch_after)).fetchall()
+                for payload,scan in plans[:8]:
+                    admissions=[json.loads(r[0]) for r in db.execute("SELECT reference FROM refs WHERE job=? AND scan=? AND stage='SCAN_FANOUT_ADMISSION' LIMIT 17",(job,scan))]
+                    children=[json.loads(r[0]) for r in db.execute("SELECT reference FROM refs WHERE job=? AND scan=? AND ledger='lifecycle' LIMIT 33",(job,scan))]
+                    parents=[json.loads(r[0]) for r in db.execute("SELECT reference FROM refs WHERE job=? AND scan=? AND stage='SCAN_ADMISSION' LIMIT 2",(job,scan))]
+                    dispatches.append(verify_dispatch(data_root,json.loads(payload),admissions,children,source,config_signature,parents))
             result={'schema':'local_scan_reconciliation_v1','binding':binding,'index_caught_up':complete,
                 'observed_joined_opportunity_rows':count if complete else None,
                 'sample_original_references':refs,'reference_sample_truncated':more,
                 'next_reference_cursor':refs[-1]['record_id'] if more else None,
+                'observed_dispatch_page':dispatches,
+                'dispatch_page_truncated':complete and len(plans)>8,
+                'next_dispatch_cursor':json.loads(plans[7][0])['record_id'] if complete and len(plans)>8 else None,
                 'exhaustive_fanout':False,'qualification_eligible':False,
                 'blockers':['EXPECTED_CHILD_DENOMINATOR_UNPROVEN','CONTINUOUS_COLLECTION_UNPROVEN']}
             db.commit()
