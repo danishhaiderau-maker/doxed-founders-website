@@ -197,7 +197,8 @@ class _NestedLockVisitor(ast.NodeVisitor):
             for outer in self.stack:
                 if outer != lock:
                     self.pairs.add((self.function, outer, lock))
-        self.stack.extend(locks)
+            # A multi-item with acquires left-to-right, just like nested withs.
+            self.stack.append(lock)
         for child in node.body:
             self.visit(child)
         if locks:
@@ -214,13 +215,27 @@ def test_nested_lock_order_has_no_new_inversions():
     local_pairs = {
         (local_name, "paper_lifecycle_transition_lock", "paper_lifecycle_file_lock"),
         (local_name, "paper_lifecycle_transition_lock", "trade_lock"),
-        (local_name, "paper_lifecycle_file_lock", "trade_lock"),
+        (local_name, "trade_lock", "paper_lifecycle_file_lock"),
     }
     relay_pairs = {(outer, inner) for function, outer, inner in expected
                    if function == "_commit_paper_lifecycle_transition"}
     assert {(outer, inner) for _, outer, inner in local_pairs} == relay_pairs
     assert {row for row in visitor.pairs if row[0] == local_name} == local_pairs
+    repaired = {
+        local_name, "_commit_paper_lifecycle_transition",
+        "_deliver_relay_outbox_record", "_push_showcase_relay_event",
+        "emit_signal_webhook", "save_paper_lifecycle",
+    }
+    for function in repaired:
+        assert (function, "trade_lock", "paper_lifecycle_file_lock") in visitor.pairs
+        assert (function, "paper_lifecycle_file_lock", "trade_lock") not in visitor.pairs
     assert visitor.pairs == expected
+
+
+def test_lock_visitor_records_multi_item_with_in_acquisition_order():
+    visitor = _NestedLockVisitor()
+    visitor.visit(ast.parse("def example():\n    with trade_lock, paper_lifecycle_file_lock:\n        pass\n"))
+    assert visitor.pairs == {("example", "trade_lock", "paper_lifecycle_file_lock")}
 
 
 def test_retired_ui_candidates_are_not_registered():
