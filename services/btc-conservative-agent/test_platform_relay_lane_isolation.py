@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import copy
+import io
+import json
 from pathlib import Path
 import threading
 import time
@@ -398,21 +400,62 @@ def test_relay_worker_has_no_idle_network_polling() -> None:
 
 
 def test_saver_and_transition_lock_order_cannot_deadlock_or_publish_state_only() -> None:
-    lifecycle_lock = threading.RLock()
-    trade = threading.RLock()
-    transition = threading.RLock()
-    saver_holds_lifecycle = threading.Event()
-    allow_saver = threading.Event()
+    saver_building = threading.Event()
+    transition_waiting = threading.Event()
+    errors = []
+
+    class BoundedLock:
+        def __init__(self, observe=False):
+            self.lock = threading.RLock()
+            self.observe = observe
+
+        def acquire(self):
+            if self.observe and threading.current_thread().name == "transition":
+                transition_waiting.set()
+            if not self.lock.acquire(timeout=2):
+                raise TimeoutError("lifecycle lock-order regression")
+            return True
+
+        def release(self):
+            self.lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *args):
+            self.release()
+
+    lifecycle_lock = BoundedLock()
+    trade = BoundedLock(observe=True)
+    transition = BoundedLock()
     state = {"orders": []}
     generations = []
 
     class FakeOutbox:
+        def decorate_lifecycle(self, payload):
+            return {**payload, "pending_relay_transitions": []}
+
         def prepare_transition(self, target, payload, suggested):
             generations.append(("PREPARE", copy.deepcopy(state), copy.deepcopy(target), payload))
             return {"event_id": "evt"}
 
         def commit_prepared(self, event_id):
             generations.append(("COMMIT", copy.deepcopy(state), event_id))
+
+    def build(reason):
+        with trade:
+            if reason == "concurrent_save":
+                saver_building.set()
+                assert transition_waiting.wait(2)
+            return {"schema": "paper_lifecycle_v1", "orders": copy.deepcopy(state["orders"])}
+
+    def atomic_write(path, writer, lock, label):
+        with lock:
+            output = io.StringIO()
+            writer(output)
+            generations.append(("SAVE", json.loads(output.getvalue())))
+            return True
 
     namespace = {
         "paper_lifecycle_transition_lock": transition,
@@ -423,33 +466,39 @@ def test_saver_and_transition_lock_order_cannot_deadlock_or_publish_state_only()
         "os": type("OS", (), {"path": type("Path", (), {"exists": staticmethod(lambda _p: True)})}),
         "_relay_event_outbox": FakeOutbox(),
         "_build_showcase_relay_event_payload": lambda event, tid, extra: {"event": event, "trade_id": tid, **extra},
-        "_build_paper_lifecycle_payload": lambda reason: {"schema": "paper_lifecycle_v1", "orders": copy.deepcopy(state["orders"])},
+        "_build_paper_lifecycle_payload": build,
+        "_atomic_file_replace": atomic_write,
+        "json": json,
+        "logger": type("Logger", (), {"warning": staticmethod(lambda *args: None)}),
         "set_execution_paused": lambda _reason: None,
     }
     commit = _compile_function("_commit_paper_lifecycle_transition", namespace)
+    save = _compile_function("save_paper_lifecycle", namespace)
 
-    def saver():
-        with lifecycle_lock:
-            saver_holds_lifecycle.set()
-            assert allow_saver.wait(5)
-            with trade:
-                generations.append(("SAVE", copy.deepcopy(state)))
+    def run(callback):
+        try:
+            assert callback() is True
+        except BaseException as exc:
+            errors.append(exc)
 
-    save_thread = threading.Thread(target=saver)
+    save_thread = threading.Thread(target=lambda: run(lambda: save("concurrent_save")), daemon=True)
     save_thread.start()
-    assert saver_holds_lifecycle.wait(5)
-    tx_thread = threading.Thread(target=lambda: commit(
+    assert saver_building.wait(2)
+    tx_thread = threading.Thread(name="transition", daemon=True, target=lambda: run(lambda: commit(
         "ORDER_PLACED", "trade", {},
         target_mutator=lambda target: target["orders"].append("trade"),
         live_mutator=lambda: state["orders"].append("trade"),
-    ))
+    )))
     tx_thread.start()
-    time.sleep(0.03)
-    allow_saver.set()
     save_thread.join(5)
     tx_thread.join(5)
     assert not save_thread.is_alive() and not tx_thread.is_alive()
+    assert errors == []
     assert [row[0] for row in generations] == ["SAVE", "PREPARE", "COMMIT"]
+    assert generations[0][1]["orders"] == []
+    assert generations[0][1]["pending_relay_transitions"] == []
+    assert generations[1][1]["orders"] == []
+    assert generations[1][2]["orders"] == ["trade"]
     assert generations[-1][1]["orders"] == ["trade"]
 
 
