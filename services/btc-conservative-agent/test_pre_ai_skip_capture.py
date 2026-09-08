@@ -95,3 +95,24 @@ def test_ambiguous_write_response_never_claims_durability(tmp_path,monkeypatch,f
         'feature_snapshot_at_signal':{'capture_schema':'measured_feature_capture_v1','captured_at_ts':999.}}
     with pytest.raises(ValueError,match='NOT_DURABLE'):
         write_pre_ai_scan_opportunity(source,epoch_id='epoch',data_dir=str(tmp_path))
+
+
+def test_real_store_pre_ai_opportunity_reaches_both_direction_replay_unknown(tmp_path):
+    from research.entry_baseline_replay import materialize_v3_opportunity_replay
+    source={'research_scan_id':'scan-census-replay-1','signal_ts':1000.,'symbol':'BTCUSD',
+        'feature_snapshot_at_signal':{'capture_schema':'measured_feature_capture_v1','captured_at_ts':999.}}
+    write_pre_ai_scan_opportunity(source,epoch_id='epoch',data_dir=str(tmp_path))
+    store=V3EvidenceStore(tmp_path,epoch_id='epoch')
+    original=store.ledger_path('opportunity').read_bytes()
+    report=materialize_v3_opportunity_replay(tmp_path)
+    assert report['same_opportunity_count']==1
+    assert report['directional_episode_count']==2
+    assert {r['direction'] for r in report['episode_receipts']}=={'LONG','SHORT'}
+    assert all(r['original_ai_direction']=='UNKNOWN' for r in report['episode_receipts'])
+    for receipt in report['episode_receipts']:
+        assert receipt['results']
+        assert all(r['outcome_state']=='UNKNOWN' and r['supported'] is False for r in receipt['results'])
+        assert all(r['rejection_codes'] for r in receipt['results'])
+    assert store.ledger_path('opportunity').read_bytes()==original
+    assert json.loads(original)['raw_ai_decision']=='AI_NOT_CALLED'
+    assert not store.ledger_path('order_intent').exists()
