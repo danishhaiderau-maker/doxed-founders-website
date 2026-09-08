@@ -123,3 +123,32 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
             return result
     finally:
         lease.release()
+
+
+def main(argv=None):
+    """Explicit local analyzer diagnostic; reconciler alone owns the mirror lease."""
+    import argparse
+    parser=argparse.ArgumentParser(description='Observed scan-child reconciliation only; not exhaustive coverage or qualification.')
+    for name in ('repo-root','data-root','source-revision','config-signature'):
+        parser.add_argument('--'+name,required=True)
+    parser.add_argument('--max-bytes',type=int,default=1048576)
+    parser.add_argument('--reference-after',default='')
+    args=vars(parser.parse_args(argv))
+    try:
+        report=reconcile_scans(**args)
+        print(json.dumps({'status':'OBSERVED_ONLY' if report['index_caught_up'] else 'INDEX_CATCHUP',
+            'source_binding':report['binding'],'index_caught_up':report['index_caught_up'],
+            'observed_joined_opportunity_rows':report['observed_joined_opportunity_rows'],
+            'verified_reference_page':report['sample_original_references'],
+            'next_reference_cursor':report['next_reference_cursor'],
+            'more_references':report['reference_sample_truncated'],
+            'exhaustive_collection_status':'UNKNOWN','qualification_eligible':False,
+            'blockers':report['blockers']},allow_nan=False))
+        return 0
+    except (OSError,ValueError,RuntimeError,sqlite3.Error):
+        print(json.dumps({'status':'UNKNOWN','error':'SCAN_RECONCILIATION_FAILED',
+            'exhaustive_collection_status':'UNKNOWN','qualification_eligible':False}))
+        return 1
+
+
+if __name__=='__main__': raise SystemExit(main())
