@@ -150,9 +150,26 @@ def collect_lifecycle_rows(root: str | Path) -> dict[LifecycleKey, list[dict[str
     """
     ledger_dir = Path(root).resolve() / "v3" / "ledgers"
     grouped: dict[LifecycleKey, list[dict[str, Any]]] = defaultdict(list)
+    shared_refs: dict[tuple[str, str], list[dict]] = defaultdict(list)
     seen: set[tuple[LifecycleKey, str, str]] = set()
     for ledger in LEDGER_NAMES:
-        for row in _read_jsonl(ledger_dir / f"{ledger}.jsonl"):
+        path = ledger_dir / f"{ledger}.jsonl"
+        if not path.exists():
+            continue
+        offset = 0
+        with path.open('rb') as handle:
+            raw_rows = handle.readlines()
+        for raw in raw_rows:
+            if not raw.endswith(b'\n'):
+                raise ValueError(f'TRUNCATED_JSONL_LINE:{path.name}')
+            row = json.loads(raw)
+            if not isinstance(row, dict):
+                raise ValueError(f'NON_OBJECT_JSONL_ROW:{path.name}')
+            position, offset = offset, offset + len(raw)
+            if ledger in {'opportunity', 'market_segment'} and not row.get('policy_signature') and not row.get('research_lane'):
+                shared_refs[(str(row.get('epoch_id') or row.get('collection_epoch_id') or ''), str(row.get('episode_id') or ''))].append({
+                    'ledger': ledger, 'byte_offset': position, 'row_length': len(raw),
+                    'row_sha256': hashlib.sha256(raw).hexdigest(), 'source_row': row})
             try:
                 key = lifecycle_key(row)
             except ValueError:
@@ -164,7 +181,9 @@ def collect_lifecycle_rows(root: str | Path) -> dict[LifecycleKey, list[dict[str
                 raise ValueError(f"DUPLICATE_LIFECYCLE_RECORD:{identity[1]}:{identity[2]}")
             seen.add(identity)
             grouped[key].append(material)
-    for rows in grouped.values():
+    from lifecycle_shared_context import attach_shared_context
+    for key, rows in grouped.items():
+        rows[:] = attach_shared_context(key, rows, shared_refs.get((key.collection_epoch_id, key.episode_id), []))
         rows.sort(key=lambda row: (
             str(row.get("ledger") or ""),
             float(row.get("observed_ts") or row.get("ts") or row.get("signal_ts") or 0.0),
@@ -240,6 +259,14 @@ def _open_incremental_index(
                     policy_signature, research_lane
                 )
             );
+            CREATE TABLE IF NOT EXISTS shared_context_event (
+                ledger TEXT NOT NULL, byte_offset INTEGER NOT NULL,
+                row_length INTEGER NOT NULL, row_sha256 TEXT NOT NULL,
+                epoch_id TEXT NOT NULL, episode_id TEXT NOT NULL,
+                PRIMARY KEY(ledger, byte_offset)
+            );
+            CREATE INDEX IF NOT EXISTS shared_context_lookup
+            ON shared_context_event(epoch_id, episode_id);
         """)
         meta_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(index_meta)")
@@ -318,13 +345,23 @@ def _validate_source_identity(path: Path, cursor: sqlite3.Row | None) -> os.stat
 
 def _index_ledger_chunk(
     connection: sqlite3.Connection, path: Path, ledger: str, *,
-    max_bytes: int, max_rows: int,
+    max_bytes: int, max_rows: int, _shared: bool = False,
 ) -> dict[str, int | bool]:
+    cursor_name = 'shared:' + ledger if _shared else ledger
+    if not _shared and ledger in {'opportunity', 'market_segment'}:
+        normal = connection.execute('SELECT byte_offset FROM ledger_cursor WHERE ledger=?', (ledger,)).fetchone()
+        shared = connection.execute('SELECT byte_offset FROM ledger_cursor WHERE ledger=?', ('shared:' + ledger,)).fetchone()
+        if normal and (not shared or int(shared[0]) < int(normal[0])):
+            # Migration replays only this ledger with the same caller budget.
+            # Never reset the authoritative ordinary cursor or scan whole runtime.
+            return _index_ledger_chunk(connection, path, ledger, max_bytes=max_bytes,
+                                       max_rows=max_rows, _shared=True)
     cursor = connection.execute(
-        "SELECT * FROM ledger_cursor WHERE ledger = ?", (ledger,)
+        "SELECT * FROM ledger_cursor WHERE ledger = ?", (cursor_name,)
     ).fetchone()
     stat = _validate_source_identity(path, cursor)
     offset = int(cursor["byte_offset"]) if cursor is not None else 0
+    inline_shared = not _shared and ledger in {'opportunity', 'market_segment'}
     available = int(stat.st_size) - offset
     if available <= 0:
         return {"bytes_indexed": 0, "rows_indexed": 0, "rows_scanned": 0, "caught_up": True}
@@ -359,6 +396,17 @@ def _index_ledger_chunk(
             if not isinstance(row, dict):
                 raise ValueError(f"NON_OBJECT_JSONL_ROW:{path.name}:{position}")
             next_position = position + len(raw)
+            if _shared or inline_shared:
+                epoch = row.get('epoch_id') or row.get('collection_epoch_id')
+                episode = row.get('episode_id')
+                if epoch and episode and not row.get('policy_signature') and not row.get('research_lane'):
+                    connection.execute('INSERT OR IGNORE INTO shared_context_event VALUES(?,?,?,?,?,?)',
+                                       (ledger, position, len(raw), hashlib.sha256(raw).hexdigest(), str(epoch), str(episode)))
+                    connection.execute('INSERT OR IGNORE INTO dirty_lifecycle SELECT DISTINCT collection_epoch_id,episode_id,policy_signature,research_lane FROM lifecycle_event WHERE collection_epoch_id=? AND episode_id=?', (str(epoch), str(episode)))
+                    indexed += 1
+                if _shared:
+                    position = next_position
+                    continue
             try:
                 key = lifecycle_key(row)
             except ValueError:
@@ -404,9 +452,11 @@ def _index_ledger_chunk(
                 source_anchor_sha256=excluded.source_anchor_sha256,
                 source_mtime_ns=excluded.source_mtime_ns
         """, (
-            ledger, int(stat.st_dev), int(stat.st_ino), position,
+            cursor_name, int(stat.st_dev), int(stat.st_ino), position,
             _source_anchor(path, position), int(stat.st_mtime_ns),
         ))
+        if inline_shared:
+            connection.execute('INSERT OR REPLACE INTO ledger_cursor SELECT ?,source_dev,source_ino,byte_offset,source_anchor_sha256,source_mtime_ns FROM ledger_cursor WHERE ledger=?', ('shared:' + ledger, ledger))
     return {
         "bytes_indexed": position - offset,
         "rows_indexed": indexed,
@@ -464,6 +514,24 @@ def _dirty_lifecycle_rows(
         finally:
             for handle in handles.values():
                 handle.close()
+        from lifecycle_shared_context import attach_shared_context
+        context_index = connection.execute(
+            'SELECT ledger,byte_offset,row_length,row_sha256 FROM shared_context_event WHERE epoch_id=? AND episode_id=? ORDER BY ledger,byte_offset LIMIT ?',
+            (key.collection_epoch_id, key.episode_id, max_events_per_lifecycle + 1)).fetchall()
+        if len(context_index) > max_events_per_lifecycle or total_bytes + sum(int(r['row_length']) for r in context_index) > max_bytes_per_lifecycle:
+            raise ValueError('SHARED_CONTEXT_RESOURCE_LIMIT')
+        refs = []
+        for ref in context_index:
+            source = root / 'v3' / 'ledgers' / (str(ref['ledger']) + '.jsonl')
+            with source.open('rb') as handle:
+                handle.seek(int(ref['byte_offset']))
+                raw = handle.read(int(ref['row_length']))
+            if len(raw) != ref['row_length'] or hashlib.sha256(raw).hexdigest() != ref['row_sha256']:
+                raise ValueError('SHARED_CONTEXT_SOURCE_CHANGED')
+            refs.append({'ledger': ref['ledger'], 'row_sha256': ref['row_sha256'],
+                         'byte_offset': ref['byte_offset'], 'row_length': ref['row_length'],
+                         'source_row': json.loads(raw)})
+        rows = attach_shared_context(key, rows, refs)
         result.append((key, rows))
     return result
 

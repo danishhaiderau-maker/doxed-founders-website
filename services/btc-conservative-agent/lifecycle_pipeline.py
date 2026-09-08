@@ -274,6 +274,11 @@ def _ledger_sources_caught_up(connection, ledger_dir: Path) -> bool:
         stat = _validate_source_identity(path, cursor)
         if int(cursor["byte_offset"]) < int(stat.st_size):
             return False
+        if ledger in {'opportunity', 'market_segment'}:
+            shared = connection.execute('SELECT * FROM ledger_cursor WHERE ledger=?', ('shared:' + ledger,)).fetchone()
+            if shared is None or int(shared['byte_offset']) < int(stat.st_size):
+                return False
+            _validate_source_identity(path, shared)
     return True
 
 
