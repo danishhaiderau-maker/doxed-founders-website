@@ -562,8 +562,9 @@ def delayed_variant_cohorts(report):
 def _declared_delayed_variants(episode, generation):
     """Separate timing cohorts; never overwrite original baseline identities."""
     from research.baseline_execution_context import (_verified, _sha,
-        declared_directional_baseline_inputs, build_declared_delayed_baseline_context, verified_segment_rows)
-    from research.latency_schedule_replay import replay_delayed_entry
+        declared_directional_baseline_inputs, build_declared_delayed_baseline_context, verified_segment_rows,
+        conditional_directional_baseline_inputs, build_conditional_delayed_baseline_context)
+    from research.latency_schedule_replay import replay_delayed_entry, replay_conditional_delayed_entry
     if generation is None or not episode.get('directional_capture'):
         return []
     pins=episode.get('_baseline_context_pins') or {}
@@ -572,6 +573,8 @@ def _declared_delayed_variants(episode, generation):
     except (ValueError,TypeError,KeyError,AttributeError):
         return []
     capture=episode['directional_capture']
+    declaration = capture.get('research_context_declaration')
+    conditional = isinstance(declaration, Mapping) and declaration.get('schema') == 'research_baseline_context_declaration_v2'
     declarations=opportunity.get('research_timing_declarations') or []
     if not isinstance(declarations,list) or len(declarations)>64:
         return [{'status':'UNKNOWN','reason_codes':['TIMING_DECLARATION_LIST_INVALID'],'results':[]}]
@@ -583,7 +586,7 @@ def _declared_delayed_variants(episode, generation):
             model_hash=_sha({key:timing.get(key) for key in ('schema','delay_sec','ordering_treatment','evidence_basis')})
         except (TypeError,ValueError):
             continue
-        variant={'timing_model_sha256':model_hash,'qualification_eligible':False,'results':[]}
+        variant={'timing_model_sha256':model_hash,'qualification_eligible':False,'results':[], 'conditional_results':[]}
         coverage=episode.get('_baseline_context_coverage') or []
         for baseline in _baseline_rows():
             result=_unknown(baseline,episode,'DELAYED_ENTRY_SOURCE_UNAVAILABLE')
@@ -594,18 +597,19 @@ def _declared_delayed_variants(episode, generation):
                 bindings=[item['binding'] for item in coverage]
                 tape,_=verified_segment_rows(evidence,bindings,pins,
                     {key:opportunity.get(key) for key in IDENTITY_FIELDS},capture['symbol'])
-                inputs=declared_directional_baseline_inputs(capture,baseline)
-                replay=replay_delayed_entry(schedule=capture['schedules'][baseline['baseline_id']]['schedule'],
+                inputs=(conditional_directional_baseline_inputs if conditional else declared_directional_baseline_inputs)(capture,baseline)
+                replay=(replay_conditional_delayed_entry if conditional else replay_delayed_entry)(schedule=capture['schedules'][baseline['baseline_id']]['schedule'],
                     delay_sec=timing.get('delay_sec'),ordering_treatment=timing.get('ordering_treatment'),
                     tape=tape,direction=capture['direction'],requested_qty=inputs['requested_qty'],
-                    quantity_constraints=inputs['signed_quantity_constraints'],symbol=capture['symbol'])
+                    **({'venue_quantity_observation': inputs['venue_quantity_observation']} if conditional else
+                       {'quantity_constraints': inputs['signed_quantity_constraints']}),symbol=capture['symbol'])
                 if replay.get('status')!='ENTRY_REPLAY_SUPPORTED':
                     raise ValueError('DELAYED_ENTRY_REPLAY_UNSUPPORTED')
                 receipt={**replay['entry_receipt'],'symbol':capture['symbol']}
                 identity={key:episode.get(key) for key in IDENTITY_FIELDS}
                 identity.update(epoch_id=generation['epoch_id'],direction=capture['direction'],symbol=capture['symbol'],
                     baseline_id=baseline['baseline_id'],baseline_policy_signature=baseline['policy_signature'])
-                projection=build_declared_delayed_baseline_context(generation=generation,identity=identity,
+                projection=(build_conditional_delayed_baseline_context if conditional else build_declared_delayed_baseline_context)(generation=generation,identity=identity,
                     capture=capture,baseline=baseline,pinned_sources=pins,
                     opportunity_binding=episode['_baseline_context_opportunity'],
                     coverage_evidence=evidence,coverage_binding=bindings,
@@ -618,9 +622,12 @@ def _declared_delayed_variants(episode, generation):
                     'model_context_status':projection['status'],'model_context_blockers':projection['reason_codes']}
                 if projection['context'] is not None:
                     result['execution_model_context']=projection['context']
-            except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError):
-                pass
-            variant['results'].append(result)
+            except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError) as exc:
+                result = _unknown(baseline, episode, 'DELAYED_ENTRY_SOURCE_UNAVAILABLE', str(exc))
+            if conditional:
+                result.update(evidence_basis='DECLARED_SIMULATION_CONDITIONAL',
+                              venue_acceptance='UNKNOWN', qualification_eligible=False)
+            variant['conditional_results' if conditional else 'results'].append(result)
         variants.append(variant)
     return variants
 

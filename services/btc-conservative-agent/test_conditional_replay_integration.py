@@ -15,7 +15,16 @@ def test_malformed_declaration_is_unknown_not_analyzer_crash(declaration):
 
 
 @pytest.mark.parametrize("missing_quotes", [False, True])
-def test_pinned_bilateral_conditional_replay_is_separate(tmp_path, monkeypatch, missing_quotes):
+@pytest.mark.parametrize("delay", [0, 2])
+def test_pinned_bilateral_conditional_replay_is_separate(tmp_path, monkeypatch, missing_quotes, delay):
+    import research.baseline_execution_context as context_module
+    from copy import deepcopy
+    context_calls = []
+    build_context = context_module.build_conditional_delayed_baseline_context
+    def capture_context(**kwargs):
+        context_calls.append(kwargs)
+        return build_context(**kwargs)
+    monkeypatch.setattr(context_module, 'build_conditional_delayed_baseline_context', capture_context)
     producer = fixture.materialize_signal_time_baseline_schedules
     def conditional(opportunity):
         declaration = opportunity["research_baseline_context_declaration"]
@@ -30,12 +39,37 @@ def test_pinned_bilateral_conditional_replay_is_separate(tmp_path, monkeypatch, 
             evidence_basis="DECLARED_SIMULATION_CONDITIONAL", qualification_eligible=False,
             venue_acceptance="UNKNOWN", min_notional_treatment="UNMODELED_VENUE_ACCEPTANCE_CONDITIONAL",
             venue_quantity_observation=observation)
-        return producer(opportunity)
+        schedules = producer(opportunity)
+        from research.latency_schedule_replay import TREATMENT
+        opportunity['research_timing_declarations'] = [dict(
+            schema='declared_submission_timing_v1', evidence_basis='DECLARED_SIMULATION',
+            provenance='FIXTURE', declared_at_ts=100,
+            source_capture_signature=capture['capture_signature'], delay_sec=delay,
+            ordering_treatment=TREATMENT)
+            for capture in schedules['directional_schedules'].values()]
+        return schedules
     monkeypatch.setattr(fixture, "materialize_signal_time_baseline_schedules", conditional)
     generation, manifest = fixture.dataset(tmp_path, defect="quote_time_missing" if missing_quotes else None)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation, canonical_manifest=manifest)
     assert len(report["episode_receipts"]) == 2
+    if not missing_quotes:
+        assert any(build_context(**args)['status'] == 'SUPPORTED' for args in context_calls), [build_context(**args) for args in context_calls]
+        supported = next(args for args in context_calls if build_context(**args)['status'] == 'SUPPORTED')
+        tampered = deepcopy(supported)
+        tampered['delayed_replay_receipt']['entry_receipt']['requested_qty'] = 999
+        assert build_context(**tampered)['status'] == 'UNKNOWN'
     for episode in report["episode_receipts"]:
+        assert len(episode['delayed_variants']) == 1
+        variant = episode['delayed_variants'][0]
+        assert variant['results'] == []
+        delayed = next(row for row in variant['conditional_results']
+                       if row['baseline_id'] == 'MARKET_ENTRY_AT_SIGNAL')
+        assert delayed['venue_acceptance'] == 'UNKNOWN'
+        assert delayed['qualification_eligible'] is False
+        if not missing_quotes and delay == 0:
+            assert delayed['model_context_status'] == 'SUPPORTED', delayed
+        else:
+            assert delayed['outcome_state'] == 'UNKNOWN'
         selected = [row for row in episode["conditional_results"] if row["baseline_id"] == "MARKET_ENTRY_AT_SIGNAL"]
         assert len(selected) == 1
         if missing_quotes:

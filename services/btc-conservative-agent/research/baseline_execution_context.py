@@ -501,11 +501,22 @@ def build_declared_directional_baseline_context(*, generation: Mapping, identity
 
 def build_declared_delayed_baseline_context(*, timing_declaration, tape, delayed_replay_receipt,
         entry_evidence, entry_binding, **kwargs):
+    return _build_delayed_context(timing_declaration=timing_declaration, tape=tape,
+        delayed_replay_receipt=delayed_replay_receipt, entry_evidence=entry_evidence,
+        entry_binding=entry_binding, conditional=False, **kwargs)
+
+
+def build_conditional_delayed_baseline_context(**kwargs):
+    return _build_delayed_context(conditional=True, **kwargs)
+
+
+def _build_delayed_context(*, timing_declaration, tape, delayed_replay_receipt,
+        entry_evidence, entry_binding, conditional, **kwargs):
     if (not isinstance(delayed_replay_receipt, Mapping)
             or not isinstance(delayed_replay_receipt.get('entry_receipt'), Mapping)
             or not isinstance(kwargs.get('capture'), Mapping)):
         return {'status':'UNKNOWN','context':None,'reason_codes':['DELAYED_CONTEXT_INPUT_INVALID']}
-    return _build_declared_context(**kwargs, entry_receipt={**(delayed_replay_receipt.get('entry_receipt') or {}),
+    return _build_declared_context(**kwargs, conditional=conditional, entry_receipt={**(delayed_replay_receipt.get('entry_receipt') or {}),
         'symbol': kwargs.get('capture', {}).get('symbol')},
         delayed={'timing': timing_declaration, 'tape': tape, 'replay': delayed_replay_receipt,
                  'entry_evidence': entry_evidence, 'entry_binding': entry_binding})
@@ -566,10 +577,14 @@ def _build_declared_context(*, generation: Mapping, identity: Mapping,
                 pinned_sources,{key:opportunity.get(key) for key in IDENTITY_FIELDS},capture['symbol'])
             if delayed['tape'] != entry_rows:
                 raise ValueError('DELAYED_CONTEXT_ENTRY_TAPE_BINDING_MISMATCH')
-            recomputed = replay_delayed_entry(schedule=schedule, delay_sec=timing.get('delay_sec'),
+            from research.latency_schedule_replay import replay_conditional_delayed_entry
+            evaluator = replay_conditional_delayed_entry if conditional else replay_delayed_entry
+            quantity_args = ({'venue_quantity_observation': inputs['venue_quantity_observation']}
+                             if conditional else {'quantity_constraints': inputs['signed_quantity_constraints']})
+            recomputed = evaluator(schedule=schedule, delay_sec=timing.get('delay_sec'),
                 ordering_treatment=timing.get('ordering_treatment'), tape=delayed['tape'],
                 direction=capture['direction'], requested_qty=inputs['requested_qty'],
-                quantity_constraints=inputs['signed_quantity_constraints'], symbol=capture['symbol'])
+                **quantity_args, symbol=capture['symbol'])
             if recomputed.get('status') != 'ENTRY_REPLAY_SUPPORTED' or recomputed != delayed['replay']:
                 raise ValueError('DELAYED_CONTEXT_REPLAY_MISMATCH')
             schedule = delayed_submission_schedule(schedule, delay_sec=timing['delay_sec'],
