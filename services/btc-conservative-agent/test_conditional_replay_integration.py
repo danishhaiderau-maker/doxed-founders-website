@@ -84,3 +84,25 @@ def test_pinned_bilateral_conditional_replay_is_separate(tmp_path, monkeypatch, 
         assert all(row["terminal"]["venue_acceptance"] == "UNKNOWN" for row in selected)
         assert terminal_report["qualification_eligible"] is False
         assert terminal_report["profitability_supported"] is False
+        from test_discovery_scorecard_manifest import _load_analyzer
+        import research.policy_evidence_schema as identity
+        import research.conservative_shadow_report as shadow
+        from research.shadow_result_stream import verify_result_stream
+        analyzer = _load_analyzer('populated_conditional_publisher')
+        (tmp_path / 'canonical_dataset_current.json').write_text('{}')
+        output = tmp_path / 'published'
+        output.mkdir()
+        monkeypatch.chdir(output)
+        monkeypatch.setattr(identity, 'generation_identity', lambda *a, **k: generation)
+        monkeypatch.setattr(shadow, 'load_current_policy_candidates', lambda *a, **k: (candidates, artifact))
+        monkeypatch.setattr(analyzer, '_atomic_mirror_analyzer_report', lambda name: output / name)
+        published, _ = analyzer._write_conservative_shadow_report(tmp_path, output, report,
+            policy_cycle_succeeded=True, research_model=contract(generation))
+        conditional = published['conditional_report']
+        assert conditional['complete_replay_count'] >= 2
+        assert conditional['qualification_eligible'] is False
+        with verify_result_stream(output, conditional, generation) as index:
+            assert index.verified_summary['verified'] is True
+            assert index.verified_summary['complete_replay_count'] >= 2
+        with verify_result_stream(output, published, generation) as index:
+            assert index.verified_summary['verified'] is True

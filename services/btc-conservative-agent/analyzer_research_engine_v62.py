@@ -19920,7 +19920,7 @@ def _write_conservative_shadow_report(
 ):
     """Stage current-input terminal research, never reuse an older outcome file."""
     from research.conservative_shadow_report import (
-        SCHEMA, build_conservative_shadow_report, load_current_policy_candidates,
+        SCHEMA, build_conservative_shadow_report, build_conditional_shadow_report, load_current_policy_candidates,
     )
     from research.policy_evidence_schema import generation_identity
     from research.shadow_result_stream import ShadowResultStreamWriter, digest as stream_digest
@@ -19974,8 +19974,29 @@ def _write_conservative_shadow_report(
                     'timing_model_sha256': timing_hash, 'report': variant_report,
                     'qualification_eligible': False})
             stream_receipt = sink.finalize(report)
+        conditional_temporary = Path(f'.shadow-conditional-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp')
+        variant_temporaries.append(conditional_temporary)
+        with ShadowResultStreamWriter(Path.cwd(), str(conditional_temporary), generation) as conditional_sink:
+            conditional_report = build_conditional_shadow_report(
+                canonical_root, expected_generation=generation,
+                baseline_report=baseline_report or {}, policy_candidates=candidates,
+                policy_artifact_receipt=candidate_receipt, research_model=research_model,
+                result_sink=conditional_sink)
+            conditional_receipt = conditional_sink.finalize(conditional_report)
         if manifest_path.read_bytes() != manifest_bytes:
             raise ValueError("SHADOW_CANONICAL_GENERATION_CHANGED_DURING_REPLAY")
+        conditional_target = Path('conditional_shadow_results.jsonl.gz')
+        os.replace(conditional_temporary, conditional_target)
+        conditional_receipt['relative_path'] = conditional_target.name
+        conditional_receipt['receipt_sha256'] = stream_digest({
+            key: value for key, value in conditional_receipt.items() if key != 'receipt_sha256'})
+        conditional_report['result_stream'] = conditional_receipt
+        report['conditional_report'] = conditional_report
+        # Bind the parent stream to the complete report, including the new
+        # separately verified conditional child receipt.
+        stream_receipt['report_sha256'] = stream_digest({
+            key: value for key, value in report.items() if key != 'result_stream'})
+        _atomic_mirror_analyzer_report(conditional_target.name)
         # Working files are replaced just like the other analyzer artifacts;
         # the visible generation retains its separate immutable copy. Never
         # accumulate one potentially large source stream per analyzer cycle.
@@ -20436,6 +20457,18 @@ def write_report_manifest(
             "shadow_terminal_status": shadow_terminal.get("status"),
         })
         stream_receipt = shadow_terminal.get("result_stream")
+        conditional_stream = (shadow_terminal.get("conditional_report") or {}).get("result_stream")
+        if conditional_stream:
+            reports.append({
+                "title": "Conditional Simulation Results — Venue Acceptance Unknown",
+                "file": conditional_stream["relative_path"],
+                "category": "Genome & Reports",
+                "description": "Declared conditional economics only; not exchange-qualified or live eligible",
+                "size_bytes": conditional_stream["compressed_bytes"],
+                "artifact_sha256": conditional_stream["artifact_sha256"],
+                "stream_receipt_sha256": conditional_stream["receipt_sha256"],
+                "analysis_provenance": analysis_provenance,
+            })
         for variant in shadow_terminal.get("delayed_variant_reports", []):
             variant_stream = variant["report"]["result_stream"]
             reports.append({
