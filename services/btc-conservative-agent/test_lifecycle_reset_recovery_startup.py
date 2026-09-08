@@ -21,15 +21,18 @@ def test_actual_bot_initializes_before_starting_owner(monkeypatch, tmp_path, fai
         if fail:
             raise ValueError('RESET_RECOVERY_STARTUP_RESET_BUSY')
     def start(*args, **kwargs):
+        assert kwargs['cycle_gate'] is admission_gate
         events.append('start')
         return True
     lock = object()
+    admission_gate = object()
     runtime = SimpleNamespace(start=start, status=lambda: {})
     namespace = dict(os=os, re=re, importlib=SimpleNamespace(import_module=lambda _: runtime),
         logger=SimpleNamespace(info=lambda *a: None, error=lambda *a: None),
         _runtime_git_rev_exact=lambda: 'a'*40, _data_sync_runtime_root=lambda: tmp_path,
         _collector_v22_epoch_id=lambda: 'epoch-test', _fresh_collection_lock=lock,
         _LIFECYCLE_PIPELINE_RUNTIME=None, _lifecycle_pipeline_pressure_probe=lambda: [],
+        _EVIDENCE_WORKER_ADMISSION_GATE=admission_gate,
         _lifecycle_pipeline_overlap_probe=lambda: [])
     monkeypatch.setattr(startup, 'initialize_reset_recovery', initialize)
     exec(compile(ast.Module(body=[function], type_ignores=[]), '<bot-startup>', 'exec'), namespace)
