@@ -3013,6 +3013,15 @@ def _ai_payload():
         except (OSError, ValueError, TypeError, KeyError, UnicodeError):
             binding_ok = False
     freshness = _generation_freshness_meta(manifest)
+    coverage_source = (report or {}).get('ai_verdict_coverage')
+    coverage = {'status':'UNKNOWN', 'counts':{}}
+    if freshness.get('current') and binding_ok and isinstance(coverage_source,dict):
+        raw_counts = coverage_source.get('raw_verdict_row_counts')
+        if isinstance(raw_counts,dict):
+            coverage = {'status':'CURRENT_GENERATION', 'binding_diagnostic':checksum_binding,
+                'counts':{key:(value if type(value) is int and value >= 0 else None)
+                    for key in ('APPROVE','REJECT','NO_TRADE','AI_NOT_CALLED','ERROR','UNKNOWN')
+                    for value in [raw_counts.get(key)]}}
     comparison = ((report or {}).get('ai_verdict_coverage') or {}).get('matched_selection_comparison')
     if not freshness.get('current') or not isinstance(comparison, dict) or not binding_ok:
         comparison = {'status':'UNKNOWN', 'groups':[], 'blockers':[
@@ -3022,6 +3031,7 @@ def _ai_payload():
         comparison = {**comparison, 'binding_diagnostic':checksum_binding}
     return {
         'matched_selection_comparison':comparison,
+        'ai_verdict_coverage':coverage,
         "calibration_status": calibration_status,
         "direction_only": not probability_mode,
         "mode_note": (
@@ -6938,6 +6948,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>AI comparison &amp; calibration</h2>
     <h3>Current matched AI selection — descriptive only</h3>
     <p class="note">Conditional on supported, cost-complete filled paths only. NO_FILL and unsupported paths are excluded. Not full-opportunity expectancy, portfolio returns, entry rate, or qualification. The filter takes APPROVE only when direction matches; otherwise incremental trade PnL is zero.</p>
+    <p class="note" id="ai-verdict-coverage">UNKNOWN — waiting for current coverage.</p>
     <p class="note" id="ai-matched-status">UNKNOWN — waiting for current evidence.</p>
     <div style="max-width:100%;min-width:0;overflow-x:auto"><table><thead><tr><th>Policy / world</th><th>Independent N</th><th>Supported rows</th><th>Rejected positive / negative</th><th>Filter minus unfiltered USD</th></tr></thead><tbody id="ai-matched-body"></tbody></table></div>
     <h3>Historical direction / gap calibration — separate evidence</h3>
@@ -8422,6 +8433,15 @@ async function loadGenome() {
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
 }
 
+function renderAICoverage(c) {
+  const counts = c.status === 'CURRENT_GENERATION' ? (c.counts || {}) : {};
+  const values = ['APPROVE','REJECT','NO_TRADE','AI_NOT_CALLED','ERROR','UNKNOWN'].map(key => {
+    const value = counts[key];
+    return `${key}: ${Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable'}`;
+  });
+  document.getElementById('ai-verdict-coverage').textContent = `${c.status === 'CURRENT_GENERATION' ? 'Current generation' : 'UNKNOWN'} · Research rows, not independent trades · ${values.join(' · ')}. AI_NOT_CALLED is excluded from AI-selection PnL comparisons.`;
+}
+
 function renderMatchedAI(c) {
   const status = document.getElementById('ai-matched-status');
   const body = document.getElementById('ai-matched-body');
@@ -8448,6 +8468,7 @@ async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
   renderMatchedAI(d.matched_selection_comparison || {});
+  renderAICoverage(d.ai_verdict_coverage || {});
   const status = String(d.calibration_status || 'NO_DATA').toUpperCase();
   const showConfidence = status === 'AVAILABLE';
   const confidenceView = document.getElementById('ai-confidence-view');
