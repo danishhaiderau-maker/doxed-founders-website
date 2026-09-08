@@ -5,6 +5,7 @@ from math import isfinite
 from collections.abc import Mapping
 
 from research.quantity_execution import validate_signed_quantity_constraints
+from research.venue_quantity_observation import validate_venue_quantity_observation
 
 
 def build_runtime_baseline_declaration(*, context, quantity_capture, symbol,
@@ -33,6 +34,16 @@ def build_runtime_baseline_declaration(*, context, quantity_capture, symbol,
     taker = number(taker_fee_rate, "CONFIGURED_TAKER_FEE_UNAVAILABLE", False)
     receipt = quantity_capture.get("receipt") if isinstance(quantity_capture, Mapping) else None
     constraints, defects = validate_signed_quantity_constraints(receipt, symbol=symbol)
+    conditional_observation = None
+    if receipt is None and isinstance(quantity_capture, Mapping) and quantity_capture.get("observation") is not None:
+        observation, observation_defects = validate_venue_quantity_observation(
+            quantity_capture["observation"], symbol=symbol, source_revision=source_revision)
+        if observation is not None and observation["min_notional"]["status"] == "UNAVAILABLE":
+            conditional_observation = observation
+            constraints = observation
+            defects = []
+        else:
+            defects = list(defects) + observation_defects + ["CONDITIONAL_QUANTITY_OBSERVATION_UNSUPPORTED"]
     reasons.extend(defects)
     if defects and isinstance(quantity_capture, Mapping):
         # Retain bounded producer codes, not raw provider errors or metadata.
@@ -90,4 +101,24 @@ def build_runtime_baseline_declaration(*, context, quantity_capture, symbol,
         "limitations": ["ZERO_ADDITIONAL_LATENCY", "FIXED_INITIAL_NOTIONAL_FEE_SCENARIO",
             "SIGNAL_ATR_HELD_CONSTANT", "FUNDING_REQUIRES_TERMINAL_EVIDENCE"],
     }
+    if conditional_observation is not None:
+        declaration.pop("signed_quantity_constraints")
+        declaration.update({
+            "schema": "research_baseline_context_declaration_v2",
+            "evidence_basis": "DECLARED_SIMULATION_CONDITIONAL",
+            "min_notional_treatment": "UNMODELED_VENUE_ACCEPTANCE_CONDITIONAL",
+            "venue_quantity_observation": deepcopy(conditional_observation),
+            "venue_acceptance": "UNKNOWN",
+        })
+        # Retain bounded machine reasons, never raw exception/private text.
+        allowed_reasons = frozenset({"VENUE_MIN_NOTIONAL_UNAVAILABLE", "VENUE_MIN_LOT_UNAVAILABLE",
+            "VENUE_QUANTITY_PRECISION_OR_STEP_UNAVAILABLE", "VENUE_MARKET_METADATA_UNAVAILABLE",
+            "VENUE_MARKET_METADATA_INVALID", "SOURCE_REVISION_UNAVAILABLE", "CAPTURE_TIME_UNAVAILABLE"})
+        supplied_reasons = quantity_capture.get("reasons")
+        original_reasons = [reason for reason in supplied_reasons[:32]
+                            if isinstance(reason, str) and reason in allowed_reasons
+                            ] if isinstance(supplied_reasons, (list, tuple)) else []
+        declaration["limitations"] = sorted(set(declaration["limitations"] + original_reasons + [
+            "VENUE_MIN_NOTIONAL_UNAVAILABLE", "EXCHANGE_ACCEPTANCE_NOT_PROVEN"]))
+        return {"status": "DECLARED_CONDITIONAL_DIAGNOSTIC", "reasons": [], "declaration": declaration}
     return {"status": "DECLARED_DIAGNOSTIC", "reasons": [], "declaration": declaration}
