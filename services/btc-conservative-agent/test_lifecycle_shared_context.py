@@ -76,7 +76,8 @@ def test_ambiguous_refs_are_unbound_and_unchanged():
     assert 'policy_signature' not in original and 'research_lane' not in original
 
 
-def test_empty_shared_ledgers_reach_caught_up(tmp_path):
+@pytest.mark.parametrize('legacy_normal_cursor', [False, True])
+def test_empty_shared_ledgers_reach_caught_up(tmp_path, legacy_normal_cursor):
     from lifecycle_pipeline import _ledger_sources_caught_up
     root = tmp_path / 'v3' / 'ledgers'
     root.mkdir(parents=True)
@@ -86,6 +87,13 @@ def test_empty_shared_ledgers_reach_caught_up(tmp_path):
     try:
         for ledger in ('opportunity', 'market_segment'):
             _index_ledger_chunk(connection, root / (ledger + '.jsonl'), ledger, max_bytes=1000, max_rows=1)
+        if legacy_normal_cursor:
+            before = [tuple(r) for r in connection.execute("SELECT * FROM ledger_cursor WHERE ledger NOT LIKE 'shared:%' ORDER BY ledger")]
+            connection.execute("DELETE FROM ledger_cursor WHERE ledger LIKE 'shared:%'")
+            connection.commit()
+            for ledger in ('opportunity', 'market_segment'):
+                _index_ledger_chunk(connection, root / (ledger + '.jsonl'), ledger, max_bytes=1000, max_rows=1)
+            assert [tuple(r) for r in connection.execute("SELECT * FROM ledger_cursor WHERE ledger NOT LIKE 'shared:%' ORDER BY ledger")] == before
         assert _ledger_sources_caught_up(connection, root)
         assert connection.execute("SELECT count(*) FROM ledger_cursor WHERE ledger LIKE 'shared:%'").fetchone()[0] == 2
     finally:

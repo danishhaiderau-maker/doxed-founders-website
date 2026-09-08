@@ -364,9 +364,9 @@ def _index_ledger_chunk(
     inline_shared = not _shared and ledger in {'opportunity', 'market_segment'}
     available = int(stat.st_size) - offset
     if available <= 0:
-        if ledger in {'opportunity', 'market_segment'} and not _shared:
+        if ledger in {'opportunity', 'market_segment'}:
             with connection:
-                for empty_cursor in (ledger, 'shared:' + ledger):
+                for empty_cursor in ((cursor_name,) if _shared else (ledger, 'shared:' + ledger)):
                     connection.execute('INSERT OR IGNORE INTO ledger_cursor VALUES(?,?,?,?,?,?)',
                         (empty_cursor, int(stat.st_dev), int(stat.st_ino), offset,
                          _source_anchor(path, offset), int(stat.st_mtime_ns)))
