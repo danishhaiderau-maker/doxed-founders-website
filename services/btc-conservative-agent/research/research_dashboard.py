@@ -6547,6 +6547,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; margin-top: 12px; }
   .table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .table-scroll table { display: table; width: max-content; min-width: 100%; max-width: none; overflow: visible; border-collapse: collapse; font-size: 0.9rem; margin-top: 0; }
+  .table-scroll table[hidden] { display: none; }
   th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   th { background: var(--panel); }
   tr:nth-child(even) { background: #101820; }
