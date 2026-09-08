@@ -1239,6 +1239,30 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
     }
 
 
+def _shared_context_projection(report: dict, freshness: dict) -> dict:
+    """Bounded evidence-binding counters; never trade qualification authority."""
+    out = {"status": "UNAVAILABLE_OR_STALE", "qualification_authority": False}
+    coverage = report.get("shared_context_coverage")
+    if freshness.get("current") is not True or not isinstance(coverage, dict):
+        return out
+    if coverage.get("schema") != "shared_context_coverage_v1":
+        return out
+    epoch = report.get("epoch_id")
+    if (not isinstance(epoch, str) or not epoch or coverage.get("epoch_id") != epoch
+            or freshness.get("generation_epoch_id") != epoch):
+        out["status"] = "EPOCH_IDENTITY_UNAVAILABLE_OR_MISMATCH"
+        return out
+    out.update(status="CURRENT_EPOCH_EVIDENCE_ONLY", page_scope="CURRENT_PAGE_ONLY")
+    for key in ("eligible_lanes", "cohort_evaluated_lanes", "cohort_bound_lanes",
+                "cohort_pending_lanes", "page_lanes", "bound_lanes"):
+        value = coverage.get(key)
+        out[key] = value if type(value) is int and value >= 0 else None
+    for key in ("cohort_evaluation_complete", "truncated"):
+        value = coverage.get(key)
+        out[key] = value if type(value) is bool else None
+    return out
+
+
 def _bounded_safe_policy_payload(report: dict) -> dict:
     """Public Safe/Top APIs expose summaries; full artifact stays downloadable."""
     if not report:
@@ -4620,6 +4644,8 @@ def _genome_payload():
             "collection": safe_v31.get("collection") or {},
             "search_progress": safe_v31.get("search_progress") or {},
             "candidate_screen": candidate_screen,
+            "shared_context_coverage": _shared_context_projection(
+                safe_v31, _generation_freshness_meta()),
             "safe_policy_ranking": bounded.get("safe_policy_ranking") or {},
             "integrity": safe_v31.get("integrity") or {},
             "blockers": list(safe_v31.get("blockers") or []),
@@ -6885,6 +6911,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="empty-state" id="genome-empty">Loading the current Genome report…</div>
     <div id="genome-content" style="display:none">
     <div class="kpis" id="genome-kpis"></div>
+    <h3>Shared market-context evidence coverage</h3>
+    <p class="note" id="genome-shared-context"></p>
     <p class="note" id="genome-taxonomy-note"></p>
     <h2>Current market cluster</h2>
     <pre id="genome-cluster"></pre>
@@ -8203,6 +8231,12 @@ async function loadGenome() {
   setEvidenceScope('genome', 'CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.');
   empty.style.display = 'none';
   content.style.display = 'block';
+  const coverage = d.shared_context_coverage || {};
+  const count = key => Number.isSafeInteger(coverage[key]) && coverage[key] >= 0 ? coverage[key] : 'UNKNOWN';
+  const flag = key => typeof coverage[key] === 'boolean' ? String(coverage[key]) : 'UNKNOWN';
+  document.getElementById('genome-shared-context').textContent = coverage.status === 'CURRENT_EPOCH_EVIDENCE_ONLY'
+    ? `Cumulative cohort: eligible ${count('eligible_lanes')}, evaluated ${count('cohort_evaluated_lanes')}, evidence-bound ${count('cohort_bound_lanes')}, pending ${count('cohort_pending_lanes')}. Evaluation complete: ${flag('cohort_evaluation_complete')}. Current page only: ${count('page_lanes')} lanes, ${count('bound_lanes')} evidence-bound. Scan truncated: ${flag('truncated')}. Evidence binding is not a completed trade, a profitable strategy, or qualification for live trading.`
+    : 'Shared context coverage UNKNOWN: current matching-epoch evidence is unavailable. Evidence binding is not trade qualification.';
   if (d.collector_generation === 'V3.1') {
     const c = d.collection || {}, s = d.search_progress || {}, cs = d.candidate_screen || {};
     const rows = cs.descriptive_top_100 || [];
