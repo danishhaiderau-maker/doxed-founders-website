@@ -12,4 +12,6 @@ http://127.0.0.1:9502/, desktop screenshot inspected on 2026-09-09.
 
 This checks rendering with synthetic data, not current data publication,
 profitability, all navigation paths, or full dashboard acceptance.
-Mobile viewport and UNKNOWN visual state remain pending.
+Mobile viewport and UNKNOWN visual state remain pending. The preview now supports
+`--ai-state unknown`; compilation passed. In-app tab 12 disappeared before its
+UNKNOWN screenshot could be captured, so no visual pass is asserted for that state.

@@ -5,6 +5,10 @@ from pathlib import Path
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ai-state', choices=('populated', 'unknown'), default='populated')
+    options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="btc-synthetic-ui-") as isolated:
         os.environ["BTC_AGENT_DATA_DIR"] = str(Path(__file__).parent / "canonical-research-data")
         os.environ["BTC_AGENT_REPORT_DIR"] = isolated
@@ -50,6 +54,11 @@ def main():
         dashboard.app.view_functions["api_genome"] = synthetic_genome
 
         def synthetic_ai():
+            if options.ai_state == 'unknown':
+                return jsonify(calibration_status="NO_DATA", direction_only=True,
+                    mode_note="SYNTHETIC UNKNOWN UI STATE — NOT MARKET EVIDENCE",
+                    matched_selection_comparison={"status": "UNKNOWN", "groups": [],
+                        "blockers": ["SYNTHETIC_MISSING_CURRENT_EVIDENCE"]})
             return jsonify(calibration_status="NO_DATA", direction_only=True,
                 mode_note="SYNTHETIC UI ONLY — NOT MARKET EVIDENCE",
                 matched_selection_comparison={
