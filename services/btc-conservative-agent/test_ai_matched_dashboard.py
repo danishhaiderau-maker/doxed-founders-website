@@ -6,6 +6,17 @@ import subprocess
 SOURCE = Path('research/research_dashboard.py').read_text(encoding='utf-8-sig')
 
 
+def test_existing_ai_navigation_and_scope_separate_evidence():
+    tree=ast.parse(SOURCE)
+    labels=[node.value for node in ast.walk(tree) if isinstance(node,ast.Constant) and isinstance(node.value,str)]
+    assert 'AI comparison & calibration' in labels
+    assert 'Historical AI Calibration' not in labels
+    assert "ai: ['MIXED / SEPARATE CURRENT AND HISTORICAL EVIDENCE'" in SOURCE
+    assert 'The matched AI selection table uses the current atomic generation only.' in SOURCE
+    assert 'Historical direction / gap calibration — separate evidence' in SOURCE
+    assert "ai: ['LEGACY EXECUTED'" not in SOURCE
+
+
 def test_declared_digest_verifies_original_bytes(tmp_path):
     import hashlib
     fn=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.FunctionDef) and n.name=='_ai_payload')

@@ -315,7 +315,7 @@ REPORT_NAV_GROUPS = (
     ("historical-group", "Historical Research", (
         ("findings", "Historical Findings", None),
         ("regime", "Historical Regime & ADX", "regime_leaderboard.json"),
-        ("ai", "Historical AI Calibration", "ai_calibration_report.json"),
+        ("ai", "AI comparison & calibration", "ai_calibration_report.json"),
         ("chase-delay", "Historical Delay", "chase_delay_report.json"),
         ("spread-perf", "Legacy Gap Performance", "top_combinations_report.json"),
         ("ladder-sim", "Historical Ladder Simulator", "exit_ladder_simulator_report.json"),
@@ -6935,12 +6935,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Horizon</th><th>Green</th><th>Still loss</th><th>Coverage</th><th>Recovery %</th></tr></thead><tbody id="horizon-fc-body"></tbody></table>
   </section>
   <section id="sec-ai">
-    <h2>AI Direction &amp; Gap Laboratory</h2>
+    <h2>AI comparison &amp; calibration</h2>
     <h3>Current matched AI selection — descriptive only</h3>
     <p class="note">Conditional on supported, cost-complete filled paths only. NO_FILL and unsupported paths are excluded. Not full-opportunity expectancy, portfolio returns, entry rate, or qualification. The filter takes APPROVE only when direction matches; otherwise incremental trade PnL is zero.</p>
     <p class="note" id="ai-matched-status">UNKNOWN — waiting for current evidence.</p>
     <div style="max-width:100%;min-width:0;overflow-x:auto"><table><thead><tr><th>Policy / world</th><th>Independent N</th><th>Supported rows</th><th>Rejected positive / negative</th><th>Filter minus unfiltered USD</th></tr></thead><tbody id="ai-matched-body"></tbody></table></div>
-    <p class="note" id="ai-mode-note">Loading the current AI evidence mode…</p>
+    <h3>Historical direction / gap calibration — separate evidence</h3>
+    <p class="note" id="ai-mode-note">Loading historical AI calibration mode…</p>
     <div id="ai-gap-view">
       <h3>Normalized score-gap performance</h3>
       <p class="note" id="ai-gap-note">Raw LONG-vs-SHORT score difference divided by 10. Example: raw gap 30 is bucket 3.</p>
@@ -7072,7 +7073,7 @@ const EVIDENCE_SCOPES = {
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current signed V3.1 counterfactual policy grid.'],
   regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
   lanes: ['CURRENT CANONICAL TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
-  ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
+  ai: ['MIXED / SEPARATE CURRENT AND HISTORICAL EVIDENCE', 'The matched AI selection table uses the current atomic generation only. Direction/gap calibration below is historical evidence and is not merged into the current comparison.'],
   chase: ['EXECUTED + SHADOW, SEPARATED', 'All available terminal chase outcomes are shown with paper execution and shadow/lab evidence kept distinct.'],
   'chase-policy-lab': ['SIGNED COMPRESSED SCHEDULES — DESCRIPTIVE ONLY', 'This panel is not a qualification result. Other shadow simulations use the separate conservative execution evaluator; executed outcomes remain separate unless explicitly matched.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
