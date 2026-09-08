@@ -260,6 +260,7 @@ def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
         decision = raw if raw != "UNKNOWN" else projected
     category = ("APPROVE" if decision in {"APPROVE", "STRONG_APPROVE", "SOFT_APPROVE"}
                 else "REJECT" if decision in {"REJECT", "SOFT_REJECT"}
+                else "NO_TRADE" if decision == "NO_TRADE"
                 else "ERROR" if decision in {"AI_ERROR", "ERROR"} else "UNKNOWN")
     direction = label(row.get("raw_ai_direction"))
     alias_direction = label(row.get("ai_direction"))
@@ -304,12 +305,14 @@ def _ai_verdict_coverage(adapted, unknown_shadow):
         errors[row.get("ai_error_status", "UNKNOWN")] += 1
         missing_family += row.get("family_policy_decision", "UNKNOWN") == "UNKNOWN"
         blocked += bool(row.get("ai_verdict_blockers"))
+    from research.ai_matched_comparison import compare_ai_selection
+    comparison = compare_ai_selection(chain(adapted, unknown_shadow))
     return {"schema": "discovery_ai_verdict_coverage_v1", "raw_verdict_row_counts": dict(classes),
             "ai_error_row_counts": dict(errors), "missing_family_verdict_rows": missing_family,
             "rows_with_verdict_blockers": blocked,
             "count_basis": "ADAPTED_RESEARCH_ROWS_NOT_INDEPENDENT_OPPORTUNITIES_OR_TRADES",
-            "comparison_status": "NOT_EVALUATED", "profitability_supported": False,
-            "blockers": ["AI_FILTER_MATCHED_COUNTERFACTUAL_COMPARISON_NOT_IMPLEMENTED"]}
+            "comparison_status": comparison['status'], "profitability_supported": False,
+            "matched_selection_comparison": comparison, "blockers": comparison['blockers']}
 
 
 def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
