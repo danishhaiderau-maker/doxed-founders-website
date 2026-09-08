@@ -33,7 +33,7 @@ def _proof(root,ref):
 
 def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry,terminal,
                      path_rows,cost_contract,policy_id,source_segments,seal_request_id=None,clock=time.time,now=None,
-                     baseline_reference=None):
+                     baseline_reference=None,replay_inputs=None,exit_candidate=None):
     from research.declared_shadow_model import validate_contract
     from research_v3_contract import canonical_json
     base=_safe_path(Path(repo_root)/'local-derived')
@@ -75,6 +75,15 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
         generation=terminal.get('generation') or {}
         if any(generation.get(k)!=source.get(v) for k,v in (('epoch_id','epoch'),('source_revision','revision'),('deployed_revision','deployed_revision'))):
             raise ValueError('COUNTERFACTUAL_GENERATION_MISMATCH')
+        if (opportunity.get('tile_config_signature')!=generation.get('tile_config_signature')
+                or opportunity.get('deployed_revision')!=generation.get('deployed_revision')):
+            raise ValueError('COUNTERFACTUAL_CONFIG_MISMATCH')
+        from research.conservative_shadow_terminal import evaluate_shadow_terminal
+        if (not isinstance(replay_inputs,dict) or replay_inputs.get('entry_receipt')!=entry
+                or replay_inputs.get('future_path_rows')!=path_rows
+                or replay_inputs.get('generation')!=generation
+                or evaluate_shadow_terminal(**replay_inputs)!=terminal):
+            raise ValueError('COUNTERFACTUAL_SEMANTIC_REPLAY_MISMATCH')
         validate_contract(cost_contract,generation)
         if terminal.get('status')!='COMPLETE' or terminal.get('declared_contract_sha256')!=_hash(cost_contract):
             raise ValueError('COUNTERFACTUAL_COST_CONTRACT')
@@ -89,6 +98,9 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
                     or wrapper.get('schema')!='local_dynamic_prospective_seal_v2'
                     or seal.get('sealed_at')!=wrapper.get('verified_fit_available_at')):
                 raise ValueError('COUNTERFACTUAL_SEAL_BINDING')
+            if any((binding.get('generation') or {}).get(k)!=generation.get(k) for k in
+                   ('epoch_id','source_revision','deployed_revision','tile_config_signature')):
+                raise ValueError('COUNTERFACTUAL_SEAL_GENERATION_MISMATCH')
             from research_dynamic_entry_policy import verify_frozen_dynamic_policy
             fitid=binding.get('fit_id')
             if not re.fullmatch('[0-9a-f]{64}',str(fitid)): raise ValueError('COUNTERFACTUAL_FIT_ID')
@@ -114,6 +126,15 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             _,schedule_hash=_normalise_schedule(schedule['schedule'])
             if entry.get('schedule_sha256')!=schedule_hash:
                 raise ValueError('COUNTERFACTUAL_NORMALIZED_SCHEDULE_SOURCE_MISMATCH')
+            from research_entry_baselines import ENTRY_BASELINE_REGISTRY
+            from research.conservative_shadow_report import build_composite_policy_identity
+            from research_v3_contract import canonical_hash
+            specs=[s for s in ENTRY_BASELINE_REGISTRY['baselines'] if s['baseline_id']==baseline_id]
+            if len(specs)!=1: raise ValueError('COUNTERFACTUAL_BASELINE_UNKNOWN')
+            composite_spec,composite=build_composite_policy_identity({'baseline_id':baseline_id,'baseline_spec':specs[0],'conservative_receipt':entry,
+                'policy_signature':specs[0]['policy_signature']}, exit_candidate or {})
+            if composite.get('composite_policy_signature')!=terminal.get('policy_signature') or composite_spec!=replay_inputs['policy_spec']:
+                raise ValueError('COUNTERFACTUAL_COMPOSITE_POLICY_MISMATCH')
             if not _positive(binding.get('holdout_start_ts'))<=signal<_positive(binding.get('holdout_end_ts')):
                 raise ValueError('COUNTERFACTUAL_OUTSIDE_WINDOW')
             if {'policy_id':policy_id,'policy_signature':terminal.get('policy_signature')} not in binding.get('sealed_policy_candidates',[]):
@@ -123,11 +144,12 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             artifact=_read(base/'dynamic-inputs'/(input_hash+'.json'))
             if _hash(artifact)!=input_hash: raise ValueError('COUNTERFACTUAL_INPUT_HASH')
             dimensions=(artifact.get('mapping_payload') or {}).get('selected_group') or {}
-            if (dimensions.get('declared_contract_sha256')!=_hash(cost_contract)
+            if ((dimensions.get('sizing') or {}).get('contract_sha256')!=_hash(cost_contract)
                     or dimensions.get('simulation_model')!=terminal.get('simulation_model')
-                    or dimensions.get('cost_model_id')!=terminal.get('cost_model_id')):
+                    or dimensions.get('cost_model_id')!=terminal.get('cost_model_id')
+                    or dimensions.get('direction')!=direction):
                 raise ValueError('COUNTERFACTUAL_SEALED_COST_MODEL_UNPROVEN')
-            scope='SEALED_POLICY_REPLAY_PROOF_NOT_QUALIFIED'; seal_hash=wrapper['receipt_sha256']
+            scope='SEALED_POLICY_ENTRY_INTEGRITY_ONLY_NOT_QUALIFIED'; seal_hash=wrapper['receipt_sha256']
         if _source(_check(repo_root,data_root,source_revision,now=now))!=source:
             raise ValueError('COUNTERFACTUAL_SOURCE_CHANGED')
         body={'schema':'local_counterfactual_completion_v1','source':source,'scope':scope,
@@ -136,7 +158,11 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             'path_rows':path_rows,'cost_contract':cost_contract,'seal_request_id':seal_request_id,
             'source_segment_references':source_segments,
             'baseline_reference':baseline_reference,
+            'exit_candidate':exit_candidate,
             'seal_receipt_sha256':seal_hash,'verified_at':verified,'qualification_allowed':False}
+        body['entry_semantic_replay_verified']=False
+        body['terminal_semantic_replay_verified']=True
+        body['verification_blockers']=['ENTRY_SOURCE_REPLAY_NOT_RECOMPUTED']
         digest=_hash(body); _write_once(base/'counterfactual-completions'/(digest+'.json'),body)
         return {'artifact_sha256':digest,'scope':scope,'qualification_allowed':False}
 

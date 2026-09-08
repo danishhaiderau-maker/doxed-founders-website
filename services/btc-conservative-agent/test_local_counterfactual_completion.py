@@ -6,14 +6,22 @@ from test_declared_shadow_model import contract
 from research.conservative_shadow_terminal import evaluate_shadow_terminal
 
 
-def inputs(tmp_path,monkeypatch):
-    values=_inputs(); costs=contract(values['generation'])
+def inputs(tmp_path,monkeypatch,generation=None,shift=0):
+    values=_inputs()
+    if generation is not None: values['generation']=generation
+    values['entry_receipt']['trigger_bucket_ts']+=shift
+    values['entry_receipt']['quantity_attempts'][0]['trigger_bucket_ts']+=shift
+    for row in values['future_path_rows']: row['bucket_ts']+=shift
+    values['required_horizon_end_ts']+=shift
+    costs=contract(values['generation'])
     values['cost_model'].update(calculation_mode='DECLARED_EXECUTION_RATE_MODEL_V1',declared_contract=costs,cost_provenance='DECLARED_SIMULATION')
     _rebind(values); terminal=evaluate_shadow_terminal(**values)
     assert terminal['status']=='COMPLETE'
     root=tmp_path/'mirror'; path=root/'v3/ledgers/opportunity.jsonl'; path.parent.mkdir(parents=True)
     raw=json.dumps({'record_id':'opp','epoch_id':values['generation']['epoch_id'],
-        'source_revision':values['generation']['source_revision'],'signal_ts':9.}).encode()
+        'source_revision':values['generation']['source_revision'],'signal_ts':9.+shift,
+        'deployed_revision':values['generation']['deployed_revision'],
+        'tile_config_signature':values['generation']['tile_config_signature']}).encode()
     path.write_bytes(raw)
     refs=[]
     for payload in values['source_segment_payloads']:
@@ -25,7 +33,7 @@ def inputs(tmp_path,monkeypatch):
     return dict(repo_root=tmp_path/'repo',data_root=root,source_revision=source['revision'],
         opportunity_ref={'record_id':'opp','byte_offset':0,'row_length':len(raw),'row_sha256':hashlib.sha256(raw).hexdigest()},
         entry=values['entry_receipt'],terminal=terminal,path_rows=values['future_path_rows'],cost_contract=costs,
-        policy_id='policy',source_segments=refs,clock=lambda:20.)
+        policy_id='policy',source_segments=refs,clock=lambda:20.+shift,replay_inputs=values)
 
 
 def test_actual_terminal_immutable_historical_proof(tmp_path,monkeypatch):
@@ -62,7 +70,7 @@ def test_genuine_seal_created_after_signal_cannot_make_replay_prospective(tmp_pa
         holdout_maturity_delay_sec=10000.,clock=lambda:2000000.)
     args=inputs(tmp_path/'proof',monkeypatch); args['repo_root']=opts['repo_root']
     args['seal_request_id']=_hash(sealed['binding'])
-    with pytest.raises(ValueError,match='MODEL_NOT_AVAILABLE'):
+    with pytest.raises(ValueError,match='SEAL_GENERATION_MISMATCH'):
         module.write_completion(**args)
 
 
@@ -71,3 +79,68 @@ def test_completion_artifact_tamper_rejected(tmp_path,monkeypatch):
     path=args['repo_root']/'local-derived/counterfactual-completions'/(receipt['artifact_sha256']+'.json')
     body=json.loads(path.read_text()); body['direction']='SHORT'; path.chmod(0o666); path.write_text(json.dumps(body))
     with pytest.raises(ValueError,match='ARTIFACT_HASH'): module.load_completion(args['repo_root'],receipt['artifact_sha256'])
+
+
+def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch):
+    from test_local_dynamic_loader import prepared
+    from test_dynamic_cohort_adapter import row
+    from research.dynamic_cohort_adapter import adapt_dynamic_cohorts
+    from research.local_dynamic_mapping import build_local_dynamic_mapping,_hash
+    from research.local_dynamic_input import write_local_dynamic_input
+    from research.local_dynamic_fit import fit_local_dynamic_input
+    from research.local_dynamic_seal import seal_historical_fit
+    from research_entry_baselines import materialize_signal_time_baseline_schedules
+    from research.conservative_limit_fill import _normalise_schedule
+    opts,mapping=prepared(tmp_path/'training'); generation=mapping['expected_generation']
+    args=inputs(tmp_path/'proof',monkeypatch,generation=generation,shift=2000000)
+    original=json.loads((args['data_root']/'v3/ledgers/opportunity.jsonl').read_bytes())
+    original.update(episode_id='original',opportunity_id='opp',raw_direction='UNKNOWN',symbol='BTCUSD',
+        signal_time_bbo={'bid':100.,'ask':100.,'bid_qty':1.,'ask_qty':1.},signal_price=100.)
+    original['baseline_schedule_snapshot']=materialize_signal_time_baseline_schedules(original)
+    capture=original['baseline_schedule_snapshot']['directional_schedules']['LONG']
+    schedule=capture['schedules']['MARKET_ENTRY_AT_SIGNAL']['schedule']
+    args['entry']['schedule_sha256']=_normalise_schedule(schedule)[1]
+    from research_entry_baselines import ENTRY_BASELINE_REGISTRY
+    from research.conservative_shadow_report import build_composite_policy_identity
+    from research_v3_contract import canonical_hash
+    spec=next(s for s in ENTRY_BASELINE_REGISTRY['baselines'] if s['baseline_id']=='MARKET_ENTRY_AT_SIGNAL')
+    exit_spec=args['replay_inputs']['policy_spec']
+    args['exit_candidate']={'policy_id':'policy','policy_signature':canonical_hash('v3-policy',exit_spec),'policy_spec':exit_spec}
+    composite_spec,composite=build_composite_policy_identity({'baseline_id':spec['baseline_id'],'baseline_spec':spec,'policy_signature':spec['policy_signature'],'conservative_receipt':args['entry']},args['exit_candidate'])
+    args['replay_inputs']['policy_spec']=composite_spec
+    args['replay_inputs']['policy_signature']=composite['composite_policy_signature']
+    _rebind(args['replay_inputs']); args['terminal']=evaluate_shadow_terminal(**args['replay_inputs'])
+    raw=json.dumps(original).encode(); (args['data_root']/'v3/ledgers/opportunity.jsonl').write_bytes(raw)
+    args['opportunity_ref'].update(row_length=len(raw),row_sha256=hashlib.sha256(raw).hexdigest())
+    args['baseline_reference']={'baseline_id':'MARKET_ENTRY_AT_SIGNAL','capture_signature':capture['capture_signature'],
+        'opportunity_id':'opp','source_episode_id':'original'}
+    protocol=dict(outer_folds=3,inner_folds=3,purge_sec=10,embargo_sec=10,minimum_bucket_support=1)
+    rows=[row(generation=generation,episode_id=f'e-{i}',opportunity_id=f'o-{i}',policy_id='policy',
+        policy_signature=args['terminal']['policy_signature'],cost_model_id=args['terminal']['cost_model_id'],
+        simulation_model=args['terminal']['simulation_model'],declared_contract_sha256=_hash(args['cost_contract']),
+        signal_ts=1000+i*20000,required_end_ts=2000+i*20000,
+        pre_entry_features={'regime':{'value':'BULL','observed_ts':999+i*20000}}) for i in range(80)]
+    adapted=adapt_dynamic_cohorts(rows,expected_generation=generation,feature_names=['regime'],protocol=protocol)
+    mapping=build_local_dynamic_mapping(adapted,group_id=adapted['groups'][0]['group_id'],expected_generation=generation,protocol=protocol)
+    opts['config_signature']=_hash(protocol)
+    receipt=write_local_dynamic_input(**opts,rows=mapping['training_episodes'],mapping_payload=mapping)
+    opts['input_sha256']=receipt['input_sha256']; fit_local_dynamic_input(**opts)
+    sealed=seal_historical_fit(**opts,holdout_start_ts=2000001.,holdout_end_ts=2100000.,
+        holdout_maturity_delay_sec=10000.,clock=lambda:2000000.)
+    args.update(repo_root=opts['repo_root'],seal_request_id=_hash(sealed['binding']))
+    result=module.write_completion(**args)
+    assert result['scope']=='SEALED_POLICY_ENTRY_INTEGRITY_ONLY_NOT_QUALIFIED'
+    assert result['qualification_allowed'] is False
+    artifact=module.load_completion(args['repo_root'],result['artifact_sha256'])
+    assert artifact['entry_semantic_replay_verified'] is False
+    assert artifact['verification_blockers']==['ENTRY_SOURCE_REPLAY_NOT_RECOMPUTED']
+    import copy
+    for kind in ('opportunity','schedule','direction','forged_terminal'):
+        altered=copy.deepcopy(args)
+        if kind=='opportunity': altered['baseline_reference']['opportunity_id']='other'
+        elif kind=='schedule': altered['entry']['schedule_sha256']='0'*64
+        elif kind=='direction': altered['entry']['direction']='SHORT'
+        else:
+            altered['terminal']['net_pnl_usd']=99999.
+            altered['terminal']['receipt_sha256']=_hash({k:v for k,v in altered['terminal'].items() if k!='receipt_sha256'})
+        with pytest.raises(ValueError): module.write_completion(**altered)
