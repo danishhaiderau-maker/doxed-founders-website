@@ -2,10 +2,37 @@
 import hashlib
 import json
 import sqlite3
+import time
 from pathlib import Path
 from research.local_dynamic_input import _check, _source, _directory, _encoded
 from research.mirror_generation_lease import MirrorGenerationLease
 from collector_v22_provisional import _atomic_write_unlocked
+
+
+def _verify_page_ref(root, ref, source, config):
+    if ref.get('ledger') not in ('decision','opportunity'):
+        raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
+    ledger=ref['ledger']; offset=ref.get('byte_offset'); length=ref.get('row_length')
+    if type(offset) is not int or offset<0 or type(length) is not int or not 0<length<=1048576:
+        raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
+    with (Path(root)/'v3/ledgers'/f'{ledger}.jsonl').open('rb') as stream:
+        stream.seek(offset); raw=stream.read(length)
+    digest=hashlib.sha256(raw).hexdigest(); row=json.loads(raw)
+    rid=row.get('record_id'); scan=row.get('scan_id') if ledger=='decision' else row.get('shared_ai_call_id')
+    directions=(row.get('baseline_schedule_snapshot') or {}).get('directional_schedules') or {}
+    if (digest!=ref.get('row_sha256') or rid!=ref.get('record_id') or scan!=ref.get('scan_id')
+            or row.get('epoch_id')!=source['epoch'] or row.get('source_revision')!=source['revision']
+            or row.get('tile_config_signature')!=config
+            or ref.get('directions')!={side:(directions.get(side) or {}).get('capture_signature') for side in ('LONG','SHORT')}):
+        raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
+    path=Path(root)/'v3/receipts/emergency_record_idempotency_v1'/ledger/(hashlib.sha256(f'{ledger}\0{rid}'.encode()).hexdigest()+'.json')
+    with path.open('rb') as handle: receipt_raw=handle.read(262145)
+    if len(receipt_raw)>262144: raise ValueError('CENSUS_RECEIPT_LIMIT')
+    receipt=json.loads(receipt_raw)
+    if (receipt.get('state')!='COMMITTED' or receipt.get('offset')!=offset
+            or receipt.get('length')!=length or receipt.get('row_sha256')!=digest):
+        raise ValueError('CENSUS_RECEIPT_MISMATCH')
+    return row
 
 
 def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, now=None,
@@ -24,9 +51,12 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
         source=_source(_check(repo_root,data_root,source_revision,now=now))
         binding={'source':source,'config_signature':config_signature}
         job=hashlib.sha256(_encoded(binding)).hexdigest()
-        with sqlite3.connect(directory/'index.sqlite') as db:
+        with sqlite3.connect(directory/'index.sqlite',timeout=1) as db:
+            deadline=time.monotonic()+5
+            db.set_progress_handler(lambda: int(time.monotonic()>deadline),1000)
             db.execute('CREATE TABLE IF NOT EXISTS cursors(job TEXT, ledger TEXT, fingerprint TEXT, offset INTEGER, PRIMARY KEY(job,ledger))')
             db.execute('CREATE TABLE IF NOT EXISTS refs(job TEXT,ledger TEXT,id TEXT,scan TEXT,digest TEXT,stage TEXT,reference TEXT, PRIMARY KEY(job,ledger,id))')
+            db.execute('CREATE INDEX IF NOT EXISTS refs_scan_stage ON refs(job,scan,stage)')
             budget=max_bytes; complete=True
             for ledger in ('decision','opportunity'):
                 path=Path(data_root)/'v3/ledgers'/f'{ledger}.jsonl'
@@ -73,11 +103,19 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
             if _source(_check(repo_root,data_root,source_revision,now=now))!=source:
                 raise ValueError('CENSUS_GENERATION_CHANGED')
             count=db.execute("SELECT COUNT(*) FROM refs o WHERE o.job=? AND o.ledger='opportunity' AND EXISTS (SELECT 1 FROM refs a WHERE a.job=o.job AND a.scan=o.scan AND a.stage='SCAN_ADMISSION')",(job,)).fetchone()[0]
-            refs=[json.loads(row[0]) for row in db.execute("SELECT o.reference FROM refs o WHERE o.job=? AND o.ledger='opportunity' AND o.id>? AND EXISTS (SELECT 1 FROM refs a WHERE a.job=o.job AND a.scan=o.scan AND a.stage='SCAN_ADMISSION') ORDER BY o.id LIMIT 8",(job,reference_after))] if complete else []
+            refs=[json.loads(row[0]) for row in db.execute("SELECT o.reference FROM refs o WHERE o.job=? AND o.ledger='opportunity' AND o.id>? AND EXISTS (SELECT 1 FROM refs a WHERE a.job=o.job AND a.scan=o.scan AND a.stage='SCAN_ADMISSION') ORDER BY o.id LIMIT 9",(job,reference_after))] if complete else []
+            more=len(refs)>8; refs=refs[:8]
+            for ref in refs:
+                _verify_page_ref(data_root,ref,source,config_signature)
+                admission=db.execute("SELECT reference FROM refs WHERE job=? AND scan=? AND stage='SCAN_ADMISSION' LIMIT 2",(job,ref['scan_id'])).fetchall()
+                if len(admission)!=1: raise ValueError('CENSUS_ADMISSION_AMBIGUOUS')
+                original=_verify_page_ref(data_root,json.loads(admission[0][0]),source,config_signature)
+                if original.get('decision_stage')!='SCAN_ADMISSION' or original.get('scan_id')!=ref['scan_id']:
+                    raise ValueError('CENSUS_ADMISSION_CONFLICT')
             result={'schema':'local_scan_reconciliation_v1','binding':binding,'index_caught_up':complete,
                 'observed_joined_opportunity_rows':count if complete else None,
-                'sample_original_references':refs,'reference_sample_truncated':complete and count>8,
-                'next_reference_cursor':refs[-1]['record_id'] if len(refs)==8 else None,
+                'sample_original_references':refs,'reference_sample_truncated':more,
+                'next_reference_cursor':refs[-1]['record_id'] if more else None,
                 'exhaustive_fanout':False,'qualification_eligible':False,
                 'blockers':['EXPECTED_CHILD_DENOMINATOR_UNPROVEN','CONTINUOUS_COLLECTION_UNPROVEN']}
             db.commit()

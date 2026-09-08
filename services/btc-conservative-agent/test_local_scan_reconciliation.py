@@ -83,3 +83,25 @@ def test_actual_coherence_and_lease_reject_failed_heartbeat(tmp_path):
     heartbeat=mirror/'.fly-data-sync-loop.heartbeat.json'
     data=json.loads(heartbeat.read_text()); data['ok']=False; heartbeat.write_text(json.dumps(data))
     with pytest.raises(MirrorCoherenceError): module.reconcile_scans(**args)
+
+
+def test_cached_reference_tamper_rejected_without_source_stat_change(tmp_path,monkeypatch):
+    import sqlite3
+    store,args=fixture(tmp_path,monkeypatch)
+    module.reconcile_scans(**args)
+    path=args['repo_root']/'local-derived/scan-reconciliation/index.sqlite'
+    with sqlite3.connect(path) as db:
+        ref=json.loads(db.execute("SELECT reference FROM refs WHERE ledger='opportunity'").fetchone()[0])
+        ref['directions']['LONG']='tampered'
+        db.execute("UPDATE refs SET reference=? WHERE ledger='opportunity'",(json.dumps(ref),))
+    with pytest.raises(ValueError,match='CACHED_REFERENCE_INVALID'): module.reconcile_scans(**args)
+
+
+def test_final_page_has_no_cursor_or_truncation(tmp_path,monkeypatch):
+    store,args=fixture(tmp_path,monkeypatch)
+    result=module.reconcile_scans(**args)
+    assert result['next_reference_cursor'] is None and not result['reference_sample_truncated']
+    after=result['sample_original_references'][0]['record_id']
+    result=module.reconcile_scans(**args,reference_after=after)
+    assert result['sample_original_references']==[] and result['next_reference_cursor'] is None
+    assert not result['reference_sample_truncated']
