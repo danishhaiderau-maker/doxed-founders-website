@@ -20061,6 +20061,16 @@ def _write_discovery_scorecard_report(
     return report, mirrored
 
 
+def _report_artifact_digest(path):
+    """Hash the staged report bytes for the atomic publication manifest."""
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _same_publication_dynamic_report(legacy_report, scorecard, expected_generation, analysis_provenance):
     """Project verified discovery cohorts without copying their episode arrays.
 
@@ -20516,6 +20526,7 @@ def write_report_manifest(
             "category": "Genome & Reports",
             "description": "Exact-generation simulation cohorts, unmatched evidence and model differences",
             "size_bytes": scorecard_mirror.stat().st_size,
+            "artifact_sha256": _report_artifact_digest(scorecard_mirror),
             "modified_at": datetime.fromtimestamp(
                 Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE).stat().st_mtime, tz=timezone.utc
             ).isoformat(),
