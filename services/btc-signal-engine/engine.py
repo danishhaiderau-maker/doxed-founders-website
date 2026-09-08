@@ -9162,7 +9162,7 @@ def _deliver_relay_outbox_record(record: dict, commit_before_ack=None) -> bool:
         if payload.get("marketable_fallback"):
             commit_before_ack = lambda: _commit_marketable_relay_payload(payload)
         if callable(commit_before_ack):
-            with paper_lifecycle_file_lock:
+            with trade_lock, paper_lifecycle_file_lock:
                 if commit_before_ack() is not True:
                     raise RuntimeError("relay source finalization rejected")
                 ack_state = _build_paper_lifecycle_payload(
@@ -9450,8 +9450,8 @@ def _commit_local_paper_lifecycle_transition(
             if canonical_lock is not None:
                 canonical_lock.acquire()
             try:
-                with paper_lifecycle_file_lock:
-                    with trade_lock:
+                with trade_lock:
+                    with paper_lifecycle_file_lock:
                         before = _build_paper_lifecycle_payload(f"local_paper_transition:{event}")
                         target = copy.deepcopy(before)
                         target_mutator(target)
@@ -9525,8 +9525,8 @@ def _commit_paper_lifecycle_transition(
             if canonical_lock is not None:
                 canonical_lock.acquire()
             try:
-                with paper_lifecycle_file_lock:
-                    with trade_lock:
+                with trade_lock:
+                    with paper_lifecycle_file_lock:
                         target = _build_paper_lifecycle_payload(
                             reason=f"relay_transition:{event}"
                         )
@@ -9661,7 +9661,7 @@ def _push_showcase_relay_event(
     try:
         # The committed lifecycle generation is the source of truth: resulting
         # paper state and its PENDING relay transition are one durable replace.
-        with paper_lifecycle_file_lock:
+        with trade_lock, paper_lifecycle_file_lock:
             lifecycle = _build_paper_lifecycle_payload(
                 reason=f"relay_transition:{event}"
             )
@@ -9885,7 +9885,7 @@ def emit_signal_webhook(event: str, signal: dict = None, ai: dict = None):
         **_dashboard_owner_metadata(),
     }
     try:
-        with paper_lifecycle_file_lock:
+        with trade_lock, paper_lifecycle_file_lock:
             lifecycle = _build_paper_lifecycle_payload(
                 reason=f"relay_transition:{event}"
             )
@@ -46184,7 +46184,9 @@ def _build_paper_lifecycle_payload(reason: str = "mutation") -> dict:
 def save_paper_lifecycle(reason: str = "mutation") -> bool:
     """Atomically persist paper state plus pending relay transitions."""
     try:
-        with paper_lifecycle_file_lock:
+        # Callers may already own trade_lock. Never take the file lock first:
+        # another saver could then hold it while waiting for that caller.
+        with trade_lock, paper_lifecycle_file_lock:
             payload = _relay_event_outbox.decorate_lifecycle(
                 _build_paper_lifecycle_payload(reason)
             )
