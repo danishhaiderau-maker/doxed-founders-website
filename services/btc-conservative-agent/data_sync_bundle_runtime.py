@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+import tempfile
 from datetime import datetime, timezone
 
 SCHEMA = "fly_transport_bundle_slice_v1"
@@ -42,7 +43,58 @@ def _reject_links(path):
                 raise ValueError("BUNDLE_LINK_REJECTED")
 
 
+PHASES = frozenset({"STARTUP", "IMPORTS", "ADMISSION", "WORKER", "LEASE_STATE", "BUILD", "CHECKPOINT"})
+
+
+def _write_phase(path, nonce, identity, phase):
+    # Best effort only: diagnostic failure must never change evidence behavior.
+    try:
+        if phase not in PHASES:
+            return
+        value = {"nonce": nonce, "identity": identity, "phase": phase}
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        if len(raw) <= 4096:
+            with open(path, "wb") as stream:
+                stream.write(raw)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _read_phase(path, nonce, identity):
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            return "UNKNOWN"
+        value = json.loads(raw)
+        if (isinstance(value, dict) and value.get("nonce") == nonce
+                and value.get("identity") == identity and value.get("phase") in PHASES):
+            return value["phase"]
+    except (OSError, ValueError, TypeError):
+        pass
+    return "UNKNOWN"
+
+
 def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subprocess.run, max_members=128):
+    # OS temporary namespace, never the derivative directory or raw evidence.
+    phase_path = None
+    try:
+        descriptor, phase_path = tempfile.mkstemp(prefix="btc-bundle-phase-", suffix=".json")
+        os.close(descriptor)
+    except OSError:
+        pass  # Missing diagnostics cannot prevent otherwise valid transfer.
+    try:
+        return _run_slice(metadata, source_root, output_root, timeout=timeout,
+                          runner=runner, max_members=max_members, phase_path=phase_path)
+    finally:
+        if phase_path is not None:
+            try:
+                Path(phase_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _run_slice(metadata, source_root, output_root, *, timeout, runner, max_members, phase_path):
     """Hard-timeout subprocess, bounded protocol, no credential inheritance."""
     if not 1 <= timeout <= 30:
         raise ValueError("INVALID_SLICE_TIMEOUT")
@@ -50,7 +102,8 @@ def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subproce
         raise ValueError("INVALID_SLICE_MEMBER_LIMIT")
     nonce = uuid.uuid4().hex
     payload = {"schema": SCHEMA, "nonce": nonce, "generation": metadata,
-                "source_root": str(source_root), "output_root": str(output_root), "max_members": max_members}
+                "source_root": str(source_root), "output_root": str(output_root), "max_members": max_members,
+                "phase_path": phase_path}
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
     if len(encoded) > MAX_REQUEST:
         raise ValueError("SLICE_REQUEST_LIMIT")
@@ -63,7 +116,8 @@ def run_slice(metadata, source_root, output_root, *, timeout=12, runner=subproce
                         timeout=timeout, check=False, cwd=str(Path(__file__).resolve().parent),
                         env=environment)
     except subprocess.TimeoutExpired:
-        return {"status": "FAILED", "error": "BUNDLE_SLICE_TIMEOUT"}
+        return {"status": "FAILED", "error": "BUNDLE_SLICE_TIMEOUT",
+                "timeout_phase": _read_phase(phase_path, nonce, _identity(metadata))}
     if len(result.stdout) > MAX_RESULT:
         return {"status": "FAILED", "error": "BUNDLE_SLICE_RESULT_LIMIT"}
     try:
@@ -189,6 +243,8 @@ def _persist_coordinator_status(metadata, source_root, output_root, receipt, *, 
         for key in ("package_index_count", "inventory_rows_selected", "retry_seconds"):
             if type(receipt.get(key)) is int and 0 <= receipt[key] <= 2**63 - 1:
                 payload[key] = receipt[key]
+        if receipt.get("timeout_phase") in PHASES | {"UNKNOWN"}:
+            payload["timeout_phase"] = receipt["timeout_phase"]
         payload["worker_state_present"] = not early
         if early and status == "COMPLETE":
             return False  # No state means no completion evidence.
@@ -293,7 +349,8 @@ def _run_managed_generation(metadata, source_root, output_root, *, pressure_prob
         if receipt.get("status") != "BUILDING":
             failures += 1
             if failures >= 2:
-                return {"status": "FAILED", "error": "BUNDLE_CIRCUIT_OPEN", "last_error": receipt.get("error")}
+                return {"status": "FAILED", "error": "BUNDLE_CIRCUIT_OPEN", "last_error": receipt.get("error"),
+                        **({"timeout_phase": receipt["timeout_phase"]} if receipt.get("timeout_phase") in PHASES | {"UNKNOWN"} else {})}
             stop.wait(3)
             continue
         failures = 0
@@ -314,11 +371,15 @@ def _child():
             or not re.fullmatch(r"[0-9a-f]{32}", str(payload.get("nonce") or ""))):
         raise ValueError("INVALID_SLICE_REQUEST")
     metadata = payload["generation"]
+    phase = lambda name: _write_phase(payload.get("phase_path"), payload["nonce"], _identity(metadata), name)
+    phase("STARTUP")
     receipt = {"schema": SCHEMA, "nonce": payload["nonce"], "identity": _identity(metadata)}
     try:
+        phase("IMPORTS")
         from data_sync_bundle_worker import run_bundle_worker, _bounded_read, _validate_output_root
         from data_sync_bundle_transport import MAX_PACKAGE_BYTES
         from data_sync_bundle_storage import check_derivative_admission
+        phase("ADMISSION")
         source = Path(payload["source_root"])
         _reject_links(source)
         output = _validate_output_root(source.resolve(strict=True), payload["output_root"])
@@ -339,9 +400,11 @@ def _child():
         member_limit = payload.get("max_members", 128)
         if type(member_limit) is not int or member_limit not in (1, 2, 4, 8, 16, 32, 64, 128):
             raise ValueError("INVALID_SLICE_MEMBER_LIMIT")
+        phase("WORKER")
         result = run_bundle_worker(metadata, payload["source_root"], output,
                                    max_pages=2, max_members=member_limit, max_payload_bytes=8 * 1024 * 1024,
-                                   max_read_bytes=32 * 1024 * 1024, max_elapsed_sec=5)
+                                   max_read_bytes=32 * 1024 * 1024, max_elapsed_sec=5,
+                                   phase_callback=phase)
         receipt.update({key: result.get(key) for key in
                         ("status", "cursor", "package_index_count", "inventory_rows_selected")})
     except Exception as exc:

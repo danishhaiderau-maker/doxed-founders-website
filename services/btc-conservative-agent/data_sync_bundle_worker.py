@@ -275,6 +275,7 @@ def run_bundle_worker(
     output_root: str | Path, *, max_pages: int = 2, max_members: int = 128,
     max_payload_bytes: int = 8 * 1024 * 1024,
     max_read_bytes: int = 32 * 1024 * 1024, max_elapsed_sec: float = 5.0,
+    phase_callback=lambda phase: None,
 ) -> dict[str, Any]:
     """Advance one package with bounded reads and cooperative elapsed checks.
 
@@ -312,6 +313,7 @@ def run_bundle_worker(
         state_path, "BUNDLE_WORKER_STATE_LINK_OR_REPARSE_FORBIDDEN")
     _reject_link_or_reparse_components(lease_path, "BUNDLE_WORKER_LEASE_LINK_OR_REPARSE_FORBIDDEN")
     started = time.monotonic()
+    phase_callback("LEASE_STATE")
     with _singleton_lease(lease_path):
         output = _validate_output_root(source, output)
         _reject_link_or_reparse_components(
@@ -388,6 +390,7 @@ def run_bundle_worker(
         if selected:
             if time.monotonic() - started >= float(max_elapsed_sec):
                 raise BundleWorkerError("INVOCATION_TIME_BUDGET_EXHAUSTED_BEFORE_BUILD")
+            phase_callback("BUILD")
             package = build_bundle(
                 generation, selected, source, generation_output / "packages",
                 max_members=int(max_members), max_payload_bytes=int(max_payload_bytes),
@@ -424,6 +427,7 @@ def run_bundle_worker(
                 trailing = check.read(1)
             if trailing:
                 raise BundleWorkerError("PAGE_INDEX_HAS_UNDECLARED_DESCRIPTORS")
+        phase_callback("CHECKPOINT")
         _atomic_json(state_path, state)
         return {"schema": SCHEMA, "status": "COMPLETE" if state["completed"] else "BUILDING",
                 "generation": generation, "cursor": cursor, "package": package,
