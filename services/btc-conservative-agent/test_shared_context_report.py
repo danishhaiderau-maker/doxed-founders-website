@@ -6,6 +6,45 @@ from research.research_v3_report import build_safe_policy_genome_v3_report, REPO
 from research.shared_context_coverage import build_shared_context_coverage
 
 
+def test_aggregate_query_budget_defers_instead_of_rejecting(tmp_path):
+    anchors, contexts = [], []
+    for index in range(2):
+        episode = 'large-%d' % index
+        lane = {**audit(), 'episode_id':episode, 'opportunity_id':'opportunity:'+episode}
+        anchors.append(lane)
+        contexts.append({**PROV, 'epoch_id':KEY.collection_epoch_id, 'episode_id':episode,
+            'shared_ai_call_id':lane['shared_ai_call_id'], 'record_id':lane['opportunity_id'],
+            'padding':'x'*1100000})
+    path = tmp_path/'v3/ledgers/opportunity.jsonl'
+    path.parent.mkdir(parents=True)
+    path.write_text(''.join(json.dumps(row)+'\n' for row in contexts))
+    build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, anchors)  # index first row
+    first = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, anchors)
+    assert first['page_lanes'] == first['cohort_bound_lanes'] == 1
+    assert first['cohort_pending_lanes'] == 1
+    second = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, anchors)
+    assert second['page_start'] == 1 and second['cohort_bound_lanes'] == 2
+    assert second['cohort_evaluation_complete']
+
+
+def test_result_persistence_lock_is_failclosed(tmp_path, monkeypatch):
+    import sqlite3
+    import research.shared_context_coverage as module
+    original = sqlite3.connect
+    calls = 0
+    def locked(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise sqlite3.OperationalError('database is locked')
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module.sqlite3, 'connect', locked)
+    result = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [audit()])
+    assert result['cohort_evaluated_lanes'] == 0
+    assert not result['cohort_evaluation_complete']
+    assert 'SHARED_CONTEXT_RESULT_PERSISTENCE_FAILED' in result['lanes'][0]['blockers']
+
+
 def test_full_cohort_paginates_and_anchor_overflow_is_local(tmp_path):
     anchors, contexts = [], []
     for index in range(70):

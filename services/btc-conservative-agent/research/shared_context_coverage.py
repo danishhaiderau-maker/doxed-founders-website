@@ -124,14 +124,28 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
             page_start = previous[1]
         page_keys = all_keys[page_start:page_start+page_limit]
         query_bytes, query_rows = 0, 0
-        for episode in sorted({key.episode_id for key in page_keys}):
+        processed_keys = []
+        queried_episodes = set()
+        for key in page_keys:
+            episode = key.episode_id
+            if episode in queried_episodes:
+                processed_keys.append(key)
+                continue
             indexed = db.execute('SELECT * FROM refs WHERE epoch=? AND episode=? ORDER BY ledger,offset LIMIT 2001', (epoch_id,episode)).fetchall()
+            own_bytes = sum(ref['length'] for ref in indexed)
+            own_rows = len(indexed)
+            if own_bytes > 2*1024*1024 or own_rows > 2000:
+                incomplete_episodes.add(episode)
+                queried_episodes.add(episode)
+                processed_keys.append(key)
+                continue
+            if query_bytes + own_bytes > 2*1024*1024 or query_rows + own_rows > 2000:
+                break  # This untouched lane is first on the next invocation.
+            query_bytes += own_bytes
+            query_rows += own_rows
+            queried_episodes.add(episode)
+            processed_keys.append(key)
             for ref in indexed:
-                query_bytes += ref['length']
-                query_rows += 1
-                if query_bytes > 2*1024*1024 or query_rows > 2000:
-                    incomplete_episodes.add(episode)
-                    break
                 path = Path(root)/'v3'/'ledgers'/(ref['ledger']+'.jsonl')
                 with path.open('rb') as stream:
                     stream.seek(ref['offset'])
@@ -140,6 +154,7 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
                     raise ValueError('SHARED_CONTEXT_SOURCE_CHANGED')
                 references[episode].append({'ledger':ref['ledger'], 'byte_offset':ref['offset'],
                     'row_length':ref['length'], 'row_sha256':ref['sha'], 'source_row':json.loads(raw)})
+        page_keys = processed_keys
     except (ValueError, OSError, sqlite3.Error) as exc:
         defects.append('SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT' if str(exc) == 'SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT'
                        else 'SHARED_CONTEXT_INDEX_OR_SOURCE_INVALID')
@@ -165,7 +180,9 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
     if not truncated and not defects:
         # Retain only sanitized verdicts for this exact generation. A new
         # source/anchor cohort invalidates prior counts rather than mixing them.
-        with sqlite3.connect(Path(root)/'analyzer/shared-context-index.sqlite3', timeout=.1) as results:
+        results = None
+        try:
+            results = sqlite3.connect(Path(root)/'analyzer/shared-context-index.sqlite3', timeout=.1)
             results.execute('CREATE TABLE IF NOT EXISTS coverage_result(cohort TEXT,lane TEXT,status TEXT,PRIMARY KEY(cohort,lane))')
             results.execute('DELETE FROM coverage_result WHERE cohort<>?', (cohort,))
             for lane in lanes:
@@ -175,6 +192,17 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
             evaluated_lanes, bound_total = results.execute(
                 "SELECT count(*),coalesce(sum(status='BOUND'),0) FROM coverage_result WHERE cohort=?", (cohort,)
             ).fetchone()
+            results.commit()
+        except (sqlite3.Error, OSError):
+            evaluated_lanes = bound_total = 0
+            defects.append('SHARED_CONTEXT_RESULT_PERSISTENCE_FAILED')
+            for lane in lanes:
+                lane['status'] = 'UNBOUND'
+                lane['references'] = []
+                lane['blockers'] = sorted(set(lane['blockers'] + defects))
+        finally:
+            if results is not None:
+                results.close()
     return {'schema':'shared_context_coverage_v1', 'epoch_id':epoch_id, 'qualification_authority':False,
             'cleanup_authority':False, 'truncated':truncated, 'rows_scanned':scanned,
             'indexed_through_bytes':indexed_through_bytes,
