@@ -1,0 +1,87 @@
+"""Bounded local observed-child index; never an exhaustive fanout certificate."""
+import hashlib
+import json
+import sqlite3
+from pathlib import Path
+from research.local_dynamic_input import _check, _source, _directory, _encoded
+from research.mirror_generation_lease import MirrorGenerationLease
+from collector_v22_provisional import _atomic_write_unlocked
+
+
+def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, now=None,
+                    max_bytes=1048576, reference_after=''):
+    if not isinstance(reference_after,str) or len(reference_after)>256:
+        raise ValueError('CENSUS_REFERENCE_CURSOR_INVALID')
+    if type(max_bytes) is not int or not 1 <= max_bytes <= 2097152:
+        raise ValueError('CENSUS_BYTE_BUDGET_INVALID')
+    if not isinstance(config_signature,str) or not config_signature:
+        raise ValueError('CENSUS_CONFIG_REQUIRED')
+    directory=_directory(repo_root,data_root).parent/'scan-reconciliation'
+    directory.mkdir(parents=True,exist_ok=True)
+    lease=MirrorGenerationLease(data_root,owner='local-scan-reconciliation')
+    lease.acquire(timeout_seconds=0)
+    try:
+        source=_source(_check(repo_root,data_root,source_revision,now=now))
+        binding={'source':source,'config_signature':config_signature}
+        job=hashlib.sha256(_encoded(binding)).hexdigest()
+        with sqlite3.connect(directory/'index.sqlite') as db:
+            db.execute('CREATE TABLE IF NOT EXISTS cursors(job TEXT, ledger TEXT, fingerprint TEXT, offset INTEGER, PRIMARY KEY(job,ledger))')
+            db.execute('CREATE TABLE IF NOT EXISTS refs(job TEXT,ledger TEXT,id TEXT,scan TEXT,digest TEXT,stage TEXT,reference TEXT, PRIMARY KEY(job,ledger,id))')
+            budget=max_bytes; complete=True
+            for ledger in ('decision','opportunity'):
+                path=Path(data_root)/'v3/ledgers'/f'{ledger}.jsonl'
+                stat=path.stat(); fingerprint=json.dumps([stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns])
+                previous=db.execute('SELECT fingerprint,offset FROM cursors WHERE job=? AND ledger=?',(job,ledger)).fetchone()
+                offset=previous[1] if previous and previous[0]==fingerprint else 0
+                if previous and previous[0]!=fingerprint:
+                    db.execute('DELETE FROM refs WHERE job=? AND ledger=?',(job,ledger))
+                with path.open('rb') as stream:
+                    stream.seek(offset)
+                    while budget and stream.tell()<stat.st_size:
+                        start=stream.tell(); raw=stream.readline(min(budget,1048576)+1)
+                        if len(raw)>budget or not raw.endswith(b'\n'):
+                            if budget==max_bytes or len(raw)>1048576: raise ValueError('CENSUS_ROW_UNSUPPORTED')
+                            break
+                        budget-=len(raw); offset=stream.tell()
+                        if not raw.strip(): continue
+                        row=json.loads(raw)
+                        scan=row.get('scan_id') if ledger=='decision' else row.get('shared_ai_call_id')
+                        if not isinstance(scan,str) or not scan.startswith('scan-census-'): continue
+                        if (row.get('epoch_id')!=source['epoch'] or row.get('source_revision')!=source['revision']
+                                or row.get('tile_config_signature')!=config_signature):
+                            raise ValueError('CENSUS_ROW_BINDING_CONFLICT')
+                        rid=row['record_id']; digest=hashlib.sha256(raw).hexdigest()
+                        receipt_path=Path(data_root)/'v3/receipts/emergency_record_idempotency_v1'/ledger/(hashlib.sha256(f'{ledger}\0{rid}'.encode()).hexdigest()+'.json')
+                        with receipt_path.open('rb') as handle: receipt_raw=handle.read(262145)
+                        if len(receipt_raw)>262144: raise ValueError('CENSUS_RECEIPT_LIMIT')
+                        receipt=json.loads(receipt_raw)
+                        if (receipt.get('state')!='COMMITTED' or receipt.get('offset')!=start
+                                or receipt.get('length')!=len(raw) or receipt.get('row_sha256')!=digest):
+                            raise ValueError('CENSUS_RECEIPT_MISMATCH')
+                        old=db.execute('SELECT digest FROM refs WHERE job=? AND ledger=? AND id=?',(job,ledger,rid)).fetchone()
+                        if old and old[0]!=digest: raise ValueError('CENSUS_DUPLICATE_CONFLICT')
+                        directions=(row.get('baseline_schedule_snapshot') or {}).get('directional_schedules') or {}
+                        reference={'record_id':rid,'scan_id':scan,'ledger':ledger,
+                            'row_sha256':digest,'byte_offset':start,'row_length':len(raw),
+                            'directions':{side:(directions.get(side) or {}).get('capture_signature') for side in ('LONG','SHORT')}}
+                        db.execute('INSERT OR IGNORE INTO refs VALUES(?,?,?,?,?,?,?)',(job,ledger,rid,scan,digest,row.get('decision_stage'),json.dumps(reference)))
+                complete &= offset==stat.st_size
+                after=path.stat()
+                if json.dumps([after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns])!=fingerprint:
+                    raise ValueError('CENSUS_SOURCE_CHANGED')
+                db.execute('INSERT OR REPLACE INTO cursors VALUES(?,?,?,?)',(job,ledger,fingerprint,offset))
+            if _source(_check(repo_root,data_root,source_revision,now=now))!=source:
+                raise ValueError('CENSUS_GENERATION_CHANGED')
+            count=db.execute("SELECT COUNT(*) FROM refs o WHERE o.job=? AND o.ledger='opportunity' AND EXISTS (SELECT 1 FROM refs a WHERE a.job=o.job AND a.scan=o.scan AND a.stage='SCAN_ADMISSION')",(job,)).fetchone()[0]
+            refs=[json.loads(row[0]) for row in db.execute("SELECT o.reference FROM refs o WHERE o.job=? AND o.ledger='opportunity' AND o.id>? AND EXISTS (SELECT 1 FROM refs a WHERE a.job=o.job AND a.scan=o.scan AND a.stage='SCAN_ADMISSION') ORDER BY o.id LIMIT 8",(job,reference_after))] if complete else []
+            result={'schema':'local_scan_reconciliation_v1','binding':binding,'index_caught_up':complete,
+                'observed_joined_opportunity_rows':count if complete else None,
+                'sample_original_references':refs,'reference_sample_truncated':complete and count>8,
+                'next_reference_cursor':refs[-1]['record_id'] if len(refs)==8 else None,
+                'exhaustive_fanout':False,'qualification_eligible':False,
+                'blockers':['EXPECTED_CHILD_DENOMINATOR_UNPROVEN','CONTINUOUS_COLLECTION_UNPROVEN']}
+            db.commit()
+            _atomic_write_unlocked(directory/'current.json',result)
+            return result
+    finally:
+        lease.release()
