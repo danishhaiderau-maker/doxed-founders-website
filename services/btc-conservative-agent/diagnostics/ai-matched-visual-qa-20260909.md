@@ -15,3 +15,11 @@ profitability, all navigation paths, or full dashboard acceptance.
 Mobile viewport and UNKNOWN visual state remain pending. The preview now supports
 `--ai-state unknown`; compilation passed. In-app tab 12 disappeared before its
 UNKNOWN screenshot could be captured, so no visual pass is asserted for that state.
+
+Follow-up: Edge tab 259540420, source d162c40, UNKNOWN preview desktop
+screenshot inspected. Historical Research -> AI comparison & calibration works;
+counts remain UNKNOWN and the table explicitly says no current eligible matched
+outcomes. Current/historical labels and synthetic warning are readable without
+overlap. This closes the desktop UNKNOWN-state check only.
+Mobile 390x844 viewport request failed because the browser debugger was not
+attached; reset returned the same error. No mobile screenshot or pass claimed.
