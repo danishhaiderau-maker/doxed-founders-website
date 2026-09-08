@@ -125,7 +125,26 @@ def _normalise_schedule(schedule: Sequence[Mapping[str, Any]]) -> tuple[list[dic
     return normalised, hashlib.sha256(encoded).hexdigest()
 
 
-def evaluate_limit_fill(
+def evaluate_limit_fill(rows, *, direction, requested_qty, chase_schedule,
+                        aggressor_window_sec=3, symbol=None, quantity_constraints=None):
+    return _evaluate_limit_fill(rows, direction=direction, requested_qty=requested_qty,
+        chase_schedule=chase_schedule, aggressor_window_sec=aggressor_window_sec,
+        symbol=symbol, quantity_constraints=quantity_constraints)
+
+
+def evaluate_conditional_limit_fill(rows, *, direction, requested_qty, chase_schedule,
+                                    aggressor_window_sec=3, symbol=None, venue_quantity_observation=None):
+    from research.conditional_quantity_execution import LABELS
+    result = _evaluate_limit_fill(rows, direction=direction, requested_qty=requested_qty,
+        chase_schedule=chase_schedule, aggressor_window_sec=aggressor_window_sec,
+        symbol=symbol, quantity_constraints=venue_quantity_observation, _conditional=True)
+    result.update(LABELS)
+    result['schema'] = 'conditional_limit_fill_receipt_v1'
+    result['model_kind'] = 'CONDITIONAL_VENUE_QUANTITY'
+    return result
+
+
+def _evaluate_limit_fill(
     rows: Iterable[Mapping[str, Any]],
     *,
     direction: str,
@@ -134,6 +153,7 @@ def evaluate_limit_fill(
     aggressor_window_sec: int = 3,
     symbol: str | None = None,
     quantity_constraints: Mapping[str, Any] | None = None,
+    _conditional: bool = False,
 ) -> dict[str, Any]:
     """Return a deterministic fill/no-fill/partial/unsupported receipt.
 
@@ -152,7 +172,13 @@ def evaluate_limit_fill(
         return _unsupported(receipt, "INVALID_DIRECTION")
     if qty is None:
         return _unsupported(receipt, "INVALID_REQUESTED_QTY")
-    normalized_constraints, constraint_reasons = validate_signed_quantity_constraints(
+    validator = validate_signed_quantity_constraints
+    quantity_apply = apply_quantity_constraints
+    if _conditional:
+        from research.conditional_quantity_execution import validate_conditional_constraints, apply_conditional_quantity_constraints
+        validator = validate_conditional_constraints
+        quantity_apply = apply_conditional_quantity_constraints
+    normalized_constraints, constraint_reasons = validator(
         quantity_constraints, symbol=symbol,
     )
     if normalized_constraints is None:
@@ -333,7 +359,7 @@ def evaluate_limit_fill(
         attempts: list[dict[str, Any]] = []
         accepted_evidence: list[dict[str, Any]] = []
         interval = strongest["interval"]
-        decision = apply_quantity_constraints(
+        decision = quantity_apply(
             requested_qty=qty,
             raw_partial_qty=float(strongest["filled"]),
             execution_price=interval["limit_price"],
