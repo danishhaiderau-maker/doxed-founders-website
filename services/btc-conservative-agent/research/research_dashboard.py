@@ -2940,6 +2940,8 @@ def _feature_payload():
             "INSUFFICIENT_OUTCOME_FEATURE_EVIDENCE: no eligible terminal outcomes "
             "exist for feature attribution in the current generation"
         )
+    elif not rep:
+        payload["empty_reason"] = "FEATURE_REPORT_UNAVAILABLE: no readable feature attribution report"
     return payload
 
 

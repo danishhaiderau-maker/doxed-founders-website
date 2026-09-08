@@ -112,7 +112,7 @@ def test_atomic_manifest_count_remains_authoritative_even_for_matching_edge(tmp_
     assert payload["performance"]["trades"] == 0
     assert payload["performance"]["net_pnl_usd"] is None
     assert payload["performance_source"] == "CURRENT_ATOMIC_MANIFEST"
-    assert "['Fresh executed', p.trades ?? 0]" in dashboard.DASHBOARD_HTML
+    assert "['Fresh executed', p.trades ?? 'UNAVAILABLE']" in dashboard.DASHBOARD_HTML
     dashboard._API_RESPONSE_CACHE.clear()
 
 

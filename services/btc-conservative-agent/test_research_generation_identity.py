@@ -283,7 +283,10 @@ def test_production_startup_and_fresh_reset_wire_exact_identity_inputs():
     assert "tile_config_signature=active_tile_registry_signature()" in BOT_SOURCE
     assert "bridge.bind_generation_identity(" in BOT_SOURCE
     assert '"GENOME_IDENTITY_INVALID": 1000' in BOT_SOURCE
-    assert BOT_SOURCE.count('set_execution_paused("GENOME_IDENTITY_INVALID")') == 2
+    assert 'set_execution_paused("GENOME_IDENTITY_INVALID")' in BOT_SOURCE
+    assert 'pause_confirmed = _fresh_reset_confirm_paused()' in BOT_SOURCE
+    assert '"pause_state_confirmed": pause_confirmed' in BOT_SOURCE
+    assert '"RESET_PAUSE_STATE_UNVERIFIED"' in BOT_SOURCE
     assert "bridge identity init failed closed" in BOT_SOURCE
     assert 'if active_reason == "GENOME_IDENTITY_INVALID":' in BOT_SOURCE
     assert '"remediation": "restart with valid exact generation identity metadata"' in BOT_SOURCE
