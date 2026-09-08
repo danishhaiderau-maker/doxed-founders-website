@@ -7,6 +7,7 @@ from research.local_dynamic_fit_loader import _read
 from research.local_dynamic_mapping import _hash
 from research.local_dynamic_input import _safe_path, _directory
 from research.local_holdout_producer import produce_local_holdout
+from research.holdout_candidate_identity import candidate_identity_matches
 from research.mirror_generation_lease import MirrorGenerationLease
 from research_dynamic_entry_policy import verify_frozen_dynamic_policy, evaluate_frozen_dynamic_policy, _opportunity_value
 from research_v3_sealed_holdout import load_seal, consume_seal, _write_once
@@ -95,7 +96,8 @@ def evaluate_local_frozen_holdout(*, seal_request_id, clock=time.time, **options
             outcomes=original['policy_outcomes']; proofs=original['collection_provenance_by_policy']
             for policy,signature in candidates.items():
                 if (policy not in outcomes or policy not in proofs
-                        or outcomes[policy].get('source_lifecycle_identity',{}).get('policy_signature')!=signature
+                        or not candidate_identity_matches(original, outcomes[policy], proofs[policy],
+                            policy=policy, signature=signature, seal_request_id=seal_request_id)
                         or not proofs[policy].get('causal_provenance')
                         or _opportunity_value(original,policy) is None):
                     raise ValueError('EVALUATION_FROZEN_CANDIDATE_COVERAGE_INCOMPLETE')
