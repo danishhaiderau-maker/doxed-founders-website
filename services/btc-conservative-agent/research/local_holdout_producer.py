@@ -48,6 +48,9 @@ def produce_local_holdout(**options):
         excluded=Counter(); rows=[]; verified_count=0
         for original in mapping['training_episodes']:
             proofs={}; outcomes={}
+            for candidate in mapping['candidates']:
+                if candidate['policy_id'] not in original['policy_outcomes']:
+                    excluded['MAPPED_CANDIDATE_OUTCOME_UNKNOWN']+=1
             for policy,outcome in original['policy_outcomes'].items():
                 identity=outcome.get('source_lifecycle_identity') or {}
                 if (not identity or identity.get('episode_id')!=original.get('source_episode_id')

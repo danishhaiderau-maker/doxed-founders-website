@@ -12,9 +12,15 @@ from dynamic_policy_analyzer import load_verified_local_dynamic_mapping
 from research_v3_sealed_holdout import create_seal, load_seal, _write_once
 
 
-def seal_historical_fit(*, holdout_start_ts, clock=time.time, **load_options):
+def seal_historical_fit(*, holdout_start_ts, holdout_end_ts, holdout_maturity_delay_sec,
+                        clock=time.time, **load_options):
+    if any(isinstance(value,bool) for value in (holdout_start_ts,holdout_end_ts,holdout_maturity_delay_sec)):
+        raise ValueError('INVALID_HOLDOUT_BOUNDARY')
     boundary=float(holdout_start_ts)
     if not math.isfinite(boundary): raise ValueError('INVALID_HOLDOUT_BOUNDARY')
+    end=float(holdout_end_ts); delay=float(holdout_maturity_delay_sec)
+    if not math.isfinite(end) or not math.isfinite(delay) or end<=boundary or delay<=0 or not math.isfinite(end+delay):
+        raise ValueError('INVALID_HOLDOUT_END_OR_MATURITY_DELAY')
     verified=load_verified_historical_fit(**load_options)
     result,model=verified['result'],verified['frozen_policy']
     if (model is None or model.get('training_evidence_complete') is not True
@@ -30,7 +36,10 @@ def seal_historical_fit(*, holdout_start_ts, clock=time.time, **load_options):
     binding={'fit_id':verified['fit_id'],'result_sha256':result['result_sha256'],
              'model_sha256':_hash(model),'input_receipt':receipt,
              'protocol':result['identity']['protocol'],'generation':generation,
-             'holdout_start_ts':boundary,'sealed_policy_candidates':candidates}
+             'holdout_start_ts':boundary,'holdout_end_ts':end,
+             'holdout_maturity_delay_sec':delay,'holdout_mature_at':end+delay,
+             'selection_window':'SIGNAL_START_INCLUSIVE_END_EXCLUSIVE',
+             'forward_paper_trial_required_days':15,'sealed_policy_candidates':candidates}
     request_id=_hash(binding)
     root=_safe_path(Path(load_options['repo_root'])/'local-derived'/'dynamic-seals')
     lease=MirrorGenerationLease(root,owner='explicit-prospective-seal')
@@ -73,7 +82,7 @@ def seal_historical_fit(*, holdout_start_ts, clock=time.time, **load_options):
             cohort_signature=_hash(binding),training_snapshot_hash=result['result_sha256'],
             training_completed_at=available,sealed_at=available,holdout_start_ts=boundary,
             policy_candidates=candidates)
-        output={'schema':'local_dynamic_prospective_seal_v1','binding':binding,'seal':seal,
+        output={'schema':'local_dynamic_prospective_seal_v2','binding':binding,'seal':seal,
             'verified_fit_available_at':available,
             'training_time_basis':'CONSERVATIVE_VERIFIED_AVAILABILITY_NOT_ORIGINAL_TRAINING_TIME',
             'qualification_allowed':False,'live_policy_change_allowed':False}
@@ -86,7 +95,8 @@ def seal_historical_fit(*, holdout_start_ts, clock=time.time, **load_options):
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Explicit future research holdout seal; no fitting or trading.')
     for name in ('repo-root','data-root','input-sha256','source-revision','analyzer-revision',
-                 'transformation-signature','config-signature','holdout-start-ts'):
+                 'transformation-signature','config-signature','holdout-start-ts',
+                 'holdout-end-ts','holdout-maturity-delay-sec'):
         parser.add_argument('--'+name,required=True)
     try:
         result=seal_historical_fit(**vars(parser.parse_args(argv)))

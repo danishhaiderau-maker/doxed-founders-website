@@ -1,7 +1,12 @@
 import pytest
 from test_local_dynamic_fit import options
 from research import local_dynamic_fit as fit
-from research.local_dynamic_seal import seal_historical_fit
+from research.local_dynamic_seal import seal_historical_fit as _seal_historical_fit
+
+
+def seal_historical_fit(**kwargs):
+    # Explicit synthetic schedule, not a production default or inferred delay.
+    return _seal_historical_fit(holdout_end_ts=2_100_000.,holdout_maturity_delay_sec=10_000.,**kwargs)
 
 
 def test_actual_seal_future_immutable_and_no_training(tmp_path,monkeypatch):
@@ -44,7 +49,7 @@ def test_interrupted_wrapper_retry_retains_single_seal(tmp_path,monkeypatch):
     args=options(tmp_path); fit.fit_local_dynamic_input(**args)
     original=module._write_once
     def fail_result(path,value):
-        if value.get('schema')=='local_dynamic_prospective_seal_v1': raise OSError('injected')
+        if value.get('schema')=='local_dynamic_prospective_seal_v2': raise OSError('injected')
         return original(path,value)
     monkeypatch.setattr(module,'_write_once',fail_result)
     with pytest.raises(OSError):
@@ -79,3 +84,9 @@ def test_seal_consumption_recognizes_frozen_dynamic_policy(tmp_path):
 def test_nonfinite_future_boundary_rejected(tmp_path,boundary):
     with pytest.raises(ValueError,match='INVALID_HOLDOUT_BOUNDARY'):
         seal_historical_fit(holdout_start_ts=boundary)
+
+
+@pytest.mark.parametrize('end,delay',[(100,1),(200,float('nan')),(200,0),(float('inf'),1)])
+def test_invalid_predeclared_end_or_delay(end,delay):
+    with pytest.raises(ValueError,match='END_OR_MATURITY'):
+        _seal_historical_fit(holdout_start_ts=100,holdout_end_ts=end,holdout_maturity_delay_sec=delay)

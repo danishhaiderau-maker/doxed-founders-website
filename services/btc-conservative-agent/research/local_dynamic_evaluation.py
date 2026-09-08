@@ -43,6 +43,14 @@ def evaluate_local_frozen_holdout(*, seal_request_id, clock=time.time, **options
     lease=MirrorGenerationLease(base/'dynamic-evaluations'/seal_request_id[:16],owner='frozen-evaluation')
     lease.acquire(timeout_seconds=0)
     try:
+        v2=wrapper.get('schema')=='local_dynamic_prospective_seal_v2'
+        end=_positive(binding.get('holdout_end_ts')) if v2 else None
+        now=_positive(clock())
+        if v2:
+            delay=_positive(binding.get('holdout_maturity_delay_sec'))
+            if (end<=_positive(seal['holdout_start_ts']) or binding.get('holdout_mature_at')!=end+delay
+                    or now<end+delay):
+                raise ValueError('EVALUATION_PREDECLARED_WINDOW_NOT_MATURE')
         holdout=produce_local_holdout(**options)
         if holdout.get('status')=='IN_PROGRESS': return holdout
         if holdout['input_receipt']['input_sha256']==binding['input_receipt']['input_sha256']:
@@ -62,14 +70,14 @@ def evaluate_local_frozen_holdout(*, seal_request_id, clock=time.time, **options
                 or dimensions(before)!=dimensions(after) or before['candidates']!=after['candidates']
                 or before['feature_names']!=after['feature_names'] or before['protocol']!=after['protocol']):
             raise ValueError('EVALUATION_COHORT_CONTRACT_CHANGED')
-        now=_positive(clock()); boundary=_positive(seal['holdout_start_ts'])
+        boundary=_positive(seal['holdout_start_ts'])
         if now<=boundary or boundary<=_positive(model['training_cutoff_required_end_ts']):
             raise ValueError('EVALUATION_BOUNDARY_INVALID')
         source=holdout['source_generation']
         for field,sourcefield in [('dataset_epoch','epoch'),('source_revision','revision'),
                                  ('deployed_revision','deployed_revision')]:
             if source.get(sourcefield)!=seal[field]: raise ValueError('EVALUATION_SOURCE_IDENTITY_MISMATCH')
-        episodes=[]; historical=0
+        episodes=[]; historical=0; postend=0
         candidates={row['policy_id']:row['policy_signature'] for row in model['candidates']}
         for original in holdout['rows']:
             if any(original.get(field)!=seal[field] for field in
@@ -77,6 +85,7 @@ def evaluate_local_frozen_holdout(*, seal_request_id, clock=time.time, **options
                 raise ValueError('EVALUATION_ROW_SOURCE_IDENTITY_MISMATCH')
             signal=_positive(original.get('signal_ts'))
             if signal<boundary: historical+=1; continue
+            if end is not None and signal>=end: postend+=1; continue
             if (_positive(original.get('required_end_ts'))>now
                     or _positive(original.get('evidence_collected_at'))>now):
                 raise ValueError('EVALUATION_HOLDOUT_NOT_MATURE')
@@ -90,6 +99,28 @@ def evaluate_local_frozen_holdout(*, seal_request_id, clock=time.time, **options
             episodes.append({**original,**{field:seal[field] for field in
                 ('dataset_epoch','source_revision','deployed_revision','tile_config_signature','cohort_signature')}})
         if not episodes: raise ValueError('EVALUATION_NO_PROSPECTIVE_EVIDENCE')
+        window_coverage=None
+        if v2:
+            if after.get('input_universe_schema')!='dynamic_input_universe_v1' or not isinstance(after.get('input_universe'),list):
+                raise ValueError('EVALUATION_INPUT_UNIVERSE_UNAVAILABLE')
+            expected=set(); past=future=0
+            for anchor in after['input_universe']:
+                signal=_positive(anchor.get('signal_ts'))
+                if signal<boundary: past+=1; continue
+                if signal>=end: future+=1; continue
+                if anchor.get('group_id') is None:
+                    raise ValueError('EVALUATION_IN_WINDOW_UNCLASSIFIED_INPUT')
+                if anchor['group_id']!=after['selected_group']['group_id']: continue
+                if not all(anchor.get(k) for k in ('episode_id','opportunity_id','policy_id')):
+                    raise ValueError('EVALUATION_IN_WINDOW_INPUT_IDENTITY_MISSING')
+                expected.add((anchor['episode_id'],anchor['opportunity_id'],anchor['policy_id']))
+            supplied={(r['source_episode_id'],r['opportunity_id'],p) for r in episodes for p in candidates}
+            if not expected or expected!=supplied:
+                raise ValueError('EVALUATION_PROSPECTIVE_UNIVERSE_INCOMPLETE')
+            window_coverage={'status':'COMPLETE_DECLARED_INPUT_UNIVERSE',
+                'expected_candidate_episodes':len(expected),'supported_candidate_episodes':len(supplied),
+                'historical_input_rows':past,'post_end_input_rows':future,
+                'source_collection_exhaustiveness_verified':False}
         directory=_safe_path(base/'dynamic-evaluations'/seal_request_id[:16])
         identity={'seal_request_id':seal_request_id,'holdout_sha256':holdout['artifact_sha256'],
                   'model_sha256':binding['model_sha256'],'episodes_sha256':_hash(episodes)}
@@ -109,16 +140,20 @@ def evaluate_local_frozen_holdout(*, seal_request_id, clock=time.time, **options
         comparison=evaluate_frozen_dynamic_policy(model,episodes,evaluation_mode='SEALED_HOLDOUT',
             sealed_holdout_evaluation=consumed)
         comparison['qualification_eligible']=False
-        comparison['qualification_blockers']=list(comparison['qualification_blockers'])+[
-            'FULL_READINESS_GATES_NOT_EVALUATED','HOLDOUT_END_NOT_PREDECLARED_IN_SEAL']
+        remaining=['FULL_READINESS_GATES_NOT_EVALUATED','FIFTEEN_DAY_FORWARD_PAPER_TRIAL_NOT_PROVEN',
+                   'SOURCE_COLLECTION_EXHAUSTIVENESS_NOT_VERIFIED']
+        if not v2: remaining.append('HOLDOUT_END_NOT_PREDECLARED_IN_SEAL')
+        comparison['qualification_blockers']=list(comparison['qualification_blockers'])+remaining
         output={'schema':'local_frozen_holdout_comparison_v1','identity':identity,'consumption_receipt':consumed,
             'comparison':comparison,'excluded_historical_rows':historical,
+            'excluded_post_end_rows':postend,
+            'declared_input_window_coverage':window_coverage,
             'producer_excluded_counts':holdout['excluded_counts'],
             'scope':'CONDITIONAL_SUPPORTED_COHORT_NOT_PORTFOLIO_RETURNS',
             'independent_source_episode_n':len({r['source_episode_id'] for r in episodes}),
             'scored_scenarios_may_be_correlated':True,
             'qualification_allowed':False,'live_policy_change_allowed':False,
-            'qualification_blockers':['FULL_READINESS_GATES_NOT_EVALUATED','HOLDOUT_END_NOT_PREDECLARED_IN_SEAL']}
+            'qualification_blockers':remaining}
         output['sha256']=_hash(output); _write_once(directory/'result.json',output)
         return output
     finally: lease.release()

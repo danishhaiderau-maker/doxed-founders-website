@@ -78,11 +78,20 @@ def adapt_dynamic_cohorts(
     )})
     total_episodes = 0
     candidate_keys: set[tuple[str, str]] = set()
+    input_universe = []
 
     for source in rows:
         counts["input_rows"] += 1
         if counts["input_rows"] > max_rows:
             raise ValueError("DYNAMIC_ADAPTER_ROW_LIMIT")
+        anchor = {key: source.get(key) if isinstance(source, Mapping) else None
+                  for key in ('episode_id','opportunity_id','policy_id','signal_ts')}
+        for key in ('episode_id','opportunity_id','policy_id'):
+            if not isinstance(anchor[key],str) or len(anchor[key])>256:
+                anchor[key]=None
+        if not _number(anchor['signal_ts']): anchor['signal_ts']=None
+        anchor['group_id']=None
+        input_universe.append(anchor)
         if not isinstance(source, Mapping):
             rejections["ROW_NOT_MAPPING"] += 1
             continue
@@ -147,6 +156,7 @@ def adapt_dynamic_cohorts(
         )}
         dimensions["sizing"] = sizing
         gid = _hash(dimensions)
+        anchor['group_id']=gid
         if gid not in groups:
             if len(groups) >= max_groups:
                 raise ValueError("DYNAMIC_ADAPTER_GROUP_LIMIT")
@@ -233,6 +243,7 @@ def adapt_dynamic_cohorts(
         result_groups.append(body)
     counts["output_episodes"] = sum(len(g["episodes"]) for g in result_groups)
     result = {"schema": "same_publication_dynamic_cohorts_v1", "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE",
+              "input_universe_schema":"dynamic_input_universe_v1", "input_universe":input_universe,
               "expected_generation": generation, "feature_names": list(names), "protocol_sha256": protocol_hash,
               "groups": result_groups, "counts": dict(sorted(counts.items())),
               "rejections": dict(sorted(rejections.items())),

@@ -111,6 +111,8 @@ def build_local_dynamic_mapping(adapted, *, group_id, expected_generation, proto
         'protocol':dict(protocol), 'protocol_run_id':_hash({'group':group_id,'protocol':protocol,
                                                           'cohort':group['cohort_sha256']}),
         'adapter_sha256':adapted['adapter_sha256'], 'selected_group':group,
+        'input_universe_schema':adapted.get('input_universe_schema'),
+        'input_universe':adapted.get('input_universe'),
         'expected_generation':dict(expected_generation), 'historical_diagnostics_allowed':True,
         'sealed_evaluation_allowed':False, 'missing_collection_timestamp_episodes':missing,
         'blockers':['PROSPECTIVE_SEAL_REQUIRED'] + (['EVIDENCE_COLLECTION_TIMESTAMP_MISSING'] if missing else []),

@@ -15,10 +15,11 @@ from lifecycle_bundles import LifecycleKey,materialize_bundle
 from lifecycle_completion_receipts import build_evidence_collected_receipt
 
 
-def prepared(tmp_path,monkeypatch):
+def prepared(tmp_path,monkeypatch,extra_signal=None):
     args=options(tmp_path)
     fit=fit_local_dynamic_input(**args)
-    seal=seal_historical_fit(**args,holdout_start_ts=2_000_100.,clock=lambda:2_000_000.)
+    seal=seal_historical_fit(**args,holdout_start_ts=2_000_100.,holdout_end_ts=2_001_500.,
+        holdout_maturity_delay_sec=18_000.,clock=lambda:2_000_000.)
     generation=seal['binding']['generation']; protocol=seal['binding']['protocol']
     key=LifecycleKey(generation['epoch_id'],'future-episode','a'*64,'CONTINUOUS')
     provenance={k:generation[k] for k in ('source_revision','deployed_revision','tile_config_signature')}
@@ -50,7 +51,12 @@ def prepared(tmp_path,monkeypatch):
     source=row(generation=generation,episode_id=key.episode_id,outcome_state='NO_FILL',net_pnl_usd=0,
         source_lifecycle_identity=key.as_dict(),config_signature='source-config',signal_ts=2_001_000.,
         required_end_ts=2_010_000.,pre_entry_features={'regime':{'value':'BULL','observed_ts':2_000_999.}})
-    adapted=adapt_dynamic_cohorts([source],expected_generation=generation,feature_names=['regime'],protocol=protocol)
+    sources=[source]
+    if extra_signal is not None:
+        sources.append(row(generation=generation,episode_id='missing-episode',opportunity_id='missing-opportunity',
+            signal_ts=None if extra_signal=='missing' else extra_signal,
+            required_end_ts=2_010_000.,pre_entry_features={},outcome_state='UNKNOWN'))
+    adapted=adapt_dynamic_cohorts(sources,expected_generation=generation,feature_names=['regime'],protocol=protocol)
     mapping=build_local_dynamic_mapping(adapted,group_id=adapted['groups'][0]['group_id'],expected_generation=generation,protocol=protocol)
     writeargs={k:v for k,v in args.items() if k!='input_sha256'}
     receipt=write_local_dynamic_input(**writeargs,rows=mapping['training_episodes'],mapping_payload=mapping)
@@ -79,6 +85,27 @@ def test_actual_prospective_producer_frozen_consumer_and_crash_retry(tmp_path,mo
     assert result['independent_source_episode_n']==1
     assert result['consumption_receipt']['evaluation_started_at']==2_020_001.
     assert evaluate_local_frozen_holdout(**args,clock=lambda:2_020_200.)==result
+
+
+@pytest.mark.parametrize('extra_signal',[1000.,2_001_200.,2_001_500.,'missing'])
+def test_window_denominator_retains_missing_future_but_not_historical_or_post_end(tmp_path,monkeypatch,extra_signal):
+    args,seal=prepared(tmp_path,monkeypatch,extra_signal=extra_signal)
+    if extra_signal in (2_001_200.,'missing'):
+        with pytest.raises(ValueError,match='IN_WINDOW_UNCLASSIFIED_INPUT|TIMESTAMP_INVALID'):
+            evaluate_local_frozen_holdout(**args,clock=lambda:2_020_001.)
+        assert not list((args['repo_root']/'local-derived/dynamic-seals/sealed_holdout/evaluations').glob('*.json'))
+    else:
+        result=evaluate_local_frozen_holdout(**args,clock=lambda:2_020_001.)
+        assert result['comparison']['episodes_scored']==1
+        assert result['declared_input_window_coverage']['expected_candidate_episodes']==1
+
+
+def test_predeclared_maturity_prevents_data_dependent_early_stop(tmp_path,monkeypatch):
+    args,seal=prepared(tmp_path,monkeypatch)
+    from research import local_dynamic_evaluation as module
+    monkeypatch.setattr(module,'produce_local_holdout',lambda **kw:pytest.fail('inspected outcomes before fixed end'))
+    with pytest.raises(ValueError,match='WINDOW_NOT_MATURE'):
+        evaluate_local_frozen_holdout(**args,clock=lambda:seal['binding']['holdout_mature_at']-1)
 
 
 @pytest.mark.parametrize('fault',['early','nonfinite','model'])
