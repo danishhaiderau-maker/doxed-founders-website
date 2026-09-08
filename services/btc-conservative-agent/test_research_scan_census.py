@@ -77,6 +77,34 @@ def test_uncertain_committed_admission_replays_without_duplicate_or_reusing_sequ
     assert scan==admissions[-1]['scan_id']
 
 
+@pytest.mark.parametrize('boundary',['after_write','before_journal_commit'])
+def test_disposition_commit_active_removal_crash_retry_exact_original_bytes(tmp_path,monkeypatch,boundary):
+    store=V3EvidenceStore(tmp_path,epoch_id='epoch')
+    census=ScanCensus(store,clock=lambda:10.,boot_id='first'); scan=census.admit()
+    if boundary=='after_write':
+        original=census._write
+        def fail(state,row):
+            original(state,row)
+            if row.get('decision_stage')=='SCAN_DISPOSITION': raise OSError('injected terminal boundary')
+        monkeypatch.setattr(census,'_write',fail)
+    else:
+        original=census._save
+        def fail(state):
+            if state.get('pending') is None and scan not in state['active']:
+                raise OSError('injected terminal boundary')
+            original(state)
+        monkeypatch.setattr(census,'_save',fail)
+    with pytest.raises(OSError): census.finish(scan,refs=[],verdicts=['REJECT'])
+    before=store.ledger_path('decision').read_bytes()
+    recovered=ScanCensus(store,clock=lambda:20.,boot_id='second')
+    recovered.finish(scan,refs=[],verdicts=['REJECT'])
+    assert store.ledger_path('decision').read_bytes()==before
+    assert scan not in recovered._load()['active']
+    assert recovered._load()['pending'] is None
+    with pytest.raises(ValueError,match='PAYLOAD_CONFLICT'):
+        recovered.finish(scan,refs=[],verdicts=['ACCEPT'])
+
+
 def test_finally_write_failure_does_not_mask_exception(tmp_path,monkeypatch):
     store=V3EvidenceStore(tmp_path,epoch_id='epoch')
     def fail(*a,**k): raise RuntimeError('journal failed')

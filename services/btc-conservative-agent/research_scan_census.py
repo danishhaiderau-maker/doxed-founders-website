@@ -56,6 +56,11 @@ class ScanCensus:
         result=self.store.append('decision',pending['row'])
         if result.get('blocked') or result.get('deferred') or not (result.get('written') or result.get('duplicate')):
             raise ValueError('SCAN_CENSUS_WRITE_NOT_DURABLE')
+        # The terminal transition and pending-clear are one journal replace.
+        # A crash before it replays the frozen row; a crash after it cannot
+        # regenerate a second timestamp for the same terminal record ID.
+        if pending['row'].get('decision_stage')=='SCAN_DISPOSITION':
+            state['active'].pop(pending['row']['scan_id'],None)
         state['pending']=None; self._save(state)
 
     def _write(self,state,row):
@@ -94,7 +99,8 @@ class ScanCensus:
         lease=MirrorGenerationLease(self.root,owner='scan-census-writer'); lease.acquire(timeout_seconds=0)
         try:
             state=self._load(); self._flush(state)
-            if scan not in state['active']: raise ValueError('SCAN_CENSUS_ADMISSION_MISSING')
+            if scan not in state['active']:
+                return self._verify_finished(scan,refs=refs,raised=raised,verdicts=verdicts)
             self._write(state,{'record_id':'scan-disposition:'+scan,'decision_stage':'SCAN_DISPOSITION',
                 'scan_id':scan,'scan_sequence':state['active'][scan]['sequence'],'observed_ts':self._time(),
                 'disposition':'EXCEPTION_UNKNOWN' if raised else 'OPPORTUNITY_RECORDED' if refs else 'NO_OPPORTUNITY_UNKNOWN',
@@ -103,8 +109,28 @@ class ScanCensus:
                 'qualification_blockers':['ASYNC_FANOUT_COVERAGE_UNPROVEN',
                     'CONTINUOUS_COLLECTION_COVERAGE_UNPROVEN']+([] if refs else ['NO_CANONICAL_OPPORTUNITY_FOR_SCAN']),
                 'qualification_eligible':False})
-            state['active'].pop(scan); self._save(state)
         finally: lease.release()
+
+    def _verify_finished(self,scan,*,refs,raised,verdicts):
+        record_id='scan-disposition:'+scan
+        try:
+            receipt=_read(self.store._record_receipt_path('decision',record_id))
+            offset,length=receipt['offset'],receipt['length']
+            if (receipt.get('state')!='COMMITTED' or type(offset) is not int or offset<0
+                    or type(length) is not int or not 0<length<=1048576):
+                raise ValueError('SCAN_CENSUS_FINISHED_RECEIPT_INVALID')
+            with self.store.ledger_path('decision').open('rb') as stream:
+                stream.seek(offset); raw=stream.read(length)
+            row=json.loads(raw)
+            disposition='EXCEPTION_UNKNOWN' if raised else 'OPPORTUNITY_RECORDED' if refs else 'NO_OPPORTUNITY_UNKNOWN'
+            if (hashlib.sha256(raw).hexdigest()!=receipt['row_sha256'] or row.get('record_id')!=record_id
+                    or row.get('scan_id')!=scan or row.get('epoch_id')!=self.store.epoch_id
+                    or row.get('opportunity_references')!=refs or row.get('disposition')!=disposition
+                    or row.get('observed_lane_verdicts')!=sorted(set(verdicts))):
+                raise ValueError('SCAN_CENSUS_FINISHED_PAYLOAD_CONFLICT')
+            return {'duplicate':True,'record_id':record_id}
+        except (OSError,KeyError,TypeError):
+            raise ValueError('SCAN_CENSUS_ADMISSION_OR_FINISHED_RECEIPT_MISSING') from None
 
 
 def observe_opportunity(store,write,policy_decision=None):
