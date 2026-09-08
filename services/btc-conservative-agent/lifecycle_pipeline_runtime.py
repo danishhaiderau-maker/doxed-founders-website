@@ -138,6 +138,46 @@ def _posix_limits(cpu_limit_sec: int, rss_limit_bytes: int) -> Callable[[], None
     return apply
 
 
+def _candidate_diagnostics(results):
+    """Bounded identity-only projection; never copy arbitrary worker records."""
+    truncated = type(results) is not list
+    results = results if type(results) is list else []
+    truncated = truncated or len(results) > 8
+    projected = []
+    def token(value, maximum, code=False):
+        nonlocal truncated
+        if type(value) is not str:
+            if value is not None:
+                truncated = True
+            return None
+        if len(value) > maximum:
+            truncated = True
+            return None  # Never display a shortened ID as an exact identity.
+        permitted = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" if code else "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
+        if not value or any(c not in permitted for c in value):
+            truncated = True
+            return None
+        return value
+    for row in results[:8]:
+        if type(row) is not dict:
+            truncated = True
+            continue
+        identity = row.get("identity")
+        identity = identity if type(identity) is dict else {}
+        blockers = row.get("blockers")
+        if type(blockers) is not list:
+            blockers = []
+            truncated = True
+        truncated = truncated or len(blockers) > 8
+        projected.append({
+            "identity": {field: token(identity.get(field), 160) for field in (
+                "collection_epoch_id", "episode_id", "policy_signature", "research_lane")},
+            "stage": token(row.get("stage"), 96, True),
+            "blockers": [code for value in blockers[:8] if (code := token(value, 96, True))],
+        })
+    return {"candidates": projected, "truncated": bool(truncated)}
+
+
 class LifecyclePipelineRuntime:
     """Exactly-one parent scheduler for a bounded credential-free subprocess."""
 
@@ -483,6 +523,7 @@ class LifecyclePipelineRuntime:
             "caught_up": sources_caught_up,
             "stage_counts": dict(pipeline.get("stage_counts") or {}),
             "blocker_counts": dict(pipeline.get("blocker_counts") or {}),
+            "recent_candidate_diagnostics": _candidate_diagnostics(pipeline.get("results")),
             "backlog_pending": backlog_pending,
             "idempotency_bootstrap_pending": bootstrap_pending,
             "receipt_bootstrap": receipt_bootstrap,
