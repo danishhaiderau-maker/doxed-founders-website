@@ -924,7 +924,7 @@ jobs:
           python -m pytest test_manual_pause_fill_handoff.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
-          python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py -q
+          python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py test_paper_family_chase_durability.py -q
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
           python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py -q
