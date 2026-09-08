@@ -5371,10 +5371,19 @@ def execution_allowed(lane: str = None) -> bool:
         return False
     status = get_execution_status()
     if status not in ["ACTIVE", "RESEARCH_ALLOW"]:
-        state["execution_reason"] = status
+        with state_lock:
+            state["entry_gate_status"] = status
+            # Health recovery relies on the original pause reason. BLOCKED
+            # describes this entry attempt, not the cause of the pause.
+            if not state.get("execution_paused") or not state.get("execution_reason"):
+                state["execution_reason"] = status
         logger.warning(f"[EXECUTION BLOCK] status={status} [PIPELINE ENFORCEMENT]")
         return False
-    state["execution_reason"] = "ALLOWED"
+    with state_lock:
+        if state.get("execution_paused"):
+            return False
+        state["entry_gate_status"] = "ALLOWED"
+        state["execution_reason"] = "ALLOWED"
     return True
 
 def clear_pending_trade():
