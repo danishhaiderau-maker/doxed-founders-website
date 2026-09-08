@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import uuid
@@ -354,6 +355,23 @@ def _verify_step(state: dict[str, Any], staging: Path) -> None:
         or _sha_prefix(source, row["identity"]["size"]) != row["sha256"]
     ):
         raise ValueError(f"LIFECYCLE_RECOVERY_SOURCE_UNSTABLE:{source.name}")
+    database = staging / "lifecycle_index.rebuilt.sqlite3"
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    try:
+        names = [row["ledger"]]
+        if row["ledger"] in {"opportunity", "market_segment"}:
+            names.append("shared:" + row["ledger"])
+        expected = (row["identity"]["dev"], row["identity"]["ino"],
+                    row["identity"]["size"], _source_anchor(source, row["identity"]["size"]))
+        for name in names:
+            cursor = connection.execute(
+                "SELECT source_dev,source_ino,byte_offset,source_anchor_sha256 FROM ledger_cursor WHERE ledger=?",
+                (name,),
+            ).fetchone()
+            if cursor != expected:
+                raise ValueError(f"LIFECYCLE_RECOVERY_CURSOR_INVALID:{source.name}")
+    finally:
+        connection.close()
     state["verify_ledger"] = index + 1
 
 
