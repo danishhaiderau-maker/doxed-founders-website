@@ -757,6 +757,12 @@ def test_corrupt_snapshot_entry_count_fails_closed_on_resume(tmp_path):
     database = next((volume / ".data-sync-snapshots").glob("*.sqlite3"))
     connection = sqlite3.connect(database)
     try:
+        # SQL edits are rejected immediately. Simulate external schema/data
+        # corruption to retain the restart fail-closed regression as well.
+        with pytest.raises(sqlite3.IntegrityError, match="FROZEN_DIRECTORY_IMMUTABLE"):
+            connection.execute("DELETE FROM directory_entries WHERE name = 'integrity-2.json'")
+        connection.rollback()
+        connection.execute("DROP TRIGGER inventory_frozen_entry_delete")
         connection.execute("DELETE FROM directory_entries WHERE name = 'integrity-2.json'")
         connection.commit()
     finally:

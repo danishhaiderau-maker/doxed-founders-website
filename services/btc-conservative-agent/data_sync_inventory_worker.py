@@ -624,6 +624,52 @@ def _load_checkpoint(path: Path, request: dict, fingerprint: str, database_path:
         raise CheckpointError(f"checkpoint cannot be decoded: {type(exc).__name__}") from exc
 
 
+def _immutable_directory_triggers() -> dict[str, str]:
+    frozen = lambda side: ("EXISTS(SELECT 1 FROM directory_snapshots WHERE "
+                          f"root_index={side}.root_index AND relative={side}.relative)")
+    specifications = {
+        "inventory_frozen_entry_insert": ("INSERT", "directory_entries", frozen("NEW")),
+        "inventory_frozen_entry_delete": ("DELETE", "directory_entries", frozen("OLD")),
+        "inventory_frozen_entry_update": ("UPDATE", "directory_entries", f"{frozen('OLD')} OR {frozen('NEW')}"),
+        "inventory_frozen_snapshot_update": ("UPDATE", "directory_snapshots", "1"),
+        "inventory_frozen_snapshot_delete": ("DELETE", "directory_snapshots", "1"),
+        "inventory_frozen_snapshot_insert": ("INSERT", "directory_snapshots",
+            "NEW.entry_count != (SELECT COUNT(*) FROM directory_entries WHERE root_index=NEW.root_index AND relative=NEW.relative)"),
+    }
+    return {name: f"CREATE TRIGGER {name} BEFORE {action} ON {table} WHEN {condition} "
+            "BEGIN SELECT RAISE(ABORT, 'FROZEN_DIRECTORY_IMMUTABLE'); END"
+            for name, (action, table, condition) in specifications.items()}
+
+
+def _ensure_immutable_directories(connection: sqlite3.Connection) -> None:
+    """One transactional migration; retained directory counts are immutable."""
+    triggers = _immutable_directory_triggers()
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        marker = connection.execute("SELECT value FROM meta WHERE key='immutable_directory_v1'").fetchone()
+        existing = dict(connection.execute("SELECT name, sql FROM sqlite_master WHERE type='trigger'"))
+        if marker is not None:
+            if marker != ('1',) or any(existing.get(name) != sql for name, sql in triggers.items()):
+                raise InventoryWorkerError("SNAPSHOT_INTEGRITY_FAILED", "immutable directory guards changed")
+        else:
+            if any(name in existing for name in triggers):
+                raise InventoryWorkerError("SNAPSHOT_INTEGRITY_FAILED", "partial immutable directory guards")
+            mismatch = connection.execute(
+                "SELECT 1 FROM directory_snapshots s LEFT JOIN directory_entries e "
+                "ON e.root_index=s.root_index AND e.relative=s.relative "
+                "GROUP BY s.root_index,s.relative HAVING COUNT(e.name)!=s.entry_count LIMIT 1"
+            ).fetchone()
+            if mismatch:
+                raise InventoryWorkerError("SNAPSHOT_INTEGRITY_FAILED", "frozen directory count mismatch")
+            for sql in triggers.values():
+                connection.execute(sql)
+            connection.execute("INSERT INTO meta(key,value) VALUES('immutable_directory_v1','1')")
+        connection.commit()
+    except BaseException:
+        connection.rollback()
+        raise
+
+
 def _open_database(path: Path, fingerprint: str, spool_limit_bytes: int) -> sqlite3.Connection:
     connection = None
     try:
@@ -683,6 +729,7 @@ def _open_database(path: Path, fingerprint: str, spool_limit_bytes: int) -> sqli
             connection.commit()
         elif existing[0] != fingerprint:
             raise CheckpointError("inventory database identity mismatch")
+        _ensure_immutable_directories(connection)
         return connection
     except (CheckpointError, InventoryWorkerError):
         if connection is not None:
@@ -823,16 +870,8 @@ def _freeze_directory_entries(
         (root_index, relative),
     ).fetchone()
     if frozen is not None:
-        actual = int(connection.execute(
-            "SELECT COUNT(*) FROM directory_entries "
-            "WHERE root_index = ? AND relative = ?",
-            (root_index, relative),
-        ).fetchone()[0])
-        if actual != int(frozen[0]):
-            raise InventoryWorkerError(
-                "SNAPSHOT_INTEGRITY_FAILED",
-                "frozen directory entry count does not match its receipt",
-            )
+        # Open validates exact schema guards. The count was checked atomically
+        # when frozen; subsequent entry and snapshot mutations are prohibited.
         return _spool_counters(connection)
     entries = _bounded_directory_entries(directory)
     directories_frozen, entries_frozen = _spool_counters(connection)
