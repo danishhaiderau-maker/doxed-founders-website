@@ -47,6 +47,10 @@ def test_pinned_bilateral_conditional_replay_is_separate(tmp_path, monkeypatch, 
             context = selected[0]["execution_model_context"]
             assert context["context_evidence_basis"] == "DECLARED_SIMULATION_CONDITIONAL"
             assert context["qualification_eligible"] is False
+            from research.declared_shadow_model import conditional_baseline_context, _baseline_context
+            assert conditional_baseline_context(selected[0], generation) == context
+            with pytest.raises(ValueError, match="CONDITIONAL_BASELINE_NOT_STRICT"):
+                _baseline_context(selected[0], generation)
         assert selected[0]["venue_acceptance"] == "UNKNOWN"
         assert selected[0]["qualification_eligible"] is False
         assert not any(row["baseline_id"] == "MARKET_ENTRY_AT_SIGNAL" for row in episode["results"])
@@ -59,3 +63,24 @@ def test_pinned_bilateral_conditional_replay_is_separate(tmp_path, monkeypatch, 
     assert sum(summary[key] for key in ("full_fills", "partial_fills", "no_fills", "unknown")) == 2
     assert summary["unknown"] == (2 if missing_quotes else 0)
     assert summary["qualification_eligible"] is False
+    if not missing_quotes:
+        from research.conservative_shadow_report import build_conditional_shadow_report
+        from test_conservative_shadow_report import _fixture
+        from test_declared_shadow_model import contract
+        _, candidates, artifact, _ = _fixture(tmp_path / "policy-fixture", model=False)
+        artifact.update(evaluation_generation=generation, artifact_identity={
+            "epoch_id": generation["epoch_id"], "source_revision": generation["source_revision"],
+            "analyzer_generation_revision": generation["analyzer_revision"],
+            "tile_config_signature": generation["tile_config_signature"]})
+        terminal_report = build_conditional_shadow_report(tmp_path,
+            expected_generation=generation, baseline_report=report,
+            policy_candidates=candidates, policy_artifact_receipt=artifact,
+            research_model=contract(generation))
+        selected = [row for row in terminal_report["results"]
+                    if row.get("baseline_id") == "MARKET_ENTRY_AT_SIGNAL"]
+        assert len(selected) == 2
+        assert all(row["status"] == "COMPLETE" for row in selected), selected
+        assert all(row["terminal"]["conditional_profitability_supported"] for row in selected)
+        assert all(row["terminal"]["venue_acceptance"] == "UNKNOWN" for row in selected)
+        assert terminal_report["qualification_eligible"] is False
+        assert terminal_report["profitability_supported"] is False

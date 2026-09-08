@@ -309,11 +309,25 @@ def _load_paths(root: Path, receipt: Mapping[str, Any], generation: Mapping[str,
     return rows, payloads, source_receipts, blockers
 
 
-def build_conservative_shadow_report(
+def build_conservative_shadow_report(canonical_root, **kwargs):
+    return _build_shadow_report(canonical_root, **kwargs)
+
+
+def build_conditional_shadow_report(canonical_root, **kwargs):
+    """Separate conditional economics; never ordinary profitability authority."""
+    result = _build_shadow_report(canonical_root, **kwargs, conditional=True)
+    result.update(schema="generation_bound_conditional_shadow_report_v1",
+                  evidence_basis="DECLARED_SIMULATION_CONDITIONAL",
+                  venue_acceptance="UNKNOWN", qualification_eligible=False,
+                  profitability_supported=False, ranking_eligible=False, live_qualification=False)
+    return result
+
+
+def _build_shadow_report(
     canonical_root: str | Path, *, expected_generation: Mapping[str, Any],
     baseline_report: Mapping[str, Any], policy_candidates: Sequence[Mapping[str, Any]],
     policy_artifact_receipt: Mapping[str, Any], research_model: Mapping[str, Any] | None = None,
-    result_sink=None, max_diagnostic_results: int = 100,
+    result_sink=None, max_diagnostic_results: int = 100, conditional=False,
 ) -> dict[str, Any]:
     if type(max_diagnostic_results) is not int or not 0 <= max_diagnostic_results <= 1000:
         raise ValueError("SHADOW_DIAGNOSTIC_LIMIT_INVALID")
@@ -383,9 +397,9 @@ def build_conservative_shadow_report(
         blockers.append("DUPLICATE_POLICY_CANDIDATE_SIGNATURE")
 
     if isinstance(research_model, Mapping) and research_model.get("schema") == "declared_shadow_model_v1":
-        from research.declared_shadow_model import build_declared_research_model
+        from research.declared_shadow_model import build_declared_research_model, build_conditional_declared_research_model
         try:
-            research_model = build_declared_research_model(
+            research_model = (build_conditional_declared_research_model if conditional else build_declared_research_model)(
                 research_model, baseline_report=baseline_report, policy_candidates=candidates,
                 expected_generation=generation)
         except ValueError as exc:
@@ -423,11 +437,11 @@ def build_conservative_shadow_report(
     for episode in receipts:
         if not isinstance(episode, Mapping) or str(episode.get("episode_id") or "") in duplicate_episodes:
             continue
-        for entry in episode.get("results") or []:
+        for entry in episode.get("conditional_results" if conditional else "results") or []:
             if not isinstance(entry, Mapping):
                 continue
             entry_receipt = entry.get("conservative_receipt")
-            if (not _conditional_entry(entry) and isinstance(entry_receipt, Mapping) and entry.get("supported") is True
+            if (_conditional_entry(entry) == conditional and isinstance(entry_receipt, Mapping) and entry.get("supported") is True
                     and entry.get("outcome_state") in {"FULL_FILL", "PARTIAL_FILL"}):
                 eligible_entries.append((episode, entry))
     if model_blocker == "RESEARCH_MODEL_MISSING":
@@ -492,10 +506,10 @@ def build_conservative_shadow_report(
             reason_counts["DUPLICATE_BASELINE_EPISODE"] += 1
             continue
         loaded_paths = None
-        for entry in sorted((item for item in episode.get("results") or [] if isinstance(item, Mapping)),
+        for entry in sorted((item for item in episode.get("conditional_results" if conditional else "results") or [] if isinstance(item, Mapping)),
                             key=lambda item: str(item.get("baseline_id") or "")):
             entry_receipt = entry.get("conservative_receipt")
-            if _conditional_entry(entry):
+            if _conditional_entry(entry) != conditional:
                 reason_counts["CONDITIONAL_ENTRY_REQUIRES_SEPARATE_DIAGNOSTIC_COHORT"] += 1
                 continue
             if not isinstance(entry_receipt, Mapping) or entry.get("supported") is not True \
@@ -607,7 +621,10 @@ def build_conservative_shadow_report(
                     "coverage_provenance": context.get("coverage_provenance"), **bindings,
                 })
                 terminal_evaluated_count += 1
-                terminal = evaluate_shadow_terminal(
+                if conditional:
+                    from research.conservative_shadow_terminal import evaluate_conditional_shadow_terminal
+                terminal_evaluator = evaluate_conditional_shadow_terminal if conditional else evaluate_shadow_terminal
+                terminal = terminal_evaluator(
                     generation=generation, entry_receipt=entry_receipt, entry_receipt_sha256=entry_sha,
                     future_path_rows=path_rows, future_path_sha256=path_sha,
                     required_horizon_end_ts=context.get("required_horizon_end_ts"),
