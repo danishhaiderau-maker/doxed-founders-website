@@ -67,6 +67,10 @@ def main():
                 mode_note="SYNTHETIC UI ONLY — NOT MARKET EVIDENCE",
                 scan_census_observed_coverage={"index_caught_up": True,
                     "observed_joined_opportunity_rows": 7,
+                    "observed_dispatch_page": [dict(entry_resolution=state,
+                        observed_only=True, trade_completed=None, qualification_eligible=False)
+                        for state in ("ORDER_SUBMITTED", "NO_ORDER", "AWAITING", "UNKNOWN")],
+                    "dispatch_page_truncated": True,
                     "exhaustive_fanout": False, "qualification_eligible": False},
                 ai_verdict_coverage={"status": "CURRENT_GENERATION", "counts": {
                     "APPROVE": 4, "REJECT": 3, "NO_TRADE": 2,
