@@ -17,6 +17,8 @@ from research_v3_bridge import (
 from research_v3_store import V3EvidenceStore
 import research_v3_store
 from lifecycle_completion_reconciler import reconcile_lifecycle_completions
+from lifecycle_completion_reconciler import evaluate_lifecycle_completion
+from lifecycle_bundles import collect_lifecycle_rows
 
 
 def _tape(path: Path, timestamps, *, price_base=100.0):
@@ -114,6 +116,7 @@ class QualificationHorizonBridgeTests(unittest.TestCase):
                 "source_revision": "a" * 40,
                 "deployed_revision": "a" * 40,
                 "tile_config_signature": "b" * 64,
+                "config_signature": "c" * 64,
             }
             self.addCleanup(
                 setattr, research_v3_store, "_provenance_cache", previous_provenance,
@@ -165,6 +168,21 @@ class QualificationHorizonBridgeTests(unittest.TestCase):
             )
             self.assertEqual(reconciled["ready_count"], 1)
             self.assertEqual(reconciled["assessments"][0]["classification"], "FULL_FILL")
+            key, rows = next(iter(collect_lifecycle_rows(tmp).items()))
+            for signature, blocker in (
+                (None, "CONFIG_SIGNATURE_MISSING_OR_SENTINEL"),
+                ("d" * 64, "CONFIG_SIGNATURE_AMBIGUOUS"),
+            ):
+                with self.subTest(config_signature=signature):
+                    changed = [dict(row) for row in rows]
+                    changed[0]["config_signature"] = signature
+                    assessment = evaluate_lifecycle_completion(
+                        key, changed, now=300, lifecycle_horizon_sec=4,
+                        reconciliation_allowance_sec=1,
+                    )
+                    self.assertFalse(assessment["ready"])
+                    self.assertIsNone(assessment["receipt"])
+                    self.assertIn(blocker, assessment["blockers"])
 
     def test_actual_bridge_no_fill_requires_same_gap_free_two_hour_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
