@@ -47,3 +47,36 @@ def test_resumed_inventory_identity_independent_of_phase_telemetry(tmp_path,monk
     assert len(seen)>1
     assert receipt['rows_written']==2
     assert 'invocation_phase_seconds' not in module._stable_request(parsed)
+
+
+@pytest.mark.parametrize('operation,phase',[('_row','row_metadata'),('_store_rows','row_storage')])
+def test_actual_build_attributes_injected_duration_without_changing_manifest(tmp_path,monkeypatch,operation,phase):
+    module=_load_worker(); volume=tmp_path/'volume'; nonce='b'*32
+    request=_request(volume,nonce)
+    (volume/'runtime'/'a.json').write_text('{}')
+    request_path,result_path=_paths(volume,nonce)
+    request_path.write_text(json.dumps(request))
+    parsed=module._load_request(request_path,result_path,nonce)
+    work=Path(request['work_root'])
+    baseline,baseline_receipt=module._build_resumable(parsed,work)
+    assert baseline is not None
+    baseline_files={str(p.relative_to(work)):p.read_bytes() for p in work.rglob('p*.json')}
+    # Rebuild in a separate spool while preserving the exact source file stat
+    # and request identity. Only telemetry sees deterministic injected time.
+    alternate=work/'alternate'; alternate.mkdir()
+    clock=[0.0]
+    monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
+    original=getattr(module,operation)
+    def delayed(*args):
+        result=original(*args)
+        clock[0]+=0.125
+        return result
+    monkeypatch.setattr(module,operation,delayed)
+    measured,receipt=module._build_resumable(parsed,alternate)
+    assert measured is not None
+    assert receipt['invocation_phase_seconds'][phase]==0.125
+    assert all(value==0 for key,value in receipt['invocation_phase_seconds'].items() if key!=phase)
+    assert receipt['request_fingerprint']==baseline_receipt['request_fingerprint']
+    assert receipt['rows_written']==baseline_receipt['rows_written']==1
+    measured_files={str(p.relative_to(alternate)):p.read_bytes() for p in alternate.rglob('p*.json')}
+    assert measured_files==baseline_files
