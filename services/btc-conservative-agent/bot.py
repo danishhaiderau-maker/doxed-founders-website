@@ -12906,8 +12906,10 @@ def build_shared_direction_prompt_context(ctx: dict) -> dict:
         "price": source.get("price"),
         "closed_3m_ts": cycle.get("closed_3m_ts") or cycle.get("candle_ts") or cycle.get("bucket_ts"),
         "rsi_3m": cycle.get("rsi_3m") or cycle.get("rsi14_3m"),
-        "stoch_rsi_k_3m": cycle.get("stoch_rsi_k_3m"),
-        "stoch_rsi_d_3m": cycle.get("stoch_rsi_d_3m"),
+        # The 3m snapshot producer uses unsuffixed keys. Preserve explicit
+        # compatibility values (including zero), otherwise read that source.
+        "stoch_rsi_k_3m": cycle.get("stoch_rsi_k_3m") if cycle.get("stoch_rsi_k_3m") is not None else cycle.get("stoch_rsi_k"),
+        "stoch_rsi_d_3m": cycle.get("stoch_rsi_d_3m") if cycle.get("stoch_rsi_d_3m") is not None else cycle.get("stoch_rsi_d"),
         "atr14_pct_3m": cycle.get("atr14_pct_3m"),
         "donchian_loc_3m": cycle.get("donchian_loc_3m"),
         "bb_width_3m": cycle.get("bb_width_3m"),
