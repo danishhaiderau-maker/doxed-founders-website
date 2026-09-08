@@ -1004,6 +1004,8 @@ def dual_write_lane_decision(
         **baseline_inputs,
         **causal_ids,
     })
+    from research_scan_census import observe_opportunity
+    observe_opportunity(store, opportunity, policy_decision)
     decision = store.append("decision", {
         "record_id": f"decision:{identity['episode_id']}:{policy['policy_signature']}:LANE_POLICY_VERDICT",
         "episode_id": identity["episode_id"],

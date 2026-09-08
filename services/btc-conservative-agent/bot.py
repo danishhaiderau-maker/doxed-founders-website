@@ -23050,7 +23050,7 @@ def process_signal(event: dict):
                     state["last_pipeline_stage"] = "IDLE"
                     return
 
-                ctx["trade_id"] = allocate_lane_trade_id(research_lane)
+                ctx["trade_id"] = event.get("research_scan_id") or allocate_lane_trade_id(research_lane)
                 with state_lock:
                     state["debug_state"]["ai_gate"] = {
                         "called": False,
@@ -23850,6 +23850,18 @@ def process_signal(event: dict):
         finally:
             if lane_started:
                 _set_lane_pipeline_stage(research_lane, "IDLE")
+
+from research_scan_census import wrap_scan_census, canonical_scan_store
+process_signal = wrap_scan_census(
+    process_signal,
+    eligible=lambda event: isinstance(event, dict)
+    and is_ai_scan_lane(event.get("research_lane") or RESEARCH_LANE_AI_SCAN)
+    and not event.get("skip_ai"),
+    store_factory=lambda: canonical_scan_store(str(_data_sync_runtime_root()), _collector_v22_epoch_id()),
+    clock=time.time,
+    on_failure=lambda code: logger.error("[RESEARCH] " + code),
+)
+
 
 def parse_ts(ts_str):
     try:
