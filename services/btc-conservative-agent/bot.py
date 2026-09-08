@@ -3607,6 +3607,11 @@ def enqueue_post_ai_research_hooks(ctx: dict, ai_result: dict, research_lane: st
 def post_ai_evidence_health_snapshot() -> dict:
     with state_lock:
         snapshot = copy.deepcopy(_post_ai_evidence_status)
+    # A hook can return after its worker deadline, or report a replay gap.
+    # Preserve the compatibility counter without calling it durable evidence.
+    snapshot["hook_returns"] = snapshot.get("completed", 0)
+    snapshot["completed_counter_basis"] = "HOOK_RETURNS_NOT_DURABLE_EVIDENCE"
+    snapshot["durable_evidence_complete"] = None
     with _post_ai_evidence_workers_lock:
         snapshot["workers"] = {
             hook: worker.snapshot() for hook, worker in _post_ai_evidence_workers.items()

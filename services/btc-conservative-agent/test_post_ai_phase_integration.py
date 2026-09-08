@@ -33,6 +33,14 @@ def test_actual_hook_append_and_health_expose_phases_without_payload(tmp_path):
     phases = health["phase_timing"]["recent"][0]["phase_seconds"]
     assert {"research_gate_wait", "path_lock_wait", "validation", "rotation", "append_write", "file_fsync", "validation_receipt", "completion_lock_wait"} <= set(phases)
     assert health["completed"] == 1
+    assert health["hook_returns"] == 1
+    assert health["completed_counter_basis"] == "HOOK_RETURNS_NOT_DURABLE_EVIDENCE"
+    assert health["durable_evidence_complete"] is None
+    ns["start_reversal_study_replay"] = lambda *a: False
+    ns["_record_post_ai_evidence_gap"] = lambda *a: None
+    ns["_run_post_ai_evidence_hook"]({"key":"failed-replay","payload":{"hook":"reversal_study"}})
+    failed=ns["post_ai_evidence_health_snapshot"]()
+    assert failed["hook_returns"] == 2 and failed["durable_evidence_complete"] is None
     assert "PRIVATE_TRADE_ID" not in json.dumps(health)
     assert "DO_NOT_REPORT" not in json.dumps(health)
     assert json.loads((tmp_path / "evidence.jsonl").read_text())["secret_payload"] == "DO_NOT_REPORT"
