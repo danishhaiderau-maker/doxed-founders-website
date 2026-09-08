@@ -1,5 +1,7 @@
 """Explicit bounded historical fit; never called by report refresh or sealing."""
 import hashlib
+import ast
+import argparse
 import json
 from pathlib import Path
 
@@ -15,10 +17,31 @@ MAX_WORK = 1_000_000
 MAX_RESULT_BYTES = 8 * 1024 * 1024
 
 
-def _code_hash():
-    base = Path(__file__).resolve().parent.parent
-    files = [Path(__file__), base/'research_dynamic_entry_policy.py', base/'research_v3_validation.py']
-    return _hash({p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files})
+def _code_hash(base=None):
+    """Bound the local static-import closure, including dirty dependency bytes."""
+    base = Path(base) if base is not None else Path(__file__).resolve().parent.parent
+    pending = ['research/local_dynamic_fit.py', 'research_dynamic_entry_policy.py']
+    hashes, total = {}, 0
+    while pending:
+        relative = pending.pop()
+        if relative in hashes:
+            continue
+        if len(hashes) >= 128:
+            raise ValueError('LOCAL_FIT_DEPENDENCY_BUDGET')
+        path = _safe_path(base/relative)
+        with path.open('rb') as stream:
+            raw = stream.read(2*1024*1024+1)
+        total += len(raw)
+        if len(raw)>2*1024*1024 or total>16*1024*1024:
+            raise ValueError('LOCAL_FIT_DEPENDENCY_BUDGET')
+        hashes[relative] = hashlib.sha256(raw).hexdigest()
+        for node in ast.walk(ast.parse(raw)):
+            names = ([node.module] if isinstance(node,ast.ImportFrom) and node.level==0 and node.module
+                     else [item.name for item in node.names] if isinstance(node,ast.Import) else [])
+            for name in names:
+                candidate = name.replace('.', '/')+'.py'
+                if (base/candidate).is_file(): pending.append(candidate)
+    return _hash(hashes)
 
 
 def fit_local_dynamic_input(**load_options):
@@ -84,3 +107,23 @@ def fit_local_dynamic_input(**load_options):
         return result
     finally:
         lease.release()
+
+
+def main(argv=None):
+    parser=argparse.ArgumentParser(description='Explicit historical fit of one verified local input; no live trading or sealing.')
+    for name in ('repo-root','data-root','input-sha256','source-revision','analyzer-revision',
+                 'transformation-signature','config-signature'):
+        parser.add_argument('--'+name,required=True)
+    options=vars(parser.parse_args(argv))
+    try:
+        result=fit_local_dynamic_input(**options)
+        print(json.dumps({key:result[key] for key in ('status','result_sha256','estimated_work_units',
+            'qualification_allowed','sealed_holdout_evaluated')},sort_keys=True))
+        return 0
+    except (OSError,ValueError,RuntimeError):
+        print(json.dumps({'status':'UNKNOWN','error':'LOCAL_DYNAMIC_FIT_FAILED','qualification_allowed':False}))
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
