@@ -41,7 +41,10 @@ def test_image_build_smokes_pre_ai_import():
 
 def test_runtime_research_import_closure_is_shipped():
     rules = (ROOT / '.dockerignore').read_text(encoding='utf-8').splitlines()
-    pending = ['bot', 'research_v3_bridge', 'research_timing_capture']
+    # Child-process entrypoints must be audited explicitly: the parent's AST
+    # cannot discover modules launched by filename rather than imported.
+    pending = ['bot', 'research_v3_bridge', 'research_timing_capture',
+               'lifecycle_pipeline_worker', 'data_sync_inventory_worker']
     seen = set()
     while pending:
         module = pending.pop()
