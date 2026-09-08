@@ -109,6 +109,8 @@ def test_real_store_pre_ai_opportunity_reaches_both_direction_replay_unknown(tmp
     assert report['directional_episode_count']==2
     assert {r['direction'] for r in report['episode_receipts']}=={'LONG','SHORT'}
     assert all(r['original_ai_direction']=='UNKNOWN' for r in report['episode_receipts'])
+    assert all(r['raw_ai_decision']=='AI_NOT_CALLED' and r['ai_evaluated'] is False
+        and r['research_scan_id']==source['research_scan_id'] for r in report['episode_receipts'])
     for receipt in report['episode_receipts']:
         assert receipt['results']
         assert all(r['outcome_state']=='UNKNOWN' and r['supported'] is False for r in receipt['results'])
@@ -116,3 +118,26 @@ def test_real_store_pre_ai_opportunity_reaches_both_direction_replay_unknown(tmp
     assert store.ledger_path('opportunity').read_bytes()==original
     assert json.loads(original)['raw_ai_decision']=='AI_NOT_CALLED'
     assert not store.ledger_path('order_intent').exists()
+
+
+@pytest.mark.parametrize('verdict,evaluated', [('AI_NOT_CALLED',False),('REJECT',True),('NO_TRADE',True),(None,None)])
+def test_replay_preserves_explicit_ai_treatment_without_inference(tmp_path,verdict,evaluated):
+    from research.entry_baseline_replay import materialize_v3_opportunity_replay
+    source={'research_scan_id':'scan-census-projection-1','signal_ts':1000.,'symbol':'BTCUSD',
+        'feature_snapshot_at_signal':{'capture_schema':'measured_feature_capture_v1','captured_at_ts':999.}}
+    write_pre_ai_scan_opportunity(source,epoch_id='epoch',data_dir=str(tmp_path))
+    store=V3EvidenceStore(tmp_path,epoch_id='epoch')
+    row=json.loads(store.ledger_path('opportunity').read_bytes())
+    # Synthetic alternate historical source; no verdict inferred from outcome or direction.
+    for key in ('raw_ai_decision','ai_evaluated','research_scan_id'):
+        row.pop(key,None)
+    if verdict is not None:
+        row.update(raw_ai_decision=verdict,ai_evaluated=evaluated,research_scan_id='explicit-scan')
+    store.ledger_path('opportunity').write_text(json.dumps(row)+'\n',encoding='utf-8')
+    report=materialize_v3_opportunity_replay(tmp_path)
+    assert len(report['episode_receipts'])==2
+    for receipt in report['episode_receipts']:
+        assert receipt['raw_ai_decision']==verdict
+        assert receipt['ai_evaluated'] is evaluated
+        assert receipt['research_scan_id']==('explicit-scan' if verdict is not None else None)
+        assert all(r['outcome_state']=='UNKNOWN' for r in receipt['results'])
