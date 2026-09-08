@@ -6,6 +6,35 @@ import subprocess
 SOURCE = Path('research/research_dashboard.py').read_text(encoding='utf-8-sig')
 
 
+def test_declared_digest_verifies_original_bytes(tmp_path):
+    import hashlib
+    fn=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.FunctionDef) and n.name=='_ai_payload')
+    name='discovery_cohort_scorecard_report.json'
+    report={'generation':{'source_revision':'s','analyzer_revision':'a','epoch_id':'e'},
+            'ai_verdict_coverage':{'matched_selection_comparison':{'status':'DESCRIPTIVE_ONLY','groups':[]}}}
+    raw=json.dumps(report,indent=3).encode()
+    (tmp_path/name).write_bytes(raw)
+    manifest={'source_data_revision':'s','generation_revision':'a','fresh_epoch':{'epoch_id':'e'},
+              'reports':[{'file':name,'artifact_sha256':hashlib.sha256(raw).hexdigest()}]}
+    path=tmp_path/'manifest.json'
+    path.write_text(json.dumps(manifest))
+    ns=dict(Path=Path,json=json,_read_json=lambda *a:{},_spread_performance_payload=lambda:{},
+        _generation_freshness_meta=lambda m:{'current':True},
+        _declared_atomic_generation_report=lambda n:(report,{'manifest':manifest,'manifest_path':str(path)}))
+    exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual-dashboard','exec'),ns)
+    assert ns['_ai_payload']()['matched_selection_comparison']['binding_diagnostic']=='DECLARED_ARTIFACT_SHA256_VERIFIED'
+    # Same parsed JSON, different bytes: a reserialization-based check would miss this.
+    (tmp_path/name).write_bytes(json.dumps(report).encode())
+    assert ns['_ai_payload']()['matched_selection_comparison']['status']=='UNKNOWN'
+    (tmp_path/name).write_bytes(raw)
+    manifest['reports'][0]['artifact_sha256']='0'*64
+    path.write_text(json.dumps(manifest))
+    assert ns['_ai_payload']()['matched_selection_comparison']['status']=='UNKNOWN'
+    del manifest['reports'][0]['artifact_sha256']
+    path.write_text(json.dumps(manifest))
+    assert ns['_ai_payload']()['matched_selection_comparison']['binding_diagnostic']=='CURRENT_GENERATION_ONLY_NO_CHECKSUM_BINDING'
+
+
 def test_actual_payload_uses_atomic_report_and_rejects_stale():
     fn=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.FunctionDef) and n.name=='_ai_payload')
     current=[True]

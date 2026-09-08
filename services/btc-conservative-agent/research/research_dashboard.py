@@ -2986,6 +2986,32 @@ def _ai_payload():
                 'epoch_id':(manifest.get('fresh_epoch') or {}).get('epoch_id') or manifest.get('epoch_id')}
     binding_ok = (report == repeated and manifest == (after.get('manifest') or {})
                   and all(value and generation.get(key) == value for key,value in expected.items()))
+    checksum_binding = 'CURRENT_GENERATION_ONLY_NO_CHECKSUM_BINDING'
+    declared = next((entry for entry in manifest.get('reports', []) if isinstance(entry,dict)
+                     and entry.get('file') == 'discovery_cohort_scorecard_report.json'), {})
+    digest = declared.get('artifact_sha256')
+    if digest is not None:
+        checksum_binding = 'DECLARED_CHECKSUM_INVALID'
+        try:
+            import hashlib
+            manifest_path = Path(binding['manifest_path'])
+            report_path = manifest_path.parent / 'discovery_cohort_scorecard_report.json'
+            if report_path.stat().st_size > 32 * 1024 * 1024:
+                raise ValueError('report read limit')
+            with report_path.open('rb') as handle:
+                raw = handle.read(32 * 1024 * 1024 + 1)
+            if (len(raw) > 32 * 1024 * 1024 or not isinstance(digest,str)
+                    or hashlib.sha256(raw).hexdigest() != digest
+                    or json.loads(raw.decode('utf-8-sig')) != report):
+                raise ValueError('report digest mismatch')
+            # The bytes must still belong to the same declared publication.
+            with manifest_path.open('rb') as handle:
+                manifest_bytes = handle.read(4 * 1024 * 1024 + 1)
+            if len(manifest_bytes) > 4 * 1024 * 1024 or json.loads(manifest_bytes.decode('utf-8-sig')) != manifest:
+                raise ValueError('manifest changed')
+            checksum_binding = 'DECLARED_ARTIFACT_SHA256_VERIFIED'
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+            binding_ok = False
     freshness = _generation_freshness_meta(manifest)
     comparison = ((report or {}).get('ai_verdict_coverage') or {}).get('matched_selection_comparison')
     if not freshness.get('current') or not isinstance(comparison, dict) or not binding_ok:
@@ -2993,7 +3019,7 @@ def _ai_payload():
             'STALE_ANALYZER_GENERATION' if not freshness.get('current') else
             'MATCHED_AI_REPORT_UNAVAILABLE' if not isinstance(comparison,dict) else 'MATCHED_AI_GENERATION_BINDING_FAILED']}
     else:
-        comparison = {**comparison, 'binding_diagnostic':'CURRENT_GENERATION_ONLY_NO_CHECKSUM_BINDING'}
+        comparison = {**comparison, 'binding_diagnostic':checksum_binding}
     return {
         'matched_selection_comparison':comparison,
         "calibration_status": calibration_status,
