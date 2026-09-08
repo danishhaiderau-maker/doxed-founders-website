@@ -31,9 +31,15 @@ def compare_ai_selection(rows, *, max_rows=100000):
         raw = row.get('raw_ai_decision')
         expected = ('APPROVE' if raw in {'APPROVE','STRONG_APPROVE','SOFT_APPROVE'} else
                     'REJECT' if raw in {'REJECT','SOFT_REJECT'} else
-                    'NO_TRADE' if raw == 'NO_TRADE' else 'UNKNOWN')
-        if verdict not in {'APPROVE','REJECT','NO_TRADE'} or row.get('ai_verdict_blockers'):
+                    'NO_TRADE' if raw == 'NO_TRADE' else
+                    'AI_NOT_CALLED' if raw == 'AI_NOT_CALLED' else 'UNKNOWN')
+        not_called = verdict == expected == 'AI_NOT_CALLED' and row.get('ai_evaluated') is False
+        if not_called:
+            reasons.append('AI_NOT_CALLED_NOT_SELECTION_COMPARABLE')
+        if (verdict not in {'APPROVE','REJECT','NO_TRADE'} and not not_called) or row.get('ai_verdict_blockers'):
             reasons.append('AI_VERDICT_UNAVAILABLE_OR_CONFLICTING')
+        if verdict in {'APPROVE','REJECT','NO_TRADE'} and row.get('ai_evaluated') is False:
+            reasons.append('AI_EVALUATED_VERDICT_CONFLICT')
         if expected != verdict or row.get('ai_error_status') == 'ERROR':
             reasons.append('AI_VERDICT_UNAVAILABLE_OR_CONFLICTING')
         if verdict == 'APPROVE' and row.get('raw_ai_direction') not in {'LONG','SHORT'}:

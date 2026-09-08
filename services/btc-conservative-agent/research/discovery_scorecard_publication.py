@@ -261,7 +261,13 @@ def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     category = ("APPROVE" if decision in {"APPROVE", "STRONG_APPROVE", "SOFT_APPROVE"}
                 else "REJECT" if decision in {"REJECT", "SOFT_REJECT"}
                 else "NO_TRADE" if decision == "NO_TRADE"
+                else "AI_NOT_CALLED" if decision == "AI_NOT_CALLED"
                 else "ERROR" if decision in {"AI_ERROR", "ERROR"} else "UNKNOWN")
+    evaluated = row.get("ai_evaluated")
+    if ((category == "AI_NOT_CALLED" and evaluated is not False)
+            or (category in {"APPROVE", "REJECT", "NO_TRADE", "ERROR"} and evaluated is False)):
+        category = "UNKNOWN"
+        blockers.append("AI_EVALUATED_VERDICT_CONFLICT")
     direction = label(row.get("raw_ai_direction"))
     alias_direction = label(row.get("ai_direction"))
     if direction != "UNKNOWN" and alias_direction != "UNKNOWN" and direction != alias_direction:
@@ -273,13 +279,14 @@ def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     error_status = ("ERROR" if category == "ERROR" or row.get("ai_error") is True
                     or error_type not in {"UNKNOWN", "NONE", "NULL"} else
                     "EXPLICIT_NO_ERROR" if row.get("ai_error") is False else "UNKNOWN")
-    if category in {"APPROVE", "REJECT"} and error_status == "ERROR":
+    if category in {"APPROVE", "REJECT", "AI_NOT_CALLED"} and error_status == "ERROR":
         category = "UNKNOWN"
         blockers.append("AI_VERDICT_ERROR_CONFLICT")
     if decision == "UNKNOWN":
         blockers.append("RAW_AI_DECISION_UNAVAILABLE")
     return {
         "raw_ai_decision": decision, "raw_ai_direction": direction,
+        "ai_evaluated": evaluated if isinstance(evaluated, bool) else None,
         "ai_verdict_class": category,
         "family_policy_decision": label(row.get("family_policy_decision")
                                         if "family_policy_decision" in row else row.get("policy_decision")),
@@ -297,7 +304,7 @@ def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _ai_verdict_coverage(adapted, unknown_shadow):
     from itertools import chain
-    classes = Counter({name: 0 for name in ("APPROVE", "REJECT", "ERROR", "UNKNOWN")})
+    classes = Counter({name: 0 for name in ("APPROVE", "REJECT", "NO_TRADE", "AI_NOT_CALLED", "ERROR", "UNKNOWN")})
     errors = Counter({name: 0 for name in ("ERROR", "EXPLICIT_NO_ERROR", "UNKNOWN")})
     missing_family = blocked = 0
     for row in chain(adapted, unknown_shadow):

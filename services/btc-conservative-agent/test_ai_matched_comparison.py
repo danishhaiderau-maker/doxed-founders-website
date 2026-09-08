@@ -1,5 +1,28 @@
 from research.ai_matched_comparison import compare_ai_selection
 from research.discovery_scorecard_publication import _ai_verdict_coverage
+from research.discovery_scorecard_publication import _ai_verdict_projection
+import pytest
+
+
+def test_not_called_is_coverage_only_not_reject_or_abstention_pnl():
+    source={**row(1,'AI_NOT_CALLED'), 'ai_evaluated':False}
+    projected={**source, **_ai_verdict_projection(source)}
+    coverage=_ai_verdict_coverage([projected],[])
+    assert coverage['raw_verdict_row_counts']['AI_NOT_CALLED']==1
+    assert coverage['raw_verdict_row_counts']['REJECT']==0
+    assert coverage['raw_verdict_row_counts']['NO_TRADE']==0
+    comparison=coverage['matched_selection_comparison']
+    assert comparison['matched_rows']==0 and comparison['groups']==[]
+    assert comparison['excluded_reason_counts']['AI_NOT_CALLED_NOT_SELECTION_COMPARABLE']==1
+    assert projected['ai_evaluated'] is False
+
+
+@pytest.mark.parametrize('verdict,evaluated', [('AI_NOT_CALLED',True),('AI_NOT_CALLED',None),
+    ('AI_NOT_CALLED',0),('REJECT',False),('NO_TRADE',False),('APPROVE',False)])
+def test_conflicting_evaluated_flag_is_unknown(verdict,evaluated):
+    projected=_ai_verdict_projection({'raw_ai_decision':verdict,'ai_evaluated':evaluated})
+    assert projected['ai_verdict_class']=='UNKNOWN'
+    assert 'AI_EVALUATED_VERDICT_CONFLICT' in projected['ai_verdict_blockers']
 
 
 def row(index, verdict='REJECT', pnl=2):
