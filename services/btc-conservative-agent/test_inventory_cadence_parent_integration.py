@@ -15,7 +15,7 @@ import pytest
 from test_inventory_finalize_cadence import worker
 
 
-@pytest.mark.parametrize('phase,elapsed,expected', [('FINALIZE',0.005,1),('SCAN',0.005,5),('FINALIZE',0.2,5)])
+@pytest.mark.parametrize('phase,elapsed,expected', [('FINALIZE',0.005,1),('SCAN',0.005,5),('FINALIZE',0.2,5),('BUSY_SHUTDOWN',0,0),('BUSY_LONG',0,0)])
 def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,expected):
     module=worker()
     receipt=defaultdict(lambda:0, phase=phase, request_fingerprint='f', checkpoint_path='c',
@@ -59,8 +59,23 @@ def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,ex
               _DATA_SYNC_INVENTORY_WORKER_NAME='worker.py',_DATA_SYNC_MANIFEST_PAGE_DEFAULT=250,
               _DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS=0.1,
               _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS=10,_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES=set())
+    helper=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_run_admitted_inventory_child')
+    ns['_EVIDENCE_WORKER_ADMISSION_GATE']=threading.Lock()
+    exec(compile(ast.Module(body=[helper],type_ignores=[]),'actual-admission','exec'),ns)
+    waits=[]
+    if phase.startswith('BUSY'):
+        ns['_run_admitted_inventory_child']=lambda *a:None
+        ns['shutdown_event']=SimpleNamespace(wait=lambda seconds: waits.append(seconds) or phase=='BUSY_SHUTDOWN' or len(waits)==121)
     exec(compile(ast.Module(body=[fn],type_ignores=[]),'actual-parent','exec'),ns)
     ns[fn.name]()
+    if phase.startswith('BUSY'):
+        assert codes==[]
+        assert waits==[1]*(1 if phase=='BUSY_SHUTDOWN' else 121)
+        assert ns['_data_sync_async_inventory']['refreshing'] is False
+        assert ns['_data_sync_async_inventory']['worker_active'] is False
+        assert ns['_data_sync_async_inventory']['admission_wait_reason']=='SHUTDOWN'
+        assert 'last_failure_at' not in ns['_data_sync_async_inventory']
+        return
     assert codes==[75], errors
     assert sleeps==[expected]
     assert ns['_data_sync_async_inventory']['retry_after_seconds']==expected

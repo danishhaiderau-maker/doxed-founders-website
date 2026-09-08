@@ -161,6 +161,7 @@ class LifecyclePipelineRuntime:
         worker_path: str | Path | None = None,
         rotation_enabled: bool = False,
         rotation_target_bytes: int = DEFAULT_TARGET_BYTES,
+        cycle_gate=None,
     ) -> None:
         data_lexical = Path(os.path.abspath(str(data_root)))
         self.data_root = data_lexical.resolve(strict=True)
@@ -210,7 +211,7 @@ class LifecyclePipelineRuntime:
         # while no worker cycle can begin or remain in flight.  This gate is
         # separate from the status lock so HTTP cleanup never waits while
         # holding runtime bookkeeping state.
-        self._cycle_gate = threading.Lock()
+        self._cycle_gate = cycle_gate if cycle_gate is not None else threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen | None = None
@@ -545,8 +546,13 @@ class LifecyclePipelineRuntime:
                 pass
 
     def _run_once(self) -> bool:
-        with self._cycle_gate:
+        if not self._cycle_gate.acquire(blocking=False):
+            self._record_skip("ADMISSION_BUSY", "shared evidence worker admission occupied", delay=1.0)
+            return False
+        try:
             return self._run_once_guarded()
+        finally:
+            self._cycle_gate.release()
 
     def _run_once_guarded(self) -> bool:
         """Execute one guarded cycle; all failures are converted to status."""

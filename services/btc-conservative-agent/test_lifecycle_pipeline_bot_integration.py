@@ -1,6 +1,7 @@
 import ast
 import re
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 
@@ -70,6 +71,10 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
         "_LIFECYCLE_PIPELINE_RUNTIME": None,
         "_LIFECYCLE_PIPELINE_LAST_STATUS": None,
         "copy": __import__("copy"),
+        "_EVIDENCE_WORKER_ADMISSION_GATE": threading.Lock(),
+        "os": SimpleNamespace(getenv=lambda name, default=None: default),
+        "_collector_v22_epoch_id": lambda: "epoch-test",
+        "_fresh_collection_lock": threading.Lock(),
         "_runtime_git_rev_exact": lambda: revision,
         "_data_sync_runtime_root": lambda: tmp_path / "runtime",
         "_data_sync_volume_root": lambda: tmp_path,
@@ -99,6 +104,7 @@ def test_optional_owner_uses_exact_revision_pressure_and_overlap_probes(tmp_path
     root, kwargs = runtime.calls[0]
     assert root == tmp_path / "runtime"
     assert kwargs["source_revision"] == "a" * 40
+    assert kwargs["cycle_gate"] is scope["_EVIDENCE_WORKER_ADMISSION_GATE"]
     assert kwargs["pressure_probe"]()["pressure"] is True
     assert kwargs["pressure_probe"]()["emergency"] is False
     scope["_data_sync_async_inventory"]["refreshing"] = True
