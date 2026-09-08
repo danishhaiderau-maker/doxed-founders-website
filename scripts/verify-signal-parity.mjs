@@ -136,6 +136,8 @@ for (const [canonical, mirror, label] of [
   [rawCleanupOwnerAgent, rawCleanupOwnerEngine, 'raw generation cleanup owner'],
   [mirrorLeaseAgent, mirrorLeaseEngine, 'mirror generation lease'],
   [relayOutboxAgent, relayOutboxEngine, 'durable relay event outbox'],
+  [join(root, 'services/btc-conservative-agent/dashboard_bounded_projection.py'),
+    join(root, 'services/btc-signal-engine/dashboard_bounded_projection.py'), 'bounded dashboard projection'],
   [join(root, 'services/btc-conservative-agent/crash_exception_receipt.py'),
     join(root, 'services/btc-signal-engine/crash_exception_receipt.py'), 'original crash receipt'],
 ]) {

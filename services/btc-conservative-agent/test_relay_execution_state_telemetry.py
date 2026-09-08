@@ -225,11 +225,15 @@ def test_fresh_route_and_confirmed_admin_mutations_are_generation_fenced() -> No
     assert route and cancel and phantom
     assert 'request.args.get("fresh")' in route
     assert "if not _admin_authed()" in route
-    assert "_publish_relay_execution_snapshot() is None" in route
+    assert "published = _publish_relay_execution_snapshot()" in route
+    assert "except TimeoutError" in route
+    assert "if published is None:" in route
     assert "generation_matches" in route and "503" in route
     assert "_invalidate_relay_execution_snapshot()" in cancel
     assert cancel.index('if not result.get("finalized")') < cancel.index("_invalidate_relay_execution_snapshot()")
-    assert phantom.count("_invalidate_relay_execution_snapshot()") == 2
+    assert phantom.count("_invalidate_relay_execution_snapshot()") == 1
+    assert phantom.index("_commit_paper_lifecycle_transition(") < phantom.index("_invalidate_relay_execution_snapshot()")
+    assert '"money_state_generation": cache_generation' in phantom
     assert "len(live_matches) > 1" in phantom
     assert "has_real_marker" in phantom
 

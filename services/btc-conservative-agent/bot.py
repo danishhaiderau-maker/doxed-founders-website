@@ -34301,13 +34301,8 @@ _DASHBOARD_ACTIVE_SIGNAL_KEYS = frozenset({
 
 def _dashboard_signal_ref_lite(sig: dict) -> dict:
     """Copy only fields required by active-signal and relay rendering."""
-    if not isinstance(sig, dict):
-        return {}
-    return {
-        key: copy.deepcopy(value)
-        for key, value in sig.items()
-        if key in _DASHBOARD_ACTIVE_SIGNAL_KEYS
-    }
+    from dashboard_bounded_projection import project_fields
+    return project_fields(sig, _DASHBOARD_ACTIVE_SIGNAL_KEYS)
 
 
 def _snapshot_bounded_trades_map_locked(
