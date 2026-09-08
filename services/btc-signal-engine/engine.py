@@ -5344,11 +5344,15 @@ def execution_allowed(lane: str = None) -> bool:
         return False
     if lane and is_ai_scan_lane(lane):
         with state_lock:
-            state["execution_reason"] = "AI_SCAN_NO_ORDERS"
+            state["entry_gate_status"] = "AI_SCAN_NO_ORDERS"
+            if not state.get("execution_paused") or not state.get("execution_reason"):
+                state["execution_reason"] = "AI_SCAN_NO_ORDERS"
         return False
     if lane and not lane_orders_allowed(lane):
         with state_lock:
-            state["execution_reason"] = "LANE_DISABLED"
+            state["entry_gate_status"] = "LANE_DISABLED"
+            if not state.get("execution_paused") or not state.get("execution_reason"):
+                state["execution_reason"] = "LANE_DISABLED"
         logger.warning(
             f"[EXECUTION BLOCK] lane={lane} toggle OFF — no limit orders "
             f"[PIPELINE ENFORCEMENT]"
@@ -5363,7 +5367,10 @@ def execution_allowed(lane: str = None) -> bool:
     active = get_active_signal_count()
     max_pos = get_effective_max_active_signals()
     if active >= max_pos:
-        state["execution_reason"] = "MAX_ACTIVE_SIGNALS"
+        with state_lock:
+            state["entry_gate_status"] = "MAX_ACTIVE_SIGNALS"
+            if not state.get("execution_paused") or not state.get("execution_reason"):
+                state["execution_reason"] = "MAX_ACTIVE_SIGNALS"
         logger.warning(
             f"[LIMIT] Max active signals reached (global pool): {active}/{max_pos} "
             f"lane={lane_key or 'ALL'} [PIPELINE ENFORCEMENT]"
@@ -5371,10 +5378,19 @@ def execution_allowed(lane: str = None) -> bool:
         return False
     status = get_execution_status()
     if status not in ["ACTIVE", "RESEARCH_ALLOW"]:
-        state["execution_reason"] = status
+        with state_lock:
+            state["entry_gate_status"] = status
+            # Health recovery relies on the original pause reason. BLOCKED
+            # describes this entry attempt, not the cause of the pause.
+            if not state.get("execution_paused") or not state.get("execution_reason"):
+                state["execution_reason"] = status
         logger.warning(f"[EXECUTION BLOCK] status={status} [PIPELINE ENFORCEMENT]")
         return False
-    state["execution_reason"] = "ALLOWED"
+    with state_lock:
+        if state.get("execution_paused"):
+            return False
+        state["entry_gate_status"] = "ALLOWED"
+        state["execution_reason"] = "ALLOWED"
     return True
 
 def clear_pending_trade():
