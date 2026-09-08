@@ -103,7 +103,11 @@ def evaluate_lifecycle_completion(
     # it confers no execution, transfer, cleanup or profitability authority.
     lane_rows = [row for row in material if row.get("ledger") == "lifecycle"]
     audit_only = bool(lane_rows) and all(
-        row.get("ledger") in {"decision", "lifecycle"} for row in material
+        row.get("ledger") in {"decision", "lifecycle", "opportunity", "market_segment"}
+        and not row.get("terminal_no_fill")
+        and not row.get("bundle_completion")
+        and str(row.get("outcome_state") or "").upper() not in {"FULL_FILL", "PARTIAL_FILL"}
+        for row in material
     ) and all(
         row.get("resolution_scope") == "LANE_ENTRY"
         and row.get("entry_resolution") == "NO_ORDER"
@@ -118,7 +122,8 @@ def evaluate_lifecycle_completion(
             and row.get("research_lane") == key.research_lane
             for row in material
         )
-        call_ids = {str(row.get("shared_ai_call_id") or "") for row in material}
+        call_ids = {str(row.get("shared_ai_call_id") or "") for row in material
+                    if row.get("ledger") in {"decision", "lifecycle"} or row.get("shared_ai_call_id")}
         if identity_ok and len(call_ids) == 1 and "" not in call_ids and not blockers:
             reason = "AUDIT_ONLY_NO_ORDER_NOT_EXECUTION_LIFECYCLE"
             return {

@@ -435,7 +435,8 @@ def _process_incremental_lifecycle_pipeline(
                     "transfer_blockers": list(transfer["blockers"]),
                     "transfer_bundle_written_or_verified": False,
                     "transfer_stage": "TRANSFER_INCOMPLETE",
-                    "stage": "QUALIFICATION_INCOMPLETE",
+                    "stage": ("ENTRY_RESOLVED_NO_ORDER" if assessment["classification"] == "ENTRY_RESOLVED_NO_ORDER"
+                              else "QUALIFICATION_INCOMPLETE"),
                 }
                 if transfer["ready"]:
                     transfer_bundle = materialize_transfer_bundle(

@@ -31,3 +31,26 @@ def test_order_evidence_or_conflicting_identity_cannot_hide_under_audit():
         result = evaluate_lifecycle_completion(KEY, rows, now=100)
         assert result['classification'] != 'ENTRY_RESOLVED_NO_ORDER'
         assert result['ready'] is False
+
+
+def test_contextual_indexed_rows_preserve_audit_disposition(tmp_path, monkeypatch):
+    from test_lifecycle_pipeline import _append, _patch_provenance, _run_until, NOW
+    _patch_provenance(monkeypatch)
+    base = audit()
+    base['record_id'] = 'lane-entry-record'
+    rows = [base]
+    for ledger in ('opportunity', 'market_segment'):
+        rows.append({**PROV, 'epoch_id': KEY.collection_epoch_id, 'episode_id': KEY.episode_id,
+                     'policy_signature': KEY.policy_signature, 'research_lane': KEY.research_lane,
+                     'ledger': ledger, 'record_id': ledger + ':context', 'event_id': 'context-event'})
+    for row in rows:
+        _append(tmp_path, row)
+    report = _run_until(tmp_path, lambda r: r['candidate_count'] > 0, now=NOW)
+    assert report['stage_counts']['ENTRY_RESOLVED_NO_ORDER'] == 1
+    item = report['results'][0]
+    assert not item['qualification_ready'] and not item['transfer_ready']
+    assert not item['completion_appended'] and not item['bundle_written_or_verified']
+    for change in ({'ledger': 'execution'}, {'ledger': 'order_intent'}, {'episode_id': 'other'},
+                   {'shared_ai_call_id': 'conflicting'}, {'outcome_state': 'FULL_FILL'}):
+        mixed = [*rows, {**rows[-1], **change}]
+        assert evaluate_lifecycle_completion(KEY, mixed, now=NOW)['classification'] != 'ENTRY_RESOLVED_NO_ORDER'
