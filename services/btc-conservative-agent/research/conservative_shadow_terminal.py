@@ -81,6 +81,30 @@ def evaluate_shadow_terminal(
     source_segment_payloads: Sequence[bytes],
 ) -> dict[str, Any]:
     """Replay one signed policy on a hash-bound, complete executable path."""
+    return _evaluate_shadow_terminal(**locals(), conditional=False)
+
+
+def evaluate_conditional_shadow_terminal(**kwargs) -> dict[str, Any]:
+    """Explicit venue-acceptance-conditional replay, never execution qualification."""
+    body = _evaluate_shadow_terminal(**kwargs, conditional=True)
+    body.pop("receipt_sha256", None)
+    body.update(schema="generation_bound_conditional_shadow_terminal_v1",
+        evidence_basis="DECLARED_SIMULATION_CONDITIONAL",
+        economics_evidence_basis="DECLARED_SIMULATION_CONDITIONAL",
+        qualification_eligible=False, live_qualification=False, venue_acceptance="UNKNOWN",
+        ranking_eligible=False, profitability_supported=False,
+        conditional_profitability_supported=body.get("status") == "COMPLETE",
+        execution_support_status="CONDITIONAL_SIMULATION_ONLY",
+        min_notional_treatment="UNMODELED_VENUE_ACCEPTANCE_CONDITIONAL",
+        simulation_model=body.get("simulation_model", SIMULATION_MODEL) + ":CONDITIONAL_VENUE_ACCEPTANCE")
+    body["receipt_sha256"] = _sha(body)
+    return body
+
+
+def _evaluate_shadow_terminal(*, generation, entry_receipt, entry_receipt_sha256,
+        future_path_rows, future_path_sha256, required_horizon_end_ts, policy_spec,
+        policy_signature, position_context, cost_model, coverage_policy,
+        source_segment_receipts, source_segment_payloads, conditional):
     blockers: list[str] = []
     normalized_generation = {}
     for field in GENERATION_FIELDS:
@@ -98,6 +122,15 @@ def evaluate_shadow_terminal(
         normalized_generation[field] = value
     if not isinstance(entry_receipt, Mapping):
         return _unknown(normalized_generation, [*blockers, "ENTRY_RECEIPT_MISSING"])
+    if conditional:
+        if (entry_receipt.get("schema") != "conditional_limit_fill_receipt_v1"
+                or entry_receipt.get("evidence_basis") != "DECLARED_SIMULATION_CONDITIONAL"
+                or entry_receipt.get("qualification_eligible") is not False
+                or entry_receipt.get("venue_acceptance") != "UNKNOWN"):
+            blockers.append("CONDITIONAL_ENTRY_AUTHORITY_INVALID")
+    elif (entry_receipt.get("schema") == "conditional_limit_fill_receipt_v1"
+            or entry_receipt.get("evidence_basis") == "DECLARED_SIMULATION_CONDITIONAL"):
+        blockers.append("CONDITIONAL_ENTRY_NOT_STRICT")
     if str(entry_receipt_sha256 or "").lower() != _sha(entry_receipt):
         blockers.append("ENTRY_RECEIPT_SHA256_MISMATCH")
     classification = str(entry_receipt.get("final_classification") or "").upper()
@@ -176,7 +209,11 @@ def evaluate_shadow_terminal(
             * Decimal(str(context.get("leverage")))
             / Decimal(str(fill_price))
         )
-        constraints, constraint_reasons = validate_signed_quantity_constraints(
+        validator = validate_signed_quantity_constraints
+        if conditional:
+            from research.conditional_quantity_execution import validate_conditional_constraints
+            validator = validate_conditional_constraints
+        constraints, constraint_reasons = validator(
             entry_receipt.get("quantity_constraints"), symbol=entry_receipt.get("symbol"),
         )
         if constraint_reasons or constraints is None:
@@ -194,11 +231,13 @@ def evaluate_shadow_terminal(
         from research.declared_shadow_model import validate_contract
         try:
             validate_contract(costs.get("declared_contract"), normalized_generation)
-            if costs.get("cost_provenance") != "DECLARED_SIMULATION":
+            if costs.get("cost_provenance") != ("DECLARED_SIMULATION_CONDITIONAL" if conditional else "DECLARED_SIMULATION"):
                 blockers.append("DECLARED_COST_PROVENANCE_INVALID")
         except ValueError as exc:
             blockers.append(str(exc))
     else:
+        if conditional:
+            blockers.append("CONDITIONAL_DECLARED_COST_MODEL_REQUIRED")
         for field in ("trading_fees_usd", "funding_usd", "latency_cost_usd"):
             cost_fields[field] = _finite(costs.get(field))
             if cost_fields[field] is None or (field != "funding_usd" and cost_fields[field] < 0):
