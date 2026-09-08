@@ -23,10 +23,14 @@ def seal_historical_fit(*, holdout_start_ts, clock=time.time, **load_options):
     mapping,receipt=load_verified_local_dynamic_mapping(**load_options)
     if receipt!=result['input_receipt']: raise ValueError('SEAL_SOURCE_CHANGED')
     generation=mapping['expected_generation']
+    candidates = list(model['candidates']) + [{'policy_id':model['policy_id'],
+                                             'policy_signature':model['content_sha256']}]
+    candidates = [dict(policy_id=key[0],policy_signature=key[1]) for key in sorted({
+        (row['policy_id'],row['policy_signature']) for row in candidates})]
     binding={'fit_id':verified['fit_id'],'result_sha256':result['result_sha256'],
              'model_sha256':_hash(model),'input_receipt':receipt,
              'protocol':result['identity']['protocol'],'generation':generation,
-             'holdout_start_ts':boundary}
+             'holdout_start_ts':boundary,'sealed_policy_candidates':candidates}
     request_id=_hash(binding)
     root=_safe_path(Path(load_options['repo_root'])/'local-derived'/'dynamic-seals')
     lease=MirrorGenerationLease(root,owner='explicit-prospective-seal')
@@ -68,7 +72,7 @@ def seal_historical_fit(*, holdout_start_ts, clock=time.time, **load_options):
             tile_config_signature=generation['tile_config_signature'],
             cohort_signature=_hash(binding),training_snapshot_hash=result['result_sha256'],
             training_completed_at=available,sealed_at=available,holdout_start_ts=boundary,
-            policy_candidates=model['candidates'])
+            policy_candidates=candidates)
         output={'schema':'local_dynamic_prospective_seal_v1','binding':binding,'seal':seal,
             'verified_fit_available_at':available,
             'training_time_basis':'CONSERVATIVE_VERIFIED_AVAILABILITY_NOT_ORIGINAL_TRAINING_TIME',
