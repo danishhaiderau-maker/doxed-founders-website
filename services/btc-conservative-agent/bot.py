@@ -523,6 +523,7 @@ _agent_debug_writes_paused = False
 _research_write_gate = threading.RLock()
 _research_report_reset_generation = 0
 _research_report_compute_lock = threading.Lock()
+_lab_history_cursor_secret = os.urandom(32)
 
 def _pause_agent_debug_writes() -> None:
     global _agent_debug_writes_paused
@@ -4115,6 +4116,54 @@ def get_lane_lab_pnl_ledger(lane: str = None) -> dict:
     if lane:
         return dict(ledger.get(_normalize_lane_key(lane), {}))
     return ledger
+
+
+def _lab_history_current_identity():
+    from research.lab_history import HistoryUnavailable
+    if not _research_write_gate.acquire(blocking=False):
+        raise HistoryUnavailable('RESEARCH_WRITER_BUSY')
+    try:
+        if _fresh_collection_lock.locked():
+            raise HistoryUnavailable('RESEARCH_RESET_ACTIVE')
+        try:
+            os.lstat(_data_sync_runtime_root() / 'research_reset_receipts' / 'ACTIVE_RESET.json')
+        except FileNotFoundError:
+            pass
+        else:
+            raise HistoryUnavailable('RESEARCH_RESET_ACTIVE')
+        policies = {lane: spec['raw_policy_id'] for lane, spec in COMBO_LANE_SPECS.items()
+                    if spec.get('raw_policy_id')}
+        policies[RESEARCH_LANE_CONTINUOUS] = 'continuous_shared_direction_gap_v1'
+        if not _data_sync_identity_cache_lock.acquire(blocking=False):
+            raise HistoryUnavailable('EPOCH_CACHE_BUSY')
+        try:
+            epoch = _data_sync_identity_epoch_cache.get('collection_epoch_id')
+        finally:
+            _data_sync_identity_cache_lock.release()
+        return {'epoch': epoch, 'reset_generation': _research_report_reset_generation,
+                'policies': policies}
+    finally:
+        _research_write_gate.release()
+
+
+def api_lab_history():
+    # This is private row-level research, not the public sanitized state view.
+    if not _admin_authed_strict():
+        return jsonify({'status': 'UNAVAILABLE', 'reason_code': 'OWNER_AUTH_REQUIRED'}), 401
+    from research.lab_history import read_history, HistoryUnavailable
+    try:
+        page = read_history(SHADOW_LANE_OUTCOME_FILE, identity=_lab_history_current_identity,
+            secret=_lab_history_cursor_secret, lane=str(request.args.get('lane') or '').upper(),
+            cursor=request.args.get('cursor'))
+        response = jsonify(page)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except HistoryUnavailable as exc:
+        return jsonify({'status': 'UNAVAILABLE', 'reason_code': str(exc),
+                        'qualification_allowed': False}), 409
+    except (OSError, ValueError, TypeError):
+        return jsonify({'status': 'UNAVAILABLE', 'reason_code': 'LAB_HISTORY_READ_FAILED',
+                        'qualification_allowed': False}), 503
 
 
 def load_lane_pnl_ledgers_from_disk():
@@ -27045,6 +27094,7 @@ expired_orders: List[Dict] = []
 open_positions: List[Dict] = []
 trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
+app.add_url_rule('/api/research/lab-history', view_func=api_lab_history)
 _DASHBOARD_BOOTSTRAP_COMPLETE = False
 
 # ============================================================================
@@ -31249,6 +31299,17 @@ __ADMIN_ACCESS_CONTROLS__
     <tbody id="tradesTable"></tbody>
 </table></div>
 
+<h2>Simulation history — LAB only</h2>
+<p>Legacy instant-entry or price-touch simulation, not exchange-verified fills. Separate from paper trades above. Current epoch and policy version only; exact policy signatures are not reconciled. Pages are not cohort totals.</p>
+<label for="labHistoryLane">Lane</label>
+<select id="labHistoryLane"><option value="CONTINUOUS">CONTINUOUS</option><option value="">All current policy versions</option></select>
+<button id="labHistoryLoad" type="button">Load simulation history</button>
+<button id="labHistoryNext" type="button" disabled>Next page</button>
+<p id="labHistoryStatus" role="status">Not loaded. Owner access required. Current epoch only.</p>
+<div class="activity-table-scroll" role="region" aria-label="LAB simulation history table" tabindex="0"><table>
+<thead><tr><th>Recorded time</th><th>Study ID</th><th>Lane / policy</th><th>Direction</th><th>Original AI verdict / direction / scores</th><th>AI call / prompt / model</th><th>Fill / entry</th><th>Exit reason</th><th>Simulated net USD</th></tr></thead>
+<tbody id="labHistoryRows"></tbody></table></div>
+
 <h2>AI History (Session)</h2>
 <p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above.</p>
 <div class="activity-table-scroll" role="region" aria-label="AI history table" tabindex="0"><table>
@@ -31274,6 +31335,65 @@ __ADMIN_ACCESS_CONTROLS__
 DASHBOARD_JS = """(function () {
   try {
     window.__LAST_AI_PAYLOAD__ = __LAST_AI_PAYLOAD_JSON__;
+    let labHistoryCursor = null;
+    let labHistoryBusy = false;
+    function renderLabHistoryPage(page) {
+      const body = document.getElementById('labHistoryRows');
+      body.replaceChildren();
+      for (const row of page.rows || []) {
+        const tr = document.createElement('tr');
+        const ai = row.original_ai || {};
+        const cells = [row.ts, row.study_id || row.trade_id,
+          String(row.research_lane || 'UNKNOWN') + ' / ' + String(row.policy_version || 'UNKNOWN'),
+          row.direction,
+          String(ai.decision ?? 'UNKNOWN') + ' / ' + String(ai.direction ?? 'UNKNOWN') + ' / LONG ' + String(ai.long_score ?? 'UNKNOWN') + ' SHORT ' + String(ai.short_score ?? 'UNKNOWN'),
+          String(row.shared_ai_call_id ?? 'UNKNOWN') + ' / ' + String(row.prompt_id ?? 'UNKNOWN') + ' / ' + String(ai.model_id ?? 'UNKNOWN'),
+          String(row.entry_outcome || 'UNKNOWN') + ' / ' + String(row.fill_price ?? row.entry ?? 'UNKNOWN'),
+          row.exit_reason, row.net_pnl_usd == null ? 'UNKNOWN' : String(row.net_pnl_usd)];
+        for (const value of cells) {
+          const td = document.createElement('td');
+          td.textContent = value == null ? 'UNKNOWN' : String(value);
+          tr.appendChild(td);
+        }
+        body.appendChild(tr);
+      }
+      const c = page.coverage || {};
+      document.getElementById('labHistoryStatus').textContent =
+        'Epoch ' + page.epoch_id + ', lane ' + page.lane + ' — page only: ' + c.returned_rows + ' rows, scanned ' + c.records_scanned
+        + ' records / ' + c.bytes_read + ' bytes. ' + (c.end_of_pinned_file ? 'End of pinned file. ' : 'More pages available. ')
+        + (c.incomplete_tail ? 'Incomplete trailing record excluded. ' : '')
+        + 'Excluded: ' + JSON.stringify(c.excluded || {}) + '. No deduplication or whole-cohort totals; legacy fill assumptions.';
+      const select = document.getElementById('labHistoryLane');
+      for (const lane of page.available_lanes || []) {
+        if (!Array.from(select.options).some(option => option.value === lane)) {
+          const option = document.createElement('option'); option.value = lane; option.textContent = lane; select.appendChild(option);
+        }
+      }
+      labHistoryCursor = page.next_cursor || null;
+    }
+    async function loadLabHistory(next) {
+      if (labHistoryBusy) return;
+      labHistoryBusy = true;
+      const first = document.getElementById('labHistoryLoad');
+      const more = document.getElementById('labHistoryNext');
+      const laneSelect = document.getElementById('labHistoryLane');
+      first.disabled = more.disabled = true;
+      laneSelect.disabled = true;
+      try {
+        const params = new URLSearchParams({lane: document.getElementById('labHistoryLane').value});
+        if (next && labHistoryCursor) params.set('cursor', labHistoryCursor);
+        const response = await fetch('/api/research/lab-history?' + params, {credentials: 'same-origin', cache: 'no-store'});
+        const page = await response.json();
+        if (!response.ok || page.status !== 'AVAILABLE') throw new Error(page.reason_code || 'READ_FAILED');
+        renderLabHistoryPage(page);
+      } catch (error) {
+        labHistoryCursor = null;
+        document.getElementById('labHistoryRows').replaceChildren();
+        document.getElementById('labHistoryStatus').textContent = 'UNAVAILABLE — ' + error.message + '. Reload after source changes; no totals inferred.';
+      } finally {
+        labHistoryBusy = false; first.disabled = false; laneSelect.disabled = false; more.disabled = !labHistoryCursor;
+      }
+    }
     function displayExitCause(reason) {
       const raw = String(reason || '').trim();
       if (!raw) return 'Not recorded';
@@ -33212,6 +33332,11 @@ DASHBOARD_JS = """(function () {
       }
     }
     document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('labHistoryLoad')?.addEventListener('click', () => loadLabHistory(false));
+      document.getElementById('labHistoryNext')?.addEventListener('click', () => loadLabHistory(true));
+      document.getElementById('labHistoryLane')?.addEventListener('change', () => {
+        labHistoryCursor = null; document.getElementById('labHistoryNext').disabled = true;
+      });
       const dropdowns = {
         'leverage': '/api/set_leverage',
         'maxConcurrentPositions': '/api/set_max_active_signals'
