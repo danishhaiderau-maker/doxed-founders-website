@@ -925,6 +925,8 @@ jobs:
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q
           python test_manual_pause_entry_gate.py
           python -m pytest test_manual_pause_fill_handoff.py -q
+          python -m pytest test_execution_pause_reason_preservation.py -q
+          python -m pytest test_conditional_shadow_terminal.py test_declared_shadow_model.py test_conditional_replay_integration.py test_conservative_shadow_report.py -q
           python -m pytest test_paper_fill_ownership.py test_direct_fill_claim_callers.py test_fill_cancel_commit_race.py test_fill_committed_telemetry.py test_thread_crash_receipt.py -q
           # Run current-source admission without requiring historical blobs in
           # the shallow CI checkout; the deployed historical reproducer is local.
