@@ -35,7 +35,12 @@ def _advance_context_index(root, byte_budget, row_budget):
                 stream.seek(max(0, offset-4096))
                 anchor = hashlib.sha256(stream.read(min(offset,4096))).hexdigest()
                 if previous and (stat.st_dev != previous['dev'] or stat.st_ino != previous['ino'] or stat.st_size < offset or anchor != previous['anchor']):
-                    raise ValueError('SHARED_SOURCE_CHANGED_REBUILD_REQUIRED')
+                    # This cache is derived, not evidence. A promoted mirror
+                    # generation invalidates only this ledger atomically.
+                    db.execute('DELETE FROM refs WHERE ledger=?', (ledger,))
+                    db.execute('DELETE FROM cursor WHERE ledger=?', (ledger,))
+                    db.commit()
+                    offset = 0
                 stream.seek(offset)
                 while byte_budget > 0 and scanned < row_budget:
                     start = stream.tell()
@@ -43,6 +48,8 @@ def _advance_context_index(root, byte_budget, row_budget):
                     if not raw:
                         break
                     if len(raw) > byte_budget:
+                        if byte_budget == 2*1024*1024:
+                            raise ValueError('SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT')
                         break
                     if not raw.endswith(b'\n'):
                         raise ValueError('SHARED_SOURCE_UNTERMINATED_ROW')
@@ -118,8 +125,9 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
                     raise ValueError('SHARED_CONTEXT_SOURCE_CHANGED')
                 references[episode].append({'ledger':ref['ledger'], 'byte_offset':ref['offset'],
                     'row_length':ref['length'], 'row_sha256':ref['sha'], 'source_row':json.loads(raw)})
-    except (ValueError, OSError, sqlite3.Error):
-        defects.append('SHARED_CONTEXT_INDEX_OR_SOURCE_INVALID')
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        defects.append('SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT' if str(exc) == 'SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT'
+                       else 'SHARED_CONTEXT_INDEX_OR_SOURCE_INVALID')
     finally:
         if db is not None:
             db.close()

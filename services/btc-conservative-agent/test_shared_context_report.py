@@ -57,3 +57,36 @@ def test_report_index_advances_past_two_mib_without_repeating_prefix(tmp_path):
     broken = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])
     assert broken['bound_lanes'] == 0
     assert 'SHARED_CONTEXT_INDEX_OR_SOURCE_INVALID' in broken['lanes'][0]['blockers']
+
+
+def test_replaced_source_invalidates_old_refs_and_converges(tmp_path):
+    import os
+    import sqlite3
+    lane = {**audit(), 'opportunity_id':'opportunity:' + KEY.episode_id}
+    directory = tmp_path/'v3/ledgers'
+    directory.mkdir(parents=True)
+    path = directory/'opportunity.jsonl'
+    row = {**PROV, 'epoch_id':KEY.collection_epoch_id, 'episode_id':KEY.episode_id,
+           'shared_ai_call_id':lane['shared_ai_call_id'], 'record_id':lane['opportunity_id']}
+    path.write_text(json.dumps(row)+'\n')
+    assert build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])['bound_lanes'] == 1
+    replacement = directory/'replacement.tmp'
+    old = {'epoch_id':'old', 'episode_id':'old', 'payload':'x'*750000}
+    replacement.write_text(''.join(json.dumps(r)+'\n' for r in [old,old,old,row]))
+    os.replace(replacement, path)
+    first = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])
+    assert first['truncated'] and first['bound_lanes'] == 0
+    db = sqlite3.connect(tmp_path/'analyzer/shared-context-index.sqlite3')
+    assert db.execute('SELECT count(*) FROM refs WHERE episode=?',(KEY.episode_id,)).fetchone()[0] == 0
+    db.close()
+    assert build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])['bound_lanes'] == 1
+
+
+def test_oversized_row_is_explicitly_unsupported(tmp_path):
+    lane = {**audit(), 'opportunity_id':'opportunity:' + KEY.episode_id}
+    path = tmp_path/'v3/ledgers/opportunity.jsonl'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({'payload':'x'*(2*1024*1024)})+'\n')
+    result = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, [lane])
+    assert result['bound_lanes'] == 0
+    assert 'SHARED_SOURCE_ROW_EXCEEDS_SCAN_LIMIT' in result['lanes'][0]['blockers']
