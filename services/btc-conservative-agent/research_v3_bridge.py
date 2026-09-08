@@ -225,7 +225,7 @@ def _signal_time_baseline_inputs(*sources: Mapping[str, Any]) -> dict[str, Any]:
                 elif result[timing_key] != source[timing_key]:
                     # A conflict must not silently select a timing assumption.
                     result[timing_key] = None
-        for context_key in ("original_context_signal_ts", "research_baseline_context_status"):
+        for context_key in ("original_context_signal_ts", "research_baseline_context_status", "research_fanout_plan_reference"):
             if context_key in source and context_key not in result:
                 result[context_key] = copy.deepcopy(source[context_key])
         if isinstance(declaration, Mapping):
@@ -823,6 +823,7 @@ def dual_write_lane_entry_resolution(
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "research_lane": lane_name,
         "resolution_scope": "LANE_ENTRY",
+        "research_fanout_plan_reference": copy.deepcopy(source.get("research_fanout_plan_reference")),
         "entry_resolution": resolution,
         "entry_resolution_terminal": resolution in {"ORDER_SUBMITTED", "NO_ORDER"},
         "exact_reason": str(exact_reason or "UNSPECIFIED"),

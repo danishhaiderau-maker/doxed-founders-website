@@ -23,6 +23,12 @@ def test_actual_enqueue_has_prior_durable_plan_and_ambiguous_false(tmp_path,acce
     def submit(key,payload,**kwargs):
         assert (rows(store)[-1]['decision_stage']=='SCAN_FANOUT_PLAN') is (not conflict)
         calls.append(key)
+        if not conflict:
+            reference=payload['research_fanout_plan_reference']
+            assert reference['plan_record_id']==rows(store)[-1]['record_id']
+            assert reference['row_sha256']
+            if accepted:
+                ns['_run_combo_lane_execution_job']({'payload':payload})
         if mutate: payload['features']['worker_changed']=True
         return accepted
     ns=dict(copy=copy,time=SimpleNamespace(time=lambda:20.),
@@ -30,7 +36,17 @@ def test_actual_enqueue_has_prior_durable_plan_and_ambiguous_false(tmp_path,acce
         _get_combo_lane_execution_worker=lambda lane:SimpleNamespace(submit=submit),
         logger=SimpleNamespace(warning=lambda *a:warnings.append(a)))
     identity=next(x for x in source.body if isinstance(x,ast.FunctionDef) and x.name=='_shared_ai_call_id')
-    exec(compile(ast.Module(body=[identity,func],type_ignores=[]),'<enqueue>','exec'),ns)
+    worker=next(x for x in source.body if isinstance(x,ast.FunctionDef) and x.name=='_run_combo_lane_execution_job')
+    def spawn(ctx,ai,edge,features,lane,trigger):
+        from research_v3_bridge import dual_write_lane_decision,dual_write_lane_entry_resolution
+        material={**ctx,'shared_ai_call_id':ctx['trade_id'],'signal_ts':100.,'symbol':'BTCUSD'}
+        policy={'policy_id':lane,'paper_only':True}
+        dual_write_lane_decision(material,lane=lane,policy_decision='REJECT',execution_disposition='AI_REJECTED_NO_ORDER',
+            exact_reason='TEST',epoch_id='epoch',data_dir=str(tmp_path),lane_policy=policy)
+        dual_write_lane_entry_resolution(material,lane=lane,entry_resolution='NO_ORDER',exact_reason='TEST',
+            epoch_id='epoch',data_dir=str(tmp_path),lane_policy=policy)
+    ns['_spawn_combo_lane']=spawn
+    exec(compile(ast.Module(body=[identity,worker,func],type_ignores=[]),'<enqueue>','exec'),ns)
     def body(event):
         ctx={**event,'trade_id':event['research_scan_id']}
         ai={'shared_ai_call_id':'conflicting'} if conflict else {}
@@ -47,6 +63,10 @@ def test_actual_enqueue_has_prior_durable_plan_and_ambiguous_false(tmp_path,acce
     receipt=next(r for r in result if r.get('decision_stage')=='SCAN_FANOUT_ADMISSION')
     plan=next(r for r in result if r.get('decision_stage')=='SCAN_FANOUT_PLAN')
     assert receipt['payload_sha256']==plan['payload_sha256']
+    if accepted:
+        for ledger in ('opportunity','lifecycle'):
+            child=json.loads(store.ledger_path(ledger).read_text().splitlines()[-1])
+            assert child['research_fanout_plan_reference']['plan_record_id']==plan['record_id']
     assert receipt['admission_status']==('ENQUEUED' if accepted else 'ADMISSION_UNKNOWN')
     assert receipt['completion_status']=='UNKNOWN' and len(calls)==1
 

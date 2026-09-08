@@ -17085,8 +17085,11 @@ def _combo_lane_execution_dead_letter(lane: str, row: dict) -> None:
 
 def _run_combo_lane_execution_job(job: dict) -> None:
     payload = job.get("payload") or {}
+    child_ctx = copy.deepcopy(payload.get("ctx") or {})
+    if isinstance(payload.get('research_fanout_plan_reference'), dict):
+        child_ctx['research_fanout_plan_reference'] = copy.deepcopy(payload['research_fanout_plan_reference'])
     _spawn_combo_lane(
-        payload.get("ctx") or {}, payload.get("ai") or {},
+        child_ctx, payload.get("ai") or {},
         payload.get("edge_score") or 0.0, payload.get("features") or {},
         str(payload.get("target_lane") or ""),
         str(payload.get("trigger_reason") or "ASYNC_COMBO_EXECUTION"),
@@ -17134,6 +17137,8 @@ def _enqueue_combo_lane_execution(
         plan = record_current_fanout(lane, policy_signature, key, job_payload, payload_sha256=payload_sha256)
     except Exception:
         logger.warning('[RESEARCH] SCAN_FANOUT_PLAN_UNKNOWN')
+    if plan is not None:
+        job_payload['research_fanout_plan_reference'] = copy.deepcopy(plan)
     accepted = _get_combo_lane_execution_worker(lane).submit(
         key, job_payload,
         source_ts=time.time(),

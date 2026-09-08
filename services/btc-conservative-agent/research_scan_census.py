@@ -143,7 +143,13 @@ class ScanCensus:
                     'decision_stage':'SCAN_FANOUT_ADMISSION',**identity,
                     'plan_record_id':'scan-fanout-plan:'+key,'observed_ts':self._time(),
                     'admission_status':status,'completion_status':'UNKNOWN','qualification_eligible':False})
-            return 'scan-fanout-plan:'+key
+            record_id='scan-fanout-plan:'+key
+            receipt=_read(self.store._record_receipt_path('decision',record_id))
+            if receipt.get('state')!='COMMITTED': raise ValueError('SCAN_FANOUT_PLAN_NOT_COMMITTED')
+            return {'schema':'scan_fanout_plan_reference_v1','plan_record_id':record_id,
+                'plan_identity':identity,'source_identity':self.store._identity_binding(),
+                'row_sha256':receipt['row_sha256'],'byte_offset':receipt['offset'],
+                'row_length':receipt['length']}
         finally: lease.release()
 
     def _verify_finished(self,scan,*,refs,raised,verdicts):
