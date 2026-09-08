@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 
-SOURCE = Path('research/research_dashboard.py').read_text(encoding='utf-8-sig')
+SOURCE = (Path(__file__).resolve().parent / 'research' / 'research_dashboard.py').read_text(encoding='utf-8-sig')
 
 
 def test_existing_ai_navigation_and_scope_separate_evidence():
