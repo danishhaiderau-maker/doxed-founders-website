@@ -4698,6 +4698,34 @@ def api_manifest():
     return jsonify(_read_json(REPORT_MANIFEST_FILE))
 
 
+def _shadow_tier_projection(report, current):
+    """Bounded display-only projection; stale economics are never promoted."""
+    out = {"status": "CURRENT" if current and isinstance(report, dict) else "UNAVAILABLE_OR_STALE",
+           "qualification_allowed": False, "rows": [], "truncated": False}
+    if out["status"] != "CURRENT":
+        return out
+    def add(value, tier, timing=None):
+        if not isinstance(value, dict):
+            value = {}
+        def count(key):
+            raw=value.get(key)
+            return raw if type(raw) is int and raw >= 0 else None
+        out["rows"].append({"tier": tier, "timing": str(timing or "BASELINE")[:128],
+            "complete": count("complete_replay_count"), "unknown": count("unknown_replay_count"),
+            "venue_acceptance": "UNKNOWN" if "CONDITIONAL" in tier else "NOT_LIVE_QUALIFICATION",
+            "qualification_allowed": False})
+    add(report, "STRICT_SIMULATION")
+    add(report.get("conditional_report"), "CONDITIONAL_SIMULATION")
+    for field,tier in (("delayed_variant_reports","STRICT_DELAYED"),
+                       ("conditional_delayed_variant_reports","CONDITIONAL_DELAYED")):
+        variants=report.get(field)
+        if not isinstance(variants,list): continue
+        out["truncated"] |= len(variants)>16
+        for variant in variants[:16]:
+            if isinstance(variant,dict): add(variant.get("report"),tier,variant.get("timing_model_sha256"))
+    return out
+
+
 @app.route("/api/research-design")
 def api_research_design():
     """Expose signed research baselines and observed Phase-7 feature coverage."""
@@ -4746,7 +4774,10 @@ def api_research_design():
         bool(report) and coverage_available
         and coverage.get("schema") == "phase7_regime_feature_coverage_v1"
     )
+    shadow, shadow_source = _declared_atomic_generation_report("conservative_shadow_terminal_report.json")
+    shadow_freshness = _generation_freshness_meta(shadow_source.get("manifest") or {})
     return jsonify({
+        "shadow_tiers": _shadow_tier_projection(shadow, shadow_freshness.get("current") is True),
         "schema": "research_design_dashboard_v1",
         "available": available,
         "status": (
@@ -6855,6 +6886,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </section>
   <section id="sec-research-design">
+    <h3>Terminal simulation evidence — separate model tiers</h3>
+    <p>Conditional venue acceptance is UNKNOWN. These counts do not qualify live trading.</p>
+    <table><thead><tr><th>Tier</th><th>Timing</th><th>Complete</th><th>Unknown</th><th>Venue acceptance</th></tr></thead><tbody id="research-shadow-tiers"></tbody></table>
     <h2>Entry baselines &amp; Phase-7 regime evidence</h2>
     <div class="stale-banner" id="research-design-banner" style="display:block"></div>
     <p class="note">Signed comparison definitions are research-only and place no orders. Coverage reports only fields explicitly captured before entry. Definitions and coverage never create fills, PnL, profitability, qualification, or live authorization.</p>
@@ -8000,6 +8034,8 @@ async function loadFeatures() {
 }
 
 async function loadResearchDesign() {
+  const tierBody = document.getElementById('research-shadow-tiers');
+  tierBody.textContent = 'UNAVAILABLE — loading current atomic generation';
   const escape = value => String(value == null ? '' : value)
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
@@ -8013,6 +8049,21 @@ async function loadResearchDesign() {
     const r = await fetch('/api/research-design');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
+    const tiers = d.shadow_tiers || {};
+    tierBody.replaceChildren();
+    if (tiers.status !== 'CURRENT') {
+      tierBody.textContent = 'UNAVAILABLE OR STALE — no current terminal evidence';
+    } else {
+      (tiers.rows || []).forEach(row => {
+        const tr = document.createElement('tr');
+        ['tier','timing','complete','unknown','venue_acceptance'].forEach(key => {
+          const td = document.createElement('td');
+          td.textContent = row[key] == null ? 'UNKNOWN' : String(row[key]);
+          tr.appendChild(td);
+        });
+        tierBody.appendChild(tr);
+      });
+    }
     const current = d.status === 'CURRENT';
     banner.style.background = current ? '#153526' : '#3d2a1f';
     banner.style.borderColor = current ? '#3dd68c' : '#d29922';
