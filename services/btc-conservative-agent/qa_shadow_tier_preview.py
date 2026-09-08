@@ -8,9 +8,10 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--ai-state', choices=('populated', 'unknown'), default='populated')
+    parser.add_argument('--port', type=int, default=9502)
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="btc-synthetic-ui-") as isolated:
-        os.environ["BTC_AGENT_DATA_DIR"] = str(Path(__file__).parent / "canonical-research-data")
+        os.environ["BTC_AGENT_DATA_DIR"] = isolated
         os.environ["BTC_AGENT_REPORT_DIR"] = isolated
         from flask import jsonify
         from research import research_dashboard as dashboard
@@ -61,6 +62,9 @@ def main():
                         "blockers": ["SYNTHETIC_MISSING_CURRENT_EVIDENCE"]})
             return jsonify(calibration_status="NO_DATA", direction_only=True,
                 mode_note="SYNTHETIC UI ONLY — NOT MARKET EVIDENCE",
+                ai_verdict_coverage={"status": "CURRENT_GENERATION", "counts": {
+                    "APPROVE": 4, "REJECT": 3, "NO_TRADE": 2,
+                    "AI_NOT_CALLED": 5, "ERROR": None, "UNKNOWN": 1}},
                 matched_selection_comparison={
                     "status": "DESCRIPTIVE_ONLY", "independent_episode_n": 3,
                     "matched_rows": 4, "excluded_rows": 2, "blockers": [],
@@ -81,7 +85,7 @@ def main():
                     'SYNTHETIC UI TEST ONLY — NOT PRODUCTION OR STRATEGY EVIDENCE</div>', 1))
             return response
 
-        dashboard.app.run(host="127.0.0.1", port=9502, use_reloader=False)
+        dashboard.app.run(host="127.0.0.1", port=options.port, use_reloader=False)
 
 
 if __name__ == "__main__":
