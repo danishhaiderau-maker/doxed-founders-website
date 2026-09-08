@@ -37,6 +37,7 @@ def test_image_build_smokes_pre_ai_import():
     dockerfile = (ROOT / 'Dockerfile').read_text(encoding='utf-8')
     assert 'RUN python -c "import research.runtime_baseline_declaration"' in dockerfile
     assert 'RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"' in dockerfile
+    assert 'RUN python -c "import research_scan_census; from research_v3_bridge import write_pre_ai_scan_opportunity; assert callable(write_pre_ai_scan_opportunity)"' in dockerfile
 
 
 def test_runtime_research_import_closure_is_shipped():

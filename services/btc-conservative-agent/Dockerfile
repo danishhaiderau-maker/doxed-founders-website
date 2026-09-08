@@ -54,6 +54,7 @@ RUN python -c "import research.conservative_fill_cohort, research.conservative_l
 RUN python -c "import research.runtime_baseline_declaration"
 RUN python -c "import public_quantity_metadata, research.venue_quantity_observation"
 RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
+RUN python -c "import research_scan_census; from research_v3_bridge import write_pre_ai_scan_opportunity; assert callable(write_pre_ai_scan_opportunity)"
 RUN python -c "import data_sync_quarantine_receipt"
 RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker"
 RUN python -c "import paper_fill_ownership, dashboard_bounded_projection, evidence_phase_trace, microstructure_bucket_clock, microstructure_tape"
