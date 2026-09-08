@@ -530,9 +530,33 @@ def delayed_variant_cohorts(report):
             if not isinstance(key,str) or len(key)!=64 or any(c not in '0123456789abcdef' for c in key) or key in seen:
                 raise ValueError('DELAYED_VARIANT_IDENTITY_CONFLICT')
             seen.add(key)
-            groups.setdefault(key,[]).append({**episode,'results':variant['results'],'delayed_variants':[]})
-    return {key:{**report,'episode_receipts':episodes,'timing_model_sha256':key}
-            for key,episodes in sorted(groups.items())}
+            conditional = variant.get('conditional_results', [])
+            if not isinstance(conditional, list):
+                raise ValueError('DELAYED_VARIANT_SHAPE_INVALID')
+            groups.setdefault(key,[]).append({**episode,'results':variant['results'],
+                'conditional_results':conditional,'delayed_variants':[]})
+    cohorts = {}
+    for key, episodes in sorted(groups.items()):
+        cohort = {**report, 'episode_receipts': episodes, 'timing_model_sha256': key}
+        cohort.pop('report_id', None)
+        cohort['same_opportunity_count'] = len({row.get('opportunity_id') for row in episodes})
+        cohort['directional_episode_count'] = len(episodes)
+        for field, output in [('results', 'summaries'), ('conditional_results', 'conditional_summaries')]:
+            summaries = {}
+            for baseline_id in report.get('baseline_ids', []):
+                matches = [(episode, row) for episode in episodes for row in episode.get(field, [])
+                           if row.get('baseline_id') == baseline_id]
+                states = Counter(row.get('outcome_state', 'UNKNOWN') for _, row in matches)
+                summaries[baseline_id] = dict(opportunities=len({e.get('opportunity_id') for e, _ in matches}),
+                    directional_evaluations=len(matches), full_fills=states['FULL_FILL'],
+                    partial_fills=states['PARTIAL_FILL'], no_fills=states['NO_FILL'], unknown=states['UNKNOWN'])
+                if field == 'conditional_results':
+                    summaries[baseline_id].update(evidence_basis='DECLARED_SIMULATION_CONDITIONAL',
+                        qualification_eligible=False, venue_acceptance='UNKNOWN')
+            cohort[output] = summaries
+        cohort['report_id'] = canonical_hash('entry-baseline-replay', cohort)
+        cohorts[key] = cohort
+    return cohorts
 
 
 def _declared_delayed_variants(episode, generation):
