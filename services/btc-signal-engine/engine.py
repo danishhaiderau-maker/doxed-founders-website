@@ -22781,7 +22781,7 @@ def log_near_edge(candidate, edge_score):
     except Exception as e:
         logger.error(f"[NEAR_EDGE LOG FAIL] {e} [PIPELINE ENFORCEMENT]")
 
-def _capture_pre_ai_skip_research(event, features, reason, ctx=None):
+def _capture_pre_ai_skip_research(event, features, reason, ctx=None, *, exact_reason=None):
     """Collect an observed skip treatment without calling AI or placing orders."""
     if (not event.get('research_scan_id') or not is_research_data_collection()
             or not isinstance(features,dict) or not is_valid_feature_set(features)):
@@ -22812,7 +22812,8 @@ def _capture_pre_ai_skip_research(event, features, reason, ctx=None):
             'research_baseline_context_declaration':declaration.get('declaration'),
             'research_baseline_context_status':declaration,
             'original_context_signal_ts':ctx.get('signal_ts') or ctx.get('created_ts_ts'),
-            'research_skip_reason':reason,**load_runtime_timing_config()},
+            'research_skip_reason':reason,'research_skip_exact_reason':exact_reason,
+            **load_runtime_timing_config()},
             epoch_id=_collector_v22_epoch_id(),data_dir=str(_data_sync_runtime_root()))
     except Exception as error:
         logger.warning('[RESEARCH] PRE_AI_CAPTURE_FAILED:'+type(error).__name__)
@@ -23106,7 +23107,7 @@ def process_signal(event: dict):
 
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
                 if not invoke_ai:
-                    _capture_pre_ai_skip_research(event,features,'PRE_AI_GATE',ctx=ctx)
+                    _capture_pre_ai_skip_research(event,features,'PRE_AI_GATE',ctx=ctx,exact_reason=ai_gate_reason)
                     logger.info(
                         f"[AI GATE] Skipped DeepSeek - {ai_gate_reason} edge={edge_score:.1f} "
                         f"[PIPELINE ENFORCEMENT]"
