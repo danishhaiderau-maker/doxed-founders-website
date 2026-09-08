@@ -140,6 +140,15 @@ def load_seal(root: str | Path, seal_id: str) -> dict[str, Any]:
         raise ValueError("SEALED_HOLDOUT_IDENTITY_MISMATCH")
     if seal.get("content_sha256") != _sha256(body):
         raise ValueError("SEALED_HOLDOUT_CHECKSUM_MISMATCH")
+    try:
+        training, sealed, boundary = (float(seal[key]) for key in
+                                      ("training_completed_at", "sealed_at", "holdout_start_ts"))
+        valid_times = all(math.isfinite(value) for value in (training, sealed, boundary))
+        valid_times = valid_times and training <= sealed < boundary
+    except (KeyError, TypeError, ValueError, OverflowError):
+        valid_times = False
+    if not valid_times:
+        raise ValueError("INVALID_STORED_SEAL_TIMES")
     return seal
 
 

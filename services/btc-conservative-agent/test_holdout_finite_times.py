@@ -1,8 +1,10 @@
 import pytest
+import json
 from research_v3_sealed_holdout import create_seal, consume_seal
 from test_research_v3_sealed_holdout import IDENTITY, CANDIDATES, episode
 from research_v3_sealed_holdout import verify_evaluation_receipt, _sha256
 from research_v3_contract import canonical_hash
+from research_v3_sealed_holdout import load_seal
 
 
 def seal(root, **overrides):
@@ -48,3 +50,17 @@ def test_rehashed_nonfinite_evaluation_receipt_rejected(tmp_path):
     receipt['receipt_id'] = canonical_hash('holdout-evaluation', body, length=64)
     receipt['content_sha256'] = _sha256(body)
     assert not verify_evaluation_receipt(receipt, policy_id='p', holdout_episodes=rows)
+
+
+@pytest.mark.parametrize('field,value', [('sealed_at', float('inf')),
+    ('holdout_start_ts', float('nan')), ('training_completed_at', 150),
+    ('holdout_start_ts', 99)])
+def test_rehashed_invalid_stored_seal_rejected(tmp_path, field, value):
+    frozen = seal(tmp_path)
+    body = {k: v for k, v in frozen.items() if k not in {'seal_id', 'content_sha256'}}
+    body[field] = value
+    identifier = canonical_hash('holdout-seal', body, length=64)
+    path = tmp_path / 'sealed_holdout' / 'seals' / (identifier + '.json')
+    path.write_text(json.dumps({**body, 'seal_id': identifier, 'content_sha256': _sha256(body)}))
+    with pytest.raises(ValueError, match='INVALID_STORED_SEAL_TIMES'):
+        load_seal(tmp_path, identifier)
