@@ -223,8 +223,11 @@ def _consistency_mode(path: Path, request: dict) -> str:
         return 'strict_generation_v1'
     if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
         return "sqlite_snapshot_v1"
-    resolved = str(path.resolve())
-    parts = tuple(part.lower() for part in path.resolve().parts)
+    # Derive both classification inputs from one resolution. Do not cache it
+    # across _row/_allowed: those independent containment checks are retained.
+    resolved_path = path.resolve()
+    resolved = str(resolved_path)
+    parts = tuple(part.lower() for part in resolved_path.parts)
     v3_append = len(parts) >= 3 and parts[-3:-1] == ("v3", "ledgers") and path.suffix.lower() == ".jsonl"
     append = resolved not in set(request.get("rewrite_targets") or []) and (
         path.suffix.lower() == ".log"
