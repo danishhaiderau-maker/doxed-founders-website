@@ -189,6 +189,16 @@ def adapt_dynamic_cohorts(
                 rejections["ZERO_OUTCOME_NONZERO_PNL"] += 1
             else:
                 outcome = {"outcome_state": state, "net_pnl_usd": pnl}
+                lineage = row.get('source_lifecycle_identity')
+                if isinstance(lineage, Mapping) and all(_text(lineage.get(k)) for k in
+                        ('collection_epoch_id','episode_id','policy_signature','research_lane')):
+                    if (lineage['collection_epoch_id']==generation['epoch_id']
+                            and lineage['episode_id']==row['episode_id']
+                            and lineage['policy_signature']==signature):
+                        outcome['source_lifecycle_identity'] = {k:lineage[k] for k in
+                            ('collection_epoch_id','episode_id','policy_signature','research_lane')}
+                        if _text(row.get('config_signature')):
+                            outcome['source_config_signature'] = row['config_signature']
         seen = episode["seen_outcomes"].setdefault(policy, set())
         fingerprint = _json(outcome)
         if fingerprint in seen:

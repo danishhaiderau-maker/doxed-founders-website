@@ -60,4 +60,5 @@ def verify_collection_provenance(bundle_path, *, epoch_id, source_episode_id,
         'events_sha256':hashlib.sha256(raw).hexdigest(),
         'evidence_collected_receipt_sha256':receipt['evidence_collected_receipt_sha256'],
         'completion_receipt_sha256':receipt['completion_receipt_sha256'],
+        'completion':joined['completion'],
         'counterfactual_timestamp_inheritance_allowed':False,'qualification_allowed':False}
