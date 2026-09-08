@@ -98,6 +98,37 @@ def evaluate_lifecycle_completion(
     provenance, provenance_blockers = _provenance(material)
     blockers.extend(provenance_blockers)
 
+    # A resolved lane decision is not an attempted order or a filled lifecycle.
+    # Only an unmixed, exactly bound audit cohort receives this disposition;
+    # it confers no execution, transfer, cleanup or profitability authority.
+    lane_rows = [row for row in material if row.get("ledger") == "lifecycle"]
+    audit_only = bool(lane_rows) and all(
+        row.get("ledger") in {"decision", "lifecycle"} for row in material
+    ) and all(
+        row.get("resolution_scope") == "LANE_ENTRY"
+        and row.get("entry_resolution") == "NO_ORDER"
+        and row.get("entry_resolution_terminal") is True
+        and row.get("terminal") is True for row in lane_rows
+    )
+    if audit_only:
+        identity_ok = all(
+            str(row.get("epoch_id") or row.get("collection_epoch_id") or "") == key.collection_epoch_id
+            and row.get("episode_id") == key.episode_id
+            and row.get("policy_signature") == key.policy_signature
+            and row.get("research_lane") == key.research_lane
+            for row in material
+        )
+        call_ids = {str(row.get("shared_ai_call_id") or "") for row in material}
+        if identity_ok and len(call_ids) == 1 and "" not in call_ids and not blockers:
+            reason = "AUDIT_ONLY_NO_ORDER_NOT_EXECUTION_LIFECYCLE"
+            return {
+                "schema": RECONCILER_SCHEMA, "identity": key.as_dict(),
+                "ready": False, "classification": "ENTRY_RESOLVED_NO_ORDER",
+                "blockers": [reason], "structural_blockers": [reason],
+                "provenance": provenance, "event_id": None,
+                "terminal_proof": {}, "receipt": None,
+            }
+
     schedules = _unique(material, lambda row: (
         row.get("ledger") == "order_intent"
         and row.get("intent_kind") == "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL"
@@ -292,6 +323,9 @@ def evaluate_lifecycle_transfer_ready(
         lifecycle_horizon_sec=lifecycle_horizon_sec,
         reconciliation_allowance_sec=reconciliation_allowance_sec,
     )
+    if qualification["classification"] == "ENTRY_RESOLVED_NO_ORDER":
+        return {**qualification, "schema": "lifecycle_transfer_ready_reconciliation_v1",
+                "qualification_ready": False, "qualification_blockers": qualification["blockers"]}
     built = build_lifecycle_transfer_ready_receipt(
         qualification["terminal_proof"], now=now,
         lifecycle_horizon_sec=lifecycle_horizon_sec,
