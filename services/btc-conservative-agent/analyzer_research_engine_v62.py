@@ -19953,16 +19953,20 @@ def _write_conservative_shadow_report(
             )
             from research.entry_baseline_replay import delayed_variant_cohorts
             report['delayed_variant_reports'] = []
-            for timing_hash, cohort in delayed_variant_cohorts(baseline_report or {}).items():
+            report['conditional_delayed_variant_reports'] = []
+            variants = [(timing_hash, cohort, conditional)
+                        for timing_hash, cohort in delayed_variant_cohorts(baseline_report or {}).items()
+                        for conditional in (False, True)]
+            for timing_hash, cohort, conditional in variants:
                 variant_temporary = Path(f'.shadow-variant-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp')
                 variant_temporaries.append(variant_temporary)
                 with ShadowResultStreamWriter(Path.cwd(), str(variant_temporary), generation) as variant_sink:
-                    variant_report = build_conservative_shadow_report(
+                    variant_report = (build_conditional_shadow_report if conditional else build_conservative_shadow_report)(
                         canonical_root, expected_generation=generation, baseline_report=cohort,
                         policy_candidates=candidates, policy_artifact_receipt=candidate_receipt,
                         research_model=research_model, result_sink=variant_sink)
                     variant_receipt = variant_sink.finalize(variant_report)
-                variant_target = Path('shadow_variant_' + timing_hash[:12] + '_' +
+                variant_target = Path(('conditional_shadow_variant_' if conditional else 'shadow_variant_') + timing_hash[:12] + '_' +
                                       variant_receipt['artifact_sha256'] + '.jsonl.gz')
                 os.replace(variant_temporary, variant_target)
                 _atomic_mirror_analyzer_report(variant_target.name)
@@ -19970,7 +19974,7 @@ def _write_conservative_shadow_report(
                 variant_receipt['receipt_sha256'] = stream_digest({
                     key: value for key, value in variant_receipt.items() if key != 'receipt_sha256'})
                 variant_report['result_stream'] = variant_receipt
-                report['delayed_variant_reports'].append({
+                report['conditional_delayed_variant_reports' if conditional else 'delayed_variant_reports'].append({
                     'timing_model_sha256': timing_hash, 'report': variant_report,
                     'qualification_eligible': False})
             stream_receipt = sink.finalize(report)
@@ -20469,10 +20473,13 @@ def write_report_manifest(
                 "stream_receipt_sha256": conditional_stream["receipt_sha256"],
                 "analysis_provenance": analysis_provenance,
             })
-        for variant in shadow_terminal.get("delayed_variant_reports", []):
+        for variant in (shadow_terminal.get("delayed_variant_reports", []) +
+                        shadow_terminal.get("conditional_delayed_variant_reports", [])):
             variant_stream = variant["report"]["result_stream"]
             reports.append({
-                "title": "Complete Delayed Shadow Results " + variant["timing_model_sha256"],
+                "title": ("Conditional Delayed Shadow Results — venue acceptance UNKNOWN "
+                          if variant["report"].get("venue_acceptance") == "UNKNOWN" else
+                          "Complete Delayed Shadow Results ") + variant["timing_model_sha256"],
                 "file": variant_stream["relative_path"],
                 "category": "Genome & Reports",
                 "description": "Complete separate declared timing cohort; not a sample or live qualification",

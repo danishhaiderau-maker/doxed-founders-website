@@ -133,6 +133,13 @@ def test_pinned_bilateral_conditional_replay_is_separate(tmp_path, monkeypatch, 
         published, _ = analyzer._write_conservative_shadow_report(tmp_path, output, report,
             policy_cycle_succeeded=True, research_model=contract(generation))
         conditional = published['conditional_report']
+        assert len(published['conditional_delayed_variant_reports']) == 1
+        delayed_report = published['conditional_delayed_variant_reports'][0]['report']
+        assert delayed_report['qualification_eligible'] is False
+        if delay == 0:
+            assert delayed_report['complete_replay_count'] >= 2
+        with verify_result_stream(output, delayed_report, generation) as index:
+            assert index.verified_summary['verified'] is True
         assert conditional['complete_replay_count'] >= 2
         assert conditional['qualification_eligible'] is False
         with verify_result_stream(output, conditional, generation) as index:

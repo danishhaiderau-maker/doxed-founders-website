@@ -32,6 +32,38 @@ def test_disabled_has_no_implicit_cost_model():
     assert_publication_shadow_model_input({})
 
 
+def test_conditional_delayed_generation_change_cannot_publish_success(tmp_path, monkeypatch):
+    import research.policy_evidence_schema as schema
+    import research.conservative_shadow_report as shadow
+    analyzer = _load_analyzer('conditional_generation_fence')
+    evidence = tmp_path / 'evidence'
+    evidence.mkdir()
+    baseline, candidates, artifact, model = _fixture(evidence)
+    manifest = evidence / 'canonical_dataset_current.json'
+    manifest.write_text('{}')
+    episode = baseline['episode_receipts'][0]
+    episode['delayed_variants'] = [{'timing_model_sha256': 'a' * 64,
+                                  'results': episode['results']}]
+    output = tmp_path / 'output'
+    output.mkdir()
+    monkeypatch.chdir(output)
+    monkeypatch.setattr(schema, 'generation_identity', lambda *a, **k: GEN)
+    monkeypatch.setattr(shadow, 'load_current_policy_candidates', lambda *a, **k: (candidates, artifact))
+    monkeypatch.setattr(analyzer, '_atomic_mirror_analyzer_report', lambda name: output / name)
+    original = shadow.build_conditional_shadow_report
+    def mutate_during_conditional(*args, **kwargs):
+        result = original(*args, **kwargs)
+        manifest.write_text('{"generation":"changed"}')
+        return result
+    monkeypatch.setattr(shadow, 'build_conditional_shadow_report', mutate_during_conditional)
+    result, _ = analyzer._write_conservative_shadow_report(evidence, output, baseline,
+        policy_cycle_succeeded=True, research_model=model)
+    assert result['status'] == 'UNKNOWN'
+    assert result['blockers'] == ['SHADOW_CANONICAL_GENERATION_CHANGED_DURING_REPLAY']
+    assert 'result_stream' not in result
+    assert not list(output.glob('*.tmp'))
+
+
 def test_file_is_pinned_and_exact_generation_required(tmp_path, monkeypatch):
     pin(tmp_path, monkeypatch)
     source = load_shadow_model_input()
@@ -198,7 +230,12 @@ def test_variant_full_streams_bound_and_mirrored(tmp_path, monkeypatch):
     for root in (output, archive):
         with verify_result_stream(root, result['conditional_report'], GEN) as index:
             assert index.verified_summary['verified'] is True
-    assert len(list(archive.glob("*.jsonl.gz"))) == 4
+    assert len(result['conditional_delayed_variant_reports']) == 2
+    for variant in result['conditional_delayed_variant_reports']:
+        for root in (output, archive):
+            with verify_result_stream(root, variant['report'], GEN) as index:
+                assert index.verified_summary['verified'] is True
+    assert len(list(archive.glob("*.jsonl.gz"))) == 6
     original = shadow.build_conservative_shadow_report
     calls = []
     def fail_variant(*args, **kwargs):
