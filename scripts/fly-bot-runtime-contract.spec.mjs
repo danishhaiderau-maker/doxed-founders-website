@@ -180,6 +180,15 @@ test('Fly image includes and imports every root runtime research module', async 
   }
 });
 
+test('Fly image checks anonymous quantity metadata dependencies at build time', async () => {
+  const dockerfile = await readFile(flyDockerfilePath, 'utf8');
+  const dockerignore = await readFile(flyDockerignorePath, 'utf8');
+  assert.match(dockerfile, /import public_quantity_metadata, research\.venue_quantity_observation/);
+  assert.match(dockerignore, /^!\*\.py$/m);
+  assert.match(dockerignore, /^!research\/venue_quantity_observation\.py$/m);
+  assert.doesNotMatch(dockerignore, /^public_quantity_metadata\.py$/m);
+});
+
 test('Fly routes on process liveness while strategy readiness stays separate', async () => {
   const config = await readFile(flyConfigPath, 'utf8');
 
