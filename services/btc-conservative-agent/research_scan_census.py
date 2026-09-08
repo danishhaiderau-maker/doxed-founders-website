@@ -168,11 +168,11 @@ class ScanCensus:
             raise ValueError('SCAN_CENSUS_ADMISSION_OR_FINISHED_RECEIPT_MISSING') from None
 
 
-def record_current_fanout(lane,policy_signature,job_key,payload,*,admitted=None):
+def record_current_fanout(lane,policy_signature,job_key,payload,*,admitted=None,payload_sha256=None):
     current=_CURRENT.get()
     if current is None: return None
     return current['census'].fanout(current['scan'],lane=lane,policy_signature=policy_signature,
-        job_key=job_key,payload_sha256=_hash(payload),admitted=admitted)
+        job_key=job_key,payload_sha256=payload_sha256 if payload_sha256 is not None else _hash(payload),admitted=admitted)
 
 
 def observe_opportunity(store,write,policy_decision=None):

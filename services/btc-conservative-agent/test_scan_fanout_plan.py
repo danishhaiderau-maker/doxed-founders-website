@@ -12,29 +12,41 @@ def rows(store):
     return [json.loads(x) for x in store.ledger_path('decision').read_text().splitlines()]
 
 
-@pytest.mark.parametrize('accepted',[True,False])
-def test_actual_enqueue_has_prior_durable_plan_and_ambiguous_false(tmp_path,accepted):
+@pytest.mark.parametrize('accepted,conflict,mutate',[(True,False,False),(False,False,False),
+                                                    (True,True,False),(True,False,True)])
+def test_actual_enqueue_has_prior_durable_plan_and_ambiguous_false(tmp_path,accepted,conflict,mutate):
     store=V3EvidenceStore(tmp_path,epoch_id='epoch')
     source=ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8'))
     func=next(x for x in source.body if isinstance(x,ast.FunctionDef) and x.name=='_enqueue_combo_lane_execution')
     calls=[]
+    warnings=[]
     def submit(key,payload,**kwargs):
-        assert rows(store)[-1]['decision_stage']=='SCAN_FANOUT_PLAN'
+        assert (rows(store)[-1]['decision_stage']=='SCAN_FANOUT_PLAN') is (not conflict)
         calls.append(key)
+        if mutate: payload['features']['worker_changed']=True
         return accepted
     ns=dict(copy=copy,time=SimpleNamespace(time=lambda:20.),
-        _shared_ai_call_id=lambda ai_result,ctx:ctx['research_scan_id'],
         _v3_lane_policy_material=lambda lane:{'policy_signature':'policy-sig'},
         _get_combo_lane_execution_worker=lambda lane:SimpleNamespace(submit=submit),
-        logger=SimpleNamespace(warning=lambda *a:None))
-    exec(compile(ast.Module(body=[func],type_ignores=[]),'<enqueue>','exec'),ns)
+        logger=SimpleNamespace(warning=lambda *a:warnings.append(a)))
+    identity=next(x for x in source.body if isinstance(x,ast.FunctionDef) and x.name=='_shared_ai_call_id')
+    exec(compile(ast.Module(body=[identity,func],type_ignores=[]),'<enqueue>','exec'),ns)
     def body(event):
-        return ns[func.name](event,{},1.,{},'CONTINUOUS','trigger')
+        ctx={**event,'trade_id':event['research_scan_id']}
+        ai={'shared_ai_call_id':'conflicting'} if conflict else {}
+        return ns[func.name](ctx,ai,1.,{},'CONTINUOUS','trigger')
     run=wrap_scan_census(body,eligible=lambda e:True,store_factory=lambda:store,
                         clock=lambda:10.,on_failure=lambda x:pytest.fail(x))
     assert run({}) is accepted
     result=rows(store)
+    if conflict:
+        assert not any(r.get('decision_stage','').startswith('SCAN_FANOUT_') for r in result)
+        assert any('SCAN_FANOUT_PLAN_UNKNOWN' in str(w) for w in warnings)
+        assert len(calls)==1
+        return
     receipt=next(r for r in result if r.get('decision_stage')=='SCAN_FANOUT_ADMISSION')
+    plan=next(r for r in result if r.get('decision_stage')=='SCAN_FANOUT_PLAN')
+    assert receipt['payload_sha256']==plan['payload_sha256']
     assert receipt['admission_status']==('ENQUEUED' if accepted else 'ADMISSION_UNKNOWN')
     assert receipt['completion_status']=='UNKNOWN' and len(calls)==1
 
