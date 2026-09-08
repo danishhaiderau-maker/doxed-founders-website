@@ -75,6 +75,17 @@ def test_identical_rotation_quarantines_rebuilds_and_replays(tmp_path):
     with sqlite3.connect(old_db) as connection:
         assert connection.execute("SELECT COUNT(*) FROM lifecycle_event").fetchone()[0] == 1
         assert connection.execute("SELECT COUNT(*) FROM dirty_lifecycle").fetchone()[0] == 0
+        cursors = connection.execute(
+            "SELECT ledger,source_dev,source_ino,byte_offset FROM ledger_cursor ORDER BY ledger"
+        ).fetchall()
+        stat = source.stat()
+        assert cursors == [
+            (name, stat.st_dev, stat.st_ino, stat.st_size)
+            for name in ("opportunity", "shared:opportunity")
+        ]
+    followup = lifecycle_pipeline.process_incremental_lifecycle_pipeline(tmp_path)
+    assert not followup.get("index_recovery")
+    assert followup["scan"]["caught_up"] is True
 
 
 def test_rotation_with_append_rebuilds_every_row_from_zero(tmp_path):

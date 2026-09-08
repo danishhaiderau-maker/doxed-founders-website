@@ -316,12 +316,21 @@ def _rebuild_step(state: dict[str, Any], root: Path, staging: Path) -> None:
                 if offset != int(row["identity"]["size"]):
                     raise ValueError(f"LIFECYCLE_RECOVERY_CURSOR_INVALID:{source.name}")
                 with connection:
-                    connection.execute(
-                        """UPDATE ledger_cursor SET source_dev = ?, source_ino = ?,
-                           source_anchor_sha256 = ?, source_mtime_ns = ? WHERE ledger = ?""",
-                        (live["dev"], live["ino"], _source_anchor(source, offset),
-                         live["mtime_ns"], row["ledger"]),
-                    )
+                    names = [row["ledger"]]
+                    if row["ledger"] in {"opportunity", "market_segment"}:
+                        names.append("shared:" + row["ledger"])
+                    for name in names:
+                        indexed = connection.execute(
+                            "SELECT byte_offset FROM ledger_cursor WHERE ledger=?", (name,),
+                        ).fetchone()
+                        if indexed is None or int(indexed["byte_offset"]) != offset:
+                            raise ValueError(f"LIFECYCLE_RECOVERY_CURSOR_INVALID:{source.name}")
+                        connection.execute(
+                            """UPDATE ledger_cursor SET source_dev = ?, source_ino = ?,
+                               source_anchor_sha256 = ?, source_mtime_ns = ? WHERE ledger = ?""",
+                            (live["dev"], live["ino"], _source_anchor(source, offset),
+                             live["mtime_ns"], name),
+                        )
                 state["rebuild_ledger"] = index + 1
             return
         state["phase"] = "VERIFY"; state["verify_ledger"] = 0
