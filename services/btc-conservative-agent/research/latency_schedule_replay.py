@@ -61,6 +61,27 @@ def delayed_submission_schedule(schedule, *, delay_sec, ordering_treatment):
 def replay_delayed_entry(*, schedule, delay_sec, ordering_treatment, tape,
                          direction, requested_qty, quantity_constraints, symbol):
     """Entry-only research result; never authorizes lifecycle qualification."""
+    return _replay_delayed_entry(**locals(), conditional=False)
+
+
+def replay_conditional_delayed_entry(*, schedule, delay_sec, ordering_treatment, tape,
+                                    direction, requested_qty, venue_quantity_observation, symbol):
+    """Explicit conditional quantity model; expiry and cancellation timing unchanged."""
+    result = _replay_delayed_entry(schedule=schedule, delay_sec=delay_sec,
+        ordering_treatment=ordering_treatment, tape=tape, direction=direction,
+        requested_qty=requested_qty, quantity_constraints=venue_quantity_observation,
+        symbol=symbol, conditional=True)
+    result.update(schema='conditional_declared_delayed_entry_replay_v1',
+        evidence_basis='DECLARED_SIMULATION_CONDITIONAL', venue_acceptance='UNKNOWN',
+        qualification_eligible=False, live_arming_authorized=False,
+        min_notional_treatment='UNMODELED_VENUE_ACCEPTANCE_CONDITIONAL')
+    result['replay_receipt_sha256'] = _strict_sha256({
+        key: value for key, value in result.items() if key != 'replay_receipt_sha256'})
+    return result
+
+
+def _replay_delayed_entry(*, schedule, delay_sec, ordering_treatment, tape,
+                          direction, requested_qty, quantity_constraints, symbol, conditional):
     adapted=delayed_submission_schedule(schedule,delay_sec=delay_sec,
                                         ordering_treatment=ordering_treatment)
     output={'schema':'declared_delayed_entry_replay_v1',
@@ -79,15 +100,21 @@ def replay_delayed_entry(*, schedule, delay_sec, ordering_treatment, tape,
         # A schedule hash alone is not a replay identity: bind every evaluator
         # input, including tape ordering and quantity constraints, separately.
         output['replay_input_sha256'] = _strict_sha256({
-            'schema': 'declared_delayed_entry_inputs_v1',
+            'schema': 'conditional_declared_delayed_entry_inputs_v1' if conditional else 'declared_delayed_entry_inputs_v1',
             'source_schedule': schedule, 'evaluated_schedule': adapted['schedule'],
             'delay_sec': delay_sec, 'ordering_treatment': ordering_treatment,
             'tape': tape, 'direction': direction, 'requested_qty': requested_qty,
             'quantity_constraints': quantity_constraints, 'symbol': symbol,
             'aggressor_window_sec': 1,
         })
-        receipt=evaluate_limit_fill(tape,direction=direction,requested_qty=requested_qty,
-            chase_schedule=adapted['schedule'],quantity_constraints=quantity_constraints,
+        evaluator = evaluate_limit_fill
+        quantity_args = {'quantity_constraints':quantity_constraints}
+        if conditional:
+            from research.conservative_limit_fill import evaluate_conditional_limit_fill
+            evaluator = evaluate_conditional_limit_fill
+            quantity_args = {'venue_quantity_observation':quantity_constraints}
+        receipt=evaluator(tape,direction=direction,requested_qty=requested_qty,
+            chase_schedule=adapted['schedule'],**quantity_args,
             symbol=symbol,aggressor_window_sec=1)
     except (ValueError,TypeError,KeyError,AttributeError,OverflowError):
         return {**output,'status':'UNKNOWN','reason_codes':['DELAYED_ENTRY_INPUT_UNSUPPORTED']}
