@@ -33,7 +33,8 @@ def _proof(root,ref):
 
 def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry,terminal,
                      path_rows,cost_contract,policy_id,source_segments,seal_request_id=None,clock=time.time,now=None,
-                     baseline_reference=None,replay_inputs=None,exit_candidate=None,entry_source_segments=None):
+                     baseline_reference=None,replay_inputs=None,exit_candidate=None,entry_source_segments=None,
+                     _verify_only=False):
     from research.declared_shadow_model import validate_contract
     from research_v3_contract import canonical_json
     base=_safe_path(Path(repo_root)/'local-derived')
@@ -82,7 +83,7 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
         if (not isinstance(replay_inputs,dict) or replay_inputs.get('entry_receipt')!=entry
                 or replay_inputs.get('future_path_rows')!=path_rows
                 or replay_inputs.get('generation')!=generation
-                or evaluate_shadow_terminal(**replay_inputs)!=terminal):
+                or canonical_json(evaluate_shadow_terminal(**replay_inputs))!=canonical_json(terminal)):
             raise ValueError('COUNTERFACTUAL_SEMANTIC_REPLAY_MISMATCH')
         validate_contract(cost_contract,generation)
         if terminal.get('status')!='COMPLETE' or terminal.get('declared_contract_sha256')!=_hash(cost_contract):
@@ -154,7 +155,7 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             if len(specs)!=1: raise ValueError('COUNTERFACTUAL_BASELINE_UNKNOWN')
             composite_spec,composite=build_composite_policy_identity({'baseline_id':baseline_id,'baseline_spec':specs[0],'conservative_receipt':entry,
                 'policy_signature':specs[0]['policy_signature']}, exit_candidate or {})
-            if composite.get('composite_policy_signature')!=terminal.get('policy_signature') or composite_spec!=replay_inputs['policy_spec']:
+            if composite.get('composite_policy_signature')!=terminal.get('policy_signature') or canonical_json(composite_spec)!=canonical_json(replay_inputs['policy_spec']):
                 raise ValueError('COUNTERFACTUAL_COMPOSITE_POLICY_MISMATCH')
             if not _positive(binding.get('holdout_start_ts'))<=signal<_positive(binding.get('holdout_end_ts')):
                 raise ValueError('COUNTERFACTUAL_OUTSIDE_WINDOW')
@@ -173,7 +174,8 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             scope='SEALED_POLICY_REPLAY_PROOF_NOT_QUALIFIED'; seal_hash=wrapper['receipt_sha256']
         if _source(_check(repo_root,data_root,source_revision,now=now))!=source:
             raise ValueError('COUNTERFACTUAL_SOURCE_CHANGED')
-        body={'schema':'local_counterfactual_completion_v1','source':source,'scope':scope,
+        persisted_replay={k:v for k,v in replay_inputs.items() if k!='source_segment_payloads'}
+        body={'schema':'local_counterfactual_completion_v2','source':source,'scope':scope,
             'opportunity_reference':opportunity_ref,'direction':direction,'policy_id':policy_id,
             'policy_signature':terminal.get('policy_signature'),'entry':entry,'terminal':terminal,
             'path_rows':path_rows,'cost_contract':cost_contract,'seal_request_id':seal_request_id,
@@ -181,10 +183,14 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
             'baseline_reference':baseline_reference,
             'exit_candidate':exit_candidate,
             'entry_source_segments':entry_source_segments,
+            'replay_inputs':persisted_replay,
             'seal_receipt_sha256':seal_hash,'verified_at':verified,'qualification_allowed':False}
         body['entry_semantic_replay_verified']=seal_request_id is not None
         body['terminal_semantic_replay_verified']=True
         body['verification_blockers']=[] if seal_request_id is not None else ['ENTRY_SOURCE_REPLAY_NOT_RECOMPUTED']
+        if _verify_only:
+            return {'body':body,'opportunity':opportunity}
+        if len(_encoded(body))>2097152: raise ValueError('COUNTERFACTUAL_PROOF_LIMIT')
         digest=_hash(body); _write_once(base/'counterfactual-completions'/(digest+'.json'),body)
         return {'artifact_sha256':digest,'scope':scope,'qualification_allowed':False}
 

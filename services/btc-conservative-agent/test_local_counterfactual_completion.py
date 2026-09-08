@@ -96,6 +96,8 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
     opts,mapping=prepared(tmp_path/'training'); generation=mapping['expected_generation']
     args=inputs(tmp_path/'proof',monkeypatch,generation=generation,shift=2000000)
     original=json.loads((args['data_root']/'v3/ledgers/opportunity.jsonl').read_bytes())
+    original['feature_snapshot_at_signal']={'capture_schema':'measured_feature_capture_v1',
+        'captured_at_ts':2000010.,'regime':'BULL'}
     original.update(signal_ts=2000010.,expiry_ts=2001810.,requested_qty=.4,requested_remaining_qty=.4,
         signed_quantity_constraints=args['entry']['quantity_constraints'],latency_sec=0,fees_usd=0,
         slippage_model='DECLARED_LIMIT',authoritative_parent_expiry=True,direction='UNKNOWN',
@@ -163,7 +165,35 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
     artifact=module.load_completion(args['repo_root'],result['artifact_sha256'])
     assert artifact['entry_semantic_replay_verified'] is True
     assert artifact['verification_blockers']==[]
+    from research.holdout_counterfactual_provenance import verify_counterfactual_provenance
+    identity={'epoch_id':generation['epoch_id'],'source_episode_id':'original','opportunity_id':'opp',
+        'policy_id':'policy','policy_signature':args['terminal']['policy_signature'],'direction':'LONG',
+        'seal_request_id':args['seal_request_id']}
+    consumer_args={k:args[k] for k in ('repo_root','data_root','source_revision')}
+    consumer_args.update(artifact_sha256=result['artifact_sha256'],expected_identity=identity,
+        clock=lambda:2000030.,now=args.get('now'))
+    before_files=set((args['repo_root']/'local-derived/counterfactual-completions').iterdir())
+    proof=verify_counterfactual_provenance(**consumer_args)
+    assert proof['counterfactual_identity']==identity
+    assert proof['entry_semantic_replay_verified'] and proof['terminal_semantic_replay_verified']
+    assert proof['causal_provenance']['signal_ts']==2000010.
+    assert proof['qualification_allowed'] is False
+    assert 'source_lifecycle_identity' not in proof
+    assert set((args['repo_root']/'local-derived/counterfactual-completions').iterdir())==before_files
+    with pytest.raises(ValueError,match='EXPECTED_IDENTITY'):
+        verify_counterfactual_provenance(**{**consumer_args,'expected_identity':{**identity,'direction':'SHORT'}})
     import copy
+    for mutation in ('historical','missing_replay','forged_fill','forged_terminal','wrong_source'):
+        changed=copy.deepcopy(artifact)
+        if mutation=='historical': changed['scope']='HISTORICAL_REPLAY_ONLY'
+        elif mutation=='missing_replay': changed.pop('replay_inputs')
+        elif mutation=='forged_fill': changed['entry']['fill_price']=90.
+        elif mutation=='forged_terminal': changed['terminal']['net_pnl_usd']=99999.
+        else: changed['source']['revision']='wrong'
+        digest=_hash(changed)
+        (args['repo_root']/'local-derived/counterfactual-completions'/(digest+'.json')).write_text(json.dumps(changed),encoding='utf-8')
+        with pytest.raises(ValueError):
+            verify_counterfactual_provenance(**{**consumer_args,'artifact_sha256':digest})
     for kind in ('opportunity','schedule','direction','forged_terminal'):
         altered=copy.deepcopy(args)
         if kind=='opportunity': altered['baseline_reference']['opportunity_id']='other'
