@@ -95,8 +95,22 @@ def test_actual_directional_fill_to_terminal_to_scorecard(tmp_path,monkeypatch,v
     assert scorecard['input_counts'].get('shadow_terminal_rows_added')==2,scorecard
     assert scorecard['dynamic_cohorts']['groups'],scorecard['dynamic_cohorts']['rejections']
     for group in scorecard['dynamic_cohorts']['groups']:
-        with pytest.raises(ValueError,match='DYNAMIC_MAPPING_ADAPTER_CHECKSUM'):
-            build_local_dynamic_mapping(scorecard['dynamic_cohorts'],group_id=group['group_id'],expected_generation=generation,protocol=PROTOCOL)
+        mapping=build_local_dynamic_mapping(scorecard['dynamic_cohorts'],group_id=group['group_id'],expected_generation=generation,protocol=PROTOCOL)
+        written=write_local_dynamic_input(**args,rows=mapping['training_episodes'],mapping_payload=mapping)
+        holdout=produce_local_holdout(**args,input_sha256=written['input_sha256'])
+        assert holdout['excluded_counts']['EXACT_SOURCE_LIFECYCLE_IDENTITY_MISSING']==1
+        assert holdout['rows']==[] and holdout['qualification_allowed'] is False
+    envelope=scorecard['dynamic_cohorts']
+    for kind in ('metadata','inner','rehashed_groups','rehashed_generation'):
+        changed=copy.deepcopy(envelope)
+        if kind=='metadata': changed['status']='tampered'
+        elif kind=='inner': changed['adapter_payload']['counts']['supported_outcomes']=999
+        elif kind=='rehashed_groups': changed['groups']=[]
+        else: changed['expected_generation']={}
+        if kind.startswith('rehashed'):
+            changed['publication_sha256']=hashlib.sha256(canonical_json({k:v for k,v in changed.items() if k!='publication_sha256'}).encode()).hexdigest()
+        with pytest.raises(ValueError,match='PUBLICATION'):
+            build_local_dynamic_mapping(changed,group_id=group['group_id'],expected_generation=generation,protocol=PROTOCOL)
 
 
 @pytest.mark.parametrize('defect',['bool','string','duplicate','missing_side'])

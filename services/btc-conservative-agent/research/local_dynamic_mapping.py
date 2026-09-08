@@ -51,6 +51,18 @@ def build_local_dynamic_mapping(adapted, *, group_id, expected_generation, proto
         raise ValueError('DYNAMIC_MAPPING_ADAPTER_INVALID')
     if len(_json(adapted).encode()) > MAX_BYTES:
         raise ValueError('DYNAMIC_MAPPING_BYTE_BUDGET')
+    if 'publication_sha256' in adapted or 'adapter_payload' in adapted:
+        from research_v3_contract import canonical_json
+        import hashlib
+        if (adapted.get('adapter_envelope_schema')!='dynamic_adapter_publication_v1'
+                or adapted.get('publication_sha256')!=hashlib.sha256(canonical_json(
+                    {k:v for k,v in adapted.items() if k!='publication_sha256'}).encode()).hexdigest()
+                or not isinstance(adapted.get('adapter_payload'),dict)):
+            raise ValueError('DYNAMIC_MAPPING_PUBLICATION_CHECKSUM')
+        outer=adapted
+        adapted=outer['adapter_payload']
+        if any(outer.get(key)!=value for key,value in adapted.items() if key!='blockers'):
+            raise ValueError('DYNAMIC_MAPPING_PUBLICATION_CORE_CONFLICT')
     if (not isinstance(expected_generation, dict)
             or any(not isinstance(expected_generation.get(k), str) or not expected_generation[k].strip()
                    for k in GENERATION_FIELDS)

@@ -419,6 +419,8 @@ def _dynamic_cohort_publication(adapted, unknown_shadow, expected, shadow_aggreg
         result = adapt_dynamic_cohorts(inputs(), expected_generation=expected,
             feature_names=DEFAULT_CAUSAL_FEATURES if feature_names is None else feature_names,
             protocol={} if protocol is None else protocol, **options)
+        # Preserve the exact original adapter contract before adding publication metadata.
+        adapter_payload=json.loads(canonical_json(result))
         supported = result["counts"]["supported_outcomes"]
         result.update(status="BUILT_INCOMPLETE_RESEARCH_ONLY" if supported else "UNAVAILABLE",
                       blockers=sorted(set(result.get("blockers", []) +
@@ -471,6 +473,8 @@ def _dynamic_cohort_publication(adapted, unknown_shadow, expected, shadow_aggreg
         result["nested_research_evaluations"] = evaluations
         result["nested_research_protocol"] = settings
         result["sealed_holdout"] = None
+        result['adapter_payload']=adapter_payload
+        result['adapter_envelope_schema']='dynamic_adapter_publication_v1'
         # The adapter hash covers its own output; this hash binds publication metadata too.
         result["publication_sha256"] = hashlib.sha256(canonical_json(result).encode()).hexdigest()
         return result
