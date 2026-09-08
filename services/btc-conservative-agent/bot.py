@@ -3536,14 +3536,49 @@ def _get_post_ai_evidence_worker(hook: str):
         return worker
 
 
+def _mark_scheduled_post_ai_stage(stage: str) -> None:
+    """Bounded owner-only synchronous stage timing; no payloads or gate changes."""
+    stages = {"POST_AI_EVIDENCE", "POST_AI_SHADOW", "POST_AI_GRID",
+              "POST_AI_COMBO", "POST_AI_CONTINUOUS", "POST_AI_PIPELINE", "IDLE"}
+    if stage not in stages:
+        raise ValueError("unknown post-AI timing stage")
+    with state_lock:
+        if scheduled_ai_cycle_state.get("owner_ident") != threading.get_ident():
+            return
+        now = time.monotonic()
+        previous = scheduled_ai_cycle_state.get("stage")
+        # Same-owner child lanes belong to the enclosing synchronous fanout.
+        # Their enqueue must not replace or reset the outer stage timer.
+        if stage == "POST_AI_EVIDENCE" and previous in stages - {"IDLE", "POST_AI_EVIDENCE"}:
+            return
+        started = scheduled_ai_cycle_state.pop("post_ai_stage_monotonic", None)
+        durations = dict(scheduled_ai_cycle_state.get("post_ai_stage_seconds") or {})
+        if previous in stages and started is not None:
+            elapsed = now - started
+            if math.isfinite(elapsed) and elapsed >= 0:
+                total = durations.get(previous, 0.0) + elapsed
+                if math.isfinite(total):
+                    durations[previous] = round(total, 6)
+        scheduled_ai_cycle_state["post_ai_stage_seconds"] = {
+            key: durations[key] for key in sorted(stages - {"IDLE"}) if key in durations
+        }
+        if stage != "IDLE":
+            scheduled_ai_cycle_state["post_ai_stage_monotonic"] = now
+            scheduled_ai_cycle_state.update(stage=stage, stage_started_ts=time.time())
+
+
 def enqueue_post_ai_research_hooks(ctx: dict, ai_result: dict, research_lane: str) -> dict:
     trade_id = str(ai_result.get("trade_id") or ctx.get("trade_id") or uuid.uuid4().hex)
     accepted = {}
     with state_lock:
-        scheduled_ai_cycle_state.update({
-            "stage": "POST_AI_ENQUEUE",
-            "stage_started_ts": time.time(),
-        })
+        if scheduled_ai_cycle_state.get("stage") not in {
+            "POST_AI_SHADOW", "POST_AI_GRID", "POST_AI_COMBO",
+            "POST_AI_CONTINUOUS", "POST_AI_PIPELINE",
+        }:
+            scheduled_ai_cycle_state.update({
+                "stage": "POST_AI_ENQUEUE",
+                "stage_started_ts": time.time(),
+            })
     for hook in ("reversal_study", "ai_reason"):
         key = f"{hook}:{trade_id}"
         queued = _get_post_ai_evidence_worker(hook).submit(
@@ -3565,6 +3600,7 @@ def enqueue_post_ai_research_hooks(ctx: dict, ai_result: dict, research_lane: st
             _record_post_ai_evidence_gap(hook, "QUEUE_REJECTED", key)
     with state_lock:
         scheduled_ai_cycle_state["last_completed_hook"] = "post_ai_hooks_enqueued"
+    _mark_scheduled_post_ai_stage("POST_AI_EVIDENCE")
     return accepted
 
 
@@ -23079,22 +23115,27 @@ def process_signal(event: dict):
                 if is_ai_scan_lane(research_lane) and ai:
                     # One correlated shadow schedule belongs to the paid
                     # shared call, never to each independently evaluated tile.
+                    _mark_scheduled_post_ai_stage("POST_AI_SHADOW")
                     _arm_shared_compressed_shadow_chase(ctx, ai)
                     # Family tiles skip per-lane touch grids. Arm one discovery
                     # grid here so offset×chase research still runs when tiles
                     # are ON, without placing extra paper orders.
+                    _mark_scheduled_post_ai_stage("POST_AI_GRID")
                     _arm_shared_discovery_touch_grid(ctx, ai)
                     # Fan out five independent paper-only family lifecycles
                     # and the Continuous benchmark directly from the completed
                     # shared-AI result.  Continuous owns an independent verdict,
                     # order ID, and lifecycle; omitting this call leaves the
                     # benchmark tile evaluation-only even while its toggle is ON.
+                    _mark_scheduled_post_ai_stage("POST_AI_COMBO")
                     spawn_combo_lanes_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
                     )
+                    _mark_scheduled_post_ai_stage("POST_AI_CONTINUOUS")
                     spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
                     )
+                    _mark_scheduled_post_ai_stage("POST_AI_PIPELINE")
 
             if not ai:
                 enforce_log({"trade_id": ctx["trade_id"]}, "BLOCKED", "AI_FAIL")
@@ -50599,6 +50640,8 @@ def periodic_pipeline_loop():
                         "started_ts": time.time(),
                         "stage": "DETECT_EVENT",
                         "stage_started_ts": time.time(),
+                        "post_ai_stage_seconds": {},
+                        "post_ai_stage_monotonic": None,
                     })
                 logger.info("[HEARTBEAT] V3.1 periodic AI check [PIPELINE ENFORCEMENT]")
                 event = detect_event_light()
@@ -50611,12 +50654,14 @@ def periodic_pipeline_loop():
                             "stage_started_ts": time.time(),
                         })
                     process_signal(event)
+                    _mark_scheduled_post_ai_stage("IDLE")
                     with state_lock:
                         scheduled_ai_cycle_state.update({
                             "stage": "AUTHORITATIVE_COMPLETE",
                             "stage_started_ts": time.time(),
                         })
             finally:
+                _mark_scheduled_post_ai_stage("IDLE")
                 with state_lock:
                     scheduled_ai_cycle_state.update({
                         "owner": None,
