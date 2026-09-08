@@ -101,9 +101,15 @@ function Start-FlyGenerationResume {
   Assert-FlyBundleUnlinkedPath -Path $leasePath
   $lease = [IO.File]::Open($leasePath,
     [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+  $resumePreviousOptIn = [Environment]::GetEnvironmentVariable('FLY_SYNC_TRANSPORT_BUNDLES', 'Process')
   try {
+    [Environment]::SetEnvironmentVariable('FLY_SYNC_TRANSPORT_BUNDLES', '1', 'Process')
     Invoke-FlyGenerationResume -Identity $Identity -ReadManifest $readManifest -RunAttempt $run
   } finally {
-    $lease.Dispose()
+    try {
+      [Environment]::SetEnvironmentVariable('FLY_SYNC_TRANSPORT_BUNDLES', $resumePreviousOptIn, 'Process')
+    } finally {
+      $lease.Dispose()
+    }
   }
 }
