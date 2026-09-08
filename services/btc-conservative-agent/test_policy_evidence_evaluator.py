@@ -416,6 +416,7 @@ def test_joined_pre_entry_buckets_are_consumed_without_relabelling_measurements(
         "opportunity_id": opportunity["opportunity_id"],
         "availability_boundary": "PRE_DECISION_ONLY",
         "captured_at_ts": 99.0,
+        "capture_schema": "measured_feature_capture_v1",
         "features": {
             "atr_bucket": "ATR_HIGH",
             "realized_volatility_bucket": "RV_HIGH",
@@ -450,6 +451,7 @@ def test_partial_pre_entry_receipt_preserves_valid_dimensions_but_not_qualificat
     receipt = {
         "episode_id": "ep-1", "opportunity_id": "opp-1",
         "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 99.0,
+        "capture_schema": "measured_feature_capture_v1",
         "features": {
             "atr_bucket": "ATR_HIGH", "spread_bucket": "SPREAD_TIGHT",
             "depth_bucket": "DEPTH_THICK", "liquidity_bucket": "LIQUID",
@@ -507,7 +509,7 @@ def test_handcrafted_pre_entry_projection_fails_closed(defect):
     assert features["atr_bucket"]["status"] == "UNKNOWN"
 
 
-@pytest.mark.parametrize("defect", ["late", "nonfinite", "malformed", "ambiguous", "mismatched"])
+@pytest.mark.parametrize("defect", ["late", "nonfinite", "malformed", "ambiguous", "mismatched", "missing_schema"])
 def test_invalid_pre_entry_receipts_never_become_observed(tmp_path, defect):
     opportunity = {
         "episode_id": "ep-1", "opportunity_id": "opp-1",
@@ -519,6 +521,7 @@ def test_invalid_pre_entry_receipts_never_become_observed(tmp_path, defect):
         "opportunity_id": opportunity["opportunity_id"],
         "availability_boundary": "PRE_DECISION_ONLY",
         "captured_at_ts": 101.0 if defect == "late" else 99.0,
+        "capture_schema": "measured_feature_capture_v1",
         "features": {
             "atr_bucket": (
                 float("inf") if defect == "nonfinite"
@@ -533,6 +536,8 @@ def test_invalid_pre_entry_receipts_never_become_observed(tmp_path, defect):
     }
     if defect == "mismatched":
         receipt["opportunity_id"] = "other-opportunity"
+    if defect == "missing_schema":
+        receipt.pop("capture_schema")
     receipts = [receipt, dict(receipt)] if defect == "ambiguous" else [receipt]
     joined, _ = join_pre_entry_feature_receipts([opportunity], receipts)
     features = _regime_features_at_signal(joined[0], {})
