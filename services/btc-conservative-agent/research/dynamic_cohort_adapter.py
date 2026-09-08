@@ -143,7 +143,7 @@ def adapt_dynamic_cohorts(
             counts["exact_quantity_fallback_rows"] += 1
         dimensions = {k: row[k] for k in (
             "evidence_world", "cost_model_id", "simulation_model", "economics_evidence_basis",
-            "market", "symbol", "bucket_definition_signature",
+            "market", "symbol", "direction", "bucket_definition_signature",
         )}
         dimensions["sizing"] = sizing
         gid = _hash(dimensions)
