@@ -633,8 +633,15 @@ def classify_evidence_collection(
     blockers = []
     if supplied != actual:
         blockers.append("EVIDENCE_COLLECTION_RECEIPT_SHA256_MISMATCH")
-    if float(receipt.get("evidence_collected_at") or 0) < float(receipt.get("qualification_eligible_at") or 0):
-        blockers.append("EVIDENCE_COLLECTION_TOO_EARLY")
+    try:
+        collected = float(receipt["evidence_collected_at"])
+        eligible = float(receipt["qualification_eligible_at"])
+        if not all(math.isfinite(value) and value > 0 for value in (collected, eligible)):
+            blockers.append("EVIDENCE_COLLECTION_TIME_INVALID")
+        elif collected < eligible:
+            blockers.append("EVIDENCE_COLLECTION_TOO_EARLY")
+    except (KeyError, TypeError, ValueError, OverflowError):
+        blockers.append("EVIDENCE_COLLECTION_TIME_INVALID")
     completions = [
         row.get("bundle_completion") for row in material
         if isinstance(row.get("bundle_completion"), dict)
