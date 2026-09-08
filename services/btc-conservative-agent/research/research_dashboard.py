@@ -8469,14 +8469,18 @@ function renderMatchedAI(c) {
   });
 }
 
+function renderScanCoverage(census) {
+  const observed=census.observed_joined_opportunity_rows;
+  const reasons=(Array.isArray(census.blockers) ? census.blockers : [])
+    .filter(code => typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,95}$/.test(code)).slice(0,4);
+  document.getElementById('scan-census-coverage').textContent = `Observed scan child rows: ${census.index_caught_up === true && Number.isSafeInteger(observed) && observed >= 0 ? observed : 'unavailable'} · index ${census.index_caught_up === true ? 'caught up' : 'incomplete or unavailable'} · exhaustive collection UNKNOWN; not qualification evidence.${reasons.length ? ' Reasons: '+reasons.join(', ') : ''}`;
+}
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
   renderMatchedAI(d.matched_selection_comparison || {});
   renderAICoverage(d.ai_verdict_coverage || {});
-  const census=d.scan_census_observed_coverage || {};
-  const observed=census.observed_joined_opportunity_rows;
-  document.getElementById('scan-census-coverage').textContent = `Observed scan child rows: ${census.index_caught_up === true && Number.isSafeInteger(observed) && observed >= 0 ? observed : 'unavailable'} · index ${census.index_caught_up === true ? 'caught up' : 'incomplete or unavailable'} · exhaustive collection UNKNOWN; not qualification evidence.`;
+  renderScanCoverage(d.scan_census_observed_coverage || {});
   const status = String(d.calibration_status || 'NO_DATA').toUpperCase();
   const showConfidence = status === 'AVAILABLE';
   const confidenceView = document.getElementById('ai-confidence-view');

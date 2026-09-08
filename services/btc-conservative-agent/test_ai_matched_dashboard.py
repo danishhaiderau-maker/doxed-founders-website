@@ -6,6 +6,20 @@ import subprocess
 SOURCE = (Path(__file__).resolve().parent / 'research' / 'research_dashboard.py').read_text(encoding='utf-8-sig')
 
 
+def test_scan_renderer_shows_bounded_codes_without_payloads():
+    js='function renderScanCoverage(census) {'+SOURCE.split('function renderScanCoverage(census) {',1)[1].split('\nasync function loadAI()',1)[0]
+    code="const assert=require('assert'); const el={textContent:''}; const document={getElementById:()=>el};\n"+js+"""
+renderScanCoverage({blockers:['MIRROR_SYNC_RECEIPT_FAILED','private path /secret','<script>'],observed_joined_opportunity_rows:4});
+assert(el.textContent.includes('rows: unavailable'));
+assert(el.textContent.includes('MIRROR_SYNC_RECEIPT_FAILED'));
+assert(!el.textContent.includes('secret') && !el.textContent.includes('<script>'));
+renderScanCoverage({index_caught_up:true,observed_joined_opportunity_rows:0});
+assert(el.textContent.includes('rows: 0'));
+assert(el.textContent.includes('exhaustive collection UNKNOWN'));
+"""
+    subprocess.run(['node','-e',code],check=True,capture_output=True,text=True)
+
+
 def test_existing_ai_navigation_and_scope_separate_evidence():
     tree=ast.parse(SOURCE)
     labels=[node.value for node in ast.walk(tree) if isinstance(node,ast.Constant) and isinstance(node.value,str)]
