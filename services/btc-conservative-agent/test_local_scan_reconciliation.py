@@ -105,3 +105,30 @@ def test_final_page_has_no_cursor_or_truncation(tmp_path,monkeypatch):
     result=module.reconcile_scans(**args,reference_after=after)
     assert result['sample_original_references']==[] and result['next_reference_cursor'] is None
     assert not result['reference_sample_truncated']
+
+
+def test_active_mirror_writer_blocks_reconciliation_without_publication(tmp_path,monkeypatch):
+    from research.mirror_generation_lease import MirrorGenerationLease, MirrorGenerationLeaseTimeout
+    store,args=fixture(tmp_path,monkeypatch)
+    writer=MirrorGenerationLease(args['data_root'],owner='test-sync-writer')
+    writer.acquire(timeout_seconds=0)
+    try:
+        with pytest.raises(MirrorGenerationLeaseTimeout):
+            module.reconcile_scans(**args)
+        assert not (args['repo_root']/'local-derived/scan-reconciliation/current.json').exists()
+    finally:
+        writer.release()
+    assert module.reconcile_scans(**args)['index_caught_up']
+
+
+def test_failed_reconciliation_releases_os_lease(tmp_path,monkeypatch):
+    from research.mirror_generation_lease import MirrorGenerationLease
+    store,args=fixture(tmp_path,monkeypatch)
+    with pytest.raises(ValueError,match='BINDING_CONFLICT'):
+        module.reconcile_scans(**dict(args,config_signature='wrong'))
+    writer=MirrorGenerationLease(args['data_root'],owner='test-sync-after-failure')
+    writer.acquire(timeout_seconds=0)
+    try:
+        assert writer.held
+    finally:
+        writer.release()
