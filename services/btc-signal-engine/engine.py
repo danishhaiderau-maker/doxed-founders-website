@@ -16950,12 +16950,6 @@ def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = No
         or source.get("observed_ts")
         or source.get("signal_ts")
     )
-    try:
-        observed_ts = float(raw_observed)
-    except (TypeError, ValueError):
-        observed_ts = 0.0
-    if observed_ts <= 0:
-        observed_ts = time.time()
     regime = (
         context.get("regime")
         or market_context.get("regime_label")
@@ -16986,6 +16980,13 @@ def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = No
     source["volatility_of_volatility"] = vov
     source["adx"] = adx
     source["causal_snapshot_phase"] = "PRE_AI_DECISION"
+    # Event time is not evidence of when these copied inputs were available.
+    # Measure availability after snapshot construction; never backdate to the
+    # original signal. A late capture must remain late in analyzer checks.
+    observed_ts = time.time()
+    source["source_event_ts"] = raw_observed
+    source["capture_schema"] = "measured_feature_capture_v1"
+    source["captured_at_ts"] = observed_ts
     source["observed_ts"] = observed_ts
     # Analyzer dynamic-policy contract: named features are {value, observed_ts}.
     source["atr_bucket"] = _causal_feature_observation(_atr_pct_bucket(atr14), observed_ts)
