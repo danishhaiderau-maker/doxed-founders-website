@@ -62,6 +62,16 @@ class RuntimeDeclarationTests(unittest.TestCase):
         args["quantity_capture"]["receipt"]["quantity_step"] = ".5"
         self.assertIsNone(build_runtime_baseline_declaration(**args)["declaration"])
 
+    def test_missing_quantity_preserves_safe_capture_cause(self):
+        args = self.inputs()
+        args["quantity_capture"] = {"receipt": None, "supported": False,
+            "reasons": ["VENUE_MIN_NOTIONAL_UNAVAILABLE", "provider secret", {}]}
+        result = build_runtime_baseline_declaration(**args)
+        self.assertEqual(result["status"], "UNSUPPORTED")
+        self.assertIsNone(result["declaration"])
+        self.assertEqual(result["reasons"], ["SIGNED_QUANTITY_CONSTRAINTS_MISSING",
+                                           "VENUE_MIN_NOTIONAL_UNAVAILABLE"])
+
     def test_executable_lane_source_for_all_verdicts(self):
         tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8-sig"))
         fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_write_v3_shared_lane_decision")

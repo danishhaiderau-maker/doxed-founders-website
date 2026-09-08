@@ -34,6 +34,18 @@ def build_runtime_baseline_declaration(*, context, quantity_capture, symbol,
     receipt = quantity_capture.get("receipt") if isinstance(quantity_capture, Mapping) else None
     constraints, defects = validate_signed_quantity_constraints(receipt, symbol=symbol)
     reasons.extend(defects)
+    if defects and isinstance(quantity_capture, Mapping):
+        # Retain bounded producer codes, not raw provider errors or metadata.
+        known_capture_reasons = {
+            "VENUE_MARKET_METADATA_UNAVAILABLE", "VENUE_MARKET_METADATA_INVALID",
+            "VENUE_QUANTITY_PRECISION_OR_STEP_UNAVAILABLE", "VENUE_MIN_LOT_UNAVAILABLE",
+            "VENUE_MIN_NOTIONAL_UNAVAILABLE", "SOURCE_REVISION_UNAVAILABLE",
+            "CAPTURE_TIME_UNAVAILABLE", "VENUE_QUANTITY_CONSTRAINT_CAPTURE_FAILED",
+        }
+        capture_reasons = quantity_capture.get("reasons")
+        if isinstance(capture_reasons, (list, tuple)):
+            reasons.extend(code for code in capture_reasons
+                           if isinstance(code, str) and code in known_capture_reasons)
     if constraints:
         if constraints.get("source_revision") != source_revision:
             reasons.append("QUANTITY_REVISION_MISMATCH")
