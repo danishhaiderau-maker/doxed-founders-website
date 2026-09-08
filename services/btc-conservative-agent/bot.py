@@ -44281,22 +44281,28 @@ def api_data_sync_lifecycle_ack():
     })
 
 
-def _data_sync_lifecycle_cleanup_current_identity() -> dict:
-    """Bind cleanup to the exact running revision, epoch, registry and config."""
-    revision = _runtime_git_rev()
+def _current_collection_config_signature() -> str:
+    """Recompute current config identity without unrelated session/registry I/O."""
     config_material = {
         key: state.get(key)
         for key in sorted(_persistent_config_keys())
         if key in state
     }
+    return hashlib.sha256(json.dumps(
+        config_material, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+
+
+def _data_sync_lifecycle_cleanup_current_identity() -> dict:
+    """Bind cleanup to the exact running revision, epoch, registry and config."""
+    revision = _runtime_git_rev()
+    config_signature = _current_collection_config_signature()
     return {
         "source_git_rev": revision,
         "deployed_git_rev": revision,
         "collection_epoch_id": _collector_v22_epoch_id(),
         "tile_registry_signature": active_tile_registry_signature(),
-        "config_signature": hashlib.sha256(json.dumps(
-            config_material, separators=(",", ":"), sort_keys=True,
-        ).encode("utf-8")).hexdigest(),
+        "config_signature": config_signature,
     }
 
 
@@ -51008,7 +51014,7 @@ def main():
     _restore_collector_v22_provisionals()
     load_persistent_config()
     set_collection_config_signature_provider(
-        lambda: _data_sync_lifecycle_cleanup_current_identity()["config_signature"]
+        _current_collection_config_signature
     )
     _apply_env_live_gating()
     reset_transient_runtime_state()
