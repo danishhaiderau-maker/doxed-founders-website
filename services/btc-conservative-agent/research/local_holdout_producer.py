@@ -7,6 +7,7 @@ from dynamic_policy_analyzer import load_verified_local_dynamic_mapping
 from research.local_dynamic_input import _check,_source,_safe_path,_encoded
 from research.mirror_generation_lease import MirrorGenerationLease
 from research.holdout_collection_provenance import verify_collection_provenance
+from research.holdout_causal_provenance import require_matching_causal_projection
 from research_v3_sealed_holdout import _write_once
 
 
@@ -29,7 +30,7 @@ def produce_local_holdout(**options):
         source=_source(token)
         if source!=input_receipt['source_generation']:
             raise ValueError('HOLDOUT_INPUT_SOURCE_CHANGED')
-        job=hashlib.sha256(_encoded({'input':input_receipt,'source':source,
+        job=hashlib.sha256(_encoded({'contract':'causal-opportunity-v1','input':input_receipt,'source':source,
             'episodes':mapping['training_episodes']})).hexdigest()
         cache=_safe_path(Path(options['repo_root'])/'local-derived/holdout-progress'/job[:16])
         if cache.is_relative_to(root) or root.is_relative_to(cache): raise ValueError('HOLDOUT_RAW_OVERLAP')
@@ -76,11 +77,21 @@ def produce_local_holdout(**options):
                     if verified_count>=32:
                         deferred+=1; continue
                     verified_count+=1
-                    proof=verify_collection_provenance(matches[0],epoch_id=key[0],source_episode_id=key[1],
-                        policy_signature=key[2],research_lane=key[3],expected_provenance=provenance)
+                    try:
+                        proof=verify_collection_provenance(matches[0],epoch_id=key[0],source_episode_id=key[1],
+                            policy_signature=key[2],research_lane=key[3],expected_provenance=provenance,
+                            data_root=root)
+                    except ValueError as error:
+                        if not str(error).startswith('HOLDOUT_CAUSAL_'): raise
+                        proof={'causal_error':str(error)}
                     stored={'job':job,'key':cache_key,'proof':proof}
                     stored['sha256']=hashlib.sha256(_encoded(stored)).hexdigest()
                     pending_cache.append((cache_path,stored))
+                if proof.get('causal_error'):
+                    excluded[proof['causal_error']]+=1; continue
+                try: require_matching_causal_projection(original,proof.get('causal_provenance') or {})
+                except ValueError as error:
+                    excluded[str(error)]+=1; continue
                 completion=proof['completion']; state=completion.get('entry_outcome')
                 pnl=(completion.get('economics') or {}).get('net_pnl_usd') if state in {'FULL_FILL','PARTIAL_FILL'} else 0 if state=='NO_FILL' else None
                 if state!=outcome.get('outcome_state') or pnl is None or pnl!=outcome.get('net_pnl_usd'):

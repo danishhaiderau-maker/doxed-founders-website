@@ -10,7 +10,8 @@ from research.lifecycle_evidence_join import verify_manifest_collection_receipt
 
 
 def verify_collection_provenance(bundle_path, *, epoch_id, source_episode_id,
-                                 policy_signature, research_lane, expected_provenance):
+                                 policy_signature, research_lane, expected_provenance,
+                                 data_root=None):
     bundle=_safe_path(bundle_path)
     key=LifecycleKey(epoch_id,source_episode_id,policy_signature,research_lane)
     # Bound the existing verifier before it reads any bundle member. No links,
@@ -53,6 +54,11 @@ def verify_collection_provenance(bundle_path, *, epoch_id, source_episode_id,
         raise ValueError('HOLDOUT_COLLECTION_MANIFEST_MISMATCH')
     if (bundle/'manifest.json').read_bytes()!=before or not verify_bundle(bundle).get('passed'):
         raise ValueError('HOLDOUT_BUNDLE_CHANGED_DURING_READ')
+    causal=None
+    if data_root is not None:
+        from research.holdout_causal_provenance import verify_opportunity_reference
+        causal=verify_opportunity_reference(rows,data_root=_safe_path(data_root),
+            identity=key.as_dict(),provenance=expected_provenance)
     return {'schema':'qualification_bundle_collection_provenance_v1','identity':key.as_dict(),
         'provenance':dict(expected_provenance),'evidence_collected_at':receipt['evidence_collected_at'],
         'qualification_eligible_at':receipt['qualification_eligible_at'],
@@ -61,4 +67,5 @@ def verify_collection_provenance(bundle_path, *, epoch_id, source_episode_id,
         'evidence_collected_receipt_sha256':receipt['evidence_collected_receipt_sha256'],
         'completion_receipt_sha256':receipt['completion_receipt_sha256'],
         'completion':joined['completion'],
+        'causal_provenance':causal,
         'counterfactual_timestamp_inheritance_allowed':False,'qualification_allowed':False}

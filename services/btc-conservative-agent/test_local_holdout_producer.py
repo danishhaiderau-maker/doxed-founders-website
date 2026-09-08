@@ -11,6 +11,23 @@ from lifecycle_bundles import LifecycleKey,materialize_bundle
 from lifecycle_completion_receipts import build_evidence_collected_receipt
 
 
+def causal_rows(root,rows,key,provenance):
+    import json,hashlib
+    source={**provenance,'epoch_id':key.collection_epoch_id,'episode_id':key.episode_id,
+        'record_id':'opportunity-one','shared_ai_call_id':'scan-one','signal_ts':1000.,
+        'feature_snapshot_at_signal':{'capture_schema':'measured_feature_capture_v1',
+            'captured_at_ts':999.,'regime':{'value':'BULL','observed_ts':999.}}}
+    raw=(json.dumps(source)+'\n').encode()
+    path=root/'v3/ledgers/opportunity.jsonl'; path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_bytes(raw)
+    rows[0].update(**key.as_dict(),**provenance)
+    rows[0].update(resolution_scope='LANE_ENTRY',opportunity_id='opportunity-one',shared_ai_call_id='scan-one',
+        shared_context_binding={'status':'BOUND','references':[{'ledger':'opportunity',
+            'source_row':source,'byte_offset':0,'row_length':len(raw),
+            'row_sha256':hashlib.sha256(raw).hexdigest()}]})
+    return rows
+
+
 def test_discovery_projection_preserves_only_explicit_lineage():
     from research.discovery_scorecard_publication import _dynamic_projection
     identity={'collection_epoch_id':'e','episode_id':'original','policy_signature':'p','research_lane':'lane'}
@@ -21,7 +38,8 @@ def test_discovery_projection_preserves_only_explicit_lineage():
     assert _dynamic_projection({'episode_id':'e','policy_signature':'p','research_lane':'lane'}, {})['source_lifecycle_identity'] is None
 
 
-def test_real_mirror_bundle_producer_preserves_exact_lane(tmp_path,monkeypatch):
+@pytest.mark.parametrize('changed',[None,'signal','features','opportunity'])
+def test_real_mirror_bundle_producer_preserves_exact_lane(tmp_path,monkeypatch,changed):
     args,mapping=prepared(tmp_path); generation=mapping['expected_generation']
     key=LifecycleKey(generation['epoch_id'],'original-episode','a'*64,'CONTINUOUS')
     provenance={k:generation[k] for k in ('source_revision','deployed_revision','tile_config_signature')}
@@ -32,14 +50,23 @@ def test_real_mirror_bundle_producer_preserves_exact_lane(tmp_path,monkeypatch):
         provenance=provenance,collected_at=evidence.NOW)['receipt']
     rows=evidence._terminal_rows()+[evidence._row('lifecycle','complete',bundle_completion=completion),
         evidence._row('lifecycle','collection',evidence_collection_receipt=receipt)]
+    causal_rows(args['data_root'],rows,key,provenance)
     assert materialize_bundle(args['data_root'],key,rows,now=evidence.NOW)['written']
     source=row(generation=generation,episode_id=key.episode_id,outcome_state='NO_FILL',net_pnl_usd=0,
         source_lifecycle_identity=key.as_dict(),config_signature='source-config')
+    if changed=='signal': source['signal_ts']=1001.
+    elif changed=='features': source['pre_entry_features']['regime']['value']='BEAR'
+    elif changed=='opportunity': source['opportunity_id']='swapped-opportunity'
     adapted=adapt_dynamic_cohorts([source],expected_generation=generation,feature_names=['regime'],protocol=PROTOCOL)
     mapping=build_local_dynamic_mapping(adapted,group_id=adapted['groups'][0]['group_id'],expected_generation=generation,protocol=PROTOCOL)
     args['config_signature']=_hash(PROTOCOL)
     written=write_local_dynamic_input(**args,rows=mapping['training_episodes'],mapping_payload=mapping)
     result=produce_local_holdout(**args,input_sha256=written['input_sha256'])
+    if changed:
+        assert not result['rows']
+        assert sum(result['excluded_counts'].values())==1
+        assert next(iter(result['excluded_counts'])).startswith('HOLDOUT_CAUSAL_PROJECTION_')
+        return
     assert len(result['rows'])==1
     assert result['rows'][0]['source_episode_id']==key.episode_id
     assert result['rows'][0]['evidence_collected_at']==evidence.NOW
@@ -58,7 +85,8 @@ def test_missing_lineage_excluded_and_bad_mirror_rejected(tmp_path):
     with pytest.raises(MirrorCoherenceError): produce_local_holdout(**args,input_sha256=written['input_sha256'])
 
 
-def test_bounded_resume_no_partial_export_and_cache_tamper(tmp_path,monkeypatch):
+@pytest.mark.parametrize('causal_missing',[False,True])
+def test_bounded_resume_no_partial_export_and_cache_tamper(tmp_path,monkeypatch,causal_missing):
     import json
     from copy import deepcopy
     from research import local_holdout_producer as module
@@ -82,7 +110,11 @@ def test_bounded_resume_no_partial_export_and_cache_tamper(tmp_path,monkeypatch)
     calls=[]
     def proof(path,**k):
         calls.append(k['source_episode_id'])
-        return {'completion':{'entry_outcome':'NO_FILL'},'evidence_collected_at':20000}
+        if causal_missing: raise ValueError('HOLDOUT_CAUSAL_OPPORTUNITY_MISSING_OR_AMBIGUOUS')
+        original=next(e for e in episodes if e['source_episode_id']==k['source_episode_id'])
+        return {'completion':{'entry_outcome':'NO_FILL'},'evidence_collected_at':20000,
+            'causal_provenance':{field:original[field] for field in
+                ('source_episode_id','opportunity_id','signal_ts','pre_entry_features')}}
     monkeypatch.setattr(module,'verify_collection_provenance',proof)
     first=module.produce_local_holdout(**opts)
     assert first['status']=='IN_PROGRESS' and first['pending_proofs']==8 and len(calls)==32
@@ -97,7 +129,9 @@ def test_bounded_resume_no_partial_export_and_cache_tamper(tmp_path,monkeypatch)
     assert not (args['repo_root']/'local-derived/holdout-inputs').exists()
     monkeypatch.setattr(module,'_write_once',writer)
     second=module.produce_local_holdout(**opts)
-    assert len(second['rows'])==40 and len(calls)==40
+    assert len(second['rows'])==(0 if causal_missing else 40) and len(calls)==40
+    if causal_missing:
+        assert second['excluded_counts']=={'HOLDOUT_CAUSAL_OPPORTUNITY_MISSING_OR_AMBIGUOUS':40}
     assert len(set(calls))==40
     cache=next((args['repo_root']/'local-derived/holdout-progress').glob('*/*.json'))
     cache.chmod(0o666); cache.write_text('{}')
