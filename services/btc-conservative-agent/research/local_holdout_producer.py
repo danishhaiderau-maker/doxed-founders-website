@@ -10,6 +10,14 @@ from research.holdout_collection_provenance import verify_collection_provenance
 from research_v3_sealed_holdout import _write_once
 
 
+def _read_manifest(path):
+    with _safe_path(path).open('rb') as stream:
+        raw = stream.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError('HOLDOUT_MANIFEST_READ_BUDGET')
+    return json.loads(raw)
+
+
 def produce_local_holdout(**options):
     mapping,input_receipt=load_verified_local_dynamic_mapping(**options)
     root=_safe_path(options['data_root'])
@@ -27,9 +35,7 @@ def produce_local_holdout(**options):
             paths.append(_safe_path(path))
         by_identity={}
         for path in paths:
-            with path.open('rb') as stream: raw=stream.read(1024*1024+1)
-            if len(raw)>1024*1024: raise ValueError('HOLDOUT_MANIFEST_READ_BUDGET')
-            manifest=json.loads(raw)
+            manifest=_read_manifest(path)
             identity=manifest.get('identity') or {}
             key=tuple(identity.get(k) for k in ('collection_epoch_id','episode_id','policy_signature','research_lane'))
             by_identity.setdefault(key,[]).append(path.parent)
@@ -50,7 +56,7 @@ def produce_local_holdout(**options):
                 provenance={k:generation[k] for k in ('source_revision','deployed_revision','tile_config_signature')}
                 provenance['config_signature']=outcome.get('source_config_signature')
                 # Config is an exact source identity, never the fitting protocol.
-                with (matches[0]/'manifest.json').open('rb') as stream: manifest=json.load(stream)
+                manifest=_read_manifest(matches[0]/'manifest.json')
                 if provenance['config_signature'] != (manifest.get('provenance') or {}).get('config_signature'):
                     excluded['SOURCE_CONFIG_BINDING_MISSING_OR_MISMATCH']+=1; continue
                 proof=verify_collection_provenance(matches[0],epoch_id=key[0],source_episode_id=key[1],
