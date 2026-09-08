@@ -40,7 +40,7 @@ def test_resumed_inventory_identity_independent_of_phase_telemetry(tmp_path,monk
         generation,receipt=module._build_resumable(parsed,Path(request['work_root']))
         seen.append(receipt)
         assert receipt['request_fingerprint']==fingerprint
-        assert set(receipt['invocation_phase_seconds'])=={'row_metadata','row_storage','directory_freeze'}
+        assert set(receipt['invocation_phase_seconds'])=={'row_metadata','row_storage','directory_freeze',*module.ROW_PHASES}
         assert all(v>=0 for v in receipt['invocation_phase_seconds'].values())
         if generation is not None: break
     assert generation is not None
@@ -80,3 +80,33 @@ def test_actual_build_attributes_injected_duration_without_changing_manifest(tmp
     assert receipt['rows_written']==baseline_receipt['rows_written']==1
     measured_files={str(p.relative_to(alternate)):p.read_bytes() for p in alternate.rglob('p*.json')}
     assert measured_files==baseline_files
+
+
+@pytest.mark.parametrize('operation,phase',[
+    ('_row_admitted_path','row_admission'),('_relpath','row_relative_path'),
+    ('_complete_record_size','row_tail'),('_consistency_mode','row_consistency'),
+    ('_quarantine_binding','row_quarantine_binding'),('_v3_ledger_generation','row_generation_binding'),
+    ('stat','row_stat')])
+def test_actual_build_subphase_attribution(tmp_path,monkeypatch,operation,phase):
+    module=_load_worker(); volume=tmp_path/'volume'; nonce='c'*32
+    request=_request(volume,nonce)
+    (volume/'runtime'/'a.json').write_text('{}')
+    request_path,result_path=_paths(volume,nonce); request_path.write_text(json.dumps(request))
+    parsed=module._load_request(request_path,result_path,nonce); work=Path(request['work_root'])
+    baseline,original_receipt=module._build_resumable(parsed,work)
+    original_pages={str(p.relative_to(work)):p.read_bytes() for p in work.rglob('p*.json')}
+    ticks=[0.0]; monkeypatch.setattr(module.time,'monotonic',lambda:ticks[0])
+    owner=Path if operation=='stat' else module
+    original=getattr(owner,operation)
+    def delayed(*args,**kwargs):
+        result=original(*args,**kwargs)
+        if operation!='stat' or args[0].name=='a.json': ticks[0]+=.125
+        return result
+    monkeypatch.setattr(owner,operation,delayed)
+    alternate=work/'alternate'; alternate.mkdir()
+    generation,receipt=module._build_resumable(parsed,alternate)
+    assert generation is not None and baseline is not None
+    assert receipt['invocation_phase_seconds'][phase]==.125
+    assert receipt['invocation_phase_seconds']['row_metadata']>=.125
+    assert receipt['request_fingerprint']==original_receipt['request_fingerprint']
+    assert {str(p.relative_to(alternate)):p.read_bytes() for p in alternate.rglob('p*.json')}==original_pages
