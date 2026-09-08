@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import pytest
 from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
@@ -279,7 +280,8 @@ def test_dashboard_releases_live_mirror_before_expensive_json_parsing(tmp_path, 
     assert [row["event_id"] for row in result["events"]] == ["event-1"]
 
 
-def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize("quote_times_present", [True, False])
+def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path, monkeypatch, quote_times_present):
     ledgers = tmp_path / "v3" / "ledgers"
     ledgers.mkdir(parents=True)
     opportunity = {
@@ -359,6 +361,7 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path,
         json.dumps({
             "schema": "market_microstructure_1s_v1", "symbol": "tBTCF0:USTF0",
             "bucket_ts": ts, "fresh": True, "valid_bbo": True,
+            **({"source_ts": ts, "observed_at_ts": ts} if quote_times_present else {}),
             "ask": 100 if ts == 102 else 101, "bid": 99,
             "ask_qty": 2, "bid_qty": 2, "sell_qty": 0, "buy_qty": 0,
             "sell_vwap": None, "buy_vwap": None, "trade_count": 0,
@@ -388,4 +391,5 @@ def test_policy_reports_prefer_v31_ledgers_over_empty_retired_v22_file(tmp_path,
     assert "NO_CURRENT_V22_EPOCH" not in reports["best"]["blockers"]
     assert reports["best"]["status"] == "NO QUALIFIED POLICY"
     assert reports["conservative_fill"]["counts"]["events"] == 1
-    assert reports["conservative_fill"]["counts"]["fill"] == 1
+    assert reports["conservative_fill"]["counts"]["fill"] == int(quote_times_present)
+    assert reports["conservative_fill"]["counts"]["unsupported"] == int(not quote_times_present)
