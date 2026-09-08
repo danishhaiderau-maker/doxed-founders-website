@@ -141,6 +141,8 @@ def test_actual_projection_is_atomically_published_and_route_visible(analyzer, t
     monkeypatch.setattr(store, "record_analyzer_completion", lambda *args, **kwargs: {})
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    # Bind the import to this fixture, not an inherited desktop report override.
+    monkeypatch.setenv("BTC_AGENT_REPORT_DIR", str(tmp_path))
     Path(analyzer.DYNAMIC_POLICY_ANALYSIS_REPORT_FILE).write_text(json.dumps(result), encoding="utf-8")
     analyzer._publish_completed_report_generation({"generation_id": "same-publication",
         "reports": [{"file": analyzer.DYNAMIC_POLICY_ANALYSIS_REPORT_FILE}], "text_artifacts": []})
