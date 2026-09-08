@@ -381,7 +381,9 @@ def test_normal_mode_advances_round_robin_and_reports_full_cycle_caught_up(tmp_p
         tmp_path, now=NOW,
     )
 
-    assert tuple(report["scan"]["ledgers"]) == ("pre_entry_features",)
+    assert tuple(report["scan"]["ledgers"]) == ("pre_entry_features", "opportunity")
+    assert report["scan"]["ledgers"]["opportunity"]["rows_scanned"] == 0
+    assert report["scan"]["ledgers"]["opportunity"]["bytes_indexed"] == 0
     assert report["scan"]["bytes_indexed"] == len(second)
     assert report["scan"]["caught_up"] is True
 

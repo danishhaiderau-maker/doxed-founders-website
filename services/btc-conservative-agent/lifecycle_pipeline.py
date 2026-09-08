@@ -355,13 +355,16 @@ def _process_incremental_lifecycle_pipeline(
                 path = ledger_dir / f"{ledger}.jsonl"
                 if not path.exists() or remaining_bytes <= 0 or remaining_rows <= 0:
                     continue
-                receipt = _index_ledger_chunk(
-                    connection,
-                    path,
-                    ledger,
-                    max_bytes=remaining_bytes,
-                    max_rows=remaining_rows,
-                )
+                try:
+                    receipt = _index_ledger_chunk(connection, path, ledger,
+                        max_bytes=remaining_bytes, max_rows=remaining_rows)
+                except ValueError as exc:
+                    # Exact split is raised before any cursor/event mutation.
+                    # Retry the untouched record with a full budget next time.
+                    if (remaining_bytes < scan_byte_limit and
+                            str(exc) == f"SCAN_BYTE_LIMIT_SPLITS_RECORD:{path.name}"):
+                        break
+                    raise
                 scan_receipts[ledger] = receipt
                 remaining_bytes -= int(receipt["bytes_indexed"])
                 remaining_rows -= int(receipt["rows_scanned"])
@@ -370,8 +373,8 @@ def _process_incremental_lifecycle_pipeline(
                         "UPDATE index_meta SET next_ledger = ? WHERE singleton = 1",
                         ((LEDGER_NAMES.index(ledger) + 1) % len(LEDGER_NAMES),),
                     )
-                break
-
+                if pressure_mode or emergency_closure_mode:
+                    break
             sources_caught_up = _ledger_sources_caught_up(connection, ledger_dir)
 
             dirty = (
