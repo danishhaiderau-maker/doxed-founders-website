@@ -131,6 +131,32 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
     args['opportunity_ref'].update(row_length=len(raw),row_sha256=hashlib.sha256(raw).hexdigest())
     args['baseline_reference']={'baseline_id':'MARKET_ENTRY_AT_SIGNAL','capture_signature':capture['capture_signature'],
         'opportunity_id':'opp','source_episode_id':'original'}
+    if authority=='real_mirror':
+        import shutil
+        from research.canonical_data_store import append_manifest
+        from test_declared_shadow_model import contract
+        shutil.copytree(args['data_root']/'v3',opts['data_root']/'v3',dirs_exist_ok=True)
+        state={}
+        for path in (opts['data_root']/'v3').rglob('*'):
+            if path.is_file():
+                data=path.read_bytes()
+                state[path.relative_to(opts['data_root']).as_posix()]={'size':len(data),'sha256':hashlib.sha256(data).hexdigest(),
+                    'inode':path.stat().st_ino,'mtime_ns':path.stat().st_mtime_ns}
+        (opts['data_root']/'.fly-sync-state.json').write_text(json.dumps(state))
+        manifest=json.loads((opts['data_root']/'canonical_dataset_current.json').read_text())
+        fields={k:v for k,v in manifest.items() if k not in ('entry_hash','previous_entry_hash','recorded_at','schema')}
+        fields['dataset_checksum']=_hash({'revision':generation['source_revision'],'epoch':generation['epoch_id'],'files':state})
+        promoted=append_manifest(opts['data_root'],fields)
+        generation={**generation,'manifest_entry_hash':promoted['entry_hash']}
+        args['replay_inputs']['generation']=generation
+        args['cost_contract']=contract(generation)
+        args['replay_inputs']['cost_model']['declared_contract']=args['cost_contract']
+        _rebind(args['replay_inputs'])
+        args['terminal']=evaluate_shadow_terminal(**args['replay_inputs'])
+        assert args['terminal']['status']=='COMPLETE'
+        args.update(data_root=opts['data_root'],source_revision=opts['source_revision'],now=opts['now'])
+        monkeypatch.setattr(module,'_check',real_check)
+        monkeypatch.setattr(module,'_source',real_source)
     protocol=dict(outer_folds=3,inner_folds=3,purge_sec=10,embargo_sec=10,minimum_bucket_support=1)
     rows=[row(generation=generation,episode_id=f'e-{i}',opportunity_id=f'o-{i}',policy_id='policy',
         policy_signature=args['terminal']['policy_signature'],cost_model_id=args['terminal']['cost_model_id'],
@@ -153,12 +179,6 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
         with pytest.raises(ValueError,match='COUNTERFACTUAL_MODEL_NOT_AVAILABLE'):
             module.write_completion(**args)
         return
-    if authority=='real_mirror':
-        import shutil
-        shutil.copytree(args['data_root']/'v3',opts['data_root']/'v3',dirs_exist_ok=True)
-        args.update(data_root=opts['data_root'],source_revision=opts['source_revision'],now=opts['now'])
-        monkeypatch.setattr(module,'_check',real_check)
-        monkeypatch.setattr(module,'_source',real_source)
     result=module.write_completion(**args)
     assert result['scope']=='SEALED_POLICY_REPLAY_PROOF_NOT_QUALIFIED'
     assert result['qualification_allowed'] is False
@@ -172,14 +192,9 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
     consumer_args={k:args[k] for k in ('repo_root','data_root','source_revision')}
     consumer_args.update(artifact_sha256=result['artifact_sha256'],expected_identity=identity,
         clock=lambda:2000030.,now=args.get('now'))
-    if authority=='real_mirror':
-        # Parity alone never proves these locally copied files belonged to the
-        # promoted inventory. This fixture deliberately has no raw membership.
-        with pytest.raises(ValueError,match='SOURCE_INVENTORY_UNVERIFIED'):
-            verify_counterfactual_provenance(**consumer_args)
-        return
-    import research.counterfactual_source_membership as membership
-    monkeypatch.setattr(membership,'verify_membership',lambda *a:None)
+    if authority=='component':
+        import research.counterfactual_source_membership as membership
+        monkeypatch.setattr(membership,'verify_membership',lambda *a:None)
     before_files=set((args['repo_root']/'local-derived/counterfactual-completions').iterdir())
     proof=verify_counterfactual_provenance(**consumer_args)
     assert proof['counterfactual_identity']==identity
