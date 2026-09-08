@@ -21474,6 +21474,20 @@ def _commit_relay_limit_chase(
         rows = [row for row in target.get("pending_orders") or [] if str(row.get("trade_id") or "") == trade_id]
         if len(rows) != 1:
             raise RuntimeError("pending chase target identity mismatch")
+        if (rows[0].get("bitfinex_order_id") or rows[0].get("bitfinex_position_id")
+                or rows[0].get("bitfinex_live_entry")
+                or any(str(row.get("trade_id") or "") == trade_id
+                       and row.get("status") != "CLOSED"
+                       for row in target.get("positions") or [])):
+            raise RuntimeError("pending chase target accounting conflict")
+        # A competing chase may have committed after our initial precheck.
+        # This check runs before any durable write. Only a strictly newer,
+        # still-pending generation is an expected supersession.
+        if (rows[0].get("status") == "PENDING"
+                and int(rows[0].get("limit_chase_count") or 0) >= chase_count
+                and 0 < float(rows[0].get("limit_price") or 0) < float("inf")):
+            from paper_fill_ownership import FillSuperseded
+            raise FillSuperseded("pending chase superseded before durable commit")
         if (rows[0].get("status") != "PENDING"
                 or abs(float(rows[0].get("limit_price") or 0) - old_limit) >= 0.005
                 or int(rows[0].get("limit_chase_count") or 0) != chase_count - 1):
@@ -21494,10 +21508,14 @@ def _commit_relay_limit_chase(
             signal["submitted_order_limit_price"] = new_limit
             signal["fill_model"] = copy.deepcopy(resolved_fill_model)
 
-    _commit_paper_lifecycle_transition(
-        "LIMIT_UPDATED", trade_id, event,
-        target_mutator=target_mutator, live_mutator=live_mutator,
-    )
+    from paper_fill_ownership import FillSuperseded
+    try:
+        _commit_paper_lifecycle_transition(
+            "LIMIT_UPDATED", trade_id, event,
+            target_mutator=target_mutator, live_mutator=live_mutator,
+        )
+    except FillSuperseded:
+        return None
 
     # Derived evidence follows the authoritative lifecycle COMMIT and is
     # idempotently keyed by trade/chase generation.
