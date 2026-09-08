@@ -122,7 +122,7 @@ def test_fixture_matches_current_touch_handoff_before_open_commit():
                    and node.name == "process_pending_orders")
     source = ast.get_source_segment(BOT.read_text(encoding="utf-8"), process)
     handoff = source[source.index('order["fill_handoff_in_progress"] = True'):]
-    assert "fills.append((order, fill_signal))" in handoff
-    assert "fill_order(order)" in handoff
+    assert "fills.append((order, fill_signal, fill_claim))" in handoff
+    assert "fill_order(order, _fill_claim=fill_claim)" in handoff
     assert 'order["status"] = "FILLED"' not in handoff
     assert "lane_unregister_pending_order(order)" not in handoff

@@ -10833,37 +10833,43 @@ def process_virtual_chase_chase6_market_conversions(price: float):
         until = float(order.get("virtual_chase_6_wait_until") or 0)
         if until <= 0 or now < until:
             continue
-        tid = order.get("trade_id")
-        meta = trades_map.get(tid, {})
-        signal = meta.get("signal_ref") or {}
-        limit_price = float(order.get("limit_price") or 0)
-        # This path is the explicit final market conversion.  Freeze the order
-        # type before price resolution so it cannot accidentally reuse the
-        # passive limit walker and its hard-limit boundary.
-        order["entry_type"] = "SIM_MARKET"
-        order["fee_type"] = "TAKER"
-        fill_px = resolve_sim_fill_price(order)
-        slippage = None
-        if limit_price > 0 and fill_px:
-            direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
-            if direction == "LONG":
-                slippage = round(float(fill_px) - limit_price, 4)
-            elif direction == "SHORT":
-                slippage = round(limit_price - float(fill_px), 4)
-        order["fill_price"] = fill_px
-        order["limit_price"] = fill_px
-        order["market_conversion"] = True
-        if signal:
-            signal["market_conversion"] = True
-            signal["conversion_slippage"] = slippage
-            signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
-            signal["fill_phase"] = _virtual_chase_fill_phase(6, market=True)
-            _record_virtual_chase_execution_metrics(signal, order)
-        logger.info(
-            f"[VIRTUAL_CHASE] chase=6 market conversion trade_id={tid} "
-            f"limit={fmt(limit_price)} fill={fmt(fill_px)} slip={slippage} [PIPELINE ENFORCEMENT]"
-        )
-        fill_order(order)
+        fill_claim = _paper_fill_ownership.claim(order, trade_lock)
+        if fill_claim is None:
+            continue
+        try:
+            tid = order.get("trade_id")
+            meta = trades_map.get(tid, {})
+            signal = meta.get("signal_ref") or {}
+            limit_price = float(order.get("limit_price") or 0)
+            # This path is the explicit final market conversion.  Freeze the order
+            # type before price resolution so it cannot accidentally reuse the
+            # passive limit walker and its hard-limit boundary.
+            order["entry_type"] = "SIM_MARKET"
+            order["fee_type"] = "TAKER"
+            fill_px = resolve_sim_fill_price(order)
+            slippage = None
+            if limit_price > 0 and fill_px:
+                direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+                if direction == "LONG":
+                    slippage = round(float(fill_px) - limit_price, 4)
+                elif direction == "SHORT":
+                    slippage = round(limit_price - float(fill_px), 4)
+            order["fill_price"] = fill_px
+            order["limit_price"] = fill_px
+            order["market_conversion"] = True
+            if signal:
+                signal["market_conversion"] = True
+                signal["conversion_slippage"] = slippage
+                signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
+                signal["fill_phase"] = _virtual_chase_fill_phase(6, market=True)
+                _record_virtual_chase_execution_metrics(signal, order)
+            logger.info(
+                f"[VIRTUAL_CHASE] chase=6 market conversion trade_id={tid} "
+                f"limit={fmt(limit_price)} fill={fmt(fill_px)} slip={slippage} [PIPELINE ENFORCEMENT]"
+            )
+            fill_order(order, _fill_claim=fill_claim)
+        finally:
+            _paper_fill_ownership.release(fill_claim, trade_lock)
 
 
 def get_effective_ai_cooldown_sec(lane: str = None) -> int:
@@ -20556,18 +20562,17 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
             or entry_mode != ENTRY_MODE_EMA_HYBRID
         )
     )
-    if can_instant and entry_mode in (ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER):
-        order["limit_price"] = price
-        order["entry_type"] = "SIM_MARKET"
-        order["fee_type"] = "TAKER"
-        fill_order(order)
-        logger.info(f"[SIM] Instant fill micro-SR at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
-    elif can_instant:
-        order["limit_price"] = price
-        order["entry_type"] = "SIM_MARKET"
-        order["fee_type"] = "TAKER"
-        fill_order(order)
-        logger.info(f"[SIM] Instant fill (pullback=0%) at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
+    if can_instant:
+        fill_claim = _paper_fill_ownership.claim(order, trade_lock)
+        if fill_claim is not None:
+            try:
+                order["limit_price"] = price
+                order["entry_type"] = "SIM_MARKET"
+                order["fee_type"] = "TAKER"
+                fill_order(order, _fill_claim=fill_claim)
+                logger.info(f"[SIM] Instant fill at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
+            finally:
+                _paper_fill_ownership.release(fill_claim, trade_lock)
     elif (
         defer_instant_fill
         and entry_mode not in (ENTRY_MODE_EMA_HYBRID, ENTRY_MODE_MICRO_SR, ENTRY_MODE_AI_PLANNER)
@@ -22011,6 +22016,8 @@ def _pending_limit_ready_for_fill(
 
 
 FILL_DIRECTION_REVALIDATE_AFTER_SEC = float(os.getenv("FILL_DIRECTION_REVALIDATE_AFTER_SEC", "180"))
+from paper_fill_ownership import FillOwnership, wrap_fill, wrap_fill_batch
+_paper_fill_ownership = FillOwnership(lambda tid: fill_handoff_trade_ids.discard(tid))
 
 
 def stale_fill_direction_conflict(order: dict, signal: dict, *, now: float, latest_ai: dict, latest_ai_ts: float, current_context: dict = None) -> str:
@@ -22118,6 +22125,9 @@ def process_pending_orders():
             continue
         if order.get("bitfinex_order_id") or order.get("bitfinex_live_entry"):
             continue
+        fill_claim = _paper_fill_ownership.claim(order, trade_lock)
+        if fill_claim is None:
+            continue
         if _pending_limit_ready_for_fill(
             order,
             price,
@@ -22126,8 +22136,10 @@ def process_pending_orders():
             venue_snapshot=venue_snapshot,
             recent_market_trades=recent_market_trades,
         ):
-            ready_orders.append(order)
-    for order in ready_orders:
+            ready_orders.append((order, fill_claim))
+        else:
+            _paper_fill_ownership.release(fill_claim, trade_lock)
+    for order, fill_claim in ready_orders:
         with trade_lock:
             if order not in pending_orders or order.get("status") != "PENDING":
                 continue
@@ -22170,8 +22182,13 @@ def process_pending_orders():
                     f"[SIM] limit touched - filling despite prior await_confirm "
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
-            fill_px = resolve_sim_fill_price(order)
+            try:
+                fill_px = resolve_sim_fill_price(order)
+            except BaseException:
+                _paper_fill_ownership.release(fill_claim, trade_lock)
+                raise
             if not fill_px or float(order.get("filled_qty") or 0) <= 0:
+                _paper_fill_ownership.release(fill_claim, trade_lock)
                 # A touched BBO without eligible cached depth is not a fill.
                 # Keep the order pending for the next authoritative snapshot;
                 # never manufacture quantity merely to advance the lifecycle.
@@ -22194,22 +22211,29 @@ def process_pending_orders():
             order["fill_handoff_in_progress"] = True
             if order.get("trade_id"):
                 fill_handoff_trade_ids.add(order["trade_id"])
-            fills.append((order, fill_signal))
-    for order, fill_signal, reason in cancelled_at_fill:
-        schedule_close = globals().get("close_research_order_schedule")
-        if callable(schedule_close):
-            schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
-        collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-        if callable(collector_refresh):
-            collector_refresh(
-                order, fill_signal if isinstance(fill_signal, dict) else None,
-                lifecycle_final=True,
-            )
-        _record_expired_order(order, reason)
-        expire_signal_for_order(order, reason)
-        logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
-    for order, fill_signal in fills:
-        fill_order(order)
+            fills.append((order, fill_signal, fill_claim))
+    try:
+        for order, fill_signal, reason in cancelled_at_fill:
+            schedule_close = globals().get("close_research_order_schedule")
+            if callable(schedule_close):
+                schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
+            collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+            if callable(collector_refresh):
+                collector_refresh(
+                    order, fill_signal if isinstance(fill_signal, dict) else None,
+                    lifecycle_final=True,
+                )
+            _record_expired_order(order, reason)
+            expire_signal_for_order(order, reason)
+            logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
+        for order, fill_signal, fill_claim in fills:
+            fill_order(order, _fill_claim=fill_claim)
+    finally:
+        for order, fill_signal, fill_claim in fills:
+            _paper_fill_ownership.release(fill_claim, trade_lock)
+
+process_pending_orders = wrap_fill_batch(process_pending_orders, _paper_fill_ownership, lambda: trade_lock)
+
 
 def fill_order(order):
     def clear_fill_handoff():
@@ -22265,11 +22289,6 @@ def fill_order(order):
         f"[ORDER] FILLED trade_id={order['trade_id']} final_direction={order.get('signal_dir')} "
         f"tick={fmt(tick)} planned_limit={fmt(planned)}{slip_note} [PIPELINE ENFORCEMENT]"
     )
-    try:
-        from execution_funnel import funnel_on_fill
-        funnel_on_fill(order, tick)
-    except Exception:
-        pass
     meta = trades_map.get(order["trade_id"], {})
     signal = meta.get("signal_ref", {})
     ai = meta.get("ai", {}) or signal.get("ai", {})
@@ -22335,6 +22354,15 @@ def fill_order(order):
         canonical_lock=position_close_lock,
     )
     pos = transition_result["pos"]
+    # Count only a successfully committed open, including resting limit fills.
+    # This path runs under the unique fill claim; pipeline submission must not
+    # count the same immediate fill again.
+    increment_pipeline_funnel("FILLED")
+    try:
+        from execution_funnel import funnel_on_fill
+        funnel_on_fill(order, fill_px)
+    except Exception:
+        logger.exception("[FUNNEL] committed fill telemetry write failed")
     if fill_lane:
         log_lane_opportunity_event(
             fill_lane, "FILLED", order.get("trade_id"),
@@ -22423,6 +22451,9 @@ def fill_order(order):
     # or graceful shutdown — a non-graceful crash orphaned every open position).
     save_positions()
     pipeline_state_sync()
+
+fill_order = wrap_fill(fill_order, _paper_fill_ownership, lambda: trade_lock)
+
 
 def _observable_exit_price() -> float:
     """Best available mark for risk-reducing exits, never for new entries."""
@@ -23604,7 +23635,6 @@ def process_signal(event: dict):
             if success:
                 _account_registered_order_submission(signal, ai)
             if signal.get("status") in ("FILLED", "OPEN"):
-                increment_pipeline_funnel("FILLED")
                 log_lane_opportunity_event(
                     research_lane, "FILLED", trade_id, final_direction,
                     ai.get("win_prob"), edge_score,
