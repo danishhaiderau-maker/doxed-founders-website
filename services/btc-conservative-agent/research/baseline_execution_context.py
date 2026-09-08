@@ -361,6 +361,15 @@ def accepted_fill_position(entry_receipt: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def declared_directional_baseline_inputs(capture: Mapping, baseline: Mapping) -> dict:
+    return _declared_directional_inputs(capture, baseline, conditional=False)
+
+
+def conditional_directional_baseline_inputs(capture: Mapping, baseline: Mapping) -> dict:
+    """Explicit research-only entrypoint; never supplies strict constraints."""
+    return _declared_directional_inputs(capture, baseline, conditional=True)
+
+
+def _declared_directional_inputs(capture: Mapping, baseline: Mapping, *, conditional: bool) -> dict:
     """Project only an explicitly captured research scenario, never defaults."""
     from research_v3_contract import canonical_hash
     if (capture.get("capture_signature") != canonical_hash("directional-entry-capture",
@@ -368,9 +377,11 @@ def declared_directional_baseline_inputs(capture: Mapping, baseline: Mapping) ->
             or capture.get("direction") not in {"LONG", "SHORT"}):
         raise ValueError("DECLARED_BASELINE_CAPTURE_INVALID")
     declaration = capture.get("research_context_declaration")
-    if not isinstance(declaration, Mapping) or declaration.get("schema") != "research_baseline_context_declaration_v1":
+    expected_schema = "research_baseline_context_declaration_v2" if conditional else "research_baseline_context_declaration_v1"
+    if not isinstance(declaration, Mapping) or declaration.get("schema") != expected_schema:
         raise ValueError("DECLARED_BASELINE_CONTEXT_DECLARATION_MISSING")
-    if (declaration.get("evidence_basis") != "DECLARED_SIMULATION"
+    expected_basis = "DECLARED_SIMULATION_CONDITIONAL" if conditional else "DECLARED_SIMULATION"
+    if (declaration.get("evidence_basis") != expected_basis
             or not str(declaration.get("provenance") or "").strip()):
         raise ValueError("DECLARED_BASELINE_PROVENANCE_REQUIRED")
     signal_ts = _decimal(capture.get("signal_ts"), positive=True)
@@ -382,7 +393,19 @@ def declared_directional_baseline_inputs(capture: Mapping, baseline: Mapping) ->
             or envelope.get("episode_id") != capture.get("episode_id")):
         raise ValueError("DECLARED_BASELINE_SCHEDULE_MISSING")
     basis_price = _decimal(schedule[0].get("limit_price"), positive=True)
-    constraints, defects = validate_signed_quantity_constraints(declaration.get("signed_quantity_constraints"), symbol=capture.get("symbol"))
+    if conditional:
+        from research.venue_quantity_observation import validate_venue_quantity_observation
+        constraints, defects = validate_venue_quantity_observation(
+            declaration.get("venue_quantity_observation"), symbol=capture.get("symbol"),
+            source_revision=capture.get("source_revision"))
+        if (declaration.get("qualification_eligible") is not False
+                or declaration.get("venue_acceptance") != "UNKNOWN"
+                or declaration.get("min_notional_treatment") != "UNMODELED_VENUE_ACCEPTANCE_CONDITIONAL"
+                or "signed_quantity_constraints" in declaration
+                or (constraints or {}).get("min_notional", {}).get("status") != "UNAVAILABLE"):
+            raise ValueError("CONDITIONAL_BASELINE_AUTHORITY_INVALID")
+    else:
+        constraints, defects = validate_signed_quantity_constraints(declaration.get("signed_quantity_constraints"), symbol=capture.get("symbol"))
     if defects or constraints is None or constraints.get("source_revision") != capture.get("source_revision"):
         raise ValueError("DECLARED_BASELINE_QUANTITY_CONSTRAINTS_INVALID")
     from datetime import datetime
@@ -430,7 +453,11 @@ def declared_directional_baseline_inputs(capture: Mapping, baseline: Mapping) ->
     horizon = _decimal(coverage.get("required_horizon_sec"), positive=True)
     if interval not in (1, 2) or offset != int(offset) or offset > interval or horizon > MAX_SOURCE_ROWS * interval:
         raise ValueError("DECLARED_BASELINE_COVERAGE_POLICY_INVALID")
-    return {"requested_qty": float(quantity), "signed_quantity_constraints": declaration["signed_quantity_constraints"],
+    quantity_fields = ({"venue_quantity_observation": declaration["venue_quantity_observation"],
+                        "evidence_basis": expected_basis, "qualification_eligible": False,
+                        "venue_acceptance": "UNKNOWN"} if conditional else
+                       {"signed_quantity_constraints": declaration["signed_quantity_constraints"]})
+    return {"requested_qty": float(quantity), **quantity_fields,
             "latency_sec": float(latency), "fees_usd": float(fees), "slippage_model": slippage,
             "declaration": dict(declaration), "requested_margin_usd": str(margin),
             "required_horizon_end_ts": float(signal_ts + horizon),
@@ -484,15 +511,20 @@ def build_declared_delayed_baseline_context(*, timing_declaration, tape, delayed
                  'entry_evidence': entry_evidence, 'entry_binding': entry_binding})
 
 
+def build_conditional_directional_baseline_context(**kwargs):
+    """Research-only context with explicit unknown venue acceptance."""
+    return _build_declared_context(**kwargs, conditional=True)
+
+
 def _build_declared_context(*, generation: Mapping, identity: Mapping,
         entry_receipt: Mapping, capture: Mapping, baseline: Mapping, pinned_sources: Mapping,
         opportunity_binding: Mapping, coverage_evidence: Mapping, coverage_binding: Mapping,
-        delayed=None) -> dict:
+        delayed=None, conditional=False) -> dict:
     """Verified public-tape position under a labelled signal-ATR scenario."""
     try:
         if any(not isinstance(generation.get(key), str) or not generation[key] for key in GENERATION_FIELDS):
             raise ValueError("BASELINE_CONTEXT_GENERATION_MISSING")
-        inputs = declared_directional_baseline_inputs(capture, baseline)
+        inputs = (conditional_directional_baseline_inputs if conditional else declared_directional_baseline_inputs)(capture, baseline)
         declaration = inputs["declaration"]
         if (any(capture.get(key) != generation.get(key) for key in
                 ("epoch_id", "source_revision", "deployed_revision", "tile_config_signature"))
@@ -544,8 +576,17 @@ def _build_declared_context(*, generation: Mapping, identity: Mapping,
                 ordering_treatment=timing['ordering_treatment'])['schedule']
         if _normalise_schedule(schedule)[1] != entry_receipt.get("schedule_sha256"):
             raise ValueError("DECLARED_BASELINE_ENTRY_SCHEDULE_MISMATCH")
-        constraints, defects = validate_signed_quantity_constraints(entry_receipt.get("quantity_constraints"), symbol=capture.get("symbol"))
-        expected_constraints, _ = validate_signed_quantity_constraints(inputs["signed_quantity_constraints"], symbol=capture.get("symbol"))
+        if conditional:
+            from research.conditional_quantity_execution import validate_conditional_constraints
+            constraints, defects = validate_conditional_constraints(entry_receipt.get("quantity_constraints"), symbol=capture.get("symbol"))
+            expected_constraints, _ = validate_conditional_constraints(inputs["venue_quantity_observation"], symbol=capture.get("symbol"))
+            if (entry_receipt.get("schema") != "conditional_limit_fill_receipt_v1"
+                    or entry_receipt.get("qualification_eligible") is not False
+                    or entry_receipt.get("venue_acceptance") != "UNKNOWN"):
+                raise ValueError("CONDITIONAL_ENTRY_AUTHORITY_INVALID")
+        else:
+            constraints, defects = validate_signed_quantity_constraints(entry_receipt.get("quantity_constraints"), symbol=capture.get("symbol"))
+            expected_constraints, _ = validate_signed_quantity_constraints(inputs["signed_quantity_constraints"], symbol=capture.get("symbol"))
         if defects or constraints != expected_constraints or _decimal(entry_receipt.get("requested_qty")) != _decimal(inputs["requested_qty"]):
             raise ValueError("DECLARED_BASELINE_ENTRY_QUANTITY_MISMATCH")
         position = accepted_fill_position(entry_receipt)
@@ -612,6 +653,10 @@ def _build_declared_context(*, generation: Mapping, identity: Mapping,
                 "coverage_provenance": "VERIFIED_TIMESTAMP_CONTINUITY:" + segment_hash,
                 "source_evidence_sha256": sorted(set([opportunity_hash] + coverage_hashes)),
                 "live_arming_authorized": False, "qualification_eligible": False}
+        if conditional:
+            body.update(context_evidence_basis="DECLARED_SIMULATION_CONDITIONAL",
+                        venue_acceptance="UNKNOWN",
+                        min_notional_treatment="UNMODELED_VENUE_ACCEPTANCE_CONDITIONAL")
         if delayed is not None:
             body.update(timing_basis='DECLARED_DELAYED_SUBMISSION_REPLAY',
                 latency_provenance='PINNED_ENTRY_TAPE_FRESH_DELAYED_FILL_REPLAY',

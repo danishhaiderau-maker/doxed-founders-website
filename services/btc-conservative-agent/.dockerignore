@@ -36,6 +36,7 @@ research/*
 !research/quantity_execution.py
 !research/venue_quantity_constraints.py
 !research/venue_quantity_observation.py
+!research/conditional_quantity_execution.py
 !research/runtime_baseline_declaration.py
 !research/scan_counterfactual_unavailable.py
 !research/reset_writer_barrier.py

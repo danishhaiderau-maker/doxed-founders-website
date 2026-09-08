@@ -25,6 +25,15 @@ def _sha(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
+def _conditional_entry(entry):
+    receipt = entry.get("conservative_receipt") or {}
+    return any(isinstance(value, Mapping) and (
+        value.get("evidence_basis") == "DECLARED_SIMULATION_CONDITIONAL"
+        or value.get("schema") == "conditional_limit_fill_receipt_v1"
+        or value.get("model_kind") == "CONDITIONAL_VENUE_QUANTITY")
+        for value in (entry, receipt))
+
+
 def _generation(value: Any, label: str) -> tuple[dict[str, str], list[str]]:
     if not isinstance(value, Mapping):
         return {}, [f"{label}_GENERATION_MISSING"]
@@ -418,7 +427,7 @@ def build_conservative_shadow_report(
             if not isinstance(entry, Mapping):
                 continue
             entry_receipt = entry.get("conservative_receipt")
-            if (isinstance(entry_receipt, Mapping) and entry.get("supported") is True
+            if (not _conditional_entry(entry) and isinstance(entry_receipt, Mapping) and entry.get("supported") is True
                     and entry.get("outcome_state") in {"FULL_FILL", "PARTIAL_FILL"}):
                 eligible_entries.append((episode, entry))
     if model_blocker == "RESEARCH_MODEL_MISSING":
@@ -486,6 +495,9 @@ def build_conservative_shadow_report(
         for entry in sorted((item for item in episode.get("results") or [] if isinstance(item, Mapping)),
                             key=lambda item: str(item.get("baseline_id") or "")):
             entry_receipt = entry.get("conservative_receipt")
+            if _conditional_entry(entry):
+                reason_counts["CONDITIONAL_ENTRY_REQUIRES_SEPARATE_DIAGNOSTIC_COHORT"] += 1
+                continue
             if not isinstance(entry_receipt, Mapping) or entry.get("supported") is not True \
                     or entry.get("outcome_state") not in {"FULL_FILL", "PARTIAL_FILL"}:
                 continue

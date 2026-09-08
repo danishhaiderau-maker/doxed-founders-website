@@ -107,6 +107,20 @@ def test_explicit_current_model_runs_complete_end_to_end(tmp_path):
     assert report["ranking_eligible"] is False
 
 
+def test_conditional_fill_cannot_enter_ordinary_profitability_aggregate(tmp_path):
+    baseline, candidates, artifact, model = _fixture(tmp_path)
+    entry = baseline["episode_receipts"][0]["results"][0]
+    entry["conservative_receipt"]["schema"] = "conditional_limit_fill_receipt_v1"
+    # Even if the generic supported flag is true and labels are missing,
+    # the receipt schema must prevent promotion into the ordinary cohort.
+    report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
+        baseline_report=baseline, policy_candidates=candidates,
+        policy_artifact_receipt=artifact, research_model=model)
+    assert report["complete_replay_count"] == 0
+    assert report["profitability_supported"] is False
+    assert report["live_qualification"] is False
+
+
 def test_missing_model_is_unknown_without_zero_cost_defaults(tmp_path):
     baseline, candidates, artifact, _ = _fixture(tmp_path, model=False)
     report = build_conservative_shadow_report(tmp_path, expected_generation=GEN,
