@@ -39184,6 +39184,7 @@ _DATA_SYNC_INVENTORY_SNAPSHOT_NAME = "sync_inventory_current.json"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA = "fly_runtime_inventory_snapshot_v1"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2 = "fly_runtime_inventory_snapshot_v2"
 _DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"
+_EVIDENCE_WORKER_ADMISSION_GATE = threading.Lock()
 _DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA = "fly_runtime_inventory_worker_request_v1"
 _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v2"
 _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES = frozenset({
@@ -39383,6 +39384,7 @@ def _start_lifecycle_pipeline_runtime() -> bool:
             source_revision=revision,
             epoch_id=epoch_id,
             pressure_probe=_lifecycle_pipeline_pressure_probe,
+            cycle_gate=_EVIDENCE_WORKER_ADMISSION_GATE,
             overlap_probe=_lifecycle_pipeline_overlap_probe,
             rotation_enabled=str(rotation_enabled_raw).strip().lower()
             in {"1", "true", "yes", "on"},
@@ -41770,6 +41772,28 @@ def _data_sync_bootstrap_pending_inventory_state(refresh_nonce=None, bootstrap=N
     }
 
 
+def _run_admitted_inventory_child(command, worker_env):
+    # Acquire before condition/status locks. Never wait while holding them.
+    if not _EVIDENCE_WORKER_ADMISSION_GATE.acquire(blocking=False):
+        return None
+    try:
+        with _data_sync_inventory_cache_condition:
+            _data_sync_async_inventory["worker_active"] = True
+            _data_sync_inventory_cache_condition.notify_all()
+        return subprocess.run(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS,
+            check=False, env=worker_env,
+        )
+    finally:
+        try:
+            with _data_sync_inventory_cache_condition:
+                _data_sync_async_inventory["worker_active"] = False
+                _data_sync_inventory_cache_condition.notify_all()
+        finally:
+            _EVIDENCE_WORKER_ADMISSION_GATE.release()
+
+
 def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> None:
     """Build the volume inventory outside the latency-sensitive bot process.
 
@@ -41866,18 +41890,21 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             "PYTHONHASHSEED": "0",
         })
         while True:
+            completed = _run_admitted_inventory_child(command, worker_env)
+            if completed is None:
+                with _data_sync_inventory_cache_condition:
+                    _data_sync_async_inventory["admission_wait_reason"] = "LIFECYCLE_OR_CLEANUP_BUSY"
+                if shutdown_event.wait(1):
+                    with _data_sync_inventory_cache_condition:
+                        _data_sync_async_inventory.update({
+                            "refreshing": False, "active_refresh_nonce": None,
+                            "status": "STALE" if _data_sync_async_inventory.get("generation") else "EMPTY",
+                            "admission_wait_reason": "SHUTDOWN",
+                        })
+                    return
+                continue
             with _data_sync_inventory_cache_condition:
-                _data_sync_async_inventory["worker_active"] = True
-                _data_sync_inventory_cache_condition.notify_all()
-            completed = subprocess.run(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=_DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS,
-                check=False,
-                env=worker_env,
-            )
+                _data_sync_async_inventory["admission_wait_reason"] = None
             result = json.loads(result_path.read_text(encoding="utf-8"))
             if (
                 result.get("schema") != _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA
