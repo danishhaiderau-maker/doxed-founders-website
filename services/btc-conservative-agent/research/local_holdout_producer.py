@@ -84,6 +84,8 @@ def produce_local_holdout(**options):
                         excluded['COUNTERFACTUAL_IDENTITY_MISMATCH']+=1; continue
                     cache_key=hashlib.sha256(_encoded(['counterfactual-producer-v1',expected,original,outcome])).hexdigest()
                     cache_path=_safe_path(cache/(cache_key[:32]+'.json'))
+                    recovered_path=_safe_path(cache/(cache_key[:32]+'.verified.json'))
+                    if recovered_path.exists(): cache_path=recovered_path
                     cached=None
                     if cache_path.exists():
                         cached=_read_manifest(cache_path)
@@ -102,7 +104,14 @@ def produce_local_holdout(**options):
                             expected_identity=expected,now=options.get('now'),held_lease=lease)
                         require_matching_causal_projection(original,proof['causal_provenance'])
                     except (ValueError,OSError) as error:
-                        excluded[_counterfactual_reason(error)]+=1; continue
+                        reason=_counterfactual_reason(error)
+                        excluded[reason]+=1
+                        if cached is None:
+                            stored={'schema':'trusted_local_counterfactual_producer_receipt_v1',
+                                'job':job,'key':cache_key,'proof':{'verification_failure':reason}}
+                            stored['sha256']=hashlib.sha256(_encoded(stored)).hexdigest()
+                            pending_cache.append((cache_path,stored))
+                        continue
                     completion=proof['completion']; entry=completion['entry']; terminal=completion['terminal']
                     dimensions=mapping['selected_group']
                     if (not candidate_identity_matches(original,outcome,proof,policy=policy,
@@ -114,14 +123,21 @@ def produce_local_holdout(**options):
                             or dimensions.get('cost_model_id')!=terminal.get('cost_model_id')
                             or dimensions.get('simulation_model')!=terminal.get('simulation_model')
                             or (dimensions.get('sizing') or {}).get('contract_sha256')!=terminal.get('declared_contract_sha256')):
-                        excluded['COUNTERFACTUAL_OUTCOME_COMPLETION_MISMATCH']+=1; continue
+                        reason='COUNTERFACTUAL_OUTCOME_COMPLETION_MISMATCH'
+                        excluded[reason]+=1
+                        if cached is None:
+                            stored={'schema':'trusted_local_counterfactual_producer_receipt_v1',
+                                'job':job,'key':cache_key,'proof':{'verification_failure':reason}}
+                            stored['sha256']=hashlib.sha256(_encoded(stored)).hexdigest()
+                            pending_cache.append((cache_path,stored))
+                        continue
                     # Fixed producer-owned state is trusted local append-only
                     # state, not arbitrary caller-supplied evidence. Its hash is
                     # corruption detection, not protection against an owner
                     # rewriting the trusted journal and artifacts together.
                     revalidations.append({'key':cache_key,'replay_proof_sha256':proof['replay_proof_sha256'],
                         'currently_verified_at':proof['qualification_eligible_at']})
-                    if cached is not None:
+                    if cached is not None and not (cached.get('proof') or {}).get('verification_failure'):
                         prior=cached.get('proof') or {}
                         timekeys={'evidence_collected_at','qualification_eligible_at'}
                         if ({k:v for k,v in prior.items() if k not in timekeys}!=
@@ -132,6 +148,7 @@ def produce_local_holdout(**options):
                             raise ValueError('HOLDOUT_COUNTERFACTUAL_PRODUCER_RECEIPT_MISMATCH')
                         proof=prior
                     else:
+                        if cached is not None: cache_path=recovered_path
                         stored={'schema':'trusted_local_counterfactual_producer_receipt_v1',
                             'job':job,'key':cache_key,'proof':proof}
                         stored['sha256']=hashlib.sha256(_encoded(stored)).hexdigest()

@@ -50,11 +50,16 @@ def test_bounded_new_proofs_resume_and_retry_preserves_original_hash(tmp_path,mo
     assert changed['status']=='IN_PROGRESS' and changed['new_proofs']==32
 
 
-def test_corrupt_fixed_producer_receipt_fails_closed(tmp_path,monkeypatch):
+@pytest.mark.parametrize('fault',['corrupt_time','foreign_receipt'])
+def test_corrupt_fixed_producer_receipt_fails_closed(tmp_path,monkeypatch,fault):
     args,*_=fixture(tmp_path,monkeypatch)
     module.produce_local_holdout(**args)
     path=next(p for p in (args['repo_root']/'local-derived/holdout-progress').glob('*/*.json') if not p.name.startswith('revalidation'))
-    value=json.loads(path.read_text()); value['proof']['evidence_collected_at']=1
+    value=json.loads(path.read_text())
+    if fault=='corrupt_time': value['proof']['evidence_collected_at']=1
+    else:
+        value['job']='different-caller-job'
+        value['sha256']=module.hashlib.sha256(module._encoded({k:v for k,v in value.items() if k!='sha256'})).hexdigest()
     path.chmod(0o666); path.write_text(json.dumps(value))
     with pytest.raises(ValueError,match='PRODUCER_RECEIPT_INVALID'):
         module.produce_local_holdout(**args)
@@ -64,3 +69,28 @@ def test_exception_details_are_allowlisted():
     assert module._counterfactual_reason(ValueError('COUNTERFACTUAL_MODEL_NOT_AVAILABLE'))=='COUNTERFACTUAL_MODEL_NOT_AVAILABLE'
     assert module._counterfactual_reason(ValueError('COUNTERFACTUAL_MODEL_NOT_AVAILABLE secret=abc'))=='COUNTERFACTUAL_PROVENANCE_UNVERIFIED'
     assert module._counterfactual_reason(OSError('secret=abc'))=='COUNTERFACTUAL_PROVENANCE_UNVERIFIED'
+
+
+@pytest.mark.parametrize('failure',['exception','mismatch'])
+def test_failed_first_page_cannot_starve_later_valid_proofs(tmp_path,monkeypatch,failure):
+    args,calls,clock,source=fixture(tmp_path,monkeypatch)
+    verify=module.verify_counterfactual_provenance
+    broken=[True]
+    def sometimes(**kw):
+        if broken[0] and int(kw['expected_identity']['source_episode_id'])<32:
+            if failure=='exception': raise ValueError('COUNTERFACTUAL_MODEL_NOT_AVAILABLE')
+            result=verify(**kw); result['completion']['terminal']['net_pnl_usd']=99
+            return result
+        return verify(**kw)
+    monkeypatch.setattr(module,'verify_counterfactual_provenance',sometimes)
+    first=module.produce_local_holdout(**args)
+    assert first['status']=='IN_PROGRESS' and first['new_proofs']==32
+    final=module.produce_local_holdout(**args)
+    assert len(final['rows'])==8
+    assert sum(final['excluded_counts'].values())==32
+    # A failed attempt is not permanent negative authority. Repaired source
+    # proof appends a separate immutable verified receipt on the next run.
+    broken[0]=False; clock[0]=200
+    recovered=module.produce_local_holdout(**args)
+    assert len(recovered['rows'])==40 and recovered['excluded_counts']=={}
+    assert len(list((args['repo_root']/'local-derived/holdout-progress').glob('*/*.verified.json')))==32
