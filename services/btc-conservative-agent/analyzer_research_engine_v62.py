@@ -20054,7 +20054,7 @@ def _write_discovery_scorecard_report(
         stream_artifact_root=Path.cwd(),
     )
     try:
-        from research.local_scan_reconciliation import reconcile_scans
+        from research.local_scan_reconciliation import reconcile_scans, diagnostic_code
         import sqlite3
         from research.local_dynamic_input import _source
         generation=report.get('generation') or {}
@@ -20064,9 +20064,9 @@ def _write_discovery_scorecard_report(
             config_signature=generation.get('tile_config_signature'),
             held_lease=_CURRENT_MIRROR_GENERATION_LEASE,
             expected_source=_source(_CURRENT_MIRROR_COHERENCE_TOKEN))
-    except (OSError,ValueError,RuntimeError,TypeError,sqlite3.Error):
+    except (OSError,ValueError,RuntimeError,TypeError,sqlite3.Error) as error:
         report['scan_census_observed_coverage']={'status':'UNKNOWN','qualification_eligible':False,
-            'exhaustive_fanout':False,'blockers':['SCAN_RECONCILIATION_UNAVAILABLE']}
+            'exhaustive_fanout':False,'blockers':[diagnostic_code(error)]}
     target = Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")

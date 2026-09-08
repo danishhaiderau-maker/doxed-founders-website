@@ -9,6 +9,27 @@ from research.mirror_generation_lease import MirrorGenerationLease
 from collector_v22_provisional import _atomic_write_unlocked
 
 
+def diagnostic_code(error):
+    """Exact known codes only; never echo arbitrary exception text."""
+    from research.mirror_generation_lease import MirrorGenerationLeaseTimeout
+    if isinstance(error,MirrorGenerationLeaseTimeout): return 'CENSUS_MIRROR_LEASE_BUSY'
+    if isinstance(error,sqlite3.Error):
+        code=getattr(error,'sqlite_errorcode',None)
+        if code==sqlite3.SQLITE_INTERRUPT: return 'CENSUS_INDEX_DEADLINE'
+        if code in (sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED): return 'CENSUS_INDEX_BUSY'
+        return 'CENSUS_INDEX_FAILED'
+    allowed={'CENSUS_REFERENCE_CURSOR_INVALID','CENSUS_BYTE_BUDGET_INVALID','CENSUS_CONFIG_REQUIRED',
+        'CENSUS_HELD_LEASE_INVALID','CENSUS_EXPECTED_SOURCE_MISMATCH','CENSUS_ROW_UNSUPPORTED',
+        'CENSUS_ROW_BINDING_CONFLICT','CENSUS_RECEIPT_LIMIT','CENSUS_RECEIPT_MISMATCH',
+        'CENSUS_DUPLICATE_CONFLICT','CENSUS_SOURCE_CHANGED','CENSUS_GENERATION_CHANGED',
+        'CENSUS_CACHED_REFERENCE_INVALID','CENSUS_ADMISSION_AMBIGUOUS','CENSUS_ADMISSION_CONFLICT',
+        'MIRROR_SYNC_IN_PROGRESS','MIRROR_SYNC_RECEIPT_FAILED','MIRROR_REVISION_PARITY_NOT_MATCH',
+        'MIRROR_REVISION_IDENTITY_MISMATCH','MIRROR_SYNC_RECEIPT_MISSING','MIRROR_SYNC_RECEIPT_INVALID',
+        'MIRROR_SYNC_STATE_INVALID','MIRROR_EPOCH_IDENTITY_MISSING','MIRROR_SOURCE_IDENTITY_CHANGED'}
+    message=str(error)
+    return message if message in allowed else 'SCAN_RECONCILIATION_FAILED'
+
+
 def _verify_page_ref(root, ref, source, config):
     if ref.get('ledger') not in ('decision','opportunity'):
         raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
@@ -151,8 +172,8 @@ def main(argv=None):
             'exhaustive_collection_status':'UNKNOWN','qualification_eligible':False,
             'blockers':report['blockers']},allow_nan=False))
         return 0
-    except (OSError,ValueError,RuntimeError,sqlite3.Error):
-        print(json.dumps({'status':'UNKNOWN','error':'SCAN_RECONCILIATION_FAILED',
+    except (OSError,ValueError,RuntimeError,sqlite3.Error) as error:
+        print(json.dumps({'status':'UNKNOWN','error':diagnostic_code(error),
             'exhaustive_collection_status':'UNKNOWN','qualification_eligible':False}))
         return 1
 

@@ -25,3 +25,15 @@ def test_cli_failure_sanitized_and_no_count(monkeypatch,capsys,error):
     raw=capsys.readouterr().out; result=json.loads(raw)
     assert 'private' not in raw and 'observed_joined_opportunity_rows' not in result
     assert result['status']=='UNKNOWN' and not result['qualification_eligible']
+
+
+@pytest.mark.parametrize('message',['CENSUS_RECEIPT_MISMATCH','CENSUS_HELD_LEASE_INVALID','MIRROR_SYNC_IN_PROGRESS'])
+def test_exact_diagnostic_allowlist(message):
+    assert module.diagnostic_code(ValueError(message))==message
+    assert module.diagnostic_code(ValueError(message+': secret path'))=='SCAN_RECONCILIATION_FAILED'
+
+
+def test_sql_deadline_classifies_native_code_not_message():
+    error=sqlite3.OperationalError('sensitive SQL')
+    error.sqlite_errorcode=sqlite3.SQLITE_INTERRUPT
+    assert module.diagnostic_code(error)=='CENSUS_INDEX_DEADLINE'
