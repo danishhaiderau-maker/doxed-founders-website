@@ -14,6 +14,8 @@ not establish current analyzer publication, market outcomes or qualification.
 The temporary browser tab was closed and preview session stopped; port 9513 had
 no listener on the subsequent check. Existing 9001/9502 services were untouched.
 
-Follow-up: preview DATA_DIR now uses its temporary directory as well as REPORT_DIR,
-so future fixture imports cannot resolve the canonical research dataset through
-that environment variable. This last isolation amendment still needs runtime QA.
+Follow-up runtime check: temporary DATA_DIR was rejected by the production
+canonical-path import guard. Restored the required import path without weakening
+the guard; the fixture replaces DATA_ROOT/ROOT immediately after import. This
+does not prove import-time filesystem isolation. UNKNOWN-mode HTTP check passed
+with no matched groups and an explicit synthetic missing-evidence blocker.

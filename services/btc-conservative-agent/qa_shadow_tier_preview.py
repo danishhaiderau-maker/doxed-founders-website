@@ -1,4 +1,4 @@
-"""Loopback-only synthetic renderer preview. Never reads the canonical dataset."""
+"""Loopback-only synthetic renderer preview; overrides report/data roots after import."""
 import os
 import tempfile
 from pathlib import Path
@@ -11,7 +11,10 @@ def main():
     parser.add_argument('--port', type=int, default=9502)
     options = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="btc-synthetic-ui-") as isolated:
-        os.environ["BTC_AGENT_DATA_DIR"] = isolated
+        # Production import enforces this source-relative canonical path. Keep
+        # that guard intact; replace runtime roots immediately after import.
+        # This fixture is not proof of import-time filesystem isolation.
+        os.environ["BTC_AGENT_DATA_DIR"] = str(Path(__file__).parent / "canonical-research-data")
         os.environ["BTC_AGENT_REPORT_DIR"] = isolated
         from flask import jsonify
         from research import research_dashboard as dashboard
