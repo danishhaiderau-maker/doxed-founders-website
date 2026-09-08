@@ -19,6 +19,9 @@ def verify_dispatch(root,plan_ref,admission_refs,child_refs,source,config,parent
     for ref in admission_refs:
         row=_verify_page_ref(root,ref,source,config)
         if row.get('plan_record_id')==plan['record_id']:
+            if (row.get('decision_stage')!='SCAN_FANOUT_ADMISSION'
+                    or row.get('admission_status') not in ('ENQUEUED','ADMISSION_UNKNOWN')):
+                raise ValueError('DISPATCH_ADMISSION_CONFLICT')
             if {key:row.get(key) for key in keys}!=identity: raise ValueError('DISPATCH_ADMISSION_CONFLICT')
             admissions.append(row)
     if len(admissions)>1: raise ValueError('DISPATCH_ADMISSION_CONFLICT')
@@ -46,4 +49,4 @@ def verify_dispatch(root,plan_ref,admission_refs,child_refs,source,config,parent
     return {'plan_record_id':plan['record_id'],'scan_id':identity['scan_id'],
         'admission_status':admissions[0].get('admission_status') if admissions else 'UNKNOWN',
         'entry_resolution':next(iter(terminals)) if terminals else 'AWAITING' if resolutions else 'UNKNOWN',
-        'observed_only':True,'trade_completed':False,'qualification_eligible':False}
+        'observed_only':True,'trade_completed':None,'qualification_eligible':False}

@@ -78,7 +78,7 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
         source=_source(_check(repo_root,data_root,source_revision,now=now))
         if expected_source is not None and source!=expected_source:
             raise ValueError('CENSUS_EXPECTED_SOURCE_MISMATCH')
-        binding={'source':source,'config_signature':config_signature}
+        binding={'source':source,'config_signature':config_signature,'index_contract':'scan_dispatch_refs_v2'}
         job=hashlib.sha256(_encoded(binding)).hexdigest()
         with sqlite3.connect(directory/'index.sqlite',timeout=1) as db:
             deadline=time.monotonic()+5
@@ -91,6 +91,7 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
                 path=Path(data_root)/'v3/ledgers'/f'{ledger}.jsonl'
                 if not path.exists() and ledger=='lifecycle':
                     db.execute('DELETE FROM refs WHERE job=? AND ledger=?',(job,ledger))
+                    db.execute('DELETE FROM cursors WHERE job=? AND ledger=?',(job,ledger))
                     continue
                 stat=path.stat(); fingerprint=json.dumps([stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns])
                 previous=db.execute('SELECT fingerprint,offset FROM cursors WHERE job=? AND ledger=?',(job,ledger)).fetchone()
