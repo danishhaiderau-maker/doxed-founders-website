@@ -30836,12 +30836,13 @@ __ADMIN_ACCESS_CONTROLS__
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
-      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Inventoried runtime files</div>
+      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Current filesystem usage</div>
       <div style="display:flex;align-items:baseline;gap:10px;margin:4px 0 2px 0;">
         <span id="dataSizeFlyMb" style="font-size:1.5rem;font-weight:700;color:#58a6ff;">-</span>
-        <span style="color:#8b949e;font-size:0.85em;">MB &middot; not the download backlog</span>
+        <span style="color:#8b949e;font-size:0.85em;">MiB used &middot; not the download backlog</span>
       </div>
-      <div style="color:#8b949e;font-size:0.85em;">Volume capacity: <span id="dataSizeVolumeTotal">-</span> MB &mdash; capacity does not shrink after a wipe.</div>
+      <div style="color:#8b949e;font-size:0.85em;">Volume capacity: <span id="dataSizeVolumeTotal">-</span> MiB &mdash; capacity does not shrink after a wipe.</div>
+      <div id="dataSizeFilesystemStatus" style="color:#8b949e;font-size:0.78em;">Filesystem observation unavailable</div>
       <div style="color:#8b949e;font-size:0.78em;">The usage bar measures the whole filesystem. Downloading copies files; only verified source deletion frees space. A dash means unavailable, not zero.</div>
       <div id="dataSizeInventoryStatus" style="color:#8b949e;font-size:0.74em;margin-top:3px;">Inventory: unavailable</div>
       <div style="background:#21262d;border-radius:6px;height:12px;overflow:hidden;margin:8px 0 4px 0;border:1px solid #30363d;">
@@ -31923,15 +31924,24 @@ DASHBOARD_JS = """(function () {
         const inventoryStatus = String(body.runtime_size_status || 'UNAVAILABLE').toUpperCase();
         const inventoryCurrent = inventoryStatus === 'CURRENT';
         const inventoryStatusEl = document.getElementById('dataSizeInventoryStatus');
-        if (mbEl) mbEl.textContent = body.runtime_size_mb == null ? '-' : Number(body.runtime_size_mb).toFixed(1);
+        if (mbEl) mbEl.textContent = body.filesystem_used_mb == null ? '-' : Number(body.filesystem_used_mb).toFixed(1);
+        const observed = Number(body.computed_at);
+        const observedText = Number.isFinite(observed) && observed > 0 ? new Date(observed * 1000).toISOString() : 'unavailable';
+        const fsStatusEl = document.getElementById('dataSizeFilesystemStatus');
+        if (fsStatusEl) fsStatusEl.textContent = 'Free: ' + (body.filesystem_free_mb == null ? 'unavailable' : Number(body.filesystem_free_mb).toFixed(1) + ' MiB') + ' | observed: ' + observedText;
         if (inventoryStatusEl) {
-          inventoryStatusEl.textContent = 'Inventory: ' + inventoryStatus.toLowerCase().replaceAll('_', ' ');
+          const generatedMs = body.inventory_generated_at ? Date.parse(body.inventory_generated_at) : NaN;
+          const generatedText = Number.isFinite(generatedMs) ? new Date(generatedMs).toISOString() : 'unavailable';
+          const age = Number.isFinite(generatedMs) && observed > 0 && observed * 1000 >= generatedMs ? Math.floor((observed * 1000 - generatedMs) / 1000) + 's' : 'unavailable';
+          const inventoryMb = body.inventory_transferable_mb == null ? 'unavailable' : Number(body.inventory_transferable_mb).toFixed(1) + ' MiB';
+          const progress = body.inventory_progress || {};
+          inventoryStatusEl.textContent = 'Cached transferable inventory: ' + inventoryMb + ' | ' + inventoryStatus + ' | generated: ' + generatedText + ' | age: ' + age + ' | refresh: ' + (body.inventory_refreshing ? 'running' : 'not running') + ' | phase: ' + (progress.phase || 'unavailable') + ' | pages: ' + (progress.pages_written == null ? '?' : progress.pages_written) + '/' + (progress.pages_total == null ? '?' : progress.pages_total);
           inventoryStatusEl.style.color = inventoryCurrent ? '#3fb950' : (inventoryStatus.includes('STALE') ? '#d29922' : '#ef4444');
         }
         if (pctEl) pctEl.textContent = body.volume_pct == null ? '-' : Number(body.volume_pct).toFixed(1);
-        if (totalEl && body.volume_total_mb != null) totalEl.textContent = String(body.volume_total_mb);
+        if (totalEl) totalEl.textContent = body.volume_total_mb == null ? '-' : String(body.volume_total_mb);
         if (pathEl) pathEl.textContent = body.runtime_path ? ('path: ' + body.runtime_path) : '';
-        if (lastEl) lastEl.textContent = new Date().toLocaleTimeString();
+        if (lastEl) lastEl.textContent = observedText;
         const pct = body.volume_pct == null ? null : Number(body.volume_pct);
         _setDataSizeCleanup(pct, badgeEl, barEl);
         if (barEl && body.volume_pct != null) {
@@ -38558,6 +38568,9 @@ def _data_size_cached_inventory_summary() -> dict:
             "refreshing": bool(_data_sync_async_inventory.get("refreshing")),
             "file_count": generation.get("file_count"),
             "total_bytes": generation.get("total_bytes"),
+            "worker_phase": _data_sync_async_inventory.get("worker_phase"),
+            "worker_pages_written": _data_sync_async_inventory.get("worker_pages_written"),
+            "worker_pages_total": _data_sync_async_inventory.get("worker_pages_total"),
             "top_files": [
                 dict(row) for row in (generation.get("top_files") or [])[:5]
                 if isinstance(row, dict)
@@ -38680,6 +38693,11 @@ def api_data_size():
         "inventory_generation_id": inventory["generation_id"],
         "inventory_file_count": inventory["file_count"],
         "inventory_refreshing": inventory["refreshing"],
+        "inventory_progress": {
+            "phase": inventory.get("worker_phase"),
+            "pages_written": inventory.get("worker_pages_written"),
+            "pages_total": inventory.get("worker_pages_total"),
+        },
         "inventory_error": inventory["error"],
         "collector_version": COLLECTOR_V31_VERSION,
         "legacy_collector_version": COLLECTOR_V22_VERSION,
