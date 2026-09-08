@@ -850,6 +850,62 @@ def dual_write_lane_entry_resolution(
     }
 
 
+def write_pre_ai_scan_opportunity(source, *, epoch_id, data_dir):
+    """Observed research scan, not an AI verdict or executable lane decision."""
+    scan=str(source.get('research_scan_id') or '')
+    if not scan.startswith('scan-census-'): raise ValueError('PRE_AI_SCAN_ID_MISSING')
+    material={**source,'shared_ai_call_id':scan,'raw_direction':'UNKNOWN','executed_direction':'UNKNOWN'}
+    event_id='pre-ai-scan:'+scan
+    identity=_causal_identity(event_id,material)
+    causal_ids=_explicit_causal_ids(epoch_id=epoch_id,event_id=event_id,episode_id=identity['episode_id'])
+    signal_ts=_positive_finite(source.get('signal_ts'))
+    features=source.get('feature_snapshot_at_signal') or {}
+    if (signal_ts is None or isinstance(source.get('signal_ts'),bool) or not isinstance(features,Mapping)
+            or features.get('capture_schema')!='measured_feature_capture_v1'):
+        raise ValueError('PRE_AI_MEASURED_CONTEXT_MISSING')
+    captured=_positive_finite(features.get('captured_at_ts'))
+    if captured is None or isinstance(features.get('captured_at_ts'),bool) or captured>signal_ts:
+        raise ValueError('PRE_AI_CAPTURE_TIME_INVALID_OR_FUTURE')
+    store=V3EvidenceStore(data_dir,epoch_id=epoch_id)
+    segment_rows,coverage=_pre_signal_market_segment(str(Path(data_dir).resolve()),signal_ts)
+    refs=[]
+    if segment_rows:
+        refs.append(store.put_market_segment(source='LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL',
+            symbol=identity['symbol'],timeframe='1s',start_ts=signal_ts-PRE_SIGNAL_CONTEXT_SEC,
+            end_ts=signal_ts,rows=segment_rows))
+        if 'signal_time_bbo' not in _signal_time_baseline_inputs(material):
+            for quote in reversed(segment_rows):
+                source_at=_positive_finite(quote.get('source_ts'))
+                observed_at=_positive_finite(quote.get('observed_at_ts'))
+                if (source_at is not None and observed_at is not None
+                        and max(source_at,observed_at)<=signal_ts
+                        and all(_positive_finite(quote.get(k)) is not None for k in ('bid','ask','bid_qty','ask_qty'))):
+                    material['signal_time_bbo']={k:quote[k] for k in
+                        ('bid','ask','bid_qty','ask_qty','source_ts','observed_at_ts')}
+                    break
+    feature_write=_pre_entry_features_receipt(store=store,source=material,identity=identity,
+        causal_ids=causal_ids,signal_ts=signal_ts,segment_refs=refs,features=features)
+    if (feature_write.get('blocked') or feature_write.get('deferred')
+            or not (feature_write.get('written') is True or feature_write.get('duplicate') is True)):
+        raise ValueError('PRE_AI_FEATURE_RECEIPT_NOT_DURABLE')
+    opportunity=store.append('opportunity',{
+        'record_id':causal_ids['opportunity_id'],**causal_ids,'episode_id':identity['episode_id'],
+        'shared_ai_call_id':scan,'research_scan_id':scan,'actual_ai_call_id':None,
+        'ai_evaluated':False,'raw_ai_decision':'AI_NOT_CALLED',
+        'raw_direction':'UNKNOWN','executed_direction':'UNKNOWN','grouping_basis':'SHARED_RESEARCH_SCAN',
+        'signal_ts':signal_ts,'symbol':identity['symbol'],'market':_opportunity_market(material),
+        'feature_snapshot_at_signal':features,'market_context_segment_refs':refs,
+        'market_context_segment_coverage':coverage,'research_skip_reason':source.get('research_skip_reason'),
+        **_signal_time_baseline_inputs(material)})
+    from research_scan_census import observe_opportunity
+    observe_opportunity(store,opportunity,'AI_NOT_CALLED')
+    if (opportunity.get('blocked') or opportunity.get('deferred')
+            or not (opportunity.get('written') is True or opportunity.get('duplicate') is True)):
+        raise ValueError('PRE_AI_OPPORTUNITY_NOT_DURABLE')
+    return {'opportunity':opportunity,'feature_receipt':feature_write,'ai_evaluated':False,
+            'qualification_eligible':False}
+
+
 def dual_write_lane_decision(
     source: Mapping[str, Any],
     *,

@@ -136,7 +136,7 @@ class ScanCensus:
 def observe_opportunity(store,write,policy_decision=None):
     current=_CURRENT.get()
     if current is None: return
-    if policy_decision in {'ACCEPT','REJECT','ERROR','NO_TRADE'}:
+    if policy_decision in {'ACCEPT','REJECT','ERROR','NO_TRADE','AI_NOT_CALLED'}:
         current['verdicts'].append(policy_decision)
     try:
         if len(current['refs'])>=8: raise ValueError('SCAN_CENSUS_REFERENCE_LIMIT')

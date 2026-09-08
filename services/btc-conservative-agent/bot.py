@@ -22745,6 +22745,44 @@ def log_near_edge(candidate, edge_score):
     except Exception as e:
         logger.error(f"[NEAR_EDGE LOG FAIL] {e} [PIPELINE ENFORCEMENT]")
 
+def _capture_pre_ai_skip_research(event, features, reason, ctx=None):
+    """Collect an observed skip treatment without calling AI or placing orders."""
+    if (not event.get('research_scan_id') or not is_research_data_collection()
+            or not isinstance(features,dict) or not is_valid_feature_set(features)):
+        return None
+    try:
+        if ctx is None:
+            buffers={'ret_1m':ret_1m_buffer,'ret_5m':ret_5m_buffer,'velocity':velocity_buffer,
+                'volume':volume_buffer,'avg_volume':get_aggregated(volume_buffer),'delta':delta_buffer,
+                'delta_change':delta_change_buffer,'imbalance':imbalance_buffer,'range':candle_range_buffer,
+                'wick_ratio':wick_ratio_buffer,'body_ratio':body_ratio_buffer}
+            ctx=build_pure_ai_context(state,buffers)
+        if not ctx or not validate_ai_features(ctx)[0]: return None
+        frozen=features if features.get('capture_schema')=='measured_feature_capture_v1' else _freeze_shared_causal_feature_snapshot(features,ctx)
+        from research.runtime_baseline_declaration import build_runtime_baseline_declaration
+        from research_timing_capture import load_runtime_timing_config
+        from research_v3_bridge import write_pre_ai_scan_opportunity
+        quantity=_capture_runtime_quantity_constraints(evidence_symbol=str(BITFINEX_WS_SYMBOL).upper(),source_revision=_runtime_git_rev_exact())
+        maker,taker=get_trading_fee_rates()
+        declaration=build_runtime_baseline_declaration(context=ctx,quantity_capture=quantity,
+            symbol=str(BITFINEX_WS_SYMBOL).upper(),source_revision=_runtime_git_rev_exact(),
+            captured_at_ts=time.time(),margin_usd=FIXED_MARGIN_USDT,leverage=_state_leverage(),
+            maker_fee_rate=maker,taker_fee_rate=taker)
+        # This is the newly measured research decision boundary, not the older
+        # market event time. Missing book/quantity evidence stays unsupported.
+        return write_pre_ai_scan_opportunity({'research_scan_id':event['research_scan_id'],
+            'signal_ts':time.time(),'symbol':str(BITFINEX_WS_SYMBOL).upper(),
+            'feature_snapshot_at_signal':copy.deepcopy(frozen),
+            'research_baseline_context_declaration':declaration.get('declaration'),
+            'research_baseline_context_status':declaration,
+            'original_context_signal_ts':ctx.get('signal_ts') or ctx.get('created_ts_ts'),
+            'research_skip_reason':reason,**load_runtime_timing_config()},
+            epoch_id=_collector_v22_epoch_id(),data_dir=str(_data_sync_runtime_root()))
+    except Exception as error:
+        logger.warning('[RESEARCH] PRE_AI_CAPTURE_FAILED:'+type(error).__name__)
+        return None
+
+
 def process_signal(event: dict):
     global last_signal_create_ts, last_ai_call_ts, last_signal_key, last_ai_signal_key, last_processed_candle_ts, last_ai_call_ts, last_price_for_debounce, last_signal_process_ts, last_signal_create_ts, test_signal_fired, prev_price, prev_delta, avg_volume, recent_high, recent_low, rejection_strength, last_signal_hash, last_pipeline_run, last_edge_compute
     event = copy.deepcopy(event or {})
@@ -22863,6 +22901,7 @@ def process_signal(event: dict):
             else:
                 trigger_ok = True
             if not trigger_ok:
+                _capture_pre_ai_skip_research(event,features,'AI_COOLDOWN')
                 increment_pipeline_funnel("COOLDOWN_BLOCK")
                 logger.info(
                     f"[AI] periodic direction call skipped ({trigger_reason}) "
@@ -22981,6 +23020,7 @@ def process_signal(event: dict):
                 ai_rem = ai_cooldown_remaining_sec(research_lane)
                 ai_cd = get_effective_ai_cooldown_sec(research_lane)
                 if is_ai_scan_lane(research_lane) and ai_rem > 0:
+                    _capture_pre_ai_skip_research(event,features,'AI_COOLDOWN')
                     logger.info(
                         f"[AI] COOLDOWN ACTIVE ({ai_rem}s of {ai_cd}s) lane={research_lane} "
                         f"- BLOCK BEFORE SIGNAL CREATION [PIPELINE ENFORCEMENT]"
@@ -23030,6 +23070,7 @@ def process_signal(event: dict):
 
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
                 if not invoke_ai:
+                    _capture_pre_ai_skip_research(event,features,'PRE_AI_GATE',ctx=ctx)
                     logger.info(
                         f"[AI GATE] Skipped DeepSeek - {ai_gate_reason} edge={edge_score:.1f} "
                         f"[PIPELINE ENFORCEMENT]"
