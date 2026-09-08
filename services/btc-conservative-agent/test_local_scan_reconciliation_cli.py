@@ -32,7 +32,11 @@ def test_cli_failure_sanitized_and_no_count(monkeypatch,capsys,error):
     assert result['status']=='UNKNOWN' and not result['qualification_eligible']
 
 
-@pytest.mark.parametrize('message',['CENSUS_RECEIPT_MISMATCH','CENSUS_HELD_LEASE_INVALID','MIRROR_SYNC_IN_PROGRESS'])
+@pytest.mark.parametrize('message',['CENSUS_RECEIPT_MISMATCH','CENSUS_HELD_LEASE_INVALID','MIRROR_SYNC_IN_PROGRESS',
+    'DISPATCH_PARENT_ADMISSION_UNKNOWN','DISPATCH_PARENT_ADMISSION_CONFLICT',
+    'DISPATCH_PLAN_IDENTITY_INVALID','DISPATCH_ADMISSION_CONFLICT',
+    'DISPATCH_CHILD_REFERENCE_CONFLICT','DISPATCH_CHILD_SOURCE_CONFLICT',
+    'DISPATCH_RESOLUTION_UNKNOWN','DISPATCH_RESOLUTION_CONFLICT'])
 def test_exact_diagnostic_allowlist(message):
     assert module.diagnostic_code(ValueError(message))==message
     assert module.diagnostic_code(ValueError(message+': secret path'))=='SCAN_RECONCILIATION_FAILED'

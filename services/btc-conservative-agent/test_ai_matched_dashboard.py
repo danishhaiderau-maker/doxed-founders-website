@@ -16,6 +16,14 @@ assert(!el.textContent.includes('secret') && !el.textContent.includes('<script>'
 renderScanCoverage({index_caught_up:true,observed_joined_opportunity_rows:0});
 assert(el.textContent.includes('rows: 0'));
 assert(el.textContent.includes('exhaustive collection UNKNOWN'));
+renderScanCoverage({index_caught_up:true,observed_dispatch_page:[
+ {entry_resolution:'ORDER_SUBMITTED',observed_only:true,qualification_eligible:false,trade_completed:null},
+ {entry_resolution:{toString:null,valueOf:null},observed_only:true,qualification_eligible:false,trade_completed:null},null],dispatch_page_truncated:true});
+assert(el.textContent.includes('submitted 1') && el.textContent.includes('unknown 2'));
+assert(el.textContent.includes('not cohort totals') && el.textContent.includes('not fills'));
+assert(el.textContent.includes('More dispatch records'));
+renderScanCoverage({index_caught_up:false,observed_dispatch_page:[{entry_resolution:'ORDER_SUBMITTED'}]});
+assert(!el.textContent.includes('dispatch page'));
 """
     subprocess.run(['node','-e',code],check=True,capture_output=True,text=True)
 
@@ -36,7 +44,9 @@ def test_declared_digest_verifies_original_bytes(tmp_path):
     fn=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.FunctionDef) and n.name=='_ai_payload')
     name='discovery_cohort_scorecard_report.json'
     report={'generation':{'source_revision':'s','analyzer_revision':'a','epoch_id':'e'},
-            'scan_census_observed_coverage':{'index_caught_up':True,'observed_joined_opportunity_rows':2,'qualification_eligible':False},
+            'scan_census_observed_coverage':{'index_caught_up':True,'observed_joined_opportunity_rows':2,'qualification_eligible':False,
+                'observed_dispatch_page':[{'entry_resolution':'ORDER_SUBMITTED','observed_only':True,
+                    'trade_completed':None,'qualification_eligible':False}], 'dispatch_page_truncated':True},
             'ai_verdict_coverage':{'raw_verdict_row_counts':{'AI_NOT_CALLED':3,'APPROVE':True,'REJECT':-1,'NO_TRADE':1.5},
                 'matched_selection_comparison':{'status':'DESCRIPTIVE_ONLY','groups':[]}}}
     raw=json.dumps(report,indent=3).encode()
@@ -52,6 +62,9 @@ def test_declared_digest_verifies_original_bytes(tmp_path):
     assert ns['_ai_payload']()['matched_selection_comparison']['binding_diagnostic']=='DECLARED_ARTIFACT_SHA256_VERIFIED'
     counts=ns['_ai_payload']()['ai_verdict_coverage']['counts']
     assert ns['_ai_payload']()['scan_census_observed_coverage']['observed_joined_opportunity_rows']==2
+    dispatch=ns['_ai_payload']()['scan_census_observed_coverage']
+    assert dispatch['observed_dispatch_page']==report['scan_census_observed_coverage']['observed_dispatch_page']
+    assert dispatch['dispatch_page_truncated'] is True
     assert counts=={'AI_NOT_CALLED':3,'APPROVE':None,'REJECT':None,'NO_TRADE':None,'ERROR':None,'UNKNOWN':None}
     # Same parsed JSON, different bytes: a reserialization-based check would miss this.
     (tmp_path/name).write_bytes(json.dumps(report).encode())

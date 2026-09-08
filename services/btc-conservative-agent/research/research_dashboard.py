@@ -8471,9 +8471,18 @@ function renderMatchedAI(c) {
 
 function renderScanCoverage(census) {
   const observed=census.observed_joined_opportunity_rows;
+  const page=Array.isArray(census.observed_dispatch_page) ? census.observed_dispatch_page.slice(0,8) : [];
+  const counts={ORDER_SUBMITTED:0,NO_ORDER:0,AWAITING:0,UNKNOWN:0};
+  for (const row of page) {
+    const state=row && row.observed_only === true && row.qualification_eligible === false && row.trade_completed === null && typeof row.entry_resolution === 'string' && Object.hasOwn(counts,row.entry_resolution) ? row.entry_resolution : 'UNKNOWN';
+    counts[state]++;
+  }
   const reasons=(Array.isArray(census.blockers) ? census.blockers : [])
     .filter(code => typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,95}$/.test(code)).slice(0,4);
   document.getElementById('scan-census-coverage').textContent = `Observed scan child rows: ${census.index_caught_up === true && Number.isSafeInteger(observed) && observed >= 0 ? observed : 'unavailable'} · index ${census.index_caught_up === true ? 'caught up' : 'incomplete or unavailable'} · exhaustive collection UNKNOWN; not qualification evidence.${reasons.length ? ' Reasons: '+reasons.join(', ') : ''}`;
+  if (census.index_caught_up === true && page.length) {
+    document.getElementById('scan-census-coverage').textContent += ` Observed dispatch page (${page.length}, not cohort totals): submitted ${counts.ORDER_SUBMITTED}, no order ${counts.NO_ORDER}, awaiting ${counts.AWAITING}, unknown ${counts.UNKNOWN}. Entry outcomes only—not fills or completed trades.${census.dispatch_page_truncated === true ? ' More dispatch records available via the reconciliation CLI.' : ''}`;
+  }
 }
 async function loadAI() {
   const r = await fetch('/api/ai');
