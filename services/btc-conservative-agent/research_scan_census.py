@@ -111,6 +111,41 @@ class ScanCensus:
                 'qualification_eligible':False})
         finally: lease.release()
 
+    def fanout(self,scan,*,lane,policy_signature,job_key,payload_sha256,admitted=None):
+        import re
+        if (not re.fullmatch(r'[A-Z0-9_]{1,64}',lane)
+                or not isinstance(policy_signature,str) or not 0<len(policy_signature)<=128
+                or job_key!=lane+':'+scan or not re.fullmatch('[0-9a-f]{64}',payload_sha256)):
+            raise ValueError('SCAN_FANOUT_IDENTITY_INVALID')
+        identity={'scan_id':scan,'research_lane':lane,'policy_signature':policy_signature,
+                  'job_key':job_key,'payload_sha256':payload_sha256}
+        key=_hash(identity)
+        lease=MirrorGenerationLease(self.root,owner='scan-fanout-writer'); lease.acquire(timeout_seconds=0)
+        try:
+            state=self._load(); self._flush(state)
+            active=state['active'].get(scan)
+            if active is None: raise ValueError('SCAN_FANOUT_PARENT_NOT_ACTIVE')
+            plans=active.setdefault('fanout',{})
+            if key not in plans:
+                if admitted is not None: raise ValueError('SCAN_FANOUT_PLAN_MISSING')
+                if len(plans)>=16: raise ValueError('SCAN_FANOUT_PLAN_LIMIT')
+                if any(p['identity']['job_key']==job_key for p in plans.values()):
+                    raise ValueError('SCAN_FANOUT_JOB_CONFLICT')
+                plans[key]={'identity':identity}
+                self._write(state,{'record_id':'scan-fanout-plan:'+key,
+                    'decision_stage':'SCAN_FANOUT_PLAN',**identity,'observed_ts':self._time(),
+                    'dispatch_kind':'ASYNC_COMBO_LANE_EXECUTION',
+                    'completion_status':'UNKNOWN','qualification_eligible':False})
+            if admitted is not None and 'admission' not in plans[key]:
+                status='ENQUEUED' if admitted is True else 'ADMISSION_UNKNOWN'
+                plans[key]['admission']=status
+                self._write(state,{'record_id':'scan-fanout-admission:'+key,
+                    'decision_stage':'SCAN_FANOUT_ADMISSION',**identity,
+                    'plan_record_id':'scan-fanout-plan:'+key,'observed_ts':self._time(),
+                    'admission_status':status,'completion_status':'UNKNOWN','qualification_eligible':False})
+            return 'scan-fanout-plan:'+key
+        finally: lease.release()
+
     def _verify_finished(self,scan,*,refs,raised,verdicts):
         record_id='scan-disposition:'+scan
         try:
@@ -131,6 +166,13 @@ class ScanCensus:
             return {'duplicate':True,'record_id':record_id}
         except (OSError,KeyError,TypeError):
             raise ValueError('SCAN_CENSUS_ADMISSION_OR_FINISHED_RECEIPT_MISSING') from None
+
+
+def record_current_fanout(lane,policy_signature,job_key,payload,*,admitted=None):
+    current=_CURRENT.get()
+    if current is None: return None
+    return current['census'].fanout(current['scan'],lane=lane,policy_signature=policy_signature,
+        job_key=job_key,payload_sha256=_hash(payload),admitted=admitted)
 
 
 def observe_opportunity(store,write,policy_decision=None):
@@ -171,7 +213,7 @@ def wrap_scan_census(function,*,eligible,store_factory,clock,on_failure):
         except Exception:
             notify('SCAN_CENSUS_ADMISSION_FAILED')
             return {'entry_resolution':'NO_ORDER','exact_reason':'SCAN_CENSUS_ADMISSION_FAILED'}
-        current={'scan':scan,'epoch_id':census.store.epoch_id,'refs':[],'reference_failure':False,'verdicts':[]}; token=_CURRENT.set(current)
+        current={'scan':scan,'census':census,'epoch_id':census.store.epoch_id,'refs':[],'reference_failure':False,'verdicts':[]}; token=_CURRENT.set(current)
         raised=False
         try:
             return function({**event,'research_scan_id':scan})

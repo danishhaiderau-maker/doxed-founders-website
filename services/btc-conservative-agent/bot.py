@@ -17118,18 +17118,30 @@ def _enqueue_combo_lane_execution(
     lane = str(target_lane or "").upper()
     call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
     key = f"{lane}:{call_id}"
-    accepted = _get_combo_lane_execution_worker(lane).submit(
-        key,
-        {
+    job_payload = {
             "ctx": copy.deepcopy(ctx),
             "ai": copy.deepcopy(ai),
             "edge_score": float(edge_score),
             "features": copy.deepcopy(features),
             "target_lane": lane,
             "trigger_reason": str(trigger_reason),
-        },
+        }
+    from research_scan_census import record_current_fanout
+    plan = None
+    try:
+        policy_signature = str((_v3_lane_policy_material(lane) or {}).get('policy_signature') or '')
+        plan = record_current_fanout(lane, policy_signature, key, job_payload)
+    except Exception:
+        logger.warning('[RESEARCH] SCAN_FANOUT_PLAN_UNKNOWN')
+    accepted = _get_combo_lane_execution_worker(lane).submit(
+        key, job_payload,
         source_ts=time.time(),
     )
+    if plan is not None:
+        try:
+            record_current_fanout(lane, policy_signature, key, job_payload, admitted=accepted)
+        except Exception:
+            logger.warning('[RESEARCH] SCAN_FANOUT_ADMISSION_UNKNOWN')
     if not accepted:
         # A duplicate key is already active/completed and therefore owns the
         # existing verdict.  Queue/stopped failures are surfaced by the
