@@ -312,31 +312,44 @@ def _v3_ledger_generation(path: Path, request: dict) -> dict | None:
             "generation": generation, "relative_path": None}
 
 
-def _row(path: Path, request: dict) -> dict | None:
+ROW_PHASES = ("row_admission", "row_stat", "row_tail", "row_relative_path", "row_consistency",
+              "row_quarantine_binding", "row_generation_binding")
+
+
+def _row_admitted_path(path, request):
+    if path.is_symlink():
+        return None
+    resolved = path.resolve(strict=True)
+    return resolved if _allowed(resolved, request) else None
+
+
+def _row(path: Path, request: dict, phase_seconds=None) -> dict | None:
+    def measured(phase, operation, *args):
+        if phase_seconds is None:
+            return operation(*args)
+        return _timed_inventory_phase(phase_seconds, phase, operation, *args)
     try:
         # Never turn a linked filename into the identity of its target. The
         # parent applies the same rule to targeted retrieval.
-        if path.is_symlink():
+        resolved = measured("row_admission", _row_admitted_path, path, request)
+        if resolved is None:
             return None
-        resolved = path.resolve(strict=True)
-        if not _allowed(resolved, request):
-            return None
-        stat = resolved.stat()
+        stat = measured("row_stat", resolved.stat)
         row = {
-            "path": _relpath(resolved, request),
-            "size": _complete_record_size(resolved, int(stat.st_size)),
+            "path": measured("row_relative_path", _relpath, resolved, request),
+            "size": measured("row_tail", _complete_record_size, resolved, int(stat.st_size)),
             "physical_size": int(stat.st_size),
             "mtime_ns": int(stat.st_mtime_ns),
             "inode": int(getattr(stat, "st_ino", 0) or 0),
-            "consistency_mode": _consistency_mode(resolved, request),
+            "consistency_mode": measured("row_consistency", _consistency_mode, resolved, request),
         }
-        quarantine = _quarantine_binding(path, request)
+        quarantine = measured("row_quarantine_binding", _quarantine_binding, path, request)
         if quarantine is not None:
             if (quarantine['size'], quarantine['mtime_ns'], quarantine['inode']) != (
                     row['physical_size'], row['mtime_ns'], row['inode']):
                 raise ValueError('QUARANTINE_COMPONENT_CHANGED')
             row['forensic_component'] = quarantine
-        generation = _v3_ledger_generation(resolved, request)
+        generation = measured("row_generation_binding", _v3_ledger_generation, resolved, request)
         parts = tuple(part.lower() for part in resolved.parts)
         is_v3_ledger_object = len(parts) >= 3 and parts[-3:-1] == ("v3", "ledgers") and (
             resolved.suffix.lower() == ".jsonl" or _rotation_parts(resolved.name, {".jsonl"}) is not None
@@ -1198,6 +1211,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
     invocation_dirs = 0
     invocation_pages = 0
     phase_seconds = {"row_metadata": 0.0, "row_storage": 0.0, "directory_freeze": 0.0}
+    phase_seconds.update({phase: 0.0 for phase in ROW_PHASES})
     batch_rows: list[dict] = []
     generation = None
 
@@ -1216,7 +1230,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                         continue
                     if budget_exhausted():
                         break
-                    row = _timed_inventory_phase(phase_seconds, "row_metadata", _row, request["_volume"] / name, request)
+                    row = _timed_inventory_phase(phase_seconds, "row_metadata", _row, request["_volume"] / name, request, phase_seconds)
                     invocation_files += 1
                     checkpoint["files_seen"] += 1
                     checkpoint["top_level_after"] = name
@@ -1295,7 +1309,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 for (name,) in files[:remaining_file_budget]:
                     if budget_exhausted():
                         break
-                    row = _timed_inventory_phase(phase_seconds, "row_metadata", _row, directory / str(name), request)
+                    row = _timed_inventory_phase(phase_seconds, "row_metadata", _row, directory / str(name), request, phase_seconds)
                     invocation_files += 1
                     checkpoint["files_seen"] += 1
                     current["after_file"] = str(name)
