@@ -364,6 +364,12 @@ def _index_ledger_chunk(
     inline_shared = not _shared and ledger in {'opportunity', 'market_segment'}
     available = int(stat.st_size) - offset
     if available <= 0:
+        if ledger in {'opportunity', 'market_segment'} and not _shared:
+            with connection:
+                for empty_cursor in (ledger, 'shared:' + ledger):
+                    connection.execute('INSERT OR IGNORE INTO ledger_cursor VALUES(?,?,?,?,?,?)',
+                        (empty_cursor, int(stat.st_dev), int(stat.st_ino), offset,
+                         _source_anchor(path, offset), int(stat.st_mtime_ns)))
         return {"bytes_indexed": 0, "rows_indexed": 0, "rows_scanned": 0, "caught_up": True}
     read_size = min(available, max(1, int(max_bytes)))
     with path.open("rb") as handle:
@@ -518,7 +524,7 @@ def _dirty_lifecycle_rows(
         context_index = connection.execute(
             'SELECT ledger,byte_offset,row_length,row_sha256 FROM shared_context_event WHERE epoch_id=? AND episode_id=? ORDER BY ledger,byte_offset LIMIT ?',
             (key.collection_epoch_id, key.episode_id, max_events_per_lifecycle + 1)).fetchall()
-        if len(context_index) > max_events_per_lifecycle or total_bytes + sum(int(r['row_length']) for r in context_index) > max_bytes_per_lifecycle:
+        if len(indexed) + len(context_index) > max_events_per_lifecycle or total_bytes + sum(int(r['row_length']) for r in context_index) > max_bytes_per_lifecycle:
             raise ValueError('SHARED_CONTEXT_RESOURCE_LIMIT')
         refs = []
         for ref in context_index:

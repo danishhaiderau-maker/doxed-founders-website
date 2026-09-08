@@ -40,6 +40,10 @@ def test_actual_shared_row_backfill_joins_without_source_identity_rewrite(tmp_pa
         assert connection.execute("SELECT byte_offset FROM ledger_cursor WHERE ledger='opportunity'").fetchone()[0] == normal_cursor
         _, rows = _dirty_lifecycle_rows(connection, tmp_path, maximum=1)[0]
         binding = rows[0]['shared_context_binding']
+        from lifecycle_completion_reconciler import evaluate_lifecycle_completion, evaluate_lifecycle_transfer_ready
+        for evaluate in (evaluate_lifecycle_completion, evaluate_lifecycle_transfer_ready):
+            assessed = evaluate(KEY, rows, now=999999)
+            assert assessed['ready'] is False and assessed['receipt'] is None
         assert collect_lifecycle_rows(tmp_path)[KEY][0]['shared_context_binding'] == binding
         if mismatch:
             assert binding['status'] == 'UNBOUND' and binding['references'] == []
@@ -50,6 +54,8 @@ def test_actual_shared_row_backfill_joins_without_source_identity_rewrite(tmp_pa
             assert ref['source_row'].get('research_lane') is None
             assert ref['source_row'].get('policy_signature') is None
             assert ref['source_row']['record_id'] == lane['opportunity_id']
+        with pytest.raises(ValueError, match='SHARED_CONTEXT_RESOURCE_LIMIT'):
+            _dirty_lifecycle_rows(connection, tmp_path, maximum=1, max_events_per_lifecycle=1)
         assert (root / 'opportunity.jsonl').read_bytes() == raw_before
         (root / 'opportunity.jsonl').write_bytes(raw_before.replace(b'scan-event', b'evil-event'))
         with pytest.raises(ValueError, match='SHARED_CONTEXT_SOURCE_CHANGED'):
@@ -68,3 +74,19 @@ def test_ambiguous_refs_are_unbound_and_unchanged():
     assert bound['status'] == 'UNBOUND' and bound['references'] == []
     assert 'SHARED_CONTEXT_AMBIGUOUS' in bound['blockers']
     assert 'policy_signature' not in original and 'research_lane' not in original
+
+
+def test_empty_shared_ledgers_reach_caught_up(tmp_path):
+    from lifecycle_pipeline import _ledger_sources_caught_up
+    root = tmp_path / 'v3' / 'ledgers'
+    root.mkdir(parents=True)
+    for ledger in ('opportunity', 'market_segment'):
+        (root / (ledger + '.jsonl')).touch()
+    connection = _open_incremental_index(tmp_path)
+    try:
+        for ledger in ('opportunity', 'market_segment'):
+            _index_ledger_chunk(connection, root / (ledger + '.jsonl'), ledger, max_bytes=1000, max_rows=1)
+        assert _ledger_sources_caught_up(connection, root)
+        assert connection.execute("SELECT count(*) FROM ledger_cursor WHERE ledger LIKE 'shared:%'").fetchone()[0] == 2
+    finally:
+        connection.close()
