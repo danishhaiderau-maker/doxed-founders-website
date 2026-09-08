@@ -9410,6 +9410,9 @@ def _commit_local_paper_lifecycle_transition(
                 if canonical_lock is not None:
                     canonical_lock.release()
     except Exception as exc:
+        from paper_fill_ownership import FillSuperseded
+        if isinstance(exc, FillSuperseded):
+            raise
         set_execution_paused("PAPER_LIFECYCLE_COMMIT_FAILED")
         raise RuntimeError(f"local paper lifecycle commit failed for {event}") from exc
     return True
@@ -9480,6 +9483,9 @@ def _commit_paper_lifecycle_transition(
                 if canonical_lock is not None:
                     canonical_lock.release()
     except Exception as exc:
+        from paper_fill_ownership import FillSuperseded
+        if isinstance(exc, FillSuperseded):
+            raise
         set_execution_paused("RELAY_LIFECYCLE_COMMIT_FAILED")
         raise RuntimeError(
             f"canonical relay lifecycle transaction failed for {event}"
@@ -22313,6 +22319,21 @@ def fill_order(order):
     transition_result = {}
 
     def target_mutator(target):
+        # This check runs under the same trade lock as normal cancellation and
+        # remains held through durable publication and the live registry swap.
+        from paper_fill_ownership import FillSuperseded
+        if any(str(row.get("trade_id") or "") == str(order.get("trade_id") or "") for row in target.get("positions") or []):
+            raise RuntimeError("position-open target already exists")
+        matching_pending = [row for row in target.get("pending_orders") or []
+                            if str(row.get("trade_id") or "") == str(order.get("trade_id") or "")]
+        if str(order.get("status") or "").upper() in {"CANCELLED", "EXPIRED"} and not matching_pending:
+            raise FillSuperseded("PAPER_FILL_CANCEL_WON")
+        if len(matching_pending) <= 1 and (order.get("cancel_confirmed") or (matching_pending and (
+                matching_pending[0].get("cancel_confirmed")
+                or str(matching_pending[0].get("status") or "").upper() in {"CANCELLED", "EXPIRED"}))):
+            raise FillSuperseded("PAPER_FILL_CANCEL_WON")
+        if len(matching_pending) != 1 or str(matching_pending[0].get("status") or "").upper() != "PENDING":
+            raise RuntimeError("position-open pending identity/status conflict")
         target["pending_orders"] = [
             row for row in target.get("pending_orders") or []
             if str(row.get("trade_id") or "") != str(order.get("trade_id") or "")

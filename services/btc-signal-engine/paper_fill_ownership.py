@@ -2,6 +2,10 @@
 import threading
 
 
+class FillSuperseded(RuntimeError):
+    """A normally finalized cancellation won the locked fill commit boundary."""
+
+
 class FillOwnership:
     def __init__(self, on_release=None):
         self.claims = {}
@@ -50,6 +54,8 @@ def wrap_fill(function, ownership, lock_provider):
         ownership.verify(order, token, lock)
         try:
             return function(order)
+        except FillSuperseded:
+            return {"filled": False, "reason": "PAPER_FILL_CANCEL_WON"}
         finally:
             ownership.release(token, lock)
     return guarded
