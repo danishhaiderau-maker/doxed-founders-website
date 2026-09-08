@@ -4698,22 +4698,34 @@ def api_manifest():
     return jsonify(_read_json(REPORT_MANIFEST_FILE))
 
 
-def _shadow_tier_projection(report, current):
+def _shadow_tier_projection(report, current, manifest=None):
     """Bounded display-only projection; stale economics are never promoted."""
     out = {"status": "CURRENT" if current and isinstance(report, dict) else "UNAVAILABLE_OR_STALE",
            "qualification_allowed": False, "rows": [], "truncated": False}
     if out["status"] != "CURRENT":
         return out
+    generation=report.get("generation")
+    mappings={"source_revision":"source_revision", "deployed_revision":"deployed_revision",
+        "analyzer_revision":"analyzer_revision", "manifest_entry_hash":"manifest_entry_hash",
+        "epoch_id":"dataset_epoch", "tile_config_signature":"config_signature"}
+    if not isinstance(generation,dict) or not isinstance(manifest,dict) or any(
+            not generation.get(key) or generation[key]!=manifest.get(field) for key,field in mappings.items()):
+        out.update(status="UNAVAILABLE_GENERATION_IDENTITY",reason="SHADOW_MANIFEST_IDENTITY_MISMATCH")
+        return out
     def add(value, tier, timing=None):
         if not isinstance(value, dict):
             value = {}
+        matched=value.get("generation")==generation
         def count(key):
             raw=value.get(key)
-            return raw if type(raw) is int and raw >= 0 else None
+            return raw if matched and type(raw) is int and raw >= 0 else None
         out["rows"].append({"tier": tier, "timing": str(timing or "BASELINE")[:128],
             "complete": count("complete_replay_count"), "unknown": count("unknown_replay_count"),
             "venue_acceptance": "UNKNOWN" if "CONDITIONAL" in tier else "NOT_LIVE_QUALIFICATION",
             "qualification_allowed": False})
+        out["rows"][-1]["status"] = str(value.get("status") or "UNKNOWN")[:80] if matched else "UNAVAILABLE_GENERATION_IDENTITY"
+        reasons=value.get("blockers") or value.get("reason_codes") or []
+        out["rows"][-1]["reason"] = "; ".join(str(reason)[:120] for reason in reasons[:4]) if isinstance(reasons,list) else "UNKNOWN"
     add(report, "STRICT_SIMULATION")
     add(report.get("conditional_report"), "CONDITIONAL_SIMULATION")
     for field,tier in (("delayed_variant_reports","STRICT_DELAYED"),
@@ -4777,7 +4789,7 @@ def api_research_design():
     shadow, shadow_source = _declared_atomic_generation_report("conservative_shadow_terminal_report.json")
     shadow_freshness = _generation_freshness_meta(shadow_source.get("manifest") or {})
     return jsonify({
-        "shadow_tiers": _shadow_tier_projection(shadow, shadow_freshness.get("current") is True),
+        "shadow_tiers": _shadow_tier_projection(shadow, shadow_freshness.get("current") is True, shadow_source.get("manifest")),
         "schema": "research_design_dashboard_v1",
         "available": available,
         "status": (
@@ -6888,7 +6900,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <section id="sec-research-design">
     <h3>Terminal simulation evidence — separate model tiers</h3>
     <p>Conditional venue acceptance is UNKNOWN. These counts do not qualify live trading.</p>
-    <table><thead><tr><th>Tier</th><th>Timing</th><th>Complete</th><th>Unknown</th><th>Venue acceptance</th></tr></thead><tbody id="research-shadow-tiers"></tbody></table>
+    <p id="research-shadow-tier-note"></p>
+    <div class="table-scroll"><table><thead><tr><th>Tier</th><th>Timing</th><th>Status</th><th>Blockers</th><th>Complete</th><th>Unknown</th><th>Venue acceptance</th></tr></thead><tbody id="research-shadow-tiers"></tbody></table></div>
     <h2>Entry baselines &amp; Phase-7 regime evidence</h2>
     <div class="stale-banner" id="research-design-banner" style="display:block"></div>
     <p class="note">Signed comparison definitions are research-only and place no orders. Coverage reports only fields explicitly captured before entry. Definitions and coverage never create fills, PnL, profitability, qualification, or live authorization.</p>
@@ -8050,13 +8063,15 @@ async function loadResearchDesign() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     const tiers = d.shadow_tiers || {};
+    document.getElementById('research-shadow-tier-note').textContent = tiers.truncated
+      ? 'Display limited to 16 timing variants per tier; full evidence remains in Report Explorer.' : '';
     tierBody.replaceChildren();
     if (tiers.status !== 'CURRENT') {
       tierBody.textContent = 'UNAVAILABLE OR STALE — no current terminal evidence';
     } else {
       (tiers.rows || []).forEach(row => {
         const tr = document.createElement('tr');
-        ['tier','timing','complete','unknown','venue_acceptance'].forEach(key => {
+        ['tier','timing','status','reason','complete','unknown','venue_acceptance'].forEach(key => {
           const td = document.createElement('td');
           td.textContent = row[key] == null ? 'UNKNOWN' : String(row[key]);
           tr.appendChild(td);
