@@ -1141,6 +1141,19 @@ def _publish_generation(
         index_temporary.unlink(missing_ok=True)
 
 
+def _timed_inventory_phase(totals, phase, operation, *args):
+    """Add bounded slice telemetry without changing results or exceptions."""
+    started = time.monotonic()
+    try:
+        return operation(*args)
+    finally:
+        duration = time.monotonic() - started
+        if 0 <= duration < float("inf"):
+            total = totals[phase] + duration
+            if total < float("inf"):
+                totals[phase] = total
+
+
 def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]:
     fingerprint = _request_fingerprint(request)
     checkpoint_path, progress_path, database_path, staging = _state_paths(work_root, fingerprint)
@@ -1184,6 +1197,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
     invocation_files = 0
     invocation_dirs = 0
     invocation_pages = 0
+    phase_seconds = {"row_metadata": 0.0, "row_storage": 0.0, "directory_freeze": 0.0}
     batch_rows: list[dict] = []
     generation = None
 
@@ -1202,7 +1216,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                         continue
                     if budget_exhausted():
                         break
-                    row = _row(request["_volume"] / name, request)
+                    row = _timed_inventory_phase(phase_seconds, "row_metadata", _row, request["_volume"] / name, request)
                     invocation_files += 1
                     checkpoint["files_seen"] += 1
                     checkpoint["top_level_after"] = name
@@ -1228,7 +1242,8 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                     checkpoint["current_dir"] = current
                 root_index = int(current["root_index"])
                 directory = roots[root_index] / current["relative"]
-                frozen_directories, frozen_entries = _freeze_directory_entries(
+                frozen_directories, frozen_entries = _timed_inventory_phase(
+                    phase_seconds, "directory_freeze", _freeze_directory_entries,
                     connection, root_index, str(current["relative"]), directory,
                     generation_directory_limit, generation_entry_limit,
                 )
@@ -1280,7 +1295,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 for (name,) in files[:remaining_file_budget]:
                     if budget_exhausted():
                         break
-                    row = _row(directory / str(name), request)
+                    row = _timed_inventory_phase(phase_seconds, "row_metadata", _row, directory / str(name), request)
                     invocation_files += 1
                     checkpoint["files_seen"] += 1
                     current["after_file"] = str(name)
@@ -1289,7 +1304,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
                 if not budget_exhausted() and len(files) <= remaining_file_budget:
                     checkpoint["current_dir"] = None
 
-            checkpoint["rows_written"] = _store_rows(connection, batch_rows)
+            checkpoint["rows_written"] = _timed_inventory_phase(phase_seconds, "row_storage", _store_rows, connection, batch_rows)
             scan_complete = bool(
                 checkpoint["top_level_complete"]
                 and checkpoint.get("current_dir") is None
@@ -1383,6 +1398,7 @@ def _build_resumable(request: dict, work_root: Path) -> tuple[dict | None, dict]
             "invocation_files_seen": invocation_files,
             "invocation_dirs_seen": invocation_dirs,
             "invocation_elapsed_seconds": elapsed,
+            "invocation_phase_seconds": dict(phase_seconds),
             "total_elapsed_seconds": checkpoint["elapsed_seconds"],
             "cpu_seconds": time.process_time() - cpu_started,
             "peak_rss_bytes": _rss_bytes(),
