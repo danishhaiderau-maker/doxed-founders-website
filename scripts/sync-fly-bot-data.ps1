@@ -1693,6 +1693,7 @@ if ($PublishAnalyzerReport) {
 # leaves the analyzer permanently fail-closed behind `inProgress: true`.
 $MirroredSourceRevision = [string]$manifest.source_git_rev
 $canonicalCandidate = if ($ProgressHeartbeatFile) { [IO.Path]::GetFullPath($ProgressHeartbeatFile) + '.canonical-' + [guid]::NewGuid().ToString('N') } else { '' }
+$canonicalBackup = if ($canonicalCandidate) { $canonicalCandidate + '.replace-backup' } else { '' }
 try {
 Write-SyncProgressHeartbeat `
   -Phase "complete" `
@@ -1712,11 +1713,18 @@ if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   if (-not $canonicalManifestReceipt) { throw "Canonical manifest commit returned no receipt." }
   # The public completion receipt is the last publication, never an input
   # falsely visible as complete while canonical identity is still pending.
-  Move-Item -LiteralPath $canonicalCandidate -Destination $ProgressHeartbeatFile -Force
+  if (Test-Path -LiteralPath $ProgressHeartbeatFile -PathType Leaf) {
+    Invoke-MirrorAtomicReplace -Candidate $canonicalCandidate -Destination $ProgressHeartbeatFile -Backup $canonicalBackup -Attempts 12
+  } else {
+    [System.IO.File]::Move($canonicalCandidate, [System.IO.Path]::GetFullPath($ProgressHeartbeatFile))
+  }
 }
 } finally {
   if ($canonicalCandidate -and (Test-Path -LiteralPath $canonicalCandidate -PathType Leaf)) {
     Remove-Item -LiteralPath $canonicalCandidate -Force
+  }
+  if ($canonicalBackup -and (Test-Path -LiteralPath $canonicalBackup -PathType Leaf)) {
+    Remove-Item -LiteralPath $canonicalBackup -Force
   }
 }
 
