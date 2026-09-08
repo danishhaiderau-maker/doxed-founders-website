@@ -15,6 +15,32 @@ def _hash(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
+def validate_stored_mapping(mapping, stored):
+    """Validate full mapping content against the independently verified store."""
+    if (not isinstance(mapping, dict) or mapping.get('schema') != 'dynamic_policy_analysis_input_v1'
+            or mapping.get('mapping_sha256') != _hash({k:v for k,v in mapping.items() if k != 'mapping_sha256'})):
+        raise ValueError('LOCAL_DYNAMIC_MAPPING_CHECKSUM')
+    source = stored['source_generation']
+    expected = mapping.get('expected_generation') or {}
+    for key, value in {'epoch_id':source['epoch'], 'source_revision':source['revision'],
+                       'deployed_revision':source['deployed_revision'],
+                       'manifest_entry_hash':source['manifest_entry_hash'],
+                       'analyzer_revision':stored['analyzer_revision']}.items():
+        if expected.get(key) != value:
+            raise ValueError('LOCAL_DYNAMIC_MAPPING_SOURCE_MISMATCH')
+    if (mapping.get('training_episodes') != stored['rows']
+            or mapping.get('generation_revision') != stored['analyzer_revision']
+            or mapping.get('dataset_epoch') != source['epoch']
+            or mapping.get('source_revision') != source['revision']
+            or _hash(mapping.get('protocol')) != stored['config_signature']):
+        raise ValueError('LOCAL_DYNAMIC_MAPPING_CONTENT_MISMATCH')
+    if (mapping.get('qualification_allowed') is not False
+            or mapping.get('sealed_evaluation_allowed') is not False
+            or mapping.get('sealed_holdout_episodes') != []
+            or mapping.get('sealed_holdout_evaluation') is not None):
+        raise ValueError('LOCAL_DYNAMIC_MAPPING_NOT_HISTORICAL')
+
+
 def build_local_dynamic_mapping(adapted, *, group_id, expected_generation, protocol):
     """Select exactly one verified adapter group, retaining its complete contract.
 

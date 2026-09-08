@@ -82,7 +82,7 @@ def _check(repo, mirror, revision, **kwargs):
 
 def write_local_dynamic_input(*, repo_root, data_root, source_revision,
                               analyzer_revision, transformation_signature, config_signature,
-                              rows, now=None):
+                              rows, now=None, mapping_payload=None):
     directory = _directory(repo_root, data_root)
     identities = {key: _text(value) for key, value in {
         'analyzer_revision': analyzer_revision, 'transformation_signature': transformation_signature,
@@ -95,6 +95,10 @@ def write_local_dynamic_input(*, repo_root, data_root, source_revision,
         body = {'schema': SCHEMA, 'source_generation': source, **identities,
                 'rows': _rows(rows, source), 'qualification_allowed': False,
                 'provenance_kind': 'LOCAL_DERIVED_NOT_FLY_SOURCE_NOT_SEALED'}
+        if mapping_payload is not None:
+            from research.local_dynamic_mapping import validate_stored_mapping
+            validate_stored_mapping(mapping_payload, body)
+            body['mapping_payload'] = json.loads(_encoded(mapping_payload))
         raw = _encoded(body)
         if len(raw) > MAX_BYTES:
             raise ValueError('LOCAL_DERIVED_BYTE_BUDGET')
@@ -133,6 +137,9 @@ def load_local_dynamic_input(*, repo_root, data_root, input_sha256, source_revis
         if not isinstance(body.get('rows'), list):
             raise ValueError('LOCAL_DERIVED_ROW_INVALID')
         _rows(body['rows'], _source(token))
+        if 'mapping_payload' in body:
+            from research.local_dynamic_mapping import validate_stored_mapping
+            validate_stored_mapping(body['mapping_payload'], body)
         _check(repo_root, data_root, source_revision, previous=token, held_lease=lease, now=now)
         return body
     finally:
