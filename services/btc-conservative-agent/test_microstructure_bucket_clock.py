@@ -56,10 +56,13 @@ def test_actual_loop_freezes_quote_before_bucket_end_and_skips_slow_write():
               BITFINEX_WS_SYMBOL="BTC", MICROSTRUCTURE_TAPE_FILE="unused", _safe_append_jsonl=append,
               _microstructure_rows_written=0, _microstructure_write_failures=0,
               _microstructure_admission_suppressions=0, _microstructure_io_write_failures=0,
+              _microstructure_capture_observation=dict(skipped_buckets_this_process=0,
+                  last_gap=None,last_capture_lag_sec=None),
               hashlib=hashlib, json=json)
     tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "microstructure_capture_loop")
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), "actual-microstructure-loop", "exec"), ns)
+    helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_record_microstructure_capture_observation")
+    exec(compile(ast.Module(body=[helper, fn], type_ignores=[]), "actual-microstructure-loop", "exec"), ns)
     ns["microstructure_capture_loop"]()
     assert rows[0]["bucket_ts"] == 101 and rows[0]["bid"] == 100
     assert rows[0]["observed_at_ts"] == 101
@@ -67,6 +70,11 @@ def test_actual_loop_freezes_quote_before_bucket_end_and_skips_slow_write():
     assert rows[1]["collection_gap"]["skipped_bucket_count"] == 20
     assert rows[1]["observed_at_ts"] >= 122
     assert ns["_microstructure_last_bucket"] == 122
+    telemetry = ns["_microstructure_capture_observation"]
+    assert telemetry["skipped_buckets_this_process"] == 20
+    assert telemetry["last_gap"]["skipped_start_ts"] == 102
+    assert telemetry["last_gap"]["skipped_end_ts_exclusive"] == 122
+    assert telemetry["last_capture_lag_sec"] >= 20
 
 
 def test_trade_interval_retention_overflow_and_reconnect_fail_closed():

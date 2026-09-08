@@ -5491,6 +5491,27 @@ _microstructure_rows_written = 0
 _microstructure_write_failures = 0
 _microstructure_admission_suppressions = 0
 _microstructure_io_write_failures = 0
+_microstructure_capture_observation = {"skipped_buckets_this_process": 0,
+    "last_gap": None, "last_capture_lag_sec": None}
+
+
+def _record_microstructure_capture_observation(scheduling, expected_bucket):
+    """Bounded process telemetry only; never synthesize absent market rows."""
+    global _microstructure_capture_observation
+    if not scheduling.get("ready"):
+        return
+    skipped = int(scheduling["skipped_bucket_count"])
+    previous = _microstructure_capture_observation
+    gap = previous["last_gap"]
+    if skipped:
+        gap = {key: scheduling[key] for key in
+               ("skipped_start_ts", "skipped_end_ts_exclusive", "skipped_bucket_count", "gap_reason")}
+        gap["observed_at_ts"] = scheduling["observed_at_ts"]
+    _microstructure_capture_observation = {
+        "skipped_buckets_this_process": previous["skipped_buckets_this_process"] + skipped,
+        "last_gap": gap,
+        "last_capture_lag_sec": max(0.0, scheduling["observed_at_ts"] - expected_bucket),
+    }
 ret_1m_buffer = deque(maxlen=20)
 ret_5m_buffer = deque(maxlen=100)
 velocity_buffer = deque(maxlen=200)
@@ -24159,6 +24180,7 @@ def microstructure_capture_loop():
             observed_at = time.time()
             stream_start = stream_state()
         scheduling = observed_bucket(next_bucket, observed_at)
+        _record_microstructure_capture_observation(scheduling, next_bucket)
         if not scheduling["ready"]:
             continue
         bucket = scheduling["bucket_ts"]
@@ -37396,6 +37418,7 @@ def status():
             "diagnostic_fill_model": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
             "qualification_fill_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
             "microstructure_tape": {
+                **_microstructure_capture_observation,
                 "schema": MICROSTRUCTURE_TAPE_SCHEMA,
                 "file": MICROSTRUCTURE_TAPE_FILE,
                 "last_bucket_ts": int(_microstructure_last_bucket or 0),
