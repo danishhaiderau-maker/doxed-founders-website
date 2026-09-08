@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -97,6 +98,8 @@ def create_seal(
     training_completed_at = float(training_completed_at)
     sealed_at = float(sealed_at)
     holdout_start_ts = float(holdout_start_ts)
+    if not all(math.isfinite(value) for value in (training_completed_at, sealed_at, holdout_start_ts)):
+        raise ValueError("NONFINITE_SEAL_TIME")
     if training_completed_at > sealed_at:
         raise ValueError("SEAL_PRECEDES_TRAINING_COMPLETION")
     if sealed_at >= holdout_start_ts:
@@ -151,6 +154,8 @@ def consume_seal(
     """Consume one seal once; this function records identities, never selects."""
     seal = load_seal(root, seal_id)
     evaluation_started_at = float(evaluation_started_at)
+    if not math.isfinite(evaluation_started_at):
+        raise ValueError("NONFINITE_EVALUATION_TIME")
     if evaluation_started_at <= float(seal["sealed_at"]):
         raise ValueError("EVALUATION_NOT_AFTER_SEAL")
     supplied_candidates = _candidates(policy_candidates)
@@ -171,6 +176,9 @@ def consume_seal(
             collected_at = float(row.get("evidence_collected_at"))
         except (TypeError, ValueError):
             defects.append(f"MISSING_CAUSAL_OR_COLLECTION_TIME:{episode_id or 'UNKNOWN'}")
+            continue
+        if not all(math.isfinite(value) for value in (signal_ts, collected_at)):
+            defects.append(f"NONFINITE_CAUSAL_OR_COLLECTION_TIME:{episode_id or 'UNKNOWN'}")
             continue
         if signal_ts < float(seal["holdout_start_ts"]):
             defects.append(f"PRE_BOUNDARY_EPISODE:{episode_id}")
