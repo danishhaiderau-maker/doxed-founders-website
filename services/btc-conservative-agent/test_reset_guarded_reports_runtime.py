@@ -30,6 +30,8 @@ def test_actual_report_writers_respect_reset_barriers(tmp_path,condition):
     env=dict(os=SimpleNamespace(lstat=lstat,path=os.path,getcwd=lambda:str(tmp_path)),
         json=json,_research_write_gate=gate,_fresh_collection_lock=threading.Lock(),
         _data_sync_runtime_root=lambda:tmp_path,utc_iso=lambda:'now',
+        _research_report_reset_generation=0, RESEARCH_SESSION_FILE=str(tmp_path/'research_session.json'),
+        _research_report_compute_lock=threading.Lock(),
         EXECUTION_FIX_VERSION='fixture',ANALYZER_SYNC_ID='fixture',
         SHADOW_VS_LIVE_ENTRY_FILE='shadow_vs_live_entry.jsonl',
         SHADOW_VS_LIVE_ENTRY_REPORT=names[0],logger=SimpleNamespace(debug=lambda *a:None))

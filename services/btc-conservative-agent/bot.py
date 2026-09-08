@@ -521,6 +521,8 @@ _agent_debug_writes_paused = False
 # epoch therefore needs its own writer barrier so the archive hash and exact
 # deletion set describe one immutable evidence snapshot.
 _research_write_gate = threading.RLock()
+_research_report_reset_generation = 0
+_research_report_compute_lock = threading.Lock()
 
 def _pause_agent_debug_writes() -> None:
     global _agent_debug_writes_paused
@@ -25899,8 +25901,8 @@ def _log_shadow_vs_live_entry(signal: dict, live_limit_price: float, entry_mode:
     _safe_append_jsonl(SHADOW_VS_LIVE_ENTRY_FILE, row, label="SHADOW_VS_LIVE_ENTRY")
 
 
-def _run_reset_guarded_report(write):
-    from research.reset_writer_barrier import run_research_writer
+def _run_reset_guarded_report(compute, *, cwd, inputs):
+    from research.derived_report_snapshot import run_snapshot_report, file_identity
     def reset_active():
         if _fresh_collection_lock.locked():
             return True
@@ -25911,27 +25913,45 @@ def _run_reset_guarded_report(write):
             return False
         except OSError:
             return None
-    outcome = run_research_writer(gate=_research_write_gate, reset_active=reset_active, write=write)
-    if outcome["status"] == "WRITTEN":
-        return outcome["result"]
-    return {"refresh_status": "SKIPPED", "reason_code": outcome["reason_code"]}
+    # Do not allow an older, slower report computation to overwrite a newer one.
+    # This independent single-flight lock never excludes raw evidence writers.
+    if not _research_report_compute_lock.acquire(blocking=False):
+        return {"refresh_status": "SKIPPED", "reason_code": "REPORT_COMPUTE_BUSY"}
+    try:
+        return run_snapshot_report(gate=_research_write_gate, reset_active=reset_active,
+            identity=lambda: (_research_report_reset_generation, file_identity(RESEARCH_SESSION_FILE)),
+            root=cwd, inputs=inputs, compute=compute)
+    finally:
+        _research_report_compute_lock.release()
 
 
 def _refresh_execution_reports_guarded(cwd):
-    from execution_funnel import refresh_all_execution_reports
-    return _run_reset_guarded_report(lambda: refresh_all_execution_reports(cwd))
+    from execution_funnel import (refresh_all_execution_reports, FUNNEL_FILE,
+                                 FUNNEL_SUMMARY_FILE, FILL_QUALITY_FILE, APPROVAL_EV_FILE)
+    def compute(snapshot):
+        result = refresh_all_execution_reports(cwd, snapshot=snapshot, publish=False)
+        return result, {FUNNEL_SUMMARY_FILE: result['funnel_summary'],
+                        FILL_QUALITY_FILE: result['fill_quality'], APPROVAL_EV_FILE: result['approval_ev']}
+    return _run_reset_guarded_report(compute, cwd=cwd,
+        inputs=(FUNNEL_FILE, 'shadow_outcome.jsonl', 'trades_3factor.csv'))
 
 
 def refresh_shadow_vs_live_entry_report(cwd: str = None) -> dict:
-    return _run_reset_guarded_report(lambda: _refresh_shadow_vs_live_entry_report_unlocked(cwd))
+    cwd = cwd or os.getcwd()
+    def compute(snapshot):
+        rows = [json.loads(line) for line in snapshot[SHADOW_VS_LIVE_ENTRY_FILE].decode('utf-8').splitlines() if line.strip()]
+        report = _refresh_shadow_vs_live_entry_report_unlocked(cwd, rows=rows, publish=False)
+        return report, {SHADOW_VS_LIVE_ENTRY_REPORT: report}
+    return _run_reset_guarded_report(compute, cwd=cwd, inputs=(SHADOW_VS_LIVE_ENTRY_FILE,))
 
 
-def _refresh_shadow_vs_live_entry_report_unlocked(cwd: str = None) -> dict:
+def _refresh_shadow_vs_live_entry_report_unlocked(cwd: str = None, *, rows=None, publish=True) -> dict:
     """Aggregate shadow_vs_live_entry.jsonl into shadow_vs_live_entry_report.json."""
     cwd = cwd or os.getcwd()
     path = os.path.join(cwd, SHADOW_VS_LIVE_ENTRY_FILE)
-    rows = []
-    if os.path.isfile(path):
+    read_source = rows is None
+    rows = [] if rows is None else rows
+    if read_source and os.path.isfile(path):
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -25966,11 +25986,12 @@ def _refresh_shadow_vs_live_entry_report_unlocked(cwd: str = None) -> dict:
         "recent": rows[-20:],
     }
     out_path = os.path.join(cwd, SHADOW_VS_LIVE_ENTRY_REPORT)
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-    except OSError as e:
-        logger.debug(f"[SHADOW_VS_LIVE] report write failed: {e}")
+    if publish:
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+        except OSError as e:
+            logger.debug(f"[SHADOW_VS_LIVE] report write failed: {e}")
     return report
 
 def _expired_order_api_row(row: dict) -> dict:
@@ -28497,6 +28518,10 @@ def _fresh_research_reset_resume() -> dict | None:
 
 def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> dict:
     """Explicit old-research discard; preserve accounting and all recovery evidence."""
+    global _research_report_reset_generation
+    # The caller already owns the reset barriers. Invalidate even same-epoch
+    # failed/resumed attempts before any destructive or rebinding operation.
+    _research_report_reset_generation += 1
     from emergency_evidence_wal import EmergencyEvidenceWal
     from research_reset_execution import execute_research_reset
     from research_reset_inventory import _managed_fly_alias
