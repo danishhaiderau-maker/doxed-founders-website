@@ -632,11 +632,25 @@ def _build_discovery_scorecard_publication(
     )
     invalid_receipts = len(baseline_report["episode_receipts"]) - len(receipts)
     unknown_counts["baseline_invalid_receipt"] += invalid_receipts
-    try:
-        declared_baseline_count = int(baseline_report.get("same_opportunity_count"))
-    except (TypeError, ValueError, OverflowError):
-        declared_baseline_count = -1
-    if declared_baseline_count != len(receipts):
+    independent_count=baseline_report.get('same_opportunity_count')
+    modern='directional_episode_count' in baseline_report
+    declared_baseline_count=baseline_report.get('directional_episode_count') if modern else independent_count
+    count_valid=(type(declared_baseline_count) is int and declared_baseline_count>=0
+        and type(independent_count) is int and independent_count>=0 and not invalid_receipts)
+    if modern:
+        by_source={}; identities=set()
+        for receipt in receipts:
+            key=(receipt.get('opportunity_id'),receipt.get('source_episode_id') or receipt.get('episode_id'))
+            identity=(*key,receipt.get('direction'))
+            if not all(isinstance(v,str) and v for v in key) or identity in identities:
+                count_valid=False
+            identities.add(identity); by_source.setdefault(key,[]).append(receipt)
+        count_valid &= (len(by_source)==independent_count
+            and baseline_report.get('independent_sample_basis')=='SOURCE_OPPORTUNITY_NOT_DIRECTIONAL_VARIANTS')
+        for group in by_source.values():
+            if any(r.get('directional_coverage')=='BOTH_SIDES_CAPTURED' for r in group):
+                count_valid &= len(group)==2 and {r.get('direction') for r in group}=={'LONG','SHORT'}
+    if not count_valid or declared_baseline_count != len(receipts):
         return _unknown(expected, ["BASELINE_ROW_COUNT_MISMATCH"],
                         input_artifacts={"evaluator": artifact},
                         input_counts={"evaluator_rows": len(rows),

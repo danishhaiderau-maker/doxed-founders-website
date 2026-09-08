@@ -58,6 +58,7 @@ def test_actual_directional_fill_to_terminal_to_scorecard(tmp_path,monkeypatch,v
     source=fresh('UNKNOWN'); source.update(source_revision=generation['source_revision'],
         deployed_revision=generation['deployed_revision'],dataset_epoch=generation['epoch_id'],epoch_id=generation['epoch_id'],
         tile_config_signature=generation['tile_config_signature'],config_signature='source-config',
+        market='spot',pre_entry_features={'regime':{'value':'BULL','observed_ts':99.}},bucket_definition_signature='buckets',
         raw_ai_decision=verdict,ai_evaluated=verdict!='AI_NOT_CALLED')
     from research_entry_baselines import materialize_signal_time_baseline_schedules
     source['baseline_schedule_snapshot']=materialize_signal_time_baseline_schedules(source)
@@ -76,6 +77,8 @@ def test_actual_directional_fill_to_terminal_to_scorecard(tmp_path,monkeypatch,v
         digest,relative=_segment_object(root,rows)
         episode['market_evidence_provenance']=[{'status':'VERIFIED','sha256':digest,'relative_path':relative,'segment_record_id':'s1'}]
         context=copy.deepcopy(model['contexts'][0])
+        from test_declared_shadow_model import contract
+        context.update(calculation_mode='DECLARED_EXECUTION_RATE_MODEL_V1',declared_contract=contract(generation),cost_provenance='DECLARED_SIMULATION')
         context.update(episode_id=episode['episode_id'],opportunity_id=episode['opportunity_id'],baseline_id=entry['baseline_id'],
             composite_policy_signature=build_composite_policy_identity(entry,candidates[0])[1]['composite_policy_signature'],
             margin_usd=entry['conservative_receipt']['fill_price']*entry['conservative_receipt']['filled_qty']/context['leverage'],
@@ -88,9 +91,27 @@ def test_actual_directional_fill_to_terminal_to_scorecard(tmp_path,monkeypatch,v
     assert shadow['complete_replay_count']==2,shadow['reason_counts']
     scorecard=build_discovery_scorecard_publication(root,expected_generation=generation,evaluator_status=status,
         baseline_report=baseline,shadow_terminal_report=shadow,dynamic_feature_names=['regime'],dynamic_protocol=PROTOCOL)
-    # Current concrete blocker: publication mistakes independent opportunities
-    # for directional receipt count. Do not rewrite either honest denominator.
     assert baseline['same_opportunity_count']==1 and baseline['directional_episode_count']==2
-    assert scorecard['blockers']==['BASELINE_ROW_COUNT_MISMATCH']
-    assert scorecard['input_counts']['declared_baseline_episode_receipts']==1
-    assert scorecard['input_counts']['valid_baseline_episode_receipts']==2
+    assert scorecard['input_counts'].get('shadow_terminal_rows_added')==2,scorecard
+    assert scorecard['dynamic_cohorts']['groups'],scorecard['dynamic_cohorts']['rejections']
+    for group in scorecard['dynamic_cohorts']['groups']:
+        with pytest.raises(ValueError,match='DYNAMIC_MAPPING_ADAPTER_CHECKSUM'):
+            build_local_dynamic_mapping(scorecard['dynamic_cohorts'],group_id=group['group_id'],expected_generation=generation,protocol=PROTOCOL)
+
+
+@pytest.mark.parametrize('defect',['bool','string','duplicate','missing_side'])
+def test_directional_count_contract_rejects_invalid_or_incomplete_pairs(tmp_path,defect):
+    from test_discovery_scorecard_publication import inputs,GENERATION
+    from research.discovery_scorecard_publication import build_discovery_scorecard_publication
+    root,status,baseline=inputs(tmp_path,rows=[])
+    baseline.update(same_opportunity_count=1,directional_episode_count=2,
+        independent_sample_basis='SOURCE_OPPORTUNITY_NOT_DIRECTIONAL_VARIANTS',
+        episode_receipts=[{'opportunity_id':'o','source_episode_id':'e','episode_id':side,
+            'direction':side,'directional_coverage':'BOTH_SIDES_CAPTURED'} for side in ('LONG','SHORT')])
+    if defect=='bool': baseline['directional_episode_count']=True
+    if defect=='string': baseline['same_opportunity_count']='1'
+    if defect=='duplicate': baseline['episode_receipts'][1]=dict(baseline['episode_receipts'][0])
+    if defect=='missing_side':
+        baseline['episode_receipts'].pop(); baseline['directional_episode_count']=1
+    result=build_discovery_scorecard_publication(root,expected_generation=GENERATION,evaluator_status=status,baseline_report=baseline)
+    assert result['blockers']==['BASELINE_ROW_COUNT_MISMATCH']
