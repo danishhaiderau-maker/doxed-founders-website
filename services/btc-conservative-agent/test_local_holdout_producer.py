@@ -11,6 +11,16 @@ from lifecycle_bundles import LifecycleKey,materialize_bundle
 from lifecycle_completion_receipts import build_evidence_collected_receipt
 
 
+def test_discovery_projection_preserves_only_explicit_lineage():
+    from research.discovery_scorecard_publication import _dynamic_projection
+    identity={'collection_epoch_id':'e','episode_id':'original','policy_signature':'p','research_lane':'lane'}
+    projected=_dynamic_projection({'source_lifecycle_identity':identity},{})
+    assert projected['source_lifecycle_identity']==identity
+    projected['source_lifecycle_identity']['episode_id']='changed'
+    assert identity['episode_id']=='original'
+    assert _dynamic_projection({'episode_id':'e','policy_signature':'p','research_lane':'lane'}, {})['source_lifecycle_identity'] is None
+
+
 def test_real_mirror_bundle_producer_preserves_exact_lane(tmp_path,monkeypatch):
     args,mapping=prepared(tmp_path); generation=mapping['expected_generation']
     key=LifecycleKey(generation['epoch_id'],'original-episode','a'*64,'CONTINUOUS')

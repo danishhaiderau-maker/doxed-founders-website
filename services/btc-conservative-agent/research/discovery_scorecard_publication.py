@@ -352,6 +352,8 @@ def _dynamic_projection(source: Mapping[str, Any], generation: Mapping[str, Any]
     """Project only explicit receipt fields; never derive a causal timestamp/bucket."""
     terminal = terminal if isinstance(terminal, Mapping) else {}
     return {
+        'source_lifecycle_identity': dict(source['source_lifecycle_identity'])
+        if isinstance(source.get('source_lifecycle_identity'), Mapping) else None,
         **_ai_verdict_projection(source),
         "generation": dict(generation), "market": source.get("market"), "symbol": source.get("symbol"),
         "signal_ts": source.get("signal_ts"),
