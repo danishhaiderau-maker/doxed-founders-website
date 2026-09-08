@@ -17126,11 +17126,12 @@ def _enqueue_combo_lane_execution(
             "target_lane": lane,
             "trigger_reason": str(trigger_reason),
         }
-    from research_scan_census import record_current_fanout
+    from research_scan_census import record_current_fanout, _hash as _fanout_payload_hash
     plan = None
     try:
         policy_signature = str((_v3_lane_policy_material(lane) or {}).get('policy_signature') or '')
-        plan = record_current_fanout(lane, policy_signature, key, job_payload)
+        payload_sha256 = _fanout_payload_hash(job_payload)
+        plan = record_current_fanout(lane, policy_signature, key, job_payload, payload_sha256=payload_sha256)
     except Exception:
         logger.warning('[RESEARCH] SCAN_FANOUT_PLAN_UNKNOWN')
     accepted = _get_combo_lane_execution_worker(lane).submit(
@@ -17139,7 +17140,7 @@ def _enqueue_combo_lane_execution(
     )
     if plan is not None:
         try:
-            record_current_fanout(lane, policy_signature, key, job_payload, admitted=accepted)
+            record_current_fanout(lane, policy_signature, key, job_payload, admitted=accepted, payload_sha256=payload_sha256)
         except Exception:
             logger.warning('[RESEARCH] SCAN_FANOUT_ADMISSION_UNKNOWN')
     if not accepted:
