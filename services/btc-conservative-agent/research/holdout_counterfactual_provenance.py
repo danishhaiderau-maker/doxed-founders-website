@@ -10,7 +10,7 @@ from research.research_v3_report import normalize_pre_entry_feature_receipt
 
 
 def verify_counterfactual_provenance(*, repo_root, data_root, source_revision,
-                                    artifact_sha256, expected_identity, clock=time.time, now=None):
+                                    artifact_sha256, expected_identity, clock=time.time, now=None,held_lease=None):
     artifact=load_completion(repo_root,artifact_sha256)
     if (artifact.get('schema')!='local_counterfactual_completion_v2'
             or artifact.get('scope')!='SEALED_POLICY_REPLAY_PROOF_NOT_QUALIFIED'
@@ -35,7 +35,8 @@ def verify_counterfactual_provenance(*, repo_root, data_root, source_revision,
         path_rows=artifact['path_rows'],cost_contract=artifact['cost_contract'],policy_id=artifact['policy_id'],
         source_segments=artifact['source_segment_references'],seal_request_id=artifact['seal_request_id'],
         baseline_reference=artifact['baseline_reference'],replay_inputs=replay,exit_candidate=artifact['exit_candidate'],
-        entry_source_segments=artifact['entry_source_segments'],clock=lambda:original,now=now,_verify_only=True)
+        entry_source_segments=artifact['entry_source_segments'],clock=lambda:original,now=now,_verify_only=True,
+        held_lease=held_lease)
     if _hash(result['body'])!=artifact_sha256:
         raise ValueError('COUNTERFACTUAL_REVERIFICATION_MISMATCH')
     source=result['opportunity']

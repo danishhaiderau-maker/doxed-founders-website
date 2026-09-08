@@ -199,8 +199,23 @@ def adapt_dynamic_cohorts(
                 rejections["ZERO_OUTCOME_NONZERO_PNL"] += 1
             else:
                 outcome = {"outcome_state": state, "net_pnl_usd": pnl}
+                counterfactual=row.get('counterfactual_identity')
+                replay_hash=row.get('replay_proof_sha256')
+                if counterfactual is not None or replay_hash is not None:
+                    expected={'epoch_id':generation['epoch_id'],'source_episode_id':row['episode_id'],
+                        'opportunity_id':row['opportunity_id'],'policy_id':policy,'policy_signature':signature,
+                        'direction':row['direction'],'seal_request_id':counterfactual.get('seal_request_id') if isinstance(counterfactual,Mapping) else None}
+                    if (counterfactual!=expected or not all(_text(v) for v in expected.values())
+                            or not isinstance(replay_hash,str) or not re.fullmatch('[0-9a-f]{64}',replay_hash)
+                            or not re.fullmatch('[0-9a-f]{64}',expected['seal_request_id'])
+                            or row.get('source_lifecycle_identity')):
+                        rejections['COUNTERFACTUAL_IDENTITY_INVALID']+=1
+                        outcome=None
+                    else:
+                        outcome['counterfactual_identity']=dict(counterfactual)
+                        outcome['replay_proof_sha256']=replay_hash
                 lineage = row.get('source_lifecycle_identity')
-                if isinstance(lineage, Mapping) and all(_text(lineage.get(k)) for k in
+                if outcome is not None and isinstance(lineage, Mapping) and all(_text(lineage.get(k)) for k in
                         ('collection_epoch_id','episode_id','policy_signature','research_lane')):
                     if (lineage['collection_epoch_id']==generation['epoch_id']
                             and lineage['episode_id']==row['episode_id']

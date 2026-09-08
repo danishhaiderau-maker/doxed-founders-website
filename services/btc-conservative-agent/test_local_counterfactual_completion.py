@@ -204,6 +204,17 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
     assert proof['evidence_collected_at']==2000030.
     assert 'source_lifecycle_identity' not in proof
     assert set((args['repo_root']/'local-derived/counterfactual-completions').iterdir())==before_files
+    from research.mirror_generation_lease import MirrorGenerationLease
+    held=MirrorGenerationLease(args['data_root'],owner='test-caller').acquire(timeout_seconds=0)
+    try:
+        assert verify_counterfactual_provenance(**consumer_args,held_lease=held)['counterfactual_identity']==identity
+        assert held.held
+        with pytest.raises(ValueError,match='EXPECTED_IDENTITY'):
+            verify_counterfactual_provenance(**{**consumer_args,'expected_identity':{}},held_lease=held)
+        assert held.held
+    finally: held.release()
+    with pytest.raises(ValueError,match='HELD_LEASE_INVALID'):
+        verify_counterfactual_provenance(**consumer_args,held_lease=held)
     with pytest.raises(ValueError,match='EXPECTED_IDENTITY'):
         verify_counterfactual_provenance(**{**consumer_args,'expected_identity':{**identity,'direction':'SHORT'}})
     import copy
@@ -214,6 +225,42 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
     earlier_proof=verify_counterfactual_provenance(**{**consumer_args,'artifact_sha256':earlier_digest})
     assert earlier_proof['evidence_collected_at']==2000030.
     assert earlier_proof['qualification_eligible_at']==2000030.
+    if authority=='real_mirror':
+        from research.local_holdout_producer import produce_local_holdout
+        from research.local_dynamic_evaluation import evaluate_local_frozen_holdout
+        import research.holdout_counterfactual_provenance as verifier
+        # Deterministic actual verification clock, not artifact-asserted time.
+        actual_verify=verifier.verify_counterfactual_provenance
+        import research.local_holdout_producer as producer
+        monkeypatch.setattr(producer,'verify_counterfactual_provenance',
+            lambda **kw:actual_verify(**kw,clock=lambda:2110001.))
+        prospective=row(generation=generation,episode_id='original',opportunity_id='opp',policy_id='policy',
+            policy_signature=args['terminal']['policy_signature'],cost_model_id=args['terminal']['cost_model_id'],
+            simulation_model=args['terminal']['simulation_model'],declared_contract_sha256=_hash(args['cost_contract']),
+            signal_ts=2000010.,required_end_ts=args['terminal']['required_horizon_end_ts'],
+            pre_entry_features={'regime':{'value':'BULL','observed_ts':2000010.}},
+            outcome_state=args['entry']['final_classification'],net_pnl_usd=args['terminal']['net_pnl_usd'],
+            counterfactual_identity=identity,replay_proof_sha256=result['artifact_sha256'])
+        adapted=adapt_dynamic_cohorts([prospective],expected_generation=generation,feature_names=['regime'],protocol=protocol)
+        future_mapping=build_local_dynamic_mapping(adapted,group_id=adapted['groups'][0]['group_id'],expected_generation=generation,protocol=protocol)
+        future_opts={k:v for k,v in opts.items() if k!='input_sha256'}
+        receipt=write_local_dynamic_input(**future_opts,rows=future_mapping['training_episodes'],mapping_payload=future_mapping)
+        future_opts['input_sha256']=receipt['input_sha256']
+        holdout=produce_local_holdout(**future_opts)
+        assert len(holdout['rows'])==1,holdout['excluded_counts']
+        assert holdout['rows'][0]['collection_provenance_by_policy']['policy']['completion']['terminal']==artifact['terminal']
+        evaluated=evaluate_local_frozen_holdout(**future_opts,seal_request_id=args['seal_request_id'],clock=lambda:2110002.)
+        assert evaluated['comparison']['episodes_scored']==1
+        assert evaluated['qualification_allowed'] is False
+        for field,value in [('net_pnl_usd',999.),('cost_model_id','wrong-cost')]:
+            badrow={**prospective,field:value}
+            adapted_bad=adapt_dynamic_cohorts([badrow],expected_generation=generation,feature_names=['regime'],protocol=protocol)
+            badmap=build_local_dynamic_mapping(adapted_bad,group_id=adapted_bad['groups'][0]['group_id'],expected_generation=generation,protocol=protocol)
+            badopts={k:v for k,v in future_opts.items() if k!='input_sha256'}
+            badreceipt=write_local_dynamic_input(**badopts,rows=badmap['training_episodes'],mapping_payload=badmap)
+            rejected=produce_local_holdout(**badopts,input_sha256=badreceipt['input_sha256'])
+            assert rejected['rows']==[]
+            assert rejected['excluded_counts']=={'COUNTERFACTUAL_OUTCOME_COMPLETION_MISMATCH':1}
     for mutation in ('historical','missing_replay','forged_fill','forged_terminal','wrong_source'):
         changed=copy.deepcopy(artifact)
         if mutation=='historical': changed['scope']='HISTORICAL_REPLAY_ONLY'

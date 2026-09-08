@@ -4,6 +4,7 @@ import json
 import math
 import re
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from research.local_dynamic_input import _check,_source,_safe_path,_encoded
 from research.local_dynamic_fit_loader import _read
@@ -34,7 +35,7 @@ def _proof(root,ref):
 def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry,terminal,
                      path_rows,cost_contract,policy_id,source_segments,seal_request_id=None,clock=time.time,now=None,
                      baseline_reference=None,replay_inputs=None,exit_candidate=None,entry_source_segments=None,
-                     _verify_only=False):
+                     _verify_only=False,held_lease=None):
     from research.declared_shadow_model import validate_contract
     from research_v3_contract import canonical_json
     base=_safe_path(Path(repo_root)/'local-derived')
@@ -42,7 +43,11 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
         raise ValueError('COUNTERFACTUAL_RAW_OVERLAP')
     if len(_encoded([entry,terminal,path_rows,cost_contract,opportunity_ref]))>2097152:
         raise ValueError('COUNTERFACTUAL_PROOF_LIMIT')
-    with MirrorGenerationLease(data_root,owner='counterfactual-proof').acquire(timeout_seconds=0):
+    if held_lease is not None and (not isinstance(held_lease,MirrorGenerationLease)
+            or not held_lease.held or held_lease.path!=_safe_path(data_root).resolve()/'.fly-mirror-generation.lease'):
+        raise ValueError('COUNTERFACTUAL_HELD_LEASE_INVALID')
+    with (nullcontext(held_lease) if held_lease is not None else
+            MirrorGenerationLease(data_root,owner='counterfactual-proof').acquire(timeout_seconds=0)):
         source=_source(_check(repo_root,data_root,source_revision,now=now))
         if _verify_only:
             from research.counterfactual_source_membership import verify_membership

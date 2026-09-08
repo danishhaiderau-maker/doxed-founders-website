@@ -9,6 +9,8 @@ from research.mirror_generation_lease import MirrorGenerationLease
 from research.holdout_collection_provenance import verify_collection_provenance
 from research.holdout_causal_provenance import require_matching_causal_projection
 from research_v3_sealed_holdout import _write_once
+from research.holdout_counterfactual_provenance import verify_counterfactual_provenance
+from research.holdout_candidate_identity import candidate_identity_matches
 
 
 def _read_manifest(path):
@@ -45,13 +47,45 @@ def produce_local_holdout(**options):
             identity=manifest.get('identity') or {}
             key=tuple(identity.get(k) for k in ('collection_epoch_id','episode_id','policy_signature','research_lane'))
             by_identity.setdefault(key,[]).append(path.parent)
-        excluded=Counter(); rows=[]; verified_count=0
+        excluded=Counter(); rows=[]; verified_count=0; counterfactual_count=0
         for original in mapping['training_episodes']:
             proofs={}; outcomes={}
             for candidate in mapping['candidates']:
                 if candidate['policy_id'] not in original['policy_outcomes']:
                     excluded['MAPPED_CANDIDATE_OUTCOME_UNKNOWN']+=1
             for policy,outcome in original['policy_outcomes'].items():
+                if outcome.get('counterfactual_identity') or outcome.get('replay_proof_sha256'):
+                    counterfactual_count+=1
+                    if counterfactual_count>32:
+                        raise ValueError('HOLDOUT_COUNTERFACTUAL_RESUMABLE_VERIFICATION_REQUIRED')
+                    identity=outcome.get('counterfactual_identity') or {}
+                    candidates=[c for c in mapping['candidates'] if c['policy_id']==policy]
+                    expected={'epoch_id':generation['epoch_id'],'source_episode_id':original.get('source_episode_id'),
+                        'opportunity_id':original.get('opportunity_id'),'policy_id':policy,
+                        'policy_signature':candidates[0]['policy_signature'] if len(candidates)==1 else None,
+                        'direction':original.get('direction'),'seal_request_id':identity.get('seal_request_id')}
+                    if outcome.get('source_lifecycle_identity') or identity!=expected:
+                        excluded['COUNTERFACTUAL_IDENTITY_MISMATCH']+=1; continue
+                    try:
+                        proof=verify_counterfactual_provenance(repo_root=options['repo_root'],data_root=root,
+                            source_revision=options['source_revision'],artifact_sha256=outcome.get('replay_proof_sha256'),
+                            expected_identity=expected,now=options.get('now'),held_lease=lease)
+                        require_matching_causal_projection(original,proof['causal_provenance'])
+                    except (ValueError,OSError):
+                        excluded['COUNTERFACTUAL_PROVENANCE_UNVERIFIED']+=1; continue
+                    completion=proof['completion']; entry=completion['entry']; terminal=completion['terminal']
+                    dimensions=mapping['selected_group']
+                    if (not candidate_identity_matches(original,outcome,proof,policy=policy,
+                            signature=expected['policy_signature'],seal_request_id=expected['seal_request_id'])
+                            or entry.get('final_classification')!=outcome.get('outcome_state')
+                            or terminal.get('net_pnl_usd')!=outcome.get('net_pnl_usd')
+                            or terminal.get('status')!='COMPLETE'
+                            or dimensions.get('cost_model_id')!=terminal.get('cost_model_id')
+                            or dimensions.get('simulation_model')!=terminal.get('simulation_model')
+                            or (dimensions.get('sizing') or {}).get('contract_sha256')!=terminal.get('declared_contract_sha256')):
+                        excluded['COUNTERFACTUAL_OUTCOME_COMPLETION_MISMATCH']+=1; continue
+                    proofs[policy]=proof; outcomes[policy]=outcome
+                    continue
                 identity=outcome.get('source_lifecycle_identity') or {}
                 if (not identity or identity.get('episode_id')!=original.get('source_episode_id')
                         or identity.get('collection_epoch_id')!=generation['epoch_id']):
