@@ -953,6 +953,7 @@ jobs:
           python -m pytest test_data_sync_bundle_transport.py test_data_sync_bundle_worker.py test_data_sync_bundle_runtime.py test_data_sync_bundle_storage.py test_data_sync_bundle_api.py test_data_sync_bundle_client.py test_data_sync_bundle_bot_integration.py test_fly_sync_bundle_adapter.py -q
           python -m pytest ../../scripts/test_fly_transport_bundle_workflow.py -q
           python -m pytest test_data_sync_bundle_runtime_topology.py -q
+          python -m pytest test_bundle_timeout_phase.py test_public_quantity_metadata.py test_lifecycle_shared_context.py test_shared_context_report.py test_genome_shared_context_dashboard.py -q
 
       - uses: actions/setup-node@v4
         with:
