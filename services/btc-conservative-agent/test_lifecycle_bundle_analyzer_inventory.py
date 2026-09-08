@@ -1,5 +1,6 @@
 import json
 import hashlib
+import pytest
 from pathlib import Path
 
 from lifecycle_bundles import LifecycleKey, materialize_bundle, materialize_transfer_bundle
@@ -23,6 +24,7 @@ def _completion():
         "source_revision": "src",
         "deployed_revision": "dep",
         "tile_config_signature": "tile",
+        "config_signature": "config",
     }
 
 
@@ -32,6 +34,7 @@ def _row(key, record_id, *, completion=True):
         "event_id": "trade-1", "observed_ts": 10_000.0,
         "source_revision": "src", "deployed_revision": "dep",
         "tile_config_signature": "tile",
+        "config_signature": "config",
         "bundle_completion": _completion() if completion else None,
     }
     if completion:
@@ -45,6 +48,7 @@ def _row(key, record_id, *, completion=True):
             "provenance": {
                 "source_revision": "src", "deployed_revision": "dep",
                 "tile_config_signature": "tile",
+                "config_signature": "config",
             },
             "completion_receipt_sha256": completion_receipt["completion_receipt_sha256"],
             "qualification_eligible_at": 18_000.0,
@@ -84,6 +88,14 @@ def _forbidden_keys(value):
         for child in value:
             found.update(_forbidden_keys(child))
     return found
+
+
+def test_missing_config_signature_cannot_materialize_transfer(tmp_path):
+    key = LifecycleKey("epoch-1", "episode-1", "policy-1", "FIXED")
+    row = _row(key, "terminal", completion=False)
+    del row["config_signature"]
+    with pytest.raises(ValueError, match="LIFECYCLE_PROVENANCE_NOT_UNIQUE:config_signature"):
+        materialize_transfer_bundle(tmp_path, key, [row], _transfer_assessment())
 
 
 def test_matching_qualification_and_transfer_are_counted_with_audit_isolation(tmp_path):
