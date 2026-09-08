@@ -74,6 +74,9 @@ function Start-FlyGenerationResume {
   if (-not $AdminToken) { $AdminToken = Import-CanonicalBotAdminToken }
   if (-not $AdminToken) { throw 'ADMIN_TOKEN_REQUIRED' }
   . (Join-Path $PSScriptRoot 'fly-sync-bundles.ps1')
+  # GetNewClosure uses a dynamic module: retain the validator explicitly rather
+  # than resolving a function from this caller's transient local scope.
+  $assertUnlinkedPath = ${function:Assert-FlyBundleUnlinkedPath}
   Assert-FlyBundleUnlinkedPath -Path $ReceiptDirectory
   New-Item -ItemType Directory -Path $ReceiptDirectory -Force | Out-Null
   $scriptPath = Join-Path $PSScriptRoot 'sync-fly-bot-data.ps1'
@@ -91,7 +94,7 @@ function Start-FlyGenerationResume {
       return @{Success=$true; Result=$result}
     } catch {
       if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { throw 'RESUME_ATTEMPT_WITHOUT_RECEIPT' }
-      Assert-FlyBundleUnlinkedPath -Path $receiptPath
+      & $assertUnlinkedPath -Path $receiptPath
       if ((Get-Item -LiteralPath $receiptPath).Length -gt 65536) { throw 'RESUME_RECEIPT_LIMIT' }
       return @{Success=$false; Receipt=(Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json)}
     }

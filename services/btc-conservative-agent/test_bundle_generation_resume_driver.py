@@ -40,7 +40,8 @@ catch {Write-Output "$($_.Exception.Message):$script:attempts"}
     assert result.stdout.strip() == expected, result.stdout + result.stderr
 
 
-def test_wrapper_uses_actual_success_return_shape_and_holds_mirror_lease(tmp_path):
+@pytest.mark.parametrize('fail', [False, True])
+def test_wrapper_uses_actual_success_return_shape_and_holds_mirror_lease(tmp_path, fail):
     import shutil
     shutil.copyfile(SCRIPT, tmp_path / SCRIPT.name)
     (tmp_path/'fly-canonical-lock.ps1').write_text("function Get-CanonicalFlyBotUrl { 'https://doxed-btc-bot.fly.dev' }")
@@ -52,9 +53,13 @@ $blocked=$false
 try {$h=[IO.File]::Open((Join-Path $TargetDir '.fly-mirror-generation.lease'),'OpenOrCreate','ReadWrite','None');$h.Dispose()}
 catch {$blocked=$true}
 if(-not $blocked){throw 'LEASE_NOT_HELD'}
+if('__FAIL__' -eq 'True') {
+ @{failureCode='HASH_MISMATCH'} | ConvertTo-Json | Set-Content -LiteralPath $ProgressHeartbeatFile
+ throw 'SYNTHETIC_TRANSFER_FAILURE'
+}
 # Normal sync return protocol: terminal success has no required heartbeat.
 [pscustomobject]@{SourceRevision=$InitialManifest.source_git_rev;AckAccepted=$true;Files=1;Bytes=10}
-''')
+'''.replace('__FAIL__', str(fail)))
     (tmp_path/'mirror').mkdir()
     code = r'''
 . '__SCRIPT__'
@@ -64,12 +69,15 @@ function Invoke-RestMethod {
  if($Uri -notlike '*generation_id=*' -or $MaximumRedirection -ne 0){throw 'REQUEST_NOT_PINNED'}
  [pscustomobject]@{inventory_generation_id=('a'*64);inventory_sha256=('a'*64);source_git_rev='rev';collection_epoch_id='epoch';tile_registry_signature='tile';inventory_status='CURRENT';inventory_authoritative=$true;inventory_ack_eligible=$true}
 }
+try {
 $r=Start-FlyGenerationResume -Identity $identity -TargetDir '__ROOT__/mirror' -ReceiptDirectory '__ROOT__/receipts' -AdminToken 'synthetic'
 if($r.AckAccepted -ne $true){throw 'NO_ACK'}
 Write-Output 'PASS'
+} catch { Write-Output $_.Exception.Message }
 '''.replace('__SCRIPT__',str(tmp_path/SCRIPT.name)).replace('__ROOT__',str(tmp_path)).replace("'rev'", "('1'*40)")
     result=subprocess.run([str(PWSH),'-NoProfile','-NonInteractive','-Command',code],capture_output=True,text=True,timeout=30)
-    assert result.returncode==0 and result.stdout.strip()=='PASS',result.stdout+result.stderr
+    expected = 'RESUME_NON_DEADLINE_FAILURE' if fail else 'PASS'
+    assert result.returncode==0 and result.stdout.strip()==expected,result.stdout+result.stderr
 
 
 @pytest.mark.parametrize('observed,expected', [('9e623f953546','PASS'),('000000000000','RESUME_PROGRESS_IDENTITY_INVALID')])
