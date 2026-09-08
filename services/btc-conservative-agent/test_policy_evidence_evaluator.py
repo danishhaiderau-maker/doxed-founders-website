@@ -38,6 +38,7 @@ def _row(ts, *, bid=99, ask=101, bid_qty=1, ask_qty=1):
     return {
         "schema": "market_microstructure_1s_v1", "symbol": "BTCUSD",
         "bucket_ts": ts, "fresh": True, "valid_bbo": True,
+        "source_ts": ts, "observed_at_ts": ts,
         "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty,
         "trade_count": 0, "buy_qty": 0, "sell_qty": 0,
     }
@@ -140,6 +141,20 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
     ])
     assert materialize_bundle(tmp_path, key, lifecycle_rows, now=20_000.0)["written"] is True
     return v3
+
+
+@pytest.mark.parametrize('observation',['missing','future'])
+def test_unproven_quote_observation_cannot_support_fill(tmp_path, observation):
+    rows=[_row(10,ask=100),_row(11,ask=100)]
+    for row in rows:
+        if observation=='missing':
+            row.pop('source_ts'); row.pop('observed_at_ts')
+        else:
+            row['source_ts']=row['bucket_ts']+2
+            row['observed_at_ts']=row['bucket_ts']+2
+    result=build_v3_conservative_results(_fixture(tmp_path,entry_rows=rows))['results'][0]
+    assert result['classification']=='UNKNOWN'
+    assert 'QUOTE_OBSERVATION_TIME_UNPROVEN' in str(result['unknown_reason_codes'])
 
 
 @pytest.mark.parametrize("direction,rows", [
