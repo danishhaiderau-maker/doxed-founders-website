@@ -6,6 +6,40 @@ from research.research_v3_report import build_safe_policy_genome_v3_report, REPO
 from research.shared_context_coverage import build_shared_context_coverage
 
 
+def test_full_cohort_paginates_and_anchor_overflow_is_local(tmp_path):
+    anchors, contexts = [], []
+    for index in range(70):
+        episode = 'episode-%03d' % index
+        lane = {**audit(), 'episode_id':episode, 'opportunity_id':'opportunity:'+episode}
+        anchors.append(lane)
+        contexts.append({**PROV, 'epoch_id':KEY.collection_epoch_id, 'episode_id':episode,
+            'shared_ai_call_id':lane['shared_ai_call_id'], 'record_id':lane['opportunity_id']})
+    # More than sixteen anchors for one lane cannot invalidate unrelated lanes.
+    anchors.extend(dict(anchors[0]) for _ in range(16))
+    path = tmp_path/'v3/ledgers/opportunity.jsonl'
+    path.parent.mkdir(parents=True)
+    path.write_text(''.join(json.dumps(row)+'\n' for row in contexts))
+    first = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, anchors)
+    assert first['eligible_lanes'] == 70 and first['page_lanes'] == 64
+    assert first['omitted_from_page'] == 6 and first['bound_lanes'] == 63
+    assert first['paginated'] and not first['truncated']
+    assert first['cohort_evaluated_lanes'] == 64 and first['cohort_pending_lanes'] == 6
+    assert not first['cohort_evaluation_complete']
+    assert 'SHARED_CONTEXT_ANCHOR_LIMIT_EXCEEDED' in first['lanes'][0]['blockers']
+    second = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, anchors)
+    assert second['page_start'] == 64 and second['page_lanes'] == 6
+    assert second['bound_lanes'] == 6 and second['evaluated_through_lane'] == 70
+    identities = [row['identity']['episode_id'] for page in (first,second) for row in page['lanes']]
+    assert len(set(identities)) == 70
+    assert second['counts_scope'] == 'CURRENT_PAGE_ONLY'
+    assert second['cohort_evaluated_lanes'] == 70 and second['cohort_bound_lanes'] == 69
+    assert second['cohort_pending_lanes'] == 0 and second['cohort_evaluation_complete']
+    anchors[1] = {**anchors[1], 'config_signature':'changed-config'}
+    changed = build_shared_context_coverage(tmp_path, KEY.collection_epoch_id, anchors)
+    assert changed['page_start'] == 0 and changed['cohort_evaluated_lanes'] == 64
+    assert changed['cohort_pending_lanes'] == 6 and not changed['cohort_evaluation_complete']
+
+
 def test_actual_analyzer_report_exports_verified_context_without_qualification(tmp_path, monkeypatch):
     _patch_provenance(monkeypatch)
     lane = {**audit(), 'record_id':'lane', 'opportunity_id':'opportunity:' + KEY.episode_id}

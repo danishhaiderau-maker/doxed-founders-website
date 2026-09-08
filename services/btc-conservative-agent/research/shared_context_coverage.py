@@ -85,6 +85,7 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
     row_limit = min(max(0, int(max_rows)), 2000)
     groups, references = defaultdict(list), defaultdict(list)
     truncated, scanned = False, 0
+    overflow = set()
     for row in anchors:
         if row.get('resolution_scope') != 'LANE_ENTRY':
             continue
@@ -94,13 +95,16 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
             continue
         if key.collection_epoch_id != epoch_id:
             continue
-        if key not in groups and len(groups) >= min(max_lanes, 64):
-            truncated = True
-            continue
         if len(groups[key]) < 16:
             groups[key].append(row)
         else:
-            truncated = True
+            overflow.add(key)
+    all_keys = sorted(groups)
+    total_lanes = len(all_keys)
+    page_start = 0
+    page_limit = min(max(1, int(max_lanes)), 64)
+    page_keys = all_keys[:page_limit]
+    incomplete_episodes = set()
     defects = []
     db = None
     indexed_through_bytes = 0
@@ -108,14 +112,25 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
         db, scanned, complete = _advance_context_index(root, remaining, row_limit)
         indexed_through_bytes = sum(r[0] for r in db.execute('SELECT offset FROM cursor'))
         truncated = truncated or not complete
+        # Pagination is not missing source evidence. Persist the next lane
+        # only against this exact anchor cohort and indexed source generation.
+        cohort = hashlib.sha256(json.dumps([
+            epoch_id, [(k.as_dict(), groups[k], k in overflow) for k in all_keys],
+            [tuple(r) for r in db.execute('SELECT * FROM cursor ORDER BY ledger')],
+        ], sort_keys=True, default=str).encode()).hexdigest()
+        db.execute('CREATE TABLE IF NOT EXISTS coverage_page(id INTEGER PRIMARY KEY,cohort TEXT,next_lane INTEGER)')
+        previous = db.execute('SELECT cohort,next_lane FROM coverage_page WHERE id=1').fetchone()
+        if previous and previous[0] == cohort and previous[1] < total_lanes:
+            page_start = previous[1]
+        page_keys = all_keys[page_start:page_start+page_limit]
         query_bytes, query_rows = 0, 0
-        for episode in {key.episode_id for key in groups}:
+        for episode in sorted({key.episode_id for key in page_keys}):
             indexed = db.execute('SELECT * FROM refs WHERE epoch=? AND episode=? ORDER BY ledger,offset LIMIT 2001', (epoch_id,episode)).fetchall()
             for ref in indexed:
                 query_bytes += ref['length']
                 query_rows += 1
                 if query_bytes > 2*1024*1024 or query_rows > 2000:
-                    truncated = True
+                    incomplete_episodes.add(episode)
                     break
                 path = Path(root)/'v3'/'ledgers'/(ref['ledger']+'.jsonl')
                 with path.open('rb') as stream:
@@ -132,17 +147,42 @@ def build_shared_context_coverage(root, epoch_id, anchors, *, max_bytes=2*1024*1
         if db is not None:
             db.close()
     lanes = []
-    for key, rows in groups.items():
+    for key in page_keys:
+        rows = groups[key]
         binding = attach_shared_context(key, rows, references.get(key.episode_id, []))[0]['shared_context_binding']
         # A partial scan cannot exclude a later conflicting shared reference.
-        usable = binding['status'] == 'BOUND' and not truncated and not defects
+        local_blockers = (['SHARED_CONTEXT_ANCHOR_LIMIT_EXCEEDED'] if key in overflow else [])
+        if key.episode_id in incomplete_episodes:
+            local_blockers.append('SHARED_CONTEXT_QUERY_LIMIT_EXCEEDED')
+        usable = binding['status'] == 'BOUND' and not truncated and not defects and not local_blockers
         provenance = {field: sorted({str(row.get(field) or '') for row in rows}) for field in (
             'source_revision', 'deployed_revision', 'config_signature', 'tile_config_signature')}
         lanes.append({'identity': key.as_dict(), 'provenance': provenance, 'status': 'BOUND' if usable else 'UNBOUND',
-                      'blockers': sorted(set(binding['blockers'] + (['SHARED_CONTEXT_MISSING'] if not references.get(key.episode_id) else []) + (['SHARED_CONTEXT_SCAN_INCOMPLETE'] if truncated else []) + defects)),
+                      'blockers': sorted(set(binding['blockers'] + (['SHARED_CONTEXT_MISSING'] if not references.get(key.episode_id) else []) + (['SHARED_CONTEXT_SCAN_INCOMPLETE'] if truncated else []) + defects + local_blockers)),
                       'references': [{k: ref[k] for k in ('ledger','byte_offset','row_length','row_sha256')}
                                      for ref in binding['references']] if usable else []})
+    evaluated_lanes = bound_total = 0
+    if not truncated and not defects:
+        # Retain only sanitized verdicts for this exact generation. A new
+        # source/anchor cohort invalidates prior counts rather than mixing them.
+        with sqlite3.connect(Path(root)/'analyzer/shared-context-index.sqlite3', timeout=.1) as results:
+            results.execute('CREATE TABLE IF NOT EXISTS coverage_result(cohort TEXT,lane TEXT,status TEXT,PRIMARY KEY(cohort,lane))')
+            results.execute('DELETE FROM coverage_result WHERE cohort<>?', (cohort,))
+            for lane in lanes:
+                results.execute('INSERT OR REPLACE INTO coverage_result VALUES(?,?,?)',
+                    (cohort,json.dumps(lane['identity'],sort_keys=True),lane['status']))
+            results.execute('INSERT OR REPLACE INTO coverage_page VALUES(1,?,?)', (cohort,page_start+len(page_keys)))
+            evaluated_lanes, bound_total = results.execute(
+                "SELECT count(*),coalesce(sum(status='BOUND'),0) FROM coverage_result WHERE cohort=?", (cohort,)
+            ).fetchone()
     return {'schema':'shared_context_coverage_v1', 'epoch_id':epoch_id, 'qualification_authority':False,
             'cleanup_authority':False, 'truncated':truncated, 'rows_scanned':scanned,
             'indexed_through_bytes':indexed_through_bytes,
+            'eligible_lanes':total_lanes, 'page_start':page_start,
+            'page_lanes':len(lanes), 'omitted_from_page':total_lanes-len(lanes),
+            'evaluated_through_lane':page_start+len(lanes),
+            'paginated':total_lanes>len(lanes), 'counts_scope':'CURRENT_PAGE_ONLY',
+            'cohort_evaluated_lanes':evaluated_lanes, 'cohort_bound_lanes':bound_total,
+            'cohort_pending_lanes':total_lanes-evaluated_lanes,
+            'cohort_evaluation_complete':not truncated and not defects and evaluated_lanes==total_lanes,
             'bound_lanes':sum(r['status']=='BOUND' for r in lanes), 'lanes':lanes}
