@@ -129,6 +129,9 @@ console.log(`Mirrored durable relay event outbox (${sha256(readFileSync(relayOut
 // retired policy files so parity cannot pass with an orphan execution path.
 copyFileSync(join(agentDir, 'crash_exception_receipt.py'), join(engineDir, 'crash_exception_receipt.py'));
 copyFileSync(join(agentDir, 'dashboard_bounded_projection.py'), join(engineDir, 'dashboard_bounded_projection.py'));
+for (const name of ['evidence_phase_trace.py', 'microstructure_bucket_clock.py', 'microstructure_tape.py']) {
+  copyFileSync(join(agentDir, name), join(engineDir, name));
+}
 const activePolicyFiles = [
   'family_policy_common.py',
   'paper_policy_family_atr_target.py',

@@ -3449,6 +3449,8 @@ def _shutdown_pending_order_evidence_worker(timeout: float = 5.0) -> bool:
 # preventing the next scheduled AI opportunity from being recorded.
 _post_ai_evidence_workers = {}
 _post_ai_evidence_workers_lock = threading.Lock()
+from evidence_phase_trace import EvidencePhaseTrace
+_post_ai_evidence_phase_trace = EvidencePhaseTrace()
 _post_ai_evidence_status = {
     "submitted": 0,
     "rejected": 0,
@@ -3481,24 +3483,28 @@ def _record_post_ai_evidence_gap(hook: str, reason: str, key: str, detail: str =
 
 
 def _run_post_ai_evidence_hook(job: dict) -> None:
+    from contextlib import nullcontext
     payload = job.get("payload") or {}
     hook = str(payload.get("hook") or "")
     ctx = payload.get("ctx") or {}
     ai_result = payload.get("ai_result") or {}
     research_lane = str(payload.get("research_lane") or "")
-    if hook == "reversal_study":
-        started = start_reversal_study_replay(ctx, ai_result, research_lane)
-        if started is False:
-            _record_post_ai_evidence_gap(hook, "REPLAY_LOCK_TIMEOUT", job.get("key"))
-    elif hook == "ai_reason":
-        log_ai_reason_research(ctx, ai_result, research_lane)
-    else:
+    if hook not in ("reversal_study", "ai_reason"):
         raise ValueError(f"unknown post-AI evidence hook: {hook}")
-    with state_lock:
-        _post_ai_evidence_status["completed"] += 1
-        _post_ai_evidence_status["last_complete_ts"] = time.time()
-        _post_ai_evidence_status["last_completed_hook"] = hook
-        scheduled_ai_cycle_state["last_completed_hook"] = hook
+    trace = globals().get("_post_ai_evidence_phase_trace")
+    with trace.hook(hook, job.get("key")) if trace else nullcontext():
+        if hook == "reversal_study":
+            with trace.phase("replay_start") if trace else nullcontext():
+                started = start_reversal_study_replay(ctx, ai_result, research_lane)
+            if started is False:
+                _record_post_ai_evidence_gap(hook, "REPLAY_LOCK_TIMEOUT", job.get("key"))
+        else:
+            log_ai_reason_research(ctx, ai_result, research_lane)
+        with trace.acquire(state_lock, "completion_lock_wait") if trace else state_lock:
+            _post_ai_evidence_status["completed"] += 1
+            _post_ai_evidence_status["last_complete_ts"] = time.time()
+            _post_ai_evidence_status["last_completed_hook"] = hook
+            scheduled_ai_cycle_state["last_completed_hook"] = hook
 
 
 def _post_ai_dead_letter(hook: str, row: dict) -> None:
@@ -3569,6 +3575,9 @@ def post_ai_evidence_health_snapshot() -> dict:
         snapshot["workers"] = {
             hook: worker.snapshot() for hook, worker in _post_ai_evidence_workers.items()
         }
+    trace = globals().get("_post_ai_evidence_phase_trace")
+    if trace is not None:
+        snapshot["phase_timing"] = trace.snapshot()
     return snapshot
 
 
@@ -5433,6 +5442,7 @@ recent_trades = deque(maxlen=50)
 # the WebSocket handler with an HTTP call.
 venue_fill_trade_tape = deque(maxlen=5000)
 venue_fill_trade_tape_lock = threading.Lock()
+venue_fill_trade_retention = {"started_ts": time.time(), "last_evicted_ts": 0.0}
 _microstructure_last_bucket = 0
 _microstructure_rows_written = 0
 _microstructure_write_failures = 0
@@ -23801,6 +23811,10 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
     _last_ws_trade_fp = trade_fp
     _last_ws_trade_fp_ts = tick_now
     with venue_fill_trade_tape_lock:
+        if len(venue_fill_trade_tape) == venue_fill_trade_tape.maxlen:
+            venue_fill_trade_retention["last_evicted_ts"] = max(
+                venue_fill_trade_retention["last_evicted_ts"],
+                float(venue_fill_trade_tape[0].get("received_ts") or 0))
         venue_fill_trade_tape.append({
             "p": price,
             "v": size,
@@ -24004,13 +24018,19 @@ def microstructure_capture_loop():
     global _microstructure_last_bucket, _microstructure_rows_written
     global _microstructure_write_failures, _microstructure_admission_suppressions
     global _microstructure_io_write_failures
+    from microstructure_bucket_clock import observed_bucket, trade_interval_proof
+    def stream_state():
+        return {"generation": int(state.get("ws_connection_generation") or 0),
+                "connected_ts": state.get("ws_connected_ts") or float("inf"),
+                "connected": state.get("ws_transport_connected") is True,
+                "ready": state.get("ws_ready") is True,
+                "trades_subscribed": "trades" in (state.get("ws_channel_ids") or {}),
+                "last_disconnect": state.get("ws_last_disconnect_ts")}
     next_bucket = int(time.time()) + 1
     while not shutdown_event.is_set():
-        wait = max(0.01, next_bucket + 1.0 - time.time())
+        wait = max(0.01, next_bucket - time.time())
         if shutdown_event.wait(wait):
             break
-        bucket = next_bucket
-        next_bucket += 1
         with state_lock:
             bid = state.get("bid")
             ask = state.get("ask")
@@ -24024,16 +24044,42 @@ def microstructure_capture_loop():
                 float(state.get("ws_last_tick") or 0.0),
                 float(state.get("rest_price_ts") or state.get("rest_last_tick") or 0.0),
             )
+            observed_at = time.time()
+            stream_start = stream_state()
+        scheduling = observed_bucket(next_bucket, observed_at)
+        if not scheduling["ready"]:
+            continue
+        bucket = scheduling["bucket_ts"]
+        next_bucket = scheduling["next_bucket"]
+        # Freeze the BBO before waiting for this second's trade interval. A
+        # late writer skips missing seconds; it never stamps new quotes back
+        # into old buckets to catch up with wall time.
+        if shutdown_event.wait(max(0.0, bucket + 1.0 - time.time())):
+            break
         with venue_fill_trade_tape_lock:
+            retention = dict(venue_fill_trade_retention)
             bucket_trades = [
                 dict(row) for row in venue_fill_trade_tape
                 if bucket <= float((row or {}).get("received_ts") or 0) < bucket + 1
             ]
+            trades_collected_at = time.time()
+        with state_lock:
+            stream_end = stream_state()
+        trade_proof = trade_interval_proof(bucket, trades_collected_at, retention, stream_start, stream_end)
         row = build_microstructure_bucket(
             bucket_ts=bucket, bid=bid, ask=ask, bid_qty=bid_qty,
             ask_qty=ask_qty, last=last, source_ts=source_ts,
             trades=bucket_trades, symbol=BITFINEX_WS_SYMBOL,
         )
+        row.update(observed_at_ts=observed_at, quote_valid_from_ts=observed_at,
+                   trade_interval_end_ts=bucket + 1, trade_collected_at_ts=trades_collected_at,
+                   trade_bucket_complete=trade_proof["complete"], trade_coverage=trade_proof,
+                   collection_gap={key: scheduling[key] for key in (
+                       "skipped_bucket_count", "skipped_start_ts", "skipped_end_ts_exclusive", "gap_reason")})
+        # Metadata is part of the immutable row binding, not an unsigned sidecar.
+        row.pop("row_sha256", None)
+        row["row_sha256"] = hashlib.sha256(json.dumps(
+            row, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
         append_outcome = {}
         if _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
@@ -49754,6 +49800,9 @@ def _safe_append_jsonl(
     Existing callers retain the boolean contract. Callers that need telemetry
     classification may supply ``outcome``; admission is still evaluated once.
     """
+    from contextlib import nullcontext
+    trace = globals().get("_post_ai_evidence_phase_trace")
+    phase = trace.phase if trace else lambda name: nullcontext()
     terminal_labels = {
         "TRADE_LIFECYCLE", "TRADE_OUTCOME", "FILL_QUALITY", "EXECUTION_SETTINGS",
         "DUPLICATE_INTENT_AUDIT", "COUNTERFACTUAL", "PATH_REPLAY",
@@ -49806,20 +49855,25 @@ def _safe_append_jsonl(
     # provides their local serialization while production supplies the shared
     # reset barrier.
     research_gate = globals().get("_research_write_gate") or threading.RLock()
-    with research_gate, _jsonl_path_lock(path):
+    with (trace.acquire(research_gate, "research_gate_wait") if trace else research_gate), (trace.acquire(_jsonl_path_lock(path), "path_lock_wait") if trace else _jsonl_path_lock(path)):
         _jsonl_serialized_append_targets.add(os.path.abspath(path))
         for attempt in range(CSV_WRITE_RETRIES):
             try:
-                _validate_or_quarantine_jsonl(path, label)
-                rotate_log(path)
+                with phase("validation"):
+                    _validate_or_quarantine_jsonl(path, label)
+                with phase("rotation"):
+                    rotate_log(path)
                 with open(path, "a", encoding="utf-8") as f:
-                    f.write(line)
-                    f.flush()
-                    os.fsync(f.fileno())
+                    with phase("append_write"):
+                        f.write(line)
+                        f.flush()
+                    with phase("file_fsync"):
+                        os.fsync(f.fileno())
                 try:
-                    _persist_jsonl_validation_receipt(
-                        path, _jsonl_validation_signature(path)
-                    )
+                    with phase("validation_receipt"):
+                        _persist_jsonl_validation_receipt(
+                            path, _jsonl_validation_signature(path)
+                        )
                 except Exception as receipt_error:
                     # The evidence row is already durable. Never retry it merely
                     # because its acceleration receipt failed; force the next

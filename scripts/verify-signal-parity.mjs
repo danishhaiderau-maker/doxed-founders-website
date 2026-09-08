@@ -138,6 +138,10 @@ for (const [canonical, mirror, label] of [
   [relayOutboxAgent, relayOutboxEngine, 'durable relay event outbox'],
   [join(root, 'services/btc-conservative-agent/dashboard_bounded_projection.py'),
     join(root, 'services/btc-signal-engine/dashboard_bounded_projection.py'), 'bounded dashboard projection'],
+  ...['evidence_phase_trace.py', 'microstructure_bucket_clock.py', 'microstructure_tape.py'].map(name => [
+    join(root, 'services/btc-conservative-agent', name),
+    join(root, 'services/btc-signal-engine', name), name,
+  ]),
   [join(root, 'services/btc-conservative-agent/crash_exception_receipt.py'),
     join(root, 'services/btc-signal-engine/crash_exception_receipt.py'), 'original crash receipt'],
 ]) {

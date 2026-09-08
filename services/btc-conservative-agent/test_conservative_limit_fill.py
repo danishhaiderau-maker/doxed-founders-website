@@ -31,6 +31,8 @@ def row(ts, *, bid=99, ask=101, bid_qty=2, ask_qty=2, buy_qty=0, sell_qty=0,
         trade_count = int(buy_qty > 0) + int(sell_qty > 0)
     return {
         "schema": "market_microstructure_1s_v1", "symbol": "BTC", "bucket_ts": ts,
+        "source_ts": ts, "observed_at_ts": ts,
+        "trade_bucket_complete": True,
         "fresh": fresh, "valid_bbo": valid, "bid": bid, "ask": ask,
         "bid_qty": bid_qty, "ask_qty": ask_qty, "buy_qty": buy_qty,
         "sell_qty": sell_qty, "buy_vwap": buy_vwap, "sell_vwap": sell_vwap,

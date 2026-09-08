@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime
+import math
 from typing import Iterable, Mapping
 
 
@@ -38,11 +39,37 @@ def _direction(row):
 
 
 def _prior_price(tape, target):
-    eligible = [row for row in tape if _ts(row.get("bucket_ts") or row.get("source_ts")) <= target]
+    eligible = [row for row in tape if _quote_available_at(row) is not None
+                and _quote_available_at(row) <= target]
     if not eligible:
         return None
-    row = max(eligible, key=lambda item: _ts(item.get("bucket_ts") or item.get("source_ts")))
+    row = max(eligible, key=_quote_available_at)
     return _num(row.get("last") or row.get("bid") or row.get("ask"))
+
+
+def _quote_available_at(row):
+    times = [_ts(row.get("bucket_ts") or row.get("source_ts"))]
+    for key in ("source_ts", "observed_at_ts", "quote_valid_from_ts"):
+        if key in row:
+            times.append(_ts(row[key]))
+    if any(value is None or not math.isfinite(value) for value in times):
+        return None
+    return max(times)
+
+
+def _flow_available_at(row):
+    bucket = _ts(row.get("bucket_ts"))
+    if bucket is None or not math.isfinite(bucket):
+        return None
+    if "trade_bucket_complete" in row and row["trade_bucket_complete"] is not True:
+        return None
+    times = [bucket + 1.0]
+    for key in ("trade_interval_end_ts", "trade_collected_at_ts"):
+        if key in row:
+            times.append(_ts(row[key]))
+    if any(value is None or not math.isfinite(value) for value in times):
+        return None
+    return max(times)
 
 
 def _blocked_summary(rows, predicate):
@@ -143,7 +170,10 @@ def build_fill_time_guard_counterfactual(
                 momentum_bps[str(horizon)] = None
         flow_imbalance = {}
         for window in flow_windows_sec:
-            sample = [row for row in tape if fill_ts - window <= _ts(row.get("bucket_ts") or row.get("source_ts")) <= fill_ts]
+            sample = [row for row in tape
+                      if fill_ts - window <= _ts(row.get("bucket_ts") or row.get("source_ts"))
+                      and _flow_available_at(row) is not None
+                      and _flow_available_at(row) <= fill_ts]
             buy = sum(_num(row.get("buy_qty"), 0.0) for row in sample)
             sell = sum(_num(row.get("sell_qty"), 0.0) for row in sample)
             denom = buy + sell
