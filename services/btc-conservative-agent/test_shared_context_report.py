@@ -22,7 +22,7 @@ def test_actual_analyzer_report_exports_verified_context_without_qualification(t
     assert coverage == report['shared_context_coverage']
     assert coverage['bound_lanes'] == 1
     assert coverage['epoch_id'] == saved['epoch_id'] == KEY.collection_epoch_id
-    assert coverage['lanes'][0]['provenance']['source_revision'] == [PROV['source_revision']]
+    assert coverage['lanes'][0]['provenance']['source_revision'] == [json.loads(raw)['source_revision']]
     assert coverage['lanes'][0]['references'][0]['row_sha256'] == hashlib.sha256(raw).hexdigest()
     assert 'source_row' not in str(coverage)
     assert not coverage['qualification_authority'] and not coverage['cleanup_authority']
