@@ -908,6 +908,7 @@ jobs:
           python -m pytest test_data_sync_inventory_worker_contract.py -q
           python -m pytest test_data_sync_cadence_throttle_contract.py -q
           python -m pytest test_shared_evidence_admission.py test_inventory_cadence_parent_integration.py test_lifecycle_pipeline_bot_integration.py -q
+          python -m pytest test_lifecycle_continuous_append_starvation.py test_lifecycle_pipeline.py test_lifecycle_bundle_incremental.py test_lifecycle_bundle_materialization.py -q
           python test_fly_startup_contract.py
           python test_paper_skips_risk_pauses.py
           python test_daily_pnl_utc_rollover.py
