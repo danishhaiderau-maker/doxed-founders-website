@@ -231,6 +231,11 @@ def verify_evaluation_receipt(
     """Cryptographically verify the in-memory receipt and frozen candidate."""
     if not isinstance(receipt, Mapping):
         return False
+    try:
+        if not math.isfinite(float(receipt.get("evaluation_started_at"))):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
     body = {key: value for key, value in receipt.items() if key not in {"receipt_id", "content_sha256"}}
     candidates = receipt.get("policy_candidates")
     if holdout_episodes is None:
@@ -238,6 +243,9 @@ def verify_evaluation_receipt(
     supplied_identities = []
     for row in holdout_episodes:
         try:
+            if not all(math.isfinite(float(row.get(field))) for field in
+                       ("signal_ts", "evidence_collected_at")):
+                return False
             supplied_identities.append({
                 "episode_id": str(row.get("episode_id") or "").strip(),
                 "signal_ts": float(row.get("signal_ts")),

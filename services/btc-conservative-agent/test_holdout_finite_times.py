@@ -1,6 +1,8 @@
 import pytest
 from research_v3_sealed_holdout import create_seal, consume_seal
 from test_research_v3_sealed_holdout import IDENTITY, CANDIDATES, episode
+from research_v3_sealed_holdout import verify_evaluation_receipt, _sha256
+from research_v3_contract import canonical_hash
 
 
 def seal(root, **overrides):
@@ -34,3 +36,15 @@ def test_nonfinite_episode_cannot_pass(tmp_path, field, bad):
                            holdout_episodes=[row], evaluation_started_at=400)
     assert not receipt['passed']
     assert 'NONFINITE_CAUSAL_OR_COLLECTION_TIME:e-0' in receipt['blockers']
+
+
+def test_rehashed_nonfinite_evaluation_receipt_rejected(tmp_path):
+    frozen = seal(tmp_path)
+    rows = [episode(0)]
+    receipt = consume_seal(tmp_path, seal_id=frozen['seal_id'], policy_candidates=CANDIDATES,
+                           holdout_episodes=rows, evaluation_started_at=400)
+    receipt['evaluation_started_at'] = float('inf')
+    body = {k: v for k, v in receipt.items() if k not in {'receipt_id', 'content_sha256'}}
+    receipt['receipt_id'] = canonical_hash('holdout-evaluation', body, length=64)
+    receipt['content_sha256'] = _sha256(body)
+    assert not verify_evaluation_receipt(receipt, policy_id='p', holdout_episodes=rows)
