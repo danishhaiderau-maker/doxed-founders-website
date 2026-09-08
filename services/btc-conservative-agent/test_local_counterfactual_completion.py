@@ -172,17 +172,33 @@ def test_genuine_successful_prospective_artifact(tmp_path,monkeypatch,authority)
     consumer_args={k:args[k] for k in ('repo_root','data_root','source_revision')}
     consumer_args.update(artifact_sha256=result['artifact_sha256'],expected_identity=identity,
         clock=lambda:2000030.,now=args.get('now'))
+    if authority=='real_mirror':
+        # Parity alone never proves these locally copied files belonged to the
+        # promoted inventory. This fixture deliberately has no raw membership.
+        with pytest.raises(ValueError,match='SOURCE_INVENTORY_UNVERIFIED'):
+            verify_counterfactual_provenance(**consumer_args)
+        return
+    import research.counterfactual_source_membership as membership
+    monkeypatch.setattr(membership,'verify_membership',lambda *a:None)
     before_files=set((args['repo_root']/'local-derived/counterfactual-completions').iterdir())
     proof=verify_counterfactual_provenance(**consumer_args)
     assert proof['counterfactual_identity']==identity
     assert proof['entry_semantic_replay_verified'] and proof['terminal_semantic_replay_verified']
     assert proof['causal_provenance']['signal_ts']==2000010.
     assert proof['qualification_allowed'] is False
+    assert proof['evidence_collected_at']==2000030.
     assert 'source_lifecycle_identity' not in proof
     assert set((args['repo_root']/'local-derived/counterfactual-completions').iterdir())==before_files
     with pytest.raises(ValueError,match='EXPECTED_IDENTITY'):
         verify_counterfactual_provenance(**{**consumer_args,'expected_identity':{**identity,'direction':'SHORT'}})
     import copy
+    earlier=copy.deepcopy(artifact)
+    earlier['verified_at']=args['terminal']['required_horizon_end_ts']
+    earlier_digest=_hash(earlier)
+    (args['repo_root']/'local-derived/counterfactual-completions'/(earlier_digest+'.json')).write_text(json.dumps(earlier),encoding='utf-8')
+    earlier_proof=verify_counterfactual_provenance(**{**consumer_args,'artifact_sha256':earlier_digest})
+    assert earlier_proof['evidence_collected_at']==2000030.
+    assert earlier_proof['qualification_eligible_at']==2000030.
     for mutation in ('historical','missing_replay','forged_fill','forged_terminal','wrong_source'):
         changed=copy.deepcopy(artifact)
         if mutation=='historical': changed['scope']='HISTORICAL_REPLAY_ONLY'

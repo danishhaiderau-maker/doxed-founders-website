@@ -44,6 +44,10 @@ def write_completion(*,repo_root,data_root,source_revision,opportunity_ref,entry
         raise ValueError('COUNTERFACTUAL_PROOF_LIMIT')
     with MirrorGenerationLease(data_root,owner='counterfactual-proof').acquire(timeout_seconds=0):
         source=_source(_check(repo_root,data_root,source_revision,now=now))
+        if _verify_only:
+            from research.counterfactual_source_membership import verify_membership
+            verify_membership(data_root,source,opportunity_ref,
+                list(source_segments or [])+list(entry_source_segments or []))
         opportunity=_proof(data_root,opportunity_ref)
         if not isinstance(source_segments,list) or not 1<=len(source_segments)<=8:
             raise ValueError('COUNTERFACTUAL_SEGMENTS_MISSING')

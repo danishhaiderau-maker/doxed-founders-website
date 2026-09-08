@@ -60,5 +60,7 @@ def verify_counterfactual_provenance(*, repo_root, data_root, source_revision,
         'counterfactual_identity':identity,'replay_proof_sha256':artifact_sha256,
         'source':artifact['source'],'causal_provenance':causal,
         'entry_semantic_replay_verified':True,'terminal_semantic_replay_verified':True,
-        'evidence_collected_at':original,'qualification_eligible_at':verified,
+        'evidence_collected_at':verified,'qualification_eligible_at':verified,
+        'artifact_claimed_verified_at':original,
+        'availability_basis':'CURRENT_SOURCE_REVERIFICATION_NOT_ARTIFACT_CLAIM',
         'counterfactual_timestamp_inheritance_allowed':False,'qualification_allowed':False}
