@@ -27498,6 +27498,13 @@ _relay_event_outbox = RelayEventOutbox(
 api_key = os.getenv("BITFINEX_API_KEY", "").strip()
 api_secret = os.getenv("BITFINEX_API_SECRET", "").strip()
 bitfinex_public = ccxt.bitfinex({"enableRateLimit": True})
+from public_quantity_metadata import PublicQuantityMetadata, anonymous_metadata_adapter
+_public_quantity_metadata = PublicQuantityMetadata(
+    lambda: anonymous_metadata_adapter(SYMBOL_CCXT), SYMBOL_CCXT)
+
+
+def public_quantity_metadata_loop():
+    _public_quantity_metadata.run(shutdown_event)
 
 
 def _load_markets_with_retry(exchange, attempts: int = 8, base_delay: float = 3.0):
@@ -37418,6 +37425,7 @@ def status():
             "diagnostic_fill_model": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
             "qualification_fill_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
             "microstructure_tape": {
+                "public_quantity_metadata": _public_quantity_metadata.status(),
                 **_microstructure_capture_observation,
                 "schema": MICROSTRUCTURE_TAPE_SCHEMA,
                 "file": MICROSTRUCTURE_TAPE_FILE,
@@ -45571,7 +45579,7 @@ def _capture_runtime_quantity_constraints(*, evidence_symbol=None, source_revisi
     """Capture exact venue metadata for evidence; never invent constraints."""
     try:
         return capture_quantity_constraints(
-            bitfinex_public,
+            _public_quantity_metadata,
             ccxt_symbol=SYMBOL_CCXT,
             evidence_symbol=evidence_symbol or BITFINEX_WS_SYMBOL,
             captured_at=utc_iso(),
@@ -51198,6 +51206,7 @@ def main():
     threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
+    threading.Thread(target=safe_thread(public_quantity_metadata_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
     threading.Thread(target=safe_thread(ws_watchdog), daemon=True).start()

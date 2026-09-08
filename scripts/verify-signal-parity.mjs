@@ -138,7 +138,7 @@ for (const [canonical, mirror, label] of [
   [relayOutboxAgent, relayOutboxEngine, 'durable relay event outbox'],
   [join(root, 'services/btc-conservative-agent/dashboard_bounded_projection.py'),
     join(root, 'services/btc-signal-engine/dashboard_bounded_projection.py'), 'bounded dashboard projection'],
-  ...['evidence_phase_trace.py', 'microstructure_bucket_clock.py', 'microstructure_tape.py', 'paper_fill_ownership.py'].map(name => [
+  ...['evidence_phase_trace.py', 'microstructure_bucket_clock.py', 'microstructure_tape.py', 'paper_fill_ownership.py', 'public_quantity_metadata.py'].map(name => [
     join(root, 'services/btc-conservative-agent', name),
     join(root, 'services/btc-signal-engine', name), name,
   ]),
