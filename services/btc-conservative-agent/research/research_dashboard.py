@@ -2977,7 +2977,25 @@ def _ai_payload():
     calibration_status = str(cal.get("calibration_status") or "NO_DATA").upper()
     probability_mode = calibration_status == "AVAILABLE"
     gap = _spread_performance_payload()
+    report, binding = _declared_atomic_generation_report('discovery_cohort_scorecard_report.json')
+    manifest = binding.get('manifest') or {}
+    repeated, after = _declared_atomic_generation_report('discovery_cohort_scorecard_report.json')
+    generation = (report or {}).get('generation') or {}
+    expected = {'source_revision':manifest.get('source_data_revision'),
+                'analyzer_revision':manifest.get('generation_revision'),
+                'epoch_id':(manifest.get('fresh_epoch') or {}).get('epoch_id') or manifest.get('epoch_id')}
+    binding_ok = (report == repeated and manifest == (after.get('manifest') or {})
+                  and all(value and generation.get(key) == value for key,value in expected.items()))
+    freshness = _generation_freshness_meta(manifest)
+    comparison = ((report or {}).get('ai_verdict_coverage') or {}).get('matched_selection_comparison')
+    if not freshness.get('current') or not isinstance(comparison, dict) or not binding_ok:
+        comparison = {'status':'UNKNOWN', 'groups':[], 'blockers':[
+            'STALE_ANALYZER_GENERATION' if not freshness.get('current') else
+            'MATCHED_AI_REPORT_UNAVAILABLE' if not isinstance(comparison,dict) else 'MATCHED_AI_GENERATION_BINDING_FAILED']}
+    else:
+        comparison = {**comparison, 'binding_diagnostic':'CURRENT_GENERATION_ONLY_NO_CHECKSUM_BINDING'}
     return {
+        'matched_selection_comparison':comparison,
         "calibration_status": calibration_status,
         "direction_only": not probability_mode,
         "mode_note": (
@@ -6892,6 +6910,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-ai">
     <h2>AI Direction &amp; Gap Laboratory</h2>
+    <h3>Current matched AI selection — descriptive only</h3>
+    <p class="note">Conditional on supported, cost-complete filled paths only. NO_FILL and unsupported paths are excluded. Not full-opportunity expectancy, portfolio returns, entry rate, or qualification. The filter takes APPROVE only when direction matches; otherwise incremental trade PnL is zero.</p>
+    <p class="note" id="ai-matched-status">UNKNOWN — waiting for current evidence.</p>
+    <div style="max-width:100%;min-width:0;overflow-x:auto"><table><thead><tr><th>Policy / world</th><th>Independent N</th><th>Supported rows</th><th>Rejected positive / negative</th><th>Filter minus unfiltered USD</th></tr></thead><tbody id="ai-matched-body"></tbody></table></div>
     <p class="note" id="ai-mode-note">Loading the current AI evidence mode…</p>
     <div id="ai-gap-view">
       <h3>Normalized score-gap performance</h3>
@@ -8373,9 +8395,32 @@ async function loadGenome() {
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
 }
 
+function renderMatchedAI(c) {
+  const status = document.getElementById('ai-matched-status');
+  const body = document.getElementById('ai-matched-body');
+  const groups = Array.isArray(c.groups) ? c.groups : [];
+  status.textContent = `${c.status || 'UNKNOWN'} · independent episodes ${c.independent_episode_n ?? 'UNKNOWN'} · supported rows ${c.matched_rows ?? 'UNKNOWN'} · excluded ${c.excluded_rows ?? 'UNKNOWN'} · ${(c.blockers || []).join(', ')}${groups.length > 100 ? ' · showing first 100 groups' : ''}`;
+  body.replaceChildren();
+  if (!groups.length || c.status !== 'DESCRIPTIVE_ONLY') {
+    const tr = document.createElement('tr'), td = document.createElement('td');
+    td.colSpan = 5; td.textContent = 'UNKNOWN — no current eligible matched outcomes';
+    tr.appendChild(td); body.appendChild(tr); return;
+  }
+  groups.slice(0,100).forEach(g => {
+    const tr = document.createElement('tr'), dims = g.dimensions || {};
+    const values = [`${dims.policy_id || 'UNKNOWN'} / ${dims.evidence_world || 'UNKNOWN'} / ${dims.direction || 'UNKNOWN'}`,
+      g.independent_episode_n ?? 'UNKNOWN', g.supported_rows ?? 'UNKNOWN',
+      `${g.rejected_positive_outcomes ?? 'UNKNOWN'} / ${g.rejected_negative_outcomes ?? 'UNKNOWN'}`,
+      Number.isFinite(g.filter_minus_unfiltered_usd) ? g.filter_minus_unfiltered_usd.toFixed(4) : 'UNKNOWN'];
+    values.forEach(value => { const td = document.createElement('td'); td.textContent = String(value); tr.appendChild(td); });
+    body.appendChild(tr);
+  });
+}
+
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
+  renderMatchedAI(d.matched_selection_comparison || {});
   const status = String(d.calibration_status || 'NO_DATA').toUpperCase();
   const showConfidence = status === 'AVAILABLE';
   const confidenceView = document.getElementById('ai-confidence-view');
