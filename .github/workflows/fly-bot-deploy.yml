@@ -922,6 +922,10 @@ jobs:
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q
           python test_manual_pause_entry_gate.py
           python -m pytest test_manual_pause_fill_handoff.py -q
+          python -m pytest test_paper_fill_ownership.py test_direct_fill_claim_callers.py test_fill_cancel_commit_race.py test_fill_committed_telemetry.py -q
+          # Run current-source admission without requiring historical blobs in
+          # the shallow CI checkout; the deployed historical reproducer is local.
+          python -m pytest 'test_deployed_duplicate_fill_handoff.py::test_deployed_handoff_flag_does_not_prevent_second_admission[True]' -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
           python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py test_paper_family_chase_durability.py -q
