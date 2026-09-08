@@ -19,6 +19,7 @@ def test_activity_tables_keep_mobile_horizontal_scroll_contract():
         "ordersTable",
         "expiredOrdersTable",
         "tradesTable",
+        "labHistoryRows",
         "aiHistoryTable",
     ]
 
