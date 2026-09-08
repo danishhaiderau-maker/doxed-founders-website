@@ -77,6 +77,65 @@ def test_disk_failure_preserves_live_and_old_snapshot(tmp_path, monkeypatch, cod
     assert paused == ["PAPER_LIFECYCLE_COMMIT_FAILED"]
 
 
+def test_newer_generation_between_precheck_and_snapshot_is_noop(tmp_path):
+    ns, order, signal, outbox, paused, schedules, relay = fixture(tmp_path, next(iter(COMBO_LANE_SPECS)))
+    original_build = ns["_build_paper_lifecycle_payload"]
+    before = outbox.path.read_bytes()
+    def concurrent_generation(reason):
+        order["limit_chase_count"] = 1
+        order["limit_price"] = 94.0
+        return original_build(reason)
+    ns["_build_paper_lifecycle_payload"] = concurrent_generation
+    assert ns["_apply_family_policy_chase"](order, signal, 100, 200) is False
+    assert outbox.path.read_bytes() == before
+    assert schedules == [] and relay == []
+    assert paused == []
+
+
+def test_two_competing_chases_commit_exactly_once(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    ns, order, signal, outbox, paused, schedules, relay = fixture(tmp_path, next(iter(COMBO_LANE_SPECS)))
+    barrier = threading.Barrier(2)
+    def resolve(*args):
+        barrier.wait(timeout=5)
+        return {"kind": "depth"}
+    ns["_resolve_fill_model"] = resolve
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(ns["_apply_family_policy_chase"], order, signal, 100, 200) for _ in range(2)]
+        results = [future.result(timeout=10) for future in futures]
+    assert sorted(results) == [False, True]
+    assert order["limit_chase_count"] == 1
+    saved = json.loads(outbox.path.read_text())
+    assert saved["pending_orders"][0]["limit_chase_count"] == 1
+    assert len(schedules) == 1 and paused == [] and relay == []
+
+
+@pytest.mark.parametrize("defect", ["same_generation_price", "duplicate", "missing", "invalid_price", "closed", "live_identity", "open_position"])
+def test_conflicting_snapshot_is_not_safe_supersession(tmp_path, defect):
+    ns, order, signal, outbox, paused, schedules, relay = fixture(tmp_path, next(iter(COMBO_LANE_SPECS)))
+    original_build = ns["_build_paper_lifecycle_payload"]
+    before = outbox.path.read_bytes()
+    def conflicting(reason):
+        target = original_build(reason)
+        row = target["pending_orders"][0]
+        if defect == "same_generation_price": row["limit_price"] = 94
+        if defect == "duplicate": target["pending_orders"].append(copy.deepcopy(row))
+        if defect == "missing": target["pending_orders"] = []
+        if defect == "invalid_price": row.update(limit_chase_count=1, limit_price=float("nan"))
+        if defect == "closed": row.update(limit_chase_count=1, status="CLOSED")
+        if defect == "live_identity": row.update(limit_chase_count=1, bitfinex_live_entry=True)
+        if defect == "open_position":
+            row["limit_chase_count"] = 1
+            target["positions"] = [{"trade_id": row["trade_id"], "status": "OPEN"}]
+        return target
+    ns["_build_paper_lifecycle_payload"] = conflicting
+    with pytest.raises(RuntimeError, match="local paper lifecycle commit failed"):
+        ns["_apply_family_policy_chase"](order, signal, 100, 200)
+    assert outbox.path.read_bytes() == before
+    assert order["limit_price"] == 90 and schedules == [] and relay == []
+    assert paused == ["PAPER_LIFECYCLE_COMMIT_FAILED"]
+
+
 @pytest.mark.parametrize("defect", ["armed", "exchange", "prefix", "lane", "non_owner", "not_paper"])
 def test_local_authority_never_promotes_invalid_or_live_chase(tmp_path, defect):
     ns, order, signal, outbox, paused, schedules, relay = fixture(tmp_path, next(iter(COMBO_LANE_SPECS)))
