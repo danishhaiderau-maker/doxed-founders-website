@@ -49,6 +49,21 @@ def main():
 
         dashboard.app.view_functions["api_genome"] = synthetic_genome
 
+        def synthetic_ai():
+            return jsonify(calibration_status="NO_DATA", direction_only=True,
+                mode_note="SYNTHETIC UI ONLY — NOT MARKET EVIDENCE",
+                matched_selection_comparison={
+                    "status": "DESCRIPTIVE_ONLY", "independent_episode_n": 3,
+                    "matched_rows": 4, "excluded_rows": 2, "blockers": [],
+                    "groups": [{"dimensions": {
+                        "policy_id": "SYNTHETIC_OFFSET_0.09_CHASE_w234_s10_i180_ATR_TP_2.5_THESIS_12_HARD_30",
+                        "evidence_world": "CONSERVATIVE_BBO", "direction": "LONG"},
+                        "independent_episode_n": 3, "supported_rows": 4,
+                        "rejected_positive_outcomes": 1, "rejected_negative_outcomes": 2,
+                        "filter_minus_unfiltered_usd": -1.25}]})
+
+        dashboard.app.view_functions["api_ai"] = synthetic_ai
+
         @dashboard.app.after_request
         def label_fixture(response):
             if response.mimetype == "text/html":
