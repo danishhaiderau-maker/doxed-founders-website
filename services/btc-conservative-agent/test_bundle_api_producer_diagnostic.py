@@ -23,11 +23,14 @@ def test_index_preserves_package_compatibility_and_exposes_only_bound_diagnostic
         "status":"FAILED", "terminal":True, "cursor":state["cursor"],
         "authority":"DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY",
         "updated_at":datetime.now(timezone.utc).isoformat(),
-        "error":"BUNDLE_CIRCUIT_OPEN", "last_error":"BUNDLE_SLICE_TIMEOUT"}
+        "error":"BUNDLE_CIRCUIT_OPEN", "last_error":"BUNDLE_SLICE_TIMEOUT",
+        "timeout_phase":"ADMISSION"}
     if mode == "mismatch": value["identity"]["source_git_rev"] = "wrong"
     if mode == "stale": value["updated_at"] = "2000-01-01T00:00:00+00:00"
     if mode == "cursor": value["cursor"] = {"page_index":21, "page_row_index":0, "index_offset":4006}
-    if mode == "secret": value["last_error"] = "secret /private/path"
+    if mode == "secret":
+        value["last_error"] = "secret /private/path"
+        value["timeout_phase"] = "secret /private/path"
     if mode != "missing":
         (directory / "bundle-coordinator-status.json").write_text("invalid" if mode == "malformed" else json.dumps(value))
     response = client.get(f"/api/data-sync/bundles?generation_id={GEN}", headers={"X-Test-Auth":"yes"})
@@ -37,6 +40,8 @@ def test_index_preserves_package_compatibility_and_exposes_only_bound_diagnostic
     assert body["ack_authority"] == "ORIGINAL_MANIFEST_ROWS_ONLY" and len(body["packages"]) == 1
     expected = "FAILED" if mode in ("valid", "secret", "stale", "cursor") else "NOT_REQUIRED_PACKAGE_COMPLETE" if mode == "complete" else "UNAVAILABLE"
     assert body["producer"]["status"] == expected
+    if expected == "FAILED":
+        assert body["producer"]["timeout_phase"] == ("UNKNOWN" if mode == "secret" else "ADMISSION")
     if mode in ("stale", "cursor"):
         assert body["producer"]["checkpoint_relation"] == "CHECKPOINT_CHANGED_OR_NEWER"
         assert body["producer"]["scope"] == "LAST_ATTEMPT_NOT_CURRENT_LIVENESS"

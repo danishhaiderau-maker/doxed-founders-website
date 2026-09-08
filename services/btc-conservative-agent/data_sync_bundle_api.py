@@ -100,7 +100,7 @@ def _producer_diagnostic(root, directory, expected, state):
                 or value.get("status") not in {"STARTING", "BUILDING", "COMPLETE", "FAILED", "DEFERRED", "STOPPED"}
                 or updated.tzinfo is None or updated.timestamp() > datetime.now(timezone.utc).timestamp()):
             return unknown
-        from data_sync_bundle_runtime import COORDINATOR_ERRORS
+        from data_sync_bundle_runtime import COORDINATOR_ERRORS, PHASES
         result = {**unknown, "status": value["status"], "terminal": value["terminal"], "updated_at": value["updated_at"]}
         result["scope"] = "LAST_ATTEMPT_NOT_CURRENT_LIVENESS"
         result["checkpoint_relation"] = (
@@ -109,6 +109,9 @@ def _producer_diagnostic(root, directory, expected, state):
         for key in ("error", "last_error"):
             if key in value:
                 result[key] = value[key] if isinstance(value[key], str) and value[key] in COORDINATOR_ERRORS else "BUNDLE_WORKER_FAILURE"
+        if "timeout_phase" in value:
+            phase = value["timeout_phase"]
+            result["timeout_phase"] = phase if isinstance(phase, str) and phase in PHASES else "UNKNOWN"
         return result
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return unknown
