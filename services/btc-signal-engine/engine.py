@@ -4076,23 +4076,28 @@ def update_lane_lab_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, 
             "long_pnl_usd": 0.0,
             "short_pnl_usd": 0.0,
             "pnl_source": "lab_simulated",
+            "pnl_precision_status": "FULL_PRECISION_FROM_CREATION",
         })
+        # Existing rounded totals cannot be reconstructed from aggregates. Keep
+        # their baseline unchanged and identify the limitation, including after
+        # restart. Currency formatting belongs at display time, not each close.
+        bucket.setdefault("pnl_precision_status", "LEGACY_ROUNDED_BASELINE_NOT_RECONSTRUCTED")
         if event == "CLOSE":
             bucket["closes"] = int(bucket.get("closes", 0)) + 1
-            bucket["net_pnl_usd"] = round(float(bucket.get("net_pnl_usd", 0)) + float(net_pnl_usd or 0), 2)
+            bucket["net_pnl_usd"] = float(bucket.get("net_pnl_usd", 0)) + float(net_pnl_usd or 0)
             if net_pnl_usd > 0:
                 bucket["wins"] = int(bucket.get("wins", 0)) + 1
-                bucket["gross_wins_usd"] = round(float(bucket.get("gross_wins_usd", 0)) + net_pnl_usd, 2)
+                bucket["gross_wins_usd"] = float(bucket.get("gross_wins_usd", 0)) + net_pnl_usd
             elif net_pnl_usd < 0:
                 bucket["losses"] = int(bucket.get("losses", 0)) + 1
-                bucket["gross_losses_usd"] = round(float(bucket.get("gross_losses_usd", 0)) + net_pnl_usd, 2)
+                bucket["gross_losses_usd"] = float(bucket.get("gross_losses_usd", 0)) + net_pnl_usd
             d = str(direction or "").upper()
             if d == "LONG":
                 bucket["long_closes"] = int(bucket.get("long_closes", 0)) + 1
-                bucket["long_pnl_usd"] = round(float(bucket.get("long_pnl_usd", 0)) + net_pnl_usd, 2)
+                bucket["long_pnl_usd"] = float(bucket.get("long_pnl_usd", 0)) + net_pnl_usd
             elif d == "SHORT":
                 bucket["short_closes"] = int(bucket.get("short_closes", 0)) + 1
-                bucket["short_pnl_usd"] = round(float(bucket.get("short_pnl_usd", 0)) + net_pnl_usd, 2)
+                bucket["short_pnl_usd"] = float(bucket.get("short_pnl_usd", 0)) + net_pnl_usd
         try:
             with open(LANE_LAB_PNL_LEDGER_FILE, "w", encoding="utf-8") as f:
                 json.dump(
