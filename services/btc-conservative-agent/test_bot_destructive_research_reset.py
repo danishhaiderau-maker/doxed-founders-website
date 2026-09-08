@@ -54,6 +54,7 @@ def runtime(tmp_path_factory, monkeypatch):
            "datetime": datetime, "timezone": timezone, "time": SimpleNamespace(time=lambda: 1788580800.125),
            "logger": Mock(), **locks, "_LIFECYCLE_PIPELINE_RUNTIME": None,
            "_RAW_GENERATION_GATE_LOCAL": SimpleNamespace(mirror=object()),
+           "_research_report_reset_generation": 0,
            "state": {"execution_paused": True, "execution_reason": "ADMIN_MANUAL", "live_armed": False,
                      "account_balance": 502, "daily_pnl_usd": 2},
            "pending_orders": [], "open_positions": [], "trades": [{"id": "old", "pnl": 2}],

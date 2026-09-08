@@ -336,9 +336,9 @@ def _load_jsonl(path: str) -> list:
     return rows
 
 
-def build_funnel_summary(cwd: str = None) -> dict:
+def build_funnel_summary(cwd: str = None, *, rows=None, publish=True) -> dict:
     cwd = cwd or os.getcwd()
-    rows = _load_funnel_rows(cwd)
+    rows = _load_funnel_rows(cwd) if rows is None else rows
     by_tid: dict[str, dict] = {}
     for r in rows:
         tid = str(r.get("trade_id") or "")
@@ -369,14 +369,15 @@ def build_funnel_summary(cwd: str = None) -> dict:
         "unaccounted_approves": max(0, approves - filled - sum(1 for s in by_tid.values() if s.get("terminal_reason"))),
     }
     out = os.path.join(cwd, FUNNEL_SUMMARY_FILE)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+    if publish:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
     return summary
 
 
-def build_fill_quality_report(cwd: str = None) -> dict:
+def build_fill_quality_report(cwd: str = None, *, rows=None, publish=True) -> dict:
     cwd = cwd or os.getcwd()
-    rows = _load_funnel_rows(cwd)
+    rows = _load_funnel_rows(cwd) if rows is None else rows
     buckets = Counter()
     distances = []
     missed = []
@@ -414,16 +415,17 @@ def build_fill_quality_report(cwd: str = None) -> dict:
         "filled_count": buckets.get("FILLED", 0),
     }
     out = os.path.join(cwd, FILL_QUALITY_FILE)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+    if publish:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
     return report
 
 
-def build_approval_ev_report(cwd: str = None) -> dict:
+def build_approval_ev_report(cwd: str = None, *, funnel_rows=None, shadow_rows=None, trade_rows=None, publish=True) -> dict:
     cwd = cwd or os.getcwd()
-    shadows = {str(s.get("trade_id")): s for s in _load_jsonl(os.path.join(cwd, "shadow_outcome.jsonl"))}
-    trades = {str(t.get("trade_id")): t for t in _load_csv_trades(os.path.join(cwd, "trades_3factor.csv"))}
-    funnel = _load_funnel_rows(cwd)
+    shadows = {str(s.get("trade_id")): s for s in (shadow_rows if shadow_rows is not None else _load_jsonl(os.path.join(cwd, "shadow_outcome.jsonl")))}
+    trades = {str(t.get("trade_id")): t for t in (trade_rows if trade_rows is not None else _load_csv_trades(os.path.join(cwd, "trades_3factor.csv")))}
+    funnel = _load_funnel_rows(cwd) if funnel_rows is None else funnel_rows
     approve_ids = {str(r.get("trade_id")) for r in funnel if r.get("stage") == "APPROVE"}
     order_ids = {str(r.get("trade_id")) for r in funnel if r.get("stage") == "ORDER_SUBMITTED"}
     fill_ids = {str(r.get("trade_id")) for r in funnel if r.get("stage") == "FILLED"}
@@ -454,8 +456,9 @@ def build_approval_ev_report(cwd: str = None) -> dict:
         "TRADED_EV": _ev(close_ids),
     }
     out = os.path.join(cwd, APPROVAL_EV_FILE)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+    if publish:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
     return report
 
 
@@ -467,8 +470,22 @@ def _load_csv_trades(path: str) -> list:
         return list(csv.DictReader(f))
 
 
-def refresh_all_execution_reports(cwd: str = None) -> dict:
+def refresh_all_execution_reports(cwd: str = None, *, snapshot=None, publish=True) -> dict:
     cwd = cwd or os.getcwd()
+    if snapshot is not None:
+        import csv
+        import io
+        def json_rows(name):
+            return [json.loads(line) for line in snapshot[name].decode('utf-8').splitlines() if line.strip()]
+        rows = json_rows(FUNNEL_FILE)
+        return {
+            "funnel_summary": build_funnel_summary(cwd, rows=rows, publish=publish),
+            "fill_quality": build_fill_quality_report(cwd, rows=rows, publish=publish),
+            "approval_ev": build_approval_ev_report(cwd, funnel_rows=rows,
+                shadow_rows=json_rows('shadow_outcome.jsonl'),
+                trade_rows=list(csv.DictReader(io.StringIO(snapshot['trades_3factor.csv'].decode('utf-8')))),
+                publish=publish),
+        }
     return {
         "funnel_summary": build_funnel_summary(cwd),
         "fill_quality": build_fill_quality_report(cwd),
