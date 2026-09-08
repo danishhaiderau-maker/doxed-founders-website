@@ -57,3 +57,28 @@ def test_unpaused_active_gate_still_allows():
     state = {"execution_paused": False}
     assert gate(state, "ACTIVE") is True
     assert state["execution_reason"] == "ALLOWED"
+
+
+@pytest.mark.parametrize("reason,cleared", [
+    ("WS_STALE", True), ("STALE_DATA_HARD_STOP", True),
+    ("PRICE_STALE_OR_MISSING", True), ("DAILY_DRAWDOWN", False),
+    ("BLOCKED", False), ("ADMIN_MANUAL", False),
+])
+def test_entry_rejection_then_actual_health_recovery(reason, cleared):
+    state = {"execution_paused": True, "execution_reason": reason,
+             "manual_admin_pause": reason == "ADMIN_MANUAL", "_pause_priority": 99}
+    # The generic rejection must not erase the cause needed by recovery.
+    assert gate(state, "BLOCKED") is False
+    tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
+    names = {"system_health_check", "_clear_execution_pause_if_reason"}
+    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    env = dict(state=state, state_lock=RLock(), time=SimpleNamespace(time=lambda: 100),
+        _WS_RECOVERABLE_PAUSE_REASONS={"WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"},
+        _recompute_system_readiness=lambda _: {"system_ready": True},
+        _market_data_health_snapshot=lambda _: {"market_data_ready": True, "market_data_mode": "WS"},
+        logger=SimpleNamespace(info=lambda *a: None, warning=lambda *a: None))
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "bot.py", "exec"), env)
+    assert env["system_health_check"]() is True
+    assert state["execution_paused"] is (not cleared)
+    assert state["execution_reason"] == ("" if cleared else reason)
+    assert state["_pause_priority"] == (0 if cleared else 99)
