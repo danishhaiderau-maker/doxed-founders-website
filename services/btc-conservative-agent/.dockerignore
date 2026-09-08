@@ -14,6 +14,7 @@
 test_*.py
 *_test.py
 conftest.py
+qa_shadow_tier_preview.py
 
 # 3. Re-include the research_genome package (imported by the bot at runtime).
 !research_genome/
