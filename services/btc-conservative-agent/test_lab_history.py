@@ -181,3 +181,41 @@ if(!elements.labHistoryStatus.textContent.includes('page only')) throw Error('co
 '''
     completed = subprocess.run([node, '-e', harness], capture_output=True, text=True, timeout=10)
     assert completed.returncode == 0, completed.stderr
+
+
+def test_actual_loader_pagination_errors_and_single_flight():
+    tree = ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8'))
+    script = next(n.value.value for n in tree.body if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == 'DASHBOARD_JS' for t in n.targets))
+    loader = script[script.index('    async function loadLabHistory('):script.index('    function displayExitCause(')]
+    node = shutil.which('node')
+    assert node, 'Node required for executable loader test'
+    harness = r'''
+let labHistoryCursor = 'signed-page-two', labHistoryBusy = false;
+let resolveFetch, calls = [], rendered = 0;
+const elements = Object.fromEntries(['labHistoryLoad','labHistoryNext','labHistoryLane','labHistoryRows','labHistoryStatus']
+  .map(id => [id, {disabled:false, value:'CONTINUOUS', cleared:false, replaceChildren(){this.cleared=true;}}]));
+const document = {getElementById:id=>elements[id]};
+let fetch = (url, options) => {calls.push({url, options}); return new Promise(resolve=>{resolveFetch=resolve;});};
+function renderLabHistoryPage(page) {rendered++; labHistoryCursor=page.next_cursor;}
+'''+loader+r'''
+(async()=>{
+  const pending = loadLabHistory(true);
+  if(!elements.labHistoryLoad.disabled || !elements.labHistoryLane.disabled) throw Error('controls not locked');
+  await loadLabHistory(true);
+  if(calls.length!==1) throw Error('duplicate request');
+  if(!calls[0].url.includes('cursor=signed-page-two')) throw Error('cursor omitted');
+  if(calls[0].options.credentials!=='same-origin' || calls[0].options.cache!=='no-store') throw Error('unsafe fetch');
+  resolveFetch({ok:true,json:async()=>({status:'AVAILABLE',next_cursor:null})}); await pending;
+  if(rendered!==1 || elements.labHistoryLoad.disabled || !elements.labHistoryNext.disabled) throw Error('terminal controls');
+  labHistoryCursor='stale';
+  const failing=loadLabHistory(false);
+  if(calls[1].url.includes('cursor=')) throw Error('reload retained cursor');
+  resolveFetch({ok:false,json:async()=>({reason_code:'CURSOR_GENERATION_CHANGED'})}); await failing;
+  if(labHistoryCursor!==null || !elements.labHistoryRows.cleared || !elements.labHistoryNext.disabled) throw Error('stale rows retained');
+  if(!elements.labHistoryStatus.textContent.includes('CURSOR_GENERATION_CHANGED')) throw Error('failure hidden');
+  if(elements.labHistoryLane.disabled || elements.labHistoryLoad.disabled || labHistoryBusy) throw Error('retry locked');
+})().catch(error=>{console.error(error);process.exitCode=1;});
+'''
+    completed = subprocess.run([node, '-e', harness], capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0, completed.stderr
