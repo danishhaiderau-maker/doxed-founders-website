@@ -65,6 +65,9 @@ def main():
                         "blockers": ["SYNTHETIC_MISSING_CURRENT_EVIDENCE"]})
             return jsonify(calibration_status="NO_DATA", direction_only=True,
                 mode_note="SYNTHETIC UI ONLY — NOT MARKET EVIDENCE",
+                scan_census_observed_coverage={"index_caught_up": True,
+                    "observed_joined_opportunity_rows": 7,
+                    "exhaustive_fanout": False, "qualification_eligible": False},
                 ai_verdict_coverage={"status": "CURRENT_GENERATION", "counts": {
                     "APPROVE": 4, "REJECT": 3, "NO_TRADE": 2,
                     "AI_NOT_CALLED": 5, "ERROR": None, "UNKNOWN": 1}},
