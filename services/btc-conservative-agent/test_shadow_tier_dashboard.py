@@ -3,6 +3,17 @@ from pathlib import Path
 
 
 SOURCE=Path(__file__).parent/'research'/'research_dashboard.py'
+
+
+def test_empty_and_failed_states_are_outside_scrollable_table():
+    script = SOURCE.read_text(encoding='utf-8').split('async function loadResearchDesign()', 1)[1].split('async function loadEvidenceCoverage()', 1)[0]
+    assert "tierNote.textContent = 'UNAVAILABLE OR STALE" in script
+    assert "tierBody.textContent" not in script
+    assert "tierTable.hidden = false" in script
+    failure = script.split('} catch (error)', 1)[1]
+    assert 'tierTable.hidden = true' in failure
+    assert 'tierBody.replaceChildren()' in failure
+    assert 'research evidence request failed' in failure
 GEN={key:key+'-1' for key in ('source_revision','deployed_revision','analyzer_revision','manifest_entry_hash','epoch_id','tile_config_signature','generation_key','evaluator_version')}
 MAN={**GEN,'dataset_epoch':GEN['epoch_id'],'config_signature':GEN['tile_config_signature']}
 

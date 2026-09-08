@@ -8048,7 +8048,11 @@ async function loadFeatures() {
 
 async function loadResearchDesign() {
   const tierBody = document.getElementById('research-shadow-tiers');
-  tierBody.textContent = 'UNAVAILABLE — loading current atomic generation';
+  const tierTable = tierBody.closest('table');
+  const tierNote = document.getElementById('research-shadow-tier-note');
+  tierTable.hidden = true;
+  tierBody.replaceChildren();
+  tierNote.textContent = 'UNAVAILABLE — loading current atomic generation';
   const escape = value => String(value == null ? '' : value)
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
@@ -8063,12 +8067,13 @@ async function loadResearchDesign() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
     const tiers = d.shadow_tiers || {};
-    document.getElementById('research-shadow-tier-note').textContent = tiers.truncated
+    tierNote.textContent = tiers.truncated
       ? 'Display limited to 16 timing variants per tier; full evidence remains in Report Explorer.' : '';
     tierBody.replaceChildren();
     if (tiers.status !== 'CURRENT') {
-      tierBody.textContent = 'UNAVAILABLE OR STALE — no current terminal evidence';
+      tierNote.textContent = 'UNAVAILABLE OR STALE — no current terminal evidence';
     } else {
+      tierTable.hidden = false;
       (tiers.rows || []).forEach(row => {
         const tr = document.createElement('tr');
         ['tier','timing','status','reason','complete','unknown','venue_acceptance'].forEach(key => {
@@ -8107,6 +8112,9 @@ async function loadResearchDesign() {
     ).join('') || '<tr><td colspan="4">Current generation has no published evaluator feature coverage; every regime dimension remains UNKNOWN.</td></tr>';
   } catch (error) {
     const detail = escape(error?.message || 'unknown response error');
+    tierTable.hidden = true;
+    tierBody.replaceChildren();
+    tierNote.textContent = 'UNAVAILABLE — research evidence request failed';
     banner.style.background = '#3d1f1f';
     banner.style.borderColor = '#f85149';
     banner.style.color = '#ffb4b4';
