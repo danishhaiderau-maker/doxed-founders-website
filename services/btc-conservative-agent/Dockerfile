@@ -31,6 +31,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the whole agent dir (bot.py, btc_conservative_agent.py, analyzer_research_engine_v62.py,
 # research_dashboard.py, showcase_ui.py, early_boot.py, pathway_*.py, etc.).
 COPY . /app
+RUN python -m py_compile lifecycle_owner_identity.py lifecycle_pipeline_runtime.py \
+    && python -c "import lifecycle_owner_identity, lifecycle_pipeline_runtime"
 
 # Fail the image build if the whitelist-style .dockerignore drops a module that
 # bot.py or the canonical analyzer imports at runtime.

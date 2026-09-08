@@ -16,6 +16,7 @@ import sys
 import threading
 import time
 import uuid
+import lifecycle_owner_identity as owner_identity
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -203,6 +204,7 @@ class LifecyclePipelineRuntime:
         )
         self.owner_path = self.work_root / "pipeline-runtime-owner.json"
         self.owner_token = uuid.uuid4().hex
+        self._owner_handle = None
         self._lock = threading.RLock()
         # Cleanup may quarantine a fully acknowledged lifecycle bundle only
         # while no worker cycle can begin or remain in flight.  This gate is
@@ -258,10 +260,28 @@ class LifecyclePipelineRuntime:
         }
 
     def _claim_owner(self) -> bool:
+        self._owner_handle = owner_identity.acquire(self.owner_path.with_suffix(".lock"))
+        if self._owner_handle is None:
+            self._status["last_error_code"] = "OWNER_LOCK_HELD"
+            return False
+        try:
+            claimed = self._claim_owner_locked()
+        except BaseException:
+            owner_identity.release(self._owner_handle)
+            self._owner_handle = None
+            raise
+        if not claimed:
+            owner_identity.release(self._owner_handle)
+            self._owner_handle = None
+        return claimed
+
+    def _claim_owner_locked(self) -> bool:
+        current_identity = owner_identity.identity(os.getpid())
         payload = {
-            "schema": "lifecycle_pipeline_runtime_owner_v1",
+            "schema": "lifecycle_pipeline_runtime_owner_v2",
             "pid": os.getpid(), "owner_token": self.owner_token,
             "created_unix": self.clock(),
+            "process_identity": current_identity,
         }
         raw = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode()
         for _attempt in range(2):
@@ -270,10 +290,15 @@ class LifecyclePipelineRuntime:
             except FileExistsError:
                 try:
                     existing = json.loads(self.owner_path.read_text(encoding="utf-8"))
-                    pid = int(existing.get("pid") or 0)
+                    if not isinstance(existing, dict) or type(existing.get("pid")) is not int or existing["pid"] <= 0:
+                        raise ValueError("invalid owner PID")
+                    pid = existing["pid"]
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    self._status["last_error_code"] = "OWNER_RECORD_INVALID"
                     return False  # corrupt ownership evidence fails closed
-                if _pid_alive(pid):
+                if not owner_identity.stale(existing, current_identity, _pid_alive(pid),
+                                            owner_identity.identity(pid), owner_identity.boot_time()):
+                    self._status["last_error_code"] = "OWNER_IDENTITY_ACTIVE_OR_UNPROVEN"
                     return False
                 try:
                     self.owner_path.unlink()
@@ -295,6 +320,9 @@ class LifecyclePipelineRuntime:
                 self.owner_path.unlink(missing_ok=True)
         except (OSError, json.JSONDecodeError):
             pass
+        finally:
+            owner_identity.release(self._owner_handle)
+            self._owner_handle = None
 
     def _overlap_reason(self) -> str | None:
         try:
@@ -734,6 +762,7 @@ def start(data_root: str | Path, **kwargs: Any) -> bool:
             return False
         candidate = LifecyclePipelineRuntime(data_root, **kwargs)
         if not candidate.start():
+            _default_runtime = candidate
             return False
         _default_runtime = candidate
         return True

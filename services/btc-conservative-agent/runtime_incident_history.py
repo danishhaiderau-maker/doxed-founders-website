@@ -60,7 +60,16 @@ def build_runtime_incident_history(
             malformed += 1
             continue
         watchdog = receipt.get("watchdog")
-        if isinstance(watchdog, dict):
+        thread_crash = receipt.get("thread_crash")
+        if isinstance(thread_crash, dict) and thread_crash.get("schema") == "thread_crash_context_v1":
+            requested = None  # A thread failure does not prove process restart intent.
+            classification = "APPLICATION_THREAD_CRASH"
+            evidence = "thread_crash_context_v1"
+            reason = "THREAD_CRASH: " + str(thread_crash.get("component") or "UNKNOWN")[:80]
+            revision = str(thread_crash.get("source_revision") or "")
+            instance_id = str(thread_crash.get("bot_instance_id") or "")
+            exit_code = None
+        elif isinstance(watchdog, dict):
             requested = watchdog.get("restart_allowed")
             requested = requested if type(requested) is bool else None
             classification = (

@@ -5089,6 +5089,33 @@ def executable_live_copy_entries_blocked() -> tuple:
     return False, "", coord
 
 
+def _pause_after_thread_crash(component: str):
+    """Retain bounded incident facts; journal failure never suppresses pause."""
+    try:
+        set_execution_paused("THREAD_CRASH")
+    finally:
+        _record_thread_crash_receipt(component)
+
+
+def _record_thread_crash_receipt(component: str):
+    try:
+        from crash_journal_writer import append_crash_snapshot
+        # Components are caller function names, never exception messages.
+        component = component if type(component) is str else "unknown_thread"
+        component = "".join(c for c in component[:80] if c.isascii() and (c.isalnum() or c in "_.-")) or "unknown_thread"
+        append_crash_snapshot(os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"), {
+            "time": utc_iso(),
+            "thread_crash": {
+                "schema": "thread_crash_context_v1",
+                "component": component[:80],
+                "source_revision": str(_runtime_git_rev_exact() or "")[:64],
+                "bot_instance_id": str(BOT_INSTANCE_ID or "")[:128],
+            },
+        })
+    except Exception:
+        logger.error("[THREAD CRASH] incident receipt unavailable")
+
+
 def set_execution_paused(reason: str):
     global last_console_update
     cancel_reason = None
@@ -24290,10 +24317,10 @@ def safe_ws_handler(message):
             logger.warning(f"[WS] non-fatal file lock: {e}")
             return
         logger.critical(f"[WS FATAL] {e}")
-        set_execution_paused("THREAD_CRASH")
+        _pause_after_thread_crash("safe_ws_handler")
     except Exception as e:
         logger.critical(f"[WS FATAL] {e}")
-        set_execution_paused("THREAD_CRASH")
+        _pause_after_thread_crash("safe_ws_handler")
 
 def on_message(ws, message):
     if not _is_current_ws_app(ws):
@@ -24547,7 +24574,7 @@ def ws_watchdog():
                     _clear_execution_pause_if_reason(state.get("execution_reason"))
     except Exception as e:
         logger.exception("[CRITICAL] WS watchdog crash")
-        set_execution_paused("THREAD_CRASH")
+        _pause_after_thread_crash("ws_watchdog")
 
 def state_monitor_loop():
     global last_pipeline_run
@@ -24799,7 +24826,7 @@ def state_monitor_loop():
             # Every active family consumes the same three-minute AI_SCAN result.
     except Exception as e:
         logger.exception("[CRITICAL] State monitor loop crash")
-        set_execution_paused("THREAD_CRASH")
+        _pause_after_thread_crash("state_monitor_loop")
 
 
 def ohlcv_refresh_loop():
@@ -25893,7 +25920,7 @@ def position_manager():
             time.sleep(_position_monitor_interval_sec())
     except Exception as e:
         logger.exception(f"Position manager crash: {e}")
-        set_execution_paused("THREAD_CRASH")
+        _pause_after_thread_crash("position_manager")
 
 _FEE_FILTERABLE_PROFIT_EXITS = frozenset({"TAKE_PROFIT", "TP_HIT"})
 
@@ -29891,8 +29918,7 @@ def safe_thread(fn):
                 fn(*args, **kwargs)
             except Exception as e:
                 logger.exception(f"[THREAD CRASH] {fn.__name__}: {e}")
-                dump_system_state()
-                set_execution_paused("THREAD_CRASH")
+                _pause_after_thread_crash(getattr(fn, "__name__", "unknown_thread"))
                 time.sleep(2)
     return wrapper
 
@@ -30095,7 +30121,7 @@ def dump_system_state(*, trigger="UNSPECIFIED", progress=None, incident=None, re
                 restart_allowed=restart_allowed,
             )
         from crash_journal_writer import append_crash_snapshot
-        append_crash_snapshot("crash_dump.json", snapshot)
+        append_crash_snapshot(os.getenv("BOT_CRASH_DUMP_FILE", "crash_dump.json"), snapshot)
         logger.critical("[CRASH DUMP] Written to crash_dump.json")
     except Exception as e:
         logger.error(f"[CRASH DUMP FAILED] {e}")
@@ -48209,7 +48235,7 @@ def analytics_loop():
             time.sleep(ANALYTICS_INTERVAL_SEC)
     except Exception as e:
         logger.exception("[CRITICAL] Analytics loop crash")
-        set_execution_paused("THREAD_CRASH")
+        _pause_after_thread_crash("analytics_loop")
 
 
 FUTURE_PATH_WORKER_WALL_TIMEOUT_SEC = 30.0
@@ -50572,7 +50598,7 @@ def engine_loop():
                     state["debug_state"]["engine_last_run"] = utc_iso()
     except Exception as e:
         logger.exception("[CRITICAL] Engine loop fatal crash")
-        set_execution_paused("THREAD_CRASH")
+        _pause_after_thread_crash("engine_loop")
 
 def tick_execution_engine():
     logger.info("[ENGINE] Tick execution engine started")
