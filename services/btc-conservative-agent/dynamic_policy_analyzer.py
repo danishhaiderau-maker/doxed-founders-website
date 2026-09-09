@@ -27,6 +27,45 @@ REPORT_FILE = "dynamic_policy_analysis_report.json"
 INPUT_FILE = "v3/dynamic_policy_analysis_input.json"
 
 
+def load_verified_local_dynamic_mapping(*, repo_root, data_root, input_sha256,
+        source_revision, analyzer_revision, transformation_signature, config_signature, now=None):
+    """Return payload and receipt for a separate explicit fit command."""
+    from research.local_dynamic_input import load_local_dynamic_input
+    stored = load_local_dynamic_input(repo_root=repo_root, data_root=data_root,
+        input_sha256=input_sha256, source_revision=source_revision,
+        analyzer_revision=analyzer_revision, transformation_signature=transformation_signature,
+        config_signature=config_signature, now=now)
+    mapping = stored.get('mapping_payload')
+    if not isinstance(mapping, dict):
+        raise ValueError('LOCAL_DYNAMIC_MAPPING_MISSING')
+    return mapping, {'input_sha256':input_sha256, 'source_generation':stored['source_generation'],
+                     'provenance_kind':stored['provenance_kind']}
+
+
+def build_local_dynamic_policy_analysis_report(*, repo_root, data_root, input_sha256,
+        source_revision, analyzer_revision, transformation_signature, config_signature, now=None):
+    """Read an explicit local input without fitting or pretending to seal it.
+
+    A future fit/freeze action is separate from dashboard/report refreshes.
+    This entry point never changes the legacy Fly-input interpretation.
+    """
+    try:
+        mapping, receipt = load_verified_local_dynamic_mapping(repo_root=repo_root, data_root=data_root,
+            input_sha256=input_sha256, source_revision=source_revision,
+            analyzer_revision=analyzer_revision, transformation_signature=transformation_signature,
+            config_signature=config_signature, now=now)
+    except (OSError, ValueError, RuntimeError):
+        return _unknown('LOCAL_DYNAMIC_INPUT_VERIFICATION_FAILED')
+    return {**_unknown('EXPLICIT_FIT_FREEZE_REQUIRED', 'PROSPECTIVE_SEAL_REQUIRED'),
+        'local_input_status':'INPUT_VERIFIED_NOT_ANALYZED',
+        'input_receipt':receipt,
+        'mapping_sha256':mapping['mapping_sha256'], 'protocol':mapping['protocol'],
+        'candidate_count':len(mapping['candidates']),
+        'training_episode_count':len(mapping['training_episodes']),
+        'missing_collection_timestamp_episodes':mapping['missing_collection_timestamp_episodes'],
+        'qualification_allowed':False, 'fit_performed':False, 'sealed_evaluation_performed':False}
+
+
 def _unknown(*reasons: str, input_receipt: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
         "schema": SCHEMA,

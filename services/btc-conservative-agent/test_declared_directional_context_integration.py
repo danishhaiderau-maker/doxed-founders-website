@@ -13,7 +13,13 @@ from research.conservative_shadow_report import build_conservative_shadow_report
 from research_entry_baselines import materialize_signal_time_baseline_schedules
 from test_declared_shadow_model import contract
 from test_conservative_shadow_report import _fixture
-from test_entry_baseline_replay import _row
+from test_entry_baseline_replay import _row as _legacy_row
+
+
+def _row(ts, **kwargs):
+    # This fixture represents an observed, on-time tape bucket. Legacy replay
+    # fixtures predate the independent source/receipt timestamp requirement.
+    return {**_legacy_row(ts, **kwargs), "source_ts": ts, "observed_at_ts": ts}
 
 
 def sha(value):
@@ -48,6 +54,10 @@ def dataset(root, *, defect=None, sizing="FIXED_MARGIN"):
         "research_baseline_context_declaration": declaration}
     opportunity["baseline_schedule_snapshot"] = materialize_signal_time_baseline_schedules(opportunity)
     rows = [_row(100, bid_qty=.4, ask_qty=.4), *[_row(ts, bid=105, ask=105.1) for ts in range(101, 105)]]
+    if defect == "quote_time_missing":
+        for row in rows:
+            row.pop("source_ts", None)
+            row.pop("observed_at_ts", None)
     if defect == "gap": rows.pop(2)
     segment = {"schema": "market_segment_v3", "symbol": "BTC", "timeframe": "1s",
                "start_ts": 100, "end_ts": 104, "rows": rows}
@@ -136,7 +146,7 @@ def test_normal_producer_to_declared_terminal_for_both_directions(tmp_path):
 
 
 @pytest.mark.parametrize("defect", ["post_signal", "atr_future", "atr_missing", "atr_time_reversed", "latency", "fees_missing",
-                                    "wrong_constraints", "late_constraints", "boolean_interval", "gap", "tampered_source"])
+                                    "wrong_constraints", "late_constraints", "boolean_interval", "gap", "tampered_source", "quote_time_missing"])
 def test_missing_late_wrong_or_corrupt_evidence_cannot_create_context(tmp_path, defect):
     generation, manifest = dataset(tmp_path, defect=defect)
     report = materialize_v3_opportunity_replay(tmp_path, generation=generation, canonical_manifest=manifest)
@@ -145,6 +155,8 @@ def test_missing_late_wrong_or_corrupt_evidence_cannot_create_context(tmp_path, 
         assert entry["outcome_state"] == "UNKNOWN" or entry.get("model_context_status") == "UNKNOWN"
         if defect == "latency":
             assert "DECLARED_BASELINE_LATENCY_TREATMENT_UNSUPPORTED" in entry["rejection_codes"]
+        if defect == "quote_time_missing":
+            assert "QUOTE_OBSERVATION_TIME_UNPROVEN" in entry["rejection_codes"]
         if defect == "late_constraints":
             assert "DECLARED_BASELINE_QUANTITY_METADATA_NOT_CAUSAL" in entry["rejection_codes"]
 

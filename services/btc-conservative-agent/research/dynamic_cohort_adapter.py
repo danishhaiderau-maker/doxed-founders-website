@@ -78,11 +78,20 @@ def adapt_dynamic_cohorts(
     )})
     total_episodes = 0
     candidate_keys: set[tuple[str, str]] = set()
+    input_universe = []
 
     for source in rows:
         counts["input_rows"] += 1
         if counts["input_rows"] > max_rows:
             raise ValueError("DYNAMIC_ADAPTER_ROW_LIMIT")
+        anchor = {key: source.get(key) if isinstance(source, Mapping) else None
+                  for key in ('episode_id','opportunity_id','policy_id','signal_ts')}
+        for key in ('episode_id','opportunity_id','policy_id'):
+            if not isinstance(anchor[key],str) or len(anchor[key])>256:
+                anchor[key]=None
+        if not _number(anchor['signal_ts']): anchor['signal_ts']=None
+        anchor['group_id']=None
+        input_universe.append(anchor)
         if not isinstance(source, Mapping):
             rejections["ROW_NOT_MAPPING"] += 1
             continue
@@ -143,10 +152,11 @@ def adapt_dynamic_cohorts(
             counts["exact_quantity_fallback_rows"] += 1
         dimensions = {k: row[k] for k in (
             "evidence_world", "cost_model_id", "simulation_model", "economics_evidence_basis",
-            "market", "symbol", "bucket_definition_signature",
+            "market", "symbol", "direction", "bucket_definition_signature",
         )}
         dimensions["sizing"] = sizing
         gid = _hash(dimensions)
+        anchor['group_id']=gid
         if gid not in groups:
             if len(groups) >= max_groups:
                 raise ValueError("DYNAMIC_ADAPTER_GROUP_LIMIT")
@@ -189,6 +199,31 @@ def adapt_dynamic_cohorts(
                 rejections["ZERO_OUTCOME_NONZERO_PNL"] += 1
             else:
                 outcome = {"outcome_state": state, "net_pnl_usd": pnl}
+                counterfactual=row.get('counterfactual_identity')
+                replay_hash=row.get('replay_proof_sha256')
+                if counterfactual is not None or replay_hash is not None:
+                    expected={'epoch_id':generation['epoch_id'],'source_episode_id':row['episode_id'],
+                        'opportunity_id':row['opportunity_id'],'policy_id':policy,'policy_signature':signature,
+                        'direction':row['direction'],'seal_request_id':counterfactual.get('seal_request_id') if isinstance(counterfactual,Mapping) else None}
+                    if (counterfactual!=expected or not all(_text(v) for v in expected.values())
+                            or not isinstance(replay_hash,str) or not re.fullmatch('[0-9a-f]{64}',replay_hash)
+                            or not re.fullmatch('[0-9a-f]{64}',expected['seal_request_id'])
+                            or row.get('source_lifecycle_identity')):
+                        rejections['COUNTERFACTUAL_IDENTITY_INVALID']+=1
+                        outcome=None
+                    else:
+                        outcome['counterfactual_identity']=dict(counterfactual)
+                        outcome['replay_proof_sha256']=replay_hash
+                lineage = row.get('source_lifecycle_identity')
+                if outcome is not None and isinstance(lineage, Mapping) and all(_text(lineage.get(k)) for k in
+                        ('collection_epoch_id','episode_id','policy_signature','research_lane')):
+                    if (lineage['collection_epoch_id']==generation['epoch_id']
+                            and lineage['episode_id']==row['episode_id']
+                            and lineage['policy_signature']==signature):
+                        outcome['source_lifecycle_identity'] = {k:lineage[k] for k in
+                            ('collection_epoch_id','episode_id','policy_signature','research_lane')}
+                        if _text(row.get('config_signature')):
+                            outcome['source_config_signature'] = row['config_signature']
         seen = episode["seen_outcomes"].setdefault(policy, set())
         fingerprint = _json(outcome)
         if fingerprint in seen:
@@ -223,6 +258,7 @@ def adapt_dynamic_cohorts(
         result_groups.append(body)
     counts["output_episodes"] = sum(len(g["episodes"]) for g in result_groups)
     result = {"schema": "same_publication_dynamic_cohorts_v1", "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE",
+              "input_universe_schema":"dynamic_input_universe_v1", "input_universe":input_universe,
               "expected_generation": generation, "feature_names": list(names), "protocol_sha256": protocol_hash,
               "groups": result_groups, "counts": dict(sorted(counts.items())),
               "rejections": dict(sorted(rejections.items())),

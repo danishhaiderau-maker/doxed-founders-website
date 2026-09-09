@@ -38,6 +38,7 @@ def _row(ts, *, bid=99, ask=101, bid_qty=1, ask_qty=1):
     return {
         "schema": "market_microstructure_1s_v1", "symbol": "BTCUSD",
         "bucket_ts": ts, "fresh": True, "valid_bbo": True,
+        "source_ts": ts, "observed_at_ts": ts,
         "bid": bid, "ask": ask, "bid_qty": bid_qty, "ask_qty": ask_qty,
         "trade_count": 0, "buy_qty": 0, "sell_qty": 0,
     }
@@ -140,6 +141,20 @@ def _fixture(tmp_path, *, direction="LONG", entry_rows=None, qty=1, constraints=
     ])
     assert materialize_bundle(tmp_path, key, lifecycle_rows, now=20_000.0)["written"] is True
     return v3
+
+
+@pytest.mark.parametrize('observation',['missing','future'])
+def test_unproven_quote_observation_cannot_support_fill(tmp_path, observation):
+    rows=[_row(10,ask=100),_row(11,ask=100)]
+    for row in rows:
+        if observation=='missing':
+            row.pop('source_ts'); row.pop('observed_at_ts')
+        else:
+            row['source_ts']=row['bucket_ts']+2
+            row['observed_at_ts']=row['bucket_ts']+2
+    result=build_v3_conservative_results(_fixture(tmp_path,entry_rows=rows))['results'][0]
+    assert result['classification']=='UNKNOWN'
+    assert 'QUOTE_OBSERVATION_TIME_UNPROVEN' in str(result['unknown_reason_codes'])
 
 
 @pytest.mark.parametrize("direction,rows", [
@@ -401,6 +416,7 @@ def test_joined_pre_entry_buckets_are_consumed_without_relabelling_measurements(
         "opportunity_id": opportunity["opportunity_id"],
         "availability_boundary": "PRE_DECISION_ONLY",
         "captured_at_ts": 99.0,
+        "capture_schema": "measured_feature_capture_v1",
         "features": {
             "atr_bucket": "ATR_HIGH",
             "realized_volatility_bucket": "RV_HIGH",
@@ -435,6 +451,7 @@ def test_partial_pre_entry_receipt_preserves_valid_dimensions_but_not_qualificat
     receipt = {
         "episode_id": "ep-1", "opportunity_id": "opp-1",
         "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 99.0,
+        "capture_schema": "measured_feature_capture_v1",
         "features": {
             "atr_bucket": "ATR_HIGH", "spread_bucket": "SPREAD_TIGHT",
             "depth_bucket": "DEPTH_THICK", "liquidity_bucket": "LIQUID",
@@ -492,7 +509,7 @@ def test_handcrafted_pre_entry_projection_fails_closed(defect):
     assert features["atr_bucket"]["status"] == "UNKNOWN"
 
 
-@pytest.mark.parametrize("defect", ["late", "nonfinite", "malformed", "ambiguous", "mismatched"])
+@pytest.mark.parametrize("defect", ["late", "nonfinite", "malformed", "ambiguous", "mismatched", "missing_schema"])
 def test_invalid_pre_entry_receipts_never_become_observed(tmp_path, defect):
     opportunity = {
         "episode_id": "ep-1", "opportunity_id": "opp-1",
@@ -504,6 +521,7 @@ def test_invalid_pre_entry_receipts_never_become_observed(tmp_path, defect):
         "opportunity_id": opportunity["opportunity_id"],
         "availability_boundary": "PRE_DECISION_ONLY",
         "captured_at_ts": 101.0 if defect == "late" else 99.0,
+        "capture_schema": "measured_feature_capture_v1",
         "features": {
             "atr_bucket": (
                 float("inf") if defect == "nonfinite"
@@ -518,6 +536,8 @@ def test_invalid_pre_entry_receipts_never_become_observed(tmp_path, defect):
     }
     if defect == "mismatched":
         receipt["opportunity_id"] = "other-opportunity"
+    if defect == "missing_schema":
+        receipt.pop("capture_schema")
     receipts = [receipt, dict(receipt)] if defect == "ambiguous" else [receipt]
     joined, _ = join_pre_entry_feature_receipts([opportunity], receipts)
     features = _regime_features_at_signal(joined[0], {})
@@ -832,6 +852,7 @@ def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
         decision.pop(field, None)
     decision.update({
         "executed_direction": "LONG", "raw_ai_decision": "APPROVE",
+        "ai_evaluated": True, "research_scan_id": "scan-census-fixture",
         "policy_decision": "REJECT", "execution_disposition": "NO_ORDER",
         "exact_reason": "TEST_FAMILY_FILTER", "ai_error": False,
         "long_score": 78, "short_score": 22, "score_gap": 56,
@@ -873,6 +894,8 @@ def test_current_v3_nested_dimensions_are_preserved_and_queryable(tmp_path):
     assert stored["short_score"] == 22
     assert stored["score_gap"] == 56
     assert stored["raw_ai_decision"] == "APPROVE"
+    assert stored["ai_evaluated"] is True
+    assert stored["research_scan_id"] == "scan-census-fixture"
     assert stored["policy_decision"] == "REJECT"
     assert stored["execution_disposition"] == "NO_ORDER"
     assert stored["exact_reason"] == "TEST_FAMILY_FILTER"

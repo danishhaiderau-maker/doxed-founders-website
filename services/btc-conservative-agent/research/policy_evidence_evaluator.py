@@ -869,6 +869,8 @@ def _unknown(binding: Mapping[str, Any], decision: Mapping[str, Any],
         "ai_direction": ai_direction,
         "ai_decision": str(decision.get("raw_ai_decision") or "").upper() or None,
         "raw_ai_decision": decision.get("raw_ai_decision"),
+        "ai_evaluated": decision.get("ai_evaluated"),
+        "research_scan_id": decision.get("research_scan_id"),
         "policy_decision": decision.get("policy_decision"),
         "execution_disposition": decision.get("execution_disposition"),
         "exact_reason": decision.get("exact_reason"),
@@ -1263,6 +1265,18 @@ def build_v3_conservative_results(
         evidence = row.get("lifecycle_evidence")
         if isinstance(evidence, Mapping) and evidence.get("status") == "VERIFIED":
             completion = evidence.get("completion")
+            collected = evidence.get("receipt")
+            expected_identity = {
+                "collection_epoch_id": row.get("epoch_id"), "episode_id": row.get("episode_id"),
+                "policy_signature": row.get("policy_signature"), "research_lane": row.get("lane"),
+            }
+            if (isinstance(collected, Mapping) and isinstance(completion, Mapping)
+                    and all(expected_identity.values())
+                    and collected.get("identity") == expected_identity
+                    and collected.get("completion_receipt_sha256") == completion.get("completion_receipt_sha256")):
+                row["source_lifecycle_identity"] = dict(collected["identity"])
+                row["source_evidence_collected_receipt_sha256"] = collected.get("evidence_collected_receipt_sha256")
+                row["source_completion_receipt_sha256"] = completion.get("completion_receipt_sha256")
             horizon = completion.get("horizon_complete_ts") if isinstance(completion, Mapping) else None
             if (isinstance(horizon, (int, float)) and not isinstance(horizon, bool)
                     and math.isfinite(horizon) and horizon > 0

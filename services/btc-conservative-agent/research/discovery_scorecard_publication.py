@@ -260,7 +260,14 @@ def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
         decision = raw if raw != "UNKNOWN" else projected
     category = ("APPROVE" if decision in {"APPROVE", "STRONG_APPROVE", "SOFT_APPROVE"}
                 else "REJECT" if decision in {"REJECT", "SOFT_REJECT"}
+                else "NO_TRADE" if decision == "NO_TRADE"
+                else "AI_NOT_CALLED" if decision == "AI_NOT_CALLED"
                 else "ERROR" if decision in {"AI_ERROR", "ERROR"} else "UNKNOWN")
+    evaluated = row.get("ai_evaluated")
+    if ((category == "AI_NOT_CALLED" and evaluated is not False)
+            or (category in {"APPROVE", "REJECT", "NO_TRADE", "ERROR"} and evaluated is False)):
+        category = "UNKNOWN"
+        blockers.append("AI_EVALUATED_VERDICT_CONFLICT")
     direction = label(row.get("raw_ai_direction"))
     alias_direction = label(row.get("ai_direction"))
     if direction != "UNKNOWN" and alias_direction != "UNKNOWN" and direction != alias_direction:
@@ -272,13 +279,14 @@ def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
     error_status = ("ERROR" if category == "ERROR" or row.get("ai_error") is True
                     or error_type not in {"UNKNOWN", "NONE", "NULL"} else
                     "EXPLICIT_NO_ERROR" if row.get("ai_error") is False else "UNKNOWN")
-    if category in {"APPROVE", "REJECT"} and error_status == "ERROR":
+    if category in {"APPROVE", "REJECT", "AI_NOT_CALLED"} and error_status == "ERROR":
         category = "UNKNOWN"
         blockers.append("AI_VERDICT_ERROR_CONFLICT")
     if decision == "UNKNOWN":
         blockers.append("RAW_AI_DECISION_UNAVAILABLE")
     return {
         "raw_ai_decision": decision, "raw_ai_direction": direction,
+        "ai_evaluated": evaluated if isinstance(evaluated, bool) else None,
         "ai_verdict_class": category,
         "family_policy_decision": label(row.get("family_policy_decision")
                                         if "family_policy_decision" in row else row.get("policy_decision")),
@@ -296,7 +304,7 @@ def _ai_verdict_projection(row: Mapping[str, Any]) -> dict[str, Any]:
 
 def _ai_verdict_coverage(adapted, unknown_shadow):
     from itertools import chain
-    classes = Counter({name: 0 for name in ("APPROVE", "REJECT", "ERROR", "UNKNOWN")})
+    classes = Counter({name: 0 for name in ("APPROVE", "REJECT", "NO_TRADE", "AI_NOT_CALLED", "ERROR", "UNKNOWN")})
     errors = Counter({name: 0 for name in ("ERROR", "EXPLICIT_NO_ERROR", "UNKNOWN")})
     missing_family = blocked = 0
     for row in chain(adapted, unknown_shadow):
@@ -304,12 +312,14 @@ def _ai_verdict_coverage(adapted, unknown_shadow):
         errors[row.get("ai_error_status", "UNKNOWN")] += 1
         missing_family += row.get("family_policy_decision", "UNKNOWN") == "UNKNOWN"
         blocked += bool(row.get("ai_verdict_blockers"))
+    from research.ai_matched_comparison import compare_ai_selection
+    comparison = compare_ai_selection(chain(adapted, unknown_shadow))
     return {"schema": "discovery_ai_verdict_coverage_v1", "raw_verdict_row_counts": dict(classes),
             "ai_error_row_counts": dict(errors), "missing_family_verdict_rows": missing_family,
             "rows_with_verdict_blockers": blocked,
             "count_basis": "ADAPTED_RESEARCH_ROWS_NOT_INDEPENDENT_OPPORTUNITIES_OR_TRADES",
-            "comparison_status": "NOT_EVALUATED", "profitability_supported": False,
-            "blockers": ["AI_FILTER_MATCHED_COUNTERFACTUAL_COMPARISON_NOT_IMPLEMENTED"]}
+            "comparison_status": comparison['status'], "profitability_supported": False,
+            "matched_selection_comparison": comparison, "blockers": comparison['blockers']}
 
 
 def _base_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -349,6 +359,8 @@ def _dynamic_projection(source: Mapping[str, Any], generation: Mapping[str, Any]
     """Project only explicit receipt fields; never derive a causal timestamp/bucket."""
     terminal = terminal if isinstance(terminal, Mapping) else {}
     return {
+        'source_lifecycle_identity': dict(source['source_lifecycle_identity'])
+        if isinstance(source.get('source_lifecycle_identity'), Mapping) else None,
         **_ai_verdict_projection(source),
         "generation": dict(generation), "market": source.get("market"), "symbol": source.get("symbol"),
         "signal_ts": source.get("signal_ts"),
@@ -407,6 +419,8 @@ def _dynamic_cohort_publication(adapted, unknown_shadow, expected, shadow_aggreg
         result = adapt_dynamic_cohorts(inputs(), expected_generation=expected,
             feature_names=DEFAULT_CAUSAL_FEATURES if feature_names is None else feature_names,
             protocol={} if protocol is None else protocol, **options)
+        # Preserve the exact original adapter contract before adding publication metadata.
+        adapter_payload=json.loads(canonical_json(result))
         supported = result["counts"]["supported_outcomes"]
         result.update(status="BUILT_INCOMPLETE_RESEARCH_ONLY" if supported else "UNAVAILABLE",
                       blockers=sorted(set(result.get("blockers", []) +
@@ -459,6 +473,8 @@ def _dynamic_cohort_publication(adapted, unknown_shadow, expected, shadow_aggreg
         result["nested_research_evaluations"] = evaluations
         result["nested_research_protocol"] = settings
         result["sealed_holdout"] = None
+        result['adapter_payload']=adapter_payload
+        result['adapter_envelope_schema']='dynamic_adapter_publication_v1'
         # The adapter hash covers its own output; this hash binds publication metadata too.
         result["publication_sha256"] = hashlib.sha256(canonical_json(result).encode()).hexdigest()
         return result
@@ -620,11 +636,25 @@ def _build_discovery_scorecard_publication(
     )
     invalid_receipts = len(baseline_report["episode_receipts"]) - len(receipts)
     unknown_counts["baseline_invalid_receipt"] += invalid_receipts
-    try:
-        declared_baseline_count = int(baseline_report.get("same_opportunity_count"))
-    except (TypeError, ValueError, OverflowError):
-        declared_baseline_count = -1
-    if declared_baseline_count != len(receipts):
+    independent_count=baseline_report.get('same_opportunity_count')
+    modern='directional_episode_count' in baseline_report
+    declared_baseline_count=baseline_report.get('directional_episode_count') if modern else independent_count
+    count_valid=(type(declared_baseline_count) is int and declared_baseline_count>=0
+        and type(independent_count) is int and independent_count>=0 and not invalid_receipts)
+    if modern:
+        by_source={}; identities=set()
+        for receipt in receipts:
+            key=(receipt.get('opportunity_id'),receipt.get('source_episode_id') or receipt.get('episode_id'))
+            identity=(*key,receipt.get('direction'))
+            if not all(isinstance(v,str) and v for v in key) or identity in identities:
+                count_valid=False
+            identities.add(identity); by_source.setdefault(key,[]).append(receipt)
+        count_valid &= (len(by_source)==independent_count
+            and baseline_report.get('independent_sample_basis')=='SOURCE_OPPORTUNITY_NOT_DIRECTIONAL_VARIANTS')
+        for group in by_source.values():
+            if any(r.get('directional_coverage')=='BOTH_SIDES_CAPTURED' for r in group):
+                count_valid &= len(group)==2 and {r.get('direction') for r in group}=={'LONG','SHORT'}
+    if not count_valid or declared_baseline_count != len(receipts):
         return _unknown(expected, ["BASELINE_ROW_COUNT_MISMATCH"],
                         input_artifacts={"evaluator": artifact},
                         input_counts={"evaluator_rows": len(rows),

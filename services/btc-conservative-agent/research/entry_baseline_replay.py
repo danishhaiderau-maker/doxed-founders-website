@@ -302,7 +302,7 @@ def _signal_snapshot_projection(root: Path, pins: Mapping, records: Mapping,
 def _execution_context(episode: Mapping, result: Mapping, generation: Mapping) -> dict:
     capture = episode.get("directional_capture") or {}
     if capture.get("research_context_declaration") is not None:
-        from research.baseline_execution_context import build_declared_directional_baseline_context
+        from research.baseline_execution_context import build_declared_directional_baseline_context, build_conditional_directional_baseline_context
         coverage = episode.get("_baseline_context_coverage") or []
         if len(coverage) != 1 or episode.get("_baseline_context_pin_reasons"):
             return {"status": "UNKNOWN", "context": None,
@@ -311,7 +311,10 @@ def _execution_context(episode: Mapping, result: Mapping, generation: Mapping) -
         identity.update(epoch_id=episode.get("epoch_id") or episode.get("dataset_epoch"),
                         direction=episode.get("direction"), symbol=episode.get("symbol"),
                         baseline_id=result["baseline_id"], baseline_policy_signature=result["policy_signature"])
-        return build_declared_directional_baseline_context(generation=generation, identity=identity,
+        builder = (build_conditional_directional_baseline_context
+                   if (capture.get("research_context_declaration") or {}).get("schema") == "research_baseline_context_declaration_v2"
+                   else build_declared_directional_baseline_context)
+        return builder(generation=generation, identity=identity,
             entry_receipt=result["conservative_receipt"], capture=capture, baseline=result["baseline_spec"],
             pinned_sources=episode.get("_baseline_context_pins") or {},
             opportunity_binding=episode.get("_baseline_context_opportunity"),
@@ -527,16 +530,41 @@ def delayed_variant_cohorts(report):
             if not isinstance(key,str) or len(key)!=64 or any(c not in '0123456789abcdef' for c in key) or key in seen:
                 raise ValueError('DELAYED_VARIANT_IDENTITY_CONFLICT')
             seen.add(key)
-            groups.setdefault(key,[]).append({**episode,'results':variant['results'],'delayed_variants':[]})
-    return {key:{**report,'episode_receipts':episodes,'timing_model_sha256':key}
-            for key,episodes in sorted(groups.items())}
+            conditional = variant.get('conditional_results', [])
+            if not isinstance(conditional, list):
+                raise ValueError('DELAYED_VARIANT_SHAPE_INVALID')
+            groups.setdefault(key,[]).append({**episode,'results':variant['results'],
+                'conditional_results':conditional,'delayed_variants':[]})
+    cohorts = {}
+    for key, episodes in sorted(groups.items()):
+        cohort = {**report, 'episode_receipts': episodes, 'timing_model_sha256': key}
+        cohort.pop('report_id', None)
+        cohort['same_opportunity_count'] = len({row.get('opportunity_id') for row in episodes})
+        cohort['directional_episode_count'] = len(episodes)
+        for field, output in [('results', 'summaries'), ('conditional_results', 'conditional_summaries')]:
+            summaries = {}
+            for baseline_id in report.get('baseline_ids', []):
+                matches = [(episode, row) for episode in episodes for row in episode.get(field, [])
+                           if row.get('baseline_id') == baseline_id]
+                states = Counter(row.get('outcome_state', 'UNKNOWN') for _, row in matches)
+                summaries[baseline_id] = dict(opportunities=len({e.get('opportunity_id') for e, _ in matches}),
+                    directional_evaluations=len(matches), full_fills=states['FULL_FILL'],
+                    partial_fills=states['PARTIAL_FILL'], no_fills=states['NO_FILL'], unknown=states['UNKNOWN'])
+                if field == 'conditional_results':
+                    summaries[baseline_id].update(evidence_basis='DECLARED_SIMULATION_CONDITIONAL',
+                        qualification_eligible=False, venue_acceptance='UNKNOWN')
+            cohort[output] = summaries
+        cohort['report_id'] = canonical_hash('entry-baseline-replay', cohort)
+        cohorts[key] = cohort
+    return cohorts
 
 
 def _declared_delayed_variants(episode, generation):
     """Separate timing cohorts; never overwrite original baseline identities."""
     from research.baseline_execution_context import (_verified, _sha,
-        declared_directional_baseline_inputs, build_declared_delayed_baseline_context, verified_segment_rows)
-    from research.latency_schedule_replay import replay_delayed_entry
+        declared_directional_baseline_inputs, build_declared_delayed_baseline_context, verified_segment_rows,
+        conditional_directional_baseline_inputs, build_conditional_delayed_baseline_context)
+    from research.latency_schedule_replay import replay_delayed_entry, replay_conditional_delayed_entry
     if generation is None or not episode.get('directional_capture'):
         return []
     pins=episode.get('_baseline_context_pins') or {}
@@ -545,6 +573,8 @@ def _declared_delayed_variants(episode, generation):
     except (ValueError,TypeError,KeyError,AttributeError):
         return []
     capture=episode['directional_capture']
+    declaration = capture.get('research_context_declaration')
+    conditional = isinstance(declaration, Mapping) and declaration.get('schema') == 'research_baseline_context_declaration_v2'
     declarations=opportunity.get('research_timing_declarations') or []
     if not isinstance(declarations,list) or len(declarations)>64:
         return [{'status':'UNKNOWN','reason_codes':['TIMING_DECLARATION_LIST_INVALID'],'results':[]}]
@@ -556,7 +586,7 @@ def _declared_delayed_variants(episode, generation):
             model_hash=_sha({key:timing.get(key) for key in ('schema','delay_sec','ordering_treatment','evidence_basis')})
         except (TypeError,ValueError):
             continue
-        variant={'timing_model_sha256':model_hash,'qualification_eligible':False,'results':[]}
+        variant={'timing_model_sha256':model_hash,'qualification_eligible':False,'results':[], 'conditional_results':[]}
         coverage=episode.get('_baseline_context_coverage') or []
         for baseline in _baseline_rows():
             result=_unknown(baseline,episode,'DELAYED_ENTRY_SOURCE_UNAVAILABLE')
@@ -567,18 +597,19 @@ def _declared_delayed_variants(episode, generation):
                 bindings=[item['binding'] for item in coverage]
                 tape,_=verified_segment_rows(evidence,bindings,pins,
                     {key:opportunity.get(key) for key in IDENTITY_FIELDS},capture['symbol'])
-                inputs=declared_directional_baseline_inputs(capture,baseline)
-                replay=replay_delayed_entry(schedule=capture['schedules'][baseline['baseline_id']]['schedule'],
+                inputs=(conditional_directional_baseline_inputs if conditional else declared_directional_baseline_inputs)(capture,baseline)
+                replay=(replay_conditional_delayed_entry if conditional else replay_delayed_entry)(schedule=capture['schedules'][baseline['baseline_id']]['schedule'],
                     delay_sec=timing.get('delay_sec'),ordering_treatment=timing.get('ordering_treatment'),
                     tape=tape,direction=capture['direction'],requested_qty=inputs['requested_qty'],
-                    quantity_constraints=inputs['signed_quantity_constraints'],symbol=capture['symbol'])
+                    **({'venue_quantity_observation': inputs['venue_quantity_observation']} if conditional else
+                       {'quantity_constraints': inputs['signed_quantity_constraints']}),symbol=capture['symbol'])
                 if replay.get('status')!='ENTRY_REPLAY_SUPPORTED':
                     raise ValueError('DELAYED_ENTRY_REPLAY_UNSUPPORTED')
                 receipt={**replay['entry_receipt'],'symbol':capture['symbol']}
                 identity={key:episode.get(key) for key in IDENTITY_FIELDS}
                 identity.update(epoch_id=generation['epoch_id'],direction=capture['direction'],symbol=capture['symbol'],
                     baseline_id=baseline['baseline_id'],baseline_policy_signature=baseline['policy_signature'])
-                projection=build_declared_delayed_baseline_context(generation=generation,identity=identity,
+                projection=(build_conditional_delayed_baseline_context if conditional else build_declared_delayed_baseline_context)(generation=generation,identity=identity,
                     capture=capture,baseline=baseline,pinned_sources=pins,
                     opportunity_binding=episode['_baseline_context_opportunity'],
                     coverage_evidence=evidence,coverage_binding=bindings,
@@ -591,9 +622,12 @@ def _declared_delayed_variants(episode, generation):
                     'model_context_status':projection['status'],'model_context_blockers':projection['reason_codes']}
                 if projection['context'] is not None:
                     result['execution_model_context']=projection['context']
-            except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError):
-                pass
-            variant['results'].append(result)
+            except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError) as exc:
+                result = _unknown(baseline, episode, 'DELAYED_ENTRY_SOURCE_UNAVAILABLE', str(exc))
+            if conditional:
+                result.update(evidence_basis='DECLARED_SIMULATION_CONDITIONAL',
+                              venue_acceptance='UNKNOWN', qualification_eligible=False)
+            variant['conditional_results' if conditional else 'results'].append(result)
         variants.append(variant)
     return variants
 
@@ -624,12 +658,17 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
     for baseline in _baseline_rows():
         episode = source_episode
         capture = episode.get("directional_capture") or {}
+        captured_declaration = capture.get("research_context_declaration")
+        conditional = (isinstance(captured_declaration, Mapping)
+                       and captured_declaration.get("schema") == "research_baseline_context_declaration_v2")
         if capture.get("research_context_declaration") is not None:
-            from research.baseline_execution_context import declared_directional_baseline_inputs
+            from research.baseline_execution_context import declared_directional_baseline_inputs, conditional_directional_baseline_inputs
             try:
-                declared_inputs = declared_directional_baseline_inputs(capture, baseline)
+                declared_inputs = (conditional_directional_baseline_inputs if conditional else declared_directional_baseline_inputs)(capture, baseline)
                 episode = {**episode, **{key: declared_inputs[key] for key in (
-                    "requested_qty", "signed_quantity_constraints", "latency_sec", "fees_usd", "slippage_model")}}
+                    "requested_qty", "latency_sec", "fees_usd", "slippage_model")},
+                    **({"venue_quantity_observation": declared_inputs["venue_quantity_observation"]} if conditional else
+                       {"signed_quantity_constraints": declared_inputs["signed_quantity_constraints"]})}
             except (ValueError, TypeError, KeyError, ArithmeticError, AttributeError) as exc:
                 results.append(_unknown(baseline, episode, str(exc)))
                 continue
@@ -650,6 +689,12 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
             continue
         evidence = _evidence_projection(baseline, episode, envelope, rows)
         gate = missing_baseline_evidence(baseline["baseline_id"], evidence)
+        if conditional:
+            # Partial venue metadata was independently validated above; do not
+            # invent a strict receipt or waive any other required input.
+            gate["rejection_codes"] = [code for code in gate["rejection_codes"]
+                if code != "MISSING_VENUE_QUANTITY_CONSTRAINTS"]
+            gate["complete"] = not gate["rejection_codes"]
         if not gate["complete"]:
             results.append(_unknown(baseline, episode, *gate["rejection_codes"]))
             continue
@@ -658,7 +703,9 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
             if baseline["baseline_id"] == "FINAL_MARKET_AFTER_EXPIRY"
             else episode.get("requested_qty")
         )
-        receipt = evaluate_limit_fill(
+        from research.conservative_limit_fill import evaluate_conditional_limit_fill
+        evaluator = evaluate_conditional_limit_fill if conditional else evaluate_limit_fill
+        receipt = evaluator(
             rows,
             direction=str(episode.get("direction") or "UNKNOWN"),
             requested_qty=requested_qty,
@@ -669,14 +716,15 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
             # exact BBO evidence into artificial interval ambiguity.
             aggressor_window_sec=1,
             symbol=str(episode.get("symbol") or ""),
-            quantity_constraints=episode.get("signed_quantity_constraints"),
+            **({"venue_quantity_observation": episode.get("venue_quantity_observation")} if conditional else
+               {"quantity_constraints": episode.get("signed_quantity_constraints")}),
         )
         receipt["declared_fees_usd"] = episode.get("fees_usd")
         receipt["measured_input_latency_sec"] = episode.get("latency_sec")
         if capture.get("research_context_declaration") is not None:
             receipt["declared_input_latency_sec"] = episode.get("latency_sec")
             receipt["measured_input_latency_sec"] = None
-            receipt["input_assumption_basis"] = "DECLARED_SIMULATION"
+            receipt["input_assumption_basis"] = "DECLARED_SIMULATION_CONDITIONAL" if conditional else "DECLARED_SIMULATION"
         receipt["declared_slippage_model"] = episode.get("slippage_model")
         terminal = str(receipt.get("final_classification") or "").upper()
         if receipt.get("supported") is not True or terminal not in {
@@ -703,6 +751,9 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
                 "evaluated_schedule_sha256": receipt.get("schedule_sha256"),
             },
         })
+        if conditional:
+            results[-1].update(evidence_basis="DECLARED_SIMULATION_CONDITIONAL",
+                qualification_eligible=False, venue_acceptance="UNKNOWN")
         receipt["simulation_model"] = receipt.get("evaluator_version")
         receipt["cost_model_id"] = episode.get("cost_model_id")
         receipt["tape_hashes"] = sorted(set(episode.get("market_tape_hashes") or []))
@@ -720,6 +771,13 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
             if projection["context"] is not None:
                 results[-1]["execution_model_context"] = projection["context"]
     episode = source_episode
+    declaration = (episode.get("directional_capture") or {}).get("research_context_declaration")
+    if isinstance(declaration, Mapping) and declaration.get("schema") == "research_baseline_context_declaration_v2":
+        # Failed conditional evaluations belong to the same separate cohort.
+        # Preserve UNKNOWN and its reasons; never count them as strict results.
+        for result in results:
+            result.update(evidence_basis="DECLARED_SIMULATION_CONDITIONAL",
+                          qualification_eligible=False, venue_acceptance="UNKNOWN")
     material = {
         "schema": EPISODE_RECEIPT_SCHEMA,
         "episode_id": episode_id,
@@ -732,6 +790,9 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         "direction": episode.get("direction"),
         "source_episode_id": episode.get("source_episode_id") or episode_id,
         "original_ai_direction": episode.get("original_ai_direction") or episode.get("raw_direction") or episode.get("direction"),
+        "raw_ai_decision": episode.get("raw_ai_decision"),
+        "ai_evaluated": episode.get("ai_evaluated"),
+        "research_scan_id": episode.get("research_scan_id"),
         "source_execution_direction": episode.get("source_execution_direction", "UNKNOWN"),
         "counterfactual_direction": episode.get("counterfactual_direction") is True,
         "directional_capture_signature": (episode.get("directional_capture") or {}).get("capture_signature"),
@@ -759,7 +820,8 @@ def replay_episode(episode: Mapping[str, Any], *, generation: Mapping | None = N
         "future_path_selection": episode.get("future_path_selection"),
         "signal_snapshot_evidence": episode.get("signal_snapshot_evidence"),
         "baseline_registry_signature": ENTRY_BASELINE_REGISTRY["registry_signature"],
-        "results": results,
+        "results": [result for result in results if result.get("evidence_basis") != "DECLARED_SIMULATION_CONDITIONAL"],
+        "conditional_results": [result for result in results if result.get("evidence_basis") == "DECLARED_SIMULATION_CONDITIONAL"],
         "delayed_variants": _declared_delayed_variants(source_episode, generation),
     }
     if generation is not None:
@@ -821,6 +883,7 @@ def materialize_same_opportunity_replay(
     receipts.sort(key=lambda row: (str(row["opportunity_id"]), str(row["episode_id"])))
     expected = [row["baseline_id"] for row in _baseline_rows()]
     summaries = {}
+    conditional_summaries = {}
     for baseline_id in expected:
         states = Counter(
             result["outcome_state"]
@@ -829,11 +892,25 @@ def materialize_same_opportunity_replay(
         )
         summaries[baseline_id] = {
             "opportunities": len(sources),
-            "directional_evaluations": len(receipts),
+            "directional_evaluations": sum(states.values()),
             "full_fills": states["FULL_FILL"],
             "partial_fills": states["PARTIAL_FILL"],
             "no_fills": states["NO_FILL"],
             "unknown": states["UNKNOWN"],
+        }
+        conditional_rows = [(receipt, result) for receipt in receipts
+                            for result in receipt.get("conditional_results", [])
+                            if result["baseline_id"] == baseline_id]
+        conditional_states = Counter(result["outcome_state"] for _, result in conditional_rows)
+        conditional_summaries[baseline_id] = {
+            "evidence_basis": "DECLARED_SIMULATION_CONDITIONAL",
+            "qualification_eligible": False, "venue_acceptance": "UNKNOWN",
+            "opportunities": len({receipt["opportunity_id"] for receipt, _ in conditional_rows}),
+            "directional_evaluations": sum(conditional_states.values()),
+            "full_fills": conditional_states["FULL_FILL"],
+            "partial_fills": conditional_states["PARTIAL_FILL"],
+            "no_fills": conditional_states["NO_FILL"],
+            "unknown": conditional_states["UNKNOWN"],
         }
     material = {
         "schema": REPLAY_SCHEMA,
@@ -844,6 +921,7 @@ def materialize_same_opportunity_replay(
         "directional_coverage": dict(Counter(row["directional_coverage"] for row in receipts)),
         "baseline_ids": expected,
         "summaries": summaries,
+        "conditional_summaries": conditional_summaries,
         "episode_receipts": receipts,
         "analysis_scope": "ENTRY_FILL_COUNTERFACTUAL_ONLY",
         "terminal_exit_pnl_evaluated": False,

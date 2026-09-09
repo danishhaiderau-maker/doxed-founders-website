@@ -19920,7 +19920,7 @@ def _write_conservative_shadow_report(
 ):
     """Stage current-input terminal research, never reuse an older outcome file."""
     from research.conservative_shadow_report import (
-        SCHEMA, build_conservative_shadow_report, load_current_policy_candidates,
+        SCHEMA, build_conservative_shadow_report, build_conditional_shadow_report, load_current_policy_candidates,
     )
     from research.policy_evidence_schema import generation_identity
     from research.shadow_result_stream import ShadowResultStreamWriter, digest as stream_digest
@@ -19953,16 +19953,20 @@ def _write_conservative_shadow_report(
             )
             from research.entry_baseline_replay import delayed_variant_cohorts
             report['delayed_variant_reports'] = []
-            for timing_hash, cohort in delayed_variant_cohorts(baseline_report or {}).items():
+            report['conditional_delayed_variant_reports'] = []
+            variants = [(timing_hash, cohort, conditional)
+                        for timing_hash, cohort in delayed_variant_cohorts(baseline_report or {}).items()
+                        for conditional in (False, True)]
+            for timing_hash, cohort, conditional in variants:
                 variant_temporary = Path(f'.shadow-variant-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp')
                 variant_temporaries.append(variant_temporary)
                 with ShadowResultStreamWriter(Path.cwd(), str(variant_temporary), generation) as variant_sink:
-                    variant_report = build_conservative_shadow_report(
+                    variant_report = (build_conditional_shadow_report if conditional else build_conservative_shadow_report)(
                         canonical_root, expected_generation=generation, baseline_report=cohort,
                         policy_candidates=candidates, policy_artifact_receipt=candidate_receipt,
                         research_model=research_model, result_sink=variant_sink)
                     variant_receipt = variant_sink.finalize(variant_report)
-                variant_target = Path('shadow_variant_' + timing_hash[:12] + '_' +
+                variant_target = Path(('conditional_shadow_variant_' if conditional else 'shadow_variant_') + timing_hash[:12] + '_' +
                                       variant_receipt['artifact_sha256'] + '.jsonl.gz')
                 os.replace(variant_temporary, variant_target)
                 _atomic_mirror_analyzer_report(variant_target.name)
@@ -19970,12 +19974,33 @@ def _write_conservative_shadow_report(
                 variant_receipt['receipt_sha256'] = stream_digest({
                     key: value for key, value in variant_receipt.items() if key != 'receipt_sha256'})
                 variant_report['result_stream'] = variant_receipt
-                report['delayed_variant_reports'].append({
+                report['conditional_delayed_variant_reports' if conditional else 'delayed_variant_reports'].append({
                     'timing_model_sha256': timing_hash, 'report': variant_report,
                     'qualification_eligible': False})
             stream_receipt = sink.finalize(report)
+        conditional_temporary = Path(f'.shadow-conditional-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp')
+        variant_temporaries.append(conditional_temporary)
+        with ShadowResultStreamWriter(Path.cwd(), str(conditional_temporary), generation) as conditional_sink:
+            conditional_report = build_conditional_shadow_report(
+                canonical_root, expected_generation=generation,
+                baseline_report=baseline_report or {}, policy_candidates=candidates,
+                policy_artifact_receipt=candidate_receipt, research_model=research_model,
+                result_sink=conditional_sink)
+            conditional_receipt = conditional_sink.finalize(conditional_report)
         if manifest_path.read_bytes() != manifest_bytes:
             raise ValueError("SHADOW_CANONICAL_GENERATION_CHANGED_DURING_REPLAY")
+        conditional_target = Path('conditional_shadow_results.jsonl.gz')
+        os.replace(conditional_temporary, conditional_target)
+        conditional_receipt['relative_path'] = conditional_target.name
+        conditional_receipt['receipt_sha256'] = stream_digest({
+            key: value for key, value in conditional_receipt.items() if key != 'receipt_sha256'})
+        conditional_report['result_stream'] = conditional_receipt
+        report['conditional_report'] = conditional_report
+        # Bind the parent stream to the complete report, including the new
+        # separately verified conditional child receipt.
+        stream_receipt['report_sha256'] = stream_digest({
+            key: value for key, value in report.items() if key != 'result_stream'})
+        _atomic_mirror_analyzer_report(conditional_target.name)
         # Working files are replaced just like the other analyzer artifacts;
         # the visible generation retains its separate immutable copy. Never
         # accumulate one potentially large source stream per analyzer cycle.
@@ -20028,12 +20053,36 @@ def _write_discovery_scorecard_report(
         shadow_terminal_report=shadow_terminal_report,
         stream_artifact_root=Path.cwd(),
     )
+    try:
+        from research.local_scan_reconciliation import reconcile_scans, diagnostic_code
+        import sqlite3
+        from research.local_dynamic_input import _source
+        generation=report.get('generation') or {}
+        report['scan_census_observed_coverage']=reconcile_scans(
+            repo_root=Path(__file__).resolve().parents[2],data_root=canonical_root,
+            source_revision=generation.get('source_revision'),
+            config_signature=generation.get('tile_config_signature'),
+            held_lease=_CURRENT_MIRROR_GENERATION_LEASE,
+            expected_source=_source(_CURRENT_MIRROR_COHERENCE_TOKEN))
+    except (OSError,ValueError,RuntimeError,TypeError,sqlite3.Error) as error:
+        report['scan_census_observed_coverage']={'status':'UNKNOWN','qualification_eligible':False,
+            'exhaustive_fanout':False,'blockers':[diagnostic_code(error)]}
     target = Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
     temporary = target.with_suffix(target.suffix + ".tmp")
     temporary.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
     os.replace(temporary, target)
     mirrored = _atomic_mirror_analyzer_report(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
     return report, mirrored
+
+
+def _report_artifact_digest(path):
+    """Hash the staged report bytes for the atomic publication manifest."""
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _same_publication_dynamic_report(legacy_report, scorecard, expected_generation, analysis_provenance):
@@ -20436,10 +20485,25 @@ def write_report_manifest(
             "shadow_terminal_status": shadow_terminal.get("status"),
         })
         stream_receipt = shadow_terminal.get("result_stream")
-        for variant in shadow_terminal.get("delayed_variant_reports", []):
+        conditional_stream = (shadow_terminal.get("conditional_report") or {}).get("result_stream")
+        if conditional_stream:
+            reports.append({
+                "title": "Conditional Simulation Results — Venue Acceptance Unknown",
+                "file": conditional_stream["relative_path"],
+                "category": "Genome & Reports",
+                "description": "Declared conditional economics only; not exchange-qualified or live eligible",
+                "size_bytes": conditional_stream["compressed_bytes"],
+                "artifact_sha256": conditional_stream["artifact_sha256"],
+                "stream_receipt_sha256": conditional_stream["receipt_sha256"],
+                "analysis_provenance": analysis_provenance,
+            })
+        for variant in (shadow_terminal.get("delayed_variant_reports", []) +
+                        shadow_terminal.get("conditional_delayed_variant_reports", [])):
             variant_stream = variant["report"]["result_stream"]
             reports.append({
-                "title": "Complete Delayed Shadow Results " + variant["timing_model_sha256"],
+                "title": ("Conditional Delayed Shadow Results — venue acceptance UNKNOWN "
+                          if variant["report"].get("venue_acceptance") == "UNKNOWN" else
+                          "Complete Delayed Shadow Results ") + variant["timing_model_sha256"],
                 "file": variant_stream["relative_path"],
                 "category": "Genome & Reports",
                 "description": "Complete separate declared timing cohort; not a sample or live qualification",
@@ -20476,6 +20540,7 @@ def write_report_manifest(
             "category": "Genome & Reports",
             "description": "Exact-generation simulation cohorts, unmatched evidence and model differences",
             "size_bytes": scorecard_mirror.stat().st_size,
+            "artifact_sha256": _report_artifact_digest(scorecard_mirror),
             "modified_at": datetime.fromtimestamp(
                 Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE).stat().st_mtime, tz=timezone.utc
             ).isoformat(),

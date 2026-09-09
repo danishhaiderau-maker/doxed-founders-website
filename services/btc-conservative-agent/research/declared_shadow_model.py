@@ -75,10 +75,35 @@ def load_declared_shadow_model(path, *, expected_sha256, expected_generation):
 
 
 def _baseline_context(entry, generation):
+    return _validate_baseline_context(entry, generation, conditional=False)
+
+
+def conditional_baseline_context(entry, generation):
+    """Explicit conditional context validation; never an exchange qualification."""
+    return _validate_baseline_context(entry, generation, conditional=True)
+
+
+def _validate_baseline_context(entry, generation, *, conditional):
     context = entry.get("execution_model_context")
     if not isinstance(context, Mapping): raise ValueError("BASELINE_EXECUTION_MODEL_CONTEXT_MISSING")
     body = {key: value for key, value in context.items() if key != "signature"}
     receipt = entry.get("conservative_receipt")
+    basis = "DECLARED_SIMULATION_CONDITIONAL"
+    if conditional:
+        if (not isinstance(receipt, Mapping)
+                or receipt.get("schema") != "conditional_limit_fill_receipt_v1"
+                or receipt.get("evidence_basis") != basis
+                or receipt.get("qualification_eligible") is not False
+                or receipt.get("venue_acceptance") != "UNKNOWN"
+                or context.get("context_evidence_basis") != basis
+                or context.get("qualification_eligible") is not False
+                or context.get("venue_acceptance") != "UNKNOWN"
+                or context.get("min_notional_treatment") != "UNMODELED_VENUE_ACCEPTANCE_CONDITIONAL"):
+            raise ValueError("CONDITIONAL_BASELINE_AUTHORITY_INVALID")
+    elif (context.get("context_evidence_basis") == basis or entry.get("evidence_basis") == basis
+            or isinstance(receipt, Mapping) and (receipt.get("evidence_basis") == basis
+                or receipt.get("schema") == "conditional_limit_fill_receipt_v1")):
+        raise ValueError("CONDITIONAL_BASELINE_NOT_STRICT")
     if (context.get("schema") != "baseline_execution_model_context_v1"
             or context.get("signature") != stable_hash("baseline-execution-model-context", body)
             or context.get("generation") != generation
@@ -90,7 +115,7 @@ def _baseline_context(entry, generation):
         if _number(context.get(key), minimum=0) <= 0: raise ValueError("BASELINE_POSITION_INPUT_MISSING")
     if context.get("atr_basis") != "EXPLICIT_AT_FILL_OBSERVATION":
         if (context.get("atr_basis") != "DECLARED_SIGNAL_ATR_HOLD_CONSTANT"
-                or context.get("context_evidence_basis") != "DECLARED_SIMULATION"
+                or context.get("context_evidence_basis") != (basis if conditional else "DECLARED_SIMULATION")
                 or context.get("measured_fill_atr") is not None
                 or not isinstance(context.get("research_context_declaration_sha256"), str)
                 or len(context["research_context_declaration_sha256"]) != 64
@@ -122,23 +147,39 @@ def _baseline_context(entry, generation):
         raise ValueError("BASELINE_SOURCE_EVIDENCE_BINDING_MISSING")
     if not isinstance(receipt, Mapping) or not isinstance(receipt.get("quantity_constraints"), Mapping):
         raise ValueError("BASELINE_QUANTITY_EVIDENCE_MISSING")
+    if conditional:
+        from research.conditional_quantity_execution import validate_conditional_constraints
+        observation, reasons = validate_conditional_constraints(receipt["quantity_constraints"], symbol=receipt.get("symbol"))
+        if reasons or observation is None or observation.get("source_revision") != generation.get("source_revision"):
+            raise ValueError("CONDITIONAL_BASELINE_QUANTITY_INVALID")
     return dict(context)
 
 
 def build_declared_research_model(contract, *, baseline_report, policy_candidates, expected_generation):
     """Validate once per baseline; composite binding stays lazy in report fanout."""
+    return _build_research_model(contract, baseline_report=baseline_report,
+        policy_candidates=policy_candidates, expected_generation=expected_generation, conditional=False)
+
+
+def build_conditional_declared_research_model(contract, *, baseline_report, policy_candidates, expected_generation):
+    """Separate opt-in conditional cohort with non-qualifying model provenance."""
+    return _build_research_model(contract, baseline_report=baseline_report,
+        policy_candidates=policy_candidates, expected_generation=expected_generation, conditional=True)
+
+
+def _build_research_model(contract, *, baseline_report, policy_candidates, expected_generation, conditional):
     contract = validate_contract(contract, expected_generation)
     if baseline_report.get("generation") != expected_generation:
         raise ValueError("DECLARED_BASELINE_GENERATION_MISMATCH")
     contexts = []
     seen_contexts = {}
     for episode in baseline_report.get("episode_receipts") or []:
-        for entry in episode.get("results") or []:
+        for entry in episode.get("conditional_results" if conditional else "results") or []:
             if entry.get("supported") is not True or entry.get("outcome_state") not in {"FULL_FILL", "PARTIAL_FILL"}: continue
             key = {"episode_id": episode.get("episode_id"), "opportunity_id": episode.get("opportunity_id"),
                    "baseline_id": entry.get("baseline_id")}
             try:
-                context = _baseline_context(entry, expected_generation)
+                context = _validate_baseline_context(entry, expected_generation, conditional=conditional)
                 context = {k: v for k, v in context.items() if k not in
                            ("signature", "schema", "composite_policy_signature", "trading_fees_usd", "funding_usd", "latency_cost_usd")}
                 context.update(key)
@@ -153,10 +194,18 @@ def build_declared_research_model(contract, *, baseline_report, policy_candidate
                 continue
             seen_contexts[identity_key] = context
             contexts.append(context)
+    if conditional:
+        for context in contexts:
+            context.update(cost_provenance="DECLARED_SIMULATION_CONDITIONAL",
+                qualification_eligible=False, venue_acceptance="UNKNOWN")
     body = {"schema": "conservative_shadow_research_model_v1", "generation": dict(expected_generation),
             "model_id": contract["model_id"], "provenance": "DECLARED_SIMULATION",
             "declared_contract_sha256": sha(contract), "declared_contract": contract,
             "context_binding_mode": "PER_BASELINE_LAZY_COMPOSITE", "contexts": contexts}
+    if conditional:
+        body.update(model_id="conditional:" + contract["model_id"],
+            provenance="DECLARED_SIMULATION_CONDITIONAL", qualification_eligible=False,
+            venue_acceptance="UNKNOWN", evidence_basis="DECLARED_SIMULATION_CONDITIONAL")
     return {**body, "signature": stable_hash("conservative-shadow-research-model", body)}
 
 
