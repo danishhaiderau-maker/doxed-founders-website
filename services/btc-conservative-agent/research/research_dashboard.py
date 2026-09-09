@@ -2245,6 +2245,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         return {
             "schema": "current_policy_grid_v3_1", "source_available": False,
             "status": "SOURCE_UNAVAILABLE", "rows": [], "diagnostic_rows": [],
+            "generation_freshness": source.get("generation_freshness") or {},
             "rows_available": None, "policy_search_statistics": None,
             "policy_episode_split": None, "search_counts": None, "evidence": None,
             "live_policy_change_allowed": False, "blockers": source["blockers"],
@@ -2462,6 +2463,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     return {
         "schema": "current_policy_grid_v3_1",
         "source_available": True,
+        "generation_freshness": source.get("generation_freshness") or {},
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
         "status": "PROFITABLE_CONSERVATIVE_POLICIES_AVAILABLE" if rows else "NO_PROFITABLE_CONSERVATIVE_POLICIES",
@@ -7138,7 +7140,7 @@ const EVIDENCE_SCOPES = {
   'chase-policy-lab': ['SIGNED COMPRESSED SCHEDULES — DESCRIPTIVE ONLY', 'This panel is not a qualification result. Other shadow simulations use the separate conservative execution evaluator; executed outcomes remain separate unless explicitly matched.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
-  combos: ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
+  combos: ['POLICY GRID FRESHNESS UNVERIFIED', 'Waiting for policy-report source and generation receipts. Legacy executed evidence remains separate; no current-epoch claim is established yet.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
   'exit-combos': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current terminal exit combinations; observed paper and shadow/lab evidence are displayed separately and remain descriptive.'],
   'exit-reason-leak': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current peak-to-close hindsight gaps; paper and shadow/lab evidence remain separate and are not directly capturable profit.'],
@@ -7661,9 +7663,23 @@ async function loadLanes() {
   if (sources.shadow === false) document.getElementById('chase-shadow-body').innerHTML = `<tr><td colspan="6">${missingResearchSource()}</td></tr>`;
 }
 
+function policyGridEvidenceScope(d) {
+  const pg = d?.policy_grid || {};
+  if (d?.source_available !== true || pg.source_available !== true) {
+    return ['SOURCE UNAVAILABLE', 'The required policy report is unavailable. No current policy-grid or profitability conclusion is established. Legacy executed evidence, if present, remains separate.'];
+  }
+  const fresh = pg.generation_freshness || {};
+  if (fresh.current !== true || fresh.stale === true || !pg.epoch_id
+      || ['UNKNOWN', 'UNBOUND'].includes(String(pg.epoch_id).toUpperCase())) {
+    return ['SAVED POLICY GRID — NOT VERIFIED CURRENT', 'Available report rows are saved research, not verified current-epoch evidence. Qualification is blocked; legacy executed evidence remains separate.'];
+  }
+  return ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table uses the verified current-epoch policy report. Conservative execution evidence and ideal-touch diagnostics are separate; a current report alone does not establish qualification. The legacy executed cohort remains separate.'];
+}
 async function loadCombos() {
+  setEvidenceScope('combos', ...EVIDENCE_SCOPES.combos);
   const r = await fetch('/api/combos');
   const d = await r.json();
+  setEvidenceScope('combos', ...policyGridEvidenceScope(d));
   const legacy = d.legacy_executed_combos || {};
   const legacyRows = legacy.rows || [];
   const note = document.getElementById('combos-note');
