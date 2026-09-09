@@ -5511,10 +5511,54 @@ def _count_valid_compressed_shadow_rows(payload: bytes) -> int:
     return count
 
 
+def _complete_export_preflight():
+    def bounded_metadata(name):
+        path = DATA_ROOT / name
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(65537)
+            if len(raw) > 65536:
+                return None
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    retired_path = DATA_ROOT / "canonical_generation_retired.json"
+    retired = bounded_metadata("canonical_generation_retired.json")
+    if retired_path.exists() and (not retired or retired.get("generation_current") is not True):
+        code, status = "MIRROR_RETIRED_AWAITING_VERIFIED_PROMOTION", 409
+    else:
+        current = bounded_metadata("canonical_dataset_current.json")
+        if current and all(current.get(key) for key in (
+            "entry_hash", "dataset_epoch", "source_revision", "deployed_revision",
+            "tile_config_signature",
+        )):
+            return None
+        code, status = "MIRROR_GENERATION_UNBOUND", 503
+    message = ("Complete export is unavailable. Finish verification and promotion "
+               "of the fresh local Fly mirror before retrying. No archive was created.")
+    if request.accept_mimetypes.best_match(["text/html", "application/json"]) == "text/html":
+        response = make_response("<!doctype html><title>Research export unavailable</title>"
+                                 "<h1>Research export unavailable</h1><p>" + message +
+                                 "</p><p>" + code + "</p>", status)
+    else:
+        response = make_response(jsonify({"ok": False, "status": code,
+                                          "message": message}), status)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/download/everything")
 def download_everything():
     """One verified ZIP containing raw research data, reports, sessions, genome,
     accumulator exports, audit source bundle, and any preserved analysis."""
+    # This is an admission check, not a substitute for the complete bundle
+    # validation below. Do not scan history or build the audit ZIP while the
+    # canonical mirror is explicitly retired or lacks a promoted identity.
+    preflight = _complete_export_preflight()
+    if preflight is not None:
+        return preflight
     freshness = _generation_freshness_meta()
     generation_current = freshness.get("current") is True
     agent_root = _agent_source_root()
