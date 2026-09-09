@@ -22,6 +22,9 @@ class LabOutcomeReconciler:
         self.binding=None; self.offset=0; self.rows={}; self.excluded=Counter(); self.failed=None
 
     def advance(self,path,identity,*,max_bytes=262144,max_rows=100):
+        if (type(max_bytes) is not int or not 0<max_bytes<=262144
+                or type(max_rows) is not int or not 0<max_rows<=100):
+            raise ValueError('LAB_RECONCILIATION_BUDGET_INVALID')
         stat=path.stat()
         binding=(stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns,
             json.dumps(identity,sort_keys=True,separators=(',',':')))
@@ -41,7 +44,10 @@ class LabOutcomeReconciler:
                 try: row=json.loads(line)
                 except (ValueError,UnicodeError): self.excluded['MALFORMED_ROW']+=1; continue
                 if not isinstance(row,dict): self.excluded['MALFORMED_ROW']+=1; continue
-                lane=row.get('research_lane'); expected=identity['policies'].get(lane)
+                lane=row.get('research_lane')
+                if not isinstance(lane,str) or not 0<len(lane)<=256:
+                    self.excluded['LANE_INVALID']+=1; continue
+                expected=identity['policies'].get(lane)
                 if (row.get('schema')!='shadow_lane_outcome_v1' or row.get('collection_mode')!='LAB'
                         or row.get('epoch_id')!=identity['epoch']
                         or row.get('collection_epoch_id')!=identity['epoch']

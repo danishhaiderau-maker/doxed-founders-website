@@ -47,6 +47,21 @@ def test_file_generation_change_resets_and_partial_line_boundary_resumes(tmp_pat
     assert reader.advance(path,IDENTITY)['CONTINUOUS']['lab_losses']==1
 
 
+def test_malformed_lane_does_not_poison_following_valid_outcome(tmp_path):
+    path=tmp_path/'outcomes.jsonl'
+    write(path,[row(1,research_lane=[]),row(2,research_lane={}),row(3)])
+    result=LabOutcomeReconciler().advance(path,IDENTITY)['CONTINUOUS']
+    assert result['lab_accounting_status']=='CURRENT' and result['lab_closes']==1
+    assert result['lab_scan_excluded_counts']['LANE_INVALID']==2
+
+
+@pytest.mark.parametrize('options',[{'max_bytes':0},{'max_rows':0},{'max_bytes':-1},
+    {'max_rows':True},{'max_bytes':262145},{'max_rows':101}])
+def test_invalid_budget_rejected_before_source_read(tmp_path,options):
+    with pytest.raises(ValueError,match='LAB_RECONCILIATION_BUDGET_INVALID'):
+        LabOutcomeReconciler().advance(tmp_path/'missing',IDENTITY,**options)
+
+
 def function(name,env):
     path=Path(__file__).with_name('bot.py'); tree=ast.parse(path.read_text(encoding='utf-8-sig'))
     node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name)
