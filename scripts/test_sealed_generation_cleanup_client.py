@@ -23,7 +23,7 @@ def fixture(tmp_path):
     for directory, value in ((root/'v3/raw_generation_manifests', manifest), (root/'v3/raw_generation_laptop_acks', ack)):
         next(directory.glob('*.json')).write_bytes(client.encoded(value) + b'\n')
     return dict(source_root=root, manifest=manifest, ack=ack, identity=identity,
-                generation_id='V3:decision:1', receipts=tmp_path/'receipts', endpoint='https://example.invalid')
+                generation_id='V3:decision:1', receipts=tmp_path/'receipts', endpoint='https://doxed-btc-bot.fly.dev')
 
 
 def test_default_plan_zero_network_and_zero_receipts(tmp_path):
@@ -80,12 +80,21 @@ def test_no_implicit_quarantine_or_purge(tmp_path):
             client.execute(**args, action=action, confirmation=action.upper()+':V3:decision:1', post=lambda *_:pytest.fail('network'))
 
 
-def test_phases_are_explicit_and_purge_protocol_blocks_before_network(tmp_path):
+@pytest.mark.parametrize('tamper', [None, 'freed_bytes', 'future_unknown_field'])
+def test_phases_are_explicit_and_purge_hash_verified(tmp_path, tamper):
     args = fixture(tmp_path)
     proof = client.execute(**args)['job']['proof_sha256']
     calls = []
     def post(url, body):
         calls.append(url)
+        if url.endswith('/purge'):
+            receipt = {'schema':'raw_generation_purge_receipt_v1', 'state':'PURGED',
+                       'generation_id':args['generation_id'], 'freed_bytes':10}
+            import hashlib
+            receipt['receipt_sha256'] = hashlib.sha256(client.encoded(receipt)).hexdigest()
+            receipt['owner_space_observation'] = {'free_bytes_delta':12}
+            if tamper: receipt[tamper] = 99
+            return {'ok':True, **receipt}
         return {'ok': True, 'generation_id': args['generation_id'],
                 'proof_sha256': proof, 'status': 'RAW_GENERATION_AUTHORITY_REGISTERED_SOURCE_RETAINED'
                 if url.endswith('/authority') else 'QUARANTINED_SOURCE_RETAINED'}
@@ -94,6 +103,17 @@ def test_phases_are_explicit_and_purge_protocol_blocks_before_network(tmp_path):
     client.execute(**args, action='quarantine', confirmation='QUARANTINE:V3:decision:1', post=post)
     assert len(calls) == 2
     assert client.execute(**args, action='quarantine', confirmation='QUARANTINE:V3:decision:1', post=post)['local_receipt_reused']
-    with pytest.raises(ValueError, match='PURGE_SIGNED_RECEIPT_PROTOCOL_REPAIR_REQUIRED'):
+    if tamper:
+        with pytest.raises(ValueError, match='PURGE_RECEIPT_HASH_UNVERIFIED'):
+            client.execute(**args, action='purge', confirmation='PURGE:V3:decision:1', post=post)
+    else:
         client.execute(**args, action='purge', confirmation='PURGE:V3:decision:1', post=post)
-    assert len(calls) == 2
+    assert len(calls) == 3
+
+
+def test_noncanonical_origin_and_redirect_are_refused(tmp_path):
+    args = fixture(tmp_path)
+    with pytest.raises(ValueError, match='REFUSED_NON_CANONICAL'):
+        client.execute(**{**args, 'endpoint':'https://example.invalid'})
+    with pytest.raises(ValueError, match='ADMIN_REDIRECT_REFUSED'):
+        client.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://example.invalid')

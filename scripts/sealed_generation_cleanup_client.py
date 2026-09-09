@@ -40,6 +40,21 @@ def once(path, value):
         os.fsync(handle.fileno())
 
 
+def canonical_origin(endpoint):
+    lock = read(Path(__file__).resolve().parents[1] / 'config' / 'fly-canonical.lock.json')
+    expected = str(lock.get('sourceUrl') or '').rstrip('/')
+    if (lock.get('frozen') is not True or lock.get('desktopBotEnabled') is not False
+            or expected != 'https://doxed-btc-bot.fly.dev'
+            or endpoint.rstrip('/') != expected):
+        raise ValueError('REFUSED_NON_CANONICAL_UPSTREAM')
+    return expected
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError('ADMIN_REDIRECT_REFUSED')
+
+
 def execute(*, source_root, manifest, ack, identity, generation_id, receipts,
             endpoint, action='plan', confirmation=None, post=None):
     if action not in {'plan', 'register', 'quarantine', 'purge'}:
@@ -47,6 +62,7 @@ def execute(*, source_root, manifest, ack, identity, generation_id, receipts,
     parsed = urlsplit(endpoint)
     if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {'', '/'}:
         raise ValueError('HTTPS_ORIGIN_REQUIRED')
+    endpoint = canonical_origin(endpoint)
     if manifest.get('generation_id') != generation_id or manifest.get('identity') != identity:
         raise ValueError('EXPECTED_GENERATION_IDENTITY_MISMATCH')
     if manifest.get('caught_up_cycle_complete') is not True or len(manifest.get('members') or []) != 1:
@@ -85,10 +101,6 @@ def execute(*, source_root, manifest, ack, identity, generation_id, receipts,
             raise ValueError('PRIOR_PHASE_RECEIPT_MISMATCH')
     if post is None:
         raise ValueError('AUTHENTICATED_TRANSPORT_REQUIRED')
-    if action == 'purge':
-        # Current owner overwrites signed receipt free-space fields before
-        # returning them. Do not issue deletion without a verifiable response.
-        raise ValueError('PURGE_SIGNED_RECEIPT_PROTOCOL_REPAIR_REQUIRED')
     body = {'manifest': manifest, 'acknowledgement': ack} if action == 'register' else {'generation_id': generation_id}
     if action == 'purge':
         body['confirmation'] = 'PURGE_SEALED_RAW_GENERATION:' + generation_id
@@ -105,7 +117,7 @@ def execute(*, source_root, manifest, ack, identity, generation_id, receipts,
                 or response.get('schema') != 'raw_generation_purge_receipt_v1'))):
         raise ValueError('SERVER_PHASE_NOT_VERIFIED_SOURCE_STATE_UNKNOWN')
     if action == 'purge':
-        material = {k: v for k, v in response.items() if k not in {'ok', 'receipt_sha256'}}
+        material = {k: v for k, v in response.items() if k not in {'ok', 'receipt_sha256', 'owner_space_observation'}}
         # Owner adds post-operation space diagnostics; receipt hash binds only
         # actual receipt fields. Require downstream review if shape differs.
         if hashlib.sha256(encoded(material)).hexdigest() != response.get('receipt_sha256'):
@@ -129,7 +141,7 @@ def main():
             raise ValueError('ADMIN_TOKEN_MISSING')
         request = urllib.request.Request(url, data=encoded(body), method='POST',
             headers={'Content-Type': 'application/json', 'X-Bot-Admin-Token': token})
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
             raw = response.read(2 * 1024 * 1024 + 1)
         if len(raw) > 2 * 1024 * 1024:
             raise ValueError('RESPONSE_READ_LIMIT')
