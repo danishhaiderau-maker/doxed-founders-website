@@ -62,13 +62,13 @@ print(json.dumps([(s['raw_policy_id'],s['policy_signature']) for s in ACTIVE_TIL
     outputs = []
     for enabled in ('0','1'):
         env = {**os.environ, 'SCORE_LED_PAPER_RESEARCH_ENABLED':enabled}
-        outputs.append(subprocess.check_output([sys.executable,'-c',code],env=env,text=True))
+        outputs.append(subprocess.check_output([sys.executable,'-c',code],env=env,text=True,cwd=Path(__file__).resolve().parent))
     assert outputs[0] != outputs[1]
     assert 'SCORE_LED_PAPER_V1::' not in outputs[0]
     assert 'SCORE_LED_PAPER_V1::' in outputs[1]
 
 def test_runtime_fanout_rejects_original_but_enqueues_projected_child():
-    tree = ast.parse(Path('bot.py').read_text(encoding='utf-8-sig'))
+    tree = ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8-sig'))
     fn = next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='spawn_combo_lanes_from_ai_scan')
     captured=[]
     env = dict(is_ai_scan_lane=lambda x:True,is_research_data_collection=lambda:True,
