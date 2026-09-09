@@ -135,11 +135,8 @@ class RawGenerationCleanupOwner:
             result = self.tx.quarantine(source, proof, dry_run=dry_run,
                                         revalidate=lambda: self._authority(generation_id)[1])
             after = shutil.disk_usage(self.root).free
-            # Preserve every byte-hashed transaction receipt field. Outer
-            # sampling occurs at a different time and is not signed evidence.
-            return {**result, "owner_space_observation": {
-                "free_bytes_before": before, "free_bytes_after": after,
-                "free_bytes_delta": after - before}}
+            return {**result, "free_bytes_before": before, "free_bytes_after": after,
+                    "free_bytes_delta": after - before}
         finally:
             if gated: self.gate_release()
             self.lock.release()
@@ -155,8 +152,11 @@ class RawGenerationCleanupOwner:
             before = shutil.disk_usage(self.root).free
             result = self.tx.purge(generation_id, dry_run=dry_run)
             after = shutil.disk_usage(self.root).free
-            return {**result, "free_bytes_before": before, "free_bytes_after": after,
-                    "free_bytes_delta": after - before}
+            # Preserve every byte-hashed transaction receipt field. Outer
+            # sampling occurs at a different time and is not signed evidence.
+            return {**result, "owner_space_observation": {
+                "free_bytes_before": before, "free_bytes_after": after,
+                "free_bytes_delta": after - before}}
         finally:
             if gated: self.gate_release()
             self.lock.release()
