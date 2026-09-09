@@ -2730,8 +2730,9 @@ def _exit_combos_payload():
     return {
         "source_available": True,
         "generation_identity": rep["generation_identity"],
+        "generation_freshness": _generation_freshness_meta(),
         **_nonqualifying_scope(
-            "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
+            "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED",
             "Terminal exit evidence is descriptive only. Executed-paper and shadow/lab rows are never merged or qualification eligible.",
         ),
         "generated_at": rep.get("generated_at"),
@@ -2765,8 +2766,9 @@ def _exit_reason_leak_payload():
     return {
         "source_available": True,
         "generation_identity": rep["generation_identity"],
+        "generation_freshness": _generation_freshness_meta(),
         **_nonqualifying_scope(
-            "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
+            "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED",
             "Peak-to-close hindsight is descriptive only; executed-paper and shadow/lab rows are shown separately.",
         ),
         "generated_at": rep.get("generated_at"),
@@ -7142,8 +7144,8 @@ const EVIDENCE_SCOPES = {
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
   combos: ['POLICY GRID FRESHNESS UNVERIFIED', 'Waiting for policy-report source and generation receipts. Legacy executed evidence remains separate; no current-epoch claim is established yet.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
-  'exit-combos': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current terminal exit combinations; observed paper and shadow/lab evidence are displayed separately and remain descriptive.'],
-  'exit-reason-leak': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current peak-to-close hindsight gaps; paper and shadow/lab evidence remain separate and are not directly capturable profit.'],
+  'exit-combos': ['EXIT EVIDENCE FRESHNESS UNVERIFIED', 'Waiting for a declared exit report and freshness receipts. Paper and shadow/lab evidence remain separate.'],
+  'exit-reason-leak': ['EXIT EVIDENCE FRESHNESS UNVERIFIED', 'Waiting for a declared leakage report and freshness receipts. Hindsight gaps are not directly capturable profit.'],
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current signed V3.1 Safe Policy Genome.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
   genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
@@ -7774,7 +7776,22 @@ async function loadSpreadPerf() {
   }).join('') || '<tr><td colspan="5">No legacy spread-performance evidence exists in the current cohort.</td></tr>';
 }
 
+function exitEvidenceScope(payload) {
+  if (payload?.source_available !== true) {
+    return ['SOURCE UNAVAILABLE', 'No declared exit report is available. Current counts and performance cannot be established.'];
+  }
+  const freshness = payload.generation_freshness || {};
+  const epoch = payload.generation_identity?.epoch_id;
+  if (freshness.current !== true || freshness.stale === true || !epoch
+      || ['UNKNOWN', 'UNBOUND'].includes(String(epoch).toUpperCase())) {
+    return ['SAVED EXIT EVIDENCE — NOT VERIFIED CURRENT', 'Saved paper and shadow/lab outcomes remain separate and descriptive. Current-epoch conclusions are blocked; hindsight gaps are not capturable profit.'];
+  }
+  return ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Verified current report; paper and shadow/lab outcomes remain separate and descriptive, not qualification proof. Hindsight gaps are not capturable profit.'];
+}
 function executionPanelSource(section, payload) {
+  if (section === 'exit-combos' || section === 'exit-reason-leak') {
+    setEvidenceScope(section, ...exitEvidenceScope(payload));
+  }
   const root = document.getElementById('sec-' + section);
   if (section === 'exit-combos') {
     const inventory = document.getElementById('exit-combos-detail-inventory');
@@ -7916,6 +7933,7 @@ async function loadChaseDelay() {
 }
 
 async function loadExitCombos() {
+  setEvidenceScope('exit-combos', ...EVIDENCE_SCOPES['exit-combos']);
   const r = await fetch('/api/exit-combos');
   const d = await r.json();
   if (!executionPanelSource('exit-combos', d)) return;
@@ -7998,6 +8016,7 @@ async function loadExitCombos() {
 }
 
 async function loadExitReasonLeak() {
+  setEvidenceScope('exit-reason-leak', ...EVIDENCE_SCOPES['exit-reason-leak']);
   const r = await fetch('/api/exit-reason-leak');
   const d = await r.json();
   if (!executionPanelSource('exit-reason-leak', d)) return;

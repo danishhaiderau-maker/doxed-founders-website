@@ -113,8 +113,10 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(tmp_p
         assert payload["qualified_v3_1"] is False
         assert payload["ranking_eligible"] is False
         assert payload["warning"]
-    assert payloads[1]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
-    assert payloads[2]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[1]["evidence_scope"] == "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[2]["evidence_scope"] == "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[1]["generation_freshness"]["current"] is False
+    assert payloads[2]["generation_freshness"]["current"] is False
     assert payloads[3]["evidence_scope"].startswith("LEGACY")
     assert payloads[3]["raw_replays_available"] == 92
     assert payloads[3]["eligible_replays_available"] == 0
