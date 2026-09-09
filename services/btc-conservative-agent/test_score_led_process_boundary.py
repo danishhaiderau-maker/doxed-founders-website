@@ -63,3 +63,48 @@ def test_actual_boundary_still_rejects_live_arming():
     namespace["state"]["live_armed"] = True
     assert run(child()) == {"entry_resolution": "NO_ORDER",
                            "exact_reason": "SCORE_LED_PAPER_BOUNDARY_REQUIRED"}
+
+
+def application_boundary(toggle_values):
+    """Run both real admission and direction application blocks in sequence."""
+    run, namespace = boundary()
+    tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
+    process = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name == "process_signal")
+    admission = next(n for n in ast.walk(process) if isinstance(n, ast.If)
+                     and ast.unparse(n.test) == "ai.get('admission_treatment') == 'SCORE_LED_PAPER_V1'")
+    application = None
+    for node in ast.walk(process):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+        for i, statement in enumerate(body):
+            if ast.unparse(statement) == "ai_direction_raw = ai.get('direction')":
+                end = next(j for j in range(i, len(body))
+                           if ast.unparse(body[j]).startswith("final_direction, inverted ="))
+                application = body[i:end + 1]
+    assert application is not None
+    invert = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                  and n.name == "apply_invert_direction")
+    wrapper = ast.parse("def run(ai):\n    pass\n").body[0]
+    wrapper.body = [copy.deepcopy(admission), *copy.deepcopy(application),
+                    ast.parse("return final_direction, inverted").body[0]]
+    values = iter(toggle_values)
+    namespace["invert_signal_active"] = lambda: next(values)
+    module = ast.fix_missing_locations(ast.Module(body=[copy.deepcopy(invert), wrapper], type_ignores=[]))
+    exec(compile(module, "actual-process-direction-boundary", "exec"), namespace)
+    return namespace["run"]
+
+
+def test_toggle_between_admission_and_application_cannot_flip_challenge():
+    assert application_boundary([False, True])(child()) == {
+        "entry_resolution": "NO_ORDER",
+        "exact_reason": "SCORE_LED_INVERSION_CHANGED_BEFORE_APPLICATION"}
+
+
+def test_challenge_stable_inversion_off_retains_short():
+    assert application_boundary([False, False])(child()) == ("SHORT", False)
+
+
+def test_baseline_inversion_behavior_is_unchanged():
+    assert application_boundary([True])({"direction": "SHORT"}) == ("LONG", True)
