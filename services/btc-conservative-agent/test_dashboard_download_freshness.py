@@ -580,6 +580,24 @@ def test_everything_includes_current_mirror_without_cache_files() -> None:
             zf.writestr("README.txt", "audit")
 
         _set_dashboard_roots(root, mirror)
+        # Use the real canonical publisher shape: an old mirror-only fixture
+        # without a promoted generation must now be refused before packaging.
+        from canonical_data_store import append_manifest, validate_manifest_chain
+        promoted = append_manifest(mirror, {
+            "dataset_epoch": "epoch-test",
+            "source_revision": "test-data-revision",
+            "deployed_revision": "test-deployed-revision",
+            "tile_config_signature": "test-tile-config-signature",
+            "collection_started_at": "2026-08-27T12:00:00+00:00",
+            "collection_observed_at": "2026-08-27T13:00:00+00:00",
+            "row_count": 1,
+            "opportunity_count": 1,
+            "dataset_checksum": hashlib.sha256(b"fixture-dataset").hexdigest(),
+            "analyzer_status": "PENDING",
+            "analyzer_completed_at": None,
+            "analyzer_schema_version": "fixture-v1",
+        })
+        assert validate_manifest_chain(mirror)[-1] == promoted
         original_ensure = dashboard._ensure_current_gpt_audit_bundle
         original_freshness = dashboard._generation_freshness_meta
         original_agent_root = dashboard._AGENT_ROOT
