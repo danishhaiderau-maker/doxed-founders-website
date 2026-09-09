@@ -14,6 +14,14 @@ SECRET = b'fixture-not-production'
 CURRENT = {'epoch': 'epoch-one', 'reset_generation': 0, 'policies': {'CONTINUOUS': 'policy-one'}}
 
 
+def test_history_labels_do_not_claim_after_cost_profit():
+    source = Path(__file__).with_name('bot.py').read_text(encoding='utf-8')
+    assert '<th>Legacy gross USD (before costs)</th>' in source
+    assert '<th>Simulated net USD</th>' not in source
+    assert 'net after costs is UNKNOWN' in source
+    assert 'Truncated outcomes are not completed trades' in source
+
+
 def row(**kw):
     return dict(schema='shadow_lane_outcome_v1', epoch_id='epoch-one', collection_epoch_id='epoch-one',
         collection_mode='LAB', research_lane='CONTINUOUS', policy_version='policy-one',

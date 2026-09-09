@@ -31295,7 +31295,7 @@ __ADMIN_ACCESS_CONTROLS__
 <button id="labHistoryNext" type="button" disabled>Next page</button>
 <p id="labHistoryStatus" role="status">Not loaded. Owner access required. Current epoch only.</p>
 <div class="activity-table-scroll" role="region" aria-label="LAB simulation history table" tabindex="0"><table>
-<thead><tr><th>Recorded time</th><th>Study ID</th><th>Lane / policy</th><th>Direction</th><th>Original AI verdict / direction / scores</th><th>AI call / prompt / model</th><th>Fill / entry</th><th>Exit reason</th><th>Simulated net USD</th></tr></thead>
+<thead><tr><th>Recorded time</th><th>Study ID</th><th>Lane / policy</th><th>Direction</th><th>Original AI verdict / direction / scores</th><th>AI call / prompt / model</th><th>Fill / entry</th><th>Exit reason</th><th>Legacy gross USD (before costs)</th></tr></thead>
 <tbody id="labHistoryRows"></tbody></table></div>
 
 <h2>AI History (Session)</h2>
@@ -31350,7 +31350,7 @@ DASHBOARD_JS = """(function () {
         'Epoch ' + page.epoch_id + ', lane ' + page.lane + ' — page only: ' + c.returned_rows + ' rows, scanned ' + c.records_scanned
         + ' records / ' + c.bytes_read + ' bytes. ' + (c.end_of_pinned_file ? 'End of pinned file. ' : 'More pages available. ')
         + (c.incomplete_tail ? 'Incomplete trailing record excluded. ' : '')
-        + 'Excluded: ' + JSON.stringify(c.excluded || {}) + '. No deduplication or whole-cohort totals; legacy fill assumptions.';
+        + 'Excluded: ' + JSON.stringify(c.excluded || {}) + '. No deduplication or whole-cohort totals; legacy fill assumptions. Amounts are gross before fees and funding; net after costs is UNKNOWN. Truncated outcomes are not completed trades.';
       const select = document.getElementById('labHistoryLane');
       for (const lane of page.available_lanes || []) {
         if (!Array.from(select.options).some(option => option.value === lane)) {
