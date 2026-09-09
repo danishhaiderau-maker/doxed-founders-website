@@ -22,6 +22,29 @@ def test_history_labels_do_not_claim_after_cost_profit():
     assert 'Truncated outcomes are not completed trades' in source
 
 
+def test_lab_producer_records_original_scores_not_challenge_approval():
+    tree = ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8'))
+    helper = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_lab_original_ai_snapshot')
+    env = {}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), 'bot.py', 'exec'), env)
+    project = env['_lab_original_ai_snapshot']
+    original = {'decision':'REJECT', 'direction':'NO_TRADE', 'long_score':0, 'short_score':35, 'model':'recorded-model'}
+    child = {'decision':'APPROVE', 'direction':'SHORT', 'original_ai_snapshot':original,
+             'admission_treatment':'SCORE_LED_PAPER_V1', 'admission_is_ai_approval':False}
+    result = project(child)
+    assert result['decision'] == 'REJECT' and result['direction'] == 'NO_TRADE'
+    assert result['long_score'] == 0 and result['short_score'] == 35
+    assert result['model_id'] == 'recorded-model'
+    assert result['admission_is_ai_approval'] is False
+    assert original['decision'] == 'REJECT'
+    assert project({'long_score':float('nan'), 'short_score':True})['long_score'] is None
+    assert project({})['model_id'] is None
+    spawn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == '_spawn_lab_combo_shadow')
+    assert any(isinstance(n, ast.keyword) and n.arg == 'ai_snapshot' and isinstance(n.value, ast.Call)
+               and isinstance(n.value.func, ast.Name) and n.value.func.id == '_lab_original_ai_snapshot'
+               for n in ast.walk(spawn))
+
+
 def row(**kw):
     return dict(schema='shadow_lane_outcome_v1', epoch_id='epoch-one', collection_epoch_id='epoch-one',
         collection_mode='LAB', research_lane='CONTINUOUS', policy_version='policy-one',

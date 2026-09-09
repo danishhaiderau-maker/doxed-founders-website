@@ -17340,6 +17340,27 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         )
 
 
+def _lab_original_ai_snapshot(ai):
+    """Project original AI provenance, never a challenge execution override."""
+    import math
+    ai = ai if isinstance(ai, dict) else {}
+    original = ai.get("original_ai_snapshot")
+    source = original if isinstance(original, dict) else ai
+    result = {}
+    for key in ("direction", "decision", "raw_decision", "prompt_id"):
+        value = source.get(key)
+        result[key] = value[:256] if isinstance(value, str) else None
+    model = source.get("model_id") or source.get("model")
+    result["model_id"] = model[:256] if isinstance(model, str) else None
+    for key in ("win_prob", "long_score", "short_score"):
+        value = source.get(key)
+        result[key] = value if type(value) in (int, float) and math.isfinite(value) else None
+    treatment = ai.get("admission_treatment")
+    result["admission_treatment"] = treatment[:128] if isinstance(treatment, str) else None
+    result["admission_is_ai_approval"] = ai.get("admission_is_ai_approval") if type(ai.get("admission_is_ai_approval")) is bool else None
+    return result
+
+
 def _spawn_lab_combo_shadow(
     ctx,
     ai,
@@ -17443,11 +17464,7 @@ def _spawn_lab_combo_shadow(
         prompt_id=(ai or {}).get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         adx_at_signal=enriched.get("adx_normalized") or enriched.get("adx"),
         entry_features=copy.deepcopy(enriched),
-        ai_snapshot={
-            "direction": (ai or {}).get("direction"),
-            "win_prob": (ai or {}).get("win_prob"),
-            "decision": (ai or {}).get("decision"),
-        },
+        ai_snapshot=_lab_original_ai_snapshot(ai),
     )
     append_replay_tick(study_id, price, None)
     logger.info(
