@@ -67,6 +67,12 @@ def _project(row):
         value = snapshot.get(key)
         result['original_ai'][key] = value if type(value) in (int, float) and math.isfinite(value) else None
     result['fill_assumption'] = 'LEGACY_INSTANT_OR_PRICE_TOUCH_SIMULATION_NOT_EXCHANGE_VERIFIED'
+    from research.lab_accounting import completed_legacy_lab
+    result['completed_strategy_exit']=completed_legacy_lab(row)
+    result['economics_basis']='LEGACY_GROSS_BEFORE_COSTS'
+    result['gross_before_costs_usd']=result['net_pnl_usd']
+    result['net_after_costs_usd']=None
+    result['costs_status']='UNMODELED'
     result['qualification_allowed'] = False
     return result
 
