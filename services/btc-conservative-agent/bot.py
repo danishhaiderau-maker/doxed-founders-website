@@ -23147,6 +23147,10 @@ def process_signal(event: dict):
                 )
                 if checked_ai is None:
                     return {"entry_resolution": "NO_ORDER", "exact_reason": boundary_reason}
+                if (ai.get("direction") != checked_ai.get("direction")
+                        or ai.get("candidate_direction") != checked_ai.get("candidate_direction")):
+                    return {"entry_resolution": "NO_ORDER",
+                            "exact_reason": "SCORE_LED_DIRECTION_PROJECTION_MISMATCH"}
             if not ai_decision_should_execute(ai):
                 trade_id = ai.get("trade_id") or ctx["trade_id"]
                 ai["trade_id"] = trade_id
