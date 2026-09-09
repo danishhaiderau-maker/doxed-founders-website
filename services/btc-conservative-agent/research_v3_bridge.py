@@ -1013,6 +1013,8 @@ def dual_write_lane_decision(
         "exact_reason": str(exact_reason or "UNSPECIFIED"),
         "executed_direction": identity["executed_direction"],
         "raw_ai_decision": source.get("raw_ai_decision"),
+        "admission_treatment": source.get("admission_treatment"),
+        "original_ai_snapshot": source.get("original_ai_snapshot"),
         "long_score": source.get("long_score"),
         "short_score": source.get("short_score"),
         "score_gap": source.get("score_gap"),

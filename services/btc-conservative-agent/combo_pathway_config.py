@@ -11,6 +11,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+
+# Startup-only, explicit research treatment. A restart changes policy identity;
+# this is not a mutable per-request switch or permission to relay live orders.
+SCORE_LED_PAPER_RESEARCH_ENABLED = os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") == "1"
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_FAMILY_CHANDELIER = "FAMILY_CHANDELIER_3"
@@ -75,6 +80,8 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           ladder: tuple[tuple[float, float], ...] = (),
           ladder_label: str = "", ladder_profile_id: str = "",
           hypothesis_result: dict | None = None) -> dict:
+    if SCORE_LED_PAPER_RESEARCH_ENABLED:
+        raw_policy_id = "SCORE_LED_PAPER_V1::" + raw_policy_id
     tile = {
         "tile_id": lane,
         "label": label,
@@ -85,7 +92,8 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
             raw_policy_id=raw_policy_id, entry=entry,
             exit_policy=exit_policy, ladder=ladder,
         ),
-        "policy_epoch": "v31-analyzer-hypothesis-paper-v1",
+        "policy_epoch": ("v31-score-led-paper-v1" if SCORE_LED_PAPER_RESEARCH_ENABLED else "v31-analyzer-hypothesis-paper-v1"),
+        "admission_treatment": ("SCORE_LED_PAPER_V1" if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
         "research_lane": lane,
         "execution_scope": "PAPER_ONLY",
         "paper_eligible": True,
@@ -130,6 +138,10 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
             "ladder_label": ladder_label,
             "ladder_profile_id": ladder_profile_id,
         })
+    if SCORE_LED_PAPER_RESEARCH_ENABLED:
+        tile["label"] = label + " · score-led paper"
+        tile["subtitle"] = "HIGHER SCORE ADMISSION EXPERIMENT — PAPER ONLY — NOT AI APPROVAL"
+        tile["presentation"]["hypothesis_result"] = {"status": "UNTESTED_NEW_ADMISSION_TREATMENT"}
     return tile
 
 
@@ -191,6 +203,8 @@ RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_CHANDELIER
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_VERSION = "v31-five-family-analyzer-hypothesis-paper"
+if SCORE_LED_PAPER_RESEARCH_ENABLED:
+    RESEARCH_STACK_VERSION = "v31-five-family-score-led-paper-v1"
 RESEARCH_STACK_FEATURES = (
     "Five exit-family tiles share one direction-only three-minute AI call while retaining "
     "independent paper decisions, locks, capacity, orders, positions, ledgers and policy identities; "
@@ -293,6 +307,7 @@ def active_tile_lifecycle_manifest() -> tuple[dict, ...]:
             "raw_policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
             "policy_signature": ACTIVE_TILE_REGISTRY[lane]["policy_signature"],
             "policy_epoch": ACTIVE_TILE_REGISTRY[lane]["policy_epoch"],
+            "admission_treatment": ACTIVE_TILE_REGISTRY[lane]["admission_treatment"],
             "id_prefix": ACTIVE_TILE_REGISTRY[lane]["id_prefix"],
             "toggle_key": ACTIVE_TILE_REGISTRY[lane]["toggle_key"],
             "lifecycle_state": ACTIVE_TILE_REGISTRY[lane]["lifecycle_state"],
