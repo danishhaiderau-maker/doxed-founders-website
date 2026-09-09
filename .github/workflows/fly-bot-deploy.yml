@@ -1551,6 +1551,9 @@ jobs:
       - name: Prove liveness, execution safety, and exact revision
         env:
           EXPECTED_REVISION: ${{ github.sha }}
+          # Must match Fly secret SCORE_LED_PAPER_RESEARCH_ENABLED so CI's
+          # expected bot_version/registry signature match the live paper treatment.
+          SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
         run: |
           python - <<'PY'
           import json

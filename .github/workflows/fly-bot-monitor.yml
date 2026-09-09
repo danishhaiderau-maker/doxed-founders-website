@@ -42,6 +42,9 @@ jobs:
       - name: Verify Fly is alive, safe, and running current bot source
         env:
           EXPECTED_REVISION: ${{ steps.expected.outputs.revision }}
+          # Must match Fly secret SCORE_LED_PAPER_RESEARCH_ENABLED so monitor
+          # expected registry signature/version match live score-led paper.
+          SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
         run: |
           python - <<'PY'
           import json
