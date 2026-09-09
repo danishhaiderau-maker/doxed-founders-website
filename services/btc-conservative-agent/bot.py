@@ -17661,6 +17661,10 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     # Honour explicit cancel before simulate (CANCELLED > TTL).
     explicit = str(buf.get("exit_outcome") or buf.get("block_reason") or "").upper()
     outcome = simulate_replay_outcome(buf)
+    from research.lab_accounting import completed_legacy_lab
+    outcome.update(economics_basis='LEGACY_GROSS_BEFORE_COSTS',
+        gross_before_costs_usd=outcome.get('net_pnl_usd'),net_after_costs_usd=None,
+        costs_status='UNMODELED',completed_strategy_exit=completed_legacy_lab(outcome))
     shared_call_id = str(buf.get("shared_ai_call_id") or buf.get("source_trade_id") or "").strip()
     opportunity_id = None
     if shared_call_id:
@@ -17733,7 +17737,7 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     # LAB mode (OFF combo tile): record simulated PnL into the parallel lab ledger so the
     # Pathway Lab dashboard can pre-flight a strategy without real orders. Tagged `mode: "lab"`
     # and kept strictly separate from the real `lane_pnl_ledger` used for live decisions.
-    if str(buf.get("collection_mode") or "") == "LAB" and outcome.get("filled") and lane:
+    if str(buf.get("collection_mode") or "") == "LAB" and completed_legacy_lab(outcome) and lane:
         try:
             update_lane_lab_pnl_ledger(
                 lane, "CLOSE",
@@ -29283,59 +29287,35 @@ def _load_lane_metrics_from_disk() -> dict:
     return out
 
 
+_lab_reconcile_reader = None
+_lab_reconcile_lock = threading.Lock()
+
+
 def _load_reconciled_lab_outcome_metrics() -> dict:
-    """Derive active LAB tile metrics from immutable outcome rows.
-
-    The legacy JSON ledger is a convenience cache and can lag process restarts.
-    This reconciliation never rewrites it; it only deduplicates completed outcomes
-    by study id so the dashboard reports the raw close count and PnL truthfully.
-    """
-    target_lanes = set(COMBO_EXECUTION_LANES)
-    rows = {}
-    if not os.path.isfile(SHADOW_LANE_OUTCOME_FILE):
-        return {}
+    """Bounded exact-current-policy LAB gross reconciliation, including Continuous."""
+    global _lab_reconcile_reader
+    from research.lab_accounting import LabOutcomeReconciler
+    lanes=set(COMBO_EXECUTION_LANES)|{RESEARCH_LANE_CONTINUOUS}
+    unavailable={lane:{'lab_accounting_status':'UNAVAILABLE','lab_closes':None,
+        'lab_wins':None,'lab_losses':None,'lab_net_pnl':None,'lab_win_rate':None,
+        'lab_per_close_ev':None,'lab_pnl_source':'EXACT_EPOCH_POLICY_UNAVAILABLE',
+        'lab_economics_basis':'LEGACY_GROSS_BEFORE_COSTS','lab_net_after_costs_usd':None,
+        'lab_costs_status':'UNMODELED'} for lane in lanes}
+    if not _lab_reconcile_lock.acquire(blocking=False): return unavailable
     try:
-        with open(SHADOW_LANE_OUTCOME_FILE, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    row = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                lane = str(row.get("research_lane") or "").upper()
-                trade_id = str(row.get("trade_id") or row.get("study_id") or "")
-                if (
-                    lane not in target_lanes
-                    or not trade_id
-                    or str(row.get("collection_mode") or "").upper() != "LAB"
-                ):
-                    continue
-                # A repeated study row replaces the earlier snapshot; only the
-                # terminal row is counted, and unfilled/cancelled rows are not trades.
-                rows[(lane, trade_id)] = row
-    except Exception as e:
-        logger.debug(f"[LAB_RECONCILE] outcome read failed: {e}")
-        return {}
-
-    result = {}
-    for lane in target_lanes:
-        completed = [r for (ln, _), r in rows.items() if ln == lane and bool(r.get("filled"))]
-        if not completed:
-            continue
-        pnl = round(sum(float(r.get("net_pnl_usd") or 0.0) for r in completed), 2)
-        wins = sum(1 for r in completed if float(r.get("net_pnl_usd") or 0.0) > 0)
-        closes = len(completed)
-        result[lane] = {
-            "lab_mode": True,
-            "lab_closes": closes,
-            "lab_net_pnl": pnl,
-            "lab_wins": wins,
-            "lab_losses": closes - wins,
-            "lab_win_rate": round(100.0 * wins / closes, 1) if closes else 0.0,
-            "lab_per_close_ev": round(pnl / closes, 2) if closes else 0.0,
-            "lab_pnl_source": "reconciled_shadow_outcomes",
-            "policy_version": (COMBO_LANE_SPECS.get(lane) or {}).get("raw_policy_id"),
-        }
-    return result
+        current=_lab_history_current_identity()
+        policies={}
+        for lane,version in current['policies'].items():
+            proof=_shadow_policy_identity(research_lane=lane,policy_version=version,
+                exit_config=get_exit_config_for_lane(lane),invert_on=invert_signal_active())
+            if proof.get('collection_epoch_id')!=current['epoch']: return unavailable
+            policies[lane]={'version':version,'signature':proof['policy_signature']}
+        if _lab_reconcile_reader is None: _lab_reconcile_reader=LabOutcomeReconciler()
+        return _lab_reconcile_reader.advance(Path(SHADOW_LANE_OUTCOME_FILE),
+            {'epoch':current['epoch'],'policies':policies})
+    except (OSError,ValueError,TypeError,KeyError):
+        return unavailable
+    finally: _lab_reconcile_lock.release()
 
 
 
@@ -29362,9 +29342,11 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     reject_sims = int(m.get("reject_counterfactual_sims") or 0)
     reject_pnl = float(m.get("reject_counterfactual_pnl") or 0)
     paper_fills = int(m.get("paper_fills") if m.get("paper_fills") is not None else (fills if not shadow_sim else 0))
-    if lab_closes:
+    if m.get('lab_accounting_status') in {'BUILDING','UNAVAILABLE'}:
+        lab_line = f"LAB gross before costs · {m['lab_accounting_status']} · totals unavailable"
+    elif lab_closes:
         lab_line = (
-            f"LAB sim · {lab_closes} closes · {lab_win_rate:.0f}% win · ${lab_pnl:.2f} sim · EV ${lab_ev:.2f}/close"
+            f"LAB gross before costs · {lab_closes} strategy exits · {lab_win_rate:.0f}% positive · ${lab_pnl:.2f} gross · costs unknown"
         )
     elif lab_open:
         lab_line = f"LAB sim · {lab_open} open shadow(s) · collecting…"
@@ -29415,6 +29397,12 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "lab_pnl_source": m.get("lab_pnl_source") or "lab_ledger",
         "lab_ledger_close_delta": int(m.get("lab_ledger_close_delta") or 0),
         "lab_summary_line": lab_line,
+        **{key:value for key,value in m.items() if key.startswith('lab_') and key in {
+            'lab_accounting_status','lab_accounting_reason','lab_economics_basis','lab_costs_status',
+            'lab_net_after_costs_usd','lab_gross_before_costs_usd','lab_incomplete_outcomes',
+            'lab_conflicting_studies','lab_scan_offset','lab_scan_bytes','lab_scan_excluded_counts'}},
+        **({key:None for key in ('lab_closes','lab_wins','lab_losses','lab_net_pnl','lab_win_rate','lab_per_close_ev')}
+            if m.get('lab_accounting_status') in {'BUILDING','UNAVAILABLE'} else {}),
     }
 
 
