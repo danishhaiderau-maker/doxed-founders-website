@@ -48,10 +48,10 @@ def test_empty_lightweight_apis_expose_generation_identity_and_exact_reason(monk
     _assert_identity_and_reason(dashboard._leakage_payload())
     _assert_identity_and_reason(dashboard._spread_performance_payload())
     horizon = dashboard._horizon_payload()
-    _assert_identity_and_reason(horizon)
+    assert horizon['source_available'] is False
     assert horizon["coverage_reason"] == horizon["empty_reason"]
-    assert horizon["max_horizon_coverage_pct"] == 0.0
-    assert {row["coverage_pct"] for row in horizon["horizons"]} == {0.0}
+    assert horizon["max_horizon_coverage_pct"] is None
+    assert horizon["horizons"] == []
 
 
 def test_archive_row_uses_manifest_time_and_labels_summary_time(monkeypatch, tmp_path):

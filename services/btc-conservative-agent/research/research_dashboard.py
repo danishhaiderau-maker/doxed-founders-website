@@ -2903,9 +2903,16 @@ def _pathway_audit_payload():
 
 
 def _horizon_payload():
-    rep = _read_json("horizon_profitability_report.json")
-    if not rep:
-        rep = _read_json(str(Path(REPORTS_DIR) / "horizon_profitability_report.json"))
+    rep, source = _declared_atomic_generation_report("horizon_profitability_report.json")
+    manifest = source.get("manifest") or {}
+    current = _generation_freshness_meta(manifest).get("current") is True
+    if not isinstance(rep, dict) or not current or type(rep.get("losing_trades")) is not int or rep["losing_trades"] < 0:
+        reason = ("HORIZON_REPORT_UNAVAILABLE" if rep is None else
+                  "HORIZON_GENERATION_NOT_CURRENT" if not current else "HORIZON_DENOMINATOR_UNAVAILABLE")
+        return {**_current_generation_identity(), "source_available": False,
+                "horizons": [], "fast_cut_recovery_summary": [], "losing_trades": None,
+                "conclusions_allowed": False, "max_horizon_coverage_pct": None,
+                "empty_reason": reason, "coverage_reason": reason, "note": reason}
     recovery = rep.get("recovery_summary") or []
     if not recovery:
         horizons = rep.get("horizons") or {}
@@ -2913,11 +2920,11 @@ def _horizon_payload():
             {
                 "horizon": label,
                 "recovery_rate_pct": (horizons.get(label) or {}).get("profitable_pct"),
-                "profitable": (horizons.get(label) or {}).get("profitable", 0),
-                "still_loss": (horizons.get(label) or {}).get("still_loss", 0),
-                "unknown": (horizons.get(label) or {}).get("unknown", 0),
+                "profitable": (horizons.get(label) or {}).get("profitable", 0 if rep["losing_trades"] == 0 else None),
+                "still_loss": (horizons.get(label) or {}).get("still_loss", 0 if rep["losing_trades"] == 0 else None),
+                "unknown": (horizons.get(label) or {}).get("unknown", 0 if rep["losing_trades"] == 0 else None),
                 "coverage_pct": (horizons.get(label) or {}).get("coverage_pct"),
-                "conclusion_allowed": (horizons.get(label) or {}).get("coverage_pct", 0) >= 80,
+                "conclusion_allowed": ((horizons.get(label) or {}).get("coverage_pct") or 0) >= 80,
             }
             for label in ("5m", "10m", "15m", "30m", "60m", "120m")
         ]
@@ -2929,6 +2936,7 @@ def _horizon_payload():
             item["coverage_pct"] = 0.0
         normalized_recovery.append(item)
     payload = {
+        "source_available": True,
         "horizons": normalized_recovery,
         "losing_trades": losing_trades,
         "fast_cut_recovery": rep.get("fast_cut_recovery"),
@@ -8170,6 +8178,12 @@ async function loadHorizon() {
   const r = await fetch('/api/horizon');
   const d = await r.json();
   const note = document.getElementById('horizon-note');
+  if (d.source_available !== true) {
+    if (note) { note.textContent = `Unavailable — ${d.coverage_reason || 'current horizon report missing'}`; note.style.color = 'var(--amber)'; }
+    document.getElementById('horizon-body').innerHTML = '<tr><td colspan="6">Unavailable — no verified current horizon counts</td></tr>';
+    document.getElementById('horizon-fc-body').innerHTML = '<tr><td colspan="5">Unavailable — no verified current recovery counts</td></tr>';
+    return;
+  }
   if (note) {
     const reason = d.coverage_reason ? ` ${d.coverage_reason}` : '';
     note.textContent = d.conclusions_allowed
@@ -8179,14 +8193,14 @@ async function loadHorizon() {
   }
   const row = h => {
     const rate = h.conclusion_allowed === false || h.recovery_rate_pct == null ? 'n/a' : `${h.recovery_rate_pct}%`;
-    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${h.unknown||0}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
+    return `<tr><td>${h.horizon}</td><td>${h.profitable ?? 'Unavailable'}</td><td>${h.still_loss ?? 'Unavailable'}</td><td>${h.unknown ?? 'Unavailable'}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
   };
   document.getElementById('horizon-body').innerHTML = (d.horizons||[]).map(row).join('') ||
     '<tr><td colspan="6">Run analyzer — needs losing trades + post-exit replay ticks</td></tr>';
   const fc = d.fast_cut_recovery_summary || [];
   document.getElementById('horizon-fc-body').innerHTML = fc.map(h => {
     const rate = h.conclusion_allowed === false || h.recovery_rate_pct == null ? 'n/a' : `${h.recovery_rate_pct}%`;
-    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
+    return `<tr><td>${h.horizon}</td><td>${h.profitable ?? 'Unavailable'}</td><td>${h.still_loss ?? 'Unavailable'}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
   }).join('') || '<tr><td colspan="5">No Fast Cut recovery data yet</td></tr>';
 }
 
