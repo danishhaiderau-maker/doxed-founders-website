@@ -2550,6 +2550,12 @@ def _current_generation_identity():
     }
 
 
+def _legacy_list_report_available(report, rows_key):
+    """An explicit empty list is observed empty; a missing report is unknown."""
+    return bool(isinstance(report, dict) and not report.get("report_unavailable")
+                and isinstance(report.get(rows_key), list))
+
+
 def _spread_performance_payload():
     """Aggregate Top Combos by normalized score-gap bucket -> P&L / WR / EV.
 
@@ -2561,6 +2567,10 @@ def _spread_performance_payload():
     spread_bucket so the user can see whether wider directional separation books more profit.
     """
     rep = _read_report("top_combinations_report.json")
+    if not _legacy_list_report_available(rep, "top"):
+        return {"source_available": False, "buckets": [], "total_combos": None,
+                "empty_reason": "UNAVAILABLE — legacy score-gap report missing or malformed; counts are not known.",
+                "evidence_scope": "LEGACY_EXECUTED", "qualification_eligible": False}
     rows = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
     buckets = {}
     for c in rows:
@@ -2586,6 +2596,7 @@ def _spread_performance_payload():
     order = {"0-1": 0, "2": 1, "3": 2, "4": 3, "5+": 4}
     out.sort(key=lambda x: (order.get(x["spread_bucket"], 99), x["spread_bucket"]))
     payload = {
+        "source_available": True,
         "total_combos": len(rows),
         "filter_note": (
             "Normalized score gap = abs(LONG score - SHORT score) / 10. "
@@ -2792,7 +2803,9 @@ def _exit_reason_leak_payload():
 
 def _ladder_sim_payload():
     rep = _read_report("exit_ladder_simulator_report.json")
+    available = _legacy_list_report_available(rep, "profiles")
     return {
+        "source_available": available,
         **_nonqualifying_scope(
             "LEGACY_COUNTERFACTUAL",
             "Historical matched-trade ladder replay; excluded from active V3.1 rankings.",
@@ -2809,7 +2822,7 @@ def _ladder_sim_payload():
         "replays_matched_executed": rep.get("replays_matched_executed"),
         "disclaimer": rep.get("disclaimer"),
         "data_status": rep.get("data_status"),
-        "empty_reason": rep.get("empty_reason"),
+        "empty_reason": rep.get("empty_reason") if available else "UNAVAILABLE — legacy ladder report missing or malformed; counts are not known.",
         "best_profile_id": rep.get("best_profile_id"),
         "profiles": rep.get("profiles") or [],
         "integrity": _integrity_payload(),
@@ -7763,6 +7776,12 @@ async function loadSpreadPerf() {
   const r = await fetch('/api/spread-performance');
   const d = await r.json();
   const note = document.getElementById('spread-perf-note');
+  if (d.source_available !== true) {
+    if (note) note.textContent = d.empty_reason || 'UNAVAILABLE — no legacy score-gap report.';
+    document.getElementById('spread-perf-kpis').innerHTML = '<div class="kpi">UNAVAILABLE — no measured counts</div>';
+    document.getElementById('spread-perf-body').innerHTML = '<tr><td colspan="5">UNAVAILABLE — no legacy score-gap report; not zero trades.</td></tr>';
+    return;
+  }
   if (note) note.textContent = d.filter_note || 'P&L by directional spread bucket.';
   const totalTrades = (d.buckets||[]).reduce((s,b)=>s+(b.trades||0),0);
   document.getElementById('spread-perf-kpis').innerHTML = [
@@ -7773,7 +7792,7 @@ async function loadSpreadPerf() {
   document.getElementById('spread-perf-body').innerHTML = (d.buckets||[]).map(b => {
     const cls = (b.pnl_usd ?? 0) >= 0 ? 'green' : 'red';
     return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td><td>${fmtPct(b.wr_pct)}</td><td>${fmtExecutionUsd(b.pnl_usd)}</td><td>${fmtExecutionUsd(b.ev_usd)}</td></tr>`;
-  }).join('') || '<tr><td colspan="5">No legacy spread-performance evidence exists in the current cohort.</td></tr>';
+  }).join('') || '<tr><td colspan="5">The available legacy report contains no eligible score-gap combinations.</td></tr>';
 }
 
 function exitEvidenceScope(payload) {
@@ -8052,6 +8071,12 @@ async function loadLadderSim() {
   const r = await fetch('/api/ladder-sim');
   const d = await r.json();
   const disc = document.getElementById('ladder-sim-disclaimer');
+  if (d.source_available !== true) {
+    if (disc) { disc.textContent = d.empty_reason || 'UNAVAILABLE — no legacy ladder report.'; disc.style.display = ''; }
+    document.getElementById('ladder-sim-kpis').innerHTML = '<div class="kpi">UNAVAILABLE — no measured counts</div>';
+    document.getElementById('ladder-sim-body').innerHTML = '<tr><td colspan="8">UNAVAILABLE — no legacy ladder report; not zero trades or replays.</td></tr>';
+    return;
+  }
   const noSim = !((d.profiles||[]).some(p => (p.trades_simulated||0) > 0));
   const noReplayEvidence = ['NO_REPLAYS','NO_ELIGIBLE_REPLAYS'].includes(d.data_status);
   const overlapZero = d.data_status === 'NO_EXECUTED_REPLAY_OVERLAP' || ((d.replays_matched_executed ?? 0) === 0 && (d.actual_trades ?? 0) > 0);
@@ -8062,10 +8087,10 @@ async function loadLadderSim() {
   }
   document.getElementById('ladder-sim-kpis').innerHTML = [
     ['Full-session actual', fmtExecutionUsd(d.actual_realized_usd)],
-    ['Full-session trades', d.actual_trades ?? 0],
+    ['Full-session trades', d.actual_trades ?? 'UNAVAILABLE'],
     ['Matched-cohort actual', fmtExecutionUsd(d.matched_actual_realized_usd)],
-    ['Matched replays', d.replays_matched_executed ?? 0],
-    ['Replays on disk', d.raw_replays_available ?? d.replays_available ?? 0],
+    ['Matched replays', d.replays_matched_executed ?? 'UNAVAILABLE'],
+    ['Replays on disk', d.raw_replays_available ?? d.replays_available ?? 'UNAVAILABLE'],
     ['Best profile', noComparableProfiles ? 'n/a' : (d.best_profile_id || 'n/a')],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   if (noComparableProfiles) {
