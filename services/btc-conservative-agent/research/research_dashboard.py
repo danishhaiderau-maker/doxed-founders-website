@@ -2550,6 +2550,12 @@ def _current_generation_identity():
     }
 
 
+def _legacy_list_report_available(report, rows_key):
+    """An explicit empty list is observed empty; a missing report is unknown."""
+    return bool(isinstance(report, dict) and not report.get("report_unavailable")
+                and isinstance(report.get(rows_key), list))
+
+
 def _spread_performance_payload():
     """Aggregate Top Combos by normalized score-gap bucket -> P&L / WR / EV.
 
@@ -2561,6 +2567,10 @@ def _spread_performance_payload():
     spread_bucket so the user can see whether wider directional separation books more profit.
     """
     rep = _read_report("top_combinations_report.json")
+    if not _legacy_list_report_available(rep, "top"):
+        return {"source_available": False, "buckets": [], "total_combos": None,
+                "empty_reason": "UNAVAILABLE — legacy score-gap report missing or malformed; counts are not known.",
+                "evidence_scope": "LEGACY_EXECUTED", "qualification_eligible": False}
     rows = [c for c in (rep.get("top") or []) if _combo_row_known(c)]
     buckets = {}
     for c in rows:
@@ -2586,18 +2596,26 @@ def _spread_performance_payload():
     order = {"0-1": 0, "2": 1, "3": 2, "4": 3, "5+": 4}
     out.sort(key=lambda x: (order.get(x["spread_bucket"], 99), x["spread_bucket"]))
     payload = {
+        "source_available": True,
         "total_combos": len(rows),
         "filter_note": (
             "Normalized score gap = abs(LONG score - SHORT score) / 10. "
             "Example: raw gap 30 is bucket 3. This is not exchange bid/ask spread."
         ),
         "buckets": out,
+        "evidence_scope": "LEGACY_EXECUTED",
+        "qualification_eligible": False,
+        "report_source": "top_combinations_report.json",
+        "generated_at": rep.get("generated_at"),
+        "generation_id": rep.get("generation_id"),
+        "generation_revision": rep.get("generation_revision"),
+        "source_data_revision": rep.get("source_data_revision"),
+        "epoch_id": rep.get("epoch_id"),
     }
-    payload.update(_current_generation_identity())
     if not out:
         payload["empty_reason"] = (
             "INSUFFICIENT_EXECUTED_SCORE_GAP_EVIDENCE: no eligible terminal "
-            "executed combinations exist in the current generation"
+            "executed combinations exist in the available legacy report"
         )
     return payload
 
@@ -2792,7 +2810,9 @@ def _exit_reason_leak_payload():
 
 def _ladder_sim_payload():
     rep = _read_report("exit_ladder_simulator_report.json")
+    available = _legacy_list_report_available(rep, "profiles")
     return {
+        "source_available": available,
         **_nonqualifying_scope(
             "LEGACY_COUNTERFACTUAL",
             "Historical matched-trade ladder replay; excluded from active V3.1 rankings.",
@@ -2809,7 +2829,7 @@ def _ladder_sim_payload():
         "replays_matched_executed": rep.get("replays_matched_executed"),
         "disclaimer": rep.get("disclaimer"),
         "data_status": rep.get("data_status"),
-        "empty_reason": rep.get("empty_reason"),
+        "empty_reason": rep.get("empty_reason") if available else "UNAVAILABLE — legacy ladder report missing or malformed; counts are not known.",
         "best_profile_id": rep.get("best_profile_id"),
         "profiles": rep.get("profiles") or [],
         "integrity": _integrity_payload(),
@@ -2890,9 +2910,16 @@ def _pathway_audit_payload():
 
 
 def _horizon_payload():
-    rep = _read_json("horizon_profitability_report.json")
-    if not rep:
-        rep = _read_json(str(Path(REPORTS_DIR) / "horizon_profitability_report.json"))
+    rep, source = _declared_atomic_generation_report("horizon_profitability_report.json")
+    manifest = source.get("manifest") or {}
+    current = _generation_freshness_meta(manifest).get("current") is True
+    if not isinstance(rep, dict) or not current or type(rep.get("losing_trades")) is not int or rep["losing_trades"] < 0:
+        reason = ("HORIZON_REPORT_UNAVAILABLE" if rep is None else
+                  "HORIZON_GENERATION_NOT_CURRENT" if not current else "HORIZON_DENOMINATOR_UNAVAILABLE")
+        return {**_current_generation_identity(), "source_available": False,
+                "horizons": [], "fast_cut_recovery_summary": [], "losing_trades": None,
+                "conclusions_allowed": False, "max_horizon_coverage_pct": None,
+                "empty_reason": reason, "coverage_reason": reason, "note": reason}
     recovery = rep.get("recovery_summary") or []
     if not recovery:
         horizons = rep.get("horizons") or {}
@@ -2900,11 +2927,11 @@ def _horizon_payload():
             {
                 "horizon": label,
                 "recovery_rate_pct": (horizons.get(label) or {}).get("profitable_pct"),
-                "profitable": (horizons.get(label) or {}).get("profitable", 0),
-                "still_loss": (horizons.get(label) or {}).get("still_loss", 0),
-                "unknown": (horizons.get(label) or {}).get("unknown", 0),
+                "profitable": (horizons.get(label) or {}).get("profitable", 0 if rep["losing_trades"] == 0 else None),
+                "still_loss": (horizons.get(label) or {}).get("still_loss", 0 if rep["losing_trades"] == 0 else None),
+                "unknown": (horizons.get(label) or {}).get("unknown", 0 if rep["losing_trades"] == 0 else None),
                 "coverage_pct": (horizons.get(label) or {}).get("coverage_pct"),
-                "conclusion_allowed": (horizons.get(label) or {}).get("coverage_pct", 0) >= 80,
+                "conclusion_allowed": ((horizons.get(label) or {}).get("coverage_pct") or 0) >= 80,
             }
             for label in ("5m", "10m", "15m", "30m", "60m", "120m")
         ]
@@ -2916,6 +2943,7 @@ def _horizon_payload():
             item["coverage_pct"] = 0.0
         normalized_recovery.append(item)
     payload = {
+        "source_available": True,
         "horizons": normalized_recovery,
         "losing_trades": losing_trades,
         "fast_cut_recovery": rep.get("fast_cut_recovery"),
@@ -7763,6 +7791,12 @@ async function loadSpreadPerf() {
   const r = await fetch('/api/spread-performance');
   const d = await r.json();
   const note = document.getElementById('spread-perf-note');
+  if (d.source_available !== true) {
+    if (note) note.textContent = d.empty_reason || 'UNAVAILABLE — no legacy score-gap report.';
+    document.getElementById('spread-perf-kpis').innerHTML = '<div class="kpi">UNAVAILABLE — no measured counts</div>';
+    document.getElementById('spread-perf-body').innerHTML = '<tr><td colspan="5">UNAVAILABLE — no legacy score-gap report; not zero trades.</td></tr>';
+    return;
+  }
   if (note) note.textContent = d.filter_note || 'P&L by directional spread bucket.';
   const totalTrades = (d.buckets||[]).reduce((s,b)=>s+(b.trades||0),0);
   document.getElementById('spread-perf-kpis').innerHTML = [
@@ -7773,7 +7807,7 @@ async function loadSpreadPerf() {
   document.getElementById('spread-perf-body').innerHTML = (d.buckets||[]).map(b => {
     const cls = (b.pnl_usd ?? 0) >= 0 ? 'green' : 'red';
     return `<tr class="${cls}"><td>${b.spread_bucket||''}</td><td>${b.trades||0}</td><td>${fmtPct(b.wr_pct)}</td><td>${fmtExecutionUsd(b.pnl_usd)}</td><td>${fmtExecutionUsd(b.ev_usd)}</td></tr>`;
-  }).join('') || '<tr><td colspan="5">No legacy spread-performance evidence exists in the current cohort.</td></tr>';
+  }).join('') || '<tr><td colspan="5">The available legacy report contains no eligible score-gap combinations.</td></tr>';
 }
 
 function exitEvidenceScope(payload) {
@@ -8052,6 +8086,12 @@ async function loadLadderSim() {
   const r = await fetch('/api/ladder-sim');
   const d = await r.json();
   const disc = document.getElementById('ladder-sim-disclaimer');
+  if (d.source_available !== true) {
+    if (disc) { disc.textContent = d.empty_reason || 'UNAVAILABLE — no legacy ladder report.'; disc.style.display = ''; }
+    document.getElementById('ladder-sim-kpis').innerHTML = '<div class="kpi">UNAVAILABLE — no measured counts</div>';
+    document.getElementById('ladder-sim-body').innerHTML = '<tr><td colspan="8">UNAVAILABLE — no legacy ladder report; not zero trades or replays.</td></tr>';
+    return;
+  }
   const noSim = !((d.profiles||[]).some(p => (p.trades_simulated||0) > 0));
   const noReplayEvidence = ['NO_REPLAYS','NO_ELIGIBLE_REPLAYS'].includes(d.data_status);
   const overlapZero = d.data_status === 'NO_EXECUTED_REPLAY_OVERLAP' || ((d.replays_matched_executed ?? 0) === 0 && (d.actual_trades ?? 0) > 0);
@@ -8062,10 +8102,10 @@ async function loadLadderSim() {
   }
   document.getElementById('ladder-sim-kpis').innerHTML = [
     ['Full-session actual', fmtExecutionUsd(d.actual_realized_usd)],
-    ['Full-session trades', d.actual_trades ?? 0],
+    ['Full-session trades', d.actual_trades ?? 'UNAVAILABLE'],
     ['Matched-cohort actual', fmtExecutionUsd(d.matched_actual_realized_usd)],
-    ['Matched replays', d.replays_matched_executed ?? 0],
-    ['Replays on disk', d.raw_replays_available ?? d.replays_available ?? 0],
+    ['Matched replays', d.replays_matched_executed ?? 'UNAVAILABLE'],
+    ['Replays on disk', d.raw_replays_available ?? d.replays_available ?? 'UNAVAILABLE'],
     ['Best profile', noComparableProfiles ? 'n/a' : (d.best_profile_id || 'n/a')],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   if (noComparableProfiles) {
@@ -8145,6 +8185,12 @@ async function loadHorizon() {
   const r = await fetch('/api/horizon');
   const d = await r.json();
   const note = document.getElementById('horizon-note');
+  if (d.source_available !== true) {
+    if (note) { note.textContent = `Unavailable — ${d.coverage_reason || 'current horizon report missing'}`; note.style.color = 'var(--amber)'; }
+    document.getElementById('horizon-body').innerHTML = '<tr><td colspan="6">Unavailable — no verified current horizon counts</td></tr>';
+    document.getElementById('horizon-fc-body').innerHTML = '<tr><td colspan="5">Unavailable — no verified current recovery counts</td></tr>';
+    return;
+  }
   if (note) {
     const reason = d.coverage_reason ? ` ${d.coverage_reason}` : '';
     note.textContent = d.conclusions_allowed
@@ -8154,14 +8200,14 @@ async function loadHorizon() {
   }
   const row = h => {
     const rate = h.conclusion_allowed === false || h.recovery_rate_pct == null ? 'n/a' : `${h.recovery_rate_pct}%`;
-    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${h.unknown||0}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
+    return `<tr><td>${h.horizon}</td><td>${h.profitable ?? 'Unavailable'}</td><td>${h.still_loss ?? 'Unavailable'}</td><td>${h.unknown ?? 'Unavailable'}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
   };
   document.getElementById('horizon-body').innerHTML = (d.horizons||[]).map(row).join('') ||
     '<tr><td colspan="6">Run analyzer — needs losing trades + post-exit replay ticks</td></tr>';
   const fc = d.fast_cut_recovery_summary || [];
   document.getElementById('horizon-fc-body').innerHTML = fc.map(h => {
     const rate = h.conclusion_allowed === false || h.recovery_rate_pct == null ? 'n/a' : `${h.recovery_rate_pct}%`;
-    return `<tr><td>${h.horizon}</td><td>${h.profitable||0}</td><td>${h.still_loss||0}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
+    return `<tr><td>${h.horizon}</td><td>${h.profitable ?? 'Unavailable'}</td><td>${h.still_loss ?? 'Unavailable'}</td><td>${fmtPct(h.coverage_pct)}</td><td>${rate}</td></tr>`;
   }).join('') || '<tr><td colspan="5">No Fast Cut recovery data yet</td></tr>';
 }
 
