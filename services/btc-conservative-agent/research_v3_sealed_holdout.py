@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -97,6 +98,8 @@ def create_seal(
     training_completed_at = float(training_completed_at)
     sealed_at = float(sealed_at)
     holdout_start_ts = float(holdout_start_ts)
+    if not all(math.isfinite(value) for value in (training_completed_at, sealed_at, holdout_start_ts)):
+        raise ValueError("NONFINITE_SEAL_TIME")
     if training_completed_at > sealed_at:
         raise ValueError("SEAL_PRECEDES_TRAINING_COMPLETION")
     if sealed_at >= holdout_start_ts:
@@ -137,6 +140,15 @@ def load_seal(root: str | Path, seal_id: str) -> dict[str, Any]:
         raise ValueError("SEALED_HOLDOUT_IDENTITY_MISMATCH")
     if seal.get("content_sha256") != _sha256(body):
         raise ValueError("SEALED_HOLDOUT_CHECKSUM_MISMATCH")
+    try:
+        training, sealed, boundary = (float(seal[key]) for key in
+                                      ("training_completed_at", "sealed_at", "holdout_start_ts"))
+        valid_times = all(math.isfinite(value) for value in (training, sealed, boundary))
+        valid_times = valid_times and training <= sealed < boundary
+    except (KeyError, TypeError, ValueError, OverflowError):
+        valid_times = False
+    if not valid_times:
+        raise ValueError("INVALID_STORED_SEAL_TIMES")
     return seal
 
 
@@ -151,6 +163,8 @@ def consume_seal(
     """Consume one seal once; this function records identities, never selects."""
     seal = load_seal(root, seal_id)
     evaluation_started_at = float(evaluation_started_at)
+    if not math.isfinite(evaluation_started_at):
+        raise ValueError("NONFINITE_EVALUATION_TIME")
     if evaluation_started_at <= float(seal["sealed_at"]):
         raise ValueError("EVALUATION_NOT_AFTER_SEAL")
     supplied_candidates = _candidates(policy_candidates)
@@ -171,6 +185,9 @@ def consume_seal(
             collected_at = float(row.get("evidence_collected_at"))
         except (TypeError, ValueError):
             defects.append(f"MISSING_CAUSAL_OR_COLLECTION_TIME:{episode_id or 'UNKNOWN'}")
+            continue
+        if not all(math.isfinite(value) for value in (signal_ts, collected_at)):
+            defects.append(f"NONFINITE_CAUSAL_OR_COLLECTION_TIME:{episode_id or 'UNKNOWN'}")
             continue
         if signal_ts < float(seal["holdout_start_ts"]):
             defects.append(f"PRE_BOUNDARY_EPISODE:{episode_id}")
@@ -223,6 +240,11 @@ def verify_evaluation_receipt(
     """Cryptographically verify the in-memory receipt and frozen candidate."""
     if not isinstance(receipt, Mapping):
         return False
+    try:
+        if not math.isfinite(float(receipt.get("evaluation_started_at"))):
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
     body = {key: value for key, value in receipt.items() if key not in {"receipt_id", "content_sha256"}}
     candidates = receipt.get("policy_candidates")
     if holdout_episodes is None:
@@ -230,6 +252,9 @@ def verify_evaluation_receipt(
     supplied_identities = []
     for row in holdout_episodes:
         try:
+            if not all(math.isfinite(float(row.get(field))) for field in
+                       ("signal_ts", "evidence_collected_at")):
+                return False
             supplied_identities.append({
                 "episode_id": str(row.get("episode_id") or "").strip(),
                 "signal_ts": float(row.get("signal_ts")),

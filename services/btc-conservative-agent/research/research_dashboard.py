@@ -315,7 +315,7 @@ REPORT_NAV_GROUPS = (
     ("historical-group", "Historical Research", (
         ("findings", "Historical Findings", None),
         ("regime", "Historical Regime & ADX", "regime_leaderboard.json"),
-        ("ai", "Historical AI Calibration", "ai_calibration_report.json"),
+        ("ai", "AI comparison & calibration", "ai_calibration_report.json"),
         ("chase-delay", "Historical Delay", "chase_delay_report.json"),
         ("spread-perf", "Legacy Gap Performance", "top_combinations_report.json"),
         ("ladder-sim", "Historical Ladder Simulator", "exit_ladder_simulator_report.json"),
@@ -1237,6 +1237,30 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         "reasons": reasons,
         "qualification_allowed": current,
     }
+
+
+def _shared_context_projection(report: dict, freshness: dict) -> dict:
+    """Bounded evidence-binding counters; never trade qualification authority."""
+    out = {"status": "UNAVAILABLE_OR_STALE", "qualification_authority": False}
+    coverage = report.get("shared_context_coverage")
+    if freshness.get("current") is not True or not isinstance(coverage, dict):
+        return out
+    if coverage.get("schema") != "shared_context_coverage_v1":
+        return out
+    epoch = report.get("epoch_id")
+    if (not isinstance(epoch, str) or not epoch or coverage.get("epoch_id") != epoch
+            or freshness.get("generation_epoch_id") != epoch):
+        out["status"] = "EPOCH_IDENTITY_UNAVAILABLE_OR_MISMATCH"
+        return out
+    out.update(status="CURRENT_EPOCH_EVIDENCE_ONLY", page_scope="CURRENT_PAGE_ONLY")
+    for key in ("eligible_lanes", "cohort_evaluated_lanes", "cohort_bound_lanes",
+                "cohort_pending_lanes", "page_lanes", "bound_lanes"):
+        value = coverage.get(key)
+        out[key] = value if type(value) is int and value >= 0 else None
+    for key in ("cohort_evaluation_complete", "truncated"):
+        value = coverage.get(key)
+        out[key] = value if type(value) is bool else None
+    return out
 
 
 def _bounded_safe_policy_payload(report: dict) -> dict:
@@ -2221,6 +2245,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
         return {
             "schema": "current_policy_grid_v3_1", "source_available": False,
             "status": "SOURCE_UNAVAILABLE", "rows": [], "diagnostic_rows": [],
+            "generation_freshness": source.get("generation_freshness") or {},
             "rows_available": None, "policy_search_statistics": None,
             "policy_episode_split": None, "search_counts": None, "evidence": None,
             "live_policy_change_allowed": False, "blockers": source["blockers"],
@@ -2438,6 +2463,7 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     return {
         "schema": "current_policy_grid_v3_1",
         "source_available": True,
+        "generation_freshness": source.get("generation_freshness") or {},
         "evidence_source": "safe_policy_genome_v3_report.json",
         "collector_generation": "V3.1",
         "status": "PROFITABLE_CONSERVATIVE_POLICIES_AVAILABLE" if rows else "NO_PROFITABLE_CONSERVATIVE_POLICIES",
@@ -2704,8 +2730,9 @@ def _exit_combos_payload():
     return {
         "source_available": True,
         "generation_identity": rep["generation_identity"],
+        "generation_freshness": _generation_freshness_meta(),
         **_nonqualifying_scope(
-            "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
+            "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED",
             "Terminal exit evidence is descriptive only. Executed-paper and shadow/lab rows are never merged or qualification eligible.",
         ),
         "generated_at": rep.get("generated_at"),
@@ -2739,8 +2766,9 @@ def _exit_reason_leak_payload():
     return {
         "source_available": True,
         "generation_identity": rep["generation_identity"],
+        "generation_freshness": _generation_freshness_meta(),
         **_nonqualifying_scope(
-            "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED",
+            "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED",
             "Peak-to-close hindsight is descriptive only; executed-paper and shadow/lab rows are shown separately.",
         ),
         "generated_at": rep.get("generated_at"),
@@ -2940,6 +2968,8 @@ def _feature_payload():
             "INSUFFICIENT_OUTCOME_FEATURE_EVIDENCE: no eligible terminal outcomes "
             "exist for feature attribution in the current generation"
         )
+    elif not rep:
+        payload["empty_reason"] = "FEATURE_REPORT_UNAVAILABLE: no readable feature attribution report"
     return payload
 
 
@@ -2951,7 +2981,65 @@ def _ai_payload():
     calibration_status = str(cal.get("calibration_status") or "NO_DATA").upper()
     probability_mode = calibration_status == "AVAILABLE"
     gap = _spread_performance_payload()
+    report, binding = _declared_atomic_generation_report('discovery_cohort_scorecard_report.json')
+    manifest = binding.get('manifest') or {}
+    repeated, after = _declared_atomic_generation_report('discovery_cohort_scorecard_report.json')
+    generation = (report or {}).get('generation') or {}
+    expected = {'source_revision':manifest.get('source_data_revision'),
+                'analyzer_revision':manifest.get('generation_revision'),
+                'epoch_id':(manifest.get('fresh_epoch') or {}).get('epoch_id') or manifest.get('epoch_id')}
+    binding_ok = (report == repeated and manifest == (after.get('manifest') or {})
+                  and all(value and generation.get(key) == value for key,value in expected.items()))
+    checksum_binding = 'CURRENT_GENERATION_ONLY_NO_CHECKSUM_BINDING'
+    declared = next((entry for entry in manifest.get('reports', []) if isinstance(entry,dict)
+                     and entry.get('file') == 'discovery_cohort_scorecard_report.json'), {})
+    digest = declared.get('artifact_sha256')
+    if digest is not None:
+        checksum_binding = 'DECLARED_CHECKSUM_INVALID'
+        try:
+            import hashlib
+            manifest_path = Path(binding['manifest_path'])
+            report_path = manifest_path.parent / 'discovery_cohort_scorecard_report.json'
+            if report_path.stat().st_size > 32 * 1024 * 1024:
+                raise ValueError('report read limit')
+            with report_path.open('rb') as handle:
+                raw = handle.read(32 * 1024 * 1024 + 1)
+            if (len(raw) > 32 * 1024 * 1024 or not isinstance(digest,str)
+                    or hashlib.sha256(raw).hexdigest() != digest
+                    or json.loads(raw.decode('utf-8-sig')) != report):
+                raise ValueError('report digest mismatch')
+            # The bytes must still belong to the same declared publication.
+            with manifest_path.open('rb') as handle:
+                manifest_bytes = handle.read(4 * 1024 * 1024 + 1)
+            if len(manifest_bytes) > 4 * 1024 * 1024 or json.loads(manifest_bytes.decode('utf-8-sig')) != manifest:
+                raise ValueError('manifest changed')
+            checksum_binding = 'DECLARED_ARTIFACT_SHA256_VERIFIED'
+        except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+            binding_ok = False
+    freshness = _generation_freshness_meta(manifest)
+    coverage_source = (report or {}).get('ai_verdict_coverage')
+    scan_coverage = (report or {}).get('scan_census_observed_coverage')
+    if not freshness.get('current') or not binding_ok or not isinstance(scan_coverage,dict):
+        scan_coverage = {'status':'UNKNOWN','qualification_eligible':False}
+    coverage = {'status':'UNKNOWN', 'counts':{}}
+    if freshness.get('current') and binding_ok and isinstance(coverage_source,dict):
+        raw_counts = coverage_source.get('raw_verdict_row_counts')
+        if isinstance(raw_counts,dict):
+            coverage = {'status':'CURRENT_GENERATION', 'binding_diagnostic':checksum_binding,
+                'counts':{key:(value if type(value) is int and value >= 0 else None)
+                    for key in ('APPROVE','REJECT','NO_TRADE','AI_NOT_CALLED','ERROR','UNKNOWN')
+                    for value in [raw_counts.get(key)]}}
+    comparison = ((report or {}).get('ai_verdict_coverage') or {}).get('matched_selection_comparison')
+    if not freshness.get('current') or not isinstance(comparison, dict) or not binding_ok:
+        comparison = {'status':'UNKNOWN', 'groups':[], 'blockers':[
+            'STALE_ANALYZER_GENERATION' if not freshness.get('current') else
+            'MATCHED_AI_REPORT_UNAVAILABLE' if not isinstance(comparison,dict) else 'MATCHED_AI_GENERATION_BINDING_FAILED']}
+    else:
+        comparison = {**comparison, 'binding_diagnostic':checksum_binding}
     return {
+        'matched_selection_comparison':comparison,
+        'ai_verdict_coverage':coverage,
+        'scan_census_observed_coverage':scan_coverage,
         "calibration_status": calibration_status,
         "direction_only": not probability_mode,
         "mode_note": (
@@ -4618,6 +4706,8 @@ def _genome_payload():
             "collection": safe_v31.get("collection") or {},
             "search_progress": safe_v31.get("search_progress") or {},
             "candidate_screen": candidate_screen,
+            "shared_context_coverage": _shared_context_projection(
+                safe_v31, _generation_freshness_meta()),
             "safe_policy_ranking": bounded.get("safe_policy_ranking") or {},
             "integrity": safe_v31.get("integrity") or {},
             "blockers": list(safe_v31.get("blockers") or []),
@@ -4698,6 +4788,46 @@ def api_manifest():
     return jsonify(_read_json(REPORT_MANIFEST_FILE))
 
 
+def _shadow_tier_projection(report, current, manifest=None):
+    """Bounded display-only projection; stale economics are never promoted."""
+    out = {"status": "CURRENT" if current and isinstance(report, dict) else "UNAVAILABLE_OR_STALE",
+           "qualification_allowed": False, "rows": [], "truncated": False}
+    if out["status"] != "CURRENT":
+        return out
+    generation=report.get("generation")
+    mappings={"source_revision":"source_revision", "deployed_revision":"deployed_revision",
+        "analyzer_revision":"analyzer_revision", "manifest_entry_hash":"manifest_entry_hash",
+        "epoch_id":"dataset_epoch", "tile_config_signature":"config_signature"}
+    if not isinstance(generation,dict) or not isinstance(manifest,dict) or any(
+            not generation.get(key) or generation[key]!=manifest.get(field) for key,field in mappings.items()):
+        out.update(status="UNAVAILABLE_GENERATION_IDENTITY",reason="SHADOW_MANIFEST_IDENTITY_MISMATCH")
+        return out
+    def add(value, tier, timing=None):
+        if not isinstance(value, dict):
+            value = {}
+        matched=value.get("generation")==generation
+        def count(key):
+            raw=value.get(key)
+            return raw if matched and type(raw) is int and raw >= 0 else None
+        out["rows"].append({"tier": tier, "timing": str(timing or "BASELINE")[:128],
+            "complete": count("complete_replay_count"), "unknown": count("unknown_replay_count"),
+            "venue_acceptance": "UNKNOWN" if "CONDITIONAL" in tier else "NOT_LIVE_QUALIFICATION",
+            "qualification_allowed": False})
+        out["rows"][-1]["status"] = str(value.get("status") or "UNKNOWN")[:80] if matched else "UNAVAILABLE_GENERATION_IDENTITY"
+        reasons=value.get("blockers") or value.get("reason_codes") or []
+        out["rows"][-1]["reason"] = "; ".join(str(reason)[:120] for reason in reasons[:4]) if isinstance(reasons,list) else "UNKNOWN"
+    add(report, "STRICT_SIMULATION")
+    add(report.get("conditional_report"), "CONDITIONAL_SIMULATION")
+    for field,tier in (("delayed_variant_reports","STRICT_DELAYED"),
+                       ("conditional_delayed_variant_reports","CONDITIONAL_DELAYED")):
+        variants=report.get(field)
+        if not isinstance(variants,list): continue
+        out["truncated"] |= len(variants)>16
+        for variant in variants[:16]:
+            if isinstance(variant,dict): add(variant.get("report"),tier,variant.get("timing_model_sha256"))
+    return out
+
+
 @app.route("/api/research-design")
 def api_research_design():
     """Expose signed research baselines and observed Phase-7 feature coverage."""
@@ -4746,7 +4876,10 @@ def api_research_design():
         bool(report) and coverage_available
         and coverage.get("schema") == "phase7_regime_feature_coverage_v1"
     )
+    shadow, shadow_source = _declared_atomic_generation_report("conservative_shadow_terminal_report.json")
+    shadow_freshness = _generation_freshness_meta(shadow_source.get("manifest") or {})
     return jsonify({
+        "shadow_tiers": _shadow_tier_projection(shadow, shadow_freshness.get("current") is True, shadow_source.get("manifest")),
         "schema": "research_design_dashboard_v1",
         "available": available,
         "status": (
@@ -5382,10 +5515,54 @@ def _count_valid_compressed_shadow_rows(payload: bytes) -> int:
     return count
 
 
+def _complete_export_preflight():
+    def bounded_metadata(name):
+        path = DATA_ROOT / name
+        try:
+            with path.open("rb") as stream:
+                raw = stream.read(65537)
+            if len(raw) > 65536:
+                return None
+            value = json.loads(raw)
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    retired_path = DATA_ROOT / "canonical_generation_retired.json"
+    retired = bounded_metadata("canonical_generation_retired.json")
+    if retired_path.exists() and (not retired or retired.get("generation_current") is not True):
+        code, status = "MIRROR_RETIRED_AWAITING_VERIFIED_PROMOTION", 409
+    else:
+        current = bounded_metadata("canonical_dataset_current.json")
+        if current and all(current.get(key) for key in (
+            "entry_hash", "dataset_epoch", "source_revision", "deployed_revision",
+            "tile_config_signature",
+        )):
+            return None
+        code, status = "MIRROR_GENERATION_UNBOUND", 503
+    message = ("Complete export is unavailable. Finish verification and promotion "
+               "of the fresh local Fly mirror before retrying. No archive was created.")
+    if request.accept_mimetypes.best_match(["text/html", "application/json"]) == "text/html":
+        response = make_response("<!doctype html><title>Research export unavailable</title>"
+                                 "<h1>Research export unavailable</h1><p>" + message +
+                                 "</p><p>" + code + "</p>", status)
+    else:
+        response = make_response(jsonify({"ok": False, "status": code,
+                                          "message": message}), status)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/download/everything")
 def download_everything():
     """One verified ZIP containing raw research data, reports, sessions, genome,
     accumulator exports, audit source bundle, and any preserved analysis."""
+    # This is an admission check, not a substitute for the complete bundle
+    # validation below. Do not scan history or build the audit ZIP while the
+    # canonical mirror is explicitly retired or lacks a promoted identity.
+    preflight = _complete_export_preflight()
+    if preflight is not None:
+        return preflight
     freshness = _generation_freshness_meta()
     generation_current = freshness.get("current") is True
     agent_root = _agent_source_root()
@@ -6504,6 +6681,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; -webkit-overflow-scrolling: touch; margin-top: 12px; }
   .table-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .table-scroll table { display: table; width: max-content; min-width: 100%; max-width: none; overflow: visible; border-collapse: collapse; font-size: 0.9rem; margin-top: 0; }
+  .table-scroll table[hidden] { display: none; }
   th, td { border: 1px solid var(--border); padding: 8px 10px; text-align: left; }
   th { background: var(--panel); }
   tr:nth-child(even) { background: #101820; }
@@ -6819,8 +6997,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Horizon</th><th>Green</th><th>Still loss</th><th>Coverage</th><th>Recovery %</th></tr></thead><tbody id="horizon-fc-body"></tbody></table>
   </section>
   <section id="sec-ai">
-    <h2>AI Direction &amp; Gap Laboratory</h2>
-    <p class="note" id="ai-mode-note">Loading the current AI evidence mode…</p>
+    <h2>AI comparison &amp; calibration</h2>
+    <h3>Current matched AI selection — descriptive only</h3>
+    <p class="note">Conditional on supported, cost-complete filled paths only. NO_FILL and unsupported paths are excluded. Not full-opportunity expectancy, portfolio returns, entry rate, or qualification. The filter takes APPROVE only when direction matches; otherwise incremental trade PnL is zero.</p>
+    <p class="note" id="ai-verdict-coverage">UNKNOWN — waiting for current coverage.</p>
+    <p class="note" id="scan-census-coverage">Observed scan coverage unavailable; exhaustive collection UNKNOWN.</p>
+    <p class="note" id="ai-matched-status">UNKNOWN — waiting for current evidence.</p>
+    <div style="max-width:100%;min-width:0;overflow-x:auto"><table><thead><tr><th>Policy / world</th><th>Independent N</th><th>Supported rows</th><th>Rejected positive / negative</th><th>Filter minus unfiltered USD</th></tr></thead><tbody id="ai-matched-body"></tbody></table></div>
+    <h3>Historical direction / gap calibration — separate evidence</h3>
+    <p class="note" id="ai-mode-note">Loading historical AI calibration mode…</p>
     <div id="ai-gap-view">
       <h3>Normalized score-gap performance</h3>
       <p class="note" id="ai-gap-note">Raw LONG-vs-SHORT score difference divided by 10. Example: raw gap 30 is bucket 3.</p>
@@ -6839,6 +7024,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="empty-state" id="genome-empty">Loading the current Genome report…</div>
     <div id="genome-content" style="display:none">
     <div class="kpis" id="genome-kpis"></div>
+    <h3>Shared market-context evidence coverage</h3>
+    <p class="note" id="genome-shared-context"></p>
     <p class="note" id="genome-taxonomy-note"></p>
     <h2>Current market cluster</h2>
     <pre id="genome-cluster"></pre>
@@ -6855,6 +7042,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
   </section>
   <section id="sec-research-design">
+    <h3>Terminal simulation evidence — separate model tiers</h3>
+    <p>Conditional venue acceptance is UNKNOWN. These counts do not qualify live trading.</p>
+    <p id="research-shadow-tier-note"></p>
+    <div class="table-scroll"><table><thead><tr><th>Tier</th><th>Timing</th><th>Status</th><th>Blockers</th><th>Complete</th><th>Unknown</th><th>Venue acceptance</th></tr></thead><tbody id="research-shadow-tiers"></tbody></table></div>
     <h2>Entry baselines &amp; Phase-7 regime evidence</h2>
     <div class="stale-banner" id="research-design-banner" style="display:block"></div>
     <p class="note">Signed comparison definitions are research-only and place no orders. Coverage reports only fields explicitly captured before entry. Definitions and coverage never create fills, PnL, profitability, qualification, or live authorization.</p>
@@ -6946,15 +7137,15 @@ const EVIDENCE_SCOPES = {
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current signed V3.1 counterfactual policy grid.'],
   regime: ['LEGACY EXECUTED', 'Historical executed-lane regime/ADX aggregation; not a qualified dynamic policy.'],
   lanes: ['CURRENT CANONICAL TILE EVIDENCE', 'One causal opportunity is counted once; tile and child-mode evidence remains separated and does not imply live execution.'],
-  ai: ['LEGACY EXECUTED', 'Historical AI direction/gap calibration; current policy-grid evidence is shown under Policy Grid & Legacy.'],
+  ai: ['MIXED / SEPARATE CURRENT AND HISTORICAL EVIDENCE', 'The matched AI selection table uses the current atomic generation only. Direction/gap calibration below is historical evidence and is not merged into the current comparison.'],
   chase: ['EXECUTED + SHADOW, SEPARATED', 'All available terminal chase outcomes are shown with paper execution and shadow/lab evidence kept distinct.'],
   'chase-policy-lab': ['SIGNED COMPRESSED SCHEDULES — DESCRIPTIVE ONLY', 'This panel is not a qualification result. Other shadow simulations use the separate conservative execution evaluator; executed outcomes remain separate unless explicitly matched.'],
   'chase-threshold': ['EXECUTED + SHADOW, SEPARATED', 'Exact chase-count outcomes include paper and shadow/lab cohorts without mixing their PnL.'],
   'chase-delay': ['LEGACY EXECUTED', 'Historical pathway-lab chase delay comparison.'],
-  combos: ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table is signed current-epoch V3.1 counterfactual OOS research; the second is a separate legacy executed-lane cohort.'],
+  combos: ['POLICY GRID FRESHNESS UNVERIFIED', 'Waiting for policy-report source and generation receipts. Legacy executed evidence remains separate; no current-epoch claim is established yet.'],
   'spread-perf': ['LEGACY EXECUTED', 'Historical executed-lane normalized score-gap aggregation.'],
-  'exit-combos': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current terminal exit combinations; observed paper and shadow/lab evidence are displayed separately and remain descriptive.'],
-  'exit-reason-leak': ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Current peak-to-close hindsight gaps; paper and shadow/lab evidence remain separate and are not directly capturable profit.'],
+  'exit-combos': ['EXIT EVIDENCE FRESHNESS UNVERIFIED', 'Waiting for a declared exit report and freshness receipts. Paper and shadow/lab evidence remain separate.'],
+  'exit-reason-leak': ['EXIT EVIDENCE FRESHNESS UNVERIFIED', 'Waiting for a declared leakage report and freshness receipts. Hindsight gaps are not directly capturable profit.'],
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current signed V3.1 Safe Policy Genome.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
   genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
@@ -7474,9 +7665,23 @@ async function loadLanes() {
   if (sources.shadow === false) document.getElementById('chase-shadow-body').innerHTML = `<tr><td colspan="6">${missingResearchSource()}</td></tr>`;
 }
 
+function policyGridEvidenceScope(d) {
+  const pg = d?.policy_grid || {};
+  if (d?.source_available !== true || pg.source_available !== true) {
+    return ['SOURCE UNAVAILABLE', 'The required policy report is unavailable. No current policy-grid or profitability conclusion is established. Legacy executed evidence, if present, remains separate.'];
+  }
+  const fresh = pg.generation_freshness || {};
+  if (fresh.current !== true || fresh.stale === true || !pg.epoch_id
+      || ['UNKNOWN', 'UNBOUND'].includes(String(pg.epoch_id).toUpperCase())) {
+    return ['SAVED POLICY GRID — NOT VERIFIED CURRENT', 'Available report rows are saved research, not verified current-epoch evidence. Qualification is blocked; legacy executed evidence remains separate.'];
+  }
+  return ['CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED', 'The first table uses the verified current-epoch policy report. Conservative execution evidence and ideal-touch diagnostics are separate; a current report alone does not establish qualification. The legacy executed cohort remains separate.'];
+}
 async function loadCombos() {
+  setEvidenceScope('combos', ...EVIDENCE_SCOPES.combos);
   const r = await fetch('/api/combos');
   const d = await r.json();
+  setEvidenceScope('combos', ...policyGridEvidenceScope(d));
   const legacy = d.legacy_executed_combos || {};
   const legacyRows = legacy.rows || [];
   const note = document.getElementById('combos-note');
@@ -7571,7 +7776,22 @@ async function loadSpreadPerf() {
   }).join('') || '<tr><td colspan="5">No legacy spread-performance evidence exists in the current cohort.</td></tr>';
 }
 
+function exitEvidenceScope(payload) {
+  if (payload?.source_available !== true) {
+    return ['SOURCE UNAVAILABLE', 'No declared exit report is available. Current counts and performance cannot be established.'];
+  }
+  const freshness = payload.generation_freshness || {};
+  const epoch = payload.generation_identity?.epoch_id;
+  if (freshness.current !== true || freshness.stale === true || !epoch
+      || ['UNKNOWN', 'UNBOUND'].includes(String(epoch).toUpperCase())) {
+    return ['SAVED EXIT EVIDENCE — NOT VERIFIED CURRENT', 'Saved paper and shadow/lab outcomes remain separate and descriptive. Current-epoch conclusions are blocked; hindsight gaps are not capturable profit.'];
+  }
+  return ['CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED', 'Verified current report; paper and shadow/lab outcomes remain separate and descriptive, not qualification proof. Hindsight gaps are not capturable profit.'];
+}
 function executionPanelSource(section, payload) {
+  if (section === 'exit-combos' || section === 'exit-reason-leak') {
+    setEvidenceScope(section, ...exitEvidenceScope(payload));
+  }
   const root = document.getElementById('sec-' + section);
   if (section === 'exit-combos') {
     const inventory = document.getElementById('exit-combos-detail-inventory');
@@ -7713,6 +7933,7 @@ async function loadChaseDelay() {
 }
 
 async function loadExitCombos() {
+  setEvidenceScope('exit-combos', ...EVIDENCE_SCOPES['exit-combos']);
   const r = await fetch('/api/exit-combos');
   const d = await r.json();
   if (!executionPanelSource('exit-combos', d)) return;
@@ -7795,6 +8016,7 @@ async function loadExitCombos() {
 }
 
 async function loadExitReasonLeak() {
+  setEvidenceScope('exit-reason-leak', ...EVIDENCE_SCOPES['exit-reason-leak']);
   const r = await fetch('/api/exit-reason-leak');
   const d = await r.json();
   if (!executionPanelSource('exit-reason-leak', d)) return;
@@ -8000,6 +8222,12 @@ async function loadFeatures() {
 }
 
 async function loadResearchDesign() {
+  const tierBody = document.getElementById('research-shadow-tiers');
+  const tierTable = tierBody.closest('table');
+  const tierNote = document.getElementById('research-shadow-tier-note');
+  tierTable.hidden = true;
+  tierBody.replaceChildren();
+  tierNote.textContent = 'UNAVAILABLE — loading current atomic generation';
   const escape = value => String(value == null ? '' : value)
     .replaceAll('&', '&amp;').replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;').replaceAll('"', '&quot;')
@@ -8013,6 +8241,24 @@ async function loadResearchDesign() {
     const r = await fetch('/api/research-design');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const d = await r.json();
+    const tiers = d.shadow_tiers || {};
+    tierNote.textContent = tiers.truncated
+      ? 'Display limited to 16 timing variants per tier; full evidence remains in Report Explorer.' : '';
+    tierBody.replaceChildren();
+    if (tiers.status !== 'CURRENT') {
+      tierNote.textContent = 'UNAVAILABLE OR STALE — no current terminal evidence';
+    } else {
+      tierTable.hidden = false;
+      (tiers.rows || []).forEach(row => {
+        const tr = document.createElement('tr');
+        ['tier','timing','status','reason','complete','unknown','venue_acceptance'].forEach(key => {
+          const td = document.createElement('td');
+          td.textContent = row[key] == null ? 'UNKNOWN' : String(row[key]);
+          tr.appendChild(td);
+        });
+        tierBody.appendChild(tr);
+      });
+    }
     const current = d.status === 'CURRENT';
     banner.style.background = current ? '#153526' : '#3d2a1f';
     banner.style.borderColor = current ? '#3dd68c' : '#d29922';
@@ -8041,6 +8287,9 @@ async function loadResearchDesign() {
     ).join('') || '<tr><td colspan="4">Current generation has no published evaluator feature coverage; every regime dimension remains UNKNOWN.</td></tr>';
   } catch (error) {
     const detail = escape(error?.message || 'unknown response error');
+    tierTable.hidden = true;
+    tierBody.replaceChildren();
+    tierNote.textContent = 'UNAVAILABLE — research evidence request failed';
     banner.style.background = '#3d1f1f';
     banner.style.borderColor = '#f85149';
     banner.style.color = '#ffb4b4';
@@ -8126,6 +8375,12 @@ async function loadGenome() {
   setEvidenceScope('genome', 'CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.');
   empty.style.display = 'none';
   content.style.display = 'block';
+  const coverage = d.shared_context_coverage || {};
+  const count = key => Number.isSafeInteger(coverage[key]) && coverage[key] >= 0 ? coverage[key] : 'UNKNOWN';
+  const flag = key => typeof coverage[key] === 'boolean' ? String(coverage[key]) : 'UNKNOWN';
+  document.getElementById('genome-shared-context').textContent = coverage.status === 'CURRENT_EPOCH_EVIDENCE_ONLY'
+    ? `Cumulative cohort: eligible ${count('eligible_lanes')}, evaluated ${count('cohort_evaluated_lanes')}, evidence-bound ${count('cohort_bound_lanes')}, pending ${count('cohort_pending_lanes')}. Evaluation complete: ${flag('cohort_evaluation_complete')}. Current page only: ${count('page_lanes')} lanes, ${count('bound_lanes')} evidence-bound. Scan truncated: ${flag('truncated')}. Evidence binding is not a completed trade, a profitable strategy, or qualification for live trading.`
+    : 'Shared context coverage UNKNOWN: current matching-epoch evidence is unavailable. Evidence binding is not trade qualification.';
   if (d.collector_generation === 'V3.1') {
     const c = d.collection || {}, s = d.search_progress || {}, cs = d.candidate_screen || {};
     const rows = cs.descriptive_top_100 || [];
@@ -8262,9 +8517,58 @@ async function loadGenome() {
   }).join('') || '<p class="note">No discoveries yet — need ≥10 trades per DNA fingerprint bucket.</p>';
 }
 
+function renderAICoverage(c) {
+  const counts = c.status === 'CURRENT_GENERATION' ? (c.counts || {}) : {};
+  const values = ['APPROVE','REJECT','NO_TRADE','AI_NOT_CALLED','ERROR','UNKNOWN'].map(key => {
+    const value = counts[key];
+    return `${key}: ${Number.isSafeInteger(value) && value >= 0 ? value : 'unavailable'}`;
+  });
+  document.getElementById('ai-verdict-coverage').textContent = `${c.status === 'CURRENT_GENERATION' ? 'Current generation' : 'UNKNOWN'} · Research rows, not independent trades · ${values.join(' · ')}. AI_NOT_CALLED is excluded from AI-selection PnL comparisons.`;
+}
+
+function renderMatchedAI(c) {
+  const status = document.getElementById('ai-matched-status');
+  const body = document.getElementById('ai-matched-body');
+  const groups = Array.isArray(c.groups) ? c.groups : [];
+  status.textContent = `${c.status || 'UNKNOWN'} · independent episodes ${c.independent_episode_n ?? 'UNKNOWN'} · supported rows ${c.matched_rows ?? 'UNKNOWN'} · excluded ${c.excluded_rows ?? 'UNKNOWN'} · ${(c.blockers || []).join(', ')}${groups.length > 100 ? ' · showing first 100 groups' : ''}`;
+  body.replaceChildren();
+  if (!groups.length || c.status !== 'DESCRIPTIVE_ONLY') {
+    const tr = document.createElement('tr'), td = document.createElement('td');
+    td.colSpan = 5; td.textContent = 'UNKNOWN — no current eligible matched outcomes';
+    tr.appendChild(td); body.appendChild(tr); return;
+  }
+  groups.slice(0,100).forEach(g => {
+    const tr = document.createElement('tr'), dims = g.dimensions || {};
+    const values = [`${dims.policy_id || 'UNKNOWN'} / ${dims.evidence_world || 'UNKNOWN'} / ${dims.direction || 'UNKNOWN'}`,
+      g.independent_episode_n ?? 'UNKNOWN', g.supported_rows ?? 'UNKNOWN',
+      `${g.rejected_positive_outcomes ?? 'UNKNOWN'} / ${g.rejected_negative_outcomes ?? 'UNKNOWN'}`,
+      Number.isFinite(g.filter_minus_unfiltered_usd) ? g.filter_minus_unfiltered_usd.toFixed(4) : 'UNKNOWN'];
+    values.forEach(value => { const td = document.createElement('td'); td.textContent = String(value); tr.appendChild(td); });
+    body.appendChild(tr);
+  });
+}
+
+function renderScanCoverage(census) {
+  const observed=census.observed_joined_opportunity_rows;
+  const page=Array.isArray(census.observed_dispatch_page) ? census.observed_dispatch_page.slice(0,8) : [];
+  const counts={ORDER_SUBMITTED:0,NO_ORDER:0,AWAITING:0,UNKNOWN:0};
+  for (const row of page) {
+    const state=row && row.observed_only === true && row.qualification_eligible === false && row.trade_completed === null && typeof row.entry_resolution === 'string' && Object.hasOwn(counts,row.entry_resolution) ? row.entry_resolution : 'UNKNOWN';
+    counts[state]++;
+  }
+  const reasons=(Array.isArray(census.blockers) ? census.blockers : [])
+    .filter(code => typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,95}$/.test(code)).slice(0,4);
+  document.getElementById('scan-census-coverage').textContent = `Observed scan child rows: ${census.index_caught_up === true && Number.isSafeInteger(observed) && observed >= 0 ? observed : 'unavailable'} · index ${census.index_caught_up === true ? 'caught up' : 'incomplete or unavailable'} · exhaustive collection UNKNOWN; not qualification evidence.${reasons.length ? ' Reasons: '+reasons.join(', ') : ''}`;
+  if (census.index_caught_up === true && page.length) {
+    document.getElementById('scan-census-coverage').textContent += ` Observed dispatch page (${page.length}, not cohort totals): submitted ${counts.ORDER_SUBMITTED}, no order ${counts.NO_ORDER}, awaiting ${counts.AWAITING}, unknown ${counts.UNKNOWN}. Entry outcomes only—not fills or completed trades.${census.dispatch_page_truncated === true ? ' More dispatch records available via the reconciliation CLI.' : ''}`;
+  }
+}
 async function loadAI() {
   const r = await fetch('/api/ai');
   const d = await r.json();
+  renderMatchedAI(d.matched_selection_comparison || {});
+  renderAICoverage(d.ai_verdict_coverage || {});
+  renderScanCoverage(d.scan_census_observed_coverage || {});
   const status = String(d.calibration_status || 'NO_DATA').toUpperCase();
   const showConfidence = status === 'AVAILABLE';
   const confidenceView = document.getElementById('ai-confidence-view');

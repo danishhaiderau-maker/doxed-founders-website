@@ -113,8 +113,10 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(tmp_p
         assert payload["qualified_v3_1"] is False
         assert payload["ranking_eligible"] is False
         assert payload["warning"]
-    assert payloads[1]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
-    assert payloads[2]["evidence_scope"] == "CURRENT EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[1]["evidence_scope"] == "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[2]["evidence_scope"] == "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[1]["generation_freshness"]["current"] is False
+    assert payloads[2]["generation_freshness"]["current"] is False
     assert payloads[3]["evidence_scope"].startswith("LEGACY")
     assert payloads[3]["raw_replays_available"] == 92
     assert payloads[3]["eligible_replays_available"] == 0
@@ -669,7 +671,12 @@ def test_dashboard_retires_five_question_cards():
     assert "fetch('/api/best-policy-research')" in source
 
 
-def test_static_and_dynamic_routes_use_v31_genome_not_retired_v22(monkeypatch):
+def test_static_and_dynamic_routes_use_v31_genome_not_retired_v22(monkeypatch, tmp_path):
+    # This explicitly exercises the no-published-generation compatibility
+    # path. Never let a developer's actual report_manifest select another path.
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    dashboard._API_RESPONSE_CACHE.clear()
     report = {
         "schema": "safe_policy_genome_v3_1_report_v1",
         "status": "V3_COLLECTING",
@@ -718,6 +725,26 @@ def test_static_and_dynamic_routes_use_v31_genome_not_retired_v22(monkeypatch):
     assert dynamic["regimes"][0]["regime"] == "BULL"
     assert dynamic["live_policy_change_allowed"] is False
     assert "NO_CURRENT_V22_EPOCH" not in dynamic["blockers"]
+
+
+def test_dynamic_absent_from_published_generation_does_not_revive_legacy(monkeypatch, tmp_path):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    dashboard._API_RESPONSE_CACHE.clear()
+    published = tmp_path / dashboard.PUBLISHED_REPORTS_DIR
+    published.mkdir()
+    (published / dashboard.REPORT_MANIFEST_FILE).write_text(json.dumps({
+        "fresh_epoch": {"epoch_id": "epoch-current"}, "reports": [],
+    }), encoding="utf-8")
+    def no_legacy_fallback():
+        raise AssertionError("A published generation must not revive legacy leaders")
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", no_legacy_fallback)
+    response = dashboard.app.test_client().get("/api/dynamic-policy-research").get_json()
+    assert response["regimes"] == []
+    assert response["epoch_id"] == "epoch-current"
+    assert response["status"] == "UNKNOWN"
+    assert response["live_policy_change_allowed"] is False
+    assert response["blockers"] == ["REPORT_NOT_IN_CURRENT_GENERATION"]
 
 
 def test_analyzer_adapter_emits_fail_closed_current_epoch_artifact(tmp_path):

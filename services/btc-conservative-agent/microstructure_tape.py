@@ -34,9 +34,9 @@ def build_bucket(*, bucket_ts, bid, ask, bid_qty, ask_qty, last,
     bid, ask = _finite(bid), _finite(ask)
     bid_qty, ask_qty = _finite(bid_qty), _finite(ask_qty)
     last, source_ts = _finite(last), _finite(source_ts)
-    age = None if source_ts is None else max(0.0, bucket_ts + 1.0 - source_ts)
+    age = None if source_ts is None else bucket_ts + 1.0 - source_ts
     valid_bbo = bool(bid and ask and bid > 0 and ask >= bid)
-    fresh = bool(valid_bbo and age is not None and age <= MAX_SOURCE_AGE_SEC)
+    fresh = bool(valid_bbo and age is not None and 0.0 <= age <= MAX_SOURCE_AGE_SEC)
     buy_qty = sell_qty = 0.0
     buy_notional = sell_notional = 0.0
     trade_count = 0
@@ -112,7 +112,20 @@ def validate_window(rows, reference) -> dict:
         if ts in seen:
             duplicate.add(ts)
         seen.add(ts)
-        if row.get("schema") != SCHEMA or row.get("fresh") is not True or row.get("valid_bbo") is not True:
+        # Recompute causality for historical rows too: older writers clamped
+        # future quote timestamps to age zero and incorrectly marked them fresh.
+        source_ts = _finite(row.get("source_ts"))
+        source_age = None if source_ts is None else ts + 1.0 - source_ts
+        observed_at = _finite(row.get("observed_at_ts"))
+        observation_invalid = ("observed_at_ts" in row and (
+            observed_at is None or not ts <= observed_at < ts + 1.0
+            or source_ts is None or source_ts > observed_at))
+        partial_trades = ("trade_bucket_complete" in row
+                          and row.get("trade_bucket_complete") is not True)
+        if (row.get("schema") != SCHEMA or row.get("fresh") is not True
+                or row.get("valid_bbo") is not True or source_age is None
+                or observation_invalid or partial_trades
+                or not 0.0 <= source_age <= MAX_SOURCE_AGE_SEC):
             invalid.append(ts)
     missing = sorted(expected - seen)
     eligible = bool(expected and not missing and not duplicate and not invalid)

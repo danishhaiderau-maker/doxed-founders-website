@@ -91,6 +91,8 @@ def normalize_pre_entry_feature_receipt(
     """
     if str(receipt.get("availability_boundary") or "") != "PRE_DECISION_ONLY":
         return {}, ["PRE_ENTRY_AVAILABILITY_BOUNDARY_INVALID"]
+    if receipt.get("capture_schema") != "measured_feature_capture_v1":
+        return {}, ["PRE_ENTRY_MEASURED_CAPTURE_MISSING"]
     features = receipt.get("features")
     if not isinstance(features, dict):
         return {}, ["PRE_ENTRY_FEATURE_PAYLOAD_INVALID"]
@@ -99,7 +101,8 @@ def normalize_pre_entry_feature_receipt(
             raise ValueError("boolean timestamp")
         captured_at = float(receipt.get("captured_at_ts"))
         signal_at = float(signal_ts)
-        if not math.isfinite(captured_at) or not math.isfinite(signal_at):
+        if (not math.isfinite(captured_at) or not math.isfinite(signal_at)
+                or captured_at <= 0 or signal_at <= 0):
             raise ValueError("nonfinite timestamp")
     except (TypeError, ValueError, OverflowError):
         return {}, ["PRE_ENTRY_CAPTURE_TIMESTAMP_INVALID"]
@@ -119,7 +122,7 @@ def normalize_pre_entry_feature_receipt(
                 if isinstance(value.get("observed_ts"), bool):
                     raise ValueError("boolean timestamp")
                 observed_at = float(value.get("observed_ts"))
-                if not math.isfinite(observed_at):
+                if not math.isfinite(observed_at) or observed_at <= 0:
                     raise ValueError("nonfinite timestamp")
             except (TypeError, ValueError, OverflowError):
                 blockers.append(f"FEATURE_TIMESTAMP_MISSING:{name}")
@@ -1141,7 +1144,9 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         tile_config_signature=active_tile_registry_signature(),
         report_blockers=report_blockers,
     )
+    from research.shared_context_coverage import build_shared_context_coverage
     report = {
+        "shared_context_coverage": build_shared_context_coverage(data_dir, epoch_id, lifecycles),
         "schema": "safe_policy_genome_v3_1_report_v1",
         "extension": "ADAPTIVE_EXIT_AND_DRAWDOWN_LAB_V3_1",
         "data_scope": "FRESH-COLLECTION" if selected_epoch is not None else "SESSION",

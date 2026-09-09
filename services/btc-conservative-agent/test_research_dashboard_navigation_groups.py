@@ -20,7 +20,8 @@ def test_navigation_preserves_all_sections_and_remaps_saved_sections():
     result=subprocess.run([shutil.which('node'),'-e',script],capture_output=True,text=True,timeout=15)
     assert result.returncode==0,result.stderr
     assert json.loads(result.stdout)==[gid for gid,_,items in groups for _ in items]
-    assert dict((sid,label) for _,_,items in groups for sid,label,_ in items)['ai']=='Historical AI Calibration'
+    assert dict((sid,label) for _,_,items in groups for sid,label,_ in items)['ai']=='AI comparison & calibration'
+    assert '<h2>AI comparison &amp; calibration</h2>' in page
 
 
 def test_registry_count_does_not_claim_collection():
