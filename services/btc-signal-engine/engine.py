@@ -23147,6 +23147,10 @@ def process_signal(event: dict):
                 )
                 if checked_ai is None:
                     return {"entry_resolution": "NO_ORDER", "exact_reason": boundary_reason}
+                if (ai.get("direction") != checked_ai.get("direction")
+                        or ai.get("candidate_direction") != checked_ai.get("candidate_direction")):
+                    return {"entry_resolution": "NO_ORDER",
+                            "exact_reason": "SCORE_LED_DIRECTION_PROJECTION_MISMATCH"}
             if not ai_decision_should_execute(ai):
                 trade_id = ai.get("trade_id") or ctx["trade_id"]
                 ai["trade_id"] = trade_id
@@ -23302,6 +23306,11 @@ def process_signal(event: dict):
             signal["signal_price"] = state.get("price")
             ai_direction_raw = ai.get("direction")
             invert_on = invert_signal_active()
+            if ai.get("admission_treatment") == "SCORE_LED_PAPER_V1" and invert_on:
+                # Recheck the exact inversion snapshot used below: the toggle
+                # may have changed since admission, but this treatment cannot invert.
+                return {"entry_resolution": "NO_ORDER",
+                        "exact_reason": "SCORE_LED_INVERSION_CHANGED_BEFORE_APPLICATION"}
             final_direction, inverted = apply_invert_direction(ai_direction_raw, invert_on)
             if inverted:
                 logger.info(f"[DIRECTION CONSISTENCY] INVERSION APPLIED immediately after AI - raw_ai={ai_direction_raw} -> final_direction={final_direction} inverted={inverted} trade_id={trade_id} [PIPELINE ENFORCEMENT]")

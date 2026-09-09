@@ -27,6 +27,32 @@ def test_original_verdict_retained(verdict):
     child["original_ai_snapshot"]["decision"] = "changed"
     assert ai == before
 
+@pytest.mark.parametrize("long_score,short_score,direction", [
+    (49, 51, "SHORT"),
+    (51, 49, "LONG"),
+    (35, 40, "SHORT"),
+    (40, 35, "LONG"),
+    (0, 1, "SHORT"),
+    (1, 0, "LONG"),
+])
+def test_any_inequality_selects_higher_side(long_score, short_score, direction):
+    child, reason = call({
+        "decision": "REJECT", "direction": "NO_TRADE",
+        "long_score": long_score, "short_score": short_score,
+    })
+    assert child is not None
+    assert child["direction"] == direction
+    assert child["original_ai_snapshot"]["decision"] == "REJECT"
+    assert reason == "SCORE_LED_HIGHER_DIRECTION_PAPER_ONLY"
+
+@pytest.mark.parametrize("long_score,short_score", [(50, 50), (20, 20), (0, 0), (37.5, 37.5)])
+def test_exact_tie_only_rejects(long_score, short_score):
+    child, why = call({
+        "decision": "NO_TRADE", "long_score": long_score, "short_score": short_score,
+    })
+    assert child is None
+    assert "TIE" in why
+
 @pytest.mark.parametrize("scores,reason", [((0, 1), None), ((1, 0), None),
     ((20,20), "TIE"), ((None,35), "MISSING"), (("20",35), "MALFORMED"),
     ((True,35), "MALFORMED"), ((float("nan"),35), "RANGE"), ((101,35), "RANGE")])
