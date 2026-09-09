@@ -268,6 +268,16 @@ function Get-CanonicalAnalyzerEnginePids([int]$P) {
 }
 
 $discoveredEnginePids = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)
+if ($Once -and $discoveredEnginePids.Count -gt 0) {
+  Write-Host (
+    "REFUSED: ONCE_ANALYZER_INCUMBENT_EXISTS for :$AnalyzerPort " +
+    "(PIDs $($discoveredEnginePids -join ', ')). No process was stopped or started. " +
+    "Use the normal controlled launcher to reconcile the existing engine."
+  ) -ForegroundColor Red
+  if ($lockHandle) { $lockHandle.Dispose() }
+  Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+  exit 2
+}
 if ($discoveredEnginePids.Count -gt 1) {
   Write-Host (
     "REFUSED: multiple analyzer engines already exist for :$AnalyzerPort " +
