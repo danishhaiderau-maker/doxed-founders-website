@@ -45,3 +45,25 @@ assert(!els['spread-perf-body'].innerHTML.includes('current cohort'));
 })().catch(e=>{console.error(e);process.exit(1)});
 '''
     subprocess.run(['node','-e',js],check=True,capture_output=True,text=True)
+
+
+def test_available_spread_report_never_borrows_current_manifest_identity():
+    names={'_legacy_list_report_available','_spread_performance_payload'}
+    nodes=[n for n in ast.parse(SOURCE).body if isinstance(n,ast.FunctionDef) and n.name in names]
+    report={'top':[], 'generation_id':'old-id', 'generation_revision':'old-code',
+            'source_data_revision':'old-source','epoch_id':'old-epoch','generated_at':'old-time'}
+    def forbidden_current_identity():
+        raise AssertionError('Legacy report must not borrow current manifest identity')
+    env={'_read_report':lambda *a:report,'_combo_row_known':lambda row:True,
+         '_current_generation_identity':forbidden_current_identity}
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),'research_dashboard.py','exec'),env)
+    payload=env['_spread_performance_payload']()
+    for key in ('generation_id','generation_revision','source_data_revision','epoch_id','generated_at'):
+        assert payload[key]==report[key]
+    assert payload['evidence_scope']=='LEGACY_EXECUTED'
+    assert payload['qualification_eligible'] is False
+    report={'top':[]}
+    payload=env['_spread_performance_payload']()
+    assert payload['source_available'] is True
+    assert payload['total_combos']==0
+    assert payload['generation_id'] is None and payload['epoch_id'] is None

@@ -2603,12 +2603,19 @@ def _spread_performance_payload():
             "Example: raw gap 30 is bucket 3. This is not exchange bid/ask spread."
         ),
         "buckets": out,
+        "evidence_scope": "LEGACY_EXECUTED",
+        "qualification_eligible": False,
+        "report_source": "top_combinations_report.json",
+        "generated_at": rep.get("generated_at"),
+        "generation_id": rep.get("generation_id"),
+        "generation_revision": rep.get("generation_revision"),
+        "source_data_revision": rep.get("source_data_revision"),
+        "epoch_id": rep.get("epoch_id"),
     }
-    payload.update(_current_generation_identity())
     if not out:
         payload["empty_reason"] = (
             "INSUFFICIENT_EXECUTED_SCORE_GAP_EVIDENCE: no eligible terminal "
-            "executed combinations exist in the current generation"
+            "executed combinations exist in the available legacy report"
         )
     return payload
 
