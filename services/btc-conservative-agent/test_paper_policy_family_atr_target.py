@@ -1,4 +1,5 @@
 import paper_policy_family_atr_target as policy
+from combo_pathway_config import SCORE_LED_PAPER_RESEARCH_ENABLED
 
 def test_fixed_target_binding_is_exact_and_paper_only():
     row = policy.entry_fields("SHORT", 100_000)
@@ -6,7 +7,11 @@ def test_fixed_target_binding_is_exact_and_paper_only():
     assert row["paper_only"] and not row["relay_eligible"]
     assert policy.SPEC.atr_target_k == 2.5
     assert policy.SPEC.initial_stop_atr_k is None
-    assert policy.POLICY_ID == "OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C"
+    expected = "OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C"
+    if SCORE_LED_PAPER_RESEARCH_ENABLED:
+        expected = "SCORE_LED_PAPER_V1::" + expected
+    assert policy.POLICY_ID == expected
+    assert policy.SPEC.policy_id == expected
     config = policy.exit_config("test")
     assert config["trail_ladder"] == [[8, 5], [12, 10], [19, 17], [40, 28], [60, 45], [80, 60], [100, 75], [150, 120]]
     assert config["ladder_first_trigger_pct"] == 8

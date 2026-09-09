@@ -10,6 +10,7 @@ from combo_pathway_config import (
     active_tile_registry_signature,
     validate_tile_registry,
     _policy_signature,
+    SCORE_LED_PAPER_RESEARCH_ENABLED,
 )
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES
 
@@ -42,9 +43,22 @@ def test_active_registry_is_the_exact_analyzer_hypothesis_experiment():
         "FAMILY_CHANDELIER_3": "OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5",
         "FAMILY_MFE_GIVEBACK": "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT",
     }
+    if SCORE_LED_PAPER_RESEARCH_ENABLED:
+        expected = {lane: "SCORE_LED_PAPER_V1::" + policy for lane, policy in expected.items()}
     assert {lane: spec["raw_policy_id"] for lane, spec in ACTIVE_TILE_REGISTRY.items()} == expected
     for spec in ACTIVE_TILE_REGISTRY.values():
-        assert spec["policy_epoch"] == "v31-analyzer-hypothesis-paper-v1"
+        if SCORE_LED_PAPER_RESEARCH_ENABLED:
+            assert spec["policy_epoch"] == "v31-score-led-paper-v1"
+            assert spec["admission_treatment"] == "SCORE_LED_PAPER_V1"
+            assert spec["analyzer_cohort"] == spec["raw_policy_id"]
+            assert spec["subtitle"] == "HIGHER SCORE ADMISSION EXPERIMENT — PAPER ONLY — NOT AI APPROVAL"
+        else:
+            assert spec["policy_epoch"] == "v31-analyzer-hypothesis-paper-v1"
+            assert spec["admission_treatment"] == "AI_FILTERED_V1"
+        assert spec["paper_only"] is True
+        assert spec["platform_relay_eligible"] is False
+        assert spec["live_copy_eligible"] is False
+        assert spec["default_enabled"] is False
         assert spec["entry_policy"]["chase_windows"] == (2, 3, 4)
         assert spec["entry_policy"]["remaining_gap_step_pct"] == 50.0
         assert spec["entry_policy"]["reprice_sec"] == 180
@@ -61,8 +75,12 @@ def test_active_registry_is_the_exact_analyzer_hypothesis_experiment():
     assert manifest["FAMILY_ATR_TARGET_2_5"]["ladder"] == fixed["ladder"]
     for row in manifest.values():
         result = row["presentation"]["hypothesis_result"]
-        assert result["status"] == "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL"
-        assert result["oos_net_usd"] > 0
+        if SCORE_LED_PAPER_RESEARCH_ENABLED:
+            assert result == {"status": "UNTESTED_NEW_ADMISSION_TREATMENT"}
+            assert row["admission_treatment"] == "SCORE_LED_PAPER_V1"
+        else:
+            assert result["status"] == "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL"
+            assert result["oos_net_usd"] > 0
 
 
 def test_policy_signature_binds_execution_parameters_not_just_display_id():
