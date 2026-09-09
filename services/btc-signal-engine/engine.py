@@ -15971,6 +15971,8 @@ def _write_v3_shared_lane_decision(
         elif raw_direction == "SHORT":
             executed_direction = "LONG"
     lane_policy = _v3_lane_policy_material(lane)
+    if (ai or {}).get("admission_treatment") == "SCORE_LED_PAPER_V1":
+        executed_direction = str(ai.get("direction") or "UNKNOWN").upper()
     factors = (ai or {}).get("factors") or {}
     long_score = (ai or {}).get("long_score", factors.get("long_score"))
     short_score = (ai or {}).get("short_score", factors.get("short_score"))
@@ -15987,6 +15989,8 @@ def _write_v3_shared_lane_decision(
                 "raw_direction": raw_direction,
                 "executed_direction": executed_direction,
                 "raw_ai_decision": (ai or {}).get("raw_decision") or (ai or {}).get("decision"),
+                "admission_treatment": (ai or {}).get("admission_treatment"),
+                "original_ai_snapshot": copy.deepcopy((ai or {}).get("original_ai_snapshot")),
                 "long_score": long_score,
                 "short_score": short_score,
                 "score_gap": score_gap,
@@ -17103,6 +17107,16 @@ def _shutdown_combo_lane_execution_workers(timeout: float = 5.0) -> bool:
 
 
 def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_reason: str):
+    if ai.get("admission_treatment") == "SCORE_LED_PAPER_V1":
+        from score_led_paper import project_score_led_paper
+        ai, reason = project_score_led_paper(
+            ai.get("original_ai_snapshot"), spec=COMBO_LANE_SPECS.get(target_lane) or {},
+            force_paper=_force_paper_mode_active(), live_armed=state.get("live_armed"),
+            inverted=invert_signal_active(),
+        )
+        if ai is None:
+            logger.warning(f"[{target_lane}] {reason}")
+            return
     if ai.get("decision") != "APPROVE":
         log_lane_opportunity_event(
             target_lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
@@ -17424,6 +17438,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         return
     if not is_research_data_collection():
         return
+    original_ai = ai
     ai_direction = ai.get("direction")
     final_direction = ai_direction
     if state.get("invert_signal", False):
@@ -17434,6 +17449,19 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
     spread = int(compute_directional_spread(final_direction, ai))
     enriched = _enrich_combo_lane_features(features, ctx)
     for lane in COMBO_EXECUTION_LANES:
+        ai = original_ai
+        treatment_reason = None
+        if (COMBO_LANE_SPECS.get(lane) or {}).get("admission_treatment") == "SCORE_LED_PAPER_V1":
+            from score_led_paper import project_score_led_paper
+            projected, treatment_reason = project_score_led_paper(
+                original_ai, spec=COMBO_LANE_SPECS[lane],
+                force_paper=_force_paper_mode_active(), live_armed=state.get("live_armed"),
+                inverted=invert_signal_active(),
+            )
+            if projected is not None:
+                ai = projected
+            final_direction = ai.get("direction")
+            spread = int(compute_directional_spread(final_direction, ai))
         # Shared-direction policy lanes are routed explicitly so their own
         # deterministic gate remains the sole entry authority.
         if (
@@ -17449,11 +17477,13 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             lane, ai, final_direction, spread, features=enriched,
         )
         ai_accepted = str(ai.get("decision") or "").upper() == "APPROVE"
+        if treatment_reason and ai is original_ai:
+            ai_accepted = False
         lane_enabled = is_research_lane_enabled(lane)
         policy_accepted = ai_accepted and bool(detail.get("passes"))
         if not ai_accepted:
             disposition = "AI_REJECTED_NO_ORDER"
-            decision_reason = f"AI_{str(ai.get('decision') or 'REJECT').upper()}"
+            decision_reason = treatment_reason or f"AI_{str(ai.get('decision') or 'REJECT').upper()}"
         elif not detail.get("passes"):
             disposition = "POLICY_FILTERED_NO_ORDER"
             decision_reason = detail.get("block_reason") or "COMBO_FILTER"
@@ -17462,7 +17492,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
         else:
             disposition = "ORDER_ELIGIBLE"
-            decision_reason = "SHARED_AI_APPROVE_AND_POLICY_PASS"
+            decision_reason = treatment_reason or "SHARED_AI_APPROVE_AND_POLICY_PASS"
         # Keep the operator-facing AI History joined to the same signed
         # per-family decision that is written to the V3 ledger below.  The
         # ledger was complete, but without this stamp genuine family
@@ -23108,6 +23138,15 @@ def process_signal(event: dict):
                 state["last_pipeline_stage"] = "IDLE"
                 return
 
+            if ai.get("admission_treatment") == "SCORE_LED_PAPER_V1":
+                from score_led_paper import project_score_led_paper
+                checked_ai, boundary_reason = project_score_led_paper(
+                    ai.get("original_ai_snapshot"), spec=COMBO_LANE_SPECS.get(research_lane) or {},
+                    force_paper=_force_paper_mode_active(), live_armed=state.get("live_armed"),
+                    inverted=invert_signal_active(),
+                )
+                if checked_ai is None:
+                    return {"entry_resolution": "NO_ORDER", "exact_reason": boundary_reason}
             if not ai_decision_should_execute(ai):
                 trade_id = ai.get("trade_id") or ctx["trade_id"]
                 ai["trade_id"] = trade_id
@@ -28891,6 +28930,7 @@ def build_static_pathway_lane_specs() -> dict:
             "lane": lane_id,
             "label": lane_spec["label"],
             "subtitle": lane_spec["subtitle"],
+            "admission_treatment": lane_spec.get("admission_treatment", "AI_FILTERED_V1"),
             "role": RESEARCH_CANDIDATE_ROLE,
             "status": "PAPER_ONLY",
             "is_benchmark": False,

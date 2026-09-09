@@ -3,7 +3,13 @@
   "combo_version": "2026-09-08",
   "exit_version": "five-family-exits-v1",
   "benchmark_lane": "CONTINUOUS_ANALYTICAL_ONLY",
+<<<<<<< HEAD
   "signal_hash": "182baba0be13",
   "source": "services/btc-conservative-agent/bot.py",
   "updated_at": "2026-09-08T20:29:31.936Z"
+=======
+  "signal_hash": "f1a202414fb5",
+  "source": "services/btc-conservative-agent/bot.py",
+  "updated_at": "2026-09-09T00:17:42.755Z"
+>>>>>>> 5c78155 (Mirror score-led paper treatment and verify its dependency)
 }
