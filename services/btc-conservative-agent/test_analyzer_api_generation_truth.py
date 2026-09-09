@@ -46,7 +46,16 @@ def test_empty_lightweight_apis_expose_generation_identity_and_exact_reason(monk
     assert feature['empty_reason'].startswith('FEATURE_REPORT_UNAVAILABLE:')
     assert feature['generation_id']=='generation-1'
     _assert_identity_and_reason(dashboard._leakage_payload())
-    _assert_identity_and_reason(dashboard._spread_performance_payload())
+    spread = dashboard._spread_performance_payload()
+    assert spread["source_available"] is False
+    assert spread["total_combos"] is None
+    assert spread["buckets"] == []
+    assert spread["evidence_scope"] == "LEGACY_EXECUTED"
+    assert spread["qualification_eligible"] is False
+    assert spread["empty_reason"].startswith("UNAVAILABLE")
+    # A current manifest is not provenance for a missing legacy report.
+    for key in ("generation_id", "generation_revision", "source_data_revision", "epoch_id"):
+        assert key not in spread
     horizon = dashboard._horizon_payload()
     assert horizon['source_available'] is False
     assert horizon["coverage_reason"] == horizon["empty_reason"]
