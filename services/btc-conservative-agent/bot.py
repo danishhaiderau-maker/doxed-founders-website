@@ -28321,8 +28321,10 @@ def _fresh_research_reset_resume() -> dict | None:
         return None
 
     def load(path):
+        # Align with scope-receipt ceiling (64MiB). COMPLETE operation.json can
+        # exceed 16MiB when inventory is embedded; the old cap blocked resume.
         _checked_path(path, root)
-        if path.stat().st_size > 16 * 1024 * 1024:
+        if path.stat().st_size > 64 * 1024 * 1024:
             raise RuntimeError("RESET_RESUME_RECEIPT_TOO_LARGE")
         return json.loads(path.read_text("utf-8"))
 
