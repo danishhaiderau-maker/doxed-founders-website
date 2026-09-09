@@ -9,7 +9,8 @@ param(
   [string]$ProgressRelayEvidenceJson = "",
   [switch]$ForceFullRefresh,
   [string]$MirroredSourceRevision = "",
-  [object]$InitialManifest = $null
+  [object]$InitialManifest = $null,
+  [hashtable]$CompleteManifestCache = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -609,7 +610,11 @@ if ($null -eq $manifest) {
       -PageSize $manifestPageSize) `
     -TimeoutSec $manifestTimeoutSec
 }
-$manifest = Get-CompleteDataSyncManifest -FirstPage $manifest
+. (Join-Path $scriptDir 'fly-sync-manifest-cache.ps1')
+$manifest = Get-FlyCachedCompleteManifest -FreshManifest $manifest -Cache $CompleteManifestCache -Expand {
+  param($firstPage)
+  Get-CompleteDataSyncManifest -FirstPage $firstPage
+}
 $inventorySha256 = [string]$manifest.inventory_sha256
 $inventoryGenerationId = [string]$manifest.inventory_generation_id
 $inventoryGeneratedAt = [string]$manifest.inventory_generated_at

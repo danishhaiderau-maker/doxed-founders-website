@@ -85,12 +85,14 @@ function Start-FlyGenerationResume {
     Invoke-RestMethod -Uri "$source/api/data-sync/manifest?paged=1&generation_id=$generation" `
       -Headers @{'X-Bot-Admin-Token'=$AdminToken} -MaximumRedirection 0 -TimeoutSec 30 -ErrorAction Stop
   }.GetNewClosure()
+  $completeManifestCache = @{}
   $run = {
     param($manifest, $attempt)
     $receiptPath = Join-Path $ReceiptDirectory ("resume-$attempt-" + [guid]::NewGuid().ToString('N') + '.json')
     try {
       $result = & $scriptPath -SourceUrl $source -AdminToken $AdminToken -TargetDir $TargetDir `
-        -InitialManifest $manifest -ProgressHeartbeatFile $receiptPath -MirroredSourceRevision $Identity.source_git_rev
+        -InitialManifest $manifest -CompleteManifestCache $completeManifestCache `
+        -ProgressHeartbeatFile $receiptPath -MirroredSourceRevision $Identity.source_git_rev
       return @{Success=$true; Result=$result}
     } catch {
       if (-not (Test-Path -LiteralPath $receiptPath -PathType Leaf)) { throw 'RESUME_ATTEMPT_WITHOUT_RECEIPT' }
