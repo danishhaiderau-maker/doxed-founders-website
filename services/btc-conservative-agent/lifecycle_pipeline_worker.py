@@ -12,6 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# Tile registry identity is import-time and env-gated. When the parent launches
+# this worker with a credential-free minimal env, SCORE_LED must still match the
+# parent or emergency idempotency complete.json drifts to the non-score-led tile.
+if os.environ.get("SCORE_LED_PAPER_RESEARCH_ENABLED") not in {"0", "false", "False"}:
+    os.environ.setdefault("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
+
 from lifecycle_pipeline import (
     DEFAULT_MAX_LIFECYCLE_BYTES,
     DEFAULT_MAX_LIFECYCLE_ROWS,
