@@ -16974,7 +16974,17 @@ def _freeze_shared_causal_feature_snapshot(features: dict = None, ctx: dict = No
     source["volatility_of_volatility"] = vov
     source["adx"] = adx
     source["causal_snapshot_phase"] = "PRE_AI_DECISION"
-    source["observed_ts"] = observed_ts
+    # Event time is not evidence of when these copied inputs were available.
+    # Measure availability after snapshot construction; never backdate to the
+    # original signal. A late capture must remain late in analyzer checks.
+    # Without capture_schema=measured_feature_capture_v1 the analyzer fail-closes
+    # every opportunity as PRE_ENTRY_MEASURED_CAPTURE_MISSING.
+    measured_ts = time.time()
+    source["source_event_ts"] = raw_observed
+    source["capture_schema"] = "measured_feature_capture_v1"
+    source["captured_at_ts"] = measured_ts
+    source["observed_ts"] = measured_ts
+    observed_ts = measured_ts
     # Analyzer dynamic-policy contract: named features are {value, observed_ts}.
     source["atr_bucket"] = _causal_feature_observation(_atr_pct_bucket(atr14), observed_ts)
     source["realized_volatility_bucket"] = _causal_feature_observation(
@@ -28321,8 +28331,10 @@ def _fresh_research_reset_resume() -> dict | None:
         return None
 
     def load(path):
+        # Align with scope-receipt ceiling (64MiB). COMPLETE operation.json can
+        # exceed 16MiB when inventory is embedded; the old cap blocked resume.
         _checked_path(path, root)
-        if path.stat().st_size > 16 * 1024 * 1024:
+        if path.stat().st_size > 64 * 1024 * 1024:
             raise RuntimeError("RESET_RESUME_RECEIPT_TOO_LARGE")
         return json.loads(path.read_text("utf-8"))
 
