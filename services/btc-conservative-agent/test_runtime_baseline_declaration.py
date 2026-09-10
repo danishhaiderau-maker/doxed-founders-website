@@ -82,8 +82,13 @@ class RuntimeDeclarationTests(unittest.TestCase):
             _shared_ai_call_id=lambda **kw: "call", invert_signal_active=lambda: False,
             _v3_lane_policy_material=lambda lane: {}, _collector_v22_epoch_id=lambda: "epoch",
             os=__import__("os"),
+            logger=type("L", (), {"error": staticmethod(lambda *a, **k: None),
+                                 "info": staticmethod(lambda *a, **k: None)})(),
+            write_pre_entry_evidence_failure=lambda *a, **k: None,
             dual_write_lane_decision=lambda source, **kw: captured.append(source) or {
-                "store_verification": {"passed": True}, "writes": [{"ledger": "pre_entry_features"}]})
+                "store_verification": {"passed": True},
+                "writes": [{"ledger": "pre_entry_features", "written": True}],
+            })
         exec(compile(ast.Module(body=[fn], type_ignores=[]), "bot.py", "exec"), namespace)
         declaration = build_runtime_baseline_declaration(**self.inputs())["declaration"]
         for verdict in ("APPROVE", "REJECT", "NO_TRADE"):

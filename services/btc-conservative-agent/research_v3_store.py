@@ -192,6 +192,13 @@ def _collection_provenance() -> dict[str, str]:
         result["config_signature"] = (
             signature if re.fullmatch(r"[0-9a-f]{64}", signature) else "UNKNOWN"
         )
+        # Tile registry can change after first provenance capture (runtime
+        # tile mutations / late SCORE_LED materialization). Refresh every call
+        # so complete.json identity stays aligned with live appends.
+        tile = str(active_tile_registry_signature() or "").strip()
+        result["tile_config_signature"] = (
+            tile if re.fullmatch(r"[0-9a-f]{64}", tile) else "UNKNOWN"
+        )
         return result
     deployed = str(os.getenv("SOURCE_GIT_REV") or "").strip()
     source = deployed
