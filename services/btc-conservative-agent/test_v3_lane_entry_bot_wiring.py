@@ -528,6 +528,27 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
     ) is False
     assert dead_letters[0][1]["failure_class"] == "ScopedVerificationFailed"
 
+    dead_letters.clear()
+    # Readable ledger alone must not count as durable pre-entry evidence.
+    namespace["dual_write_lane_decision"] = lambda *_args, **_kwargs: {
+        "writes": [{
+            "ledger": "pre_entry_features",
+            "written": False,
+            "duplicate": False,
+            "blocked": True,
+            "reason": "EMERGENCY_IDEMPOTENCY_INDEX_INCOMPLETE",
+        }],
+        "store_verification": {"passed": True},
+    }
+    assert writer(
+        "FAMILY_ONE",
+        {"decision": "APPROVE", "direction": "LONG"},
+        {"created_ts_ts": 1000, "symbol": "BTCUSD"},
+        {"adx": 25}, policy_decision="ACCEPT",
+        execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+    ) is False
+    assert dead_letters[0][1]["failure_class"] == "ScopedVerificationFailed"
+
     enqueues = []
     fanout_namespace = {
         "is_ai_scan_lane": lambda _lane: True,

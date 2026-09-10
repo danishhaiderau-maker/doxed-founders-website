@@ -16017,11 +16017,20 @@ def _write_v3_shared_lane_decision(
             row for row in receipt.get("writes", [])
             if row.get("ledger") == "pre_entry_features"
         ]
-        verified = bool(verification.get("passed") and len(feature_writes) == 1)
+        # verify_write_set only proves touched ledgers are readable — a blocked
+        # append still returns ledger=pre_entry_features. Require durable write
+        # or proven duplicate before ORDER_ELIGIBLE may proceed.
+        feature_write = feature_writes[0] if len(feature_writes) == 1 else None
+        durable = bool(
+            feature_write
+            and (feature_write.get("written") is True or feature_write.get("duplicate") is True)
+        )
+        verified = bool(verification.get("passed") and durable)
         if not verified:
             logger.error(
                 f"[COLLECTOR_V3] pre-entry scoped verification failed lane={lane} "
-                f"call_id={call_id} [PIPELINE ENFORCEMENT]"
+                f"call_id={call_id} durable={durable} "
+                f"write={feature_write} [PIPELINE ENFORCEMENT]"
             )
             try:
                 write_pre_entry_evidence_failure(
