@@ -119,6 +119,12 @@ def _minimal_worker_environment(source_revision: str | None = None) -> dict[str,
         # the parent environment wholesale: it may contain exchange/database
         # credentials, while the worker only needs exact provenance parity.
         environment["SOURCE_GIT_REV"] = revision
+    # Tile-registry identity is import-time and env-gated. The lifecycle worker
+    # bootstraps emergency idempotency complete.json; without this flag it binds
+    # the non-score-led tile (ab621…) while the parent appends under 91bc… and
+    # optional pre_entry_features stamps fail closed as INDEX_INCOMPLETE.
+    if os.environ.get("SCORE_LED_PAPER_RESEARCH_ENABLED") == "1":
+        environment["SCORE_LED_PAPER_RESEARCH_ENABLED"] = "1"
     return environment
 
 

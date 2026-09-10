@@ -449,6 +449,15 @@ def test_minimal_environment_excludes_credentials(monkeypatch):
     assert "SOURCE_GIT_REV" not in runtime_module._minimal_worker_environment("short")
 
 
+def test_minimal_environment_preserves_score_led_tile_identity(monkeypatch):
+    monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
+    assert "SCORE_LED_PAPER_RESEARCH_ENABLED" not in runtime_module._minimal_worker_environment("a" * 40)
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
+    assert runtime_module._minimal_worker_environment("a" * 40)["SCORE_LED_PAPER_RESEARCH_ENABLED"] == "1"
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "true")
+    assert "SCORE_LED_PAPER_RESEARCH_ENABLED" not in runtime_module._minimal_worker_environment("a" * 40)
+
+
 def test_revision_mismatch_fails_closed_and_capability_is_truthful(tmp_path, monkeypatch):
     runtime = _runtime(tmp_path)
     _install_launch(monkeypatch, runtime, _Process())
