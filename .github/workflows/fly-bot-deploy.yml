@@ -989,15 +989,15 @@ jobs:
           legacy_bootstrap_revision = "e5e61229871744a062ae75651d3c442bae910b5d"
           legacy_status_revision = legacy_bootstrap_revision[:12]
           status = None
-          for attempt in range(1, 6):
+          for attempt in range(1, 12):
               try:
                   request = urllib.request.Request(base + "/api/pause", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
-                  with urllib.request.urlopen(request, timeout=20) as response:
+                  with urllib.request.urlopen(request, timeout=90) as response:
                       json.load(response)
               except Exception as exc:
                   print(f"pause mutation attempt={attempt} response={type(exc).__name__}; checking durable state", flush=True)
               try:
-                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=60) as response:
                       status = json.load(response)
                   if (
                       status.get("execution_paused") is True
@@ -1009,7 +1009,7 @@ jobs:
                       break
               except Exception as exc:
                   print(f"pause state attempt={attempt} response={type(exc).__name__}", flush=True)
-              time.sleep(min(2 * attempt, 8))
+              time.sleep(min(3 * attempt, 20))
           else:
               raise SystemExit("durable paper maintenance boundary was not confirmed")
           def request_json(path, payload=None):
