@@ -382,16 +382,17 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
     }
     fanout = load_function("spawn_combo_lanes_from_ai_scan", namespace)
     fanout(ctx, ai, 2.0, base_features, "AI_SCAN")
+    enriched_features = {**base_features, "lane_enriched_marker": True}
     assert persist(
-        "CONTINUOUS", ai, ctx, base_features,
+        "CONTINUOUS", ai, ctx, enriched_features,
         policy_decision="ACCEPT", execution_disposition="ORDER_ELIGIBLE",
         exact_reason="APPROVE",
     )
 
     assert decisions == [
-        ("FAMILY_ONE", base_features),
-        ("FAMILY_TWO", base_features),
-        ("CONTINUOUS", base_features),
+        ("FAMILY_ONE", enriched_features),
+        ("FAMILY_TWO", enriched_features),
+        ("CONTINUOUS", enriched_features),
     ]
     ledger_dir = tmp_path / "v3" / "ledgers"
     pre_entry_rows = [
@@ -407,7 +408,7 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
         for line in (ledger_dir / "opportunity.jsonl").read_text().splitlines()
     ]
     assert len(pre_entry_rows) == 1
-    assert pre_entry_rows[0]["features"] == base_features
+    assert pre_entry_rows[0]["features"] == enriched_features
     assert {row["research_lane"] for row in decision_rows} == {
         "FAMILY_ONE", "FAMILY_TWO", "CONTINUOUS",
     }

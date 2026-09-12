@@ -17126,21 +17126,44 @@ def _shutdown_combo_lane_execution_workers(timeout: float = 5.0) -> bool:
 
 
 def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_reason: str):
+    def _abort_preorder_expectation(reason: str, ai_obj=None) -> None:
+        """Close an already-written ORDER_ELIGIBLE expectation without fabricating fills."""
+        src_ai = ai_obj if isinstance(ai_obj, dict) else (ai or {})
+        call_id = _shared_ai_call_id(ai_result=src_ai, ctx=ctx)
+        if not call_id:
+            return
+        source = {
+            **(ctx or {}),
+            "shared_ai_call_id": call_id,
+            "raw_direction": src_ai.get("raw_direction") or src_ai.get("direction"),
+            "executed_direction": src_ai.get("direction"),
+            "research_lane": target_lane,
+        }
+        _append_v3_lane_entry_resolution(
+            source, target_lane, "NO_ORDER", str(reason or "SPAWN_ABORTED"),
+        )
+
     if ai.get("admission_treatment") == "SCORE_LED_PAPER_V1":
         from score_led_paper import project_score_led_paper
-        ai, reason = project_score_led_paper(
+        projected, reason = project_score_led_paper(
             ai.get("original_ai_snapshot"), spec=COMBO_LANE_SPECS.get(target_lane) or {},
             force_paper=_force_paper_mode_active(), live_armed=state.get("live_armed"),
             inverted=invert_signal_active(),
         )
-        if ai is None:
+        if projected is None:
             logger.warning(f"[{target_lane}] {reason}")
+            _abort_preorder_expectation(reason or "SCORE_LED_PROJECTION_FAILED", ai)
             return
+        ai = projected
     if ai.get("decision") != "APPROVE":
         log_lane_opportunity_event(
             target_lane, "SPAWN_SKIPPED", (ctx or {}).get("trade_id"),
             (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
             block_reason=f"DECISION_NOT_APPROVE ({(ai or {}).get('decision')})",
+        )
+        _abort_preorder_expectation(
+            f"SPAWN_SKIPPED_DECISION_NOT_APPROVE_{(ai or {}).get('decision') or 'UNKNOWN'}",
+            ai,
         )
         return
     if not is_research_data_collection():
@@ -17149,6 +17172,7 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
             (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
             block_reason="RESEARCH_DATA_COLLECTION_OFF",
         )
+        _abort_preorder_expectation("SPAWN_SKIPPED_RESEARCH_DATA_COLLECTION_OFF", ai)
         return
     if not guard_retired_lane_execution(target_lane, "spawn_combo_lane", (ctx or {}).get("trade_id")):
         log_lane_opportunity_event(
@@ -17156,6 +17180,7 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
             (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
             block_reason="RETIRED_LANE_GUARD",
         )
+        _abort_preorder_expectation("SPAWN_FILTERED_RETIRED_LANE_GUARD", ai)
         return
     enriched = _enrich_combo_lane_features(features, ctx)
     if not is_research_lane_enabled(target_lane):
@@ -17530,7 +17555,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             ),
         )
         evidence_ready = _write_v3_shared_lane_decision(
-            lane, ai, ctx, features or {},
+            lane, ai, ctx, enriched or features or {},
             policy_decision=(
                 "ERROR" if bool(ai.get("ai_error"))
                 else "ACCEPT" if policy_accepted else "REJECT"
