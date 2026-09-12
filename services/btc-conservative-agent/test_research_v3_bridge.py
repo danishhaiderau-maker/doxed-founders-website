@@ -801,7 +801,10 @@ class V3BridgeTests(unittest.TestCase):
                 )
                 search = compact_search_receipt()
                 self.assertEqual(row["receipt_schema"], "pre_entry_features_v1")
-                self.assertEqual(row["captured_at_ts"], 1000.0)
+                # Unmeasured snapshots must not fake a measured capture clock.
+                self.assertIsNone(row.get("capture_schema"))
+                self.assertIsNone(row.get("captured_at_ts"))
+                self.assertEqual(row.get("source_event_ts"), 1000.0)
                 self.assertEqual(row["availability_boundary"], "PRE_DECISION_ONLY")
                 self.assertEqual(row["feature_schema_version"], "causal-features-v7")
                 self.assertEqual(row["bucket_definition_signature"], search["signature"])
@@ -817,6 +820,37 @@ class V3BridgeTests(unittest.TestCase):
                 )
                 self.assertNotIn("policy_decision", row)
                 self.assertNotIn("outcome_state", row)
+
+    def test_pre_entry_receipt_promotes_measured_capture_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            features = {
+                "research_feature_schema_version": "causal-features-v7",
+                "capture_schema": "measured_feature_capture_v1",
+                "captured_at_ts": 999.5,
+                "price": 100.25,
+            }
+            dual_write_lane_decision(
+                {
+                    "trade_id": "scan-measured",
+                    "shared_ai_call_id": "scan-measured",
+                    "shared_ai_call_ts_epoch": 1000,
+                    "symbol": "tBTCF0:USTF0", "raw_direction": "LONG",
+                    "feature_snapshot_at_signal": features,
+                },
+                lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+            )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            row = json.loads(
+                store.ledger_path("pre_entry_features").read_text().strip()
+            )
+            self.assertEqual(row["capture_schema"], "measured_feature_capture_v1")
+            self.assertEqual(row["captured_at_ts"], 999.5)
+            self.assertEqual(row["captured_at_timezone"], "UTC")
+            self.assertEqual(row["source_event_ts"], 1000.0)
+            self.assertEqual(row["features"]["capture_schema"], "measured_feature_capture_v1")
 
     def test_pre_entry_receipt_is_one_per_episode_and_rejects_content_collision(self):
         with tempfile.TemporaryDirectory() as tmp:
