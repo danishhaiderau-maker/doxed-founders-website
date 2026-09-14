@@ -38,7 +38,32 @@ try {
   $env:REQUIRE_BOT_ADMIN_TOKEN = $priorAdminProof
   $env:SHOWCASE_OWNER_URL = $priorOwnerUrl
 }
-$registryJson = & python -c "import json,sys;sys.path.insert(0,sys.argv[1]);import combo_pathway_config as c;print(json.dumps({'version':c.EXECUTION_FIX_VERSION,'signature':c.active_tile_registry_signature(),'lanes':list(c.ACTIVE_TILE_ORDER)}))" $serviceRoot
+# Resolve a local interpreter before the guarded deployment starts.  Some
+# managed Windows hosts intentionally have no global ``python`` command even
+# though Codex supplies a bundled stdlib runtime.  The registry read is local
+# and deterministic; failing closed here is safer than bypassing the registry
+# parity fence or silently deploying a different service context.
+$pythonCandidates = @()
+if ($env:PYTHON_EXE) {
+  $pythonCandidates += [string]$env:PYTHON_EXE
+}
+$systemPython = Get-Command python -ErrorAction SilentlyContinue
+if ($systemPython -and $systemPython.Source) {
+  $pythonCandidates += [string]$systemPython.Source
+}
+if ($env:LOCALAPPDATA) {
+  $pythonCandidates += (Join-Path $env:LOCALAPPDATA "codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
+}
+if ($env:USERPROFILE) {
+  $pythonCandidates += (Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe")
+}
+$pythonExe = @($pythonCandidates | Where-Object {
+  $_ -and (Test-Path -LiteralPath $_)
+} | Select-Object -First 1)[0]
+if (-not $pythonExe) {
+  throw "No local Python interpreter is available for the tile-registry deploy fence. Set PYTHON_EXE or install Python."
+}
+$registryJson = & $pythonExe -c "import json,sys;sys.path.insert(0,sys.argv[1]);import combo_pathway_config as c;print(json.dumps({'version':c.EXECUTION_FIX_VERSION,'signature':c.active_tile_registry_signature(),'lanes':list(c.ACTIVE_TILE_ORDER)}))" $serviceRoot
 if ($LASTEXITCODE -ne 0) {
   throw "Unable to resolve the canonical tile registry contract."
 }

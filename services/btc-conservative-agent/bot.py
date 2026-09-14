@@ -39354,10 +39354,20 @@ _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES = frozenset({
     "GENERATION_ENTRY_LIMIT_EXCEEDED",
     "GENERATION_LEASE_ACTIVE",
     "GENERATION_SPOOL_LIMIT_EXCEEDED",
+    "INVENTORY_CAPACITY_DEFERRED",
     "INVENTORY_SQLITE_FAILED",
     "INVENTORY_WORKER_FAILED",
     "SNAPSHOT_INTEGRITY_FAILED",
 })
+_DATA_SYNC_INVENTORY_FAILURE_STAGES = frozenset({
+    "CAPACITY_GATE",
+    "PARENT_REFRESH",
+})
+# Inventory construction writes SQLite/checkpoint state before it can publish a
+# recoverable manifest.  Do not start a new construction pass once the Fly
+# volume has less than this reserve; retain existing authority if present and
+# report a typed deferral instead of turning temporary pressure into a crash.
+_DATA_SYNC_INVENTORY_MIN_FREE_BYTES = 512 * 1024 * 1024
 _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS = 300
 # The worker is resumable, so short slices preserve completeness while yielding
 # the single Fly CPU and publishing progress well inside the desktop client's
@@ -39403,10 +39413,43 @@ _data_sync_async_inventory = {
     "worker_failure_code": None,
     "last_worker_failure_code": None,
     "last_worker_failure_at": None,
+    "last_worker_failure_stage": None,
+    "last_worker_failure_fingerprint": None,
+    "last_worker_failure_volume_free_bytes": None,
     "worker_invocations": 0,
     "worker_pages_written": 0,
     "worker_pages_total": None,
 }
+
+
+def _data_sync_inventory_volume_free_bytes() -> int | None:
+    """Return a capacity fact without fabricating zero when the probe fails."""
+    try:
+        return max(0, int(shutil.disk_usage(_data_sync_volume_root()).free))
+    except OSError:
+        return None
+
+
+def _data_sync_inventory_failure_fingerprint(
+    *, stage: str, code: str, nonce: str | None,
+) -> str:
+    """Correlate a public failure without exposing a path or exception text."""
+    payload = json.dumps({
+        "code": str(code),
+        "nonce": str(nonce or ""),
+        "stage": str(stage),
+    }, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _data_sync_inventory_public_failure_code(value) -> str | None:
+    """Project only the finite public failure vocabulary."""
+    candidate = str(value or "")
+    return (
+        candidate
+        if candidate in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
+        else None
+    )
 _DATA_SYNC_MANIFEST_PAGE_DEFAULT = 250
 _DATA_SYNC_MANIFEST_PAGE_MAX = 500
 _DATA_SYNC_ACK_FILE_MAX = 100_000
@@ -41968,6 +42011,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
     request_path = None
     result_path = None
     worker_failure_code = None
+    worker_failure_stage = "PARENT_REFRESH"
+    worker_failure_fingerprint = None
+    worker_failure_volume_free_bytes = None
     try:
         nonce = uuid.uuid4().hex
         launched_unix = time.time()
@@ -42140,6 +42186,26 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                     if candidate_failure_code in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
                     else "INVENTORY_WORKER_FAILED"
                 )
+                candidate_failure_stage = str(result.get("failure_stage") or "")
+                worker_failure_stage = (
+                    candidate_failure_stage
+                    if candidate_failure_stage in _DATA_SYNC_INVENTORY_FAILURE_STAGES
+                    else "PARENT_REFRESH"
+                )
+                candidate_fingerprint = str(result.get("failure_fingerprint") or "")
+                worker_failure_fingerprint = (
+                    candidate_fingerprint
+                    if re.fullmatch(r"[0-9a-f]{64}", candidate_fingerprint)
+                    else None
+                )
+                candidate_free_bytes = result.get("volume_free_bytes")
+                worker_failure_volume_free_bytes = (
+                    int(candidate_free_bytes)
+                    if isinstance(candidate_free_bytes, int)
+                    and not isinstance(candidate_free_bytes, bool)
+                    and candidate_free_bytes >= 0
+                    else None
+                )
                 raise RuntimeError(
                     f"inventory subprocess failed: {worker_failure_code}"
                 )
@@ -42234,6 +42300,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 "worker_failure_code": None,
                 "last_worker_failure_code": None,
                 "last_worker_failure_at": None,
+                "last_worker_failure_stage": None,
+                "last_worker_failure_fingerprint": None,
+                "last_worker_failure_volume_free_bytes": None,
             })
             _data_sync_inventory_cache_condition.notify_all()
         threading.Thread(
@@ -42243,12 +42312,38 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             daemon=True,
         ).start()
         _start_data_sync_bundle_generation(inventory_generation_id)
-    except BaseException as exc:
-        logger.error(f"data-sync inventory background refresh failed: {exc}")
+    except BaseException:
         persisted_worker_failure_code = (
             worker_failure_code
             if worker_failure_code in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
             else "INVENTORY_WORKER_FAILED"
+        )
+        persisted_worker_failure_stage = (
+            worker_failure_stage
+            if worker_failure_stage in _DATA_SYNC_INVENTORY_FAILURE_STAGES
+            else "PARENT_REFRESH"
+        )
+        persisted_worker_failure_fingerprint = (
+            worker_failure_fingerprint
+            if re.fullmatch(r"[0-9a-f]{64}", str(worker_failure_fingerprint or ""))
+            else _data_sync_inventory_failure_fingerprint(
+                stage=persisted_worker_failure_stage,
+                code=persisted_worker_failure_code,
+                nonce=nonce,
+            )
+        )
+        persisted_worker_failure_free_bytes = (
+            worker_failure_volume_free_bytes
+            if isinstance(worker_failure_volume_free_bytes, int)
+            and not isinstance(worker_failure_volume_free_bytes, bool)
+            and worker_failure_volume_free_bytes >= 0
+            else _data_sync_inventory_volume_free_bytes()
+        )
+        logger.error(
+            "data-sync inventory background refresh failed code=%s stage=%s fingerprint=%s",
+            persisted_worker_failure_code,
+            persisted_worker_failure_stage,
+            persisted_worker_failure_fingerprint,
         )
         worker_failure_at = utc_iso()
         with _data_sync_inventory_cache_condition:
@@ -42262,10 +42357,13 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 "refreshing": False,
                 "active_refresh_nonce": None,
                 "last_failure_at": worker_failure_at,
-                "error": type(exc).__name__,
+                "error": persisted_worker_failure_code,
                 "worker_failure_code": persisted_worker_failure_code,
                 "last_worker_failure_code": persisted_worker_failure_code,
                 "last_worker_failure_at": worker_failure_at,
+                "last_worker_failure_stage": persisted_worker_failure_stage,
+                "last_worker_failure_fingerprint": persisted_worker_failure_fingerprint,
+                "last_worker_failure_volume_free_bytes": persisted_worker_failure_free_bytes,
                 "expires_at": 0.0,
             })
             _data_sync_inventory_cache_condition.notify_all()
@@ -42436,6 +42534,73 @@ def _data_sync_request_async_inventory(
                 "worker_spool_bytes_used": _data_sync_async_inventory.get("worker_spool_bytes_used"),
                 "error": None,
             }
+        # A new inventory generation writes SQLite/checkpoint data before it
+        # can publish an immutable manifest.  Under capacity pressure do not
+        # start (or repeatedly restart) that work.  This fence intentionally
+        # leaves any already-running worker alone and never removes evidence.
+        if not _data_sync_async_inventory.get("refreshing"):
+            free_bytes = _data_sync_inventory_volume_free_bytes()
+            if (
+                free_bytes is None
+                or free_bytes < _DATA_SYNC_INVENTORY_MIN_FREE_BYTES
+            ):
+                deferred_at = utc_iso()
+                stale_rows = _data_sync_async_inventory.get("rows")
+                stale_generation = _data_sync_async_inventory.get("generation")
+                has_retained_generation = (
+                    isinstance(stale_rows, list)
+                    or isinstance(stale_generation, dict)
+                )
+                deferred_status = "STALE" if has_retained_generation else "EMPTY"
+                deferred_fingerprint = _data_sync_inventory_failure_fingerprint(
+                    stage="CAPACITY_GATE",
+                    code="INVENTORY_CAPACITY_DEFERRED",
+                    nonce=None,
+                )
+                _data_sync_async_inventory.update({
+                    "status": deferred_status,
+                    "refreshing": False,
+                    "active_refresh_nonce": None,
+                    "last_failure_at": deferred_at,
+                    "error": "INVENTORY_CAPACITY_DEFERRED",
+                    "worker_phase": "CAPACITY_DEFERRED",
+                    "worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_at": deferred_at,
+                    "last_worker_failure_stage": "CAPACITY_GATE",
+                    "last_worker_failure_fingerprint": deferred_fingerprint,
+                    "last_worker_failure_volume_free_bytes": free_bytes,
+                    "retry_after_seconds": 30,
+                })
+                return {
+                    "status": deferred_status,
+                    "rows": (
+                        [dict(row) for row in stale_rows]
+                        if isinstance(stale_rows, list) else []
+                    ),
+                    "generation": (
+                        dict(stale_generation)
+                        if isinstance(stale_generation, dict) else None
+                    ),
+                    "generated_at": _data_sync_async_inventory.get("generated_at"),
+                    "generation_id": _data_sync_async_inventory.get("generation_id"),
+                    "refreshing": False,
+                    "refresh_nonce": None,
+                    "refresh_started_at": _data_sync_async_inventory.get(
+                        "refresh_started_at"
+                    ),
+                    "refresh_completed_at": _data_sync_async_inventory.get(
+                        "refresh_completed_at"
+                    ),
+                    "last_failure_at": deferred_at,
+                    "worker_phase": "CAPACITY_DEFERRED",
+                    "worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_at": deferred_at,
+                    "retry_after_seconds": 30,
+                    "capacity_deferred": True,
+                    "error": "INVENTORY_CAPACITY_DEFERRED",
+                }
         if not _data_sync_async_inventory.get("refreshing"):
             _data_sync_async_inventory["refreshing"] = True
             _data_sync_async_inventory["status"] = "BUILDING"
@@ -43329,6 +43494,18 @@ def api_data_sync_manifest():
         fresh_collection_signal_ts=fresh_collection_signal_ts,
     )
     tile_registry = active_tile_lifecycle_manifest()
+    inventory_error = _data_sync_inventory_public_failure_code(
+        inventory_state.get("error")
+    )
+    inventory_failure_stage = str(
+        _data_sync_async_inventory.get("last_worker_failure_stage") or ""
+    )
+    inventory_failure_fingerprint = str(
+        _data_sync_async_inventory.get("last_worker_failure_fingerprint") or ""
+    )
+    inventory_failure_free_bytes = _data_sync_async_inventory.get(
+        "last_worker_failure_volume_free_bytes"
+    )
     payload = {
         "schema": "fly_runtime_incremental_sync_v1",
         "generated_at": utc_iso(),
@@ -43350,7 +43527,7 @@ def api_data_sync_manifest():
         "inventory_authoritative": inventory_status == "CURRENT",
         "inventory_ack_eligible": inventory_status == "CURRENT" and receipt_bootstrap["complete"],
         "receipt_bootstrap": receipt_bootstrap,
-        "inventory_error": inventory_state.get("error"),
+        "inventory_error": inventory_error,
         "inventory_build_status": (
             "PENDING" if inventory_state.get("worker_phase") == "WAITING_RECEIPT_BOOTSTRAP"
             else "BUILDING" if inventory_state.get("refreshing")
@@ -43418,9 +43595,30 @@ def api_data_sync_manifest():
             "invocations": inventory_state.get("worker_invocations"),
             "pages_written": inventory_state.get("worker_pages_written"),
             "pages_total": inventory_state.get("worker_pages_total"),
-            "failure_code": inventory_state.get("worker_failure_code"),
-            "last_failure_code": inventory_state.get("last_worker_failure_code"),
+            "failure_code": _data_sync_inventory_public_failure_code(
+                inventory_state.get("worker_failure_code")
+            ),
+            "last_failure_code": _data_sync_inventory_public_failure_code(
+                inventory_state.get("last_worker_failure_code")
+            ),
             "last_failure_code_at": inventory_state.get("last_worker_failure_at"),
+            "last_failure_stage": (
+                inventory_failure_stage
+                if inventory_failure_stage in _DATA_SYNC_INVENTORY_FAILURE_STAGES
+                else None
+            ),
+            "last_failure_fingerprint": (
+                inventory_failure_fingerprint
+                if re.fullmatch(r"[0-9a-f]{64}", inventory_failure_fingerprint)
+                else None
+            ),
+            "last_failure_volume_free_bytes": (
+                int(inventory_failure_free_bytes)
+                if isinstance(inventory_failure_free_bytes, int)
+                and not isinstance(inventory_failure_free_bytes, bool)
+                and inventory_failure_free_bytes >= 0
+                else None
+            ),
             "scan_units_completed": inventory_state.get("worker_scan_units_completed"),
             "directories_frozen": inventory_state.get("worker_directories_frozen"),
             "directory_entries_frozen": inventory_state.get("worker_directory_entries_frozen"),

@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -137,6 +139,11 @@ test('manual Fly deployment is pinned to the BTC service context and flat bounda
   assert.match(helper, /paperOpenPositions/);
   assert.match(helper, /paperPendingOrders/);
   assert.doesNotMatch(helper, /Push-Location \$repoRoot/);
+  assert.match(helper, /\$env:PYTHON_EXE/);
+  assert.match(helper, /Get-Command python -ErrorAction SilentlyContinue/);
+  assert.match(helper, /codex-primary-runtime\\dependencies\\python\\python\.exe/);
+  assert.match(helper, /\$env:USERPROFILE/);
+  assert.match(helper, /No local Python interpreter is available for the tile-registry deploy fence/);
 });
 
 test('Fly deploy proves a disarmed paper-signal owner, never a direct live executor', async () => {
@@ -226,7 +233,39 @@ test('production wrapper refuses every non-Fly runtime before importing bot.py',
   );
   assert.match(wrapper, /else:[\s\S]*os\.environ\["BLOCK_RESEARCH_WAREHOUSE"\]\s*=\s*"0"/);
 
-  const python = process.platform === 'win32' ? 'python.exe' : 'python';
+  const bundledPython = process.env.LOCALAPPDATA
+    ? path.join(
+      process.env.LOCALAPPDATA,
+      'codex-runtimes',
+      'codex-primary-runtime',
+      'dependencies',
+      'python',
+      'python.exe',
+    )
+    : null;
+  const cachedPython = process.env.USERPROFILE
+    ? path.join(
+      process.env.USERPROFILE,
+      '.cache',
+      'codex-runtimes',
+      'codex-primary-runtime',
+      'dependencies',
+      'python',
+      'python.exe',
+    )
+    : null;
+  const defaultPython = process.platform === 'win32' ? 'python.exe' : 'python';
+  const systemPython = spawnSync(defaultPython, ['--version'], {
+    encoding: 'utf8',
+  }).status === 0 ? defaultPython : null;
+  const python = [
+    process.env.PYTHON_EXE && existsSync(process.env.PYTHON_EXE)
+      ? process.env.PYTHON_EXE : null,
+    systemPython,
+    bundledPython && existsSync(bundledPython) ? bundledPython : null,
+    cachedPython && existsSync(cachedPython) ? cachedPython : null,
+  ].find(Boolean);
+  assert.ok(python, 'a Python interpreter is required to execute the wrapper contract');
   const result = spawnSync(python, [fileURLToPath(wrapperPath)], {
     encoding: 'utf8',
     env: {
