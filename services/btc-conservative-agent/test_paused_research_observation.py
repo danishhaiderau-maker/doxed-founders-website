@@ -118,7 +118,10 @@ def test_paused_enabled_lane_reaches_real_lab_helper(monkeypatch):
     monkeypatch.setattr(bot, "is_research_data_collection", lambda: True)
     monkeypatch.setattr(bot, "lane_orders_allowed", lambda _lane: True)
     monkeypatch.setattr(bot, "invert_signal_active", lambda: False)
-    monkeypatch.setattr(bot, "manual_admin_pause_active", lambda: True)
+    # The operator may resume while the in-flight AI call is finishing.  The
+    # collection-mode stamp, not only the current global flag, must preserve
+    # the non-executable paused-shadow provenance.
+    monkeypatch.setattr(bot, "manual_admin_pause_active", lambda: False)
     monkeypatch.setattr(bot, "is_patient_chase_lane", lambda _lane: False)
     monkeypatch.setattr(bot, "get_exit_config_for_lane", lambda _lane: {})
     monkeypatch.setattr(bot, "_enrich_combo_lane_features", lambda features, _ctx: features or {})

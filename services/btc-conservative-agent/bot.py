@@ -17329,7 +17329,13 @@ def _spawn_lab_combo_shadow(
         return
     enriched = _enrich_combo_lane_features(features, ctx)
     margin_usdt, size_mult = _lane_sized_margin_usdt(target_lane, enriched)
-    paused_shadow = manual_admin_pause_active()
+    # Latch the non-executable provenance from the request itself.  Resume may
+    # be clicked while an AI call is still in flight; the replay must remain a
+    # paused-shadow observation even after the global pause flag clears.
+    paused_shadow = (
+        manual_admin_pause_active()
+        or str(collection_mode or "").upper() == "ADMIN_PAUSED_SHADOW"
+    )
     patient_shadow = is_patient_chase_lane(target_lane)
     if patient_shadow:
         lane_spec = COMBO_LANE_SPECS.get(target_lane) or {}
