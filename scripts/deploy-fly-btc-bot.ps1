@@ -68,7 +68,16 @@ $pythonExe = @($pythonCandidates | Where-Object {
 if (-not $pythonExe) {
   throw "No local Python interpreter is available for the tile-registry deploy fence. Set PYTHON_EXE or install Python."
 }
-$registryJson = & $pythonExe -c "import json,sys;sys.path.insert(0,sys.argv[1]);import combo_pathway_config as c;print(json.dumps({'version':c.EXECUTION_FIX_VERSION,'signature':c.active_tile_registry_signature(),'lanes':list(c.ACTIVE_TILE_ORDER)}))" $serviceRoot
+$priorScoreLedFlag = $env:SCORE_LED_PAPER_RESEARCH_ENABLED
+try {
+  # The production cohort is score-led.  Registry parity must be calculated
+  # under the same explicit feature flag as the Fly image, otherwise a healthy
+  # deploy is rejected by a local legacy-registry false negative.
+  $env:SCORE_LED_PAPER_RESEARCH_ENABLED = "1"
+  $registryJson = & $pythonExe -c "import json,sys;sys.path.insert(0,sys.argv[1]);import combo_pathway_config as c;print(json.dumps({'version':c.EXECUTION_FIX_VERSION,'signature':c.active_tile_registry_signature(),'lanes':list(c.ACTIVE_TILE_ORDER)}))" $serviceRoot
+} finally {
+  $env:SCORE_LED_PAPER_RESEARCH_ENABLED = $priorScoreLedFlag
+}
 if ($LASTEXITCODE -ne 0) {
   throw "Unable to resolve the canonical tile registry contract."
 }
