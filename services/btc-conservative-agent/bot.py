@@ -39820,15 +39820,26 @@ _LIFECYCLE_PIPELINE_LAST_STATUS = None
 
 
 def _lifecycle_pipeline_pressure_probe() -> dict:
-    """Project existing collector pressure without inventing a new threshold."""
+    """Project collector pressure and operator quiescence into the worker.
+
+    An ADMIN_MANUAL pause is an explicit request to stop new execution.  While
+    that boundary is active, the optional lifecycle worker must use its
+    existing bounded-pressure path so receipt bootstrap can advance without
+    competing with a paused one-vCPU trading process.  This changes only the
+    worker budget; it does not authorize cleanup, deletion, or live trading.
+    """
     try:
         used_fraction = float(
             disk_usage_fraction(str(_data_sync_runtime_root()))
         )
+        manual_pause = bool(manual_admin_pause_active())
         return {
-            "pressure": bool(used_fraction >= STORAGE_PRESSURE_THRESHOLD),
+            "pressure": bool(
+                used_fraction >= STORAGE_PRESSURE_THRESHOLD or manual_pause
+            ),
             "emergency": used_fraction >= 0.90,
             "used_fraction": used_fraction,
+            "manual_admin_pause": manual_pause,
         }
     except Exception as exc:
         raise RuntimeError(type(exc).__name__) from exc

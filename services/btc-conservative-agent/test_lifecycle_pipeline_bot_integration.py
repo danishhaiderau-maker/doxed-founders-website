@@ -63,6 +63,11 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
     condition = threading.Condition()
     snapshot_condition = threading.Condition()
     runtime = runtime or _Runtime()
+    state = {
+        "manual_admin_pause": False,
+        "execution_paused": False,
+        "execution_reason": "",
+    }
     return {
         "Path": Path,
         "re": re,
@@ -74,6 +79,14 @@ def _namespace(tmp_path, runtime=None, revision="a" * 40):
         "_EVIDENCE_WORKER_ADMISSION_GATE": threading.Lock(),
         "os": SimpleNamespace(getenv=lambda name, default=None: default),
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "state": state,
+        "manual_admin_pause_active": lambda: bool(
+            state.get("manual_admin_pause")
+            or (
+                state.get("execution_paused")
+                and state.get("execution_reason") == "ADMIN_MANUAL"
+            )
+        ),
         "_fresh_collection_lock": threading.Lock(),
         "_runtime_git_rev_exact": lambda: revision,
         "_data_sync_runtime_root": lambda: tmp_path / "runtime",
@@ -107,6 +120,7 @@ def test_optional_owner_uses_exact_revision_pressure_and_overlap_probes(tmp_path
     assert kwargs["cycle_gate"] is scope["_EVIDENCE_WORKER_ADMISSION_GATE"]
     assert kwargs["pressure_probe"]()["pressure"] is True
     assert kwargs["pressure_probe"]()["emergency"] is False
+    assert kwargs["pressure_probe"]()["manual_admin_pause"] is False
     scope["_data_sync_async_inventory"]["refreshing"] = True
     assert kwargs["overlap_probe"]() == []
     scope["_data_sync_async_inventory"]["worker_active"] = True
@@ -125,6 +139,22 @@ def test_optional_owner_uses_exact_revision_pressure_and_overlap_probes(tmp_path
     assert kwargs["overlap_probe"]() == []
     assert scope["_stop_lifecycle_pipeline_runtime"](3.0) is True
     assert runtime.calls[-1] == ("stop", 3.0)
+
+
+def test_manual_admin_pause_clamps_optional_lifecycle_worker(tmp_path):
+    (tmp_path / "runtime").mkdir()
+    scope = _load_functions(
+        "_lifecycle_pipeline_pressure_probe",
+        namespace={
+            **_namespace(tmp_path),
+            "disk_usage_fraction": lambda _root: 0.20,
+        },
+    )
+    scope["state"]["manual_admin_pause"] = True
+    probe = scope["_lifecycle_pipeline_pressure_probe"]()
+    assert probe["pressure"] is True
+    assert probe["emergency"] is False
+    assert probe["manual_admin_pause"] is True
 
 
 def test_optional_owner_skips_unknown_revision_and_contains_failure(tmp_path):
