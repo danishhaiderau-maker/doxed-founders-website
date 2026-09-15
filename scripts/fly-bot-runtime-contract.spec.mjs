@@ -130,6 +130,8 @@ test('manual Fly deployment is pinned to the BTC service context and flat bounda
   assert.match(helper, /check-relay-flat\.mjs/);
   assert.match(helper, /REQUIRE_CANONICAL_FLY_OWNER = "YES"/);
   assert.match(helper, /REQUIRE_BOT_ADMIN_TOKEN = "YES"/);
+  assert.match(helper, /PLATFORM_API_URL = "https:\/\/doxed-founders-website-production\.up\.railway\.app\/api"/);
+  assert.match(helper, /PLATFORM_API_URL = \$priorPlatformApiUrl/);
   assert.match(helper, /SOURCE_GIT_REV=\$revision/);
   assert.match(helper, /source_git_rev/);
   assert.match(helper, /live_armed -eq \$false/);

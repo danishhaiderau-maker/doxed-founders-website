@@ -25,10 +25,14 @@ if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
 $priorCanonicalOwner = $env:REQUIRE_CANONICAL_FLY_OWNER
 $priorAdminProof = $env:REQUIRE_BOT_ADMIN_TOKEN
 $priorOwnerUrl = $env:SHOWCASE_OWNER_URL
+$priorPlatformApiUrl = $env:PLATFORM_API_URL
 try {
   $env:REQUIRE_CANONICAL_FLY_OWNER = "YES"
   $env:REQUIRE_BOT_ADMIN_TOKEN = "YES"
   $env:SHOWCASE_OWNER_URL = "https://doxed-btc-bot.fly.dev"
+  if (-not $env:PLATFORM_API_URL) {
+    $env:PLATFORM_API_URL = "https://doxed-founders-website-production.up.railway.app/api"
+  }
   & node (Join-Path $PSScriptRoot "check-relay-flat.mjs")
   if ($LASTEXITCODE -ne 0) {
     throw "Flat-boundary proof failed; Fly deployment refused."
@@ -37,6 +41,7 @@ try {
   $env:REQUIRE_CANONICAL_FLY_OWNER = $priorCanonicalOwner
   $env:REQUIRE_BOT_ADMIN_TOKEN = $priorAdminProof
   $env:SHOWCASE_OWNER_URL = $priorOwnerUrl
+  $env:PLATFORM_API_URL = $priorPlatformApiUrl
 }
 # Resolve a local interpreter before the guarded deployment starts.  Some
 # managed Windows hosts intentionally have no global ``python`` command even
