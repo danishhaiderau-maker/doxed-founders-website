@@ -178,6 +178,14 @@ def _relpath(path: Path, request: dict) -> str:
 def _allowed(path: Path, request: dict) -> bool:
     try:
         resolved = path.resolve(strict=True)
+    except (OSError, ValueError):
+        return False
+    return _allowed_resolved(resolved, request)
+
+
+def _allowed_resolved(resolved: Path, request: dict) -> bool:
+    """Apply admission checks to a path already resolved by the caller."""
+    try:
         resolved.relative_to(request["_volume"])
     except (OSError, ValueError):
         return False
@@ -192,7 +200,7 @@ def _allowed(path: Path, request: dict) -> bool:
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
         return False
     supported = (resolved.suffix.lower() in extensions or _rotation_parts(resolved.name, extensions)
-                 or _quarantine_binding(path, request) is not None)
+                 or _quarantine_binding(resolved, request) is not None)
     return bool(resolved.is_file() and supported)
 
 
@@ -326,7 +334,7 @@ def _row(path: Path, request: dict) -> dict | None:
         if path.is_symlink():
             return None
         resolved = path.resolve(strict=True)
-        if not _allowed(resolved, request):
+        if not _allowed_resolved(resolved, request):
             return None
         stat = resolved.stat()
         row = {
