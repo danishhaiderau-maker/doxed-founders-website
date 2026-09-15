@@ -3449,6 +3449,13 @@ def _shutdown_pending_order_evidence_worker(timeout: float = 5.0) -> bool:
 # preventing the next scheduled AI opportunity from being recorded.
 _post_ai_evidence_workers = {}
 _post_ai_evidence_workers_lock = threading.Lock()
+# Post-AI studies are optional derived evidence, but they must be given enough
+# bounded time for the real research-gate and filesystem validation phases.
+# Live phase receipts have reached ~14s; the former 5s budget converted healthy
+# hooks into HOOK_TIMEOUT dead letters and left the cadence stage stale.  Keep a
+# finite ceiling (rather than disabling the guard) so a genuinely wedged hook
+# still becomes an explicit evidence gap without blocking the scheduler forever.
+POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC = 30.0
 from evidence_phase_trace import EvidencePhaseTrace
 _post_ai_evidence_phase_trace = EvidencePhaseTrace()
 _post_ai_evidence_status = {
@@ -3529,7 +3536,7 @@ def _get_post_ai_evidence_worker(hook: str):
                 max_queue=64,
                 max_retries=0,
                 name=f"post-ai-{hook}",
-                handler_timeout_sec=5.0,
+                handler_timeout_sec=POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC,
                 on_dead_letter=lambda row, _hook=hook: _post_ai_dead_letter(_hook, row),
             )
             _post_ai_evidence_workers[hook] = worker
