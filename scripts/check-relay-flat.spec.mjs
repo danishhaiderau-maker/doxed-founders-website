@@ -14,8 +14,23 @@ import {
   isRelayPausedAndDisarmed,
   isRetryablePrismaConnectionError,
   ownerFetchErrorChain,
+  resolvePlatformApiUrl,
   refreshPausedRelayAudit,
 } from './check-relay-flat.mjs';
+
+test('platform audit URL accepts the vault base-url alias without overriding the explicit URL', () => {
+  assert.equal(
+    resolvePlatformApiUrl({ PLATFORM_API_BASE_URL: 'https://vault.example/api' }),
+    'https://vault.example/api',
+  );
+  assert.equal(
+    resolvePlatformApiUrl({
+      PLATFORM_API_URL: 'https://workflow.example/api',
+      PLATFORM_API_BASE_URL: 'https://vault.example/api',
+    }),
+    'https://workflow.example/api',
+  );
+});
 
 test('credential resolver receipt accepts only the legacy text or an allowlisted exact code', () => {
   assert.equal(isCredentialResolutionUnavailableError(

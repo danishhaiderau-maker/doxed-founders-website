@@ -45,7 +45,18 @@ const requireCanonicalFlyOwner =
   process.env.REQUIRE_CANONICAL_FLY_OWNER === 'YES';
 const durableOnlyRecovery =
   process.env.DURABLE_RELAYS_ONLY_RECOVERY === 'YES';
-const platformApiUrl = process.env.PLATFORM_API_URL?.trim() || '';
+export function resolvePlatformApiUrl(env = process.env) {
+  return String(
+    env?.PLATFORM_API_URL
+      || env?.PLATFORM_API_BASE_URL
+      || '',
+  ).trim();
+}
+
+// The vault names this value PLATFORM_API_BASE_URL; the workflow may provide
+// the stricter PLATFORM_API_URL alias.  Accept both without weakening the
+// HTTPS/authenticated refresh checks below.
+const platformApiUrl = resolvePlatformApiUrl(process.env);
 if (durableOnlyRecovery && requireCanonicalFlyOwner) {
   throw new Error(
     'DURABLE_RELAYS_ONLY_RECOVERY cannot be combined with REQUIRE_CANONICAL_FLY_OWNER=YES',
