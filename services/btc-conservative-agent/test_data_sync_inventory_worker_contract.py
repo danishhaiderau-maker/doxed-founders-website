@@ -161,6 +161,17 @@ def test_worker_nonce_identity_containment_and_atomic_result(tmp_path):
     assert worker.run(request_path, result_path, wrong_nonce) == 1
 
 
+def test_complete_record_size_fast_path_preserves_newline_terminated_files(tmp_path):
+    worker = _load_worker()
+    path = tmp_path / "events.jsonl"
+    payload = (b'{"ok":true}\n' * 8192)
+    path.write_bytes(payload)
+    assert worker._complete_record_size(path, len(payload)) == len(payload)
+    partial = tmp_path / "partial.jsonl"
+    partial.write_bytes(payload + b'{"tail":')
+    assert worker._complete_record_size(partial, partial.stat().st_size) == len(payload)
+
+
 def test_worker_rejects_allowed_root_outside_volume(tmp_path):
     worker = _load_worker()
     volume = tmp_path / "volume"

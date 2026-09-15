@@ -94,6 +94,13 @@ def _complete_record_size(path: Path, size: int) -> int:
         return max(0, int(size))
     cursor = int(size)
     with path.open("rb") as handle:
+        # The normal append-only path is newline-terminated.  Probe the last
+        # byte first so the common case avoids reading and searching a 64 KiB
+        # tail for every file in a large inventory.  If the byte is not a
+        # newline, retain the original bounded reverse scan below.
+        handle.seek(cursor - 1)
+        if handle.read(1) == b"\n":
+            return cursor
         while cursor > 0:
             start = max(0, cursor - (64 * 1024))
             handle.seek(start)
