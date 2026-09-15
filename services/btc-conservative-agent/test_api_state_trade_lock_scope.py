@@ -173,6 +173,19 @@ def test_enrichment_loader_runs_before_trade_lock_acquisition():
             assert forbidden not in locked, (function_name, forbidden)
 
 
+def test_relay_execution_history_projection_runs_after_trade_lock_release():
+    body = ast.get_source_segment(
+        SOURCE, _function("_build_relay_execution_state_snapshot")
+    )
+    release = body.index("trade_lock.release()")
+    projection = body.index(
+        "_snapshot_relay_trade_projections(trades_source, session_start)"
+    )
+    assert projection > release
+    assert "_session_trade_aggregates(" in body[release:]
+    assert "_snapshot_expired_rows(" in body[release:]
+
+
 def test_legacy_relay_builder_uses_bounded_money_state_lock_acquisition():
     body = ast.get_source_segment(SOURCE, _function("api_relay_state"))
     assert "state_lock.acquire(timeout=_RELAY_EXECUTION_LOCK_TIMEOUT_SEC)" in body

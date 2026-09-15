@@ -32,7 +32,7 @@ def test_relay_execution_builder_never_deepcopies_closed_trade_rows():
     function = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
                     and node.name == "_build_relay_execution_state_snapshot")
     body = ast.get_source_segment(SOURCE, function)
-    assert "_snapshot_relay_trade_projections_locked" in body
+    assert "_snapshot_relay_trade_projections(trades_source, session_start)" in body
     assert "copy.deepcopy(trades[" not in body
     assert "_snapshot_trade_rows_locked(session_start)" not in body
 
@@ -58,7 +58,7 @@ def test_all_runtime_relay_evidence_consumers_share_file_identity_cache():
 def test_projection_shape_is_bounded_and_ignores_oversized_research_fields():
     namespace = _functions(
         "_relay_trade_row_lite", "_relay_fidelity_trade_row",
-        "_relay_trade_enrichment_row_lite", "_snapshot_relay_trade_projections_locked",
+        "_relay_trade_enrichment_row_lite", "_snapshot_relay_trade_projections",
     )
 
     class DeepcopyForbidden:
@@ -82,7 +82,8 @@ def test_projection_shape_is_bounded_and_ignores_oversized_research_fields():
             "ts": index, "closed_epoch": index, **bulky_fields,
         })
     namespace["trades"][:] = rows
-    recent, relay, fidelity = namespace["_snapshot_relay_trade_projections_locked"](0)
+    detached = [dict(row) for row in namespace["trades"]]
+    recent, relay, fidelity = namespace["_snapshot_relay_trade_projections"](detached, 0)
     assert len(recent) == 5
     assert len(relay) == 512
     assert len(fidelity) == 512
@@ -96,7 +97,7 @@ def test_projection_shape_is_bounded_and_ignores_oversized_research_fields():
 def test_projection_preserves_relay_identity_execution_and_fidelity_fields():
     namespace = _functions(
         "_relay_trade_row_lite", "_relay_fidelity_trade_row",
-        "_relay_trade_enrichment_row_lite", "_snapshot_relay_trade_projections_locked",
+        "_relay_trade_enrichment_row_lite", "_snapshot_relay_trade_projections",
     )
     namespace["trades"].append({
         "trade_id": "trade-1", "shared_ai_call_id": "scan-1", "dir": "SHORT",
@@ -104,12 +105,34 @@ def test_projection_preserves_relay_identity_execution_and_fidelity_fields():
         "exit_reason": "TP", "net_pnl_usd": 1.25, "research_lane": "LANE",
         "status": "CLOSED", "executed": True, "epoch_id": "epoch-1",
     })
-    recent, relay, fidelity = namespace["_snapshot_relay_trade_projections_locked"](0)
+    recent, relay, fidelity = namespace["_snapshot_relay_trade_projections"](
+        [dict(row) for row in namespace["trades"]], 0
+    )
     assert recent[0]["trade_id"] == relay[0]["trade_id"] == fidelity[0]["trade_id"] == "trade-1"
     assert recent[0]["shared_ai_call_id"] == "scan-1"
     assert recent[0]["net_pnl_usd"] == 1.25
     assert recent[0]["status"] == "CLOSED" and recent[0]["executed"] is True
     assert fidelity[0]["closed_ts"] == 20
+
+
+def test_detached_projection_is_not_affected_by_later_source_row_mutation():
+    namespace = _functions(
+        "_relay_trade_row_lite", "_relay_fidelity_trade_row",
+        "_relay_trade_enrichment_row_lite", "_snapshot_relay_trade_projections",
+    )
+    source = [{
+        "trade_id": "trade-detached", "dir": "LONG", "entry": 100,
+        "exit": 101, "net_pnl_usd": 2.0, "ts": 10,
+    }]
+    recent, relay, fidelity = namespace["_snapshot_relay_trade_projections"](
+        [dict(row) for row in source], 0
+    )
+    source[0]["exit"] = 999
+    source[0]["net_pnl_usd"] = -999
+    assert recent[0]["exit"] == 101
+    assert recent[0]["net_pnl_usd"] == 2.0
+    assert relay[0]["exit"] == 101
+    assert fidelity[0]["exit"] == 101
 
 
 def test_dashboard_trade_enrichment_is_loaded_once_per_file_revision(tmp_path):

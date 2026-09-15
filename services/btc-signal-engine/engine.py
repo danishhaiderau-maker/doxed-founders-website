@@ -35459,27 +35459,40 @@ def _relay_trade_enrichment_row_lite(row: dict) -> dict:
     return lite
 
 
-def _snapshot_relay_trade_projections_locked(session_start: float) -> tuple[list, list, list]:
-    """Project bounded relay rows while holding ``trade_lock``.
+def _snapshot_relay_trade_projections(
+    trades_source, session_start: float
+) -> tuple[list, list, list]:
+    """Project bounded relay rows from a detached trade-ledger view.
 
     Closed trade rows retain rich research dictionaries such as
     ``entry_features``, ``entry_controls``, ``entry_indicators``, entry/exit
     context and occasionally replay/path payloads. Deep-copying 512 of those
     dictionaries held the money-state lock for minutes even though relay
-    presentation consumes only scalar identity/execution fields.
+    presentation consumes only scalar identity/execution fields. The caller
+    takes the bounded money-state copy under ``trade_lock``; projecting that
+    detached view here keeps expensive scans and scalar projections off the
+    money lock.
     """
+    trades_source = list(trades_source or [])
     if session_start:
-        recent_source = [row for row in trades if _trade_row_in_session(row, session_start)]
+        recent_source = [
+            row for row in trades_source if _trade_row_in_session(row, session_start)
+        ]
     else:
-        recent_source = trades
+        recent_source = trades_source
     recent_source = recent_source[-_DASHBOARD_TRADES_MAX:]
-    relay_source = trades[-_RELAY_TRADES_MAP_MAX:]
-    fidelity_source = trades[-_RELAY_FIDELITY_TRADES_MAX:]
+    relay_source = trades_source[-_RELAY_TRADES_MAP_MAX:]
+    fidelity_source = trades_source[-_RELAY_FIDELITY_TRADES_MAX:]
     return (
         [_relay_trade_enrichment_row_lite(row) for row in recent_source if isinstance(row, dict)],
         [_relay_trade_row_lite(row) for row in relay_source if isinstance(row, dict)],
         [_relay_fidelity_trade_row(row) for row in fidelity_source if isinstance(row, dict)],
     )
+
+
+def _snapshot_relay_trade_projections_locked(session_start: float) -> tuple[list, list, list]:
+    """Compatibility wrapper for callers that already own ``trade_lock``."""
+    return _snapshot_relay_trade_projections(list(trades), session_start)
 
 
 def _relay_order_row_lite(row: dict, now_ts: float, tick_px) -> dict:
@@ -35719,19 +35732,19 @@ def _build_relay_execution_state_snapshot() -> dict:
         pending_copy = copy.deepcopy(pending_orders)
         positions_copy = copy.deepcopy(open_positions)
         money_state_generation = _RELAY_EXECUTION_MONEY_STATE_GENERATION
-        (
-            raw_recent_trades,
-            relay_trades_copy,
-            raw_fidelity_trades,
-        ) = _snapshot_relay_trade_projections_locked(
-            session_start
-        )
-        session_trade_count, session_realized_pnl = (
-            _session_trade_aggregates_locked(session_start)
-        )
-        recent_expired, expired_orders_total = _snapshot_expired_rows_locked(
-            MAX_EXPIRED_ORDERS
-        )
+        # Only copy bounded money-path state while holding the lock. Trade
+        # history and expired-order projections are presentation data; scan and
+        # project them after release so a large research ledger cannot starve
+        # execution-state requests or the background refresh loop.
+        # Detach the small scalar row dictionaries while the lock is held.
+        # ``list(trades)`` alone would leave shared dictionaries whose fields
+        # can still be finalized by the writer after the lock is released.
+        trades_source = [
+            dict(row) if isinstance(row, dict) else row for row in trades
+        ]
+        expired_source = [
+            dict(row) if isinstance(row, dict) else row for row in expired_orders
+        ]
         bounded_trades_map = _snapshot_bounded_trades_map_locked(
             pending_copy,
             positions_copy,
@@ -35739,6 +35752,17 @@ def _build_relay_execution_state_snapshot() -> dict:
     finally:
         trade_lock.release()
         phase_timings["trade_lock_hold"] = (time.perf_counter() - phase_started) * 1000
+    (
+        raw_recent_trades,
+        relay_trades_copy,
+        raw_fidelity_trades,
+    ) = _snapshot_relay_trade_projections(trades_source, session_start)
+    session_trade_count, session_realized_pnl = _session_trade_aggregates(
+        trades_source, session_start
+    )
+    recent_expired, expired_orders_total = _snapshot_expired_rows(
+        expired_source, MAX_EXPIRED_ORDERS
+    )
     phase_started = time.perf_counter()
     recent_trades = _enrich_dashboard_trade_rows(
         raw_recent_trades,
@@ -36274,11 +36298,11 @@ def _snapshot_trade_rows_locked(session_start: float):
     return copy.deepcopy(src)
 
 
-def _session_trade_aggregates_locked(session_start: float) -> tuple[int, float]:
-    """Calculate exact session totals without copying the unbounded ledger."""
+def _session_trade_aggregates(trades_source, session_start: float) -> tuple[int, float]:
+    """Calculate exact session totals from a detached trade-ledger view."""
     count = 0
     realized = 0.0
-    for row in trades:
+    for row in list(trades_source or []):
         if session_start and not _trade_row_in_session(row, session_start):
             continue
         count += 1
@@ -36292,12 +36316,17 @@ def _session_trade_aggregates_locked(session_start: float) -> tuple[int, float]:
     return count, round(realized, 2)
 
 
-def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
-    """Copy a bounded tail while returning the exact visible-row count."""
+def _session_trade_aggregates_locked(session_start: float) -> tuple[int, float]:
+    """Compatibility wrapper for callers that already own ``trade_lock``."""
+    return _session_trade_aggregates(list(trades), session_start)
+
+
+def _snapshot_expired_rows(expired_source, limit: int) -> tuple[list, int]:
+    """Copy a bounded tail from a detached expired-order view."""
     selected = []
     total = 0
     bounded_limit = max(0, int(limit))
-    for row in expired_orders:
+    for row in list(expired_source or []):
         if (
             not isinstance(row, dict)
             or str(row.get("research_lane") or "").upper() == "AI_SCAN"
@@ -36309,6 +36338,11 @@ def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
             if len(selected) > bounded_limit:
                 del selected[0]
     return copy.deepcopy(selected), total
+
+
+def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
+    """Compatibility wrapper for callers that already own ``trade_lock``."""
+    return _snapshot_expired_rows(list(expired_orders), limit)
 
 
 _DASHBOARD_TRADE_ENRICHMENT_CACHE_LOCK = threading.Lock()
