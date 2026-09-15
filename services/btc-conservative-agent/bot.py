@@ -17955,6 +17955,11 @@ def evaluate_signal_with_ai(
             prompt += RESEARCH_AI_PROMPT_ADDENDUM
         if not trigger_reason:
             trigger_reason = state.get("debug_state", {}).get("edge_trigger_reason") or ""
+        # Keep cassette/demo responses visibly distinct from a real provider
+        # response.  A replay can exercise parsing and downstream research
+        # paths, but it must never be presented as fresh DeepSeek evidence.
+        ai_response_source = "FRESH"
+        ai_response_synthetic = False
         if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
             from demo_mode import cassette_lookup, cassette_record
             cassette_resp = cassette_lookup(_deepseek_model(), temperature, prompt[:256])
@@ -17964,6 +17969,8 @@ def evaluate_signal_with_ai(
                 if not text:
                     text = json.dumps(response_data) if isinstance(response_data, dict) else str(response_data)
                 latency_ms = 5
+                ai_response_source = "CASSETTE_REPLAY"
+                ai_response_synthetic = True
                 log_pipeline_event("AI", "API_OK_CASSETTE", "DEEPSEEK_CASSETTE_REPLAY", ctx.get("trade_id"), state.get("last_edge"), {"latency_ms": latency_ms}, force=True)
             else:
                 text, latency_ms = call_deepseek_api(
@@ -18011,7 +18018,8 @@ def evaluate_signal_with_ai(
             "long_score": factors.get("long_score", 0),
             "short_score": factors.get("short_score", 0),
             "preferred_direction": factors.get("preferred_direction"),
-            "source": "FRESH",
+            "source": ai_response_source,
+            "synthetic_response": ai_response_synthetic,
             "approved": decision in AI_EXECUTE_TIERS,
             "trade_id": ctx.get("trade_id"),
             "shared_ai_call_id": ctx.get("trade_id"),
