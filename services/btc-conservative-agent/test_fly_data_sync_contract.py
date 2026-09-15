@@ -946,6 +946,8 @@ def test_data_sync_inventory_cache_is_short_ttl_single_flight():
         "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 0.2,
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -1007,6 +1009,7 @@ def test_data_sync_inventory_forced_refresh_bypasses_stale_rows_and_serializes()
         "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -1072,6 +1075,7 @@ def test_failed_forced_refresh_never_releases_stale_rows_to_waiter():
         "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS": 30.0,
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -3077,6 +3081,7 @@ def test_long_sync_ack_can_select_the_exact_retained_initial_generation():
         "threading": threading,
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -4027,6 +4032,8 @@ def test_invalid_persisted_v2_snapshot_starts_exactly_one_async_rebuild(tmp_path
         ),
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -4063,6 +4070,8 @@ def test_async_inventory_cold_start_is_nonblocking_single_flight():
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -4118,6 +4127,8 @@ def test_async_inventory_exposes_exact_allowlisted_worker_failure_code():
         "time": time, "threading": SimpleNamespace(Thread=None),
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -4132,7 +4143,7 @@ def test_async_inventory_exposes_exact_allowlisted_worker_failure_code():
     result = namespace["_data_sync_request_async_inventory"]()
     assert result["status"] == "BUILDING"
     assert result["worker_failure_code"] == "DIRECTORY_SCAN_FAILED"
-    assert '"failure_code": inventory_state.get("worker_failure_code")' in BOT
+    assert '"worker_failure_code": _data_sync_async_inventory.get("worker_failure_code")' in BOT
 
 
 def test_async_inventory_retry_preserves_last_failure_until_worker_advances():
@@ -4174,6 +4185,8 @@ def test_async_inventory_retry_preserves_last_failure_until_worker_advances():
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -4199,7 +4212,8 @@ def test_async_inventory_retry_preserves_last_failure_until_worker_advances():
         BOT.index("def api_data_sync_manifest"):
         BOT.index("def _data_sync_resolve_lifecycle_bundle_manifest")
     ]
-    assert '"last_failure_code": inventory_state.get("last_worker_failure_code")' in manifest_block
+    assert '"last_failure_code": _data_sync_inventory_public_failure_code(' in manifest_block
+    assert 'inventory_state.get("last_worker_failure_code")' in manifest_block
     assert '"scan_units_completed": inventory_state.get("worker_scan_units_completed")' in manifest_block
 
 
@@ -4223,11 +4237,18 @@ def _exercise_parent_inventory_worker_failure(tmp_path, run_subprocess):
     namespace = {
         "__file__": str(ROOT / "bot.py"),
         "Path": Path, "os": os, "json": json, "sys": sys, "time": time,
+        "re": re,
         "uuid": uuid, "hmac": hmac, "threading": threading,
         "subprocess": SimpleNamespace(
             run=run_subprocess, DEVNULL=subprocess.DEVNULL,
         ),
-        "logger": SimpleNamespace(error=lambda message: logged.append(str(message))),
+        "_run_admitted_inventory_child": lambda command, worker_env: run_subprocess(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=300, check=False, env=worker_env,
+        ),
+        "_data_sync_inventory_failure_fingerprint": lambda **kwargs: "d" * 64,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "logger": SimpleNamespace(error=lambda *args: logged.append(" ".join(map(str, args)))),
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
@@ -4257,6 +4278,9 @@ def _exercise_parent_inventory_worker_failure(tmp_path, run_subprocess):
         "_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES": frozenset({
             "INVENTORY_WORKER_FAILED", "DIRECTORY_SCAN_FAILED",
         }),
+        "_DATA_SYNC_INVENTORY_FAILURE_STAGES": frozenset({
+            "CAPACITY_GATE", "PARENT_REFRESH",
+        }),
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
     namespace["_data_sync_inventory_refresh_worker"]("c" * 32)
@@ -4270,7 +4294,7 @@ def test_parent_timeout_exposes_generic_current_and_last_worker_failure(tmp_path
 
     state = _exercise_parent_inventory_worker_failure(tmp_path, timeout)
     assert state["refreshing"] is False
-    assert state["error"] == "TimeoutExpired", state["_logged"]
+    assert state["error"] == "INVENTORY_WORKER_FAILED", state["_logged"]
     assert state["worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_at"] == "2026-09-03T01:02:03Z"
@@ -4284,7 +4308,7 @@ def test_parent_malformed_result_exposes_generic_current_and_last_worker_failure
 
     state = _exercise_parent_inventory_worker_failure(tmp_path, malformed)
     assert state["refreshing"] is False
-    assert state["error"] == "JSONDecodeError", state["_logged"]
+    assert state["error"] == "INVENTORY_WORKER_FAILED", state["_logged"]
     assert state["worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_code"] == "INVENTORY_WORKER_FAILED"
     assert state["last_worker_failure_at"] == "2026-09-03T01:02:03Z"
@@ -4310,6 +4334,8 @@ def test_completed_inventory_is_delivered_once_after_outer_backoff_exceeds_ttl()
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
@@ -4360,6 +4386,8 @@ def test_completed_inventory_survives_new_force_refresh_nonce_after_client_timeo
         "time": time, "threading": SimpleNamespace(Thread=FakeThread),
         # This isolated inventory fixture starts after reservation hydration.
         "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
         "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
         "_data_sync_inventory_cache_condition": threading.Condition(),
