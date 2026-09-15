@@ -206,6 +206,12 @@ class StrategyProgressHealthTest(unittest.TestCase):
             "ws_last_hb_ts": self.now - 1,
             "ws_transport_connected": True,
             "last_ai_call_ts": self.now - 10,
+            "last_ai_ts": self.now - 10,
+            "last_ai": {"source": "FRESH", "synthetic_response": False},
+            "last_ai_provider_result_ts": self.now - 10,
+            "last_ai_provider_result_source": "FRESH",
+            "last_ai_provider_result_synthetic": False,
+            "last_ai_provider_result_error": False,
             "execution_paused": False,
             "manual_admin_pause": False,
             "live_armed": False,
@@ -234,6 +240,50 @@ class StrategyProgressHealthTest(unittest.TestCase):
 
     def test_healthy_requires_real_progress_not_only_process_heartbeat(self):
         self.assertTrue(self.snapshot(self.now)["ok"])
+
+    def test_ai_reservation_without_completed_result_is_not_progress(self):
+        self.state["last_ai_call_ts"] = self.now - 10
+        self.state["last_ai_ts"] = self.now - 501
+        self.state["last_ai_provider_result_ts"] = self.now - 501
+        result = self.snapshot(self.now)
+        self.assertFalse(result["ai_result_progressing"])
+        self.assertFalse(result["ok"])
+        self.assertIn("AI_CADENCE_STALLED", result["reasons"])
+
+    def test_error_result_cannot_clear_ai_incident(self):
+        self.state["last_ai"] = {"source": "ERROR", "synthetic_response": False}
+        self.state["last_ai_provider_result_source"] = "ERROR"
+        self.state["last_ai_provider_result_error"] = True
+        self.snapshot.__globals__["_strategy_progress_incident"].update({
+            "active": True,
+            "reasons": ["AI_CADENCE_STALLED"],
+        })
+        result = self.snapshot(self.now)
+        self.assertFalse(result["ai_result_progressing"])
+        self.assertFalse(result["recovery_probe_ok"])
+
+    def test_fresh_error_result_cannot_clear_ai_incident(self):
+        self.state["last_ai_provider_result_source"] = "FRESH"
+        self.state["last_ai_provider_result_error"] = True
+        self.snapshot.__globals__["_strategy_progress_incident"].update({
+            "active": True,
+            "reasons": ["AI_CADENCE_STALLED"],
+        })
+        result = self.snapshot(self.now)
+        self.assertFalse(result["ai_result_progressing"])
+        self.assertFalse(result["recovery_probe_ok"])
+
+    def test_cassette_result_cannot_clear_ai_incident(self):
+        self.state["last_ai"] = {"source": "CASSETTE_REPLAY", "synthetic_response": True}
+        self.state["last_ai_provider_result_source"] = "CASSETTE_REPLAY"
+        self.state["last_ai_provider_result_synthetic"] = True
+        self.snapshot.__globals__["_strategy_progress_incident"].update({
+            "active": True,
+            "reasons": ["AI_CADENCE_STALLED"],
+        })
+        result = self.snapshot(self.now)
+        self.assertFalse(result["ai_result_progressing"])
+        self.assertFalse(result["recovery_probe_ok"])
 
     def test_wedged_trade_lock_is_unhealthy(self):
         self.lock.acquire()
@@ -327,6 +377,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
     def test_stale_ai_call_is_unhealthy_when_collection_expected(self):
         with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
             self.state["last_ai_call_ts"] = self.now - 501
+            self.state["last_ai_ts"] = self.now - 501
+            self.state["last_ai_provider_result_ts"] = self.now - 501
             result = self.snapshot(self.now)
         self.assertTrue(result["ai_expected"])
         self.assertFalse(result["ai_progressing"])
@@ -334,6 +386,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
 
     def test_recent_no_trigger_cycle_is_valid_scheduler_progress(self):
         self.state["last_ai_call_ts"] = self.now - 501
+        self.state["last_ai_ts"] = self.now - 501
+        self.state["last_ai_provider_result_ts"] = self.now - 501
         self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
             "owner": None, "owner_ident": None, "started_ts": 0.0,
             "completed_ts": self.now - 5, "stage": "IDLE",
@@ -348,6 +402,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
 
     def test_recent_entry_gate_block_does_not_invent_ai_stall(self):
         self.state["last_ai_call_ts"] = self.now - 501
+        self.state["last_ai_ts"] = self.now - 501
+        self.state["last_ai_provider_result_ts"] = self.now - 501
         self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
             "owner": None, "owner_ident": None, "started_ts": 0.0,
             "completed_ts": 0.0, "stage": "IDLE", "stage_started_ts": 0.0,
@@ -363,6 +419,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
 
     def test_stale_entry_gate_poll_cannot_mask_ai_stall(self):
         self.state["last_ai_call_ts"] = self.now - 501
+        self.state["last_ai_ts"] = self.now - 501
+        self.state["last_ai_provider_result_ts"] = self.now - 501
         self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
             "owner": None, "owner_ident": None, "started_ts": 0.0,
             "completed_ts": 0.0, "stage": "IDLE", "stage_started_ts": 0.0,
@@ -377,6 +435,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
 
     def test_owned_scheduled_cycle_gets_separate_bounded_completion_window(self):
         self.state["last_ai_call_ts"] = self.now - 501
+        self.state["last_ai_ts"] = self.now - 501
+        self.state["last_ai_provider_result_ts"] = self.now - 501
         self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
             "owner": "periodic-ai",
             "owner_ident": threading.get_ident(),
@@ -394,6 +454,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
 
     def test_owned_scheduled_cycle_still_fails_after_hard_bound(self):
         self.state["last_ai_call_ts"] = self.now - 701
+        self.state["last_ai_ts"] = self.now - 701
+        self.state["last_ai_provider_result_ts"] = self.now - 701
         self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
             "owner": "periodic-ai",
             "owner_ident": threading.get_ident(),
@@ -411,6 +473,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
     def test_fresh_process_gets_bounded_ai_startup_grace_even_for_old_session(self):
         self.snapshot.__globals__["process_boot_time"] = self.now - 10
         self.state["last_ai_call_ts"] = 0
+        self.state["last_ai_ts"] = 0
+        self.state["last_ai_provider_result_ts"] = 0
         with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
             result = self.snapshot(self.now)
         self.assertFalse(result["ai_expected"])
@@ -421,6 +485,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
     def test_ai_startup_grace_expires_if_no_call_completes(self):
         self.snapshot.__globals__["process_boot_time"] = self.now - 501
         self.state["last_ai_call_ts"] = 0
+        self.state["last_ai_ts"] = 0
+        self.state["last_ai_provider_result_ts"] = 0
         with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
             result = self.snapshot(self.now)
         self.assertTrue(result["ai_expected"])
@@ -432,6 +498,8 @@ class StrategyProgressHealthTest(unittest.TestCase):
         self.snapshot.__globals__["process_boot_time"] = self.now - 501
         self.snapshot.__globals__["last_pipeline_run"] = self.now - 5
         self.state["last_ai_call_ts"] = 0
+        self.state["last_ai_ts"] = 0
+        self.state["last_ai_provider_result_ts"] = 0
         with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
             result = self.snapshot(self.now)
         self.assertFalse(result["ai_expected"])

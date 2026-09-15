@@ -5,6 +5,13 @@
 app = "doxed-btc-bot"
 primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested syd host (mem_overcommit)
 
+# Build content-addressed transfer packages on the Fly owner.  The client-side
+# `FLY_SYNC_TRANSPORT_BUNDLES` flag only selects the package protocol; without
+# this server-side flag the bundle worker never publishes a package index and
+# the transfer terminates with PACKAGE_NOT_BUILT_OR_RETAINED.
+[env]
+  DATA_SYNC_TRANSPORT_BUNDLES_ENABLED = "1"
+
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]
   internal_port = 7002

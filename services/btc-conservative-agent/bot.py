@@ -4216,6 +4216,12 @@ def log_ai_input_full(
                 "approved": ai_result.get("approved"),
                 "ai_error": ai_result.get("ai_error"),
                 "latency_ms": ai_result.get("latency_ms"),
+                # Keep provider provenance beside the input row itself.  A
+                # consumer must not have to join a separate AI-history file
+                # to distinguish a real DeepSeek response from a synthetic
+                # cassette replay.
+                "source": ai_result.get("source"),
+                "synthetic_response": bool(ai_result.get("synthetic_response", False)),
             },
             "replay_model": replay_eval,
             "bot_version": EXECUTION_FIX_VERSION,
@@ -8674,11 +8680,11 @@ state = {
     "allow_compression": True,
     "live_armed": False,
     "bitfinex_live_enabled": False,
-    # New paper/research sessions start executable by default.  An explicit
-    # operator pause is still persisted and remains authoritative until the
-    # Resume Trading control is used; this default does not auto-clear a saved
-    # pause on restart.
+    # New paper/research sessions start executable by default.  A manual pause
+    # applies for the current process session; operational holds still fail
+    # closed and are never cleared by this default.
     "manual_admin_pause": False,
+    "operator_pause_boot_receipt": None,
     "exchange_sync_audit": {
         "checked_ts": 0.0,
         "authoritative": False,
@@ -8755,7 +8761,12 @@ state = {
     "ws_transport_connected": False,
     "last_engine_error": "None",
     "drawdown_kill_until": None,
-    "last_ai": {"win_prob": None, "direction": None, "trade_id": None, "comment": None, "ai_error": None, "factors": {}, "source": "NONE", "decision": None},
+    "last_ai": {"win_prob": None, "direction": None, "trade_id": None, "comment": None, "ai_error": None, "factors": {}, "source": "NONE", "synthetic_response": False, "decision": None},
+    "last_ai_provider_result_ts": 0.0,
+    "last_ai_provider_result_source": "UNKNOWN",
+    "last_ai_provider_result_synthetic": False,
+    "last_ai_provider_result_error": False,
+    "last_ai_provider_result_call_id": "",
     "last_approve_outcome": {"status": None, "reason": None, "effective_threshold": None, "edge_at_approve": None, "trade_id": None, "ts": None},
     "last_ai_ts": 0.0,
     "last_ai_fp": "",
@@ -10995,6 +11006,13 @@ def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple
             return False, "RESEARCH_OBSERVATION_DISABLED"
         if ai_cooldown_remaining_sec() > 0:
             return False, f"AI_COOLDOWN_{ai_cooldown_remaining_sec(RESEARCH_LANE_AI_SCAN)}s"
+        if ctx.get("scheduled_research_assessment") or ctx.get("scheduled_research_observation_only"):
+            # The scheduled observer is intentionally the full structural-data
+            # cadence.  Research quality is recorded for analysis, but it must
+            # not silently turn a real three-minute provider slot into a
+            # missing AI decision; structural readiness was already enforced
+            # by can_run_scheduled_research_observation().
+            return True, "SCHEDULED_RESEARCH_AI"
         rq = compute_research_quality_score(ctx)
         if rq < RESEARCH_QUALITY_MIN:
             return False, f"RESEARCH_QUALITY_{rq:.0f}"
@@ -16238,6 +16256,7 @@ def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
         state["last_ai"]["trade_id"] = tid
         state["last_ai"]["comment"] = (ai_result.get("comment") or "")[:500]
         state["last_ai"]["source"] = ai_result.get("source", "FRESH")
+        state["last_ai"]["synthetic_response"] = bool(ai_result.get("synthetic_response", False))
         state["last_ai"]["ai_error"] = ai_result.get("ai_error", False)
         state["last_ai"]["error_type"] = ai_result.get("error_type")
         state["last_ai"]["error_detail"] = (ai_result.get("error_detail") or "")[:500]
@@ -16249,6 +16268,19 @@ def _sync_ai_dashboard_debug(ai_result: dict, trade_id: str = None) -> None:
         state["last_ai"]["research_model"] = ai_result.get("research_model") or research_lane_label(ai_result.get("research_lane"))
         state["ai_outcome"] = ai_result.get("decision")
         state["ai_decision"] = ai_result.get("decision")
+
+
+def _record_ai_provider_result_receipt(ai_result: dict) -> None:
+    """Record provider completion once; dashboard re-projections must not refresh it."""
+    result = ai_result if isinstance(ai_result, dict) else {}
+    with state_lock:
+        state["last_ai_provider_result_ts"] = time.time()
+        state["last_ai_provider_result_source"] = str(result.get("source") or "UNKNOWN").upper()
+        state["last_ai_provider_result_synthetic"] = bool(result.get("synthetic_response", False))
+        state["last_ai_provider_result_error"] = bool(result.get("ai_error", False))
+        state["last_ai_provider_result_call_id"] = str(
+            result.get("shared_ai_call_id") or result.get("trade_id") or ""
+        )
 
 
 def _emit_genome_ai_events(ai_result: dict) -> None:
@@ -18040,6 +18072,7 @@ def evaluate_signal_with_ai(
         ai_result["research_baseline_context_status"] = research_context_capture
         ai_result["shared_ai_call_ts"] = utc_iso()
         ai_result["original_context_signal_ts"] = ctx.get("signal_ts") or ctx.get("created_ts_ts")
+        _record_ai_provider_result_receipt(ai_result)
         ai_result = apply_trend_hierarchy_gate(ctx, ai_result)
         ai_result = normalize_research_ai_decision(ai_result)
         # Stage 1 Fix #3: hard-reject counter-structure directions before lane
@@ -18126,6 +18159,7 @@ def evaluate_signal_with_ai(
     except Exception as e:
         logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
         ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
+        _record_ai_provider_result_receipt(ai_result)
         # Preserve only evidence captured before the failed API/parsing stage.
         # An AI failure does not invalidate the already observed market context.
         if research_context_capture is not None:
@@ -18191,6 +18225,13 @@ def can_run_paused_research_observation(now: float = None) -> tuple:
         live_armed = bool(state.get("live_armed"))
         bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled"))
         ai_enabled = bool(state.get("ai_enabled", True))
+        execution_paused = bool(state.get("execution_paused", False))
+        execution_reason = str(state.get("execution_reason") or "")
+    entry_only_pause = execution_reason in {
+        "ADMIN_MANUAL",
+        "REST_ENTRY_QUOTE_NOT_READY",
+        "READINESS_STABILIZING",
+    }
     allowed = bool(
         research
         and _force_paper_mode_active()
@@ -18198,6 +18239,7 @@ def can_run_paused_research_observation(now: float = None) -> tuple:
         and not bitfinex_live_enabled
         and ai_enabled
         and runtime.get("system_ready")
+        and (not execution_paused or entry_only_pause)
     )
     if allowed:
         reason = "ADMIN_MANUAL_RESEARCH_OBSERVATION_ONLY"
@@ -18210,6 +18252,65 @@ def can_run_paused_research_observation(now: float = None) -> tuple:
     else:
         reasons = runtime.get("readiness_reasons") or []
         reason = str(reasons[0] if reasons else "SYSTEM_NOT_READY")
+    return allowed, reason, runtime
+
+
+def can_run_scheduled_research_observation(now: float = None) -> tuple:
+    """Allow a scheduled, data-only AI observation when entry-only gates fail.
+
+    Research cadence must still capture a real provider decision when a fresh
+    market snapshot exists, even if a manual paper pause or an ephemeral REST
+    entry quote/capacity gate prevents an order.  This function never grants
+    order authority: structural market prerequisites, paper-only mode, and
+    the shared research lane remain mandatory.  Operational safety holds
+    (lifecycle, stale-data, incident, or risk pauses) fail closed.
+    """
+    runtime = _recompute_system_readiness(now)
+    with _strategy_progress_incident_lock:
+        incident_active = bool(_strategy_progress_incident["active"])
+        incident_reasons = set(_strategy_progress_incident["reasons"])
+    with state_lock:
+        research = state.get("strategy_mode") == "RESEARCH"
+        live_armed = bool(state.get("live_armed"))
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled"))
+        ai_enabled = bool(state.get("ai_enabled", True))
+        execution_paused = bool(state.get("execution_paused"))
+        execution_reason = str(state.get("execution_reason") or "")
+    entry_only_pause = execution_reason in {
+        "ADMIN_MANUAL",
+        "REST_ENTRY_QUOTE_NOT_READY",
+        "READINESS_STABILIZING",
+    }
+    allowed = bool(
+        research
+        and _force_paper_mode_active()
+        and not live_armed
+        and not bitfinex_live_enabled
+        and ai_enabled
+        and shared_research_ai_observation_enabled()
+        and runtime.get("structural_prerequisites_ready")
+        and (not execution_paused or entry_only_pause)
+        and (not incident_active or incident_reasons == {"AI_CADENCE_STALLED"})
+    )
+    if allowed:
+        reason = "SCHEDULED_RESEARCH_OBSERVATION_ONLY"
+    elif not research:
+        reason = "RESEARCH_MODE_REQUIRED"
+    elif live_armed or bitfinex_live_enabled or not _force_paper_mode_active():
+        reason = "PAPER_ONLY_REQUIRED"
+    elif not ai_enabled:
+        reason = "AI_DISABLED"
+    elif not runtime.get("structural_prerequisites_ready"):
+        reasons = runtime.get("readiness_reasons") or []
+        reason = str(reasons[0] if reasons else "STRUCTURAL_MARKET_DATA_NOT_READY")
+    elif execution_paused and not entry_only_pause:
+        reason = execution_reason or "EXECUTION_PAUSED"
+    elif incident_active and incident_reasons != {"AI_CADENCE_STALLED"}:
+        reason = next(iter(sorted(incident_reasons)), "STRATEGY_PROGRESS_STALLED")
+    elif not shared_research_ai_observation_enabled():
+        reason = "RESEARCH_OBSERVATION_DISABLED"
+    else:
+        reason = "SCHEDULED_RESEARCH_OBSERVATION_NOT_ALLOWED"
     return allowed, reason, runtime
 
 def _clamp_ai_threshold(value: float) -> float:
@@ -22905,7 +23006,13 @@ def process_signal(event: dict):
     recovery_observation_only = bool(
         event.get("strategy_recovery_observation_only")
     )
-    requested_paused_shadow = bool(event.get("paused_shadow_mode")) or (
+    scheduled_observation_only = bool(
+        event.get("scheduled_research_observation_only")
+    )
+    scheduled_research_assessment = bool(
+        event.get("scheduled_research_assessment")
+    )
+    requested_paused_shadow = bool(event.get("paused_shadow_mode")) or scheduled_observation_only or (
         manual_pause and is_research_data_collection()
     )
     # This lane has no paused-shadow mode. A pause must cancel/refuse paper
@@ -22918,9 +23025,14 @@ def process_signal(event: dict):
         # observer gate at the process boundary so a direct caller or a
         # runtime transition (AI disabled, live enabled, readiness lost) can
         # never turn a stale marker into an AI/replay execution path.
-        observer_ok, observer_reason, _observer_runtime = (
-            can_run_paused_research_observation()
-        )
+        if scheduled_observation_only:
+            observer_ok, observer_reason, _observer_runtime = (
+                can_run_scheduled_research_observation()
+            )
+        else:
+            observer_ok, observer_reason, _observer_runtime = (
+                can_run_paused_research_observation()
+            )
         if not observer_ok:
             logger.warning(
                 f"[PIPELINE] refused paused research observation reason={observer_reason} "
@@ -22942,6 +23054,8 @@ def process_signal(event: dict):
         # records never enter the global signal/order/position books and never
         # publish relay webhooks.
         event["paused_shadow_mode"] = True
+        if scheduled_observation_only:
+            event["research_observation_only"] = True
     elif recovery_observation_only:
         recovery_ok, recovery_reason, _runtime = can_run_ai_recovery_observation()
         if not recovery_ok or not is_ai_scan_lane(event_lane):
@@ -23198,6 +23312,12 @@ def process_signal(event: dict):
                 # this single immutable causal snapshot.
                 features = _freeze_shared_causal_feature_snapshot(features, ctx)
 
+                if scheduled_research_assessment:
+                    # Keep scheduled cadence provenance even when entries are
+                    # currently eligible; the observation-only flag below is
+                    # the separate no-order control.
+                    ctx["scheduled_research_assessment"] = True
+
                 if paused_shadow_mode:
                     # Carry the operator-pause mode into the exact context
                     # sent to DeepSeek and the durable AI input/output row.
@@ -23206,7 +23326,10 @@ def process_signal(event: dict):
                     ctx.update({
                         "paused_shadow_mode": True,
                         "research_observation_only": True,
-                        "paused_shadow_reason": "ADMIN_MANUAL",
+                        "paused_shadow_reason": event.get("paused_shadow_reason") or (
+                            "ADMIN_MANUAL" if manual_pause else "ENTRY_GATE"
+                        ),
+                        "scheduled_research_observation_only": scheduled_observation_only,
                     })
 
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
@@ -30470,7 +30593,13 @@ def _strategy_progress_health_snapshot(
         ws_ts = float(state.get("ws_last_tick") or 0)
         ws_hb_ts = float(state.get("ws_last_hb_ts") or 0)
         ws_connected = bool(state.get("ws_transport_connected", False))
-        ai_ts = float(state.get("last_ai_call_ts") or 0)
+        # ``last_ai_call_ts`` is reserved immediately before the provider
+        # request. It is not proof that DeepSeek returned a result.
+        ai_result_ts = float(state.get("last_ai_provider_result_ts") or 0)
+        ai_ts = ai_result_ts
+        ai_source = str(state.get("last_ai_provider_result_source") or "UNKNOWN").upper()
+        ai_synthetic = bool(state.get("last_ai_provider_result_synthetic", False))
+        ai_error = bool(state.get("last_ai_provider_result_error", False))
         paused = bool(state.get("execution_paused", False))
         manual = bool(state.get("manual_admin_pause", False))
         live_armed = bool(state.get("live_armed", False))
@@ -30581,9 +30710,17 @@ def _strategy_progress_health_snapshot(
     # watchdog needs this independent signal to prove that a recovery AI call
     # really completed; otherwise the latch forces ``ai_progressing`` false and
     # can never accumulate the successful probes required to clear itself.
-    ai_observed_progressing = bool(
-        not ai_expected or (ai_ts and ai_age <= ai_stale_sec)
+    # Only a completed fresh provider result is valid recovery evidence.
+    # Errors and cassette/demo responses remain visible in history but cannot
+    # clear a real cadence incident.
+    ai_result_progressing = bool(
+        ai_result_ts
+        and ai_age <= ai_stale_sec
+        and ai_source == "FRESH"
+        and not ai_synthetic
+        and not ai_error
     )
+    ai_observed_progressing = bool(not ai_expected or ai_result_progressing)
     ai_progressing = ai_observed_progressing
     with _strategy_progress_incident_lock:
         ai_stall_latched = bool(
@@ -30649,8 +30786,13 @@ def _strategy_progress_health_snapshot(
         "ai_expected": ai_expected,
         "ai_progressing": ai_progressing,
         "recovery_probe_ok": bool(
-            lock_progressing and ws_progressing and ai_observed_progressing
+            lock_progressing and ws_progressing and ai_result_progressing
         ),
+        "ai_result_progressing": ai_result_progressing,
+        "ai_result_ts": ai_result_ts,
+        "ai_result_source": ai_source,
+        "ai_result_synthetic": ai_synthetic,
+        "ai_result_error": ai_error,
         "ai_age_sec": ai_age,
         "evaluation_age_sec": evaluation_age,
         "evaluation_progressing": evaluation_progressing,
@@ -37634,6 +37776,14 @@ def status():
         "execution_paused": paused,
         "execution_reason": reason,
         "manual_admin_pause": manual,
+        "operator_pause_boot_receipt": copy.deepcopy(state.get("operator_pause_boot_receipt")),
+        "ai_provider_receipt": {
+            "completed_ts": float(state.get("last_ai_provider_result_ts") or 0),
+            "source": str(state.get("last_ai_provider_result_source") or "UNKNOWN").upper(),
+            "synthetic_response": bool(state.get("last_ai_provider_result_synthetic", False)),
+            "ai_error": bool(state.get("last_ai_provider_result_error", False)),
+            "call_id": str(state.get("last_ai_provider_result_call_id") or ""),
+        },
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
         "runtime_readiness": runtime,
@@ -46310,8 +46460,8 @@ def reset_session_risk_state():
         state["daily_pnl_usd"] = 0.0
         state["consecutive_losses"] = 0
         state["loss_pause_until"] = 0.0
-        # Session-risk state is transient, but the operator's manual pause is
-        # persistent and must remain authoritative through the full boot order.
+        # Session-risk state is transient.  A manual pause is session-scoped;
+        # operational blockers are applied separately by their own gates.
         state["execution_paused"] = manual_admin_pause
         state["execution_reason"] = "ADMIN_MANUAL" if manual_admin_pause else ""
         state["_pause_priority"] = PAUSE_PRIORITIES["ADMIN_MANUAL"] if manual_admin_pause else 0
@@ -46334,6 +46484,11 @@ def reset_runtime_state(*, preserve_execution_pause: bool = False):
             "consecutive_losses": 0,
             "loss_pause_until": 0.0,
             "last_ai": {"win_prob": 0, "direction": None, "trade_id": None, "comment": "NO_SIGNAL", "ai_error": False, "factors": {}, "source": "NONE", "decision": None},
+            "last_ai_provider_result_ts": 0.0,
+            "last_ai_provider_result_source": "UNKNOWN",
+            "last_ai_provider_result_synthetic": False,
+            "last_ai_provider_result_error": False,
+            "last_ai_provider_result_call_id": "",
             "last_ai_ts": 0.0,
             "last_ai_fp": "",
             "ai_history": [],
@@ -46375,6 +46530,11 @@ def reset_transient_runtime_state():
             "consecutive_losses": 0,
             "loss_pause_until": 0.0,
             "last_ai": {"win_prob": 0, "direction": None, "trade_id": None, "comment": "NO_SIGNAL", "ai_error": False, "factors": {}, "source": "NONE", "decision": None},
+            "last_ai_provider_result_ts": 0.0,
+            "last_ai_provider_result_source": "UNKNOWN",
+            "last_ai_provider_result_synthetic": False,
+            "last_ai_provider_result_error": False,
+            "last_ai_provider_result_call_id": "",
             "last_ai_ts": 0.0,
             "last_ai_fp": "",
             "ai_history": [],
@@ -46387,8 +46547,9 @@ def reset_transient_runtime_state():
             "last_block_time": 0.0,
             "last_setup_time": 0.0,
             "last_engine_error": "None",
-            # load_persistent_config() runs before this reset. Preserve the
-            # operator's fail-closed pause across the transient-state cleanup.
+            # load_persistent_config() runs before this reset. Preserve any
+            # pause that is active in this process; startup policy has already
+            # handled prior-session operator preferences.
             "execution_paused": manual_admin_pause,
             "execution_reason": "ADMIN_MANUAL" if manual_admin_pause else "",
             "_pause_priority": PAUSE_PRIORITIES["ADMIN_MANUAL"] if manual_admin_pause else 0,
@@ -49867,6 +50028,11 @@ def _persistent_config_keys():
         keys.append("daily_pnl_usd")
     return keys
 
+
+def _paper_operator_pause_session_scoped() -> bool:
+    """Return whether a saved operator pause expires at the next paper boot."""
+    return str(os.getenv("PAPER_OPERATOR_PAUSE_SCOPE", "SESSION") or "SESSION").strip().upper() == "SESSION"
+
 def enforce_clean_research_session():
     """Research sim always starts at STARTING_BALANCE with no carry-over trades."""
     global bot_start_time
@@ -49927,6 +50093,8 @@ def load_persistent_config():
     config_path = _resolve_config_file_for_load()
     if os.path.exists(config_path):
         allowed_keys = _persistent_config_keys()
+        manual_pause_migrated = False
+        manual_pause_already_active = bool(state.get("manual_admin_pause"))
         with open(config_path, 'r') as f:
             config = json.load(f)
             with state_lock:
@@ -49944,10 +50112,63 @@ def load_persistent_config():
                 state["research_lane_enabled"] = merged_lanes
                 if "_threshold_locked" in config:
                     state["_threshold_locked"] = config["_threshold_locked"]
-                if bool(state.get("manual_admin_pause")):
+                persisted_manual_pause = bool(state.get("manual_admin_pause"))
+                paper_research = (
+                    str(state.get("strategy_mode") or "RESEARCH").upper() == "RESEARCH"
+                    and not bool(state.get("live_armed"))
+                    and not bool(state.get("bitfinex_live_enabled"))
+                )
+                if (
+                    persisted_manual_pause
+                    and not manual_pause_already_active
+                    and paper_research
+                    and _paper_operator_pause_session_scoped()
+                ):
+                    # A previous session's operator preference must not leave
+                    # paper collection silently stopped after restart.  This
+                    # does not clear incident/maintenance holds created later
+                    # in startup, and it never applies to live-capable mode.
+                    state["manual_admin_pause"] = False
+                    if str(state.get("execution_reason") or "") == "ADMIN_MANUAL":
+                        state["execution_paused"] = False
+                        state["execution_reason"] = ""
+                        state["_pause_priority"] = 0
+                    state["operator_pause_boot_receipt"] = {
+                        "schema": "operator_pause_boot_receipt_v1",
+                        "previous_manual_pause": True,
+                        "policy": "SESSION",
+                        "applied": "CLEARED_PREVIOUS_SESSION_OPERATOR_PAUSE",
+                        "paper_research": True,
+                        "live_armed": False,
+                        "bitfinex_live_enabled": False,
+                        "ts": utc_iso(),
+                    }
+                    manual_pause_migrated = True
+                elif bool(state.get("manual_admin_pause")):
                     state["execution_paused"] = True
                     state["execution_reason"] = "ADMIN_MANUAL"
                     state["_pause_priority"] = PAUSE_PRIORITIES["ADMIN_MANUAL"]
+                    state["operator_pause_boot_receipt"] = {
+                        "schema": "operator_pause_boot_receipt_v1",
+                        "previous_manual_pause": True,
+                        "policy": "PERSISTED_OUTSIDE_PAPER_SESSION",
+                        "applied": "RETAINED",
+                        "paper_research": paper_research,
+                        "live_armed": bool(state.get("live_armed")),
+                        "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled")),
+                        "ts": utc_iso(),
+                    }
+                else:
+                    state["operator_pause_boot_receipt"] = {
+                        "schema": "operator_pause_boot_receipt_v1",
+                        "previous_manual_pause": False,
+                        "policy": "SESSION",
+                        "applied": "DEFAULT_ON",
+                        "paper_research": paper_research,
+                        "live_armed": bool(state.get("live_armed")),
+                        "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled")),
+                        "ts": utc_iso(),
+                    }
         with state_lock:
             lev = int(state.get("leverage", DEFAULT_RESEARCH_LEVERAGE) or DEFAULT_RESEARCH_LEVERAGE)
             leverage_raised = False
@@ -49989,9 +50210,22 @@ def load_persistent_config():
                         if k in raw_sg:
                             out_sg[k] = bool(raw_sg[k])
                 state["spread_gate"] = out_sg
-        if leverage_raised:
+        if leverage_raised or manual_pause_migrated:
             save_persistent_config()
         logger.info(f"Loaded persistent config from {config_path} - ai_threshold restored")
+    else:
+        with state_lock:
+            state["operator_pause_boot_receipt"] = {
+                "schema": "operator_pause_boot_receipt_v1",
+                "previous_manual_pause": False,
+                "policy": "SESSION",
+                "applied": "DEFAULT_ON_NO_SAVED_CONFIG",
+                "paper_research": str(state.get("strategy_mode") or "RESEARCH").upper() == "RESEARCH",
+                "live_armed": bool(state.get("live_armed")),
+                "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled")),
+                "ts": utc_iso(),
+            }
+        logger.info("No persistent config found; paper/research resume defaults ON; live remains fail-closed")
 
 def save_persistent_config():
     config_path = get_config_file()
@@ -51049,14 +51283,15 @@ def periodic_pipeline_loop():
                 "last_poll_reason": str(entry_reason or "UNKNOWN")[:120],
             })
         recovery_observation_only = False
-        paused_research_observation = False
+        scheduled_observation_only = False
+        scheduled_research_assessment = bool(_sole_ai_research_mode())
         if not entry_ok:
+            scheduled_observation_only = can_run_scheduled_research_observation(now)[0]
             recovery_observation_only = can_run_ai_recovery_observation(now)[0]
-            paused_research_observation = bool(
-                manual_admin_pause_active()
-                and can_run_paused_research_observation(now)[0]
-            )
-            if not recovery_observation_only and not paused_research_observation:
+            if (
+                not recovery_observation_only
+                and not scheduled_observation_only
+            ):
                 continue
         ai_cd = get_effective_ai_cooldown_sec()
         if now - state.get("last_ai_call_ts", 0) < ai_cd:
@@ -51083,10 +51318,16 @@ def periodic_pipeline_loop():
                 logger.info("[HEARTBEAT] V3.1 periodic AI check [PIPELINE ENFORCEMENT]")
                 event = detect_event_light()
                 if event and event.get("event_trigger"):
-                    if paused_research_observation:
+                    if scheduled_research_assessment:
+                        event["scheduled_research_assessment"] = True
+                    if scheduled_observation_only:
+                        event["scheduled_research_observation_only"] = True
                         event["paused_shadow_mode"] = True
                         event["research_observation_only"] = True
-                        event["paused_shadow_reason"] = "ADMIN_MANUAL"
+                        event["paused_shadow_reason"] = (
+                            "ADMIN_MANUAL" if manual_admin_pause_active()
+                            else str(entry_reason or "ENTRY_GATE")
+                        )
                     if recovery_observation_only:
                         event["strategy_recovery_observation_only"] = True
                     with state_lock:

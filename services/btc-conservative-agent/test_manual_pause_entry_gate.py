@@ -235,7 +235,7 @@ bot._apply_position_exits = original_exits
 check("existing position still managed", managed == [("pause-existing-position-1", 64_000.0)])
 
 
-print("\n[6] Manual pause survives a process restart")
+print("\n[6] Manual pause is session-scoped for paper boots")
 reset_state()
 config_dir = tempfile.mkdtemp(prefix="manual-pause-config-")
 config_path = os.path.join(config_dir, "config-7002.json")
@@ -258,25 +258,39 @@ with bot.state_lock:
     bot.state["execution_reason"] = ""
     bot.state["_pause_priority"] = 0
 bot.load_persistent_config()
-check("manual pause restored", bot.state.get("manual_admin_pause") is True)
-check("restored process is execution-paused", bot.state.get("execution_paused") is True)
-check("restored reason is ADMIN_MANUAL", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+check("previous-session pause cleared", bot.state.get("manual_admin_pause") is False)
+check("fresh paper boot is execution-enabled", bot.state.get("execution_paused") is False)
+check("boot receipt records default-on migration", (bot.state.get("operator_pause_boot_receipt") or {}).get("applied") == "CLEARED_PREVIOUS_SESSION_OPERATOR_PAUSE")
 bot.reset_transient_runtime_state()
-check("startup reset preserves manual pause flag", bot.state.get("manual_admin_pause") is True)
-check("startup reset preserves execution pause", bot.state.get("execution_paused") is True)
-check("startup reset preserves ADMIN_MANUAL reason", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+check("startup reset keeps paper enabled", bot.state.get("manual_admin_pause") is False)
+check("startup reset keeps execution enabled", bot.state.get("execution_paused") is False)
+check("startup reset has no ADMIN_MANUAL reason", bot.state.get("execution_reason") == "")
 check(
-    "startup reset preserves ADMIN_MANUAL priority",
-    bot.state.get("_pause_priority") == bot.PAUSE_PRIORITIES["ADMIN_MANUAL"],
+    "startup reset clears ADMIN_MANUAL priority",
+    bot.state.get("_pause_priority") == 0,
 )
 bot.reset_session_risk_state()
-check("session reset preserves manual pause flag", bot.state.get("manual_admin_pause") is True)
-check("session reset preserves execution pause", bot.state.get("execution_paused") is True)
-check("session reset preserves ADMIN_MANUAL reason", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+check("session reset preserves paper enabled flag", bot.state.get("manual_admin_pause") is False)
+check("session reset preserves execution enabled", bot.state.get("execution_paused") is False)
+check("session reset has no ADMIN_MANUAL reason", bot.state.get("execution_reason") == "")
 check(
-    "session reset preserves ADMIN_MANUAL priority",
-    bot.state.get("_pause_priority") == bot.PAUSE_PRIORITIES["ADMIN_MANUAL"],
+    "session reset clears ADMIN_MANUAL priority",
+    bot.state.get("_pause_priority") == 0,
 )
+
+print("\n[6b] Manual pause remains active within the running paper session")
+reset_state()
+with bot.state_lock:
+    bot.state["manual_admin_pause"] = True
+    bot.state["execution_paused"] = True
+    bot.state["execution_reason"] = "ADMIN_MANUAL"
+    bot.state["_pause_priority"] = bot.PAUSE_PRIORITIES["ADMIN_MANUAL"]
+_original_save_persistent_config()
+bot.load_persistent_config()
+check("same-session pause is not auto-cleared", bot.state.get("manual_admin_pause") is True)
+check("same-session execution remains paused", bot.state.get("execution_paused") is True)
+check("same-session reason remains ADMIN_MANUAL", bot.state.get("execution_reason") == "ADMIN_MANUAL")
+
 bot.get_config_file = original_get_config_file
 bot._resolve_config_file_for_load = original_resolve_config_file
 
