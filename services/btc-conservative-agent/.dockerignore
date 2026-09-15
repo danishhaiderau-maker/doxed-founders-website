@@ -5,6 +5,14 @@
 
 # 1. Exclude everything by default.
 *
+.pytest_cache
+**/.pytest_cache
+__pycache__
+**/__pycache__
+.mypy_cache
+**/.mypy_cache
+.ruff_cache
+**/.ruff_cache
 
 # 2. Re-include Python source at the repo root (bot, analyzer, pathways, executors).
 !*.py
