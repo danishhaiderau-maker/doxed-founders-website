@@ -39,7 +39,10 @@ def cached_descriptor(root, entry, generation):
     if cache_directory(root) is None:
         return None
     path = root / (digest + ".json")
-    signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    # Creation time is unstable on Windows between metadata reads; the
+    # descriptor cache is non-authoritative and must not force a payload
+    # refetch for an unchanged file.
+    signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
     try:
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or getattr(before, "st_file_attributes", 0) & 0x400:

@@ -1,7 +1,10 @@
 import base64
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -27,14 +30,28 @@ def test_parent_promotes_verified_staging_through_original_checkpoint(tmp_path, 
         manifest["files"][0]["size"] += 1
     encoded = base64.b64encode(json.dumps(manifest).encode()).decode()
     target = tmp_path / "mirror"
+    # The checkout normally lives under OneDrive, whose ancestry is marked as
+    # a reparse point.  The production guard must reject that path, so stage
+    # this positive-flow fixture under pytest's local temp root instead of
+    # weakening the guard merely to make the test run from OneDrive.
+    fixture_root = tmp_path / "fixture-root"
+    for relative_script in (
+        "scripts/fly-mirror-atomic.ps1",
+        "scripts/fly-sync-bundles.ps1",
+        "scripts/test-support/bundle-staging-fixture.py",
+    ):
+        destination = fixture_root / relative_script
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / relative_script, destination)
+    fixture_root_posix = fixture_root.as_posix()
     if defect in {"reuse", "reuse-size"}:
         (target / relative).parent.mkdir(parents=True)
         (target / relative).write_text(payload)
     no_publish = "function Publish-MirrorCandidate { throw 'REUSE_MUST_NOT_PUBLISH' }" if defect in {"reuse", "reuse-size"} else ""
     script = f"""
 $ErrorActionPreference='Stop'
-. '{ROOT.as_posix()}/scripts/fly-mirror-atomic.ps1'
-. '{ROOT.as_posix()}/scripts/fly-sync-bundles.ps1'
+. '{fixture_root_posix}/scripts/fly-mirror-atomic.ps1'
+. '{fixture_root_posix}/scripts/fly-sync-bundles.ps1'
 {no_publish}
 $manifest=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))|ConvertFrom-Json
 $state=@{{}}
@@ -42,12 +59,18 @@ $script:saves=0
 $script:phases=@()
 $script:details=@()
 try {{
- $result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{ROOT.as_posix()}/scripts/test-support/bundle-staging-fixture.py' -SyncState $state -SaveCheckpoint {{$script:saves+=1}} -Progress {{param($n,$phase,$detail) $script:phases+=@{{files=$n;phase=$phase}}; $script:details+=@{{detail=$detail;durableSaves=$script:saves}}}}
+ $result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{fixture_root_posix}/scripts/test-support/bundle-staging-fixture.py' -SyncState $state -SaveCheckpoint {{$script:saves+=1}} -Progress {{param($n,$phase,$detail) $script:phases+=@{{files=$n;phase=$phase}}; $script:details+=@{{detail=$detail;durableSaves=$script:saves}}}}
  @{{result=$result;state=$state;saves=$script:saves;phases=$script:phases;details=$script:details}}|ConvertTo-Json -Depth 10 -Compress
 }} catch {{ Write-Output $_.Exception.Message; @{{phases=$script:phases;details=$script:details}}|ConvertTo-Json -Depth 10 -Compress; exit 7 }}
 """
+    env = os.environ.copy()
+    # The bundled QA interpreter is not necessarily on the inherited PATH;
+    # the PowerShell transport intentionally resolves `python` by command
+    # name, so expose the exact interpreter running this test without making
+    # the production script accept an arbitrary executable path.
+    env["PATH"] = str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", "")
     completed = subprocess.run([str(PWSH), "-NoProfile", "-Command", script],
-                               capture_output=True, text=True, timeout=30)
+                               capture_output=True, text=True, timeout=30, env=env)
     if str(defect).startswith('dual-'):
         assert completed.returncode==7 and 'BUNDLE_INDEX_WAIT_INVALID' in completed.stdout
         result=json.loads(completed.stdout.splitlines()[-1])

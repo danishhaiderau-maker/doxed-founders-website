@@ -8674,6 +8674,11 @@ state = {
     "allow_compression": True,
     "live_armed": False,
     "bitfinex_live_enabled": False,
+    # New paper/research sessions start executable by default.  An explicit
+    # operator pause is still persisted and remains authoritative until the
+    # Resume Trading control is used; this default does not auto-clear a saved
+    # pause on restart.
+    "manual_admin_pause": False,
     "exchange_sync_audit": {
         "checked_ts": 0.0,
         "authoritative": False,
@@ -17313,7 +17318,8 @@ def _spawn_lab_combo_shadow(
     # only this explicitly tagged counterfactual path through.
     safe_counterfactual = (
         bool(is_counterfactual)
-        and str(collection_mode or "").upper() == "CALIBRATION_COUNTERFACTUAL"
+        and str(collection_mode or "").upper()
+        in {"CALIBRATION_COUNTERFACTUAL", "ADMIN_PAUSED_SHADOW"}
     )
     if lane_orders_allowed(target_lane) and not safe_counterfactual:
         logger.error(
@@ -17472,7 +17478,10 @@ TILE2_ENTRY_TTL_SEC = int(os.getenv("TILE2_ENTRY_TTL_SEC", str(30 * 60)))
 
 
 
-def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
+def spawn_combo_lanes_from_ai_scan(
+    ctx, ai, edge_score, features, source_lane: str,
+    paused_shadow_mode: bool = False,
+):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
     Independent-AI lanes and deterministic bracket lanes are excluded. Patient
@@ -17534,6 +17543,9 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         elif not lane_enabled:
             disposition = "LANE_DISABLED_NO_ORDER"
             decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
+        elif paused_shadow_mode:
+            disposition = "PAUSED_SHADOW_NO_ORDER"
+            decision_reason = "ADMIN_MANUAL_PAUSED_SHADOW"
         else:
             disposition = "ORDER_ELIGIBLE"
             decision_reason = treatment_reason or "SHARED_AI_APPROVE_AND_POLICY_PASS"
@@ -17581,6 +17593,16 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             logger.info(
                 f"[{lane}] combo filter blocked spawn reason={br} "
                 f"[PIPELINE ENFORCEMENT]"
+            )
+            continue
+        if paused_shadow_mode:
+            # Manual execution pause is a data-collection mode, not a queued
+            # order. Use the isolated LAB replay path so a later resume cannot
+            # turn this already-paused observation into a paper/live order.
+            _spawn_lab_combo_shadow(
+                ctx, ai, edge_score, lane, enriched,
+                collection_mode="ADMIN_PAUSED_SHADOW",
+                is_counterfactual=True,
             )
             continue
         _enqueue_combo_lane_execution(
@@ -17690,7 +17712,10 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     close_replay_buffer(study_id)
 
 
-def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
+def spawn_continuous_lane_from_ai_scan(
+    ctx, ai, edge_score, features, source_lane: str,
+    paused_shadow_mode: bool = False,
+):
     """CONTINUOUS benchmark tile — mirrors AI_SCAN AI; toggle ON places limits, OFF logs shadow data only."""
     if not is_ai_scan_lane(source_lane) or not ai:
         return
@@ -17758,7 +17783,12 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         score=abs(long_score - short_score),
         policy_version="continuous_shared_direction_gap_v1",
     )
-    if continuous_accept and orders_on:
+    if paused_shadow_mode:
+        # A paused observation is never an executable expectation, even when
+        # the tile is enabled and the shared score would otherwise approve.
+        v3_disposition = "PAUSED_SHADOW_NO_ORDER"
+        v3_reason = "ADMIN_MANUAL_PAUSED_SHADOW"
+    elif continuous_accept and orders_on:
         v3_disposition = "ORDER_ELIGIBLE"
         v3_reason = continuous_reason
     elif continuous_accept:
@@ -17794,6 +17824,17 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         f"orders={'ON' if orders_on else 'OFF(data-only)'} "
         f"[PIPELINE ENFORCEMENT]"
     )
+    if paused_shadow_mode:
+        # Never enqueue a child while the operator pause is active. This
+        # replay is explicitly non-executable and keeps its causal identity
+        # separate from observed paper fills.
+        _spawn_lab_combo_shadow(
+            spawn_ctx, continuous_ai, float(edge_score or 0),
+            RESEARCH_LANE_CONTINUOUS, features or {},
+            collection_mode="ADMIN_PAUSED_SHADOW",
+            is_counterfactual=True,
+        )
+        return
     # Apply the same toggle contract as every other execution tile. ON enters
     # the local order lifecycle; OFF opens a full LAB replay. The former direct
     # process_signal call stopped at DATA_COLLECT_ONLY and produced no shadow.
@@ -17976,6 +18017,9 @@ def evaluate_signal_with_ai(
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
             "deepseek_model": _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
+            "paused_shadow_mode": bool(ctx.get("paused_shadow_mode")),
+            "research_observation_only": bool(ctx.get("research_observation_only")),
+            "paused_shadow_reason": ctx.get("paused_shadow_reason"),
         }
         ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
         ai_result.update(research_timing_capture)
@@ -18116,6 +18160,43 @@ def evaluate_signal_with_ai(
 def is_research_data_collection() -> bool:
     with state_lock:
         return state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+
+
+def can_run_paused_research_observation(now: float = None) -> tuple:
+    """Allow DeepSeek evidence collection while paper execution is manually paused.
+
+    This is deliberately narrower than ``is_research_data_collection``. A
+    manual pause may suppress every executable order path, but it must not
+    erase the causal AI observation needed to explain what the bot would have
+    done. The observer is permitted only on a warmed, explicitly forced-paper
+    runtime with live relay disabled. It never grants entry authority.
+    """
+    runtime = _recompute_system_readiness(now)
+    with state_lock:
+        research = state.get("strategy_mode") == "RESEARCH"
+        live_armed = bool(state.get("live_armed"))
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled"))
+        ai_enabled = bool(state.get("ai_enabled", True))
+    allowed = bool(
+        research
+        and _force_paper_mode_active()
+        and not live_armed
+        and not bitfinex_live_enabled
+        and ai_enabled
+        and runtime.get("system_ready")
+    )
+    if allowed:
+        reason = "ADMIN_MANUAL_RESEARCH_OBSERVATION_ONLY"
+    elif not research:
+        reason = "RESEARCH_MODE_REQUIRED"
+    elif live_armed or bitfinex_live_enabled or not _force_paper_mode_active():
+        reason = "PAPER_ONLY_REQUIRED"
+    elif not ai_enabled:
+        reason = "AI_DISABLED"
+    else:
+        reasons = runtime.get("readiness_reasons") or []
+        reason = str(reasons[0] if reasons else "SYSTEM_NOT_READY")
+    return allowed, reason, runtime
 
 def _clamp_ai_threshold(value: float) -> float:
     return max(AI_THRESHOLD_MIN, min(AI_THRESHOLD_MAX, float(value)))
@@ -22810,13 +22891,31 @@ def process_signal(event: dict):
     recovery_observation_only = bool(
         event.get("strategy_recovery_observation_only")
     )
-    paused_shadow_mode = bool(event.get("paused_shadow_mode")) or (
+    requested_paused_shadow = bool(event.get("paused_shadow_mode")) or (
         manual_pause and is_research_data_collection()
     )
     # This lane has no paused-shadow mode. A pause must cancel/refuse paper
     # exposure and leave cancellation evidence, never synthesize an outcome.
     if is_patient_chase_lane(event_lane):
-        paused_shadow_mode = False
+        requested_paused_shadow = False
+    paused_shadow_mode = False
+    if requested_paused_shadow:
+        # The scheduler's marker is only a request. Revalidate the narrow
+        # observer gate at the process boundary so a direct caller or a
+        # runtime transition (AI disabled, live enabled, readiness lost) can
+        # never turn a stale marker into an AI/replay execution path.
+        observer_ok, observer_reason, _observer_runtime = (
+            can_run_paused_research_observation()
+        )
+        if not observer_ok:
+            logger.warning(
+                f"[PIPELINE] refused paused research observation reason={observer_reason} "
+                f"lane={event_lane} [PIPELINE ENFORCEMENT]"
+            )
+            if manual_pause:
+                _manual_pause_block_entry(event, "PAUSED_RESEARCH_OBSERVATION")
+            return {"entry_resolution": "NO_ORDER", "exact_reason": observer_reason}
+        paused_shadow_mode = True
     if manual_pause and not paused_shadow_mode:
         # A manual stop may collect isolated counterfactual outcomes only in
         # the paper/research configuration.  If a future live-armed runtime is
@@ -23085,6 +23184,17 @@ def process_signal(event: dict):
                 # this single immutable causal snapshot.
                 features = _freeze_shared_causal_feature_snapshot(features, ctx)
 
+                if paused_shadow_mode:
+                    # Carry the operator-pause mode into the exact context
+                    # sent to DeepSeek and the durable AI input/output row.
+                    # The marker is provenance only; it grants no execution
+                    # authority and is revalidated at process entry.
+                    ctx.update({
+                        "paused_shadow_mode": True,
+                        "research_observation_only": True,
+                        "paused_shadow_reason": "ADMIN_MANUAL",
+                    })
+
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
                 if not invoke_ai:
                     logger.info(
@@ -23165,9 +23275,11 @@ def process_signal(event: dict):
                     # benchmark tile evaluation-only even while its toggle is ON.
                     spawn_combo_lanes_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
+                        paused_shadow_mode=paused_shadow_mode,
                     )
                     spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
+                        paused_shadow_mode=paused_shadow_mode,
                     )
 
             if not ai:
@@ -41302,6 +41414,7 @@ def _start_data_sync_bundle_reservation_hydration() -> None:
     def hydrate():
         global _DATA_SYNC_BUNDLE_REGISTRY, _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING, _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT
         acquired = _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False)
+        retry_generation_id = None
         try:
             if not acquired:
                 return
@@ -41320,6 +41433,25 @@ def _start_data_sync_bundle_reservation_hydration() -> None:
                 with _data_sync_inventory_cache_condition:
                     _DATA_SYNC_BUNDLE_REGISTRY = registry
             _DATA_SYNC_BUNDLE_REGISTRY.hydrate()
+            # Inventory finalization can complete while this metadata
+            # hydration owns the coordinator lock.  In that race the
+            # one-shot producer call at the end of the inventory worker sees
+            # the lock held and returns without creating a package.  Capture
+            # the already-published CURRENT generation and retry only after
+            # releasing the lock below; the producer's own identity,
+            # retention, and singleton checks remain authoritative.
+            with _data_sync_inventory_cache_condition:
+                candidate_id = str(
+                    _data_sync_async_inventory.get("generation_id") or ""
+                )
+                candidate = _data_sync_inventory_generations.get(candidate_id)
+                if (
+                    _DATA_SYNC_BUNDLE_REGISTRY.ready
+                    and _data_sync_async_inventory.get("status") == "CURRENT"
+                    and isinstance(candidate, dict)
+                    and candidate.get("ack_eligible") is True
+                ):
+                    retry_generation_id = candidate_id
         except Exception as exc:
             logger.warning("bundle reservation hydration deferred: %s", type(exc).__name__)
         finally:
@@ -41328,6 +41460,8 @@ def _start_data_sync_bundle_reservation_hydration() -> None:
             with _DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK:
                 _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING = False
                 _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT = time.monotonic() + 5
+        if retry_generation_id:
+            _start_data_sync_bundle_generation(retry_generation_id)
     try:
         threading.Thread(target=hydrate, name="data-sync-reservation-hydration", daemon=True).start()
     except Exception:
@@ -50867,9 +51001,14 @@ def periodic_pipeline_loop():
                 "last_poll_reason": str(entry_reason or "UNKNOWN")[:120],
             })
         recovery_observation_only = False
+        paused_research_observation = False
         if not entry_ok:
             recovery_observation_only = can_run_ai_recovery_observation(now)[0]
-            if not recovery_observation_only:
+            paused_research_observation = bool(
+                manual_admin_pause_active()
+                and can_run_paused_research_observation(now)[0]
+            )
+            if not recovery_observation_only and not paused_research_observation:
                 continue
         ai_cd = get_effective_ai_cooldown_sec()
         if now - state.get("last_ai_call_ts", 0) < ai_cd:
@@ -50896,6 +51035,10 @@ def periodic_pipeline_loop():
                 logger.info("[HEARTBEAT] V3.1 periodic AI check [PIPELINE ENFORCEMENT]")
                 event = detect_event_light()
                 if event and event.get("event_trigger"):
+                    if paused_research_observation:
+                        event["paused_shadow_mode"] = True
+                        event["research_observation_only"] = True
+                        event["paused_shadow_reason"] = "ADMIN_MANUAL"
                     if recovery_observation_only:
                         event["strategy_recovery_observation_only"] = True
                     with state_lock:

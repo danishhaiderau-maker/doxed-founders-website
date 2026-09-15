@@ -98,8 +98,22 @@ def test_inventory_hook_follows_publication_and_is_not_in_http_handler():
             for call in ast.walk(node):
                 if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "_start_data_sync_bundle_generation":
                     calls.append((node.name, call.lineno))
-    assert len(calls) == 1 and calls[0][0] == "_data_sync_inventory_refresh_worker"
-    fn = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == calls[0][0])
+    # Publication remains the primary hook.  Reservation hydration also
+    # retries a generation that was published while it held the coordinator
+    # lock; that retry is deliberately outside every HTTP handler.
+    assert {name for name, _ in calls} == {
+        "_data_sync_inventory_refresh_worker",
+        "_start_data_sync_bundle_reservation_hydration",
+    }
+    publication_line = next(
+        line for name, line in calls
+        if name == "_data_sync_inventory_refresh_worker"
+    )
+    fn = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_data_sync_inventory_refresh_worker"
+    )
     retains = [call.lineno for call in ast.walk(fn) if isinstance(call, ast.Call)
                and isinstance(call.func, ast.Name) and call.func.id == "_data_sync_retain_disk_inventory_generation"]
-    assert retains and max(retains) < calls[0][1]
+    assert retains and max(retains) < publication_line

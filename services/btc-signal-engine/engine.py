@@ -8674,6 +8674,11 @@ state = {
     "allow_compression": True,
     "live_armed": False,
     "bitfinex_live_enabled": False,
+    # New paper/research sessions start executable by default.  An explicit
+    # operator pause is still persisted and remains authoritative until the
+    # Resume Trading control is used; this default does not auto-clear a saved
+    # pause on restart.
+    "manual_admin_pause": False,
     "exchange_sync_audit": {
         "checked_ts": 0.0,
         "authoritative": False,
@@ -17313,7 +17318,8 @@ def _spawn_lab_combo_shadow(
     # only this explicitly tagged counterfactual path through.
     safe_counterfactual = (
         bool(is_counterfactual)
-        and str(collection_mode or "").upper() == "CALIBRATION_COUNTERFACTUAL"
+        and str(collection_mode or "").upper()
+        in {"CALIBRATION_COUNTERFACTUAL", "ADMIN_PAUSED_SHADOW"}
     )
     if lane_orders_allowed(target_lane) and not safe_counterfactual:
         logger.error(
@@ -17472,7 +17478,10 @@ TILE2_ENTRY_TTL_SEC = int(os.getenv("TILE2_ENTRY_TTL_SEC", str(30 * 60)))
 
 
 
-def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
+def spawn_combo_lanes_from_ai_scan(
+    ctx, ai, edge_score, features, source_lane: str,
+    paused_shadow_mode: bool = False,
+):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
     Independent-AI lanes and deterministic bracket lanes are excluded. Patient
@@ -17534,6 +17543,9 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         elif not lane_enabled:
             disposition = "LANE_DISABLED_NO_ORDER"
             decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
+        elif paused_shadow_mode:
+            disposition = "PAUSED_SHADOW_NO_ORDER"
+            decision_reason = "ADMIN_MANUAL_PAUSED_SHADOW"
         else:
             disposition = "ORDER_ELIGIBLE"
             decision_reason = treatment_reason or "SHARED_AI_APPROVE_AND_POLICY_PASS"
@@ -17581,6 +17593,16 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             logger.info(
                 f"[{lane}] combo filter blocked spawn reason={br} "
                 f"[PIPELINE ENFORCEMENT]"
+            )
+            continue
+        if paused_shadow_mode:
+            # Manual execution pause is a data-collection mode, not a queued
+            # order. Use the isolated LAB replay path so a later resume cannot
+            # turn this already-paused observation into a paper/live order.
+            _spawn_lab_combo_shadow(
+                ctx, ai, edge_score, lane, enriched,
+                collection_mode="ADMIN_PAUSED_SHADOW",
+                is_counterfactual=True,
             )
             continue
         _enqueue_combo_lane_execution(
@@ -17690,7 +17712,10 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
     close_replay_buffer(study_id)
 
 
-def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
+def spawn_continuous_lane_from_ai_scan(
+    ctx, ai, edge_score, features, source_lane: str,
+    paused_shadow_mode: bool = False,
+):
     """CONTINUOUS benchmark tile — mirrors AI_SCAN AI; toggle ON places limits, OFF logs shadow data only."""
     if not is_ai_scan_lane(source_lane) or not ai:
         return
@@ -17758,7 +17783,12 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         score=abs(long_score - short_score),
         policy_version="continuous_shared_direction_gap_v1",
     )
-    if continuous_accept and orders_on:
+    if paused_shadow_mode:
+        # A paused observation is never an executable expectation, even when
+        # the tile is enabled and the shared score would otherwise approve.
+        v3_disposition = "PAUSED_SHADOW_NO_ORDER"
+        v3_reason = "ADMIN_MANUAL_PAUSED_SHADOW"
+    elif continuous_accept and orders_on:
         v3_disposition = "ORDER_ELIGIBLE"
         v3_reason = continuous_reason
     elif continuous_accept:
@@ -17794,6 +17824,17 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         f"orders={'ON' if orders_on else 'OFF(data-only)'} "
         f"[PIPELINE ENFORCEMENT]"
     )
+    if paused_shadow_mode:
+        # Never enqueue a child while the operator pause is active. This
+        # replay is explicitly non-executable and keeps its causal identity
+        # separate from observed paper fills.
+        _spawn_lab_combo_shadow(
+            spawn_ctx, continuous_ai, float(edge_score or 0),
+            RESEARCH_LANE_CONTINUOUS, features or {},
+            collection_mode="ADMIN_PAUSED_SHADOW",
+            is_counterfactual=True,
+        )
+        return
     # Apply the same toggle contract as every other execution tile. ON enters
     # the local order lifecycle; OFF opens a full LAB replay. The former direct
     # process_signal call stopped at DATA_COLLECT_ONLY and produced no shadow.
@@ -17976,6 +18017,9 @@ def evaluate_signal_with_ai(
             "prompt_id": SHARED_DIRECTION_PROMPT_ID,
             "deepseek_model": _deepseek_model(),
             "deepseek_thinking_mode": _deepseek_thinking_mode(),
+            "paused_shadow_mode": bool(ctx.get("paused_shadow_mode")),
+            "research_observation_only": bool(ctx.get("research_observation_only")),
+            "paused_shadow_reason": ctx.get("paused_shadow_reason"),
         }
         ai_result["research_baseline_context_declaration"] = research_context_capture["declaration"]
         ai_result.update(research_timing_capture)
@@ -18116,6 +18160,43 @@ def evaluate_signal_with_ai(
 def is_research_data_collection() -> bool:
     with state_lock:
         return state.get("strategy_mode") == "RESEARCH" and not state.get("live_armed")
+
+
+def can_run_paused_research_observation(now: float = None) -> tuple:
+    """Allow DeepSeek evidence collection while paper execution is manually paused.
+
+    This is deliberately narrower than ``is_research_data_collection``. A
+    manual pause may suppress every executable order path, but it must not
+    erase the causal AI observation needed to explain what the bot would have
+    done. The observer is permitted only on a warmed, explicitly forced-paper
+    runtime with live relay disabled. It never grants entry authority.
+    """
+    runtime = _recompute_system_readiness(now)
+    with state_lock:
+        research = state.get("strategy_mode") == "RESEARCH"
+        live_armed = bool(state.get("live_armed"))
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled"))
+        ai_enabled = bool(state.get("ai_enabled", True))
+    allowed = bool(
+        research
+        and _force_paper_mode_active()
+        and not live_armed
+        and not bitfinex_live_enabled
+        and ai_enabled
+        and runtime.get("system_ready")
+    )
+    if allowed:
+        reason = "ADMIN_MANUAL_RESEARCH_OBSERVATION_ONLY"
+    elif not research:
+        reason = "RESEARCH_MODE_REQUIRED"
+    elif live_armed or bitfinex_live_enabled or not _force_paper_mode_active():
+        reason = "PAPER_ONLY_REQUIRED"
+    elif not ai_enabled:
+        reason = "AI_DISABLED"
+    else:
+        reasons = runtime.get("readiness_reasons") or []
+        reason = str(reasons[0] if reasons else "SYSTEM_NOT_READY")
+    return allowed, reason, runtime
 
 def _clamp_ai_threshold(value: float) -> float:
     return max(AI_THRESHOLD_MIN, min(AI_THRESHOLD_MAX, float(value)))
@@ -22810,13 +22891,31 @@ def process_signal(event: dict):
     recovery_observation_only = bool(
         event.get("strategy_recovery_observation_only")
     )
-    paused_shadow_mode = bool(event.get("paused_shadow_mode")) or (
+    requested_paused_shadow = bool(event.get("paused_shadow_mode")) or (
         manual_pause and is_research_data_collection()
     )
     # This lane has no paused-shadow mode. A pause must cancel/refuse paper
     # exposure and leave cancellation evidence, never synthesize an outcome.
     if is_patient_chase_lane(event_lane):
-        paused_shadow_mode = False
+        requested_paused_shadow = False
+    paused_shadow_mode = False
+    if requested_paused_shadow:
+        # The scheduler's marker is only a request. Revalidate the narrow
+        # observer gate at the process boundary so a direct caller or a
+        # runtime transition (AI disabled, live enabled, readiness lost) can
+        # never turn a stale marker into an AI/replay execution path.
+        observer_ok, observer_reason, _observer_runtime = (
+            can_run_paused_research_observation()
+        )
+        if not observer_ok:
+            logger.warning(
+                f"[PIPELINE] refused paused research observation reason={observer_reason} "
+                f"lane={event_lane} [PIPELINE ENFORCEMENT]"
+            )
+            if manual_pause:
+                _manual_pause_block_entry(event, "PAUSED_RESEARCH_OBSERVATION")
+            return {"entry_resolution": "NO_ORDER", "exact_reason": observer_reason}
+        paused_shadow_mode = True
     if manual_pause and not paused_shadow_mode:
         # A manual stop may collect isolated counterfactual outcomes only in
         # the paper/research configuration.  If a future live-armed runtime is
@@ -23085,6 +23184,17 @@ def process_signal(event: dict):
                 # this single immutable causal snapshot.
                 features = _freeze_shared_causal_feature_snapshot(features, ctx)
 
+                if paused_shadow_mode:
+                    # Carry the operator-pause mode into the exact context
+                    # sent to DeepSeek and the durable AI input/output row.
+                    # The marker is provenance only; it grants no execution
+                    # authority and is revalidated at process entry.
+                    ctx.update({
+                        "paused_shadow_mode": True,
+                        "research_observation_only": True,
+                        "paused_shadow_reason": "ADMIN_MANUAL",
+                    })
+
                 invoke_ai, ai_gate_reason = should_invoke_ai(ctx, edge_score, True)
                 if not invoke_ai:
                     logger.info(
@@ -23165,9 +23275,11 @@ def process_signal(event: dict):
                     # benchmark tile evaluation-only even while its toggle is ON.
                     spawn_combo_lanes_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
+                        paused_shadow_mode=paused_shadow_mode,
                     )
                     spawn_continuous_lane_from_ai_scan(
                         ctx, ai, edge_score, features, research_lane,
+                        paused_shadow_mode=paused_shadow_mode,
                     )
 
             if not ai:
@@ -39354,10 +39466,20 @@ _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES = frozenset({
     "GENERATION_ENTRY_LIMIT_EXCEEDED",
     "GENERATION_LEASE_ACTIVE",
     "GENERATION_SPOOL_LIMIT_EXCEEDED",
+    "INVENTORY_CAPACITY_DEFERRED",
     "INVENTORY_SQLITE_FAILED",
     "INVENTORY_WORKER_FAILED",
     "SNAPSHOT_INTEGRITY_FAILED",
 })
+_DATA_SYNC_INVENTORY_FAILURE_STAGES = frozenset({
+    "CAPACITY_GATE",
+    "PARENT_REFRESH",
+})
+# Inventory construction writes SQLite/checkpoint state before it can publish a
+# recoverable manifest.  Do not start a new construction pass once the Fly
+# volume has less than this reserve; retain existing authority if present and
+# report a typed deferral instead of turning temporary pressure into a crash.
+_DATA_SYNC_INVENTORY_MIN_FREE_BYTES = 512 * 1024 * 1024
 _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS = 300
 # The worker is resumable, so short slices preserve completeness while yielding
 # the single Fly CPU and publishing progress well inside the desktop client's
@@ -39403,10 +39525,43 @@ _data_sync_async_inventory = {
     "worker_failure_code": None,
     "last_worker_failure_code": None,
     "last_worker_failure_at": None,
+    "last_worker_failure_stage": None,
+    "last_worker_failure_fingerprint": None,
+    "last_worker_failure_volume_free_bytes": None,
     "worker_invocations": 0,
     "worker_pages_written": 0,
     "worker_pages_total": None,
 }
+
+
+def _data_sync_inventory_volume_free_bytes() -> int | None:
+    """Return a capacity fact without fabricating zero when the probe fails."""
+    try:
+        return max(0, int(shutil.disk_usage(_data_sync_volume_root()).free))
+    except OSError:
+        return None
+
+
+def _data_sync_inventory_failure_fingerprint(
+    *, stage: str, code: str, nonce: str | None,
+) -> str:
+    """Correlate a public failure without exposing a path or exception text."""
+    payload = json.dumps({
+        "code": str(code),
+        "nonce": str(nonce or ""),
+        "stage": str(stage),
+    }, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _data_sync_inventory_public_failure_code(value) -> str | None:
+    """Project only the finite public failure vocabulary."""
+    candidate = str(value or "")
+    return (
+        candidate
+        if candidate in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
+        else None
+    )
 _DATA_SYNC_MANIFEST_PAGE_DEFAULT = 250
 _DATA_SYNC_MANIFEST_PAGE_MAX = 500
 _DATA_SYNC_ACK_FILE_MAX = 100_000
@@ -41259,6 +41414,7 @@ def _start_data_sync_bundle_reservation_hydration() -> None:
     def hydrate():
         global _DATA_SYNC_BUNDLE_REGISTRY, _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING, _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT
         acquired = _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False)
+        retry_generation_id = None
         try:
             if not acquired:
                 return
@@ -41277,6 +41433,25 @@ def _start_data_sync_bundle_reservation_hydration() -> None:
                 with _data_sync_inventory_cache_condition:
                     _DATA_SYNC_BUNDLE_REGISTRY = registry
             _DATA_SYNC_BUNDLE_REGISTRY.hydrate()
+            # Inventory finalization can complete while this metadata
+            # hydration owns the coordinator lock.  In that race the
+            # one-shot producer call at the end of the inventory worker sees
+            # the lock held and returns without creating a package.  Capture
+            # the already-published CURRENT generation and retry only after
+            # releasing the lock below; the producer's own identity,
+            # retention, and singleton checks remain authoritative.
+            with _data_sync_inventory_cache_condition:
+                candidate_id = str(
+                    _data_sync_async_inventory.get("generation_id") or ""
+                )
+                candidate = _data_sync_inventory_generations.get(candidate_id)
+                if (
+                    _DATA_SYNC_BUNDLE_REGISTRY.ready
+                    and _data_sync_async_inventory.get("status") == "CURRENT"
+                    and isinstance(candidate, dict)
+                    and candidate.get("ack_eligible") is True
+                ):
+                    retry_generation_id = candidate_id
         except Exception as exc:
             logger.warning("bundle reservation hydration deferred: %s", type(exc).__name__)
         finally:
@@ -41285,6 +41460,8 @@ def _start_data_sync_bundle_reservation_hydration() -> None:
             with _DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK:
                 _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING = False
                 _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT = time.monotonic() + 5
+        if retry_generation_id:
+            _start_data_sync_bundle_generation(retry_generation_id)
     try:
         threading.Thread(target=hydrate, name="data-sync-reservation-hydration", daemon=True).start()
     except Exception:
@@ -41968,6 +42145,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
     request_path = None
     result_path = None
     worker_failure_code = None
+    worker_failure_stage = "PARENT_REFRESH"
+    worker_failure_fingerprint = None
+    worker_failure_volume_free_bytes = None
     try:
         nonce = uuid.uuid4().hex
         launched_unix = time.time()
@@ -42140,6 +42320,26 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                     if candidate_failure_code in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
                     else "INVENTORY_WORKER_FAILED"
                 )
+                candidate_failure_stage = str(result.get("failure_stage") or "")
+                worker_failure_stage = (
+                    candidate_failure_stage
+                    if candidate_failure_stage in _DATA_SYNC_INVENTORY_FAILURE_STAGES
+                    else "PARENT_REFRESH"
+                )
+                candidate_fingerprint = str(result.get("failure_fingerprint") or "")
+                worker_failure_fingerprint = (
+                    candidate_fingerprint
+                    if re.fullmatch(r"[0-9a-f]{64}", candidate_fingerprint)
+                    else None
+                )
+                candidate_free_bytes = result.get("volume_free_bytes")
+                worker_failure_volume_free_bytes = (
+                    int(candidate_free_bytes)
+                    if isinstance(candidate_free_bytes, int)
+                    and not isinstance(candidate_free_bytes, bool)
+                    and candidate_free_bytes >= 0
+                    else None
+                )
                 raise RuntimeError(
                     f"inventory subprocess failed: {worker_failure_code}"
                 )
@@ -42234,6 +42434,9 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 "worker_failure_code": None,
                 "last_worker_failure_code": None,
                 "last_worker_failure_at": None,
+                "last_worker_failure_stage": None,
+                "last_worker_failure_fingerprint": None,
+                "last_worker_failure_volume_free_bytes": None,
             })
             _data_sync_inventory_cache_condition.notify_all()
         threading.Thread(
@@ -42243,12 +42446,38 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             daemon=True,
         ).start()
         _start_data_sync_bundle_generation(inventory_generation_id)
-    except BaseException as exc:
-        logger.error(f"data-sync inventory background refresh failed: {exc}")
+    except BaseException:
         persisted_worker_failure_code = (
             worker_failure_code
             if worker_failure_code in _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES
             else "INVENTORY_WORKER_FAILED"
+        )
+        persisted_worker_failure_stage = (
+            worker_failure_stage
+            if worker_failure_stage in _DATA_SYNC_INVENTORY_FAILURE_STAGES
+            else "PARENT_REFRESH"
+        )
+        persisted_worker_failure_fingerprint = (
+            worker_failure_fingerprint
+            if re.fullmatch(r"[0-9a-f]{64}", str(worker_failure_fingerprint or ""))
+            else _data_sync_inventory_failure_fingerprint(
+                stage=persisted_worker_failure_stage,
+                code=persisted_worker_failure_code,
+                nonce=nonce,
+            )
+        )
+        persisted_worker_failure_free_bytes = (
+            worker_failure_volume_free_bytes
+            if isinstance(worker_failure_volume_free_bytes, int)
+            and not isinstance(worker_failure_volume_free_bytes, bool)
+            and worker_failure_volume_free_bytes >= 0
+            else _data_sync_inventory_volume_free_bytes()
+        )
+        logger.error(
+            "data-sync inventory background refresh failed code=%s stage=%s fingerprint=%s",
+            persisted_worker_failure_code,
+            persisted_worker_failure_stage,
+            persisted_worker_failure_fingerprint,
         )
         worker_failure_at = utc_iso()
         with _data_sync_inventory_cache_condition:
@@ -42262,10 +42491,13 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                 "refreshing": False,
                 "active_refresh_nonce": None,
                 "last_failure_at": worker_failure_at,
-                "error": type(exc).__name__,
+                "error": persisted_worker_failure_code,
                 "worker_failure_code": persisted_worker_failure_code,
                 "last_worker_failure_code": persisted_worker_failure_code,
                 "last_worker_failure_at": worker_failure_at,
+                "last_worker_failure_stage": persisted_worker_failure_stage,
+                "last_worker_failure_fingerprint": persisted_worker_failure_fingerprint,
+                "last_worker_failure_volume_free_bytes": persisted_worker_failure_free_bytes,
                 "expires_at": 0.0,
             })
             _data_sync_inventory_cache_condition.notify_all()
@@ -42436,6 +42668,73 @@ def _data_sync_request_async_inventory(
                 "worker_spool_bytes_used": _data_sync_async_inventory.get("worker_spool_bytes_used"),
                 "error": None,
             }
+        # A new inventory generation writes SQLite/checkpoint data before it
+        # can publish an immutable manifest.  Under capacity pressure do not
+        # start (or repeatedly restart) that work.  This fence intentionally
+        # leaves any already-running worker alone and never removes evidence.
+        if not _data_sync_async_inventory.get("refreshing"):
+            free_bytes = _data_sync_inventory_volume_free_bytes()
+            if (
+                free_bytes is None
+                or free_bytes < _DATA_SYNC_INVENTORY_MIN_FREE_BYTES
+            ):
+                deferred_at = utc_iso()
+                stale_rows = _data_sync_async_inventory.get("rows")
+                stale_generation = _data_sync_async_inventory.get("generation")
+                has_retained_generation = (
+                    isinstance(stale_rows, list)
+                    or isinstance(stale_generation, dict)
+                )
+                deferred_status = "STALE" if has_retained_generation else "EMPTY"
+                deferred_fingerprint = _data_sync_inventory_failure_fingerprint(
+                    stage="CAPACITY_GATE",
+                    code="INVENTORY_CAPACITY_DEFERRED",
+                    nonce=None,
+                )
+                _data_sync_async_inventory.update({
+                    "status": deferred_status,
+                    "refreshing": False,
+                    "active_refresh_nonce": None,
+                    "last_failure_at": deferred_at,
+                    "error": "INVENTORY_CAPACITY_DEFERRED",
+                    "worker_phase": "CAPACITY_DEFERRED",
+                    "worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_at": deferred_at,
+                    "last_worker_failure_stage": "CAPACITY_GATE",
+                    "last_worker_failure_fingerprint": deferred_fingerprint,
+                    "last_worker_failure_volume_free_bytes": free_bytes,
+                    "retry_after_seconds": 30,
+                })
+                return {
+                    "status": deferred_status,
+                    "rows": (
+                        [dict(row) for row in stale_rows]
+                        if isinstance(stale_rows, list) else []
+                    ),
+                    "generation": (
+                        dict(stale_generation)
+                        if isinstance(stale_generation, dict) else None
+                    ),
+                    "generated_at": _data_sync_async_inventory.get("generated_at"),
+                    "generation_id": _data_sync_async_inventory.get("generation_id"),
+                    "refreshing": False,
+                    "refresh_nonce": None,
+                    "refresh_started_at": _data_sync_async_inventory.get(
+                        "refresh_started_at"
+                    ),
+                    "refresh_completed_at": _data_sync_async_inventory.get(
+                        "refresh_completed_at"
+                    ),
+                    "last_failure_at": deferred_at,
+                    "worker_phase": "CAPACITY_DEFERRED",
+                    "worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_code": "INVENTORY_CAPACITY_DEFERRED",
+                    "last_worker_failure_at": deferred_at,
+                    "retry_after_seconds": 30,
+                    "capacity_deferred": True,
+                    "error": "INVENTORY_CAPACITY_DEFERRED",
+                }
         if not _data_sync_async_inventory.get("refreshing"):
             _data_sync_async_inventory["refreshing"] = True
             _data_sync_async_inventory["status"] = "BUILDING"
@@ -43329,6 +43628,18 @@ def api_data_sync_manifest():
         fresh_collection_signal_ts=fresh_collection_signal_ts,
     )
     tile_registry = active_tile_lifecycle_manifest()
+    inventory_error = _data_sync_inventory_public_failure_code(
+        inventory_state.get("error")
+    )
+    inventory_failure_stage = str(
+        _data_sync_async_inventory.get("last_worker_failure_stage") or ""
+    )
+    inventory_failure_fingerprint = str(
+        _data_sync_async_inventory.get("last_worker_failure_fingerprint") or ""
+    )
+    inventory_failure_free_bytes = _data_sync_async_inventory.get(
+        "last_worker_failure_volume_free_bytes"
+    )
     payload = {
         "schema": "fly_runtime_incremental_sync_v1",
         "generated_at": utc_iso(),
@@ -43350,7 +43661,7 @@ def api_data_sync_manifest():
         "inventory_authoritative": inventory_status == "CURRENT",
         "inventory_ack_eligible": inventory_status == "CURRENT" and receipt_bootstrap["complete"],
         "receipt_bootstrap": receipt_bootstrap,
-        "inventory_error": inventory_state.get("error"),
+        "inventory_error": inventory_error,
         "inventory_build_status": (
             "PENDING" if inventory_state.get("worker_phase") == "WAITING_RECEIPT_BOOTSTRAP"
             else "BUILDING" if inventory_state.get("refreshing")
@@ -43418,9 +43729,30 @@ def api_data_sync_manifest():
             "invocations": inventory_state.get("worker_invocations"),
             "pages_written": inventory_state.get("worker_pages_written"),
             "pages_total": inventory_state.get("worker_pages_total"),
-            "failure_code": inventory_state.get("worker_failure_code"),
-            "last_failure_code": inventory_state.get("last_worker_failure_code"),
+            "failure_code": _data_sync_inventory_public_failure_code(
+                inventory_state.get("worker_failure_code")
+            ),
+            "last_failure_code": _data_sync_inventory_public_failure_code(
+                inventory_state.get("last_worker_failure_code")
+            ),
             "last_failure_code_at": inventory_state.get("last_worker_failure_at"),
+            "last_failure_stage": (
+                inventory_failure_stage
+                if inventory_failure_stage in _DATA_SYNC_INVENTORY_FAILURE_STAGES
+                else None
+            ),
+            "last_failure_fingerprint": (
+                inventory_failure_fingerprint
+                if re.fullmatch(r"[0-9a-f]{64}", inventory_failure_fingerprint)
+                else None
+            ),
+            "last_failure_volume_free_bytes": (
+                int(inventory_failure_free_bytes)
+                if isinstance(inventory_failure_free_bytes, int)
+                and not isinstance(inventory_failure_free_bytes, bool)
+                and inventory_failure_free_bytes >= 0
+                else None
+            ),
             "scan_units_completed": inventory_state.get("worker_scan_units_completed"),
             "directories_frozen": inventory_state.get("worker_directories_frozen"),
             "directory_entries_frozen": inventory_state.get("worker_directory_entries_frozen"),
@@ -50669,9 +51001,14 @@ def periodic_pipeline_loop():
                 "last_poll_reason": str(entry_reason or "UNKNOWN")[:120],
             })
         recovery_observation_only = False
+        paused_research_observation = False
         if not entry_ok:
             recovery_observation_only = can_run_ai_recovery_observation(now)[0]
-            if not recovery_observation_only:
+            paused_research_observation = bool(
+                manual_admin_pause_active()
+                and can_run_paused_research_observation(now)[0]
+            )
+            if not recovery_observation_only and not paused_research_observation:
                 continue
         ai_cd = get_effective_ai_cooldown_sec()
         if now - state.get("last_ai_call_ts", 0) < ai_cd:
@@ -50698,6 +51035,10 @@ def periodic_pipeline_loop():
                 logger.info("[HEARTBEAT] V3.1 periodic AI check [PIPELINE ENFORCEMENT]")
                 event = detect_event_light()
                 if event and event.get("event_trigger"):
+                    if paused_research_observation:
+                        event["paused_shadow_mode"] = True
+                        event["research_observation_only"] = True
+                        event["paused_shadow_reason"] = "ADMIN_MANUAL"
                     if recovery_observation_only:
                         event["strategy_recovery_observation_only"] = True
                     with state_lock:

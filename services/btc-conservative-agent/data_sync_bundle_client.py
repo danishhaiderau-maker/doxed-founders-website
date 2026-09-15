@@ -111,8 +111,11 @@ def _verified_local_members(raw_root, selected, check_deadline):
                 raise BundleClientError("LOCAL_REUSE_LINK_REJECTED")
         return True
 
+    # Windows can report a slightly different creation-time value between
+    # lstat() and an open handle.  It is not a stable mutation signal; keep
+    # device/inode/size/mtime plus the full content hash and boundary checks.
     signature = lambda value: (value.st_dev, value.st_ino, value.st_size,
-                               value.st_mtime_ns, value.st_ctime_ns)
+                               value.st_mtime_ns)
     try:
         if not unlinked(root) or not root.is_dir() or root.resolve(strict=True) != root:
             return None

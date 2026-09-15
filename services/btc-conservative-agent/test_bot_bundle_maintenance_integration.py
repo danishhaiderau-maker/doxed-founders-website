@@ -114,6 +114,23 @@ def test_unreserved_persisted_restores_only_after_hydration(tmp_path):
         ns["_data_sync_request_async_inventory"]()
 
 
+def test_hydration_retries_current_generation_after_coordinator_race(tmp_path, monkeypatch):
+    ns, _, _, _ = harness(tmp_path)
+    identity = IDS[4]
+    ns["_data_sync_inventory_generations"][identity] = {
+        **generation(identity),
+        "ack_eligible": True,
+        "retained_at": time.monotonic(),
+    }
+    ns["_data_sync_async_inventory"].update(
+        status="CURRENT", generation_id=identity, generation=generation(identity)
+    )
+    started = []
+    ns["_start_data_sync_bundle_generation"] = lambda value: started.append(value)
+    ns["_start_data_sync_bundle_reservation_hydration"]()
+    assert started == [identity]
+
+
 def test_publication_and_accessor_consult_same_reservation_under_condition(tmp_path):
     ns, _, _, _ = harness(tmp_path)
     ns["_start_data_sync_bundle_reservation_hydration"]()
@@ -141,6 +158,15 @@ def test_coordinator_maintains_capacity_before_starting_slice_owner(tmp_path, se
     shutil.copytree(args["output_root"], work / "transport-bundles")
     (source / "raw-record").write_bytes(b"preserved")
     ns["_start_data_sync_bundle_reservation_hydration"]()
+    # Hydration is intentionally asynchronous; wait for the bounded readiness
+    # receipt before asking the coordinator to start a generation.  This keeps
+    # the test deterministic without changing production scheduling semantics.
+    deadline = time.monotonic() + 2
+    while (ns["_DATA_SYNC_BUNDLE_REGISTRY"] is None
+           or not ns["_DATA_SYNC_BUNDLE_REGISTRY"].ready) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert ns["_DATA_SYNC_BUNDLE_REGISTRY"] is not None
+    assert ns["_DATA_SYNC_BUNDLE_REGISTRY"].ready
     for identity in (IDS[3], IDS[4]): publish(ns, identity)
     ns["_data_sync_async_inventory"].update(status="CURRENT", generation_id=IDS[3])
     events = []
