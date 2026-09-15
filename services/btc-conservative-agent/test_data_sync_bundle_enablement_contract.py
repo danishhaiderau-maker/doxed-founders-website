@@ -1,5 +1,4 @@
 """Static contract for the server-side package worker enablement.
-
 The transfer client can request the bundle protocol, but Fly must also run the
 server-side worker that builds and retains the content-addressed packages.
 Keep this check dependency-free so it can run before Flask/requests are
@@ -21,4 +20,3 @@ def test_fly_config_explicitly_enables_server_bundle_worker():
 
 def test_bundle_worker_still_fails_closed_when_flag_is_absent_or_not_one():
     assert 'os.getenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "0") != "1"' in BOT_SOURCE
-
