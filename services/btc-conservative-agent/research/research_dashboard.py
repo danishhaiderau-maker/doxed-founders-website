@@ -7213,9 +7213,9 @@ function analyzerAttemptLabel(d) {
 }
 function analyzerRecoveryGuidance(d) {
   if (((d || {}).analysis_run || {}).phase === 'FAILED') {
-    return 'Latest analysis failed. Recovery required: inspect the failure receipt and repair the verified mirror/publication through the existing single-owner workflow. Do not start a duplicate analyzer.';
+    return 'Latest analysis failed. Recovery required: wait for the verified Fly mirror, inspect the failure receipt, and repair the mirror/publication through the existing single-owner workflow. Do not start a duplicate analyzer.';
   }
-  return 'Current publication is not verified. Check the existing single-owner workflow and its receipts; saved status does not prove a process is running. Do not start a duplicate analyzer.';
+  return 'Current publication is not verified. Wait for the verified Fly mirror, then check the existing single-owner workflow and its receipts; saved status does not prove a process is running. Do not start a duplicate analyzer.';
 }
 function formatExecutiveText(raw, d) {
   if (!raw) return analyzerRecoveryGuidance(d);
