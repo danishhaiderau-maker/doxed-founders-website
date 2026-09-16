@@ -18166,7 +18166,6 @@ def evaluate_signal_with_ai(
     except Exception as e:
         logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
         ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
-        _record_ai_provider_result_receipt(ai_result)
         # Preserve only evidence captured before the failed API/parsing stage.
         # An AI failure does not invalidate the already observed market context.
         if research_context_capture is not None:
@@ -18175,6 +18174,7 @@ def evaluate_signal_with_ai(
         ai_result.update(research_timing_capture)
         if counterfactual_coverage is not None:
             ai_result["counterfactual_coverage"] = counterfactual_coverage
+        _record_ai_provider_result_receipt(ai_result)
         ai_result["research_lane"] = research_lane
         ai_result["shadow_only"] = shadow_only
         ai_result["prompt_id"] = SHARED_DIRECTION_PROMPT_ID
