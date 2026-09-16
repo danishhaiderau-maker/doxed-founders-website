@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import threading
 import time
@@ -41,7 +42,7 @@ def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,ex
     bot=Path(os.environ.get('CADENCE_TEST_BOT_PATH') or Path(__file__).with_name('bot.py'))
     tree=ast.parse(bot.read_text(encoding='utf-8'))
     fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_data_sync_inventory_refresh_worker')
-    ns=dict(Path=Path,os=os,sys=sys,uuid=uuid,json=json,hmac=hmac,__file__=str(bot),threading=threading,
+    ns=dict(Path=Path,os=os,re=re,sys=sys,uuid=uuid,json=json,hmac=hmac,__file__=str(bot),threading=threading,
             time=SimpleNamespace(time=time.time,sleep=sleep),
             subprocess=SimpleNamespace(run=run,DEVNULL=-3),logger=SimpleNamespace(error=lambda *a:errors.append(a)),
             utc_iso=lambda:'test',active_tile_registry_signature=lambda:'config',
@@ -51,6 +52,8 @@ def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,ex
             _data_sync_allowed_roots=lambda:[tmp_path],_data_sync_inventory_file_budget=lambda:250,
             _data_sync_inventory_slice_seconds=lambda:0.1,
             _data_sync_cleanup_inventory_worker_orphans=lambda *a:None,
+            _data_sync_inventory_failure_fingerprint=lambda **_kwargs:'a'*64,
+            _data_sync_inventory_volume_free_bytes=lambda:1024*1024*1024,
             _data_sync_inventory_cache_condition=threading.Condition(),_data_sync_async_inventory={})
     for name in ('TOP_LEVEL_RECEIPT_NAMES','EXTENSIONS','EXCLUDED_NAMES','EXCLUDED_DIR_NAMES','APPEND_PREFIX_NAMES'):
         ns['_DATA_SYNC_'+name]=set()
@@ -58,7 +61,8 @@ def test_worker_result_drives_parent_sleep(tmp_path,monkeypatch,phase,elapsed,ex
               _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA=module.RESULT_SCHEMA,
               _DATA_SYNC_INVENTORY_WORKER_NAME='worker.py',_DATA_SYNC_MANIFEST_PAGE_DEFAULT=250,
               _DATA_SYNC_INVENTORY_WORKER_SLICE_SECONDS=0.1,
-              _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS=10,_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES=set())
+              _DATA_SYNC_INVENTORY_WORKER_TIMEOUT_SECONDS=10,_DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES=set(),
+              _DATA_SYNC_INVENTORY_FAILURE_STAGES=frozenset({'CAPACITY_GATE','PARENT_REFRESH'}))
     helper=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_run_admitted_inventory_child')
     ns['_EVIDENCE_WORKER_ADMISSION_GATE']=threading.Lock()
     exec(compile(ast.Module(body=[helper],type_ignores=[]),'actual-admission','exec'),ns)
