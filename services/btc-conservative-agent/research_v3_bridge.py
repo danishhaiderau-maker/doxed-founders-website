@@ -1388,6 +1388,290 @@ def dual_write_terminal_paper_schedule(
     }
 
 
+def dual_write_terminal_paper_no_fill(
+    order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str,
+    data_dir: str, lifecycle_final: bool = False,
+    paper_cancel_confirmed: bool = False,
+) -> dict[str, Any] | None:
+    """Append explicit never-opened truth after a confirmed paper cancellation.
+
+    Absence of fill evidence is not enough.  The caller must have won the
+    normal cancellation race, closed the authoritative schedule, and retained
+    explicit zero-fill state.  Pre-order NO_ORDER decisions and temporary
+    chase pulls therefore cannot enter this path.
+    """
+    if (
+        lifecycle_final is not True
+        or paper_cancel_confirmed is not True
+        or order.get("cancel_confirmed") is not True
+    ):
+        return None
+    # ``bitfinex_order_id`` may have been cleared by the confirmed-cancel
+    # mutator.  The caller's explicit paper proof is therefore mandatory; a
+    # cleared handle is never evidence that an order was paper-only.
+    if order.get("bitfinex_live_entry") is True:
+        return None
+    if str(order.get("status") or "").upper() in {
+        "FILLED", "FILLED_ON_EXCHANGE", "OPEN", "CLOSED", "COMPLETE",
+    }:
+        return None
+    if order.get("partial_fill") is True:
+        return None
+    fill_sim = order.get("fill_sim") if isinstance(order.get("fill_sim"), Mapping) else {}
+    for value in (
+        order.get("fill_ts"), order.get("entry_ts"), order.get("fill_price"),
+        order.get("entry"), order.get("live_fill_ts"), order.get("live_fill_price"),
+    ):
+        if value is not None:
+            return None
+    supplied_quantities = []
+    for value in (
+        order.get("filled_qty"), order.get("cumulative_filled_qty"),
+        order.get("executed_qty"), order.get("cancel_confirmed_filled_qty"),
+        fill_sim.get("filled_qty"),
+        fill_sim.get("cumulative_filled_qty"), fill_sim.get("executed_qty"),
+    ):
+        if value not in (None, ""):
+            supplied_quantities.append(value)
+    # Missing fill quantity is not proof of zero. Every supplied quantity must
+    # be a finite, non-negative number equal to zero, and at least one explicit
+    # zero is required from the cancellation evidence.
+    if not supplied_quantities:
+        return None
+    for value in supplied_quantities:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(parsed) or parsed != 0.0:
+            return None
+    fill_state = str(_first(
+        order.get("fill_state"), order.get("fill_status"),
+        fill_sim.get("state"), fill_sim.get("status"),
+        fill_sim.get("outcome"),
+    ) or "").upper()
+    if fill_state in {"FILL", "FILLED", "FULL_FILL", "PARTIAL_FILL", "OPEN"}:
+        return None
+
+    cancel_ts = _timestamp(order.get("cancel_confirmed_ts"))
+    cancel_reason = str(order.get("cancel_confirmed_reason") or "").strip()
+    if cancel_ts is None or cancel_ts <= 0 or not cancel_reason:
+        return None
+
+    schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+    if not isinstance(schedule, Mapping) or schedule.get("authoritative") is not True:
+        return None
+    if schedule.get("terminal_ts") is None or not schedule.get("terminal_reason"):
+        return None
+    schedule_ts = _timestamp(schedule.get("terminal_ts_exact") or schedule.get("terminal_ts"))
+    schedule_reason = str(schedule.get("terminal_reason") or "").strip()
+    if schedule_ts is None or abs(schedule_ts - cancel_ts) > 1.0 or schedule_reason != cancel_reason:
+        return None
+    intervals = schedule.get("intervals")
+    if not isinstance(intervals, list) or not intervals:
+        return None
+    if any(not isinstance(row, Mapping) or row.get("end_ts") is None for row in intervals):
+        return None
+    if str(schedule.get("terminal_reason") or "").upper() in {
+        "FILLED", "FULL_FILL", "PARTIAL_FILL",
+    }:
+        return None
+
+    event_id = str(_first(order.get("trade_id"), signal.get("trade_id")) or "")
+    if not event_id:
+        return None
+    identity = _causal_identity(event_id, signal, order)
+    policy = _paper_policy_identity(str(epoch_id), order, signal)
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id,
+        episode_id=identity["episode_id"], include_schedule=True,
+    )
+    requested_qty = _positive_finite(_first(
+        order.get("requested_qty"), schedule.get("requested_qty"), order.get("qty"),
+    ))
+    if requested_qty is None:
+        return None
+    schedule_sha256 = hashlib.sha256(
+        canonical_json(copy.deepcopy(dict(schedule))).encode("utf-8")
+    ).hexdigest()
+    row = {
+        "record_id": f"lifecycle:{event_id}:terminal",
+        "epoch_id": str(epoch_id),
+        "episode_id": identity["episode_id"],
+        "event_id": event_id,
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "research_lane": policy["paper_policy_spec"].get("research_lane"),
+        "observation_status": "PAPER_ORDER_CLOSED_NO_FILL",
+        "outcome_state": "NO_FILL",
+        "terminal": True,
+        "terminal_no_fill": True,
+        "terminal_reason": schedule.get("terminal_reason"),
+        "terminal_ts": schedule.get("terminal_ts_exact") or schedule.get("terminal_ts"),
+        "schedule_sha256": schedule_sha256,
+        "requested_qty": requested_qty,
+        "filled_qty": 0.0,
+        "position_state": "NEVER_OPENED",
+        "open_quantity": 0.0,
+        "effective_execution_mode": "PAPER_OBSERVED",
+        "ranking_eligible": False,
+        "ranking_blocker": "QUALIFICATION_HORIZON_PENDING",
+        **causal_ids,
+        **policy,
+    }
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    write = store.append("lifecycle", row)
+    if write.get("duplicate"):
+        _assert_existing_terminal_no_fill(store, row)
+    return {
+        "schema": "v3_terminal_paper_no_fill_receipt_v1",
+        "epoch_id": str(epoch_id), **identity, **causal_ids, **policy,
+        "schedule_sha256": schedule_sha256, "write": write,
+        "store_verification": store.verify_write_set(ledgers=("lifecycle",)),
+    }
+
+
+def _assert_existing_terminal_no_fill(store: V3EvidenceStore, expected: Mapping[str, Any]) -> None:
+    """Reject a canonical terminal-ID collision unless semantics are exact.
+
+    ``V3EvidenceStore.append`` is intentionally ID-idempotent, but an ID-only
+    replay is insufficient for terminal evidence: a later conflicting outcome
+    must not be hidden as a harmless duplicate.  Use the bounded idempotency
+    receipt to read one exact row rather than scanning the whole ledger.
+    """
+    actual = _read_exact_terminal_record(
+        store, str(expected.get("record_id") or ""),
+    )
+    if str(actual.get("observation_status") or "") != "PAPER_ORDER_CLOSED_NO_FILL":
+        _assert_cross_writer_terminal_no_fill(actual, expected)
+        return
+    fields = (
+        "record_id", "epoch_id", "event_id", "episode_id", "shared_ai_call_id",
+        "research_lane", "policy_signature", "terminal_no_fill", "outcome_state",
+        "terminal_reason", "terminal_ts", "schedule_sha256", "requested_qty",
+        "filled_qty", "open_quantity",
+    )
+    if any(actual.get(field) != expected.get(field) for field in fields):
+        raise ValueError("V3_TERMINAL_OUTCOME_ID_CONFLICT")
+
+
+def _read_exact_terminal_record(
+    store: V3EvidenceStore, record_id: str,
+) -> dict[str, Any]:
+    """Load the one receipt-bound durable row for a canonical terminal ID."""
+    receipt_path = store._record_receipt_path("lifecycle", record_id)
+    try:
+        receipt = json.loads(receipt_path.read_text("utf-8"))
+        offset = int(receipt["offset"])
+        length = int(receipt["length"])
+        payload = store._bounded_slice(store.ledger_path("lifecycle"), offset, length)
+        if hashlib.sha256(payload).hexdigest() != str(receipt.get("row_sha256") or ""):
+            raise ValueError("V3_TERMINAL_OUTCOME_ID_CONFLICT")
+        actual = json.loads(payload.decode("utf-8"))
+    except (FileNotFoundError, OSError, KeyError, TypeError, ValueError,
+            json.JSONDecodeError, UnicodeDecodeError):
+        raise ValueError("V3_TERMINAL_OUTCOME_ID_CONFLICT")
+    return actual
+
+
+def _assert_v22_terminal_dedupe(
+    store: V3EvidenceStore, expected: Mapping[str, Any], *, primary_outcome: str,
+) -> None:
+    """Validate same-writer V2.2 replay or explicit NO_FILL convergence."""
+    actual = _read_exact_terminal_record(
+        store, str(expected.get("record_id") or ""),
+    )
+    if str(actual.get("observation_status") or "") == "PAPER_ORDER_CLOSED_NO_FILL":
+        if str(primary_outcome or "") != "ACCEPTED_UNFILLED":
+            raise ValueError("V3_TERMINAL_OUTCOME_ID_CONFLICT")
+        _assert_cross_writer_terminal_no_fill(actual, expected)
+        return
+    actual_no_fill = (
+        actual.get("terminal_no_fill") is True
+        or str(actual.get("outcome_state") or "").upper() == "NO_FILL"
+    )
+    expected_no_fill = (
+        str(primary_outcome or "") == "ACCEPTED_UNFILLED"
+        or expected.get("terminal_no_fill") is True
+        or str(expected.get("outcome_state") or "").upper() == "NO_FILL"
+    )
+    # NO_FILL is evidence-sensitive and never receives legacy field
+    # forgiveness. An ordinary FILLED/CLOSED row written by the deployed V2.2
+    # bridge may predate these three candidate fields, though. Compare the
+    # complete former contract plus any new field the durable row actually
+    # contains, so an unchanged source replay stays idempotent without hiding
+    # a present-field conflict.
+    legacy_optional_fields = {
+        "terminal_ts", "requested_qty", "schedule_sha256",
+    }
+    if any(
+        actual.get(field) != value
+        for field, value in expected.items()
+        if (
+            actual_no_fill
+            or expected_no_fill
+            or field not in legacy_optional_fields
+            or field in actual
+        )
+    ):
+        raise ValueError("V3_TERMINAL_OUTCOME_ID_CONFLICT")
+
+
+def _assert_cross_writer_terminal_no_fill(
+    actual: Mapping[str, Any], expected: Mapping[str, Any],
+) -> None:
+    """Join the two NO_FILL writers only on their shared immutable semantics."""
+    actual_no_fill = (
+        actual.get("terminal") is True
+        and actual.get("terminal_no_fill") is True
+        and str(actual.get("outcome_state") or "").upper() == "NO_FILL"
+    )
+    expected_no_fill = (
+        expected.get("terminal") is True
+        and expected.get("terminal_no_fill") is True
+        and str(expected.get("outcome_state") or "").upper() == "NO_FILL"
+    )
+    actual_shared_ai_call_id = actual.get("shared_ai_call_id")
+    expected_shared_ai_call_id = expected.get("shared_ai_call_id")
+    explicit_shared_identity = (
+        isinstance(actual_shared_ai_call_id, str)
+        and isinstance(expected_shared_ai_call_id, str)
+        and bool(actual_shared_ai_call_id.strip())
+        and bool(expected_shared_ai_call_id.strip())
+        and actual_shared_ai_call_id == expected_shared_ai_call_id
+    )
+    fields = (
+        "epoch_id", "event_id", "episode_id", "shared_ai_call_id",
+        "research_lane", "policy_signature", "terminal_reason",
+    )
+    actual_terminal_ts = _timestamp(actual.get("terminal_ts"))
+    expected_terminal_ts = _timestamp(expected.get("terminal_ts"))
+    actual_requested_qty = _positive_finite(actual.get("requested_qty"))
+    expected_requested_qty = _positive_finite(expected.get("requested_qty"))
+    actual_schedule_sha256 = str(actual.get("schedule_sha256") or "").lower()
+    expected_schedule_sha256 = str(expected.get("schedule_sha256") or "").lower()
+    valid_schedule_hashes = all(
+        len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+        for value in (actual_schedule_sha256, expected_schedule_sha256)
+    )
+    if (
+        not actual_no_fill
+        or not expected_no_fill
+        or not explicit_shared_identity
+        or actual_terminal_ts is None
+        or expected_terminal_ts is None
+        or not math.isfinite(actual_terminal_ts)
+        or not math.isfinite(expected_terminal_ts)
+        or actual_requested_qty is None
+        or expected_requested_qty is None
+        or not valid_schedule_hashes
+        or actual_terminal_ts != expected_terminal_ts
+        or actual_requested_qty != expected_requested_qty
+        or actual_schedule_sha256 != expected_schedule_sha256
+        or any(actual.get(field) != expected.get(field) for field in fields)
+    ):
+        raise ValueError("V3_TERMINAL_OUTCOME_ID_CONFLICT")
+
+
 def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], position: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
     """Write an observed paper fill once, without claiming exchange execution."""
     event_id = str(_first(position.get("trade_id"), order.get("trade_id"), signal.get("trade_id")) or "")
@@ -1959,8 +2243,47 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     ranking_eligible = bool(record.get("ranking_eligible")) and (
         not source_fill_present or complete_execution_identity
     )
-    writes.append(store.append("lifecycle", {
+    terminal_schedule = _first(
+        record.get("research_chase_schedule"),
+        envelope.get("research_chase_schedule"),
+    )
+    terminal_schedule = (
+        copy.deepcopy(dict(terminal_schedule))
+        if isinstance(terminal_schedule, Mapping) else None
+    )
+    terminal_intervals = (
+        terminal_schedule.get("intervals") if terminal_schedule else None
+    )
+    terminal_schedule_ts = _timestamp(_first(
+        terminal_schedule.get("terminal_ts_exact") if terminal_schedule else None,
+        terminal_schedule.get("terminal_ts") if terminal_schedule else None,
+    ))
+    authoritative_terminal_schedule = bool(
+        terminal_schedule
+        and terminal_schedule.get("authoritative") is True
+        and terminal_schedule.get("terminal_reason")
+        and isinstance(terminal_intervals, list)
+        and terminal_intervals
+        and all(
+            isinstance(interval, Mapping) and interval.get("end_ts") is not None
+            for interval in terminal_intervals
+        )
+        and terminal_schedule_ts is not None
+        and math.isfinite(terminal_schedule_ts)
+    )
+    terminal_execution_basis = record.get("research_execution_basis")
+    terminal_execution_basis = (
+        terminal_execution_basis
+        if isinstance(terminal_execution_basis, Mapping) else {}
+    )
+    terminal_requested_qty = _positive_finite(_first(
+        terminal_execution_basis.get("requested_qty"),
+        terminal_execution_basis.get("qty"),
+        terminal_schedule.get("requested_qty") if terminal_schedule else None,
+    ))
+    terminal_row = {
         "record_id": f"lifecycle:{event_id}:terminal",
+        "epoch_id": epoch_id,
         **snapshot_fields,
         "episode_id": episode_id,
         "event_id": event_id,
@@ -1968,6 +2291,22 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "terminal_reason": _first(
             record.get("exact_reason"), record.get("terminal_provenance"),
             record.get("primary_outcome"),
+        ),
+        # Cross-writer NO_FILL convergence is permitted only when the V2.2
+        # source carries the same closed authoritative schedule. Missing
+        # material remains explicit None and therefore fails closed if it
+        # collides with the paper cancellation writer.
+        "terminal_ts": (
+            terminal_schedule_ts if authoritative_terminal_schedule else None
+        ),
+        "requested_qty": (
+            terminal_requested_qty if authoritative_terminal_schedule else None
+        ),
+        "schedule_sha256": (
+            hashlib.sha256(
+                canonical_json(terminal_schedule).encode("utf-8")
+            ).hexdigest()
+            if authoritative_terminal_schedule else None
         ),
         "terminal_no_fill": record.get("primary_outcome") == "ACCEPTED_UNFILLED",
         "terminal_ttl_expired": "TTL_EXPIRED" in str(_first(
@@ -1996,7 +2335,14 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "replay_eligibility": record.get("replay_eligibility") or {},
         "market_segment_refs": segment_refs,
         **policy_provenance,
-    }))
+    }
+    terminal_write = store.append("lifecycle", terminal_row)
+    if terminal_write.get("duplicate"):
+        _assert_v22_terminal_dedupe(
+            store, terminal_row,
+            primary_outcome=str(record.get("primary_outcome") or ""),
+        )
+    writes.append(terminal_write)
     return {
         "schema": "v22_to_v3_dual_write_receipt_v1",
         "epoch_id": epoch_id,

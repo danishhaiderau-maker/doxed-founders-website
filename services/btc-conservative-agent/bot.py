@@ -212,7 +212,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_no_fill, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
 from opportunity_capture_v22 import analyze_v22_events
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
@@ -22540,7 +22540,7 @@ def process_pending_orders():
             }
             if revalidation_reason:
                 order["fill_revalidation_reason"] = revalidation_reason
-                cancelled_at_fill.append((order, fill_signal, revalidation_reason))
+                cancelled_at_fill.append((order, fill_signal, revalidation_reason, fill_claim))
                 continue
             if order.pop("await_confirm", None):
                 logger.debug(
@@ -22578,18 +22578,21 @@ def process_pending_orders():
                 fill_handoff_trade_ids.add(order["trade_id"])
             fills.append((order, fill_signal, fill_claim))
     try:
-        for order, fill_signal, reason in cancelled_at_fill:
-            schedule_close = globals().get("close_research_order_schedule")
-            if callable(schedule_close):
-                schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
-            collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-            if callable(collector_refresh):
-                collector_refresh(
-                    order, fill_signal if isinstance(fill_signal, dict) else None,
-                    lifecycle_final=True,
+        for order, fill_signal, reason, fill_claim in cancelled_at_fill:
+            # Revalidation cancellation is a confirmed paper terminal path;
+            # route it through the same cancellation primitive as TTL/admin
+            # paths so confirmation proof, schedule closure, and explicit
+            # NO_FILL evidence cannot drift apart.
+            try:
+                _cancel_pending_order_confirmed(
+                    order,
+                    reason,
+                    record_expired=True,
+                    expire_signal=True,
+                    evidence_lifecycle_final=True,
                 )
-            _record_expired_order(order, reason)
-            expire_signal_for_order(order, reason)
+            finally:
+                _paper_fill_ownership.release(fill_claim, trade_lock)
             logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
         for order, fill_signal, fill_claim in fills:
             fill_order(order, _fill_claim=fill_claim)
@@ -26020,6 +26023,11 @@ def _cancel_pending_order_confirmed(
         order["cancel_confirmed"] = True
         order["cancel_confirmed_reason"] = reason
         order["cancel_confirmed_ts"] = time.time()
+        if not oid:
+            # Local paper cancellation is the authoritative zero-fill proof;
+            # retain it explicitly instead of making the evidence writer infer
+            # zero from a missing/cleared fill field.
+            order["cancel_confirmed_filled_qty"] = 0.0
         order.pop("cancel_pending_reason", None)
         master_signal = trades_map.get(tid, {}).get("signal_ref") if tid else None
         schedule_close = globals().get("close_research_order_schedule")
@@ -26049,6 +26057,31 @@ def _cancel_pending_order_confirmed(
             order, master_signal if isinstance(master_signal, dict) else None,
             lifecycle_final=bool(evidence_lifecycle_final),
         )
+    # Preserve the pre-mutation venue fact: ``oid`` is the exchange handle
+    # captured before a confirmed cancellation clears it.  Only a paper order
+    # (no original exchange handle) may emit the explicit terminal NO_FILL
+    # receipt, and only after the authoritative schedule was closed.
+    if not oid and evidence_lifecycle_final is True:
+        try:
+            # Do not depend on the volatile V2 provisional cache for the
+            # canonical terminal schedule required by lifecycle transfer.
+            dual_write_terminal_paper_schedule(
+                order,
+                master_signal if isinstance(master_signal, dict) else {},
+                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+                lifecycle_final=True,
+            )
+            dual_write_terminal_paper_no_fill(
+                order,
+                master_signal if isinstance(master_signal, dict) else {},
+                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+                lifecycle_final=True, paper_cancel_confirmed=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[COLLECTOR_V3] terminal paper no-fill evidence unavailable: {exc} "
+                "[EVIDENCE ONLY]"
+            )
     result["confirmed"] = True
     result["finalized"] = True
     if record_expired:

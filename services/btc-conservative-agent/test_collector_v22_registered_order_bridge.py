@@ -309,8 +309,22 @@ def test_filled_terminal_schedule_is_published_only_after_open_commit_wins():
     fill_body = BOT_SOURCE[fill_start:fill_end]
 
     # Touch detection delegates to fill_order without claiming FILLED evidence.
-    fill_loop = process_body[process_body.rindex("    for order, fill_signal in fills:"):]
-    assert "fill_order(order)" in fill_loop
+    fill_marker = next(
+        marker for marker in (
+            "    for order, fill_signal in fills:",
+            "    for order, fill_signal, fill_claim in fills:",
+        ) if marker in process_body
+    )
+    marker_positions = [
+        index for index in range(len(process_body))
+        if process_body.startswith(fill_marker, index)
+    ]
+    fill_loop = next(
+        process_body[index:]
+        for index in reversed(marker_positions)
+        if "fill_order(order" in process_body[index:]
+    )
+    assert "fill_order(order" in fill_loop
     assert "lifecycle_final=True" not in fill_loop
 
     # The terminal write follows the atomic OPEN lifecycle winner. The earlier
