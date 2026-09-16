@@ -1123,6 +1123,7 @@ jobs:
                       raise SystemExit("flat relay authority predates maintenance mutations")
                   print(f"Durable maintenance boundary is flat after round {round_no}")
                   break
+              cancel_outcome_unconfirmed = False
               for trade_id in orders:
                   try:
                       cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
@@ -1135,6 +1136,14 @@ jobs:
                       # flat proof below remains mandatory before deployment.
                       cancelled = {"status": "not_found"}
                       print(f"Legacy maintenance order already absent trade_id={trade_id}", flush=True)
+                  except (TimeoutError, urllib.error.URLError) as exc:
+                      cancel_outcome_unconfirmed = True
+                      print(
+                          f"Maintenance cancel outcome unconfirmed trade_id={trade_id} "
+                          f"response={type(exc).__name__}; re-reading authority",
+                          flush=True,
+                      )
+                      break
                   if cancelled.get("status") == "not_found":
                       continue
                   if cancelled.get("status") != "cancelled":
@@ -1150,6 +1159,9 @@ jobs:
                       raise SystemExit("maintenance cancel did not advance relay authority generation")
                   round_generation = generation
                   required_generation = max(required_generation or 0, generation)
+              if cancel_outcome_unconfirmed:
+                  time.sleep(2)
+                  continue
               for trade_id in positions:
                   reconciled = request_json("/api/reconcile/phantom-cancel", {"trade_id": trade_id, "reason": "GUARDED_DEPLOY_MAINTENANCE_BOUNDARY"})
                   if reconciled.get("ok") is not True:

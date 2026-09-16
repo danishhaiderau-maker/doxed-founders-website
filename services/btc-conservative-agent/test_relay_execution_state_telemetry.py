@@ -300,6 +300,72 @@ def test_guarded_deploy_does_not_retry_non_503_http_errors() -> None:
         raise AssertionError("non-503 HTTP errors must fail closed")
 
 
+def test_guarded_deploy_rechecks_authority_after_unconfirmed_cancel_timeout() -> None:
+    start = WORKFLOW_SOURCE.index("          required_generation = None")
+    end = WORKFLOW_SOURCE.index("          PY", start)
+    maintenance_source = textwrap.dedent(WORKFLOW_SOURCE[start:end])
+    exposures = iter(
+        (
+            {
+                "money_state_generation": 11,
+                "orders": [{"trade_id": "paper-order-1"}],
+                "positions": [],
+            },
+            {"money_state_generation": 11, "orders": [], "positions": []},
+        )
+    )
+    fresh_requirements = []
+    cancel_calls = []
+    sleeps = []
+
+    def fresh_exposure(minimum_generation=None):
+        fresh_requirements.append(minimum_generation)
+        return next(exposures)
+
+    def request_json(path, payload):
+        cancel_calls.append((path, payload))
+        raise TimeoutError("cancel response timed out")
+
+    namespace = {
+        "fresh_exposure": fresh_exposure,
+        "prove_legacy_bootstrap_flat": lambda: None,
+        "request_json": request_json,
+        "time": SimpleNamespace(sleep=sleeps.append),
+        "urllib": urllib,
+    }
+    exec(compile(maintenance_source, str(BOT_PATH), "exec"), namespace)
+
+    assert cancel_calls == [("/api/orders/cancel", {"trade_id": "paper-order-1"})]
+    assert fresh_requirements == [None, None]
+    assert sleeps == [2]
+
+    repeated_cancel_calls = []
+
+    def still_present(minimum_generation=None):
+        return {
+            "money_state_generation": 11,
+            "orders": [{"trade_id": "paper-order-1"}],
+            "positions": [],
+        }
+
+    def repeated_timeout(path, payload):
+        repeated_cancel_calls.append((path, payload))
+        raise TimeoutError("cancel response timed out")
+
+    namespace.update(
+        fresh_exposure=still_present,
+        request_json=repeated_timeout,
+        time=SimpleNamespace(sleep=lambda delay: None),
+    )
+    try:
+        exec(compile(maintenance_source, str(BOT_PATH), "exec"), namespace)
+    except SystemExit as exc:
+        assert str(exc) == "maintenance boundary did not become flat"
+    else:
+        raise AssertionError("repeated unconfirmed cancel timeouts must fail closed")
+    assert len(repeated_cancel_calls) == 3
+
+
 def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:
     """Optimization evidence must carry immutable policy and completion proof."""
     policy_func = _function("get_exit_config_snapshot")
