@@ -18,7 +18,10 @@ import ast
 import json
 import threading
 import time
+import textwrap
+import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 
 
 BOT_PATH = Path(__file__).with_name("bot.py")
@@ -238,14 +241,63 @@ def test_fresh_route_and_confirmed_admin_mutations_are_generation_fenced() -> No
     assert "has_real_marker" in phantom
 
 
-def test_guarded_deploy_requires_post_mutation_generation_and_retries_only_503() -> None:
+def _fresh_exposure_namespace(request_json, sleep):
+    start = WORKFLOW_SOURCE.index("          def fresh_exposure(minimum_generation=None):")
+    end = WORKFLOW_SOURCE.index("          required_generation = None", start)
+    namespace = {
+        "request_json": request_json,
+        "require_legacy_bootstrap_status": lambda require_flat: None,
+        "time": SimpleNamespace(sleep=sleep),
+        "urllib": urllib,
+    }
+    exec(compile(textwrap.dedent(WORKFLOW_SOURCE[start:end]), str(BOT_PATH), "exec"), namespace)
+    return namespace
+
+
+def test_guarded_deploy_requires_post_mutation_generation_and_retries_transients() -> None:
     assert "def fresh_exposure(minimum_generation=None):" in WORKFLOW_SOURCE
     assert "if exc.code != 503:" in WORKFLOW_SOURCE
+    assert "except (TimeoutError, urllib.error.URLError) as exc:" in WORKFLOW_SOURCE
     assert 'request_json("/api/relay-execution-state?fresh=1")' in WORKFLOW_SOURCE
     assert "required_generation = max(required_generation or 0, generation)" in WORKFLOW_SOURCE
     assert "generation <= round_generation" in WORKFLOW_SOURCE
     assert "flat relay authority predates maintenance mutations" in WORKFLOW_SOURCE
     assert "if not orders and not positions:" in WORKFLOW_SOURCE
+
+    calls = []
+    sleeps = []
+    responses = iter(
+        (
+            TimeoutError("read timed out"),
+            urllib.error.HTTPError("https://example.invalid", 503, "busy", None, None),
+            {"money_state_generation": 7, "orders": [], "positions": []},
+        )
+    )
+
+    def request_json(path):
+        calls.append(path)
+        response = next(responses)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+    namespace = _fresh_exposure_namespace(request_json, sleeps.append)
+    assert namespace["fresh_exposure"](minimum_generation=7)["money_state_generation"] == 7
+    assert calls == ["/api/relay-execution-state?fresh=1"] * 3
+    assert sleeps == [1, 2]
+
+
+def test_guarded_deploy_does_not_retry_non_503_http_errors() -> None:
+    def request_json(path):
+        raise urllib.error.HTTPError("https://example.invalid", 401, "unauthorized", None, None)
+
+    namespace = _fresh_exposure_namespace(request_json, lambda delay: None)
+    try:
+        namespace["fresh_exposure"]()
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 401
+    else:
+        raise AssertionError("non-503 HTTP errors must fail closed")
 
 
 def test_counterfactual_policy_and_replay_evidence_fail_closed() -> None:

@@ -1102,6 +1102,8 @@ jobs:
                       if exc.code != 503:
                           raise
                       last = "503 rebuilding generation-matching authority"
+                  except (TimeoutError, urllib.error.URLError) as exc:
+                      last = f"transient {type(exc).__name__} reading generation-matching authority"
                   time.sleep(min(attempt, 5))
               raise SystemExit(f"generation-matching relay authority unavailable: {last}")
           required_generation = None
