@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import math
+import re
 from pathlib import Path
 
 
@@ -61,6 +63,83 @@ def test_api_exposes_collector_and_legacy_writer_as_separate_identities() -> Non
         assert '"legacy_collector_version"' in body
     assert 'safeText(\'collectorVersionBanner\', d.collector_version || \'UNKNOWN\')' in BOT_SOURCE
     assert 'safeText(\'legacyCollectorVersionBanner\', d.legacy_collector_version || \'none\')' in BOT_SOURCE
+
+
+def test_dashboard_projects_collection_receipts_without_claiming_a_rank() -> None:
+    snapshot = _function_source("_build_api_state_snapshot")
+    overlay = _function_source("_api_state_cache_refresher_loop")
+    projection = _function_source("_research_collection_dashboard_projection")
+
+    assert 'snapshot["research_collection"] = _research_collection_dashboard_projection(now_ts)' in snapshot
+    assert 'snap["research_collection"] = _research_collection_dashboard_projection()' in overlay
+    for field in (
+        '"order_multiverse_pending"',
+        '"order_multiverse_written"',
+        '"rows_written_this_process"',
+        '"skipped_buckets_this_process"',
+        '"write_failures_this_process"',
+        '"candidate_count"',
+        '"completion_bundles"',
+        '"transfer_bundles"',
+        '"UNKNOWN_NOT_SCANNED"',
+        '"UNSCOPED_RUNTIME_TELEMETRY"',
+        '"ack_count"',
+        '"blocker_counts"',
+    ):
+        assert field in projection
+    assert '"CURRENT_ACK_UNVERIFIED"' in projection
+    assert '"ACK_PRESENT_ANALYZER_PUBLICATION_REQUIRED"' in projection
+    assert '_current_generation_ack_is_current(' in projection
+    projection_calls = {
+        node.func.id
+        for node in ast.walk(_function("_research_collection_dashboard_projection"))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_lifecycle_pipeline_public_status" not in projection_calls
+    assert "_lifecycle_artifact_counts" not in projection_calls
+    assert "renderResearchCollection(d.research_collection);" in BOT_SOURCE
+    assert 'id="researchCollectionPanel"' in BOT_SOURCE
+    assert '"research_collection",' in BOT_SOURCE
+
+
+def test_current_generation_ack_truth_table_requires_identity_and_freshness() -> None:
+    fn = _isolated_function("_current_generation_ack_is_current", {"math": math, "re": re})
+    now = 1_000.0
+    generation_id = "canonical-generation-20260917"
+    generation_sha = "a" * 64
+    current_generation = {
+        "generation_id": generation_id,
+        "generation_sha256": generation_sha,
+        "authoritative_generation": True,
+    }
+    valid_ack = {
+        "count": 1,
+        "generation_id": generation_id,
+        "generation_sha256": generation_sha,
+        "canonical_generation": True,
+        "current_generation": True,
+        "freshness_status": "FRESH",
+        "newest_age_sec": 3.0,
+        "freshness_max_age_sec": 30.0,
+        "observed_at": 997.0,
+    }
+    cases = {
+        "absent": (None, False),
+        "malformed": ({"count": "1"}, False),
+        "zero": ({**valid_ack, "count": 0}, False),
+        "stale": ({**valid_ack, "newest_age_sec": 31.0}, False),
+        "frozen_stale_age": ({**valid_ack, "observed_at": 900.0}, False),
+        "mismatched": ({**valid_ack, "generation_sha256": "b" * 64}, False),
+        "missing_freshness": ({key: value for key, value in valid_ack.items()
+                               if key not in {"freshness_status", "newest_age_sec", "freshness_max_age_sec"}}, False),
+        "missing_timestamp": ({key: value for key, value in valid_ack.items()
+                              if key != "observed_at"}, False),
+        "infinite_age": ({**valid_ack, "newest_age_sec": math.inf}, False),
+        "infinite_max": ({**valid_ack, "freshness_max_age_sec": math.inf}, False),
+        "valid": (valid_ack, True),
+    }
+    for name, (ack, expected) in cases.items():
+        assert fn(ack, current_generation, now) is expected, name
 
 
 def test_health_separates_diagnostic_and_qualification_fill_worlds() -> None:
