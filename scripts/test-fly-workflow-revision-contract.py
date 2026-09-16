@@ -269,6 +269,28 @@ def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     assert "checking durable state" in DEPLOY
 
 
+def test_initial_maintenance_pause_confirmation_is_three_attempts_and_fail_closed():
+    block = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert block.count("for attempt in range(1, 4):") == 1
+    assert "for attempt in range(1, 12):" not in block
+    for predicate in (
+        'status.get("execution_paused") is True',
+        'status.get("manual_admin_pause") is True',
+        'status.get("live_armed") is False',
+        'status.get("bitfinex_live_enabled") is False',
+        'status.get("force_paper_mode") is True',
+    ):
+        assert predicate in block
+    assert "time.sleep(min(3 * attempt, 20))" in block
+    assert 'raise SystemExit("durable paper maintenance boundary was not confirmed")' in block
+    assert "def fresh_exposure(minimum_generation=None):" in block
+    assert "required_generation = max(required_generation or 0, generation)" in block
+    assert "maintenance boundary did not become flat" in block
+
+
 def test_postdeploy_restart_boundary_is_exact_generation_fenced_and_flat():
     block = DEPLOY[
         DEPLOY.index("- name: Re-enter maintenance and flatten the exact deployed revision"):
