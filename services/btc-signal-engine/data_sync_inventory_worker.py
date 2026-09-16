@@ -94,6 +94,13 @@ def _complete_record_size(path: Path, size: int) -> int:
         return max(0, int(size))
     cursor = int(size)
     with path.open("rb") as handle:
+        # The normal append-only path is newline-terminated.  Probe the last
+        # byte first so the common case avoids reading and searching a 64 KiB
+        # tail for every file in a large inventory.  If the byte is not a
+        # newline, retain the original bounded reverse scan below.
+        handle.seek(cursor - 1)
+        if handle.read(1) == b"\n":
+            return cursor
         while cursor > 0:
             start = max(0, cursor - (64 * 1024))
             handle.seek(start)
@@ -171,6 +178,14 @@ def _relpath(path: Path, request: dict) -> str:
 def _allowed(path: Path, request: dict) -> bool:
     try:
         resolved = path.resolve(strict=True)
+    except (OSError, ValueError):
+        return False
+    return _allowed_resolved(resolved, request)
+
+
+def _allowed_resolved(resolved: Path, request: dict) -> bool:
+    """Apply admission checks to a path already resolved by the caller."""
+    try:
         resolved.relative_to(request["_volume"])
     except (OSError, ValueError):
         return False
@@ -185,7 +200,7 @@ def _allowed(path: Path, request: dict) -> bool:
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
         return False
     supported = (resolved.suffix.lower() in extensions or _rotation_parts(resolved.name, extensions)
-                 or _quarantine_binding(path, request) is not None)
+                 or _quarantine_binding(resolved, request) is not None)
     return bool(resolved.is_file() and supported)
 
 
@@ -319,7 +334,7 @@ def _row(path: Path, request: dict) -> dict | None:
         if path.is_symlink():
             return None
         resolved = path.resolve(strict=True)
-        if not _allowed(resolved, request):
+        if not _allowed_resolved(resolved, request):
             return None
         stat = resolved.stat()
         row = {

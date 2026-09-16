@@ -212,7 +212,7 @@ from collector_v22_provisional import (
     reset_provisional_events,
     upsert_provisional_event,
 )
-from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
+from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_no_fill, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
 from opportunity_capture_v22 import analyze_v22_events
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
@@ -3449,6 +3449,13 @@ def _shutdown_pending_order_evidence_worker(timeout: float = 5.0) -> bool:
 # preventing the next scheduled AI opportunity from being recorded.
 _post_ai_evidence_workers = {}
 _post_ai_evidence_workers_lock = threading.Lock()
+# Post-AI studies are optional derived evidence, but they must be given enough
+# bounded time for the real research-gate and filesystem validation phases.
+# Live phase receipts have reached ~14s; the former 5s budget converted healthy
+# hooks into HOOK_TIMEOUT dead letters and left the cadence stage stale.  Keep a
+# finite ceiling (rather than disabling the guard) so a genuinely wedged hook
+# still becomes an explicit evidence gap without blocking the scheduler forever.
+POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC = 30.0
 from evidence_phase_trace import EvidencePhaseTrace
 _post_ai_evidence_phase_trace = EvidencePhaseTrace()
 _post_ai_evidence_status = {
@@ -3529,7 +3536,7 @@ def _get_post_ai_evidence_worker(hook: str):
                 max_queue=64,
                 max_retries=0,
                 name=f"post-ai-{hook}",
-                handler_timeout_sec=5.0,
+                handler_timeout_sec=POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC,
                 on_dead_letter=lambda row, _hook=hook: _post_ai_dead_letter(_hook, row),
             )
             _post_ai_evidence_workers[hook] = worker
@@ -18159,7 +18166,6 @@ def evaluate_signal_with_ai(
     except Exception as e:
         logger.error(f"[AI CRASH] lane={research_lane} shadow={shadow_only} {e} [PIPELINE ENFORCEMENT]")
         ai_result = build_ai_error_result(e, raw_context.get("trade_id"))
-        _record_ai_provider_result_receipt(ai_result)
         # Preserve only evidence captured before the failed API/parsing stage.
         # An AI failure does not invalidate the already observed market context.
         if research_context_capture is not None:
@@ -18168,6 +18174,7 @@ def evaluate_signal_with_ai(
         ai_result.update(research_timing_capture)
         if counterfactual_coverage is not None:
             ai_result["counterfactual_coverage"] = counterfactual_coverage
+        _record_ai_provider_result_receipt(ai_result)
         ai_result["research_lane"] = research_lane
         ai_result["shadow_only"] = shadow_only
         ai_result["prompt_id"] = SHARED_DIRECTION_PROMPT_ID
@@ -22533,7 +22540,7 @@ def process_pending_orders():
             }
             if revalidation_reason:
                 order["fill_revalidation_reason"] = revalidation_reason
-                cancelled_at_fill.append((order, fill_signal, revalidation_reason))
+                cancelled_at_fill.append((order, fill_signal, revalidation_reason, fill_claim))
                 continue
             if order.pop("await_confirm", None):
                 logger.debug(
@@ -22571,18 +22578,21 @@ def process_pending_orders():
                 fill_handoff_trade_ids.add(order["trade_id"])
             fills.append((order, fill_signal, fill_claim))
     try:
-        for order, fill_signal, reason in cancelled_at_fill:
-            schedule_close = globals().get("close_research_order_schedule")
-            if callable(schedule_close):
-                schedule_close(order, fill_signal if isinstance(fill_signal, dict) else None, now=time.time(), reason=reason)
-            collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-            if callable(collector_refresh):
-                collector_refresh(
-                    order, fill_signal if isinstance(fill_signal, dict) else None,
-                    lifecycle_final=True,
+        for order, fill_signal, reason, fill_claim in cancelled_at_fill:
+            # Revalidation cancellation is a confirmed paper terminal path;
+            # route it through the same cancellation primitive as TTL/admin
+            # paths so confirmation proof, schedule closure, and explicit
+            # NO_FILL evidence cannot drift apart.
+            try:
+                _cancel_pending_order_confirmed(
+                    order,
+                    reason,
+                    record_expired=True,
+                    expire_signal=True,
+                    evidence_lifecycle_final=True,
                 )
-            _record_expired_order(order, reason)
-            expire_signal_for_order(order, reason)
+            finally:
+                _paper_fill_ownership.release(fill_claim, trade_lock)
             logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
         for order, fill_signal, fill_claim in fills:
             fill_order(order, _fill_claim=fill_claim)
@@ -26013,6 +26023,11 @@ def _cancel_pending_order_confirmed(
         order["cancel_confirmed"] = True
         order["cancel_confirmed_reason"] = reason
         order["cancel_confirmed_ts"] = time.time()
+        if not oid:
+            # Local paper cancellation is the authoritative zero-fill proof;
+            # retain it explicitly instead of making the evidence writer infer
+            # zero from a missing/cleared fill field.
+            order["cancel_confirmed_filled_qty"] = 0.0
         order.pop("cancel_pending_reason", None)
         master_signal = trades_map.get(tid, {}).get("signal_ref") if tid else None
         schedule_close = globals().get("close_research_order_schedule")
@@ -26042,6 +26057,31 @@ def _cancel_pending_order_confirmed(
             order, master_signal if isinstance(master_signal, dict) else None,
             lifecycle_final=bool(evidence_lifecycle_final),
         )
+    # Preserve the pre-mutation venue fact: ``oid`` is the exchange handle
+    # captured before a confirmed cancellation clears it.  Only a paper order
+    # (no original exchange handle) may emit the explicit terminal NO_FILL
+    # receipt, and only after the authoritative schedule was closed.
+    if not oid and evidence_lifecycle_final is True:
+        try:
+            # Do not depend on the volatile V2 provisional cache for the
+            # canonical terminal schedule required by lifecycle transfer.
+            dual_write_terminal_paper_schedule(
+                order,
+                master_signal if isinstance(master_signal, dict) else {},
+                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+                lifecycle_final=True,
+            )
+            dual_write_terminal_paper_no_fill(
+                order,
+                master_signal if isinstance(master_signal, dict) else {},
+                epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
+                lifecycle_final=True, paper_cancel_confirmed=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[COLLECTOR_V3] terminal paper no-fill evidence unavailable: {exc} "
+                "[EVIDENCE ONLY]"
+            )
     result["confirmed"] = True
     result["finalized"] = True
     if record_expired:
@@ -31200,6 +31240,19 @@ __ADMIN_ACCESS_CONTROLS__
     <span id="refreshStatus" style="margin-left:8px;color:#8b949e;">Manual refresh by default — click Refresh now or enable auto</span>
 </p>
 
+<details id="researchCollectionPanel" open style="margin:12px 0;padding:0 12px 12px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
+  <summary style="cursor:pointer;padding:12px 0;color:#58a6ff;font-weight:700;">Research collection &amp; lifecycle</summary>
+  <p style="color:#8b949e;font-size:.84em;margin:0 0 10px;">Current collection telemetry only — it is not a strategy ranking, profitability claim, or live-readiness verdict.</p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;font-size:.84em;">
+    <div><strong>Observed</strong><br><span id="researchCollectionAsOf">checking…</span></div>
+    <div><strong>Order multiverse</strong><br><span id="researchCollectionCoverage">checking…</span></div>
+    <div><strong>Microstructure tape</strong><br><span id="researchCollectionMicrostructure">checking…</span></div>
+    <div><strong>Lifecycle</strong><br><span id="researchCollectionLifecycle">checking…</span></div>
+    <div><strong>Ranking state</strong><br><span id="researchCollectionRankability">checking…</span></div>
+  </div>
+  <p style="margin:10px 0 0;color:#d29922;font-size:.82em;"><strong>Evidence blockers:</strong> <span id="researchCollectionBlockers">checking…</span></p>
+</details>
+
 <div id="dashboardToggles" style="margin:12px 0;padding:10px 12px;background:#161b22;border:1px solid #30363d;border-radius:6px;">
     <strong style="color:#58a6ff;">Quick toggles</strong>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
@@ -31526,6 +31579,33 @@ DASHBOARD_JS = """(function () {
     function safeHTML(id, html) {
       const el = document.getElementById(id);
       if (el) el.innerHTML = html ?? "";
+    }
+    function renderResearchCollection(receipt) {
+      const value = (v) => v == null || v === '' ? 'UNKNOWN' : String(v);
+      const coverage = receipt && receipt.coverage || {};
+      const micro = receipt && receipt.microstructure || {};
+      const lifecycle = receipt && receipt.lifecycle || {};
+      const stages = lifecycle.stage_counts && typeof lifecycle.stage_counts === 'object'
+        ? Object.entries(lifecycle.stage_counts).map(([k, v]) => `${k}: ${v}`).join(' · ')
+        : 'UNKNOWN';
+      const blockers = lifecycle.blocker_counts && typeof lifecycle.blocker_counts === 'object'
+        ? Object.entries(lifecycle.blocker_counts).map(([k, v]) => `${k}: ${v}`).join(' · ')
+        : 'UNKNOWN';
+      const artifact = (a) => {
+        if (!a || typeof a !== 'object') return 'UNKNOWN_NOT_SCANNED';
+        return `count ${value(a.count)} · ${value(a.status)} · scope ${value(a.scope)} · scan truncated ${value(a.scan_truncated)} · newest age ${value(a.newest_age_sec)}`;
+      };
+      safeText('researchCollectionAsOf', receipt && receipt.observed_at
+        ? formatMelbourneDateTime(receipt.observed_at) : 'UNAVAILABLE');
+      safeText('researchCollectionCoverage',
+        `pending ${value(coverage.order_multiverse_pending)} · written ${value(coverage.order_multiverse_written)} · worlds ${(coverage.evidence_worlds || []).join(', ') || 'UNKNOWN'}`);
+      safeText('researchCollectionMicrostructure',
+        `rows ${value(micro.rows_written_this_process)} · skipped ${value(micro.skipped_buckets_this_process)} · write failures ${value(micro.write_failures_this_process)} · I/O failures ${value(micro.io_write_failures_this_process)} · last gap ${value(micro.last_gap_reason)}`);
+      safeText('researchCollectionLifecycle',
+        `candidates ${value(lifecycle.candidate_count)} · stages ${stages} · completion bundles ${artifact(lifecycle.completion_bundles)} · transfer bundles ${artifact(lifecycle.transfer_bundles)} · ACKs ${artifact(lifecycle.acks)}`);
+      safeText('researchCollectionRankability', receipt && receipt.ranking_state
+        ? receipt.ranking_state : 'NOT_RANKING_READY_RECEIPT_UNAVAILABLE');
+      safeText('researchCollectionBlockers', blockers);
     }
     const DASH_PREFS_KEY = 'bitfinex_research_dashboard_prefs_v2_' + __DASHBOARD_PORT__;
     function loadDashPrefs() {
@@ -32522,6 +32602,7 @@ DASHBOARD_JS = """(function () {
         safeText('collectorVersionBanner', d.collector_version || 'UNKNOWN');
         safeText('runtimeRevisionBanner', d.git_rev || d.source_git_rev || 'UNKNOWN');
         safeText('legacyCollectorVersionBanner', d.legacy_collector_version || 'none');
+        renderResearchCollection(d.research_collection);
         const skipBlk = d.display_skip_block || {};
         const rs = document.getElementById('refreshStatus');
         if (rs) rs.innerText = 'Last updated ' + formatMelbourneNow() + ' (Melbourne)';
@@ -36705,6 +36786,164 @@ def _attach_patient_chase_routes(
     return enriched, counts
 
 
+def _current_generation_ack_is_current(
+    ack: object, current_generation: object, now: float
+) -> bool:
+    """Return whether bounded runtime telemetry proves a current canonical ACK.
+
+    This is deliberately stricter than the producer's boolean labels.  A
+    dashboard cache must see a positive ACK count, exact canonical identity,
+    explicit current/canonical bindings, and an ACK timestamp whose age at the
+    projection clock remains within its declared limit.  Missing or malformed
+    telemetry is unknown, not current.
+    """
+    if not isinstance(ack, dict) or not isinstance(current_generation, dict):
+        return False
+    ack_count = ack.get("count")
+    ack_generation_id = str(
+        ack.get("generation_id") or ack.get("canonical_generation_id") or ""
+    ).strip()
+    ack_generation_sha = str(
+        ack.get("generation_sha256")
+        or ack.get("inventory_sha256")
+        or ack.get("manifest_sha256")
+        or ""
+    ).strip().lower()
+    current_generation_id = str(
+        current_generation.get("generation_id")
+        or current_generation.get("canonical_generation_id")
+        or ""
+    ).strip()
+    current_generation_sha = str(
+        current_generation.get("generation_sha256")
+        or current_generation.get("inventory_sha256")
+        or current_generation.get("manifest_sha256")
+        or ""
+    ).strip().lower()
+    ack_age_sec = ack.get("newest_age_sec")
+    freshness_limit_sec = ack.get("freshness_max_age_sec")
+    ack_observed_at = ack.get("observed_at", ack.get("ack_observed_at"))
+    valid_age = (
+        isinstance(ack_age_sec, (int, float))
+        and not isinstance(ack_age_sec, bool)
+        and isinstance(freshness_limit_sec, (int, float))
+        and not isinstance(freshness_limit_sec, bool)
+        and isinstance(ack_observed_at, (int, float))
+        and not isinstance(ack_observed_at, bool)
+        and isinstance(now, (int, float))
+        and not isinstance(now, bool)
+        and math.isfinite(ack_age_sec)
+        and math.isfinite(freshness_limit_sec)
+        and math.isfinite(ack_observed_at)
+        and math.isfinite(now)
+        and 0 <= ack_age_sec <= freshness_limit_sec
+        and freshness_limit_sec > 0
+        and 0 <= now - ack_observed_at <= freshness_limit_sec
+    )
+    return bool(
+        ack.get("canonical_generation") is True
+        and ack.get("current_generation") is True
+        and current_generation.get("authoritative_generation") is True
+        and isinstance(ack_count, int)
+        and not isinstance(ack_count, bool)
+        and ack_count > 0
+        and ack.get("freshness_status") == "FRESH"
+        and valid_age
+        and ack_generation_id
+        and ack_generation_id == current_generation_id
+        and re.fullmatch(r"[0-9a-f]{64}", ack_generation_sha)
+        and ack_generation_sha == current_generation_sha
+    )
+
+
+def _research_collection_dashboard_projection(now: float | None = None) -> dict:
+    """Return a small, public-safe collection receipt for the owner dashboard.
+
+    This reports collection and lifecycle evidence only. It never ranks a
+    policy, infers profitability, or turns an ACK into a readiness claim.
+    Raw ledgers stay off ``/api/state`` so the cached dashboard response stays
+    bounded.
+    """
+    observed_at = float(now if now is not None else time.time())
+    micro = dict(_microstructure_capture_observation or {})
+    # Do not call _lifecycle_pipeline_public_status here. That endpoint counts
+    # artifacts by scanning the volume, which is acceptable for its explicit
+    # operator request but not for the ~1.5s /api/state cache refresher.
+    # Runtime status is the already-cached, bounded worker telemetry.
+    runtime = _lifecycle_pipeline_runtime_status()
+    last = runtime.get("last_result") if isinstance(runtime.get("last_result"), dict) else {}
+    blockers = dict(last.get("blocker_counts") or {})
+    stages = dict(last.get("stage_counts") or {})
+
+    # An artifact count from an unscoped runtime result cannot prove that an
+    # ACK belongs to this canonical generation. Keep it UNKNOWN unless a future
+    # runtime producer explicitly supplies both bindings.
+    ack = runtime.get("current_generation_ack")
+    if not isinstance(ack, dict):
+        ack = last.get("current_generation_ack")
+    if not isinstance(ack, dict):
+        ack = None
+    current_generation = runtime.get("current_generation")
+    if not isinstance(current_generation, dict):
+        current_generation = last.get("current_generation")
+    if not isinstance(current_generation, dict):
+        current_generation = {}
+    ack_is_current = _current_generation_ack_is_current(
+        ack, current_generation, observed_at
+    )
+    # No producer-bound current generation means the ACK state is unknown;
+    # never convert absence or stale booleans into a factual NO_CURRENT_ACK.
+    ack_is_unverified = not ack_is_current
+    ack_count = int(ack.get("count")) if ack_is_current else None
+    artifact_unknown = {
+        "count": None,
+        "status": "UNKNOWN_NOT_SCANNED",
+        "scan_truncated": None,
+        "newest_age_sec": None,
+        "scope": "UNSCOPED_RUNTIME_TELEMETRY",
+    }
+
+    return {
+        "schema": "research_collection_dashboard_projection_v1",
+        "observed_at": utc_iso(),
+        "coverage": {
+            "order_multiverse_pending": len(_order_multiverse_pending_src),
+            "order_multiverse_written": len(_order_multiverse_written),
+            "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
+        },
+        "microstructure": {
+            "rows_written_this_process": int(_microstructure_rows_written),
+            "skipped_buckets_this_process": int(micro.get("skipped_buckets_this_process") or 0),
+            "write_failures_this_process": int(_microstructure_write_failures),
+            "io_write_failures_this_process": int(_microstructure_io_write_failures),
+            "last_gap_reason": str((micro.get("last_gap") or {}).get("gap_reason") or "NONE"),
+        },
+        "lifecycle": {
+            "candidate_count": int(last.get("candidate_count") or 0),
+            "stage_counts": stages,
+            "completion_bundles": dict(artifact_unknown),
+            "transfer_bundles": dict(artifact_unknown),
+            "acks": (
+                {
+                    "count": ack_count,
+                    "status": "CURRENT_CANONICAL_GENERATION",
+                    "scan_truncated": None,
+                    "newest_age_sec": None,
+                    "scope": "CURRENT_CANONICAL_GENERATION",
+                }
+                if ack_is_current else dict(artifact_unknown)
+            ),
+            "ack_count": ack_count,
+            "blocker_counts": blockers,
+        },
+        "ranking_state": (
+            "CURRENT_ACK_UNVERIFIED"
+            if ack_is_unverified
+            else "ACK_PRESENT_ANALYZER_PUBLICATION_REQUIRED"
+        ),
+    }
+
+
 def _build_api_state_snapshot():
     """Build the full /api/state payload dict.
 
@@ -37087,6 +37326,7 @@ def _build_api_state_snapshot():
         snapshot["bot_version"] = EXECUTION_FIX_VERSION
         snapshot["collector_version"] = COLLECTOR_V31_VERSION
         snapshot["legacy_collector_version"] = COLLECTOR_V22_VERSION
+        snapshot["research_collection"] = _research_collection_dashboard_projection(now_ts)
         snapshot["analyzer_sync_id"] = ANALYZER_SYNC_ID
         snapshot["research_kpis"] = get_research_kpis_cached(for_api=True)
         snapshot["pathway_scorecard"] = get_pathway_scorecard_cached(for_api=True)
@@ -37342,6 +37582,7 @@ def _api_state_cache_refresher_loop():
                     )
                 snap["collector_version"] = COLLECTOR_V31_VERSION
                 snap["legacy_collector_version"] = COLLECTOR_V22_VERSION
+                snap["research_collection"] = _research_collection_dashboard_projection()
                 # Rebuild the small server-side display projection after the
                 # live diagnostic overlay. Otherwise display_pipeline and the
                 # AI/debug labels still describe the paused-built base.
@@ -37452,6 +37693,9 @@ _PUBLIC_STATE_SAFE_TOP_KEYS = {
     # dashboard meta
     "dashboard_url", "dashboard_port", "display_timezone",
     "server_ts", "server_ts_melbourne",
+    # Compact evidence-only projection; excludes strategies, thresholds, raw
+    # tapes, orders, prompts, and policy decisions.
+    "research_collection",
     # market data
     "price", "price_ts", "price_age", "ws_age", "ws_last_tick",
     "rest_last_tick", "ws_transport_connected",
@@ -39820,15 +40064,26 @@ _LIFECYCLE_PIPELINE_LAST_STATUS = None
 
 
 def _lifecycle_pipeline_pressure_probe() -> dict:
-    """Project existing collector pressure without inventing a new threshold."""
+    """Project collector pressure and operator quiescence into the worker.
+
+    An ADMIN_MANUAL pause is an explicit request to stop new execution.  While
+    that boundary is active, the optional lifecycle worker must use its
+    existing bounded-pressure path so receipt bootstrap can advance without
+    competing with a paused one-vCPU trading process.  This changes only the
+    worker budget; it does not authorize cleanup, deletion, or live trading.
+    """
     try:
         used_fraction = float(
             disk_usage_fraction(str(_data_sync_runtime_root()))
         )
+        manual_pause = bool(manual_admin_pause_active())
         return {
-            "pressure": bool(used_fraction >= STORAGE_PRESSURE_THRESHOLD),
+            "pressure": bool(
+                used_fraction >= STORAGE_PRESSURE_THRESHOLD or manual_pause
+            ),
             "emergency": used_fraction >= 0.90,
             "used_fraction": used_fraction,
+            "manual_admin_pause": manual_pause,
         }
     except Exception as exc:
         raise RuntimeError(type(exc).__name__) from exc
