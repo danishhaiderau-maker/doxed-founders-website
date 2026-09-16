@@ -131,6 +131,8 @@ def _async_inventory_function(state, monotonic_value):
         "_data_sync_retain_inventory_generation": lambda *args, **kwargs: "f" * 64,
         "_data_sync_inventory_refresh_worker": lambda: None,
         "_data_sync_inventory_generation": retained_generation,
+        "_data_sync_inventory_volume_free_bytes": lambda: 1024 * 1024 * 1024,
+        "_DATA_SYNC_INVENTORY_MIN_FREE_BYTES": 512 * 1024 * 1024,
         "_data_sync_memory_identity_payload": lambda: {
             "source_git_rev": "rev", "collection_epoch_id": "epoch",
             "tile_registry_signature": "tile",
