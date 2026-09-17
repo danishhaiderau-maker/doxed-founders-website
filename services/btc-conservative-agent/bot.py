@@ -22848,7 +22848,14 @@ def process_signal(event: dict):
                     "wick_ratio": wick_ratio_buffer,
                     "body_ratio": body_ratio_buffer
                 }
-                ctx = build_pure_ai_context(state, buffers)
+                # Refresh structural support/resistance at the signal boundary
+                # so a market-ready cycle cannot race the periodic monitor.
+                # Snapshot under the same lock before building AI context; the
+                # provider must never see a mutable live state object.
+                update_support_resistance()
+                with state_lock:
+                    ai_state_snapshot = copy.deepcopy(state)
+                ctx = build_pure_ai_context(ai_state_snapshot, buffers)
                 if not ctx:
                     enforce_log({"trade_id": str(uuid.uuid4())}, "BLOCKED", "CTX_FAIL")
                     full_pipeline_trace("BLOCKED", "CTX_FAIL", None)
