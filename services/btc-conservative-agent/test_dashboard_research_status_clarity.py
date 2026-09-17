@@ -16,6 +16,8 @@ def main() -> None:
     assert "verdict not recorded" not in source
     assert "AI call failed — no verdict" in source
     assert "evaluation not reached" in source
+    assert "SCORE-LED ${scoreLedDirection}" in source
+    assert "lane receipt pending" in source
     assert "RESTORED_PRE_RESTART_NO_LANE_METADATA" in source
     assert ">not evaluated</span>" not in source
     assert ">pending</span>" not in source
@@ -34,6 +36,11 @@ def main() -> None:
     assert 'unrealUsd < 0 ? \'-$\' : \'$\'' in source
 
     print("Dashboard research-status clarity tests passed")
+
+
+def test_research_status_clarity() -> None:
+    """Expose the direct assertions to pytest collection as well."""
+    main()
 
 
 if __name__ == "__main__":
