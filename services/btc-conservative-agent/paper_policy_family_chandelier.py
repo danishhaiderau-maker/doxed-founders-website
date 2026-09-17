@@ -3,6 +3,8 @@ from family_policy_common import PolicySpec, account_risk_quantity as _size, cha
 
 POLICY_ID = "OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5"
 LANE = "FAMILY_CHANDELIER_3"
+from combo_pathway_config import COMBO_LANE_SPECS
+POLICY_ID = COMBO_LANE_SPECS[LANE]["raw_policy_id"]
 SPEC = PolicySpec(policy_id=POLICY_ID, lane=LANE, label="Chandelier 1.5 ATR hypothesis", family="CHANDELIER", entry_offset_pct=0.30, chase_windows=(2, 3, 4), chase_interval_sec=180, chase_step=0.50, initial_stop_atr_k=2.0, chandelier_atr_k=1.5, trail_activation_atr_k=1.0)
 CHASE_STEP = SPEC.chase_step
 def entry_fields(direction, reference_price): return _entry(SPEC, direction, reference_price)
