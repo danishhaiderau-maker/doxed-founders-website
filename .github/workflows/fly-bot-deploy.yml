@@ -26,6 +26,7 @@ on:
         type: choice
         options:
           - deploy
+          - verify-relay-flat
           - recover-startup-crash
           - recover-unready
           - recover-stalled-runtime
@@ -1008,6 +1009,30 @@ jobs:
 
       - name: Prove relay accounts remain flat after startup recovery
         working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: "https://doxed-founders-website-production.up.railway.app/api"
+          REQUIRE_BOT_ADMIN_TOKEN: "YES"
+          REQUIRE_CANONICAL_FLY_OWNER: "YES"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+        run: node scripts/check-relay-flat.mjs
+
+  verify-relay-flat:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'verify-relay-flat'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install relay-boundary checker dependencies
+        run: |
+          npm ci
+          npx prisma generate
+      - name: Verify canonical Fly owner and relay accounts remain flat
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
