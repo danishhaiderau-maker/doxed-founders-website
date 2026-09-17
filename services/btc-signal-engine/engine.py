@@ -390,7 +390,17 @@ def _load_tile_policy_modules() -> dict[str, Any]:
         module = importlib.import_module(Path(owned[0]).stem)
         if str(getattr(module, "LANE", "")) != lane:
             raise RuntimeError(f"{lane}: policy module lane mismatch")
-        if str(getattr(module, "POLICY_ID", "")) != str(spec.get("raw_policy_id") or ""):
+        module_policy_id = str(getattr(module, "POLICY_ID", ""))
+        expected_policy_id = str(spec.get("raw_policy_id") or "")
+        # Score-led paper is an admission treatment layered over the same
+        # immutable execution family.  Its registry identity is deliberately
+        # namespaced, while the policy module continues to publish the base
+        # execution identity.  Accept that one explicit namespace only; every
+        # other mismatch remains fail-closed.
+        accepted_policy_ids = {expected_policy_id}
+        if expected_policy_id.startswith("SCORE_LED_PAPER_V1::"):
+            accepted_policy_ids.add(expected_policy_id.split("::", 1)[1])
+        if module_policy_id not in accepted_policy_ids:
             raise RuntimeError(f"{lane}: policy module identity mismatch")
         modules[lane] = module
     return modules
