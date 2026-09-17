@@ -995,6 +995,17 @@ jobs:
               raise SystemExit(f"repaired revision did not become paused, paper-only, and flat: {last}")
           PY
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install relay-boundary checker dependencies
+        working-directory: ${{ github.workspace }}
+        run: |
+          npm ci
+          npx prisma generate
+
       - name: Prove relay accounts remain flat after startup recovery
         working-directory: ${{ github.workspace }}
         env:
