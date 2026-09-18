@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -447,6 +448,60 @@ def test_minimal_environment_excludes_credentials(monkeypatch):
     assert environment["PYTHONIOENCODING"] == "utf-8"
     assert environment["SOURCE_GIT_REV"] == "a" * 40
     assert "SOURCE_GIT_REV" not in runtime_module._minimal_worker_environment("short")
+
+
+def test_minimal_environment_propagates_only_validated_research_mode(monkeypatch):
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
+    assert runtime_module._minimal_worker_environment("a" * 40)[
+        "SCORE_LED_PAPER_RESEARCH_ENABLED"
+    ] == "1"
+
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "0")
+    assert "SCORE_LED_PAPER_RESEARCH_ENABLED" not in runtime_module._minimal_worker_environment("a" * 40)
+
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "unexpected")
+    assert "SCORE_LED_PAPER_RESEARCH_ENABLED" not in runtime_module._minimal_worker_environment("a" * 40)
+
+
+def test_child_registry_identity_matches_parent_mode_without_credentials(monkeypatch):
+    command = [
+        sys.executable,
+        "-c",
+        "import combo_pathway_config as c; "
+        "print(c.RESEARCH_STACK_VERSION); "
+        "print(c.active_tile_registry_signature())",
+    ]
+
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
+    score_env = runtime_module._minimal_worker_environment(REVISION)
+    score_env["BITFINEX_API_SECRET"] = "must-not-be-inherited"
+    score_child = subprocess.run(
+        command,
+        cwd=Path(__file__).parent,
+        env=score_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert score_child.stdout.splitlines() == [
+        "v31-five-family-score-led-paper-v1",
+        "91bc9ef8a4b90e24bbaab008f1abef53a62e989591e37fd2f20c1f4bfefd445b",
+    ]
+
+    monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
+    hypothesis_env = runtime_module._minimal_worker_environment(REVISION)
+    hypothesis_child = subprocess.run(
+        command,
+        cwd=Path(__file__).parent,
+        env=hypothesis_env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert hypothesis_child.stdout.splitlines() == [
+        "v31-five-family-analyzer-hypothesis-paper",
+        "ab621cf7d2be060bd8fc44d400e26d01cfda552c548bd37dc0fea095cda10260",
+    ]
 
 
 def test_revision_mismatch_fails_closed_and_capability_is_truthful(tmp_path, monkeypatch):

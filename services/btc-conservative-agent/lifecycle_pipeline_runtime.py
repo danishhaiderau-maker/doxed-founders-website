@@ -118,6 +118,13 @@ def _minimal_worker_environment(source_revision: str | None = None) -> dict[str,
         # the parent environment wholesale: it may contain exchange/database
         # credentials, while the worker only needs exact provenance parity.
         environment["SOURCE_GIT_REV"] = revision
+    # Research mode is release identity, not a credential. Propagate only the
+    # exact score-led value so the credential-free worker imports the same tile
+    # registry as its parent. Unset/other values intentionally remain absent,
+    # preserving the hypothesis-mode default rather than accepting arbitrary
+    # environment input.
+    if os.environ.get("SCORE_LED_PAPER_RESEARCH_ENABLED") == "1":
+        environment["SCORE_LED_PAPER_RESEARCH_ENABLED"] = "1"
     return environment
 
 
