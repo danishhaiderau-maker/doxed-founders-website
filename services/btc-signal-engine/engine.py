@@ -39827,9 +39827,13 @@ def _data_sync_consistency_mode(path: Path) -> str:
 
 def _data_sync_sqlite_snapshot_deadline_seconds() -> float:
     try:
-        configured = float(os.getenv("DATA_SYNC_SQLITE_SNAPSHOT_DEADLINE_SECONDS", "60"))
+        # Large qualification indexes routinely need just over one minute to
+        # build on the one-core Fly machine.  Keep the existing bounded
+        # 15..120-second clamp, but make the safe upper-bound default the
+        # normal path so valid leases do not expire at the old 60-second edge.
+        configured = float(os.getenv("DATA_SYNC_SQLITE_SNAPSHOT_DEADLINE_SECONDS", "120"))
     except (TypeError, ValueError):
-        configured = 60.0
+        configured = 120.0
     return max(15.0, min(120.0, configured))
 
 

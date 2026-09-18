@@ -3,6 +3,8 @@ from family_policy_common import PolicySpec, account_risk_quantity as _size, cha
 
 POLICY_ID = "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT"
 LANE = "FAMILY_MFE_GIVEBACK"
+from combo_pathway_config import COMBO_LANE_SPECS
+POLICY_ID = COMBO_LANE_SPECS[LANE]["raw_policy_id"]
 SPEC = PolicySpec(policy_id=POLICY_ID, lane=LANE, label="MFE giveback 20% hypothesis", family="MFE_GIVEBACK", entry_offset_pct=0.30, chase_windows=(2, 3, 4), chase_interval_sec=180, chase_step=0.50, initial_stop_atr_k=None, atr_target_k=None, mfe_giveback_fraction=0.20)
 CHASE_STEP = SPEC.chase_step
 def entry_fields(direction, reference_price): return _entry(SPEC, direction, reference_price)

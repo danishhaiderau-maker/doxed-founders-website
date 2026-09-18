@@ -563,6 +563,27 @@ def _load_bot_functions(*names):
     return namespace
 
 
+def test_sqlite_snapshot_deadline_defaults_to_bounded_upper_limit():
+    namespace = _load_bot_functions("_data_sync_sqlite_snapshot_deadline_seconds")
+    name = "DATA_SYNC_SQLITE_SNAPSHOT_DEADLINE_SECONDS"
+    previous = os.environ.pop(name, None)
+    try:
+        assert namespace["_data_sync_sqlite_snapshot_deadline_seconds"]() == 120.0
+        os.environ[name] = "not-a-number"
+        assert namespace["_data_sync_sqlite_snapshot_deadline_seconds"]() == 120.0
+        os.environ[name] = "60"
+        assert namespace["_data_sync_sqlite_snapshot_deadline_seconds"]() == 60.0
+        os.environ[name] = "1"
+        assert namespace["_data_sync_sqlite_snapshot_deadline_seconds"]() == 15.0
+        os.environ[name] = "999"
+        assert namespace["_data_sync_sqlite_snapshot_deadline_seconds"]() == 120.0
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
+
 def test_data_sync_inventory_excludes_preserved_history_from_active_mirror():
     tree = ast.parse(BOT)
     wanted = {
