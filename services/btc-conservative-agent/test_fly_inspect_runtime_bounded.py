@@ -1,5 +1,8 @@
 import re
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 
 WORKFLOW = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "fly-bot-deploy.yml"
@@ -64,6 +67,36 @@ def test_postdeploy_acceptance_has_one_deadline_and_endpoint_receipts():
         assert f"stage={stage}" in section
     assert "latency_ms=" in section
     assert "stage=request status=failed" in section
+
+
+def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
+    """The verifier must expect the same explicit cohort that Fly runs."""
+    source = WORKFLOW.read_text(encoding="utf-8")
+    section = source.split(
+        "Prove liveness, execution safety, and exact revision", 1
+    )[1].split("Complete receipt bootstrap inside exact-revision maintenance", 1)[0]
+    assert 'SCORE_LED_PAPER_RESEARCH_ENABLED: "1"' in section
+
+    env = os.environ.copy()
+    env["SCORE_LED_PAPER_RESEARCH_ENABLED"] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import combo_pathway_config as c; "
+            "print(c.RESEARCH_STACK_VERSION); "
+            "print(c.active_tile_registry_signature())",
+        ],
+        cwd=WORKFLOW.parents[2] / "services" / "btc-conservative-agent",
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.splitlines() == [
+        "v31-five-family-score-led-paper-v1",
+        "91bc9ef8a4b90e24bbaab008f1abef53a62e989591e37fd2f20c1f4bfefd445b",
+    ]
 
 
 def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():

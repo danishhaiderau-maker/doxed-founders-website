@@ -1671,6 +1671,10 @@ jobs:
       - name: Prove liveness, execution safety, and exact revision
         env:
           EXPECTED_REVISION: ${{ github.sha }}
+          # The deployed paper cohort is explicitly score-led. Keep the
+          # verifier's registry identity on the same startup policy as Fly;
+          # an unset local flag would expect the retired hypothesis identity.
+          SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
         run: |
           python - <<'PY'
           import json
