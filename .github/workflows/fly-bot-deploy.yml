@@ -1110,6 +1110,24 @@ jobs:
           legacy_status_revision = legacy_bootstrap_revision[:12]
           status = None
           for attempt in range(1, 6):
+              # The previous guarded run may already have established the
+              # durable pause before its client timed out.  Re-posting
+              # /api/pause in that state can wait behind the lifecycle worker
+              # and turn a safe idempotent boundary into a false failure.
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                      status = json.load(response)
+                  if (
+                      status.get("execution_paused") is True
+                      and status.get("manual_admin_pause") is True
+                      and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False
+                      and status.get("force_paper_mode") is True
+                  ):
+                      print("durable paper maintenance already established; skipping duplicate pause mutation", flush=True)
+                      break
+              except Exception as exc:
+                  print(f"pause precheck attempt={attempt} response={type(exc).__name__}", flush=True)
               try:
                   request = urllib.request.Request(base + "/api/pause", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
                   with urllib.request.urlopen(request, timeout=20) as response:
