@@ -3449,6 +3449,11 @@ def _shutdown_pending_order_evidence_worker(timeout: float = 5.0) -> bool:
 # preventing the next scheduled AI opportunity from being recorded.
 _post_ai_evidence_workers = {}
 _post_ai_evidence_workers_lock = threading.Lock()
+# Optional evidence hooks can legitimately spend ~14s in the research-gate
+# and filesystem validation path. Keep a finite ceiling so healthy hooks do
+# not become false timeout gaps while a genuinely wedged hook still fails
+# explicitly and cannot block the cadence owner forever.
+POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC = 30.0
 _post_ai_evidence_status = {
     "submitted": 0,
     "rejected": 0,
@@ -3523,7 +3528,7 @@ def _get_post_ai_evidence_worker(hook: str):
                 max_queue=64,
                 max_retries=0,
                 name=f"post-ai-{hook}",
-                handler_timeout_sec=5.0,
+                handler_timeout_sec=POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC,
                 on_dead_letter=lambda row, _hook=hook: _post_ai_dead_letter(_hook, row),
             )
             _post_ai_evidence_workers[hook] = worker
@@ -12860,6 +12865,10 @@ _compressed_shadow_lock = threading.RLock()
 _collector_v22_merge_guard = threading.Lock()
 _collector_v22_merge_inflight = False
 _collector_v22_last_merge = 0.0
+_cancellation_evidence_handoff_lock = threading.Lock()
+_cancellation_evidence_worker = None
+_cancellation_evidence_worker_lock = threading.Lock()
+_cancellation_evidence_reset_fence = False
 _order_multiverse_maturation_cursor = 0
 _order_multiverse_ready_sweep_batch = 0
 _order_multiverse_ready_sweep_started_ts = 0.0
@@ -13051,6 +13060,9 @@ def _restore_collector_v22_provisionals() -> int:
     global _collector_v22_last_merge
     restored = _merge_collector_v22_provisionals(reason="STARTUP")
     _collector_v22_last_merge = time.time()
+    replay = globals().get("_replay_cancellation_evidence_handoffs")
+    if callable(replay):
+        replay()
     return restored
 
 
@@ -13736,11 +13748,26 @@ def _promote_collector_v22_registered_order(order: dict, signal: dict = None):
     return result
 
 
+def _terminal_schedule_receipt_durable(receipt: dict) -> bool:
+    """Return true only for a canonical terminal append or exact duplicate."""
+    if not isinstance(receipt, dict):
+        return False
+    write = receipt.get("write")
+    if not isinstance(write, dict):
+        return False
+    if write.get("blocked") is True or write.get("deferred") is True:
+        return False
+    return bool(write.get("written") is True or write.get("duplicate") is True)
+
+
 @_collector_epoch_serialized
 def _refresh_collector_v22_registered_order_evidence(
     order: dict, signal: dict = None, *, lifecycle_final: bool = False,
+    expected_epoch_id: str = None, require_terminal_receipt: bool = False,
 ):
     """Persist the latest authoritative order schedule after every mutation."""
+    if expected_epoch_id is not None and _collector_v22_epoch_id() != str(expected_epoch_id):
+        return False
     if not isinstance(order, dict):
         return False
     tid = str(order.get("trade_id") or "")
@@ -13783,18 +13810,21 @@ def _refresh_collector_v22_registered_order_evidence(
     # V3 submit receipts are immutable. Once the existing recorder closes the
     # schedule, append its final exact version for conservative replay. This is
     # evidence-only and cannot affect order execution.
-    if (
-        lifecycle_final is True
-        and schedule.get("terminal_ts") is not None
-        and schedule.get("terminal_reason")
-    ):
+    terminal_fields_present = bool(
+        schedule.get("terminal_ts") is not None and schedule.get("terminal_reason")
+    )
+    if lifecycle_final is True and require_terminal_receipt and not terminal_fields_present:
+        return False
+    if lifecycle_final is True and terminal_fields_present:
         try:
-            dual_write_terminal_paper_schedule(
+            terminal_receipt = dual_write_terminal_paper_schedule(
                 order,
                 signal if isinstance(signal, dict) else {},
                 epoch_id=_collector_v22_epoch_id(), data_dir=os.getcwd(),
                 lifecycle_final=True,
             )
+            if require_terminal_receipt and not _terminal_schedule_receipt_durable(terminal_receipt):
+                return False
         except Exception as exc:
             # Evidence capture is deliberately fail-isolated: an absent causal
             # owner remains UNKNOWN and must never interrupt a fill/cancel.
@@ -13802,7 +13832,250 @@ def _refresh_collector_v22_registered_order_evidence(
                 f"[COLLECTOR_V3] terminal schedule evidence unavailable: {exc} "
                 "[EVIDENCE ONLY]"
             )
+            if require_terminal_receipt:
+                return False
     return True
+
+
+def _cancellation_evidence_handoff_path() -> str:
+    return os.path.join(
+        str(_data_sync_runtime_root()), "cancellation_evidence_handoffs.jsonl"
+    )
+
+
+def _append_cancellation_evidence_handoff(row: dict) -> bool:
+    """Append a tiny handoff record without shared research-gate locks/rotation.
+
+    This journal is deliberately separate from the general JSONL writer: the
+    cancellation caller must not wait behind collector validation, rotation, or
+    the research write barrier.  The append is serialized only against other
+    handoff rows and is fsynced before the bounded evidence worker is notified.
+    """
+    path = _cancellation_evidence_handoff_path()
+    encoded = json.dumps(row, default=str, separators=(",", ":")).encode("utf-8") + b"\n"
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with _cancellation_evidence_handoff_lock:
+            # A process crash can leave an incomplete final JSONL row.  Fence
+            # the next append with a newline so the partial forensic bytes stay
+            # isolated and the new durable receipt remains independently
+            # replayable.  Never rewrite or discard the torn bytes here.
+            fence = b""
+            try:
+                probe_fd = os.open(path, os.O_RDONLY)
+            except FileNotFoundError:
+                probe_fd = None
+            if probe_fd is not None:
+                try:
+                    if os.lseek(probe_fd, 0, os.SEEK_END) > 0:
+                        os.lseek(probe_fd, -1, os.SEEK_END)
+                        if os.read(probe_fd, 1) != b"\n":
+                            fence = b"\n"
+                finally:
+                    os.close(probe_fd)
+            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+            try:
+                # ``os.write`` is allowed to perform a short write.  Do not
+                # fsync a truncated JSONL row and then report it durable.
+                for chunk in (fence, encoded):
+                    view = memoryview(chunk)
+                    offset = 0
+                    while offset < len(view):
+                        written = os.write(fd, view[offset:])
+                        if written <= 0:
+                            raise OSError("cancellation evidence journal short write")
+                        offset += written
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        logger.error(
+            f"[COLLECTOR_V22] cancellation evidence handoff append failed: {exc} "
+            "[EVIDENCE GAP]"
+        )
+        return False
+
+
+def _write_cancellation_evidence_handoff(job: dict) -> None:
+    """Reconcile one journal row; the bounded worker owns retry/back-pressure."""
+    receipt = copy.deepcopy((job.get("payload") or {}).get("receipt") or {})
+    receipt_id = str(receipt.get("receipt_id") or "")
+    expected_epoch_id = str(receipt.get("collector_epoch_id") or "")
+    if not receipt_id or not expected_epoch_id:
+        raise ValueError("cancellation evidence receipt identity is incomplete")
+    if _collector_v22_epoch_id() != expected_epoch_id:
+        if not _append_cancellation_evidence_handoff({
+            "schema": "cancellation_evidence_handoff_result_v1",
+            "receipt_id": receipt_id,
+            "collector_epoch_id": expected_epoch_id,
+            "trade_id": str(receipt.get("trade_id") or ""),
+            "status": "EPOCH_MISMATCH_PRESERVED",
+            "completed_at": utc_iso(),
+            "lifecycle_final": bool(receipt.get("lifecycle_final")),
+        }):
+            raise OSError("could not durably append epoch-mismatch result")
+        return
+    refreshed = _refresh_collector_v22_registered_order_evidence(
+        copy.deepcopy(receipt.get("order_snapshot") or {}),
+        copy.deepcopy(receipt.get("signal_snapshot") or {}),
+        lifecycle_final=bool(receipt.get("lifecycle_final")),
+        expected_epoch_id=expected_epoch_id,
+        require_terminal_receipt=True,
+    )
+    if not refreshed:
+        raise RuntimeError("collector refresh did not apply; handoff remains pending")
+    if not _append_cancellation_evidence_handoff({
+        "schema": "cancellation_evidence_handoff_result_v1",
+        "receipt_id": receipt_id,
+        "collector_epoch_id": expected_epoch_id,
+        "trade_id": str(receipt.get("trade_id") or ""),
+        "status": "APPLIED",
+        "completed_at": utc_iso(),
+        "lifecycle_final": bool(receipt.get("lifecycle_final")),
+    }):
+        raise OSError("could not durably append applied result")
+
+
+def _cancellation_evidence_dead_letter(row: dict) -> None:
+    # Leave the pending row without a terminal result so a restart can replay it.
+    # This callback is observability only and never changes execution authority.
+    logger.error(
+        f"[COLLECTOR_V22] cancellation evidence handoff deferred "
+        f"key={row.get('key')} reason={row.get('reason')} "
+        f"error={row.get('error')} [EVIDENCE GAP]"
+    )
+
+
+def _get_cancellation_evidence_worker():
+    global _cancellation_evidence_worker
+    with _cancellation_evidence_worker_lock:
+        if _cancellation_evidence_reset_fence:
+            return None
+        if _cancellation_evidence_worker is not None:
+            existing = _cancellation_evidence_worker.snapshot()
+            if (not existing.get("accepting")
+                    and not existing.get("timed_out_handler_alive")):
+                _cancellation_evidence_worker = None
+        if _cancellation_evidence_worker is None:
+            _cancellation_evidence_worker = BoundedEvidenceWorker(
+                _write_cancellation_evidence_handoff,
+                max_queue=128,
+                max_retries=1,
+                handler_timeout_sec=10.0,
+                name="cancellation-evidence",
+                on_dead_letter=_cancellation_evidence_dead_letter,
+            )
+        return _cancellation_evidence_worker
+
+
+def _shutdown_cancellation_evidence_worker(timeout: float = 5.0) -> bool:
+    global _cancellation_evidence_worker
+    worker = _cancellation_evidence_worker
+    if worker is None:
+        return True
+    drained = worker.shutdown(drain_timeout=timeout)
+    snapshot = worker.snapshot()
+    if not drained or snapshot.get("timed_out_handler_alive"):
+        return False
+    with _cancellation_evidence_worker_lock:
+        if _cancellation_evidence_worker is worker:
+            _cancellation_evidence_worker = None
+    return True
+
+
+def _dispatch_cancellation_evidence_handoff(receipt: dict) -> bool:
+    """Queue one durable handoff without blocking the scheduler owner."""
+    receipt_id = str(receipt.get("receipt_id") or "")
+    if not receipt_id:
+        return False
+    worker = _get_cancellation_evidence_worker()
+    if worker is None:
+        logger.warning(
+            f"[COLLECTOR_V22] cancellation evidence dispatch fenced during reset "
+            f"receipt_id={receipt_id} [EVIDENCE GAP]"
+        )
+        return False
+    return bool(worker.submit(
+        receipt_id,
+        {"receipt": copy.deepcopy(receipt)},
+        source_ts=time.time(),
+    ))
+
+
+def _replay_cancellation_evidence_handoffs() -> int:
+    """Replay append-first handoffs left pending by an interrupted process."""
+    path = _cancellation_evidence_handoff_path()
+    if not os.path.exists(path):
+        return 0
+    pending = {}
+    terminal = set()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                receipt_id = str(row.get("receipt_id") or "")
+                if not receipt_id:
+                    continue
+                if row.get("schema") == "cancellation_evidence_handoff_pending_v1":
+                    if len(receipt_id) != 64 or not row.get("collector_epoch_id"):
+                        logger.error(
+                            f"[COLLECTOR_V22] malformed cancellation handoff identity "
+                            f"receipt_id={receipt_id!r} [EVIDENCE GAP]"
+                        )
+                        continue
+                    pending.setdefault(receipt_id, row)
+                elif row.get("schema") == "cancellation_evidence_handoff_result_v1":
+                    status = str(row.get("status") or "")
+                    if status in {"APPLIED", "EPOCH_MISMATCH_PRESERVED"}:
+                        terminal.add(receipt_id)
+                else:
+                    logger.error(
+                        f"[COLLECTOR_V22] unknown cancellation handoff schema "
+                        f"receipt_id={receipt_id!r} [EVIDENCE GAP]"
+                    )
+    except OSError as exc:
+        logger.warning(f"[COLLECTOR_V22] cancellation evidence replay unavailable: {exc}")
+        return 0
+    dispatched = 0
+    for receipt_id, receipt in pending.items():
+        if receipt_id not in terminal and _dispatch_cancellation_evidence_handoff(receipt):
+            dispatched += 1
+    return dispatched
+
+
+def _enqueue_cancellation_evidence_handoff(
+    order: dict, signal: dict = None, *, lifecycle_final: bool = True,
+) -> bool:
+    """Durably bind cancellation evidence before asynchronous collector work."""
+    epoch_id = _collector_v22_epoch_id()
+    order_snapshot = copy.deepcopy(order if isinstance(order, dict) else {})
+    signal_snapshot = copy.deepcopy(signal if isinstance(signal, dict) else {})
+    identity = {
+        "collector_epoch_id": epoch_id,
+        "trade_id": str(order_snapshot.get("trade_id") or ""),
+        "cancel_confirmed_ts": order_snapshot.get("cancel_confirmed_ts"),
+        "cancel_confirmed_reason": order_snapshot.get("cancel_confirmed_reason"),
+    }
+    receipt_id = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    ).hexdigest()
+    receipt = {
+        "schema": "cancellation_evidence_handoff_pending_v1",
+        "receipt_id": receipt_id,
+        "collector_epoch_id": epoch_id,
+        "trade_id": identity["trade_id"],
+        "created_at": utc_iso(),
+        "lifecycle_final": bool(lifecycle_final),
+        "order_snapshot": order_snapshot,
+        "signal_snapshot": signal_snapshot,
+    }
+    if not _append_cancellation_evidence_handoff(receipt):
+        return False
+    return _dispatch_cancellation_evidence_handoff(receipt)
 
 
 @_collector_epoch_serialized
@@ -25522,12 +25795,6 @@ def _cancel_pending_order_confirmed(
             acknowledgement_ts=float(order["cancel_confirmed_ts"]),
         )
 
-    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-    if callable(collector_refresh):
-        collector_refresh(
-            order, master_signal if isinstance(master_signal, dict) else None,
-            lifecycle_final=bool(evidence_lifecycle_final),
-        )
     result["confirmed"] = True
     result["finalized"] = True
     if record_expired:
@@ -25544,6 +25811,20 @@ def _cancel_pending_order_confirmed(
                     bucket.remove(order)
     if expire_signal:
         result["signal_expired"] = bool(expire_signal_for_order(order, reason))
+    evidence_handoff = globals().get("_enqueue_cancellation_evidence_handoff")
+    if callable(evidence_handoff):
+        handoff_ok = bool(evidence_handoff(
+            order, master_signal if isinstance(master_signal, dict) else None,
+            lifecycle_final=bool(evidence_lifecycle_final),
+        ))
+        result["evidence_handoff"] = "QUEUED" if handoff_ok else "PENDING"
+        if not handoff_ok:
+            logger.error(
+                f"[COLLECTOR_V22] cancellation evidence handoff not queued "
+                f"trade_id={tid} reason={reason} [EVIDENCE GAP]"
+            )
+    else:
+        result["evidence_handoff"] = "UNAVAILABLE"
     return result
 
 
@@ -27838,6 +28119,15 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         return {"ok": False, "wipe_aborted": True,
                 "error": "fresh_collection_lifecycle_not_quiescent",
                 "summary": "Reset aborted before archive: lifecycle owner did not stop"}
+    global _cancellation_evidence_reset_fence
+    with _cancellation_evidence_worker_lock:
+        _cancellation_evidence_reset_fence = True
+    if not _shutdown_cancellation_evidence_worker(timeout=5.0):
+        with _cancellation_evidence_worker_lock:
+            _cancellation_evidence_reset_fence = False
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_cancellation_evidence_not_quiescent",
+                "summary": "Reset aborted before archive: cancellation evidence worker did not drain"}
     _FRESH_RESET_LIFECYCLE_RESTART_PENDING = (
         _FRESH_RESET_LIFECYCLE_RESTART_PENDING or lifecycle_was_registered
     )
@@ -27905,6 +28195,8 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
                 if not pause_confirmed:
                     result["pause_state_blocker"] = "RESET_PAUSE_STATE_UNVERIFIED"
                     result["summary"] = "Research reset failed; pause state could not be re-confirmed because its lock is busy"
+        with _cancellation_evidence_worker_lock:
+            _cancellation_evidence_reset_fence = False
 
     if result.get("ok") is True and not result.get("wipe_aborted") and _FRESH_RESET_LIFECYCLE_RESTART_PENDING:
         if not _start_lifecycle_pipeline_runtime():
@@ -45442,6 +45734,8 @@ def shutdown_handler(signum, frame):
     shutdown_event.set()
     drained = _shutdown_pending_order_evidence_worker(timeout=5.0)
     logger.warning(f"[SHUTDOWN] Pending-order evidence drained={drained}")
+    cancellation_drained = _shutdown_cancellation_evidence_worker(timeout=5.0)
+    logger.warning(f"[SHUTDOWN] Cancellation evidence drained={cancellation_drained}")
     post_ai_drained = _shutdown_post_ai_evidence_workers(timeout=2.0)
     logger.warning(f"[SHUTDOWN] Post-AI evidence drained={post_ai_drained}")
     combo_drained = _shutdown_combo_lane_execution_workers(timeout=5.0)

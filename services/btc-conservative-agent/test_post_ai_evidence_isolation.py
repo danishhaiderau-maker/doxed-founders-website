@@ -174,3 +174,11 @@ def test_post_ai_timeout_is_reported_as_an_explicit_evidence_gap() -> None:
     assert "evidence handler exceeded" in body
     assert "HOOK_TIMEOUT" in body
     assert "_record_post_ai_evidence_gap" in body
+
+
+def test_post_ai_worker_uses_real_phase_budget_without_disabling_timeout() -> None:
+    body = _source("_get_post_ai_evidence_worker")
+    assert "POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC" in body
+    assert "handler_timeout_sec=5.0" not in body
+    assert "handler_timeout_sec=None" not in body
+    assert "POST_AI_EVIDENCE_HANDLER_TIMEOUT_SEC = 30.0" in SOURCE
