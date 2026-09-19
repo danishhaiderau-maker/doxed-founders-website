@@ -1897,9 +1897,12 @@ def test_sqlite_snapshot_authority_requires_exact_current_inventory_row(tmp_path
     tree = ast.parse(BOT)
     selected = [node for node in tree.body
                 if isinstance(node, ast.FunctionDef)
-                and node.name == "_data_sync_authorize_sqlite_snapshot_request"]
+                and node.name in {
+                    "_data_sync_authorize_sqlite_snapshot_request",
+                    "_data_sync_disk_manifest_row_for_path",
+                }]
     namespace = {
-        "Path": Path, "hmac": hmac,
+        "Path": Path, "hmac": hmac, "json": json,
         "_data_sync_inventory_generation": lambda digest: generation if digest == generation_id else None,
         "_data_sync_disk_manifest_page": lambda retained, raw_cursor="": {"rows": [row]},
         "_data_sync_manifest_cursor": lambda digest, page: f"{digest}.{page}",
@@ -1926,6 +1929,7 @@ def test_sqlite_snapshot_authority_requires_exact_current_inventory_row(tmp_path
     generation.update({
         "status": "CURRENT", "ack_eligible": True,
         "storage": "disk_pages_v2", "page_count": 1,
+        "generation_id": generation_id,
     })
     generation.pop("rows", None)
     assert authorize(source, generation_id, generation_id, row)["path"] == "authority.db"
@@ -4486,6 +4490,7 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
         "_data_sync_manifest_cursor",
         "_data_sync_disk_page_descriptor",
         "_data_sync_disk_manifest_page",
+        "_data_sync_disk_manifest_row_for_path",
     }
     selected = [
         node for node in tree.body
@@ -4526,6 +4531,8 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
         (generation_dir / name).write_bytes(raw)
         descriptors.append({
             "page_index": index,
+            "first_path": rows[0]["path"],
+            "last_path": rows[-1]["path"],
             "file_count": len(rows),
             "total_bytes": sum(row["size"] for row in rows),
             "page_sha256": digest,
@@ -4569,6 +4576,7 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
         "file_count": 3,
         "total_bytes": 6,
         "top_files": top_files,
+        "path_index_version": 2,
     }
     generation = namespace["_data_sync_validate_disk_inventory_generation"](result, work)
     assert "rows" not in generation
@@ -4579,6 +4587,9 @@ def test_parent_validates_and_serves_disk_generation_one_bounded_page_at_a_time(
     assert [row["path"] for row in first["rows"]] == ["a.json", "b.json"]
     assert [row["path"] for row in second["rows"]] == ["c.json"]
     assert second["is_last_page"] is True and second["next_cursor"] is None
+    assert namespace["_data_sync_disk_manifest_row_for_path"](
+        generation, "c.json"
+    )["path"] == "c.json"
     (generation_dir / descriptors[1]["file_name"]).write_bytes(b"tampered")
     with __import__("pytest").raises(ValueError, match="page hash mismatch"):
         namespace["_data_sync_disk_manifest_page"](

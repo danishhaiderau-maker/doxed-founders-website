@@ -987,6 +987,7 @@ def _write_page(staging: Path, page_index: int, rows: list[dict]) -> dict:
         _atomic_bytes(destination, raw)
     return {
         "page_index": page_index,
+        "first_path": rows[0]["path"] if rows else "",
         "file_count": len(rows),
         "total_bytes": total_bytes,
         "page_sha256": page_sha256,
@@ -1033,7 +1034,7 @@ def _publish_generation(
                 descriptor = json.loads(raw_descriptor)
                 public = {
                     key: descriptor[key]
-                    for key in ("page_index", "file_count", "total_bytes", "page_sha256", "file_name")
+                    for key in ("page_index", "first_path", "last_path", "file_count", "total_bytes", "page_sha256", "file_name")
                 }
                 line = json.dumps(
                     public, separators=(",", ":"), sort_keys=True, ensure_ascii=True,
