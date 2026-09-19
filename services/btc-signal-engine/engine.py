@@ -40342,24 +40342,17 @@ def _data_sync_authorize_sqlite_snapshot_request(
             or generation.get("ack_eligible") is not True
             or str(generation.get("status") or "").upper() != "CURRENT"):
         raise ValueError("sqlite snapshot inventory generation is unavailable")
-    rows = []
-    if generation.get("storage") == "disk_pages_v2":
-        for page_index in range(int(generation.get("page_count") or 0)):
-            page = _data_sync_disk_manifest_page(
-                generation,
-                raw_cursor=(
-                    "" if page_index == 0
-                    else _data_sync_manifest_cursor(inventory_generation_id, page_index)
-                ),
-            )
-            rows.extend(page.get("rows") or [])
-    else:
-        rows = generation.get("rows") or []
     relpath = _data_sync_relpath(path.resolve())
-    matches = [dict(row) for row in rows if str(row.get("path") or "") == relpath]
-    if len(matches) != 1:
+    if generation.get("storage") == "disk_pages_v2":
+        row = _data_sync_disk_manifest_row_for_path(generation, relpath)
+    else:
+        matches = [dict(row) for row in generation.get("rows") or []
+                   if str(row.get("path") or "") == relpath]
+        if len(matches) > 1:
+            raise ValueError("sqlite snapshot inventory contains duplicate path rows")
+        row = matches[0] if matches else None
+    if row is None:
         raise ValueError("sqlite snapshot path is absent from retained inventory")
-    row = matches[0]
     if str(row.get("consistency_mode") or "") != "sqlite_snapshot_v1":
         raise ValueError("retained inventory row is not a SQLite snapshot")
     try:
@@ -41098,6 +41091,8 @@ def _data_sync_validate_disk_inventory_generation(
     indexed_files = 0
     indexed_bytes = 0
     descriptors_seen = 0
+    previous_last_path = None
+    path_index_version = 2
     generation_hasher = hashlib.sha256(b"fly_runtime_inventory_generation_v2\n")
     with index_path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -41114,12 +41109,24 @@ def _data_sync_validate_disk_inventory_generation(
                 raise RuntimeError("inventory page descriptor is invalid") from exc
             page_sha256 = str(descriptor.get("page_sha256") or "").lower()
             file_name = str(descriptor.get("file_name") or "")
+            first_path = str(descriptor.get("first_path") or "")
+            last_path = str(descriptor.get("last_path") or "")
+            has_path_bounds = "first_path" in descriptor and "last_path" in descriptor
+            if not has_path_bounds:
+                path_index_version = 1
             if (
                 page_index != descriptors_seen or page_files < 0 or page_bytes < 0
                 or not re.fullmatch(r"[0-9a-f]{64}", page_sha256)
                 or file_name != f"p{page_index:08d}-{page_sha256[:24]}.json"
+                or (has_path_bounds and page_files == 0 and (first_path or last_path))
+                or (has_path_bounds and page_files > 0 and (
+                    not first_path or not last_path or first_path > last_path
+                    or (previous_last_path is not None and first_path <= previous_last_path)
+                ))
             ):
                 raise RuntimeError("inventory page descriptor sequence is invalid")
+            if page_files > 0:
+                previous_last_path = last_path
             page_path = (generation_dir / file_name).resolve(strict=True)
             page_path.relative_to(generation_dir)
             if not page_path.is_file() or page_path.stat().st_size > 8 * 1024 * 1024:
@@ -41156,6 +41163,7 @@ def _data_sync_validate_disk_inventory_generation(
         "file_count": file_count,
         "total_bytes": total_bytes,
         "top_files": top_files,
+        "path_index_version": path_index_version,
     }
 
 
@@ -41537,6 +41545,7 @@ def _data_sync_disk_manifest_page(
     generation: dict,
     *,
     raw_cursor: str = "",
+    descriptor: dict | None = None,
 ) -> dict:
     generation_id = str(generation["generation_id"])
     page_count = int(generation["page_count"])
@@ -41550,7 +41559,10 @@ def _data_sync_disk_manifest_page(
         page_index = 0
     if page_index < 0 or page_index >= page_count:
         raise ValueError("manifest cursor page is invalid")
-    descriptor = _data_sync_disk_page_descriptor(generation, page_index)
+    if descriptor is None:
+        descriptor = _data_sync_disk_page_descriptor(generation, page_index)
+    elif int(descriptor.get("page_index", -1)) != page_index:
+        raise ValueError("manifest page descriptor index mismatch")
     generation_dir = Path(str(generation["generation_dir"]))
     page_path = (generation_dir / str(descriptor["file_name"])).resolve(strict=True)
     page_path.relative_to(generation_dir.resolve(strict=True))
@@ -41590,6 +41602,63 @@ def _data_sync_disk_manifest_page(
         "is_last_page": next_index >= page_count,
         "page_sha256": str(descriptor["page_sha256"]),
     }
+
+
+def _data_sync_disk_manifest_row_for_path(
+    generation: dict, relpath: str,
+) -> dict | None:
+    """Resolve one manifest row without decoding every inventory page.
+
+    New generations publish first/last path bounds in the authenticated page
+    index. Those bounds identify one page; only that page is then hash-checked
+    and decoded. Legacy generations retain the previous all-page fallback.
+    """
+    target = str(relpath or "")
+    if int(generation.get("path_index_version") or 1) >= 2:
+        selected = None
+        index_path = Path(str(generation.get("page_index_path") or ""))
+        with index_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                descriptor = json.loads(line)
+                first_path = str(descriptor.get("first_path") or "")
+                last_path = str(descriptor.get("last_path") or "")
+                if not first_path or not last_path:
+                    raise ValueError("manifest path index descriptor is incomplete")
+                if target < first_path:
+                    break
+                if target <= last_path:
+                    selected = descriptor
+                    break
+        if selected is None:
+            return None
+        page = _data_sync_disk_manifest_page(
+            generation,
+            raw_cursor=_data_sync_manifest_cursor(
+                str(generation["generation_id"]), int(selected["page_index"])
+            ),
+            descriptor=selected,
+        )
+        matches = [dict(row) for row in page.get("rows") or []
+                   if str(row.get("path") or "") == target]
+        if len(matches) > 1:
+            raise ValueError("manifest path index contains duplicate rows")
+        return matches[0] if matches else None
+
+    rows = []
+    generation_id = str(generation["generation_id"])
+    for page_index in range(int(generation.get("page_count") or 0)):
+        page = _data_sync_disk_manifest_page(
+            generation,
+            raw_cursor=(
+                "" if page_index == 0
+                else _data_sync_manifest_cursor(generation_id, page_index)
+            ),
+        )
+        rows.extend(page.get("rows") or [])
+    matches = [dict(row) for row in rows if str(row.get("path") or "") == target]
+    if len(matches) > 1:
+        raise ValueError("manifest contains duplicate path rows")
+    return matches[0] if matches else None
 
 
 def _data_sync_manifest_cursor(generation_id: str, offset: int) -> str:
