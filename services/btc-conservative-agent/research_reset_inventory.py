@@ -157,7 +157,8 @@ def _essential(relative):
             or name.endswith((".pem", ".key", ".pfx", ".p12"))):
         return "ESSENTIAL_CONFIG_OR_CREDENTIAL"
     if (any(p in {".locks", "locks", "emergency_evidence_wal_v2", "emergency_wal_release_acks",
-                  "append_heads", "ledger_generations_v1"} for p in parts)
+                  "append_heads", "ledger_generations_v1",
+                  "transactional_record_authority_v1"} for p in parts)
             or name.endswith((".lock", ".pid", "-wal", "-shm"))
             or any(any(x in p for x in ("owner", "recovery", "emergency")) for p in parts)
             or "pending" in name):

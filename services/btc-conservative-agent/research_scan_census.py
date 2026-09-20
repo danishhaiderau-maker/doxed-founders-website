@@ -144,8 +144,7 @@ class ScanCensus:
                     'plan_record_id':'scan-fanout-plan:'+key,'observed_ts':self._time(),
                     'admission_status':status,'completion_status':'UNKNOWN','qualification_eligible':False})
             record_id='scan-fanout-plan:'+key
-            receipt=_read(self.store._record_receipt_path('decision',record_id))
-            if receipt.get('state')!='COMMITTED': raise ValueError('SCAN_FANOUT_PLAN_NOT_COMMITTED')
+            receipt=self.store.verified_record_receipt('decision',record_id)
             return {'schema':'scan_fanout_plan_reference_v1','plan_record_id':record_id,
                 'plan_identity':identity,'source_identity':self.store._identity_binding(),
                 'row_sha256':receipt['row_sha256'],'byte_offset':receipt['offset'],
@@ -155,7 +154,7 @@ class ScanCensus:
     def _verify_finished(self,scan,*,refs,raised,verdicts):
         record_id='scan-disposition:'+scan
         try:
-            receipt=_read(self.store._record_receipt_path('decision',record_id))
+            receipt=self.store.verified_record_receipt('decision',record_id)
             offset,length=receipt['offset'],receipt['length']
             if (receipt.get('state')!='COMMITTED' or type(offset) is not int or offset<0
                     or type(length) is not int or not 0<length<=1048576):
@@ -188,8 +187,7 @@ def observe_opportunity(store,write,policy_decision=None):
         current['verdicts'].append(policy_decision)
     try:
         if len(current['refs'])>=8: raise ValueError('SCAN_CENSUS_REFERENCE_LIMIT')
-        receipt=_read(store._record_receipt_path('opportunity',write['record_id']))
-        if receipt.get('state')!='COMMITTED': raise ValueError('SCAN_CENSUS_OPPORTUNITY_NOT_COMMITTED')
+        receipt=store.verified_record_receipt('opportunity',write['record_id'])
         offset,length=receipt['offset'],receipt['length']
         if type(offset) is not int or offset<0 or type(length) is not int or not 0<length<=1048576:
             raise ValueError('SCAN_CENSUS_REFERENCE_LIMIT')

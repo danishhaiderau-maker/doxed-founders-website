@@ -13,6 +13,10 @@ import re
 import stat
 
 from research_v3_contract import LEDGER_NAMES, canonical_json
+from transactional_receipt_store import (
+    ReceiptAuthorityError,
+    audit_transactional_receipt_authority,
+)
 
 
 def _unsafe(info):
@@ -46,6 +50,7 @@ def audit_research_reset_recovery(runtime_root, *, expected_identity,
     if not root.is_dir():
         raise ValueError("RUNTIME_ROOT_NOT_DIRECTORY")
     blockers, retained, completed, retired = [], [], [], []
+    receipt_authority = {"present": False, "active": False}
     seen, consumed, complete = 0, 0, True
 
     def block(code, path=None):
@@ -237,6 +242,33 @@ def audit_research_reset_recovery(runtime_root, *, expected_identity,
         else:
             block("EPOCH_RETIREMENT_RECEIPT_OR_METADATA_INVALID", paths["COMPLETED"])
 
+    try:
+        receipt_authority = audit_transactional_receipt_authority(
+            root, expected_identity,
+        )
+        if receipt_authority.get("present"):
+            authority_root = root / "v3/receipts/transactional_record_authority_v1"
+            for authority_path in entries(authority_root):
+                retained.append({
+                    "path": authority_path.relative_to(root).as_posix(),
+                    "reason": "TRANSACTIONAL_RECEIPT_AUTHORITY_RETAINED",
+                })
+            if receipt_authority.get("active") is not True:
+                block("TRANSACTIONAL_RECEIPT_IMPORT_INCOMPLETE", authority_root)
+            else:
+                # Reset currently preserves this fixed-path epoch-bound DB and
+                # marker. Until a separately reviewed retirement protocol can
+                # archive it atomically, deleting its ledgers would strand the
+                # next epoch behind an identity mismatch.
+                block("TRANSACTIONAL_RECEIPT_AUTHORITY_RETIREMENT_REQUIRED", authority_root)
+    except (OSError, ValueError, ReceiptAuthorityError):
+        authority_root = root / "v3/receipts/transactional_record_authority_v1"
+        block("TRANSACTIONAL_RECEIPT_AUTHORITY_INVALID", authority_root)
+        retained.append({
+            "path": authority_root.relative_to(root).as_posix(),
+            "reason": "UNKNOWN_RECOVERY_RETAINED",
+        })
+
     heads = root / "v3/receipts/emergency_record_idempotency_v1/append_heads"
     for path in entries(heads):
         if path.name not in {n + ".json" for n in LEDGER_NAMES}:
@@ -331,6 +363,7 @@ def audit_research_reset_recovery(runtime_root, *, expected_identity,
               "pending_or_unknown_count": len(blockers) if complete else None,
               "scanned_entries": seen, "metadata_bytes_read": consumed,
               "blockers": blockers, "retained_paths": retained, "completed_rotations": completed,
-              "completed_epoch_retirements": retired}
+              "completed_epoch_retirements": retired,
+              "transactional_receipt_authority": receipt_authority}
     result["receipt_sha256"] = hashlib.sha256(canonical_json(result).encode()).hexdigest()
     return result

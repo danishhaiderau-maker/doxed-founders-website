@@ -7,7 +7,7 @@ from __future__ import annotations
 import ctypes, hashlib, json, math, os, re, struct, threading, time, uuid, zlib
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 MAX_ROW_BYTES = 8 * 1024 * 1024
 DEFAULT_EXTENTS = 4
@@ -574,24 +574,37 @@ class EmergencyEvidenceWal:
 
     def mark_replayed(
         self, generation: str, *, canonical_ledger: str | Path,
-        canonical_receipt: str | Path,
+        canonical_receipt: str | Path | Mapping[str, Any],
     ) -> dict[str, Any]:
         """Persist exact canonical replay proof, without releasing capacity."""
         ledger_path = Path(canonical_ledger).resolve(strict=True)
-        receipt_path = Path(canonical_receipt).resolve(strict=True)
         volume_root = self.root.parent.parent
         expected_ledgers = (volume_root / "v3" / "ledgers").resolve()
-        expected_receipts = (volume_root / "v3" / "receipts").resolve()
         try:
             ledger_path.relative_to(expected_ledgers)
-            receipt_path.relative_to(expected_receipts)
         except ValueError as exc:
             raise RuntimeError("EMERGENCY_WAL_REPLAY_PATH_OUTSIDE_VOLUME") from exc
-        receipt_raw = receipt_path.read_bytes()
-        try:
-            receipt = json.loads(receipt_raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("EMERGENCY_WAL_REPLAY_RECEIPT_INVALID") from exc
+        if isinstance(canonical_receipt, Mapping):
+            receipt = dict(canonical_receipt)
+            try:
+                receipt_raw = (
+                    json.dumps(receipt, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=True, allow_nan=False) + "\n"
+                ).encode("utf-8")
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("EMERGENCY_WAL_REPLAY_RECEIPT_INVALID") from exc
+        else:
+            receipt_path = Path(canonical_receipt).resolve(strict=True)
+            expected_receipts = (volume_root / "v3" / "receipts").resolve()
+            try:
+                receipt_path.relative_to(expected_receipts)
+            except ValueError as exc:
+                raise RuntimeError("EMERGENCY_WAL_REPLAY_PATH_OUTSIDE_VOLUME") from exc
+            receipt_raw = receipt_path.read_bytes()
+            try:
+                receipt = json.loads(receipt_raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("EMERGENCY_WAL_REPLAY_RECEIPT_INVALID") from exc
         with _cross_process_lock(self.lock_path, timeout=self.lock_timeout), self.header_path.open("r+b") as hf, self.data_path.open("rb") as data:
             headers = self._read_validate_headers_or_alarm(hf)
             self._validate_all_extents(data, headers)
