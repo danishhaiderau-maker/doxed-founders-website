@@ -8,7 +8,7 @@ import math
 import os
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 
@@ -59,7 +59,7 @@ def _bounded_resources(deadline_seconds: float, memory_bytes: int):
                     pass
 
 
-def build_snapshot(request: dict) -> dict:
+def build_snapshot(request: dict, *, enforce_resource_limits: bool = False) -> dict:
     source_path = Path(str(request["source_path"])).resolve(strict=True)
     destination_path = Path(str(request["destination_path"])).resolve()
     deadline_seconds = max(15.0, min(120.0, float(request["deadline_seconds"])))
@@ -69,7 +69,12 @@ def build_snapshot(request: dict) -> dict:
     # established 256 MiB floor so integrity checks fail with a typed result
     # instead of an opaque sqlite disk-I/O error.
     memory_bytes = max(256 * 1024 * 1024, int(request["memory_bytes"]))
-    with _bounded_resources(deadline_seconds, memory_bytes):
+    # Resource limits belong to the short-lived CLI worker. Imported callers
+    # (including the in-process contract tests) must not inherit RLIMIT_AS or
+    # RLIMIT_CPU, because those limits would poison the host process after the
+    # snapshot returns. The CLI opts in explicitly below.
+    bounds = _bounded_resources(deadline_seconds, memory_bytes) if enforce_resource_limits else nullcontext()
+    with bounds:
         started = time.monotonic()
 
         def require_bounds() -> None:
@@ -128,7 +133,7 @@ def main() -> int:
     result_path = Path(args.result).resolve()
     request = json.loads(request_path.read_text(encoding="utf-8"))
     try:
-        payload = {"ok": True, **build_snapshot(request)}
+        payload = {"ok": True, **build_snapshot(request, enforce_resource_limits=True)}
     except Exception as exc:
         payload = {"ok": False, "error_code": type(exc).__name__}
     temporary = result_path.with_suffix(result_path.suffix + f".{os.getpid()}.tmp")
