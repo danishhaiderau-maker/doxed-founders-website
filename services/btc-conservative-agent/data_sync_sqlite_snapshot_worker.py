@@ -64,7 +64,11 @@ def build_snapshot(request: dict) -> dict:
     destination_path = Path(str(request["destination_path"])).resolve()
     deadline_seconds = max(15.0, min(120.0, float(request["deadline_seconds"])))
     max_output_bytes = max(1, int(request["max_output_bytes"]))
-    memory_bytes = max(128 * 1024 * 1024, int(request["memory_bytes"]))
+    # 128 MiB is below the address-space needed by a Python worker plus
+    # SQLite's page cache on Linux. Keep the request bounded, but use the
+    # established 256 MiB floor so integrity checks fail with a typed result
+    # instead of an opaque sqlite disk-I/O error.
+    memory_bytes = max(256 * 1024 * 1024, int(request["memory_bytes"]))
     with _bounded_resources(deadline_seconds, memory_bytes):
         started = time.monotonic()
 
