@@ -802,66 +802,48 @@ jobs:
   inspect-runtime:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'inspect-runtime'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
-
-      - name: Capture current machine status and recent logs without mutation
+      - name: Read bounded reset receipts only
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          run_probe() {
-            label="$1"
-            shift
-            echo "===${label}==="
-            if timeout --signal=TERM --kill-after=5s 45s "$@"; then
-              return 0
-            else
-              code="$?"
-            fi
-            echo "::warning title=Fly read-only probe incomplete::${label} exited ${code}; continuing with the remaining bounded probes"
-            return 0
-          }
-          run_probe FLY_STATUS flyctl status --app doxed-btc-bot
-          run_probe VOLUME_LIST flyctl volumes list --app doxed-btc-bot --json
-          machine_json="$(timeout --signal=TERM --kill-after=5s 30s flyctl machines list --app doxed-btc-bot --json)"
-          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
-          run_probe MACHINE_STATUS flyctl machine status --app doxed-btc-bot "$machine_id"
-          run_probe RECENT_PLATFORM_LOGS flyctl logs --app doxed-btc-bot --no-tail
-          # Machine Exec uses the Fly Machines guest-agent path rather than
-          # the application's Flask worker or SSH service.  Keep this probe
-          # read-only and emit only bounded lifecycle identity/count fields so
-          # a wedged owner can still prove whether its last atomic paper
-          # snapshot contains exposure without disclosing order payloads.
-          run_probe DURABLE_PAPER_LIFECYCLE flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "python -c 'from pathlib import Path; import json,os; p=Path(\"/app/data/runtime/paper_lifecycle_v1.json\"); d=json.loads(p.read_text(encoding=\"utf-8\")); assert d.get(\"schema\")==\"paper_lifecycle_v1\"; assert d.get(\"paper_only\") is True and d.get(\"live_armed\") is False; positions=d.get(\"positions\"); orders=d.get(\"pending_orders\"); assert isinstance(positions,list) and isinstance(orders,list); assert len(positions)<=100000 and len(orders)<=100000; assert all(isinstance(x,dict) and str(x.get(\"trade_id\") or \"\").strip() and str(x.get(\"status\") or \"\").upper()==\"OPEN\" for x in positions); assert all(isinstance(x,dict) and str(x.get(\"trade_id\") or \"\").strip() and str(x.get(\"status\") or \"\").upper()==\"PENDING\" for x in orders); pids=sorted(str(x[\"trade_id\"]) for x in positions); oids=sorted(str(x[\"trade_id\"]) for x in orders); print(json.dumps({\"schema\":d.get(\"schema\"),\"saved_at\":d.get(\"saved_at\"),\"file_mtime_epoch\":p.stat().st_mtime,\"snapshot_git_rev\":d.get(\"git_rev\"),\"runtime_source_git_rev\":os.getenv(\"SOURCE_GIT_REV\"),\"paper_only\":d.get(\"paper_only\"),\"live_armed\":d.get(\"live_armed\"),\"open_position_count\":len(positions),\"open_position_id_sample\":pids[:20],\"open_position_ids_truncated\":len(pids)>20,\"pending_order_count\":len(orders),\"pending_order_id_sample\":oids[:20],\"pending_order_ids_truncated\":len(oids)>20},sort_keys=True))'"
-          run_probe PROCESS_AND_BOT_LOG flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
-            "sh -lc 'echo ===PROCESS_MEMORY===; ps -eo pid,ppid,rss,vsz,etime,comm,args --sort=-rss | head -n 20; echo ===RECENT_BOT_LOG===; tail -n 2500 /app/data/bot.log'"
-          # Read only the final bounded JSONL window and emit the already-sanitized
-          # watchdog receipt.  Persistent logs span deployments, so bind every
-          # scheduler-wedge diagnosis to the receipt's exact source revision.
-          run_probe WATCHDOG_CRASH_RECEIPT flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "python -c 'exec(\"\"\"from pathlib import Path\nimport json\np=Path(\"/app/data/runtime/crash_dump.json\")\nassert p.is_file(), \"crash receipt missing\"\nsize=p.stat().st_size\nwith p.open(\"rb\") as h:\n    h.seek(max(0,size-131072))\n    rows=h.read(131072).splitlines()\nreceipt=None\nfor raw in reversed(rows):\n    try:\n        candidate=json.loads(raw.decode(\"utf-8\"))\n    except Exception:\n        continue\n    watchdog=candidate.get(\"watchdog\") if isinstance(candidate,dict) else None\n    if isinstance(watchdog,dict):\n        receipt={\"time\":candidate.get(\"time\"),\"watchdog\":watchdog}\n        break\nassert receipt is not None, \"bounded crash window contains no watchdog receipt\"\nprint(json.dumps(receipt,sort_keys=True,separators=(\",\",\":\")))\n\"\"\")'"
-          run_probe VOLUME_USAGE flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "sh -lc 'echo ===DF===; df -h /app/data; echo ===INODES===; df -i /app/data; echo ===TOP_LEVEL_BYTES===; du -x -B1 -d1 /app/data 2>/dev/null | sort -n | tail -n 40; echo ===RUNTIME_BYTES===; du -x -B1 -d2 /app/data/runtime 2>/dev/null | sort -n | tail -n 60'"
-          run_probe EXECUTION_FUNNEL_JSONL_INTEGRITY flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json\np=Path(\\\"/app/data/runtime/execution_funnel.jsonl\\\")\ndata=p.read_bytes()\nrows=data.splitlines(keepends=True)\nbad=[]\nfor number,raw in enumerate(rows,1):\n    if not raw.strip():\n        continue\n    try:\n        json.loads(raw.decode(\\\"utf-8\\\"))\n    except Exception as exc:\n        stripped=raw.strip()\n        detail={\\\"line\\\":number,\\\"bytes\\\":len(raw),\\\"is_last\\\":number==len(rows),\\\"error\\\":type(exc).__name__,\\\"raw_sha256\\\":hashlib.sha256(raw).hexdigest(),\\\"starts_object\\\":stripped.startswith(b\\\"{\\\"),\\\"ends_object\\\":stripped.endswith(b\\\"}\\\"),\\\"concat_markers\\\":stripped.count(b\\\"}{\\\")}\n        if isinstance(exc,json.JSONDecodeError):\n            detail.update({\\\"error_message\\\":exc.msg,\\\"error_pos\\\":exc.pos,\\\"error_line\\\":exc.lineno,\\\"error_column\\\":exc.colno})\n        try:\n            text=stripped.decode(\\\"utf-8\\\")\n            _,end=json.JSONDecoder().raw_decode(text)\n            detail.update({\\\"first_value_end\\\":end,\\\"trailing_nonspace_bytes\\\":len(text[end:].strip().encode(\\\"utf-8\\\"))})\n        except Exception:\n            pass\n        bad.append(detail)\nprint(json.dumps({\\\"path\\\":str(p),\\\"bytes\\\":len(data),\\\"lines\\\":len(rows),\\\"ends_with_newline\\\":data.endswith(b\\\"\\\\n\\\"),\\\"sha256\\\":hashlib.sha256(data).hexdigest(),\\\"invalid_count\\\":len(bad),\\\"invalid\\\":bad[:20],\\\"invalid_truncated\\\":len(bad)>20},sort_keys=True))\n\"\"\")'"
-          run_probe LIFECYCLE_JSONL_TAIL_INTEGRITY flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json\np=Path(\\\"/app/data/runtime/v3/ledgers/lifecycle.jsonl\\\")\ndata=p.read_bytes()\nnewline=bytes([10])\nlast_newline=data.rfind(newline)\npublished=last_newline+1 if last_newline>=0 else 0\ntail=data[published:]\ntail_valid=False\ntail_error=None\nif tail:\n    try:\n        value=json.loads(tail.decode(\\\"utf-8\\\"))\n        tail_valid=isinstance(value,dict)\n    except Exception as exc:\n        tail_error=type(exc).__name__\nprint(json.dumps({\\\"path_name\\\":p.name,\\\"physical_size\\\":len(data),\\\"published_size\\\":published,\\\"complete_prefix_sha256\\\":hashlib.sha256(data[:published]).hexdigest(),\\\"source_sha256\\\":hashlib.sha256(data).hexdigest(),\\\"tail_size\\\":len(tail),\\\"tail_sha256\\\":hashlib.sha256(tail).hexdigest(),\\\"ends_with_newline\\\":data.endswith(newline),\\\"tail_starts_object\\\":tail.lstrip().startswith(b\\\"{\\\"),\\\"tail_ends_object\\\":tail.rstrip().endswith(b\\\"}\\\"),\\\"tail_json_object_valid\\\":tail_valid,\\\"tail_error_class\\\":tail_error},sort_keys=True))\n\"\"\")'"
-          run_probe LIFECYCLE_INDEX_CURSOR_IDENTITY flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
-            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json,sqlite3\nroot=Path(\\\"/app/data/runtime\\\")\np=root/\\\"v3/ledgers/lifecycle.jsonl\\\"\ndb=root/\\\"v3/lifecycle_bundle_index/lifecycle_index.sqlite3\\\"\nstat=p.stat()\nwith sqlite3.connect(db) as c:\n    c.row_factory=sqlite3.Row\n    row=c.execute(\\\"SELECT ledger,source_dev,source_ino,byte_offset,source_anchor_sha256,source_mtime_ns FROM ledger_cursor WHERE ledger=?\\\", (\\\"lifecycle\\\",)).fetchone()\nassert row is not None\noffset=int(row[\\\"byte_offset\\\"])\nstart=max(0,offset-4096)\nwith p.open(\\\"rb\\\") as h:\n    h.seek(start); material=h.read(offset-start)\nprint(json.dumps({\\\"ledger\\\":\\\"lifecycle\\\",\\\"cursor_source_dev\\\":int(row[\\\"source_dev\\\"]),\\\"cursor_source_ino\\\":int(row[\\\"source_ino\\\"]),\\\"cursor_byte_offset\\\":offset,\\\"cursor_anchor_sha256\\\":row[\\\"source_anchor_sha256\\\"],\\\"active_anchor_sha256\\\":hashlib.sha256(material).hexdigest(),\\\"active_dev\\\":int(stat.st_dev),\\\"active_ino\\\":int(stat.st_ino),\\\"active_size\\\":int(stat.st_size),\\\"active_mtime_ns\\\":int(stat.st_mtime_ns),\\\"anchor_matches\\\":hashlib.sha256(material).hexdigest()==row[\\\"source_anchor_sha256\\\"],\\\"offset_within_active\\\":offset<=int(stat.st_size)},sort_keys=True))\n\"\"\")'"
-          run_probe EXECUTION_JSONL_TAIL_AND_CURSOR flyctl machine exec --app doxed-btc-bot --timeout 60 "$machine_id" \
-            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json,sqlite3\nroot=Path(\\\"/app/data/runtime\\\")\np=root/\\\"v3/ledgers/execution.jsonl\\\"\ndb=root/\\\"v3/lifecycle_bundle_index/lifecycle_index.sqlite3\\\"\ndata=p.read_bytes(); stat=p.stat(); lf=bytes([10]); published=data.rfind(lf)+1; tail=data[published:]\nwith sqlite3.connect(db) as c:\n c.row_factory=sqlite3.Row; row=c.execute(\\\"SELECT * FROM ledger_cursor WHERE ledger=?\\\",(\\\"execution\\\",)).fetchone()\noffset=int(row[\\\"byte_offset\\\"]) if row else 0; start=max(0,offset-4096)\nwith p.open(\\\"rb\\\") as h: h.seek(start); anchor=h.read(offset-start)\ntry: tail_value=json.loads(tail.decode(\\\"utf-8\\\")) if tail else None; tail_valid=isinstance(tail_value,dict) if tail else True; tail_error=None\nexcept Exception as exc: tail_valid=False; tail_error=type(exc).__name__\nprint(json.dumps({\\\"ledger\\\":\\\"execution\\\",\\\"source_size\\\":len(data),\\\"source_sha256\\\":hashlib.sha256(data).hexdigest(),\\\"published_size\\\":published,\\\"prefix_sha256\\\":hashlib.sha256(data[:published]).hexdigest(),\\\"tail_size\\\":len(tail),\\\"tail_sha256\\\":hashlib.sha256(tail).hexdigest(),\\\"tail_valid\\\":tail_valid,\\\"tail_error\\\":tail_error,\\\"ends_with_newline\\\":data.endswith(lf),\\\"active_dev\\\":int(stat.st_dev),\\\"active_ino\\\":int(stat.st_ino),\\\"active_mtime_ns\\\":int(stat.st_mtime_ns),\\\"cursor_source_dev\\\":int(row[\\\"source_dev\\\"]) if row else None,\\\"cursor_source_ino\\\":int(row[\\\"source_ino\\\"]) if row else None,\\\"cursor_byte_offset\\\":offset,\\\"cursor_anchor_sha256\\\":row[\\\"source_anchor_sha256\\\"] if row else None,\\\"active_anchor_sha256\\\":hashlib.sha256(anchor).hexdigest(),\\\"anchor_matches\\\":bool(row) and hashlib.sha256(anchor).hexdigest()==row[\\\"source_anchor_sha256\\\"]},sort_keys=True))\n\"\"\")'"
-          run_probe RELAY_STREAM_VALIDATION flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
-            "python -c 'from pathlib import Path; import json,resource,time; from platform_relay_streaming import validate_streaming; p=Path(\"/app/data/relay_lifecycle_evidence_v1.json\"); t=time.perf_counter(); r=validate_streaming(p); print(json.dumps({\"stage\":\"direct_stream_validation\",\"valid\":r[0],\"code\":r[1],\"records\":r[2].get(\"records\"),\"bytes\":p.stat().st_size,\"seconds\":round(time.perf_counter()-t,3),\"maxrss_kib\":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))'"
-          run_probe INCIDENT_LOG_SCAN flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
-            "grep -nE 'fly-entrypoint.*bot (starting|exited)|WATCHDOG.*(failed|exiting|stale)|Traceback|MemoryError|Killed|Out of memory' /app/data/bot.log"
-          # The line-number scan proves an incident exists but a bare
-          # `Traceback` marker cannot identify the failing thread.  Emit only
-          # bounded context around the newest traceback so diagnosis remains
-          # useful without downloading or disclosing the complete bot log.
-          run_probe LATEST_TRACEBACK_CONTEXT flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
-            "sh -lc 'grep -n -B 8 -A 48 \"Traceback (most recent call last):\" /app/data/bot.log | tail -n 120'"
+          set -euo pipefail
+          machine_json="$(timeout 30s flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=[r for r in json.load(sys.stdin) if r.get("state")=="started"]; assert len(rows)==1; print(rows[0]["id"])')"
+          payload="$(python - <<'PY'
+          import base64
+          source = r'''
+          import json,os,re,itertools
+          from pathlib import Path
+          assert os.getenv('SOURCE_GIT_REV') == '70d9ff728de7dd27b5716246bc0425cd5192d31b', 'revision changed'
+          root=Path('/app/data/runtime/research_reset_receipts')
+          allowed={'schema','reset_id','attempt_id','stage','status','phase','scope_name','completed_targets','total_targets','fingerprinted_bytes','observed_at_ts','error','error_code','accounting_preserved','payload_copy_performed','target_count','target_bytes','deleted_count','deleted_bytes','created_at','updated_at','ok'}
+          def read(p):
+              if not p.is_file():
+                  print(json.dumps({'receipt':str(p.relative_to(root)), 'exists':False})); return {}
+              assert not p.is_symlink() and p.stat().st_size <= 4*1024*1024, 'receipt bound'
+              d=json.loads(p.read_text()); assert isinstance(d,dict)
+              print(json.dumps({'receipt':str(p.relative_to(root)), 'mtime':p.stat().st_mtime,'fields':{k:v for k,v in d.items() if k in allowed and isinstance(v,(str,int,float,bool,type(None)))}},sort_keys=True))
+              return d
+          active=read(root/'ACTIVE_RESET.json')
+          reset_id=active.get('reset_id','')
+          if re.fullmatch('[a-f0-9]{24}',reset_id):
+              read(root/reset_id/'operation.json')
+              read(root/reset_id/'deletion.json')
+          for folder in ('_progress','_preflight'):
+              p=root/folder
+              if p.is_dir():
+                  rows=list(itertools.islice(p.iterdir(),257))
+                  assert len(rows)<=256, 'receipt count bound'
+                  for f in sorted((x for x in rows if x.suffix=='.json' and not x.is_symlink()),key=lambda x:x.stat().st_mtime,reverse=True)[:5]: read(f)
+          '''
+          import textwrap
+          print(base64.b64encode(textwrap.dedent(source).encode()).decode())
+          PY
+          )"
+          timeout 45s flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "python -c 'import base64;exec(base64.b64decode(\"$payload\"))'"
 
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
