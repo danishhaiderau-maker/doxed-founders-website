@@ -819,6 +819,15 @@ jobs:
           from pathlib import Path
           assert os.getenv('SOURCE_GIT_REV') == '70d9ff728de7dd27b5716246bc0425cd5192d31b', 'revision changed'
           root=Path('/app/data/runtime/research_reset_receipts')
+          import subprocess
+          print(subprocess.check_output(['ps','-eo','pid,ppid,rss,etime,comm'],text=True,timeout=5)[:12000])
+          print(json.dumps({'disk':dict(zip(('total','used','free'),__import__('shutil').disk_usage('/app/data')))}))
+          log=Path('/app/data/bot.log')
+          if log.is_file():
+              with log.open('rb') as h:
+                  h.seek(max(0,log.stat().st_size-65536)); tail=h.read(65536).decode('utf-8','replace')
+              for line in tail.splitlines():
+                  if any(x in line for x in ('FRESH COLLECTION','RESET_', 'reset failed', 'research_reset')): print(line[:1000])
           allowed={'schema','reset_id','attempt_id','stage','status','phase','scope_name','completed_targets','total_targets','fingerprinted_bytes','observed_at_ts','error','error_code','accounting_preserved','payload_copy_performed','target_count','target_bytes','deleted_count','deleted_bytes','created_at','updated_at','ok'}
           def read(p):
               if not p.is_file():
