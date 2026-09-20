@@ -198,6 +198,7 @@ $script:timeouts = @()
 function Start-Sleep {{ param([int]$Seconds) }}
 function Test-DataSyncResourcePressureError {{ param([string]$Message) return $true }}
 function Get-DataSyncRetryDelaySec {{ param([int]$Attempt, [bool]$ResourcePressure) return 0 }}
+function ConvertTo-DataSyncCanonicalTransportIdentity {{ param($Value) return $Value }}
 function Invoke-RestMethod {{
   param($Uri, $Method, $Headers, [int]$TimeoutSec)
   $script:timeouts += $TimeoutSec

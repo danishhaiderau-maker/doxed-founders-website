@@ -78,6 +78,56 @@ function Get-DataSyncRetryDelaySec {
   return [Math]::Min(15, 2 * [Math]::Max(1, $Attempt))
 }
 
+function ConvertTo-DataSyncCanonicalInventoryTimestamp {
+  param([Parameter(Mandatory = $true)][object]$Value)
+  if ($Value -is [string]) {
+    $text = [string]$Value
+    if ($text -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|[+-]\d{2}:\d{2})$') {
+      throw 'Fly data-sync inventory timestamp is invalid.'
+    }
+    $parsedText = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+      $text,
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::RoundtripKind,
+      [ref]$parsedText
+    )) {
+      throw 'Fly data-sync inventory timestamp is invalid.'
+    }
+    return $text
+  }
+  $parsed = if ($Value -is [DateTimeOffset]) {
+    [DateTimeOffset]$Value
+  } elseif ($Value -is [DateTime]) {
+    if ([DateTime]$Value -eq [DateTime]::MinValue -or ([DateTime]$Value).Kind -eq [DateTimeKind]::Unspecified) {
+      throw 'Fly data-sync inventory timestamp is invalid.'
+    }
+    [DateTimeOffset]([DateTime]$Value)
+  } else {
+    throw 'Fly data-sync inventory timestamp is invalid.'
+  }
+  $utc = $parsed.ToUniversalTime().UtcDateTime
+  $fractionTicks = $utc.Ticks % [TimeSpan]::TicksPerSecond
+  if (($fractionTicks % 10) -ne 0) {
+    throw 'Fly data-sync inventory timestamp precision is invalid.'
+  }
+  $format = if ($fractionTicks -eq 0) {
+    "yyyy-MM-dd'T'HH:mm:ss'+00:00'"
+  } else {
+    "yyyy-MM-dd'T'HH:mm:ss.ffffff'+00:00'"
+  }
+  return $utc.ToString($format, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function ConvertTo-DataSyncCanonicalTransportIdentity {
+  param([Parameter(Mandatory = $true)][object]$Value)
+  $timestampProperty = $Value.PSObject.Properties['inventory_generated_at']
+  if ($null -ne $timestampProperty) {
+    $timestampProperty.Value = ConvertTo-DataSyncCanonicalInventoryTimestamp -Value $timestampProperty.Value
+  }
+  return $Value
+}
+
 function Invoke-DataSyncJsonRequest {
   param(
     [Parameter(Mandatory = $true)][string]$Stage,
@@ -107,6 +157,7 @@ function Invoke-DataSyncJsonRequest {
         $parameters.Body = $Body
       }
       $result = Invoke-RestMethod @parameters
+      $result = ConvertTo-DataSyncCanonicalTransportIdentity -Value $result
       if ($requestWatch.Elapsed.TotalSeconds -ge $MaxElapsedSec) {
         throw "Fly data-sync stage=$Stage failed: REQUEST_DEADLINE_EXCEEDED."
       }
@@ -177,6 +228,40 @@ function Invoke-DataSyncJsonRequest {
   }
 }
 
+function Resolve-DataSyncManifestMemberPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][string]$MemberPath
+  )
+  $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/')
+  if (
+    [string]::IsNullOrWhiteSpace($MemberPath) -or [Text.Encoding]::UTF8.GetByteCount($MemberPath) -gt 1024 -or
+    $MemberPath.StartsWith('.') -or $MemberPath.StartsWith('/') -or
+    $MemberPath.Contains('\') -or $MemberPath.Contains(':') -or
+    $MemberPath -match '[<>"|?*\x00-\x1F\x7F]' -or
+    [IO.Path]::IsPathRooted($MemberPath)
+  ) { throw 'DATA_SYNC_MANIFEST_MEMBER_INVALID' }
+  $segments = @($MemberPath.Split('/'))
+  if ($segments.Count -lt 1) { throw 'DATA_SYNC_MANIFEST_MEMBER_INVALID' }
+  foreach ($segment in $segments) {
+    $deviceStem = @($segment.Split('.'))[0]
+    if (
+      [string]::IsNullOrWhiteSpace($segment) -or $segment -in @('.', '..') -or
+      $segment.EndsWith('.') -or $segment.EndsWith(' ') -or
+      $deviceStem -cmatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$'
+    ) { throw 'DATA_SYNC_MANIFEST_MEMBER_INVALID' }
+  }
+  Assert-FlyBundleUnlinkedPath -Path $rootFull
+  $nativeRelative = $MemberPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
+  $candidate = [IO.Path]::GetFullPath((Join-Path $rootFull $nativeRelative))
+  $prefix = $rootFull + [IO.Path]::DirectorySeparatorChar
+  if (-not $candidate.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'DATA_SYNC_MANIFEST_MEMBER_OUTSIDE_ROOT'
+  }
+  Assert-FlyBundleUnlinkedPath -Path $candidate
+  return $candidate
+}
+
 function New-DataSyncManifestUri {
   param(
     [switch]$IdentityOnly,
@@ -216,6 +301,7 @@ function Get-CompleteDataSyncManifest {
   param(
     [Parameter(Mandatory = $true)]$FirstPage
   )
+  $FirstPage = ConvertTo-DataSyncCanonicalTransportIdentity -Value $FirstPage
   if ([string]$FirstPage.schema -ne "fly_runtime_incremental_sync_v1") {
     throw "Unexpected Fly sync manifest schema."
   }
@@ -292,6 +378,7 @@ function Get-CompleteDataSyncManifest {
       page_index = $expectedIndex
       page_sha256 = [string]$page.manifest_page_sha256
       file_count = $pageRows.Count
+      total_bytes = [int64]$pageBytes
       paths = @($pageRows | ForEach-Object { [string]$_.path })
     })
 
@@ -409,10 +496,12 @@ function Write-SyncProgressHeartbeat {
     [int64]$FileBytes = 0,
     [int64]$RemoteBytes = 0,
     [switch]$Completed,
-    [object]$BundleProgress = $null
+    [string]$ReceiptTarget = "",
+    [object]$BundleProgress = $null,
+    [object]$TerminalAcknowledgement = $null
   )
   if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) { return }
-  $target = [System.IO.Path]::GetFullPath($ProgressHeartbeatFile)
+  $target = [System.IO.Path]::GetFullPath($(if ($ReceiptTarget) { $ReceiptTarget } else { $ProgressHeartbeatFile }))
   $relayEvidence = $null
   if (-not [string]::IsNullOrWhiteSpace($ProgressRelayEvidenceJson)) {
     try { $relayEvidence = $ProgressRelayEvidenceJson | ConvertFrom-Json }
@@ -459,6 +548,11 @@ function Write-SyncProgressHeartbeat {
       elseif ($revisionMatches) { "MATCH" }
       else { "MISMATCH" }
     )
+    inventoryGenerationId = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "inventory_generation_id") { [string]$manifest.inventory_generation_id } else { $null })
+    inventorySha256 = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "inventory_sha256") { [string]$manifest.inventory_sha256 } else { $null })
+    inventoryGeneratedAt = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "inventory_generated_at") { [string]$manifest.inventory_generated_at } else { $null })
+    collectionEpochId = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "collection_epoch_id") { [string]$manifest.collection_epoch_id } else { $null })
+    manifestPageCount = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "manifest_page_count") { [int]$manifest.manifest_page_count } else { $null })
     tileRegistrySignature = $(if ($manifest -and $manifest.PSObject.Properties.Name -contains "tile_registry_signature") { [string]$manifest.tile_registry_signature } else { $null })
     currentFile = $RelativePath
     fileIndex = $FileIndex
@@ -483,6 +577,30 @@ function Write-SyncProgressHeartbeat {
     $progress['reusedLocalBytes'] = [int64]$BundleProgress.ReusedBytes
     $progress['newlyTransferredPayloadBytes'] = [int64]$BundleProgress.VerifiedBytes - [int64]$BundleProgress.ReusedBytes
     $progress['networkBytes'] = $null # Payload excludes TAR/protocol overhead; not measured wire traffic.
+  }
+  if ($null -ne $TerminalAcknowledgement) {
+    $progress['ackAccepted'] = [bool]$TerminalAcknowledgement.AckAccepted
+    $progress['ackFinalized'] = [bool]$TerminalAcknowledgement.AckFinalized
+    $progress['ackCoverageComplete'] = [bool]$TerminalAcknowledgement.AckCoverageComplete
+    $progress['ackAcceptedCount'] = [int64]$TerminalAcknowledgement.AckAcceptedCount
+    $progress['ackExpectedCount'] = [int64]$TerminalAcknowledgement.AckExpectedCount
+    $progress['ackRejectedCount'] = [int64]$TerminalAcknowledgement.AckRejectedCount
+    $progress['ackOperation'] = [string]$TerminalAcknowledgement.AckOperation
+    $progress['ackInventoryStatus'] = [string]$TerminalAcknowledgement.AckInventoryStatus
+    $progress['ackSessionId'] = [string]$TerminalAcknowledgement.AckSessionId
+    $progress['ackManifestPagesComplete'] = [bool]$TerminalAcknowledgement.AckManifestPagesComplete
+    $progress['ackInventoryFileCount'] = [int64]$TerminalAcknowledgement.AckInventoryFileCount
+    $progress['ackManifestFileCount'] = [int64]$TerminalAcknowledgement.AckManifestFileCount
+    $progress['ackManifestTotalBytes'] = [int64]$TerminalAcknowledgement.AckManifestTotalBytes
+    $progress['ackLocalContentFileCount'] = [int64]$TerminalAcknowledgement.AckLocalContentFileCount
+    $progress['ackLocalContentTotalBytes'] = [int64]$TerminalAcknowledgement.AckLocalContentTotalBytes
+    $progress['ackLocalContentDigestSha256'] = [string]$TerminalAcknowledgement.AckLocalContentDigestSha256
+    $progress['ackMembershipReceiptName'] = [string]$TerminalAcknowledgement.AckMembershipReceiptName
+    $progress['ackMembershipReceiptSha256'] = [string]$TerminalAcknowledgement.AckMembershipReceiptSha256
+    $progress['ackMembershipReceiptSchema'] = [string]$TerminalAcknowledgement.AckMembershipReceiptSchema
+    $progress['ackMembershipContentHashStatus'] = [string]$TerminalAcknowledgement.AckMembershipContentHashStatus
+    $progress['completionAuthority'] = 'REMOTE_ACK_FINALIZED'
+    $progress['ackPending'] = $false
   }
   $backup = "$temporary.replace-backup"
   $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -510,6 +628,575 @@ function Write-SyncProgressHeartbeat {
     }
   }
 }
+
+function Get-DataSyncTerminalMembershipPageDigest {
+  param(
+    [Parameter(Mandatory = $true)][object[]]$PageReceipts,
+    [Parameter(Mandatory = $true)][int]$ExpectedPageCount,
+    [Parameter(Mandatory = $true)][int64]$ExpectedFileCount,
+    [Parameter(Mandatory = $true)][int64]$ExpectedTotalBytes
+  )
+  if ($ExpectedPageCount -lt 1 -or $ExpectedFileCount -lt 1 -or $ExpectedTotalBytes -lt 0) {
+    throw 'Terminal membership receipt has invalid expected manifest totals.'
+  }
+  if (@($PageReceipts).Count -ne $ExpectedPageCount) {
+    throw 'Terminal membership receipt page descriptor count is incomplete.'
+  }
+  $pageIndexes = [System.Collections.Generic.HashSet[int]]::new()
+  $descriptors = [System.Collections.Generic.List[object]]::new()
+  [int64]$actualFileCount = 0
+  [int64]$actualTotalBytes = 0
+  foreach ($pageReceipt in @($PageReceipts)) {
+    if ($null -eq $pageReceipt) {
+      throw 'Terminal membership receipt contains an empty manifest page descriptor.'
+    }
+    foreach ($requiredName in @('page_index', 'page_sha256', 'file_count', 'total_bytes')) {
+      if (-not ($pageReceipt.PSObject.Properties.Name -contains $requiredName)) {
+        throw "Terminal membership receipt page descriptor is missing $requiredName."
+      }
+    }
+    $pageIndexText = [string]$pageReceipt.page_index
+    $fileCountText = [string]$pageReceipt.file_count
+    $totalBytesText = [string]$pageReceipt.total_bytes
+    $pageSha256 = [string]$pageReceipt.page_sha256
+    if (
+      $pageIndexText -notmatch '^(0|[1-9][0-9]*)$' -or
+      $fileCountText -notmatch '^(0|[1-9][0-9]*)$' -or
+      $totalBytesText -notmatch '^(0|[1-9][0-9]*)$' -or
+      $pageSha256 -notmatch '^[0-9a-fA-F]{64}$'
+    ) {
+      throw 'Terminal membership receipt page descriptor has an invalid field.'
+    }
+    $pageIndex = [int]$pageIndexText
+    [int64]$fileCount = [int64]$fileCountText
+    [int64]$totalBytes = [int64]$totalBytesText
+    if ($pageIndex -ge $ExpectedPageCount -or -not $pageIndexes.Add($pageIndex)) {
+      throw 'Terminal membership receipt page descriptor index is duplicate or out of range.'
+    }
+    $actualFileCount += $fileCount
+    $actualTotalBytes += $totalBytes
+    $descriptors.Add([pscustomobject][ordered]@{
+      page_index = $pageIndex
+      page_sha256 = $pageSha256.ToLowerInvariant()
+      file_count = $fileCount
+      total_bytes = $totalBytes
+    })
+  }
+  $orderedDescriptors = @($descriptors | Sort-Object -Property page_index)
+  for ($expectedIndex = 0; $expectedIndex -lt $ExpectedPageCount; $expectedIndex++) {
+    if ([int]$orderedDescriptors[$expectedIndex].page_index -ne $expectedIndex) {
+      throw 'Terminal membership receipt page descriptors are not contiguous.'
+    }
+  }
+  if ($actualFileCount -ne $ExpectedFileCount -or $actualTotalBytes -ne $ExpectedTotalBytes) {
+    throw 'Terminal membership receipt page descriptor totals do not match the manifest.'
+  }
+  $canonicalRows = @(
+    $orderedDescriptors | ForEach-Object {
+      ('{0}:{1}:{2}:{3}' -f $_.page_index, $_.page_sha256, $_.file_count, $_.total_bytes)
+    }
+  )
+  $hasher = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $digest = ([BitConverter]::ToString(
+      $hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes((($canonicalRows -join "`n") + "`n")))
+    )).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+  return [pscustomobject]@{
+    descriptors = $orderedDescriptors
+    digest_sha256 = $digest
+    canonicalization = 'PAGE_INDEX_PAGE_SHA256_FILE_COUNT_TOTAL_BYTES_UTF8_LF_V1'
+  }
+}
+
+function Get-DataSyncTerminalMembershipLocalContentDigest {
+  param(
+    [Parameter(Mandatory = $true)][object[]]$SelectedFiles,
+    [Parameter(Mandatory = $true)][string]$TargetRoot,
+    [Parameter(Mandatory = $true)][int64]$ExpectedFileCount,
+    [Parameter(Mandatory = $true)][int64]$ExpectedTotalBytes
+  )
+  if (@($SelectedFiles).Count -ne $ExpectedFileCount -or $ExpectedFileCount -lt 1 -or $ExpectedTotalBytes -lt 0) {
+    throw 'Terminal membership receipt local content coverage is incomplete.'
+  }
+  $root = [System.IO.Path]::GetFullPath($TargetRoot).TrimEnd('\')
+  $byRelativePath = [System.Collections.Generic.SortedDictionary[string, object]]::new(
+    [System.StringComparer]::Ordinal
+  )
+  [int64]$actualTotalBytes = 0
+  foreach ($row in @($SelectedFiles)) {
+    $relativePath = [string]$row.path
+    $expectedSizeText = [string]$row.size
+    if (
+      [string]::IsNullOrWhiteSpace($relativePath) -or
+      $relativePath.StartsWith('.') -or
+      $relativePath.Split('/') -contains '..' -or
+      $expectedSizeText -notmatch '^(0|[1-9][0-9]*)$'
+    ) {
+      throw 'Terminal membership receipt local content coverage has an unsafe manifest row.'
+    }
+    [int64]$expectedSize = [int64]$expectedSizeText
+    $local = Resolve-DataSyncManifestMemberPath -Root $root -MemberPath $relativePath
+    if (-not (Test-Path -LiteralPath $local -PathType Leaf)) {
+      throw 'Terminal membership receipt local content file is missing.'
+    }
+    $actualSize = [int64](Get-Item -LiteralPath $local).Length
+    if ($actualSize -ne $expectedSize) {
+      throw 'Terminal membership receipt local content file size changed.'
+    }
+    $sha256 = (Get-FileHash -LiteralPath $local -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stableSize = [int64](Get-Item -LiteralPath $local).Length
+    if ($stableSize -ne $actualSize) {
+      throw 'Terminal membership receipt local content file changed while hashing.'
+    }
+    if ($sha256 -notmatch '^[0-9a-f]{64}$' -or $byRelativePath.ContainsKey($relativePath)) {
+      throw 'Terminal membership receipt local content identity is invalid or duplicate.'
+    }
+    $byRelativePath.Add($relativePath, [pscustomobject][ordered]@{
+      relative_path = $relativePath
+      size_bytes = $actualSize
+      sha256 = $sha256
+    })
+    $actualTotalBytes += $actualSize
+  }
+  if ($byRelativePath.Count -ne $ExpectedFileCount -or $actualTotalBytes -ne $ExpectedTotalBytes) {
+    throw 'Terminal membership receipt local content totals do not match the manifest.'
+  }
+  $canonicalRows = @(
+    $byRelativePath.Values | ForEach-Object {
+      $pathByteLength = [System.Text.Encoding]::UTF8.GetByteCount([string]$_.relative_path)
+      ('{0}:{1}:{2}:{3}' -f $pathByteLength, $_.relative_path, $_.size_bytes, $_.sha256)
+    }
+  )
+  $hasher = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $digest = ([BitConverter]::ToString(
+      $hasher.ComputeHash([System.Text.Encoding]::UTF8.GetBytes((($canonicalRows -join "`n") + "`n")))
+    )).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+  return [pscustomobject]@{
+    file_count = [int64]$byRelativePath.Count
+    total_bytes = $actualTotalBytes
+    digest_sha256 = $digest
+    canonicalization = 'UTF8_PATH_BYTE_LENGTH_RELATIVE_PATH_SIZE_BYTES_SHA256_UTF8_LF_V1'
+    files = @($byRelativePath.Values)
+  }
+}
+
+function Assert-DataSyncTerminalMembershipIdentityText {
+  param(
+    [Parameter(Mandatory = $true)][string]$Label,
+    [Parameter(Mandatory = $true)][string]$Value
+  )
+  if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 512 -or $Value -match '[\x00-\x1F]') {
+    throw "Terminal membership receipt identity $Label is invalid."
+  }
+}
+
+function New-DataSyncTerminalMembershipReceipt {
+  param(
+    [Parameter(Mandatory = $true)]$Manifest,
+    [Parameter(Mandatory = $true)]$FinalAck,
+    [Parameter(Mandatory = $true)][object[]]$SelectedFiles,
+    [Parameter(Mandatory = $true)][string]$TargetRoot,
+    [Parameter(Mandatory = $true)][int64]$AckExpectedCount,
+    [Parameter(Mandatory = $true)][int64]$AckAcceptedCount,
+    [Parameter(Mandatory = $true)][int64]$AckRejectedCount,
+    [Parameter(Mandatory = $true)][string]$AckSessionId,
+    [Parameter(Mandatory = $true)][string]$CanonicalSourceRevision,
+    [Parameter(Mandatory = $true)][switch]$PostAckIdentityFencePassed
+  )
+  if (-not $PostAckIdentityFencePassed) {
+    throw 'Terminal membership receipt requires the post-ACK identity fence.'
+  }
+  $inventoryGenerationId = [string]$Manifest.inventory_generation_id
+  $inventorySha256 = [string]$Manifest.inventory_sha256
+  $inventoryGeneratedAt = [string]$Manifest.inventory_generated_at
+  $manifestSourceRevision = [string]$Manifest.source_git_rev
+  $sourceGitRevision = [string]$CanonicalSourceRevision
+  $tileRegistrySignature = [string]$Manifest.tile_registry_signature
+  $collectionEpoch = Get-DataSyncManifestIdentityValue `
+    -Manifest $Manifest `
+    -Names @('collection_epoch_id', 'dataset_epoch', 'epoch_id', 'generation_epoch')
+  if (
+    $inventoryGenerationId -notmatch '^[0-9a-f]{64}$' -or
+    $inventorySha256 -notmatch '^[0-9a-f]{64}$' -or
+    $inventoryGenerationId -cne $inventorySha256 -or
+    $manifestSourceRevision -notmatch '^[0-9a-fA-F]{7,40}$' -or
+    $sourceGitRevision -notmatch '^[0-9a-fA-F]{40}$' -or
+    -not $sourceGitRevision.StartsWith($manifestSourceRevision, [StringComparison]::OrdinalIgnoreCase) -or
+    -not $collectionEpoch.Present -or
+    $AckSessionId -notmatch '^[0-9a-f]{32}$'
+  ) {
+    throw 'Terminal membership receipt identity is incomplete.'
+  }
+  Assert-DataSyncTerminalMembershipIdentityText -Label 'inventory_generated_at' -Value $inventoryGeneratedAt
+  Assert-DataSyncTerminalMembershipIdentityText -Label 'tile_registry_signature' -Value $tileRegistrySignature
+  Assert-DataSyncTerminalMembershipIdentityText -Label 'collection_epoch' -Value ([string]$collectionEpoch.Value)
+  $inventoryGeneratedAtValue = [DateTimeOffset]::MinValue
+  if (-not [DateTimeOffset]::TryParse(
+    $inventoryGeneratedAt,
+    [Globalization.CultureInfo]::InvariantCulture,
+    [Globalization.DateTimeStyles]::RoundtripKind,
+    [ref]$inventoryGeneratedAtValue
+  )) {
+    throw 'Terminal membership receipt inventory timestamp is invalid.'
+  }
+  if (
+    $AckExpectedCount -ne [int64]$Manifest.file_count -or
+    $AckAcceptedCount -ne $AckExpectedCount -or
+    $AckRejectedCount -ne 0 -or
+    $FinalAck.ok -isnot [bool] -or $FinalAck.ok -ne $true -or
+    [string]$FinalAck.operation -cne 'FINALIZE' -or
+    [string]$FinalAck.inventory_status -cne 'VALIDATED' -or
+    [string]$FinalAck.inventory_generation_id -cne $inventoryGenerationId -or
+    [string]$FinalAck.inventory_sha256 -cne $inventorySha256 -or
+    [string]$FinalAck.inventory_generated_at -cne $inventoryGeneratedAt -or
+    [int64]$FinalAck.inventory_file_count -ne $AckExpectedCount -or
+    [int]$FinalAck.manifest_page_count -ne [int]$Manifest.manifest_page_count -or
+    $FinalAck.manifest_pages_complete -isnot [bool] -or $FinalAck.manifest_pages_complete -ne $true -or
+    [string]$FinalAck.ack_session_id -cne $AckSessionId
+  ) {
+    throw 'Terminal membership receipt requires a complete remote FINALIZE acknowledgement.'
+  }
+  $pageMembership = Get-DataSyncTerminalMembershipPageDigest `
+    -PageReceipts @($Manifest.manifest_page_receipts) `
+    -ExpectedPageCount ([int]$Manifest.manifest_page_count) `
+    -ExpectedFileCount ([int64]$Manifest.file_count) `
+    -ExpectedTotalBytes ([int64]$Manifest.total_bytes)
+  $localContent = Get-DataSyncTerminalMembershipLocalContentDigest `
+    -SelectedFiles @($SelectedFiles) `
+    -TargetRoot $TargetRoot `
+    -ExpectedFileCount ([int64]$Manifest.file_count) `
+    -ExpectedTotalBytes ([int64]$Manifest.total_bytes)
+  return [pscustomobject][ordered]@{
+    schema = 'fly_terminal_transfer_membership_receipt_v1'
+    receipt_written_at = [DateTimeOffset]::UtcNow.ToString('o')
+    inventory_generation_id = $inventoryGenerationId
+    inventory_sha256 = $inventorySha256
+    inventory_generated_at = $inventoryGeneratedAt
+    source_git_rev = $sourceGitRevision.ToLowerInvariant()
+    collection_epoch_id = [string]$collectionEpoch.Value
+    collection_epoch_field = [string]$collectionEpoch.Name
+    tile_registry_signature = $tileRegistrySignature
+    manifest_file_count = [int64]$Manifest.file_count
+    manifest_total_bytes = [int64]$Manifest.total_bytes
+    remote_final_ack = [ordered]@{
+      ok = $true
+      outcome = 'FINALIZE_VALIDATED'
+      operation = 'FINALIZE'
+      inventory_status = 'VALIDATED'
+      ack_session_id = $AckSessionId
+      expected_count = $AckExpectedCount
+      accepted_count = $AckAcceptedCount
+      rejected_count = $AckRejectedCount
+      manifest_pages_complete = $true
+    }
+    post_ack_identity_fence = 'PASSED'
+    manifest_pages = [ordered]@{
+      descriptor_schema = 'fly_manifest_page_descriptor_v1'
+      canonicalization = [string]$pageMembership.canonicalization
+      sorted_page_digest_sha256 = [string]$pageMembership.digest_sha256
+      descriptors = @($pageMembership.descriptors)
+    }
+    content_coverage = [ordered]@{
+      remote_manifest_page_descriptors = 'COMPLETE_IMMUTABLE_PAGE_METADATA'
+      remote_per_file_content_sha256 = 'UNAVAILABLE_NOT_DECLARED_BY_MANIFEST'
+      local_content_coverage_complete = $true
+      local_full_file_sha256 = [ordered]@{
+        status = 'COMPLETE_FRESH_RECOMPUTED'
+        file_count = [int64]$localContent.file_count
+        total_bytes = [int64]$localContent.total_bytes
+        canonicalization = [string]$localContent.canonicalization
+        sorted_file_digest_sha256 = [string]$localContent.digest_sha256
+        files = @($localContent.files)
+      }
+      promotion_content_hash_status = 'LOCAL_COMPLETE_FRESH_RECOMPUTED'
+      promotion_consumer_must_verify_local_content_digest = $true
+    }
+  }
+}
+
+function Get-DataSyncTerminalMembershipReceiptPath {
+  param(
+    [Parameter(Mandatory = $true)][string]$TargetRoot,
+    [Parameter(Mandatory = $true)][string]$InventoryGenerationId,
+    [Parameter(Mandatory = $true)][string]$AckSessionId
+  )
+  $root = [System.IO.Path]::GetFullPath($TargetRoot).TrimEnd('\')
+  if ($InventoryGenerationId -notmatch '^[0-9a-f]{64}$' -or $AckSessionId -notmatch '^[0-9a-f]{32}$') {
+    throw 'Terminal membership receipt cannot be assigned a safe immutable name.'
+  }
+  $receiptDirectory = [System.IO.Path]::GetFullPath(
+    (Join-Path $root 'receipts\terminal-transfer-membership')
+  )
+  if (-not $receiptDirectory.StartsWith(($root + [System.IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Terminal membership receipt directory escaped the mirror root.'
+  }
+  $receiptName = "terminal-transfer-membership-$InventoryGenerationId-$AckSessionId.json"
+  if ($receiptName -cne [System.IO.Path]::GetFileName($receiptName)) {
+    throw 'Terminal membership receipt name is unsafe.'
+  }
+  $destination = [System.IO.Path]::GetFullPath((Join-Path $receiptDirectory $receiptName))
+  if (-not $destination.StartsWith(($receiptDirectory + [System.IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Terminal membership receipt destination escaped its receipt directory.'
+  }
+  return $destination
+}
+
+function Write-DataSyncTerminalMembershipReceipt {
+  param(
+    [Parameter(Mandatory = $true)][string]$TargetRoot,
+    [Parameter(Mandatory = $true)]$Receipt
+  )
+  $generationId = [string]$Receipt.inventory_generation_id
+  $ackSessionId = [string]$Receipt.remote_final_ack.ack_session_id
+  $destination = Get-DataSyncTerminalMembershipReceiptPath `
+    -TargetRoot $TargetRoot `
+    -InventoryGenerationId $generationId `
+    -AckSessionId $ackSessionId
+  $receiptDirectory = Split-Path -Parent $destination
+  [void][System.IO.Directory]::CreateDirectory($receiptDirectory)
+  $receiptName = [System.IO.Path]::GetFileName($destination)
+  $encoded = [System.Text.UTF8Encoding]::new($false)
+  $payload = (($Receipt | ConvertTo-Json -Depth 12 -Compress) + [Environment]::NewLine)
+  $payloadBytes = $encoded.GetBytes($payload)
+  if ($payloadBytes.Length -gt 32MB) {
+    throw 'Terminal membership receipt exceeds the 32 MiB safety bound.'
+  }
+  $candidate = "$destination.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    Assert-FlyBundleUnlinkedPath -Path ([System.IO.Path]::GetFullPath($TargetRoot))
+    Assert-FlyBundleUnlinkedPath -Path $receiptDirectory
+    Assert-FlyBundleUnlinkedPath -Path $candidate
+    [System.IO.File]::WriteAllBytes($candidate, $payloadBytes)
+    $candidateSha256 = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+    if (Test-Path -LiteralPath $destination -PathType Leaf) {
+      $existingSha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+      if ($existingSha256 -cne $candidateSha256) {
+        throw 'Terminal membership receipt immutable-name collision.'
+      }
+    } else {
+      try {
+        Assert-FlyBundleUnlinkedPath -Path ([System.IO.Path]::GetFullPath($TargetRoot))
+        Assert-FlyBundleUnlinkedPath -Path $receiptDirectory
+        Assert-FlyBundleUnlinkedPath -Path $destination
+        [System.IO.File]::Move($candidate, $destination)
+      } catch {
+        if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw }
+        $existingSha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($existingSha256 -cne $candidateSha256) {
+          throw 'Terminal membership receipt immutable-name collision.'
+        }
+      }
+    }
+    $persistedSha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($persistedSha256 -cne $candidateSha256) {
+      throw 'Terminal membership receipt persistence hash mismatch.'
+    }
+    return [pscustomobject]@{
+      name = $receiptName
+      sha256 = $persistedSha256
+      schema = [string]$Receipt.schema
+      promotion_content_hash_status = [string]$Receipt.content_coverage.promotion_content_hash_status
+    }
+  } finally {
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+      Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Test-DataSyncTerminalAcknowledgementCount {
+  param([object]$Value, [int64]$Expected)
+  if ($null -eq $Value -or (
+      $Value -isnot [byte] -and $Value -isnot [sbyte] -and
+      $Value -isnot [int16] -and $Value -isnot [uint16] -and
+      $Value -isnot [int] -and $Value -isnot [uint32] -and
+      $Value -isnot [long] -and $Value -isnot [uint64]
+    )) { return $false }
+  try { return ([int64]$Value -eq $Expected) }
+  catch { return $false }
+}
+
+function Assert-DataSyncRawFinalizeAcknowledgement {
+  param(
+    [Parameter(Mandatory = $true)]$Manifest,
+    [Parameter(Mandatory = $true)]$FinalAck,
+    [Parameter(Mandatory = $true)][string]$AckSessionId
+  )
+  if (
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $Manifest.file_count -Expected ([int64]$Manifest.file_count)) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $Manifest.manifest_page_count -Expected ([int64]$Manifest.manifest_page_count)) -or
+    [int64]$Manifest.file_count -le 0 -or
+    [int64]$Manifest.manifest_page_count -le 0 -or
+    $Manifest.inventory_generation_id -isnot [string] -or
+    $Manifest.inventory_sha256 -isnot [string] -or
+    $Manifest.inventory_generated_at -isnot [string] -or
+    [string]$Manifest.inventory_generation_id -cnotmatch '^[0-9a-f]{64}$' -or
+    [string]$Manifest.inventory_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    [string]$Manifest.inventory_generation_id -cne [string]$Manifest.inventory_sha256 -or
+    [string]::IsNullOrWhiteSpace([string]$Manifest.inventory_generated_at)
+  ) {
+    throw 'Raw FINALIZE manifest identity or counts are invalid.'
+  }
+  $expectedFileCount = [int64]$Manifest.file_count
+  $expectedPageCount = [int64]$Manifest.manifest_page_count
+  if (
+    $FinalAck.ok -isnot [bool] -or $FinalAck.ok -ne $true -or
+    $FinalAck.manifest_pages_complete -isnot [bool] -or $FinalAck.manifest_pages_complete -ne $true -or
+    $FinalAck.operation -isnot [string] -or [string]$FinalAck.operation -cne 'FINALIZE' -or
+    $FinalAck.inventory_status -isnot [string] -or [string]$FinalAck.inventory_status -cne 'VALIDATED' -or
+    $FinalAck.inventory_generation_id -isnot [string] -or
+    [string]$FinalAck.inventory_generation_id -cne [string]$Manifest.inventory_generation_id -or
+    $FinalAck.inventory_sha256 -isnot [string] -or
+    [string]$FinalAck.inventory_sha256 -cne [string]$Manifest.inventory_sha256 -or
+    $FinalAck.inventory_generated_at -isnot [string] -or
+    [string]$FinalAck.inventory_generated_at -cne [string]$Manifest.inventory_generated_at -or
+    $FinalAck.ack_session_id -isnot [string] -or
+    [string]$FinalAck.ack_session_id -cnotmatch '^[0-9a-f]{32}$' -or
+    [string]$FinalAck.ack_session_id -cne $AckSessionId -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.accepted -Expected $expectedFileCount) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.rejected_count -Expected 0) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.inventory_file_count -Expected $expectedFileCount) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.manifest_page_count -Expected $expectedPageCount)
+  ) {
+    throw 'Raw FINALIZE acknowledgement fields are invalid.'
+  }
+}
+
+function New-DataSyncTerminalAcknowledgement {
+  param(
+    [Parameter(Mandatory = $true)]$Manifest,
+    [Parameter(Mandatory = $true)]$FinalAck,
+    [Parameter(Mandatory = $true)]$MembershipReceipt,
+    [Parameter(Mandatory = $true)]$PersistedMembershipReceipt,
+    [Parameter(Mandatory = $true)][int64]$AckExpectedCount,
+    [Parameter(Mandatory = $true)][int64]$AckAcceptedCount,
+    [Parameter(Mandatory = $true)][int64]$AckRejectedCount,
+    [Parameter(Mandatory = $true)][string]$AckSessionId,
+    [Parameter(Mandatory = $true)][string]$CanonicalSourceRevision
+  )
+  if (
+    $Manifest.file_count -isnot [byte] -and $Manifest.file_count -isnot [sbyte] -and
+    $Manifest.file_count -isnot [int16] -and $Manifest.file_count -isnot [uint16] -and
+    $Manifest.file_count -isnot [int] -and $Manifest.file_count -isnot [uint32] -and
+    $Manifest.file_count -isnot [long] -and $Manifest.file_count -isnot [uint64] -or
+    $Manifest.total_bytes -isnot [byte] -and $Manifest.total_bytes -isnot [sbyte] -and
+    $Manifest.total_bytes -isnot [int16] -and $Manifest.total_bytes -isnot [uint16] -and
+    $Manifest.total_bytes -isnot [int] -and $Manifest.total_bytes -isnot [uint32] -and
+    $Manifest.total_bytes -isnot [long] -and $Manifest.total_bytes -isnot [uint64]
+  ) {
+    throw 'Terminal acknowledgement manifest coverage is invalid.'
+  }
+  $expectedFileCount = [int64]$Manifest.file_count
+  $expectedTotalBytes = [int64]$Manifest.total_bytes
+  if ($expectedFileCount -le 0 -or $expectedTotalBytes -lt 0 -or
+      $AckExpectedCount -ne $expectedFileCount -or
+      $AckAcceptedCount -ne $expectedFileCount -or
+      $AckRejectedCount -ne 0 -or
+      $AckSessionId -cnotmatch '^[0-9a-f]{32}$' -or
+      $CanonicalSourceRevision -cnotmatch '^[0-9a-fA-F]{40}$') {
+    throw 'Terminal acknowledgement counts or identity are invalid.'
+  }
+  $inventoryGenerationId = [string]$Manifest.inventory_generation_id
+  $inventorySha256 = [string]$Manifest.inventory_sha256
+  $inventoryGeneratedAt = [string]$Manifest.inventory_generated_at
+  $collectionEpochId = [string]$Manifest.collection_epoch_id
+  $tileRegistrySignature = [string]$Manifest.tile_registry_signature
+  if (
+    $inventoryGenerationId -notmatch '^[0-9a-f]{64}$' -or
+    $inventorySha256 -notmatch '^[0-9a-f]{64}$' -or
+    $inventoryGenerationId -cne $inventorySha256 -or
+    [string]$Manifest.source_git_rev -notmatch '^[0-9a-fA-F]{7,40}$' -or
+    -not $CanonicalSourceRevision.StartsWith([string]$Manifest.source_git_rev, [StringComparison]::OrdinalIgnoreCase) -or
+    [string]::IsNullOrWhiteSpace($collectionEpochId) -or
+    [string]::IsNullOrWhiteSpace($tileRegistrySignature)
+  ) {
+    throw 'Terminal acknowledgement manifest identity is invalid.'
+  }
+  if (
+    $FinalAck.ok -isnot [bool] -or $FinalAck.ok -ne $true -or
+    [string]$FinalAck.operation -cne 'FINALIZE' -or
+    [string]$FinalAck.inventory_status -cne 'VALIDATED' -or
+    [string]$FinalAck.inventory_generation_id -cne $inventoryGenerationId -or
+    [string]$FinalAck.inventory_sha256 -cne $inventorySha256 -or
+    [string]$FinalAck.inventory_generated_at -cne $inventoryGeneratedAt -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.accepted -Expected $expectedFileCount) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.rejected_count -Expected 0) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.inventory_file_count -Expected $expectedFileCount) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $FinalAck.manifest_page_count -Expected ([int64]$Manifest.manifest_page_count)) -or
+    $FinalAck.manifest_pages_complete -isnot [bool] -or $FinalAck.manifest_pages_complete -ne $true -or
+    [string]$FinalAck.ack_session_id -cne $AckSessionId
+  ) {
+    throw 'Terminal acknowledgement requires a complete remote FINALIZE result.'
+  }
+  $remoteReceipt = $MembershipReceipt.remote_final_ack
+  $coverage = $MembershipReceipt.content_coverage
+  $localContent = $coverage.local_full_file_sha256
+  $expectedReceiptName = "terminal-transfer-membership-$inventoryGenerationId-$AckSessionId.json"
+  if (
+    [string]$MembershipReceipt.schema -cne 'fly_terminal_transfer_membership_receipt_v1' -or
+    [string]$MembershipReceipt.inventory_generation_id -cne $inventoryGenerationId -or
+    [string]$MembershipReceipt.inventory_sha256 -cne $inventorySha256 -or
+    [string]$MembershipReceipt.source_git_rev -cne $CanonicalSourceRevision.ToLowerInvariant() -or
+    [string]$MembershipReceipt.collection_epoch_id -cne $collectionEpochId -or
+    [string]$MembershipReceipt.tile_registry_signature -cne $tileRegistrySignature -or
+    [string]$remoteReceipt.outcome -cne 'FINALIZE_VALIDATED' -or
+    [string]$remoteReceipt.operation -cne 'FINALIZE' -or
+    [string]$remoteReceipt.inventory_status -cne 'VALIDATED' -or
+    [string]$remoteReceipt.ack_session_id -cne $AckSessionId -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $remoteReceipt.expected_count -Expected $expectedFileCount) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $remoteReceipt.accepted_count -Expected $expectedFileCount) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $remoteReceipt.rejected_count -Expected 0) -or
+    $remoteReceipt.manifest_pages_complete -isnot [bool] -or $remoteReceipt.manifest_pages_complete -ne $true -or
+    $coverage.local_content_coverage_complete -isnot [bool] -or $coverage.local_content_coverage_complete -ne $true -or
+    [string]$coverage.promotion_content_hash_status -cne 'LOCAL_COMPLETE_FRESH_RECOMPUTED' -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $localContent.file_count -Expected $expectedFileCount) -or
+    -not (Test-DataSyncTerminalAcknowledgementCount -Value $localContent.total_bytes -Expected $expectedTotalBytes) -or
+    [string]$localContent.sorted_file_digest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    [string]$PersistedMembershipReceipt.name -cne $expectedReceiptName -or
+    [string]$PersistedMembershipReceipt.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    [string]$PersistedMembershipReceipt.schema -cne 'fly_terminal_transfer_membership_receipt_v1' -or
+    [string]$PersistedMembershipReceipt.promotion_content_hash_status -cne 'LOCAL_COMPLETE_FRESH_RECOMPUTED'
+  ) {
+    throw 'Terminal acknowledgement receipt coverage is invalid.'
+  }
+  return [pscustomobject][ordered]@{
+    AckAccepted = $true
+    AckFinalized = $true
+    AckCoverageComplete = $true
+    AckAcceptedCount = [int64]$AckAcceptedCount
+    AckExpectedCount = [int64]$AckExpectedCount
+    AckRejectedCount = [int64]$AckRejectedCount
+    AckOperation = 'FINALIZE'
+    AckInventoryStatus = 'VALIDATED'
+    AckSessionId = $AckSessionId
+    AckManifestPagesComplete = $true
+    AckInventoryFileCount = [int64]$expectedFileCount
+    AckManifestFileCount = [int64]$expectedFileCount
+    AckManifestTotalBytes = [int64]$expectedTotalBytes
+    AckLocalContentFileCount = [int64]$localContent.file_count
+    AckLocalContentTotalBytes = [int64]$localContent.total_bytes
+    AckLocalContentDigestSha256 = [string]$localContent.sorted_file_digest_sha256
+    AckMembershipReceiptName = [string]$PersistedMembershipReceipt.name
+    AckMembershipReceiptSha256 = [string]$PersistedMembershipReceipt.sha256
+    AckMembershipReceiptSchema = [string]$PersistedMembershipReceipt.schema
+    AckMembershipContentHashStatus = [string]$PersistedMembershipReceipt.promotion_content_hash_status
+    InventoryGenerationId = $inventoryGenerationId
+    InventorySha256 = $inventorySha256
+    CollectionEpochId = $collectionEpochId
+    TileRegistrySignature = $tileRegistrySignature
+    SourceRevision = [string]$Manifest.source_git_rev
+    CanonicalSourceRevision = $CanonicalSourceRevision.ToLowerInvariant()
+  }
+}
+
+
 
 $syncState = @{}
 if (Test-Path -LiteralPath $statePath) {
@@ -599,6 +1286,9 @@ function Set-SqliteSnapshotLease {
 # callers retain the authenticated fetch below. Per-file generation fences and
 # the final authenticated acknowledgement remain authoritative for atomicity.
 $manifest = $InitialManifest
+if ($null -ne $manifest) {
+  $manifest = ConvertTo-DataSyncCanonicalTransportIdentity -Value $manifest
+}
 if ($null -eq $manifest) {
   $manifestRefreshNonce = [guid]::NewGuid().ToString("N")
   $manifest = Invoke-DataSyncJsonRequest `
@@ -632,6 +1322,15 @@ $baseInterFileThrottleMs = 1500
 $maxAdaptiveThrottleMs = 5000
 $adaptiveThrottleMs = $baseInterChunkThrottleMs
 $selectedFiles = @($manifest.files)
+$admittedMemberPaths = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+foreach ($manifestRow in @($manifest.files)) {
+  $memberPath = [string]$manifestRow.path
+  if ($admittedMemberPaths.ContainsKey($memberPath)) { throw 'DATA_SYNC_MANIFEST_MEMBER_DUPLICATE' }
+  $admittedMemberPaths.Add(
+    $memberPath,
+    (Resolve-DataSyncManifestMemberPath -Root $targetRoot -MemberPath $memberPath)
+  )
+}
 $selectedFiles = @(
   $selectedFiles | Sort-Object `
     @{ Expression = { if ([string]$_.consistency_mode -eq "sqlite_snapshot_v1") { 0 } else { 1 } } }, `
@@ -656,7 +1355,7 @@ $manifestPaths = [System.Collections.Generic.HashSet[string]]::new(
   [System.StringComparer]::OrdinalIgnoreCase
 )
 foreach ($manifestRow in @($manifest.files)) {
-  [void]$manifestPaths.Add(([string]$manifestRow.path).Replace("\", "/"))
+  [void]$manifestPaths.Add([string]$manifestRow.path)
 }
 $staleArchiveRoot = Join-Path $targetRoot "archive\sync-retired"
 $canonicalLocalFiles = [System.Collections.Generic.HashSet[string]]::new(
@@ -750,7 +1449,7 @@ $currentMirrorBytes = [int64](
 )
 $incomingGrowth = [int64]0
 foreach ($row in $selectedFiles) {
-  $candidate = Join-Path $targetRoot (([string]$row.path) -replace "/", "\")
+  $candidate = $admittedMemberPaths[[string]$row.path]
   $existingBytes = if (Test-Path -LiteralPath $candidate) {
     [int64](Get-Item -LiteralPath $candidate).Length
   } else { 0 }
@@ -783,15 +1482,11 @@ if ($env:FLY_SYNC_TRANSPORT_BUNDLES -eq '1') {
 foreach ($row in $selectedFiles) {
   $selectedFileIndex += 1
   $rel = [string]$row.path
-  if (-not $rel -or $rel.StartsWith(".") -or $rel.Split("/") -contains "..") {
-    throw "Unsafe relative path from Fly manifest: $rel"
-  }
-  $local = [System.IO.Path]::GetFullPath((Join-Path $targetRoot ($rel -replace "/", "\")))
-  if (-not $local.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "Fly manifest path escaped the mirror root: $rel"
-  }
+  $local = Resolve-DataSyncManifestMemberPath -Root $targetRoot -MemberPath $rel
   $parent = Split-Path -Parent $local
   New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  $localAfterParentCreate = Resolve-DataSyncManifestMemberPath -Root $targetRoot -MemberPath $rel
+  if ($localAfterParentCreate -cne $local) { throw 'DATA_SYNC_MANIFEST_MEMBER_PATH_CHANGED' }
 
   $previous = $syncState[$rel]
   $remoteSize = [int64]$row.size
@@ -1212,7 +1907,11 @@ foreach ($row in $selectedFiles) {
       }
     }
     if ($forensicOriginal) { Assert-FlyForensicPayload -Row $row -Path $candidate }
-    Publish-MirrorCandidate -Candidate $candidate -Destination $local
+    # Re-admit immediately before the destination mutation. A parent directory
+    # may have been reparse-swapped after its earlier creation/check.
+    $localBeforePublish = Resolve-DataSyncManifestMemberPath -Root $targetRoot -MemberPath $rel
+    if ($localBeforePublish -cne $local) { throw 'DATA_SYNC_MANIFEST_MEMBER_PATH_CHANGED' }
+    Publish-MirrorCandidate -Candidate $candidate -Destination $localBeforePublish
     $downloadedGeneration = $true
   } finally {
     Remove-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
@@ -1357,6 +2056,13 @@ $ack = Invoke-DataSyncJsonRequest `
   -Body ($finalizePayload | ConvertTo-Json -Depth 5 -Compress) `
   -TimeoutSec $ackTimeoutSec
 
+# Validate the raw JSON types before any cast can normalize a string count and
+# before any FINALIZE_VALIDATED membership receipt is built or persisted.
+Assert-DataSyncRawFinalizeAcknowledgement `
+  -Manifest $manifest `
+  -FinalAck $ack `
+  -AckSessionId $ackSessionId
+
 # A transport-level HTTP success is not sufficient: every exact manifest row
 # must have been accepted. Missing v2 result fields and partial acceptance both
 # fail closed so an older or overloaded server can never publish false parity.
@@ -1374,12 +2080,17 @@ if ($ackAccepted -ne $ackExpected -or $ackRejected -ne 0) {
   )
 }
 if (
+  $ack.ok -isnot [bool] -or $ack.ok -ne $true -or
+  [string]$ack.operation -cne 'FINALIZE' -or
+  [string]$ack.inventory_status -cne 'VALIDATED' -or
   [string]$ack.inventory_sha256 -ne $inventorySha256 -or
   [string]$ack.inventory_generation_id -ne $inventoryGenerationId -or
   [string]$ack.inventory_generated_at -ne $inventoryGeneratedAt -or
   [int]$ack.inventory_file_count -ne [int]$manifest.file_count -or
   [int]$ack.manifest_page_count -ne [int]$manifest.manifest_page_count -or
-  $ack.manifest_pages_complete -ne $true
+  $ack.manifest_pages_complete -isnot [bool] -or
+  $ack.manifest_pages_complete -ne $true -or
+  [string]$ack.ack_session_id -cne $ackSessionId
 ) {
   throw "Fly sync acknowledgement did not bind to the requested inventory generation."
 }
@@ -1395,6 +2106,45 @@ $postAckManifest = Invoke-DataSyncJsonRequest `
     -GenerationId $inventoryGenerationId) `
   -TimeoutSec $manifestTimeoutSec
 Assert-DataSyncManifestIdentity -Initial $manifest -Final $postAckManifest
+$finalManifestSourceRevision = [string]$postAckManifest.source_git_rev
+if ($MirroredSourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
+  throw "Fly sync terminal membership requires the exact 40-character mirrored source revision."
+}
+if (
+  $finalManifestSourceRevision -notmatch '^[0-9a-fA-F]{7,40}$' -or
+  -not $MirroredSourceRevision.StartsWith($finalManifestSourceRevision, [StringComparison]::OrdinalIgnoreCase)
+) {
+  throw "Fly sync caller revision does not match the final authoritative manifest prefix."
+}
+$canonicalSourceRevision = $MirroredSourceRevision.ToLowerInvariant()
+$terminalMembershipEvidence = New-DataSyncTerminalMembershipReceipt `
+  -Manifest $manifest `
+  -FinalAck $ack `
+  -SelectedFiles @($selectedFiles) `
+  -TargetRoot $targetRoot `
+  -AckExpectedCount ([int64]$ackExpected) `
+  -AckAcceptedCount ([int64]$ackAccepted) `
+  -AckRejectedCount ([int64]$ackRejected) `
+  -AckSessionId $ackSessionId `
+  -CanonicalSourceRevision $canonicalSourceRevision `
+  -PostAckIdentityFencePassed
+$terminalMembershipReceipt = Write-DataSyncTerminalMembershipReceipt `
+  -TargetRoot $targetRoot `
+  -Receipt $terminalMembershipEvidence
+$terminalAcknowledgement = New-DataSyncTerminalAcknowledgement `
+  -Manifest $manifest `
+  -FinalAck $ack `
+  -MembershipReceipt $terminalMembershipEvidence `
+  -PersistedMembershipReceipt $terminalMembershipReceipt `
+  -AckExpectedCount ([int64]$ackExpected) `
+  -AckAcceptedCount ([int64]$ackAccepted) `
+  -AckRejectedCount ([int64]$ackRejected) `
+  -AckSessionId $ackSessionId `
+  -CanonicalSourceRevision $canonicalSourceRevision
+$terminalMembershipReceiptPath = Get-DataSyncTerminalMembershipReceiptPath `
+  -TargetRoot $targetRoot `
+  -InventoryGenerationId $inventoryGenerationId `
+  -AckSessionId $ackSessionId
 
 # Immutable lifecycle bundles need a stronger acknowledgement than the raw
 # incremental mirror: retain and re-verify canonical, recoverable archive and
@@ -1687,26 +2437,62 @@ if ($PublishAnalyzerReport) {
   }
 }
 
-# The child sync owns the atomic data download and ACK, so it must also commit
-# the progress receipt. Without this final marker a successful standalone sync
-# leaves the analyzer permanently fail-closed behind `inProgress: true`.
-$MirroredSourceRevision = [string]$manifest.source_git_rev
+# Keep the caller-supplied full revision that passed the post-ACK manifest
+# prefix fence. A short deployed manifest revision is not terminal authority.
+$MirroredSourceRevision = $canonicalSourceRevision
+$canonicalCandidate = if ($ProgressHeartbeatFile) {
+  [IO.Path]::GetFullPath($ProgressHeartbeatFile) + '.canonical-' + [guid]::NewGuid().ToString('N')
+} else { '' }
+$canonicalBackup = if ($canonicalCandidate) { $canonicalCandidate + '.replace-backup' } else { '' }
+$canonicalPointerPath = Join-Path $targetRoot 'canonical_dataset_current.json'
+$canonicalPointerSha256 = $null
+$terminalProgressReceiptPath = [IO.Path]::GetFullPath($ProgressHeartbeatFile)
+try {
 Write-SyncProgressHeartbeat `
   -Phase "complete" `
   -FileIndex $selectedFiles.Count `
   -FileCount $selectedFiles.Count `
   -FileBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
   -RemoteBytes ([int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)) `
-  -Completed
+  -Completed -ReceiptTarget $canonicalCandidate -TerminalAcknowledgement $terminalAcknowledgement
 
 # Commit an append-first, hash-chained dataset identity only after the complete
 # authenticated generation and its heartbeat are durable. Analyzer admission
 # can therefore fail closed on epoch/revision/tile parity.
 if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   $migrationScript = Join-Path $repoRoot "scripts\migrate_canonical_research_store.py"
-  $canonicalManifestReceipt = & python $migrationScript --record-existing --destination $targetRoot --heartbeat $ProgressHeartbeatFile
+  $canonicalManifestReceipt = & python $migrationScript --record-existing --destination $targetRoot --heartbeat $canonicalCandidate
   if ($LASTEXITCODE -ne 0) { throw "Canonical manifest commit failed with exit code $LASTEXITCODE." }
   if (-not $canonicalManifestReceipt) { throw "Canonical manifest commit returned no receipt." }
+  if (-not (Test-Path -LiteralPath $terminalMembershipReceiptPath -PathType Leaf)) {
+    throw "Canonical manifest commit requires the persisted terminal membership receipt."
+  }
+  if (-not (Test-Path -LiteralPath $canonicalPointerPath -PathType Leaf)) {
+    throw "Canonical manifest commit did not publish canonical_dataset_current.json."
+  }
+  $canonicalPointerSha256 = (Get-FileHash -LiteralPath $canonicalPointerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($canonicalPointerSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw "Canonical manifest pointer hash is invalid."
+  }
+  # The public completion receipt is published last, never exposed as complete
+  # while canonical identity is still pending.
+  if (Test-Path -LiteralPath $ProgressHeartbeatFile -PathType Leaf) {
+    Invoke-MirrorAtomicReplace `
+      -Candidate $canonicalCandidate `
+      -Destination $ProgressHeartbeatFile `
+      -Backup $canonicalBackup `
+      -Attempts 12
+  } else {
+    [System.IO.File]::Move($canonicalCandidate, [System.IO.Path]::GetFullPath($ProgressHeartbeatFile))
+  }
+}
+} finally {
+  if ($canonicalCandidate -and (Test-Path -LiteralPath $canonicalCandidate -PathType Leaf)) {
+    Remove-Item -LiteralPath $canonicalCandidate -Force
+  }
+  if ($canonicalBackup -and (Test-Path -LiteralPath $canonicalBackup -PathType Leaf)) {
+    Remove-Item -LiteralPath $canonicalBackup -Force
+  }
 }
 
 [pscustomobject]@{
@@ -1714,8 +2500,42 @@ if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   Target = $targetRoot
   Files = $selectedFiles.Count
   Bytes = [int64](($selectedFiles | Measure-Object -Property size -Sum).Sum)
-  SourceRevision = $manifest.source_git_rev
-  AckAccepted = $ack.accepted
+  SourceRevision = [string]$terminalAcknowledgement.SourceRevision
+  CanonicalSourceRevision = [string]$terminalAcknowledgement.CanonicalSourceRevision
+  CollectionEpochId = [string]$terminalAcknowledgement.CollectionEpochId
+  TileRegistrySignature = [string]$terminalAcknowledgement.TileRegistrySignature
+  InventoryGenerationId = [string]$terminalAcknowledgement.InventoryGenerationId
+  InventorySha256 = [string]$terminalAcknowledgement.InventorySha256
+  InventoryGeneratedAt = $inventoryGeneratedAt
+  ManifestPageCount = [int]$manifest.manifest_page_count
+  AckAccepted = [bool]$terminalAcknowledgement.AckAccepted
+  AckFinalized = [bool]$terminalAcknowledgement.AckFinalized
+  AckCoverageComplete = [bool]$terminalAcknowledgement.AckCoverageComplete
+  AckAcceptedCount = [int64]$terminalAcknowledgement.AckAcceptedCount
+  AckExpectedCount = [int64]$terminalAcknowledgement.AckExpectedCount
+  AckRejectedCount = [int64]$terminalAcknowledgement.AckRejectedCount
+  AckOperation = [string]$terminalAcknowledgement.AckOperation
+  AckInventoryStatus = [string]$terminalAcknowledgement.AckInventoryStatus
+  AckSessionId = [string]$terminalAcknowledgement.AckSessionId
+  AckManifestPagesComplete = [bool]$terminalAcknowledgement.AckManifestPagesComplete
+  AckInventoryFileCount = [int64]$terminalAcknowledgement.AckInventoryFileCount
+  AckManifestFileCount = [int64]$terminalAcknowledgement.AckManifestFileCount
+  AckManifestTotalBytes = [int64]$terminalAcknowledgement.AckManifestTotalBytes
+  AckLocalContentFileCount = [int64]$terminalAcknowledgement.AckLocalContentFileCount
+  AckLocalContentTotalBytes = [int64]$terminalAcknowledgement.AckLocalContentTotalBytes
+  AckLocalContentDigestSha256 = [string]$terminalAcknowledgement.AckLocalContentDigestSha256
+  AckMembershipReceiptName = [string]$terminalAcknowledgement.AckMembershipReceiptName
+  AckMembershipReceiptSha256 = [string]$terminalAcknowledgement.AckMembershipReceiptSha256
+  AckMembershipReceiptSchema = [string]$terminalAcknowledgement.AckMembershipReceiptSchema
+  AckMembershipContentHashStatus = [string]$terminalAcknowledgement.AckMembershipContentHashStatus
+  terminal_membership_receipt_name = [string]$terminalMembershipReceipt.name
+  terminal_membership_receipt_sha256 = [string]$terminalMembershipReceipt.sha256
+  terminal_membership_receipt_schema = [string]$terminalMembershipReceipt.schema
+  terminal_membership_receipt_content_hash_status = [string]$terminalMembershipReceipt.promotion_content_hash_status
+  MirrorPath = $targetRoot
+  CanonicalPointerPath = $canonicalPointerPath
+  CanonicalPointerSha256 = $canonicalPointerSha256
+  TerminalProgressReceiptPath = $terminalProgressReceiptPath
   LifecycleAcknowledged = $lifecycleAckCount
   LifecycleTransferAcknowledged = $lifecycleTransferAckCount
   PrunedRotations = @($ack.removed_acknowledged_rotations).Count
