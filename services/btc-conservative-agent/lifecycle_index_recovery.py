@@ -105,6 +105,23 @@ def _same(path: Path, expected: dict[str, int]) -> bool:
         return False
 
 
+def _path_entry_exists(path: Path) -> bool:
+    """Absence proof must reject every directory entry, including broken links."""
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _assert_all_canonical_sources_absent(root: Path) -> None:
+    if any(
+        _path_entry_exists(root / "v3" / "ledgers" / f"{name}.jsonl")
+        for name in LEDGER_NAMES
+    ):
+        raise ValueError("LIFECYCLE_RESET_DELETED_LEDGER_NOT_PROVEN")
+
+
 def _same_append_source(path: Path, expected: dict[str, int]) -> bool:
     """Permit append-only growth while protecting the captured source object."""
     try:
@@ -149,7 +166,7 @@ def _components(index_dir: Path) -> list[Path]:
 
 
 def _initial(root: Path, trigger: str, index_dir: Path, reset_authorized=False) -> dict[str, Any]:
-    pattern = r"SOURCE_LEDGER_(?:ROTATED|TRUNCATED):[A-Za-z0-9_.-]+\.jsonl" if reset_authorized else r"SOURCE_LEDGER_ROTATED:[A-Za-z0-9_.-]+\.jsonl"
+    pattern = r"SOURCE_LEDGER_(?:ROTATED|TRUNCATED|DELETED_BY_RESET):[A-Za-z0-9_.-]+\.jsonl" if reset_authorized else r"SOURCE_LEDGER_ROTATED:[A-Za-z0-9_.-]+\.jsonl"
     if not re.fullmatch(pattern, trigger):
         raise ValueError("LIFECYCLE_RECOVERY_TRIGGER_INVALID")
     sources = []
@@ -359,6 +376,8 @@ def _swap(state: dict[str, Any], index_dir: Path, staging: Path) -> None:
             or _sha_prefix(source, row["identity"]["size"]) != row["sha256"]
         ):
             raise ValueError(f"LIFECYCLE_RECOVERY_SOURCE_PREFIX_CHANGED:{source.name}")
+    if str(state.get("trigger") or "").startswith("SOURCE_LEDGER_DELETED_BY_RESET:"):
+        _assert_all_canonical_sources_absent(index_dir.parents[1])
     database = staging / "lifecycle_index.rebuilt.sqlite3"
     quarantine = index_dir / "recovery-quarantine" / _directory_id(state)
     active = index_dir / "lifecycle_index.sqlite3"
@@ -400,9 +419,19 @@ def _reset_binding(root, trigger, operation_path, expected_sha256, current_epoch
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
         raise ValueError("LIFECYCLE_RESET_RECEIPT_HASH_MISMATCH")
     operation = _strict_reset_json(raw)
-    _validate_reset_operation(root, trigger, operation, current_epoch_id)
-    return {"operation_path": str(lexical), "operation_sha256": expected_sha256,
-            "epoch_id": current_epoch_id, "source_revision": operation["proof"]["source_revision"]}
+    validated = _validate_reset_operation(root, trigger, operation, current_epoch_id)
+    binding = {"operation_path": str(lexical), "operation_sha256": expected_sha256,
+               "epoch_id": current_epoch_id,
+               "source_revision": operation["proof"]["source_revision"]}
+    # Preserve the exact historical TRUNCATED binding shape so an in-progress
+    # recovery remains resumable. Whole-index retirement fields are meaningful
+    # only for the new DELETED_BY_RESET authority.
+    if validated["trigger_kind"] == "DELETED_BY_RESET":
+        binding.update(
+            retired_epoch_id=operation["proof"]["retired_epoch_id"],
+            deleted_ledgers=validated["deleted_ledgers"],
+        )
+    return binding
 
 
 def _validate_reset_operation(root, trigger, operation, current_epoch_id):
@@ -411,10 +440,17 @@ def _validate_reset_operation(root, trigger, operation, current_epoch_id):
     from research_reset_inventory import _proof_valid
     deletion = (operation.get("deletion") or {}).get("deletion_receipt") or {}
     canonical = json.dumps(proof, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    ledger = trigger.removeprefix("SOURCE_LEDGER_TRUNCATED:").removesuffix(".jsonl")
+    match = re.fullmatch(
+        r"SOURCE_LEDGER_(TRUNCATED|DELETED_BY_RESET):([A-Za-z0-9_.-]+)\.jsonl",
+        trigger,
+    )
+    trigger_kind = match.group(1) if match else None
+    ledger = match.group(2) if match else None
     target = str(root / "v3" / "ledgers" / f"{ledger}.jsonl")
+    operation_deleted = operation.get("deleted")
+    receipt_deleted = deletion.get("deleted")
     if (not _proof_valid(root, proof)
-            or not trigger.startswith("SOURCE_LEDGER_TRUNCATED:") or ledger not in LEDGER_NAMES
+            or match is None or ledger not in LEDGER_NAMES
             or operation.get("schema") != "bot_destructive_research_reset_v1"
             or operation.get("stage") != "COMPLETE" or operation.get("accounting_preserved") is not True
             or proof.get("runtime_root") != str(root)
@@ -424,8 +460,137 @@ def _validate_reset_operation(root, trigger, operation, current_epoch_id):
             or not proof.get("source_revision")
             or deletion.get("status") != "COMPLETE" or deletion.get("root") != str(root)
             or deletion.get("context", {}).get("proof_sha256") != hashlib.sha256(canonical.encode()).hexdigest()
-            or target not in deletion.get("deleted", []) or target not in operation.get("deleted", [])):
+            or not isinstance(operation_deleted, list)
+            or not isinstance(receipt_deleted, list)
+            or not all(isinstance(value, str) for value in operation_deleted)
+            or not all(isinstance(value, str) for value in receipt_deleted)
+            or target not in receipt_deleted or target not in operation_deleted):
         raise ValueError("LIFECYCLE_RESET_PROOF_INVALID")
+    source_exists = _path_entry_exists(Path(target))
+    if ((trigger_kind == "DELETED_BY_RESET" and source_exists)
+            or (trigger_kind == "TRUNCATED" and not source_exists)):
+        raise ValueError("LIFECYCLE_RESET_SOURCE_STATE_INVALID")
+    if trigger_kind == "DELETED_BY_RESET":
+        _assert_all_canonical_sources_absent(root)
+    deleted_ledgers = sorted(
+        name for name in LEDGER_NAMES
+        if str(root / "v3" / "ledgers" / f"{name}.jsonl") in operation_deleted
+        and str(root / "v3" / "ledgers" / f"{name}.jsonl") in receipt_deleted
+    )
+    return {"trigger_kind": trigger_kind, "deleted_ledgers": deleted_ledgers}
+
+
+def _validate_reset_cursor(database: Path, root: Path, trigger: str, reset_proof: dict[str, Any]) -> None:
+    import sqlite3
+    ledger = trigger.split(":", 1)[1].removesuffix(".jsonl")
+    source = root / "v3" / "ledgers" / f"{ledger}.jsonl"
+    deleted = trigger.startswith("SOURCE_LEDGER_DELETED_BY_RESET:")
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
+    try:
+        cursor = connection.execute(
+            "SELECT byte_offset FROM ledger_cursor WHERE ledger=?", (ledger,)
+        ).fetchone()
+        if cursor is None or int(cursor[0]) <= 0:
+            raise ValueError("LIFECYCLE_RESET_CURSOR_MISMATCH_NOT_PROVEN")
+        if not deleted:
+            if int(cursor[0]) <= source.stat().st_size:
+                raise ValueError("LIFECYCLE_RESET_CURSOR_MISMATCH_NOT_PROVEN")
+            return
+
+        retired_epoch = str(reset_proof.get("retired_epoch_id") or "")
+        deleted_ledgers = reset_proof.get("deleted_ledgers")
+        if (not retired_epoch or retired_epoch != retired_epoch.strip()
+                or not isinstance(deleted_ledgers, list)):
+            raise ValueError("LIFECYCLE_RESET_DELETED_LEDGER_NOT_PROVEN")
+        deleted_set = set(deleted_ledgers)
+        if len(deleted_set) != len(deleted_ledgers) or not deleted_set.issubset(LEDGER_NAMES):
+            raise ValueError("LIFECYCLE_RESET_DELETED_LEDGER_NOT_PROVEN")
+
+        supported_cursors = tuple(LEDGER_NAMES) + (
+            "shared:opportunity", "shared:market_segment",
+        )
+        cursor_placeholders = ",".join("?" for _ in supported_cursors)
+        if connection.execute(
+            f"SELECT 1 FROM ledger_cursor WHERE ledger NOT IN ({cursor_placeholders}) LIMIT 1",
+            supported_cursors,
+        ).fetchone() is not None:
+            raise ValueError("LIFECYCLE_RESET_DELETED_LEDGER_NOT_PROVEN")
+        cursor_rows = connection.execute(
+            f"""SELECT ledger, byte_offset FROM ledger_cursor
+                WHERE ledger IN ({cursor_placeholders})""",
+            supported_cursors,
+        ).fetchall()
+        selected_cursor = next(
+            (row for row in cursor_rows if str(row[0]) == ledger), None
+        )
+        if selected_cursor is None or int(selected_cursor[1]) <= 0:
+            raise ValueError("LIFECYCLE_RESET_CURSOR_MISMATCH_NOT_PROVEN")
+
+        ledger_placeholders = ",".join("?" for _ in LEDGER_NAMES)
+        for table in ("lifecycle_event", "shared_context_event"):
+            if connection.execute(
+                f"SELECT 1 FROM {table} WHERE ledger NOT IN ({ledger_placeholders}) LIMIT 1",
+                tuple(LEDGER_NAMES),
+            ).fetchone() is not None:
+                raise ValueError("LIFECYCLE_RESET_DELETED_LEDGER_NOT_PROVEN")
+        indexed_count, indexed_bad = connection.execute(
+            """SELECT COUNT(*), COALESCE(SUM(
+                   CASE WHEN collection_epoch_id IS NULL
+                          OR TRIM(collection_epoch_id) = ''
+                          OR collection_epoch_id <> ? THEN 1 ELSE 0 END), 0)
+               FROM lifecycle_event""",
+            (retired_epoch,),
+        ).fetchone()
+        shared_count, shared_bad = connection.execute(
+            """SELECT COUNT(*), COALESCE(SUM(
+                   CASE WHEN epoch_id IS NULL OR TRIM(epoch_id) = ''
+                          OR epoch_id <> ? THEN 1 ELSE 0 END), 0)
+               FROM shared_context_event""",
+            (retired_epoch,),
+        ).fetchone()
+        dirty_count, dirty_bad = connection.execute(
+            """SELECT COUNT(*), COALESCE(SUM(
+                   CASE WHEN collection_epoch_id IS NULL
+                          OR TRIM(collection_epoch_id) = ''
+                          OR collection_epoch_id <> ? THEN 1 ELSE 0 END), 0)
+               FROM dirty_lifecycle""",
+            (retired_epoch,),
+        ).fetchone()
+        indexed_ledgers = {
+            str(row[0]) for row in connection.execute(
+                f"""SELECT DISTINCT ledger FROM lifecycle_event
+                    WHERE ledger IN ({ledger_placeholders})""",
+                tuple(LEDGER_NAMES),
+            ).fetchall()
+        }
+        shared_ledgers = {
+            str(row[0]) for row in connection.execute(
+                f"""SELECT DISTINCT ledger FROM shared_context_event
+                    WHERE ledger IN ({ledger_placeholders})""",
+                tuple(LEDGER_NAMES),
+            ).fetchall()
+        }
+        cursor_ledgers = {
+            str(row[0]).removeprefix("shared:") for row in cursor_rows
+        }
+        referenced_ledgers = indexed_ledgers | shared_ledgers | cursor_ledgers
+        selected_evidence = sum(row[0] for row in (
+            connection.execute(
+                "SELECT COUNT(*) FROM lifecycle_event WHERE ledger=?", (ledger,),
+            ).fetchone(),
+            connection.execute(
+                "SELECT COUNT(*) FROM shared_context_event WHERE ledger=?", (ledger,),
+            ).fetchone(),
+        ))
+        if (source.exists()
+                or not referenced_ledgers.issubset(LEDGER_NAMES)
+                or not referenced_ledgers.issubset(deleted_set)
+                or int(indexed_count) + int(shared_count) + int(dirty_count) <= 0
+                or selected_evidence <= 0
+                or int(indexed_bad) or int(shared_bad) or int(dirty_bad)):
+            raise ValueError("LIFECYCLE_RESET_DELETED_LEDGER_NOT_PROVEN")
+    finally:
+        connection.close()
 
 
 def recover_reset_index(root, trigger, *, operation_path, operation_sha256, current_epoch_id):
@@ -473,16 +638,8 @@ def recover_rotated_index(root: str | Path, trigger: str, *, _reset_proof=None) 
             state = _load_state(state_path)
         else:
             if _reset_proof is not None:
-                import sqlite3
-                ledger = trigger.split(":", 1)[1].removesuffix(".jsonl")
                 database = index_dir / "lifecycle_index.sqlite3"
-                connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
-                try:
-                    cursor = connection.execute("SELECT byte_offset FROM ledger_cursor WHERE ledger=?", (ledger,)).fetchone()
-                finally:
-                    connection.close()
-                if cursor is None or int(cursor[0]) <= (root / "v3" / "ledgers" / f"{ledger}.jsonl").stat().st_size:
-                    raise ValueError("LIFECYCLE_RESET_CURSOR_MISMATCH_NOT_PROVEN")
+                _validate_reset_cursor(database, root, trigger, _reset_proof)
             state = _initial(root, trigger, index_dir, reset_authorized=_reset_proof is not None)
             if _reset_proof is not None:
                 state["reset_proof"] = _reset_proof

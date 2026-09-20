@@ -22,7 +22,7 @@ def initialize_reset_recovery(*, root, operation_path=None, operation_sha256=Non
             or not isinstance(operation_sha256, str)
             or not re.fullmatch(r"[0-9a-f]{64}", operation_sha256)
             or not isinstance(trigger, str)
-            or not re.fullmatch(r"SOURCE_LEDGER_TRUNCATED:[A-Za-z0-9_.-]+\.jsonl", trigger)
+            or not re.fullmatch(r"SOURCE_LEDGER_(?:TRUNCATED|DELETED_BY_RESET):[A-Za-z0-9_.-]+\.jsonl", trigger)
             or not isinstance(operation_path, (str, Path)) or not str(operation_path)):
         raise ValueError("RESET_RECOVERY_STARTUP_CONFIG_INVALID")
     if not reset_lock.acquire(blocking=False):

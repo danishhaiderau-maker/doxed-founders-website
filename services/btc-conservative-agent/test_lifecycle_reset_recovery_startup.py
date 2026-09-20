@@ -61,9 +61,13 @@ def config(events, **changes):
     return value
 
 
-def test_one_step_under_lock_with_exact_arguments(monkeypatch):
+@pytest.mark.parametrize('trigger', [
+    'SOURCE_LEDGER_TRUNCATED:opportunity.jsonl',
+    'SOURCE_LEDGER_DELETED_BY_RESET:lifecycle.jsonl',
+])
+def test_one_step_under_lock_with_exact_arguments(monkeypatch, trigger):
     events=[]
-    cfg=config(events)
+    cfg=config(events,trigger=trigger)
     def recover(root, trigger, **kwargs):
         assert cfg['reset_lock'].held
         events.append('recover')
@@ -101,7 +105,13 @@ def test_missing_is_noop_partial_is_failure():
     assert events==[]
 
 
-@pytest.mark.parametrize('trigger', ['SOURCE_LEDGER_ROTATED:opportunity.jsonl','SOURCE_LEDGER_TRUNCATED:../x.jsonl',''])
+@pytest.mark.parametrize('trigger', [
+    'SOURCE_LEDGER_ROTATED:opportunity.jsonl',
+    'SOURCE_LEDGER_TRUNCATED:../x.jsonl',
+    'SOURCE_LEDGER_DELETED_BY_RESET:../x.jsonl',
+    'SOURCE_LEDGER_DELETED:lifecycle.jsonl',
+    '',
+])
 def test_no_generic_recovery_configuration(trigger):
     with pytest.raises(ValueError,match='CONFIG_INVALID'):
         startup.initialize_reset_recovery(**config([],trigger=trigger))
