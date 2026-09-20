@@ -835,7 +835,8 @@ jobs:
           def read(p):
               if not p.is_file():
                   print(json.dumps({'receipt':str(p.relative_to(root)), 'exists':False})); return {}
-              cap=(32 if p.name=='deletion.json' else 4)*1024*1024
+              cap=(32 if p.name in {'deletion.json','operation.json'} else 4)*1024*1024
+              print(json.dumps({'receipt_size':str(p.relative_to(root)),'bytes':p.stat().st_size}))
               assert not p.is_symlink() and p.stat().st_size <= cap, 'receipt bound'
               d=json.loads(p.read_text()); assert isinstance(d,dict)
               print(json.dumps({'receipt':str(p.relative_to(root)), 'mtime':p.stat().st_mtime,'fields':{k:v for k,v in d.items() if k in allowed and isinstance(v,(str,int,float,bool,type(None)))}},sort_keys=True))
@@ -845,6 +846,14 @@ jobs:
           if re.fullmatch('[a-f0-9]{24}',reset_id):
               read(root/reset_id/'operation.json')
               read(root/reset_id/'deletion.json')
+              journal=root/reset_id/'deletion.json.progress.jsonl'
+              if journal.is_file() and not journal.is_symlink():
+                  with journal.open('rb') as handle:
+                      handle.seek(max(0,journal.stat().st_size-4096)); tail=handle.read(4096)
+                  lines=tail.splitlines()
+                  if lines and tail.endswith(b'\n'):
+                      last=json.loads(lines[-1])
+                      print(json.dumps({'unlink_progress':{k:last.get(k) for k in ('index','phase')}}))
           for folder in ('_progress','_preflight'):
               p=root/folder
               if p.is_dir():
