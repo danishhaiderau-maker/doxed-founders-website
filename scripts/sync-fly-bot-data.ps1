@@ -251,7 +251,6 @@ function Resolve-DataSyncManifestMemberPath {
       $deviceStem -cmatch '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$'
     ) { throw 'DATA_SYNC_MANIFEST_MEMBER_INVALID' }
   }
-  Assert-FlyBundleUnlinkedPath -Path $rootFull
   $nativeRelative = $MemberPath.Replace('/', [IO.Path]::DirectorySeparatorChar)
   $candidate = [IO.Path]::GetFullPath((Join-Path $rootFull $nativeRelative))
   $prefix = $rootFull + [IO.Path]::DirectorySeparatorChar
@@ -498,7 +497,10 @@ function Write-SyncProgressHeartbeat {
     [switch]$Completed,
     [string]$ReceiptTarget = "",
     [object]$BundleProgress = $null,
-    [object]$TerminalAcknowledgement = $null
+    [object]$TerminalAcknowledgement = $null,
+    [switch]$ValidationOnly,
+    [int]$ValidationIndex = 0,
+    [int]$ValidationCount = 0
   )
   if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) { return }
   $target = [System.IO.Path]::GetFullPath($(if ($ReceiptTarget) { $ReceiptTarget } else { $ProgressHeartbeatFile }))
@@ -560,6 +562,18 @@ function Write-SyncProgressHeartbeat {
     fileBytes = $FileBytes
     remoteBytes = $RemoteBytes
     relayEvidence = $relayEvidence
+  }
+  if ($ValidationOnly) {
+    $progress.currentFile = ""
+    $progress.fileIndex = 0
+    $progress.fileCount = 0
+    $progress.fileBytes = 0
+    $progress.remoteBytes = 0
+    $progress['validationOnly'] = $true
+    $progress['validatedMemberCount'] = $ValidationIndex
+    $progress['expectedMemberCount'] = $ValidationCount
+    $progress['ackPending'] = $true
+    $progress['completionAuthority'] = 'NONE_PATH_VALIDATION_ONLY'
   }
   $temporary = "$target.progress-$PID-$([Guid]::NewGuid().ToString('N'))"
   if ($null -ne $BundleProgress) {
@@ -1323,6 +1337,8 @@ $maxAdaptiveThrottleMs = 5000
 $adaptiveThrottleMs = $baseInterChunkThrottleMs
 $selectedFiles = @($manifest.files)
 $admittedMemberPaths = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+$validatedManifestMemberCount = 0
+$expectedManifestMemberCount = $selectedFiles.Count
 foreach ($manifestRow in @($manifest.files)) {
   $memberPath = [string]$manifestRow.path
   if ($admittedMemberPaths.ContainsKey($memberPath)) { throw 'DATA_SYNC_MANIFEST_MEMBER_DUPLICATE' }
@@ -1330,6 +1346,17 @@ foreach ($manifestRow in @($manifest.files)) {
     $memberPath,
     (Resolve-DataSyncManifestMemberPath -Root $targetRoot -MemberPath $memberPath)
   )
+  $validatedManifestMemberCount += 1
+  if (
+    $validatedManifestMemberCount -eq $expectedManifestMemberCount -or
+    ($validatedManifestMemberCount % 250) -eq 0
+  ) {
+    Write-SyncProgressHeartbeat `
+      -Phase "manifest_path_validation" `
+      -ValidationOnly `
+      -ValidationIndex $validatedManifestMemberCount `
+      -ValidationCount $expectedManifestMemberCount
+  }
 }
 $selectedFiles = @(
   $selectedFiles | Sort-Object `
