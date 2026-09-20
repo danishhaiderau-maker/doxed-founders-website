@@ -7,6 +7,7 @@ import {
   resumeTradingAgent,
   forceFlatShowcasePaper,
   fetchServerBotHealth,
+  type ServerBotHealth,
 } from '@/lib/api';
 
 const LAUNCHER = 'http://127.0.0.1:7810';
@@ -163,6 +164,55 @@ const ADVANCED_COMMANDS: HomeCmd[] = [
 ];
 
 export type FlyStatus = 'online' | 'stale' | 'unreachable';
+export type AnalyzerMirrorStatus =
+  | 'epoch_bound_fresh'
+  | 'epoch_bound_stale'
+  | 'waiting_first_publication'
+  | 'unbound'
+  | 'unreachable';
+type StatusChipState = FlyStatus | AnalyzerMirrorStatus;
+
+export function analyzerMirrorStatusLabel(status: AnalyzerMirrorStatus): string {
+  return status === 'epoch_bound_fresh'
+    ? 'epoch-bound · analyzer fresh'
+    : status === 'epoch_bound_stale'
+      ? 'epoch-bound · analyzer stale'
+      : status === 'waiting_first_publication'
+        ? 'waiting for first publication'
+        : status === 'unbound'
+          ? 'not current / unbound'
+          : 'unreachable';
+}
+
+export function resolveAnalyzerMirrorPresentation(
+  mirror?: ServerBotHealth['analyzerMirror'],
+): { status: AnalyzerMirrorStatus; sub: string } {
+  if (!mirror) {
+    return { status: 'unreachable', sub: 'Mirror status unavailable' };
+  }
+  if (mirror.status === 'waiting_first_publication') {
+    return {
+      status: mirror.status,
+      sub: 'Awaiting first verified analyzer publication',
+    };
+  }
+  if (mirror.status === 'unbound') {
+    return {
+      status: mirror.status,
+      sub: 'Mirror present · current collection epoch unverified',
+    };
+  }
+  if (mirror.status === 'epoch_bound_fresh' || mirror.status === 'epoch_bound_stale') {
+    const age =
+      typeof mirror.ageSec === 'number'
+        ? mirror.ageSec < 3600
+          ? `${Math.round(mirror.ageSec / 60)}m ago`
+          : `${(mirror.ageSec / 3600).toFixed(1)}h ago`
+        : 'age unavailable';
+    return { status: mirror.status, sub: `Analyzer generation · ${age}` };
+  }
+  return { status: 'unreachable', sub: 'Mirror status unavailable' };
+}
 
 /**
  * Resolve the Fly strategy/trading owner status without the cross-region
@@ -254,8 +304,9 @@ export function AgentAdminShowcaseControl({
   const [startSteps, setStartSteps] = useState<string | null>(null);
   const [serverUplinkOnline, setServerUplinkOnline] = useState<boolean | null>(null);
   const [flyDirectProbe, setFlyDirectProbe] = useState<boolean | null>(null);
-  const [analyzerMirrorStatus, setAnalyzerMirrorStatus] = useState<FlyStatus>('unreachable');
-  const [analyzerMirrorSub, setAnalyzerMirrorSub] = useState('Fly uploaded research mirror');
+  const [analyzerMirrorStatus, setAnalyzerMirrorStatus] =
+    useState<AnalyzerMirrorStatus>('unreachable');
+  const [analyzerMirrorSub, setAnalyzerMirrorSub] = useState('Mirror status unavailable');
 
   const flyStatus = resolveFlyStatus(flyReachable, flyDirectProbe);
   const feedStatus = resolveFeedStatus(botConnected, serverUplinkOnline, flyReachable);
@@ -304,22 +355,9 @@ export function AgentAdminShowcaseControl({
           // "unreachable" — the exact flap Danish reported.
           setFlyDirectProbe(json.fly === true ? true : json.fly === false ? false : null);
           const mirror = json.analyzerMirror;
-          if (mirror?.status === 'online' || mirror?.status === 'stale' || mirror?.status === 'unreachable') {
-            setAnalyzerMirrorStatus(mirror.status);
-          } else {
-            setAnalyzerMirrorStatus('unreachable');
-          }
-          if (mirror?.available && mirror.uploadedAt) {
-            const age =
-              typeof mirror.ageSec === 'number'
-                ? mirror.ageSec < 3600
-                  ? `${Math.round(mirror.ageSec / 60)}m ago`
-                  : `${(mirror.ageSec / 3600).toFixed(1)}h ago`
-                : 'uploaded';
-            setAnalyzerMirrorSub(`Fly mirror · ${age}`);
-          } else {
-            setAnalyzerMirrorSub('Fly uploaded research mirror');
-          }
+          const presentation = resolveAnalyzerMirrorPresentation(mirror);
+          setAnalyzerMirrorStatus(presentation.status);
+          setAnalyzerMirrorSub(presentation.sub);
         }
       } catch {
         // leave as-is; client-side probe remains a secondary fallback
@@ -479,6 +517,7 @@ export function AgentAdminShowcaseControl({
         <FlyStatusChip
           label="Analyzer mirror"
           status={analyzerMirrorStatus}
+          statusText={analyzerMirrorStatusLabel(analyzerMirrorStatus)}
           sub={analyzerMirrorSub}
         />
       </div>
@@ -618,26 +657,33 @@ export function AgentAdminShowcaseControl({
 function FlyStatusChip({
   label,
   status,
+  statusText,
   sub,
 }: {
   label: string;
-  status: FlyStatus;
+  status: StatusChipState;
+  statusText?: string;
   sub?: string;
 }) {
   const tone =
-    status === 'online'
+    status === 'online' || status === 'epoch_bound_fresh'
       ? 'border-emerald-500/40 text-emerald-300'
-      : status === 'stale'
+      : status === 'stale' || status === 'epoch_bound_stale' || status === 'unbound'
         ? 'border-amber-500/40 text-amber-300'
+        : status === 'waiting_first_publication'
+          ? 'border-sky-500/40 text-sky-300'
         : 'border-red-500/50 text-red-300';
   const dotClass =
-    status === 'online'
+    status === 'online' || status === 'epoch_bound_fresh'
       ? 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]'
-      : status === 'stale'
+      : status === 'stale' || status === 'epoch_bound_stale' || status === 'unbound'
         ? 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.7)]'
+        : status === 'waiting_first_publication'
+          ? 'bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.7)]'
         : 'bg-red-500';
   const labelText =
-    status === 'online' ? 'online' : status === 'stale' ? 'feed stale' : 'unreachable';
+    statusText ??
+    (status === 'online' ? 'online' : status === 'stale' ? 'feed stale' : 'unreachable');
   return (
     <div className={`flex flex-col gap-0.5 rounded-lg border px-2 py-1.5 text-[11px] ${tone}`}>
       <div className="flex items-center gap-2">

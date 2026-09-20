@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { resolveFlyStatus, resolveFeedStatus } from './agent-admin-showcase-control';
+import {
+  analyzerMirrorStatusLabel,
+  resolveAnalyzerMirrorPresentation,
+  resolveFlyStatus,
+  resolveFeedStatus,
+} from './agent-admin-showcase-control';
 
 // These tests pin down the exact flap Danish reported on the admin profile:
 // the admin "Fly strategy/trading owner" chip must NOT flip to "unreachable"
@@ -53,4 +58,74 @@ test('resolveFeedStatus: true outage => unreachable', () => {
   assert.equal(resolveFeedStatus(false, false, false), 'unreachable');
   assert.equal(resolveFeedStatus(false, null, false), 'unreachable');
   assert.equal(resolveFeedStatus(undefined, undefined, undefined), 'unreachable');
+});
+
+test('analyzer mirror presentation distinguishes waiting, unbound, epoch freshness, and unreachable', () => {
+  assert.deepEqual(resolveAnalyzerMirrorPresentation(undefined), {
+    status: 'unreachable',
+    sub: 'Mirror status unavailable',
+  });
+
+  assert.deepEqual(
+    resolveAnalyzerMirrorPresentation({
+      available: false,
+      fresh: false,
+      epochBound: false,
+      status: 'waiting_first_publication',
+    }),
+    {
+      status: 'waiting_first_publication',
+      sub: 'Awaiting first verified analyzer publication',
+    },
+  );
+
+  assert.deepEqual(
+    resolveAnalyzerMirrorPresentation({
+      available: true,
+      fresh: false,
+      epochBound: false,
+      status: 'unbound',
+    }),
+    {
+      status: 'unbound',
+      sub: 'Mirror present · current collection epoch unverified',
+    },
+  );
+
+  assert.deepEqual(
+    resolveAnalyzerMirrorPresentation({
+      available: true,
+      fresh: true,
+      epochBound: true,
+      status: 'epoch_bound_fresh',
+      ageSec: 120,
+    }),
+    { status: 'epoch_bound_fresh', sub: 'Analyzer generation · 2m ago' },
+  );
+
+  assert.deepEqual(
+    resolveAnalyzerMirrorPresentation({
+      available: true,
+      fresh: false,
+      epochBound: true,
+      status: 'epoch_bound_stale',
+      ageSec: 90000,
+    }),
+    { status: 'epoch_bound_stale', sub: 'Analyzer generation · 25.0h ago' },
+  );
+
+  assert.equal(
+    analyzerMirrorStatusLabel('epoch_bound_fresh'),
+    'epoch-bound · analyzer fresh',
+  );
+  assert.equal(
+    analyzerMirrorStatusLabel('epoch_bound_stale'),
+    'epoch-bound · analyzer stale',
+  );
+  assert.equal(
+    analyzerMirrorStatusLabel('waiting_first_publication'),
+    'waiting for first publication',
+  );
+  assert.equal(analyzerMirrorStatusLabel('unbound'), 'not current / unbound');
+  assert.equal(analyzerMirrorStatusLabel('unreachable'), 'unreachable');
 });

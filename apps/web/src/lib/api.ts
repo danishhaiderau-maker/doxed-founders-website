@@ -4556,10 +4556,19 @@ export type ServerBotHealth = {
   analyzerMirror?: {
     available: boolean;
     fresh: boolean;
-    status: 'online' | 'stale' | 'unreachable';
+    epochBound: boolean;
+    status:
+      | 'epoch_bound_fresh'
+      | 'epoch_bound_stale'
+      | 'waiting_first_publication'
+      | 'unbound'
+      | 'unreachable';
     uploadedAt?: string | null;
+    generatedAt?: string | null;
     ageSec?: number | null;
     size?: number | null;
+    collectionEpochId?: string | null;
+    reason?: string;
     source?: string;
   };
 };
