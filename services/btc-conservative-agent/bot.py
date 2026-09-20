@@ -13950,7 +13950,7 @@ def _cancellation_evidence_dead_letter(row: dict) -> None:
 def _get_cancellation_evidence_worker():
     global _cancellation_evidence_worker
     with _cancellation_evidence_worker_lock:
-        if _cancellation_evidence_reset_fence:
+        if _cancellation_evidence_reset_fence or _fresh_collection_lock.locked():
             return None
         if _cancellation_evidence_worker is not None:
             existing = _cancellation_evidence_worker.snapshot()
@@ -27972,6 +27972,17 @@ def maintain_fresh_collection_files():
     if os.path.exists(log_path) and os.path.getsize(log_path) > LOG_MAX_BYTES:
         _reset_runtime_log_handlers()
 
+_FRESH_RESET_RETRYABLE_PREMUTATION_ERRORS = frozenset({
+    "fresh_collection_sync_scheduler_busy",
+    "fresh_collection_sync_builder_active",
+    "fresh_collection_cleanup_lease_busy",
+    "fresh_collection_epoch_writer_busy",
+    "fresh_collection_research_writer_busy",
+})
+_FRESH_RESET_QUIESCE_TIMEOUT_SEC = 15.0
+_FRESH_RESET_QUIESCE_RETRY_SEC = 0.25
+
+
 def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
     """Dashboard-triggered archive+wipe: never delete without verified archive first.
 
@@ -27990,8 +28001,48 @@ def perform_fresh_collection_reset(send_local_signal: bool = True) -> dict:
             "error": "reset_already_in_progress",
             "summary": "Reset already running — wait a few seconds and refresh",
         }
+    started = time.monotonic()
+    deadline = started + _FRESH_RESET_QUIESCE_TIMEOUT_SEC
+    attempts = 0
+    retry_errors = []
     try:
-        return _perform_fresh_collection_reset_locked(send_local_signal=send_local_signal)
+        while True:
+            attempts += 1
+            result = _perform_fresh_collection_reset_locked(
+                send_local_signal=send_local_signal
+            )
+            error = str(result.get("error") or "") if isinstance(result, dict) else ""
+            retryable = bool(
+                isinstance(result, dict)
+                and result.get("ok") is not True
+                and result.get("wipe_aborted") is True
+                and result.get("reset_completed") is not True
+                and error in _FRESH_RESET_RETRYABLE_PREMUTATION_ERRORS
+            )
+            if not retryable:
+                if isinstance(result, dict) and attempts > 1:
+                    result = {
+                        **result,
+                        "quiesce_attempts": attempts,
+                        "quiesce_wait_seconds": round(time.monotonic() - started, 3),
+                        "quiesce_retry_errors": retry_errors,
+                    }
+                return result
+
+            retry_errors.append(error)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    **result,
+                    "quiesce_attempts": attempts,
+                    "quiesce_wait_seconds": round(time.monotonic() - started, 3),
+                    "quiesce_retry_errors": retry_errors,
+                    "quiesce_retry_exhausted": True,
+                }
+            # The inner attempt has released every scheduler/lease/writer gate.
+            # Retain only the reset-intent lock while the active owner drains so
+            # guarded research reports cannot restart between attempts.
+            time.sleep(min(_FRESH_RESET_QUIESCE_RETRY_SEC, remaining))
     finally:
         _fresh_collection_lock.release()
 

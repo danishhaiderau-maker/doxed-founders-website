@@ -29,8 +29,11 @@ def reset_env(tmp_path):
         "_data_sync_sqlite_snapshot_states": {},
         "_research_write_gate": threading.RLock(),
         "_collector_epoch_lock": threading.RLock(),
+        "_cancellation_evidence_worker_lock": threading.Lock(),
+        "_cancellation_evidence_reset_fence": False,
     }
     env["_stop_lifecycle_pipeline_runtime"] = Mock(side_effect=lambda **_: events.append("stop") or True)
+    env["_shutdown_cancellation_evidence_worker"] = Mock(return_value=True)
     env["_raw_generation_cleanup_gate_acquire"] = Mock(side_effect=lambda: events.append("lease") or True)
     env["_raw_generation_cleanup_gate_release"] = Mock(side_effect=lambda: events.append("release"))
 
