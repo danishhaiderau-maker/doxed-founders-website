@@ -223,6 +223,31 @@ def test_nested_lock_order_has_no_new_inversions():
     assert visitor.pairs == expected
 
 
+def test_chase_preflight_releases_trade_lock_before_durable_commit():
+    function = next(node for node in _tree().body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_commit_relay_limit_chase")
+    parents = {child: parent for parent in ast.walk(function)
+               for child in ast.iter_child_nodes(parent)}
+    commits = [node for node in ast.walk(function)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id == "_commit_paper_lifecycle_transition"]
+    assert len(commits) == 1
+    contexts = []
+    ancestor = parents[commits[0]]
+    while ancestor is not function:
+        if isinstance(ancestor, ast.With):
+            contexts.extend(ast.unparse(item.context_expr) for item in ancestor.items)
+        ancestor = parents[ancestor]
+    assert "paper_lifecycle_transition_lock" in contexts
+    assert "trade_lock" not in contexts
+    visitor = _NestedLockVisitor()
+    visitor.visit(function)
+    assert visitor.pairs == {
+        (function.name, "paper_lifecycle_transition_lock", "trade_lock"),
+    }
+
+
 def test_retired_ui_candidates_are_not_registered():
     candidates = _manifest()["historical_ui_tile_candidates"]
     assert candidates == []
