@@ -831,11 +831,12 @@ jobs:
                   h.seek(max(0,log.stat().st_size-65536)); tail=h.read(65536).decode('utf-8','replace')
               for line in tail.splitlines():
                   if any(x in line for x in ('FRESH COLLECTION','RESET_', 'reset failed', 'research_reset')): print(line[:1000])
-          allowed={'schema','reset_id','attempt_id','stage','status','phase','scope_name','completed_targets','total_targets','fingerprinted_bytes','observed_at_ts','error','error_code','accounting_preserved','payload_copy_performed','target_count','target_bytes','deleted_count','deleted_bytes','created_at','updated_at','ok'}
+          allowed={'schema','reset_id','attempt_id','stage','status','phase','scope_name','completed_targets','total_targets','fingerprinted_bytes','observed_at_ts','error','error_code','accounting_preserved','payload_copy_performed','target_count','target_bytes','deleted_count','deleted_bytes','created_at','updated_at','ok','new_epoch_id','genome_reset_completed'}
           def read(p):
               if not p.is_file():
                   print(json.dumps({'receipt':str(p.relative_to(root)), 'exists':False})); return {}
-              assert not p.is_symlink() and p.stat().st_size <= 4*1024*1024, 'receipt bound'
+              cap=(32 if p.name=='deletion.json' else 4)*1024*1024
+              assert not p.is_symlink() and p.stat().st_size <= cap, 'receipt bound'
               d=json.loads(p.read_text()); assert isinstance(d,dict)
               print(json.dumps({'receipt':str(p.relative_to(root)), 'mtime':p.stat().st_mtime,'fields':{k:v for k,v in d.items() if k in allowed and isinstance(v,(str,int,float,bool,type(None)))}},sort_keys=True))
               return d
