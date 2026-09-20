@@ -28937,6 +28937,15 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
             store._atomic_json_receipt(operation_path, operation)
             store._atomic_json_receipt(receipt_dir.parent / "ACTIVE_RESET.json", {
                 "reset_id": reset_id, "binding_sha256": hashlib.sha256(canonical_json(binding).encode()).hexdigest()})
+        # Revoke inventory before ANY source deletion or epoch mutation. Even
+        # a later partial reset/failed epoch publisher cannot retain old ACK
+        # authority. Resume may already have published the planned new epoch.
+        stage = "INVALIDATE_OLD_INVENTORY"
+        invalidation = _data_sync_invalidate_reset_inventory(
+            boundary["new_epoch"],
+            expected_current_epoch=boundary["evidence"]["old_identity"]["epoch_id"])
+        operation.update(inventory_invalidation=invalidation)
+        store._atomic_json_receipt(operation_path, operation)
         stage = "PAYLOAD_DELETION"
         operation.update(stage=stage)
         store._atomic_json_receipt(operation_path, operation)
@@ -41372,6 +41381,68 @@ def _data_sync_inventory_snapshot_path() -> Path:
     return _data_sync_volume_root() / _DATA_SYNC_INVENTORY_SNAPSHOT_NAME
 
 
+def _data_sync_invalidate_reset_inventory(new_epoch: str, *, expected_current_epoch=None) -> dict:
+    """Reset-only invalidation under the already-held quiescent inventory gate.
+
+    Replace only the acceleration pointer with a durable non-authoritative
+    tombstone. Raw pages, research and ACK/recovery receipts are not deleted.
+    The normal loader cannot restore this schema as a retained generation.
+    """
+    with _data_sync_inventory_cache_condition:
+        if (_data_sync_inventory_cache.get("refreshing")
+                or _data_sync_async_inventory.get("refreshing")
+                or _data_sync_async_inventory.get("worker_active")):
+            raise RuntimeError("RESET_INVENTORY_OWNER_ACTIVE")
+        if not new_epoch or _collector_v22_epoch_id() not in {new_epoch, expected_current_epoch}:
+            raise RuntimeError("RESET_INVENTORY_EPOCH_MISMATCH")
+        marker = {
+            "schema": "fly_runtime_inventory_invalidated_v1",
+            "status": "EMPTY",
+            "collection_epoch_id": new_epoch,
+            "previous_generation_id": _data_sync_async_inventory.get("generation_id"),
+            "invalidated_at": utc_iso(),
+            "ack_eligible": False,
+        }
+        # Revoke first. Any subsequent persistence error must leave authority
+        # revoked, never preserve old CURRENT metadata after partial deletion.
+        _data_sync_inventory_cache.clear()
+        _data_sync_inventory_cache.update(
+            rows=None, expires_at=0.0, refreshed_at=0.0, refreshing=False)
+        _data_sync_async_inventory.clear()
+        _data_sync_async_inventory.update(
+            status="EMPTY", rows=None, generation=None, generation_id=None,
+            generated_at=None, expires_at=0.0, served_since_refresh=False,
+            refreshing=False, worker_active=False, active_refresh_nonce=None,
+            completed_refresh_nonce=None, error=None, worker_failure_code=None)
+        _data_sync_inventory_generations.clear()
+        _data_sync_inventory_cache_condition.notify_all()
+        target = _data_sync_inventory_snapshot_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            raise RuntimeError("RESET_INVENTORY_POINTER_LINKED")
+        temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(marker, handle, sort_keys=True, separators=(",", ":"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            try:
+                directory_fd = os.open(str(target.parent), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                # Windows may not permit a directory descriptor. On Fly/Linux
+                # failure is fatal; memory remains revoked and reset stops.
+                if os.name != "nt":
+                    raise
+        finally:
+            temporary.unlink(missing_ok=True)
+        return marker
+
+
 def _data_sync_inventory_rows_sha256(rows: list) -> str:
     canonical = json.dumps(
         rows, separators=(",", ":"), sort_keys=True, ensure_ascii=True
@@ -43045,7 +43116,22 @@ def _data_sync_ack_path() -> Path:
 def _read_data_sync_ack() -> dict:
     try:
         raw = json.loads(_data_sync_ack_path().read_text(encoding="utf-8"))
-        return raw if isinstance(raw, dict) else {}
+        if not isinstance(raw, dict):
+            return {}
+        session = _load_research_session_meta() or {}
+        identity = {
+            "source_git_rev": _runtime_git_rev(),
+            "collection_epoch_id": str(session.get("collector_v22_epoch_id") or ""),
+            "tile_registry_signature": active_tile_registry_signature(),
+        }
+        def matches(receipt):
+            return isinstance(receipt, dict) and all(
+                expected and receipt.get(key) == expected for key, expected in identity.items())
+        if raw.get("schema") == "fly_runtime_incremental_generation_ack_v3":
+            return raw if matches(raw) else {}
+        # Historical/unbound receipts remain on disk as evidence; they cannot
+        # describe acknowledgements for a new source epoch.
+        return {path: row for path, row in raw.items() if matches(row)}
     except (OSError, ValueError, TypeError):
         return {}
 
@@ -43813,6 +43899,12 @@ def api_data_sync_manifest():
         _read_data_sync_ack()
         if inventory_status == "CURRENT" and not targeted_path else {}
     )
+    if ack.get("schema") == "fly_runtime_incremental_generation_ack_v3":
+        if ack.get("inventory_generation_id") != inventory_generation_id:
+            ack = {}
+    else:
+        ack = {path: row for path, row in ack.items()
+               if isinstance(row, dict) and row.get("inventory_sha256") == inventory_generation_id}
     session = _load_research_session_meta() or {}
     collection_epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
     # Keep the identity-only manifest independent of trading-state contention.
@@ -44250,6 +44342,11 @@ def _data_sync_ack_v3(body: dict):
             "inventory_status": "UNAVAILABLE",
         }), 503
     identity_ok, identity_key = _data_sync_ack_v3_identity_matches(body)
+    frozen_identity = generation.get("bundle_identity")
+    if identity_ok and (not isinstance(frozen_identity, dict) or any(
+            frozen_identity.get(key) != body.get(key) for key in
+            ("source_git_rev", "collection_epoch_id", "tile_registry_signature"))):
+        identity_ok, identity_key = False, "inventory_frozen_identity"
     if not identity_ok:
         return jsonify({
             "error": f"acknowledgement identity mismatch: {identity_key}",
@@ -44402,6 +44499,8 @@ def _data_sync_ack_v3(body: dict):
     acknowledged_at = utc_iso()
     compact_ack = {
         "schema": "fly_runtime_incremental_generation_ack_v3",
+        **{key: body[key] for key in
+           ("source_git_rev", "collection_epoch_id", "tile_registry_signature")},
         "inventory_generation_id": generation_id,
         "inventory_sha256": generation_id,
         "inventory_generated_at": generation.get("generated_at"),
@@ -44422,7 +44521,18 @@ def _data_sync_ack_v3(body: dict):
                 "receipt_bootstrap": bootstrap_gate,
                 "retry_after_seconds": 2,
             }), 503
-        _write_data_sync_ack(compact_ack)
+        # Serialize the final authority check/write with reset invalidation.
+        # Reset never acquires ack_lock while holding this condition.
+        with _data_sync_inventory_cache_condition:
+            final_generation = _data_sync_inventory_generation(generation_id)
+            final_identity_ok, _ = _data_sync_ack_v3_identity_matches(body)
+            if (not final_identity_ok or not isinstance(final_generation, dict)
+                    or final_generation.get("ack_eligible") is not True
+                    or final_generation.get("bundle_identity") != frozen_identity
+                    or final_generation.get("generated_at") != generation.get("generated_at")):
+                return jsonify({"error": "generation changed before acknowledgement",
+                                "accepted": 0, "inventory_status": "IDENTITY_MISMATCH"}), 409
+            _write_data_sync_ack(compact_ack)
     return jsonify({
         "ok": True,
         "operation": "FINALIZE",
@@ -44551,15 +44661,27 @@ def api_data_sync_ack():
                 "receipt_bootstrap": bootstrap_gate,
                 "retry_after_seconds": 2,
             }), 503
-        acks = _read_data_sync_ack()
-        for rel, row in accepted_rows.items():
-            acks[rel] = {
-                **row,
-                "acknowledged_at": acknowledged_at,
-                "inventory_generated_at": inventory_generated_at,
-                "inventory_sha256": inventory_sha256,
-            }
-        _write_data_sync_ack(acks)
+        with _data_sync_inventory_cache_condition:
+            final_generation = _data_sync_inventory_generation(inventory_sha256)
+            final_identity_ok, _ = _data_sync_ack_v3_identity_matches(body)
+            if (not final_identity_ok or not isinstance(final_generation, dict)
+                    or final_generation.get("ack_eligible") is not True
+                    or final_generation.get("generated_at") != inventory_generated_at):
+                return jsonify({"error": "generation changed before acknowledgement",
+                                "accepted": 0, "inventory_status": "IDENTITY_MISMATCH"}), 409
+            acks = _read_data_sync_ack()
+            if acks.get("schema") == "fly_runtime_incremental_generation_ack_v3":
+                acks = {}
+            for rel, row in accepted_rows.items():
+                acks[rel] = {
+                    **row,
+                    **{key: body[key] for key in
+                       ("source_git_rev", "collection_epoch_id", "tile_registry_signature")},
+                    "acknowledged_at": acknowledged_at,
+                    "inventory_generated_at": inventory_generated_at,
+                    "inventory_sha256": inventory_sha256,
+                }
+            _write_data_sync_ack(acks)
     try:
         usage = shutil.disk_usage(_data_sync_volume_root())
         volume_used_pct = round((usage.used / usage.total) * 100, 2) if usage.total else None
