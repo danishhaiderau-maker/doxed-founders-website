@@ -18,6 +18,8 @@ const singletonAgent = join(root, 'services/btc-conservative-agent/process_singl
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
 const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sync_inventory_worker.py');
 const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
+const bundleAdmissionAgent = join(root, 'services/btc-conservative-agent/data_sync_bundle_admission.py');
+const bundleAdmissionEngine = join(root, 'services/btc-signal-engine/data_sync_bundle_admission.py');
 const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/platform_relay_evidence_worker.py');
 const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
 const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
@@ -90,6 +92,12 @@ if (!existsSync(inventoryWorkerAgent)) {
 copyFileSync(inventoryWorkerAgent, inventoryWorkerEngine);
 copyFileSync(join(agentDir, 'data_sync_quarantine_receipt.py'), join(engineDir, 'data_sync_quarantine_receipt.py'));
 console.log(`Mirrored data-sync inventory worker (${sha256(readFileSync(inventoryWorkerAgent, 'utf8'))})`);
+
+if (!existsSync(bundleAdmissionAgent)) {
+  throw new Error('Missing canonical data-sync bundle admission dependency');
+}
+copyFileSync(bundleAdmissionAgent, bundleAdmissionEngine);
+console.log(`Mirrored data-sync bundle admission (${sha256(readFileSync(bundleAdmissionAgent, 'utf8'))})`);
 
 if (!existsSync(relayEvidenceWorkerAgent)) {
   throw new Error('Missing canonical platform_relay_evidence_worker.py');
