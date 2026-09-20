@@ -22,7 +22,8 @@ function Receive-FlyTransportBundles {
     [Parameter(Mandatory)][string]$ClientScript,
     [Parameter(Mandatory)][System.Collections.IDictionary]$SyncState,
     [Parameter(Mandatory)][scriptblock]$SaveCheckpoint,
-    [Parameter(Mandatory)][scriptblock]$Progress
+    [Parameter(Mandatory)][scriptblock]$Progress,
+    [scriptblock]$BeforePromote = { }
   )
   $mirror = [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\', '/')
   # A short canonical workspace staging path avoids legacy Python MAX_PATH.
@@ -173,6 +174,7 @@ function Receive-FlyTransportBundles {
           [IO.File]::Copy($staged, $candidate, $false)
           Test-MirrorCandidate -Path $candidate -RelativePath $rel -ExpectedSize ([int64]$row.size)
           if ((Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$member.sha256) { throw 'BUNDLE_CANDIDATE_HASH_MISMATCH' }
+          & $BeforePromote
           Publish-MirrorCandidate -Candidate $candidate -Destination $destination
         } finally {
           if (Test-Path -LiteralPath $candidate) { Remove-Item -LiteralPath $candidate -Force }

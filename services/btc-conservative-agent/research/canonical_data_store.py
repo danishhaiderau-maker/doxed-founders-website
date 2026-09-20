@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from research.local_generation_fence import assert_local_generation_available
+
 
 STORE_SCHEMA = "canonical_research_store_v1"
 MANIFEST_SCHEMA = "canonical_research_manifest_v1"
@@ -74,6 +76,7 @@ def initialize_store(
     root: str | os.PathLike[str], project_root: str | os.PathLike[str]
 ) -> Path:
     resolved = assert_store_root(root, project_root)
+    assert_local_generation_available(resolved, stage="canonical_store_initialize")
     resolved.mkdir(parents=True, exist_ok=True)
     for name in ("archive", "backups", "migration"):
         (resolved / name).mkdir(exist_ok=True)
@@ -172,6 +175,7 @@ def current_analyzer_dataset_identity(
 
 def append_manifest(root: str | os.PathLike[str], fields: Mapping[str, Any]) -> dict[str, Any]:
     store = Path(root).resolve()
+    assert_local_generation_available(store, stage="canonical_manifest_append")
     required = (
         "dataset_epoch",
         "source_revision",
@@ -303,6 +307,7 @@ def publish_parity_status(
 ) -> dict[str, Any]:
     """Atomically publish parity for the latest append-only manifest entry."""
     store = Path(root).resolve()
+    assert_local_generation_available(store, stage="canonical_parity_publish")
     validate_manifest_chain(store)
     current = _read_current(store)
     status = parity_status(current, remote)
@@ -330,6 +335,7 @@ def archive_before_cleanup(
     root: str | os.PathLike[str], candidate: str | os.PathLike[str], *, reason: str
 ) -> dict[str, Any]:
     store = Path(root).resolve()
+    assert_local_generation_available(store, stage="canonical_archive_publish")
     source = contained_path(store, candidate)
     if not source.exists():
         raise CanonicalStoreError("CLEANUP_TARGET_MISSING")

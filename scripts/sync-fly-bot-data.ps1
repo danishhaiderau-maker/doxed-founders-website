@@ -21,6 +21,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-sync-backoff.ps1")
 . (Join-Path $scriptDir "fly-sync-file-pacing.ps1")
 . (Join-Path $scriptDir "fly-lifecycle-bundle-copy.ps1")
+. (Join-Path $scriptDir "local-generation-fence.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 if (-not $TargetDir) {
   $TargetDir = Get-DoxxedFlyMirrorDir
@@ -37,6 +38,7 @@ if (-not $AdminToken) {
 . (Join-Path $scriptDir "fly-forensic-group-verify.ps1")
 $targetRoot = [System.IO.Path]::GetFullPath($TargetDir)
 New-Item -ItemType Directory -Path $targetRoot -Force | Out-Null
+Assert-LocalGenerationUnfenced -DataRoot $targetRoot -Stage 'standalone_sync_start'
 if ([string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   $ProgressHeartbeatFile = Join-Path $targetRoot ".fly-data-sync-loop.heartbeat.json"
 }
@@ -88,6 +90,9 @@ function Invoke-DataSyncJsonRequest {
     [ValidateRange(1, 900)][int]$MaxElapsedSec = 300,
     [string]$Body = ""
   )
+  if ($Method -eq 'Post') {
+    Assert-LocalGenerationUnfenced -DataRoot $targetRoot -Stage ("remote_" + $Stage)
+  }
   $requestWatch = [System.Diagnostics.Stopwatch]::StartNew()
   $consecutiveNonBuildingPressureFailures = 0
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
@@ -750,6 +755,7 @@ $currentMirrorBytes = [int64](
 )
 $incomingGrowth = [int64]0
 foreach ($row in $selectedFiles) {
+  Assert-LocalGenerationUnfenced -DataRoot $targetRoot -Stage 'file_promotion_loop'
   $candidate = Join-Path $targetRoot (([string]$row.path) -replace "/", "\")
   $existingBytes = if (Test-Path -LiteralPath $candidate) {
     [int64](Get-Item -LiteralPath $candidate).Length
@@ -773,6 +779,7 @@ if ($env:FLY_SYNC_TRANSPORT_BUNDLES -eq '1') {
     -AdminToken $AdminToken -TargetRoot $targetRoot `
     -ClientScript (Join-Path $scriptDir 'fly-sync-bundle-client.py') `
     -SyncState $syncState -SaveCheckpoint { Save-SyncState } `
+    -BeforePromote { Assert-LocalGenerationUnfenced -DataRoot $targetRoot -Stage 'bundle_file_atomic_promotion' } `
     -Progress { param($files, $phase, $details)
       Write-Host "[FLY SYNC] stage=$phase files=$files ack=pending"
       Write-SyncProgressHeartbeat -Phase $phase -FileIndex $files -FileCount $selectedFiles.Count `
@@ -1212,6 +1219,7 @@ foreach ($row in $selectedFiles) {
       }
     }
     if ($forensicOriginal) { Assert-FlyForensicPayload -Row $row -Path $candidate }
+    Assert-LocalGenerationUnfenced -DataRoot $targetRoot -Stage 'file_atomic_promotion'
     Publish-MirrorCandidate -Candidate $candidate -Destination $local
     $downloadedGeneration = $true
   } finally {
@@ -1661,6 +1669,7 @@ if ($PublishAnalyzerReport) {
         $content = [System.Net.Http.StreamContent]::new($stream)
         $content.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::new("application/zip")
         $form.Add($content, "bundle", "analyzer_bundle.zip")
+        Assert-LocalGenerationUnfenced -DataRoot $targetRoot -Stage 'analyzer_report_remote_publish'
         $publishResponse = $client.PostAsync(
           "$base/api/data-sync/analyzer-report",
           $form
@@ -1703,6 +1712,7 @@ Write-SyncProgressHeartbeat `
 # authenticated generation and its heartbeat are durable. Analyzer admission
 # can therefore fail closed on epoch/revision/tile parity.
 if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
+  Assert-LocalGenerationUnfenced -DataRoot $targetRoot -Stage 'canonical_manifest_promotion'
   $migrationScript = Join-Path $repoRoot "scripts\migrate_canonical_research_store.py"
   $canonicalManifestReceipt = & python $migrationScript --record-existing --destination $targetRoot --heartbeat $ProgressHeartbeatFile
   if ($LASTEXITCODE -ne 0) { throw "Canonical manifest commit failed with exit code $LASTEXITCODE." }

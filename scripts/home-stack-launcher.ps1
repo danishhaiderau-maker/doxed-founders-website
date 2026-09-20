@@ -19,6 +19,7 @@ if ($BotPort -le 0) { $BotPort = $stackMode.BotPort }
 if ($AnalyzerPort -le 0) { $AnalyzerPort = $stackMode.AnalyzerPort }
 . (Join-Path $scriptDir "home-stack-common.ps1") -BridgePort $Port -BotPort $BotPort -AnalyzerPort $AnalyzerPort
 . (Join-Path $scriptDir "home-stack-health.ps1")
+. (Join-Path $scriptDir "local-reset-http.ps1")
 # Load HttpClient before the single-threaded listener accepts requests. On this
 # Windows host the first Add-Type can take several seconds under disk pressure;
 # paying that startup cost here keeps the first /status request cancellation-
@@ -149,12 +150,7 @@ function Write-Cors {
     [System.Net.HttpListenerRequest]$Request,
     [System.Net.HttpListenerResponse]$Response
   )
-  $allowed = @(
-    "https://doxxedcrypto.digital",
-    "https://www.doxxedcrypto.digital",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000"
-  )
+  $allowed = @(Get-LocalResetAllowedOrigins)
   $origin = $Request.Headers["Origin"]
   if ($origin -and ($allowed -contains $origin)) {
     $Response.Headers.Add("Access-Control-Allow-Origin", $origin)
@@ -162,7 +158,7 @@ function Write-Cors {
     $Response.Headers.Add("Access-Control-Allow-Origin", "https://doxxedcrypto.digital")
   }
   $Response.Headers.Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-  $Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type")
+  $Response.Headers.Add("Access-Control-Allow-Headers", "Content-Type, X-Local-Reset-Capability")
   $Response.Headers.Add("Access-Control-Allow-Private-Network", "true")
 }
 
@@ -264,14 +260,36 @@ $script:BridgeTunnelCache = @{
   at = [datetime]::MinValue
 }
 
-function Invoke-HomeCommandBackground([string]$Action) {
+function Invoke-HomeCommandBackground([string]$Action, [string]$OperationId = "") {
   $modeArg = if ($stackMode.Mode -eq "local-collection") { "local-collection" } else { "production" }
-  Start-HiddenPs1 (Join-Path $scriptDir "home-stack-cmd-worker.ps1") @(
+  $workerArguments = @(
     "-Action", $Action,
     "-BotPort", "$BotPort",
     "-AnalyzerPort", "$AnalyzerPort",
     "-StackMode", $modeArg
   )
+  if ($OperationId) { $workerArguments += @("-OperationId", $OperationId) }
+  Start-HiddenPs1 (Join-Path $scriptDir "home-stack-cmd-worker.ps1") $workerArguments
+}
+
+function Get-LocalResetCapabilityHashPath {
+  if (-not $env:LOCALAPPDATA) { return $null }
+  return (Join-Path $env:LOCALAPPDATA 'DoxxedCrypto\local-research-reset\capability.sha256')
+}
+
+function Serve-LocalResetApi(
+  [System.Net.HttpListenerRequest]$Request,
+  [System.Net.HttpListenerResponse]$Response,
+  [string]$Path
+) {
+  $hashPath = Get-LocalResetCapabilityHashPath
+  if (-not $hashPath) { $hashPath = '__LOCAL_RESET_CAPABILITY_UNAVAILABLE__' }
+  $cli = Join-Path $repoRoot 'services\btc-conservative-agent\local_fresh_collection_cli.py'
+  Invoke-LocalResetApiRoute -Request $Request -Response $Response -Path $Path `
+    -CliPath $cli -CapabilityHashPath $hashPath -StartWorker {
+      param($OperationId)
+      Invoke-HomeCommandBackground 'fresh-collection-local-run' $OperationId
+    }
 }
 
 function Invoke-TradingControl([ValidateSet("pause", "resume")][string]$Action) {
@@ -497,11 +515,11 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
       return (Invoke-TradingControl "pause")
     }
     "wipe-research" {
-      if (-not (Test-PortOpen $BotPort)) {
-        return @{ ok = $false; error = "Bot not running on :$BotPort - start bot first" }
+      return @{
+        ok = $false
+        error = "LEGACY_WIPE_RESEARCH_RETIRED_USE_AUTHENTICATED_LAPTOP_ONLY_API"
+        fly_unchanged = $true
       }
-      Invoke-HomeCommandBackground "wipe-research"
-      return @{ ok = $true; message = "Fresh collection wipe queued (runs in background, up to 3 min)." }
     }
     "stop-bot" {
       Invoke-HomeCommandBackground "stop-bot"
@@ -560,18 +578,27 @@ function Invoke-HomeCommand([string]$Action, [string]$QueryUrl) {
 function Serve-Request([System.Net.HttpListenerContext]$Context) {
   $request = $Context.Request
   $response = $Context.Response
-  Write-Cors $request $response
+  $path = ($request.Url.AbsolutePath.TrimEnd("/"))
+  if (-not $path) { $path = "/" }
+  $localResetRoute = $path -like '/api/local-research-reset/v1/*'
+  if ($localResetRoute -and $request.HttpMethod -eq "OPTIONS") {
+    Write-LocalResetCors -Request $request -Response $response
+  } elseif (-not $localResetRoute) {
+    Write-Cors $request $response
+  }
 
   if ($request.HttpMethod -eq "OPTIONS") {
-    $response.Headers.Add("Access-Control-Allow-Private-Network", "true")
     $response.StatusCode = 204
     $response.Close()
     return
   }
 
-  $path = ($request.Url.AbsolutePath.TrimEnd("/"))
-  if (-not $path) { $path = "/" }
   $tunnelParam = $request.QueryString["url"]
+
+  if ($localResetRoute) {
+    Serve-LocalResetApi -Request $request -Response $response -Path $path
+    return
+  }
 
   try {
     $payload = switch -Regex ($path) {
