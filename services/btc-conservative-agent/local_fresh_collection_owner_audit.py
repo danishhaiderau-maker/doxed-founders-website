@@ -13,6 +13,21 @@ class LocalOwnerAuditUnavailable(RuntimeError):
     pass
 
 
+OWNER_COMMAND_PATTERNS = (
+    "sync-fly-bot-data",
+    "fly-sync-bundle-client",
+    "fly-sync-generation-resume",
+    "start-fly-batch-sync",
+    "analyzer_research_engine_v62",
+    "research_dashboard.py",
+    "migrate_canonical_research_store",
+    "archive-research-data",
+    "fly-mirror-quarantine",
+    "raw_generation_cleanup_owner",
+    "canonical_generation_retirement",
+)
+
+
 def audit_local_research_owners(_canonical_root, _archive_root) -> dict:
     if os.name != "nt":
         raise LocalOwnerAuditUnavailable("LOCAL_RESET_WINDOWS_OWNER_AUDIT_REQUIRED")
@@ -21,9 +36,10 @@ def audit_local_research_owners(_canonical_root, _archive_root) -> dict:
         raise LocalOwnerAuditUnavailable("LOCAL_RESET_POWERSHELL_UNAVAILABLE")
     # The bridge itself is intentionally not a blocker.  Only processes which
     # can read/write/promote the eligible research roots are included.
+    pattern_literals = ",".join(json.dumps(value) for value in OWNER_COMMAND_PATTERNS)
     command = r'''
 $ErrorActionPreference='Stop'
-$patterns=@('sync-fly-bot-data','analyzer_research_engine_v62','research_dashboard.py','migrate_canonical_research_store','archive-research-data','fly-mirror-quarantine')
+$patterns=@(__OWNER_COMMAND_PATTERNS__)
 $owners=@(Get-CimInstance Win32_Process -OperationTimeoutSec 8 | Where-Object {
   $process=$_
   $process.ProcessId -ne $PID -and $process.CommandLine -and ($patterns | Where-Object {$process.CommandLine -like ('*'+$_+'*')}).Count -gt 0
@@ -32,6 +48,7 @@ $taskNames=@('DoxxedFlyMirrorOneshot','DoxxedFlyMirrorSync','DoxxedFlySyncDurabl
 $tasks=@(Get-ScheduledTask -ErrorAction Stop | Where-Object {$_.TaskName -in $taskNames -and [string]$_.State -eq 'Running'} | ForEach-Object {@{name=$_.TaskName;state=[string]$_.State}})
 @{schema='local_research_owner_audit_v1';safe=($owners.Count -eq 0 -and $tasks.Count -eq 0);owners=$owners;running_tasks=$tasks;checked_at=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()/1000} | ConvertTo-Json -Depth 5 -Compress
 '''
+    command = command.replace("__OWNER_COMMAND_PATTERNS__", pattern_literals)
     encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
     completed = subprocess.run(
         [shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],

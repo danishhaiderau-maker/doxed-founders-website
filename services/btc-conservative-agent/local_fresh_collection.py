@@ -12,7 +12,7 @@ import stat
 import tempfile
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from research.local_generation_fence import (
     BLOCKED_STATE,
@@ -25,6 +25,7 @@ from research.mirror_generation_lease import (
     MirrorGenerationLease,
     MirrorGenerationLeaseTimeout,
 )
+from research_reset_inventory import _essential as _research_reset_protected_reason
 
 
 PROTOCOL = "local_research_reset_protocol_v1"
@@ -32,6 +33,8 @@ SCOPE_VERSION = "laptop_research_scope_v1"
 RECEIPT_SCHEMA = "local_fresh_collection_operation_v1"
 CONFIRMATION = "DELETE LAPTOP RESEARCH ONLY"
 PROTECTED_CANONICAL_NAMES = {LEASE_FILE_NAME, FENCE_FILE_NAME}
+ARCHIVE_META_MAX_BYTES = 4 * 1024 * 1024
+RECOVERY_PROTECTION_REASONS = frozenset({"ESSENTIAL_RECOVERY_OR_OWNER_STATE"})
 
 
 class LocalFreshCollectionRejected(RuntimeError):
@@ -145,6 +148,120 @@ def _relative_file_inventory(root: Path, *, protected_names=frozenset()) -> list
                 else:
                     _reject("LOCAL_RESET_NONREGULAR_FILE_REFUSED")
     return sorted(rows, key=lambda row: row["relative_path"])
+
+
+def _safe_relative_text(value: object) -> bool:
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        return False
+    parts = value.split("/")
+    return not value.startswith("/") and all(part not in {"", ".", ".."} for part in parts)
+
+
+def _archive_dependency_protection(root: Path, rows: list[dict]) -> tuple[dict[str, str], list[str]]:
+    """Return archive-session closures and fail-closed recovery blockers.
+
+    An archive receipt can hide a protected source behind a sequence/digest
+    payload name.  If one source is protected, retain its complete session so
+    the receipt never points at deleted siblings.  Malformed archive metadata
+    is unresolved authority and blocks the reset before the first unlink.
+    """
+    row_by_relative = {row["relative_path"]: row for row in rows}
+    protected: dict[str, str] = {}
+    blockers: list[str] = []
+    for metadata_row in rows:
+        relative = metadata_row["relative_path"]
+        if PurePosixPath(relative).name != "archive_meta.json":
+            continue
+        path = _safe_target(root, relative)
+        try:
+            if metadata_row["bytes"] > ARCHIVE_META_MAX_BYTES:
+                raise ValueError("metadata too large")
+            metadata = _read_json(path)
+            digest, size = _sha256_file(path)
+            if digest != metadata_row["sha256"] or size != metadata_row["bytes"]:
+                raise ValueError("metadata changed")
+            if metadata.get("schema") != "research_archive_receipt_v2":
+                raise ValueError("unknown metadata schema")
+            source_rows = metadata.get("source_inventory")
+            if not isinstance(source_rows, list) or len(source_rows) > 200_000:
+                raise ValueError("invalid source inventory")
+            protected_source_reasons: list[str] = []
+            metadata_parent = PurePosixPath(relative).parent
+            for source_row in source_rows:
+                if not isinstance(source_row, dict):
+                    raise ValueError("invalid source row")
+                source = source_row.get("path")
+                preserved = source_row.get("preserved_path")
+                if not _safe_relative_text(source) or not _safe_relative_text(preserved):
+                    raise ValueError("unsafe archive binding")
+                target = (metadata_parent / PurePosixPath(preserved)).as_posix()
+                if target not in row_by_relative:
+                    raise ValueError("archive payload missing")
+                target_row = row_by_relative[target]
+                expected_size = source_row.get("preserved_bytes")
+                expected_hash = source_row.get("preserved_sha256")
+                if (
+                    type(expected_size) is not int
+                    or expected_size != target_row["bytes"]
+                    or not isinstance(expected_hash, str)
+                    or len(expected_hash) != 64
+                    or any(char not in "0123456789abcdef" for char in expected_hash)
+                    or expected_hash != target_row["sha256"]
+                ):
+                    raise ValueError("archive payload binding mismatch")
+                reason = _research_reset_protected_reason(source)
+                if reason:
+                    protected_source_reasons.append(reason)
+            prefix = "" if str(metadata_parent) == "." else metadata_parent.as_posix() + "/"
+            direct_session_reasons = [
+                reason
+                for candidate in rows
+                if not prefix or candidate["relative_path"].startswith(prefix)
+                for reason in [_research_reset_protected_reason(candidate["relative_path"])]
+                if reason
+            ]
+            protected_source_reasons.extend(direct_session_reasons)
+            if not protected_source_reasons:
+                continue
+            closure_reason = "PROTECTED_ARCHIVE_DEPENDENCY_CLOSURE:" + ",".join(
+                sorted(set(protected_source_reasons))
+            )
+            for candidate in rows:
+                if not prefix or candidate["relative_path"].startswith(prefix):
+                    protected[candidate["relative_path"]] = closure_reason
+            if any(reason in RECOVERY_PROTECTION_REASONS for reason in protected_source_reasons):
+                blockers.append("PROTECTED_ARCHIVE_RECOVERY_REQUIRES_AUDIT:" + relative)
+        except (LocalFreshCollectionRejected, OSError, TypeError, ValueError):
+            blockers.append("UNRESOLVED_ARCHIVE_METADATA_REQUIRES_AUDIT:" + relative)
+    return protected, blockers
+
+
+def _classified_inventory(
+    root: Path, *, root_label: str, protected_names=frozenset()
+) -> tuple[list[dict], list[dict], list[str]]:
+    rows = _relative_file_inventory(root, protected_names=protected_names)
+    protected: dict[str, str] = {}
+    blockers: list[str] = []
+    for row in rows:
+        reason = _research_reset_protected_reason(row["relative_path"])
+        if reason:
+            protected[row["relative_path"]] = reason
+            if reason in RECOVERY_PROTECTION_REASONS:
+                blockers.append(
+                    "PROTECTED_RECOVERY_REQUIRES_AUDIT:" + row["relative_path"]
+                )
+    archive_protected, archive_blockers = _archive_dependency_protection(root, rows)
+    protected.update(archive_protected)
+    blockers.extend(archive_blockers)
+    eligible, retained = [], []
+    for row in rows:
+        if row["relative_path"] in protected:
+            retained.append(
+                dict(row, root=root_label, reason=protected[row["relative_path"]])
+            )
+        else:
+            eligible.append(dict(row, root=root_label))
+    return eligible, retained, sorted(set(blockers))
 
 
 def _safe_target(root: Path, relative: str) -> Path:
@@ -318,6 +435,10 @@ def _verify_completion_pin(operation_receipt_path: Path, receipt: dict) -> dict:
     if digest != receipt.get("completion_receipt_sha256"):
         _reject("LOCAL_RESET_COMPLETION_PIN_INVALID")
     completion = _read_json(completion_path)
+    retained_rows = receipt.get("retained", [])
+    retained_digest = hashlib.sha256(
+        json.dumps(retained_rows, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
     if (
         completion.get("schema") != "local_fresh_collection_completion_v1"
         or completion.get("operation_id") != receipt.get("operation_id")
@@ -325,6 +446,12 @@ def _verify_completion_pin(operation_receipt_path: Path, receipt: dict) -> dict:
         or completion.get("remaining_rows") != []
         or completion.get("deleted_file_count") != receipt.get("deleted_file_count")
         or completion.get("deleted_bytes") != receipt.get("deleted_bytes")
+        or completion.get("retained_file_count") != receipt.get("retained_file_count")
+        or completion.get("retained_bytes") != receipt.get("retained_bytes")
+        or completion.get("retained_inventory_sha256")
+        != receipt.get("retained_inventory_sha256")
+        or completion.get("retained_inventory_sha256") != retained_digest
+        or completion.get("retained_rows") != retained_rows
         or completion.get("fly_mutation_requested") is not False
     ):
         _reject("LOCAL_RESET_COMPLETION_PIN_INVALID")
@@ -395,15 +522,32 @@ def _reconcile_and_delete(
                     child.rmdir()
                 except OSError:
                     pass
-    remaining = []
-    for label, root, protected in (
-        ("canonical", canonical, PROTECTED_CANONICAL_NAMES), ("archives", archives, set())
+    remaining: list[dict] = []
+    current_retained: list[dict] = []
+    reconciliation_blockers: list[str] = []
+    for label, root, protected_names in (
+        ("canonical", canonical, PROTECTED_CANONICAL_NAMES),
+        ("archives", archives, set()),
     ):
-        for row in _relative_file_inventory(root, protected_names=protected):
-            remaining.append(dict(row, root=label))
+        eligible, retained, blockers = _classified_inventory(
+            root, root_label=label, protected_names=protected_names
+        )
+        remaining.extend(eligible)
+        current_retained.extend(retained)
+        reconciliation_blockers.extend(blockers)
+    if reconciliation_blockers:
+        receipt["protected_blockers"] = sorted(set(reconciliation_blockers))
+        _reject("LOCAL_RESET_PROTECTED_RECOVERY_REQUIRES_AUDIT")
     if remaining:
         receipt["remaining"] = remaining
         _reject("LOCAL_RESET_RECONCILIATION_INCOMPLETE")
+    retained_signature = lambda row: (
+        row["root"], row["relative_path"], row["sha256"], row["bytes"], row["reason"]
+    )
+    if sorted(map(retained_signature, current_retained)) != sorted(
+        map(retained_signature, receipt.get("retained", []))
+    ):
+        _reject("LOCAL_RESET_RETAINED_FILE_CHANGED")
 
 
 def execute_operation(
@@ -445,6 +589,11 @@ def _execute_operation_locked(
         _reject("LOCAL_RESET_RECEIPT_INVALID")
     if receipt.get("status") == "COMPLETE":
         _verify_completion_pin(path, receipt)
+        return receipt
+    if (
+        receipt.get("status") == "BLOCKED"
+        and receipt.get("error") == "LOCAL_RESET_PROTECTED_RECOVERY_REQUIRES_AUDIT"
+    ):
         return receipt
     canonical = _validate_root(
         Path(receipt["canonical_root"]), expected=expected_canonical_root
@@ -489,21 +638,44 @@ def _execute_operation_locked(
                 _write_status(path, receipt, "BLOCKED", error="LOCAL_RESET_ACTIVE_OWNER")
                 return receipt
             if "inventory" not in receipt:
-                canonical_rows = [
-                    dict(row, root="canonical")
-                    for row in _relative_file_inventory(
-                        canonical, protected_names=PROTECTED_CANONICAL_NAMES
-                    )
-                ]
-                archive_rows = [
-                    dict(row, root="archives")
-                    for row in _relative_file_inventory(archives)
-                ]
+                canonical_rows, canonical_retained, canonical_blockers = _classified_inventory(
+                    canonical,
+                    root_label="canonical",
+                    protected_names=PROTECTED_CANONICAL_NAMES,
+                )
+                archive_rows, archive_retained, archive_blockers = _classified_inventory(
+                    archives, root_label="archives"
+                )
                 receipt["inventory"] = canonical_rows + archive_rows
+                receipt["retained"] = canonical_retained + archive_retained
                 receipt["planned_file_count"] = len(receipt["inventory"])
                 receipt["planned_bytes"] = sum(row["bytes"] for row in receipt["inventory"])
+                receipt["retained_file_count"] = len(receipt["retained"])
+                receipt["retained_bytes"] = sum(row["bytes"] for row in receipt["retained"])
+                receipt["retained_categories"] = sorted(
+                    {row["reason"] for row in receipt["retained"]}
+                    | {
+                        "local operation receipts",
+                        "mirror generation lease",
+                        "local generation fence",
+                        "source configuration and credentials outside eligible roots",
+                        "no Fly mutation requested by this operation",
+                    }
+                )
                 receipt["deleted"] = []
                 _write_status(path, receipt, "RUNNING", inventory_persisted=True)
+                protected_blockers = sorted(
+                    set(canonical_blockers + archive_blockers)
+                )
+                if protected_blockers:
+                    _write_status(
+                        path,
+                        receipt,
+                        "BLOCKED",
+                        error="LOCAL_RESET_PROTECTED_RECOVERY_REQUIRES_AUDIT",
+                        protected_blockers=protected_blockers,
+                    )
+                    return receipt
             if crash_at == "after_inventory":
                 raise InjectedResetCrash(crash_at)
             _reconcile_and_delete(
@@ -529,6 +701,16 @@ def _execute_operation_locked(
                 ).hexdigest(),
                 "deleted_rows": deleted,
                 "remaining_rows": [],
+                "retained_rows": receipt.get("retained", []),
+                "retained_file_count": receipt.get("retained_file_count", 0),
+                "retained_bytes": receipt.get("retained_bytes", 0),
+                "retained_inventory_sha256": hashlib.sha256(
+                    json.dumps(
+                        receipt.get("retained", []),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest(),
                 "fly_mutation_requested": False,
                 "sync_state": BLOCKED_STATE,
             }
@@ -541,6 +723,11 @@ def _execute_operation_locked(
                 completed_at=time.time(),
                 deleted_file_count=len(deleted),
                 deleted_bytes=sum(row["bytes"] for row in deleted),
+                retained_file_count=receipt.get("retained_file_count", 0),
+                retained_bytes=receipt.get("retained_bytes", 0),
+                retained_inventory_sha256=completion_receipt[
+                    "retained_inventory_sha256"
+                ],
                 exact_hash_reconciliation=True,
                 deletion_reconciled=True,
                 completion_receipt_path=str(completion_path),
