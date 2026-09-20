@@ -24,6 +24,7 @@ process.stdin.on('end', async () => {
     deletion_reconciled:true, exact_hash_reconciliation:true,
     completion_receipt_path:'fixture/completion.json', completion_receipt_sha256:'a'.repeat(64),
     sync_state:'BLOCKED_PENDING_VERIFIED_IMPORT', deleted_file_count:4, deleted_bytes:1024,
+    retained_file_count:2, retained_bytes:128, retained_inventory_sha256:'b'.repeat(64),
   };
   const context = {
     document:{getElementById: key => nodes[key] ||= {innerText:'', disabled:false}},
@@ -52,6 +53,7 @@ process.stdin.on('end', async () => {
       } else {
         polls++; body={...complete};
         if (scenario === 'bad_proof') body.exact_hash_reconciliation=false;
+        if (scenario === 'bad_retained') delete body.retained_inventory_sha256;
         if (scenario === 'wrong_operation') body.operation_id='0'.repeat(32);
         if (scenario === 'remote_write') body.remote_http_writes=1;
         if (scenario === 'blocked') body.status='BLOCKED';
@@ -108,7 +110,7 @@ class LocalResetDashboardTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node needed for real JS execution')
     def test_real_js_contract_with_mock_http(self):
         for scenario in ('complete','queued','lost_post','cancel','auth','wrong_scope',
-                         'bad_proof','wrong_operation','remote_write','blocked','partial'):
+                         'bad_proof','bad_retained','wrong_operation','remote_write','blocked','partial'):
             with self.subTest(scenario=scenario):
                 result = subprocess.run(['node','--unhandled-rejections=strict','-e',NODE_HARNESS],
                     input=json.dumps({'code':self.code,'scenario':scenario}), text=True,

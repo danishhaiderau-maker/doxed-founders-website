@@ -32695,9 +32695,12 @@ DASHBOARD_JS = """(function () {
         && body.fly_mutation_requested === false && body.remote_http_writes === 0
         && body.sync_state === 'BLOCKED_PENDING_VERIFIED_IMPORT'
         && /^[a-f0-9]{64}$/.test(body.completion_receipt_sha256 || '')
+        && /^[a-f0-9]{64}$/.test(body.retained_inventory_sha256 || '')
         && typeof body.completion_receipt_path === 'string' && body.completion_receipt_path.length > 0
         && Number.isSafeInteger(body.deleted_file_count) && body.deleted_file_count >= 0
-        && Number.isSafeInteger(body.deleted_bytes) && body.deleted_bytes >= 0;
+        && Number.isSafeInteger(body.deleted_bytes) && body.deleted_bytes >= 0
+        && Number.isSafeInteger(body.retained_file_count) && body.retained_file_count >= 0
+        && Number.isSafeInteger(body.retained_bytes) && body.retained_bytes >= 0;
     }
     async function toggleFreshCollection() {
       if (freshCollectionInFlight) return;
@@ -32740,7 +32743,8 @@ DASHBOARD_JS = """(function () {
           if (state === 'COMPLETE') {
             if (!localResetCompletionVerified(body)) throw new Error('LOCAL_RESET_COMPLETION_NOT_VERIFIED');
             localResetStatus('COMPLETE', 'Verified deletion: ' + body.deleted_file_count + ' files, '
-              + body.deleted_bytes + ' bytes. Fly unchanged. Sync BLOCKED pending verified import. Receipt: '
+              + body.deleted_bytes + ' bytes. Protected files retained: ' + body.retained_file_count
+              + ' (' + body.retained_bytes + ' bytes). Fly unchanged. Sync BLOCKED pending verified import. Receipt: '
               + body.completion_receipt_path + ' · SHA-256 ' + body.completion_receipt_sha256);
             return;
           }
