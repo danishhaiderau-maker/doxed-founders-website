@@ -819,8 +819,11 @@ jobs:
           from pathlib import Path
           assert os.getenv('SOURCE_GIT_REV') == '70d9ff728de7dd27b5716246bc0425cd5192d31b', 'revision changed'
           root=Path('/app/data/runtime/research_reset_receipts')
-          import subprocess
-          print(subprocess.check_output(['ps','-eo','pid,ppid,rss,etime,comm'],text=True,timeout=5)[:12000])
+          for p in itertools.islice((p for p in Path('/proc').iterdir() if p.name.isdigit()),64):
+              try:
+                  lines=(p/'status').read_text().splitlines()
+                  print(json.dumps({'pid':p.name,'process':[x for x in lines if x.split(':')[0] in {'Name','State','PPid','VmRSS','Threads'}],'wchan':(p/'wchan').read_text()}))
+              except OSError: pass
           print(json.dumps({'disk':dict(zip(('total','used','free'),__import__('shutil').disk_usage('/app/data')))}))
           log=Path('/app/data/bot.log')
           if log.is_file():
@@ -847,12 +850,15 @@ jobs:
                   rows=list(itertools.islice(p.iterdir(),257))
                   assert len(rows)<=256, 'receipt count bound'
                   for f in sorted((x for x in rows if x.suffix=='.json' and not x.is_symlink()),key=lambda x:x.stat().st_mtime,reverse=True)[:5]: read(f)
+          print('RESET_PROBE_COMPLETE')
           '''
           import textwrap
           print(base64.b64encode(textwrap.dedent(source).encode()).decode())
           PY
           )"
-          timeout 45s flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "python -c 'import base64;exec(base64.b64decode(\"$payload\"))'"
+          result="$(timeout 45s flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "python -c 'import base64;exec(base64.b64decode(\"$payload\"))'")"
+          printf '%s\n' "$result"
+          [[ "$result" == *RESET_PROBE_COMPLETE* ]]
 
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
