@@ -26059,15 +26059,13 @@ def _log_shadow_vs_live_entry(signal: dict, live_limit_price: float, entry_mode:
 
 def _run_reset_guarded_report(write):
     from research.reset_writer_barrier import run_research_writer
+    from research_reset_receipt_state import active_reset_receipt_exists
     def reset_active():
         if _fresh_collection_lock.locked():
             return True
         try:
-            os.lstat(_data_sync_runtime_root() / "research_reset_receipts" / "ACTIVE_RESET.json")
-            return True
-        except FileNotFoundError:
-            return False
-        except OSError:
+            return active_reset_receipt_exists(_data_sync_runtime_root())
+        except (OSError, ValueError):
             return None
     outcome = run_research_writer(gate=_research_write_gate, reset_active=reset_active, write=write)
     if outcome["status"] == "WRITTEN":
@@ -28622,6 +28620,9 @@ def _fresh_research_reset_resume() -> dict | None:
     from research_reset_inventory import _proof_valid, _managed_fly_alias
     from research_v3_contract import canonical_json
     from research_v3_store import V3EvidenceStore
+    from research_reset_receipt_state import (
+        active_reset_receipt_exists, read_reset_receipt,
+    )
 
     _fresh_research_reset_assert_quiesced()
     root = _data_sync_runtime_root()
@@ -28629,13 +28630,18 @@ def _fresh_research_reset_resume() -> dict | None:
     if not active.exists():
         return None
 
-    def load(path):
-        _checked_path(path, root)
-        if path.stat().st_size > 16 * 1024 * 1024:
-            raise RuntimeError("RESET_RESUME_RECEIPT_TOO_LARGE")
-        return json.loads(path.read_text("utf-8"))
+    # COMPLETE receipts are intentionally retained as audit evidence. Classify
+    # the bounded operation before materializing its potentially large arrays.
+    if not active_reset_receipt_exists(root):
+        return None
 
-    pointer = load(active)
+    def load(path, max_bytes=16 * 1024 * 1024):
+        try:
+            return read_reset_receipt(path, root, max_bytes)
+        except ValueError as exc:
+            raise RuntimeError("RESET_RESUME_RECEIPT_INVALID") from exc
+
+    pointer = load(active, 64 * 1024)
     reset_id = pointer.get("reset_id")
     if not re.fullmatch(r"[0-9a-f]{24}", str(reset_id)):
         raise RuntimeError("RESET_RESUME_POINTER_INVALID")
@@ -38047,44 +38053,11 @@ def api_resume():
         _fresh_collection_lock.release()
 
 
-def _resume_reset_receipt(path: Path, root: Path, max_bytes: int) -> dict:
-    """Read one reset receipt without following links or accepting torn bytes."""
-    from research_exact_deletion import _checked_path
-
-    checked = _checked_path(path, root)
-    before = checked.lstat()
-    if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
-        raise RuntimeError("RESET_RECEIPT_INVALID")
-    payload = checked.read_bytes()
-    after = checked.lstat()
-    before_identity = (before.st_size, before.st_mtime_ns, before.st_ino)
-    after_identity = (after.st_size, after.st_mtime_ns, after.st_ino)
-    if before_identity != after_identity or len(payload) != before.st_size:
-        raise RuntimeError("RESET_RECEIPT_CHANGED_DURING_READ")
-    decoded = json.loads(payload)
-    if not isinstance(decoded, dict):
-        raise RuntimeError("RESET_RECEIPT_INVALID")
-    return decoded
-
-
 def _resume_active_reset_receipt_exists() -> bool:
     """Treat every readable nonterminal reset pointer as active; ambiguity blocks."""
-    from research_exact_deletion import _checked_path
+    from research_reset_receipt_state import active_reset_receipt_exists
 
-    root = _data_sync_runtime_root()
-    active = _checked_path(root / "research_reset_receipts" / "ACTIVE_RESET.json", root)
-    try:
-        active.lstat()
-    except FileNotFoundError:
-        return False
-    pointer = _resume_reset_receipt(active, root, 64 * 1024)
-    reset_id = pointer.get("reset_id")
-    if not re.fullmatch(r"[0-9a-f]{24}", str(reset_id or "")):
-        raise RuntimeError("RESET_RESUME_POINTER_INVALID")
-    operation = _resume_reset_receipt(
-        active.parent / str(reset_id) / "operation.json", root, 16 * 1024 * 1024
-    )
-    return operation.get("stage") != "COMPLETE"
+    return active_reset_receipt_exists(_data_sync_runtime_root())
 
 
 def _resume_blocked_by_reset(reason: str):

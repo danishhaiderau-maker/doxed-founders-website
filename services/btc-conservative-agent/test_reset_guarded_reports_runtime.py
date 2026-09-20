@@ -7,10 +7,13 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+import research_reset_receipt_state
 
 
-@pytest.mark.parametrize('condition',['held_gate','failed_marker','missing_marker','unknown_os_error'])
-def test_actual_report_writers_respect_reset_barriers(tmp_path,condition):
+@pytest.mark.parametrize('condition',[
+    'held_gate','failed_marker','complete_marker','missing_marker','unknown_os_error',
+])
+def test_actual_report_writers_respect_reset_barriers(tmp_path,condition,monkeypatch):
     names=['shadow_vs_live_entry_report.json','approval_ev_report.json',
            'fill_quality_report.json','execution_funnel_summary.json']
     for name in names:
@@ -18,6 +21,13 @@ def test_actual_report_writers_respect_reset_barriers(tmp_path,condition):
     if condition=='failed_marker':
         folder=tmp_path/'research_reset_receipts'; folder.mkdir()
         (folder/'ACTIVE_RESET.json').write_text('{"stage":"FAILED"}')
+    if condition=='complete_marker':
+        reset_id='a'*24
+        folder=tmp_path/'research_reset_receipts'; (folder/reset_id).mkdir(parents=True)
+        (folder/'ACTIVE_RESET.json').write_text(json.dumps({
+            'reset_id':reset_id,'binding_sha256':'b'*64,
+        }))
+        (folder/reset_id/'operation.json').write_text('{"stage":"COMPLETE"}')
     tree=ast.parse(Path(__file__).with_name('bot.py').read_text(encoding='utf-8'))
     selected={'_run_reset_guarded_report','_refresh_execution_reports_guarded',
               'refresh_shadow_vs_live_entry_report','_refresh_shadow_vs_live_entry_report_unlocked'}
@@ -26,6 +36,11 @@ def test_actual_report_writers_respect_reset_barriers(tmp_path,condition):
         if condition=='unknown_os_error':
             raise PermissionError('unavailable')
         return os.lstat(path)
+    if condition=='unknown_os_error':
+        monkeypatch.setattr(
+            research_reset_receipt_state,'active_reset_receipt_exists',
+            lambda _root: (_ for _ in ()).throw(PermissionError('unavailable')),
+        )
     gate=threading.RLock()
     env=dict(os=SimpleNamespace(lstat=lstat,path=os.path,getcwd=lambda:str(tmp_path)),
         json=json,_research_write_gate=gate,_fresh_collection_lock=threading.Lock(),
@@ -46,7 +61,7 @@ def test_actual_report_writers_respect_reset_barriers(tmp_path,condition):
     else:
         invoke()
     assert len(results)==2
-    if condition=='missing_marker':
+    if condition in {'missing_marker','complete_marker'}:
         assert 'funnel_summary' in results[0] and results[1]['sample_count']==0
         for name in names:
             assert isinstance(json.loads((tmp_path/name).read_text()),dict)

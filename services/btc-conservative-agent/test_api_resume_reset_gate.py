@@ -123,3 +123,29 @@ def test_normal_resume_contract_is_unchanged(resume_runtime, completed_pointer):
         assert bot.state["execution_paused"] is False
         assert bot.state["execution_reason"] == ""
         assert bot.state["manual_admin_pause"] is False
+
+
+def test_large_terminal_operation_allows_resume_and_fresh_reset_noop(
+    resume_runtime, monkeypatch,
+):
+    root, calls = resume_runtime
+    receipts = root / "research_reset_receipts"
+    operation = receipts / RESET_ID / "operation.json"
+    operation.parent.mkdir(parents=True)
+    (receipts / "ACTIVE_RESET.json").write_text(
+        json.dumps({"reset_id": RESET_ID, "binding_sha256": "b" * 64}),
+        encoding="utf-8",
+    )
+    target_size = 36_081_612
+    prefix = b'{"padding":"'
+    suffix = b'","stage":"COMPLETE"}'
+    operation.write_bytes(
+        prefix + (b"x" * (target_size - len(prefix) - len(suffix))) + suffix
+    )
+    monkeypatch.setattr(bot, "_fresh_research_reset_assert_quiesced", lambda: None)
+
+    assert bot._fresh_research_reset_resume() is None
+    with bot.app.test_client() as client:
+        response = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    assert response.status_code == 200
+    assert calls == {"readiness": 1, "save": 1, "resume": 1, "cache": 1}

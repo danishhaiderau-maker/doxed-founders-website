@@ -33,6 +33,8 @@ const rotationAgent = join(root, 'services/btc-conservative-agent/production_rot
 const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
 const relayOutboxAgent = join(root, 'services/btc-conservative-agent/relay_event_outbox.py');
 const relayOutboxEngine = join(root, 'services/btc-signal-engine/relay_event_outbox.py');
+const resetReceiptStateAgent = join(root, 'services/btc-conservative-agent/research_reset_receipt_state.py');
+const resetReceiptStateEngine = join(root, 'services/btc-signal-engine/research_reset_receipt_state.py');
 const probe = join(root, 'services/btc-signal-engine/signal_probe.py');
 const fixtures = join(root, 'tests/fixtures/signal-parity-cases.json');
 const agentDir = join(root, 'services/btc-conservative-agent');
@@ -136,6 +138,7 @@ for (const [canonical, mirror, label] of [
   [rawCleanupOwnerAgent, rawCleanupOwnerEngine, 'raw generation cleanup owner'],
   [mirrorLeaseAgent, mirrorLeaseEngine, 'mirror generation lease'],
   [relayOutboxAgent, relayOutboxEngine, 'durable relay event outbox'],
+  [resetReceiptStateAgent, resetReceiptStateEngine, 'reset receipt state'],
   [join(root, 'services/btc-conservative-agent/crash_exception_receipt.py'),
     join(root, 'services/btc-signal-engine/crash_exception_receipt.py'), 'original crash receipt'],
 ]) {
