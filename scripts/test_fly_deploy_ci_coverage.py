@@ -26,6 +26,7 @@ def test_guarded_deploy_runs_complete_focused_safety_matrix():
         "test_chase_analytics_truth.py",
         "test_local_fresh_collection.py",
         "test_local_fresh_collection_integration.py",
+        "test_local_generation_fence.py",
         "test_local_research_reset.py",
         "test_local_research_reset_cli.py",
         "test_local_research_reset_audit.py",

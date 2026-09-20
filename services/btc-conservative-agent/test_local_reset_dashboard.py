@@ -41,8 +41,9 @@ process.stdin.on('end', async () => {
       if (scenario === 'auth') return {ok:false, status:401, json:async()=>({})};
       if (url.endsWith('/capability')) {
         body={protocol:'local_research_reset_protocol_v1', scope_version:'laptop_research_scope_v1',
-          scope:'LAPTOP_RESEARCH_ONLY',fly_mutation_supported:false,current_local_generation:'fixture-epoch'};
+          scope:'LAPTOP_RESEARCH_ONLY',fly_mutation_supported:false,current_local_generation:'fixture-epoch',reset_enabled:true};
         if (scenario === 'wrong_scope') body.scope='FLY';
+        if (scenario === 'disabled') body.reset_enabled=false;
       } else if (url.endsWith('/requests')) {
         writes++; assert.equal(options.method,'POST');
         requestBodies.push(options.body);
@@ -91,6 +92,7 @@ process.stdin.on('end', async () => {
   }
   if (['complete','queued','lost_post','retry_preflight'].includes(scenario)) assert.equal(label,'COMPLETE');
   else if (scenario==='cancel') assert.equal(writes,0);
+  else if (scenario==='disabled') { assert.equal(writes,0); assert.equal(label,'UNAVAILABLE'); }
   else if (['auth','wrong_scope'].includes(scenario)) { assert.equal(writes,0); assert.equal(label,'NOT VERIFIED'); }
   else if (['blocked','partial','blocked_error','unsafe_retry'].includes(scenario)) assert.equal(label,scenario==='partial'?'PARTIAL':'BLOCKED');
   else assert.equal(label,'NOT VERIFIED');
@@ -128,7 +130,7 @@ class LocalResetDashboardTests(unittest.TestCase):
     def test_real_js_contract_with_mock_http(self):
         for scenario in ('complete','queued','lost_post','cancel','auth','wrong_scope',
                          'bad_proof','bad_retained','wrong_operation','remote_write','blocked','partial',
-                         'blocked_error','retry_preflight','unsafe_retry'):
+                         'blocked_error','retry_preflight','unsafe_retry','disabled'):
             with self.subTest(scenario=scenario):
                 result = subprocess.run(['node','--unhandled-rejections=strict','-e',NODE_HARNESS],
                     input=json.dumps({'code':self.code,'scenario':scenario}), text=True,

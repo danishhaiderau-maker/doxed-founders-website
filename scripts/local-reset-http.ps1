@@ -114,7 +114,8 @@ function Invoke-LocalResetApiRoute {
     [Parameter(Mandatory = $true)][string]$Path,
     [Parameter(Mandatory = $true)][string]$CliPath,
     [Parameter(Mandatory = $true)][string]$CapabilityHashPath,
-    [Parameter(Mandatory = $true)][scriptblock]$StartWorker
+    [Parameter(Mandatory = $true)][scriptblock]$StartWorker,
+    [switch]$EnableLocalReset
   )
   Write-LocalResetCors -Request $Request -Response $Response
   try {
@@ -145,6 +146,7 @@ function Invoke-LocalResetApiRoute {
         return
       }
       $payload = Invoke-LocalResetCli -CliPath $CliPath -Arguments @('capability')
+      $payload | Add-Member -NotePropertyName reset_enabled -NotePropertyValue ([bool]$EnableLocalReset) -Force
       Send-LocalResetJson -Response $Response -Payload $payload
       return
     }
@@ -153,6 +155,15 @@ function Invoke-LocalResetApiRoute {
         Send-LocalResetJson -Response $Response -Payload @{
           ok=$false; error='METHOD_NOT_ALLOWED'
         } -Status 405
+        return
+      }
+      # Authentication is not rollout acceptance. Production stays disabled
+      # until installed owner/relaunch, canonical-root and viewer gates pass.
+      if (-not $EnableLocalReset) {
+        Send-LocalResetJson -Response $Response -Payload @{
+          ok=$false; error='LOCAL_RESET_RELEASE_NOT_ENABLED';
+          message='Laptop reset unavailable - local controller readiness required'
+        } -Status 503
         return
       }
       $body = Read-LocalResetBoundedRequestJson $Request

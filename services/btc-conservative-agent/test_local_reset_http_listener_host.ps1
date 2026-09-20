@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory = $true)][string]$RouteModule,
   [Parameter(Mandatory = $true)][string]$FixtureCli,
   [Parameter(Mandatory = $true)][string]$CapabilityHashPath,
-  [Parameter(Mandatory = $true)][string]$ReadyPath
+  [Parameter(Mandatory = $true)][string]$ReadyPath,
+  [switch]$DisableReset
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +24,7 @@ try {
     try {
       Invoke-LocalResetApiRoute -Request $request -Response $response `
         -Path $path -CliPath $FixtureCli -CapabilityHashPath $CapabilityHashPath `
+        -EnableLocalReset:(-not $DisableReset) `
         -StartWorker {
           param($OperationId)
           Start-Process -FilePath 'python' -ArgumentList @(

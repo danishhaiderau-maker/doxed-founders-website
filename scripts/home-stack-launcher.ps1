@@ -286,7 +286,7 @@ function Serve-LocalResetApi(
   if (-not $hashPath) { $hashPath = '__LOCAL_RESET_CAPABILITY_UNAVAILABLE__' }
   $cli = Join-Path $repoRoot 'services\btc-conservative-agent\local_fresh_collection_cli.py'
   Invoke-LocalResetApiRoute -Request $Request -Response $Response -Path $Path `
-    -CliPath $cli -CapabilityHashPath $hashPath -StartWorker {
+    -CliPath $cli -CapabilityHashPath $hashPath -EnableLocalReset:$false -StartWorker {
       param($OperationId)
       Invoke-HomeCommandBackground 'fresh-collection-local-run' $OperationId
     }

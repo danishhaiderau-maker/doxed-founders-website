@@ -1094,7 +1094,7 @@ jobs:
           mkdir -p "$BTC_AGENT_DATA_DIR"
           python -m pytest test_transactional_receipt_store.py test_execution_admission_pause_truth.py test_reset_inventory_invalidation.py test_relay_owner_delivery_plan.py -q
           python -m pytest test_chase_analytics_truth.py -q
-          python -m pytest test_local_fresh_collection.py test_local_fresh_collection_integration.py test_local_research_reset.py test_local_research_reset_cli.py test_local_research_reset_audit.py test_local_reset_dashboard.py test_fresh_collection_signals.py -q
+          python -m pytest test_local_fresh_collection.py test_local_fresh_collection_integration.py test_local_generation_fence.py test_local_research_reset.py test_local_research_reset_cli.py test_local_research_reset_audit.py test_local_reset_dashboard.py test_fresh_collection_signals.py -q
           # A Linux runner may skip the real HttpListener acceptance when its
           # Windows host is unavailable. Release evidence still requires the
           # separate Windows HttpListener receipt; this check pins the adapter.

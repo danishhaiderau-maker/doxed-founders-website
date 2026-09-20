@@ -31571,7 +31571,7 @@ __ADMIN_ACCESS_CONTROLS__
     <button id="invertToggleBtn" onclick="toggleInvert()" title="Flip LONG↔SHORT on new signals only. Existing tickets stay unchanged. Admin login required to toggle.">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark paper orders — OFF still runs the shared three-minute AI observation and records shadow outcomes">Continuous Paper Orders: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
-    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Delete laptop research only through the authenticated local controller. Fly is unchanged. Requires this page open on the laptop.">Fresh Collection — Laptop Only: <span id="freshCollectionLabel">READY TO REQUEST</span></button>
+    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Laptop reset is unavailable until local controller readiness is verified. Fly is unchanged. Requires this page open on the laptop.">Fresh Collection — Laptop Only: <span id="freshCollectionLabel">READINESS REQUIRED</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
     <button onclick="window.location.href='/api/export.csv'" title="Owner-auth ZIP of CSV/JSONL collection files (same as /api/export_csv)">Download CSV Logs</button>
@@ -31693,7 +31693,7 @@ __ADMIN_ACCESS_CONTROLS__
   <br><br>
   <strong>Wipe Fly Data Only:</strong> deletes scoped Fly research files + resets Fly in-memory research state while retaining protected credentials, accounting, and recovery state. It does not signal a fresh desktop epoch: the existing local sync mirror is left untouched.
 </p>
-<p id="freshCollectionStatus" role="status" aria-live="polite" style="color:#58a6ff;font-size:0.85em;margin-top:4px;overflow-wrap:anywhere;">Laptop reset not requested. Fly is unchanged.</p>
+<p id="freshCollectionStatus" role="status" aria-live="polite" style="color:#58a6ff;font-size:0.85em;margin-top:4px;overflow-wrap:anywhere;">Laptop reset unavailable — local controller readiness required. No reset requested; Fly is unchanged.</p>
 <dialog id="localResetDialog" style="max-width:540px;width:calc(100% - 48px);box-sizing:border-box;background:#161b22;color:#c9d1d9;border:1px solid #8b949e;border-radius:10px;">
   <form method="dialog">
     <h3>Delete laptop research only</h3>
@@ -32725,6 +32725,10 @@ DASHBOARD_JS = """(function () {
           || status.scope !== 'LAPTOP_RESEARCH_ONLY' || status.fly_mutation_supported !== false
           || typeof status.current_local_generation !== 'string' || !status.current_local_generation) {
           throw new Error('LOCAL_CONTROLLER_PROTOCOL_MISMATCH');
+        }
+        if (status.reset_enabled !== true) {
+          localResetStatus('UNAVAILABLE', 'Laptop reset unavailable — local controller readiness required. No deletion or Fly reset was requested.');
+          return;
         }
         if (!localResetOperationId) {
           if (!confirm('Permanently DELETE LAPTOP RESEARCH ONLY? Fly stays unchanged. Local mirror, derived analysis and eligible archives will be deleted. Protected credentials, accounting and recovery are retained. Local sync stays BLOCKED pending a verified import.')) return;

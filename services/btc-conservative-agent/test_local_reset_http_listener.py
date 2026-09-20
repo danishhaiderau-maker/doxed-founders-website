@@ -119,7 +119,7 @@ class LocalResetHttpListenerAcceptanceTests(unittest.TestCase):
                 str(self.capability_hash),
                 "-ReadyPath",
                 str(self.ready),
-            ],
+            ] + (["-DisableReset"] if self._testMethodName == "test_default_disabled_rejects_even_authenticated_post" else []),
             env=environment,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -192,6 +192,7 @@ class LocalResetHttpListenerAcceptanceTests(unittest.TestCase):
         self.assertEqual(capability["protocol"], "local_research_reset_protocol_v1")
         self.assertEqual(capability["scope_version"], "laptop_research_scope_v1")
         self.assertEqual(capability["current_local_generation"], "fixture-generation")
+        self.assertTrue(capability["reset_enabled"])
 
         operation_id = secrets.token_hex(16)
         body = {
@@ -239,6 +240,21 @@ class LocalResetHttpListenerAcceptanceTests(unittest.TestCase):
             hashlib.sha256(completion.read_bytes()).hexdigest(),
             payload["completion_receipt_sha256"],
         )
+
+    def test_default_disabled_rejects_even_authenticated_post(self):
+        status, capability = self.request("GET", "/api/local-research-reset/v1/capability")
+        self.assertEqual(status, 200)
+        self.assertFalse(capability["reset_enabled"])
+        status, payload = self.request("POST", "/api/local-research-reset/v1/requests", body={
+            "request_id": secrets.token_hex(16),
+            "confirmation": "DELETE LAPTOP RESEARCH ONLY",
+            "expected_local_generation": "fixture-generation",
+        })
+        self.assertEqual((status, payload["error"]), (503, "LOCAL_RESET_RELEASE_NOT_ENABLED"))
+        self.assertTrue((self.canonical / "raw.jsonl").exists())
+        self.assertFalse((self.canonical / ".local-generation-fence.json").exists())
+        self.assertFalse(self.state.exists())
+        self.assertIn("-EnableLocalReset:$false", (REPO / "scripts" / "home-stack-launcher.ps1").read_text(encoding="utf-8-sig"))
 
 
 if __name__ == "__main__":

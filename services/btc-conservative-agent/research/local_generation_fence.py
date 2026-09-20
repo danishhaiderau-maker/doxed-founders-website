@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -27,16 +28,23 @@ def fence_path(data_root: str | os.PathLike[str]) -> Path:
 
 def read_local_generation_fence(data_root: str | os.PathLike[str]) -> dict | None:
     path = fence_path(data_root)
-    if not path.exists():
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
         return None
-    if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+    except OSError as exc:
+        raise LocalGenerationFenced("LOCAL_GENERATION_FENCE_INVALID") from exc
+    if (not stat.S_ISREG(metadata.st_mode)
+        or getattr(metadata, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 1024)
+        or metadata.st_size > 1024 * 1024):
         raise LocalGenerationFenced("LOCAL_GENERATION_FENCE_INVALID")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError) as exc:
         raise LocalGenerationFenced("LOCAL_GENERATION_FENCE_INVALID") from exc
     if (
-        payload.get("schema") != FENCE_SCHEMA
+        not isinstance(payload, dict)
+        or payload.get("schema") != FENCE_SCHEMA
         or payload.get("state") != BLOCKED_STATE
         or not payload.get("operation_id")
         or not payload.get("local_generation")
