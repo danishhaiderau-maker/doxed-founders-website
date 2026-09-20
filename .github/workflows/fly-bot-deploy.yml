@@ -46,6 +46,10 @@ on:
         required: false
         default: false
         type: boolean
+      lifecycle_reset_proof:
+        description: Optional bounded JSON proof for one explicit lifecycle reset recovery deploy
+        required: false
+        type: string
       expected_bundle_revision:
         description: Exact 12-character incumbent revision for derivative-only bundle inspection/canary
         required: false
@@ -1030,6 +1034,7 @@ jobs:
 
       - name: Verify Fly and dashboard safety contracts
         run: |
+          python -m pytest ../../scripts/test_fly_deploy_reset_proof.py -q
           python -m py_compile bot.py data_sync_inventory_worker.py btc_conservative_agent.py fly_relay_state_pusher.py platform_relay_evidence_worker.py platform_relay_streaming.py
           python -m pytest test_platform_relay_evidence_worker.py -q
           python -m pytest test_fly_runtime_baseline_packaging.py test_runtime_baseline_declaration.py -q
@@ -1091,6 +1096,13 @@ jobs:
           npx prisma generate
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Validate optional lifecycle reset startup proof
+        working-directory: ${{ github.workspace }}
+        env:
+          DEPLOY_MODE: ${{ inputs.mode }}
+          LIFECYCLE_RESET_PROOF: ${{ inputs.lifecycle_reset_proof }}
+        run: python scripts/fly_deploy_reset_proof.py validate
 
       - name: Enter durable authenticated paper maintenance boundary
         id: paper_maintenance
@@ -1545,9 +1557,15 @@ jobs:
 
       - name: Deploy the exact source revision
         id: deploy_source
-        run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}" --env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=${TRANSPORT_BUNDLES_ENABLED}"
+        # The helper preserves the normal Fly argv, including
+        # --build-arg SOURCE_GIT_REV="${GITHUB_SHA}" and
+        # --env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=${TRANSPORT_BUNDLES_ENABLED}",
+        # and appends only the three validated reset-recovery overrides.
+        run: python ../../scripts/fly_deploy_reset_proof.py deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DEPLOY_MODE: ${{ inputs.mode }}
+          LIFECYCLE_RESET_PROOF: ${{ inputs.lifecycle_reset_proof }}
           # Only an explicit normal-deploy opt-in enables acceleration. Pushes,
           # omitted inputs, and recovery modes deploy it disabled.
           TRANSPORT_BUNDLES_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' && inputs.transport_bundles && '1' || '0' }}
