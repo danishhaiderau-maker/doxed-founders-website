@@ -1,0 +1,50 @@
+name: Inspect Fly research reset progress
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Read bounded reset receipts only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_json="$(timeout 30s flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=[r for r in json.load(sys.stdin) if r.get("state")=="started"]; assert len(rows)==1; print(rows[0]["id"])')"
+          payload="$(python - <<'PY'
+          import base64
+          source = r'''
+          import json,os,re,itertools
+          from pathlib import Path
+          assert os.getenv('SOURCE_GIT_REV') == '70d9ff728de7dd27b5716246bc0425cd5192d31b', 'revision changed'
+          root=Path('/app/data/runtime/research_reset_receipts')
+          allowed={'schema','reset_id','attempt_id','stage','status','phase','scope_name','completed_targets','total_targets','fingerprinted_bytes','observed_at_ts','error','error_code','accounting_preserved','payload_copy_performed','target_count','target_bytes','deleted_count','deleted_bytes','created_at','updated_at','ok'}
+          def read(p):
+              if not p.is_file():
+                  print(json.dumps({'receipt':str(p.relative_to(root)), 'exists':False})); return {}
+              assert not p.is_symlink() and p.stat().st_size <= 4*1024*1024, 'receipt bound'
+              d=json.loads(p.read_text()); assert isinstance(d,dict)
+              print(json.dumps({'receipt':str(p.relative_to(root)), 'mtime':p.stat().st_mtime,'fields':{k:v for k,v in d.items() if k in allowed and isinstance(v,(str,int,float,bool,type(None)))}},sort_keys=True))
+              return d
+          active=read(root/'ACTIVE_RESET.json')
+          reset_id=active.get('reset_id','')
+          if re.fullmatch('[a-f0-9]{24}',reset_id):
+              read(root/reset_id/'operation.json')
+              read(root/reset_id/'deletion.json')
+          for folder in ('_progress','_preflight'):
+              p=root/folder
+              if p.is_dir():
+                  rows=list(itertools.islice(p.iterdir(),257))
+                  assert len(rows)<=256, 'receipt count bound'
+                  for f in sorted((x for x in rows if x.suffix=='.json' and not x.is_symlink()),key=lambda x:x.stat().st_mtime,reverse=True)[:5]: read(f)
+          '''
+          import textwrap
+          print(base64.b64encode(textwrap.dedent(source).encode()).decode())
+          PY
+          )"
+          timeout 45s flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "python -c 'import base64;exec(base64.b64decode(\"$payload\"))'"
