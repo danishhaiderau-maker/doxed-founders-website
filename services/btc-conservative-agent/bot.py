@@ -42018,6 +42018,8 @@ _DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK = threading.Lock()
 _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING = False
 _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT = 0.0
 _DATA_SYNC_BUNDLE_EXTERNAL_PROTECTED = frozenset()
+_DATA_SYNC_BUNDLE_PROCESS_INCARNATION = uuid.uuid4().hex
+_DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "NOT_OBSERVED"}
 
 
 def _data_sync_bundle_retention_allowed_locked(generation_id: str) -> bool:
@@ -42179,51 +42181,210 @@ def _data_sync_bundle_generation(generation_id: str) -> dict | None:
             "inventory_sha256": generation_id}
 
 
-def _start_data_sync_bundle_generation(generation_id: str) -> bool:
-    """Optional acceleration, isolated from HTTP and from trading's interpreter."""
-    if os.getenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "0") != "1":
+def _data_sync_bundle_admission_identity(generation: dict) -> dict:
+    return {
+        "generation_id": str(generation.get("generation_id") or generation.get("inventory_generation_id") or ""),
+        "page_index_sha256": str(generation.get("page_index_sha256") or ""),
+        "source_git_rev": str(generation.get("source_git_rev") or ""),
+        "collection_epoch_id": str(generation.get("collection_epoch_id") or ""),
+        "tile_registry_signature": str(generation.get("tile_registry_signature") or ""),
+    }
+
+
+def _data_sync_bundle_admission_store():
+    from data_sync_bundle_admission import AdmissionStore
+    return AdmissionStore(
+        _data_sync_inventory_work_root() / "bundle-admission-state.json",
+        _DATA_SYNC_BUNDLE_PROCESS_INCARNATION,
+    )
+
+
+def _data_sync_bundle_admission_publish(store, identity, outcome: str, **kwargs) -> bool:
+    """Best-effort diagnostic publication; never leak errors or disrupt an owner."""
+    global _DATA_SYNC_BUNDLE_ADMISSION_STATUS
+    try:
+        receipt = store.publish(identity, outcome, **kwargs)
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {
+            "outcome": receipt["outcome"], "attempt_count": receipt["attempt_count"],
+            "next_retry_unix": receipt["next_retry_unix"],
+        }
+        return True
+    except Exception:
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "DIAGNOSTIC_WRITE_FAILED"}
         return False
+
+
+def _admit_data_sync_bundle_generation(generation_id: str) -> dict:
+    """Attempt one bounded producer owner start; never called from HTTP."""
+    global _DATA_SYNC_BUNDLE_ADMISSION_STATUS
+    try:
+        bootstrap = _data_sync_receipt_bootstrap_gate()
+    except Exception:
+        bootstrap = {"complete": False}
+    if bootstrap.get("complete") is not True:
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "BOOTSTRAP_REJECTED"}
+        try:
+            with _data_sync_inventory_cache_condition:
+                candidate = dict(_data_sync_inventory_generations.get(generation_id) or {})
+            frozen = candidate.get("bundle_identity") or {}
+            candidate = {**candidate, **frozen, "generation_id": generation_id}
+            identity = _data_sync_bundle_admission_identity(candidate)
+            store = _data_sync_bundle_admission_store()
+            _data_sync_bundle_admission_publish(store, identity, "BOOTSTRAP_REJECTED")
+        except Exception:
+            pass
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "BOOTSTRAP_REJECTED"}
+        return {"outcome": "BOOTSTRAP_REJECTED", "started": False}
+    if os.getenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "0") != "1":
+        with _data_sync_inventory_cache_condition:
+            candidate = dict(_data_sync_inventory_generations.get(generation_id) or {})
+        frozen = candidate.get("bundle_identity") or {}
+        candidate = {**candidate, **frozen, "generation_id": generation_id}
+        try:
+            store = _data_sync_bundle_admission_store()
+            _data_sync_bundle_admission_publish(
+                store, _data_sync_bundle_admission_identity(candidate),
+                "DISABLED", attempt_count=0,
+            )
+        except Exception:
+            pass
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "DISABLED"}
+        return {"outcome": "DISABLED", "started": False}
+    registry = _DATA_SYNC_BUNDLE_REGISTRY
+    if registry is None or not registry.ready:
+        # The guarded accessor intentionally rejects publication while the
+        # reservation registry is unhydrated.  Read only the already-retained
+        # in-memory metadata here so the admission diagnostic can bind its
+        # exact candidate without weakening that publication fence.
+        with _data_sync_inventory_cache_condition:
+            candidate = dict(_data_sync_inventory_generations.get(generation_id) or {})
+        frozen = candidate.get("bundle_identity") or {}
+        candidate = {**candidate, **frozen, "generation_id": generation_id}
+        if (candidate.get("storage") != "disk_pages_v2"
+                or candidate.get("ack_eligible") is not True
+                or not re.fullmatch(r"[0-9a-f]{64}", str(candidate.get("page_index_sha256") or ""))
+                or not isinstance(frozen, dict)
+                or set(frozen) != {"source_git_rev", "collection_epoch_id", "tile_registry_signature"}
+                or any(not isinstance(value, str) or not value for value in frozen.values())
+                or frozen.get("source_git_rev") != _runtime_git_rev()):
+            _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "IDENTITY_REJECTED"}
+            return {"outcome": "IDENTITY_REJECTED", "started": False}
+        identity = _data_sync_bundle_admission_identity(candidate)
+        _start_data_sync_bundle_reservation_hydration()
+        try:
+            store = _data_sync_bundle_admission_store()
+            _data_sync_bundle_admission_publish(store, identity, "REGISTRY_HYDRATING")
+        except Exception:
+            pass
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "REGISTRY_HYDRATING"}
+        return {"outcome": "REGISTRY_HYDRATING", "started": False}
     try:
         generation = _data_sync_bundle_generation(generation_id)
     except Exception:
-        return False  # Optional acceleration must not invalidate inventory.
-    if not generation or not _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False):
-        return False
-
-    def owner():
-        global _DATA_SYNC_BUNDLE_LAST_STATUS
-        def publish(receipt):
-            global _DATA_SYNC_BUNDLE_LAST_STATUS
-            _DATA_SYNC_BUNDLE_LAST_STATUS = {**receipt, "generation_id": generation_id,
-                                           "updated_at": utc_iso()}
-        try:
-            from data_sync_bundle_resumption import run_resumable_generation
-            work = _data_sync_inventory_work_root()
-            def pressure():
-                return {**_lifecycle_pipeline_pressure_probe(),
-                        "overlap": bool(_lifecycle_pipeline_overlap_probe())}
-            def retained(expected):
-                current = _data_sync_bundle_generation(generation_id)
-                return current is not None and all(current.get(key) == expected.get(key) for key in (
-                    "generation_id", "page_index_sha256", "source_git_rev",
-                    "collection_epoch_id", "tile_registry_signature"))
-            maintenance = _data_sync_bundle_maintain_capacity(generation)
-            if maintenance.get("status") != "ADMITTED":
-                publish({"status": "DEFERRED", "error": "BUNDLE_MAINTENANCE_DEFERRED"})
-                return
-            publish(run_resumable_generation(
-                generation, _data_sync_runtime_root(), work / "transport-bundles",
-                pressure_probe=pressure, generation_available=retained, publish=publish))
-        except Exception:
-            publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED"})
-        finally:
-            _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+        generation = None
+    if not generation:
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "IDENTITY_REJECTED"}
+        return {"outcome": "IDENTITY_REJECTED", "started": False}
+    identity = _data_sync_bundle_admission_identity(generation)
     try:
-        threading.Thread(target=owner, name="data-sync-bundle-coordinator", daemon=True).start()
+        store = _data_sync_bundle_admission_store()
     except Exception:
-        _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
-        return False
-    return True
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "DIAGNOSTIC_WRITE_FAILED"}
+        return {"outcome": "DIAGNOSTIC_WRITE_FAILED", "started": False}
+    if not _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False):
+        # This observer has no ownership evidence.  Do not replace the
+        # incumbent's receipt with a historical SINGLETON_BUSY observation.
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "SINGLETON_BUSY"}
+        return {"outcome": "SINGLETON_BUSY", "started": False}
+    lock_owned = True
+    try:
+        # Authority may have changed while another owner or hydration held the
+        # lock.  The post-lock exact comparison is the mutation boundary.
+        current = _data_sync_bundle_generation(generation_id)
+        if current is None or _data_sync_bundle_admission_identity(current) != identity:
+            _data_sync_bundle_admission_publish(store, identity, "IDENTITY_REJECTED")
+            return {"outcome": "IDENTITY_REJECTED", "started": False}
+        try:
+            admission = store.begin(identity)
+        except Exception:
+            _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "DIAGNOSTIC_WRITE_FAILED"}
+            return {"outcome": "DIAGNOSTIC_WRITE_FAILED", "started": False}
+        if admission.get("started") is not True:
+            _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {
+                "outcome": str(admission.get("outcome") or "CORRUPT_STATE"),
+                "attempt_count": int(admission.get("attempt_count") or 0),
+            }
+            return {**admission, "started": False}
+
+        def owner():
+            global _DATA_SYNC_BUNDLE_LAST_STATUS
+            def publish(receipt):
+                global _DATA_SYNC_BUNDLE_LAST_STATUS
+                _DATA_SYNC_BUNDLE_LAST_STATUS = {**receipt, "generation_id": generation_id,
+                                               "updated_at": utc_iso()}
+            try:
+                from data_sync_bundle_resumption import run_resumable_generation
+                work = _data_sync_inventory_work_root()
+                def pressure():
+                    return {**_lifecycle_pipeline_pressure_probe(),
+                            "overlap": bool(_lifecycle_pipeline_overlap_probe())}
+                def retained(expected):
+                    available = _data_sync_bundle_generation(generation_id)
+                    return available is not None and all(available.get(key) == expected.get(key) for key in (
+                        "generation_id", "page_index_sha256", "source_git_rev",
+                        "collection_epoch_id", "tile_registry_signature"))
+                try:
+                    maintenance = _data_sync_bundle_maintain_capacity(generation)
+                except Exception:
+                    publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED"})
+                    _data_sync_bundle_admission_publish(store, identity, "MAINTENANCE_FAILED")
+                    return
+                if maintenance.get("status") != "ADMITTED":
+                    publish({"status": "DEFERRED", "error": "BUNDLE_MAINTENANCE_DEFERRED"})
+                    _data_sync_bundle_admission_publish(store, identity, "MAINTENANCE_DEFERRED")
+                    return
+                _data_sync_bundle_admission_publish(store, identity, "STARTED")
+                result = run_resumable_generation(
+                    generation, _data_sync_runtime_root(), work / "transport-bundles",
+                    pressure_probe=pressure, generation_available=retained, publish=publish)
+                publish(result)
+                _data_sync_bundle_admission_publish(
+                    store, identity,
+                    "COMPLETE" if result.get("status") == "COMPLETE" else "TERMINAL_FAILURE",
+                )
+            except Exception:
+                publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED"})
+                _data_sync_bundle_admission_publish(store, identity, "TERMINAL_FAILURE")
+            finally:
+                _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+        try:
+            threading.Thread(target=owner, name="data-sync-bundle-coordinator", daemon=True).start()
+        except Exception:
+            _data_sync_bundle_admission_publish(store, identity, "THREAD_START_FAILED")
+            _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+            lock_owned = False
+            return {"outcome": "THREAD_START_FAILED", "started": False}
+        lock_owned = False  # The owner thread now releases it.
+        return {"outcome": "STARTED", "started": True,
+                "attempt_count": admission["attempt_count"]}
+    finally:
+        if lock_owned:
+            _DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()
+
+
+def _start_data_sync_bundle_generation(generation_id: str) -> bool:
+    """Compatibility entry point for publication; detailed state is durable."""
+    return _admit_data_sync_bundle_generation(generation_id).get("started") is True
+
+
+def _reconcile_data_sync_bundle_generation() -> dict:
+    """Ordinary bounded cadence hook; HTTP routes never invoke this function."""
+    with _data_sync_inventory_cache_condition:
+        generation_id = str(_data_sync_async_inventory.get("generation_id") or "")
+        current = _data_sync_async_inventory.get("status") == "CURRENT"
+    if not current or not re.fullmatch(r"[0-9a-f]{64}", generation_id):
+        return {"outcome": "NO_CURRENT_GENERATION", "started": False}
+    return _admit_data_sync_bundle_generation(generation_id)
 
 
 def _data_sync_gc_disk_inventory_generations(
@@ -52413,6 +52574,7 @@ def main():
         try:
             recover_from_crash()
             safe_clear_pending()
+            _reconcile_data_sync_bundle_generation()
             print_console_dashboard()
             if shutdown_event.wait(60):
                 logger.info("Shutting down...")

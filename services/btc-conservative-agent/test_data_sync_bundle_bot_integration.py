@@ -63,19 +63,14 @@ def test_adapter_rejects_missing_authority(defect):
 
 
 def test_disabled_coordinator_never_starts_work():
-    import os
-    ns = load_functions(os=SimpleNamespace(getenv=lambda *args: "0"))
+    ns = load_functions(_admit_data_sync_bundle_generation=lambda _: {"started": False})
     assert ns["_start_data_sync_bundle_generation"]("a" * 64) is False
 
 
 def test_coordinator_singleton_rejects_duplicate_start():
-    lock = threading.Lock(); lock.acquire()
-    ns = load_functions(os=SimpleNamespace(getenv=lambda *args: "1"),
-                        _DATA_SYNC_BUNDLE_COORDINATOR_LOCK=lock)
-    ns["_data_sync_bundle_generation"] = lambda _: {"generation_id": "a" * 64}
+    ns = load_functions(_admit_data_sync_bundle_generation=lambda _: {
+        "outcome": "SINGLETON_BUSY", "started": False})
     assert ns["_start_data_sync_bundle_generation"]("a" * 64) is False
-    assert lock.locked()
-    lock.release()
 
 
 def test_real_registration_is_lazy_and_does_not_create_volume_artifacts(tmp_path):
@@ -103,3 +98,14 @@ def test_inventory_hook_follows_publication_and_is_not_in_http_handler():
     retains = [call.lineno for call in ast.walk(fn) if isinstance(call, ast.Call)
                and isinstance(call.func, ast.Name) and call.func.id == "_data_sync_retain_disk_inventory_generation"]
     assert retains and max(retains) < calls[0][1]
+
+
+def test_http_routes_never_call_reconciliation_or_start():
+    tree = ast.parse(BOT.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or not node.name.startswith("data_sync_bundle_"):
+            continue
+        calls = {call.func.id for call in ast.walk(node) if isinstance(call, ast.Call)
+                 and isinstance(call.func, ast.Name)}
+        assert "_reconcile_data_sync_bundle_generation" not in calls
+        assert "_start_data_sync_bundle_generation" not in calls

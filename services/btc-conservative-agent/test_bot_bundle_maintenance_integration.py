@@ -24,6 +24,9 @@ NAMES = {
     "_data_sync_bundle_maintain_capacity", "_data_sync_retain_inventory_generation",
     "_data_sync_retain_disk_inventory_generation", "_data_sync_inventory_rows_sha256",
     "_data_sync_inventory_generation", "_data_sync_bundle_generation", "_start_data_sync_bundle_generation",
+    "_data_sync_bundle_admission_identity", "_data_sync_bundle_admission_store",
+    "_data_sync_bundle_admission_publish", "_admit_data_sync_bundle_generation",
+    "_reconcile_data_sync_bundle_generation",
     "_data_sync_request_async_inventory", "_data_sync_validated_inventory_index",
     "_data_sync_register_served_ack_generation",
 }
@@ -49,6 +52,8 @@ def harness(tmp_path, *, queued=False):
         _DATA_SYNC_BUNDLE_REGISTRY_INIT_LOCK=threading.Lock(), _DATA_SYNC_BUNDLE_REGISTRY_HYDRATING=False,
         _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT=0, _DATA_SYNC_BUNDLE_EXTERNAL_PROTECTED=frozenset(),
         _DATA_SYNC_BUNDLE_LAST_STATUS={}, _data_sync_inventory_cache_condition=threading.Condition(),
+        _DATA_SYNC_BUNDLE_PROCESS_INCARNATION="1" * 32,
+        _DATA_SYNC_BUNDLE_ADMISSION_STATUS={"outcome": "NOT_OBSERVED"},
         _data_sync_inventory_generations={}, _data_sync_async_inventory={"status": "EMPTY"},
         _DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS=7200, _DATA_SYNC_INVENTORY_GENERATION_MAX=8,
         _DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS=7200,
@@ -136,6 +141,7 @@ def test_publication_and_accessor_consult_same_reservation_under_condition(tmp_p
 
 def test_coordinator_maintains_capacity_before_starting_slice_owner(tmp_path, setup, monkeypatch):
     import data_sync_bundle_runtime
+    import data_sync_bundle_resumption
     args, _, _ = setup
     ns, _, work, source = harness(tmp_path)
     shutil.copytree(args["output_root"], work / "transport-bundles")
@@ -151,9 +157,85 @@ def test_coordinator_maintains_capacity_before_starting_slice_owner(tmp_path, se
         events.append("run")
         return {"status": "COMPLETE"}
     monkeypatch.setattr(data_sync_bundle_runtime, "run_managed_generation", run)
+    monkeypatch.setattr(data_sync_bundle_resumption, "run_managed_generation", run)
     monkeypatch.setenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "1")
     assert ns["_start_data_sync_bundle_generation"](IDS[4]) is True
     assert events == ["run"] and not ns["_DATA_SYNC_BUNDLE_COORDINATOR_LOCK"].locked()
+
+
+def test_registry_hydration_race_is_typed_and_starts_no_owner(tmp_path, monkeypatch):
+    ns, tasks, work, _ = harness(tmp_path, queued=True)
+    candidate = {**generation(IDS[0]), "ack_eligible": True,
+                 "retained_at": time.monotonic()}
+    ns["_data_sync_inventory_generations"][IDS[0]] = candidate
+    monkeypatch.setenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "1")
+    result = ns["_admit_data_sync_bundle_generation"](IDS[0])
+    assert result == {"outcome": "REGISTRY_HYDRATING", "started": False}
+    assert len(tasks) == 1 and not ns["_DATA_SYNC_BUNDLE_COORDINATOR_LOCK"].locked()
+    receipt = json.loads((work / "bundle-admission-state.json").read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "REGISTRY_HYDRATING" and receipt["attempt_count"] == 0
+
+
+def test_reconcile_missing_start_and_busy_observer_preserve_incumbent(tmp_path, monkeypatch):
+    ns, tasks, work, _ = harness(tmp_path, queued=True)
+    ns["_start_data_sync_bundle_reservation_hydration"]()
+    tasks.pop(0)()
+    publish(ns, IDS[0])
+    ns["_data_sync_async_inventory"].update(status="CURRENT", generation_id=IDS[0])
+    monkeypatch.setenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "1")
+    first = ns["_reconcile_data_sync_bundle_generation"]()
+    before = (work / "bundle-admission-state.json").read_bytes()
+    second = ns["_reconcile_data_sync_bundle_generation"]()
+    assert first["started"] is True and first["outcome"] == "STARTED"
+    assert second == {"outcome": "SINGLETON_BUSY", "started": False}
+    assert (work / "bundle-admission-state.json").read_bytes() == before
+    assert len(tasks) == 1 and ns["_DATA_SYNC_BUNDLE_COORDINATOR_LOCK"].locked()
+
+
+def test_post_lock_identity_race_fails_without_start(tmp_path, monkeypatch):
+    ns, tasks, _, _ = harness(tmp_path)
+    ns["_start_data_sync_bundle_reservation_hydration"]()
+    base = generation(IDS[0])
+    frozen = {**base, **base["bundle_identity"], "ack_eligible": True,
+              "retained_at": time.monotonic()}
+    calls = [frozen, None]
+    ns["_data_sync_bundle_generation"] = lambda _: calls.pop(0)
+    monkeypatch.setenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "1")
+    result = ns["_admit_data_sync_bundle_generation"](IDS[0])
+    assert result == {"outcome": "IDENTITY_REJECTED", "started": False}
+    assert tasks == [] and not ns["_DATA_SYNC_BUNDLE_COORDINATOR_LOCK"].locked()
+
+
+def test_thread_start_failure_is_retryable_and_unlocks(tmp_path, monkeypatch):
+    ns, _, work, _ = harness(tmp_path)
+    ns["_start_data_sync_bundle_reservation_hydration"]()
+    publish(ns, IDS[0])
+    class BrokenThread:
+        def __init__(self, **kwargs): pass
+        def start(self): raise RuntimeError("private text must not escape")
+    ns["threading"] = SimpleNamespace(Thread=BrokenThread)
+    monkeypatch.setenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "1")
+    result = ns["_admit_data_sync_bundle_generation"](IDS[0])
+    assert result == {"outcome": "THREAD_START_FAILED", "started": False}
+    assert not ns["_DATA_SYNC_BUNDLE_COORDINATOR_LOCK"].locked()
+    receipt = json.loads((work / "bundle-admission-state.json").read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "THREAD_START_FAILED"
+    assert "private" not in json.dumps(receipt)
+
+
+def test_admission_write_failure_is_fail_closed_before_thread(tmp_path, monkeypatch):
+    ns, tasks, _, _ = harness(tmp_path, queued=True)
+    ns["_start_data_sync_bundle_reservation_hydration"]()
+    tasks.pop(0)()
+    publish(ns, IDS[0])
+    class BrokenStore:
+        def begin(self, identity): raise OSError("secret path")
+    ns["_data_sync_bundle_admission_store"] = lambda: BrokenStore()
+    monkeypatch.setenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "1")
+    result = ns["_admit_data_sync_bundle_generation"](IDS[0])
+    assert result == {"outcome": "DIAGNOSTIC_WRITE_FAILED", "started": False}
+    assert tasks == [] and not ns["_DATA_SYNC_BUNDLE_COORDINATOR_LOCK"].locked()
+    assert ns["_DATA_SYNC_BUNDLE_ADMISSION_STATUS"] == {"outcome": "DIAGNOSTIC_WRITE_FAILED"}
 
 
 def test_canonical_callsites_guard_every_retention_writer_and_direct_accessor():

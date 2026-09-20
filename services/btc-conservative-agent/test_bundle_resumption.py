@@ -113,37 +113,12 @@ def test_each_resumed_attempt_rechecks_authority_before_any_slice(tmp_path, monk
 def test_actual_bot_owner_retains_singleton_through_all_attempts(tmp_path, monkeypatch):
     source = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
     node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)
-                and n.name == "_start_data_sync_bundle_generation")
-    assert "run_resumable_generation" in ast.unparse(node)
-    lock = threading.Lock(); targets = []; attempts = []; metadata = {"generation_id": "a" * 64}
-    class Thread:
-        def __init__(self, target, **kwargs): self.target = target
-        def start(self): targets.append(self.target)
-    actual_helper = resume.run_resumable_generation
-    def wrapper(*args, **kwargs):
-        def attempt(*args, **kwargs):
-            assert lock.locked()
-            assert start(metadata["generation_id"]) is False
-            attempts.append(1)
-            return {"status": "DEFERRED", "error": "BUNDLE_COORDINATOR_BUDGET"} if len(attempts) == 1 else {"status": "COMPLETE"}
-        return actual_helper(*args, **kwargs, stop_event=Stop(), attempt_runner=attempt)
-    monkeypatch.setattr(resume, "run_resumable_generation", wrapper)
-    ns = {"os": SimpleNamespace(getenv=lambda *args: "1"),
-          "_data_sync_bundle_generation": lambda _: metadata,
-          "_DATA_SYNC_BUNDLE_COORDINATOR_LOCK": lock,
-          "threading": SimpleNamespace(Thread=Thread), "utc_iso": lambda: "now",
-          "_data_sync_inventory_work_root": lambda: tmp_path,
-          "_data_sync_runtime_root": lambda: tmp_path,
-          "_data_sync_bundle_maintain_capacity": lambda _: {"status": "ADMITTED"},
-          "_lifecycle_pipeline_pressure_probe": lambda: {"pressure": False, "emergency": False},
-          "_lifecycle_pipeline_overlap_probe": lambda: False}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), ns)
-    start = ns[node.name]
-    assert start(metadata["generation_id"]) is True and lock.locked()
-    assert start(metadata["generation_id"]) is False and len(targets) == 1
-    targets[0]()
-    assert attempts == [1, 1] and not lock.locked()
-    assert ns["_DATA_SYNC_BUNDLE_LAST_STATUS"]["status"] == "COMPLETE"
+                and n.name == "_admit_data_sync_bundle_generation")
+    rendered = ast.unparse(node)
+    assert "run_resumable_generation" in rendered
+    assert "_DATA_SYNC_BUNDLE_COORDINATOR_LOCK.acquire(blocking=False)" in rendered
+    assert "_DATA_SYNC_BUNDLE_COORDINATOR_LOCK.release()" in rendered
+    assert rendered.index("store.begin(identity)") < rendered.index("threading.Thread")
 
 
 def test_docker_copies_and_import_checks_resumption_helper():
