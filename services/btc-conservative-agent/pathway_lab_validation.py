@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from combo_pathway_config import (
     COMBO_EXECUTION_LANES,
+    COMPARISON_BENCHMARK_LANE,
     EXECUTION_FIX_VERSION,
     RESEARCH_LANE_AI_SCAN,
     ACTIVE_TILE_ORDER,
@@ -121,13 +122,29 @@ def validate_lane_memory_runtime(
     max_bucket: int = 1000, identity: dict = None,
 ) -> dict:
     allowed = set(ACTIVE_TILE_ORDER)
+    # The configured paper benchmark owns exposure outside the family-tile
+    # display roster. Recognition here does not grant entry/relay eligibility:
+    # those gates remain with the runtime, including when its toggle is OFF
+    # while an existing position is still being managed.
+    benchmark = str(COMPARISON_BENCHMARK_LANE or "").upper()
+    if benchmark and benchmark != RESEARCH_LANE_AI_SCAN:
+        allowed.add(benchmark)
     critical = []
     warnings = []
-    for lane, count in {**lane_pending_counts, **lane_open_counts}.items():
-        if str(lane).upper() not in allowed and int(count or 0) > 0:
-            critical.append(f"UNREGISTERED_LANE_EXPOSURE:{lane}:{count}")
-        elif int(count or 0) > max_bucket:
-            warnings.append(f"LANE_BUCKET_OVERFLOW:{lane}:{count}")
+    retired = {str(lane).upper() for lane in retired_lanes}
+    allowed.difference_update(retired)
+    # Inspect both buckets: an open count of zero must not conceal pending
+    # exposure for the same lane (nor conceal an overflowing pending bucket).
+    for counts in (lane_pending_counts, lane_open_counts):
+        for lane, count in counts.items():
+            if str(lane).upper() not in allowed and int(count or 0) > 0:
+                issue = f"UNREGISTERED_LANE_EXPOSURE:{lane}:{count}"
+                if issue not in critical:
+                    critical.append(issue)
+            elif int(count or 0) > max_bucket:
+                issue = f"LANE_BUCKET_OVERFLOW:{lane}:{count}"
+                if issue not in warnings:
+                    warnings.append(issue)
     return {
         **dict(identity or {}),
         "schema": "lane_memory_validation_v3", "generated_at": _utc_now(),
