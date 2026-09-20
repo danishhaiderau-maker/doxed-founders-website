@@ -1,9 +1,11 @@
 import copy
 import ast
+import io
 import hmac
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -160,6 +162,157 @@ def test_inspection_allows_stale_and_reads_only_exact_progress(tmp_path, monkeyp
         assert result['progress_receipts'][0][key] == value
     assert 'NOT_CURRENT_INVENTORY_OR_CANARY_PROOF' in result['inspection_authority']
     assert paths == ['/api/status', '/api/data-sync/manifest?identity_only=1']
+
+
+def coordinator_value(generation, *, worker_state_present, **changes):
+    value = {
+        'schema': 'fly_transport_bundle_coordinator_status_v1',
+        'identity': {'generation_id': generation, 'page_index_sha256': 'd' * 64,
+                     'source_git_rev': REV, 'collection_epoch_id': 'epoch-test',
+                     'tile_registry_signature': 'f' * 64},
+        'status': 'FAILED', 'terminal': True, 'cursor': {},
+        'started_at': '2026-09-21T00:00:00+00:00',
+        'updated_at': '2026-09-21T00:01:00+00:00',
+        'authority': 'DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY',
+        'error': 'BUNDLE_BUILD_DEADLINE',
+        'worker_state_present': worker_state_present,
+    }
+    value.update(changes)
+    return value
+
+
+def test_inspection_reads_only_exact_coordinator_slots_and_normalized_flags(tmp_path):
+    digest, manifest, status = fixture(tmp_path)
+    root = tmp_path / '.data-sync-snapshots/transport-bundles'
+    root.mkdir(parents=True)
+    (root / 'bundle-coordinator-early-status.json').write_bytes(
+        canonical(coordinator_value(digest, worker_state_present=False)))
+    generation = root / ('g-' + digest[:16])
+    generation.mkdir()
+    (generation / 'bundle-coordinator-status.json').write_bytes(
+        canonical(coordinator_value(digest, worker_state_present=True,
+                                    status='DEFERRED', error='RESOURCE_PRESSURE')))
+    environment = {'DATA_SYNC_TRANSPORT_BUNDLES_ENABLED': '1', 'ANALYZER_ENABLED': 'true',
+                   'BOT_ADMIN_TOKEN': 'TOP_SECRET'}
+    result = c.inspect_only(REV, digest,
+        lambda url: status if url == '/api/status' else manifest,
+        volume=tmp_path, environment=environment, resource_probe=lambda _: {})
+    assert result['slice_invoked'] is False
+    assert result['runtime_flags'] == {
+        'data_sync_transport_bundles_enabled': True, 'analyzer_enabled': True,
+        'basis': 'EXACT_ALLOWLISTED_VALUES_ONLY'}
+    assert result['bundle_coordinator_diagnostics']['early']['classification'] == 'VALID'
+    assert result['bundle_coordinator_diagnostics']['early']['terminal'] is True
+    assert result['bundle_coordinator_diagnostics']['generation']['classification'] == 'VALID'
+    assert result['bundle_coordinator_diagnostics']['generation']['status'] == 'DEFERRED'
+    serialized = json.dumps(result)
+    assert 'TOP_SECRET' not in serialized
+    assert str(root) not in serialized
+    assert 'NO_CURRENT_LIVENESS' in serialized
+
+
+def test_runtime_flags_use_exact_values_and_never_return_raw_environment():
+    flags = c.normalized_runtime_flags({
+        'DATA_SYNC_TRANSPORT_BUNDLES_ENABLED': 'true',
+        'ANALYZER_ENABLED': '1', 'PRIVATE': 'TOP_SECRET'})
+    assert flags['data_sync_transport_bundles_enabled'] is False
+    assert flags['analyzer_enabled'] is False
+    assert 'TOP_SECRET' not in json.dumps(flags)
+
+
+def test_coordinator_diagnostics_absent_without_enumeration(tmp_path, monkeypatch):
+    monkeypatch.setattr(c.os, 'scandir', lambda *a: pytest.fail('no directory enumeration'))
+    result = c.coordinator_diagnostic(
+        tmp_path / 'missing/early.json', 'a' * 64, REV, False)
+    assert result == {'classification': 'ABSENT'}
+
+
+@pytest.mark.parametrize('mutate,reason', [
+    (lambda value: value.update(status='SECRET_STATUS'), 'COORDINATOR_STATUS_INVALID'),
+    (lambda value: value.update(error='SECRET_ERROR'), 'COORDINATOR_ERROR_INVALID'),
+    (lambda value: value['identity'].update(generation_id='b' * 64),
+     'COORDINATOR_IDENTITY_INVALID'),
+    (lambda value: value['identity'].update(source_git_rev='e' * 12),
+     'COORDINATOR_IDENTITY_INVALID'),
+    (lambda value: value.update(worker_state_present=True), 'COORDINATOR_STATUS_INVALID'),
+    (lambda value: value.update(terminal='yes'), 'COORDINATOR_STATUS_INVALID'),
+    (lambda value: value.update(private='TOP_SECRET'), 'COORDINATOR_SCHEMA_INVALID'),
+])
+def test_coordinator_diagnostic_malformed_fields_are_non_authoritative(tmp_path, mutate, reason):
+    generation = 'a' * 64
+    value = coordinator_value(generation, worker_state_present=False)
+    mutate(value)
+    path = tmp_path / 'diagnostic.json'
+    path.write_bytes(canonical(value))
+    result = c.coordinator_diagnostic(path, generation, REV, False)
+    assert result == {'classification': 'INVALID', 'reason': reason}
+    assert 'TOP_SECRET' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('raw', [
+    b'{"schema":"fly_transport_bundle_coordinator_status_v1","status":"FAILED","status":"COMPLETE"}',
+    b'{not-json', b'{"status":NaN}', b'[]',
+])
+def test_coordinator_diagnostic_rejects_duplicate_or_malformed_json(tmp_path, raw):
+    path = tmp_path / 'diagnostic.json'
+    path.write_bytes(raw)
+    result = c.coordinator_diagnostic(path, 'a' * 64, REV, False)
+    assert result['classification'] == 'INVALID'
+    assert result['reason'] in {'COORDINATOR_CONTENT_INVALID', 'COORDINATOR_SCHEMA_INVALID'}
+    assert raw.decode('utf-8', errors='ignore') not in json.dumps(result)
+
+
+def test_coordinator_diagnostic_rejects_empty_oversize_and_hardlink(tmp_path):
+    path = tmp_path / 'diagnostic.json'
+    path.write_bytes(b'')
+    assert c.coordinator_diagnostic(path, 'a' * 64, REV, False) == {
+        'classification': 'INVALID', 'reason': 'COORDINATOR_OBJECT_SIZE_INVALID'}
+    path.write_bytes(b'x' * (c.MAX_COORDINATOR_DIAGNOSTIC + 1))
+    assert c.coordinator_diagnostic(path, 'a' * 64, REV, False) == {
+        'classification': 'INVALID', 'reason': 'COORDINATOR_OBJECT_SIZE_INVALID'}
+    source = tmp_path / 'source.json'
+    source.write_bytes(canonical(coordinator_value('a' * 64, worker_state_present=False)))
+    path.unlink()
+    os.link(source, path)
+    assert c.coordinator_diagnostic(path, 'a' * 64, REV, False) == {
+        'classification': 'INVALID', 'reason': 'COORDINATOR_HARDLINK_REJECTED'}
+
+
+def test_coordinator_diagnostic_rejects_symlink(tmp_path):
+    source = tmp_path / 'source.json'
+    source.write_bytes(canonical(coordinator_value('a' * 64, worker_state_present=False)))
+    path = tmp_path / 'diagnostic.json'
+    try:
+        path.symlink_to(source)
+    except OSError as exc:
+        pytest.skip(f'symlink unavailable: {type(exc).__name__}')
+    assert c.coordinator_diagnostic(path, 'a' * 64, REV, False) == {
+        'classification': 'INVALID', 'reason': 'COORDINATOR_PATH_LINK_REJECTED'}
+
+
+def test_coordinator_diagnostic_detects_change_during_read(tmp_path, monkeypatch):
+    generation = 'a' * 64
+    path = tmp_path / 'diagnostic.json'
+    path.write_bytes(canonical(coordinator_value(generation, worker_state_present=False)))
+    original_open = Path.open
+    def changing_open(self, *args, **kwargs):
+        stream = original_open(self, *args, **kwargs)
+        if self != path or not args or args[0] != 'rb':
+            return stream
+        class ChangingReader:
+            def __enter__(inner):
+                return inner
+            def read(inner, size=-1):
+                raw = stream.read(size)
+                with original_open(path, 'ab') as writer:
+                    writer.write(b' ')
+                return raw
+            def __exit__(inner, *exc):
+                stream.close()
+        return ChangingReader()
+    monkeypatch.setattr(Path, 'open', changing_open)
+    assert c.coordinator_diagnostic(path, generation, REV, False) == {
+        'classification': 'INVALID', 'reason': 'COORDINATOR_OBJECT_CHANGED'}
 
 
 def test_bounded_refuses_oversize_and_path_link(tmp_path):

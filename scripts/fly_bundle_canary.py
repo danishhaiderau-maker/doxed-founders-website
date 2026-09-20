@@ -10,6 +10,7 @@ they do not prove a bottleneck or a rate without a separately timed second sampl
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import hashlib
 import json
 import math
@@ -17,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import sys
 import time
 import urllib.request
@@ -27,6 +29,35 @@ OUTPUT = VOLUME / '.data-sync-snapshots/transport-bundles'
 SNAPSHOT = VOLUME / 'sync_inventory_current.json'
 MAX_JSON = 2 * 1024 * 1024
 MAX_INDEX = 16 * 1024 * 1024
+MAX_COORDINATOR_DIAGNOSTIC = 16 * 1024
+COORDINATOR_STATUSES = frozenset({'STARTING', 'BUILDING', 'COMPLETE', 'FAILED',
+                                  'DEFERRED', 'STOPPED'})
+COORDINATOR_ERRORS = frozenset({
+    'BUNDLE_ADMISSION_UNAVAILABLE', 'BUNDLE_BUILD_DEADLINE', 'BUNDLE_CIRCUIT_OPEN',
+    'BUNDLE_COORDINATOR_BUDGET', 'BUNDLE_COORDINATOR_EXCEPTION',
+    'BUNDLE_COORDINATOR_SLICE_LIMIT', 'BUNDLE_DERIVATIVE_ADMISSION_ARGUMENTS',
+    'BUNDLE_DERIVATIVE_ADMISSION_UNAVAILABLE', 'BUNDLE_DERIVATIVE_ARTIFACT_SIZE_LIMIT',
+    'BUNDLE_DERIVATIVE_DIAGNOSTIC_IDENTITY', 'BUNDLE_DERIVATIVE_DIAGNOSTIC_INVALID',
+    'BUNDLE_DERIVATIVE_DUPLICATE_JSON_KEY', 'BUNDLE_DERIVATIVE_ENTRY_LIMIT',
+    'BUNDLE_DERIVATIVE_ESTIMATE_UNDERSTATES_FILES', 'BUNDLE_DERIVATIVE_GENERATION_INVALID',
+    'BUNDLE_DERIVATIVE_GENERATION_LIMIT', 'BUNDLE_DERIVATIVE_INDEXED_ARTIFACT_MISSING',
+    'BUNDLE_DERIVATIVE_INDEX_INVALID', 'BUNDLE_DERIVATIVE_INDEX_LIMIT',
+    'BUNDLE_DERIVATIVE_JSON_INVALID', 'BUNDLE_DERIVATIVE_LEASE_LIMIT',
+    'BUNDLE_DERIVATIVE_LINK_REJECTED', 'BUNDLE_DERIVATIVE_ORPHAN_ARTIFACT',
+    'BUNDLE_DERIVATIVE_STATE_CHANGED', 'BUNDLE_DERIVATIVE_STATE_LIMIT',
+    'BUNDLE_DERIVATIVE_TOTAL_BUDGET', 'BUNDLE_DERIVATIVE_TYPE_INVALID',
+    'BUNDLE_GENERATION_STORAGE_BUDGET', 'BUNDLE_INDEX_LIMIT', 'BUNDLE_NO_CURSOR_PROGRESS',
+    'BUNDLE_RECEIPT_JSON_INVALID', 'BUNDLE_RECEIPT_NOT_COMMITTED',
+    'BUNDLE_SIGNAL_SNAPSHOT_HASH_MISMATCH', 'BUNDLE_SIGNAL_SNAPSHOT_JSON_INVALID',
+    'BUNDLE_SIGNAL_SNAPSHOT_SCHEMA_INVALID', 'BUNDLE_SIGNAL_SNAPSHOT_TOO_LARGE',
+    'BUNDLE_SLICE_FAILED', 'BUNDLE_SLICE_RECEIPT_INVALID', 'BUNDLE_SLICE_RESULT_LIMIT',
+    'BUNDLE_SLICE_TIMEOUT', 'BUNDLE_SOURCE_CHANGED_DURING_READ',
+    'BUNDLE_SOURCE_GENERATION_MISMATCH', 'BUNDLE_STATE_LIMIT', 'BUNDLE_WORKER_FAILURE',
+    'GENERATION_AUTHORITY_UNAVAILABLE', 'INVENTORY_PAGE_ROW_CURSOR_INVALID',
+    'INVOCATION_TIME_BUDGET_EXHAUSTED_BEFORE_BUILD', 'PACKAGE_DESCRIPTOR_TOO_LARGE',
+    'PACKAGE_HARD_BUDGET_EXCEEDED', 'PACKAGE_INDEX_LIMIT_EXCEEDED',
+    'PAGE_INDEX_CURSOR_OR_READ_BUDGET_INVALID', 'RESOURCE_PRESSURE',
+})
 
 
 class Blocked(ValueError):
@@ -56,6 +87,132 @@ def bounded(path, maximum):
     signature = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
     require(len(raw) == before.st_size and signature(before) == signature(after), 'OBJECT_CHANGED')
     return raw
+
+
+def normalized_runtime_flags(environment=None):
+    """Expose only reviewed boolean interpretations, never environment values."""
+    environment = os.environ if environment is None else environment
+    return {
+        'data_sync_transport_bundles_enabled':
+            environment.get('DATA_SYNC_TRANSPORT_BUNDLES_ENABLED') == '1',
+        'analyzer_enabled': environment.get('ANALYZER_ENABLED') == 'true',
+        'basis': 'EXACT_ALLOWLISTED_VALUES_ONLY',
+    }
+
+
+def _bounded_coordinator_bytes(path):
+    """Stable exact-file read; no enumeration, links, hardlinks or raw errors."""
+    path = Path(path)
+    for component in (*reversed(path.parents), path):
+        info = component.lstat()
+        require(not stat.S_ISLNK(info.st_mode)
+                and not int(getattr(info, 'st_file_attributes', 0) or 0) & 0x400,
+                'COORDINATOR_PATH_LINK_REJECTED')
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), 'COORDINATOR_OBJECT_TYPE_INVALID')
+    require(before.st_nlink == 1, 'COORDINATOR_HARDLINK_REJECTED')
+    require(0 < before.st_size <= MAX_COORDINATOR_DIAGNOSTIC,
+            'COORDINATOR_OBJECT_SIZE_INVALID')
+    with path.open('rb') as stream:
+        raw = stream.read(MAX_COORDINATOR_DIAGNOSTIC + 1)
+    after = path.lstat()
+    signature = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                               value.st_size, value.st_mtime_ns)
+    require(len(raw) == before.st_size and signature(before) == signature(after),
+            'COORDINATOR_OBJECT_CHANGED')
+    return raw
+
+
+def _unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError('DUPLICATE_JSON_KEY')
+        value[key] = item
+    return value
+
+
+def _validate_coordinator_diagnostic(raw, generation_id, revision, worker_state_present):
+    value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_object,
+                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError('NONFINITE_JSON')))
+    allowed = {'schema', 'identity', 'status', 'terminal', 'cursor', 'started_at', 'updated_at',
+               'authority', 'error', 'last_error', 'package_index_count',
+               'inventory_rows_selected', 'retry_seconds', 'worker_state_present'}
+    require(isinstance(value, dict) and set(value) <= allowed,
+            'COORDINATOR_SCHEMA_INVALID')
+    identity = value.get('identity')
+    identity_fields = {'generation_id', 'page_index_sha256', 'source_git_rev',
+                       'collection_epoch_id', 'tile_registry_signature'}
+    require(value.get('schema') == 'fly_transport_bundle_coordinator_status_v1'
+            and value.get('authority') == 'DIAGNOSTIC_ONLY_NO_ACK_OR_LIVENESS_AUTHORITY'
+            and isinstance(identity, dict) and set(identity) == identity_fields,
+            'COORDINATOR_SCHEMA_INVALID')
+    require(identity.get('generation_id') == generation_id
+            and identity.get('source_git_rev') == revision
+            and isinstance(identity.get('page_index_sha256'), str)
+            and re.fullmatch('[0-9a-f]{64}', identity['page_index_sha256'])
+            and all(isinstance(identity.get(key), str) and 1 <= len(identity[key]) <= 256
+                    for key in ('collection_epoch_id', 'tile_registry_signature')),
+            'COORDINATOR_IDENTITY_INVALID')
+    status_value = value.get('status')
+    require(status_value in COORDINATOR_STATUSES and type(value.get('terminal')) is bool
+            and value.get('worker_state_present') is worker_state_present,
+            'COORDINATOR_STATUS_INVALID')
+    require(not (value['terminal'] and status_value in {'STARTING', 'BUILDING'})
+            and not (worker_state_present is False and status_value == 'COMPLETE'),
+            'COORDINATOR_STATUS_INVALID')
+    for key in ('started_at', 'updated_at'):
+        timestamp = value.get(key)
+        require(isinstance(timestamp, str) and 1 <= len(timestamp) <= 64,
+                'COORDINATOR_TIMESTAMP_INVALID')
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            raise Blocked('COORDINATOR_TIMESTAMP_INVALID')
+        require(parsed.tzinfo is not None, 'COORDINATOR_TIMESTAMP_INVALID')
+    cursor = value.get('cursor')
+    require(isinstance(cursor, dict) and set(cursor) <= {
+        'page_index', 'page_row_index', 'index_offset'}, 'COORDINATOR_CURSOR_INVALID')
+    require(all(type(item) is int and 0 <= item <= 2**63 - 1 for item in cursor.values()),
+            'COORDINATOR_CURSOR_INVALID')
+    for key in ('package_index_count', 'inventory_rows_selected', 'retry_seconds'):
+        if key in value:
+            require(type(value[key]) is int and 0 <= value[key] <= 2**63 - 1,
+                    'COORDINATOR_COUNT_INVALID')
+    for key in ('error', 'last_error'):
+        if key in value:
+            require(value[key] in COORDINATOR_ERRORS, 'COORDINATOR_ERROR_INVALID')
+    public = {
+        'classification': 'VALID', 'status': status_value, 'terminal': value['terminal'],
+        'worker_state_present': worker_state_present,
+        'authority': 'LAST_ATTEMPT_ONLY_NO_CURRENT_LIVENESS_OR_ACK_AUTHORITY',
+    }
+    for key in ('error', 'last_error', 'package_index_count',
+                'inventory_rows_selected', 'retry_seconds'):
+        if key in value:
+            public[key] = value[key]
+    return public
+
+
+def coordinator_diagnostic(path, generation_id, revision, worker_state_present):
+    try:
+        raw = _bounded_coordinator_bytes(path)
+        return _validate_coordinator_diagnostic(
+            raw, generation_id, revision, worker_state_present)
+    except FileNotFoundError:
+        return {'classification': 'ABSENT'}
+    except (Blocked, OSError, UnicodeError, ValueError, TypeError, OverflowError) as exc:
+        safe = str(exc) if isinstance(exc, Blocked) else 'COORDINATOR_CONTENT_INVALID'
+        if safe not in {
+            'COORDINATOR_PATH_LINK_REJECTED', 'COORDINATOR_OBJECT_TYPE_INVALID',
+            'COORDINATOR_HARDLINK_REJECTED', 'COORDINATOR_OBJECT_SIZE_INVALID',
+            'COORDINATOR_OBJECT_CHANGED', 'COORDINATOR_SCHEMA_INVALID',
+            'COORDINATOR_IDENTITY_INVALID', 'COORDINATOR_STATUS_INVALID',
+            'COORDINATOR_TIMESTAMP_INVALID', 'COORDINATOR_CURSOR_INVALID',
+            'COORDINATOR_COUNT_INVALID', 'COORDINATOR_ERROR_INVALID',
+        }:
+            safe = 'COORDINATOR_CONTENT_INVALID'
+        return {'classification': 'INVALID', 'reason': safe}
 
 
 def validate_status(status, revision):
@@ -357,7 +514,11 @@ def resource_snapshot(status, *, proc_root=Path('/proc'), cgroup_root=Path('/sys
 
 
 def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, inventory_fingerprint=None,
-                 resource_probe=resource_snapshot):
+                 resource_probe=resource_snapshot, environment=None):
+    require(isinstance(revision, str) and re.fullmatch('[0-9a-f]{12}', revision),
+            'EXACT_REVISION_REQUIRED')
+    require(isinstance(generation_id, str) and re.fullmatch('[0-9a-f]{64}', generation_id),
+            'GENERATION_REQUIRED')
     status = request_json('/api/status')
     require(status.get('source_git_rev') == revision, 'STATUS_REVISION_MISMATCH')
     # Identity-only is the explicit no-refresh/physical-inventory path.
@@ -373,6 +534,15 @@ def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, invent
                 'peak_rss_bytes')
     progress = []
     work = volume / '.data-sync-snapshots'
+    bundle_root = work / 'transport-bundles'
+    coordinator = {
+        'early': coordinator_diagnostic(
+            bundle_root / 'bundle-coordinator-early-status.json',
+            generation_id, revision, False),
+        'generation': coordinator_diagnostic(
+            bundle_root / ('g-' + generation_id[:16]) / 'bundle-coordinator-status.json',
+            generation_id, revision, True),
+    }
     if inventory_fingerprint is not None:
         require(re.fullmatch('[0-9a-f]{64}', inventory_fingerprint), 'INVALID_INVENTORY_FINGERPRINT')
         name = f'inventory-worker-v2-{inventory_fingerprint[:32]}.progress.json'
@@ -395,6 +565,9 @@ def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, invent
                          'overlap_code', 'last_success_age_sec', 'receipt_bootstrap')},
             'progress_receipts': progress,
             'progress_status': 'READ' if progress else 'EXACT_RECEIPT_UNAVAILABLE',
+            'runtime_flags': normalized_runtime_flags(environment),
+            'bundle_coordinator_diagnostics': coordinator,
+            'bundle_coordinator_diagnostic_scope': 'LAST_ATTEMPT_ONLY_NOT_CURRENT_LIVENESS_OR_ACK',
             'resources': resource_probe(status),
             'os_coordinator_ownership': 'UNAVAILABLE_IN_PROCESS_LOCK_NOT_EXPORTED'}
 

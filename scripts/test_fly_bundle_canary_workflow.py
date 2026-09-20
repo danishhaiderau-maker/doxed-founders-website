@@ -43,6 +43,13 @@ def test_encoded_remote_command_executes_exact_args_without_shell_injection():
         "--generation-id", "b" * 64, "--inventory-fingerprint", "c" * 64, "--inspect-only"]
 
 
+def test_actual_helper_fits_reviewed_remote_command_bounds():
+    source = (ROOT / 'scripts/fly_bundle_canary.py').read_bytes()
+    assert 0 < len(source) <= 48 * 1024
+    command = remote_command(source, 'a' * 12, 'b' * 64, 'c' * 64, '1')
+    assert len(command.encode()) <= 24 * 1024
+
+
 @pytest.mark.parametrize("rows", [[], [{"id": "a" * 14, "state": "starting"}],
     [{"id": "a" * 14, "state": "started"}, {"id": "b" * 14, "state": "started"}]])
 def test_no_remote_execution_without_exactly_one_started_owner(monkeypatch, rows):
