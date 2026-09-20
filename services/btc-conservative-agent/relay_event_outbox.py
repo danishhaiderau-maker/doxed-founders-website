@@ -353,21 +353,90 @@ class RelayEventOutbox:
             return copy.deepcopy(row)
 
     def due(self, now: float | None = None, limit: int = 100) -> list[dict]:
+        return self.delivery_plan(now=now, limit=limit)["records"]
+
+    def delivery_plan(
+        self, now: float | None = None, limit: int = 100, *,
+        enforce_owner: bool = False, active_owner_id: str | None = None,
+        event_id: str | None = None,
+    ) -> dict:
+        """Derive a delivery schedule without changing durable pending evidence.
+
+        Owner filtering is opt-in for the verified paper/disarmed caller. Old
+        owner payloads cannot be re-signed with a new identity. Select each
+        trade's earliest sequence BEFORE filtering so its successors cannot
+        bypass missing history. Unrelated eligible heads are limited only after
+        filtering, preventing stale heads from consuming the whole batch.
+        """
+        counts = {
+            "pending_total": 0, "stale_owner_pending": 0,
+            "missing_owner_pending": 0, "owner_unverified_pending": 0,
+            "blocked_by_stale_owner_predecessor": 0,
+            "blocked_by_missing_owner_predecessor": 0,
+            "ready_trade_heads": 0,
+        }
+        result = {
+            "schema": "relay_delivery_plan_v1", "records": [],
+            "owner_filter_applied": bool(enforce_owner), "counts": counts,
+            "source_cleanup_authorized": False,
+            "target_block_reason": None,
+        }
         if not self.healthy:
-            return []
+            result["target_block_reason"] = "OUTBOX_UNHEALTHY"
+            return result
         now = time.time() if now is None else float(now)
+        owner = active_owner_id if isinstance(active_owner_id, str) else ""
+        owner_verified = bool(owner and owner == owner.strip())
         with self._lock:
             groups: dict[str, list[dict]] = {}
             for row in self._pending.values():
                 groups.setdefault(str(row.get("trade_id")), []).append(row)
+            counts["pending_total"] = len(self._pending)
             for rows in groups.values():
                 rows.sort(key=lambda row: (int(row.get("event_seq") or 0), float(row.get("created_at_unix") or 0)))
-            # Never deliver N+1 while N is backing off. Interleave trade heads
-            # so one busy lifecycle cannot starve every other trade.
-            ready = [rows[0] for rows in groups.values()
-                     if rows and float(rows[0].get("next_attempt_at_unix") or 0) <= now]
+            ready = []
+            for rows in groups.values():
+                head = rows[0]
+                head_owner = (head.get("payload") or {}).get("bot_instance_id")
+                head_block = None
+                if enforce_owner:
+                    if not owner_verified:
+                        head_block = "OWNER_UNVERIFIED_PENDING"
+                    elif not isinstance(head_owner, str) or not head_owner:
+                        head_block = "MISSING_OWNER_PENDING"
+                    elif head_owner != owner:
+                        head_block = "STALE_OWNER_PENDING"
+                for index, row in enumerate(rows):
+                    reason = None
+                    row_owner = (row.get("payload") or {}).get("bot_instance_id")
+                    if enforce_owner:
+                        if not owner_verified:
+                            reason = "OWNER_UNVERIFIED_PENDING"
+                        elif not isinstance(row_owner, str) or not row_owner:
+                            reason = "MISSING_OWNER_PENDING"
+                        elif row_owner != owner:
+                            reason = "STALE_OWNER_PENDING"
+                        elif head_block == "STALE_OWNER_PENDING":
+                            reason = "BLOCKED_BY_STALE_OWNER_PREDECESSOR"
+                        elif head_block == "MISSING_OWNER_PENDING":
+                            reason = "BLOCKED_BY_MISSING_OWNER_PREDECESSOR"
+                    if reason:
+                        counts[reason.lower()] += 1
+                    if event_id and row.get("event_id") == event_id:
+                        result["target_block_reason"] = reason or (
+                            "PENDING_PREDECESSOR" if index else
+                            "RETRY_BACKOFF" if float(row.get("next_attempt_at_unix") or 0) > now
+                            else None
+                        )
+                if not head_block and float(head.get("next_attempt_at_unix") or 0) <= now:
+                    ready.append(head)
+            counts["ready_trade_heads"] = len(ready)
+            # An explicit drain still cannot leapfrog a trade predecessor.
+            if event_id:
+                ready = [row for row in ready if row.get("event_id") == event_id]
             ready.sort(key=lambda row: float(row.get("created_at_unix") or 0))
-            return copy.deepcopy(ready[:max(1, int(limit))])
+            result["records"] = copy.deepcopy(ready[:max(1, int(limit))])
+            return result
 
     def fail(self, event_id: str, error: object, now: float | None = None) -> None:
         now = time.time() if now is None else float(now)

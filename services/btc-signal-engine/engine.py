@@ -9132,9 +9132,28 @@ def _drain_relay_event_outbox_once(event_id: str | None = None, commit_before_ac
     if not _relay_event_drain_lock.acquire(blocking=False):
         return {"attempted": 0, "acked": 0, "busy": True}
     try:
-        rows = _relay_event_outbox.due(limit=100)
-        if event_id:
-            rows = [row for row in rows if row.get("event_id") == event_id]
+        with state_lock:
+            owner_filter = bool(
+                _force_paper_mode_active()
+                and state.get("live_armed") is False
+                and state.get("bitfinex_live_enabled") is False
+            )
+        if owner_filter:
+            # The OS singleton, not an HTTP 401 or a guessed identity, proves
+            # which paper process may issue current-owner events. Missing proof
+            # withholds delivery; it does not rewrite, ACK or discard history.
+            owner_id = BOT_INSTANCE_ID if is_active_dashboard_owner() else None
+            plan = _relay_event_outbox.delivery_plan(
+                limit=100, enforce_owner=True, active_owner_id=owner_id,
+                event_id=event_id,
+            )
+            rows = plan.pop("records")
+            _relay_push_state["delivery_scheduler"] = plan
+        else:
+            _relay_push_state.pop("delivery_scheduler", None)
+            rows = _relay_event_outbox.due(limit=100)
+            if event_id:
+                rows = [row for row in rows if row.get("event_id") == event_id]
         acked = sum(
             1 for row in rows
             if _deliver_relay_outbox_record(row, commit_before_ack=commit_before_ack)
@@ -35612,6 +35631,7 @@ def build_state_integrity() -> dict:
         "last_platform_received_at": _relay_push_state["last_platform_received_at"],
         "last_sec_ago": (now - _relay_push_state["last_ts"]) if _relay_push_state["last_ts"] else None,
         "recent_deliveries": _relay_delivery_history_snapshot(10),
+        "delivery_scheduler": copy.deepcopy(_relay_push_state.get("delivery_scheduler")),
     }
     bx_live = None
     try:
@@ -36129,6 +36149,7 @@ def _build_relay_execution_state_snapshot() -> dict:
             now_ts - _relay_push_state["last_ts"]
         ) if _relay_push_state["last_ts"] else None,
         "recent_deliveries_count": len(_relay_delivery_history_snapshot(10)),
+        "delivery_scheduler": copy.deepcopy(_relay_push_state.get("delivery_scheduler")),
     }
     ddollar_gate_summary = None
     try:
