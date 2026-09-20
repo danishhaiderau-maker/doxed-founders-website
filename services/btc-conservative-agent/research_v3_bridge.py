@@ -1088,8 +1088,20 @@ def dual_write_lane_decision(
         "outcome_state": outcome_state,
         "exact_reason": str(exact_reason or "UNSPECIFIED"),
         "executed_direction": identity["executed_direction"],
+        "raw_direction": identity["raw_direction"],
         "raw_ai_decision": source.get("raw_ai_decision"),
-        "admission_treatment": source.get("admission_treatment"),
+        "admission_treatment": _first(
+            source.get("admission_treatment"),
+            material.get("admission_treatment"),
+            policy["paper_policy_spec"].get("admission_treatment"),
+        ),
+        "effective_research_direction": source.get("effective_research_direction"),
+        "effective_research_admission": copy.deepcopy(
+            source.get("effective_research_admission")
+        ),
+        "effective_research_admission_policy_id": source.get(
+            "effective_research_admission_policy_id"
+        ),
         "original_ai_snapshot": source.get("original_ai_snapshot"),
         "long_score": source.get("long_score"),
         "short_score": source.get("short_score"),

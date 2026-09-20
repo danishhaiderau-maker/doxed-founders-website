@@ -89,6 +89,8 @@ from combo_pathway_config import (
     COMBO_TILE_DISPLAY_ORDER,
     EXECUTION_FIX_VERSION as COMBO_EXECUTION_FIX_VERSION,
     RESEARCH_STACK_FEATURES,
+    SCORE_LED_ADMISSION_POLICY_ID,
+    SCORE_LED_PAPER_RESEARCH_ENABLED,
     EXPECTED_EXCHANGE,
     PRIMARY_PRODUCTION_LANE,
     PRIMARY_PRODUCTION_ROLE,
@@ -117,6 +119,7 @@ from combo_pathway_config import (
     get_lane_ladder_override,
     is_virtual_chase_entry_lane,
     resolve_lane_size_multiplier,
+    resolve_score_led_paper_admission,
     SIZE_MULT_MAX,
     SIZE_MULT_MIN,
 )
@@ -16235,6 +16238,7 @@ def _v3_lane_policy_material(lane: str) -> dict:
         # PAPER_RESEARCH_ONLY, making provenance look mixed/contaminated.
         "paper_only": True,
         "relay_eligible": relay_eligible,
+        "admission_treatment": spec.get("admission_treatment") or "AI_FILTERED_V1",
     }
     base_control = dict(CONTROL_CELL)
     base_control["invert_on"] = bool(invert_signal_active())
@@ -16327,19 +16331,28 @@ def _write_v3_shared_lane_decision(
         or (ai or {}).get("direction")
         or "UNKNOWN"
     ).upper()
-    executed_direction = raw_direction
+    effective_research_direction = str(
+        (ai or {}).get("effective_research_direction") or raw_direction
+    ).upper()
+    executed_direction = effective_research_direction
     if invert_signal_active():
-        if raw_direction == "LONG":
+        if effective_research_direction == "LONG":
             executed_direction = "SHORT"
-        elif raw_direction == "SHORT":
+        elif effective_research_direction == "SHORT":
             executed_direction = "LONG"
     lane_policy = _v3_lane_policy_material(lane)
     factors = (ai or {}).get("factors") or {}
     long_score = (ai or {}).get("long_score", factors.get("long_score"))
     short_score = (ai or {}).get("short_score", factors.get("short_score"))
     try:
-        score_gap = abs(int(long_score or 0) - int(short_score or 0))
-    except (TypeError, ValueError):
+        numeric_long_score = float(long_score)
+        numeric_short_score = float(short_score)
+        score_gap = (
+            abs(numeric_long_score - numeric_short_score)
+            if math.isfinite(numeric_long_score) and math.isfinite(numeric_short_score)
+            else None
+        )
+    except (OverflowError, TypeError, ValueError):
         score_gap = None
     try:
         source = {
@@ -16360,6 +16373,16 @@ def _write_v3_shared_lane_decision(
                 "research_timing_config_sha256": (ai or {}).get("research_timing_config_sha256"),
                 "original_context_signal_ts": copy.deepcopy((ai or {}).get("original_context_signal_ts")),
             }
+        if (ai or {}).get("effective_research_admission") is not None:
+            source.update({
+                "effective_research_direction": effective_research_direction,
+                "effective_research_admission": copy.deepcopy(
+                    (ai or {}).get("effective_research_admission")
+                ),
+                "effective_research_admission_policy_id": (
+                    (ai or {}).get("effective_research_admission_policy_id")
+                ),
+            })
         failure_source = {**source, **lane_policy}
         receipt = dual_write_lane_decision(
             source,
@@ -16436,6 +16459,8 @@ def _stamp_shared_ai_lane_verdict(
     reason: str,
     score=None,
     policy_version: str = None,
+    effective_direction: str = None,
+    admission_policy_id: str = None,
 ) -> None:
     """Attach one independent post-AI lane verdict and increment it once."""
     call_id = str(call_id or "")
@@ -16455,6 +16480,8 @@ def _stamp_shared_ai_lane_verdict(
         "block_reason": None if accepted else str(reason or "REJECT"),
         "score": score,
         "policy_version": policy_version,
+        "effective_direction": effective_direction,
+        "admission_policy_id": admission_policy_id,
         "stamped_at": time.time(),
     }
     with state_lock:
@@ -17777,6 +17804,50 @@ TILE2_ENTRY_TTL_SEC = int(os.getenv("TILE2_ENTRY_TTL_SEC", str(30 * 60)))
 
 
 
+def _effective_score_led_family_ai(ai: dict) -> tuple[dict, dict]:
+    """Return a lane-only effective copy; never rewrite the shared raw AI row."""
+    with state_lock:
+        live_armed = bool(state.get("live_armed"))
+        bitfinex_live_enabled = bool(state.get("bitfinex_live_enabled"))
+    admission = resolve_score_led_paper_admission(
+        ai,
+        score_led_enabled=SCORE_LED_PAPER_RESEARCH_ENABLED,
+        research_mode=is_research_data_collection(),
+        forced_paper=_force_paper_mode_active(),
+        live_armed=live_armed,
+        bitfinex_live_enabled=bitfinex_live_enabled,
+    )
+    if not admission["applied"]:
+        return ai, admission
+
+    effective = copy.deepcopy(ai or {})
+    effective["raw_direction"] = str(
+        effective.get("raw_direction") or effective.get("direction") or "UNKNOWN"
+    ).upper()
+    effective["raw_decision"] = str(
+        effective.get("raw_decision") or effective.get("decision") or "UNKNOWN"
+    ).upper()
+    effective["effective_research_admission"] = copy.deepcopy(admission)
+    effective["effective_research_admission_policy_id"] = SCORE_LED_ADMISSION_POLICY_ID
+    effective["effective_research_direction"] = admission["effective_direction"]
+    if admission["accepted"]:
+        direction = admission["effective_direction"]
+        effective["direction"] = direction
+        effective["candidate_direction"] = direction
+        effective["decision"] = "APPROVE"
+        effective["approved"] = True
+        effective["execution_tier"] = "APPROVE"
+        effective["research_soft"] = "APPROVE"
+    else:
+        effective["direction"] = "NO_TRADE"
+        effective["candidate_direction"] = "NO_TRADE"
+        effective["decision"] = "REJECT"
+        effective["approved"] = False
+        effective["execution_tier"] = "REJECT"
+        effective["research_soft"] = "REJECT"
+    return effective, admission
+
+
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
@@ -17787,14 +17858,20 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         return
     if not is_research_data_collection():
         return
-    ai_direction = ai.get("direction")
+    lane_ai, score_led_admission = _effective_score_led_family_ai(ai)
+    ai_direction = lane_ai.get("direction")
     final_direction = ai_direction
     if state.get("invert_signal", False):
         if ai_direction == "LONG":
             final_direction = "SHORT"
         elif ai_direction == "SHORT":
             final_direction = "LONG"
-    spread = int(compute_directional_spread(final_direction, ai))
+    spread = (
+        0
+        if score_led_admission.get("applied")
+        and not score_led_admission.get("accepted")
+        else int(compute_directional_spread(final_direction, lane_ai))
+    )
     enriched = _enrich_combo_lane_features(features, ctx)
     for lane in COMBO_EXECUTION_LANES:
         # Shared-direction policy lanes are routed explicitly so their own
@@ -17809,14 +17886,14 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         ):
             continue
         detail = combo_lane_match_detail(
-            lane, ai, final_direction, spread, features=enriched,
+            lane, lane_ai, final_direction, spread, features=enriched,
         )
-        ai_accepted = str(ai.get("decision") or "").upper() == "APPROVE"
+        ai_accepted = str(lane_ai.get("decision") or "").upper() == "APPROVE"
         lane_enabled = is_research_lane_enabled(lane)
         policy_accepted = ai_accepted and bool(detail.get("passes"))
         if not ai_accepted:
             disposition = "AI_REJECTED_NO_ORDER"
-            decision_reason = f"AI_{str(ai.get('decision') or 'REJECT').upper()}"
+            decision_reason = f"AI_{str(lane_ai.get('decision') or 'REJECT').upper()}"
         elif not detail.get("passes"):
             disposition = "POLICY_FILTERED_NO_ORDER"
             decision_reason = detail.get("block_reason") or "COMBO_FILTER"
@@ -17825,14 +17902,18 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
         else:
             disposition = "ORDER_ELIGIBLE"
-            decision_reason = "SHARED_AI_APPROVE_AND_POLICY_PASS"
+            decision_reason = (
+                score_led_admission["reason"]
+                if score_led_admission.get("applied")
+                else "SHARED_AI_APPROVE_AND_POLICY_PASS"
+            )
         # Keep the operator-facing AI History joined to the same signed
         # per-family decision that is written to the V3 ledger below.  The
         # ledger was complete, but without this stamp genuine family
         # evaluations rendered as "not evaluated" even while their paper
         # workers and orders were advancing.
         _stamp_shared_ai_lane_verdict(
-            _shared_ai_call_id(ai_result=ai, ctx=ctx),
+            _shared_ai_call_id(ai_result=lane_ai, ctx=ctx),
             lane,
             policy_accepted,
             decision_reason,
@@ -17842,11 +17923,17 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
                 or (_v3_lane_policy_material(lane) or {}).get("raw_policy_id")
                 or lane
             ),
+            effective_direction=(
+                lane_ai.get("effective_research_direction") or final_direction
+            ),
+            admission_policy_id=(
+                lane_ai.get("effective_research_admission_policy_id")
+            ),
         )
         evidence_ready = _write_v3_shared_lane_decision(
-            lane, ai, ctx, features or {},
+            lane, lane_ai, ctx, features or {},
             policy_decision=(
-                "ERROR" if bool(ai.get("ai_error"))
+                "ERROR" if bool(lane_ai.get("ai_error"))
                 else "ACCEPT" if policy_accepted else "REJECT"
             ),
             execution_disposition=disposition,
@@ -17864,7 +17951,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             br = detail.get("block_reason") or "COMBO_FILTER"
             log_lane_opportunity_event(
                 lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
-                (ai or {}).get("direction"), (ai or {}).get("win_prob"), edge_score,
+                (lane_ai or {}).get("direction"), (lane_ai or {}).get("win_prob"), edge_score,
                 block_reason=br,
             )
             logger.info(
@@ -17873,7 +17960,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             )
             continue
         _enqueue_combo_lane_execution(
-            ctx, ai, edge_score, enriched, lane,
+            ctx, lane_ai, edge_score, enriched, lane,
             f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
 

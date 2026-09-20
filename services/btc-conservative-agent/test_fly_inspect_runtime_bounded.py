@@ -94,8 +94,8 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
         text=True,
     )
     assert result.stdout.splitlines() == [
-        "v31-five-family-score-led-paper-v1",
-        "91bc9ef8a4b90e24bbaab008f1abef53a62e989591e37fd2f20c1f4bfefd445b",
+        "v31-five-family-score-led-non-tie-paper-v2",
+        "524acf4949ae234e39a3902882a20872dadfe33d1235453696256348bf0c9335",
     ]
 
 

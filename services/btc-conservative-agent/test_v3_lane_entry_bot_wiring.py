@@ -67,6 +67,7 @@ def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expec
         "copy": copy,
         "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
         "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
         "guard_retired_lane_execution": lambda *_args: True,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
         "is_research_lane_enabled": lambda _lane: True,
@@ -265,6 +266,7 @@ def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
     namespace = {
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
         "state": {"invert_signal": False},
         "compute_directional_spread": lambda *_args: 5,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
@@ -356,6 +358,7 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
     namespace = {
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
         "state": {"invert_signal": False},
         "compute_directional_spread": lambda *_args: 5,
         "_enrich_combo_lane_features": lambda features, _ctx: {
@@ -528,6 +531,7 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
     fanout_namespace = {
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
         "state": {"invert_signal": False},
         "compute_directional_spread": lambda *_args: 5,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
