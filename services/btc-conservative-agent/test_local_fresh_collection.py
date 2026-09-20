@@ -316,6 +316,57 @@ class LocalFreshCollectionTests(unittest.TestCase):
         )
         self.assertEqual(replay["status"], "BLOCKED")
 
+    def test_known_sqlite_sidecars_block_with_database_dependency_before_unlink(self):
+        databases = (
+            (
+                self.canonical / "research_accumulator" / "research_trades_v983.db",
+                "-journal",
+            ),
+            (
+                self.canonical / "v3" / "lifecycle_bundle_index" / "lifecycle_index.sqlite3",
+                "-wal",
+            ),
+            (
+                self.canonical
+                / "derived"
+                / "policy-evidence"
+                / ("generation-" + "a" * 64)
+                / "results.sqlite",
+                "-shm",
+            ),
+        )
+        for database, suffix in databases:
+            database.parent.mkdir(parents=True, exist_ok=True)
+            database.write_bytes(b"sqlite-fixture")
+            Path(str(database) + suffix).write_bytes(b"sidecar-fixture")
+        queued, _ = self.queue()
+        result = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["error"], "LOCAL_RESET_PROTECTED_RECOVERY_REQUIRES_AUDIT")
+        self.assertEqual(result["deleted"], [])
+        self.assertEqual(
+            len(
+                [
+                    blocker
+                    for blocker in result["protected_blockers"]
+                    if blocker.startswith("PROTECTED_SQLITE_SIDECAR_REQUIRES_AUDIT:")
+                ]
+            ),
+            3,
+        )
+        retained = {(row["root"], row["relative_path"]) for row in result["retained"]}
+        for database, suffix in databases:
+            self.assertTrue(database.exists())
+            self.assertTrue(Path(str(database) + suffix).exists())
+            relative = database.relative_to(self.canonical).as_posix()
+            self.assertIn(("canonical", relative), retained)
+            self.assertIn(("canonical", relative + suffix), retained)
+        self.assertTrue((self.canonical / "raw" / "events.jsonl").exists())
+
     def test_protected_source_copy_retains_complete_archive_receipt_closure(self):
         session = self.archives / "source-copy"
         payload = session / "payload"
