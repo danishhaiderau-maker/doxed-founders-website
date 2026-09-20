@@ -27,9 +27,14 @@ try {
         -EnableLocalReset:(-not $DisableReset) `
         -StartWorker {
           param($OperationId)
-          Start-Process -FilePath 'python' -ArgumentList @(
-            $FixtureCli, 'run', '--operation-id', $OperationId
-          ) -WindowStyle Hidden | Out-Null
+          $workerArgs = @($FixtureCli, 'run', '--operation-id', $OperationId)
+          if ($IsWindows) {
+            Start-Process -FilePath 'python' -ArgumentList $workerArgs -WindowStyle Hidden | Out-Null
+          } else {
+            # WindowStyle is a Windows-only process option; keep the Linux
+            # acceptance fixture cross-platform without changing the route.
+            Start-Process -FilePath 'python' -ArgumentList $workerArgs | Out-Null
+          }
         }
     } catch {
       try { $response.Abort() } catch { }
