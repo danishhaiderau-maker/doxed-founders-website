@@ -23,6 +23,7 @@ from local_fresh_collection import (  # noqa: E402
     queue_operation,
     read_operation,
 )
+from local_fresh_collection_owner_audit import OWNER_COMMAND_PATTERNS  # noqa: E402
 from research.local_generation_fence import (  # noqa: E402
     BLOCKED_STATE,
     LocalGenerationFenced,
@@ -251,6 +252,186 @@ class LocalFreshCollectionTests(unittest.TestCase):
         self.assertEqual(result["status"], "PARTIAL")
         self.assertEqual(result["error"], "LOCAL_RESET_RECONCILIATION_INCOMPLETE")
         self.assertEqual(result["remaining"][0]["relative_path"], "late-writer.json")
+
+    def test_nested_config_credentials_and_accounting_are_preserved(self):
+        protected = {
+            self.canonical / "nested" / "config" / "service.json": "config",
+            self.canonical / "nested" / "credentials" / "api.txt": "credential",
+            self.canonical / "accounting" / "lane_pnl_ledger.json": "accounting",
+            self.archives / "old" / "nested" / "config" / "settings.json": "archive-config",
+        }
+        for path, value in protected.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(value, encoding="utf-8")
+        queued, _ = self.queue()
+        result = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertEqual(result["retained_file_count"], len(protected))
+        self.assertEqual(
+            result["retained_inventory_sha256"],
+            hashlib.sha256(
+                json.dumps(
+                    result["retained"], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest(),
+        )
+        for path, value in protected.items():
+            self.assertEqual(path.read_text(encoding="utf-8"), value)
+        self.assertFalse((self.canonical / "raw" / "events.jsonl").exists())
+        self.assertFalse((self.archives / "old" / "report.html").exists())
+        reasons = {row["reason"] for row in result["retained"]}
+        self.assertIn("ESSENTIAL_CONFIG_OR_CREDENTIAL", reasons)
+        self.assertIn("ESSENTIAL_ORDER_PAPER_OR_ACCOUNTING_STATE", reasons)
+
+    def test_nested_recovery_or_wal_blocks_before_any_delete(self):
+        recovery = self.canonical / "nested" / "recovery" / "owner-state.json"
+        recovery.parent.mkdir(parents=True)
+        recovery.write_text("recovery", encoding="utf-8")
+        ledger = self.canonical / "v3" / "ledgers" / "lifecycle.jsonl"
+        ledger.parent.mkdir(parents=True)
+        ledger.write_text("ledger\n", encoding="utf-8")
+        wal = Path(str(ledger) + "-wal")
+        wal.write_text("wal", encoding="utf-8")
+        queued, _ = self.queue()
+        result = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["error"], "LOCAL_RESET_PROTECTED_RECOVERY_REQUIRES_AUDIT")
+        self.assertEqual(result["deleted"], [])
+        self.assertTrue(recovery.exists())
+        self.assertTrue(ledger.exists())
+        self.assertTrue(wal.exists())
+        self.assertTrue((self.canonical / "raw" / "events.jsonl").exists())
+        replay = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=lambda *_: self.fail("protection block must be durable"),
+        )
+        self.assertEqual(replay["status"], "BLOCKED")
+
+    def test_protected_source_copy_retains_complete_archive_receipt_closure(self):
+        session = self.archives / "source-copy"
+        payload = session / "payload"
+        payload.mkdir(parents=True)
+        protected_copy = payload / "9f4a.bin"
+        protected_copy.write_text("credential-copy", encoding="utf-8")
+        research_copy = payload / "research.bin"
+        research_copy.write_text("research-copy", encoding="utf-8")
+        metadata = {
+            "schema": "research_archive_receipt_v2",
+            "source_inventory": [
+                {
+                    "path": "nested/credentials/provider-token.json",
+                    "preserved_path": "payload/9f4a.bin",
+                    "preserved_bytes": len(b"credential-copy"),
+                    "preserved_sha256": hashlib.sha256(b"credential-copy").hexdigest(),
+                },
+                {
+                    "path": "signal_snapshot.jsonl",
+                    "preserved_path": "payload/research.bin",
+                    "preserved_bytes": len(b"research-copy"),
+                    "preserved_sha256": hashlib.sha256(b"research-copy").hexdigest(),
+                },
+            ],
+        }
+        receipt = session / "archive_meta.json"
+        receipt.write_text(json.dumps(metadata), encoding="utf-8")
+        queued, _ = self.queue()
+        result = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertTrue(receipt.exists())
+        self.assertTrue(protected_copy.exists())
+        self.assertTrue(research_copy.exists())
+        closure = [
+            row for row in result["retained"]
+            if row["reason"].startswith("PROTECTED_ARCHIVE_DEPENDENCY_CLOSURE:")
+        ]
+        self.assertEqual(len(closure), 3)
+
+    def test_recovery_source_copy_blocks_without_deleting_archive_or_canonical(self):
+        session = self.archives / "recovery-copy"
+        payload = session / "payload"
+        payload.mkdir(parents=True)
+        recovery_copy = payload / "opaque.bin"
+        recovery_copy.write_text("recovery", encoding="utf-8")
+        (session / "archive_meta.json").write_text(
+            json.dumps(
+                {
+                    "schema": "research_archive_receipt_v2",
+                    "source_inventory": [
+                        {
+                            "path": "nested/recovery/pending.json",
+                            "preserved_path": "payload/opaque.bin",
+                            "preserved_bytes": len(b"recovery"),
+                            "preserved_sha256": hashlib.sha256(b"recovery").hexdigest(),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        queued, _ = self.queue()
+        result = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["deleted"], [])
+        self.assertTrue(recovery_copy.exists())
+        self.assertTrue((self.canonical / "raw" / "events.jsonl").exists())
+
+    def test_unresolved_archive_receipt_blocks_before_any_delete(self):
+        session = self.archives / "unresolved-copy"
+        payload = session / "payload"
+        payload.mkdir(parents=True)
+        (payload / "opaque.bin").write_text("unknown", encoding="utf-8")
+        (session / "archive_meta.json").write_text(
+            json.dumps(
+                {
+                    "schema": "research_archive_receipt_v2",
+                    "source_inventory": [
+                        {
+                            "path": "nested/config/provider.json",
+                            "preserved_path": "payload/opaque.bin",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        queued, _ = self.queue()
+        result = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertIn("UNRESOLVED_ARCHIVE_METADATA_REQUIRES_AUDIT", result["protected_blockers"][0])
+        self.assertTrue((self.canonical / "raw" / "events.jsonl").exists())
+        self.assertTrue((payload / "opaque.bin").exists())
+
+    def test_owner_audit_covers_bundle_batch_resume_and_retirement_entrypoints(self):
+        self.assertTrue(
+            {
+                "fly-sync-bundle-client",
+                "start-fly-batch-sync",
+                "fly-sync-generation-resume",
+                "raw_generation_cleanup_owner",
+                "canonical_generation_retirement",
+            }.issubset(set(OWNER_COMMAND_PATTERNS))
+        )
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_link_escape_is_refused(self):
