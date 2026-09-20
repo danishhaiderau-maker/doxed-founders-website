@@ -31426,9 +31426,9 @@ __ADMIN_ACCESS_CONTROLS__
 </div>
 
 <p id="freshCollectionHint" style="color:#8b949e;font-size:0.85em;margin-top:8px;">
-  <strong>Fresh Collection (Fly epoch):</strong> one-way ON for the bound epoch. Clicking while ON does not turn it OFF — it offers <em>start a NEW fresh epoch</em>, which calls authenticated <code>POST /api/fresh_epoch_reset</code> on the Fly owner. That quarantines Fly volume research dumps (trades, snapshots, funnel, counterfactual, shadow, market evidence, analyzer generations) and bumps the desktop-sync signal so the home mirror picks up the new empty epoch without mixing quarantine into the active tree. Paper must be paused and flat; Cheetah stays paused/disarmed. While ON, oversized aux logs are trimmed hourly.
+  <strong>Fresh Collection (Fly epoch):</strong> one-way ON for the bound epoch. Clicking while ON does not turn it OFF — it offers <em>start a NEW fresh epoch</em>, which calls authenticated <code>POST /api/fresh_epoch_reset</code> on the Fly owner. That resets the Fly research epoch and signals desktop sync. On the desktop, the next successful sync moves the prior active mirror into local quarantine; it does not delete that local copy. Paper must be paused and flat; Cheetah stays paused/disarmed. While ON, oversized aux logs are trimmed hourly.
   <br><br>
-  <strong>Wipe Fly Data Only:</strong> same Fly wipe + in-memory reset, but the local sync mirror is retained for offline analysis history. Use when Fly is filling up but you want to keep local data.
+  <strong>Wipe Fly Data Only:</strong> deletes scoped Fly research files + resets Fly in-memory research state while retaining protected credentials, accounting, and recovery state. It does not signal a fresh desktop epoch: the existing local sync mirror is left untouched.
 </p>
 <p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 <p id="wipeFlyOnlyStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
@@ -31442,12 +31442,13 @@ __ADMIN_ACCESS_CONTROLS__
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
-      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Inventoried runtime files</div>
+      <div style="font-size:0.74rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Current transferable research inventory</div>
       <div style="display:flex;align-items:baseline;gap:10px;margin:4px 0 2px 0;">
         <span id="dataSizeFlyMb" style="font-size:1.5rem;font-weight:700;color:#58a6ff;">-</span>
-        <span style="color:#8b949e;font-size:0.85em;">MB &middot; not the download backlog</span>
+        <span style="color:#8b949e;font-size:0.85em;">MB &middot; transfer allowlist, not whole filesystem</span>
       </div>
       <div style="color:#8b949e;font-size:0.85em;">Volume capacity: <span id="dataSizeVolumeTotal">-</span> MB &mdash; capacity does not shrink after a wipe.</div>
+      <div style="color:#8b949e;font-size:0.85em;">Current filesystem used: <span id="dataSizeFilesystemUsed">-</span> MB &mdash; measured independently of transfer inventory.</div>
       <div style="color:#8b949e;font-size:0.78em;">The usage bar measures the whole filesystem. Downloading copies files; only verified source deletion frees space. A dash means unavailable, not zero.</div>
       <div id="dataSizeInventoryStatus" style="color:#8b949e;font-size:0.74em;margin-top:3px;">Inventory: unavailable</div>
       <div style="background:#21262d;border-radius:6px;height:12px;overflow:hidden;margin:8px 0 4px 0;border:1px solid #30363d;">
@@ -32396,8 +32397,8 @@ DASHBOARD_JS = """(function () {
         const epoch = status.epoch_id || 'unbound';
         const alreadyOn = !!status.fresh_collection_mode;
         const confirmMsg = alreadyOn
-          ? ('Fresh Collection is already ON for epoch ' + epoch + '.\\n\\nThis control cannot turn OFF. Start a NEW fresh epoch? That quarantines Fly volume research dumps via POST /api/fresh_epoch_reset and the desktop mirror then syncs the empty epoch (quarantine stays out of the active tree).\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?')
-          : ('Start a fresh collection epoch on Fly? This calls POST /api/fresh_epoch_reset: quarantines Fly volume research dumps, resets session counters, and signals the desktop mirror.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?');
+          ? ('Fresh Collection is already ON for epoch ' + epoch + '.\\n\\nThis control cannot turn OFF. Start a NEW fresh epoch on Fly? The next successful desktop sync moves the prior local active mirror into local quarantine; it does not delete that local copy.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?')
+          : ('Start a fresh collection epoch on Fly? This resets Fly research data and session counters, then signals desktop sync. The next successful desktop sync moves the prior local active mirror into local quarantine; it does not delete that local copy.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?');
         if (!confirm(confirmMsg)) return;
         const freshStatusRes = await fetch('/api/fresh_epoch_reset', {
           method: 'GET',
@@ -32450,7 +32451,7 @@ DASHBOARD_JS = """(function () {
     async function wipeFlyOnly() {
       if (wipeFlyOnlyInFlight) return;
       const ok = confirm(
-        'Wipe ALL data on the Fly volume (research CSVs, jsonl logs, debug/log files) and reset in-memory trades?\\n\\n' +
+        'Delete scoped Fly research files (research CSVs, jsonl logs, debug/log files) and reset in-memory research state? Protected credentials, accounting, and recovery state are retained.\\n\\n' +
         'The LOCAL SYNC MIRROR will be RETAINED for offline analysis.\\n\\n' +
         'Use this when Fly is filling up but you want to keep local history. Continue?'
       );
@@ -32475,7 +32476,7 @@ DASHBOARD_JS = """(function () {
           return;
         }
         if (status) {
-          let msg = 'Fly wiped. Local retained. ✓';
+          let msg = 'Scoped Fly research deleted. Protected state and local mirror retained. ✓';
           if (body.reset && body.reset.summary) msg += ' (' + body.reset.summary + ')';
           status.innerText = msg;
         }
@@ -32509,6 +32510,22 @@ DASHBOARD_JS = """(function () {
       }
       if (barEl) barEl.style.background = color;
     }
+    function _dataSizeInventoryView(body) {
+      const rawStatus = String(body.runtime_size_status || 'UNAVAILABLE').toUpperCase();
+      const rawSize = body.runtime_size_mb;
+      const size = Number(rawSize);
+      const validSize = rawSize !== null && rawSize !== undefined && !(typeof rawSize === 'string' && rawSize.trim() === '') && Number.isFinite(size) && size >= 0;
+      const current = rawStatus === 'CURRENT' && validSize;
+      const status = rawStatus === 'CURRENT' && !validSize ? 'UNAVAILABLE' : rawStatus;
+      const stale = status.includes('STALE');
+      return {
+        status: status,
+        current: current,
+        sizeText: current && Number.isFinite(size) ? size.toFixed(1) : '-',
+        statusText: current ? 'Inventory: current transferable runtime files' : (stale ? 'Inventory: STALE cached transfer inventory — not current runtime size' : 'Inventory: unavailable — current runtime size unknown'),
+        statusColor: current ? '#3fb950' : (stale ? '#d29922' : '#ef4444')
+      };
+    }
     async function refreshDataSize() {
       if (dataSizeRefreshInFlight) return;
       dataSizeRefreshInFlight = true;
@@ -32524,18 +32541,21 @@ DASHBOARD_JS = """(function () {
         const mbEl = document.getElementById('dataSizeFlyMb');
         const pctEl = document.getElementById('dataSizeVolumePct');
         const totalEl = document.getElementById('dataSizeVolumeTotal');
+        const filesystemUsedEl = document.getElementById('dataSizeFilesystemUsed');
         const pathEl = document.getElementById('dataSizeRuntimePath');
         const lastEl = document.getElementById('dataSizeLastCheck');
-        const inventoryStatus = String(body.runtime_size_status || 'UNAVAILABLE').toUpperCase();
-        const inventoryCurrent = inventoryStatus === 'CURRENT';
+        const inventoryView = _dataSizeInventoryView(body);
+        const inventoryStatus = inventoryView.status;
+        const inventoryCurrent = inventoryView.current;
         const inventoryStatusEl = document.getElementById('dataSizeInventoryStatus');
-        if (mbEl) mbEl.textContent = body.runtime_size_mb == null ? '-' : Number(body.runtime_size_mb).toFixed(1);
+        if (mbEl) mbEl.textContent = inventoryView.sizeText;
         if (inventoryStatusEl) {
-          inventoryStatusEl.textContent = 'Inventory: ' + inventoryStatus.toLowerCase().replaceAll('_', ' ');
-          inventoryStatusEl.style.color = inventoryCurrent ? '#3fb950' : (inventoryStatus.includes('STALE') ? '#d29922' : '#ef4444');
+          inventoryStatusEl.textContent = inventoryView.statusText;
+          inventoryStatusEl.style.color = inventoryView.statusColor;
         }
         if (pctEl) pctEl.textContent = body.volume_pct == null ? '-' : Number(body.volume_pct).toFixed(1);
         if (totalEl && body.volume_total_mb != null) totalEl.textContent = String(body.volume_total_mb);
+        if (filesystemUsedEl) filesystemUsedEl.textContent = body.filesystem_used_mb == null ? '-' : Number(body.filesystem_used_mb).toFixed(1);
         if (pathEl) pathEl.textContent = body.runtime_path ? ('path: ' + body.runtime_path) : '';
         if (lastEl) lastEl.textContent = new Date().toLocaleTimeString();
         const pct = body.volume_pct == null ? null : Number(body.volume_pct);
