@@ -585,6 +585,11 @@ def _summary_stale_meta(compact: dict) -> dict:
     data_scope = str(compact.get("data_scope") or "all").lower()
     scope_label = compact.get("session_scope") or "ALL-DATA"
     trades_csv = DATA_ROOT / "trades_3factor.csv"
+    all_data_report = ROOT / ALL_DATA_REPORTS_DIR / "top_combinations_report.json"
+    try:
+        report_trades = int((compact.get("performance") or {}).get("trades") or 0)
+    except (TypeError, ValueError, OverflowError):
+        report_trades = 0
     trades_rows = 0
     if trades_csv.is_file():
         try:
@@ -601,15 +606,21 @@ def _summary_stale_meta(compact: dict) -> dict:
         except Exception:
             pass
 
-    if data_scope == "all" and scope_label == "ALL-DATA":
-        if session.get("fresh_collection_mode") or not trades_csv.is_file():
-            stale = True
-            reasons.append("ALL-DATA scope includes pre-wipe history — run analyzer after fresh collection")
-        elif trades_rows == 0 and int((compact.get("performance") or {}).get("trades") or 0) > 0:
-            stale = True
-            reasons.append("Trades CSV empty but report shows historical trades")
-
     freshness = _generation_freshness_meta()
+    if data_scope == "all" and scope_label == "ALL-DATA":
+        # The defaults above describe an absent summary; they do not prove that
+        # any pre-wipe history exists. A saved report can itself be fresh V3
+        # analysis, which need not have a legacy trades CSV. Identity, not file
+        # existence or trade count, decides whether its scope is current.
+        all_data_present = all_data_report.is_file() or report_trades > 0
+        scope_verified = freshness.get("current") is True and freshness.get("epoch_parity") == "MATCH"
+        if all_data_present and not scope_verified:
+            stale = True
+            if freshness.get("epoch_parity") == "MISMATCH":
+                reasons.append("ALL-DATA report belongs to a different collection epoch")
+            else:
+                reasons.append("ALL-DATA report scope is not verified against the current collection epoch")
+
     if not freshness["current"]:
         stale = True
         reasons.extend(freshness["reasons"])
@@ -8501,13 +8512,20 @@ async function loadGenome() {
   const empty = document.getElementById('genome-empty');
   const content = document.getElementById('genome-content');
   if (!d || !d.schema || d.available === false) {
-    setEvidenceScope('genome', 'SOURCE UNAVAILABLE', 'The required current Genome evidence is unavailable. Prior artifacts are preserved but current conclusions are blocked.');
+    const preserved = d?.preserved_report_available === true;
+    const unavailableScope = preserved
+      ? 'The required current Genome evidence is unavailable. A prior report is preserved but current conclusions are blocked.'
+      : 'The required current Genome evidence is unavailable. No readable preserved Genome report is declared; current conclusions are blocked.';
+    setEvidenceScope('genome', 'SOURCE UNAVAILABLE', unavailableScope);
     content.style.display = 'none';
     empty.style.display = 'block';
     const src = (d && d.source_status) || {};
     const missing = (src.missing_tables || []).join(', ');
     empty.textContent = (d && d.warning) || `Genome source unavailable: ${src.reason || src.status || 'unknown reason'}.`;
-    document.getElementById('genome-note').textContent = `SOURCE UNAVAILABLE · missing tables: ${missing || 'not reported'} · prior artifacts preserved but blocked · execution unaffected.`;
+    const preservation = preserved
+      ? 'prior report preserved but blocked'
+      : 'no readable preserved Genome report declared';
+    document.getElementById('genome-note').textContent = `SOURCE UNAVAILABLE · missing tables: ${missing || 'not reported'} · ${preservation} · execution unaffected.`;
     return;
   }
   setEvidenceScope('genome', 'V3.1 SAFE POLICY GENOME - PUBLISHED SNAPSHOT', 'Check publication freshness above. Stale reports are not current qualification evidence. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.');

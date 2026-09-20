@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,24 @@ def publication_state(manifest, compact, paths):
     }
     exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), env)
     return env["_analyzer_publication_state"](manifest, compact)
+
+
+def stale_meta(compact, *, root, session, freshness):
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_summary_stale_meta"
+    )
+    env = {
+        "ALL_DATA_REPORTS_DIR": "all_data_reports",
+        "DATA_ROOT": root / "data",
+        "ROOT": root,
+        "_generation_freshness_meta": lambda: freshness,
+        "_load_bot_session": lambda: session,
+        "datetime": datetime,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), env)
+    return env["_summary_stale_meta"](compact)
 
 
 def test_complete_dashboard_javascript_parses():
@@ -164,6 +183,106 @@ def test_proven_empty_publication_is_awaiting_not_stale():
     assert "if (analysisFailed)" in source
     assert "} else if (noPublication) {" in source
     assert "} else if (stale.stale) {" in source
+
+
+def test_proven_empty_publication_does_not_invent_pre_wipe_history(tmp_path):
+    publication = publication_state({}, {}, [])
+    assert publication["absence_proven"] is True
+    stale = stale_meta(
+        {},
+        root=tmp_path,
+        session={"fresh_collection_mode": True},
+        freshness={"current": False, "reasons": ["NO_CURRENT_GENERATION"]},
+    )
+    assert stale["stale"] is True
+    assert stale["reasons"] == ["NO_CURRENT_GENERATION"]
+    assert not any("pre-wipe history" in reason for reason in stale["reasons"])
+
+
+def test_existing_all_data_report_with_unverified_epoch_keeps_scope_warning(tmp_path):
+    report = tmp_path / "all_data_reports" / "top_combinations_report.json"
+    report.parent.mkdir()
+    report.write_text("{}", encoding="utf-8")
+    stale = stale_meta(
+        {"data_scope": "all", "session_scope": "ALL-DATA"},
+        root=tmp_path,
+        session={"fresh_collection_mode": True},
+        freshness={"current": False, "reasons": ["NO_CURRENT_GENERATION"]},
+    )
+    assert stale["stale"] is True
+    assert "ALL-DATA report scope is not verified against the current collection epoch" in stale["reasons"]
+
+
+def test_current_v3_all_data_report_does_not_require_legacy_trades_csv(tmp_path):
+    stale = stale_meta(
+        {"data_scope": "all", "session_scope": "ALL-DATA", "performance": {"trades": 3}},
+        root=tmp_path,
+        session={"fresh_collection_mode": True},
+        freshness={"current": True, "epoch_parity": "MATCH", "reasons": []},
+    )
+    assert stale["stale"] is False
+    assert stale["reasons"] == []
+
+
+def test_all_data_report_with_different_epoch_is_not_current(tmp_path):
+    stale = stale_meta(
+        {"data_scope": "all", "session_scope": "ALL-DATA", "performance": {"trades": 3}},
+        root=tmp_path,
+        session={"fresh_collection_mode": True},
+        freshness={"current": False, "epoch_parity": "MISMATCH", "reasons": ["EPOCH_MISMATCH"]},
+    )
+    assert stale["stale"] is True
+    assert stale["reasons"] == [
+        "ALL-DATA report belongs to a different collection epoch", "EPOCH_MISMATCH",
+    ]
+
+
+def render_unavailable_genome(preserved):
+    page = html()
+    loader = page[page.index("async function loadGenome()"):page.index("async function loadAI()")]
+    payload = {
+        "schema": "genome_dashboard_status_v1",
+        "available": False,
+        "status": "GENOME_SOURCE_UNAVAILABLE",
+        "preserved_report_available": preserved,
+        "source_status": {"status": "SOURCE_STATUS_MISSING"},
+    }
+    script = """
+const elements = {};
+const document = {getElementById: id => elements[id] ||= {textContent:'',style:{}}};
+let scope = null;
+const setEvidenceScope = (...args) => {scope = args;};
+const fetch = async () => ({json: async () => (PAYLOAD)});
+""".replace("PAYLOAD", json.dumps(payload))
+    script += loader
+    script += """
+(async()=>{await loadGenome(); console.log(JSON.stringify({
+  scope, note: elements['genome-note'].textContent, empty: elements['genome-empty'].textContent
+}));})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    result = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_empty_genome_does_not_claim_prior_artifacts_are_preserved():
+    rendered = render_unavailable_genome(False)
+    assert rendered["scope"][1] == "SOURCE UNAVAILABLE"
+    assert "No readable preserved Genome report is declared" in rendered["scope"][2]
+    assert "no readable preserved Genome report declared" in rendered["note"]
+    assert "prior artifacts preserved" not in json.dumps(rendered).lower()
+
+
+def test_unavailable_genome_with_preserved_report_keeps_archive_warning():
+    rendered = render_unavailable_genome(True)
+    assert "A prior report is preserved" in rendered["scope"][2]
+    assert "prior report preserved but blocked" in rendered["note"]
 
 
 def test_existing_unverified_artifact_is_not_claimed_absent(tmp_path):
