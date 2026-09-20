@@ -4745,7 +4745,7 @@ def _genome_payload():
                 "status": "RETIRED_RESEARCH_DB_DNA_EXCLUDED_FROM_V3_1_QUALIFICATION",
             },
             "warning": (
-                "Current V3.1 Safe Policy Genome evidence. Descriptive rows do not "
+                "Published V3.1 Safe Policy Genome evidence; check freshness above. Descriptive rows do not "
                 "authorize live trading until every chronological OOS and risk gate passes."
             ),
         }
@@ -7055,7 +7055,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h3>Shared market-context evidence coverage</h3>
     <p class="note" id="genome-shared-context"></p>
     <p class="note" id="genome-taxonomy-note"></p>
-    <h2>Current market cluster</h2>
+    <h2>Published market cluster</h2>
     <pre id="genome-cluster"></pre>
     <h2>Discoveries</h2>
     <div id="genome-discoveries"></div>

@@ -19,6 +19,8 @@ def test_genome_navigation_is_not_hard_coded_unavailable():
     assert "genome: ['V3.1 SAFE POLICY GENOME - PUBLISHED SNAPSHOT'" in source
     assert 'CURRENT V3.1 SAFE POLICY GENOME' not in source
     assert 'Stale reports are not current qualification evidence.' in source
+    assert 'Current V3.1 Safe Policy Genome evidence.' not in source
+    assert '<h2>Current market cluster</h2>' not in source
     assert "setEvidenceScope('genome', 'SOURCE UNAVAILABLE'" in source
     assert "setEvidenceScope('genome', 'V3.1 SAFE POLICY GENOME - PUBLISHED SNAPSHOT'" in source
 
