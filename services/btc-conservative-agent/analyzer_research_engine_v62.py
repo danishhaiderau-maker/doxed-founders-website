@@ -13460,6 +13460,7 @@ def chase_attribution_report(trades=None, session=None):
     trade_chase = {}
     trade_lane = {}
     trade_hold = {}
+    trade_settings_epoch = {}
     if trades is not None and not trades.empty and "trade_id" in trades.columns:
         work = trades.copy()
         if "trade_id" in work.columns:
@@ -13475,6 +13476,23 @@ def chase_attribution_report(trades=None, session=None):
                 if pd.notna(pnl):
                     trade_pnl[tid] = float(pnl)
                     trade_wr[tid] = float(pnl) > 0
+                    raw_settings_ts = next(
+                        (
+                            t.get(name) for name in ("entry_ts", "open_ts", "ts")
+                            if name in work.columns and t.get(name) not in (None, "")
+                        ),
+                        None,
+                    )
+                    try:
+                        numeric_settings_ts = float(raw_settings_ts)
+                    except (TypeError, ValueError, OverflowError):
+                        numeric_settings_ts = None
+                    if numeric_settings_ts is not None and math.isfinite(numeric_settings_ts):
+                        trade_settings_epoch[tid] = numeric_settings_ts
+                    else:
+                        parsed_settings_ts = pd.to_datetime(raw_settings_ts, utc=True, errors="coerce")
+                        if pd.notna(parsed_settings_ts):
+                            trade_settings_epoch[tid] = float(parsed_settings_ts.timestamp())
         for _, t in work.iterrows():
             tid = str(t.get("trade_id") or "")
             if tid:
@@ -13635,6 +13653,11 @@ def chase_attribution_report(trades=None, session=None):
             "fill_price": fill_price,
             "net_pnl_usd": trade_pnl.get(tid),
             "win": trade_wr.get(tid),
+            "settings_observation_epoch": (
+                order_epoch
+                or (_funnel_row_epoch(fill_row) if fill_row else None)
+                or trade_settings_epoch.get(tid)
+            ),
             "ttl_expired": expire_row is not None and not filled,
         }
         joined_relay = relay_index.get(tid) if isinstance(relay_index, dict) else None
@@ -13710,6 +13733,7 @@ def chase_attribution_report(trades=None, session=None):
             "fill_price": None,
             "net_pnl_usd": pnl,
             "win": trade_wr.get(tid),
+            "settings_observation_epoch": trade_settings_epoch.get(tid),
             "ttl_expired": False,
             "chase_count_source": "trades_3factor.limit_chase_count",
         })
@@ -13892,6 +13916,43 @@ def _chase_bucket_integrity_cohorts(trades, chase_payload) -> dict:
     }
 
 
+def _current_execution_settings_binding(session) -> dict | None:
+    """Return the latest canonical runtime settings epoch in this collection."""
+    session_start = _session_start_ts(session)
+    if session_start is None or pd.isna(session_start):
+        return None
+    cutoff = float(session_start.timestamp())
+    candidates = []
+    for row in _load_jsonl_rows("execution_settings_history.jsonl"):
+        if not isinstance(row, dict):
+            continue
+        try:
+            effective_epoch = float(row.get("epoch"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        gap_buckets = row.get("gap_buckets")
+        chase_buckets = row.get("chase_buckets")
+        if (not math.isfinite(effective_epoch) or effective_epoch < cutoff
+                or not isinstance(gap_buckets, list)
+                or not isinstance(chase_buckets, list)
+                or any(not isinstance(value, str) for value in [*gap_buckets, *chase_buckets])):
+            continue
+        expected = "gap=" + ",".join(gap_buckets) + "|chase=" + ",".join(chase_buckets)
+        if row.get("signature") != expected:
+            continue
+        candidates.append((effective_epoch, expected, gap_buckets, chase_buckets))
+    if not candidates:
+        return None
+    effective_epoch, signature, gap_buckets, chase_buckets = max(candidates, key=lambda row: row[0])
+    return {
+        "schema": "execution_settings_binding_v1",
+        "signature": signature,
+        "effective_epoch": effective_epoch,
+        "gap_buckets": gap_buckets,
+        "chase_buckets": chase_buckets,
+    }
+
+
 def _chase_bucket_stats(attributions):
     order = ["0", "1", "2", "3", "4", "5+"]
     buckets = {
@@ -13902,14 +13963,17 @@ def _chase_bucket_stats(attributions):
         for k in order
     }
     for row in attributions or []:
-        if row.get("net_pnl_usd") is None and row.get("win") is None:
+        try:
+            pnl = float(row.get("net_pnl_usd"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(pnl):
             continue
         key = _chase_count_bucket(row.get("chase_count"))
         b = buckets[key]
         b["trades"] += 1
-        pnl = float(row.get("net_pnl_usd") or 0)
         b["sum_pnl_usd"] = round(b["sum_pnl_usd"] + pnl, 2)
-        if row.get("win") or pnl > 0:
+        if pnl > 0:
             b["wins"] += 1
         hold = row.get("avg_hold_min")
         if hold is not None:
@@ -13947,7 +14011,35 @@ def chase_effectiveness_report(trades=None, session=None, chase_payload=None):
     if chase_payload is None:
         chase_payload = chase_attribution_report(trades=trades, session=session)
     attributions = (chase_payload or {}).get("trades") or []
-    buckets = _chase_bucket_stats(attributions)
+    settings_binding = _current_execution_settings_binding(session)
+    eligible = []
+    exclusions = {
+        "MISSING_OR_NONFINITE_NET_PNL": 0,
+        "MISSING_OR_INVALID_SETTINGS_TIME": 0,
+        "BEFORE_CURRENT_SETTINGS_EPOCH": 0,
+    }
+    for row in attributions:
+        try:
+            pnl = float(row.get("net_pnl_usd"))
+        except (TypeError, ValueError, OverflowError):
+            exclusions["MISSING_OR_NONFINITE_NET_PNL"] += 1
+            continue
+        if not math.isfinite(pnl):
+            exclusions["MISSING_OR_NONFINITE_NET_PNL"] += 1
+            continue
+        try:
+            settings_epoch = float(row.get("settings_observation_epoch"))
+        except (TypeError, ValueError, OverflowError):
+            exclusions["MISSING_OR_INVALID_SETTINGS_TIME"] += 1
+            continue
+        if not math.isfinite(settings_epoch):
+            exclusions["MISSING_OR_INVALID_SETTINGS_TIME"] += 1
+            continue
+        if settings_binding is None or settings_epoch < settings_binding["effective_epoch"]:
+            exclusions["BEFORE_CURRENT_SETTINGS_EPOCH"] += 1
+            continue
+        eligible.append(row)
+    buckets = _chase_bucket_stats(eligible)
     for key, b in buckets.items():
         if b["trades"]:
             print(
@@ -13961,6 +14053,22 @@ def chase_effectiveness_report(trades=None, session=None, chase_payload=None):
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "question": "Are heavily chased trades profitable or rescue fills?",
+        "metric_basis": {
+            "pnl_field": "net_pnl_usd",
+            "pnl_basis": "AFTER_COST_NET_PNL",
+            "ev_denominator": "current_settings_bucket_attributions_with_finite_net_pnl",
+            "bucket_field": "chase_count",
+        },
+        "metrics_status": (
+            "VERIFIED_CURRENT_SETTINGS_COHORT"
+            if settings_binding is not None else "UNAVAILABLE_SETTINGS_BINDING"
+        ),
+        "execution_settings_binding": settings_binding,
+        "cohort_counts": {
+            "input_attributions": len(attributions),
+            "included_finite_net_pnl": len(eligible),
+            "exclusions": exclusions,
+        },
         "buckets": buckets,
     }
     try:
