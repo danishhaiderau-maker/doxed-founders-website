@@ -815,7 +815,7 @@ jobs:
           payload="$(python - <<'PY'
           import base64
           source = r'''
-          import json,os,re,itertools,time
+          import json,os,re,itertools,time,hashlib
           from pathlib import Path
           assert os.getenv('SOURCE_GIT_REV') == '70d9ff728de7dd27b5716246bc0425cd5192d31b', 'revision changed'
           root=Path('/app/data/runtime/research_reset_receipts')
@@ -838,7 +838,10 @@ jobs:
               cap=(64 if p.name == 'operation.json' else 32 if p.name == 'deletion.json' else 4)*1024*1024
               print(json.dumps({'receipt_size':str(p.relative_to(root)),'bytes':p.stat().st_size}))
               assert not p.is_symlink() and p.stat().st_size <= cap, 'receipt bound'
-              d=json.loads(p.read_text()); assert isinstance(d,dict)
+              raw=p.read_bytes(); assert len(raw) <= cap, 'receipt grew beyond bound'
+              d=json.loads(raw); assert isinstance(d,dict)
+              if p.name == 'operation.json':
+                  print(json.dumps({'operation_binding':{'path':str(p),'sha256':hashlib.sha256(raw).hexdigest()}}))
               print(json.dumps({'receipt':str(p.relative_to(root)), 'mtime':p.stat().st_mtime,'fields':{k:v for k,v in d.items() if k in allowed and isinstance(v,(str,int,float,bool,type(None)))}},sort_keys=True))
               return d
           active=read(root/'ACTIVE_RESET.json')
@@ -882,6 +885,9 @@ jobs:
                       'sidecars':{s:Path(str(cache)+s).exists() for s in ('-wal','-shm','-journal')},
                       'dirty_epochs':[list(r) for r in con.execute('SELECT collection_epoch_id,count(*) FROM dirty_lifecycle GROUP BY collection_epoch_id LIMIT 5')],
                       'indexed_ledgers':[list(r) for r in con.execute('SELECT ledger,count(*) FROM lifecycle_event GROUP BY ledger LIMIT 16')],
+                      'indexed_epochs':[list(r) for r in con.execute('SELECT collection_epoch_id,count(*) FROM lifecycle_event GROUP BY collection_epoch_id LIMIT 5')],
+                      'shared_epochs':[list(r) for r in con.execute('SELECT epoch_id,count(*) FROM shared_context_event GROUP BY epoch_id LIMIT 5')],
+                      'cursors':[list(r) for r in con.execute('SELECT ledger,byte_offset FROM ledger_cursor LIMIT 32')],
                       'source_exists':{n:(cache.parent.parent/'ledgers'/(n+'.jsonl')).exists() for n in ('opportunity','decision','order_intent','execution','lifecycle','market_segment')}}}))
               finally: con.close()
           print('DERIVED_INDEX_PROBE_COMPLETE')
