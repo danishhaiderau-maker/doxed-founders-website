@@ -3,6 +3,8 @@ import ast
 import hashlib
 import json
 import os
+import re
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 import threading
@@ -30,13 +32,30 @@ class InlineThread:
 
 
 def load_adapter(extra):
-    names = {"_start_data_sync_bundle_generation", "_data_sync_runtime_root",
-             "_data_sync_volume_root", "_data_sync_relpath"}
+    names = {
+        "_data_sync_bundle_admission_identity",
+        "_data_sync_bundle_admission_store",
+        "_data_sync_bundle_admission_publish",
+        "_admit_data_sync_bundle_generation",
+        "_start_data_sync_bundle_generation",
+        "_data_sync_runtime_root", "_data_sync_volume_root", "_data_sync_relpath",
+    }
     tree = ast.parse(BOT.read_text(encoding="utf-8"))
     selected = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert {node.name for node in selected} == names
-    namespace = {"os": os, "Path": Path, "threading": SimpleNamespace(Thread=InlineThread),
-                 "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": set(), **extra}
+    namespace = {
+        "os": os, "Path": Path, "re": re, "uuid": uuid,
+        "threading": SimpleNamespace(Thread=InlineThread),
+        "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": set(),
+        "_DATA_SYNC_BUNDLE_PROCESS_INCARNATION": "1" * 32,
+        "_DATA_SYNC_BUNDLE_ADMISSION_STATUS": {"outcome": "NOT_OBSERVED"},
+        "_DATA_SYNC_BUNDLE_LAST_STATUS": {},
+        "_DATA_SYNC_BUNDLE_REGISTRY": SimpleNamespace(ready=True),
+        "_data_sync_receipt_bootstrap_gate": lambda: {"complete": True},
+        "_data_sync_inventory_generation": lambda generation_id: extra["_data_sync_bundle_generation"](generation_id),
+        "_start_data_sync_bundle_reservation_hydration": lambda: None,
+        **extra,
+    }
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOT), "exec"), namespace)
     return namespace
 
