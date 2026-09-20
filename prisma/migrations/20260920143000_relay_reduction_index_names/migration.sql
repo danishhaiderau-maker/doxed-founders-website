@@ -1,0 +1,2 @@
+ALTER INDEX "public"."SignalCycleParticipantReduction_participantId_sourceEventSeq_ke" RENAME TO "SignalCycleParticipantReduction_participantId_sourceEventSe_key";
+ALTER INDEX "public"."SignalCycleParticipantReduction_participantId_phase_createdAt_i" RENAME TO "SignalCycleParticipantReduction_participantId_phase_created_idx";
