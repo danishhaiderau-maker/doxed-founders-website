@@ -1090,7 +1090,14 @@ jobs:
           # Keep bot/analyzer imports away from the checkout and any inherited
           # runner state. Tests still create their own per-case temporary data.
           BTC_AGENT_DATA_DIR: ${{ runner.temp }}/btc-agent-data-ci
+          # The preceding safety-contract matrix creates many ephemeral
+          # pytest directories. Give the SQLite/receipt regression batch a
+          # fresh bounded temp root so stale CI scratch cannot cause disk-I/O
+          # or shared-library mapping failures.
+          TMPDIR: ${{ runner.temp }}/transactional-pytest
         run: |
+          rm -rf "$TMPDIR" /tmp/pytest-of-runner
+          mkdir -p "$TMPDIR"
           mkdir -p "$BTC_AGENT_DATA_DIR"
           # Keep each bounded group in its own process. Some hosted runners
           # enforce a per-process CPU quota; splitting preserves all tests
