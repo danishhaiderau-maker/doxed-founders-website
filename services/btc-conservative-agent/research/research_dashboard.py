@@ -1400,6 +1400,40 @@ def _read_json(name: str, default=None):
     return _pick_best_payload(name, default)
 
 
+def _analyzer_publication_state(manifest: dict, compact: dict) -> dict:
+    """Distinguish a proven empty publication root from stale/invalid output."""
+    manifest = manifest if isinstance(manifest, dict) else {}
+    compact = compact if isinstance(compact, dict) else {}
+    generation_id = str(manifest.get("generation_id") or "").strip()
+    reports = manifest.get("reports")
+    manifest_valid = bool(generation_id and isinstance(reports, list))
+    candidates = {
+        path
+        for name in (REPORT_MANIFEST_FILE, COMPACT_SUMMARY_FILE, EXECUTIVE_SUMMARY_FILE)
+        for path in _data_file_candidates(name)
+        if path.is_file()
+    }
+    if manifest_valid:
+        status = "PUBLISHED"
+        absence_proven = False
+        report_count = len(reports)
+    elif not candidates and not manifest and not compact:
+        status = "NO_ANALYZER_PUBLICATION"
+        absence_proven = True
+        report_count = 0
+    else:
+        status = "PUBLICATION_UNVERIFIED"
+        absence_proven = False
+        report_count = None
+    return {
+        "status": status,
+        "absence_proven": absence_proven,
+        "generation_id": generation_id or None,
+        "report_count": report_count,
+        "qualification_eligible": False,
+    }
+
+
 def _current_generation_report(name: str) -> dict:
     """Read a manifest-owned report without reviving undeclared stale files."""
     payload = _read_report(name, {}) or {}
@@ -4312,6 +4346,7 @@ def partial_reduction_page(): return _v31_evidence_page("V3.1 Partial-Reduction 
 def api_summary():
     compact = _read_json(COMPACT_SUMMARY_FILE)
     manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    publication = _analyzer_publication_state(manifest, compact)
     real = _read_json("real_edge_summary.json")
     historical = _read_json(HISTORICAL_COHORT_REPORT_FILE)
     retention = _read_json(RETENTION_STATUS_FILE)
@@ -4502,6 +4537,7 @@ def api_summary():
         # Same bounded latest-attempt reader as /api/status. Do not infer an
         # active/successful run from saved report presence or freshness alone.
         "analysis_run": _analyzer_run_state(),
+        "analyzer_publication": publication,
         "data_scope": compact.get("data_scope"),
         "generated_at": manifest.get("generated_at") or compact.get("generated_at"),
         "performance": p,
@@ -7327,6 +7363,15 @@ function missedProofTouchLabel(row) {
 function summaryEvidenceScope(data) {
   const stale = data?.stale || {};
   const freshness = stale.generation_freshness || {};
+  if ((data?.analysis_run || {}).phase === 'FAILED') return [
+    'LATEST ANALYZER ATTEMPT FAILED — QUALIFICATION DISABLED',
+    'The failure remains authoritative even when no publication exists. Inspect the failure receipt and repair the single-owner workflow.'
+  ];
+  if (data?.analyzer_publication?.status === 'NO_ANALYZER_PUBLICATION'
+      && data.analyzer_publication.absence_proven === true) return [
+    'AWAITING FRESH VERIFIED DATA — NO ANALYZER PUBLICATION',
+    'The analyzer publication root is empty. Qualification remains disabled until a fresh verified generation is published.'
+  ];
   if (stale.stale === true || freshness.current === false) return [
     'STALE SAVED POLICY + SEPARATE HISTORICAL EXECUTED — READ-ONLY',
     'Saved policy evidence is not current session data. Freshness/parity must recover before qualification; historical executed results remain a separate cohort.'
@@ -7356,6 +7401,10 @@ function analyzerAttemptLabel(d) {
 function analyzerRecoveryGuidance(d) {
   if (((d || {}).analysis_run || {}).phase === 'FAILED') {
     return 'Latest analysis failed. Recovery required: inspect the failure receipt and repair the verified mirror/publication through the existing single-owner workflow. Do not start a duplicate analyzer.';
+  }
+  if (d?.analyzer_publication?.status === 'NO_ANALYZER_PUBLICATION'
+      && d.analyzer_publication.absence_proven === true) {
+    return 'Awaiting fresh verified data. No analyzer publication exists yet; qualification remains disabled.';
   }
   return 'Current publication is not verified. Check the existing single-owner workflow and its receipts; saved status does not prove a process is running. Do not start a duplicate analyzer.';
 }
@@ -7405,9 +7454,13 @@ async function loadSummary() {
   const storage = d.storage || {};
   const integrity = d.integrity || {};
   const lifecycleBundles = d.lifecycle_bundles || {};
+  const noPublication = d.analyzer_publication?.status === 'NO_ANALYZER_PUBLICATION'
+    && d.analyzer_publication.absence_proven === true;
+  const analysisFailed = (d.analysis_run || {}).phase === 'FAILED';
   const iBanner = document.getElementById('integrity-banner');
   if (iBanner) {
-    if (integrity.valid === false || integrity.report_status === 'INVALID') {
+    if ((integrity.valid === false || integrity.report_status === 'INVALID')
+        && (!noPublication || analysisFailed)) {
       iBanner.style.display = 'block';
       const integrityValue = value => (
         value && typeof value === 'object' ? JSON.stringify(value) : String(value)
@@ -7432,7 +7485,21 @@ async function loadSummary() {
   setEvidenceScope('summary', ...EVIDENCE_SCOPES.summary);
   const banner = document.getElementById('stale-banner');
   if (banner) {
-    if (stale.stale) {
+    if (analysisFailed) {
+      banner.style.display = 'block';
+      banner.style.background = '#3d1f24';
+      banner.style.borderColor = '#f85149';
+      banner.style.color = '#ffd5d2';
+      banner.innerHTML = '<strong>✖ Latest analyzer attempt failed — qualification disabled.</strong> '
+        + escapeHtml(analyzerRecoveryGuidance(d));
+    } else if (noPublication) {
+      banner.style.display = 'block';
+      banner.style.background = '#1f2d3d';
+      banner.style.borderColor = '#58a6ff';
+      banner.style.color = '#c9d1d9';
+      banner.innerHTML = '<strong>ℹ Awaiting fresh verified data — no analyzer publication.</strong> '
+        + 'The empty publication state is verified. Qualification remains disabled until a fresh generation is published.';
+    } else if (stale.stale) {
       const reasonList = stale.reasons || [];
       const reasons = reasonList.join('\n');
       banner.style.display = 'block';
@@ -7452,9 +7519,13 @@ async function loadSummary() {
       banner.style.display = 'none';
     }
   }
-  const scopeLabel = stale.stale
-    ? 'STALE SAVED ANALYZER GENERATION · READ-ONLY'
-    : d.all_data_fallback_active
+  const scopeLabel = analysisFailed
+    ? 'LATEST ANALYZER ATTEMPT FAILED · QUALIFICATION DISABLED'
+    : noPublication
+      ? 'AWAITING FRESH VERIFIED DATA · NO ANALYZER PUBLICATION'
+      : stale.stale
+      ? 'STALE SAVED ANALYZER GENERATION · READ-ONLY'
+      : d.all_data_fallback_active
       ? 'FRESH COLLECTION · reports/all_data fallback'
       : (d.scope || 'ALL-DATA') + ' · ' + (d.data_scope || '').toUpperCase();
   document.getElementById('scope').textContent = scopeLabel;
@@ -7462,15 +7533,19 @@ async function loadSummary() {
   if (bundleProvenance) {
     const generated = d.generated_at || 'UNKNOWN';
     const reasons = (stale.reasons || []).join(' · ');
-    bundleProvenance.style.background = stale.stale ? '#3d2a1f' : '#153526';
-    bundleProvenance.style.borderColor = stale.stale ? '#d29922' : '#3dd68c';
-    bundleProvenance.style.color = stale.stale ? '#f8e3a1' : '#9df0c8';
-    bundleProvenance.textContent = stale.stale
-      ? `FORENSIC EXPORT · STALE SAVED ANALYZER GENERATION · report ${generated}`
+    bundleProvenance.style.background = noPublication ? '#1f2d3d' : stale.stale ? '#3d2a1f' : '#153526';
+    bundleProvenance.style.borderColor = noPublication ? '#58a6ff' : stale.stale ? '#d29922' : '#3dd68c';
+    bundleProvenance.style.color = noPublication ? '#c9d1d9' : stale.stale ? '#f8e3a1' : '#9df0c8';
+    bundleProvenance.textContent = analysisFailed
+      ? 'FORENSIC EXPORT · LATEST ANALYZER ATTEMPT FAILED · no verified new publication'
+      : noPublication
+        ? 'FORENSIC EXPORT · NO ANALYZER PUBLICATION · awaiting fresh verified data'
+        : stale.stale
+        ? `FORENSIC EXPORT · STALE SAVED ANALYZER GENERATION · report ${generated}`
         + `${reasons ? ' · ' + reasons : ''}`
         + ' · inspect MANIFEST.json generation_current and provenance before use'
-      : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
-        + ' · current does not mean qualified; inspect MANIFEST.json';
+        : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
+          + ' · current does not mean qualified; inspect MANIFEST.json';
   }
   const execSnapshotLabel = document.getElementById('exec-snapshot-label');
   const execSnapshotProvenance = executiveSnapshotProvenance(d);

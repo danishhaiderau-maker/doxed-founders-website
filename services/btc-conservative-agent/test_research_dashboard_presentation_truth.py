@@ -29,6 +29,22 @@ def run_helpers(expression):
     return json.loads(result.stdout)
 
 
+def publication_state(manifest, compact, paths):
+    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+    function = next(
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_analyzer_publication_state"
+    )
+    env = {
+        "REPORT_MANIFEST_FILE": "report_manifest.json",
+        "COMPACT_SUMMARY_FILE": "research_compact_summary.json",
+        "EXECUTIVE_SUMMARY_FILE": "executive_summary.txt",
+        "_data_file_candidates": lambda _name: paths,
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(SOURCE), "exec"), env)
+    return env["_analyzer_publication_state"](manifest, compact)
+
+
 def test_complete_dashboard_javascript_parses():
     rendered = Template(html()).render(nav_groups_json="[]", tile_lane_names="")
     script = re.search(r"<script>([\s\S]*?)</script>", rendered).group(1)
@@ -125,6 +141,53 @@ def test_current_is_not_claimed_as_qualified():
     assert "EVIDENCE_SCOPES.summary = summaryEvidenceScope(d);" in source
     assert "setEvidenceScope('summary', ...EVIDENCE_SCOPES.summary);" in source
     assert "Best-policy evidence is current/pinned" not in source
+
+
+def test_proven_empty_publication_is_awaiting_not_stale():
+    publication = publication_state({}, {}, [])
+    assert publication == {
+        "status": "NO_ANALYZER_PUBLICATION",
+        "absence_proven": True,
+        "generation_id": None,
+        "report_count": 0,
+        "qualification_eligible": False,
+    }
+    payload = {
+        "analyzer_publication": publication,
+        "stale": {"stale": True, "generation_freshness": {"current": False}},
+    }
+    scope = run_helpers("summaryEvidenceScope(" + json.dumps(payload) + ")")
+    assert scope[0] == "AWAITING FRESH VERIFIED DATA — NO ANALYZER PUBLICATION"
+    assert "Qualification remains disabled" in scope[1]
+    source = html()
+    assert "Awaiting fresh verified data — no analyzer publication." in source
+    assert "if (analysisFailed)" in source
+    assert "} else if (noPublication) {" in source
+    assert "} else if (stale.stale) {" in source
+
+
+def test_existing_unverified_artifact_is_not_claimed_absent(tmp_path):
+    artifact = tmp_path / "report_manifest.json"
+    artifact.write_text("{", encoding="utf-8")
+    publication = publication_state({}, {}, [artifact])
+    assert publication["status"] == "PUBLICATION_UNVERIFIED"
+    assert publication["absence_proven"] is False
+    assert publication["qualification_eligible"] is False
+
+
+def test_failed_attempt_remains_visible_even_without_publication():
+    payload = {
+        "analysis_run": {"phase": "FAILED"},
+        "analyzer_publication": {
+            "status": "NO_ANALYZER_PUBLICATION",
+            "absence_proven": True,
+            "qualification_eligible": False,
+        },
+        "stale": {"stale": True, "generation_freshness": {"current": False}},
+    }
+    scope = run_helpers("summaryEvidenceScope(" + json.dumps(payload) + ")")
+    assert scope[0] == "LATEST ANALYZER ATTEMPT FAILED — QUALIFICATION DISABLED"
+    assert "failure remains authoritative" in scope[1]
 
 
 def test_old_launch_instruction_replaced_without_changing_findings():
