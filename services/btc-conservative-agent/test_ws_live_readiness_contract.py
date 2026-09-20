@@ -1235,7 +1235,29 @@ class WsLiveReadinessSourceContractTest(unittest.TestCase):
         self.assertIn('"ws_connection"', ready)
         self.assertNotIn('ready_ok = bool(process_ready and runtime["signal_generation_ready"])', ready)
         self.assertIn("(200 if ready_ok else 503)", ready)
-        resume = function_source("api_resume")
+        resume_route = function_source("api_resume")
+        self.assertIn("_fresh_collection_lock.acquire(blocking=False)", resume_route)
+        self.assertIn("_resume_active_reset_receipt_exists()", resume_route)
+        self.assertIn("return _api_resume_with_reset_intent_held()", resume_route)
+        self.assertLess(
+            resume_route.index("_fresh_collection_lock.acquire(blocking=False)"),
+            resume_route.index("_resume_active_reset_receipt_exists()"),
+        )
+        self.assertLess(
+            resume_route.index("_resume_active_reset_receipt_exists()"),
+            resume_route.index("return _api_resume_with_reset_intent_held()"),
+        )
+        self.assertIn("finally:", resume_route)
+        self.assertIn("_fresh_collection_lock.release()", resume_route)
+        self.assertLess(
+            resume_route.index("return _api_resume_with_reset_intent_held()"),
+            resume_route.index("finally:"),
+        )
+        self.assertLess(
+            resume_route.index("finally:"),
+            resume_route.index("_fresh_collection_lock.release()"),
+        )
+        resume = function_source("_api_resume_with_reset_intent_held")
         self.assertIn("_recompute_system_readiness", resume)
         self.assertIn("resume_blocked", resume)
         self.assertIn("response.status_code = 409", resume)
