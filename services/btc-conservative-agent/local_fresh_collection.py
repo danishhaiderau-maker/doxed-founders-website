@@ -36,6 +36,37 @@ PROTECTED_CANONICAL_NAMES = {LEASE_FILE_NAME, FENCE_FILE_NAME}
 ARCHIVE_META_MAX_BYTES = 4 * 1024 * 1024
 RECOVERY_PROTECTION_REASONS = frozenset({"ESSENTIAL_RECOVERY_OR_OWNER_STATE"})
 SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+READINESS_SCOPE = "local_research_owners_and_relaunch_authorities_v1"
+_OWNER_CATEGORY_ALLOWLIST = frozenset(
+    {
+        "sync_owner",
+        "analyzer_owner",
+        "dashboard_owner",
+        "stability_supervisor_owner",
+        "batch_resume_owner",
+        "relaunch_supervisor_owner",
+        "archive_writer_owner",
+        "migration_owner",
+        "generation_maintenance_owner",
+    }
+)
+_RELAUNCH_CATEGORY_ALLOWLIST = frozenset(
+    {
+        "sync_relaunch_authority",
+        "stability_supervisor_authority",
+        "showcase_autostart_authority",
+        "stack_supervisor_authority",
+        "unknown_relaunch_authority",
+    }
+)
+_BLOCKER_CATEGORY_ALLOWLIST = frozenset(
+    {
+        "active_local_research_owner",
+        "enabled_relaunch_authority",
+        "owner_audit_invalid",
+        "owner_audit_unavailable",
+    }
+)
 
 
 class LocalFreshCollectionRejected(RuntimeError):
@@ -83,6 +114,41 @@ def _validate_root(
             break
         current = current.parent
     return path
+
+
+def _validate_scope_topology(
+    canonical_root: Path,
+    archive_root: Path,
+    *,
+    expected_canonical_root: Path | None = None,
+    expected_archive_root: Path | None = None,
+    runtime_agent_root: Path | None = None,
+    allow_missing_archive: bool = False,
+) -> tuple[Path, Path]:
+    canonical = _validate_root(canonical_root, expected=expected_canonical_root)
+    archives = _validate_root(
+        archive_root,
+        expected=expected_archive_root,
+        allow_missing=allow_missing_archive,
+    )
+    if archives == canonical or canonical in archives.parents or archives in canonical.parents:
+        _reject("LOCAL_RESET_ROOTS_OVERLAP")
+    if canonical.exists() and archives.exists():
+        try:
+            if os.path.samefile(canonical, archives):
+                _reject("LOCAL_RESET_DUPLICATE_TARGET")
+        except OSError as exc:
+            raise LocalFreshCollectionRejected("LOCAL_RESET_TOPOLOGY_UNAVAILABLE") from exc
+    if runtime_agent_root is not None:
+        runtime = _validate_root(Path(runtime_agent_root))
+        if runtime != canonical.parent:
+            _reject("LOCAL_RESET_RUNTIME_ROOT_MISMATCH")
+        try:
+            if not os.path.samefile(runtime, canonical.parent):
+                _reject("LOCAL_RESET_RUNTIME_ROOT_MISMATCH")
+        except OSError as exc:
+            raise LocalFreshCollectionRejected("LOCAL_RESET_TOPOLOGY_UNAVAILABLE") from exc
+    return canonical, archives
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -390,13 +456,16 @@ def queue_operation(
     request: dict,
     expected_canonical_root: Path | None = None,
     expected_archive_root: Path | None = None,
+    runtime_agent_root: Path | None = None,
 ) -> tuple[dict, bool]:
-    canonical = _validate_root(Path(canonical_root), expected=expected_canonical_root)
-    archives = _validate_root(
-        Path(archive_root), expected=expected_archive_root, allow_missing=True
+    canonical, archives = _validate_scope_topology(
+        Path(canonical_root),
+        Path(archive_root),
+        expected_canonical_root=expected_canonical_root,
+        expected_archive_root=expected_archive_root,
+        runtime_agent_root=runtime_agent_root,
+        allow_missing_archive=True,
     )
-    if archives == canonical or canonical in archives.parents or archives in canonical.parents:
-        _reject("LOCAL_RESET_ROOTS_OVERLAP")
     archives.mkdir(exist_ok=True)
     archives = _validate_root(archives)
     if not isinstance(request, dict) or set(request) != {
@@ -511,9 +580,18 @@ def _verify_completion_pin(operation_receipt_path: Path, receipt: dict) -> dict:
     return completion
 
 
-def capability_status(*, canonical_root, archive_root) -> dict:
-    canonical = _validate_root(Path(canonical_root))
-    archives = _validate_root(Path(archive_root), allow_missing=True)
+def capability_status(
+    *, canonical_root, archive_root, expected_canonical_root: Path | None = None,
+    expected_archive_root: Path | None = None, runtime_agent_root: Path | None = None,
+) -> dict:
+    canonical, archives = _validate_scope_topology(
+        Path(canonical_root),
+        Path(archive_root),
+        expected_canonical_root=expected_canonical_root,
+        expected_archive_root=expected_archive_root,
+        runtime_agent_root=runtime_agent_root,
+        allow_missing_archive=True,
+    )
     fence = read_local_generation_fence(canonical)
     return {
         "ok": True,
@@ -526,6 +604,8 @@ def capability_status(*, canonical_root, archive_root) -> dict:
             str(fence["local_generation"]) if fence else (_source_epoch(canonical) or "unversioned-local")
         ),
         "sync_state": str(fence["state"]) if fence else "READY",
+        "root_topology_ready": True,
+        "readiness_scope": READINESS_SCOPE,
         "fly_mutation_supported": False,
         "fly_mutation_requested": False,
     }
@@ -536,6 +616,91 @@ def _write_status(path: Path, receipt: dict, status: str, **fields) -> None:
     receipt["status"] = status
     receipt["updated_at"] = time.time()
     _atomic_json(path, receipt)
+
+
+def _allowed_categories(value: object, allowlist: frozenset[str]) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return sorted({item for item in value if isinstance(item, str) and item in allowlist})
+
+
+def _sanitized_owner_evidence(value: object) -> dict:
+    """Return bounded categories only; never persist commands, paths, or arguments."""
+    if not isinstance(value, dict) or type(value.get("safe")) is not bool:
+        return {
+            "schema": "local_reset_readiness_evidence_v1",
+            "readiness_scope": READINESS_SCOPE,
+            "safe": False,
+            "blocker_categories": ["owner_audit_invalid"],
+            "active_owner_categories": [],
+            "relaunch_authority_categories": [],
+        }
+    owners = _allowed_categories(
+        value.get("active_owner_categories"), _OWNER_CATEGORY_ALLOWLIST
+    )
+    relaunch = _allowed_categories(
+        value.get("relaunch_authority_categories"), _RELAUNCH_CATEGORY_ALLOWLIST
+    )
+    blockers = _allowed_categories(
+        value.get("blocker_categories"), _BLOCKER_CATEGORY_ALLOWLIST
+    )
+    # Backward-compatible injected auditors remain useful in fixture tests, but
+    # their raw rows are never copied into the durable operation receipt.
+    if value.get("owners"):
+        blockers.append("active_local_research_owner")
+    if value.get("running_tasks") or value.get("enabled_tasks"):
+        blockers.append("enabled_relaunch_authority")
+    blockers = sorted(set(blockers))
+    safe = value.get("safe") is True and not blockers and not owners and not relaunch
+    if not safe and not blockers:
+        blockers = ["owner_audit_invalid"]
+    evidence = {
+        "schema": "local_reset_readiness_evidence_v1",
+        "readiness_scope": READINESS_SCOPE,
+        "safe": safe,
+        "blocker_categories": blockers,
+        "active_owner_categories": owners,
+        "relaunch_authority_categories": relaunch,
+    }
+    checked_at = value.get("checked_at")
+    if isinstance(checked_at, (int, float)) and not isinstance(checked_at, bool):
+        evidence["checked_at"] = checked_at
+    return evidence
+
+
+def _preflight_blocked(
+    path: Path, receipt: dict, *, error: str, evidence: dict
+) -> dict:
+    if receipt.get("fence") is not None or receipt.get("deleted"):
+        _reject("LOCAL_RESET_PREFLIGHT_STATE_INVALID")
+    _write_status(
+        path,
+        receipt,
+        "BLOCKED",
+        error=error,
+        readiness_scope=READINESS_SCOPE,
+        blocker_categories=evidence["blocker_categories"],
+        owner_evidence={"preflight": evidence},
+        retryable_preflight=True,
+        mutation_started=False,
+        fence_persisted=False,
+        deleted_file_count=0,
+        deleted_bytes=0,
+    )
+    return receipt
+
+
+def _clear_retryable_preflight(receipt: dict) -> None:
+    for key in (
+        "retryable_preflight",
+        "mutation_started",
+        "fence_persisted",
+        "deleted_file_count",
+        "deleted_bytes",
+        "blocker_categories",
+        "error",
+    ):
+        receipt.pop(key, None)
 
 
 def _reconcile_and_delete(
@@ -607,6 +772,7 @@ def execute_operation(
     *, state_root, operation_id: str, owner_auditor, crash_at: str | None = None,
     expected_canonical_root: Path | None = None,
     expected_archive_root: Path | None = None,
+    runtime_agent_root: Path | None = None,
 ) -> dict:
     operation_directory = operation_path(Path(state_root), operation_id).parent
     operation_lease = MirrorGenerationLease(
@@ -626,6 +792,7 @@ def execute_operation(
             crash_at=crash_at,
             expected_canonical_root=expected_canonical_root,
             expected_archive_root=expected_archive_root,
+            runtime_agent_root=runtime_agent_root,
         )
     finally:
         operation_lease.release()
@@ -635,6 +802,7 @@ def _execute_operation_locked(
     *, state_root, operation_id: str, owner_auditor, crash_at: str | None = None,
     expected_canonical_root: Path | None = None,
     expected_archive_root: Path | None = None,
+    runtime_agent_root: Path | None = None,
 ) -> dict:
     path = operation_path(Path(state_root), operation_id)
     receipt = _read_json(path)
@@ -648,15 +816,48 @@ def _execute_operation_locked(
         and receipt.get("error") == "LOCAL_RESET_PROTECTED_RECOVERY_REQUIRES_AUDIT"
     ):
         return receipt
-    canonical = _validate_root(
-        Path(receipt["canonical_root"]), expected=expected_canonical_root
+    canonical, archives = _validate_scope_topology(
+        Path(receipt["canonical_root"]),
+        Path(receipt["archive_root"]),
+        expected_canonical_root=expected_canonical_root,
+        expected_archive_root=expected_archive_root,
+        runtime_agent_root=runtime_agent_root,
     )
-    archives = _validate_root(Path(receipt["archive_root"]), expected=expected_archive_root)
     try:
-        if crash_at == "before_fence":
-            raise InjectedResetCrash(crash_at)
         fence_payload = receipt.get("fence")
         if fence_payload is None:
+            existing_fence = read_local_generation_fence(canonical)
+            if existing_fence is not None:
+                _clear_retryable_preflight(receipt)
+                _write_status(
+                    path,
+                    receipt,
+                    "BLOCKED",
+                    error="LOCAL_RESET_FOREIGN_FENCE_PRESENT",
+                    sync_state=str(existing_fence.get("state") or BLOCKED_STATE),
+                )
+                return receipt
+            try:
+                preflight = _sanitized_owner_evidence(owner_auditor(canonical, archives))
+            except Exception:
+                preflight = {
+                    "schema": "local_reset_readiness_evidence_v1",
+                    "readiness_scope": READINESS_SCOPE,
+                    "safe": False,
+                    "blocker_categories": ["owner_audit_unavailable"],
+                    "active_owner_categories": [],
+                    "relaunch_authority_categories": [],
+                }
+            if preflight["safe"] is not True:
+                return _preflight_blocked(
+                    path,
+                    receipt,
+                    error="LOCAL_RESET_READINESS_BLOCKED",
+                    evidence=preflight,
+                )
+            if crash_at == "before_fence":
+                raise InjectedResetCrash(crash_at)
+            _clear_retryable_preflight(receipt)
             fence_payload = {
                 "operation_id": operation_id,
                 "local_generation": "local-reset-" + uuid.uuid4().hex,
@@ -666,29 +867,48 @@ def _execute_operation_locked(
                 "fly_mutation_requested": False,
             }
             receipt["fence"] = fence_payload
+            receipt["owner_evidence"] = {"preflight": preflight}
             _write_status(
                 path, receipt, "RUNNING", sync_state=BLOCKED_STATE, fence_persisting=True
             )
         persisted = persist_local_generation_fence(canonical, fence_payload)
         receipt["fence"] = persisted
-        _write_status(path, receipt, "RUNNING", fence_persisted=True, fence_persisting=False)
+        _write_status(
+            path,
+            receipt,
+            "RUNNING",
+            mutation_started=True,
+            fence_persisted=True,
+            fence_persisting=False,
+        )
         if crash_at == "after_fence":
             raise InjectedResetCrash(crash_at)
 
-        first_audit = owner_auditor(canonical, archives)
-        if not isinstance(first_audit, dict) or first_audit.get("safe") is not True:
-            _write_status(path, receipt, "BLOCKED", owner_evidence=first_audit,
-                          error="LOCAL_RESET_ACTIVE_OWNER")
-            return receipt
         with MirrorGenerationLease(canonical, owner="laptop-only-fresh-collection").acquire(
             timeout_seconds=0
         ) as lease:
             if not lease.held or lease.path != canonical / LEASE_FILE_NAME:
                 _reject("LOCAL_RESET_MATCHING_LEASE_REQUIRED")
-            second_audit = owner_auditor(canonical, archives)
-            receipt["owner_evidence"] = {"before_lease": first_audit, "under_lease": second_audit}
-            if not isinstance(second_audit, dict) or second_audit.get("safe") is not True:
-                _write_status(path, receipt, "BLOCKED", error="LOCAL_RESET_ACTIVE_OWNER")
+            try:
+                second_audit = _sanitized_owner_evidence(owner_auditor(canonical, archives))
+            except Exception:
+                second_audit = {
+                    "schema": "local_reset_readiness_evidence_v1",
+                    "readiness_scope": READINESS_SCOPE,
+                    "safe": False,
+                    "blocker_categories": ["owner_audit_unavailable"],
+                    "active_owner_categories": [],
+                    "relaunch_authority_categories": [],
+                }
+            receipt.setdefault("owner_evidence", {})["under_lease"] = second_audit
+            if second_audit["safe"] is not True:
+                _write_status(
+                    path,
+                    receipt,
+                    "BLOCKED",
+                    error="LOCAL_RESET_ACTIVE_OWNER",
+                    blocker_categories=second_audit["blocker_categories"],
+                )
                 return receipt
             if "inventory" not in receipt:
                 canonical_rows, canonical_retained, canonical_blockers = _classified_inventory(
