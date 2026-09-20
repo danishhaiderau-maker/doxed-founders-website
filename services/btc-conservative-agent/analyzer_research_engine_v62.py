@@ -12202,7 +12202,7 @@ def _first_number(*values):
     return None
 
 
-def _v3_ledger_rows(name):
+def _v3_ledger_rows(name, *, current_contract=None, blocker_sink=None):
     configured_root = os.getenv("BTC_AGENT_DATA_DIR")
     candidates = (
         [Path(configured_root) / "v3" / "ledgers" / f"{name}.jsonl"]
@@ -12223,6 +12223,16 @@ def _v3_ledger_rows(name):
                 by_record_id = {}
                 for _ref, generation_path in store.ledger_generation_paths(name):
                     for row in _load_jsonl_rows(str(generation_path)):
+                        if current_contract is not None:
+                            from research.analyzer_current_collection_contract import select_current_rows
+                            selected, blockers = select_current_rows(
+                                [row], current_contract, source=f"V3_{name.upper()}",
+                            )
+                            if blockers and blocker_sink is not None:
+                                blocker_sink.extend(blockers)
+                            if not selected:
+                                continue
+                            row = selected[0]
                         record_id = str(row.get("record_id") or "")
                         if not record_id:
                             raise ValueError("V3 analyzer row missing record identity")
@@ -12240,7 +12250,7 @@ def _v3_ledger_rows(name):
     return []
 
 
-def _compressed_shadow_rows(session=None):
+def _compressed_shadow_rows(session=None, *, current_contract=None, blocker_sink=None):
     rows = []
     seen = set()
     configured_root = os.getenv("BTC_AGENT_DATA_DIR")
@@ -12255,7 +12265,15 @@ def _compressed_shadow_rows(session=None):
             for row in _load_jsonl_rows(str(path)):
                 if str(row.get("schema") or "") == "compressed_chase_shadow_v1":
                     rows.append(row)
-    return _filter_jsonl_rows_by_session(rows, session)
+    rows = _filter_jsonl_rows_by_session(rows, session)
+    if current_contract is not None:
+        from research.analyzer_current_collection_contract import select_current_rows
+        rows, blockers = select_current_rows(
+            rows, current_contract, source="COMPRESSED_SHADOW",
+        )
+        if blockers and blocker_sink is not None:
+            blocker_sink.extend(blockers)
+    return rows
 
 
 def _compressed_shadow_arm_receipts(session=None):
@@ -12426,6 +12444,9 @@ def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
             continue
         points.append({
             "bucket_ts": second,
+            "source_ts": row.get("source_ts"),
+            "observed_at_ts": row.get("observed_at_ts"),
+            "quote_valid_from_ts": row.get("quote_valid_from_ts"),
             "bbo": {"bid": row.get("bid"), "ask": row.get("ask"), "last": row.get("last")},
             "bid_qty": row.get("bid_qty"),
             "ask_qty": row.get("ask_qty"),
@@ -12535,6 +12556,9 @@ def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tap
             continue
         points.append({
             "bucket_ts": second,
+            "source_ts": row.get("source_ts"),
+            "observed_at_ts": row.get("observed_at_ts"),
+            "quote_valid_from_ts": row.get("quote_valid_from_ts"),
             "bbo": {"bid": row.get("bid"), "ask": row.get("ask"), "last": row.get("last")},
             "bid_qty": row.get("bid_qty"), "ask_qty": row.get("ask_qty"),
             "row_sha256": row.get("row_sha256"),
@@ -12718,43 +12742,95 @@ def build_missed_opportunity_proof_report(session=None):
     requires a complete signed identity join, every scheduled checkpoint plus
     expiry, a conservative BBO touch, and an executable terminal BBO mark.
     """
-    schedules = _compressed_shadow_rows(session=session)
-    opportunities = _v3_ledger_rows("opportunity")
-    decisions = _v3_ledger_rows("decision")
-    executions = _v3_ledger_rows("execution")
+    from research.analyzer_current_collection_contract import (
+        load_current_collection_contract, unique_exact_match,
+    )
+    collection_blockers = []
+    configured_root = os.getenv("BTC_AGENT_DATA_DIR")
+    current_contract = None
+    if configured_root:
+        current_contract, contract_blockers = load_current_collection_contract(configured_root)
+        collection_blockers.extend(contract_blockers)
+    schedules = _compressed_shadow_rows(
+        session=session, current_contract=current_contract,
+        blocker_sink=collection_blockers,
+    ) if current_contract is not None or not configured_root else []
+    opportunities = _v3_ledger_rows(
+        "opportunity", current_contract=current_contract,
+        blocker_sink=collection_blockers,
+    ) if current_contract is not None or not configured_root else []
+    decisions = _v3_ledger_rows(
+        "decision", current_contract=current_contract,
+        blocker_sink=collection_blockers,
+    ) if current_contract is not None or not configured_root else []
+    executions = _v3_ledger_rows(
+        "execution", current_contract=current_contract,
+        blocker_sink=collection_blockers,
+    ) if current_contract is not None or not configured_root else []
     tape_by_bucket = _one_second_tape_by_bucket() if schedules else {}
-    opp_by_id = {str(r.get("opportunity_id")): r for r in opportunities if r.get("opportunity_id")}
-    opp_by_call = {str(r.get("shared_ai_call_id")): r for r in opportunities if r.get("shared_ai_call_id")}
-    decision_by_call = {}
-    for row in decisions:
-        call_id = str(row.get("shared_ai_call_id") or "")
-        if call_id:
-            decision_by_call.setdefault(call_id, []).append(row)
-    execution_keys = {
-        (str(r.get("episode_id") or ""), str(r.get("policy_id") or ""))
-        for r in executions
-    }
     grouped = {}
     for row in schedules:
         key = (
+            str(row.get("epoch_id") or row.get("dataset_epoch") or ""),
             str(row.get("episode_id") or row.get("trade_id") or ""),
             str(row.get("policy_id") or ""),
             str(row.get("policy_signature") or ""),
             str(row.get("schedule_generation_id") or ""),
+            str(row.get("direction") or "").upper(),
         )
         grouped.setdefault(key, []).append(row)
 
     proofs = []
-    for (episode_id, policy_id, policy_signature, schedule_generation_id), rows in grouped.items():
+    for (
+        schedule_epoch, episode_id, policy_id, policy_signature,
+        schedule_generation_id, selected_side,
+    ), rows in grouped.items():
         rows.sort(key=lambda r: _first_number(r.get("observed_ts"), r.get("ts")) or 0.0)
         first = rows[0]
         call_id = str(first.get("shared_ai_call_id") or "")
         opportunity_id = str(first.get("opportunity_id") or "")
-        opportunity = opp_by_id.get(opportunity_id) or opp_by_call.get(call_id) or {}
-        decision_rows = decision_by_call.get(call_id, [])
-        decision = next((r for r in decision_rows if str(r.get("episode_id") or "") == episode_id), None)
-        decision = decision or (decision_rows[0] if decision_rows else {})
-        direction = str(first.get("direction") or opportunity.get("raw_direction") or "").upper()
+        join_blockers = []
+        if current_contract is not None:
+            opportunity, blockers = unique_exact_match(
+                opportunities,
+                {"epoch_id": schedule_epoch, "opportunity_id": opportunity_id},
+                source="CURRENT_OPPORTUNITY",
+            )
+            join_blockers.extend(blockers)
+            decision, blockers = unique_exact_match(
+                decisions,
+                {
+                    "epoch_id": schedule_epoch,
+                    "episode_id": episode_id,
+                    "shared_ai_call_id": call_id,
+                },
+                source="CURRENT_DECISION",
+            )
+            join_blockers.extend(blockers)
+            opportunity = opportunity or {}
+            decision = decision or {}
+            direction = selected_side
+        else:
+            matching_opportunities = [
+                row for row in opportunities
+                if str(row.get("opportunity_id") or "") == opportunity_id
+            ]
+            opportunity = matching_opportunities[0] if len(matching_opportunities) == 1 else {}
+            decision_rows = [
+                row for row in decisions
+                if str(row.get("shared_ai_call_id") or "") == call_id
+                and str(row.get("episode_id") or "") == episode_id
+            ]
+            decision = decision_rows[0] if len(decision_rows) == 1 else {}
+            direction = str(first.get("direction") or opportunity.get("raw_direction") or "").upper()
+        execution_matches = [
+            row for row in executions
+            if str(row.get("epoch_id") or row.get("dataset_epoch") or "") == schedule_epoch
+            and str(row.get("episode_id") or "") == episode_id
+            and str(row.get("policy_id") or "") == policy_id
+            and str(row.get("policy_signature") or "") == policy_signature
+            and str(row.get("executed_direction") or row.get("direction") or "").upper() == direction
+        ]
         expected = [int(x) for x in (first.get("schedule_seconds") or [0, 60, 120, 240, 420, 600])]
         expiry_sec = int(_first_number(first.get("terminal_expiry_sec"), 780) or 780)
         stage_rows = [
@@ -12871,6 +12947,7 @@ def build_missed_opportunity_proof_report(session=None):
         if not isinstance(contraindications, list):
             contraindications = [str(contraindications)] if contraindications else []
         identity_missing = [name for name, value in (
+            ("epoch_id", schedule_epoch),
             ("shared_ai_call_id", call_id), ("opportunity", opportunity),
             ("episode_id", episode_id), ("policy_id", policy_id),
             ("policy_signature", policy_signature),
@@ -12880,6 +12957,7 @@ def build_missed_opportunity_proof_report(session=None):
         for row in rows:
             if row.get("identity_complete") is not True:
                 identity_missing.extend(row.get("missing_identity_fields") or ["runtime_identity_complete"])
+        identity_missing.extend(join_blockers)
         identity_missing = sorted({str(value) for value in identity_missing if value})
         expected_stage_indexes = set(range(len(expected)))
         stage_coverage_complete = (
@@ -12924,6 +13002,7 @@ def build_missed_opportunity_proof_report(session=None):
         rejection_codes = []
         if identity_missing:
             rejection_codes.append("IDENTITY_INCOMPLETE")
+        rejection_codes.extend(join_blockers)
         if not stage_coverage_complete:
             rejection_codes.append("STAGE_COVERAGE_INCOMPLETE")
         if duplicate_stage_indexes:
@@ -12960,6 +13039,9 @@ def build_missed_opportunity_proof_report(session=None):
             "policy_signature": policy_signature or None,
             "schedule_generation_id": schedule_generation_id or None,
             "direction": direction or None,
+            "selected_simulation_side": direction or None,
+            "raw_ai_decision": decision.get("raw_ai_decision"),
+            "original_ai_direction": opportunity.get("raw_direction"),
             "signal_ts": opportunity.get("signal_ts"),
             "scores": scores,
             "regime": feature.get("regime") or feature.get("market_regime"),
@@ -13008,6 +13090,7 @@ def build_missed_opportunity_proof_report(session=None):
                 "signed_quantity_constraints": tape.get("signed_quantity_constraints"),
                 "quantity_constraint_reasons": tape.get("quantity_constraint_reasons") or [],
                 "identity_missing": identity_missing,
+                "identity_join_blockers": sorted(set(join_blockers)),
                 "rejection_codes": rejection_codes,
             },
             "cost_assumption": {
@@ -13020,7 +13103,7 @@ def build_missed_opportunity_proof_report(session=None):
                 "explicit_costs_complete": explicit_costs,
                 "note": "A PROVEN classification requires explicit fee and slippage amounts; gross-only paths fail closed.",
             },
-            "matching_executed_record": (episode_id, policy_id) in execution_keys,
+            "matching_executed_record": len(execution_matches) == 1,
         })
     counts = {name: 0 for name in _MISSED_PROOF_CLASSES}
     execution_outcome_counts = {name: 0 for name in _EXECUTION_OUTCOME_CLASSES}
@@ -13035,7 +13118,13 @@ def build_missed_opportunity_proof_report(session=None):
         reason = str(receipt.get("reason") or "UNKNOWN")
         arm_status_counts[status] = arm_status_counts.get(status, 0) + 1
         arm_reason_counts[reason] = arm_reason_counts.get(reason, 0) + 1
-    empty_reason = None if proofs else "SOURCE_EMPTY_OR_UNAVAILABLE: no compressed_chase_shadow_v1 rows"
+    empty_reason = None if proofs else (
+        "CURRENT_COLLECTION_CONTRACT_UNAVAILABLE"
+        if configured_root and current_contract is None
+        else "CURRENT_COLLECTION_EMPTY_OR_STALE"
+        if configured_root
+        else "SOURCE_EMPTY_OR_UNAVAILABLE: no compressed_chase_shadow_v1 rows"
+    )
     return {
         "schema": "missed_opportunity_proof_v1",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -13046,6 +13135,8 @@ def build_missed_opportunity_proof_report(session=None):
         "classification_contract": list(_MISSED_PROOF_CLASSES),
         "execution_outcome_contract": list(_EXECUTION_OUTCOME_CLASSES),
         "empty_reason": empty_reason,
+        "current_collection_contract": current_contract,
+        "current_collection_blockers": sorted(set(collection_blockers)),
         "proof_count": len(proofs),
         "classification_counts": counts,
         "execution_outcome_counts": execution_outcome_counts,
