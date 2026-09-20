@@ -5302,53 +5302,76 @@ def purge_dead_pending_orders():
         _agent_dbg("H3", "purge_dead_pending_orders", "purged", {"removed": removed, "remaining": len(pending_orders)})
     return removed
 
-def execution_allowed(lane: str = None) -> bool:
-    # Preserve the operator's kill switch as the authoritative reason. The
-    # older flow called get_execution_status() and replaced ADMIN_MANUAL with
-    # the generic string BLOCKED, which made health and dashboard snapshots
-    # disagree even though the entry gate itself remained closed.
+def _finish_execution_admission(allowed: bool, reason: str, lane: str = None) -> tuple:
+    """Return a call-local verdict without changing pause/recovery authority."""
+    with state_lock:
+        # Recheck after readiness/risk/capacity work: another worker may have
+        # paused execution meanwhile. Unknown legacy causes remain unknown.
+        if state.get("execution_paused"):
+            allowed = False
+            reason = str(state.get("execution_reason") or "EXECUTION_PAUSED")
+        elif state.get("manual_admin_pause"):
+            allowed = False
+            reason = "ADMIN_MANUAL"
+        verdict = (bool(allowed), str(reason or "EXECUTION_BLOCK"))
+        state["last_execution_admission"] = {
+            "allowed": verdict[0], "reason": verdict[1],
+            "lane": str(lane or "ALL"), "checked_at": time.time(),
+        }
+    return verdict
+
+
+def _execution_control_fields_locked() -> dict:
+    """Copy the full control tuple while the caller holds state_lock."""
+    return {
+        "execution_paused": bool(state.get("execution_paused", False)),
+        "execution_reason": state.get("execution_reason", ""),
+        "_pause_priority": state.get("_pause_priority", 0),
+        "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
+        "last_execution_admission": dict(state.get("last_execution_admission") or {}),
+    }
+
+
+def evaluate_execution_admission(lane: str = None) -> tuple:
+    # Admission diagnostics are not pause transitions. In particular, a manual
+    # flag must not downgrade a stronger GENOME_IDENTITY_INVALID pause.
     if manual_admin_pause_active():
-        with state_lock:
-            state["manual_admin_pause"] = True
-            state["execution_paused"] = True
-            state["execution_reason"] = "ADMIN_MANUAL"
-            state["_pause_priority"] = PAUSE_PRIORITIES["ADMIN_MANUAL"]
         logger.warning("[EXECUTION BLOCK] operator manual pause [PIPELINE ENFORCEMENT]")
-        return False
+        return _finish_execution_admission(False, "ADMIN_MANUAL", lane)
     if lane and is_ai_scan_lane(lane):
-        with state_lock:
-            state["execution_reason"] = "AI_SCAN_NO_ORDERS"
-        return False
+        return _finish_execution_admission(False, "AI_SCAN_NO_ORDERS", lane)
     if lane and not lane_orders_allowed(lane):
-        with state_lock:
-            state["execution_reason"] = "LANE_DISABLED"
         logger.warning(
             f"[EXECUTION BLOCK] lane={lane} toggle OFF — no limit orders "
             f"[PIPELINE ENFORCEMENT]"
         )
-        return False
+        return _finish_execution_admission(False, "LANE_DISABLED", lane)
     if not risk_trading_allowed():
-        with state_lock:
-            state["execution_reason"] = state.get("execution_reason") or "RISK_PAUSE"
         logger.warning(f"[EXECUTION BLOCK] risk pause reason={state.get('execution_reason')} [PIPELINE ENFORCEMENT]")
-        return False
+        return _finish_execution_admission(False, "RISK_PAUSE", lane)
     lane_key = str(lane).upper() if lane and research_isolation_enabled() else None
     active = get_active_signal_count()
     max_pos = get_effective_max_active_signals()
     if active >= max_pos:
-        state["execution_reason"] = "MAX_ACTIVE_SIGNALS"
         logger.warning(
             f"[LIMIT] Max active signals reached (global pool): {active}/{max_pos} "
             f"lane={lane_key or 'ALL'} [PIPELINE ENFORCEMENT]"
         )
-        return False
+        return _finish_execution_admission(False, "MAX_ACTIVE_SIGNALS", lane)
     status = get_execution_status()
     if status not in ["ACTIVE", "RESEARCH_ALLOW"]:
-        state["execution_reason"] = status
         logger.warning(f"[EXECUTION BLOCK] status={status} [PIPELINE ENFORCEMENT]")
-        return False
-    state["execution_reason"] = "ALLOWED"
-    return True
+        return _finish_execution_admission(False, status, lane)
+    return _finish_execution_admission(True, "ALLOWED", lane)
+
+
+def execution_allowed(lane: str = None) -> bool:
+    return evaluate_execution_admission(lane)[0]
+
+
+def execution_admission_snapshot(lane: str = None) -> dict:
+    allowed, reason = evaluate_execution_admission(lane)
+    return {"allowed": allowed, "reason": reason}
 
 def clear_pending_trade():
     with state_lock:
@@ -12139,7 +12162,7 @@ def debug_snapshot(signal=None, ai=None, stage="UNKNOWN"):
             "threshold": state.get("ai_threshold"),
             "max_pos": get_effective_max_active_signals(),
             "active_signals": get_active_signal_count(),
-            "execution": {"allowed": execution_allowed(),"reason": state.get("execution_reason")},
+            "execution": execution_admission_snapshot(),
             "signal": {"id": signal.get("trade_id") if signal else None,"status": signal.get("status") if signal else None,"direction": signal.get("final_direction") if signal else None},
             "orderflow": {"delta": orderflow["delta"], "imbalance": orderflow["imbalance"]},
             "volume_spike": (len(volume_buffer) > 5 and volume_buffer[-1] > np.mean(volume_buffer) * 1.5),
@@ -24150,8 +24173,8 @@ def process_signal(event: dict):
                 f"[PIPELINE] -> AI APPROVED tier={ai.get('execution_tier') or ai.get('research_soft') or 'APPROVE'} "
                 f"-> EXECUTION STAGE (patient limit entry) [PIPELINE ENFORCEMENT]"
             )
-            if not execution_allowed(research_lane):
-                exec_reason = state.get("execution_reason") or "EXECUTION_BLOCK"
+            exec_allowed, exec_reason = evaluate_execution_admission(research_lane)
+            if not exec_allowed:
                 hard_exec_blocks = frozenset({"STALE_DATA_HARD_STOP", "NO_PRICE", "AI_FAIL"})
                 if sole and exec_reason not in hard_exec_blocks:
                     _research_log_would_block(signal, ai, exec_reason, edge_score)
@@ -35938,9 +35961,7 @@ def _build_relay_execution_state_snapshot() -> dict:
             "bot_start_time": bot_start_time,
             "last_fresh_reset_ts": state.get("last_fresh_reset_ts"),
             "fresh_collection_mode": bool(state.get("fresh_collection_mode", False)),
-            "execution_paused": bool(state.get("execution_paused", False)),
-            "execution_reason": state.get("execution_reason"),
-            "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
+            **_execution_control_fields_locked(),
             "continuous_ai_research_enabled": bool(
                 state.get("continuous_ai_research_enabled", CONTINUOUS_AI_DEFAULT_ENABLED)
             ),
@@ -36275,8 +36296,7 @@ def api_relay_state(force_rebuild: bool = False):
                 "bot_start_time": bot_start_time,
                 "last_fresh_reset_ts": state.get("last_fresh_reset_ts"),
                 "fresh_collection_mode": bool(state.get("fresh_collection_mode", False)),
-                "execution_paused": bool(state.get("execution_paused", False)),
-                "execution_reason": state.get("execution_reason"),
+                **_execution_control_fields_locked(),
                 "max_active_signals": state.get("max_active_signals", MAX_CONCURRENT_POSITIONS_DEFAULT),
                 "strategy_mode": state.get("strategy_mode"),
                 "dashboard_port": DASHBOARD_PORT,
@@ -37344,6 +37364,8 @@ def _api_state_cache_refresher_loop():
                     "runtime_readiness",
                     "execution_paused",
                     "execution_reason",
+                    "_pause_priority",
+                    "last_execution_admission",
                     "manual_admin_pause",
                     "continuous_ai_research_enabled",
                     "research_lane_enabled",
@@ -37838,6 +37860,7 @@ def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
 def status():
     with state_lock:
         hb = state.get("last_heartbeat", last_heartbeat)
+        execution_control = _execution_control_fields_locked()
         paused = bool(state.get("execution_paused", False))
         reason = state.get("execution_reason", "")
         manual = bool(state.get("manual_admin_pause", False))
@@ -37878,9 +37901,7 @@ def status():
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
-        "execution_paused": paused,
-        "execution_reason": reason,
-        "manual_admin_pause": manual,
+        **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
         "runtime_readiness": runtime,
