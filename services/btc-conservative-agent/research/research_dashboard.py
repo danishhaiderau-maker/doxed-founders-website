@@ -7176,7 +7176,7 @@ const EVIDENCE_SCOPES = {
   'exit-reason-leak': ['EXIT EVIDENCE FRESHNESS UNVERIFIED', 'Waiting for a declared leakage report and freshness receipts. Hindsight gaps are not directly capturable profit.'],
   'ladder-sim': ['LEGACY COUNTERFACTUAL', 'Older matched-trade ladder replay; separate from the current signed V3.1 Safe Policy Genome.'],
   exits: ['LEGACY HINDSIGHT', 'Historical peak-to-close leakage, not a current-policy result.'],
-  genome: ['CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
+  genome: ['V3.1 SAFE POLICY GENOME - PUBLISHED SNAPSHOT', 'Check publication freshness above. Stale reports are not current qualification evidence. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.'],
   'evidence-coverage': ['CURRENT DECLARED ATOMIC GENERATION ONLY', 'Checksum-verified canonical counts and triage. Stale generations remain visible but are explicitly blocked from qualification.'],
   'research-design': ['RESEARCH DEFINITIONS + PRE-ENTRY COVERAGE ONLY', 'Signed baselines place no orders. OBSERVED/UNKNOWN feature coverage is not profitability or qualification evidence.'],
   edge: ['LEGACY EXECUTED', 'Historical feature correlation; validation only and never an automatic trading rule.'],
@@ -8418,7 +8418,7 @@ async function loadGenome() {
     document.getElementById('genome-note').textContent = `SOURCE UNAVAILABLE · missing tables: ${missing || 'not reported'} · prior artifacts preserved but blocked · execution unaffected.`;
     return;
   }
-  setEvidenceScope('genome', 'CURRENT V3.1 SAFE POLICY GENOME', 'Signed current-epoch policy replay. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.');
+  setEvidenceScope('genome', 'V3.1 SAFE POLICY GENOME - PUBLISHED SNAPSHOT', 'Check publication freshness above. Stale reports are not current qualification evidence. Descriptive rows remain blocked from live use until chronological OOS and risk gates pass.');
   empty.style.display = 'none';
   content.style.display = 'block';
   const coverage = d.shared_context_coverage || {};
