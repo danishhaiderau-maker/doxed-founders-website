@@ -24,6 +24,7 @@ import copy
 import functools
 import importlib
 import shutil
+import stat
 import sys
 import subprocess
 import traceback
@@ -12705,13 +12706,114 @@ def enrich_ai_context_upgrade(ctx: dict) -> dict:
     return ctx
 
 
-def build_pure_ai_context(state_snapshot, buffers):
+def _finite_positive_sr_value(value) -> bool:
+    """Return whether one S/R swing is a finite positive numeric scalar."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return False
+    return bool(math.isfinite(numeric) and numeric > 0)
+
+
+def _sr_swing_pair_ready(support_resistance) -> bool:
+    """Non-mutating structural predicate shared by readiness and AI context."""
+    if not isinstance(support_resistance, dict):
+        return False
+    swing_high = support_resistance.get("swing_high")
+    swing_low = support_resistance.get("swing_low")
+    return bool(
+        _finite_positive_sr_value(swing_high)
+        and _finite_positive_sr_value(swing_low)
+        and float(swing_high) > float(swing_low)
+    )
+
+
+def _sr_swing_prerequisite_failures(support_resistance) -> list:
+    """Classify missing and invalid S/R inputs without changing source state."""
+    if support_resistance is None:
+        support_resistance = {}
+    if not isinstance(support_resistance, dict):
+        return ["SR_STRUCTURE_INVALID"]
+    swing_high = support_resistance.get("swing_high")
+    swing_low = support_resistance.get("swing_low")
+    failures = []
+    high_missing = swing_high is None or (
+        not isinstance(swing_high, bool)
+        and isinstance(swing_high, (int, float)) and swing_high == 0
+    )
+    low_missing = swing_low is None or (
+        not isinstance(swing_low, bool)
+        and isinstance(swing_low, (int, float)) and swing_low == 0
+    )
+    high_valid = _finite_positive_sr_value(swing_high)
+    low_valid = _finite_positive_sr_value(swing_low)
+    if high_missing:
+        failures.append("SR_SWING_HIGH_MISSING")
+    elif not high_valid:
+        failures.append("SR_SWING_HIGH_INVALID")
+    if low_missing:
+        failures.append("SR_SWING_LOW_MISSING")
+    elif not low_valid:
+        failures.append("SR_SWING_LOW_INVALID")
+    if high_valid and low_valid and float(swing_high) <= float(swing_low):
+        failures.append("SR_SWING_RANGE_INVALID")
+    return failures
+
+
+def _bounded_ctx_failure_scalar(value, *, max_text: int = 64, numeric_only: bool = False):
+    """Project one JSON-safe bounded scalar for diagnostic evidence only."""
+    if value is None:
+        return None
+    if numeric_only and (isinstance(value, bool) or not isinstance(value, (int, float))):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            if not math.isfinite(float(value)) or len(str(value)) > 64:
+                return None
+        except (OverflowError, TypeError, ValueError):
+            return None
+        return value
+    if isinstance(value, str):
+        return value[:max(0, min(int(max_text), 256))]
+    return None
+
+
+def _ctx_fail_prerequisite_detail(state_snapshot: dict) -> dict:
+    """Return only observed S/R prerequisites that made pure context unavailable."""
+    raw_sr = state_snapshot.get("support_resistance")
+    sr = raw_sr if isinstance(raw_sr, dict) else {}
+    return {
+        "prerequisite_failures": _sr_swing_prerequisite_failures(raw_sr),
+        "sr_swing_high": _bounded_ctx_failure_scalar(
+            sr.get("swing_high"), numeric_only=True,
+        ),
+        "sr_swing_low": _bounded_ctx_failure_scalar(
+            sr.get("swing_low"), numeric_only=True,
+        ),
+        "sr_state": _bounded_ctx_failure_scalar(sr.get("sr_state"), max_text=64),
+        "sr_timestamp": _bounded_ctx_failure_scalar(sr.get("ts"), max_text=64),
+    }
+
+
+def build_pure_ai_context(state_snapshot, buffers, failure_detail=None):
+    raw_sr = state_snapshot.get("support_resistance")
+    if not _sr_swing_pair_ready(raw_sr):
+        if isinstance(failure_detail, dict):
+            failure_detail.clear()
+            failure_detail.update(_ctx_fail_prerequisite_detail(state_snapshot))
+        logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
+        return None
+    sr = raw_sr
     ctx = {
         "price": nz(state_snapshot.get("price")),
-        "recent_high": nz(state_snapshot.get("support_resistance", {}).get("swing_high")),
-        "recent_low": nz(state_snapshot.get("support_resistance", {}).get("swing_low")),
-        "dist_to_resistance": nz(state_snapshot.get("support_resistance", {}).get("dist_to_resistance")),
-        "dist_to_support": nz(state_snapshot.get("support_resistance", {}).get("dist_to_support")),
+        "recent_high": nz(sr.get("swing_high")),
+        "recent_low": nz(sr.get("swing_low")),
+        "dist_to_resistance": nz(sr.get("dist_to_resistance")),
+        "dist_to_support": nz(sr.get("dist_to_support")),
         "ema9": nz(state_snapshot.get("ema_status", {}).get("ema9")),
         "ema21": nz(state_snapshot.get("ema_status", {}).get("ema21")),
         "ema200": nz(state_snapshot.get("ema_status", {}).get("ema200")),
@@ -12731,19 +12833,93 @@ def build_pure_ai_context(state_snapshot, buffers):
         "edge_score": state.get("last_edge", 0.0),
         "edge_threshold": get_edge_threshold(),
         "regime": state_snapshot.get("regime", "UNKNOWN"),
-        "sr_state": state_snapshot.get("support_resistance", {}).get("sr_state", "UNKNOWN"),
-        "sr_bias": state_snapshot.get("support_resistance", {}).get("sr_bias", "UNKNOWN"),
+        "sr_state": sr.get("sr_state", "UNKNOWN"),
+        "sr_bias": sr.get("sr_bias", "UNKNOWN"),
         "data_quality": state_snapshot.get("data_quality", 0.0),
         "funding": get_funding_snapshot_for_ai(),
         "market_context": get_market_context_for_ai(),
     }
     ctx = sanitize_features(ctx)
-    if ctx["recent_high"] == 0 or ctx["recent_low"] == 0:
-        logger.warning("[SR VALIDATION] Invalid SR data - skipping AI [PIPELINE ENFORCEMENT]")
-        return None
     ctx = enrich_ai_context_upgrade(ctx)
     ctx = _stamp_3m_exhaustion_for_ai(ctx)
     return sanitize_ai_inputs(ctx)
+
+
+def _record_ctx_fail_unavailable_coverage(raw_context: dict, failure_detail: dict) -> dict:
+    """Persist a bounded no-call receipt; never create a research opportunity."""
+    from research.scan_counterfactual_unavailable import build_scan_counterfactual_unavailable
+
+    observed_at = time.time()
+    receipt = build_scan_counterfactual_unavailable(
+        context=raw_context,
+        reason_code="CONTEXT_UNAVAILABLE",
+        observed_at_ts=observed_at,
+        source_revision=_runtime_git_rev_exact(),
+        epoch_id=_collector_v22_epoch_id(),
+    )
+    try:
+        readiness = _runtime_readiness_components(observed_at)
+    except Exception:
+        readiness = {}
+    receipt.update({
+        "context_failure_schema": "pure_ai_context_prerequisite_failure_v1",
+        "prerequisite_failures": list(
+            (failure_detail or {}).get("prerequisite_failures") or []
+        )[:2],
+        "sr_swing_high": (failure_detail or {}).get("sr_swing_high"),
+        "sr_swing_low": (failure_detail or {}).get("sr_swing_low"),
+        "sr_state": (failure_detail or {}).get("sr_state"),
+        "sr_timestamp": (failure_detail or {}).get("sr_timestamp"),
+        "candle_count": len(latest_candles),
+        "buffer_counts": {
+            "price": len(price_buffer),
+            "volume": len(volume_buffer),
+            "delta": len(delta_buffer),
+            "imbalance": len(imbalance_buffer),
+            "candle_range": len(candle_range_buffer),
+            "wick_ratio": len(wick_ratio_buffer),
+            "body_ratio": len(body_ratio_buffer),
+        },
+        "readiness": {
+            "system_ready": bool(readiness.get("system_ready")),
+            "structural_prerequisites_ready": bool(
+                readiness.get("structural_prerequisites_ready")
+            ),
+            "sr_ready": bool(readiness.get("sr_ready")),
+            "buffers_ready": bool(readiness.get("buffers_ready")),
+            "candle_ready": bool(readiness.get("candle_ready")),
+            "ema_ready": bool(readiness.get("ema_ready")),
+            "ohlcv_ready": bool(readiness.get("ohlcv_ready")),
+            "readiness_reasons": [
+                str(reason)[:64]
+                for reason in (readiness.get("readiness_reasons") or [])[:16]
+            ],
+        },
+    })
+    try:
+        accepted = _safe_append_jsonl(
+            AI_INPUT_LOG_FILE, receipt, label="AI_INPUT",
+        ) is True
+    except Exception:
+        accepted = False
+    if not accepted:
+        logger.warning("[RESEARCH] CTX_FAIL_COVERAGE_WRITE_FAILED")
+    return {
+        "receipt": receipt,
+        "write_status": "ACCEPTED" if accepted else "FAILED",
+    }
+
+
+def _build_pure_ai_context_with_evidence(state_snapshot, buffers, raw_context):
+    failure_detail = {}
+    ctx = build_pure_ai_context(
+        state_snapshot, buffers, failure_detail=failure_detail,
+    )
+    if ctx is not None:
+        return ctx, None
+    return None, _record_ctx_fail_unavailable_coverage(
+        raw_context, failure_detail,
+    )
 
 
 def build_shared_direction_prompt_context(ctx: dict) -> dict:
@@ -23128,9 +23304,27 @@ def process_signal(event: dict):
                 update_support_resistance()
                 with state_lock:
                     ai_state_snapshot = copy.deepcopy(state)
-                ctx = build_pure_ai_context(ai_state_snapshot, buffers)
+                ctx_fail_id = str(
+                    event.get("research_scan_id")
+                    or event.get("trade_id")
+                    or uuid.uuid4()
+                )
+                ctx, ctx_fail_coverage = _build_pure_ai_context_with_evidence(
+                    ai_state_snapshot,
+                    buffers,
+                    {
+                        "trade_id": ctx_fail_id,
+                        "shared_ai_call_id": event.get("research_scan_id"),
+                    },
+                )
                 if not ctx:
-                    enforce_log({"trade_id": str(uuid.uuid4())}, "BLOCKED", "CTX_FAIL")
+                    enforce_log({
+                        "trade_id": ctx_fail_id,
+                        "ai_evaluated": False,
+                        "ctx_fail_coverage_write_status": (
+                            (ctx_fail_coverage or {}).get("write_status") or "FAILED"
+                        ),
+                    }, "BLOCKED", "CTX_FAIL")
                     full_pipeline_trace("BLOCKED", "CTX_FAIL", None)
                     with state_lock:
                         state["debug_state"]["last_block_reason"] = "CTX_FAIL"
@@ -37835,6 +38029,79 @@ def api_live_copy_coordination():
 
 @app.route('/api/resume', methods=['POST'])
 def api_resume():
+    if not _fresh_collection_lock.acquire(blocking=False):
+        return _resume_blocked_by_reset("FRESH_COLLECTION_RESET_IN_PROGRESS")
+    try:
+        try:
+            reset_active = _resume_active_reset_receipt_exists()
+        except Exception:
+            logger.error(
+                "[ADMIN] /api/resume blocked: active reset receipt could not be "
+                "validated [PIPELINE ENFORCEMENT]"
+            )
+            return _resume_blocked_by_reset("RESET_RECEIPT_UNREADABLE")
+        if reset_active:
+            return _resume_blocked_by_reset("FRESH_COLLECTION_RESET_IN_PROGRESS")
+        return _api_resume_with_reset_intent_held()
+    finally:
+        _fresh_collection_lock.release()
+
+
+def _resume_reset_receipt(path: Path, root: Path, max_bytes: int) -> dict:
+    """Read one reset receipt without following links or accepting torn bytes."""
+    from research_exact_deletion import _checked_path
+
+    checked = _checked_path(path, root)
+    before = checked.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+        raise RuntimeError("RESET_RECEIPT_INVALID")
+    payload = checked.read_bytes()
+    after = checked.lstat()
+    before_identity = (before.st_size, before.st_mtime_ns, before.st_ino)
+    after_identity = (after.st_size, after.st_mtime_ns, after.st_ino)
+    if before_identity != after_identity or len(payload) != before.st_size:
+        raise RuntimeError("RESET_RECEIPT_CHANGED_DURING_READ")
+    decoded = json.loads(payload)
+    if not isinstance(decoded, dict):
+        raise RuntimeError("RESET_RECEIPT_INVALID")
+    return decoded
+
+
+def _resume_active_reset_receipt_exists() -> bool:
+    """Treat every readable nonterminal reset pointer as active; ambiguity blocks."""
+    from research_exact_deletion import _checked_path
+
+    root = _data_sync_runtime_root()
+    active = _checked_path(root / "research_reset_receipts" / "ACTIVE_RESET.json", root)
+    try:
+        active.lstat()
+    except FileNotFoundError:
+        return False
+    pointer = _resume_reset_receipt(active, root, 64 * 1024)
+    reset_id = pointer.get("reset_id")
+    if not re.fullmatch(r"[0-9a-f]{24}", str(reset_id or "")):
+        raise RuntimeError("RESET_RESUME_POINTER_INVALID")
+    operation = _resume_reset_receipt(
+        active.parent / str(reset_id) / "operation.json", root, 16 * 1024 * 1024
+    )
+    return operation.get("stage") != "COMPLETE"
+
+
+def _resume_blocked_by_reset(reason: str):
+    with state_lock:
+        paused = bool(state.get("execution_paused"))
+        active_reason = str(state.get("execution_reason") or "")
+    response = jsonify({
+        "status": "resume_blocked",
+        "execution_paused": paused,
+        "reason": reason,
+        "active_pause_reason": active_reason,
+    })
+    response.status_code = 409
+    return response
+
+
+def _api_resume_with_reset_intent_held():
     runtime = _recompute_system_readiness()
     # The system_ready latch can't stabilize while the bot is paused (the
     # pipeline doesn't run, so readiness components never get ticked). Requiring
@@ -45755,20 +46022,218 @@ def research_export_files():
     ]
 
 
+_RESEARCH_EXPORT_MAX_SOURCE_BYTES = 64 * 1024 * 1024
+_RESEARCH_EXPORT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+_RESEARCH_EXPORT_MIN_FREE_BYTES = 256 * 1024 * 1024
+_RESEARCH_EXPORT_BUILD_TIMEOUT_SEC = 20.0
+_RESEARCH_EXPORT_COPY_CHUNK_BYTES = 256 * 1024
+_RESEARCH_EXPORT_BUILD_LOCK = threading.Lock()
+_RESEARCH_EXPORT_MANIFEST_NAME = "EXPORT_MANIFEST.json"
+
+
+class _ResearchExportTooLarge(RuntimeError):
+    pass
+
+
+class _ResearchExportUnavailable(RuntimeError):
+    pass
+
+
+class _BoundedResearchArchiveWriter:
+    """File proxy that refuses to let ZipFile grow beyond the export cap."""
+
+    def __init__(self, raw_file, *, max_bytes, deadline):
+        self._raw_file = raw_file
+        self._max_bytes = int(max_bytes)
+        self._deadline = float(deadline)
+        self._high_water = 0
+
+    def write(self, data):
+        if time.monotonic() > self._deadline:
+            raise _ResearchExportUnavailable("archive build deadline exceeded")
+        end_position = max(self._high_water, self._raw_file.tell() + len(data))
+        if end_position > self._max_bytes:
+            raise _ResearchExportTooLarge("archive output exceeds small-export limit")
+        written = self._raw_file.write(data)
+        self._high_water = max(self._high_water, self._raw_file.tell())
+        return written
+
+    def __getattr__(self, name):
+        return getattr(self._raw_file, name)
+
+
+def _research_export_members():
+    """Return existing allowlisted files rooted inside the runtime data directory."""
+    data_root = Path.cwd().resolve()
+    members = []
+    omitted_optional = []
+    seen_arcnames = {_RESEARCH_EXPORT_MANIFEST_NAME}
+    total_source_bytes = 0
+    try:
+        configured_paths = dict.fromkeys(research_export_files())
+    except (TypeError, ValueError) as exc:
+        raise _ResearchExportUnavailable("invalid research export allowlist") from exc
+    for configured_path in configured_paths:
+        try:
+            candidate = Path(configured_path)
+            source_path = (candidate if candidate.is_absolute() else data_root / candidate).resolve()
+            relative_name = source_path.relative_to(data_root).as_posix()
+        except (OSError, TypeError, ValueError) as exc:
+            raise _ResearchExportUnavailable("unsafe research export member path") from exc
+        if not source_path.exists():
+            omitted_optional.append(relative_name)
+            continue
+        if not source_path.is_file():
+            raise _ResearchExportUnavailable("research export member is not a regular file")
+        arcname = source_path.name
+        if arcname in seen_arcnames:
+            raise _ResearchExportUnavailable("conflicting research export member names")
+        try:
+            source_bytes = source_path.stat().st_size
+        except OSError as exc:
+            raise _ResearchExportUnavailable("research export member cannot be inspected") from exc
+        total_source_bytes += source_bytes
+        if total_source_bytes > _RESEARCH_EXPORT_MAX_SOURCE_BYTES:
+            raise _ResearchExportTooLarge("research export source exceeds small-export limit")
+        seen_arcnames.add(arcname)
+        members.append((source_path, arcname, source_bytes))
+    return members, omitted_optional, total_source_bytes
+
+
+def _research_export_manifest(members, omitted_optional):
+    """Describe this convenience bundle without claiming canonical evidence coverage."""
+    return {
+        "schema": "bounded_research_export_manifest_v1",
+        "scope": "diagnostic_convenience_existing_files_only",
+        "canonical_mirror_ack_evidence": False,
+        "complete_research_coverage": False,
+        "generated_members": [_RESEARCH_EXPORT_MANIFEST_NAME],
+        "included_members": [arcname for _, arcname, _ in members],
+        "omitted_optional_absent": list(omitted_optional),
+    }
+
+
+def _research_export_error(status_code):
+    if status_code == 413:
+        payload = {
+            "error": "research export exceeds the bounded HTTP download limit",
+            "action": "use the verified research sync for large exports",
+        }
+    else:
+        payload = {
+            "error": "research export temporarily unavailable",
+            "action": "retry later or use the verified research sync",
+        }
+    response = jsonify(payload)
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if status_code == 503:
+        response.headers["Retry-After"] = "60"
+    return response
+
+
 @app.route('/api/export_csv')
 @app.route('/api/export.csv')
 def export_csv():
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # Include both legacy 3-factor files and the authoritative per-lane
-        # research lifecycle. The old export omitted these newer files, so a
-        # downloaded ZIP could show replay buffers but could not prove whether
-        # Current lane filled, expired, closed, or remained counterfactual.
-        for file in dict.fromkeys(research_export_files()):
-            if os.path.exists(file):
-                zip_file.write(file, arcname=os.path.basename(file))
-    zip_buffer.seek(0)
-    return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='3factor_logs.zip')
+    build_lock_acquired = _RESEARCH_EXPORT_BUILD_LOCK.acquire(blocking=False)
+    if not build_lock_acquired:
+        return _research_export_error(503)
+    zip_buffer = None
+    try:
+        members, omitted_optional, _ = _research_export_members()
+        if not members:
+            raise _ResearchExportUnavailable("no research export data files are available")
+        temp_root = Path(tempfile.gettempdir())
+        try:
+            free_bytes = shutil.disk_usage(temp_root).free
+        except OSError as exc:
+            raise _ResearchExportUnavailable("temporary storage cannot be inspected") from exc
+        required_free_bytes = (
+            _RESEARCH_EXPORT_MIN_FREE_BYTES + _RESEARCH_EXPORT_MAX_ARCHIVE_BYTES
+        )
+        if free_bytes < required_free_bytes:
+            raise _ResearchExportUnavailable("insufficient temporary storage reserve")
+
+        deadline = time.monotonic() + _RESEARCH_EXPORT_BUILD_TIMEOUT_SEC
+        zip_buffer = tempfile.TemporaryFile(mode="w+b", dir=temp_root)
+        bounded_writer = _BoundedResearchArchiveWriter(
+            zip_buffer,
+            max_bytes=_RESEARCH_EXPORT_MAX_ARCHIVE_BYTES,
+            deadline=deadline,
+        )
+        copied_source_bytes = 0
+        with zipfile.ZipFile(bounded_writer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr(
+                _RESEARCH_EXPORT_MANIFEST_NAME,
+                json.dumps(
+                    _research_export_manifest(members, omitted_optional),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            # Include both legacy 3-factor files and the authoritative per-lane
+            # research lifecycle. The old export omitted these newer files, so a
+            # downloaded ZIP could show replay buffers but could not prove whether
+            # Current lane filled, expired, closed, or remained counterfactual.
+            for source_path, arcname, _ in members:
+                try:
+                    with source_path.open("rb") as source, zip_file.open(arcname, "w") as target:
+                        while True:
+                            if time.monotonic() > deadline:
+                                raise _ResearchExportUnavailable("archive build deadline exceeded")
+                            chunk = source.read(_RESEARCH_EXPORT_COPY_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            copied_source_bytes += len(chunk)
+                            if copied_source_bytes > _RESEARCH_EXPORT_MAX_SOURCE_BYTES:
+                                raise _ResearchExportTooLarge(
+                                    "research export source exceeds small-export limit"
+                                )
+                            target.write(chunk)
+                except (_ResearchExportTooLarge, _ResearchExportUnavailable):
+                    raise
+                except OSError as exc:
+                    raise _ResearchExportUnavailable(
+                        "research export member could not be copied"
+                    ) from exc
+        content_length = zip_buffer.tell()
+        zip_buffer.seek(0)
+        _RESEARCH_EXPORT_BUILD_LOCK.release()
+        build_lock_acquired = False
+        response = send_file(
+            zip_buffer,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="3factor_logs.zip",
+            conditional=False,
+        )
+        response.headers["Content-Length"] = str(content_length)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.call_on_close(zip_buffer.close)
+        return response
+    except _ResearchExportTooLarge:
+        if zip_buffer is not None:
+            zip_buffer.close()
+        if build_lock_acquired:
+            _RESEARCH_EXPORT_BUILD_LOCK.release()
+        logger.warning("[EXPORT] bounded HTTP research export rejected as too large")
+        return _research_export_error(413)
+    except _ResearchExportUnavailable:
+        if zip_buffer is not None:
+            zip_buffer.close()
+        if build_lock_acquired:
+            _RESEARCH_EXPORT_BUILD_LOCK.release()
+        logger.warning("[EXPORT] bounded HTTP research export unavailable", exc_info=True)
+        return _research_export_error(503)
+    except Exception:
+        if zip_buffer is not None:
+            zip_buffer.close()
+        if build_lock_acquired:
+            _RESEARCH_EXPORT_BUILD_LOCK.release()
+        logger.error("[EXPORT ERROR] failed to build bounded research archive", exc_info=True)
+        return _research_export_error(503)
 
 def _capture_runtime_quantity_constraints(*, evidence_symbol=None, source_revision=None) -> dict:
     """Capture exact venue metadata for evidence; never invent constraints."""

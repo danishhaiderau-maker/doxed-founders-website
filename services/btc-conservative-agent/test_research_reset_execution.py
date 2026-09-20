@@ -40,12 +40,12 @@ def test_progress_reports_existing_fingerprint_passes(tmp_path):
     rows=[]
     result=execution.execute_research_reset(**args,progress_callback=rows.append)
     assert result['status']=='COMPLETE'
-    assert {row['phase'] for row in rows}=={'EXECUTOR_FINGERPRINT','DELETER_FINGERPRINT','PRE_UNLINK_REVALIDATION'}
+    assert {row['phase'] for row in rows}=={'METADATA_ADMISSION','EXECUTOR_FINGERPRINT','DELETER_FINGERPRINT','PRE_UNLINK_REVALIDATION'}
     for phase in {row['phase'] for row in rows}:
         items=[row for row in rows if row['phase']==phase]
         assert items[0]['completed_targets']==0
         assert items[-1]['completed_targets']==items[-1]['total_targets']==1
-        assert items[-1]['fingerprinted_bytes']==4
+        assert items[-1]['fingerprinted_bytes']==(0 if phase=='METADATA_ADMISSION' else 4)
         assert all(row['authority']=='ADVISORY_ONLY' for row in items)
 
 

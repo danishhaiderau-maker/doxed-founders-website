@@ -15,6 +15,7 @@ def test_throttle_boundaries_and_no_raw_path(tmp_path,monkeypatch):
     clock=[1.]
     monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
     callback=make(tmp_path)
+    assert callback(event(phase='METADATA_ADMISSION'))
     assert callback(event())
     assert not callback(event(1))
     clock[0]=6.

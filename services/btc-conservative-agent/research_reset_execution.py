@@ -80,7 +80,8 @@ def execute_research_reset(*, runtime_root, proof, quiescent: bool,
         root=root, targets=candidate_paths, allowed_paths=candidate_paths,
         receipt_path=receipt_path, quiescent=quiescent, recovery_states=recovery_states,
         protected_paths=protected_paths, max_files=max_files, max_total_bytes=max_total_bytes,
-        receipt_context=context, prospective_receipt_parent=validate_only)
+        receipt_context=context, prospective_receipt_parent=validate_only,
+        progress_callback=progress_callback)
     hashed_bytes = 0
     _notify_reset_progress(progress_callback, 'EXECUTOR_FINGERPRINT', 0, len(targets), 0)
     for row in targets:

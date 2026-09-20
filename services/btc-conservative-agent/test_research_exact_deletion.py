@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -125,6 +127,64 @@ def test_windows_reparse_attribute_rejected_without_following(tmp_path, monkeypa
     with pytest.raises(deletion.ResearchDeletionRejected, match="REPARSE"):
         deletion.delete_exact_research_files(**args)
     assert target.exists()
+
+
+
+def test_metadata_admission_reuses_exact_normalized_path_checks(tmp_path, monkeypatch):
+    args = setup(tmp_path)
+    target = args["targets"][0]
+    args["targets"] = [target, Path(os.path.abspath(target))]
+    args["allowed_paths"] = [Path(os.path.abspath(target)), target]
+    args["expected_sha256_by_path"] = {
+        str(Path(os.path.abspath(target))): hashlib.sha256(target.read_bytes()).hexdigest()
+    }
+    target_key = os.path.normcase(os.path.abspath(os.fspath(target)))
+    calls = []
+    target_lstats = []
+    original = deletion._checked_path
+    original_lstat = Path.lstat
+    def counted(raw, root):
+        calls.append(os.path.normcase(os.path.abspath(os.fspath(raw))))
+        return original(raw, root)
+    def counted_lstat(path, *args, **kwargs):
+        if os.path.normcase(os.path.abspath(os.fspath(path))) == target_key:
+            target_lstats.append(True)
+        return original_lstat(path, *args, **kwargs)
+    monkeypatch.setattr(deletion, "_checked_path", counted)
+    monkeypatch.setattr(Path, "lstat", counted_lstat)
+    deletion.validate_exact_research_deletion(**args)
+    assert calls.count(target_key) == 1
+    # One admission lstat plus the independent final regular-file/byte check.
+    # Without exact-key reuse this fixture performs six target lstats.
+    assert len(target_lstats) == 2
+
+
+def test_broken_symlink_is_still_rejected_by_single_lstat_check(tmp_path):
+    args = setup(tmp_path)
+    link = args["root"] / "broken.json"
+    try:
+        link.symlink_to(args["root"] / "missing.json")
+    except OSError:
+        pytest.skip("host cannot create symlink")
+    args["targets"] = args["allowed_paths"] = [link]
+    with pytest.raises(deletion.ResearchDeletionRejected, match="SYMLINK"):
+        deletion.validate_exact_research_deletion(**args)
+
+
+def test_checked_path_cache_never_crosses_admission_calls(tmp_path):
+    args = setup(tmp_path)
+    deletion.validate_exact_research_deletion(**args)
+    target = args["targets"][0]
+    target.unlink()
+    outside = tmp_path / "outside.json"
+    outside.write_text("keep")
+    try:
+        target.symlink_to(outside)
+    except OSError:
+        pytest.skip("host cannot create symlink")
+    with pytest.raises(deletion.ResearchDeletionRejected, match="SYMLINK"):
+        deletion.validate_exact_research_deletion(**args)
+    assert outside.read_text() == "keep"
 
 
 def test_changed_file_after_metadata_receipt_aborts_before_first_unlink(tmp_path, monkeypatch):
