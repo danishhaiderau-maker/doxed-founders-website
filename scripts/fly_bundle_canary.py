@@ -103,23 +103,41 @@ def normalized_runtime_flags(environment=None):
 def _bounded_coordinator_bytes(path):
     """Stable exact-file read; no enumeration, links, hardlinks or raw errors."""
     path = Path(path)
-    for component in (*reversed(path.parents), path):
+    components = (*reversed(path.parents), path)
+    component_identities = []
+    component_signature = lambda value: (
+        value.st_dev, value.st_ino, value.st_mode,
+        int(getattr(value, 'st_file_attributes', 0) or 0))
+    for component in components:
         info = component.lstat()
         require(not stat.S_ISLNK(info.st_mode)
                 and not int(getattr(info, 'st_file_attributes', 0) or 0) & 0x400,
                 'COORDINATOR_PATH_LINK_REJECTED')
+        component_identities.append(component_signature(info))
     before = path.lstat()
     require(stat.S_ISREG(before.st_mode), 'COORDINATOR_OBJECT_TYPE_INVALID')
     require(before.st_nlink == 1, 'COORDINATOR_HARDLINK_REJECTED')
     require(0 < before.st_size <= MAX_COORDINATOR_DIAGNOSTIC,
             'COORDINATOR_OBJECT_SIZE_INVALID')
     with path.open('rb') as stream:
+        opened_before = os.fstat(stream.fileno())
         raw = stream.read(MAX_COORDINATOR_DIAGNOSTIC + 1)
+        opened_after = os.fstat(stream.fileno())
     after = path.lstat()
     signature = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
                                value.st_size, value.st_mtime_ns)
-    require(len(raw) == before.st_size and signature(before) == signature(after),
+    require(len(raw) == before.st_size
+            and signature(before) == signature(opened_before)
+            and signature(opened_before) == signature(opened_after)
+            and signature(opened_after) == signature(after),
             'COORDINATOR_OBJECT_CHANGED')
+    for position, component in enumerate(components):
+        final = component.lstat()
+        require(not stat.S_ISLNK(final.st_mode)
+                and not int(getattr(final, 'st_file_attributes', 0) or 0) & 0x400,
+                'COORDINATOR_PATH_LINK_REJECTED')
+        require(component_signature(final) == component_identities[position],
+                'COORDINATOR_OBJECT_CHANGED')
     return raw
 
 

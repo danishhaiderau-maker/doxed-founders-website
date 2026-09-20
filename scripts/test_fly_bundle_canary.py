@@ -302,6 +302,8 @@ def test_coordinator_diagnostic_detects_change_during_read(tmp_path, monkeypatch
         class ChangingReader:
             def __enter__(inner):
                 return inner
+            def fileno(inner):
+                return stream.fileno()
             def read(inner, size=-1):
                 raw = stream.read(size)
                 with original_open(path, 'ab') as writer:
@@ -311,6 +313,23 @@ def test_coordinator_diagnostic_detects_change_during_read(tmp_path, monkeypatch
                 stream.close()
         return ChangingReader()
     monkeypatch.setattr(Path, 'open', changing_open)
+    assert c.coordinator_diagnostic(path, generation, REV, False) == {
+        'classification': 'INVALID', 'reason': 'COORDINATOR_OBJECT_CHANGED'}
+
+
+def test_coordinator_diagnostic_binds_open_handle_to_lexical_file(tmp_path, monkeypatch):
+    generation = 'a' * 64
+    path = tmp_path / 'diagnostic.json'
+    substitute = tmp_path / 'substitute.json'
+    raw = canonical(coordinator_value(generation, worker_state_present=False))
+    path.write_bytes(raw)
+    substitute.write_bytes(raw)
+    original_open = Path.open
+    def substituted_open(self, *args, **kwargs):
+        if self == path and args and args[0] == 'rb':
+            return original_open(substitute, *args, **kwargs)
+        return original_open(self, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', substituted_open)
     assert c.coordinator_diagnostic(path, generation, REV, False) == {
         'classification': 'INVALID', 'reason': 'COORDINATOR_OBJECT_CHANGED'}
 
