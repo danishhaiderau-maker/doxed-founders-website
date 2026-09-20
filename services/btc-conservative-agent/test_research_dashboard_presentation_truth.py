@@ -138,6 +138,35 @@ def test_old_launch_instruction_replaced_without_changing_findings():
     assert "formatExecutiveText(d.executive_text, d)" in html()
 
 
+def test_stale_embedded_executive_report_is_archived_with_timestamp_and_raw_text_preserved():
+    raw = "EXECUTIVE SUMMARY — FRESH-COLLECTION (~49.2h bot session)\nSaved September 12 finding"
+    payload = {
+        "generated_at": "2026-09-12T03:04:05Z",
+        "executive_text": raw,
+        "stale": {"stale": True, "generation_freshness": {"current": False}},
+    }
+    label, displayed = run_helpers(
+        "[executiveSnapshotProvenance(" + json.dumps(payload) + "), "
+        "formatExecutiveText(" + json.dumps(raw) + ", " + json.dumps(payload) + ")]"
+    )
+    assert "ARCHIVED / STALE SNAPSHOT" in label
+    assert "2026-09-12T03:04:05Z" in label
+    assert "not current-session evidence" in label
+    assert displayed == raw
+    source = html()
+    assert 'id="exec-snapshot-label"' in source
+    assert "execSnapshotLabel.textContent = execSnapshotProvenance || '';" in source
+
+
+def test_current_embedded_executive_report_has_no_archived_label():
+    payload = {
+        "generated_at": "2026-09-20T03:04:05Z",
+        "executive_text": "CURRENT REPORT",
+        "stale": {"stale": False, "generation_freshness": {"current": True}},
+    }
+    assert run_helpers("executiveSnapshotProvenance(" + json.dumps(payload) + ")") is None
+
+
 def test_no_direct_unavailable_currency_or_percentage_templates_remain():
     source = html()
     assert "$${fmtUsd(" not in source

@@ -6800,6 +6800,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="table-scroll" tabindex="0"><table><thead><tr><th>Gate</th><th>Status</th><th>Evidence / receipt</th><th>Precise blocker</th></tr></thead><tbody id="qualification-gate-body"><tr><td colspan="4">Loading qualification gates…</td></tr></tbody></table></div>
     <p class="note" id="decision-readiness-provenance"></p>
     </details>
+    <div id="exec-snapshot-label" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
     <pre id="exec-text"></pre>
     <p class="note">Active tab refreshes every 3 minutes. Canonical workspace: <code>C:\DoxxedCrypto\btc-v31-current</code>. Use the existing single-owner analyzer workflow; do not launch a duplicate analyzer or use retired laptop folders. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
   </section>
@@ -7365,6 +7366,16 @@ function formatExecutiveText(raw, d) {
     ? '[Retired launch instruction omitted. Use the existing analyzer owner in C:\\DoxxedCrypto\\btc-v31-current; do not start a duplicate.]'
     : line).join('\n');
 }
+function executiveSnapshotProvenance(d) {
+  const stale = d?.stale || {};
+  const freshness = stale.generation_freshness || {};
+  const current = stale.stale === false && freshness.current === true;
+  if (current || !d?.executive_text) return null;
+  const generated = typeof d.generated_at === 'string' && d.generated_at
+    ? d.generated_at : 'UNKNOWN';
+  return `ARCHIVED / STALE SNAPSHOT — SAVED ANALYZER REPORT · generated ${generated} · `
+    + 'embedded report text is preserved below for historical reference only; it is not current-session evidence.';
+}
 function fmtAdxBucket(v) {
   const key = String(v || '').toLowerCase();
   if (['adx_low', 'adx<18', 'adx_lt_18'].includes(key)) return 'ADX <18';
@@ -7460,6 +7471,12 @@ async function loadSummary() {
         + ' · inspect MANIFEST.json generation_current and provenance before use'
       : `FORENSIC EXPORT · CURRENT ANALYZER GENERATION · report ${generated}`
         + ' · current does not mean qualified; inspect MANIFEST.json';
+  }
+  const execSnapshotLabel = document.getElementById('exec-snapshot-label');
+  const execSnapshotProvenance = executiveSnapshotProvenance(d);
+  if (execSnapshotLabel) {
+    execSnapshotLabel.style.display = execSnapshotProvenance ? 'block' : 'none';
+    execSnapshotLabel.textContent = execSnapshotProvenance || '';
   }
   document.getElementById('exec-text').textContent = formatExecutiveText(d.executive_text, d);
   const kpis = [
