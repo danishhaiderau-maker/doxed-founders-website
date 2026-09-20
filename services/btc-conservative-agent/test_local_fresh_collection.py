@@ -23,7 +23,11 @@ from local_fresh_collection import (  # noqa: E402
     queue_operation,
     read_operation,
 )
-from local_fresh_collection_owner_audit import OWNER_COMMAND_PATTERNS  # noqa: E402
+from local_fresh_collection_owner_audit import (  # noqa: E402
+    OWNER_COMMAND_PATTERNS,
+    RELAUNCH_ACTION_PATTERNS,
+    RELAUNCH_TASK_NAMES,
+)
 from research.local_generation_fence import (  # noqa: E402
     BLOCKED_STATE,
     LocalGenerationFenced,
@@ -86,6 +90,11 @@ class LocalFreshCollectionTests(unittest.TestCase):
         self.assertEqual(result["scope_version"], SCOPE_VERSION)
         self.assertEqual(result["scope"], "LAPTOP_RESEARCH_ONLY")
         self.assertEqual(result["current_local_generation"], "fly-epoch-kept")
+        self.assertTrue(result["root_topology_ready"])
+        self.assertEqual(
+            result["readiness_scope"],
+            "local_research_owners_and_relaunch_authorities_v1",
+        )
         self.assertFalse(result["fly_mutation_supported"])
         self.assertFalse(result["fly_mutation_requested"])
 
@@ -139,7 +148,7 @@ class LocalFreshCollectionTests(unittest.TestCase):
         )
         self.assertEqual(again["status"], "COMPLETE")
 
-    def test_active_owner_blocks_after_fence_without_deleting(self):
+    def test_active_owner_preflight_blocks_without_fence_then_exact_replay_completes(self):
         queued, _ = self.queue()
         result = execute_operation(
             state_root=self.state,
@@ -147,8 +156,86 @@ class LocalFreshCollectionTests(unittest.TestCase):
             owner_auditor=lambda *_: {"safe": False, "owners": [{"pid": 7}]},
         )
         self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["error"], "LOCAL_RESET_READINESS_BLOCKED")
+        self.assertTrue(result["retryable_preflight"])
+        self.assertFalse(result["mutation_started"])
+        self.assertFalse(result["fence_persisted"])
+        self.assertEqual(result["deleted_file_count"], 0)
+        self.assertEqual(result["deleted_bytes"], 0)
+        self.assertEqual(result["blocker_categories"], ["active_local_research_owner"])
+        self.assertNotIn("pid", json.dumps(result["owner_evidence"]))
+        self.assertNotIn("fence", result)
         self.assertTrue((self.canonical / "raw" / "events.jsonl").exists())
+        self.assertIsNone(read_local_generation_fence(self.canonical))
+
+        replayed, replay = self.queue()
+        self.assertTrue(replay)
+        self.assertEqual(replayed["operation_id"], queued["operation_id"])
+        self.assertNotIn("fence", replayed)
+        completed = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(completed["status"], "COMPLETE")
+        self.assertFalse(completed.get("retryable_preflight", False))
+        self.assertTrue(completed["mutation_started"])
+        self.assertTrue(completed["fence_persisted"])
+
+    def test_enabled_unknown_relauncher_preflight_is_retryable_and_unmutated(self):
+        queued, _ = self.queue()
+        result = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=lambda *_: {
+                "safe": False,
+                "blocker_categories": ["enabled_relaunch_authority"],
+                "active_owner_categories": [],
+                "relaunch_authority_categories": ["unknown_relaunch_authority"],
+            },
+        )
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertTrue(result["retryable_preflight"])
+        self.assertEqual(
+            result["owner_evidence"]["preflight"]["relaunch_authority_categories"],
+            ["unknown_relaunch_authority"],
+        )
+        self.assertIsNone(read_local_generation_fence(self.canonical))
+        self.assertTrue((self.canonical / "raw" / "events.jsonl").exists())
+
+    def test_owner_race_under_lease_stays_fenced_and_reuses_same_tombstone(self):
+        queued, _ = self.queue()
+        audits = iter(
+            [
+                safe_audit(self.canonical, self.archives),
+                {
+                    "safe": False,
+                    "blocker_categories": ["active_local_research_owner"],
+                    "active_owner_categories": ["sync_owner"],
+                    "relaunch_authority_categories": [],
+                },
+            ]
+        )
+        blocked = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=lambda *_: next(audits),
+        )
+        self.assertEqual(blocked["status"], "BLOCKED")
+        self.assertEqual(blocked["error"], "LOCAL_RESET_ACTIVE_OWNER")
+        self.assertTrue(blocked["mutation_started"])
+        self.assertTrue(blocked["fence_persisted"])
+        self.assertFalse(blocked.get("retryable_preflight", False))
+        first_tombstone = blocked["fence"]["tombstone_id"]
         self.assertIsNotNone(read_local_generation_fence(self.canonical))
+
+        completed = execute_operation(
+            state_root=self.state,
+            operation_id=queued["operation_id"],
+            owner_auditor=safe_audit,
+        )
+        self.assertEqual(completed["status"], "COMPLETE")
+        self.assertEqual(completed["fence"]["tombstone_id"], first_tombstone)
 
     def test_concurrent_lease_owner_fails_without_unlinking_lock(self):
         queued, _ = self.queue()
@@ -252,6 +339,10 @@ class LocalFreshCollectionTests(unittest.TestCase):
         self.assertEqual(result["status"], "PARTIAL")
         self.assertEqual(result["error"], "LOCAL_RESET_RECONCILIATION_INCOMPLETE")
         self.assertEqual(result["remaining"][0]["relative_path"], "late-writer.json")
+        self.assertTrue(result["mutation_started"])
+        self.assertTrue(result["fence_persisted"])
+        self.assertFalse(result.get("retryable_preflight", False))
+        self.assertIsNotNone(read_local_generation_fence(self.canonical))
 
     def test_nested_config_credentials_and_accounting_are_preserved(self):
         protected = {
@@ -479,10 +570,43 @@ class LocalFreshCollectionTests(unittest.TestCase):
                 "fly-sync-bundle-client",
                 "start-fly-batch-sync",
                 "fly-sync-generation-resume",
+                "resume-current-epoch-batch-20260921.ps1",
+                "small-sync-client-20260920",
                 "raw_generation_cleanup_owner",
                 "canonical_generation_retirement",
+                "research-stability-supervisor.py",
             }.issubset(set(OWNER_COMMAND_PATTERNS))
         )
+        self.assertIn("DcfShowcaseBotAutostart", RELAUNCH_TASK_NAMES)
+        self.assertIn("DoxxedResearchStabilitySupervisor", RELAUNCH_TASK_NAMES)
+        self.assertIn("DoxedSupervisorWatchdog", RELAUNCH_TASK_NAMES)
+        self.assertIn(
+            "resume-current-epoch-batch-20260921.ps1", RELAUNCH_ACTION_PATTERNS
+        )
+        self.assertIn("small-sync-client-20260920", RELAUNCH_ACTION_PATTERNS)
+        self.assertIn("home-stack-supervisor-watchdog.ps1", RELAUNCH_ACTION_PATTERNS)
+
+    def test_capability_refuses_split_runtime_root_and_duplicate_target(self):
+        different_runtime = Path(self.temp.name) / "different-agent-root"
+        different_runtime.mkdir()
+        with self.assertRaisesRegex(
+            LocalFreshCollectionRejected, "LOCAL_RESET_RUNTIME_ROOT_MISMATCH"
+        ):
+            capability_status(
+                canonical_root=self.canonical,
+                archive_root=self.archives,
+                expected_canonical_root=self.canonical,
+                expected_archive_root=self.archives,
+                runtime_agent_root=different_runtime,
+            )
+        with mock.patch("local_fresh_collection.os.path.samefile", return_value=True):
+            with self.assertRaisesRegex(
+                LocalFreshCollectionRejected, "LOCAL_RESET_DUPLICATE_TARGET"
+            ):
+                capability_status(
+                    canonical_root=self.canonical,
+                    archive_root=self.archives,
+                )
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink support required")
     def test_link_escape_is_refused(self):

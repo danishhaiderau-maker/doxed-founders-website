@@ -26,6 +26,7 @@ ARCHIVE_ROOT = Path(
 STATE_ROOT = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData/Local") / (
     "DoxxedCrypto/local-research-reset"
 )
+RUNTIME_AGENT_ROOT = Path(__file__).resolve().parent
 
 
 def main() -> int:
@@ -35,7 +36,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "capability":
-            result = capability_status(canonical_root=CANONICAL_ROOT, archive_root=ARCHIVE_ROOT)
+            result = capability_status(
+                canonical_root=CANONICAL_ROOT,
+                archive_root=ARCHIVE_ROOT,
+                expected_canonical_root=CANONICAL_ROOT,
+                expected_archive_root=ARCHIVE_ROOT,
+                runtime_agent_root=RUNTIME_AGENT_ROOT,
+            )
         elif args.command == "queue":
             request = json.load(sys.stdin)
             result, replay = queue_operation(
@@ -45,6 +52,7 @@ def main() -> int:
                 request=request,
                 expected_canonical_root=CANONICAL_ROOT,
                 expected_archive_root=ARCHIVE_ROOT,
+                runtime_agent_root=RUNTIME_AGENT_ROOT,
             )
             result = dict(result, replay=replay)
         elif args.command == "status":
@@ -56,6 +64,7 @@ def main() -> int:
                 owner_auditor=audit_local_research_owners,
                 expected_canonical_root=CANONICAL_ROOT,
                 expected_archive_root=ARCHIVE_ROOT,
+                runtime_agent_root=RUNTIME_AGENT_ROOT,
             )
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
