@@ -11,11 +11,98 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+from typing import Any
 
 # Startup-only, explicit research treatment. A restart changes policy identity;
 # this is not a mutable per-request switch or permission to relay live orders.
 SCORE_LED_PAPER_RESEARCH_ENABLED = os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") == "1"
+SCORE_LED_ADMISSION_POLICY_ID = "SCORE_LED_NON_TIE_PAPER_V2"
+SCORE_LED_ADMISSION_SCHEMA = "score_led_paper_admission_v2"
+
+
+def _bounded_score(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    # Bound arbitrary-size Python integers before converting them to float;
+    # float(10**400), for example, raises OverflowError instead of returning
+    # an out-of-range value that the finite check can reject.
+    if value < 0 or value > 100:
+        return None
+    try:
+        score = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(score) or score < 0.0 or score > 100.0:
+        return None
+    return score
+
+
+def resolve_score_led_paper_admission(
+    ai: dict | None,
+    *,
+    score_led_enabled: bool,
+    research_mode: bool,
+    forced_paper: bool,
+    live_armed: bool,
+    bitfinex_live_enabled: bool,
+) -> dict:
+    """Choose the stronger valid score only for the disarmed paper cohort.
+
+    applied=False means callers must preserve the pre-existing admission
+    behavior. An applied rejection is fail-closed for invalid or tied scores.
+    The input mapping is never mutated.
+    """
+    result = {
+        "schema": SCORE_LED_ADMISSION_SCHEMA,
+        "policy_id": SCORE_LED_ADMISSION_POLICY_ID,
+        "applied": False,
+        "accepted": False,
+        "effective_direction": None,
+        "reason": "SCORE_LED_TREATMENT_INACTIVE",
+        "long_score": None,
+        "short_score": None,
+        "score_gap": None,
+    }
+    if not (
+        score_led_enabled
+        and research_mode
+        and forced_paper
+        and not live_armed
+        and not bitfinex_live_enabled
+    ):
+        return result
+
+    result["applied"] = True
+    source = ai if isinstance(ai, dict) else {}
+    factors = source.get("factors") if isinstance(source.get("factors"), dict) else {}
+    if source.get("ai_error") or factors.get("score_parse_error"):
+        result["reason"] = "SCORE_LED_AI_OR_SCORE_PARSE_ERROR"
+        return result
+    long_raw = source.get("long_score")
+    short_raw = source.get("short_score")
+    if long_raw is None:
+        long_raw = factors.get("long_score")
+    if short_raw is None:
+        short_raw = factors.get("short_score")
+    long_score = _bounded_score(long_raw)
+    short_score = _bounded_score(short_raw)
+    if long_score is None or short_score is None:
+        result["reason"] = "SCORE_LED_INVALID_OR_MISSING_SCORES"
+        return result
+
+    result["long_score"] = long_score
+    result["short_score"] = short_score
+    result["score_gap"] = abs(long_score - short_score)
+    if long_score == short_score:
+        result["reason"] = "SCORE_LED_TRUE_TIE"
+        return result
+
+    result["accepted"] = True
+    result["effective_direction"] = "LONG" if long_score > short_score else "SHORT"
+    result["reason"] = "SCORE_LED_VALID_NON_TIE"
+    return result
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_FAMILY_CHANDELIER = "FAMILY_CHANDELIER_3"
@@ -81,7 +168,7 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           ladder_label: str = "", ladder_profile_id: str = "",
           hypothesis_result: dict | None = None) -> dict:
     if SCORE_LED_PAPER_RESEARCH_ENABLED:
-        raw_policy_id = "SCORE_LED_PAPER_V1::" + raw_policy_id
+        raw_policy_id = SCORE_LED_ADMISSION_POLICY_ID + "::" + raw_policy_id
     tile = {
         "tile_id": lane,
         "label": label,
@@ -92,8 +179,8 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
             raw_policy_id=raw_policy_id, entry=entry,
             exit_policy=exit_policy, ladder=ladder,
         ),
-        "policy_epoch": ("v31-score-led-paper-v1" if SCORE_LED_PAPER_RESEARCH_ENABLED else "v31-analyzer-hypothesis-paper-v1"),
-        "admission_treatment": ("SCORE_LED_PAPER_V1" if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
+        "policy_epoch": ("v31-score-led-non-tie-paper-v2" if SCORE_LED_PAPER_RESEARCH_ENABLED else "v31-analyzer-hypothesis-paper-v1"),
+        "admission_treatment": (SCORE_LED_ADMISSION_POLICY_ID if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
         "research_lane": lane,
         "execution_scope": "PAPER_ONLY",
         "paper_eligible": True,
@@ -204,7 +291,7 @@ RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_VERSION = "v31-five-family-analyzer-hypothesis-paper"
 if SCORE_LED_PAPER_RESEARCH_ENABLED:
-    RESEARCH_STACK_VERSION = "v31-five-family-score-led-paper-v1"
+    RESEARCH_STACK_VERSION = "v31-five-family-score-led-non-tie-paper-v2"
 RESEARCH_STACK_FEATURES = (
     "Five exit-family tiles share one direction-only three-minute AI call while retaining "
     "independent paper decisions, locks, capacity, orders, positions, ledgers and policy identities; "
