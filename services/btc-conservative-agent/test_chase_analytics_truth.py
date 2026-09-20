@@ -15,15 +15,27 @@ BOT_SOURCE = (ROOT / "bot.py").read_text(encoding="utf-8")
 ANALYZER_SOURCE = (ROOT / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
 
 
+_COMPILED_FUNCTIONS = {}
+
+
 def _compile(source, name, namespace):
-    tree = ast.parse(source)
-    node = next(
-        item for item in tree.body
-        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name
-    )
-    module = ast.Module(body=[node], type_ignores=[])
-    ast.fix_missing_locations(module)
-    exec(compile(module, name, "exec"), namespace)
+    # The same bot functions are extracted for every fixture case. Cache only
+    # the immutable code object; execute it into each test namespace so the
+    # fixture-specific globals remain isolated while CI avoids repeated AST
+    # parsing/compilation CPU cost.
+    key = (id(source), name)
+    code = _COMPILED_FUNCTIONS.get(key)
+    if code is None:
+        tree = ast.parse(source)
+        node = next(
+            item for item in tree.body
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name
+        )
+        module = ast.Module(body=[node], type_ignores=[])
+        ast.fix_missing_locations(module)
+        code = compile(module, name, "exec")
+        _COMPILED_FUNCTIONS[key] = code
+    exec(code, namespace)
     return namespace[name]
 
 

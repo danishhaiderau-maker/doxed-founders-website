@@ -1092,9 +1092,22 @@ jobs:
           BTC_AGENT_DATA_DIR: ${{ runner.temp }}/btc-agent-data-ci
         run: |
           mkdir -p "$BTC_AGENT_DATA_DIR"
-          python -m pytest test_transactional_receipt_store.py test_execution_admission_pause_truth.py test_reset_inventory_invalidation.py test_relay_owner_delivery_plan.py -q
+          # Keep each bounded group in its own process. Some hosted runners
+          # enforce a per-process CPU quota; splitting preserves all tests
+          # while avoiding a false gate failure from a single long batch.
+          python -m pytest test_transactional_receipt_store.py -q
+          python -m pytest test_execution_admission_pause_truth.py -q
+          python -m pytest test_reset_inventory_invalidation.py -q
+          python -m pytest test_relay_owner_delivery_plan.py -q
           python -m pytest test_chase_analytics_truth.py -q
-          python -m pytest test_local_fresh_collection.py test_local_fresh_collection_integration.py test_local_generation_fence.py test_local_research_reset.py test_local_research_reset_cli.py test_local_research_reset_audit.py test_local_reset_dashboard.py test_fresh_collection_signals.py -q
+          python -m pytest test_local_fresh_collection.py -q
+          python -m pytest test_local_fresh_collection_integration.py -q
+          python -m pytest test_local_generation_fence.py -q
+          python -m pytest test_local_research_reset.py -q
+          python -m pytest test_local_research_reset_cli.py -q
+          python -m pytest test_local_research_reset_audit.py -q
+          python -m pytest test_local_reset_dashboard.py -q
+          python -m pytest test_fresh_collection_signals.py -q
           # A Linux runner may skip the real HttpListener acceptance when its
           # Windows host is unavailable. Release evidence still requires the
           # separate Windows HttpListener receipt; this check pins the adapter.
