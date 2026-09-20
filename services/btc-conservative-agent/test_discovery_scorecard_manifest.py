@@ -108,6 +108,11 @@ def test_rejected_generation_returns_fresh_unknown_not_prior_publication(tmp_pat
     assert persisted["profitability_supported"] is False
     assert persisted["winner"] is None
     assert "stale-winner" not in target.read_text(encoding="utf-8")
+    assert persisted["scan_census_observed_coverage"] == {
+        "status": "UNKNOWN", "qualification_eligible": False,
+        "exhaustive_fanout": False,
+        "blockers": ["CENSUS_HELD_LEASE_INVALID"],
+    }
 
 
 def test_generation_mismatch_fails_closed_before_artifact_read(tmp_path):

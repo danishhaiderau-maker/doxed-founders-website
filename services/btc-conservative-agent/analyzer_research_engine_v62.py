@@ -20149,12 +20149,16 @@ def _write_discovery_scorecard_report(
         import sqlite3
         from research.local_dynamic_input import _source
         generation=report.get('generation') or {}
+        held_lease = globals().get('_CURRENT_MIRROR_GENERATION_LEASE')
+        coherence_token = globals().get('_CURRENT_MIRROR_COHERENCE_TOKEN')
+        if held_lease is None or coherence_token is None:
+            raise ValueError('CENSUS_HELD_LEASE_INVALID')
         report['scan_census_observed_coverage']=reconcile_scans(
             repo_root=Path(__file__).resolve().parents[2],data_root=canonical_root,
             source_revision=generation.get('source_revision'),
             config_signature=generation.get('tile_config_signature'),
-            held_lease=_CURRENT_MIRROR_GENERATION_LEASE,
-            expected_source=_source(_CURRENT_MIRROR_COHERENCE_TOKEN))
+            held_lease=held_lease,
+            expected_source=_source(coherence_token))
     except (OSError,ValueError,RuntimeError,TypeError,sqlite3.Error) as error:
         report['scan_census_observed_coverage']={'status':'UNKNOWN','qualification_eligible':False,
             'exhaustive_fanout':False,'blockers':[diagnostic_code(error)]}
