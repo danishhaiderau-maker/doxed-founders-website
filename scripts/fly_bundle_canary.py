@@ -100,6 +100,113 @@ def normalized_runtime_flags(environment=None):
     }
 
 
+def _safe_bool(value):
+    return value if type(value) is bool else None
+
+
+def _safe_nonnegative_int(value, maximum=2**63 - 1):
+    return value if type(value) is int and 0 <= value <= maximum else None
+
+
+def _safe_nonnegative_number(value, maximum=2**53):
+    return value if number(value) and 0 <= value <= maximum else None
+
+
+def _safe_enum(value, allowed):
+    return value if isinstance(value, str) and value in allowed else None
+
+
+def _safe_bootstrap(value):
+    value = value if isinstance(value, dict) else {}
+    return {
+        'required': _safe_bool(value.get('required')),
+        'complete': _safe_bool(value.get('complete')),
+        'blocked': _safe_bool(value.get('blocked')),
+        'status': _safe_enum(value.get('status'),
+                             {'PENDING', 'COMPLETE', 'BLOCKED', 'NOT_REQUIRED'}),
+    }
+
+
+def _safe_manifest_inspection(value, revision, generation_id):
+    value = value if isinstance(value, dict) else {}
+    if value.get('schema') != 'fly_runtime_incremental_sync_v1':
+        value = {}
+    return {
+        'source_git_rev': revision if value.get('source_git_rev') == revision else None,
+        'inventory_status': _safe_enum(value.get('inventory_status'), {
+            'IDENTITY_ONLY', 'CURRENT', 'BUILDING', 'STALE', 'STALE_REVALIDATING', 'EMPTY'}),
+        'inventory_sha256': generation_id
+            if value.get('inventory_sha256') == generation_id else None,
+        'inventory_generation_id': generation_id
+            if value.get('inventory_generation_id') == generation_id else None,
+        'inventory_build_status': _safe_enum(value.get('inventory_build_status'),
+                                             {'PENDING', 'BUILDING', 'FAILED', 'IDLE'}),
+    }
+
+
+def _safe_runtime_inspection(value, revision):
+    value = value if isinstance(value, dict) else {}
+    return {
+        'source_git_rev': revision if value.get('source_git_rev') == revision else None,
+        'process_alive': _safe_bool(value.get('process_alive')),
+        'dashboard_owner': _safe_bool(value.get('dashboard_owner')),
+        'dashboard_pid': _safe_nonnegative_int(value.get('dashboard_pid'), 2**31 - 1),
+        'force_paper_mode': _safe_bool(value.get('force_paper_mode')),
+        'live_armed': _safe_bool(value.get('live_armed')),
+        'bitfinex_live_enabled': _safe_bool(value.get('bitfinex_live_enabled')),
+    }
+
+
+def _safe_pipeline_inspection(value):
+    value = value if isinstance(value, dict) else {}
+    overlap = value.get('overlap_code')
+    if 'overlap_code' not in value:
+        overlap_status = 'UNAVAILABLE'
+    elif overlap is None:
+        overlap_status = 'CLEAR'
+    elif overlap == 'CALLER_REPORTED_SYNC_OR_INVENTORY_OVERLAP' \
+            or isinstance(overlap, str) and overlap.startswith('ACTIVE_OVERLAP_PATH:'):
+        overlap_status = 'REPORTED'
+    else:
+        overlap_status = 'UNAVAILABLE'
+    return {
+        'owner': _safe_bool(value.get('owner')),
+        'running': _safe_bool(value.get('running')),
+        'active': _safe_bool(value.get('active')),
+        'source_revision_match': _safe_bool(value.get('source_revision_match')),
+        'last_outcome': _safe_enum(value.get('last_outcome'), {
+            'NEVER_RUN', 'NOT_STARTED', 'STATUS_UNAVAILABLE', 'STARTED', 'RUNNING', 'SUCCESS',
+            'DUPLICATE_ACTIVE_SKIPPED', 'OVERLAP_SKIPPED', 'PRESSURE_SKIPPED', 'TIMEOUT',
+            'WORKER_FAILED', 'PARENT_GUARD_FAILURE', 'OWNER_LOOP_FAILED',
+            'DUPLICATE_OWNER_REJECTED', 'FAILED'}),
+        'pressure': _safe_bool(value.get('pressure')),
+        'emergency': _safe_bool(value.get('emergency')),
+        'overlap_status': overlap_status,
+        'last_success_age_sec': _safe_nonnegative_number(value.get('last_success_age_sec')),
+        'receipt_bootstrap': _safe_bootstrap(value.get('receipt_bootstrap')),
+    }
+
+
+def _safe_inventory_progress(value, fingerprint, raw):
+    require(isinstance(value, dict) and value.get('request_fingerprint') == fingerprint,
+            'PROGRESS_FINGERPRINT_MISMATCH')
+    result = {
+        'sha256': hashlib.sha256(raw).hexdigest(),
+        'complete': _safe_bool(value.get('complete')),
+        'phase': _safe_enum(value.get('phase'), {'SCAN', 'FINALIZE', 'COMPLETE'}),
+    }
+    integer_fields = (
+        'files_seen', 'dirs_seen', 'rows_written', 'invocations', 'pages_written',
+        'pages_total', 'spool_bytes_used', 'pending_directories', 'invocation_files_seen',
+        'invocation_dirs_seen', 'file_budget', 'current_directory_files_remaining',
+        'peak_rss_bytes')
+    number_fields = ('total_elapsed_seconds', 'invocation_elapsed_seconds',
+                     'cpu_seconds', 'elapsed_budget_seconds')
+    result.update({key: _safe_nonnegative_int(value.get(key)) for key in integer_fields})
+    result.update({key: _safe_nonnegative_number(value.get(key)) for key in number_fields})
+    return result
+
+
 def _bounded_coordinator_bytes(path):
     """Stable exact-file read; no enumeration, links, hardlinks or raw errors."""
     path = Path(path)
@@ -542,14 +649,6 @@ def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, invent
     # Identity-only is the explicit no-refresh/physical-inventory path.
     manifest = request_json('/api/data-sync/manifest?identity_only=1')
     pipeline = status.get('lifecycle_pipeline') or {}
-    fields = ('source_git_rev', 'inventory_status', 'inventory_sha256',
-              'inventory_generation_id', 'inventory_build_status', 'inventory_error')
-    counters = ('complete', 'phase', 'files_seen', 'dirs_seen', 'rows_written',
-                'invocations', 'pages_written', 'pages_total', 'total_elapsed_seconds',
-                'invocation_elapsed_seconds', 'spool_bytes_used', 'pending_directories',
-                'cpu_seconds', 'invocation_files_seen', 'invocation_dirs_seen',
-                'file_budget', 'elapsed_budget_seconds', 'current_directory_files_remaining',
-                'peak_rss_bytes')
     progress = []
     work = volume / '.data-sync-snapshots'
     bundle_root = work / 'transport-bundles'
@@ -567,20 +666,18 @@ def inspect_only(revision, generation_id, request_json, *, volume=VOLUME, invent
         path = work / name
         if path.exists():
             raw = bounded(path, 65536)
-            value = json.loads(raw)
-            require(value.get('request_fingerprint') == inventory_fingerprint, 'PROGRESS_FINGERPRINT_MISMATCH')
-            progress.append({'name': name, 'sha256': hashlib.sha256(raw).hexdigest(),
-                             **{key: value.get(key) for key in counters}})
+            value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_object,
+                               parse_constant=lambda _: (_ for _ in ()).throw(
+                                   ValueError('NONFINITE_JSON')))
+            progress.append(_safe_inventory_progress(
+                value, inventory_fingerprint, raw))
     return {'schema': 'fly_bundle_canary_inspection_v1', 'status': 'INSPECTED',
             'inspection_authority': 'IDENTITY_AND_PROGRESS_ONLY_NOT_CURRENT_INVENTORY_OR_CANARY_PROOF',
             'requested_generation_id': generation_id, 'slice_invoked': False,
-            'manifest_identity_only': {key: manifest.get(key) for key in fields},
-            'runtime': {key: status.get(key) for key in ('source_git_rev', 'process_alive',
-                        'dashboard_owner', 'dashboard_pid', 'bot_instance_id',
-                        'force_paper_mode', 'live_armed', 'bitfinex_live_enabled')},
-            'pipeline': {key: pipeline.get(key) for key in ('owner', 'running', 'active',
-                         'source_revision_match', 'last_outcome', 'pressure', 'emergency',
-                         'overlap_code', 'last_success_age_sec', 'receipt_bootstrap')},
+            'manifest_identity_only': _safe_manifest_inspection(
+                manifest, revision, generation_id),
+            'runtime': _safe_runtime_inspection(status, revision),
+            'pipeline': _safe_pipeline_inspection(pipeline),
             'progress_receipts': progress,
             'progress_status': 'READ' if progress else 'EXACT_RECEIPT_UNAVAILABLE',
             'runtime_flags': normalized_runtime_flags(environment),

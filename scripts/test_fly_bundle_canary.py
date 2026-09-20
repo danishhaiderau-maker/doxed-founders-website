@@ -164,6 +164,88 @@ def test_inspection_allows_stale_and_reads_only_exact_progress(tmp_path, monkeyp
     assert paths == ['/api/status', '/api/data-sync/manifest?identity_only=1']
 
 
+def test_inspection_drops_malicious_server_and_progress_values(tmp_path):
+    digest, manifest, status = fixture(tmp_path)
+    secret = 'TOP_SECRET_ARBITRARY_TEXT'
+    manifest.update({
+        'inventory_error': secret, 'inventory_status': secret,
+        'inventory_build_status': secret, 'inventory_generation_id': 'a' * 64,
+        'inventory_sha256': {'private': secret},
+    })
+    status.update({
+        'bot_instance_id': secret, 'process_alive': secret,
+        'dashboard_owner': {'private': secret}, 'dashboard_pid': [secret],
+        'force_paper_mode': 1, 'live_armed': secret,
+    })
+    status['lifecycle_pipeline'].update({
+        'last_outcome': secret, 'pressure': secret, 'emergency': [secret],
+        'overlap_code': secret, 'last_success_age_sec': secret,
+        'receipt_bootstrap': {'required': secret, 'complete': [secret],
+                              'blocked': {'private': secret}, 'status': secret,
+                              'private': secret},
+    })
+    fingerprint = '9' * 64
+    progress_path = tmp_path / '.data-sync-snapshots' / (
+        f'inventory-worker-v2-{fingerprint[:32]}.progress.json')
+    progress_path.write_bytes(canonical({
+        'request_fingerprint': fingerprint, 'phase': secret, 'complete': secret,
+        'files_seen': secret, 'dirs_seen': [secret], 'rows_written': {'private': secret},
+        'cpu_seconds': secret, 'peak_rss_bytes': -1, 'private': secret,
+    }))
+    result = c.inspect_only(REV, digest,
+        lambda url: status if url == '/api/status' else manifest,
+        volume=tmp_path, inventory_fingerprint=fingerprint,
+        environment={'PRIVATE': secret}, resource_probe=lambda _: {})
+    serialized = json.dumps(result)
+    assert secret not in serialized
+    assert 'inventory_error' not in result['manifest_identity_only']
+    assert 'bot_instance_id' not in result['runtime']
+    assert result['manifest_identity_only']['inventory_status'] is None
+    assert result['manifest_identity_only']['inventory_generation_id'] is None
+    assert result['manifest_identity_only']['inventory_sha256'] is None
+    assert result['runtime']['process_alive'] is None
+    assert result['pipeline']['last_outcome'] is None
+    assert result['pipeline']['overlap_status'] == 'UNAVAILABLE'
+    assert result['pipeline']['receipt_bootstrap'] == {
+        'required': None, 'complete': None, 'blocked': None, 'status': None}
+    assert result['progress_receipts'][0]['phase'] is None
+    assert result['progress_receipts'][0]['files_seen'] is None
+    assert result['progress_receipts'][0]['cpu_seconds'] is None
+    assert result['progress_receipts'][0]['peak_rss_bytes'] is None
+
+
+def test_duplicate_progress_json_blocks_without_echoing_content(tmp_path):
+    digest, manifest, status = fixture(tmp_path)
+    fingerprint = '9' * 64
+    progress_path = tmp_path / '.data-sync-snapshots' / (
+        f'inventory-worker-v2-{fingerprint[:32]}.progress.json')
+    raw = ('{"request_fingerprint":"' + fingerprint
+           + '","phase":"SCAN","phase":"TOP_SECRET"}').encode()
+    progress_path.write_bytes(raw)
+    with pytest.raises(ValueError) as failure:
+        c.inspect_only(REV, digest,
+            lambda url: status if url == '/api/status' else manifest,
+            volume=tmp_path, inventory_fingerprint=fingerprint,
+            resource_probe=lambda _: {})
+    receipt = c.blocked_receipt(failure.value)
+    assert receipt['error'] == 'ValueError'
+    assert 'TOP_SECRET' not in json.dumps(receipt)
+
+
+def test_pipeline_overlap_missing_is_unavailable_and_explicit_null_is_clear():
+    assert c._safe_pipeline_inspection({})['overlap_status'] == 'UNAVAILABLE'
+    assert c._safe_pipeline_inspection({'overlap_code': None})['overlap_status'] == 'CLEAR'
+
+
+def test_wrong_manifest_schema_cannot_project_valid_looking_identity_or_status():
+    projected = c._safe_manifest_inspection({
+        'schema': 'attacker_schema', 'source_git_rev': REV,
+        'inventory_status': 'CURRENT', 'inventory_sha256': 'a' * 64,
+        'inventory_generation_id': 'a' * 64, 'inventory_build_status': 'IDLE'},
+        REV, 'a' * 64)
+    assert set(projected.values()) == {None}
+
+
 def coordinator_value(generation, *, worker_state_present, **changes):
     value = {
         'schema': 'fly_transport_bundle_coordinator_status_v1',
