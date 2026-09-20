@@ -199,6 +199,17 @@ export function activeLiveRelayArmForSessionReset(
   status: string,
   dashboardState: Record<string, unknown>,
 ): Record<string, unknown> {
+  // The reset replaces the whole dashboard JSON. Preserve an explicit
+  // disarmed state as well as active arms, otherwise PAUSED becomes missing
+  // mode and fails the strict deployment boundary after every session reset.
+  // Status remains authoritative even when a legacy snapshot has arm fields.
+  if (status === 'PAUSED') {
+    return {
+      relayExecutionMode: 'PAUSED',
+      relayArmedAt: null,
+      realTradingConfirmedAt: null,
+    };
+  }
   if (status !== 'ACTIVE' || dashboardState.relayExecutionMode !== 'LIVE') return {};
 
   const validIso = (value: unknown): string | null => {
