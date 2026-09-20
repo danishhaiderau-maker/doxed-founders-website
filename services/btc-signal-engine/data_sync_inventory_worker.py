@@ -46,6 +46,15 @@ class CheckpointError(ValueError):
     """The durable traversal state cannot be trusted."""
 
 
+def _strict_object_pairs(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError('DUPLICATE_JSON_KEY')
+        value[key] = item
+    return value
+
+
 def _building_retry_seconds(receipt: dict) -> int:
     """Yield faster only after a measured, short finalization page advance.
 
@@ -210,6 +219,43 @@ def _quarantine_binding(path: Path, request: dict) -> dict | None:
         raise RuntimeError('QUARANTINE_COMPONENT_BINDING_INVALID') from exc
 
 
+def _transactional_receipt_authority_binding(path: Path, request: dict) -> dict | None:
+    runtime = Path(request['_runtime'])
+    expected = runtime / 'v3/receipts/transactional_record_authority_v1/receipts.sqlite3'
+    try:
+        if Path(os.path.abspath(path)) != expected:
+            return None
+        marker_path = expected.with_name('ACTIVE.json')
+        if marker_path.is_symlink() or not marker_path.is_file():
+            raise RuntimeError('TRANSACTIONAL_RECEIPT_AUTHORITY_MARKER_MISSING')
+        raw = marker_path.read_bytes()
+        if len(raw) > 65536:
+            raise RuntimeError('TRANSACTIONAL_RECEIPT_AUTHORITY_MARKER_INVALID')
+        marker = json.loads(raw, object_pairs_hook=_strict_object_pairs)
+        material = dict(marker)
+        supplied = str(material.pop('binding_sha256', ''))
+        if (marker.get('schema') != 'v3_transactional_record_receipt_authority_marker_v1'
+                or marker.get('state') != 'ACTIVE'
+                or marker.get('identity') != request.get('v3_runtime_identity')
+                or marker.get('database_relative')
+                    != 'v3/receipts/transactional_record_authority_v1/receipts.sqlite3'
+                or not hmac.compare_digest(supplied, hashlib.sha256(json.dumps(
+                    material, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
+                ).encode()).hexdigest())):
+            raise RuntimeError('TRANSACTIONAL_RECEIPT_AUTHORITY_MARKER_INVALID')
+        return {
+            'schema': 'v3_transactional_receipt_snapshot_binding_v1',
+            'authority_id': marker.get('authority_id'),
+            'identity': marker.get('identity'),
+            'marker_sha256': hashlib.sha256(raw).hexdigest(),
+            'database_relative': marker.get('database_relative'),
+        }
+    except RuntimeError:
+        raise
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError('TRANSACTIONAL_RECEIPT_AUTHORITY_MARKER_INVALID') from exc
+
+
 def _linked_directory(path: Path) -> bool:
     try:
         lexical = Path(os.path.abspath(path))
@@ -333,6 +379,9 @@ def _row(path: Path, request: dict) -> dict | None:
                     row['physical_size'], row['mtime_ns'], row['inode']):
                 raise ValueError('QUARANTINE_COMPONENT_CHANGED')
             row['forensic_component'] = quarantine
+        receipt_authority = _transactional_receipt_authority_binding(path, request)
+        if receipt_authority is not None:
+            row['transactional_receipt_authority'] = receipt_authority
         generation = _v3_ledger_generation(resolved, request)
         parts = tuple(part.lower() for part in resolved.parts)
         is_v3_ledger_object = len(parts) >= 3 and parts[-3:-1] == ("v3", "ledgers") and (
@@ -360,6 +409,7 @@ def _stable_request(request: dict) -> dict:
     # never try to interpret an older cursor using newer snapshot semantics.
     stable["worker_snapshot_contract"] = CHECKPOINT_SCHEMA
     stable['quarantine_component_contract'] = 'receipt_bound_original_components_v1'
+    stable['transactional_receipt_snapshot_contract'] = 'marker_bound_sqlite_backup_v1'
     directories, entries, spool_bytes = _generation_limits(request)
     stable["generation_directory_limit"] = directories
     stable["generation_entry_limit"] = entries
