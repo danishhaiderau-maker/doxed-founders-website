@@ -389,16 +389,16 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.assertFalse(body["wiped"])
         reset.assert_not_called()
 
-    def test_dashboard_button_posts_official_epoch_reset(self):
+    def test_dashboard_button_is_laptop_only_and_never_posts_fly_reset(self):
         src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
         start = src.index("async function toggleFreshCollection()")
         end = src.index("async function wipeFlyOnly()", start)
         fn = src[start:end]
-        self.assertIn("fetch('/api/fresh_epoch_reset'", fn)
+        self.assertNotIn("/api/fresh_epoch_reset", fn)
         self.assertNotIn("/api/toggle_fresh_collection", fn)
-        self.assertIn("cannot turn OFF", fn)
-        self.assertIn("method: 'GET'", fn)
-        self.assertIn("method: 'POST'", fn)
+        self.assertIn("/api/local-research-reset/v1/requests", fn)
+        self.assertIn("DELETE LAPTOP RESEARCH ONLY", fn)
+        self.assertIn("localResetCompletionVerified(body)", fn)
 
 
 if __name__ == "__main__":

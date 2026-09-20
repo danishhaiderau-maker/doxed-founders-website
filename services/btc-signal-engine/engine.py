@@ -31571,7 +31571,7 @@ __ADMIN_ACCESS_CONTROLS__
     <button id="invertToggleBtn" onclick="toggleInvert()" title="Flip LONG↔SHORT on new signals only. Existing tickets stay unchanged. Admin login required to toggle.">Invert Signal: <span id="invertBtn">OFF</span></button>
     <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark paper orders — OFF still runs the shared three-minute AI observation and records shadow outcomes">Continuous Paper Orders: <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
-    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Starts a NEW Fly research epoch via POST /api/fresh_epoch_reset (quarantine + wipe Fly volume, then desktop mirror syncs the empty epoch). Stays ON for the bound epoch — click does not turn it OFF.">Fresh Collection (Fly epoch): <span id="freshCollectionLabel">OFF</span></button>
+    <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Delete laptop research only through the authenticated local controller. Fly is unchanged. Requires this page open on the laptop.">Fresh Collection — Laptop Only: <span id="freshCollectionLabel">READY TO REQUEST</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
     <button onclick="downloadDebug()">Download Debug Logs</button>
     <button onclick="window.location.href='/api/export.csv'" title="Owner-auth ZIP of CSV/JSONL collection files (same as /api/export_csv)">Download CSV Logs</button>
@@ -31689,11 +31689,22 @@ __ADMIN_ACCESS_CONTROLS__
 </div>
 
 <p id="freshCollectionHint" style="color:#8b949e;font-size:0.85em;margin-top:8px;">
-  <strong>Fresh Collection (Fly epoch):</strong> one-way ON for the bound epoch. Clicking while ON does not turn it OFF — it offers <em>start a NEW fresh epoch</em>, which calls authenticated <code>POST /api/fresh_epoch_reset</code> on the Fly owner. That resets the Fly research epoch and signals desktop sync. On the desktop, the next successful sync moves the prior active mirror into local quarantine; it does not delete that local copy. Paper must be paused and flat; Cheetah stays paused/disarmed. While ON, oversized aux logs are trimmed hourly.
+  <strong>Fresh Collection — Laptop Only:</strong> deletes the configured laptop research mirror, derived analysis and eligible research archives. Fly data and its collection epoch stay unchanged. Protected credentials, configuration, accounting, recovery state and operation receipts are retained. Open this page on the laptop with its authenticated local controller available; a phone cannot reach the laptop through localhost. After deletion, local sync remains blocked until a verified import is explicitly approved, so old downloads cannot silently restore deleted data. This is a one-shot operation, not an ON/OFF mode.
   <br><br>
   <strong>Wipe Fly Data Only:</strong> deletes scoped Fly research files + resets Fly in-memory research state while retaining protected credentials, accounting, and recovery state. It does not signal a fresh desktop epoch: the existing local sync mirror is left untouched.
 </p>
-<p id="freshCollectionStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
+<p id="freshCollectionStatus" role="status" aria-live="polite" style="color:#58a6ff;font-size:0.85em;margin-top:4px;overflow-wrap:anywhere;">Laptop reset not requested. Fly is unchanged.</p>
+<dialog id="localResetDialog" style="max-width:540px;width:calc(100% - 48px);box-sizing:border-box;background:#161b22;color:#c9d1d9;border:1px solid #8b949e;border-radius:10px;">
+  <form method="dialog">
+    <h3>Delete laptop research only</h3>
+    <p>This permanently deletes eligible laptop research and analysis. It does not wipe Fly, change trading controls, or arm Bitfinex. Local sync will be blocked pending a verified import.</p>
+    <p>Use the dedicated capability provisioned on this laptop. Do not enter a Fly, Bitfinex, or account password. The capability is held in this page's memory only.</p>
+    <label for="localResetCapability">Local reset capability</label>
+    <input id="localResetCapability" type="password" autocomplete="off" minlength="32" style="display:block;box-sizing:border-box;width:100%;margin:8px 0;" />
+    <button value="cancel">Cancel</button>
+    <button value="confirm">Verify laptop controller</button>
+  </form>
+</dialog>
 <p id="wipeFlyOnlyStatus" style="color:#58a6ff;font-size:0.85em;margin-top:4px;"></p>
 
 <div id="dataStoragePanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
@@ -32644,78 +32655,112 @@ DASHBOARD_JS = """(function () {
       await post('/api/toggle_debug', {enabled: cur});
       refresh();
     }
+    // Laptop-only controller contract. Never fall back to any Fly reset endpoint.
+    let localResetOperationId = null;
+    function localResetStatus(label, message) {
+      document.getElementById('freshCollectionLabel').innerText = label;
+      document.getElementById('freshCollectionStatus').innerText = message;
+    }
+    async function localResetCapabilityPrompt() {
+      const dialog = document.getElementById('localResetDialog');
+      const field = document.getElementById('localResetCapability');
+      field.value = '';
+      dialog.returnValue = 'cancel';
+      return new Promise(function (resolve) {
+        dialog.addEventListener('close', function () {
+          const value = dialog.returnValue === 'confirm' ? field.value : '';
+          field.value = '';
+          resolve(value);
+        }, {once: true});
+        dialog.showModal();
+        field.focus();
+      });
+    }
+    async function localResetApi(path, capability, payload) {
+      if (!/^\\/api\\/local-research-reset\\/v1\\/(capability|requests|operations\\/[a-f0-9]{32})$/.test(path)) {
+        throw new Error('LOCAL_RESET_PATH_REFUSED');
+      }
+      const response = await fetch('http://127.0.0.1:7810' + path, {
+        method: payload ? 'POST' : 'GET', credentials: 'omit', cache: 'no-store', redirect: 'error',
+        signal: AbortSignal.timeout(20000),
+        headers: {'Content-Type': 'application/json', 'X-Local-Reset-Capability': capability},
+        ...(payload ? {body: JSON.stringify(payload)} : {}),
+      });
+      const body = await response.json();
+      if (!response.ok || body.error) throw new Error('LOCAL_CONTROLLER_HTTP_' + response.status);
+      return body;
+    }
+    function localResetCompletionVerified(body) {
+      return body.deletion_reconciled === true && body.exact_hash_reconciliation === true
+        && body.fly_mutation_requested === false && body.remote_http_writes === 0
+        && body.sync_state === 'BLOCKED_PENDING_VERIFIED_IMPORT'
+        && /^[a-f0-9]{64}$/.test(body.completion_receipt_sha256 || '')
+        && typeof body.completion_receipt_path === 'string' && body.completion_receipt_path.length > 0
+        && Number.isSafeInteger(body.deleted_file_count) && body.deleted_file_count >= 0
+        && Number.isSafeInteger(body.deleted_bytes) && body.deleted_bytes >= 0;
+    }
     async function toggleFreshCollection() {
       if (freshCollectionInFlight) return;
-      const freshLabelEl = document.getElementById('freshCollectionLabel');
       const freshBtn = document.getElementById('freshCollectionBtn');
       freshCollectionInFlight = true;
-      if (freshBtn) freshBtn.disabled = true;
+      freshBtn.disabled = true;
+      let capability = '';
       try {
-        const statusRes = await fetch('/api/fresh_epoch_reset', {
-          method: 'GET',
-          credentials: 'same-origin',
-        });
-        let status = {};
-        try { status = await statusRes.json(); } catch (_) { status = {}; }
-        if (statusRes.status === 401) {
-          alert('Fresh Collection needs admin login on the Fly owner dashboard (cookie/token). The click never reached POST /api/fresh_epoch_reset.');
-          return;
+        capability = await localResetCapabilityPrompt();
+        if (!capability) return;
+        if (capability.length < 32) throw new Error('LOCAL_CAPABILITY_TOO_SHORT');
+        const status = await localResetApi('/api/local-research-reset/v1/capability', capability);
+        if (status.protocol !== 'local_research_reset_protocol_v1'
+          || status.scope_version !== 'laptop_research_scope_v1'
+          || status.scope !== 'LAPTOP_RESEARCH_ONLY' || status.fly_mutation_supported !== false
+          || typeof status.current_local_generation !== 'string' || !status.current_local_generation) {
+          throw new Error('LOCAL_CONTROLLER_PROTOCOL_MISMATCH');
         }
-        if (!statusRes.ok) {
-          alert('Fresh Collection status failed: ' + (status.error || statusRes.statusText || statusRes.status));
-          return;
+        if (!localResetOperationId) {
+          if (!confirm('Permanently DELETE LAPTOP RESEARCH ONLY? Fly stays unchanged. Local mirror, derived analysis and eligible archives will be deleted. Protected credentials, accounting and recovery are retained. Local sync stays BLOCKED pending a verified import.')) return;
+          // Retain the id before POST: if its response is lost, query this operation;
+          // never issue a new destructive request automatically.
+          localResetOperationId = crypto.randomUUID().replaceAll('-', '');
+          await localResetApi('/api/local-research-reset/v1/requests', capability, {
+            request_id: localResetOperationId, confirmation: 'DELETE LAPTOP RESEARCH ONLY',
+            expected_local_generation: status.current_local_generation,
+          });
         }
-        const epoch = status.epoch_id || 'unbound';
-        const alreadyOn = !!status.fresh_collection_mode;
-        const confirmMsg = alreadyOn
-          ? ('Fresh Collection is already ON for epoch ' + epoch + '.\\n\\nThis control cannot turn OFF. Start a NEW fresh epoch on Fly? The next successful desktop sync moves the prior local active mirror into local quarantine; it does not delete that local copy.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?')
-          : ('Start a fresh collection epoch on Fly? This resets Fly research data and session counters, then signals desktop sync. The next successful desktop sync moves the prior local active mirror into local quarantine; it does not delete that local copy.\\n\\nPaper must be paused and flat. Cheetah stays paused.\\n\\nContinue?');
-        if (!confirm(confirmMsg)) return;
-        const freshStatusRes = await fetch('/api/fresh_epoch_reset', {
-          method: 'GET',
-          credentials: 'same-origin',
-        });
-        try { status = await freshStatusRes.json(); } catch (_) { status = {}; }
-        if (!freshStatusRes.ok) {
-          alert('Fresh Collection re-check failed: ' + (status.error || freshStatusRes.statusText || freshStatusRes.status));
-          return;
+        const operationId = localResetOperationId;
+        localResetStatus('CHECKING', 'Checking laptop reset ' + operationId + '. Not complete; Fly is unchanged.');
+        for (let attempt = 0; attempt < 120; attempt++) {
+          const body = await localResetApi('/api/local-research-reset/v1/operations/' + operationId, capability);
+          if (body.operation_id !== operationId || body.request_id !== operationId
+            || body.protocol !== 'local_research_reset_protocol_v1'
+            || body.scope_version !== 'laptop_research_scope_v1'
+            || body.fly_mutation_requested !== false || body.remote_http_writes !== 0) {
+            throw new Error('LOCAL_RESET_RECEIPT_MISMATCH');
+          }
+          const state = body.status;
+          if (state === 'COMPLETE') {
+            if (!localResetCompletionVerified(body)) throw new Error('LOCAL_RESET_COMPLETION_NOT_VERIFIED');
+            localResetStatus('COMPLETE', 'Verified deletion: ' + body.deleted_file_count + ' files, '
+              + body.deleted_bytes + ' bytes. Fly unchanged. Sync BLOCKED pending verified import. Receipt: '
+              + body.completion_receipt_path + ' · SHA-256 ' + body.completion_receipt_sha256);
+            return;
+          }
+          if (['QUEUED', 'RUNNING', 'BLOCKED', 'PARTIAL', 'FAILED'].indexOf(state) < 0) {
+            throw new Error('LOCAL_RESET_UNKNOWN_STATUS');
+          }
+          localResetStatus(state, 'Laptop reset ' + operationId + ': ' + state
+            + '. Not complete. Fly is unchanged. ' + (body.error || ''));
+          if (['BLOCKED', 'PARTIAL', 'FAILED'].indexOf(state) >= 0) return;
+          await new Promise(function (resolve) { setTimeout(resolve, 2000); });
         }
-        if (!status.wipe_ready) {
-          alert(
-            'Cannot wipe Fly yet.\\n\\n' +
-            ((status.blockers && status.blockers.length) ? status.blockers.join('\\n') : 'not flat / not paused') +
-            '\\n\\nPause paper, wait until pending/open are zero, keep Cheetah paused/disarmed, then click again. No wipe was sent.'
-          );
-          return;
-        }
-        const res = await fetch('/api/fresh_epoch_reset', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            confirmation: status.confirmation_required,
-            strict_flat_proof: status.strict_flat_proof,
-          }),
-        });
-        const body = await res.json().catch(function () { return {}; });
-        if (!res.ok || body.error || (body.reset && body.reset.ok === false)) {
-          alert('Fresh Collection blocked: ' + (body.error || (body.reset && (body.reset.summary || body.reset.error)) || res.statusText || res.status));
-          return;
-        }
-        const epochAfter = body.epoch_id || (body.reset && body.reset.epoch_cutoff_utc) || epoch;
-        let msg = 'Fresh epoch wipe accepted on Fly: ' + (body.reset && body.reset.summary ? body.reset.summary : 'ok');
-        if (epochAfter) msg += '\\nEpoch: ' + epochAfter;
-        if (body.reset && body.reset.quarantine_path) msg += '\\nQuarantine: ' + body.reset.quarantine_path;
-        alert(msg);
-        if (freshLabelEl) {
-          freshLabelEl.innerText = body.epoch_id ? ('ON · ' + body.epoch_id) : 'ON';
-        }
+        localResetStatus('NOT VERIFIED', 'Still pending. Click again to check the SAME operation ' + operationId + '; do not start another reset.');
       } catch (e) {
-        alert('Fresh Collection request failed: ' + e);
+        // Do not display raw request errors: they may contain credential material.
+        localResetStatus('NOT VERIFIED', 'Laptop reset unavailable or not verified. Use this page on the laptop with the local controller and a provisioned capability. No Fly reset was requested.'
+          + (localResetOperationId ? ' Operation ' + localResetOperationId + ': click again to check its status; do not assume deletion completed.' : ''));
       } finally {
+        capability = '';
         freshCollectionInFlight = false;
-        if (freshBtn) freshBtn.disabled = false;
-        refresh();
+        freshBtn.disabled = false;
       }
     }
     let wipeFlyOnlyInFlight = false;
@@ -33258,34 +33303,8 @@ DASHBOARD_JS = """(function () {
           debugBtn.innerText = `Debug Mode (Console) ${d.debug_enabled ? 'ON' : 'OFF'}`;
           debugBtn.style.backgroundColor = d.debug_enabled ? '#10b981' : '#ef4444';
         }
-        const freshBtn = document.getElementById('freshCollectionBtn');
-        const freshLabel = document.getElementById('freshCollectionLabel');
-        if (freshLabel) {
-          if (d.fresh_collection_mode) {
-            freshLabel.innerText = d.fresh_epoch_id
-              ? ('ON · ' + d.fresh_epoch_id)
-              : 'ON';
-          } else {
-            freshLabel.innerText = 'OFF';
-          }
-        }
-        if (freshBtn) {
-          freshBtn.style.backgroundColor = d.fresh_collection_mode ? '#2563eb' : '#374151';
-        }
-        const freshStatus = document.getElementById('freshCollectionStatus');
-        if (freshStatus) {
-          const epochNote = d.fresh_epoch_id
-            ? ('Bound epoch ' + d.fresh_epoch_id + ' — click starts a NEW Fly wipe, not OFF. ')
-            : '';
-          if (d.last_fresh_reset_summary) {
-            freshStatus.innerText = epochNote + 'Last reset: ' + (d.last_fresh_reset_summary || '-') +
-              (d.last_fresh_reset_ts ? ' @ ' + formatMelbourneDateTime(new Date(d.last_fresh_reset_ts * 1000).toISOString()) : '');
-          } else {
-            freshStatus.innerText = d.fresh_collection_mode
-              ? (epochNote + 'Auto-trim active — aux logs checked hourly')
-              : 'Fresh Collection OFF — click starts a Fly epoch wipe via POST /api/fresh_epoch_reset';
-          }
-        }
+        // Fresh Collection status belongs to the authenticated laptop operation,
+        // never to Fly's historical fresh_collection_mode or epoch-reset flag.
         if (d.leverage) {
           const lev = document.getElementById('leverage');
           if (lev) lev.value = d.leverage;
