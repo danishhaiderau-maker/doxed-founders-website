@@ -844,7 +844,16 @@ jobs:
           active=read(root/'ACTIVE_RESET.json')
           reset_id=active.get('reset_id','')
           if re.fullmatch('[a-f0-9]{24}',reset_id):
-              read(root/reset_id/'operation.json')
+              operation=read(root/reset_id/'operation.json')
+              proof=operation.get('proof') or {}
+              deletion=operation.get('deletion') or {}
+              print(json.dumps({'reset_acceptance': {
+                  'new_epoch_id': operation.get('new_epoch_id'),
+                  'proof_new_epoch_id': proof.get('new_epoch_id'),
+                  'deletion_status': deletion.get('status'),
+                  'scope_statuses': {k:v.get('status') for k,v in (operation.get('scope_deletions') or {}).items() if isinstance(v,dict)},
+                  'genome_reset_completed': operation.get('genome_reset_completed'),
+                  'deleted_file_count': len(operation.get('deleted') or [])}}))
               read(root/reset_id/'deletion.json')
               journal=root/reset_id/'deletion.json.progress.jsonl'
               if journal.is_file() and not journal.is_symlink():
