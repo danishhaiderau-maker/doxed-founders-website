@@ -19388,18 +19388,6 @@ def enforce_dashboard_chase_gates_on_pending() -> None:
 
 
 def _load_chase_analytics_snapshot() -> dict:
-    buckets = []
-    raw = {}
-    generated_at = None
-    path = _resolve_analytics_report_path(CHASE_EFFECTIVENESS_REPORT_FILE)
-    if os.path.isfile(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            raw = data.get("buckets") or {}
-            generated_at = data.get("generated_at")
-        except Exception:
-            pass
     report_key_by_control = {
         "0_chases": "0",
         "1_chase": "1",
@@ -19408,39 +19396,262 @@ def _load_chase_analytics_snapshot() -> dict:
         "4_chases": "4",
         "5+_chases": "5+",
     }
+    unavailable_buckets = [
+        {
+            "bucket": key,
+            "trades": None,
+            "win_rate_pct": None,
+            "sum_pnl_usd": None,
+            "ev_usd": None,
+        }
+        for key in CHASE_EXECUTION_BUCKET_ORDER
+    ]
+
+    def unavailable(reason):
+        return {
+            "status": "UNAVAILABLE",
+            "unavailable_reason": reason,
+            "buckets": unavailable_buckets,
+            "assisted": None,
+            "assisted_total": None,
+            "saved": None,
+            "ttl_expired": None,
+            "generated_at": None,
+            "provenance": None,
+        }
+
+    active = _active_analyzer_mirror_dir()
+    if active is None:
+        return unavailable("NO_VALIDATED_ANALYZER_BUNDLE")
+    try:
+        status = json.loads((active / "status.json").read_text(encoding="utf-8-sig"))
+        bundle_manifest = json.loads((active / _ANALYZER_BUNDLE_MANIFEST).read_text(encoding="utf-8-sig"))
+        report_manifest_payload = (active / "report_manifest.json").read_bytes()
+        report_manifest = json.loads(report_manifest_payload.decode("utf-8-sig"))
+        data = json.loads(
+            (active / "reports" / CHASE_EFFECTIVENESS_REPORT_FILE).read_text(encoding="utf-8-sig")
+        )
+    except (OSError, ValueError, TypeError):
+        return unavailable("ANALYZER_BUNDLE_REPORTS_UNREADABLE")
+    if not hmac.compare_digest(
+        hashlib.sha256(report_manifest_payload).hexdigest(),
+        str(bundle_manifest.get("source_report_manifest_sha256") or "").lower(),
+    ):
+        return unavailable("SOURCE_REPORT_MANIFEST_HASH_MISMATCH")
+
+    reason = _chase_analytics_identity_error(
+        status,
+        bundle_manifest,
+        report_manifest,
+        data,
+        filename=CHASE_EFFECTIVENESS_REPORT_FILE,
+        expected_schema="chase_effectiveness_v1",
+        runtime_fly_source_revision=_runtime_git_rev(),
+        runtime_epoch=_collector_v22_epoch_id(),
+        runtime_tile_config_signature=active_tile_registry_signature(),
+    )
+    if reason:
+        return unavailable(reason)
+
+    expected_basis = {
+        "pnl_field": "net_pnl_usd",
+        "pnl_basis": "AFTER_COST_NET_PNL",
+        "ev_denominator": "current_settings_bucket_attributions_with_finite_net_pnl",
+        "bucket_field": "chase_count",
+    }
+    if data.get("metric_basis") != expected_basis:
+        return unavailable("METRIC_BASIS_UNVERIFIED")
+    runtime_settings_signature = _execution_settings_signature(_enabled_execution_settings())
+    settings_binding = data.get("execution_settings_binding")
+    if (data.get("metrics_status") != "VERIFIED_CURRENT_SETTINGS_COHORT"
+            or not isinstance(settings_binding, dict)
+            or settings_binding.get("schema") != "execution_settings_binding_v1"
+            or settings_binding.get("signature") != runtime_settings_signature):
+        return unavailable("EXECUTION_SETTINGS_MISMATCH_OR_UNBOUND")
+
+    raw = data.get("buckets")
+    if not isinstance(raw, dict):
+        return unavailable("BUCKETS_INVALID")
+    buckets = []
     for key in CHASE_EXECUTION_BUCKET_ORDER:
-        b = raw.get(report_key_by_control[key]) if isinstance(raw, dict) else None
-        if isinstance(b, dict):
-            buckets.append({
-                "bucket": key,
-                "trades": b.get("trades", 0),
-                "win_rate_pct": b.get("win_rate_pct", b.get("wr_pct", 0)),
-                "sum_pnl_usd": b.get("sum_pnl_usd", 0),
-                "ev_usd": b.get("ev_usd", 0),
-            })
-        else:
-            buckets.append({"bucket": key, "trades": 0, "win_rate_pct": 0, "sum_pnl_usd": 0, "ev_usd": 0})
+        bucket = raw.get(report_key_by_control[key])
+        if not isinstance(bucket, dict):
+            return unavailable("BUCKETS_INCOMPLETE")
+        trades = bucket.get("trades")
+        wins = bucket.get("wins")
+        values = (bucket.get("win_rate_pct"), bucket.get("sum_pnl_usd"), bucket.get("ev_usd"))
+        if (isinstance(trades, bool) or not isinstance(trades, int) or trades < 0
+                or isinstance(wins, bool) or not isinstance(wins, int) or not 0 <= wins <= trades
+                or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                       or not math.isfinite(float(value)) for value in values)):
+            return unavailable("BUCKET_METRICS_INVALID")
+        win_rate, net_pnl, ev = (float(value) for value in values)
+        expected_wr = round(100.0 * wins / trades, 1) if trades else 0.0
+        expected_ev = round(net_pnl / trades, 2) if trades else 0.0
+        if (not 0.0 <= win_rate <= 100.0
+                or abs(win_rate - expected_wr) > 0.051
+                or abs(ev - expected_ev) > 0.011):
+            return unavailable("BUCKET_METRICS_INCONSISTENT")
+        buckets.append({
+            "bucket": key,
+            "trades": trades,
+            "win_rate_pct": win_rate,
+            "sum_pnl_usd": net_pnl,
+            "ev_usd": ev,
+        })
+
     assisted = saved = ttl_expired = total_fills = None
-    attr_path = _resolve_analytics_report_path(CHASE_ATTRIBUTION_REPORT_FILE)
-    if os.path.isfile(attr_path):
-        try:
-            with open(attr_path, "r", encoding="utf-8") as f:
-                attr = json.load(f)
-            totals = attr.get("totals") or attr.get("overnight_watch") or {}
-            assisted = totals.get("chase_assisted_fills")
-            saved = totals.get("saved_fills_heuristic") or totals.get("saved_fills")
-            ttl_expired = totals.get("ttl_expired")
-            total_fills = totals.get("total_fills") or attr.get("overnight_watch", {}).get("total_fills")
-        except Exception:
-            pass
+    try:
+        attr = json.loads(
+            (active / "reports" / CHASE_ATTRIBUTION_REPORT_FILE).read_text(encoding="utf-8-sig")
+        )
+        attr_reason = _chase_analytics_identity_error(
+            status,
+            bundle_manifest,
+            report_manifest,
+            attr,
+            filename=CHASE_ATTRIBUTION_REPORT_FILE,
+            expected_schema="chase_attribution_v1",
+            runtime_fly_source_revision=_runtime_git_rev(),
+            runtime_epoch=_collector_v22_epoch_id(),
+            runtime_tile_config_signature=active_tile_registry_signature(),
+        )
+        if not attr_reason:
+            totals = attr.get("totals") or {}
+            overnight = attr.get("overnight_watch") or {}
+            candidates = {
+                "assisted": totals.get("chase_assisted_fills"),
+                "saved": totals.get("saved_fills_heuristic"),
+                "ttl_expired": totals.get("ttl_expired"),
+                "total_fills": overnight.get("total_fills"),
+            }
+            if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                   for value in candidates.values()):
+                assisted = candidates["assisted"]
+                saved = candidates["saved"]
+                ttl_expired = candidates["ttl_expired"]
+                total_fills = candidates["total_fills"]
+    except (OSError, ValueError, TypeError):
+        pass
     return {
+        "status": "VERIFIED_RECENT_SNAPSHOT",
+        "unavailable_reason": None,
         "buckets": buckets,
         "assisted": assisted,
         "assisted_total": total_fills,
         "saved": saved,
         "ttl_expired": ttl_expired,
-        "generated_at": generated_at,
+        "generated_at": data.get("generated_at"),
+        "freshness_max_age_seconds": 3600,
+        "live_data_coverage_verified": False,
+        "provenance": {
+            "bundle_generation": status.get("generation"),
+            "snapshot_id": bundle_manifest.get("snapshot_id"),
+            "fly_source_revision": bundle_manifest.get("source_data_revision"),
+            "analyzer_generation_revision": bundle_manifest.get("analyzer_generation_revision"),
+            "dataset_epoch": report_manifest.get("dataset_epoch"),
+            "tile_config_signature": report_manifest.get("config_signature"),
+            "evidence_source_data_revision": report_manifest.get("source_data_revision"),
+            "execution_settings_signature": runtime_settings_signature,
+            "metric_basis": data.get("metric_basis"),
+        },
     }
+
+
+def _chase_analytics_identity_error(
+    status, bundle_manifest, report_manifest, report, *, filename, expected_schema,
+    runtime_fly_source_revision, runtime_epoch, runtime_tile_config_signature,
+):
+    """Bind a chase report to one validated uploaded analyzer generation."""
+    if not (
+        isinstance(status, dict)
+        and status.get("schema") == _ANALYZER_BUNDLE_SCHEMA
+        and status.get("complete") is True
+        and isinstance(bundle_manifest, dict)
+        and bundle_manifest.get("schema") == _ANALYZER_BUNDLE_SCHEMA
+        and isinstance(report_manifest, dict)
+        and report_manifest.get("schema") == "report_manifest_v1"
+    ):
+        return "ANALYZER_BUNDLE_IDENTITY_INVALID"
+    if not isinstance(report, dict) or report.get("schema") != expected_schema:
+        return "REPORT_INVALID"
+    for field in (
+        "snapshot_id", "analyzer_run_id", "analyzer_generated_at",
+        "source_data_revision", "analyzer_generation_revision",
+        "analyzer_version", "cohort_schema", "data_scope",
+        "source_report_manifest_sha256",
+    ):
+        if status.get(field) != bundle_manifest.get(field):
+            return f"BUNDLE_STATUS_{field.upper()}_MISMATCH"
+    declared = [
+        row for row in (report_manifest.get("reports") or [])
+        if isinstance(row, dict) and row.get("file") == filename
+    ]
+    if len(declared) != 1:
+        return "REPORT_NOT_IN_CURRENT_PUBLICATION"
+    expected = {
+        "dataset_epoch": runtime_epoch,
+        "config_signature": runtime_tile_config_signature,
+    }
+    for field, current in expected.items():
+        published = report_manifest.get(field)
+        if (not isinstance(current, str) or not current.strip()
+                or current.lower() == "unknown"):
+            return f"CURRENT_{field.upper()}_UNAVAILABLE"
+        if (not isinstance(published, str) or not published.strip()
+                or published.strip().upper() == "UNKNOWN"):
+            return f"PUBLISHED_{field.upper()}_MISSING"
+        if published != current:
+            return f"{field.upper()}_MISMATCH"
+    # Bundle-v2's historical `source_data_revision` field contains the
+    # canonical Fly `source_git_rev`; analyzer code identity is the separate
+    # `analyzer_generation_revision` field and must never be compared to it.
+    fly_source_revision = str(bundle_manifest.get("source_data_revision") or "").lower()
+    if (not re.fullmatch(r"[0-9a-f]{7,40}", str(runtime_fly_source_revision or "").lower())
+            or fly_source_revision != str(runtime_fly_source_revision).lower()):
+        return "FLY_SOURCE_REVISION_MISMATCH"
+    analyzer_revision = str(bundle_manifest.get("analyzer_generation_revision") or "")
+    if analyzer_revision != str(report_manifest.get("generation_revision") or ""):
+        return "ANALYZER_GENERATION_REVISION_MISMATCH"
+    provenance = report.get("analysis_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    for field in (
+        "generation_revision", "analyzer_revision", "source_revision",
+        "deployed_revision", "dataset_epoch", "config_signature",
+        "source_data_revision",
+    ):
+        published = report_manifest.get(field)
+        observed = report.get(field) or provenance.get(field)
+        if (not isinstance(published, str) or not published.strip()
+                or published.strip().upper() == "UNKNOWN"):
+            return f"PUBLISHED_{field.upper()}_MISSING"
+        if observed != published:
+            return f"REPORT_{field.upper()}_MISMATCH"
+    fresh_epoch = report_manifest.get("fresh_epoch")
+    if not isinstance(fresh_epoch, dict) or fresh_epoch.get("status") != "BOUND":
+        return "FRESH_EPOCH_UNBOUND"
+    report_epoch = report.get("epoch_id") or provenance.get("fresh_epoch_id")
+    if not report_epoch or report_epoch != fresh_epoch.get("epoch_id"):
+        return "REPORT_FRESH_EPOCH_MISMATCH"
+    try:
+        generated = datetime.fromisoformat(str(report["generated_at"]).replace("Z", "+00:00"))
+        published_at = datetime.fromisoformat(str(bundle_manifest["analyzer_generated_at"]).replace("Z", "+00:00"))
+        cutoff = datetime.fromisoformat(str(fresh_epoch["cutoff_utc"]).replace("Z", "+00:00"))
+        if any(value.tzinfo is None for value in (generated, published_at, cutoff)):
+            return "REPORT_TIMESTAMP_INVALID"
+        if generated < cutoff or generated > published_at:
+            return "REPORT_TIMESTAMP_OUTSIDE_CURRENT_GENERATION"
+        # Code/epoch/settings identity can stay unchanged for days while the
+        # dataset advances. A validated publication is an as-of snapshot, not
+        # proof of current live coverage. Bound display to two 30-minute cycles.
+        now = time.time()
+        if generated.timestamp() > now + 30 or published_at.timestamp() > now + 30:
+            return "REPORT_TIMESTAMP_IN_FUTURE"
+        if now - min(generated.timestamp(), published_at.timestamp()) > 3600:
+            return "ANALYZER_PUBLICATION_STALE"
+    except (KeyError, TypeError, ValueError):
+        return "REPORT_TIMESTAMP_INVALID"
+    return None
 
 
 def _load_spread_analytics_snapshot() -> dict:
@@ -31389,6 +31600,7 @@ __ADMIN_ACCESS_CONTROLS__
 <p style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;">Checked = eligible to place/reprice in that 5-minute signal-age window, subject to other gates (not a 60s chase-count tick). Chase 0=0–5m, 1=5–10m, 2=10–15m, 3=15–20m, 4=20–25m, 5+=25–30m. Before the first checked window the bot waits without placing a limit. Inside an enabled window it may reprice every 3 min without leaving the window. Disabled windows before/between enabled windows mean virtual wait or cancellation of a resting order. Only after the last enabled window do existing orders hold their last permitted limit until TTL, with no further repricing. Example: select 2, 3 and 4 only → wait 0–10m, eligible to submit at 10–15m, rest/reprice through 20–25m, hold through 25–30m if 5+ is off.</p>
 <p id="chaseBucketGateStatus" style="font-size:0.85em;color:#58a6ff;margin:0 0 8px 0;"></p>
 <div id="chaseKpis" style="display:flex;gap:16px;flex-wrap:wrap;margin:6px 0 10px 0;font-size:0.9em;"></div>
+<div id="chaseAnalyticsStatus" style="color:#8b949e;font-size:0.82em;margin:0 0 8px 0;"></div>
 <div id="chaseBucketControls" style="display:flex;flex-wrap:wrap;gap:10px 16px;margin:6px 0 10px 0;padding:10px;border:1px solid #30363d;border-radius:6px;background:#161b22;"></div>
 <table style="width:100%;max-width:640px;margin-bottom:12px;"><thead><tr><th>Bucket</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th></tr></thead><tbody id="chaseBucketStats"></tbody></table>
 <h3>Directional gap hard-gate</h3>
@@ -31964,6 +32176,14 @@ DASHBOARD_JS = """(function () {
     }
     function renderChaseAnalyticsPanel(ch) {
       ensureChaseBucketControls();
+      ch = ch && typeof ch === 'object' ? ch : {status:'UNAVAILABLE', unavailable_reason:'NO_SNAPSHOT', buckets:[]};
+      const verified = ch.status === 'VERIFIED_RECENT_SNAPSHOT';
+      const status = document.getElementById('chaseAnalyticsStatus');
+      if (status) {
+        status.innerHTML = verified
+          ? '<strong style="color:#3fb950">VERIFIED RECENT SNAPSHOT</strong> · WR and EV: current-settings cohort with finite after-cost net PnL; not live coverage (maximum report age 60 min)'
+          : '<strong style="color:#f59e0b">UNAVAILABLE</strong> · ' + (ch.unavailable_reason || 'current analyzer publication not verified');
+      }
       const kpis = document.getElementById('chaseKpis');
       if (kpis) {
         const assisted = ch.assisted != null ? ch.assisted : '—';
