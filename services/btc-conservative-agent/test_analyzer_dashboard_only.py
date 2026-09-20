@@ -44,3 +44,57 @@ def test_dashboard_branch_after_scrub_provenance_before_engine_operations():
     assert branch < source.index('$discoveredEnginePids =')
     block=source[source.index('function Restart-OwnedAnalyzerDashboard'):branch]
     assert '.home-analyzer.pid' not in block
+
+
+@pytest.mark.skipif(not PWSH.exists(), reason='PowerShell unavailable')
+@pytest.mark.parametrize('scenario', ['no_pid', 'retained', 'wrong_listener', 'unowned_listener'])
+def test_fenced_dashboard_start_or_retain_is_fail_closed(tmp_path, scenario):
+    script=f"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile('{ROOT.as_posix()}/scripts/start-home-analyzer.ps1',[ref]$tokens,[ref]$errors)
+if ($errors.Count) {{throw 'PARSE'}}
+$fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Restart-OwnedAnalyzerDashboard'}},$true)
+Invoke-Expression $fn.Extent.Text
+$repoRoot='{tmp_path.as_posix()}';$agentDir=$repoRoot;$AnalyzerPort=19431;$scenarioLaunch=@{{}}
+$script:starts=0;$script:stops=0;$script:writes=0
+function Test-Path {{param($LiteralPath) return ('{scenario}' -in @('retained','wrong_listener'))}}
+function Get-NetTCPConnection {{param($LocalPort,$State,$ErrorAction)
+  if ('{scenario}' -eq 'no_pid') {{return}}
+  [pscustomobject]@{{OwningProcess=$(if ('{scenario}' -eq 'wrong_listener') {{99}} else {{42}});LocalAddress='127.0.0.1'}}
+}}
+function Get-Content {{param($LiteralPath,[switch]$Raw,$ErrorAction) '42'}}
+function Get-ProcessCommandLineFast {{param($ProcessId) 'python research_dashboard.py --standalone'}}
+function Get-Process {{param($Id,$ErrorAction) [pscustomobject]@{{Id=$Id;StartTime=1}}}}
+function Assert-AnalyzerScenarioLaunchConfig {{param($Receipt)}}
+function Stop-Process {{$script:stops++}}
+function Start-Process {{param($FilePath,$ArgumentList,$WorkingDirectory,$WindowStyle,[switch]$PassThru)
+  if (($ArgumentList -join ' ') -ne 'research_dashboard.py --standalone') {{throw 'WRONG_COMMAND'}}
+  $script:starts++;[pscustomobject]@{{Id=43}}
+}}
+function Set-Content {{param($LiteralPath,$Value,[switch]$NoNewline,$Encoding) $script:writes++}}
+$caught=$false
+try {{Restart-OwnedAnalyzerDashboard -LocalGenerationFence @{{state='BLOCKED_PENDING_VERIFIED_IMPORT'}}}} catch {{$caught=$true}}
+if ('{scenario}' -eq 'no_pid') {{
+  if ($caught -or $script:starts -ne 1 -or $script:writes -ne 1 -or $script:stops) {{throw 'NO_PID_START_FAILED'}}
+}} elseif ('{scenario}' -eq 'retained') {{
+  if ($caught -or $script:starts -or $script:writes -or $script:stops) {{throw 'OWNER_NOT_RETAINED'}}
+}} else {{
+  if (-not $caught -or $script:starts -or $script:writes -or $script:stops) {{throw 'LISTENER_NOT_REFUSED'}}
+}}
+"""
+    result=subprocess.run([str(PWSH),'-NoProfile','-EncodedCommand',base64.b64encode(script.encode('utf-16-le')).decode()],capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stdout+result.stderr
+
+
+def test_launcher_allows_only_valid_fenced_dashboard_mode():
+    source=(ROOT/'scripts/start-home-analyzer.ps1').read_text()
+    fence_read=source.index('$localGenerationFence = Get-LocalGenerationFence')
+    dashboard_branch=source.index('if ($DashboardOnly) {')
+    assert fence_read < dashboard_branch
+    assert "if (-not $DashboardOnly) {\n  Assert-LocalGenerationUnfenced" in source
+    assert 'Restart-OwnedAnalyzerDashboard -LocalGenerationFence $localGenerationFence' in source
+    report_dir = source.index('$analyzerReportDir =')
+    dashboard_branch = source.index('if ($DashboardOnly) {')
+    assert report_dir < dashboard_branch
+    assert "if ($null -eq $localGenerationFence) {\n  New-Item -ItemType Directory -Path $analyzerReportDir" in source

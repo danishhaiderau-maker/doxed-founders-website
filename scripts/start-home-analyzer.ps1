@@ -19,11 +19,16 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 . (Join-Path $scriptDir "fly-data-paths.ps1")
+. (Join-Path $scriptDir "local-generation-fence.ps1")
 $flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
 $analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
   Get-DoxxedFlyMirrorDir
 } else {
   $agentDir
+}
+$localGenerationFence = Get-LocalGenerationFence -DataRoot $analyzerDataDir
+if (-not $DashboardOnly) {
+  Assert-LocalGenerationUnfenced -DataRoot $analyzerDataDir -Stage 'analyzer_launcher_start'
 }
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $machineStateBase = if ($env:LOCALAPPDATA) {
@@ -206,14 +211,42 @@ $env:SOURCE_GIT_REV = $sourceRevision.ToLowerInvariant()
 # launcher are long-lived and can otherwise pass an obsolete report directory
 # into a freshly restarted dashboard.
 $analyzerReportDir = Join-Path $analyzerDataDir "analyzer"
-New-Item -ItemType Directory -Path $analyzerReportDir -Force | Out-Null
+if ($null -eq $localGenerationFence) {
+  New-Item -ItemType Directory -Path $analyzerReportDir -Force | Out-Null
+}
 $env:BTC_AGENT_REPORT_DIR = $analyzerReportDir
 
 . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
 
 function Restart-OwnedAnalyzerDashboard {
+  param($LocalGenerationFence = $null)
   $receiptPath = Join-Path $repoRoot '.home-analyzer-dashboard.pid'
+  if ($null -ne $LocalGenerationFence) {
+    $listeners = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction SilentlyContinue)
+    if (-not (Test-Path -LiteralPath $receiptPath)) {
+      if ($listeners.Count -ne 0) { throw 'DASHBOARD_FENCED_LISTENER_NOT_OWNED' }
+      Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+      $dashboard = Start-Process -FilePath 'python' -ArgumentList @('research_dashboard.py','--standalone') `
+        -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+      if ($null -eq $dashboard -or $dashboard.Id -le 0) { throw 'DASHBOARD_START_FAILED' }
+      Set-Content -LiteralPath $receiptPath -Value ([string]$dashboard.Id) -NoNewline -Encoding UTF8
+      return
+    }
+    try { $owner = [int](Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop) } catch {
+      throw 'DASHBOARD_OWNER_INVALID'
+    }
+    if ($owner -le 0 -or $listeners.Count -eq 0 -or @($listeners | Where-Object {
+        [int]$_.OwningProcess -ne $owner -or $_.LocalAddress -notin @('127.0.0.1','::1')
+      }).Count -gt 0) { throw 'DASHBOARD_LISTENER_NOT_EXCLUSIVELY_OWNED_LOOPBACK' }
+    $command = [string](Get-ProcessCommandLineFast -ProcessId $owner)
+    if ($command -notmatch '(^|[\\/\s])research_dashboard\.py(["''\s]|$)' -or
+        $command -notmatch '(^|\s)--standalone(\s|$)' -or
+        $command -match 'analyzer_research_engine') { throw 'DASHBOARD_COMMAND_NOT_OWNED' }
+    Get-Process -Id $owner -ErrorAction Stop | Out-Null
+    Write-Host "Fenced read-only dashboard PID $owner retained on loopback :$AnalyzerPort." -ForegroundColor Yellow
+    return
+  }
   $owner = [int](Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop)
   if ($owner -le 0) { throw 'DASHBOARD_OWNER_INVALID' }
   $listeners = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction Stop)
@@ -245,7 +278,7 @@ function Restart-OwnedAnalyzerDashboard {
 }
 
 if ($DashboardOnly) {
-  try { Restart-OwnedAnalyzerDashboard } finally {
+  try { Restart-OwnedAnalyzerDashboard -LocalGenerationFence $localGenerationFence } finally {
     if ($lockHandle) { $lockHandle.Dispose() }
     Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
   }

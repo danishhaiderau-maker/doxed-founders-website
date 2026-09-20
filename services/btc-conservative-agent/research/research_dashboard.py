@@ -58,6 +58,11 @@ def _parse_utc_dt(value):
 
 
 from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
+from research.local_generation_fence import (
+    BLOCKED_STATE as LOCAL_GENERATION_BLOCKED_STATE,
+    LocalGenerationFenced,
+    read_local_generation_fence,
+)
 
 try:
     from collector_v22 import research_event_generation_paths
@@ -342,6 +347,76 @@ BUNDLE_FILES = (
 )
 
 app = Flask("research_dashboard")
+
+_LOCAL_RESET_VIEW_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Local research reset</title>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:32px}.card{max-width:760px;margin:auto;border:1px solid #d29922;background:#161b22;border-radius:10px;padding:24px}.state{color:#f2cc60;font-weight:800;overflow-wrap:anywhere}.muted{color:#8b949e}</style></head>
+<body><main class="card"><h1>Local research reset</h1><p class="state">__STATE__</p>
+<p>No current local generation is available. Ready: NO.</p>
+<p>Analysis, synchronization, publication, archive/export, report viewing, and policy qualification are blocked pending a separate verified import.</p>
+<p class="muted">This read-only status page does not treat retained reports as current evidence.</p></main></body></html>"""
+
+
+def _local_reset_view_state() -> dict | None:
+    """Return a fail-closed projection without reading any research report."""
+    try:
+        fence = read_local_generation_fence(DATA_ROOT)
+    except LocalGenerationFenced:
+        return {
+            "schema": "local_reset_dashboard_view_v1",
+            "status": "LOCAL_GENERATION_FENCE_INVALID",
+            "local_reset": "INVALID_FENCE_FAIL_CLOSED",
+            "current_generation": None,
+            "ready": False,
+            "report_access_allowed": False,
+            "analysis_allowed": False,
+            "sync_allowed": False,
+            "publication_allowed": False,
+            "archive_export_allowed": False,
+            "qualification_allowed": False,
+            "blockers": ["LOCAL_GENERATION_FENCE_INVALID"],
+        }
+    if fence is None:
+        return None
+    return {
+        "schema": "local_reset_dashboard_view_v1",
+        "status": LOCAL_GENERATION_BLOCKED_STATE,
+        "local_reset": "COMPLETE_PENDING_VERIFIED_IMPORT",
+        "current_generation": None,
+        "ready": False,
+        "report_access_allowed": False,
+        "analysis_allowed": False,
+        "sync_allowed": False,
+        "publication_allowed": False,
+        "archive_export_allowed": False,
+        "qualification_allowed": False,
+        "blockers": [LOCAL_GENERATION_BLOCKED_STATE],
+    }
+
+
+@app.before_request
+def _serve_local_reset_view():
+    state = _local_reset_view_state()
+    if state is None:
+        return None
+    invalid = state["status"] == "LOCAL_GENERATION_FENCE_INVALID"
+    status_code = 503 if invalid else 200
+    if request.path == "/":
+        return make_response(
+            _LOCAL_RESET_VIEW_HTML.replace("__STATE__", state["status"]),
+            status_code,
+            {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
+        )
+    if request.path in ("/api/health", "/api/status", "/api/integrity"):
+        response = jsonify(state)
+        response.status_code = status_code
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    response = jsonify({**state, "requested_path": request.path})
+    response.status_code = 423 if not invalid else 503
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 # Report JSON is immutable between analyzer writes, but several payload builders
 # aggregate large historical ledgers. A short server-side cache keeps tab
