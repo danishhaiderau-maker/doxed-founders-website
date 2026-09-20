@@ -349,6 +349,7 @@ def test_limit_chase_never_emits_after_the_same_trade_is_open() -> None:
         "pending_orders": pending,
         "open_positions": positions,
         "_resolve_fill_model": lambda _signal, _order: "SIM_LIMIT",
+        "paper_lifecycle_transition_lock": threading.RLock(),
         "_commit_paper_lifecycle_transition": commit_transition,
         "utc_iso": lambda: "2026-08-11T19:50:32.000Z",
     }

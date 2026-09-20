@@ -2,6 +2,7 @@ import ast
 import copy
 import errno
 import json
+import os
 from pathlib import Path
 import threading
 from types import SimpleNamespace
@@ -162,6 +163,108 @@ def test_unknown_lane_still_uses_fail_closed_relay_builder(tmp_path):
         ns["_commit_paper_lifecycle_transition"]("LIMIT_UPDATED", "unknown-x", {"research_lane": "UNKNOWN"},
             target_mutator=lambda _: None, live_mutator=lambda: None)
     assert len(relay) == 1
+
+
+@pytest.mark.parametrize("winner", ["chase", "fill", "cancel", "removed"])
+def test_stale_chase_candidate_is_noop_before_durable_prepare(tmp_path, winner):
+    ns, order, signal, outbox, paused, schedules, relay = fixture(
+        tmp_path, next(iter(COMBO_LANE_SPECS))
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    results = []
+    failures = []
+    original_resolver = ns["_resolve_fill_model"]
+
+    def delayed_resolver(*args):
+        entered.set()
+        assert release.wait(3)
+        return original_resolver(*args)
+
+    ns["_resolve_fill_model"] = delayed_resolver
+
+    def losing_candidate():
+        try:
+            results.append(ns["_commit_relay_limit_chase"](
+                order, signal, direction="LONG", old_limit=90.0,
+                new_limit=95.0, chase_count=1, now=200.0,
+            ))
+        except Exception as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=losing_candidate)
+    thread.start()
+    assert entered.wait(3)
+    with ns["paper_lifecycle_transition_lock"]:
+        with ns["trade_lock"]:
+            if winner == "chase":
+                order.update(limit_price=94.0, limit_chase_count=1)
+            elif winner == "fill":
+                order["status"] = "FILLED"
+                ns["open_positions"].append({"trade_id": order["trade_id"], "status": "OPEN"})
+            elif winner == "cancel":
+                order["status"] = "CANCELLED"
+            else:
+                ns["pending_orders"].clear()
+            outbox._atomic_write(outbox.decorate_lifecycle(
+                ns["_build_paper_lifecycle_payload"]("winning_transition")
+            ))
+    winner_bytes = outbox.path.read_bytes()
+    release.set()
+    thread.join(3)
+    assert not thread.is_alive()
+    assert failures == [] and results == [None]
+    assert outbox.path.read_bytes() == winner_bytes
+    assert paused == [] and schedules == [] and relay == []
+    assert signal["limit_price"] == 90.0
+
+
+@pytest.mark.parametrize("relay_lane", [False, True])
+def test_same_generation_contenders_commit_exactly_once(tmp_path, relay_lane):
+    ns, order, signal, outbox, paused, schedules, relay = fixture(
+        tmp_path, next(iter(COMBO_LANE_SPECS))
+    )
+    if relay_lane:
+        ns["os"] = os
+        ns["PAPER_LIFECYCLE_FILE"] = str(outbox.path)
+        order.update(trade_id="cont-concurrent", research_lane="CONTINUOUS")
+        signal.update(trade_id=order["trade_id"], research_lane="CONTINUOUS")
+        ns["_build_showcase_relay_event_payload"] = lambda event, tid, extra: {
+            **extra, "event": event, "trade_id": tid,
+        }
+    ready = threading.Barrier(2)
+    results = []
+    failures = []
+
+    def resolve(*args):
+        ready.wait(3)
+        return {"kind": "depth"}
+
+    ns["_resolve_fill_model"] = resolve
+
+    def contender():
+        try:
+            results.append(ns["_commit_relay_limit_chase"](
+                order, signal, direction="LONG", old_limit=90.0,
+                new_limit=95.0, chase_count=1, now=200.0,
+            ))
+        except Exception as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=contender) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == [], [repr(exc.__cause__) for exc in failures]
+    assert len(results) == 2 and sum(value is None for value in results) == 1
+    assert order["limit_chase_count"] == signal["limit_chase_count"] == 1
+    assert order["limit_price"] == signal["limit_price"] == 95.0
+    assert len(schedules) == 1 and paused == []
+    saved = json.loads(outbox.path.read_text())
+    assert saved["pending_orders"][0]["limit_price"] == 95.0
+    assert outbox.pending_count() == (1 if relay_lane else 0)
 
 
 @pytest.mark.parametrize("call_index", range(7))
