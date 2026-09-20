@@ -21966,10 +21966,25 @@ def _commit_relay_limit_chase(
             signal["submitted_order_limit_price"] = new_limit
             signal["fill_model"] = copy.deepcopy(resolved_fill_model)
 
-    _commit_paper_lifecycle_transition(
-        "LIMIT_UPDATED", trade_id, event,
-        target_mutator=target_mutator, live_mutator=live_mutator,
-    )
+    # A second chase/fill may win while this candidate is calculated. Recheck
+    # after joining the lifecycle serializer, before PREPARE or any live swap.
+    # A stale candidate is a no-op; actual durable-commit failures still pause.
+    with paper_lifecycle_transition_lock:
+        with trade_lock:
+            if (
+                order not in pending_orders or order.get("status") != "PENDING"
+                or abs(float(order.get("limit_price") or 0) - old_limit) >= 0.005
+                or int(order.get("limit_chase_count") or 0) != chase_count - 1
+                or any(
+                    p.get("trade_id") == trade_id and p.get("status") != "CLOSED"
+                    for p in open_positions
+                )
+            ):
+                return None
+        _commit_paper_lifecycle_transition(
+            "LIMIT_UPDATED", trade_id, event,
+            target_mutator=target_mutator, live_mutator=live_mutator,
+        )
 
     # Derived evidence follows the authoritative lifecycle COMMIT and is
     # idempotently keyed by trade/chase generation.
