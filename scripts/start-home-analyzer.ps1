@@ -223,6 +223,44 @@ function Restart-OwnedAnalyzerDashboard {
   param($LocalGenerationFence = $null)
   $receiptPath = Join-Path $repoRoot '.home-analyzer-dashboard.pid'
   if ($null -ne $LocalGenerationFence) {
+    $expectedSourceRevision = ([string]$env:SOURCE_GIT_REV).Trim().ToLowerInvariant()
+    if ($expectedSourceRevision -notmatch '^[0-9a-f]{40}$') {
+      throw 'DASHBOARD_FENCED_EXPECTED_REVISION_INVALID'
+    }
+    $assertFencedView = {
+      param([int]$ExpectedOwner, [bool]$WaitForStartup)
+      $deadline = [DateTime]::UtcNow.AddSeconds($(if ($WaitForStartup) { 8 } else { 0 }))
+      do {
+        $attested = $false
+        try {
+          $ownedListeners = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction Stop)
+          if ($ownedListeners.Count -gt 0 -and @($ownedListeners | Where-Object {
+              [int]$_.OwningProcess -ne $ExpectedOwner -or $_.LocalAddress -notin @('127.0.0.1','::1')
+            }).Count -eq 0) {
+            $status = Invoke-RestMethod -Method Get `
+              -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 2 -ErrorAction Stop
+            $attested = (
+              [string]$status.schema -ceq 'local_reset_dashboard_view_v1' -and
+              [string]$status.status -ceq 'BLOCKED_PENDING_VERIFIED_IMPORT' -and
+              [string]$status.local_reset -ceq 'FENCED_PENDING_VERIFIED_IMPORT' -and
+              [string]$status.source_revision -ceq $expectedSourceRevision -and
+              $null -eq $status.current_generation -and
+              $status.ready -is [bool] -and -not $status.ready -and
+              $status.report_access_allowed -is [bool] -and -not $status.report_access_allowed -and
+              $status.analysis_allowed -is [bool] -and -not $status.analysis_allowed -and
+              $status.sync_allowed -is [bool] -and -not $status.sync_allowed -and
+              $status.publication_allowed -is [bool] -and -not $status.publication_allowed -and
+              $status.archive_export_allowed -is [bool] -and -not $status.archive_export_allowed -and
+              $status.qualification_allowed -is [bool] -and -not $status.qualification_allowed
+            )
+          }
+        } catch { $attested = $false }
+        if ($attested) { return }
+        if (-not $WaitForStartup -or [DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 250
+      } while ($true)
+      throw 'DASHBOARD_FENCED_VIEW_ATTESTATION_FAILED'
+    }
     $listeners = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction SilentlyContinue)
     if (-not (Test-Path -LiteralPath $receiptPath)) {
       if ($listeners.Count -ne 0) { throw 'DASHBOARD_FENCED_LISTENER_NOT_OWNED' }
@@ -230,7 +268,13 @@ function Restart-OwnedAnalyzerDashboard {
       $dashboard = Start-Process -FilePath 'python' -ArgumentList @('research_dashboard.py','--standalone') `
         -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
       if ($null -eq $dashboard -or $dashboard.Id -le 0) { throw 'DASHBOARD_START_FAILED' }
-      Set-Content -LiteralPath $receiptPath -Value ([string]$dashboard.Id) -NoNewline -Encoding UTF8
+      try {
+        & $assertFencedView ([int]$dashboard.Id) $true
+        Set-Content -LiteralPath $receiptPath -Value ([string]$dashboard.Id) -NoNewline -Encoding UTF8
+      } catch {
+        Stop-Process -Id $dashboard.Id -Force -ErrorAction SilentlyContinue
+        throw
+      }
       return
     }
     try { $owner = [int](Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop) } catch {
@@ -244,6 +288,7 @@ function Restart-OwnedAnalyzerDashboard {
         $command -notmatch '(^|\s)--standalone(\s|$)' -or
         $command -match 'analyzer_research_engine') { throw 'DASHBOARD_COMMAND_NOT_OWNED' }
     Get-Process -Id $owner -ErrorAction Stop | Out-Null
+    & $assertFencedView $owner $false
     Write-Host "Fenced read-only dashboard PID $owner retained on loopback :$AnalyzerPort." -ForegroundColor Yellow
     return
   }

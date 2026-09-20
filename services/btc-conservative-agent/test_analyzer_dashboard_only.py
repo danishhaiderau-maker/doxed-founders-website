@@ -47,7 +47,10 @@ def test_dashboard_branch_after_scrub_provenance_before_engine_operations():
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason='PowerShell unavailable')
-@pytest.mark.parametrize('scenario', ['no_pid', 'retained', 'wrong_listener', 'unowned_listener'])
+@pytest.mark.parametrize('scenario', [
+    'no_pid', 'retained', 'wrong_listener', 'unowned_listener',
+    'old_generic_status', 'wrong_revision',
+])
 def test_fenced_dashboard_start_or_retain_is_fail_closed(tmp_path, scenario):
     script=f"""
 $ErrorActionPreference='Stop'
@@ -57,17 +60,29 @@ if ($errors.Count) {{throw 'PARSE'}}
 $fn=$ast.Find({{param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Restart-OwnedAnalyzerDashboard'}},$true)
 Invoke-Expression $fn.Extent.Text
 $repoRoot='{tmp_path.as_posix()}';$agentDir=$repoRoot;$AnalyzerPort=19431;$scenarioLaunch=@{{}}
+$env:SOURCE_GIT_REV='{'a' * 40}'
 $script:starts=0;$script:stops=0;$script:writes=0
-function Test-Path {{param($LiteralPath) return ('{scenario}' -in @('retained','wrong_listener'))}}
+function Test-Path {{param($LiteralPath) return ('{scenario}' -in @('retained','wrong_listener','old_generic_status','wrong_revision'))}}
 function Get-NetTCPConnection {{param($LocalPort,$State,$ErrorAction)
-  if ('{scenario}' -eq 'no_pid') {{return}}
-  [pscustomobject]@{{OwningProcess=$(if ('{scenario}' -eq 'wrong_listener') {{99}} else {{42}});LocalAddress='127.0.0.1'}}
+  if ('{scenario}' -eq 'no_pid' -and $script:starts -eq 0) {{return}}
+  [pscustomobject]@{{OwningProcess=$(if ('{scenario}' -eq 'wrong_listener') {{99}} elseif ('{scenario}' -eq 'no_pid') {{43}} else {{42}});LocalAddress='127.0.0.1'}}
 }}
 function Get-Content {{param($LiteralPath,[switch]$Raw,$ErrorAction) '42'}}
 function Get-ProcessCommandLineFast {{param($ProcessId) 'python research_dashboard.py --standalone'}}
 function Get-Process {{param($Id,$ErrorAction) [pscustomobject]@{{Id=$Id;StartTime=1}}}}
 function Assert-AnalyzerScenarioLaunchConfig {{param($Receipt)}}
-function Stop-Process {{$script:stops++}}
+function Stop-Process {{param($Id,[switch]$Force,$ErrorAction) $script:stops++}}
+function Start-Sleep {{param($Milliseconds)}}
+function Invoke-RestMethod {{param($Method,$Uri,$TimeoutSec,$ErrorAction)
+  if ('{scenario}' -eq 'old_generic_status') {{return [pscustomobject]@{{status='ready';ready=$true}}}}
+  [pscustomobject]@{{
+    schema='local_reset_dashboard_view_v1';status='BLOCKED_PENDING_VERIFIED_IMPORT';
+    local_reset='FENCED_PENDING_VERIFIED_IMPORT';current_generation=$null;
+    source_revision=$(if ('{scenario}' -eq 'wrong_revision') {{'b' * 40}} else {{'a' * 40}});
+    ready=$false;report_access_allowed=$false;analysis_allowed=$false;sync_allowed=$false;
+    publication_allowed=$false;archive_export_allowed=$false;qualification_allowed=$false
+  }}
+}}
 function Start-Process {{param($FilePath,$ArgumentList,$WorkingDirectory,$WindowStyle,[switch]$PassThru)
   if (($ArgumentList -join ' ') -ne 'research_dashboard.py --standalone') {{throw 'WRONG_COMMAND'}}
   $script:starts++;[pscustomobject]@{{Id=43}}
@@ -94,6 +109,8 @@ def test_launcher_allows_only_valid_fenced_dashboard_mode():
     assert fence_read < dashboard_branch
     assert "if (-not $DashboardOnly) {\n  Assert-LocalGenerationUnfenced" in source
     assert 'Restart-OwnedAnalyzerDashboard -LocalGenerationFence $localGenerationFence' in source
+    assert "schema -ceq 'local_reset_dashboard_view_v1'" in source
+    assert '[string]$status.source_revision -ceq $expectedSourceRevision' in source
     report_dir = source.index('$analyzerReportDir =')
     dashboard_branch = source.index('if ($DashboardOnly) {')
     assert report_dir < dashboard_branch

@@ -36,6 +36,7 @@ def test_fenced_view_never_reads_reports_exports_or_writes(tmp_path, monkeypatch
     fence = tmp_path / ".local-generation-fence.json"
     fence.write_text("{" if malformed else json.dumps(_fence_payload()), encoding="utf-8")
     monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    monkeypatch.setenv("SOURCE_GIT_REV", "a" * 40)
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("fenced viewer attempted research/report/archive access")
@@ -65,6 +66,10 @@ def test_fenced_view_never_reads_reports_exports_or_writes(tmp_path, monkeypatch
         assert response.status_code == expected_status
         payload = response.get_json()
         assert payload["status"] == expected
+        assert payload["local_reset"] == (
+            "INVALID_FENCE_FAIL_CLOSED" if malformed else "FENCED_PENDING_VERIFIED_IMPORT"
+        )
+        assert payload["source_revision"] == "a" * 40
         assert payload["current_generation"] is None
         assert payload["ready"] is False
         assert payload["qualification_allowed"] is False

@@ -360,6 +360,7 @@ _LOCAL_RESET_VIEW_HTML = """<!doctype html>
 
 def _local_reset_view_state() -> dict | None:
     """Return a fail-closed projection without reading any research report."""
+    source_revision = str(os.getenv("SOURCE_GIT_REV", "")).strip().lower() or None
     try:
         fence = read_local_generation_fence(DATA_ROOT)
     except LocalGenerationFenced:
@@ -367,6 +368,7 @@ def _local_reset_view_state() -> dict | None:
             "schema": "local_reset_dashboard_view_v1",
             "status": "LOCAL_GENERATION_FENCE_INVALID",
             "local_reset": "INVALID_FENCE_FAIL_CLOSED",
+            "source_revision": source_revision,
             "current_generation": None,
             "ready": False,
             "report_access_allowed": False,
@@ -382,7 +384,8 @@ def _local_reset_view_state() -> dict | None:
     return {
         "schema": "local_reset_dashboard_view_v1",
         "status": LOCAL_GENERATION_BLOCKED_STATE,
-        "local_reset": "COMPLETE_PENDING_VERIFIED_IMPORT",
+        "local_reset": "FENCED_PENDING_VERIFIED_IMPORT",
+        "source_revision": source_revision,
         "current_generation": None,
         "ready": False,
         "report_access_allowed": False,
