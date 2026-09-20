@@ -2461,12 +2461,22 @@ Write-SyncProgressHeartbeat `
 # can therefore fail closed on epoch/revision/tile parity.
 if (-not [string]::IsNullOrWhiteSpace($ProgressHeartbeatFile)) {
   $migrationScript = Join-Path $repoRoot "scripts\migrate_canonical_research_store.py"
-  $canonicalManifestReceipt = & python $migrationScript --record-existing --destination $targetRoot --heartbeat $canonicalCandidate
-  if ($LASTEXITCODE -ne 0) { throw "Canonical manifest commit failed with exit code $LASTEXITCODE." }
-  if (-not $canonicalManifestReceipt) { throw "Canonical manifest commit returned no receipt." }
   if (-not (Test-Path -LiteralPath $terminalMembershipReceiptPath -PathType Leaf)) {
     throw "Canonical manifest commit requires the persisted terminal membership receipt."
   }
+  $persistedTerminalMembershipSha256 = (
+    Get-FileHash -LiteralPath $terminalMembershipReceiptPath -Algorithm SHA256
+  ).Hash.ToLowerInvariant()
+  if ($persistedTerminalMembershipSha256 -cne [string]$terminalMembershipReceipt.sha256) {
+    throw "Canonical manifest commit terminal membership receipt hash mismatch."
+  }
+  $canonicalManifestReceipt = & python $migrationScript `
+    --record-existing `
+    --destination $targetRoot `
+    --heartbeat $canonicalCandidate `
+    --terminal-membership-receipt $terminalMembershipReceiptPath
+  if ($LASTEXITCODE -ne 0) { throw "Canonical manifest commit failed with exit code $LASTEXITCODE." }
+  if (-not $canonicalManifestReceipt) { throw "Canonical manifest commit returned no receipt." }
   if (-not (Test-Path -LiteralPath $canonicalPointerPath -PathType Leaf)) {
     throw "Canonical manifest commit did not publish canonical_dataset_current.json."
   }

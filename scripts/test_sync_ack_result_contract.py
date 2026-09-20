@@ -57,16 +57,28 @@ def _assert_source_order() -> None:
     private_heartbeat = source.index(
         "$canonicalCandidate = if ($ProgressHeartbeatFile)", receipt_write
     )
+    receipt_preflight = source.index(
+        "Test-Path -LiteralPath $terminalMembershipReceiptPath -PathType Leaf",
+        private_heartbeat,
+    )
     migration = source.index(
         "$canonicalManifestReceipt = & python $migrationScript", private_heartbeat
     )
+    migration_failure_gate = source.index(
+        'if ($LASTEXITCODE -ne 0) { throw "Canonical manifest commit failed',
+        migration,
+    )
     public_publish = source.index(
-        "-Destination $ProgressHeartbeatFile", migration
+        "-Destination $ProgressHeartbeatFile", migration_failure_gate
     )
     assert ack_call < raw_gate < post_ack < receipt_build < receipt_write
-    assert receipt_write < private_heartbeat < migration < public_publish
+    assert receipt_write < private_heartbeat < receipt_preflight < migration
+    assert migration < migration_failure_gate < public_publish
     assert "-ReceiptTarget $canonicalCandidate" in source[private_heartbeat:migration]
     assert "-TerminalAcknowledgement $terminalAcknowledgement" in source[private_heartbeat:migration]
+    assert "--terminal-membership-receipt $terminalMembershipReceiptPath" in source[
+        migration:migration_failure_gate
+    ]
 
 
 def _run_powershell(harness: str, *, timeout: int = 45) -> str:

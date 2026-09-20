@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -331,6 +332,43 @@ def test_record_existing_store_is_deterministic_and_preserves_evidence(tmp_path)
         assert pointer["terminal_membership_content_digest_sha256"] == receipt[
             "content_coverage"
         ]["local_full_file_sha256"]["sorted_file_digest_sha256"]
+    finally:
+        _remove_terminal_receipt_fixture(receipt_path)
+
+
+def test_record_existing_cli_requires_receipt_before_publishing_completion(
+    tmp_path, monkeypatch, capsys
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    module = _load_migration(project)
+    destination = default_store_root(project)
+    receipt_path, heartbeat, _, _ = _terminal_membership_fixture(destination)
+    pointer = destination / "canonical_dataset_current.json"
+    try:
+        base_args = [
+            str(Path(module.__file__)),
+            "--record-existing",
+            "--destination",
+            str(destination),
+            "--heartbeat",
+            str(heartbeat),
+        ]
+        monkeypatch.setattr(sys, "argv", base_args)
+        with pytest.raises(SystemExit) as missing:
+            module.main()
+        assert missing.value.code == 2
+        assert not pointer.exists()
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            base_args + ["--terminal-membership-receipt", str(receipt_path)],
+        )
+        assert module.main() == 0
+        output = json.loads(capsys.readouterr().out)
+        assert output["terminal_membership_receipt_name"] == receipt_path.name
+        assert pointer.is_file()
     finally:
         _remove_terminal_receipt_fixture(receipt_path)
 
