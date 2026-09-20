@@ -30,6 +30,62 @@ function makeBridge(snapshot: Record<string, unknown> | null = null, at: Date | 
   return new BotBridgeService(config as never, snapshots as never);
 }
 
+test('analyzer mirror 404 no-publication receipt is preserved without retry fallback', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(
+      JSON.stringify({
+        available: false,
+        reason: 'no complete validated analyzer bundle is installed',
+        required_schema: 'analyzer_mirror_bundle_v2',
+      }),
+      { status: 404, headers: { 'content-type': 'application/json' } },
+    );
+  };
+  try {
+    const config = {
+      get: (name: string) => (name === 'BOT_ADMIN_TOKEN' ? 'fly-admin-token' : undefined),
+    };
+    const snapshots = {
+      getCachedSnapshot: async () => ({ snapshot: null, at: null, snapshot_seq: null }),
+    };
+    const bridge = new BotBridgeService(config as never, snapshots as never);
+    const receipt = await bridge.fetchAnalyzerMirrorReceipt();
+    assert.equal(calls, 1);
+    assert.equal(receipt?.available, false);
+    assert.equal(receipt?.required_schema, 'analyzer_mirror_bundle_v2');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('unknown analyzer 404 JSON is not accepted as a no-publication receipt', async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(
+      JSON.stringify({ available: false, error: 'proxy route not found' }),
+      { status: 404, headers: { 'content-type': 'application/json' } },
+    );
+  };
+  try {
+    const config = {
+      get: (name: string) => (name === 'BOT_ADMIN_TOKEN' ? 'fly-admin-token' : undefined),
+    };
+    const snapshots = {
+      getCachedSnapshot: async () => ({ snapshot: null, at: null, snapshot_seq: null }),
+    };
+    const bridge = new BotBridgeService(config as never, snapshots as never);
+    assert.equal(await bridge.fetchAnalyzerMirrorReceipt(), null);
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('canonical cumulative-state fallback authenticates to protected Fly /api/state', async () => {
   const originalFetch = globalThis.fetch;
   let capturedHeaders: Headers | null = null;

@@ -3,10 +3,40 @@ import test from 'node:test';
 import {
   isFreshBotSnapshot,
   probePublicBotHealth,
+  selectAnalyzerMirrorInput,
   summarizeAnalyzerMirrorHealth,
   summarizeCanonicalBotHealth,
   type ProbeFetch,
 } from './public-bot-health-probe';
+
+test('explicit no-publication receipt wins over an older analyzer summary', () => {
+  const receipt = { available: false, required_schema: 'analyzer_mirror_bundle_v2' };
+  const oldSummary = { mirror_available: true, uploaded_at: '2026-08-01T00:00:00Z' };
+  assert.equal(selectAnalyzerMirrorInput(receipt, oldSummary), receipt);
+  assert.equal(selectAnalyzerMirrorInput(null, oldSummary), oldSummary);
+});
+
+test('service mirror inputs fail closed when receipt retrieval fails', () => {
+  const missing = summarizeAnalyzerMirrorHealth(selectAnalyzerMirrorInput(null, null));
+  assert.equal(missing.status, 'unreachable');
+  assert.equal(missing.fresh, false);
+
+  const legacy = summarizeAnalyzerMirrorHealth(
+    selectAnalyzerMirrorInput(null, {
+      mirror_available: true,
+      mirror_status: {
+        uploaded_at: '2026-08-17T10:29:00.000Z',
+        size: 100,
+      },
+    }),
+    Date.parse('2026-08-17T10:30:00.000Z'),
+    undefined,
+    'epoch-current',
+  );
+  assert.equal(legacy.status, 'unbound');
+  assert.equal(legacy.fresh, false);
+  assert.equal(legacy.epochBound, false);
+});
 
 test('cached snapshots count as connected only while their own integrity timestamp is fresh', () => {
   assert.equal(
@@ -92,9 +122,9 @@ test('canonical health accepts only the exact Fly probe or a fresh authenticated
   assert.equal(fly.source, 'fly-direct');
 });
 
-test('analyzer mirror online only when Fly mirror is present and fresh', () => {
+test('analyzer mirror distinguishes waiting, unbound, and unreachable without inventing currentness', () => {
   const now = Date.parse('2026-08-07T16:50:00.000Z');
-  const online = summarizeAnalyzerMirrorHealth(
+  const legacy = summarizeAnalyzerMirrorHealth(
     {
       ok: false,
       mirror_available: true,
@@ -106,31 +136,23 @@ test('analyzer mirror online only when Fly mirror is present and fresh', () => {
     },
     now,
   );
-  assert.equal(online.status, 'online');
-  assert.equal(online.available, true);
-  assert.equal(online.fresh, true);
+  assert.equal(legacy.status, 'unbound');
+  assert.equal(legacy.available, true);
+  assert.equal(legacy.epochBound, false);
+  assert.equal(legacy.fresh, false);
 
-  const stale = summarizeAnalyzerMirrorHealth(
-    {
-      mirror_available: true,
-      mirror_status: { uploaded_at: '2026-08-01T12:00:00.000Z', size: 100 },
-    },
-    now,
-  );
-  assert.equal(stale.status, 'stale');
-  assert.equal(stale.fresh, false);
-
-  const missing = summarizeAnalyzerMirrorHealth(
+  const waiting = summarizeAnalyzerMirrorHealth(
     { ok: false, mirror_available: false, mode: 'external_desktop_analyzer' },
     now,
   );
-  assert.equal(missing.status, 'unreachable');
-  assert.equal(missing.available, false);
+  assert.equal(waiting.status, 'waiting_first_publication');
+  assert.equal(waiting.available, false);
+  assert.equal(waiting.epochBound, false);
 
   assert.equal(summarizeAnalyzerMirrorHealth(null, now).status, 'unreachable');
 });
 
-test('analyzer mirror receipt accepts bundle-v2 status shape', () => {
+test('analyzer mirror reports fresh only for a complete bundle bound to the canonical epoch', () => {
   const now = Date.parse('2026-08-17T10:30:00.000Z');
   const receipt = summarizeAnalyzerMirrorHealth(
     {
@@ -139,12 +161,87 @@ test('analyzer mirror receipt accepts bundle-v2 status shape', () => {
       schema: 'analyzer_mirror_bundle_v2',
       uploaded_at: '2026-08-17T10:17:06.543361+00:00',
       analyzer_generated_at: '2026-08-17T09:47:16.998023+00:00',
+      collection_epoch_id: 'epoch-current',
       size: 398066,
       source: 'Fly trading owner + uploaded desktop analyzer mirror',
     },
     now,
+    undefined,
+    'epoch-current',
   );
-  assert.equal(receipt.status, 'online');
+  assert.equal(receipt.status, 'epoch_bound_fresh');
   assert.equal(receipt.fresh, true);
-  assert.equal(receipt.ageSec, 773);
+  assert.equal(receipt.epochBound, true);
+  assert.equal(receipt.ageSec, 2563);
+
+  const mismatched = summarizeAnalyzerMirrorHealth(
+    {
+      available: true,
+      complete: true,
+      schema: 'analyzer_mirror_bundle_v2',
+      uploaded_at: '2026-08-17T10:29:00.000Z',
+      analyzer_generated_at: '2026-08-17T10:28:00.000Z',
+      collection_epoch_id: 'epoch-old',
+    },
+    now,
+    undefined,
+    'epoch-current',
+  );
+  assert.equal(mismatched.status, 'unbound');
+  assert.equal(mismatched.epochBound, false);
+
+  const missingEpoch = summarizeAnalyzerMirrorHealth(
+    {
+      available: true,
+      complete: true,
+      schema: 'analyzer_mirror_bundle_v2',
+      uploaded_at: '2026-08-17T10:29:00.000Z',
+      analyzer_generated_at: '2026-08-17T10:28:00.000Z',
+    },
+    now,
+    undefined,
+    'epoch-current',
+  );
+  assert.equal(missingEpoch.status, 'unbound');
+  assert.equal(missingEpoch.epochBound, false);
+  assert.match(missingEpoch.reason ?? '', /no collection epoch binding/);
+});
+
+test('analyzer mirror stale uses analyzer generation age, not a recent upload time', () => {
+  const now = Date.parse('2026-08-17T10:30:00.000Z');
+  const stale = summarizeAnalyzerMirrorHealth(
+    {
+      available: true,
+      complete: true,
+      schema: 'analyzer_mirror_bundle_v2',
+      uploaded_at: '2026-08-17T10:29:59.000Z',
+      analyzer_generated_at: '2026-08-15T10:30:00.000Z',
+      collection_epoch_id: 'epoch-current',
+    },
+    now,
+    undefined,
+    'epoch-current',
+  );
+  assert.equal(stale.status, 'epoch_bound_stale');
+  assert.equal(stale.epochBound, true);
+  assert.equal(stale.fresh, false);
+  assert.equal(stale.ageSec, 172800);
+
+  for (const analyzerGeneratedAt of [undefined, 'not-a-date']) {
+    const invalid = summarizeAnalyzerMirrorHealth(
+      {
+        available: true,
+        complete: true,
+        schema: 'analyzer_mirror_bundle_v2',
+        uploaded_at: '2026-08-17T10:29:59.000Z',
+        analyzer_generated_at: analyzerGeneratedAt,
+        collection_epoch_id: 'epoch-current',
+      },
+      now,
+      undefined,
+      'epoch-current',
+    );
+    assert.equal(invalid.status, 'unbound');
+    assert.equal(invalid.epochBound, false);
+  }
 });

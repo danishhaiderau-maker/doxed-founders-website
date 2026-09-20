@@ -55,6 +55,7 @@ import { normalizeAnalyzerGenomeStatus } from './analyzer-genome-status';
 import { missingBitfinexVenueEvidenceReadiness } from './bitfinex-live-copy-readiness';
 import {
   probePublicBotHealth,
+  selectAnalyzerMirrorInput,
   summarizeAnalyzerMirrorHealth,
   summarizeCanonicalBotHealth,
   type CanonicalBotHealth,
@@ -896,7 +897,12 @@ export class TradingAgentsService implements OnModuleInit {
         botConnected: false,
         source: 'unreachable',
         error: 'only conservative-btc',
-        analyzerMirror: { available: false, fresh: false, status: 'unreachable' },
+        analyzerMirror: {
+          available: false,
+          fresh: false,
+          epochBound: false,
+          status: 'unreachable',
+        },
       };
     }
     const [flyProbe, canonical, mirrorReceipt, analyzerSummary] = await Promise.all([
@@ -905,11 +911,20 @@ export class TradingAgentsService implements OnModuleInit {
       this.botBridge.fetchAnalyzerMirrorReceipt().catch(() => null),
       this.botBridge.fetchAnalyzerSummary().catch(() => null),
     ]);
-    const mirrorInput =
-      mirrorReceipt && mirrorReceipt.available === true ? mirrorReceipt : analyzerSummary;
+    const mirrorInput = selectAnalyzerMirrorInput(mirrorReceipt, analyzerSummary);
+    const canonicalHealth = summarizeCanonicalBotHealth(flyProbe, canonical);
+    const currentCollectionEpochId =
+      canonicalHealth.snapshotFresh && canonical && typeof canonical.fresh_epoch_id === 'string'
+        ? canonical.fresh_epoch_id
+        : null;
     return {
-      ...summarizeCanonicalBotHealth(flyProbe, canonical),
-      analyzerMirror: summarizeAnalyzerMirrorHealth(mirrorInput),
+      ...canonicalHealth,
+      analyzerMirror: summarizeAnalyzerMirrorHealth(
+        mirrorInput,
+        Date.now(),
+        undefined,
+        currentCollectionEpochId,
+      ),
     };
   }
 

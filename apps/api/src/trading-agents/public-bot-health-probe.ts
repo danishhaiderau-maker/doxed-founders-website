@@ -24,13 +24,30 @@ export const ANALYZER_MIRROR_FRESH_MAX_AGE_SEC = 24 * 60 * 60;
 export type AnalyzerMirrorHealth = {
   available: boolean;
   fresh: boolean;
-  /** online = mirror present and within freshness window; stale = present but old; unreachable = no mirror. */
-  status: 'online' | 'stale' | 'unreachable';
+  epochBound: boolean;
+  /** Fresh/stale describes analyzer age only after exact collection-epoch binding. */
+  status:
+    | 'epoch_bound_fresh'
+    | 'epoch_bound_stale'
+    | 'waiting_first_publication'
+    | 'unbound'
+    | 'unreachable';
   uploadedAt?: string | null;
+  generatedAt?: string | null;
   ageSec?: number | null;
   size?: number | null;
+  collectionEpochId?: string | null;
+  reason?: string;
   source?: string;
 };
+
+/** An authenticated receipt is authoritative even when it proves no publication. */
+export function selectAnalyzerMirrorInput(
+  receipt: Record<string, unknown> | null,
+  legacySummary: Record<string, unknown> | null,
+): Record<string, unknown> | null {
+  return receipt ?? legacySummary;
+}
 
 /**
  * Derive analyzer-mirror chip state from Fly `/api/analyzer/summary` external payload.
@@ -40,9 +57,10 @@ export function summarizeAnalyzerMirrorHealth(
   summary: Record<string, unknown> | null,
   nowMs = Date.now(),
   maxAgeSec = ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
+  currentCollectionEpochId?: string | null,
 ): AnalyzerMirrorHealth {
   if (!summary) {
-    return { available: false, fresh: false, status: 'unreachable' };
+    return { available: false, fresh: false, epochBound: false, status: 'unreachable' };
   }
 
   const mirrorStatus =
@@ -57,6 +75,18 @@ export function summarizeAnalyzerMirrorHealth(
       : typeof summary.uploaded_at === 'string'
         ? summary.uploaded_at
         : null;
+  const generatedAt =
+    typeof mirrorStatus?.analyzer_generated_at === 'string'
+      ? mirrorStatus.analyzer_generated_at
+      : typeof summary.analyzer_generated_at === 'string'
+        ? summary.analyzer_generated_at
+        : null;
+  const collectionEpochId =
+    typeof mirrorStatus?.collection_epoch_id === 'string'
+      ? mirrorStatus.collection_epoch_id.trim() || null
+      : typeof summary.collection_epoch_id === 'string'
+        ? summary.collection_epoch_id.trim() || null
+        : null;
   const sizeRaw = mirrorStatus?.size ?? summary.size;
   const size = typeof sizeRaw === 'number' && Number.isFinite(sizeRaw) ? sizeRaw : null;
   const available =
@@ -68,10 +98,17 @@ export function summarizeAnalyzerMirrorHealth(
     return {
       available: false,
       fresh: false,
-      status: 'unreachable',
+      epochBound: false,
+      status: 'waiting_first_publication',
       uploadedAt,
+      generatedAt,
       ageSec: null,
       size,
+      collectionEpochId,
+      reason:
+        typeof summary.reason === 'string'
+          ? summary.reason
+          : 'no complete validated analyzer publication is installed',
       source:
         typeof summary.source === 'string'
           ? summary.source
@@ -79,19 +116,57 @@ export function summarizeAnalyzerMirrorHealth(
     };
   }
 
-  const uploadedMs = uploadedAt ? Date.parse(uploadedAt) : Number.NaN;
-  const ageSec = Number.isFinite(uploadedMs)
-    ? Math.max(0, (nowMs - uploadedMs) / 1_000)
+  const expectedEpoch = currentCollectionEpochId?.trim() || null;
+  const bundleComplete = mirrorStatus?.complete ?? summary.complete;
+  const bundleSchema = mirrorStatus?.schema ?? summary.schema;
+  const completeBundle =
+    bundleComplete === true && bundleSchema === 'analyzer_mirror_bundle_v2';
+  const epochBound = Boolean(
+    completeBundle && expectedEpoch && collectionEpochId === expectedEpoch,
+  );
+  const generatedMs = generatedAt ? Date.parse(generatedAt) : Number.NaN;
+  const ageSec = Number.isFinite(generatedMs)
+    ? Math.max(0, (nowMs - generatedMs) / 1_000)
     : null;
-  const fresh = ageSec != null && ageSec < maxAgeSec;
+  const fresh = epochBound && ageSec != null && ageSec < maxAgeSec;
+
+  if (!epochBound || ageSec == null) {
+    return {
+      available: true,
+      fresh: false,
+      epochBound: false,
+      status: 'unbound',
+      uploadedAt,
+      generatedAt,
+      ageSec,
+      size,
+      collectionEpochId,
+      reason: !completeBundle
+        ? 'mirror is not a complete validated bundle-v2 publication'
+        : !expectedEpoch
+          ? 'current collection epoch is unavailable'
+          : !collectionEpochId
+            ? 'mirror publication has no collection epoch binding'
+            : collectionEpochId !== expectedEpoch
+              ? 'mirror publication belongs to a different collection epoch'
+              : 'mirror analyzer generation timestamp is invalid',
+      source:
+        typeof summary.source === 'string'
+          ? summary.source
+          : 'Fly trading owner + uploaded desktop analyzer mirror',
+    };
+  }
 
   return {
     available: true,
     fresh,
-    status: fresh ? 'online' : ageSec != null ? 'stale' : 'unreachable',
+    epochBound: true,
+    status: fresh ? 'epoch_bound_fresh' : 'epoch_bound_stale',
     uploadedAt,
+    generatedAt,
     ageSec: ageSec != null ? Math.round(ageSec) : null,
     size,
+    collectionEpochId,
     source:
       typeof summary.source === 'string'
         ? summary.source

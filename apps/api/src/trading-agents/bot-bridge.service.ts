@@ -830,13 +830,24 @@ export class BotBridgeService {
             'X-Bot-Admin-Token': adminToken,
           },
         });
+        const payload = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+        if (
+          res.status === 404 &&
+          payload?.available === false &&
+          payload.required_schema === 'analyzer_mirror_bundle_v2' &&
+          payload.reason === 'no complete validated analyzer bundle is installed'
+        ) {
+          // A validated, explicit "no publication" receipt is authoritative.
+          // Preserve it so callers never fall back to an older summary mirror.
+          return payload;
+        }
         if (!res.ok) {
           this.logger.warn(
             `Analyzer mirror receipt ${cf}/api/analyzer-mirror/status HTTP ${res.status} (attempt ${attempt + 1})`,
           );
           continue;
         }
-        return (await res.json()) as Record<string, unknown>;
+        return payload;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.logger.warn(

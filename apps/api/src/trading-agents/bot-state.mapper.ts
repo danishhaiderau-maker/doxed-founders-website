@@ -22,6 +22,7 @@ export type BotApiState = {
   equity?: number;
   fresh_collection_mode?: boolean;
   fresh_collection_start_time?: number | null;
+  fresh_epoch_id?: string | null;
   bot_start_time?: number;
   last_fresh_reset_ts?: number;
   trade_count_session?: number;
