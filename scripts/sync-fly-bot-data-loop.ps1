@@ -34,6 +34,7 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 . (Join-Path $scriptDir "fly-mirror-quarantine.ps1")
 . (Join-Path $scriptDir "fly-sync-backoff.ps1")
+. (Join-Path $scriptDir "local-generation-fence.ps1")
 $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 $analyzerReport = Join-Path $agentDir "analysis_dashboard.html"
@@ -56,6 +57,7 @@ $relayEvidenceDestination = Join-Path $mirrorDir "relay_lifecycle_evidence_v1.js
 $sizeReportFile = Join-Path $mirrorDir "_size_report.json"
 $growthStateFile = Join-Path $mirrorDir ".fly-sync-growth-state.json"
 $generationLeaseFile = Join-Path $mirrorDir ".fly-mirror-generation.lease"
+Assert-LocalGenerationUnfenced -DataRoot $mirrorDir -Stage 'sync_loop_start'
 New-Item -ItemType Directory -Path (Split-Path -Parent $logFile) -Force | Out-Null
 $relayEvidenceLastSuccessAt = if (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf) {
   (Get-Item -LiteralPath $relayEvidenceDestination).LastWriteTimeUtc.ToString("o")
@@ -682,6 +684,7 @@ if (Test-Path -LiteralPath $growthStateFile) {
 
 try {
   while ($true) {
+    Assert-LocalGenerationUnfenced -DataRoot $mirrorDir -Stage 'sync_loop_iteration'
     Remove-OrphanedMirrorCandidates -MirrorPath $mirrorDir
     $started = Get-Date
     $didSync = $false
@@ -977,6 +980,11 @@ try {
         Start-Sleep -Seconds $pollSec
         continue
       }
+      # The reset fence is persisted before its worker waits for this same
+      # lease. Recheck while holding the lease so a stale preflight can never
+      # promote or ACK data after a laptop-only reset request begins. A fence
+      # exception is not rewritten as a sync heartbeat; it exits the loop.
+      Assert-LocalGenerationUnfenced -DataRoot $mirrorDir -Stage 'sync_loop_under_lease'
       # Keep the generation lease until the completed/failed heartbeat is
       # durably published below. Releasing it immediately after file copying
       # let a waiting analyzer acquire the lease while the prior inProgress
@@ -1047,6 +1055,13 @@ try {
         "$($heartbeat.syncedAt)`tOK`ttrigger=$($heartbeat.trigger)`trev=$($heartbeat.sourceRevision)`tfiles=$($heartbeat.files)`tpruned=$($heartbeat.prunedRotations)`telapsed=$($heartbeat.elapsedSec)s"
       )
     } catch {
+      if ($_.Exception.Message -like 'LOCAL_GENERATION_FENCED:*') {
+        if ($generationLease) {
+          $generationLease.Dispose()
+          $generationLease = $null
+        }
+        throw
+      }
       $consecutiveFailures += 1
       $sleepSec = Get-FlySyncFailureBackoffSeconds `
         -ConsecutiveFailures $consecutiveFailures `

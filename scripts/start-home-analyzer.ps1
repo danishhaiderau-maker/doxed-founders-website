@@ -19,12 +19,14 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 . (Join-Path $scriptDir "fly-data-paths.ps1")
+. (Join-Path $scriptDir "local-generation-fence.ps1")
 $flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
 $analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
   Get-DoxxedFlyMirrorDir
 } else {
   $agentDir
 }
+Assert-LocalGenerationUnfenced -DataRoot $analyzerDataDir -Stage 'analyzer_launcher_start'
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $machineStateBase = if ($env:LOCALAPPDATA) {
   $env:LOCALAPPDATA

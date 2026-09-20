@@ -9018,6 +9018,15 @@ def _mirror_coherence_retry_delay_seconds(
         return fallback, "mirror coherence/lease retry"
 
 
+def _assert_local_generation_unfenced(stage):
+    from research.local_generation_fence import assert_local_generation_available
+
+    configured = (os.environ.get("BTC_AGENT_DATA_DIR") or "").strip()
+    if not configured:
+        raise RuntimeError("BTC_AGENT_DATA_DIR_REQUIRED_FOR_LOCAL_GENERATION_FENCE")
+    assert_local_generation_available(configured, stage=stage)
+
+
 def run(interval_min=30, session_only=True, max_iterations=None):
     iteration = 0
     sleep_sec = max(60, int(interval_min) * 60)
@@ -9066,12 +9075,14 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
         global _CURRENT_MIRROR_GENERATION_LEASE
         from research.mirror_generation_lease import MirrorGenerationLease
 
+        _assert_local_generation_unfenced("analyzer_iteration_start")
         lease = MirrorGenerationLease(
             Path(os.environ["BTC_AGENT_DATA_DIR"]),
             owner=f"analyzer-iteration-{iteration}",
         )
         wait_sec = float(os.getenv("ANALYZER_MIRROR_LEASE_WAIT_SEC", "1200"))
         with lease.acquire(timeout_seconds=wait_sec):
+            _assert_local_generation_unfenced("analyzer_iteration_under_lease")
             _CURRENT_MIRROR_GENERATION_LEASE = lease
             try:
                 return _run_analyzer_iteration_with_lease(iteration, interval_min, session_only)
@@ -19510,6 +19521,7 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
 
 def _atomic_mirror_analyzer_report(source_name):
     """Atomically mirror a completed report into the archive authority tree."""
+    _assert_local_generation_unfenced("analyzer_report_mirror")
     source = Path(source_name)
     if not source.is_file() or source.name != str(source_name):
         raise ValueError("ANALYZER_REPORT_SOURCE_MUST_BE_LOCAL_BASENAME")
@@ -20954,6 +20966,8 @@ def _publish_completed_report_generation(manifest):
     """
     from research.mirror_coherence import assert_mirror_coherent
 
+    _assert_local_generation_unfenced("analyzer_generation_publish")
+
     from research.runtime_identity_incidents import assert_publication_incident_input
     from research.shadow_model_input import assert_publication_shadow_model_input
     assert_publication_incident_input(manifest)
@@ -21015,6 +21029,7 @@ def _publish_completed_report_generation(manifest):
                 raise ValueError("ANALYZER_ARTIFACT_COPY_HASH_MISMATCH")
         assert_publication_incident_input(manifest)
         assert_publication_shadow_model_input(manifest)
+        _assert_local_generation_unfenced("analyzer_generation_atomic_swap")
         if published.exists():
             os.replace(published, backup)
         try:
@@ -21060,6 +21075,7 @@ def _manifest_category(title: str) -> str:
 def archive_research_session(payload):
     """Atomically store one exact, hash-bound analyzer generation."""
     try:
+        _assert_local_generation_unfenced("analyzer_session_archive")
         from research.immutable_archive import create_archive
         return str(
             create_archive(
@@ -22098,6 +22114,7 @@ if __name__ == "__main__":
             file=sys.stderr,
         )
         sys.exit(2)
+    _assert_local_generation_unfenced("analyzer_process_start")
 
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     _configured_report_root = os.getenv("BTC_AGENT_REPORT_DIR", "").strip()
