@@ -35,6 +35,7 @@ CONFIRMATION = "DELETE LAPTOP RESEARCH ONLY"
 PROTECTED_CANONICAL_NAMES = {LEASE_FILE_NAME, FENCE_FILE_NAME}
 ARCHIVE_META_MAX_BYTES = 4 * 1024 * 1024
 RECOVERY_PROTECTION_REASONS = frozenset({"ESSENTIAL_RECOVERY_OR_OWNER_STATE"})
+SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 
 
 class LocalFreshCollectionRejected(RuntimeError):
@@ -157,6 +158,55 @@ def _safe_relative_text(value: object) -> bool:
     return not value.startswith("/") and all(part not in {"", ".", ".."} for part in parts)
 
 
+def _local_protected_reason(relative: str) -> str | None:
+    reason = _research_reset_protected_reason(relative)
+    if reason:
+        return reason
+    if PurePosixPath(relative.lower()).name.endswith("-journal"):
+        return "ESSENTIAL_RECOVERY_OR_OWNER_STATE"
+    return None
+
+
+def _known_sqlite_dependency_base(relative: str) -> bool:
+    if relative in {
+        "research_accumulator/research_trades_v983.db",
+        "v3/lifecycle_bundle_index/lifecycle_index.sqlite3",
+    }:
+        return True
+    parts = PurePosixPath(relative).parts
+    return (
+        len(parts) == 4
+        and parts[:2] == ("derived", "policy-evidence")
+        and parts[2].startswith("generation-")
+        and len(parts[2]) == len("generation-") + 64
+        and all(char in "0123456789abcdef" for char in parts[2][len("generation-"):])
+        and parts[3] == "results.sqlite"
+    )
+
+
+def _sqlite_dependency_protection(rows: list[dict]) -> tuple[dict[str, str], list[str]]:
+    """Mirror the shared reset planner's known SQLite sidecar guard."""
+    relative_paths = {row["relative_path"] for row in rows}
+    protected: dict[str, str] = {}
+    blockers: list[str] = []
+    for relative in sorted(relative_paths):
+        if not _known_sqlite_dependency_base(relative):
+            continue
+        sidecars = [
+            relative + suffix
+            for suffix in SQLITE_SIDECAR_SUFFIXES
+            if relative + suffix in relative_paths
+        ]
+        if not sidecars:
+            continue
+        reason = "ESSENTIAL_RECOVERY_OR_OWNER_STATE:SQLITE_SIDECAR_DEPENDENCY"
+        protected[relative] = reason
+        for sidecar in sidecars:
+            protected[sidecar] = reason
+        blockers.append("PROTECTED_SQLITE_SIDECAR_REQUIRES_AUDIT:" + relative)
+    return protected, blockers
+
+
 def _archive_dependency_protection(root: Path, rows: list[dict]) -> tuple[dict[str, str], list[str]]:
     """Return archive-session closures and fail-closed recovery blockers.
 
@@ -209,7 +259,7 @@ def _archive_dependency_protection(root: Path, rows: list[dict]) -> tuple[dict[s
                     or expected_hash != target_row["sha256"]
                 ):
                     raise ValueError("archive payload binding mismatch")
-                reason = _research_reset_protected_reason(source)
+                reason = _local_protected_reason(source)
                 if reason:
                     protected_source_reasons.append(reason)
             prefix = "" if str(metadata_parent) == "." else metadata_parent.as_posix() + "/"
@@ -217,7 +267,7 @@ def _archive_dependency_protection(root: Path, rows: list[dict]) -> tuple[dict[s
                 reason
                 for candidate in rows
                 if not prefix or candidate["relative_path"].startswith(prefix)
-                for reason in [_research_reset_protected_reason(candidate["relative_path"])]
+                for reason in [_local_protected_reason(candidate["relative_path"])]
                 if reason
             ]
             protected_source_reasons.extend(direct_session_reasons)
@@ -243,13 +293,16 @@ def _classified_inventory(
     protected: dict[str, str] = {}
     blockers: list[str] = []
     for row in rows:
-        reason = _research_reset_protected_reason(row["relative_path"])
+        reason = _local_protected_reason(row["relative_path"])
         if reason:
             protected[row["relative_path"]] = reason
             if reason in RECOVERY_PROTECTION_REASONS:
                 blockers.append(
                     "PROTECTED_RECOVERY_REQUIRES_AUDIT:" + row["relative_path"]
                 )
+    sqlite_protected, sqlite_blockers = _sqlite_dependency_protection(rows)
+    protected.update(sqlite_protected)
+    blockers.extend(sqlite_blockers)
     archive_protected, archive_blockers = _archive_dependency_protection(root, rows)
     protected.update(archive_protected)
     blockers.extend(archive_blockers)
