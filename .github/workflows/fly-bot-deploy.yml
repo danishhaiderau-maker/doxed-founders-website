@@ -870,6 +870,21 @@ jobs:
                   assert len(rows)<=256, 'receipt count bound'
                   for f in sorted((x for x in rows if x.suffix=='.json' and not x.is_symlink()),key=lambda x:x.stat().st_mtime,reverse=True)[:5]: read(f)
           print('RESET_PROBE_COMPLETE')
+          import sqlite3
+          cache=Path('/app/data/runtime/v3/lifecycle_bundle_index/lifecycle_index.sqlite3')
+          if cache.is_file() and not cache.is_symlink():
+              con=sqlite3.connect(cache.as_uri()+'?mode=ro', uri=True, timeout=2)
+              con.execute('PRAGMA query_only=ON')
+              con.set_progress_handler(lambda: 1 if time.monotonic()-query_start>3 else 0,1000)
+              query_start=time.monotonic()
+              try:
+                  print(json.dumps({'derived_index': {'bytes':cache.stat().st_size,
+                      'sidecars':{s:Path(str(cache)+s).exists() for s in ('-wal','-shm','-journal')},
+                      'dirty_epochs':[list(r) for r in con.execute('SELECT collection_epoch_id,count(*) FROM dirty_lifecycle GROUP BY collection_epoch_id LIMIT 5')],
+                      'indexed_ledgers':[list(r) for r in con.execute('SELECT ledger,count(*) FROM lifecycle_event GROUP BY ledger LIMIT 16')],
+                      'source_exists':{n:(cache.parent.parent/'ledgers'/(n+'.jsonl')).exists() for n in ('opportunity','decision','order_intent','execution','lifecycle','market_segment')}}}))
+              finally: con.close()
+          print('DERIVED_INDEX_PROBE_COMPLETE')
           '''
           import textwrap
           print(base64.b64encode(textwrap.dedent(source).encode()).decode())
@@ -878,6 +893,7 @@ jobs:
           result="$(timeout 45s flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "python -c 'import base64;exec(base64.b64decode(\"$payload\"))'")"
           printf '%s\n' "$result"
           [[ "$result" == *RESET_PROBE_COMPLETE* ]]
+          [[ "$result" == *DERIVED_INDEX_PROBE_COMPLETE* ]]
 
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
