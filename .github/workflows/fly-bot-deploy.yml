@@ -1118,7 +1118,10 @@ jobs:
           # A Linux runner may skip the real HttpListener acceptance when its
           # Windows host is unavailable. Release evidence still requires the
           # separate Windows HttpListener receipt; this check pins the adapter.
-          python -m pytest test_local_reset_http_listener.py -q
+          # PowerShell's Linux HttpListener fixture launches a child Python
+          # process; keep it off the SQLite batch's custom TMPDIR so its
+          # process/fixture paths remain independent.
+          env -u TMPDIR python -m pytest test_local_reset_http_listener.py -q
           python -m pytest ../../scripts/test_fly_deploy_ci_coverage.py -q
 
       - name: Verify canonical signal-engine parity
