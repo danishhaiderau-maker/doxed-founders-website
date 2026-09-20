@@ -73,11 +73,20 @@ def test_overview_real_generation_loader_handles_synthetic_unavailable(monkeypat
 def render_loader(name, payload, ok=True):
     page = dashboard.DASHBOARD_HTML
     helper = page[page.index('function missingResearchSource()'):page.index('async function loadFindings()')]
+    # Keep the real evidence-scope logic in this extracted-loader fixture.
+    # loadCombos now calls these helpers before rendering its tables.
+    scope_helpers = (
+        page[page.index('const EVIDENCE_SCOPES ='):page.index('const navEl =')]
+        + page[page.index('function setEvidenceScope('):page.index('const showAllEl =')]
+        + page[page.index('function policyGridEvidenceScope('):page.index('async function loadCombos()')]
+    )
     start = page.index('async function ' + name + '()')
     end = page.index('async function ', start + 15)
-    script = helper + page[start:end] + """
+    script = helper + scope_helpers + page[start:end] + """
 const elements = {};
-const document = {getElementById: id => elements[id] ||= {innerHTML:'', textContent:''}};
+const element = id => elements[id] ||= {innerHTML:'', textContent:'',
+  querySelector: selector => element(id + selector)};
+const document = {getElementById: element};
 const chaseLaneQuery = () => '';
 const fmtExecutionUsd = x => String(x), fmtPct = x => String(x), fmtAdxBucket = x => String(x);
 """ + f"const fetch = async () => ({{ok:{json.dumps(ok)}, json:async () => ({json.dumps(payload)})}});\n"
@@ -101,6 +110,7 @@ def test_unavailable_is_unknown_not_measured_zero(loader, payload, target):
     if loader == 'loadCombos':
         assert 'No profitable' not in elements[target]['innerHTML']
         assert elements['policy-grid-kpis']['innerHTML'] == ''
+        assert 'SOURCE UNAVAILABLE' in elements['sec-combos:scope > .evidence-scope-banner']['innerHTML']
     if loader == 'loadChase':
         assert 'UNAVAILABLE' in elements['chase-kpis']['innerHTML']
         assert '0/0' not in elements['chase-kpis']['innerHTML']
@@ -160,4 +170,7 @@ def test_api_source_flags_do_not_depend_on_nonempty_result_rows(monkeypatch, pre
     chase = client.get('/api/chase').json
     assert chase['source_available'] == dict.fromkeys(('totals','executed','shadow'), present)
     if not present:
-        assert 'empty_reason' not in client.get('/api/features').json
+        # An explicit unavailable reason is different from measured zero rows.
+        assert client.get('/api/features').json['empty_reason'].startswith('FEATURE_REPORT_UNAVAILABLE:')
+    else:
+        assert client.get('/api/features').json['empty_reason'].startswith('INSUFFICIENT_OUTCOME_FEATURE_EVIDENCE:')

@@ -32657,6 +32657,8 @@ DASHBOARD_JS = """(function () {
     }
     // Laptop-only controller contract. Never fall back to any Fly reset endpoint.
     let localResetOperationId = null;
+    let localResetRequest = null;
+    let localResetRetryAllowed = false;
     function localResetStatus(label, message) {
       document.getElementById('freshCollectionLabel').innerText = label;
       document.getElementById('freshCollectionStatus').innerText = message;
@@ -32687,7 +32689,8 @@ DASHBOARD_JS = """(function () {
         ...(payload ? {body: JSON.stringify(payload)} : {}),
       });
       const body = await response.json();
-      if (!response.ok || body.error) throw new Error('LOCAL_CONTROLLER_HTTP_' + response.status);
+      const isOperationStatus = /^\\/api\\/local-research-reset\\/v1\\/operations\\/[a-f0-9]{32}$/.test(path);
+      if (!response.ok || (body.error && !isOperationStatus)) throw new Error('LOCAL_CONTROLLER_HTTP_' + response.status);
       return body;
     }
     function localResetCompletionVerified(body) {
@@ -32712,6 +32715,10 @@ DASHBOARD_JS = """(function () {
         capability = await localResetCapabilityPrompt();
         if (!capability) return;
         if (capability.length < 32) throw new Error('LOCAL_CAPABILITY_TOO_SHORT');
+        // A retry is a later deliberate click, never an automatic replay after
+        // a timeout, lost response, or uncertain partial deletion.
+        const replayRequested = localResetRetryAllowed;
+        localResetRetryAllowed = false;
         const status = await localResetApi('/api/local-research-reset/v1/capability', capability);
         if (status.protocol !== 'local_research_reset_protocol_v1'
           || status.scope_version !== 'laptop_research_scope_v1'
@@ -32724,10 +32731,11 @@ DASHBOARD_JS = """(function () {
           // Retain the id before POST: if its response is lost, query this operation;
           // never issue a new destructive request automatically.
           localResetOperationId = crypto.randomUUID().replaceAll('-', '');
-          await localResetApi('/api/local-research-reset/v1/requests', capability, {
+          localResetRequest = {
             request_id: localResetOperationId, confirmation: 'DELETE LAPTOP RESEARCH ONLY',
             expected_local_generation: status.current_local_generation,
-          });
+          };
+          await localResetApi('/api/local-research-reset/v1/requests', capability, localResetRequest);
         }
         const operationId = localResetOperationId;
         localResetStatus('CHECKING', 'Checking laptop reset ' + operationId + '. Not complete; Fly is unchanged.');
@@ -32751,8 +32759,22 @@ DASHBOARD_JS = """(function () {
           if (['QUEUED', 'RUNNING', 'BLOCKED', 'PARTIAL', 'FAILED'].indexOf(state) < 0) {
             throw new Error('LOCAL_RESET_UNKNOWN_STATUS');
           }
+          const safePreflightRetry = state === 'BLOCKED' && body.retryable_preflight === true
+            && body.mutation_started === false && body.fence_persisted === false
+            && body.deleted_file_count === 0 && body.deleted_bytes === 0;
+          if (safePreflightRetry) {
+            if (replayRequested && attempt === 0 && localResetRequest
+              && status.current_local_generation === localResetRequest.expected_local_generation) {
+              await localResetApi('/api/local-research-reset/v1/requests', capability, localResetRequest);
+              localResetStatus('QUEUED', 'Retrying the SAME laptop-only operation after its no-mutation preflight refusal. Not complete.');
+              continue;
+            }
+            localResetRetryAllowed = true;
+            localResetStatus('BLOCKED', 'Preflight refused: no data deleted and no local fence created. Stop local analyzer/mirror and scheduled restart owners, then click again to retry the SAME operation. Fly is unchanged.');
+            return;
+          }
           localResetStatus(state, 'Laptop reset ' + operationId + ': ' + state
-            + '. Not complete. Fly is unchanged. ' + (body.error || ''));
+            + '. Not complete. Fly is unchanged. Inspect the local operation receipt; no automatic replay is permitted.');
           if (['BLOCKED', 'PARTIAL', 'FAILED'].indexOf(state) >= 0) return;
           await new Promise(function (resolve) { setTimeout(resolve, 2000); });
         }
