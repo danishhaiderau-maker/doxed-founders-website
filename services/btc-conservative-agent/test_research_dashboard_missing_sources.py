@@ -48,6 +48,15 @@ def test_overview_real_generation_loader_handles_synthetic_unavailable(monkeypat
               'collection': {'independent_opportunities': 0}} if present else {}
     monkeypatch.setattr(dashboard, '_read_report', lambda name, *a, **k:
                         report if name == dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE else {})
+    monkeypatch.setattr(
+        dashboard,
+        '_declared_atomic_generation_report',
+        lambda name: (
+            (report, {'reason': None, 'manifest': {'reports': [{'file': name}]}})
+            if report else
+            (None, {'reason': 'ATOMIC_GENERATION_UNAVAILABLE', 'manifest': {}})
+        ),
+    )
     monkeypatch.setattr(dashboard, '_read_json', lambda *a, **k: {})
     monkeypatch.setattr(dashboard, '_generation_freshness_meta', lambda: {
         'current': False, 'stale': True, 'revision_parity': 'UNKNOWN',

@@ -1447,11 +1447,12 @@ def _analyzer_publication_state(manifest: dict, compact: dict) -> dict:
 
 def _current_generation_report(name: str) -> dict:
     """Read a manifest-owned report without reviving undeclared stale files."""
-    payload = _read_report(name, {}) or {}
-    if payload:
+    payload, binding = _declared_atomic_generation_report(name)
+    if payload is not None:
         return payload
-    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    manifest = binding.get("manifest") or {}
     fresh_epoch = manifest.get("fresh_epoch") or {}
+    reason = str(binding.get("reason") or "REPORT_NOT_IN_CURRENT_GENERATION")
     return {
         "schema": "current_generation_report_unavailable_v1",
         "generated_at": manifest.get("generated_at"),
@@ -1462,7 +1463,7 @@ def _current_generation_report(name: str) -> dict:
         "qualification": "NO_SAFE_QUALIFIED_POLICY",
         "live_policy_change_allowed": False,
         "real_bitfinex_trading_allowed": False,
-        "blockers": ["REPORT_NOT_IN_CURRENT_GENERATION", name],
+        "blockers": [reason, name],
         "report_unavailable": True,
         "missing_report": name,
         "collection": {},
@@ -5590,7 +5591,7 @@ def _count_valid_compressed_shadow_rows(payload: bytes) -> int:
     return count
 
 
-def _complete_export_preflight():
+def _complete_export_preflight(*, json_only=False):
     def bounded_metadata(name):
         path = DATA_ROOT / name
         try:
@@ -5617,13 +5618,30 @@ def _complete_export_preflight():
         code, status = "MIRROR_GENERATION_UNBOUND", 503
     message = ("Complete export is unavailable. Finish verification and promotion "
                "of the fresh local Fly mirror before retrying. No archive was created.")
-    if request.accept_mimetypes.best_match(["text/html", "application/json"]) == "text/html":
+    payload = {"ok": False, "admitted": False, "status": code, "message": message}
+    if not json_only and request.accept_mimetypes.best_match(
+        ["text/html", "application/json"]
+    ) == "text/html":
         response = make_response("<!doctype html><title>Research export unavailable</title>"
                                  "<h1>Research export unavailable</h1><p>" + message +
                                  "</p><p>" + code + "</p>", status)
     else:
-        response = make_response(jsonify({"ok": False, "status": code,
-                                          "message": message}), status)
+        response = make_response(jsonify(payload), status)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/export-admission")
+def api_export_admission():
+    """Bounded read-only export admission; never scans or builds the ZIP."""
+    blocked = _complete_export_preflight(json_only=True)
+    if blocked is not None:
+        return blocked
+    response = jsonify({
+        "ok": True,
+        "admitted": True,
+        "status": "MIRROR_GENERATION_BOUND",
+    })
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -7177,7 +7195,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     </div>
     <p><b>Complete Research Evidence Bundle</b> — a forensic ZIP containing the available Fly mirror, immutable relay lifecycle evidence, counterfactual and cohort data, current and historical reports, Genome/DNA artifacts, preserved sessions, source audit, and a SHA-256 manifest. ZIP checksums prove captured bytes; they do not prove that the analyzer generation is current or qualification-ready.</p>
     <div class="stale-banner" id="bundle-provenance" style="display:block">Loading export provenance…</div>
-    <a class="btn" href="/download/everything" id="dl-everything" style="background:#7b4cc9">⬇ Download Forensic Research Evidence Bundle</a>
+    <a class="btn" id="dl-everything" aria-disabled="true" title="Checking export admission" style="background:#7b4cc9;opacity:.45;pointer-events:none">⬇ Download Forensic Research Evidence Bundle</a>
+    <p class="note" id="export-admission-reason">Checking bounded export admission…</p>
     <p class="note">Older specialized download routes remain available for compatibility, but are intentionally hidden here so there is one authoritative export.</p>
     <pre id="bundle-list"></pre>
   </section>
@@ -8892,6 +8911,42 @@ async function loadRuntimeIncidents() {
   ).join('') || '<tr><td colspan="6">No retained application incident receipts in the bounded crash-dump tail.</td></tr>';
 }
 
+async function loadExportAdmission() {
+  const button = document.getElementById('dl-everything');
+  const reason = document.getElementById('export-admission-reason');
+  if (!button || !reason) return;
+  const disable = (status) => {
+    button.removeAttribute('href');
+    button.setAttribute('aria-disabled', 'true');
+    button.style.opacity = '0.45';
+    button.style.pointerEvents = 'none';
+    if (status === 'MIRROR_RETIRED_AWAITING_VERIFIED_PROMOTION') {
+      reason.textContent = 'RETIRED — the prior local Fly mirror was retired; complete export stays disabled until a verified generation is promoted.';
+    } else if (status === 'MIRROR_GENERATION_UNBOUND') {
+      reason.textContent = 'UNBOUND — no proof-bound current local Fly mirror is promoted; complete export stays disabled.';
+    } else {
+      reason.textContent = 'UNAVAILABLE — bounded export admission could not be verified; complete export stays disabled.';
+    }
+    button.title = reason.textContent;
+  };
+  try {
+    const response = await fetch('/api/export-admission', {headers:{Accept:'application/json'}});
+    const admission = await response.json();
+    if (response.ok && admission.admitted === true && admission.status === 'MIRROR_GENERATION_BOUND') {
+      button.href = '/download/everything';
+      button.removeAttribute('aria-disabled');
+      button.style.opacity = '1';
+      button.style.pointerEvents = 'auto';
+      button.title = 'Download the admitted forensic research evidence bundle';
+      reason.textContent = 'BOUND — complete export is admitted by the current promoted local Fly mirror identity.';
+      return;
+    }
+    disable(admission.status);
+  } catch (_) {
+    disable('EXPORT_ADMISSION_UNAVAILABLE');
+  }
+}
+
 const SECTION_LOADERS = {
   summary: [loadSummary], findings: [loadFindings], regime: [loadRegime],
   lanes: [loadLanes],
@@ -8903,7 +8958,7 @@ const SECTION_LOADERS = {
   'ladder-sim': [loadLadderSim], exits: [loadLeakage], genome: [loadGenome],
   'research-design': [loadResearchDesign], 'evidence-coverage': [loadEvidenceCoverage],
   edge: [loadFeatures], explorer: [loadExplorer], archives: [loadArchives],
-  download: [loadArchives, loadGptAuditNote], 'runtime-incidents': [loadRuntimeIncidents], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
+  download: [loadArchives, loadGptAuditNote, loadExportAdmission], 'runtime-incidents': [loadRuntimeIncidents], 'pathway-audit': [loadPathwayAudit], horizon: [loadHorizon],
 };
 const SECTION_REFRESHES = new Map();
 
