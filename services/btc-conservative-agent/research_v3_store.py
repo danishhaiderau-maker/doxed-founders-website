@@ -21,6 +21,13 @@ from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
 from combo_pathway_config import active_tile_registry_signature
 from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
 from emergency_evidence_wal import EmergencyEvidenceWal
+from transactional_receipt_store import (
+    ReceiptAuthorityError,
+    TransactionalReceiptStore,
+    legacy_receipt_path,
+    read_legacy_receipt,
+    unpublished_authority_state,
+)
 
 _locks_guard = threading.Lock()
 _locks: dict[str, threading.RLock] = {}
@@ -302,6 +309,8 @@ class V3EvidenceStore:
         for path in (self.ledger_dir, self.segment_dir, self.receipt_dir, self.lock_dir):
             path.mkdir(parents=True, exist_ok=True)
         self.__emergency_wal: EmergencyEvidenceWal | None = None
+        self.__transactional_receipt_backend: TransactionalReceiptStore | None = None
+        self.__transactional_receipt_authority_seen = False
         # Reserve must exist before pressure/ENOSPC. Local inspect-only runs do
         # not possess a deployed revision and therefore cannot create a
         # misleading production-bound reserve.
@@ -309,7 +318,9 @@ class V3EvidenceStore:
             self._emergency_wal()
 
     @classmethod
-    def open_read_only(cls, root: str | Path) -> "V3EvidenceStore":
+    def open_read_only(
+        cls, root: str | Path, *, expected_identity: Mapping[str, Any] | None = None,
+    ) -> "V3EvidenceStore":
         """Open generation authorities without creating files or WAL state."""
         resolved = Path(root).resolve(strict=True)
         instance = cls.__new__(cls)
@@ -319,10 +330,22 @@ class V3EvidenceStore:
         instance.receipt_dir = resolved / "v3" / "receipts"
         instance.lock_dir = resolved / "v3" / ".locks"
         instance.__emergency_wal = None
+        instance.__transactional_receipt_backend = None
+        instance.__transactional_receipt_authority_seen = False
         instance.epoch_id = ""
         instance._read_identity_override = None
-        pointers = sorted((instance.receipt_dir / "ledger_generations_v1").glob("*/ACTIVE.json"))
-        for pointer in pointers:
+        candidates = list(sorted(
+            (instance.receipt_dir / "ledger_generations_v1").glob("*/ACTIVE.json")
+        ))
+        candidates.extend(sorted(
+            (instance.receipt_dir / "emergency_record_idempotency_v1").glob("*/complete.json")
+        ))
+        marker = (
+            instance.receipt_dir / "transactional_record_authority_v1" / "ACTIVE.json"
+        )
+        if marker.exists() or marker.is_symlink():
+            candidates.append(marker)
+        for pointer in candidates:
             try:
                 row = json.loads(pointer.read_text("utf-8")); identity = row.get("identity")
             except (OSError, json.JSONDecodeError):
@@ -332,6 +355,9 @@ class V3EvidenceStore:
                     raise ValueError("V3 read authority identity conflict")
                 instance._read_identity_override = dict(identity)
                 instance.epoch_id = str(identity.get("epoch_id") or "")
+        if instance._read_identity_override is None and expected_identity is not None:
+            instance._read_identity_override = dict(expected_identity)
+            instance.epoch_id = str(expected_identity.get("epoch_id") or "")
         return instance
 
     def _emergency_wal(self) -> EmergencyEvidenceWal:
@@ -397,7 +423,9 @@ class V3EvidenceStore:
             raise RuntimeError("EMERGENCY_WAL_CANONICAL_REPLAY_BLOCKED")
         replay = wal.mark_replayed(
             record["generation"], canonical_ledger=self.ledger_path(record["ledger"]),
-            canonical_receipt=self._record_receipt_path(record["ledger"], record["record_id"]),
+            canonical_receipt=self.verified_record_receipt(
+                record["ledger"], record["record_id"], require_committed=True,
+            ),
         )
         return {
             "replayed": True, "canonical_duplicate": bool(result.get("duplicate")),
@@ -905,15 +933,20 @@ class V3EvidenceStore:
         return recovered
 
     def _receipt_targets_active_generation(self, ledger: str, receipt: dict[str, Any]) -> bool:
+        # The name is retained for compatibility with existing callers. A
+        # committed receipt may target an immutable SEALED generation after a
+        # normal rotation; resolution verifies the exact seal/migration chain.
         generation = receipt.get("ledger_generation")
         current = self._active_ledger_generation(ledger)
-        if generation == current:
+        # Empty-ledger completeness authorities legitimately precede creation
+        # of the active file, so exact current bindings do not require a path.
+        if generation == current or (generation is None and current["generation"] == 0):
             return True
-        if generation is None and current["generation"] == 0:
+        try:
+            self.resolve_receipt_ledger_generation(ledger, receipt)
             return True
-        if generation is None and current["generation"] == 1:
-            return self._legacy_receipt_is_migrated(ledger, receipt)
-        return False
+        except (OSError, ValueError, json.JSONDecodeError):
+            return False
 
     def resolve_ledger_generation(
         self, ledger: str, generation_ref: dict[str, Any] | None = None,
@@ -1008,10 +1041,20 @@ class V3EvidenceStore:
         """Resolve a receipt's original bytes across ACTIVE-to-SEALED rotation."""
         ref = receipt.get("ledger_generation")
         current = self._active_ledger_generation(ledger)
-        if ref is None:
+        legacy_migration = None
+        legacy_ref = None
+        if current["generation"] > 0:
+            legacy_migration = self._load_legacy_migration(ledger)
+            legacy_ref = {
+                "schema": "v3_ledger_generation_ref_v1", "state": "ACTIVE",
+                "ledger": ledger,
+                "generation": legacy_migration["from_generation"],
+                "relative_path": legacy_migration["relative_path"],
+            }
+        if ref is None or ref == legacy_ref:
             if current["generation"] == 0:
                 return self.resolve_ledger_generation(ledger, None)
-            migration = self._load_legacy_migration(ledger)
+            migration = legacy_migration
             if not self._legacy_receipt_is_migrated(ledger, receipt):
                 raise ValueError("legacy receipt absent from migration authority")
             adopted = {"schema":"v3_ledger_generation_ref_v1","state":"ACTIVE","ledger":ledger,
@@ -1228,8 +1271,73 @@ class V3EvidenceStore:
         )
 
     def _record_receipt_path(self, ledger: str, record_id: str) -> Path:
-        digest = hashlib.sha256(f"{ledger}\0{record_id}".encode("utf-8")).hexdigest()
-        return self.receipt_dir / "emergency_record_idempotency_v1" / ledger / f"{digest}.json"
+        """Legacy JSON path only; active epochs use the transactional backend."""
+        return legacy_receipt_path(self.root, ledger, record_id)
+
+    def _transactional_receipts(self) -> TransactionalReceiptStore | None:
+        """Return active authority, failing closed if its marker is invalid."""
+        marker = (
+            self.receipt_dir / "transactional_record_authority_v1" / "ACTIVE.json"
+        )
+        if os.path.lexists(marker):
+            if self.__transactional_receipt_backend is None:
+                self.__transactional_receipt_backend = TransactionalReceiptStore(
+                    self.root, self._identity_binding(), create=False,
+                )
+            self.__transactional_receipt_authority_seen = True
+            return self.__transactional_receipt_backend
+        if self.__transactional_receipt_authority_seen:
+            raise ReceiptAuthorityError("RECEIPT_AUTHORITY_MARKER_DISAPPEARED")
+        unpublished = unpublished_authority_state(
+            self.root, self._identity_binding(),
+        )
+        if unpublished == "ACTIVE":
+            raise ReceiptAuthorityError("RECEIPT_AUTHORITY_MARKER_MISSING")
+        if unpublished not in {None, "IMPORTING"}:
+            raise ReceiptAuthorityError("RECEIPT_AUTHORITY_UNPUBLISHED_INVALID")
+        return None
+
+    def _load_record_receipt(self, ledger: str, record_id: str) -> dict[str, Any] | None:
+        backend = self._transactional_receipts()
+        if backend is not None:
+            return backend.get(ledger, record_id)
+        return read_legacy_receipt(self.root, ledger, record_id)
+
+    def _record_receipt_exists(self, ledger: str, record_id: str) -> bool:
+        return self._load_record_receipt(ledger, record_id) is not None
+
+    def verified_record_receipt(
+        self, ledger: str, record_id: str, *, require_committed: bool = True,
+    ) -> dict[str, Any]:
+        """Load one receipt and verify its exact generation-bound ledger bytes."""
+        receipt = self._load_record_receipt(ledger, record_id)
+        if receipt is None:
+            raise ReceiptAuthorityError("RECORD_RECEIPT_MISSING")
+        if (
+            receipt.get("schema") != "emergency_record_idempotency_v1"
+            or receipt.get("ledger") != ledger
+            or receipt.get("record_id") != record_id
+            or receipt.get("identity") != self._identity_binding()
+            or not self._receipt_targets_active_generation(ledger, receipt)
+            or (require_committed and receipt.get("state") != "COMMITTED")
+        ):
+            raise ReceiptAuthorityError("RECORD_RECEIPT_BINDING_INVALID")
+        if receipt.get("state") == "DEFERRED":
+            if require_committed:
+                raise ReceiptAuthorityError("RECORD_RECEIPT_NOT_COMMITTED")
+            payload = str(receipt.get("row_payload_utf8") or "").encode("utf-8")
+        else:
+            try:
+                offset, length = int(receipt["offset"]), int(receipt["length"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ReceiptAuthorityError("RECORD_RECEIPT_RANGE_INVALID") from exc
+            generation_path = self.resolve_receipt_ledger_generation(ledger, receipt)
+            payload = self._bounded_slice(generation_path, offset, length)
+            if payload is None:
+                raise ReceiptAuthorityError("RECORD_RECEIPT_BYTES_MISSING")
+        if hashlib.sha256(payload).hexdigest() != receipt.get("row_sha256"):
+            raise ReceiptAuthorityError("RECORD_RECEIPT_BYTES_MISMATCH")
+        return receipt
 
     def _completeness_path(self, ledger: str) -> Path:
         return self.receipt_dir / "emergency_record_idempotency_v1" / ledger / "complete.json"
@@ -1344,7 +1452,6 @@ class V3EvidenceStore:
             return {"recovered": False, "blocked": True,
                     "reason": "LEDGER_APPEND_HEAD_LEDGER_DIVERGED",
                     "record_id": record_id, "ledger": ledger}
-        receipt_path = self._record_receipt_path(ledger, record_id)
         if unchanged_eof:
             self._publish_record_receipt(
                 ledger, record_id, offset=offset, payload=payload, state="PREPARED",
@@ -1367,18 +1474,19 @@ class V3EvidenceStore:
         final_signature = _path_signature(path)
         if final_signature is None:
             raise RuntimeError("LEDGER_MISSING_AFTER_HEAD_RECOVERY")
-        self._atomic_json_receipt(self._completeness_path(ledger), {
-            "schema": "emergency_record_index_complete_v1", "ledger": ledger,
-            "identity": self._identity_binding(),
-            "ledger_generation": self._active_ledger_generation(ledger),
-            "ledger_signature": self._signature_payload(final_signature),
-            "tail_anchor": anchor,
-        })
+        self._publish_completeness(ledger, final_signature, anchor)
         self._clear_append_head(ledger)
         return {"recovered": True, "record_id": record_id,
                 "ledger": ledger, "appended": unchanged_eof}
 
     def _complete_generation(self, ledger: str, signature: tuple[int, int, int, int] | None) -> bool:
+        backend = self._transactional_receipts()
+        if backend is not None:
+            payload = None if signature is None else self._signature_payload(signature)
+            return backend.ledger_complete(
+                ledger, payload,
+                lambda anchor: self._anchor_valid(self.ledger_path(ledger), anchor),
+            )
         try:
             receipt = json.loads(self._completeness_path(ledger).read_text("utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError):
@@ -1398,17 +1506,143 @@ class V3EvidenceStore:
         )
 
     def _publish_record_receipt(
-        self, ledger: str, record_id: str, *, offset: int, payload: bytes, state: str
+        self, ledger: str, record_id: str, *, offset: int | None, payload: bytes, state: str,
+        row_payload_utf8: str | None = None,
     ) -> dict[str, Any]:
         receipt = {
             "schema": "emergency_record_idempotency_v1", "state": state,
             "ledger": ledger, "record_id": record_id,
             "row_sha256": hashlib.sha256(payload).hexdigest(),
-            "offset": int(offset), "length": len(payload), "identity": self._identity_binding(),
+            "length": len(payload), "identity": self._identity_binding(),
             "ledger_generation": self._active_ledger_generation(ledger),
         }
+        if offset is not None:
+            receipt["offset"] = int(offset)
+        if row_payload_utf8 is not None:
+            receipt["row_payload_utf8"] = row_payload_utf8
+        backend = self._transactional_receipts()
+        if backend is not None:
+            return backend.put(receipt)
         self._atomic_json_receipt(self._record_receipt_path(ledger, record_id), receipt)
         return receipt
+
+    def _publish_completeness(
+        self, ledger: str, signature: tuple[int, int, int, int] | None,
+        anchor: dict[str, Any] | None,
+    ) -> None:
+        backend = self._transactional_receipts()
+        if backend is not None:
+            backend.set_ledger_complete(
+                ledger, None if signature is None else self._signature_payload(signature), anchor,
+            )
+            return
+        self._atomic_json_receipt(self._completeness_path(ledger), {
+            "schema": "emergency_record_index_complete_v1", "ledger": ledger,
+            "identity": self._identity_binding(),
+            "ledger_generation": self._active_ledger_generation(ledger),
+            "ledger_signature": (
+                None if signature is None else self._signature_payload(signature)
+            ),
+            "tail_anchor": anchor,
+        })
+
+    def advance_transactional_receipt_import(
+        self, ledger: str, *, max_bytes: int = 8 * 1024 * 1024,
+        max_records: int = 64,
+    ) -> dict[str, Any]:
+        """Import one bounded populated-epoch prefix without activating it."""
+        path = self.ledger_path(ledger)
+        with self._exclusive(path):
+            recovery = self._recover_append_head(ledger, path)
+            if recovery.get("blocked") is True or self._append_head_path(ledger).exists():
+                raise ReceiptAuthorityError("RECEIPT_AUTHORITY_APPEND_HEAD_UNRESOLVED")
+            backend = TransactionalReceiptStore(
+                self.root, self._identity_binding(), create=True,
+            )
+            generations = (
+                self.ledger_generation_paths(ledger)
+                if path.exists()
+                else ((self._active_ledger_generation(ledger), path),)
+            )
+            last = None
+            advanced = False
+            for generation, generation_path in generations:
+                if backend.generation_import_complete(
+                    ledger, generation_path, generation,
+                ):
+                    continue
+                if advanced:
+                    return {
+                        **last, "complete": False,
+                        "generation_complete": True,
+                        "all_generations_complete": False,
+                    }
+                last = backend.advance_import(
+                    ledger, generation_path, generation,
+                    max_bytes=max_bytes, max_records=max_records,
+                    receipt_generation_validator=lambda receipt, expected=generation_path: (
+                        self.resolve_receipt_ledger_generation(ledger, receipt)
+                        == expected.resolve(strict=True)
+                    ),
+                )
+                advanced = True
+                if last.get("complete") is not True:
+                    return {**last, "all_generations_complete": False}
+            active_signature = _path_signature(path)
+            backend.finalize_ledger_import(
+                ledger, generations,
+                None if active_signature is None
+                else self._signature_payload(active_signature),
+            )
+            return {
+                "ledger": ledger, "complete": True,
+                "all_generations_complete": True,
+                "cursor": 0 if active_signature is None else active_signature[2],
+                "records_imported": int((last or {}).get("records_imported") or 0),
+                "bytes_imported": int((last or {}).get("bytes_imported") or 0),
+                "ledger_generation": self._active_ledger_generation(ledger),
+            }
+
+    def activate_transactional_receipt_authority(
+        self, *, boundary_proof: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Switch only after an external writer/reset barrier is already held.
+
+        No runtime path calls this method in this slice. The explicit proof and
+        all-ledger locks make a future guarded activation reviewable and prevent
+        an append from crossing the marker publication boundary.
+        """
+        backend = TransactionalReceiptStore(
+            self.root, self._identity_binding(), create=True,
+        )
+        ledgers = tuple(LEDGER_NAMES)
+        with ExitStack() as frozen:
+            for ledger in ledgers:
+                frozen.enter_context(self._exclusive(self.ledger_path(ledger)))
+            for ledger in ledgers:
+                recovery = self._recover_append_head(ledger, self.ledger_path(ledger))
+                if recovery.get("blocked") is True or self._append_head_path(ledger).exists():
+                    raise ReceiptAuthorityError("RECEIPT_AUTHORITY_APPEND_HEAD_UNRESOLVED")
+            paths = {ledger: self.ledger_path(ledger) for ledger in ledgers}
+            generations = {
+                ledger: self._active_ledger_generation(ledger) for ledger in ledgers
+            }
+            # Re-resolve every immutable SEALED generation and the current
+            # ACTIVE generation under the activation barrier. A completed
+            # import is not authority if any source object changed afterward.
+            for ledger in ledgers:
+                generation_paths = (
+                    self.ledger_generation_paths(ledger)
+                    if paths[ledger].exists()
+                    else ((generations[ledger], paths[ledger]),)
+                )
+                active_signature = _path_signature(paths[ledger])
+                backend.finalize_ledger_import(
+                    ledger, generation_paths,
+                    None if active_signature is None
+                    else self._signature_payload(active_signature),
+                )
+            return backend.activate(paths, generations, boundary_proof)
 
     def advance_emergency_idempotency_bootstrap(
         self, ledger: str, *, max_bytes: int = _BOOTSTRAP_BYTES_PER_STEP,
@@ -1430,12 +1664,7 @@ class V3EvidenceStore:
         with self._exclusive(path):
             signature = _path_signature(path)
             if signature is None:
-                self._atomic_json_receipt(self._completeness_path(ledger), {
-                    "schema": "emergency_record_index_complete_v1", "ledger": ledger,
-                    "identity": self._identity_binding(), "ledger_signature": None,
-                    "ledger_generation": self._active_ledger_generation(ledger),
-                    "tail_anchor": None,
-                })
+                self._publish_completeness(ledger, None, None)
                 return {"complete": True, "bytes_indexed": 0, "cursor": 0}
             if self._complete_generation(ledger, signature):
                 return {"complete": True, "bytes_indexed": 0, "cursor": signature[2]}
@@ -1495,13 +1724,7 @@ class V3EvidenceStore:
             })
             complete = after == signature and cursor == signature[2]
             if complete:
-                self._atomic_json_receipt(self._completeness_path(ledger), {
-                    "schema": "emergency_record_index_complete_v1", "ledger": ledger,
-                    "identity": self._identity_binding(),
-                    "ledger_generation": self._active_ledger_generation(ledger),
-                    "ledger_signature": self._signature_payload(signature),
-                    "tail_anchor": cursor_anchor,
-                })
+                self._publish_completeness(ledger, signature, cursor_anchor)
             return {
                 "complete": complete, "bytes_indexed": consumed,
                 "records_indexed": records_indexed, "cursor": cursor,
@@ -1648,15 +1871,11 @@ class V3EvidenceStore:
                 "record_id": record_id, "ledger": ledger,
                 "reason": "EMERGENCY_ID_OR_ROW_EXCEEDS_BOUNDED_RECEIPT_LIMIT",
             }
-        receipt_path = self._record_receipt_path(ledger, record_id)
         expected_identity = self._identity_binding()
         row_sha = hashlib.sha256(payload).hexdigest()
-        receipt = None
         try:
-            receipt = json.loads(receipt_path.read_text("utf-8"))
-        except FileNotFoundError:
-            pass
-        except (OSError, json.JSONDecodeError):
+            receipt = self._load_record_receipt(ledger, record_id)
+        except (OSError, json.JSONDecodeError, ReceiptAuthorityError):
             return {
                 "written": False, "duplicate": False, "blocked": True,
                 "record_id": record_id, "ledger": ledger,
@@ -1721,17 +1940,13 @@ class V3EvidenceStore:
                     self._record_lifecycle_membership(
                         str(material.get("episode_id") or ""), signature, anchor
                     )
-                prepared["state"] = "COMMITTED"
-                self._atomic_json_receipt(receipt_path, prepared)
+                self._publish_record_receipt(
+                    ledger, record_id, offset=offset, payload=payload,
+                    state="COMMITTED",
+                )
                 final_signature = _path_signature(path)
                 if final_signature is not None:
-                    self._atomic_json_receipt(self._completeness_path(ledger), {
-                        "schema": "emergency_record_index_complete_v1", "ledger": ledger,
-                        "identity": self._identity_binding(),
-                        "ledger_generation": self._active_ledger_generation(ledger),
-                        "ledger_signature": self._signature_payload(final_signature),
-                        "tail_anchor": anchor,
-                    })
+                    self._publish_completeness(ledger, final_signature, anchor)
                 self._advance_cached_ids_after_append(
                     path, record_id, source_signature, final_signature, len(payload),
                 )
@@ -1780,18 +1995,13 @@ class V3EvidenceStore:
                         self._record_lifecycle_membership(
                             str(material.get("episode_id") or ""), signature, anchor,
                         )
-                    repaired = dict(receipt)
-                    repaired["state"] = "COMMITTED"
-                    self._atomic_json_receipt(receipt_path, repaired)
+                    self._publish_record_receipt(
+                        ledger, record_id, offset=receipt_offset, payload=payload,
+                        state="COMMITTED",
+                    )
                     final_signature = _path_signature(path)
                     if final_signature is not None:
-                        self._atomic_json_receipt(self._completeness_path(ledger), {
-                            "schema": "emergency_record_index_complete_v1",
-                            "ledger": ledger, "identity": self._identity_binding(),
-                            "ledger_generation": self._active_ledger_generation(ledger),
-                            "ledger_signature": self._signature_payload(final_signature),
-                            "tail_anchor": anchor,
-                        })
+                        self._publish_completeness(ledger, final_signature, anchor)
                     self._advance_cached_ids_after_append(
                         path, record_id, current_signature, final_signature, len(payload),
                     )
@@ -1809,14 +2019,25 @@ class V3EvidenceStore:
                 "offset": receipt_offset, "length": receipt_length,
                 "sha256": str(receipt.get("row_sha256") or ""),
             }
+            if committed:
+                # A committed receipt and its exact durable bytes are already
+                # authoritative. The same record_id is idempotent even when a
+                # caller retries with different material; never rewrite its
+                # receipt from the incoming payload.
+                return {
+                    "written": False, "duplicate": True,
+                    "record_id": record_id, "ledger": ledger,
+                    "idempotency_receipt_repaired": False,
+                }
             if ledger == "lifecycle" and exact_prepared:
                 signature = _path_signature(path)
                 if signature is None:
                     raise RuntimeError("LIFECYCLE_LEDGER_MISSING_DURING_RECEIPT_REPAIR")
                 self._record_lifecycle_membership(str(material.get("episode_id") or ""), signature, anchor)
-            repaired = dict(receipt)
-            repaired["state"] = "COMMITTED"
-            self._atomic_json_receipt(receipt_path, repaired)
+            self._publish_record_receipt(
+                ledger, record_id, offset=receipt_offset, payload=durable,
+                state="COMMITTED",
+            )
             return {
                 "written": False, "duplicate": True, "record_id": record_id, "ledger": ledger,
                 "idempotency_receipt_repaired": exact_prepared,
@@ -1833,14 +2054,10 @@ class V3EvidenceStore:
                     "record_id": record_id, "ledger": ledger,
                     "reason": "EMERGENCY_IDEMPOTENCY_INDEX_INCOMPLETE",
                 }
-            deferred = {
-                "schema": "emergency_record_idempotency_v1", "state": "DEFERRED",
-                "ledger": ledger, "record_id": record_id, "row_sha256": row_sha,
-                "length": len(payload), "identity": expected_identity,
-                "ledger_generation": self._active_ledger_generation(ledger),
-                "row_payload_utf8": line,
-            }
-            self._atomic_json_receipt(receipt_path, deferred)
+            self._publish_record_receipt(
+                ledger, record_id, offset=None, payload=payload, state="DEFERRED",
+                row_payload_utf8=line,
+            )
             return {
                 "written": False, "duplicate": False, "deferred": True,
                 "record_id": record_id, "ledger": ledger,
@@ -1864,17 +2081,12 @@ class V3EvidenceStore:
             if signature is None:
                 raise RuntimeError("LIFECYCLE_LEDGER_MISSING_AFTER_DURABLE_APPEND")
             self._record_lifecycle_membership(str(material.get("episode_id") or ""), signature, anchor)
-        prepared["state"] = "COMMITTED"
-        self._atomic_json_receipt(receipt_path, prepared)
+        self._publish_record_receipt(
+            ledger, record_id, offset=offset, payload=payload, state="COMMITTED",
+        )
         final_signature = _path_signature(path)
         if final_signature is not None and self._complete_generation(ledger, source_signature):
-            self._atomic_json_receipt(self._completeness_path(ledger), {
-                "schema": "emergency_record_index_complete_v1", "ledger": ledger,
-                "identity": self._identity_binding(),
-                "ledger_generation": self._active_ledger_generation(ledger),
-                "ledger_signature": self._signature_payload(final_signature),
-                "tail_anchor": anchor,
-            })
+            self._publish_completeness(ledger, final_signature, anchor)
         self._advance_cached_ids_after_append(
             path, record_id, source_signature, final_signature, len(payload),
         )
@@ -2049,7 +2261,7 @@ class V3EvidenceStore:
             # ledger fsync; ordinary admission would correctly see that stale
             # membership and otherwise strand the lifecycle forever.
             emergency_now = storage_blocks_new_nonessential_research(str(self.root))
-            if emergency_now and self._record_receipt_path(ledger, record_id).exists():
+            if emergency_now and self._record_receipt_exists(ledger, record_id):
                 return self._emergency_append(ledger, path, record_id, material, line)
             admission = self._emergency_admission(ledger, material)
             if not admission["allowed"]:

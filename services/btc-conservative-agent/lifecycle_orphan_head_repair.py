@@ -264,8 +264,7 @@ def preserve_exact_orphan(root, *, expected_identity, runtime_probe, held_mirror
                     or row.get("row_sha256") != ROW_SHA256):
                 raise ValueError("ORPHAN_REPAIR_PAYLOAD_SCOPE_MISMATCH")
             head = _checked(store._append_head_path("lifecycle"))
-            receipt = _checked(store._record_receipt_path("lifecycle", row["record_id"]))
-            if head.exists() or receipt.exists():
+            if head.exists() or store._record_receipt_exists("lifecycle", row["record_id"]):
                 raise ValueError("ORPHAN_REPAIR_PUBLISHED_AUTHORITY_PRESENT")
             ledger_stat = ledger.stat()
             ledger_fingerprint = (ledger_stat.st_dev, ledger_stat.st_ino, ledger_stat.st_size, ledger_stat.st_mtime_ns)
@@ -293,7 +292,8 @@ def preserve_exact_orphan(root, *, expected_identity, runtime_probe, held_mirror
                         or (current_source.st_ino, current_source.st_dev, current_source.st_mtime_ns) != (
                             SOURCE_INODE, SOURCE_DEVICE, SOURCE_MTIME_NS)
                         or (current_ledger.st_dev, current_ledger.st_ino, current_ledger.st_size, current_ledger.st_mtime_ns) != ledger_fingerprint
-                        or head.exists() or receipt.exists()):
+                        or head.exists()
+                        or store._record_receipt_exists("lifecycle", row["record_id"])):
                     raise ValueError("ORPHAN_REPAIR_SOURCE_CHANGED")
                 source.unlink()
                 _fsync_directory(source.parent)

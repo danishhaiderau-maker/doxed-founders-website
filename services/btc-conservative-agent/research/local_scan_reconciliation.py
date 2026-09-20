@@ -34,13 +34,18 @@ def diagnostic_code(error):
     return message if message in allowed else 'SCAN_RECONCILIATION_FAILED'
 
 
-def _verify_page_ref(root, ref, source, config):
+def _verify_page_ref(store, ref, source, config):
+    if not hasattr(store,'ledger_path'):
+        from research_v3_store import V3EvidenceStore
+        store=V3EvidenceStore.open_read_only(store,expected_identity={
+            'epoch_id':source['epoch'],'source_revision':source['revision'],
+            'deployed_revision':source['revision'],'tile_config_signature':config})
     if ref.get('ledger') not in ('decision','opportunity','lifecycle'):
         raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
     ledger=ref['ledger']; offset=ref.get('byte_offset'); length=ref.get('row_length')
     if type(offset) is not int or offset<0 or type(length) is not int or not 0<length<=1048576:
         raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
-    with (Path(root)/'v3/ledgers'/f'{ledger}.jsonl').open('rb') as stream:
+    with store.ledger_path(ledger).open('rb') as stream:
         stream.seek(offset); raw=stream.read(length)
     digest=hashlib.sha256(raw).hexdigest(); row=json.loads(raw)
     rid=row.get('record_id'); scan=row.get('scan_id') if ledger=='decision' else row.get('shared_ai_call_id')
@@ -50,10 +55,9 @@ def _verify_page_ref(root, ref, source, config):
             or row.get('tile_config_signature')!=config
             or ref.get('directions')!={side:(directions.get(side) or {}).get('capture_signature') for side in ('LONG','SHORT')}):
         raise ValueError('CENSUS_CACHED_REFERENCE_INVALID')
-    path=Path(root)/'v3/receipts/emergency_record_idempotency_v1'/ledger/(hashlib.sha256(f'{ledger}\0{rid}'.encode()).hexdigest()+'.json')
-    with path.open('rb') as handle: receipt_raw=handle.read(262145)
-    if len(receipt_raw)>262144: raise ValueError('CENSUS_RECEIPT_LIMIT')
-    receipt=json.loads(receipt_raw)
+    try: receipt=store.verified_record_receipt(ledger,rid)
+    except (OSError,ValueError,RuntimeError):
+        raise ValueError('CENSUS_RECEIPT_MISMATCH') from None
     if (receipt.get('state')!='COMMITTED' or receipt.get('offset')!=offset
             or receipt.get('length')!=length or receipt.get('row_sha256')!=digest):
         raise ValueError('CENSUS_RECEIPT_MISMATCH')
@@ -82,6 +86,14 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
         source=_source(_check(repo_root,data_root,source_revision,now=now))
         if expected_source is not None and source!=expected_source:
             raise ValueError('CENSUS_EXPECTED_SOURCE_MISMATCH')
+        from research_v3_store import V3EvidenceStore
+        receipt_store=V3EvidenceStore.open_read_only(data_root,expected_identity={
+            'epoch_id':source['epoch'],'source_revision':source['revision'],
+            'deployed_revision':source['revision'],'tile_config_signature':config_signature})
+        receipt_identity=receipt_store._identity_binding()
+        if (receipt_identity.get('epoch_id')!=source['epoch']
+                or receipt_identity.get('source_revision')!=source['revision']):
+            raise ValueError('CENSUS_RECEIPT_MISMATCH')
         binding={'source':source,'config_signature':config_signature,'index_contract':'scan_dispatch_refs_v2'}
         job=hashlib.sha256(_encoded(binding)).hexdigest()
         with sqlite3.connect(directory/'index.sqlite',timeout=1) as db:
@@ -118,10 +130,9 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
                                 or row.get('tile_config_signature')!=config_signature):
                             raise ValueError('CENSUS_ROW_BINDING_CONFLICT')
                         rid=row['record_id']; digest=hashlib.sha256(raw).hexdigest()
-                        receipt_path=Path(data_root)/'v3/receipts/emergency_record_idempotency_v1'/ledger/(hashlib.sha256(f'{ledger}\0{rid}'.encode()).hexdigest()+'.json')
-                        with receipt_path.open('rb') as handle: receipt_raw=handle.read(262145)
-                        if len(receipt_raw)>262144: raise ValueError('CENSUS_RECEIPT_LIMIT')
-                        receipt=json.loads(receipt_raw)
+                        try: receipt=receipt_store.verified_record_receipt(ledger,rid)
+                        except (OSError,ValueError,RuntimeError):
+                            raise ValueError('CENSUS_RECEIPT_MISMATCH') from None
                         if (receipt.get('state')!='COMMITTED' or receipt.get('offset')!=start
                                 or receipt.get('length')!=len(raw) or receipt.get('row_sha256')!=digest):
                             raise ValueError('CENSUS_RECEIPT_MISMATCH')
@@ -143,10 +154,10 @@ def reconcile_scans(*, repo_root, data_root, source_revision, config_signature, 
             refs=[json.loads(row[0]) for row in db.execute("SELECT o.reference FROM refs o WHERE o.job=? AND o.ledger='opportunity' AND o.id>? AND EXISTS (SELECT 1 FROM refs a WHERE a.job=o.job AND a.scan=o.scan AND a.stage='SCAN_ADMISSION') ORDER BY o.id LIMIT 9",(job,reference_after))] if complete else []
             more=len(refs)>8; refs=refs[:8]
             for ref in refs:
-                _verify_page_ref(data_root,ref,source,config_signature)
+                _verify_page_ref(receipt_store,ref,source,config_signature)
                 admission=db.execute("SELECT reference FROM refs WHERE job=? AND scan=? AND stage='SCAN_ADMISSION' LIMIT 2",(job,ref['scan_id'])).fetchall()
                 if len(admission)!=1: raise ValueError('CENSUS_ADMISSION_AMBIGUOUS')
-                original=_verify_page_ref(data_root,json.loads(admission[0][0]),source,config_signature)
+                original=_verify_page_ref(receipt_store,json.loads(admission[0][0]),source,config_signature)
                 if original.get('decision_stage')!='SCAN_ADMISSION' or original.get('scan_id')!=ref['scan_id']:
                     raise ValueError('CENSUS_ADMISSION_CONFLICT')
             dispatches=[]
