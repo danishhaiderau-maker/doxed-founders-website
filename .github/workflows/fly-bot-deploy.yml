@@ -815,7 +815,7 @@ jobs:
           payload="$(python - <<'PY'
           import base64
           source = r'''
-          import json,os,re,itertools
+          import json,os,re,itertools,time
           from pathlib import Path
           assert os.getenv('SOURCE_GIT_REV') == '70d9ff728de7dd27b5716246bc0425cd5192d31b', 'revision changed'
           root=Path('/app/data/runtime/research_reset_receipts')
