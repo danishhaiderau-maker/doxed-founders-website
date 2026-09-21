@@ -17,11 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The scheduled workflow definition lives on master, but production
-          # is intentionally deployed from the validated V3.1 branch.  Check
-          # out that production source so branch drift is not misreported as
-          # bot downtime.
-          ref: codex/v31-analyzer-cohort-truth
+          # Scheduled workflow definition lives on master, but Fly production
+          # for the score-led paper experiment is intentionally deployed from
+          # the residual-junk-exclude ops pin (live SHA 37f3a57a36db family).
+          # The older cohort-truth pin (9a788…) falsely alarms every 15 minutes.
+          ref: ops/log-exclude-runtime-20260921
           # Resolve the newest commit that could have triggered a Fly deploy.
           # The deploy workflow also runs when its own safety contract or the
           # canonical flat-boundary checker changes, so service-only history
@@ -47,6 +47,10 @@ jobs:
       - name: Verify Fly is alive, safe, and running current bot source
         env:
           EXPECTED_REVISION: ${{ steps.expected.outputs.revision }}
+          # Fly production runs the score-led paper experiment. Registry
+          # identity (version + signature + lanes) only matches when this
+          # flag is set the same way the live machine is configured.
+          SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
         run: |
           python - <<'PY'
           import json
@@ -54,17 +58,34 @@ jobs:
           import re
           import subprocess
           import sys
+          import time
           import urllib.error
           import urllib.request
 
           sys.path.insert(0, "services/btc-conservative-agent")
           import combo_pathway_config as registry
 
+          def load_json(url: str):
+              try:
+                  with urllib.request.urlopen(url, timeout=12) as response:
+                      return response.status, json.load(response)
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode("utf-8", "replace")
+                  try:
+                      payload = json.loads(body)
+                  except Exception:
+                      payload = {"raw": body[:2000]}
+                  return int(exc.code), payload
+
           required = os.environ["EXPECTED_REVISION"]
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
-              health = json.load(response)
-          if response.status != 200 or health.get("process_alive") is not True:
+          status, health = load_json("https://doxed-btc-bot.fly.dev/health")
+          if status != 200 or health.get("process_alive") is not True:
               raise SystemExit(f"Fly process is not alive: {health}")
+          # Accept legacy payloads without the contract marker, but reject
+          # unknown future contracts instead of silently trusting them.
+          probe_contract = health.get("probe_contract")
+          if probe_contract is not None and probe_contract != "PROCESS_LIVENESS_ONLY":
+              raise SystemExit(f"Fly /health unknown probe contract: {probe_contract}")
           reported = str(health.get("source_git_rev") or health.get("git_rev") or "")
           if not re.fullmatch(r"[0-9a-f]{7,40}", reported):
               raise SystemExit(f"Fly returned an invalid source revision: {reported}")
@@ -81,7 +102,7 @@ jobs:
           # descendant of the newest bot-source commit. Exact equality creates
           # false drift alarms. Prove both ancestry directions instead: the
           # deployed revision contains the latest required bot source, and it
-          # belongs to the current checked-out master history.
+          # belongs to the current production-pin history.
           if subprocess.run(
               ["git", "merge-base", "--is-ancestor", required, actual],
               check=False,
@@ -94,7 +115,7 @@ jobs:
               check=False,
           ).returncode != 0:
               raise SystemExit(
-                  f"Fly revision is not on current master: {actual[:12]}"
+                  f"Fly revision is not on production pin history: {actual[:12]}"
               )
           if not (
               health.get("force_paper_mode") is True
@@ -102,31 +123,60 @@ jobs:
               and health.get("bitfinex_live_enabled") is False
           ):
               raise SystemExit(f"Fly bot execution safety drift: {health}")
-          runtime_lanes = [row.get("lane") for row in health.get("active_tiles") or []]
+
+          # Lean /health is PROCESS_LIVENESS_ONLY and omits active_tiles.
+          # Registry truth lives on /ready (and /api/status). Retry briefly:
+          # paper chase can hold trade_lock past the zero-wait ready probe and
+          # return intermittent 503 without implying revision drift.
+          ready = None
+          ready_status = None
+          last_error = None
+          for attempt in range(1, 6):
+              ready_status, ready = load_json("https://doxed-btc-bot.fly.dev/ready")
+              if not isinstance(ready, dict):
+                  last_error = f"non-object ready payload on attempt {attempt}"
+                  time.sleep(3)
+                  continue
+              if ready.get("tile_registry_signature") and ready.get("active_tiles") is not None:
+                  break
+              last_error = f"ready missing registry fields on attempt {attempt}: {ready_status}"
+              time.sleep(3)
+          else:
+              raise SystemExit(f"Unable to sample ready registry payload: {last_error}")
+
+          runtime_lanes = [row.get("lane") for row in ready.get("active_tiles") or []]
           if (
-              health.get("bot_version") != registry.EXECUTION_FIX_VERSION
-              or health.get("tile_registry_signature") != registry.active_tile_registry_signature()
+              ready.get("bot_version") != registry.EXECUTION_FIX_VERSION
+              or ready.get("tile_registry_signature") != registry.active_tile_registry_signature()
               or runtime_lanes != list(registry.ACTIVE_TILE_ORDER)
           ):
               raise SystemExit(
                   "Fly tile registry drift: "
-                  f"version={health.get('bot_version')} lanes={runtime_lanes} "
-                  f"signature={health.get('tile_registry_signature')}"
+                  f"version={ready.get('bot_version')} lanes={runtime_lanes} "
+                  f"signature={ready.get('tile_registry_signature')}"
               )
+          # Revision-drift proves image/source + registry identity. Do not fail
+          # the job solely because /ready is briefly 503 under chase load;
+          # strategy-progress owns sustained progress failures.
           print(
               f"Fly process healthy, disarmed, and current: {actual} "
               f"(contains bot source {required[:12]})"
           )
-
-          with urllib.request.urlopen(
-              "https://doxed-btc-bot.fly.dev/ready", timeout=12
-          ) as response:
-              ready = json.load(response)
-          if response.status != 200 or ready.get("ok") is not True:
-              raise SystemExit(f"Strict readiness failed: {ready}")
-          if ready.get("tile_registry_signature") != registry.active_tile_registry_signature():
-              raise SystemExit(f"Ready tile registry drift: {ready}")
-          print(f"Strict readiness sample: {json.dumps(ready, sort_keys=True)}")
+          print(
+              "Ready sample: "
+              + json.dumps(
+                  {
+                      "http_status": ready_status,
+                      "ok": ready.get("ok"),
+                      "process_ready": ready.get("process_ready"),
+                      "bot_version": ready.get("bot_version"),
+                      "tile_registry_signature": ready.get("tile_registry_signature"),
+                      "strategy_progress_ok": (ready.get("strategy_progress") or {}).get("ok"),
+                      "strategy_progress_reasons": (ready.get("strategy_progress") or {}).get("reasons"),
+                  },
+                  sort_keys=True,
+              )
+          )
           PY
   strategy-progress:
     runs-on: ubuntu-slim
@@ -136,34 +186,104 @@ jobs:
         run: |
           python - <<'PY'
           import json
+          import time
+          import urllib.error
           import urllib.request
 
-          with urllib.request.urlopen(
-              "https://doxed-btc-bot.fly.dev/health", timeout=12
-          ) as response:
-              health = json.load(response)
-          progress = health.get("strategy_progress") or {}
-          incident = health.get("strategy_progress_incident") or {}
-          diagnostics = {
-              "process_alive": health.get("process_alive"),
-              "revision": health.get("source_git_rev") or health.get("git_rev"),
-              "strategy_progress": progress,
-              "strategy_progress_incident": incident,
-              "market_data_mode": health.get("market_data_mode"),
-              "paper_only": health.get("force_paper_mode"),
-              "live_armed": health.get("live_armed"),
+          def load_json(url: str):
+              try:
+                  with urllib.request.urlopen(url, timeout=12) as response:
+                      return response.status, json.load(response)
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode("utf-8", "replace")
+                  try:
+                      payload = json.loads(body)
+                  except Exception:
+                      payload = {"raw": body[:2000]}
+                  return int(exc.code), payload
+
+          # /health is PROCESS_LIVENESS_ONLY and intentionally omits
+          # strategy_progress. Progress truth is on /ready and /api/status.
+          # TRADE_LOCK_UNAVAILABLE alone is often a zero-wait race during
+          # legitimate paper chase commits; retry before failing closed.
+          hard_reasons = {
+              "AI_CADENCE_STALLED",
+              "WS_TRANSPORT_STALLED",
+              "WS_TRADE_STREAM_STALLED",
           }
-          print(json.dumps(diagnostics, indent=2, sort_keys=True))
-          if response.status != 200 or health.get("process_alive") is not True:
-              raise SystemExit("Fly process liveness failed")
-          if progress.get("ok") is not True:
-              reasons = progress.get("reasons") or ["UNKNOWN_PROGRESS_FAILURE"]
+          last_diagnostics = None
+          for attempt in range(1, 7):
+              health_status, health = load_json("https://doxed-btc-bot.fly.dev/health")
+              ready_status, ready = load_json("https://doxed-btc-bot.fly.dev/ready")
+              status_code, status_payload = load_json(
+                  "https://doxed-btc-bot.fly.dev/api/status"
+              )
+              progress = {}
+              incident = {}
+              if isinstance(ready, dict) and isinstance(ready.get("strategy_progress"), dict):
+                  progress = ready.get("strategy_progress") or {}
+                  incident = ready.get("strategy_progress_incident") or {}
+              elif isinstance(status_payload, dict) and isinstance(
+                  status_payload.get("strategy_progress"), dict
+              ):
+                  progress = status_payload.get("strategy_progress") or {}
+                  incident = status_payload.get("strategy_progress_incident") or {}
+              diagnostics = {
+                  "attempt": attempt,
+                  "process_alive": health.get("process_alive") if isinstance(health, dict) else None,
+                  "revision": (
+                      (health.get("source_git_rev") or health.get("git_rev"))
+                      if isinstance(health, dict)
+                      else None
+                  ),
+                  "ready_http_status": ready_status,
+                  "status_http_status": status_code,
+                  "strategy_progress": {
+                      "ok": progress.get("ok"),
+                      "reasons": progress.get("reasons"),
+                      "ws_age_sec": progress.get("ws_age_sec"),
+                      "ai_age_sec": progress.get("ai_age_sec"),
+                      "ai_progressing": progress.get("ai_progressing"),
+                      "trade_lock_available": progress.get("trade_lock_available"),
+                      "trade_lock_busy_transient": progress.get("trade_lock_busy_transient"),
+                      "open_positions": progress.get("open_positions"),
+                      "pending_orders": progress.get("pending_orders"),
+                  },
+                  "strategy_progress_incident": incident,
+                  "market_data_mode": (
+                      health.get("market_data_mode")
+                      if isinstance(health, dict)
+                      else None
+                  )
+                  or (ready.get("market_data_mode") if isinstance(ready, dict) else None),
+                  "paper_only": health.get("force_paper_mode") if isinstance(health, dict) else None,
+                  "live_armed": health.get("live_armed") if isinstance(health, dict) else None,
+              }
+              last_diagnostics = diagnostics
+              print(json.dumps(diagnostics, indent=2, sort_keys=True))
+              if health_status != 200 or not isinstance(health, dict) or health.get("process_alive") is not True:
+                  raise SystemExit("Fly process liveness failed")
+              if progress.get("ok") is True:
+                  print(f"Strategy progress OK on attempt {attempt}")
+                  break
+              reasons = set(progress.get("reasons") or ["UNKNOWN_PROGRESS_FAILURE"])
+              if reasons & hard_reasons:
+                  raise SystemExit(
+                      "Fly strategy progress stalled: "
+                      f"reasons={sorted(reasons)} ws_age={progress.get('ws_age_sec')} "
+                      f"ai_age={progress.get('ai_age_sec')} "
+                      f"trade_lock_available={progress.get('trade_lock_available')} "
+                      f"positions={progress.get('open_positions')} "
+                      f"pending={progress.get('pending_orders')}"
+                  )
+              # Soft/transient path (typically TRADE_LOCK_UNAVAILABLE under chase).
+              time.sleep(3)
+          else:
+              reasons = (last_diagnostics or {}).get("strategy_progress", {}).get("reasons") or [
+                  "UNKNOWN_PROGRESS_FAILURE"
+              ]
               raise SystemExit(
-                  "Fly strategy progress stalled: "
-                  f"reasons={reasons} ws_age={progress.get('ws_age_sec')} "
-                  f"ai_age={progress.get('ai_age_sec')} "
-                  f"trade_lock_available={progress.get('trade_lock_available')} "
-                  f"positions={progress.get('open_positions')} "
-                  f"pending={progress.get('pending_orders')}"
+                  "Fly strategy progress stalled after retries: "
+                  f"reasons={reasons} diagnostics={json.dumps(last_diagnostics, sort_keys=True)}"
               )
           PY
