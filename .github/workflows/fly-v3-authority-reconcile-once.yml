@@ -1,0 +1,40 @@
+name: Fly V3 authority reconcile once
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Inspect only when true; quarantine conflicting ACTIVE pointers when false
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      expected_epoch:
+        description: Session epoch_id that must remain (others quarantine)
+        required: true
+        default: epoch-52f0bd2918f836c52122c962
+        type: string
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Inspect and optionally quarantine conflicting ACTIVE identities
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          EXPECTED_EPOCH: ${{ inputs.expected_epoch }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          echo "MACHINE_ID=${machine_id}"
+          script_b64="$(base64 -w0 diagnostics/fly-v3-active-identity-reconcile.py)"
+          flyctl ssh console --app doxed-btc-bot --machine "${machine_id}" --command \
+            "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-v3-active-identity-reconcile.py && DRY_RUN=${DRY_RUN} EXPECTED_EPOCH=${EXPECTED_EPOCH} python /tmp/fly-v3-active-identity-reconcile.py'"
