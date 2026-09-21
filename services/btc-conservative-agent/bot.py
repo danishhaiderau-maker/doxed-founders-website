@@ -40076,6 +40076,15 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     # Optional operational projection, explicitly audited in the manifest.
     # It is intentionally not advertised as a required/retrievable file.
     "open_positions.json",
+    # Non-research operational logs. Numbered rotations inherit exclusion via
+    # _data_sync_path_allowed. Never inventory / package / ACK these — they are
+    # not analyzer evidence and previously burned multi-hour downloads.
+    "bot_runtime.log",
+    "bot_stdout.log",
+    "bot_stderr.log",
+    "bot_restart.log",
+    "bot_supervisor.log",
+    "analyzer_run_latest.log",
 })
 _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     # V3 per-object writer locks are transient coordination state, not
@@ -40786,11 +40795,15 @@ def _data_sync_path_allowed(path: Path) -> bool:
         return False
     if resolved.name in _DATA_SYNC_EXCLUDED_NAMES:
         return False
+    # Fail-closed for numbered rotations of excluded bases (bot_runtime.log.3).
+    rotation = _data_sync_rotation_parts(resolved.name)
+    if rotation is not None and rotation[0] in _DATA_SYNC_EXCLUDED_NAMES:
+        return False
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
         return False
     supported_type = (
         resolved.suffix.lower() in _DATA_SYNC_EXTENSIONS
-        or _data_sync_rotation_parts(resolved.name) is not None
+        or rotation is not None
         or _data_sync_forensic_binding(path) is not None
     )
     return resolved.is_file() and supported_type

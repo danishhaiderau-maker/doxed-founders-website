@@ -53,6 +53,17 @@ def test_noncanonical_aliases_are_not_bundle_members():
         assert transport.is_bundle_eligible_path(path) is False
 
 
+def test_runtime_logs_are_never_bundle_eligible():
+    for path in (
+        "bot_runtime.log",
+        "bot_runtime.log.3",
+        "bot_stdout.log",
+        "runtime/bot_runtime.log",
+        "analyzer_run_latest.log.1",
+    ):
+        assert transport.is_bundle_eligible_path(path) is False
+
+
 def test_maximum_payload_package_roundtrips_with_tar_record_padding(tmp_path):
     source = tmp_path / "source"
     row = make_row(source, segment(), b"x" * transport.MAX_PAYLOAD_BYTES)

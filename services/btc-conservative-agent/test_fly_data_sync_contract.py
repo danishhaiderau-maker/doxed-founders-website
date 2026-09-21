@@ -2123,6 +2123,65 @@ def test_ephemeral_open_positions_is_explicitly_optional_not_required():
     assert "optional_files" not in SYNC_SCRIPT
 
 
+def test_non_research_runtime_logs_are_fail_closed_from_inventory_and_sync():
+    excluded = BOT[BOT.index("_DATA_SYNC_EXCLUDED_NAMES"):BOT.index("_DATA_SYNC_EXCLUDED_DIR_NAMES")]
+    for name in (
+        "bot_runtime.log",
+        "bot_stdout.log",
+        "bot_stderr.log",
+        "bot_restart.log",
+        "bot_supervisor.log",
+        "analyzer_run_latest.log",
+    ):
+        assert f'"{name}"' in excluded
+    assert "rotation[0] in _DATA_SYNC_EXCLUDED_NAMES" in BOT
+    assert "Test-DataSyncExcludedRuntimeLog" in SYNC_SCRIPT
+    assert "bot_runtime.log" in SYNC_SCRIPT
+    from data_sync_bundle_transport import is_bundle_eligible_path
+    assert is_bundle_eligible_path("bot_runtime.log") is False
+    assert is_bundle_eligible_path("bot_runtime.log.3") is False
+    assert is_bundle_eligible_path("runtime/bot_runtime.log") is False
+
+    namespace = _load_bot_functions(
+        "_data_sync_rotation_parts",
+        "_data_sync_path_allowed",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp).resolve()
+        runtime_log = root / "bot_runtime.log"
+        rotated = root / "bot_runtime.log.3"
+        research = root / "signal_snapshot.jsonl"
+        for path, payload in (
+            (runtime_log, b"noise\n"),
+            (rotated, b"noise\n"),
+            (research, b"{}\n"),
+        ):
+            path.write_bytes(payload)
+        namespace.update({
+            "Path": Path,
+            "os": os,
+            "_DATA_SYNC_EXTENSIONS": frozenset(
+                {".csv", ".json", ".jsonl", ".log", ".db", ".sqlite", ".sqlite3", ".txt"}
+            ),
+            "_DATA_SYNC_EXCLUDED_NAMES": frozenset({
+                "bot_runtime.log",
+                "bot_stdout.log",
+                "bot_stderr.log",
+                "bot_restart.log",
+                "bot_supervisor.log",
+                "analyzer_run_latest.log",
+            }),
+            "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
+            "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
+            "_data_sync_volume_root": lambda: root,
+            "_data_sync_runtime_root": lambda: root,
+            "_data_sync_forensic_binding": lambda _path: None,
+        })
+        assert namespace["_data_sync_path_allowed"](runtime_log) is False
+        assert namespace["_data_sync_path_allowed"](rotated) is False
+        assert namespace["_data_sync_path_allowed"](research) is True
+
+
 def test_data_sync_generation_fence_rejects_every_generation_change():
     namespace = _load_bot_functions("_data_sync_generation_matches")
     matches = namespace["_data_sync_generation_matches"]

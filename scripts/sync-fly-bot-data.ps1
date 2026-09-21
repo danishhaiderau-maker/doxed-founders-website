@@ -62,6 +62,28 @@ $downloadClient = [System.Net.Http.HttpClient]::new()
 $downloadClient.Timeout = [TimeSpan]::FromSeconds($chunkTimeoutSec)
 $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
 
+function Test-DataSyncExcludedRuntimeLog {
+  param([string]$RelativePath = "")
+  # Fail-closed client filter: never download/ACK non-research operational logs
+  # even if a stale Fly inventory still advertises them.
+  $leaf = [System.IO.Path]::GetFileName(([string]$RelativePath).Replace('\', '/'))
+  if ([string]::IsNullOrWhiteSpace($leaf)) { return $false }
+  $bases = @(
+    'bot_runtime.log',
+    'bot_stdout.log',
+    'bot_stderr.log',
+    'bot_restart.log',
+    'bot_supervisor.log',
+    'analyzer_run_latest.log'
+  )
+  foreach ($base in $bases) {
+    if ($leaf -ceq $base -or $leaf.StartsWith(($base + '.'), [StringComparison]::Ordinal)) {
+      return $true
+    }
+  }
+  return $false
+}
+
 function Test-DataSyncResourcePressureError {
   param([string]$Message = "")
   return Test-FlySyncResourcePressureMessage -Message $Message
@@ -637,6 +659,11 @@ $baseInterFileThrottleMs = 1500
 $maxAdaptiveThrottleMs = 5000
 $adaptiveThrottleMs = $baseInterChunkThrottleMs
 $selectedFiles = @($manifest.files)
+$selectedFiles = @(
+  $selectedFiles | Where-Object {
+    -not (Test-DataSyncExcludedRuntimeLog -RelativePath ([string]$_.path))
+  }
+)
 $selectedFiles = @(
   $selectedFiles | Sort-Object `
     @{ Expression = { if ([string]$_.consistency_mode -eq "sqlite_snapshot_v1") { 0 } else { 1 } } }, `

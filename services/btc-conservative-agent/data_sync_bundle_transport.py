@@ -33,6 +33,16 @@ _IDEMPOTENCY_RE = re.compile(
     r"^v3/receipts/emergency_record_idempotency_v1/"
     r"[a-z][a-z0-9_]{0,63}/[0-9a-f]{64}\.json$"
 )
+# Belt-and-suspenders: operational runtime logs are never package members even
+# if a stale inventory generation still lists them.
+_EXCLUDED_RUNTIME_LOG_BASES = frozenset({
+    "bot_runtime.log",
+    "bot_stdout.log",
+    "bot_stderr.log",
+    "bot_restart.log",
+    "bot_supervisor.log",
+    "analyzer_run_latest.log",
+})
 
 
 class BundleTransportError(ValueError):
@@ -68,6 +78,10 @@ def is_bundle_eligible_path(raw: object) -> bool:
         value = _safe_member_path(raw)
     except BundleTransportError:
         return False
+    leaf = PurePosixPath(value).name
+    for base in _EXCLUDED_RUNTIME_LOG_BASES:
+        if leaf == base or leaf.startswith(base + "."):
+            return False
     return bool(_SEGMENT_RE.fullmatch(value) or _IDEMPOTENCY_RE.fullmatch(value)
                 or _SIGNAL_SNAPSHOT_RE.fullmatch(value))
 
