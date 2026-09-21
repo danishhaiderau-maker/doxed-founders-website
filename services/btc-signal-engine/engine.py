@@ -10948,6 +10948,8 @@ def reserve_ai_cooldown_slot(lane: str = RESEARCH_LANE_CONTINUOUS) -> tuple:
 
 def should_invoke_ai(ctx: dict, edge_score: float, event_trigger: bool) -> tuple:
     """Final non-Edge gate before the single direction AI call."""
+    if manual_admin_pause_active():
+        return False, "ADMIN_MANUAL_PAUSE"
     if state.get("force_ai_every_signal"):
         return True, "FORCE_AI"
     if _sole_ai_research_mode():
@@ -17002,6 +17004,8 @@ _last_pipeline_event_log = {"key": None, "ts": 0.0}
 
 def call_deepseek_api(messages, temperature=0.4, *, purpose: str):
     """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    if manual_admin_pause_active():
+        raise RuntimeError("ADMIN_MANUAL_PAUSE")
     if TRADING_AI_ONLY and purpose not in TRADING_AI_ALLOWED_PURPOSES:
         raise RuntimeError(f"AI_PURPOSE_BLOCKED:{purpose or 'missing'}")
     api_key = _deepseek_api_key()
@@ -23396,24 +23400,17 @@ def process_signal(event: dict):
     recovery_observation_only = bool(
         event.get("strategy_recovery_observation_only")
     )
-    paused_shadow_mode = bool(event.get("paused_shadow_mode")) or (
-        manual_pause and is_research_data_collection()
-    )
-    # This lane has no paused-shadow mode. A pause must cancel/refuse paper
-    # exposure and leave cancellation evidence, never synthesize an outcome.
-    if is_patient_chase_lane(event_lane):
-        paused_shadow_mode = False
-    if manual_pause and not paused_shadow_mode:
-        # A manual stop may collect isolated counterfactual outcomes only in
-        # the paper/research configuration.  If a future live-armed runtime is
-        # paused, fail before feature/AI work as well as before execution.
+    # True flat (ADMIN_MANUAL): stop paper entries, AI calls, and Fly research
+    # writes. The old paused_shadow_mode path under research collection could
+    # still invoke DeepSeek and write CF/shadow evidence while "paused" — that
+    # half-pause is forbidden. Keep paper ON for normal work by not pausing.
+    if manual_pause:
         _manual_pause_block_entry(event, "SIGNAL_PIPELINE")
         return
+    # Retained for downstream branch compatibility; never armed from ADMIN_MANUAL.
+    paused_shadow_mode = False
     if paused_shadow_mode:
-        # ADMIN_MANUAL stops every executable entry surface, while still
-        # allowing an isolated counterfactual research replay. Paused-shadow
-        # records never enter the global signal/order/position books and never
-        # publish relay webhooks.
+        # Unreachable under true-flat; kept for structure parity with older branches.
         event["paused_shadow_mode"] = True
     elif recovery_observation_only:
         recovery_ok, recovery_reason, _runtime = can_run_ai_recovery_observation()

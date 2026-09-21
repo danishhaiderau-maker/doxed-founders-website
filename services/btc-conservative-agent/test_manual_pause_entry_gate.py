@@ -115,12 +115,12 @@ check("manual flag blocks fills after reason replacement", not bot.open_position
 check("reason replacement order cancelled", pending.get("status") == "CANCELLED")
 
 
-print("\n[3] Paused research may collect, while every execution route fails closed")
+print("\n[3] True flat ADMIN_MANUAL stops AI + writes; every execution route fails closed")
 reset_state()
 with bot.state_lock:
     bot.state["manual_admin_pause"] = True
     bot.state["execution_paused"] = True
-    bot.state["execution_reason"] = "BLOCKED"
+    bot.state["execution_reason"] = "ADMIN_MANUAL"
 
 signal_event = {
     "trade_id": "pause-signal-1",
@@ -129,16 +129,36 @@ signal_event = {
 }
 original_is_buffer_ready = bot.is_buffer_ready
 original_log_no_signal = bot.log_no_signal_with_context
+original_call_deepseek = bot.call_deepseek_api
 research_progress = []
+deepseek_calls = []
+
+def _blocked_deepseek(*args, **kwargs):
+    deepseek_calls.append((args, kwargs))
+    raise RuntimeError("AI_SHOULD_NOT_RUN_UNDER_ADMIN_MANUAL")
+
 bot.is_buffer_ready = lambda: False
 bot.log_no_signal_with_context = lambda reason=None, **kwargs: research_progress.append(reason)
+bot.call_deepseek_api = _blocked_deepseek
 bot.process_signal(signal_event)
+# AI_SCAN under research collection must also fail closed (no paused_shadow AI).
+ai_scan_event = {
+    "trade_id": "pause-ai-scan-1",
+    "research_lane": bot.RESEARCH_LANE_AI_SCAN,
+    "event_trigger": True,
+    "paused_shadow_mode": True,  # explicit flag must not reopen the AI path
+}
+bot.process_signal(ai_scan_event)
+invoke_ok, invoke_reason = bot.should_invoke_ai({}, 1.0, True)
 bot.is_buffer_ready = original_is_buffer_ready
 bot.log_no_signal_with_context = original_log_no_signal
+bot.call_deepseek_api = original_call_deepseek
 check(
     "paused paper entry stops before feature work",
     research_progress == [],
 )
+check("paused AI_SCAN creates no DeepSeek calls", deepseek_calls == [])
+check("should_invoke_ai fail-closed under ADMIN_MANUAL", invoke_ok is False and invoke_reason == "ADMIN_MANUAL_PAUSE")
 check("paused research creates no global order", not bot.pending_orders)
 check("paused research creates no global position", not bot.open_positions)
 
