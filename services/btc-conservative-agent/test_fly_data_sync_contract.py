@@ -2761,7 +2761,8 @@ def test_incremental_sync_is_authenticated_and_chunk_verified():
     assert 'path.name in _DATA_SYNC_APPEND_PREFIX_NAMES' in BOT
     assert 'return "append_prefix_v1" if append_prefix' in BOT
     assert 'limit = min(limit, max(0, published_boundary - offset))' in BOT
-    assert "_data_sync_rotation_parts(resolved.name) is not None" in BOT
+    assert "rotation = _data_sync_rotation_parts(resolved.name)" in BOT
+    assert "or rotation is not None" in BOT
     assert 'path.startswith("/api/data-sync/")' in BOT
     assert "and not is_authenticated_data_sync" in BOT
     assert "@app.route('/api/data-sync/platform-relay-evidence', methods=['POST'])" in BOT
