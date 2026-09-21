@@ -3980,15 +3980,20 @@ def test_full_inventory_admission_and_promotion_are_bootstrap_fenced():
 
     bootstrap.clear()
     bootstrap.update({
-        "required": False, "status": "NOT_REQUIRED", "complete": True,
+        "required": False, "status": "PENDING", "complete": False,
         "blocked": False,
     })
     not_required = namespace["_data_sync_receipt_bootstrap_gate"]()
     assert not_required["required"] is False
     assert not_required["status"] == "NOT_REQUIRED"
     assert not_required["complete"] is True
-    bootstrap["complete"] = False
-    assert namespace["_data_sync_receipt_bootstrap_gate"]()["complete"] is False
+    # Stale PENDING/incomplete flags must not block when required is false.
+    bootstrap.update({"status": "PENDING", "complete": False})
+    assert namespace["_data_sync_receipt_bootstrap_gate"]()["complete"] is True
+    # Missing required key (dead lifecycle owner) also admits inventory.
+    bootstrap.clear()
+    missing = namespace["_data_sync_receipt_bootstrap_gate"]()
+    assert missing["required"] is False and missing["complete"] is True
 
     route = BOT[BOT.index("def api_data_sync_manifest") : BOT.index("_data_sync_identity_cache_lock")]
     assert route.index('elif not receipt_bootstrap["complete"]') < route.index(
