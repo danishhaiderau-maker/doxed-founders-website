@@ -814,7 +814,7 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
     # without these fields caused V2/V3 to silently mint an epoch-v22-* alias
     # while the dashboard continued to advertise the official epoch-* id.
     # Only a new, explicitly confirmed reset is allowed to replace them.
-    if fcm and not fresh_collection_reset:
+    if not fresh_collection_reset:
         for key in (
             "collector_v22_epoch_ts",
             "collector_v22_epoch_id",
@@ -822,6 +822,14 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         ):
             if prev.get(key) not in (None, ""):
                 payload[key] = prev.get(key)
+        if not fcm:
+            for key in (
+                "fresh_collection_start_time",
+                "fresh_collection_start_iso",
+                "fresh_collection_start_iso_utc",
+            ):
+                if prev.get(key) not in (None, ""):
+                    payload[key] = prev.get(key)
     if fresh_collection_reset and fresh_start is not None:
         cutoff = _utc_isoformat_ns(float(fresh_start))
         material = f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{cutoff}"
@@ -40123,7 +40131,7 @@ _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 # The desktop polls every three minutes. Expire shortly before that poll so it
 # can never report MATCH/SKIP from an inventory that predates newly appended or
 # newly created evidence. The non-blocking worker refresh remains fail closed.
-_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 150.0
+_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 2 * 60 * 60
 _DATA_SYNC_INVENTORY_SNAPSHOT_NAME = "sync_inventory_current.json"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA = "fly_runtime_inventory_snapshot_v1"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2 = "fly_runtime_inventory_snapshot_v2"
