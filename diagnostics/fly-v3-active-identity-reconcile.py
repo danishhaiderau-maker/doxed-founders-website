@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""Quarantine/purge retained post-wipe volume that blocks inventory CURRENT.
+"""Fast post-wipe retained purge/quarantine. Rename-first, no deep walks.
 
-Authorized by Danish wipe/delete-all-old-data for epoch-4d795… collect.
-Safe gates:
-  - EXPECTED_EPOCH must match a COMPLETE wipe operation
-  - live paths never touched for trading/arm
-  - emergency append_heads retained in place
-  - research_reset_receipts retained (wipe proof)
-  - current v3/ledgers retained
-
-Actions (DRY_RUN=true default):
-  1) MOVE emergency_record_idempotency_v1 ledger dirs (except append_heads)
-     -> research_epoch_quarantine/postwipe-emergency-idempotency-<ts>/
-     (inventory excludes research_epoch_quarantine)
-  2) DELETE files under .data-sync-snapshots/ (operational cache; excluded)
-  3) MOVE research_archive/ -> research_epoch_quarantine/postwipe-research-archive-<ts>/
-  4) MOVE lifecycle recovery-quarantine/* -> research_epoch_quarantine/postwipe-lifecycle-rq-<ts>/
+Moves inventory file-bombs under research_epoch_quarantine (excluded from
+data-sync inventory). Deletes .data-sync-snapshots contents. Keeps
+append_heads, research_reset_receipts, and v3/ledgers.
 """
 from __future__ import annotations
 
@@ -31,91 +19,81 @@ EXPECTED_EPOCH = str(os.environ.get("EXPECTED_EPOCH") or "").strip()
 DRY_RUN = str(os.environ.get("DRY_RUN", "true")).strip().lower() in {"1", "true", "yes"}
 
 
-def _dir_bytes_files(path: Path) -> tuple[int, int]:
-    files = 0
-    bytes_ = 0
-    if not path.exists():
-        return 0, 0
-    for root, _dirs, names in os.walk(path, followlinks=False):
-        for name in names:
-            files += 1
-            try:
-                bytes_ += (Path(root) / name).stat().st_size
-            except OSError:
-                pass
-    return bytes_, files
+def disk() -> dict:
+    try:
+        u = os.statvfs("/app/data")
+        return {
+            "used_bytes": u.f_frsize * (u.f_blocks - u.f_bavail),
+            "free_bytes": u.f_frsize * u.f_bavail,
+            "total_bytes": u.f_frsize * u.f_blocks,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
-def _move_tree(src: Path, dest: Path, report_actions: list, *, dry: bool) -> dict:
-    row = {
-        "action": "MOVE",
-        "src": str(src.relative_to(DATA)).replace("\\", "/"),
-        "dest": str(dest.relative_to(DATA)).replace("\\", "/"),
-        "exists": src.exists(),
-    }
+def child_names(path: Path) -> list[str]:
+    if not path.is_dir():
+        return []
+    try:
+        return sorted(p.name for p in path.iterdir())
+    except OSError:
+        return []
+
+
+def move_path(src: Path, dest: Path, actions: list) -> None:
+    rel_src = str(src.relative_to(DATA)).replace("\\", "/")
+    rel_dest = str(dest.relative_to(DATA)).replace("\\", "/")
+    row = {"action": "MOVE", "src": rel_src, "dest": rel_dest, "exists": src.exists()}
     if not src.exists():
         row["skipped"] = "ABSENT"
-        report_actions.append(row)
-        return row
-    b, f = _dir_bytes_files(src)
-    row["bytes"] = b
-    row["files"] = f
-    if dry:
-        row["status"] = "WOULD_MOVE"
-        report_actions.append(row)
-        return row
-    dest.parent.mkdir(parents=True, exist_ok=True)
+        actions.append(row)
+        return
     if dest.exists():
-        row["status"] = "DEST_EXISTS"
-        row["error"] = "REFUSED"
-        report_actions.append(row)
-        return row
+        row["status"] = "DEST_EXISTS_REFUSED"
+        actions.append(row)
+        return
+    if DRY_RUN:
+        row["status"] = "WOULD_MOVE"
+        row["children"] = child_names(src)[:30]
+        actions.append(row)
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dest))
     row["status"] = "MOVED"
-    report_actions.append(row)
-    return row
+    actions.append(row)
 
 
-def _rm_tree_contents(path: Path, report_actions: list, *, dry: bool) -> dict:
-    row = {
-        "action": "DELETE_CONTENTS",
-        "src": str(path.relative_to(DATA)).replace("\\", "/") if path.is_relative_to(DATA) else str(path),
-        "exists": path.exists(),
-    }
+def delete_contents(path: Path, actions: list) -> None:
+    rel = str(path.relative_to(DATA)).replace("\\", "/")
+    row = {"action": "DELETE_CONTENTS", "src": rel, "exists": path.exists()}
     if not path.exists():
         row["skipped"] = "ABSENT"
-        report_actions.append(row)
-        return row
-    b, f = _dir_bytes_files(path)
-    row["bytes_before"] = b
-    row["files_before"] = f
-    if dry:
+        actions.append(row)
+        return
+    names = child_names(path)
+    row["child_count_before"] = len(names)
+    row["children_sample"] = names[:20]
+    if DRY_RUN:
         row["status"] = "WOULD_DELETE_CONTENTS"
-        report_actions.append(row)
-        return row
+        actions.append(row)
+        return
     deleted = 0
-    deleted_bytes = 0
+    errors = []
     for child in list(path.iterdir()):
         try:
-            if child.is_symlink():
+            if child.is_symlink() or child.is_file():
                 child.unlink(missing_ok=True)
                 deleted += 1
-            elif child.is_file():
-                deleted_bytes += child.stat().st_size
-                child.unlink()
-                deleted += 1
             elif child.is_dir():
-                cb, cf = _dir_bytes_files(child)
                 shutil.rmtree(child)
-                deleted += cf
-                deleted_bytes += cb
+                deleted += 1
         except OSError as exc:
-            row.setdefault("errors", []).append(f"{child.name}:{type(exc).__name__}")
-    row["deleted_files"] = deleted
-    row["deleted_bytes"] = deleted_bytes
+            errors.append(f"{child.name}:{type(exc).__name__}")
+    row["deleted_entries"] = deleted
+    if errors:
+        row["errors"] = errors[:20]
     row["status"] = "DELETED_CONTENTS"
-    report_actions.append(row)
-    return row
+    actions.append(row)
 
 
 def main() -> int:
@@ -125,15 +103,15 @@ def main() -> int:
         "expected_epoch": EXPECTED_EPOCH or None,
         "ok": False,
         "actions": [],
+        "disk_before": disk(),
     }
     if not EXPECTED_EPOCH.startswith("epoch-"):
         report["error"] = "EXPECTED_EPOCH_INVALID"
         print(json.dumps(report, indent=2, sort_keys=True))
         return 2
 
-    # Prove COMPLETE wipe for this epoch exists
-    rr = RUNTIME / "research_reset_receipts"
     matching = []
+    rr = RUNTIME / "research_reset_receipts"
     for op in sorted(rr.glob("*/operation.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:12]:
         try:
             j = json.loads(op.read_text("utf-8"))
@@ -149,26 +127,17 @@ def main() -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
         return 3
 
-    try:
-        usage = os.statvfs("/app/data")
-        report["disk_before"] = {
-            "used_bytes": usage.f_frsize * (usage.f_blocks - usage.f_bavail),
-            "free_bytes": usage.f_frsize * usage.f_bavail,
-            "total_bytes": usage.f_frsize * usage.f_blocks,
-        }
-    except Exception as exc:
-        report["disk_before"] = {"error": str(exc)}
-
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     qroot = DATA / "research_epoch_quarantine" / f"postwipe-retained-{EXPECTED_EPOCH}-{ts}"
+    report["quarantine_root"] = str(qroot.relative_to(DATA)).replace("\\", "/")
 
-    # 1) Emergency idempotency ledger dirs (file-count bomb for inventory)
+    # 1) Emergency idempotency ledgers (inventory file-count bomb)
     em = RUNTIME / "v3/receipts/emergency_record_idempotency_v1"
     keep = {"append_heads"}
     if em.is_dir():
-        dest_em = qroot / "emergency_record_idempotency_v1"
-        for child in sorted(em.iterdir(), key=lambda p: p.name):
-            if child.name in keep:
+        for name in child_names(em):
+            child = em / name
+            if name in keep:
                 report["actions"].append({
                     "action": "KEEP",
                     "src": str(child.relative_to(DATA)).replace("\\", "/"),
@@ -176,56 +145,33 @@ def main() -> int:
                 })
                 continue
             if child.is_dir():
-                _move_tree(child, dest_em / child.name, report["actions"], dry=DRY_RUN)
+                move_path(child, qroot / "emergency_record_idempotency_v1" / name, report["actions"])
 
-    # 2) .data-sync-snapshots operational cache
-    _rm_tree_contents(DATA / ".data-sync-snapshots", report["actions"], dry=DRY_RUN)
+    # 2) Operational snapshot cache
+    delete_contents(DATA / ".data-sync-snapshots", report["actions"])
 
-    # 3) research_archive (pre-wipe copies; inventory-excluded but huge)
-    _move_tree(
-        DATA / "research_archive",
-        qroot / "research_archive",
-        report["actions"],
-        dry=DRY_RUN,
-    )
+    # 3) Pre-wipe research_archive
+    move_path(DATA / "research_archive", qroot / "research_archive", report["actions"])
 
-    # 4) lifecycle recovery-quarantine retired sqlite copies
+    # 4) Lifecycle recovery-quarantine copies
     rq = RUNTIME / "v3/lifecycle_bundle_index/recovery-quarantine"
     if rq.is_dir():
-        dest_rq = qroot / "lifecycle_recovery_quarantine"
-        for child in sorted(rq.iterdir(), key=lambda p: p.name):
-            _move_tree(child, dest_rq / child.name, report["actions"], dry=DRY_RUN)
+        for name in child_names(rq):
+            move_path(rq / name, qroot / "lifecycle_recovery_quarantine" / name, report["actions"])
 
-    # 5) corrupt_evidence_quarantine under runtime (small)
-    _move_tree(
+    # 5) corrupt evidence quarantine
+    move_path(
         RUNTIME / "corrupt_evidence_quarantine",
         qroot / "corrupt_evidence_quarantine",
         report["actions"],
-        dry=DRY_RUN,
     )
 
-    try:
-        usage = os.statvfs("/app/data")
-        report["disk_after"] = {
-            "used_bytes": usage.f_frsize * (usage.f_blocks - usage.f_bavail),
-            "free_bytes": usage.f_frsize * usage.f_bavail,
-            "total_bytes": usage.f_frsize * usage.f_blocks,
-        }
-    except Exception as exc:
-        report["disk_after"] = {"error": str(exc)}
-
-    moved_files = sum(int(a.get("files") or a.get("deleted_files") or 0) for a in report["actions"])
-    moved_bytes = sum(
-        int(a.get("bytes") or a.get("bytes_before") or a.get("deleted_bytes") or 0)
-        for a in report["actions"]
-        if a.get("action") in {"MOVE", "DELETE_CONTENTS"}
-    )
-    report["totals"] = {"files": moved_files, "bytes": moved_bytes, "quarantine_root": str(qroot.relative_to(DATA)).replace("\\", "/") if not DRY_RUN or True else None}
+    report["disk_after"] = disk()
     report["ok"] = True
     report["note"] = (
-        "Emergency idempotency moved under research_epoch_quarantine (inventory-excluded). "
-        "Snapshots deleted. research_archive + lifecycle RQ moved. "
-        "append_heads + research_reset_receipts + ledgers retained."
+        "Moved emergency idempotency ledgers + research_archive + lifecycle RQ "
+        "under research_epoch_quarantine (inventory-excluded). Deleted "
+        ".data-sync-snapshots contents. Kept append_heads, wipe receipts, ledgers."
     )
     print(json.dumps(report, indent=2, sort_keys=True, default=str))
     return 0
