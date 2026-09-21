@@ -170,7 +170,7 @@ def continue_bootstrap(expected: str, request_json, *, monotonic=time.monotonic,
         raise RuntimeError("resume-bootstrap bounded deadline expired: " + json.dumps(last_diagnostic or {}, sort_keys=True, separators=(",", ":")))
 
     # Sole mutation. An ambiguous response propagates and is never retried.
-    resumed = request_json("/api/resume", {})
+    resumed = request_json("/api/resume", {"clear_admin_manual_pause": True})
     if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
         raise RuntimeError("single paper resume was not acknowledged")
     final = None

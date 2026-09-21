@@ -171,7 +171,7 @@ def resume_incumbent(incumbent: str, candidate: str, request_json, *, monotonic,
     ):
         raise RuntimeError("fresh incumbent paper relay state is not generation-current and flat")
     # Sole resume mutation. An ambiguous response propagates and is never retried.
-    resumed = request_json("/api/resume", {})
+    resumed = request_json("/api/resume", {"clear_admin_manual_pause": True})
     if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
         raise RuntimeError("single incumbent paper resume was not acknowledged")
     final = observe_status(request_json, until=deadline, monotonic=monotonic, sleep=sleep)

@@ -91,7 +91,7 @@ def test_resume_proves_fresh_flat_incumbent_and_posts_once():
         if path == "/api/resume": return {"status": "resumed", "execution_paused": False}
         raise AssertionError(path)
     assert resume_incumbent(INCUMBENT, CANDIDATE, request, monotonic=clock.monotonic, sleep=clock.sleep)["execution_paused"] is False
-    assert calls.count(("/api/resume", {})) == 1
+    assert calls.count(("/api/resume", {"clear_admin_manual_pause": True})) == 1
 
 
 @pytest.mark.parametrize("mutate", [

@@ -301,6 +301,57 @@ bot.get_config_file = original_get_config_file
 bot._resolve_config_file_for_load = original_resolve_config_file
 
 
+print("\n[6b] Sticky ADMIN_MANUAL blocks bare /api/resume")
+reset_state()
+_sticky_original_recompute = bot._recompute_system_readiness
+_sticky_original_token = bot._BOT_ADMIN_TOKEN
+_sticky_original_bootstrap = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+_sticky_original_reset_probe = bot._resume_active_reset_receipt_exists
+bot._BOT_ADMIN_TOKEN = "required-test-token"
+bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+bot._resume_active_reset_receipt_exists = lambda: False
+with bot.state_lock:
+    bot.state["manual_admin_pause"] = True
+    bot.state["execution_paused"] = True
+    bot.state["execution_reason"] = "ADMIN_MANUAL"
+    bot.state["_pause_priority"] = bot.PAUSE_PRIORITIES["ADMIN_MANUAL"]
+bot._recompute_system_readiness = lambda: {
+    "system_ready": True,
+    "ws_transport_ready": True,
+    "readiness_reasons": [],
+}
+with bot.app.test_client() as client:
+    blocked = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    blocked_body = blocked.get_json() or {}
+    check(
+        "bare resume is blocked while ADMIN_MANUAL is sticky",
+        blocked.status_code == 409,
+        detail=f"status={blocked.status_code} body={blocked_body}",
+    )
+    check("bare resume leaves manual pause armed", bot.state.get("manual_admin_pause") is True)
+    check(
+        "bare resume reports sticky reason",
+        blocked_body.get("reason") == "STICKY_ADMIN_MANUAL_PAUSE",
+        detail=str(blocked_body),
+    )
+    cleared = client.post(
+        "/api/resume",
+        json={"clear_admin_manual_pause": True},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    cleared_body = cleared.get_json() or {}
+    check(
+        "explicit clear resumes sticky ADMIN_MANUAL",
+        cleared.status_code == 200,
+        detail=f"status={cleared.status_code} body={cleared_body}",
+    )
+    check("explicit clear disarms manual pause", bot.state.get("manual_admin_pause") is False)
+bot._recompute_system_readiness = _sticky_original_recompute
+bot._BOT_ADMIN_TOKEN = _sticky_original_token
+bot._DASHBOARD_BOOTSTRAP_COMPLETE = _sticky_original_bootstrap
+bot._resume_active_reset_receipt_exists = _sticky_original_reset_probe
+
+
 print("\n[7] Direct local bridge control is safe during secret rotation")
 reset_state()
 original_admin_token = bot._BOT_ADMIN_TOKEN
@@ -346,7 +397,11 @@ with bot.app.test_client() as client:
         "system_ready": True,
         "readiness_reasons": [],
     }
-    ready_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    ready_resume = client.post(
+        "/api/resume",
+        json={"clear_admin_manual_pause": True},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
     check("ready direct loopback resume is accepted without a token", ready_resume.status_code == 200)
     check("ready direct loopback resume changes state", bot.state.get("execution_paused") is False)
     resumed_state = client.get(
@@ -452,13 +507,18 @@ bot._recompute_system_readiness = lambda: {
 }
 with bot.app.test_request_context("/api/pause", method="POST"):
     pause_response = bot.api_pause()
-with bot.app.test_request_context("/api/resume", method="POST"):
+with bot.app.test_request_context(
+    "/api/resume",
+    method="POST",
+    json={"clear_admin_manual_pause": True},
+):
     resume_response = bot.api_resume()
 check("pause endpoint succeeds", pause_response.status_code == 200)
 check("resume endpoint succeeds", resume_response.status_code == 200)
 check(
     "state lock released before persistence and cancellation",
     lock_observations == [
+        ("persist", True),
         ("persist", True),
         ("cancel", True),
         ("persist", True),

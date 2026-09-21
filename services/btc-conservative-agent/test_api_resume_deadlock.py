@@ -123,7 +123,7 @@ check("DAILY_DRAWDOWN reason preserved", bot.state.get("execution_reason") == "D
 # [3] Resume succeeds when system_ready=False, ws=True, reason=ADMIN_MANUAL
 #     (manual pause is also in the resumable set)
 # ---------------------------------------------------------------------------
-print("\n[3] Resume succeeds for ADMIN_MANUAL pause under same conditions")
+print("\n[3] Sticky ADMIN_MANUAL blocks bare resume; explicit clear still works")
 reset_pause_state()
 with bot.state_lock:
     bot.state["manual_admin_pause"] = True
@@ -131,9 +131,27 @@ bot.set_execution_paused("ADMIN_MANUAL")
 check("precondition: paused for ADMIN_MANUAL", bot.state.get("execution_reason") == "ADMIN_MANUAL")
 _stub_runtime(system_ready=False, ws_transport_ready=True, reasons=["READINESS_STABILIZING"])
 with bot.app.test_client() as client:
-    resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    blocked = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
 check(
-    "resume returns 200 for ADMIN_MANUAL with healthy WS",
+    "bare resume returns 409 for sticky ADMIN_MANUAL",
+    blocked.status_code == 409,
+    detail=f"status={blocked.status_code}",
+)
+blocked_body = blocked.get_json() or {}
+check(
+    "bare resume reports sticky reason",
+    blocked_body.get("reason") == "STICKY_ADMIN_MANUAL_PAUSE",
+    detail=str(blocked_body),
+)
+check("manual_admin_pause remains armed", bot.state.get("manual_admin_pause") is True)
+with bot.app.test_client() as client:
+    resp = client.post(
+        "/api/resume",
+        json={"clear_admin_manual_pause": True},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+check(
+    "explicit clear returns 200 for ADMIN_MANUAL with healthy WS",
     resp.status_code == 200,
     detail=f"status={resp.status_code}",
 )

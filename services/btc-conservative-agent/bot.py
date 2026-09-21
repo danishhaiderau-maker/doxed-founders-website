@@ -38398,6 +38398,9 @@ def get_debug_state():
 def api_pause():
     with state_lock:
         state["manual_admin_pause"] = True
+    # Persist before any cancel/trade_lock work so true-flat survives a stalled
+    # response or process restart without requiring another /api/pause.
+    save_persistent_config()
     disarm = _disarm_live_control("ADMIN_MANUAL")
     set_execution_paused("ADMIN_MANUAL")
     with trade_lock:
@@ -38522,6 +38525,12 @@ def _api_resume_with_reset_intent_held():
     # pause even when system_ready is false, as long as the WS transport is
     # genuinely healthy — that proves the market-data feed is alive, which is
     # the only safety property system_ready was indirectly checking here.
+    body = request.get_json(silent=True) or {}
+    clear_manual = bool(
+        body.get("clear_admin_manual_pause") is True
+        or str(body.get("clear_admin_manual_pause") or "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
     with state_lock:
         active_reason = str(state.get("execution_reason") or "")
         manual_paused = bool(state.get("manual_admin_pause", False))
@@ -38532,6 +38541,22 @@ def _api_resume_with_reset_intent_held():
             "reason": "GENOME_IDENTITY_INVALID",
             "active_pause_reason": active_reason,
             "remediation": "restart with valid exact generation identity metadata",
+        })
+        response.status_code = 409
+        return response
+    # True-flat / maintenance ADMIN_MANUAL is durable across deploy+restart.
+    # Guarding resume prevents the normal post-accept /api/resume from wiping
+    # an operator maintenance pause unless the caller opts in explicitly.
+    if manual_paused and not clear_manual:
+        response = jsonify({
+            "status": "resume_blocked",
+            "execution_paused": True,
+            "reason": "STICKY_ADMIN_MANUAL_PAUSE",
+            "active_pause_reason": active_reason or "ADMIN_MANUAL",
+            "remediation": (
+                "POST /api/resume with JSON "
+                '{"clear_admin_manual_pause": true} to end true-flat maintenance'
+            ),
         })
         response.status_code = 409
         return response

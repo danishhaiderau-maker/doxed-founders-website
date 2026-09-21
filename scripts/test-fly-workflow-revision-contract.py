@@ -95,7 +95,7 @@ def test_bootstrap_continuation_is_proof_bound_and_never_deploys_or_restarts():
         assert f'unique_step("{name}", "{conclusion}")' in BOOTSTRAP_HELPER
     assert 'int(deployed["number"]) < int(live["number"]) < int(failed["number"])' in BOOTSTRAP_HELPER
     assert 'step.get("name") == "Resume paper execution after exact-revision acceptance"' in BOOTSTRAP_HELPER
-    assert BOOTSTRAP_HELPER.count('request_json("/api/resume", {})') == 1
+    assert BOOTSTRAP_HELPER.count('request_json("/api/resume", {"clear_admin_manual_pause": True})') == 1
     assert "flyctl deploy" not in block
     assert "machines restart" not in block
     assert BOOTSTRAP_HELPER.count('request_json("/api/pause", {})') == 1
@@ -124,7 +124,7 @@ def test_bootstrap_continuation_requires_exact_safe_owner_and_complete_receipt()
     assert 'bootstrap.get("complete") is True' in block
     assert "timeout=45 * 60" in block
     assert "bootstrap_deadline = deadline - min(60, timeout / 4)" in block
-    after_resume = block[block.index('resumed = request_json("/api/resume", {})'):]
+    after_resume = block[block.index('resumed = request_json("/api/resume", {"clear_admin_manual_pause": True})'):]
     assert '_common_safe(final, expected, paused=False)' in after_resume
     assert '"receipt_bootstrap_complete"' in after_resume
 
@@ -160,7 +160,7 @@ def test_predeploy_abort_resume_is_separate_proof_bound_and_non_deploying():
     assert "fly_resume_predeploy_abort.py resume" in block
     assert "fly_resume_predeploy_abort.py preserve-maintenance" in block
     assert "flyctl deploy" not in block and "machines restart" not in block
-    assert PREDEPLOY_ABORT_HELPER.count('request_json("/api/resume", {})') == 1
+    assert PREDEPLOY_ABORT_HELPER.count('request_json("/api/resume", {"clear_admin_manual_pause": True})') == 1
     assert '"Deploy the exact source revision",' in PREDEPLOY_ABORT_HELPER
     assert '"skipped"' in PREDEPLOY_ABORT_HELPER
     compile(PREDEPLOY_ABORT_HELPER, "fly_resume_predeploy_abort.py", "exec")

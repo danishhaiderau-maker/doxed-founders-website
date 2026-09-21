@@ -184,7 +184,7 @@ def test_pending_bootstrap_waits_then_resumes_exactly_once():
         return statuses.pop(0)
     result = continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
     assert result["execution_paused"] is False
-    assert posts == [{}]
+    assert posts == [{"clear_admin_manual_pause": True}]
 
 
 def test_zero_wait_lock_busy_is_accepted_when_progressing_is_true():
@@ -199,7 +199,7 @@ def test_zero_wait_lock_busy_is_accepted_when_progressing_is_true():
             posts.append(payload); return {"status": "resumed", "execution_paused": False}
         return rows.pop(0)
     assert continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)["execution_paused"] is False
-    assert posts == [{}]
+    assert posts == [{"clear_admin_manual_pause": True}]
 
 
 def test_nonprogressing_lock_is_reobserved_until_deadline_without_resume():
@@ -230,7 +230,7 @@ def test_resume_requires_complete_and_every_readiness_gate_in_one_snapshot():
     continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=40)
     # Three pre-resume observations were required; neither partial snapshot was
     # sufficient on its own. One post-resume observation remains at mutation.
-    assert posts == [({}, 1)]
+    assert posts == [({"clear_admin_manual_pause": True}, 1)]
 
 
 def test_hard_revision_drift_fails_on_first_snapshot():
@@ -254,7 +254,7 @@ def test_post_resume_bootstrap_regression_deadline_fails_after_one_post():
         return status() if not posts else status(paused=False, complete=False)
     with pytest.raises(RuntimeError, match="post-resume readiness deadline expired"):
         continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
-    assert posts == [{}]
+    assert posts == [{"clear_admin_manual_pause": True}]
 
 
 def test_ambiguous_resume_post_is_never_retried():
@@ -266,7 +266,7 @@ def test_ambiguous_resume_post_is_never_retried():
         return status()
     with pytest.raises(urllib.error.URLError):
         continue_bootstrap(REV, request, monotonic=clock.monotonic, sleep=clock.sleep, timeout=20)
-    assert posts == [{}]
+    assert posts == [{"clear_admin_manual_pause": True}]
 
 
 def test_failed_run_proof_binds_sha_and_required_step_order():

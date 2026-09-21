@@ -46,6 +46,11 @@ on:
         required: false
         default: false
         type: boolean
+      keep_maintenance_pause:
+        description: Keep ADMIN_MANUAL true-flat after accept; skip paper resume (maintenance sticky)
+        required: false
+        default: false
+        type: boolean
       lifecycle_reset_proof:
         description: Optional bounded JSON proof for one explicit lifecycle reset recovery deploy
         required: false
@@ -323,7 +328,7 @@ jobs:
           def call(path,payload=None):
             data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
             with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
-          resumed=call("/api/resume",{}); final=call("/api/status")
+          resumed=call("/api/resume",{"clear_admin_manual_pause": True}); final=call("/api/status")
           if not(resumed.get("status")=="resumed" and final.get("execution_paused") is False and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False): raise SystemExit("safe paper resume not proven")
           PY
 
@@ -412,7 +417,7 @@ jobs:
                   raise SystemExit("worker reached a new classified blocker: "+json.dumps(pipeline,sort_keys=True))
               time.sleep(10)
           if len(successes)<2: raise SystemExit("two advancing worker successes not proven: "+json.dumps(last or {},sort_keys=True))
-          resumed=call("/api/resume", {}); final=call("/api/status")
+          resumed=call("/api/resume", {"clear_admin_manual_pause": True}); final=call("/api/status")
           if not (resumed.get("status")=="resumed" and final.get("execution_paused") is False
                   and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True
                   and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False
@@ -553,7 +558,7 @@ jobs:
           if len(success_receipts) < 2:
               raise SystemExit("two distinct lifecycle worker successes were not proven")
 
-          resumed = call("/api/resume", {})
+          resumed = call("/api/resume", {"clear_admin_manual_pause": True})
           if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
               raise SystemExit("paper resume was not acknowledged")
           final = call("/api/status")
@@ -1972,6 +1977,7 @@ jobs:
           PY
 
       - name: Resume paper execution after exact-revision acceptance
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ github.sha }}
@@ -1981,7 +1987,7 @@ jobs:
           base = "https://doxed-btc-bot.fly.dev"
           expected = os.environ["EXPECTED_REVISION"][:12]
           headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
-          request = urllib.request.Request(base + "/api/resume", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
+          request = urllib.request.Request(base + "/api/resume", data=json.dumps({"clear_admin_manual_pause": True}).encode(), headers={**headers, "Content-Type": "application/json"}, method="POST")
           with urllib.request.urlopen(request, timeout=30) as response:
               resumed = json.load(response)
           if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
@@ -2003,6 +2009,64 @@ jobs:
                   raise SystemExit(0)
               time.sleep(3)
           raise SystemExit("exact-revision paper resume confirmation failed: " + json.dumps(last, sort_keys=True))
+          PY
+
+
+      - name: Keep true-flat ADMIN_MANUAL after exact-revision acceptance
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          last = None
+          for _ in range(20):
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  status = json.load(response)
+              last = status
+              if (
+                  str(status.get("source_git_rev") or "").startswith(expected)
+                  and status.get("execution_paused") is True
+                  and status.get("manual_admin_pause") is True
+                  and status.get("execution_reason") == "ADMIN_MANUAL"
+                  and status.get("live_armed") is False
+                  and status.get("bitfinex_live_enabled") is False
+                  and status.get("force_paper_mode") is True
+              ):
+                  request = urllib.request.Request(
+                      base + "/api/resume",
+                      data=b"{}",
+                      headers={**headers, "Content-Type": "application/json"},
+                      method="POST",
+                  )
+                  try:
+                      with urllib.request.urlopen(request, timeout=30) as response:
+                          body = json.load(response)
+                      raise SystemExit(
+                          "bare resume unexpectedly cleared sticky ADMIN_MANUAL: "
+                          + json.dumps(body, sort_keys=True)
+                      )
+                  except urllib.error.HTTPError as exc:
+                      body = json.loads(exc.read().decode() or "{}")
+                      if exc.code != 409 or body.get("reason") != "STICKY_ADMIN_MANUAL_PAUSE":
+                          raise SystemExit(
+                              "sticky ADMIN_MANUAL gate not proven: "
+                              + json.dumps(body, sort_keys=True)
+                          )
+                  print(
+                      f"True-flat ADMIN_MANUAL retained on accepted revision {expected}; "
+                      "bare resume blocked"
+                  )
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit(
+              "true-flat maintenance retention not proven: "
+              + json.dumps(last, sort_keys=True)
+          )
           PY
 
       - name: Best-effort preserve safe paper maintenance after failed guarded deploy
