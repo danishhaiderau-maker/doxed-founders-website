@@ -1,0 +1,19 @@
+﻿name: Fly wipe progress inspect once
+on:
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Inspect ACTIVE_RESET / wipe stage
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          script_b64="$(base64 -w0 diagnostics/fly-wipe-progress-inspect.py)"
+          flyctl ssh console --app doxed-btc-bot --machine "${machine_id}" --command \
+            "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-wipe-progress-inspect.py && python /tmp/fly-wipe-progress-inspect.py'"
