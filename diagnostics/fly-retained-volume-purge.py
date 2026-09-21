@@ -124,13 +124,19 @@ def main() -> int:
                         continue
                     rm_path(child, report["actions"], report["errors"])
 
-            for name in ("bot_runtime.log", "near_edge.log", "signal_persist.log"):
+            log_names = (
+                "bot_runtime.log",
+                "near_edge.log",
+                "signal_persist.log",
+                "bot.log",
+                "relay-state-pusher.log",
+                "relay-state-pusher-stdlib.log",
+            )
+            for name in log_names:
                 for base in (DATA_ROOT, runtime, DATA_ROOT / "logs"):
-                    if not base.is_dir() and base != DATA_ROOT:
+                    if not base.exists() or not base.is_dir():
                         continue
-                    if not base.exists():
-                        continue
-                    for child in list(base.iterdir()) if base.is_dir() else []:
+                    for child in list(base.iterdir()):
                         if not child.is_file():
                             continue
                         if child.name == name or child.name.startswith(name + "."):
@@ -146,6 +152,10 @@ def main() -> int:
                         or n.startswith(".research_events_v22.provisional.json.")
                     ):
                         rm_path(child, report["actions"], report["errors"])
+                # Old wipe epoch quarantine under runtime (not live research).
+                eq = runtime / "epoch_quarantine"
+                if eq.exists():
+                    rm_path(eq, report["actions"], report["errors"])
 
             ce = runtime / "cancellation_evidence_handoffs.jsonl"
             if ce.is_file():
@@ -155,10 +165,27 @@ def main() -> int:
                 except OSError:
                     pass
 
+            # Explicit quarantine copies under v3 (name contains quarantine).
+            v3 = runtime / "v3"
+            if v3.is_dir():
+                for child in list(v3.iterdir()):
+                    if "quarantine" in child.name.lower():
+                        rm_path(child, report["actions"], report["errors"])
+
             snaps = DATA_ROOT / ".data-sync-snapshots"
             if snaps.is_dir():
                 for child in list(snaps.iterdir()):
                     rm_path(child, report["actions"], report["errors"])
+
+            # Root leftover relay evidence projection (not sealed research cohort).
+            for name in ("relay_lifecycle_evidence_v1.json",):
+                p = DATA_ROOT / name
+                if p.is_file():
+                    try:
+                        if p.stat().st_size > 2 * 1048576:
+                            rm_path(p, report["actions"], report["errors"])
+                    except OSError:
+                        pass
 
     report["after_mb"] = fs_used_mb()
     report["deleted_mb_planned"] = round(
