@@ -1,0 +1,37 @@
+name: Fly repair collection epoch bind once
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_epoch:
+        description: Official wipe epoch id to restore (no wipe)
+        required: true
+        default: epoch-281be253d7ee19636c6bf487
+        type: string
+      expected_cutoff_utc:
+        description: Exact SHOWCASE cutoff that hashes to expected_epoch
+        required: true
+        default: "2026-09-21T09:45:16.543256760+00:00"
+        type: string
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Rebind collector_v22_epoch_id on Fly volume (no wipe, paper untouched)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_EPOCH: ${{ inputs.expected_epoch }}
+          EXPECTED_CUTOFF: ${{ inputs.expected_cutoff_utc }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          echo "MACHINE_ID=${machine_id}"
+          script_b64="$(base64 -w0 diagnostics/fly-repair-collection-epoch-bind.py)"
+          flyctl ssh console --app doxed-btc-bot --machine "${machine_id}" --command \
+            "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-repair-collection-epoch-bind.py && EXPECTED_EPOCH_ID=${EXPECTED_EPOCH} EXPECTED_CUTOFF_UTC=${EXPECTED_CUTOFF} python /tmp/fly-repair-collection-epoch-bind.py'"
