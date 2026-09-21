@@ -1,10 +1,10 @@
-name: Fly retained volume purge once
+﻿name: Fly retained volume purge once
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Inspect only when true; delete quarantine residue when false
+        description: Inspect only when true; delete bulky logs + persist ADMIN_MANUAL when false
         required: true
         default: "true"
         type: choice
@@ -12,7 +12,7 @@ on:
           - "true"
           - "false"
       expected_epoch:
-        description: Live epoch id that must never be deleted
+        description: Unused for trueflat log purge (kept for workflow compatibility)
         required: true
         default: epoch-4d795fe51650f09d4bccc872
         type: string
@@ -20,13 +20,13 @@ on:
 jobs:
   purge:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Inspect or purge retained post-wipe quarantine trees
+      - name: True-flat log purge + persist ADMIN_MANUAL + restart
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
@@ -38,3 +38,9 @@ jobs:
           script_b64="$(base64 -w0 diagnostics/fly-retained-volume-purge.py)"
           flyctl ssh console --app doxed-btc-bot --machine "${machine_id}" --command \
             "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-retained-volume-purge.py && DRY_RUN=${DRY_RUN} EXPECTED_EPOCH=${EXPECTED_EPOCH} DATA_ROOT=/app/data python /tmp/fly-retained-volume-purge.py'"
+          if [ "${DRY_RUN}" = "false" ]; then
+            echo "Restarting machine ${machine_id} so ADMIN_MANUAL loads"
+            flyctl machines restart "${machine_id}" --app doxed-btc-bot
+            sleep 25
+            flyctl status --app doxed-btc-bot || true
+          fi
