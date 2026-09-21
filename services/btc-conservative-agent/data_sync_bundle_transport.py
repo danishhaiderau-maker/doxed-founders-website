@@ -33,8 +33,8 @@ _IDEMPOTENCY_RE = re.compile(
     r"^v3/receipts/emergency_record_idempotency_v1/"
     r"[a-z][a-z0-9_]{0,63}/[0-9a-f]{64}\.json$"
 )
-# Belt-and-suspenders: operational runtime logs are never package members even
-# if a stale inventory generation still lists them.
+# Belt-and-suspenders: operational runtime logs / residual-purge junk are never
+# package members even if a stale inventory generation still lists them.
 _EXCLUDED_RUNTIME_LOG_BASES = frozenset({
     "bot_runtime.log",
     "bot_stdout.log",
@@ -42,6 +42,26 @@ _EXCLUDED_RUNTIME_LOG_BASES = frozenset({
     "bot_restart.log",
     "bot_supervisor.log",
     "analyzer_run_latest.log",
+    "near_edge.log",
+    "signal_persist.log",
+    "bot.log",
+    "relay-state-pusher.log",
+    "relay-state-pusher-stdlib.log",
+})
+_EXCLUDED_PACKAGE_NAMES = frozenset({
+    "cancellation_evidence_handoffs.jsonl",
+})
+# Directory name segments that must never appear in a transport package member.
+# Includes signal_snapshots_v1: residual purge proved pre-wipe trees alone can
+# exceed the 80 MiB CURRENT soft-cap; inventory/client/package all fail closed.
+_EXCLUDED_PACKAGE_DIR_NAMES = frozenset({
+    "research_reset_receipts",
+    "signal_snapshots_v1",
+    "lifecycle_transfer_bundles",
+    "analyzer_generations",
+    "epoch_quarantine",
+    ".data-sync-snapshots",
+    "research_epoch_quarantine",
 })
 
 
@@ -78,12 +98,18 @@ def is_bundle_eligible_path(raw: object) -> bool:
         value = _safe_member_path(raw)
     except BundleTransportError:
         return False
+    parts = PurePosixPath(value).parts
+    if any(part in _EXCLUDED_PACKAGE_DIR_NAMES for part in parts):
+        return False
     leaf = PurePosixPath(value).name
+    if leaf in _EXCLUDED_PACKAGE_NAMES:
+        return False
     for base in _EXCLUDED_RUNTIME_LOG_BASES:
         if leaf == base or leaf.startswith(base + "."):
             return False
-    return bool(_SEGMENT_RE.fullmatch(value) or _IDEMPOTENCY_RE.fullmatch(value)
-                or _SIGNAL_SNAPSHOT_RE.fullmatch(value))
+    # signal_snapshots_v1 is intentionally excluded above even though
+    # _SIGNAL_SNAPSHOT_RE still documents the historical content-address shape.
+    return bool(_SEGMENT_RE.fullmatch(value) or _IDEMPOTENCY_RE.fullmatch(value))
 
 
 def _manifest_identity(row: Mapping[str, object]) -> tuple[int, int, int]:

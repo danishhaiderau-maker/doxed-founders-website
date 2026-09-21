@@ -64,17 +64,44 @@ $downloadClient.DefaultRequestHeaders.Add("X-Bot-Admin-Token", $AdminToken)
 
 function Test-DataSyncExcludedRuntimeLog {
   param([string]$RelativePath = "")
-  # Fail-closed client filter: never download/ACK non-research operational logs
-  # even if a stale Fly inventory still advertises them.
-  $leaf = [System.IO.Path]::GetFileName(([string]$RelativePath).Replace('\', '/'))
+  # Fail-closed client filter: never download/ACK non-research operational bulk
+  # even if a stale Fly inventory still advertises them. Mirrors Fly
+  # _DATA_SYNC_EXCLUDED_NAMES / _DATA_SYNC_EXCLUDED_DIR_NAMES residual-purge set.
+  $normalized = ([string]$RelativePath).Replace('\', '/').TrimStart('/')
+  if ([string]::IsNullOrWhiteSpace($normalized)) { return $false }
+  $segments = @($normalized.Split('/'))
+  $excludedDirs = @(
+    'research_reset_receipts',
+    'signal_snapshots_v1',
+    'lifecycle_transfer_bundles',
+    'analyzer_generations',
+    'epoch_quarantine',
+    '.data-sync-snapshots',
+    'research_epoch_quarantine',
+    'research_archive',
+    'research_session_archives'
+  )
+  foreach ($dir in $excludedDirs) {
+    if ($segments -contains $dir) { return $true }
+  }
+  $leaf = $segments[-1]
   if ([string]::IsNullOrWhiteSpace($leaf)) { return $false }
+  $exactNames = @(
+    'cancellation_evidence_handoffs.jsonl'
+  )
+  if ($exactNames -contains $leaf) { return $true }
   $bases = @(
     'bot_runtime.log',
     'bot_stdout.log',
     'bot_stderr.log',
     'bot_restart.log',
     'bot_supervisor.log',
-    'analyzer_run_latest.log'
+    'analyzer_run_latest.log',
+    'near_edge.log',
+    'signal_persist.log',
+    'bot.log',
+    'relay-state-pusher.log',
+    'relay-state-pusher-stdlib.log'
   )
   foreach ($base in $bases) {
     if ($leaf -ceq $base -or $leaf.StartsWith(($base + '.'), [StringComparison]::Ordinal)) {

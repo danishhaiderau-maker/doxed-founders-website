@@ -2132,15 +2132,34 @@ def test_non_research_runtime_logs_are_fail_closed_from_inventory_and_sync():
         "bot_restart.log",
         "bot_supervisor.log",
         "analyzer_run_latest.log",
+        "near_edge.log",
+        "signal_persist.log",
+        "bot.log",
+        "relay-state-pusher.log",
+        "relay-state-pusher-stdlib.log",
+        "cancellation_evidence_handoffs.jsonl",
     ):
         assert f'"{name}"' in excluded
+    excluded_dirs = BOT[BOT.index("_DATA_SYNC_EXCLUDED_DIR_NAMES"):BOT.index("_DATA_SYNC_CHUNK_MAX")]
+    for name in (
+        "research_reset_receipts",
+        "signal_snapshots_v1",
+        "lifecycle_transfer_bundles",
+        "analyzer_generations",
+        "epoch_quarantine",
+    ):
+        assert f'"{name}"' in excluded_dirs
     assert "rotation[0] in _DATA_SYNC_EXCLUDED_NAMES" in BOT
     assert "Test-DataSyncExcludedRuntimeLog" in SYNC_SCRIPT
     assert "bot_runtime.log" in SYNC_SCRIPT
+    assert "research_reset_receipts" in SYNC_SCRIPT
+    assert "signal_snapshots_v1" in SYNC_SCRIPT
     from data_sync_bundle_transport import is_bundle_eligible_path
     assert is_bundle_eligible_path("bot_runtime.log") is False
     assert is_bundle_eligible_path("bot_runtime.log.3") is False
     assert is_bundle_eligible_path("runtime/bot_runtime.log") is False
+    assert is_bundle_eligible_path("research_reset_receipts/x/operation.json") is False
+    assert is_bundle_eligible_path("v3/signal_snapshots_v1/" + ("a" * 64) + ".json") is False
 
     namespace = _load_bot_functions(
         "_data_sync_rotation_parts",
@@ -2151,10 +2170,16 @@ def test_non_research_runtime_logs_are_fail_closed_from_inventory_and_sync():
         runtime_log = root / "bot_runtime.log"
         rotated = root / "bot_runtime.log.3"
         research = root / "signal_snapshot.jsonl"
+        reset_receipt = root / "research_reset_receipts" / "abc" / "operation.json"
+        reset_receipt.parent.mkdir(parents=True)
+        snap = root / "v3" / "signal_snapshots_v1" / (("b" * 64) + ".json")
+        snap.parent.mkdir(parents=True)
         for path, payload in (
             (runtime_log, b"noise\n"),
             (rotated, b"noise\n"),
             (research, b"{}\n"),
+            (reset_receipt, b"{}\n"),
+            (snap, b"{}\n"),
         ):
             path.write_bytes(payload)
         namespace.update({
@@ -2170,8 +2195,12 @@ def test_non_research_runtime_logs_are_fail_closed_from_inventory_and_sync():
                 "bot_restart.log",
                 "bot_supervisor.log",
                 "analyzer_run_latest.log",
+                "cancellation_evidence_handoffs.jsonl",
             }),
-            "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset(),
+            "_DATA_SYNC_EXCLUDED_DIR_NAMES": frozenset({
+                "research_reset_receipts",
+                "signal_snapshots_v1",
+            }),
             "_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES": frozenset(),
             "_data_sync_volume_root": lambda: root,
             "_data_sync_runtime_root": lambda: root,
@@ -2180,6 +2209,8 @@ def test_non_research_runtime_logs_are_fail_closed_from_inventory_and_sync():
         assert namespace["_data_sync_path_allowed"](runtime_log) is False
         assert namespace["_data_sync_path_allowed"](rotated) is False
         assert namespace["_data_sync_path_allowed"](research) is True
+        assert namespace["_data_sync_path_allowed"](reset_receipt) is False
+        assert namespace["_data_sync_path_allowed"](snap) is False
 
 
 def test_data_sync_generation_fence_rejects_every_generation_change():

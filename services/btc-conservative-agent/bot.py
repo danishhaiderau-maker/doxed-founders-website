@@ -40085,6 +40085,14 @@ _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "bot_restart.log",
     "bot_supervisor.log",
     "analyzer_run_latest.log",
+    "near_edge.log",
+    "signal_persist.log",
+    "bot.log",
+    "relay-state-pusher.log",
+    "relay-state-pusher-stdlib.log",
+    # Ops handoff journal only; sealed cancellation evidence lives in ledgers.
+    # Large leftovers previously poisoned CURRENT after wipe.
+    "cancellation_evidence_handoffs.jsonl",
 })
 _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     # V3 per-object writer locks are transient coordination state, not
@@ -40098,6 +40106,15 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "archive-v2",
     "object-store",
     "object_store",
+    # Post-wipe residual purge classes: ops reset trees + rebuildable caches.
+    # Never inventory / ACK these — they regrow into multi-hundred MiB CURRENT
+    # poison. Keep live research ledgers/receipts (research_events, paper
+    # lifecycle, tile receipts, WAL) eligible for analyzer.
+    "research_reset_receipts",
+    "signal_snapshots_v1",
+    "lifecycle_transfer_bundles",
+    "analyzer_generations",
+    "epoch_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 # A complete canonical mirror pass can legitimately take several minutes on

@@ -60,6 +60,21 @@ def test_runtime_logs_are_never_bundle_eligible():
         "bot_stdout.log",
         "runtime/bot_runtime.log",
         "analyzer_run_latest.log.1",
+        "near_edge.log",
+        "relay-state-pusher.log.2",
+    ):
+        assert transport.is_bundle_eligible_path(path) is False
+
+
+def test_residual_purge_junk_dirs_are_never_bundle_eligible():
+    for path in (
+        "research_reset_receipts/ACTIVE_RESET.json",
+        "research_reset_receipts/abc/operation.json",
+        "v3/signal_snapshots_v1/" + ("a" * 64) + ".json",
+        "v3/lifecycle_transfer_bundles/pkg.tar",
+        "analyzer_generations/latest.json",
+        "epoch_quarantine/old/tree.json",
+        "cancellation_evidence_handoffs.jsonl",
     ):
         assert transport.is_bundle_eligible_path(path) is False
 

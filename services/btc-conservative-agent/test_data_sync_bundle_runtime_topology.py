@@ -11,7 +11,6 @@ import threading
 
 import pytest
 
-from collector_signal_snapshot import freeze_signal_snapshot
 import data_sync_bundle_resumption as runtime_module
 from data_sync_bundle_transport import build_bundle, extract_verified_bundle, is_bundle_eligible_path, MAX_PACKAGE_BYTES
 from data_sync_bundle_storage import check_derivative_admission
@@ -60,7 +59,7 @@ def load_adapter(extra):
     return namespace
 
 
-@pytest.mark.parametrize("kind", ["market_segment", "signal_snapshot"])
+@pytest.mark.parametrize("kind", ["market_segment"])
 def test_real_coordinator_uses_inventory_runtime_root_not_parent_volume(tmp_path, monkeypatch, kind):
     volume = tmp_path / "volume"
     runtime = volume / "runtime"
@@ -69,21 +68,15 @@ def test_real_coordinator_uses_inventory_runtime_root_not_parent_volume(tmp_path
     work.mkdir()
     monkeypatch.setenv("BOT_DATA_DIR", str(volume))
     monkeypatch.setenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "1")
-    if kind == "signal_snapshot":
-        ref = freeze_signal_snapshot(
-            {"event_id": "event", "epoch_id": "epoch", "envelope": {"signal_ts": 1000.0}},
-            data_dir=runtime, captured_at=1001.0,
-        )
-        path = runtime / ref["relative_path"]
-        payload = path.read_bytes()
-    else:
-        payload = json.dumps({"schema": "market_segment_v3", "source": "CANONICAL_1M",
-                              "symbol": "BTCUSD", "timeframe": "1m", "start_ts": 960,
-                              "end_ts": 1020, "rows": [{"t": 960, "o": 100, "h": 101, "l": 99, "c": 100}]}).encode()
-        digest = hashlib.sha256(payload).hexdigest()
-        path = runtime / "v3" / "market_segments" / digest[:2] / (digest + ".json")
-        path.parent.mkdir(parents=True)
-        path.write_bytes(payload)
+    # signal_snapshots_v1 is inventory/package-excluded (ACK poison); market
+    # segments remain the content-addressed transport proof surface here.
+    payload = json.dumps({"schema": "market_segment_v3", "source": "CANONICAL_1M",
+                          "symbol": "BTCUSD", "timeframe": "1m", "start_ts": 960,
+                          "end_ts": 1020, "rows": [{"t": 960, "o": 100, "h": 101, "l": 99, "c": 100}]}).encode()
+    digest = hashlib.sha256(payload).hexdigest()
+    path = runtime / "v3" / "market_segments" / digest[:2] / (digest + ".json")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(payload)
     metadata = {"generation_id": GEN, "inventory_generation_id": GEN, "inventory_sha256": GEN,
                 "page_index_sha256": "b" * 64, "source_git_rev": "source", "collection_epoch_id": "epoch",
                 "tile_registry_signature": "tile", "ack_eligible": True}
