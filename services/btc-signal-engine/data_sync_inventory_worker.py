@@ -191,9 +191,13 @@ def _allowed(path: Path, request: dict) -> bool:
         return False
     if resolved.name in excluded_names:
         return False
+    # Fail-closed for numbered rotations of excluded bases (bot_runtime.log.3).
+    rotation = _rotation_parts(resolved.name, extensions)
+    if rotation is not None and rotation[0] in excluded_names:
+        return False
     if name_lower.startswith(".env") or "secret" in name_lower or "credential" in name_lower:
         return False
-    supported = (resolved.suffix.lower() in extensions or _rotation_parts(resolved.name, extensions)
+    supported = (resolved.suffix.lower() in extensions or rotation is not None
                  or _quarantine_binding(path, request) is not None)
     return bool(resolved.is_file() and supported)
 
