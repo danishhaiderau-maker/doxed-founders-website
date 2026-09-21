@@ -1,181 +1,152 @@
 #!/usr/bin/env python3
-"""Fast post-wipe retained purge/quarantine. Rename-first, no deep walks.
+"""Physically purge retained post-wipe Fly volume bulk toward ~0 used research.
 
-Moves inventory file-bombs under research_epoch_quarantine (excluded from
-data-sync inventory). Deletes .data-sync-snapshots contents. Keeps
-append_heads, research_reset_receipts, and v3/ledgers.
+Safe boundaries:
+- Never touches Bitfinex / live arm state.
+- Keeps append_heads, wipe receipts, bound-epoch ledgers, ACTIVE identity.
+- Deletes inventory-excluded quarantine trees that still consume disk after
+  the earlier move-based purge (research_epoch_quarantine/postwipe-*).
+- Clears leftover .data-sync-snapshots contents.
+
+Env:
+  DRY_RUN=true|false (default true)
+  DATA_ROOT=/app/data (default)
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
-DATA = Path("/app/data")
-RUNTIME = DATA / "runtime"
-EXPECTED_EPOCH = str(os.environ.get("EXPECTED_EPOCH") or "").strip()
-DRY_RUN = str(os.environ.get("DRY_RUN", "true")).strip().lower() in {"1", "true", "yes"}
+
+SCHEMA = "fly_postwipe_retained_purge_v2"
+DRY_RUN = str(os.getenv("DRY_RUN", "true")).strip().lower() in {"1", "true", "yes"}
+DATA_ROOT = Path(os.getenv("DATA_ROOT", "/app/data")).resolve()
 
 
-def disk() -> dict:
-    try:
-        u = os.statvfs("/app/data")
-        return {
-            "used_bytes": u.f_frsize * (u.f_blocks - u.f_bavail),
-            "free_bytes": u.f_frsize * u.f_bavail,
-            "total_bytes": u.f_frsize * u.f_blocks,
-        }
-    except Exception as exc:
-        return {"error": str(exc)}
-
-
-def child_names(path: Path) -> list[str]:
-    if not path.is_dir():
-        return []
-    try:
-        return sorted(p.name for p in path.iterdir())
-    except OSError:
-        return []
-
-
-def move_path(src: Path, dest: Path, actions: list) -> None:
-    rel_src = str(src.relative_to(DATA)).replace("\\", "/")
-    rel_dest = str(dest.relative_to(DATA)).replace("\\", "/")
-    row = {"action": "MOVE", "src": rel_src, "dest": rel_dest, "exists": src.exists()}
-    if not src.exists():
-        row["skipped"] = "ABSENT"
-        actions.append(row)
-        return
-    if dest.exists():
-        row["status"] = "DEST_EXISTS_REFUSED"
-        actions.append(row)
-        return
-    if DRY_RUN:
-        row["status"] = "WOULD_MOVE"
-        row["children"] = child_names(src)[:30]
-        actions.append(row)
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dest))
-    row["status"] = "MOVED"
-    actions.append(row)
-
-
-def delete_contents(path: Path, actions: list) -> None:
-    rel = str(path.relative_to(DATA)).replace("\\", "/")
-    row = {"action": "DELETE_CONTENTS", "src": rel, "exists": path.exists()}
+def _dir_size(path: Path) -> tuple[int, int]:
+    files = 0
+    bytes_ = 0
     if not path.exists():
-        row["skipped"] = "ABSENT"
-        actions.append(row)
-        return
-    names = child_names(path)
-    row["child_count_before"] = len(names)
-    row["children_sample"] = names[:20]
-    if DRY_RUN:
-        row["status"] = "WOULD_DELETE_CONTENTS"
-        actions.append(row)
-        return
-    deleted = 0
-    errors = []
-    for child in list(path.iterdir()):
+        return 0, 0
+    if path.is_file():
         try:
-            if child.is_symlink() or child.is_file():
-                child.unlink(missing_ok=True)
-                deleted += 1
-            elif child.is_dir():
-                shutil.rmtree(child)
-                deleted += 1
-        except OSError as exc:
-            errors.append(f"{child.name}:{type(exc).__name__}")
-    row["deleted_entries"] = deleted
-    if errors:
-        row["errors"] = errors[:20]
-    row["status"] = "DELETED_CONTENTS"
-    actions.append(row)
+            return 1, path.stat().st_size
+        except OSError:
+            return 1, 0
+    for dirpath, _dns, fns in os.walk(path, followlinks=False):
+        for name in fns:
+            files += 1
+            try:
+                bytes_ += (Path(dirpath) / name).stat().st_size
+            except OSError:
+                pass
+    return files, bytes_
+
+
+def _fs_used_mb(root: Path) -> float | None:
+    try:
+        st = os.statvfs(str(root))
+        used = (st.f_blocks - st.f_bfree) * st.f_frsize
+        return round(used / (1024 * 1024), 1)
+    except Exception:
+        return None
+
+
+def _rm_tree(path: Path, actions: list, errors: list) -> None:
+    files, bytes_ = _dir_size(path)
+    actions.append({
+        "action": "DELETE_TREE",
+        "path": str(path.relative_to(DATA_ROOT)) if path.is_relative_to(DATA_ROOT) else str(path),
+        "files": files,
+        "bytes": bytes_,
+        "dry_run": DRY_RUN,
+    })
+    if DRY_RUN or not path.exists():
+        return
+    try:
+        if path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(path, ignore_errors=False)
+    except Exception as exc:
+        errors.append(f"{path}:{type(exc).__name__}:{exc}")
+
+
+def _clear_dir_contents(path: Path, actions: list, errors: list) -> None:
+    if not path.is_dir():
+        return
+    for child in list(path.iterdir()):
+        _rm_tree(child, actions, errors)
 
 
 def main() -> int:
-    report = {
-        "schema": "fly_postwipe_retained_purge_v1",
-        "dry_run": DRY_RUN,
-        "expected_epoch": EXPECTED_EPOCH or None,
-        "ok": False,
-        "actions": [],
-        "disk_before": disk(),
-    }
-    if not EXPECTED_EPOCH.startswith("epoch-"):
-        report["error"] = "EXPECTED_EPOCH_INVALID"
-        print(json.dumps(report, indent=2, sort_keys=True))
+    if not DATA_ROOT.is_dir():
+        print(json.dumps({"ok": False, "error": f"DATA_ROOT missing: {DATA_ROOT}"}))
         return 2
 
-    matching = []
-    rr = RUNTIME / "research_reset_receipts"
-    for op in sorted(rr.glob("*/operation.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:12]:
-        try:
-            j = json.loads(op.read_text("utf-8"))
-        except Exception:
-            continue
-        proof = j.get("proof") or {}
-        new_epoch = j.get("new_epoch_id") or proof.get("new_epoch_id")
-        if new_epoch == EXPECTED_EPOCH and j.get("stage") == "COMPLETE":
-            matching.append(str(op.relative_to(RUNTIME)).replace("\\", "/"))
-    report["matching_wipe_ops"] = matching
-    if not matching:
-        report["error"] = "NO_COMPLETE_WIPE_OPERATION_FOR_EXPECTED_EPOCH"
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return 3
+    before_mb = _fs_used_mb(DATA_ROOT)
+    actions: list = []
+    errors: list = []
+    targets: list[Path] = []
 
-    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    qroot = DATA / "research_epoch_quarantine" / f"postwipe-retained-{EXPECTED_EPOCH}-{ts}"
-    report["quarantine_root"] = str(qroot.relative_to(DATA)).replace("\\", "/")
-
-    # 1) Emergency idempotency ledgers (inventory file-count bomb)
-    em = RUNTIME / "v3/receipts/emergency_record_idempotency_v1"
-    keep = {"append_heads"}
-    if em.is_dir():
-        for name in child_names(em):
-            child = em / name
-            if name in keep:
-                report["actions"].append({
-                    "action": "KEEP",
-                    "src": str(child.relative_to(DATA)).replace("\\", "/"),
-                    "reason": "APPEND_HEADS_REQUIRED",
-                })
-                continue
-            if child.is_dir():
-                move_path(child, qroot / "emergency_record_idempotency_v1" / name, report["actions"])
-
-    # 2) Operational snapshot cache
-    delete_contents(DATA / ".data-sync-snapshots", report["actions"])
-
-    # 3) Pre-wipe research_archive
-    move_path(DATA / "research_archive", qroot / "research_archive", report["actions"])
-
-    # 4) Lifecycle recovery-quarantine copies
-    rq = RUNTIME / "v3/lifecycle_bundle_index/recovery-quarantine"
+    # Move-based quarantine still occupies disk — delete postwipe retained trees.
+    rq = DATA_ROOT / "research_epoch_quarantine"
     if rq.is_dir():
-        for name in child_names(rq):
-            move_path(rq / name, qroot / "lifecycle_recovery_quarantine" / name, report["actions"])
+        for child in sorted(rq.iterdir()):
+            name = child.name
+            if name.startswith("postwipe-retained-") or name.startswith("postwipe-"):
+                targets.append(child)
+            # Also drop empty/orphan quarantine buckets older than this epoch work.
+            if name in {"corrupt_evidence_quarantine"} and child.is_dir():
+                targets.append(child)
 
-    # 5) corrupt evidence quarantine
-    move_path(
-        RUNTIME / "corrupt_evidence_quarantine",
-        qroot / "corrupt_evidence_quarantine",
-        report["actions"],
-    )
+    # Snapshots are rebuildable inventory caches.
+    snaps = DATA_ROOT / ".data-sync-snapshots"
+    if snaps.is_dir():
+        actions.append({"action": "CLEAR_SNAPSHOTS", "path": ".data-sync-snapshots", "dry_run": DRY_RUN})
+        if not DRY_RUN:
+            _clear_dir_contents(snaps, actions, errors)
 
-    report["disk_after"] = disk()
-    report["ok"] = True
-    report["note"] = (
-        "Moved emergency idempotency ledgers + research_archive + lifecycle RQ "
-        "under research_epoch_quarantine (inventory-excluded). Deleted "
-        ".data-sync-snapshots contents. Kept append_heads, wipe receipts, ledgers."
-    )
-    print(json.dumps(report, indent=2, sort_keys=True, default=str))
-    return 0
+    # Lifecycle recovery quarantine copies moved earlier.
+    for rel in (
+        "lifecycle_recovery_quarantine",
+        "research_archive",
+    ):
+        p = DATA_ROOT / rel
+        if p.exists():
+            targets.append(p)
+
+    for t in targets:
+        _rm_tree(t, actions, errors)
+
+    # Emergency idempotency file-count bomb should already be moved; if stubs remain empty, leave.
+    after_mb = _fs_used_mb(DATA_ROOT)
+    deleted_bytes = sum(int(a.get("bytes") or 0) for a in actions if a.get("action") == "DELETE_TREE")
+    out = {
+        "ok": len(errors) == 0,
+        "schema": SCHEMA,
+        "dry_run": DRY_RUN,
+        "data_root": str(DATA_ROOT),
+        "before_mb": before_mb,
+        "after_mb": after_mb,
+        "deleted_bytes_planned": deleted_bytes,
+        "deleted_mb_planned": round(deleted_bytes / (1024 * 1024), 1),
+        "actions": actions,
+        "errors": errors[:40],
+        "note": (
+            "Physical delete of postwipe quarantine + rebuildable snapshots. "
+            "Keeps ACTIVE identity, wipe receipts, append_heads, live research epoch files. "
+            "Never arms Bitfinex."
+        ),
+        "ts": int(time.time()),
+    }
+    print(json.dumps(out, separators=(",", ":")))
+    return 0 if out["ok"] else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

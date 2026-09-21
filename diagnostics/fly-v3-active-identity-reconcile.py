@@ -1,181 +1,229 @@
-#!/usr/bin/env python3
-"""Fast post-wipe retained purge/quarantine. Rename-first, no deep walks.
+﻿#!/usr/bin/env python3
+"""Ops entrypoint for fly-v3-authority-reconcile-once (Fly SSH).
 
-Moves inventory file-bombs under research_epoch_quarantine (excluded from
-data-sync inventory). Deletes .data-sync-snapshots contents. Keeps
-append_heads, research_reset_receipts, and v3/ledgers.
+EXPECTED_EPOCH / OPS_MODE:
+  SIZE | SHALLOW | SHALLOW_SIZE  -> shallow volume probe
+  BOOTSTRAP | RECOVERY           -> quarantine stale recovery-state
+  anything else (incl. epoch-*)  -> physical postwipe purge v2
+
+DRY_RUN=true|false from workflow input.
+Never arms Bitfinex. Never deletes ACTIVE identity / append_heads / wipe receipts.
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 
-DATA = Path("/app/data")
-RUNTIME = DATA / "runtime"
-EXPECTED_EPOCH = str(os.environ.get("EXPECTED_EPOCH") or "").strip()
-DRY_RUN = str(os.environ.get("DRY_RUN", "true")).strip().lower() in {"1", "true", "yes"}
+MODE = (os.getenv("OPS_MODE") or os.getenv("EXPECTED_EPOCH") or "PURGE").strip().upper()
+DRY_RUN = str(os.getenv("DRY_RUN", "true")).strip().lower() in {"1", "true", "yes"}
+DATA_ROOT = Path(os.getenv("DATA_ROOT", "/app/data")).resolve()
 
 
-def disk() -> dict:
+def _fs_used_mb(root: Path):
     try:
-        u = os.statvfs("/app/data")
-        return {
-            "used_bytes": u.f_frsize * (u.f_blocks - u.f_bavail),
-            "free_bytes": u.f_frsize * u.f_bavail,
-            "total_bytes": u.f_frsize * u.f_blocks,
-        }
-    except Exception as exc:
-        return {"error": str(exc)}
+        st = os.statvfs(str(root))
+        return round((st.f_blocks - st.f_bfree) * st.f_frsize / (1024 * 1024), 1)
+    except Exception:
+        return None
 
 
-def child_names(path: Path) -> list[str]:
-    if not path.is_dir():
-        return []
-    try:
-        return sorted(p.name for p in path.iterdir())
-    except OSError:
-        return []
-
-
-def move_path(src: Path, dest: Path, actions: list) -> None:
-    rel_src = str(src.relative_to(DATA)).replace("\\", "/")
-    rel_dest = str(dest.relative_to(DATA)).replace("\\", "/")
-    row = {"action": "MOVE", "src": rel_src, "dest": rel_dest, "exists": src.exists()}
-    if not src.exists():
-        row["skipped"] = "ABSENT"
-        actions.append(row)
-        return
-    if dest.exists():
-        row["status"] = "DEST_EXISTS_REFUSED"
-        actions.append(row)
-        return
-    if DRY_RUN:
-        row["status"] = "WOULD_MOVE"
-        row["children"] = child_names(src)[:30]
-        actions.append(row)
-        return
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(dest))
-    row["status"] = "MOVED"
-    actions.append(row)
-
-
-def delete_contents(path: Path, actions: list) -> None:
-    rel = str(path.relative_to(DATA)).replace("\\", "/")
-    row = {"action": "DELETE_CONTENTS", "src": rel, "exists": path.exists()}
+def _dir_size(path: Path):
+    files = 0
+    bytes_ = 0
     if not path.exists():
-        row["skipped"] = "ABSENT"
-        actions.append(row)
-        return
-    names = child_names(path)
-    row["child_count_before"] = len(names)
-    row["children_sample"] = names[:20]
-    if DRY_RUN:
-        row["status"] = "WOULD_DELETE_CONTENTS"
-        actions.append(row)
-        return
-    deleted = 0
-    errors = []
-    for child in list(path.iterdir()):
+        return 0, 0
+    if path.is_file():
         try:
-            if child.is_symlink() or child.is_file():
-                child.unlink(missing_ok=True)
-                deleted += 1
-            elif child.is_dir():
-                shutil.rmtree(child)
-                deleted += 1
-        except OSError as exc:
-            errors.append(f"{child.name}:{type(exc).__name__}")
-    row["deleted_entries"] = deleted
-    if errors:
-        row["errors"] = errors[:20]
-    row["status"] = "DELETED_CONTENTS"
-    actions.append(row)
+            return 1, path.stat().st_size
+        except OSError:
+            return 1, 0
+    for dp, _dns, fns in os.walk(path, followlinks=False):
+        for name in fns:
+            files += 1
+            try:
+                bytes_ += (Path(dp) / name).stat().st_size
+            except OSError:
+                pass
+    return files, bytes_
 
 
-def main() -> int:
-    report = {
-        "schema": "fly_postwipe_retained_purge_v1",
-        "dry_run": DRY_RUN,
-        "expected_epoch": EXPECTED_EPOCH or None,
-        "ok": False,
-        "actions": [],
-        "disk_before": disk(),
-    }
-    if not EXPECTED_EPOCH.startswith("epoch-"):
-        report["error"] = "EXPECTED_EPOCH_INVALID"
-        print(json.dumps(report, indent=2, sort_keys=True))
+def run_size() -> int:
+    if not DATA_ROOT.is_dir():
+        print(json.dumps({"ok": False, "error": f"missing {DATA_ROOT}"}))
         return 2
-
-    matching = []
-    rr = RUNTIME / "research_reset_receipts"
-    for op in sorted(rr.glob("*/operation.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:12]:
-        try:
-            j = json.loads(op.read_text("utf-8"))
-        except Exception:
-            continue
-        proof = j.get("proof") or {}
-        new_epoch = j.get("new_epoch_id") or proof.get("new_epoch_id")
-        if new_epoch == EXPECTED_EPOCH and j.get("stage") == "COMPLETE":
-            matching.append(str(op.relative_to(RUNTIME)).replace("\\", "/"))
-    report["matching_wipe_ops"] = matching
-    if not matching:
-        report["error"] = "NO_COMPLETE_WIPE_OPERATION_FOR_EXPECTED_EPOCH"
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return 3
-
-    ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    qroot = DATA / "research_epoch_quarantine" / f"postwipe-retained-{EXPECTED_EPOCH}-{ts}"
-    report["quarantine_root"] = str(qroot.relative_to(DATA)).replace("\\", "/")
-
-    # 1) Emergency idempotency ledgers (inventory file-count bomb)
-    em = RUNTIME / "v3/receipts/emergency_record_idempotency_v1"
-    keep = {"append_heads"}
-    if em.is_dir():
-        for name in child_names(em):
-            child = em / name
-            if name in keep:
-                report["actions"].append({
-                    "action": "KEEP",
-                    "src": str(child.relative_to(DATA)).replace("\\", "/"),
-                    "reason": "APPEND_HEADS_REQUIRED",
-                })
-                continue
-            if child.is_dir():
-                move_path(child, qroot / "emergency_record_idempotency_v1" / name, report["actions"])
-
-    # 2) Operational snapshot cache
-    delete_contents(DATA / ".data-sync-snapshots", report["actions"])
-
-    # 3) Pre-wipe research_archive
-    move_path(DATA / "research_archive", qroot / "research_archive", report["actions"])
-
-    # 4) Lifecycle recovery-quarantine copies
-    rq = RUNTIME / "v3/lifecycle_bundle_index/recovery-quarantine"
-    if rq.is_dir():
-        for name in child_names(rq):
-            move_path(rq / name, qroot / "lifecycle_recovery_quarantine" / name, report["actions"])
-
-    # 5) corrupt evidence quarantine
-    move_path(
-        RUNTIME / "corrupt_evidence_quarantine",
-        qroot / "corrupt_evidence_quarantine",
-        report["actions"],
-    )
-
-    report["disk_after"] = disk()
-    report["ok"] = True
-    report["note"] = (
-        "Moved emergency idempotency ledgers + research_archive + lifecycle RQ "
-        "under research_epoch_quarantine (inventory-excluded). Deleted "
-        ".data-sync-snapshots contents. Kept append_heads, wipe receipts, ledgers."
-    )
-    print(json.dumps(report, indent=2, sort_keys=True, default=str))
+    used_mb = _fs_used_mb(DATA_ROOT)
+    try:
+        st = os.statvfs(str(DATA_ROOT))
+        free_mb = round(st.f_bfree * st.f_frsize / (1024 * 1024), 1)
+        total_mb = round(st.f_blocks * st.f_frsize / (1024 * 1024), 1)
+    except Exception:
+        free_mb = total_mb = None
+    top = []
+    for child in sorted(DATA_ROOT.iterdir(), key=lambda p: p.name):
+        files = 0
+        bytes_ = 0
+        if child.is_file():
+            files = 1
+            try:
+                bytes_ = child.stat().st_size
+            except OSError:
+                pass
+        elif child.is_dir():
+            for dp, dns, fns in os.walk(child, followlinks=False):
+                rel_parts = Path(dp).relative_to(child).parts
+                if len(rel_parts) > 1:
+                    dns[:] = []
+                for name in fns:
+                    files += 1
+                    try:
+                        bytes_ += (Path(dp) / name).stat().st_size
+                    except OSError:
+                        pass
+        top.append({"path": child.name, "files": files, "mb": round(bytes_ / (1024 * 1024), 2)})
+    top.sort(key=lambda r: -r["mb"])
+    print(json.dumps({
+        "ok": True,
+        "used_mb": used_mb,
+        "free_mb": free_mb,
+        "total_mb": total_mb,
+        "top": top[:25],
+    }, separators=(",", ":")))
     return 0
 
 
+def run_bootstrap() -> int:
+    actions = []
+    errors = []
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    candidates = []
+    runtime_v3 = DATA_ROOT / "runtime" / "v3"
+    if runtime_v3.is_dir():
+        for dirpath, dirnames, _fns in os.walk(runtime_v3):
+            depth = Path(dirpath).relative_to(runtime_v3).parts
+            if len(depth) > 4:
+                dirnames[:] = []
+                continue
+            if "recovery-state" in dirnames:
+                candidates.append(Path(dirpath) / "recovery-state")
+    qroot = DATA_ROOT / "research_epoch_quarantine" / f"lifecycle-recovery-state-{stamp}"
+    seen = set()
+    for src in candidates:
+        key = str(src.resolve()) if src.exists() else str(src)
+        if key in seen or not src.exists():
+            continue
+        seen.add(key)
+        dest = qroot / src.name
+        n = 0
+        while dest.exists():
+            n += 1
+            dest = qroot / f"{src.name}-{n}"
+        actions.append({"action": "MOVE", "src": str(src), "dest": str(dest), "dry_run": DRY_RUN})
+        if not DRY_RUN:
+            try:
+                qroot.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dest))
+            except Exception as exc:
+                errors.append(f"{src}:{type(exc).__name__}:{exc}")
+    print(json.dumps({
+        "ok": len(errors) == 0,
+        "schema": "fly_lifecycle_recovery_state_quarantine_v1",
+        "dry_run": DRY_RUN,
+        "actions": actions,
+        "errors": errors,
+        "note": "Moves stale recovery-state aside so receipt_bootstrap can COMPLETE. Never arms.",
+    }, separators=(",", ":")))
+    return 0 if not errors else 1
+
+
+def _rm_tree(path: Path, actions, errors) -> None:
+    files, bytes_ = _dir_size(path)
+    try:
+        rel = str(path.relative_to(DATA_ROOT))
+    except Exception:
+        rel = str(path)
+    actions.append({
+        "action": "DELETE_TREE",
+        "path": rel,
+        "files": files,
+        "bytes": bytes_,
+        "dry_run": DRY_RUN,
+    })
+    if DRY_RUN or not path.exists():
+        return
+    try:
+        if path.is_file() or path.is_symlink():
+            path.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(path)
+    except Exception as exc:
+        errors.append(f"{path}:{type(exc).__name__}:{exc}")
+
+
+def run_purge() -> int:
+    if not DATA_ROOT.is_dir():
+        print(json.dumps({"ok": False, "error": f"missing {DATA_ROOT}"}))
+        return 2
+    before_mb = _fs_used_mb(DATA_ROOT)
+    actions = []
+    errors = []
+    targets = []
+    rq = DATA_ROOT / "research_epoch_quarantine"
+    if rq.is_dir():
+        for child in sorted(rq.iterdir()):
+            name = child.name
+            if (
+                name.startswith("postwipe-retained-")
+                or name.startswith("postwipe-")
+                or name == "corrupt_evidence_quarantine"
+                or name.startswith("lifecycle-recovery-state-")
+            ):
+                targets.append(child)
+    snaps = DATA_ROOT / ".data-sync-snapshots"
+    if snaps.is_dir():
+        for child in list(snaps.iterdir()):
+            _rm_tree(child, actions, errors)
+    for rel in ("lifecycle_recovery_quarantine", "research_archive"):
+        p = DATA_ROOT / rel
+        if p.exists():
+            targets.append(p)
+    for t in targets:
+        _rm_tree(t, actions, errors)
+    after_mb = _fs_used_mb(DATA_ROOT)
+    deleted_bytes = sum(int(a.get("bytes") or 0) for a in actions if a.get("action") == "DELETE_TREE")
+    out = {
+        "ok": len(errors) == 0,
+        "schema": "fly_postwipe_retained_purge_v2",
+        "dry_run": DRY_RUN,
+        "data_root": str(DATA_ROOT),
+        "before_mb": before_mb,
+        "after_mb": after_mb,
+        "deleted_bytes_planned": deleted_bytes,
+        "deleted_mb_planned": round(deleted_bytes / (1024 * 1024), 1),
+        "actions": actions,
+        "errors": errors[:40],
+        "note": (
+            "Physical delete of postwipe quarantine + rebuildable snapshots. "
+            "Keeps ACTIVE identity, wipe receipts, append_heads, live research. Never arms."
+        ),
+        "ts": int(time.time()),
+        "mode": MODE,
+    }
+    print(json.dumps(out, separators=(",", ":")))
+    return 0 if out["ok"] else 1
+
+
+def main() -> int:
+    print(f"OPS_MODE_RESOLVED={MODE} DRY_RUN={DRY_RUN} DATA_ROOT={DATA_ROOT}", flush=True)
+    if MODE in {"SIZE", "SHALLOW", "SHALLOW_SIZE"}:
+        return run_size()
+    if MODE in {"BOOTSTRAP", "RECOVERY", "RECOVERY_STATE"}:
+        return run_bootstrap()
+    return run_purge()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
