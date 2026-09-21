@@ -171,6 +171,21 @@ def main() -> int:
                 for child in list(v3.iterdir()):
                     if "quarantine" in child.name.lower():
                         rm_path(child, report["actions"], report["errors"])
+                # Pre-wipe signal snapshot tree survives wipe and alone exceeds the
+                # 80 MiB CURRENT soft-cap. Fresh epoch can rebuild; keep ledgers/WAL.
+                snaps_v1 = v3 / "signal_snapshots_v1"
+                if snaps_v1.exists():
+                    rm_path(snaps_v1, report["actions"], report["errors"])
+                # Rebuildable transfer bundle caches (not live ledgers).
+                for name in ("lifecycle_transfer_bundles", "lifecycle_bundle_index"):
+                    p = v3 / name
+                    if p.exists():
+                        rm_path(p, report["actions"], report["errors"])
+
+            # Analyzer generation caches at volume root (not sealed research).
+            ag = DATA_ROOT / "analyzer_generations"
+            if ag.exists():
+                rm_path(ag, report["actions"], report["errors"])
 
             snaps = DATA_ROOT / ".data-sync-snapshots"
             if snaps.is_dir():
