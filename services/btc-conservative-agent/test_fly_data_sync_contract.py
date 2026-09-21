@@ -2144,6 +2144,8 @@ def test_non_research_runtime_logs_are_fail_closed_from_inventory_and_sync():
     for name in (
         "research_reset_receipts",
         "signal_snapshots_v1",
+        "recovery_receipts",
+        "authority_identity_quarantine_v1",
         "lifecycle_transfer_bundles",
         "analyzer_generations",
         "epoch_quarantine",

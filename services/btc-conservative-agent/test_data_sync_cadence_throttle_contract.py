@@ -203,7 +203,7 @@ def test_low_requested_interval_is_clamped_for_poll_and_post_sync_sleep():
     assert post_sync == 180
 
 
-def test_default_cadence_is_bounded_to_180_seconds_and_cache_expires_first():
+def test_default_cadence_is_bounded_to_180_seconds_and_cache_outlasts_ack():
     source = LOOP_PATH.read_text(encoding="utf-8")
     tree = ast.parse(BOT_PATH.read_text(encoding="utf-8"))
     ttl = next(
@@ -213,8 +213,8 @@ def test_default_cadence_is_bounded_to_180_seconds_and_cache_expires_first():
         and any(isinstance(target, ast.Name) and target.id == "_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS" for target in node.targets)
     )
     assert "[int]$IntervalSec = 180" in source
-    assert ttl == 150.0
-    assert ttl < 180
+    assert ttl == 7200.0
+    assert ttl > 180
 
 
 def test_ordinary_poll_uses_identity_only_and_full_inventory_is_due_gated():

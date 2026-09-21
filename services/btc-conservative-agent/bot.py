@@ -40120,18 +40120,19 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     # lifecycle, tile receipts, WAL) eligible for analyzer.
     "research_reset_receipts",
     "signal_snapshots_v1",
+    "recovery_receipts",
+    # Windows-illegal / deep forensic quarantine trees; not analyzer evidence.
+    "authority_identity_quarantine_v1",
     "lifecycle_transfer_bundles",
     "analyzer_generations",
     "epoch_quarantine",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
-# A complete canonical mirror pass can legitimately take several minutes on
-# the shared-CPU Fly machine.  A 30-second lease guaranteed that the first poll
-# after a large pass launched another recursive inventory walk immediately.
-# The desktop polls every three minutes. Expire shortly before that poll so it
-# can never report MATCH/SKIP from an inventory that predates newly appended or
-# newly created evidence. The non-blocking worker refresh remains fail closed.
-_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 2 * 60 * 60
+# In-memory CURRENT fence. Must outlast a full volume revalidation and a
+# desktop serial ACK (~25-50 MiB). A 150s TTL raced STALE_REVALIDATING mid-xfer.
+# Desktop InitialManifest pin owns transfer consistency; identity polling still
+# detects growth via volume counters. Literal float required by cadence contract.
+_DATA_SYNC_INVENTORY_CACHE_TTL_SECONDS = 7200.0
 _DATA_SYNC_INVENTORY_SNAPSHOT_NAME = "sync_inventory_current.json"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA = "fly_runtime_inventory_snapshot_v1"
 _DATA_SYNC_INVENTORY_SNAPSHOT_SCHEMA_V2 = "fly_runtime_inventory_snapshot_v2"
