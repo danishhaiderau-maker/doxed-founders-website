@@ -215,3 +215,36 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+# --- wipe progress (read-only) ---
+try:
+    active = RUNTIME / "research_reset_receipts" / "ACTIVE_RESET.json"
+    wipe = {"active_reset_exists": active.exists()}
+    if active.exists():
+        wipe["active_reset"] = json.loads(active.read_text("utf-8"))
+        rid = wipe["active_reset"].get("reset_id")
+        if rid:
+            op = RUNTIME / "research_reset_receipts" / rid / "operation.json"
+            if op.exists():
+                opj = json.loads(op.read_text("utf-8"))
+                wipe["operation_stage"] = opj.get("stage")
+                wipe["operation_keys"] = sorted(opj.keys())
+                wipe["payload_copy_performed"] = opj.get("payload_copy_performed")
+    diag = RUNTIME / "research_reset_diagnostics"
+    if diag.exists():
+        files = sorted(diag.rglob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+        wipe["recent_diagnostics"] = []
+        for p in files:
+            try:
+                row = json.loads(p.read_text("utf-8"))
+                wipe["recent_diagnostics"].append({
+                    "path": str(p.relative_to(RUNTIME)).replace("\\", "/"),
+                    "stage": row.get("stage"),
+                    "status": row.get("status"),
+                })
+            except Exception as exc:
+                wipe["recent_diagnostics"].append({"path": str(p), "error": str(exc)})
+    print("===WIPE_PROGRESS===")
+    print(json.dumps(wipe, indent=2, sort_keys=True, default=str))
+except Exception:
+    traceback.print_exc()
