@@ -42909,14 +42909,31 @@ def _data_sync_receipt_bootstrap_gate() -> dict:
     )
     status = str(bootstrap.get("status") or "PENDING").upper()
     required = bootstrap.get("required") is True
-    explicitly_not_required = bootstrap.get("required") is False
+    # Bootstrap is only mandatory when the lifecycle owner explicitly marks it
+    # required. A dead/not-started owner (or no-epoch projection) previously
+    # left required=false/missing with status=PENDING and starved inventory at
+    # WAITING_RECEIPT_BOOTSTRAP forever on shared-cpu Fly.
+    if not required and bootstrap.get("blocked") is not True:
+        return {
+            "required": False,
+            "status": "NOT_REQUIRED",
+            "complete": True,
+            "blocked": False,
+            "ledger": bootstrap.get("ledger"),
+            "ledgers_checked": max(0, int(bootstrap.get("ledgers_checked") or 0)),
+            "records_indexed": max(0, int(bootstrap.get("records_indexed") or 0)),
+            "bytes_indexed": max(0, int(bootstrap.get("bytes_indexed") or 0)),
+            "cursor": (
+                bootstrap.get("cursor")
+                if isinstance(bootstrap.get("cursor"), int)
+                and not isinstance(bootstrap.get("cursor"), bool)
+                and bootstrap.get("cursor") >= 0 else None
+            ),
+        }
     complete = bool(
         bootstrap.get("complete") is True
         and bootstrap.get("blocked") is not True
-        and (
-            (required and status == "COMPLETE")
-            or (explicitly_not_required and status == "NOT_REQUIRED")
-        )
+        and status == "COMPLETE"
     )
     if status not in {"PENDING", "COMPLETE", "BLOCKED", "NOT_REQUIRED"}:
         status = "PENDING"
