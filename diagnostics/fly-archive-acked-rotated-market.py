@@ -1,38 +1,51 @@
 #!/usr/bin/env python3
-"""Quarantine already-ACKed closed market rotations out of Fly invent.
+"""Quarantine closed market rotations out of Fly invent (preserve, never delete).
 
-Moves (never deletes) sealed closed rotations into research_archive/, which is
-already invent-excluded. Active (unsuffixed) writers are never touched.
+Moves closed ``market_microstructure_1s.jsonl.N`` / ``source_order_market_evidence.jsonl.N``
+(N>=1) into invent-excluded ``research_archive/``. Active unsuffixed writers stay put.
+
+Why: client soft-cap 200 MiB skips invents; these closed ~20 MiB rotations are the
+dominant organic bloat. Already-ACKed copies exist in the laptop mirror; newly
+rotated closed siblings are quarantined (not destroyed) so CURRENT can seal.
 
 Safe boundaries:
-- Never arms Bitfinex.
-- Never touches sole watchers / paper toggles.
-- Refuses move unless size + sha256 match the sealed ACK membership proof.
-- Quarantine only; unique un-ACKed data stays in place.
+- Never arms Bitfinex / never touches watchers or paper toggles.
+- Never touches active (unsuffixed) files.
+- Quarantine only (shutil.move into research_archive).
+- Refuses if active sibling is missing.
 
 Env:
   DRY_RUN=true|false (default true)
   APPLY=true|false (default false; must be true with DRY_RUN=false to move)
   DATA_ROOT=/app/data
   EXPECTED_EPOCH=epoch-...
+  MODE=closed_family|acked_sha (default closed_family)
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import shutil
 import time
 from pathlib import Path
 
-SCHEMA = "fly_archive_acked_rotated_market_v1"
+SCHEMA = "fly_archive_acked_rotated_market_v2"
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() not in {"0", "false", "no"}
 APPLY = os.environ.get("APPLY", "false").strip().lower() in {"1", "true", "yes"}
 DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/app/data")).resolve()
 EXPECTED_EPOCH = os.environ.get("EXPECTED_EPOCH", "epoch-281be253d7ee19636c6bf487").strip()
+MODE = os.environ.get("MODE", "closed_family").strip().lower()
 
-# Sealed ACK gen 6f100488212356de… membership + local mirror sizes/sha256.
-ALLOWLIST = (
+STEMS = (
+    "market_microstructure_1s.jsonl",
+    "source_order_market_evidence.jsonl",
+)
+CLOSED_RE = re.compile(r"^(?P<stem>.+\.jsonl)\.(?P<n>\d+)$")
+
+# Optional exact sealed-ACK pins (MODE=acked_sha only).
+ACKED_SHA_ALLOWLIST = (
     {
         "rel": "market_microstructure_1s.jsonl.1",
         "size": 20971757,
@@ -84,6 +97,43 @@ def _fs_used_mb() -> float | None:
         return None
 
 
+def _discover_closed_family() -> list[dict]:
+    found: dict[str, dict] = {}
+    for root in SEARCH_ROOTS:
+        if not root.is_dir():
+            continue
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_file():
+                continue
+            m = CLOSED_RE.match(child.name)
+            if not m:
+                continue
+            stem = m.group("stem")
+            if stem not in STEMS:
+                continue
+            rel = child.name
+            if rel in found:
+                continue
+            active = _find(stem)
+            try:
+                size = child.stat().st_size
+            except OSError:
+                continue
+            found[rel] = {
+                "rel": rel,
+                "stem": stem,
+                "path": str(child.resolve()),
+                "size": size,
+                "active_present": active is not None,
+                "active_path": str(active) if active is not None else None,
+            }
+    return [found[k] for k in sorted(found)]
+
+
 def main() -> int:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     archive_root = (
@@ -100,6 +150,7 @@ def main() -> int:
         "ok": False,
         "dry_run": DRY_RUN,
         "apply": APPLY,
+        "mode": MODE,
         "expected_epoch": EXPECTED_EPOCH,
         "data_root": str(DATA_ROOT),
         "archive_root": str(archive_root),
@@ -116,53 +167,75 @@ def main() -> int:
     if do_move:
         archive_root.mkdir(parents=True, exist_ok=True)
 
-    for row in ALLOWLIST:
-        rel = row["rel"]
-        entry = {
-            "rel": rel,
-            "expected_size": row["size"],
-            "expected_sha256": row["sha256"],
-            "acked_gen": row["acked_gen"],
-            "found": False,
-            "matched": False,
-        }
-        path = _find(rel)
-        if path is None:
-            entry["status"] = "NOT_FOUND"
-            report["candidates"].append(entry)
-            report["errors"].append(f"missing:{rel}")
-            continue
-        entry["found"] = True
-        entry["path"] = str(path)
-        try:
-            size = path.stat().st_size
-        except OSError as exc:
-            entry["status"] = "STAT_FAILED"
-            entry["error"] = str(exc)
-            report["candidates"].append(entry)
-            report["errors"].append(f"stat:{rel}:{exc}")
-            continue
-        entry["actual_size"] = size
-        if size != row["size"]:
-            entry["status"] = "SIZE_MISMATCH"
-            report["candidates"].append(entry)
-            report["errors"].append(f"size_mismatch:{rel}:{size}!={row['size']}")
-            continue
-        try:
-            digest = _sha256_file(path)
-        except OSError as exc:
-            entry["status"] = "HASH_FAILED"
-            entry["error"] = str(exc)
-            report["candidates"].append(entry)
-            report["errors"].append(f"hash:{rel}:{exc}")
-            continue
-        entry["actual_sha256"] = digest
-        if digest.lower() != row["sha256"].lower():
-            entry["status"] = "SHA_MISMATCH"
-            report["candidates"].append(entry)
-            report["errors"].append(f"sha_mismatch:{rel}")
-            continue
-        entry["matched"] = True
+    targets: list[dict] = []
+    if MODE == "acked_sha":
+        for row in ACKED_SHA_ALLOWLIST:
+            path = _find(row["rel"])
+            entry = {
+                "rel": row["rel"],
+                "expected_size": row["size"],
+                "expected_sha256": row["sha256"],
+                "acked_gen": row["acked_gen"],
+                "found": path is not None,
+            }
+            if path is None:
+                entry["status"] = "NOT_FOUND"
+                report["candidates"].append(entry)
+                report["errors"].append(f"missing:{row['rel']}")
+                continue
+            entry["path"] = str(path)
+            try:
+                size = path.stat().st_size
+                digest = _sha256_file(path)
+            except OSError as exc:
+                entry["status"] = "STAT_OR_HASH_FAILED"
+                entry["error"] = str(exc)
+                report["candidates"].append(entry)
+                report["errors"].append(f"hash:{row['rel']}:{exc}")
+                continue
+            entry["actual_size"] = size
+            entry["actual_sha256"] = digest
+            if size != row["size"] or digest.lower() != row["sha256"].lower():
+                entry["status"] = "IDENTITY_MISMATCH"
+                report["candidates"].append(entry)
+                report["errors"].append(f"identity_mismatch:{row['rel']}")
+                continue
+            entry["matched"] = True
+            targets.append({"rel": row["rel"], "path": path, "size": size, "sha256": digest, "meta": entry})
+    else:
+        for row in _discover_closed_family():
+            entry = dict(row)
+            if not row["active_present"]:
+                entry["status"] = "ACTIVE_MISSING_REFUSE"
+                report["candidates"].append(entry)
+                report["errors"].append(f"active_missing:{row['stem']}")
+                continue
+            path = Path(row["path"])
+            try:
+                digest = _sha256_file(path)
+            except OSError as exc:
+                entry["status"] = "HASH_FAILED"
+                entry["error"] = str(exc)
+                report["candidates"].append(entry)
+                report["errors"].append(f"hash:{row['rel']}:{exc}")
+                continue
+            entry["sha256"] = digest
+            entry["matched"] = True
+            targets.append(
+                {
+                    "rel": row["rel"],
+                    "path": path,
+                    "size": int(row["size"]),
+                    "sha256": digest,
+                    "meta": entry,
+                }
+            )
+
+    for item in targets:
+        rel = item["rel"]
+        path = item["path"]
+        size = item["size"]
+        digest = item["sha256"]
         dest = archive_root / rel
         action = {
             "action": "MOVE" if do_move else "WOULD_MOVE",
@@ -171,6 +244,7 @@ def main() -> int:
             "bytes": size,
             "sha256": digest,
         }
+        entry = item["meta"]
         if do_move:
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -179,15 +253,17 @@ def main() -> int:
                 shutil.move(str(path), str(dest))
                 action["moved"] = True
                 report["bytes_moved"] += size
+                entry["status"] = "ARCHIVED"
             except Exception as exc:
                 action["moved"] = False
                 action["error"] = f"{type(exc).__name__}:{exc}"
-                report["errors"].append(f"move:{rel}:{exc}")
                 entry["status"] = "MOVE_FAILED"
+                report["errors"].append(f"move:{rel}:{exc}")
                 report["candidates"].append(entry)
                 report["actions"].append(action)
                 continue
-        entry["status"] = "ARCHIVED" if do_move else "ELIGIBLE"
+        else:
+            entry["status"] = "ELIGIBLE"
         report["candidates"].append(entry)
         report["actions"].append(action)
 
@@ -196,10 +272,9 @@ def main() -> int:
     report["eligible_mib"] = round(
         sum(a.get("bytes") or 0 for a in report["actions"]) / 1048576, 2
     )
-    report["ok"] = not report["errors"] and bool(report["actions"])
+    report["ok"] = (not report["errors"]) and bool(report["actions"])
     report["invent_delta_mib_estimate"] = -report["eligible_mib"]
 
-    # Persist receipt under archive (or /tmp on dry-run).
     receipt_dir = archive_root if do_move else Path("/tmp")
     receipt_dir.mkdir(parents=True, exist_ok=True)
     receipt_path = receipt_dir / "archive-acked-rotated-market-receipt.json"
