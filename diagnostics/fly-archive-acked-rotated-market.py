@@ -19,7 +19,7 @@ Env:
   APPLY=true|false (default false; must be true with DRY_RUN=false to move)
   DATA_ROOT=/app/data
   EXPECTED_EPOCH=epoch-...
-  MODE=closed_family|acked_sha (default closed_family)
+  MODE=closed_family|acked_sha|inspect (default closed_family)
 """
 from __future__ import annotations
 
@@ -29,9 +29,10 @@ import os
 import re
 import shutil
 import time
+import urllib.request
 from pathlib import Path
 
-SCHEMA = "fly_archive_acked_rotated_market_v2"
+SCHEMA = "fly_archive_acked_rotated_market_v3"
 DRY_RUN = os.environ.get("DRY_RUN", "true").strip().lower() not in {"0", "false", "no"}
 APPLY = os.environ.get("APPLY", "false").strip().lower() in {"1", "true", "yes"}
 DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/app/data")).resolve()
@@ -43,6 +44,16 @@ STEMS = (
     "source_order_market_evidence.jsonl",
 )
 CLOSED_RE = re.compile(r"^(?P<stem>.+\.jsonl)\.(?P<n>\d+)$")
+SKIP_DIR_NAMES = frozenset(
+    {
+        "research_archive",
+        "research_epoch_quarantine",
+        "research_accumulator",
+        ".git",
+        "__pycache__",
+        "node_modules",
+    }
+)
 
 # Optional exact sealed-ACK pins (MODE=acked_sha only).
 ACKED_SHA_ALLOWLIST = (
@@ -86,6 +97,21 @@ def _find(rel: str) -> Path | None:
             continue
         if cand.is_file():
             return cand
+    # Recursive fallback for nested writers.
+    needle = Path(rel).name
+    for root in SEARCH_ROOTS:
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+            if needle in filenames:
+                cand = Path(dirpath) / needle
+                try:
+                    cand.resolve().relative_to(DATA_ROOT)
+                except ValueError:
+                    continue
+                if cand.is_file():
+                    return cand
     return None
 
 
@@ -102,36 +128,98 @@ def _discover_closed_family() -> list[dict]:
     for root in SEARCH_ROOTS:
         if not root.is_dir():
             continue
-        try:
-            children = list(root.iterdir())
-        except OSError:
-            continue
-        for child in children:
-            if not child.is_file():
-                continue
-            m = CLOSED_RE.match(child.name)
-            if not m:
-                continue
-            stem = m.group("stem")
-            if stem not in STEMS:
-                continue
-            rel = child.name
-            if rel in found:
-                continue
-            active = _find(stem)
-            try:
-                size = child.stat().st_size
-            except OSError:
-                continue
-            found[rel] = {
-                "rel": rel,
-                "stem": stem,
-                "path": str(child.resolve()),
-                "size": size,
-                "active_present": active is not None,
-                "active_path": str(active) if active is not None else None,
-            }
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES]
+            for name in filenames:
+                m = CLOSED_RE.match(name)
+                if not m:
+                    continue
+                stem = m.group("stem")
+                if stem not in STEMS:
+                    continue
+                child = Path(dirpath) / name
+                try:
+                    resolved = child.resolve()
+                    resolved.relative_to(DATA_ROOT)
+                except (OSError, ValueError):
+                    continue
+                # Prefer shortest rel under DATA_ROOT.
+                try:
+                    rel = str(resolved.relative_to(DATA_ROOT)).replace("\\", "/")
+                except ValueError:
+                    rel = name
+                key = name  # one closed name per stem.N
+                if key in found:
+                    continue
+                if not resolved.is_file():
+                    continue
+                active = _find(stem)
+                try:
+                    size = resolved.stat().st_size
+                except OSError:
+                    continue
+                found[key] = {
+                    "rel": name,
+                    "rel_full": rel,
+                    "stem": stem,
+                    "path": str(resolved),
+                    "size": size,
+                    "active_present": active is not None,
+                    "active_path": str(active) if active is not None else None,
+                }
     return [found[k] for k in sorted(found)]
+
+
+def _inspect_disk() -> dict:
+    hits = []
+    archives = []
+    for root in SEARCH_ROOTS:
+        if not root.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            # Do not skip research_archive for inspect — we want to see prior moves.
+            for name in filenames:
+                if "market_microstructure_1s.jsonl" in name or "source_order_market_evidence.jsonl" in name:
+                    p = Path(dirpath) / name
+                    try:
+                        st = p.stat()
+                        item = {
+                            "path": str(p.resolve()),
+                            "size": st.st_size,
+                            "mib": round(st.st_size / 1048576, 2),
+                        }
+                        if "research_archive" in str(p).replace("\\", "/"):
+                            archives.append(item)
+                        else:
+                            hits.append(item)
+                    except OSError:
+                        continue
+    invent = None
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:8080/api/data_size", timeout=20) as resp:
+            invent = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:
+        invent = {"error": f"{type(exc).__name__}:{exc}"}
+    return {
+        "live_market_jsonl": hits,
+        "archived_market_jsonl": archives[:30],
+        "archived_count": len(archives),
+        "invent": {
+            k: (invent or {}).get(k)
+            for k in (
+                "inventory_generation_id",
+                "inventory_transferable_mb",
+                "runtime_size_mb",
+                "runtime_size_status",
+                "inventory_refreshing",
+                "inventory_file_count",
+                "filesystem_used_mb",
+                "error",
+            )
+        }
+        if isinstance(invent, dict)
+        else invent,
+    }
 
 
 def main() -> int:
@@ -162,6 +250,13 @@ def main() -> int:
         "never_arm": True,
         "NO_SAFE": True,
     }
+
+    if MODE == "inspect":
+        report["inspect"] = _inspect_disk()
+        report["discover_closed_family"] = _discover_closed_family()
+        report["ok"] = True
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
 
     do_move = APPLY and (not DRY_RUN)
     if do_move:
@@ -272,7 +367,13 @@ def main() -> int:
     report["eligible_mib"] = round(
         sum(a.get("bytes") or 0 for a in report["actions"]) / 1048576, 2
     )
-    report["ok"] = (not report["errors"]) and bool(report["actions"])
+    # Empty candidates after prior successful archive is success-noop for dry_run.
+    if not report["actions"] and not report["errors"] and MODE == "closed_family":
+        report["inspect"] = _inspect_disk()
+        report["ok"] = True
+        report["noop_reason"] = "no_closed_rotations_on_disk"
+    else:
+        report["ok"] = (not report["errors"]) and bool(report["actions"])
     report["invent_delta_mib_estimate"] = -report["eligible_mib"]
 
     receipt_dir = archive_root if do_move else Path("/tmp")

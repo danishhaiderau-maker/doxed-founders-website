@@ -25,13 +25,14 @@ on:
         default: epoch-281be253d7ee19636c6bf487
         type: string
       mode:
-        description: closed_family=any stem.jsonl.N (N>=1); acked_sha=exact sealed pins only
+        description: closed_family=any stem.jsonl.N (N>=1); acked_sha=exact sealed pins; inspect=disk+invent dump
         required: true
         default: closed_family
         type: choice
         options:
           - closed_family
           - acked_sha
+          - inspect
 
 jobs:
   archive:
