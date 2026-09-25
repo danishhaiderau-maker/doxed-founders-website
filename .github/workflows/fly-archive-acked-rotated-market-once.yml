@@ -1,0 +1,59 @@
+name: Fly archive ACKed rotated market once
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Inspect/hash only when true; move when false+apply
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      apply:
+        description: Must be true with dry_run=false to actually move files
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      expected_epoch:
+        description: Live epoch id (informational; refuse if active writers mismatch)
+        required: true
+        default: epoch-281be253d7ee19636c6bf487
+        type: string
+      mode:
+        description: closed_family=any stem.jsonl.N (N>=1); acked_sha=exact sealed pins; inspect=disk+invent dump
+        required: true
+        default: closed_family
+        type: choice
+        options:
+          - closed_family
+          - acked_sha
+          - inspect
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Quarantine closed market rotations (invent shrink)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          APPLY: ${{ inputs.apply }}
+          EXPECTED_EPOCH: ${{ inputs.expected_epoch }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          echo "MACHINE_ID=${machine_id}"
+          script_b64="$(base64 -w0 diagnostics/fly-archive-acked-rotated-market.py)"
+          flyctl ssh console --app doxed-btc-bot --machine "${machine_id}" --command \
+            "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-archive-acked-rotated-market.py && DRY_RUN=${DRY_RUN} APPLY=${APPLY} MODE=${MODE} EXPECTED_EPOCH=${EXPECTED_EPOCH} DATA_ROOT=/app/data python /tmp/fly-archive-acked-rotated-market.py'"
