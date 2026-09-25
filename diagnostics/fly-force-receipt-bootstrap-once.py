@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
-"""Force receipt-bootstrap while keeping the trading bot from holding ledger locks.
+"""Force receipt-bootstrap while keeping trading-bot writers off ledger locks.
 
-Fly entrypoint auto-restarts the bot every ~3s. This script:
-1) continuously SIGKILLs bot/lifecycle writers + fuser-kills ledger lock holders
-2) advances emergency idempotency bootstrap round-robin until all_complete
-3) exits so the entrypoint can revive the bot
-
-Env:
-  DATA_ROOT=/app/data (default)
-  EXPECTED_EPOCH=epoch-... (required)
-  APPLY=true to mutate; false = probe only
-  MAX_SECONDS=1200
+Fly guest image may lack `ps`/`pkill`; scan /proc instead. Advance calls can
+block forever on LOCK_EX, so each round runs in a worker thread with a join
+timeout and hard-exits the chunk with BOOTSTRAP_PARTIAL on stall.
 """
 from __future__ import annotations
 
 import json
 import os
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -29,55 +21,57 @@ APPLY = os.environ.get("APPLY", "false").strip().lower() in {"1", "true", "yes"}
 MAX_SECONDS = max(15, int(os.environ.get("MAX_SECONDS") or "1200"))
 RUNTIME = DATA_ROOT / "runtime"
 STATUS_PATH = Path("/tmp/force_chunk_status.json")
-_KILL_MATCHES = (
-    "btc_conservative_agent.py",
+_KILL_TOKENS = (
     "btc_conservative_agent",
-    "lifecycle_pipeline_worker.py",
     "lifecycle_pipeline_worker",
-    "analyzer_research_engine",
 )
 
 
 def _write_status(payload: dict) -> None:
-    STATUS_PATH.write_text(json.dumps(payload, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    text = json.dumps(payload, sort_keys=True, default=str) + "\n"
+    STATUS_PATH.write_text(text, encoding="utf-8")
+    print(text, end="", flush=True)
 
 
-def _ps_snapshot() -> list[str]:
+def _proc_cmdlines() -> list[tuple[int, str]]:
+    rows: list[tuple[int, str]] = []
     try:
-        out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True, stderr=subprocess.DEVNULL)
-    except Exception:
-        return []
-    lines = []
-    for line in out.splitlines():
-        low = line.lower()
-        if any(tok in low for tok in ("python", "btc", "lifecycle", "7002", "agent")):
-            lines.append(line.strip()[:240])
-    return lines[:40]
-
-
-def _matching_pids(*needles: str) -> list[int]:
-    try:
-        out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True, stderr=subprocess.DEVNULL)
-    except Exception:
-        return []
-    pids: list[int] = []
-    for line in out.splitlines():
-        if "fly-force-receipt-bootstrap" in line:
+        entries = os.listdir("/proc")
+    except OSError:
+        return rows
+    for name in entries:
+        if not name.isdigit():
             continue
-        if not any(n in line for n in needles):
-            continue
-        parts = line.strip().split(None, 1)
-        if not parts:
-            continue
+        pid = int(name)
         try:
-            pids.append(int(parts[0]))
-        except ValueError:
-            pass
-    return pids
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            continue
+        cmd = raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+        if cmd:
+            rows.append((pid, cmd))
+    return rows
 
 
 def _bot_pids() -> list[int]:
-    return _matching_pids(*_KILL_MATCHES)
+    me = os.getpid()
+    found = []
+    for pid, cmd in _proc_cmdlines():
+        if pid == me:
+            continue
+        if "fly-force-receipt-bootstrap" in cmd:
+            continue
+        if any(tok in cmd for tok in _KILL_TOKENS):
+            found.append(pid)
+    return found
+
+
+def _ps_snapshot() -> list[str]:
+    out = []
+    for pid, cmd in _proc_cmdlines():
+        if any(tok in cmd for tok in ("python", "btc", "lifecycle", "7002", "agent")):
+            out.append(f"{pid} {cmd[:200]}")
+    return out[:40]
 
 
 def _fuser_kill_ledgers() -> int:
@@ -86,15 +80,31 @@ def _fuser_kill_ledgers() -> int:
         return 0
     n = 0
     for path in ledgers.glob("*.jsonl*"):
+        # Best-effort: open+fcntl unlock isn't enough across processes; try
+        # killing whoever has the file open via /proc/pid/fd.
         try:
-            proc = subprocess.run(
-                ["fuser", "-k", "-9", str(path)],
-                check=False, capture_output=True, text=True,
-            )
-            if proc.returncode == 0 or (proc.stdout or proc.stderr):
-                n += 1
-        except Exception:
-            pass
+            target = str(path.resolve())
+        except OSError:
+            continue
+        for pid, _cmd in _proc_cmdlines():
+            fd_dir = Path(f"/proc/{pid}/fd")
+            if not fd_dir.is_dir():
+                continue
+            try:
+                for fd in fd_dir.iterdir():
+                    try:
+                        link = os.readlink(fd)
+                    except OSError:
+                        continue
+                    if link == target or link.startswith(target + " "):
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                            n += 1
+                        except (ProcessLookupError, PermissionError):
+                            pass
+                        break
+            except OSError:
+                continue
     return n
 
 
@@ -108,32 +118,13 @@ def _kill_bots() -> int:
             pass
         except PermissionError:
             pass
-    try:
-        subprocess.run(
-            ["pkill", "-9", "-f", "btc_conservative_agent"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["pkill", "-9", "-f", "lifecycle_pipeline_worker"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        subprocess.run(
-            ["pkill", "-9", "-f", "python /app/btc_conservative"],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-    _fuser_kill_ledgers()
+    killed += _fuser_kill_ledgers()
     return killed
 
 
 def _freezer(stop: threading.Event) -> None:
-    while not stop.wait(0.4):
+    while not stop.wait(0.35):
         _kill_bots()
-
-
-class _Deadline(Exception):
-    pass
 
 
 def main() -> int:
@@ -144,11 +135,11 @@ def main() -> int:
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
 
     if MAX_SECONDS <= 45:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 256
-        store_module._BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 128
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 4 * 1024 * 1024
     elif MAX_SECONDS <= 120:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 1024
-        store_module._BOOTSTRAP_BYTES_PER_STEP = 16 * 1024 * 1024
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 512
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
     else:
         store_module._BOOTSTRAP_RECORDS_PER_STEP = 4096
         store_module._BOOTSTRAP_BYTES_PER_STEP = 64 * 1024 * 1024
@@ -168,47 +159,60 @@ def main() -> int:
     }
     print(json.dumps({"probe": probe}, sort_keys=True), flush=True)
     if not APPLY:
-        payload = {"ok": True, "dry_run": True}
-        print(json.dumps(payload, sort_keys=True), flush=True)
-        _write_status(payload)
+        _write_status({"ok": True, "dry_run": True})
         return 0
 
     stop = threading.Event()
     thr = threading.Thread(target=_freezer, args=(stop,), daemon=True)
     thr.start()
-    time.sleep(1.0)
+    time.sleep(0.8)
     killed = _kill_bots()
     print(json.dumps({
         "freezer_started": True,
         "killed": killed,
         "alive_after": _bot_pids(),
         "ps_after_kill": _ps_snapshot(),
-        "fuser_targets": True,
     }, sort_keys=True), flush=True)
-    time.sleep(0.5)
 
-    def _alarm_handler(signum, frame):  # noqa: ARG001
-        raise _Deadline("BOOTSTRAP_ALARM")
+    print(json.dumps({"phase": "store_init"}, sort_keys=True), flush=True)
+    store = store_module.V3EvidenceStore(RUNTIME, epoch_id=EXPECTED_EPOCH)
+    print(json.dumps({"phase": "store_ready"}, sort_keys=True), flush=True)
 
-    # Hard interrupt hung LOCK_EX waits so short chunks always emit PARTIAL.
-    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.alarm(max(10, MAX_SECONDS))
-    store = None
     started = time.time()
     rounds = 0
     last = None
     hit_deadline = False
     try:
-        print(json.dumps({"phase": "store_init"}, sort_keys=True), flush=True)
-        store = store_module.V3EvidenceStore(RUNTIME, epoch_id=EXPECTED_EPOCH)
-        print(json.dumps({"phase": "store_ready"}, sort_keys=True), flush=True)
         while True:
             remaining = MAX_SECONDS - (time.time() - started)
-            if remaining <= 0:
+            if remaining <= 0.5:
                 hit_deadline = True
                 break
-            signal.alarm(max(5, int(remaining) + 1))
-            last = store.advance_one_emergency_bootstrap_round_robin()
+            box: dict = {}
+
+            def _worker() -> None:
+                try:
+                    box["last"] = store.advance_one_emergency_bootstrap_round_robin()
+                except Exception as exc:  # noqa: BLE001
+                    box["error"] = f"{type(exc).__name__}:{exc}"
+
+            worker = threading.Thread(target=_worker, daemon=True)
+            worker.start()
+            worker.join(timeout=max(3.0, min(remaining, 20.0)))
+            if worker.is_alive():
+                hit_deadline = True
+                print(json.dumps({
+                    "phase": "advance_timeout",
+                    "rounds": rounds,
+                    "remaining_s": round(remaining, 1),
+                    "killed_bots": _kill_bots(),
+                }, sort_keys=True), flush=True)
+                break
+            if "error" in box:
+                print(json.dumps({"phase": "advance_error", "error": box["error"]}, sort_keys=True), flush=True)
+                hit_deadline = True
+                break
+            last = box.get("last")
             rounds += 1
             print(json.dumps({
                 "round": rounds,
@@ -216,21 +220,16 @@ def main() -> int:
                 "killed_bots": _kill_bots(),
                 "elapsed_s": round(time.time() - started, 1),
             }, sort_keys=True, default=str), flush=True)
-            if last.get("all_complete") is True:
+            if isinstance(last, dict) and last.get("all_complete") is True:
                 break
-            if last.get("blocked") is True:
-                time.sleep(0.2)
-    except _Deadline:
-        hit_deadline = True
-        print(json.dumps({"phase": "alarm_deadline", "rounds": rounds}, sort_keys=True), flush=True)
+            if isinstance(last, dict) and last.get("blocked") is True:
+                time.sleep(0.15)
     finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old_handler)
         stop.set()
-        thr.join(timeout=2.0)
+        thr.join(timeout=1.0)
 
     if hit_deadline and not (isinstance(last, dict) and last.get("all_complete") is True):
-        payload = {
+        _write_status({
             "ok": True,
             "status": "BOOTSTRAP_PARTIAL",
             "rounds": rounds,
@@ -238,23 +237,19 @@ def main() -> int:
             "bot_pids_after": _bot_pids(),
             "deadline": True,
             "source_cleanup_authorized": False,
-        }
-        print(json.dumps(payload, sort_keys=True, default=str), flush=True)
-        _write_status(payload)
-        return 0
+        })
+        # Hard-exit so a stuck LOCK_EX worker thread cannot keep the process alive.
+        os._exit(0)
 
-    assert store is not None
     final = store.advance_one_emergency_bootstrap_round_robin()
-    payload = {
+    _write_status({
         "ok": True,
         "status": "BOOTSTRAP_FORCED",
         "rounds": rounds,
         "final": final,
         "bot_pids_after": _bot_pids(),
         "source_cleanup_authorized": False,
-    }
-    print(json.dumps(payload, sort_keys=True, default=str), flush=True)
-    _write_status(payload)
+    })
     if final.get("all_complete") is not True:
         raise SystemExit("BOOTSTRAP_NOT_COMPLETE:" + json.dumps(final, sort_keys=True, default=str)[:2000])
     return 0
