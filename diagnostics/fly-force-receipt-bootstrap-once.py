@@ -28,6 +28,9 @@ _KILL_TOKENS = (
 
 
 def _write_status(payload: dict) -> None:
+    payload = dict(payload)
+    payload["pid"] = os.getpid()
+    payload["written_at"] = time.time()
     text = json.dumps(payload, sort_keys=True, default=str) + "\n"
     STATUS_PATH.write_text(text, encoding="utf-8")
     print(text, end="", flush=True)
