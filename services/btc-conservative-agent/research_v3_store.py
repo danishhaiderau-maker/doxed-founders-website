@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
-from combo_pathway_config import active_tile_registry_signature
+try:
+    from combo_pathway_config import active_tile_registry_signature
+except ImportError:
+    def active_tile_registry_signature() -> str:
+        return "unavailable"
 from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
 from emergency_evidence_wal import EmergencyEvidenceWal
 from transactional_receipt_store import (
