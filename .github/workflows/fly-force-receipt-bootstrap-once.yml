@@ -143,11 +143,21 @@ jobs:
               while time.time() < deadline:
                   _rc2, body = exec_cmd(
                       "sh -lc 'echo RC=$(cat /tmp/force_chunk_rc.txt 2>/dev/null || echo missing); "
+                      "echo STATUS_FILE=$(cat /tmp/force_chunk_status.json 2>/dev/null || echo missing); "
                       "wc -c /tmp/force_chunk_out.txt 2>/dev/null; "
-                      "tail -n 60 /tmp/force_chunk_out.txt 2>/dev/null || true'",
+                      "tail -n 80 /tmp/force_chunk_out.txt 2>/dev/null || true'",
                       timeout=60,
                   )
-                  print(body[-5000:], flush=True)
+                  print(body[-6000:], flush=True)
+                  # Prefer explicit status file written by the guest script.
+                  if "STATUS_FILE={" in body:
+                      try:
+                          raw = body.split("STATUS_FILE=", 1)[1].splitlines()[0].strip()
+                          last = json.loads(raw)
+                          if last.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"} or last.get("dry_run") is True:
+                              return body, last
+                      except Exception:
+                          pass
                   last = last_status(body)
                   if "RC=missing" in body:
                       time.sleep(5)
