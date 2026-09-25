@@ -1,0 +1,52 @@
+name: Fly probe lifecycle bootstrap once
+
+# Read-only probe: emergency bootstrap completeness markers + process snapshot.
+# Never arms Bitfinex.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Probe bootstrap completeness
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          mid="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; print(active[0]["id"])')"
+          echo "MACHINE_ID=$mid"
+          flyctl machine exec --app doxed-btc-bot --timeout 60 "$mid" \
+            "sh -lc 'rm -f /tmp/boot_probe.txt /tmp/boot_probe_rc.txt; setsid nohup sh -c \"
+              {
+                echo EPOCH_DIRS; ls -d /app/data/runtime/v3/epochs/* 2>/dev/null | head
+                echo COMPLETENESS; find /app/data/runtime/v3 -name \"*complete*\" 2>/dev/null | head -n 40
+                echo BOOTSTRAP_STATE; find /app/data/runtime/v3 -name \"*bootstrap*\" 2>/dev/null | head -n 40
+                echo SAMPLE_COMPLETE; for f in \$(find /app/data/runtime/v3 -name \"emergency_record_index_complete*.json\" 2>/dev/null | head -n 8); do echo FILE=\$f; head -c 400 \$f; echo; done
+                echo PS; ps aux | head -n 40
+                echo LOCKS; ls -la /app/data/runtime/v3/ledgers/.locks 2>/dev/null | head
+                echo DF; df -h /app/data | tail -n 1
+              } > /tmp/boot_probe.txt 2>&1; echo \\\$? > /tmp/boot_probe_rc.txt
+            \" </dev/null >/dev/null 2>&1 & echo LAUNCHED=\$!'"
+          python - <<'PY'
+          import json, subprocess, time
+          mid=json.loads(subprocess.check_output(["flyctl","machines","list","--app","doxed-btc-bot","--json"], text=True))
+          machine=[r for r in mid if str(r.get("state") or "").lower() not in {"destroyed","stopped"}][0]["id"]
+          deadline=time.time()+180
+          while time.time()<deadline:
+              p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","45",machine,
+                "sh -lc 'echo RC=$(cat /tmp/boot_probe_rc.txt 2>/dev/null || echo missing); wc -c /tmp/boot_probe.txt 2>/dev/null'"],
+                text=True, capture_output=True)
+              body=(p.stdout or "")+("\n"+(p.stderr or ""))
+              print(body, flush=True)
+              if "RC=0" in body or "RC=1" in body: break
+              time.sleep(5)
+          else:
+              raise SystemExit("probe timeout")
+          p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","60",machine,
+            "sh -lc 'cat /tmp/boot_probe.txt'"], text=True, capture_output=True)
+          print((p.stdout or "")+(("\n"+p.stderr) if p.stderr else ""), flush=True)
+          PY
