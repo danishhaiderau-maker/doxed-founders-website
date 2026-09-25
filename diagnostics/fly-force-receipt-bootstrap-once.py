@@ -77,8 +77,10 @@ def main() -> int:
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
 
     # Raise cooperative caps for this one-shot only (module clamps use these).
-    store_module._BOOTSTRAP_RECORDS_PER_STEP = 512
-    store_module._BOOTSTRAP_BYTES_PER_STEP = 32 * 1024 * 1024
+    # Incident needs multi-GB ledger indexing; default 64/8MiB is too slow under
+    # a single SSH wall clock.
+    store_module._BOOTSTRAP_RECORDS_PER_STEP = 4096
+    store_module._BOOTSTRAP_BYTES_PER_STEP = 64 * 1024 * 1024
 
     probe = {
         "data_root": str(DATA_ROOT),
