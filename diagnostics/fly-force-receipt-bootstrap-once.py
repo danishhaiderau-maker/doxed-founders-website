@@ -135,14 +135,14 @@ def main() -> int:
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
 
     if MAX_SECONDS <= 45:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 128
-        store_module._BOOTSTRAP_BYTES_PER_STEP = 4 * 1024 * 1024
-    elif MAX_SECONDS <= 120:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 512
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 64
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 2 * 1024 * 1024
+    elif MAX_SECONDS <= 150:
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 256
         store_module._BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
     else:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 4096
-        store_module._BOOTSTRAP_BYTES_PER_STEP = 64 * 1024 * 1024
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 1024
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 16 * 1024 * 1024
 
     probe = {
         "data_root": str(DATA_ROOT),
@@ -173,8 +173,9 @@ def main() -> int:
         "alive_after": _bot_pids(),
         "ps_after_kill": _ps_snapshot(),
     }, sort_keys=True), flush=True)
+    # Give kernel a beat to release flock after SIGKILL before store init.
+    time.sleep(1.5)
 
-    print(json.dumps({"phase": "store_init"}, sort_keys=True), flush=True)
     store = store_module.V3EvidenceStore(RUNTIME, epoch_id=EXPECTED_EPOCH)
     print(json.dumps({"phase": "store_ready"}, sort_keys=True), flush=True)
 
@@ -198,7 +199,9 @@ def main() -> int:
 
             worker = threading.Thread(target=_worker, daemon=True)
             worker.start()
-            worker.join(timeout=max(3.0, min(remaining, 20.0)))
+            # One emergency bootstrap round can exceed 20s under fsync load.
+            # Allow nearly the full chunk budget so rounds can actually complete.
+            worker.join(timeout=max(15.0, remaining - 2.0))
             if worker.is_alive():
                 hit_deadline = True
                 print(json.dumps({
