@@ -1,0 +1,48 @@
+name: Fly invent du slices once
+on:
+  workflow_dispatch:
+jobs:
+  du:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Short du slices to file
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          mid="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; print(active[0]["id"])')"
+          echo "MACHINE_ID=$mid"
+          # Launch background slice dump (avoid 408).
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+            "sh -lc 'rm -f /tmp/du_slices.txt /tmp/du_slices_rc.txt; setsid nohup sh -c \"
+              {
+                echo runtime_v3; du -sm /app/data/runtime/v3 2>/dev/null;
+                echo runtime_v3_children; du -sm /app/data/runtime/v3/* 2>/dev/null | sort -n;
+                echo runtime_top; du -sm /app/data/runtime/* 2>/dev/null | sort -n | tail -n 25;
+                echo large5m; find /app/data/runtime -xdev -type f -size +5M ! -path \"*/research_archive/*\" ! -path \"*/.locks/*\" ! -path \"*/.data-sync-snapshots/*\" -printf \"%s\\t%p\\n\" 2>/dev/null | sort -n | tail -n 30;
+              } > /tmp/du_slices.txt 2>&1; echo \\$? > /tmp/du_slices_rc.txt
+            \" </dev/null >/dev/null 2>&1 & echo LAUNCHED=\$!'"
+          python - <<'PY'
+          import subprocess, time, sys
+          mid = subprocess.check_output(["flyctl","machines","list","--app","doxed-btc-bot","--json"], text=True)
+          import json
+          rows=json.loads(mid)
+          machine=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}][0]["id"]
+          deadline=time.time()+480
+          while time.time()<deadline:
+              p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","45",machine,
+                "sh -lc 'echo RC=$(cat /tmp/du_slices_rc.txt 2>/dev/null || echo missing); wc -c /tmp/du_slices.txt 2>/dev/null'"],
+                text=True, capture_output=True)
+              body=(p.stdout or "")+(("\n"+p.stderr) if p.stderr else "")
+              print(body, flush=True)
+              if "RC=0" in body or "RC=1" in body:
+                  break
+              time.sleep(10)
+          else:
+              raise SystemExit("du slices timed out")
+          p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","60",machine,
+            "sh -lc 'cat /tmp/du_slices.txt'"], text=True, capture_output=True)
+          print((p.stdout or "")+(("\n"+p.stderr) if p.stderr else ""), flush=True)
+          PY
