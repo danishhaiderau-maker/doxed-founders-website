@@ -1,0 +1,63 @@
+name: Fly CONT entrypoint once
+
+# Best-effort SIGCONT / machine restart after a cancelled force-bootstrap left
+# PID 1 stopped. Never arms Bitfinex.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cont:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: CONT or restart
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          set +e
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; print(active[0]["id"] if active else "")')"
+          echo "MACHINE_ID=${machine_id}"
+          flyctl machine exec --app doxed-btc-bot --timeout 45 "${machine_id}" \
+            "sh -lc 'kill -CONT 1; kill -CONT -1; for p in /proc/[0-9]*; do c=$(tr \"\\0\" \" \" < \"$p/cmdline\" 2>/dev/null || true); case \"$c\" in *fly-entrypoint*) kill -CONT $(basename \"$p\");; *fly-force-receipt-bootstrap*) kill -9 $(basename \"$p\");; esac; done; true'" || true
+          sleep 8
+          if ! curl -fsS --max-time 20 "https://doxed-btc-bot.fly.dev/ready" >/dev/null 2>&1; then
+            echo "restarting machine"
+            flyctl machines restart "${machine_id}" --app doxed-btc-bot
+            for i in $(seq 1 36); do
+              curl -fsS --max-time 15 "https://doxed-btc-bot.fly.dev/ready" && break
+              sleep 5
+            done
+          fi
+          python - <<'PY'
+          import json, os, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache", "Content-Type": "application/json"}
+          def call(path, payload=None, timeout=60):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(base+path, data=data, headers=headers, method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          for _ in range(24):
+              try:
+                  ready = call("/ready"); status = call("/api/status")
+                  if ready.get("ok") is True:
+                      break
+              except Exception as exc:
+                  print("wait", exc); 
+              import time; time.sleep(5)
+          status = call("/api/status")
+          if status.get("execution_paused") or status.get("manual_admin_pause"):
+              print(json.dumps(call("/api/resume", {"clear_admin_manual_pause": True}), sort_keys=True))
+          status = call("/api/status")
+          print(json.dumps({
+              "ready": True,
+              "paused": status.get("execution_paused"),
+              "paper": status.get("force_paper_mode"),
+              "live": status.get("live_armed"),
+              "bitfinex": status.get("bitfinex_live_enabled"),
+              "rev": status.get("source_git_rev"),
+              "NO_SAFE": True,
+          }, sort_keys=True))
+          PY

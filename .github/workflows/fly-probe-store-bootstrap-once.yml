@@ -1,0 +1,69 @@
+name: Fly probe store bootstrap once
+
+# Call V3EvidenceStore.round-robin once; print all_complete under live identity.
+# Never arms Bitfinex.
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_epoch:
+        required: true
+        default: epoch-v22-03a92c2c2cde21a79e2f
+        type: string
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Probe store bootstrap round
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_EPOCH: ${{ inputs.expected_epoch }}
+        run: |
+          set -euo pipefail
+          mid="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; print(active[0]["id"])')"
+          echo "MACHINE_ID=$mid EPOCH=$EXPECTED_EPOCH"
+          cat > /tmp/probe_store.py <<'PY'
+          import json, os, sys, time
+          from pathlib import Path
+          sys.path.insert(0, "/app")
+          epoch = os.environ["EXPECTED_EPOCH"].strip()
+          root = Path("/app/data/runtime")
+          t0 = time.time()
+          out = {"epoch": epoch}
+          try:
+              from research_v3_store import V3EvidenceStore
+              store = V3EvidenceStore(root, epoch_id=epoch)
+              out["identity"] = store._identity_binding()
+              out["rr"] = store.advance_one_emergency_bootstrap_round_robin()
+              out["ok"] = True
+          except Exception as exc:
+              out["ok"] = False
+              out["error"] = f"{type(exc).__name__}:{exc}"
+          out["elapsed_s"] = round(time.time() - t0, 2)
+          print(json.dumps(out, sort_keys=True, default=str))
+          PY
+          b64="$(base64 -w0 /tmp/probe_store.py)"
+          flyctl machine exec --app doxed-btc-bot --timeout 45 "$mid" \
+            "sh -lc 'printf %s ${b64} | base64 -d > /tmp/probe_store.py && wc -c /tmp/probe_store.py && head -n 2 /tmp/probe_store.py'"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+            "sh -lc 'rm -f /tmp/store_boot.json /tmp/store_boot_rc.txt; setsid nohup sh -c \"EXPECTED_EPOCH=${EXPECTED_EPOCH} PYTHONUNBUFFERED=1 python -u /tmp/probe_store.py > /tmp/store_boot.json 2>&1; echo \\$? > /tmp/store_boot_rc.txt\" </dev/null >/dev/null 2>&1 & echo LAUNCHED=\$!'"
+          python - <<'PY'
+          import json, subprocess, time
+          mid=json.loads(subprocess.check_output(["flyctl","machines","list","--app","doxed-btc-bot","--json"], text=True))
+          machine=[r for r in mid if str(r.get("state") or "").lower() not in {"destroyed","stopped"}][0]["id"]
+          deadline=time.time()+240
+          while time.time()<deadline:
+              p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","45",machine,
+                "sh -lc 'echo RC=$(cat /tmp/store_boot_rc.txt 2>/dev/null || echo missing); wc -c /tmp/store_boot.json 2>/dev/null; cat /tmp/store_boot.json 2>/dev/null || true'"],
+                text=True, capture_output=True)
+              body=(p.stdout or "")+(("\n"+p.stderr) if p.stderr else "")
+              print(body[-2500:], flush=True)
+              if "RC=0" in body or "RC=1" in body:
+                  break
+              time.sleep(5)
+          else:
+              raise SystemExit("store probe timed out")
+          PY

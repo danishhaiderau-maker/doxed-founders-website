@@ -1,0 +1,42 @@
+name: Fly clear worker pycache and bounce once
+
+# Clear lifecycle_pipeline_worker bytecode cache and bounce bot so hotpatch loads.
+# Never arms Bitfinex.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  bounce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Clear pycache + verify hotpatch + bounce
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          mid="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; print(active[0]["id"])')"
+          echo "MACHINE_ID=$mid"
+          flyctl machine exec --app doxed-btc-bot --timeout 60 "$mid" \
+            "sh -lc '
+              set -e
+              echo VERIFY
+              grep -n bootstrap_early_exit /app/lifecycle_pipeline_worker.py | head
+              wc -c /app/lifecycle_pipeline_worker.py
+              echo PYCACHE
+              rm -rf /app/__pycache__/lifecycle_pipeline_worker*.pyc /app/__pycache__/lifecycle_pipeline_worker*.pyo || true
+              find /app -name \"lifecycle_pipeline_worker*.pyc\" -delete 2>/dev/null || true
+              ls -la /app/__pycache__/lifecycle_pipeline_worker* 2>/dev/null || echo no_pyc
+              echo BOUNCE
+              for p in /proc/[0-9]*; do
+                c=\$(tr \"\\0\" \" \" < \"\$p/cmdline\" 2>/dev/null || true)
+                case \"\$c\" in
+                  *btc_conservative_agent*|*lifecycle_pipeline_worker*|*data_sync_inventory_worker*)
+                    kill -9 \$(basename \"\$p\") 2>/dev/null || true
+                    ;;
+                esac
+              done
+              echo DONE
+            '"

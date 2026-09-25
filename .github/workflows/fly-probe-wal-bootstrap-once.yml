@@ -1,0 +1,57 @@
+name: Fly probe WAL bootstrap once
+
+# Time emergency WAL status/replay + bootstrap rr. Never arms Bitfinex.
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_epoch:
+        required: true
+        default: epoch-v22-03a92c2c2cde21a79e2f
+        type: string
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Probe WAL + bootstrap timings
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_EPOCH: ${{ inputs.expected_epoch }}
+        run: |
+          set -euo pipefail
+          mid="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; print(active[0]["id"])')"
+          echo "MACHINE_ID=$mid"
+          b64="$(base64 -w0 diagnostics/fly-probe-wal-bootstrap.py)"
+          # chunk upload
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" "sh -lc 'rm -f /tmp/probe_wal.py /tmp/probe_wal.b64 /tmp/wal_probe.json /tmp/wal_probe_rc.txt'"
+          echo "$b64" > /tmp/wal.b64
+          split -b 3000 -d /tmp/wal.b64 /tmp/wal_part_
+          for part in /tmp/wal_part_*; do
+            chunk="$(cat "$part")"
+            flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" "sh -lc 'printf %s ${chunk} >> /tmp/probe_wal.b64'"
+          done
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+            "sh -lc 'base64 -d /tmp/probe_wal.b64 > /tmp/probe_wal.py && wc -c /tmp/probe_wal.py'"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+            "sh -lc 'setsid nohup sh -c \"EXPECTED_EPOCH=${EXPECTED_EPOCH} PYTHONUNBUFFERED=1 python -u /tmp/probe_wal.py > /tmp/wal_probe.json 2>&1; echo \\$? > /tmp/wal_probe_rc.txt\" </dev/null >/dev/null 2>&1 & echo LAUNCHED=\$!'"
+          python - <<'PY'
+          import json, subprocess, time
+          mid=json.loads(subprocess.check_output(["flyctl","machines","list","--app","doxed-btc-bot","--json"], text=True))
+          machine=[r for r in mid if str(r.get("state") or "").lower() not in {"destroyed","stopped"}][0]["id"]
+          deadline=time.time()+600
+          while time.time()<deadline:
+              p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","60",machine,
+                "sh -lc 'echo RC=$(cat /tmp/wal_probe_rc.txt 2>/dev/null || echo missing); wc -c /tmp/wal_probe.json 2>/dev/null; cat /tmp/wal_probe.json 2>/dev/null || true'"],
+                text=True, capture_output=True)
+              body=(p.stdout or "")+(("\n"+p.stderr) if p.stderr else "")
+              print(body[-3000:], flush=True)
+              if "RC=0" in body or "RC=1" in body:
+                  break
+              time.sleep(8)
+          else:
+              raise SystemExit("wal probe timed out")
+          PY

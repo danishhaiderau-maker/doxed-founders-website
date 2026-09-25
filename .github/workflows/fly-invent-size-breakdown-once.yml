@@ -1,0 +1,63 @@
+name: Fly invent size breakdown once
+
+# Read-only invent composition dump. Never moves/deletes; never arms Bitfinex.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  breakdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Dump invent size buckets
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          echo "MACHINE_ID=${machine_id}"
+          script_b64="$(base64 -w0 diagnostics/fly-invent-size-breakdown-once.py)"
+          flyctl machine exec --app doxed-btc-bot --timeout 60 "${machine_id}" \
+            "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-invent-size-breakdown-once.py && wc -c /tmp/fly-invent-size-breakdown-once.py'"
+          # Background: walk can exceed machine-exec HTTP 408.
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "${machine_id}" \
+            "sh -lc 'rm -f /tmp/invent_size_out.json /tmp/invent_size_rc.txt; setsid nohup sh -c \"DATA_ROOT=/app/data python -u /tmp/fly-invent-size-breakdown-once.py > /tmp/invent_size_out.json 2>&1; echo \\$? > /tmp/invent_size_rc.txt\" </dev/null >/dev/null 2>&1 & echo LAUNCHED=\$!'"
+          python - <<'PY'
+          import json, subprocess, time, sys
+          mid = subprocess.check_output(
+              ["flyctl", "machines", "list", "--app", "doxed-btc-bot", "--json"], text=True,
+          )
+          rows = json.loads(mid)
+          active = [r for r in rows if str(r.get("state") or "").lower() not in {"destroyed", "stopped"}]
+          assert len(active) == 1, active
+          machine = active[0]["id"]
+          deadline = time.time() + 300
+          body = ""
+          while time.time() < deadline:
+              proc = subprocess.run(
+                  ["flyctl", "machine", "exec", "--app", "doxed-btc-bot", "--timeout", "45", machine,
+                   "sh -lc 'echo RC=$(cat /tmp/invent_size_rc.txt 2>/dev/null || echo missing); "
+                   "wc -c /tmp/invent_size_out.json 2>/dev/null; "
+                   "tail -n 5 /tmp/invent_size_out.json 2>/dev/null || true'"],
+                  text=True, capture_output=True,
+              )
+              body = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+              print(body[-2000:], flush=True)
+              if "RC=0" in body or "RC=1" in body:
+                  break
+              time.sleep(8)
+          else:
+              raise SystemExit("breakdown timed out")
+          proc = subprocess.run(
+              ["flyctl", "machine", "exec", "--app", "doxed-btc-bot", "--timeout", "60", machine,
+               "sh -lc 'cat /tmp/invent_size_out.json'"],
+              text=True, capture_output=True,
+          )
+          text = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+          print(text, flush=True)
+          if '"ok": true' not in text and '"ok":true' not in text:
+              raise SystemExit("breakdown missing ok")
+          PY

@@ -1,0 +1,405 @@
+name: Fly force receipt bootstrap once
+
+# Freeze bot writers, force emergency idempotency bootstrap to all_complete,
+# then let entrypoint revive the bot. Never arms Bitfinex.
+#
+# Constraints learned this incident:
+# - ssh console hangs without starting freezer
+# - nohup under machine-exec is reaped when exec returns
+# - machine-exec HTTP 408 ~60s if streaming a long kill+bootstrap
+# So: short chunks (35s), guest redirects to /tmp, then cat results.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Must be true to mutate; false = probe only
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      expected_epoch:
+        description: Live collector epoch (auto-detected when blank/auto)
+        required: true
+        default: auto
+        type: string
+      expected_revision:
+        required: true
+        default: "37f3a57a36db"
+        type: string
+      max_seconds:
+        required: true
+        default: "3600"
+        type: string
+
+jobs:
+  force-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Pause paper and prove flat
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, re, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          expected = str(os.environ.get("EXPECTED_REVISION") or "").strip().lower()
+          if not token: raise SystemExit("BOT_ADMIN_TOKEN missing")
+          if not re.fullmatch(r"[0-9a-f]{12}", expected): raise SystemExit("bad revision")
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          def call(path, payload=None, timeout=60):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(base+path, data=data, headers={**headers, **({"Content-Type":"application/json"} if data else {})}, method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          # After prior SIGSTOP/cancel, wait for HTTP to return before safety checks.
+          for _ in range(36):
+              try:
+                  ready = call("/ready", timeout=20)
+                  status = call("/api/status", timeout=30)
+              except Exception as exc:
+                  print(f"wait_ready: {type(exc).__name__}: {exc}", flush=True)
+                  time.sleep(5)
+                  continue
+              if ready.get("ok") is True and str(status.get("source_git_rev") or "").lower() == expected:
+                  break
+              time.sleep(5)
+          else:
+              raise SystemExit("bot not ready after restore wait")
+          status = call("/api/status")
+          if str(status.get("source_git_rev") or "").lower() != expected:
+              raise SystemExit(f"revision mismatch: {status.get('source_git_rev')}")
+          if not (status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False):
+              raise SystemExit("paper-only disarmed safety not proven")
+          call("/api/pause", {})
+          for _ in range(20):
+              status = call("/api/status"); progress = status.get("strategy_progress") or {}
+              if (status.get("execution_paused") is True and status.get("manual_admin_pause") is True
+                  and int(progress.get("pending_orders") or 0) == 0 and int(progress.get("open_positions") or 0) == 0):
+                  break
+              time.sleep(2)
+          else:
+              raise SystemExit("flat paused boundary not proven")
+          print(json.dumps({"maintenance":"flat_paused","revision":expected}, sort_keys=True))
+          PY
+
+      - name: Force receipt bootstrap via short file-buffered chunks
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+          EXPECTED_EPOCH: ${{ inputs.expected_epoch }}
+          MAX_SECONDS: ${{ inputs.max_seconds }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          echo "MACHINE_ID=${machine_id}"
+          script_b64="$(base64 -w0 diagnostics/fly-force-receipt-bootstrap-once.py)"
+          flyctl machine exec --app doxed-btc-bot --timeout 60 "${machine_id}" \
+            "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-force-receipt-bootstrap-once.py && wc -c /tmp/fly-force-receipt-bootstrap-once.py'"
+
+          python - <<'PY'
+          import json, os, subprocess, sys, time
+          mid = subprocess.check_output(
+              ["flyctl", "machines", "list", "--app", "doxed-btc-bot", "--json"], text=True,
+          )
+          rows = json.loads(mid)
+          active = [r for r in rows if str(r.get("state") or "").lower() not in {"destroyed", "stopped"}]
+          assert len(active) == 1, active
+          machine = active[0]["id"]
+          apply = os.environ["APPLY"].strip().lower() in {"1", "true", "yes"}
+          epoch_in = os.environ["EXPECTED_EPOCH"].strip()
+          total = max(60, int(os.environ["MAX_SECONDS"]))
+          chunk_s = 90
+          elapsed = 0
+          chunk = 0
+          out_path = "/tmp/force_bootstrap_out.txt"
+          open(out_path, "w", encoding="utf-8").close()
+
+          def exec_cmd(command: str, timeout: int = 90) -> tuple[int, str]:
+              proc = subprocess.run(
+                  ["flyctl", "machine", "exec", "--app", "doxed-btc-bot",
+                   "--timeout", str(timeout), machine, command],
+                  text=True, capture_output=True,
+              )
+              text = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
+              return proc.returncode, text
+
+          # Resolve live collector epoch from research_session.json when input is auto.
+          if epoch_in in {"", "auto", "AUTO"}:
+              detect = (
+                  "python -c \"import json;from pathlib import Path;"
+                  "paths=[Path('/app/data/runtime/research_session.json'),"
+                  "Path('/app/data/research_session.json'),Path('/app/research_session.json')];"
+                  "import sys;"
+                  "[(print(e),sys.exit(0)) for p in paths "
+                  "for e in [str(json.loads(p.read_text()).get('collector_v22_epoch_id') or '').strip()] "
+                  "if p.is_file() and e.startswith('epoch-')];"
+                  "raise SystemExit('no_live_epoch')\""
+              )
+              _rc, live_body = exec_cmd(f"sh -lc {json.dumps(detect)}", timeout=30)
+              epoch = ""
+              for line in live_body.splitlines():
+                  s = line.strip()
+                  if s.startswith("epoch-"):
+                      epoch = s
+                      break
+              if not epoch:
+                  raise SystemExit(f"live epoch detect failed: {live_body[-1500:]}")
+              print(json.dumps({"live_epoch": epoch}, sort_keys=True), flush=True)
+          else:
+              epoch = epoch_in
+
+          def last_status(text: str):
+              last = None
+              last_with_status = None
+              for line in text.splitlines():
+                  s = line.strip()
+                  if not s.startswith("{"):
+                      continue
+                  try:
+                      obj = json.loads(s)
+                  except Exception:
+                      continue
+                  last = obj
+                  if isinstance(obj, dict) and (
+                      obj.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL", "BOOTSTRAP_STARTING"}
+                      or obj.get("dry_run") is True
+                  ):
+                      last_with_status = obj
+              return last_with_status or last
+
+          def wait_chunk_result(timeout_s: int = 90):
+              deadline = time.time() + timeout_s
+              body = ""
+              last = None
+              saw_missing_status = False
+              while time.time() < deadline:
+                  _rc2, body = exec_cmd(
+                      "sh -lc 'echo RC=$(cat /tmp/force_chunk_rc.txt 2>/dev/null || echo missing); "
+                      "echo STATUS_FILE=$(cat /tmp/force_chunk_status.json 2>/dev/null || echo missing); "
+                      "wc -c /tmp/force_chunk_out.txt 2>/dev/null; "
+                      "tail -n 80 /tmp/force_chunk_out.txt 2>/dev/null || true'",
+                      timeout=60,
+                  )
+                  print(body[-6000:], flush=True)
+                  if "STATUS_FILE=missing" in body:
+                      saw_missing_status = True
+                  if "STATUS_FILE={" in body and saw_missing_status:
+                      try:
+                          raw = body.split("STATUS_FILE=", 1)[1].splitlines()[0].strip()
+                          cand = json.loads(raw)
+                          if cand.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"} or cand.get("dry_run") is True:
+                              # STARTING/PARTIAL mid-flight: keep waiting unless FORCED or deadline PARTIAL.
+                              if cand.get("status") == "BOOTSTRAP_FORCED" or cand.get("deadline") is True or cand.get("dry_run") is True:
+                                  return body, cand
+                              if cand.get("status") == "BOOTSTRAP_PARTIAL" and cand.get("phase") in {None, "advancing"} and "RC=missing" not in body:
+                                  last = cand
+                      except Exception:
+                          pass
+                  last = last_status(body) or last
+                  # OOM / SIGKILL of the force process: treat as retryable PARTIAL.
+                  if "Killed" in body and "RC=missing" not in body:
+                      return body, {"ok": True, "status": "BOOTSTRAP_PARTIAL", "phase": "oom_killed", "rounds": 0, "final": None, "deadline": True}
+                  if "RC=missing" in body:
+                      time.sleep(5)
+                      continue
+                  if saw_missing_status and last and (
+                      last.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
+                      or last.get("dry_run") is True
+                  ):
+                      if last.get("status") == "BOOTSTRAP_FORCED" or last.get("deadline") is True or last.get("dry_run") is True:
+                          return body, last
+                      if last.get("status") == "BOOTSTRAP_PARTIAL" and ("RC=0" in body or "RC=1" in body):
+                          return body, last
+                  if ("RC=0" in body or "RC=1" in body) and last and last.get("status") in {
+                      "BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"
+                  }:
+                      return body, last
+                  time.sleep(5)
+              # Timed out waiting: if we saw progress, continue as PARTIAL.
+              if last and last.get("status") in {"BOOTSTRAP_PARTIAL", "BOOTSTRAP_STARTING"}:
+                  last = dict(last)
+                  last["status"] = "BOOTSTRAP_PARTIAL"
+                  last["deadline"] = True
+                  return body, last
+              return body, last
+
+
+          while elapsed < total:
+              chunk += 1
+              this = min(chunk_s, max(60, total - elapsed))
+              print(f"CHUNK={chunk} THIS={this} ELAPSED={elapsed} BUDGET={total}", flush=True)
+              # Ensure prior force leftovers and invent workers are gone before launch.
+              exec_cmd(
+                  "sh -lc 'for p in /proc/[0-9]*; do "
+                  "c=$(tr \"\\0\" \" \" < \"$p/cmdline\" 2>/dev/null || true); "
+                  "case \"$c\" in *fly-force-receipt-bootstrap*|*data_sync_inventory_worker*|*lifecycle_pipeline_worker*|*research_v3_future_paths_worker*) "
+                  "kill -9 $(basename \"$p\") 2>/dev/null || true;; esac; done; "
+                  "kill -CONT 1 2>/dev/null || true; true'",
+                  timeout=30,
+              )
+              run_cmd = (
+                  "sh -lc "
+                  f"'rm -f /tmp/force_chunk_out.txt /tmp/force_chunk_rc.txt /tmp/force_chunk.pid /tmp/force_chunk_status.json; "
+                  f"setsid nohup sh -c \"APPLY={str(apply).lower()} EXPECTED_EPOCH={epoch} MAX_SECONDS={this} "
+                  "DATA_ROOT=/app/data PYTHONUNBUFFERED=1 "
+                  "python -u /tmp/fly-force-receipt-bootstrap-once.py "
+                  "> /tmp/force_chunk_out.txt 2>&1; "
+                  "echo \\$? > /tmp/force_chunk_rc.txt\" "
+                  "</dev/null >/dev/null 2>&1 & "
+                  "echo $! > /tmp/force_chunk.pid; sleep 2; "
+                  "echo LAUNCHED=$(cat /tmp/force_chunk.pid); "
+                  "head -n 5 /tmp/force_chunk_out.txt 2>/dev/null || true'"
+              )
+              # Short launch exec; setsid should keep guest work alive after return.
+              rc, text = exec_cmd(run_cmd, timeout=30)
+              print(f"launch_rc={rc} launch_tail={text[-800:]}", flush=True)
+              time.sleep(2)
+              body, last = wait_chunk_result(timeout_s=max(150, this + 45))
+              with open(out_path, "a", encoding="utf-8") as fh:
+                  fh.write(body + ("\n" if not body.endswith("\n") else ""))
+              elapsed += this
+              # Always CONT entrypoint between chunks so API can breathe.
+              exec_cmd("sh -lc 'kill -CONT 1 2>/dev/null || true'", timeout=20)
+              if last is None:
+                  raise SystemExit(f"no JSON from chunk {chunk}; launch_rc={rc}")
+              if not apply and last.get("dry_run") is True:
+                  print(json.dumps({"dry_run": "ok"}, sort_keys=True), flush=True)
+                  sys.exit(0)
+              if last.get("status") == "BOOTSTRAP_FORCED" and (last.get("final") or {}).get("all_complete") is True:
+                  print(json.dumps({"force_bootstrap": "ok", "rounds": last.get("rounds"), "chunks": chunk}, sort_keys=True), flush=True)
+                  sys.exit(0)
+              if last.get("status") == "BOOTSTRAP_PARTIAL":
+                  print(json.dumps({"chunk_partial": True, "chunk": chunk, "final": last.get("final"), "phase": last.get("phase")}, sort_keys=True, default=str), flush=True)
+                  continue
+              raise SystemExit(f"unexpected chunk status: {last}")
+          raise SystemExit("budget exhausted without BOOTSTRAP_FORCED")
+          PY
+
+      - name: Always CONT entrypoint after force chunks
+        if: always()
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set +e
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; print(active[0]["id"] if active else "")' 2>/dev/null)"
+          echo "MACHINE_ID=${machine_id}"
+          if [ -n "${machine_id}" ]; then
+            flyctl machine exec --app doxed-btc-bot --timeout 45 "${machine_id}" \
+              "sh -lc 'kill -CONT 1 2>/dev/null; kill -CONT -1 2>/dev/null; for p in /proc/[0-9]*; do c=$(tr \"\\0\" \" \" < \"$p/cmdline\" 2>/dev/null || true); case \"$c\" in *fly-force-receipt-bootstrap*) kill -9 $(basename \"$p\") 2>/dev/null || true;; *fly-entrypoint*) kill -CONT $(basename \"$p\") 2>/dev/null || true;; esac; done; true'" || true
+            # If HTTP still dead after CONT, restart the machine (paper-only; never arms).
+            sleep 5
+            if ! curl -fsS --max-time 15 "https://doxed-btc-bot.fly.dev/ready" >/dev/null 2>&1; then
+              echo "ready_still_down -> machine restart"
+              flyctl machines restart "${machine_id}" --app doxed-btc-bot || true
+            fi
+          fi
+          echo "entrypoint_cont_attempted"
+          exit 0
+
+      - name: Wait invent publish then resume paper
+        if: success() && inputs.apply == 'true'
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ inputs.expected_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"].lower()
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          def call(path, payload=None, timeout=90):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(base+path, data=data, headers={**headers, **({"Content-Type":"application/json"} if data else {})}, method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          deadline = time.time() + 1200
+          last = None
+          invent_ok = False
+          try:
+            while time.time() < deadline:
+                try:
+                    ready = call("/ready")
+                    if ready.get("ok") is not True:
+                        time.sleep(5); continue
+                    call("/api/pause", {})
+                    last = call("/api/status")
+                    man = call("/api/data-sync/manifest?page=0&page_size=5")
+                    boot = (last.get("lifecycle_pipeline") or {}).get("receipt_bootstrap") or {}
+                    print(json.dumps({
+                        "t": time.strftime("%H:%M:%S"),
+                        "boot": boot.get("status"),
+                        "boot_complete": boot.get("complete"),
+                        "recs": boot.get("records_indexed"),
+                        "invent": man.get("inventory_status"),
+                        "ack": man.get("inventory_ack_eligible"),
+                        "auth": man.get("inventory_authoritative"),
+                        "files": man.get("file_count"),
+                        "mib": round((man.get("total_bytes") or 0)/1048576, 2),
+                        "gen": str(man.get("inventory_generation_id") or "")[:12],
+                        "phase": ((man.get("inventory_worker") or {}).get("phase")),
+                        "paused": last.get("execution_paused"),
+                    }, sort_keys=True), flush=True)
+                    if (
+                        str(last.get("source_git_rev") or "").lower() == expected
+                        and last.get("live_armed") is False
+                        and boot.get("complete") is True
+                        and man.get("inventory_status") in {"CURRENT", "STALE_REVALIDATING"}
+                        and int(man.get("file_count") or 0) > 0
+                    ):
+                        invent_ok = True
+                        break
+                except Exception as exc:
+                    print(f"wait: {type(exc).__name__}: {exc}", flush=True)
+                time.sleep(10)
+            if not invent_ok:
+                raise SystemExit("invent did not publish after bootstrap: " + json.dumps(last or {}, sort_keys=True)[:4000])
+          finally:
+            try:
+              resumed = call("/api/resume", {"clear_admin_manual_pause": True})
+              final = call("/api/status")
+              print(json.dumps({"resume": resumed, "paused": final.get("execution_paused"), "paper": final.get("force_paper_mode"), "NO_SAFE": True}, sort_keys=True), flush=True)
+            except Exception as exc:
+              print(f"resume_failed: {type(exc).__name__}: {exc}", flush=True)
+              raise
+          final = call("/api/status")
+          if not (
+              final.get("execution_paused") is False
+              and final.get("manual_admin_pause") is False
+              and final.get("force_paper_mode") is True
+              and final.get("live_armed") is False
+              and str(final.get("source_git_rev") or "").lower() == expected
+          ):
+              raise SystemExit("resume not proven")
+          print(json.dumps({"resume":"ok","NO_SAFE":True,"never_arm":True}, sort_keys=True))
+          PY
+
+      - name: Resume paper if force did not finish invent wait
+        if: always() && inputs.apply == 'true'
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache", "Content-Type": "application/json"}
+          def call(path, payload=None, timeout=60):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(base+path, data=data, headers=headers, method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          try:
+              status = call("/api/status")
+          except Exception as exc:
+              print(f"status_unavailable: {exc}"); raise SystemExit(0)
+          if status.get("execution_paused") is True or status.get("manual_admin_pause") is True:
+              resumed = call("/api/resume", {"clear_admin_manual_pause": True})
+              print(json.dumps({"emergency_resume": resumed}, sort_keys=True))
+          else:
+              print(json.dumps({"emergency_resume": "already_running", "paper": status.get("force_paper_mode"), "live": status.get("live_armed")}, sort_keys=True))
+          PY
