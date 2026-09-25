@@ -3379,11 +3379,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <main>
   <section id="sec-summary" class="active">
     <h2>Executive Summary</h2>
+    <div id="summary-banners"></div>
     <div class="empty-state" id="collection-status">
       <b>Collection ON:</b> raw signal, feature, order, fill, lifecycle,
       MFE/MAE, shadow and Type-B evidence continues independently of analysis.
       Dashboard reports are cached and deterministic. AI egress is reserved for
       the trading-direction pipeline only.
+      Fixed watch: ATR_TRAIL + CHANDELIER_3. No regime-dynamic. No live arm.
     </div>
     <div class="kpis" id="kpis"></div>
     <p class="note" id="cohort-note"></p>
@@ -3391,12 +3393,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note">Paper (OBSERVED_PAPER), shadow (IDEAL_TOUCH), and counterfactual (CONSERVATIVE_BBO) share the same columns. After-cost expectancy is the rank. Win rate is not the rank. A SAFE badge appears only when every safety gate passes.</p>
     <div id="equal-rights-root">Loading equal-rights ranks…</div>
     <h2>Best Policy Research</h2>
-    <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
+    <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate. Genome 0/N — no gate has passed.</p>
     <p class="note"><a href="/safe-policy-genome-v3.1">Safe Policy Genome V3.1</a> · <a href="/static-policies">Static profitable-policy research</a> · <a href="/dynamic-policies">Dynamic market-regime research</a> · <a href="/shadow-research">Shadow and rejected-opportunity research</a></p>
     <div class="kpis" id="decision-readiness"></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>
-    <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code>. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
+    <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> (~30 min cadence + data-change trigger). No live arm.</p>
   </section>
   <section id="sec-findings">
     <h2>Research Findings</h2>
@@ -3538,8 +3540,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Trade</th><th>Lane</th><th>Exit</th><th>Peak MFE%</th><th>Realized%</th><th>Leak%</th><th>Realized $</th><th>Peak $</th><th>Left $</th></tr></thead><tbody id="leak-body"></tbody></table>
   </section>
   <section id="sec-horizon">
-    <h2>Horizon Recovery</h2>
-    <p class="note" id="horizon-note">Would losing trades have been green N minutes after exit?</p>
+    <h2>Horizon Recovery (evidence only)</h2>
+    <p class="note" id="horizon-note">Descriptive hindsight only — not proof of profitability. Would losing trades have been green N minutes after exit?</p>
     <table><thead><tr><th>Horizon</th><th>Green</th><th>Still loss</th><th>Unknown</th><th>Coverage</th><th>Recovery %</th></tr></thead><tbody id="horizon-body"></tbody></table>
     <h3>Fast Cut recovery</h3>
     <table><thead><tr><th>Horizon</th><th>Green</th><th>Still loss</th><th>Coverage</th><th>Recovery %</th></tr></thead><tbody id="horizon-fc-body"></tbody></table>
@@ -3805,6 +3807,14 @@ async function loadSummary() {
   document.getElementById('scope').textContent = scopeLabel;
   document.getElementById('updated').textContent = d.generated_at ? d.generated_at.slice(0, 19) : 'no run yet';
   document.getElementById('exec-text').textContent = d.executive_text || '(Run analyzer first)';
+  const summaryBanners = document.getElementById('summary-banners');
+  if (summaryBanners) {
+    const bList = [];
+    bList.push('<div style="padding:8px 12px;border-radius:6px;margin:6px 0;background:#3d2a1f;border:1px solid #d29922;color:#f8e3a1;font-size:13px">NO_SAFE — no strategy has passed every safety gate. All results are descriptive only.</div>');
+    if ((p.trades ?? 0) < 30) bList.push('<div style="padding:8px 12px;border-radius:6px;margin:6px 0;background:#3d2a1f;border:1px solid #d29922;color:#f8e3a1;font-size:13px">SAMPLE_POOR — fewer than 30 closed episodes.</div>');
+    bList.push('<div style="padding:8px 12px;border-radius:6px;margin:6px 0;background:#1f2d3d;border:1px solid #58a6ff;color:#c9d1d9;font-size:13px">live_policy_change_allowed = false. Forward paper only. No live arm.</div>');
+    summaryBanners.innerHTML = bList.join('');
+  }
   const kpis = [
     ['Net PnL', '$' + fmtUsd(p.net_pnl_usd)],
     ['After-cost EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
@@ -3869,10 +3879,11 @@ async function loadDecisionReadiness() {
   const dynamicSummary = candidate.kind === 'DYNAMIC'
     ? `${Object.keys(candidate.regime_policy_map || {}).length} regimes · fallback ${candidate.fallback || 'missing'} · drift ${candidate.drift_action || 'missing'}`
     : (candidate.kind === 'STATIC' ? (candidate.policy_signature || 'signature missing') : '—');
+  const noSafe = d.status !== 'QUALIFIED';
   const cards = [
-    ['Research result', d.status || 'NO QUALIFIED POLICY', d.status === 'QUALIFIED' ? 'green' : 'amber'],
-    ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
-    ['Candidate type', candidateKind, d.status === 'QUALIFIED' ? 'green' : ''],
+    ['Research result', d.status || 'NO QUALIFIED POLICY', 'amber'],
+    ['Current candidate', candidateName, 'amber'],
+    ['Candidate type', candidateKind, ''],
     ['Policy design', dynamicSummary, ''],
     ['Completed paths', `${e.completed_paths || 0} / ${e.current_epoch_events || 0}`, ''],
     ['Independent episodes', e.independent_episode_count || 0, ''],
@@ -3880,11 +3891,11 @@ async function loadDecisionReadiness() {
     ['Qualified OOS episodes', e.qualified_oos_episodes || 0, ''],
     ['Entry policies', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString(), ''],
     ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString(), ''],
-    ['Static vs dynamic', (design.static_vs_dynamic || {}).required ? 'Required · OOS decides' : 'Manifest unavailable', ''],
-    ['Profitable OOS winner', challenger.winner_kind === 'NONE' ? 'NONE — no profitable OOS candidate' : (challenger.winner_kind || 'Waiting for matured OOS'), ''],
+    ['Static vs dynamic', 'Regime OFF — fixed watch only', ''],
+    ['Profitable OOS winner', challenger.winner_kind === 'NONE' ? 'NONE — hypothesis only, not SAFE' : (challenger.winner_kind || 'Waiting for matured OOS'), ''],
     ['Relative leader only', challenger.relative_leader_kind || 'Unavailable', ''],
     ['Static OOS expectancy', challenger.static_oos && challenger.static_oos.expectancy_usd != null ? '$' + Number(challenger.static_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
-    ['Dynamic OOS expectancy', challenger.dynamic_oos && challenger.dynamic_oos.expectancy_usd != null ? '$' + Number(challenger.dynamic_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
+    ['Dynamic OOS expectancy', 'OFF — no regime-dynamic', ''],
   ];
   document.getElementById('decision-readiness').innerHTML = cards.map(([label, value, cls]) =>
     `<div class="kpi"><div class="lbl">${label}</div><div class="val ${cls}">${value}</div></div>`
@@ -3902,12 +3913,12 @@ async function loadFindings() {
   const hlk = [
     ['Top Lane', (hl.best_lane||{}).lane || 'n/a'],
     ['Worst Lane', (hl.worst_lane||{}).lane || 'n/a'],
-    ['Best Conf', (hl.best_confidence||{}).bucket || 'n/a'],
     ['Edge corr', hl.edge_correlation ?? 'n/a'],
   ];
   document.getElementById('hl-kpis').innerHTML = hlk.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('findings-list').innerHTML = (d.findings||[]).map(f => `<li>${f}</li>`).join('') || '<li>Run analyzer to generate findings.</li>';
+  const prefix = '<li style="color:var(--amber);font-weight:700">NO_SAFE — findings below are descriptive only. SAMPLE_POOR until enough episodes close.</li>';
+  document.getElementById('findings-list').innerHTML = prefix + ((d.findings||[]).map(f => `<li>${f}</li>`).join('') || '<li>Run analyzer to generate findings.</li>');
 }
 
 async function loadLanes() {
@@ -4424,7 +4435,7 @@ async function loadGenome() {
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
     ['Sample', dq.sample_size ?? 0],
     ['EV/trade', '$' + fmtUsd(dq.ev)],
-    ['Confidence', dq.research_confidence || 'LOW'],
+    ['Genome gates passed', '0 / N — advisory only'],
     ['Genomes (persistent)', tax.persistent_genomes ?? (d.genome_memory || {}).persistent_genomes ?? 0],
     ['Validated clusters', tax.validated_clusters ?? 0],
     ['Discoveries', (d.discoveries || []).length],

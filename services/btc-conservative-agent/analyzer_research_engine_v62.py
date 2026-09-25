@@ -8846,9 +8846,56 @@ def _write_analyzer_crash_log(iteration: int, tb: str):
         pass
 
 
+_DATA_CHANGE_EVENT = threading.Event()
+
+_WATCH_FILES = (
+    TRADES_FILE,
+    BLOCKED_FILE,
+    DECISIONS_FILE,
+    AI_TRANCHE_FILE,
+    PIPELINE_EVENTS_FILE,
+    SAFE_POLICY_GENOME_V3_REPORT_FILE,
+    "research_session.json",
+)
+
+_DATA_CHANGE_MIN_QUIET_SEC = 10
+
+
+def _start_data_watcher():
+    """Poll key data files every 5 s; set _DATA_CHANGE_EVENT on mtime change."""
+    mtimes: dict[str, float] = {}
+    for name in _WATCH_FILES:
+        try:
+            mtimes[name] = os.path.getmtime(name)
+        except OSError:
+            mtimes[name] = 0.0
+
+    def _watch():
+        while True:
+            time.sleep(5)
+            for name in _WATCH_FILES:
+                try:
+                    current = os.path.getmtime(name)
+                except OSError:
+                    current = 0.0
+                if current > mtimes.get(name, 0.0):
+                    mtimes[name] = current
+                    print(
+                        f"  📂 Data change detected: {name} — "
+                        f"triggering early re-analysis {PIPELINE_ENFORCEMENT_TAG}"
+                    )
+                    time.sleep(_DATA_CHANGE_MIN_QUIET_SEC)
+                    _DATA_CHANGE_EVENT.set()
+
+    thread = threading.Thread(target=_watch, daemon=True, name="data-watcher")
+    thread.start()
+    return thread
+
+
 def run(interval_min=30, session_only=True, max_iterations=None):
     iteration = 0
     sleep_sec = max(60, int(interval_min) * 60)
+    _start_data_watcher()
     while True:
         iteration += 1
         crashed = False
@@ -8865,13 +8912,22 @@ def run(interval_min=30, session_only=True, max_iterations=None):
             )
             _write_analyzer_crash_log(iteration, tb)
         crash_note = " (recovered from error)" if crashed else ""
-        print(
-            f"\n⏳ Next run in {interval_min} minutes... "
-            f"Iteration {iteration} complete{crash_note} {PIPELINE_ENFORCEMENT_TAG}\n"
-        )
+        early = _DATA_CHANGE_EVENT.is_set()
+        _DATA_CHANGE_EVENT.clear()
+        if early:
+            print(
+                f"\n🔄 Data changed during iteration {iteration}{crash_note} — "
+                f"re-running immediately {PIPELINE_ENFORCEMENT_TAG}\n"
+            )
+        else:
+            print(
+                f"\n⏳ Next run in {interval_min} minutes (or earlier on data change)... "
+                f"Iteration {iteration} complete{crash_note} {PIPELINE_ENFORCEMENT_TAG}\n"
+            )
         if max_iterations is not None and iteration >= max_iterations:
             break
-        time.sleep(sleep_sec)
+        _DATA_CHANGE_EVENT.wait(timeout=sleep_sec)
+        _DATA_CHANGE_EVENT.clear()
 
 
 def _run_analyzer_iteration(iteration, interval_min, session_only):
