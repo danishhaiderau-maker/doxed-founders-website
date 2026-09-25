@@ -142,18 +142,27 @@ def _merge_gates(current: Any, incoming: Any) -> Any:
 class _Accumulator:
     def __init__(self) -> None:
         self.closed_n = 0
+        self.fills = 0
         self.net = 0.0
         self.net_known = True
+        self.max_drawdown_usd: float | None = None
         self.gates: Any = None
 
-    def add(self, closed_n: int, net: float | None, gates: Any) -> None:
+    def add(self, closed_n: int, net: float | None, gates: Any,
+            fills: int = 0, max_drawdown_usd: float | None = None) -> None:
         if closed_n <= 0:
             return
         self.closed_n += closed_n
+        self.fills += max(0, fills)
         if net is None:
             self.net_known = False
         else:
             self.net += net
+        if max_drawdown_usd is not None:
+            if self.max_drawdown_usd is None:
+                self.max_drawdown_usd = max_drawdown_usd
+            else:
+                self.max_drawdown_usd = min(self.max_drawdown_usd, max_drawdown_usd)
         self.gates = _merge_gates(self.gates, gates)
 
     @property
@@ -181,11 +190,14 @@ def _observation_from_lifecycle(row: Mapping[str, Any]) -> dict[str, Any] | None
     net = _float_or_none(row.get("net_pnl_usd"))
     if net is None and outcome not in _CLOSED_WITHOUT_NET:
         return None
+    fills = 1 if row.get("fill_confirmed") or row.get("filled") else 0
     return {
         "surface": surface,
         "policy_id": _policy_id(row),
         "closed_n": 1,
         "net": net,
+        "fills": fills,
+        "max_drawdown_usd": _float_or_none(row.get("max_drawdown_usd")),
         "gates": row.get("gates") if isinstance(row.get("gates"), Mapping) else None,
     }
 
@@ -207,11 +219,14 @@ def _observation_from_candidate(row: Mapping[str, Any]) -> dict[str, Any] | None
     net = _float_or_none(row.get("sealed_oos_net_usd"))
     if net is None:
         net = _float_or_none(row.get("after_cost_net_usd"))
+    fills = _int_or_zero(row.get("oos_fills") or row.get("fills"))
     return {
         "surface": surface,
         "policy_id": _policy_id(row),
         "closed_n": closed_n,
         "net": net,
+        "fills": fills,
+        "max_drawdown_usd": _float_or_none(row.get("max_drawdown_usd")),
         "gates": row.get("gates") if isinstance(row.get("gates"), Mapping) else None,
     }
 
@@ -275,8 +290,10 @@ def _ranked_policy_rows(grouped: Mapping[str, _Accumulator]) -> list[dict[str, A
         rows.append({
             "policy_id": policy_id,
             "closed_n": acc.closed_n,
+            "fills": acc.fills,
             "after_cost_net_usd": acc.net_value,
             "after_cost_expectancy_usd": acc.expectancy,
+            "max_drawdown_usd": acc.max_drawdown_usd,
             "qualification": _qualify(acc.closed_n, safe),
             "safe_badge": "SAFE" if safe else None,
             "gates": {name: True for name in REQUIRED_GATES} if safe else None,
@@ -298,6 +315,9 @@ def _ranked_policy_rows(grouped: Mapping[str, _Accumulator]) -> list[dict[str, A
 def _surface_payload(surface: Mapping[str, str], grouped: Mapping[str, _Accumulator]) -> dict[str, Any]:
     rows = _ranked_policy_rows(grouped)
     closed_n = sum(row["closed_n"] for row in rows)
+    total_fills = sum(row.get("fills") or 0 for row in rows)
+    dds = [row["max_drawdown_usd"] for row in rows if row.get("max_drawdown_usd") is not None]
+    worst_dd = min(dds) if dds else None
     nets = [row["after_cost_net_usd"] for row in rows]
     pooled = None
     if closed_n > 0 and rows and all(net is not None for net in nets):
@@ -308,8 +328,10 @@ def _surface_payload(surface: Mapping[str, str], grouped: Mapping[str, _Accumula
         "label": surface["label"],
         "world": surface["world"],
         "closed_n": closed_n,
+        "fills": total_fills,
         "after_cost_net_usd": None if pooled is None else round(pooled * closed_n, 6),
         "after_cost_expectancy_usd": pooled,
+        "max_drawdown_usd": worst_dd,
         "qualification": _qualify(closed_n, safe),
         "safe_badge": "SAFE" if safe else None,
         "rows": rows,
@@ -317,8 +339,10 @@ def _surface_payload(surface: Mapping[str, str], grouped: Mapping[str, _Accumula
             "rank",
             "policy_id",
             "closed_n",
+            "fills",
             "after_cost_expectancy_usd",
             "after_cost_net_usd",
+            "max_drawdown_usd",
             "qualification",
             "safe_badge",
         ],
@@ -344,8 +368,10 @@ def _comparison_rows(by_surface: Mapping[str, Mapping[str, _Accumulator]]) -> li
             worlds[surface_id] = {
                 "world": WORLD_BY_SURFACE[surface_id],
                 "closed_n": acc.closed_n,
+                "fills": acc.fills,
                 "after_cost_net_usd": acc.net_value,
                 "after_cost_expectancy_usd": acc.expectancy,
+                "max_drawdown_usd": acc.max_drawdown_usd,
                 "qualification": _qualify(acc.closed_n, row_safe),
                 "safe_badge": "SAFE" if row_safe else None,
             }
@@ -392,6 +418,8 @@ def _add_observation(groups: dict[str, dict[str, _Accumulator]], observation: Ma
         _int_or_zero(observation.get("closed_n")),
         _float_or_none(observation.get("net")),
         observation.get("gates"),
+        fills=_int_or_zero(observation.get("fills")),
+        max_drawdown_usd=_float_or_none(observation.get("max_drawdown_usd")),
     )
 
 
@@ -460,6 +488,43 @@ def _freshness_label(age_sec: float | None) -> str:
     return "FROZEN"
 
 
+def _secondary_world_columns(report: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """SHADOW_BLOCKED, CF, MISSED as evidence-only columns (not strategy ranks)."""
+    collection = (report or {}).get("collection") or {}
+    outcomes = collection.get("decision_outcomes") or {}
+    dispositions = collection.get("decision_dispositions") or {}
+    if not isinstance(outcomes, Mapping):
+        outcomes = {}
+    if not isinstance(dispositions, Mapping):
+        dispositions = {}
+    shadow_blocked = 0
+    cf_count = 0
+    missed_count = 0
+    for source in (outcomes, dispositions):
+        for key, count in source.items():
+            token = str(key or "").upper()
+            if "SHADOW" in token and ("BLOCK" in token or "REJECT" in token):
+                shadow_blocked += _int_or_zero(count)
+            if "COUNTERFACTUAL" in token or "CF_" in token:
+                cf_count += _int_or_zero(count)
+            if "MISS" in token or "TIMEOUT" in token or "EXPIRED" in token:
+                missed_count += _int_or_zero(count)
+    return [
+        {"id": "shadow_blocked", "world": "SHADOW_BLOCKED", "label": "Shadow blocked",
+         "closed_n": shadow_blocked, "after_cost_expectancy_usd": None, "fills": 0,
+         "max_drawdown_usd": None, "qualification": "NOT_A_STRATEGY_RANK", "safe_badge": None,
+         "role": "EVIDENCE_ONLY"},
+        {"id": "cf_evidence", "world": "CF", "label": "Counterfactual evidence",
+         "closed_n": cf_count, "after_cost_expectancy_usd": None, "fills": 0,
+         "max_drawdown_usd": None, "qualification": "NOT_A_STRATEGY_RANK", "safe_badge": None,
+         "role": "EVIDENCE_ONLY"},
+        {"id": "missed", "world": "MISSED", "label": "Missed / expired",
+         "closed_n": missed_count, "after_cost_expectancy_usd": None, "fills": 0,
+         "max_drawdown_usd": None, "qualification": "NOT_A_STRATEGY_RANK", "safe_badge": None,
+         "role": "EVIDENCE_ONLY"},
+    ]
+
+
 def _exit_leakage_tile(report: Mapping[str, Any] | None) -> dict[str, Any]:
     """Summarise exit leakage from the report collection or a co-located file."""
     collection = (report or {}).get("collection") or {}
@@ -526,6 +591,34 @@ def _banners(qualification: str, total_closed: int, report: Mapping[str, Any] | 
     return banners
 
 
+def _post_fresh_diff(report: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Epoch, gen hash, and sync timestamp for the post-FRESH diff panel."""
+    r = report or {}
+    return {
+        "epoch_id": r.get("epoch_id"),
+        "data_scope": r.get("data_scope"),
+        "schema": r.get("schema"),
+        "generated_at": r.get("generated_at"),
+        "status": r.get("status"),
+        "qualification": r.get("qualification"),
+    }
+
+
+def _genome_surface(report: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Genome 0/N gate progress for the summary."""
+    ranking = (report or {}).get("safe_policy_ranking") or {}
+    gates = ranking.get("gates") or {}
+    required = list(REQUIRED_GATES)
+    passed = sum(1 for name in required if gates.get(name) is True) if isinstance(gates, Mapping) else 0
+    return {
+        "gates_passed": passed,
+        "gates_total": len(required),
+        "label": f"{passed}/{len(required)}",
+        "all_pass": passed == len(required) and len(required) > 0,
+        "gates": {name: gates.get(name) if isinstance(gates, Mapping) else None for name in required},
+    }
+
+
 def _frozen_digest(
     report: Mapping[str, Any] | None,
     qualification: str,
@@ -538,8 +631,11 @@ def _frozen_digest(
         "freshness_age_sec": age_sec,
         "world_tags": list(_WORLD_TAGS),
         "banners": _banners(qualification, total_closed, report),
+        "secondary_worlds": _secondary_world_columns(report),
         "exit_leakage": _exit_leakage_tile(report),
         "regime_progress": _regime_progress(report),
+        "post_fresh_diff": _post_fresh_diff(report),
+        "genome": _genome_surface(report),
         "fixed_watch": "ATR_TRAIL + CHANDELIER_3",
         "regime_dynamic": False,
         "live_arm": False,
@@ -606,6 +702,8 @@ def _groups_from_payload(payload: Mapping[str, Any]) -> dict[str, dict[str, _Acc
                 "policy_id": row.get("policy_id") or "UNATTRIBUTED",
                 "closed_n": row.get("closed_n"),
                 "net": row.get("after_cost_net_usd"),
+                "fills": row.get("fills"),
+                "max_drawdown_usd": row.get("max_drawdown_usd"),
                 "gates": row.get("gates"),
             })
     return groups
@@ -661,7 +759,9 @@ function renderEqualRights(d) {
     };
   }
   const noSafe = d.qualification !== 'QUALIFIED';
-  const money = (v) => (v == null || v === '' || Number.isNaN(Number(v))) ? '---' : ((Number(v) >= 0 ? '+' : '') + Number(v).toFixed(4));
+  const money = (v) => (v == null || v === '' || Number.isNaN(Number(v))) ? 'UNAVAILABLE' : ((Number(v) >= 0 ? '+' : '') + Number(v).toFixed(4));
+  const intOrUnavail = (v) => (v == null || v === '') ? 'UNAVAILABLE' : String(v);
+  const ddFmt = (v) => (v == null || v === '' || Number.isNaN(Number(v))) ? 'UNAVAILABLE' : ('$' + Number(v).toFixed(2));
   const badge = (row) => {
     if (row && row.safe_badge === 'SAFE' && !noSafe)
       return '<span class="er-safe">SAFE</span>';
@@ -682,24 +782,38 @@ function renderEqualRights(d) {
     const evClass = profitableOnly ? 'er-profitable-hypothesis' : '';
     return '<article class="er-tile">'
     + '<div class="er-kicker">' + (s.label || '') + ' · ' + (s.world || '') + '</div>'
-    + '<div class="er-metric"><span>After-cost expectancy</span><strong class="' + evClass + '">' + money(s.after_cost_expectancy_usd) + '</strong></div>'
-    + '<div class="er-sub">Closed n ' + (s.closed_n || 0) + ' · ' + (s.qualification || 'EMPTY') + ' · ' + badge(s) + '</div>'
+    + '<div class="er-metric"><span>After-cost EV</span><strong class="' + evClass + '">' + money(s.after_cost_expectancy_usd) + '</strong></div>'
+    + '<div class="er-sub">n ' + intOrUnavail(s.closed_n) + ' · fills ' + intOrUnavail(s.fills) + ' · DD ' + ddFmt(s.max_drawdown_usd) + '</div>'
+    + '<div class="er-sub">' + (s.qualification || 'EMPTY') + ' · ' + badge(s) + '</div>'
     + ((s.closed_n || 0) > 0 ? '' : '<div class="er-empty">EMPTY --- no closed after-cost evidence</div>')
     + '</article>';
   }).join('');
-  const cell = (world) => '<td>' + (world.closed_n || 0) + '</td><td>' + money(world.after_cost_expectancy_usd) + '</td>';
+  const cell = (world) => '<td>' + intOrUnavail(world.closed_n) + '</td><td>' + intOrUnavail(world.fills) + '</td><td>' + money(world.after_cost_expectancy_usd) + '</td><td>' + ddFmt(world.max_drawdown_usd) + '</td>';
   const body = (d.comparison_rows || []).map(r => {
     const worlds = r.worlds || {};
     return '<tr><td>' + (r.rank == null ? '---' : r.rank) + '</td><td>' + (r.policy_id || '---') + '</td>'
       + cell(worlds.paper || {}) + cell(worlds.shadow || {}) + cell(worlds.counterfactual || {})
       + '<td>' + badge(r) + ' ' + (r.qualification || 'NO_SAFE_QUALIFIED_POLICY') + '</td></tr>';
-  }).join('') || '<tr><td colspan="9">EMPTY --- no closed after-cost evidence in paper, shadow, or counterfactual.</td></tr>';
+  }).join('') || '<tr><td colspan="15">EMPTY --- no closed after-cost evidence in paper, shadow, or counterfactual.</td></tr>';
   const evidenceItems = (d.evidence || []).concat(dig.exit_leakage ? [dig.exit_leakage] : []);
   const evidence = evidenceItems.map(e => (
     '<article class="er-tile"><div class="er-kicker">' + (e.label || '') + '</div>'
     + '<div class="er-sub">n ' + (e.count || 0) + ' · ' + (e.qualification || 'NOT_A_STRATEGY_RANK') + '</div>'
     + '<div class="er-empty">Evidence only. Not a strategy rank and not SAFE.</div></article>'
   )).join('');
+  const secondaryWorlds = (dig.secondary_worlds || []).map(sw => (
+    '<article class="er-tile"><div class="er-kicker">' + (sw.label || '') + ' · ' + (sw.world || '') + '</div>'
+    + '<div class="er-sub">n ' + intOrUnavail(sw.closed_n) + ' · fills ' + intOrUnavail(sw.fills) + ' · DD ' + ddFmt(sw.max_drawdown_usd) + '</div>'
+    + '<div class="er-sub">' + (sw.qualification || 'NOT_A_STRATEGY_RANK') + '</div>'
+    + '<div class="er-empty">Evidence only. Not a strategy rank.</div></article>'
+  )).join('');
+  const genome = dig.genome || {};
+  const genomeChip = '<span class="er-chip ' + (genome.all_pass ? 'er-chip-fresh' : 'er-chip-frozen') + '">'
+    + 'Genome ' + (genome.label || '0/N') + '</span>';
+  const postFresh = dig.post_fresh_diff || {};
+  const postFreshLine = postFresh.epoch_id
+    ? '<span style="font-size:12px;color:#8b949e;margin-left:12px">Epoch ' + postFresh.epoch_id + ' · ' + (postFresh.data_scope || '') + ' · ' + (postFresh.status || '') + '</span>'
+    : '';
   const rp = dig.regime_progress || {};
   const regimeBar = '<div class="er-regime">'
     + '<span class="er-regime-label">Regime cells: ' + (rp.regime_count || 0) + ' / ' + (rp.min_required || 3)
@@ -736,7 +850,9 @@ function renderEqualRights(d) {
   return style + banners
     + '<div class="er-digest">'
     + '<span style="font-size:12px;color:#8b949e">Freshness </span>' + freshChip
+    + ' ' + genomeChip
     + ' <span style="font-size:12px;color:#8b949e;margin-left:12px">Worlds </span>' + worldTags
+    + postFreshLine
     + '<div style="margin-top:6px;font-size:12px;color:#8b949e">' + fixedCopy + '</div>'
     + regimeBar
     + '</div>'
@@ -745,10 +861,11 @@ function renderEqualRights(d) {
     + '<div class="er-grid">' + tiles + '</div>'
     + '<div class="er-scroll"><table class="er-table"><thead><tr>'
     + '<th>Rank</th><th>Policy</th>'
-    + '<th>Paper n</th><th>Paper after-cost EV</th>'
-    + '<th>Shadow n</th><th>Shadow after-cost EV</th>'
-    + '<th>CF n</th><th>CF after-cost EV</th>'
+    + '<th>Paper n</th><th>Paper fills</th><th>Paper after-cost EV</th><th>Paper DD</th>'
+    + '<th>Shadow n</th><th>Shadow fills</th><th>Shadow after-cost EV</th><th>Shadow DD</th>'
+    + '<th>CF n</th><th>CF fills</th><th>CF after-cost EV</th><th>CF DD</th>'
     + '<th>Qualification</th></tr></thead><tbody>' + body + '</tbody></table></div>'
+    + '<h3>Secondary worlds (evidence only)</h3><div class="er-grid">' + secondaryWorlds + '</div>'
     + '<h3>Evidence (not strategy ranks)</h3><div class="er-grid">' + evidence + '</div>';
 }
 async function loadEqualRights() {

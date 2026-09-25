@@ -283,6 +283,94 @@ def test_safe_badge_demoted_under_no_safe():
     assert "regime_progress" in EQUAL_RIGHTS_CLIENT_JS or "regime" in EQUAL_RIGHTS_CLIENT_JS
 
 
+def test_fills_and_drawdown_in_surface_rows():
+    payload = build_equal_rights_ranking(
+        candidates=[{
+            "policy_id": "WITH_DD",
+            "oos_episodes": 3,
+            "oos_fills": 2,
+            "sealed_oos_net_usd": 6.0,
+            "max_drawdown_usd": -1.5,
+            "policy_spec": {"fill": {"execution_world": "IDEAL_TOUCH"}},
+        }],
+    )
+    shadow = payload["surfaces"][1]
+    assert shadow["fills"] == 2
+    assert shadow["max_drawdown_usd"] == -1.5
+    row = shadow["rows"][0]
+    assert row["fills"] == 2
+    assert row["max_drawdown_usd"] == -1.5
+    assert "fills" in shadow["columns"]
+    assert "max_drawdown_usd" in shadow["columns"]
+
+
+def test_unavailable_in_js_for_missing_values():
+    from equal_rights_ranking import EQUAL_RIGHTS_CLIENT_JS
+    assert "UNAVAILABLE" in EQUAL_RIGHTS_CLIENT_JS
+    assert "intOrUnavail" in EQUAL_RIGHTS_CLIENT_JS
+    assert "ddFmt" in EQUAL_RIGHTS_CLIENT_JS
+
+
+def test_secondary_worlds_in_digest():
+    payload = build_equal_rights_ranking(
+        report={
+            "collection": {
+                "decision_outcomes": {"SHADOW_BLOCKED_SPREAD": 5, "CF_MISSED": 2, "TIMEOUT_EXPIRED": 3},
+                "decision_dispositions": {"REJECTED_SHADOW": 1},
+            },
+        },
+    )
+    digest = payload["digest"]
+    sws = digest["secondary_worlds"]
+    assert len(sws) == 3
+    assert sws[0]["world"] == "SHADOW_BLOCKED"
+    assert sws[0]["closed_n"] == 6
+    assert sws[0]["role"] == "EVIDENCE_ONLY"
+    assert sws[2]["world"] == "MISSED"
+    assert sws[2]["closed_n"] >= 3
+
+
+def test_genome_surface_in_digest():
+    payload = build_equal_rights_ranking(report={})
+    genome = payload["digest"]["genome"]
+    assert genome["gates_passed"] == 0
+    assert genome["gates_total"] > 0
+    assert genome["all_pass"] is False
+    assert genome["label"].startswith("0/")
+
+
+def test_post_fresh_diff_in_digest():
+    payload = build_equal_rights_ranking(
+        report={
+            "epoch_id": "EP_42",
+            "data_scope": "FRESH-COLLECTION",
+            "generated_at": "2026-09-22T01:00:00Z",
+            "status": "V3_READY_FOR_FRESH_EPOCH",
+            "schema": "safe_policy_genome_v3_1_report_v1",
+        },
+    )
+    diff = payload["digest"]["post_fresh_diff"]
+    assert diff["epoch_id"] == "EP_42"
+    assert diff["data_scope"] == "FRESH-COLLECTION"
+    assert diff["status"] == "V3_READY_FOR_FRESH_EPOCH"
+
+
+def test_comparison_rows_include_fills_and_drawdown():
+    payload = build_equal_rights_ranking(
+        candidates=[{
+            "policy_id": "DD_POLICY",
+            "oos_episodes": 5,
+            "oos_fills": 3,
+            "sealed_oos_net_usd": 10.0,
+            "max_drawdown_usd": -2.0,
+            "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO"}},
+        }],
+    )
+    cf_world = payload["comparison_rows"][0]["worlds"]["counterfactual"]
+    assert cf_world["fills"] == 3
+    assert cf_world["max_drawdown_usd"] == -2.0
+
+
 def main() -> None:
     tests = (
         test_empty_report_keeps_three_empty_worlds_and_no_crown,
@@ -296,6 +384,12 @@ def main() -> None:
         test_frozen_digest_has_banners_freshness_worlds_regime_leakage,
         test_profitable_hypothesis_decoupled_from_safe,
         test_safe_badge_demoted_under_no_safe,
+        test_fills_and_drawdown_in_surface_rows,
+        test_unavailable_in_js_for_missing_values,
+        test_secondary_worlds_in_digest,
+        test_genome_surface_in_digest,
+        test_post_fresh_diff_in_digest,
+        test_comparison_rows_include_fills_and_drawdown,
     )
     for test in tests:
         test()
