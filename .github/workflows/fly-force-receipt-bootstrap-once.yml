@@ -119,55 +119,78 @@ jobs:
 
           def last_status(text: str):
               last = None
+              last_with_status = None
               for line in text.splitlines():
                   s = line.strip()
                   if not s.startswith("{"):
                       continue
                   try:
-                      last = json.loads(s)
+                      obj = json.loads(s)
                   except Exception:
-                      pass
-              return last
+                      continue
+                  last = obj
+                  if isinstance(obj, dict) and (
+                      obj.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
+                      or obj.get("dry_run") is True
+                  ):
+                      last_with_status = obj
+              return last_with_status or last
+
+          def wait_chunk_result(timeout_s: int = 90):
+              deadline = time.time() + timeout_s
+              body = ""
+              last = None
+              while time.time() < deadline:
+                  _rc2, body = exec_cmd(
+                      "sh -lc 'echo RC=$(cat /tmp/force_chunk_rc.txt 2>/dev/null || echo missing); "
+                      "wc -c /tmp/force_chunk_out.txt 2>/dev/null; "
+                      "tail -n 60 /tmp/force_chunk_out.txt 2>/dev/null || true'",
+                      timeout=60,
+                  )
+                  print(body[-5000:], flush=True)
+                  last = last_status(body)
+                  if "RC=missing" in body:
+                      time.sleep(5)
+                      continue
+                  if last and (
+                      last.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
+                      or last.get("dry_run") is True
+                  ):
+                      return body, last
+                  if "RC=0" in body or "RC=1" in body:
+                      return body, last
+                  time.sleep(5)
+              return body, last
+
 
           while elapsed < total:
               chunk += 1
               this = min(chunk_s, max(20, total - elapsed))
               print(f"CHUNK={chunk} THIS={this} ELAPSED={elapsed} BUDGET={total}", flush=True)
-              # Run in guest with output to file to avoid streaming 408.
               run_cmd = (
                   "sh -lc "
-                  f"'rm -f /tmp/force_chunk_out.txt /tmp/force_chunk_rc.txt; "
-                  f"APPLY={str(apply).lower()} EXPECTED_EPOCH={epoch} MAX_SECONDS={this} "
+                  f"'rm -f /tmp/force_chunk_out.txt /tmp/force_chunk_rc.txt /tmp/force_chunk.pid; "
+                  f"setsid nohup sh -c \"APPLY={str(apply).lower()} EXPECTED_EPOCH={epoch} MAX_SECONDS={this} "
                   "DATA_ROOT=/app/data PYTHONUNBUFFERED=1 "
                   "python -u /tmp/fly-force-receipt-bootstrap-once.py "
                   "> /tmp/force_chunk_out.txt 2>&1; "
-                  "echo $? > /tmp/force_chunk_rc.txt'"
+                  "echo \\$? > /tmp/force_chunk_rc.txt\" "
+                  "</dev/null >/dev/null 2>&1 & "
+                  "echo $! > /tmp/force_chunk.pid; sleep 2; "
+                  "echo LAUNCHED=$(cat /tmp/force_chunk.pid); "
+                  "ps -p $(cat /tmp/force_chunk.pid) -o pid=,args= || echo DEAD; "
+                  "head -n 3 /tmp/force_chunk_out.txt 2>/dev/null || true'"
               )
-              rc, text = exec_cmd(run_cmd, timeout=90)
-              # Fetch results in a second short exec even if the first returned 408.
-              rc2, body = exec_cmd(
-                  "sh -lc 'echo RC=$(cat /tmp/force_chunk_rc.txt 2>/dev/null || echo missing); "
-                  "wc -c /tmp/force_chunk_out.txt 2>/dev/null; "
-                  "cat /tmp/force_chunk_out.txt 2>/dev/null || true'",
-                  timeout=60,
-              )
-              combined = text + "\n" + body
+              # Short launch exec; setsid should keep guest work alive after return.
+              rc, text = exec_cmd(run_cmd, timeout=30)
+              print(f"launch_rc={rc} launch_tail={text[-800:]}", flush=True)
+              time.sleep(2)
+              body, last = wait_chunk_result(timeout_s=max(120, this + 90))
               with open(out_path, "a", encoding="utf-8") as fh:
-                  fh.write(combined + ("\n" if not combined.endswith("\n") else ""))
-              print(combined[-8000:], flush=True)
+                  fh.write(body + ("\n" if not body.endswith("\n") else ""))
               elapsed += this
-              last = last_status(body) or last_status(text)
               if last is None:
-                  # Retry once after brief sleep if 408 raced the writer.
-                  time.sleep(2)
-                  rc3, body3 = exec_cmd(
-                      "sh -lc 'cat /tmp/force_chunk_out.txt 2>/dev/null || true'",
-                      timeout=60,
-                  )
-                  print(body3[-4000:], flush=True)
-                  last = last_status(body3)
-              if last is None:
-                  raise SystemExit(f"no JSON from chunk {chunk}; exec_rc={rc}/{rc2}")
+                  raise SystemExit(f"no JSON from chunk {chunk}; launch_rc={rc}")
               if not apply and last.get("dry_run") is True:
                   print(json.dumps({"dry_run": "ok"}, sort_keys=True), flush=True)
                   sys.exit(0)
@@ -176,8 +199,6 @@ jobs:
                   sys.exit(0)
               if last.get("status") == "BOOTSTRAP_PARTIAL":
                   print(json.dumps({"chunk_partial": True, "chunk": chunk, "final": last.get("final")}, sort_keys=True, default=str), flush=True)
-                  continue
-              if last.get("ok") is True and last.get("status") == "BOOTSTRAP_PARTIAL":
                   continue
               raise SystemExit(f"unexpected chunk status: {last}")
           raise SystemExit("budget exhausted without BOOTSTRAP_FORCED")
