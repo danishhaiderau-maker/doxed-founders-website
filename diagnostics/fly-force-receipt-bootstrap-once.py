@@ -85,8 +85,17 @@ def main() -> int:
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
 
     # Raise cooperative caps for this one-shot only (module clamps use these).
-    store_module._BOOTSTRAP_RECORDS_PER_STEP = 4096
-    store_module._BOOTSTRAP_BYTES_PER_STEP = 64 * 1024 * 1024
+    # Short machine-exec chunks (~35s) must finish ≥1 round before deadline, so
+    # scale caps down when MAX_SECONDS is small (Fly HTTP 408 ~60s).
+    if MAX_SECONDS <= 45:
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 256
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
+    elif MAX_SECONDS <= 120:
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 1024
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 16 * 1024 * 1024
+    else:
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 4096
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 64 * 1024 * 1024
 
     probe = {
         "data_root": str(DATA_ROOT),
