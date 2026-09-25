@@ -139,6 +139,7 @@ jobs:
               deadline = time.time() + timeout_s
               body = ""
               last = None
+              saw_missing_status = False
               while time.time() < deadline:
                   _rc2, body = exec_cmd(
                       "sh -lc 'echo RC=$(cat /tmp/force_chunk_rc.txt 2>/dev/null || echo missing); "
@@ -148,25 +149,30 @@ jobs:
                       timeout=60,
                   )
                   print(body[-6000:], flush=True)
-                  # Prefer explicit status file written by the guest script.
-                  if "STATUS_FILE={" in body:
+                  if "STATUS_FILE=missing" in body:
+                      saw_missing_status = True
+                  if "STATUS_FILE={" in body and saw_missing_status:
                       try:
                           raw = body.split("STATUS_FILE=", 1)[1].splitlines()[0].strip()
-                          last = json.loads(raw)
-                          if last.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"} or last.get("dry_run") is True:
-                              return body, last
+                          cand = json.loads(raw)
+                          if cand.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"} or cand.get("dry_run") is True:
+                              return body, cand
                       except Exception:
                           pass
                   last = last_status(body)
                   if "RC=missing" in body:
                       time.sleep(5)
                       continue
-                  if last and (
+                  # Only accept terminal JSON after we observed status missing
+                  # (proves this chunk's rm ran) or after RC exists with status.
+                  if saw_missing_status and last and (
                       last.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
                       or last.get("dry_run") is True
                   ):
                       return body, last
-                  if "RC=0" in body or "RC=1" in body:
+                  if ("RC=0" in body or "RC=1" in body) and last and last.get("status") in {
+                      "BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"
+                  }:
                       return body, last
                   time.sleep(5)
               return body, last
@@ -178,7 +184,7 @@ jobs:
               print(f"CHUNK={chunk} THIS={this} ELAPSED={elapsed} BUDGET={total}", flush=True)
               run_cmd = (
                   "sh -lc "
-                  f"'rm -f /tmp/force_chunk_out.txt /tmp/force_chunk_rc.txt /tmp/force_chunk.pid; "
+                  f"'rm -f /tmp/force_chunk_out.txt /tmp/force_chunk_rc.txt /tmp/force_chunk.pid /tmp/force_chunk_status.json; "
                   f"setsid nohup sh -c \"APPLY={str(apply).lower()} EXPECTED_EPOCH={epoch} MAX_SECONDS={this} "
                   "DATA_ROOT=/app/data PYTHONUNBUFFERED=1 "
                   "python -u /tmp/fly-force-receipt-bootstrap-once.py "
