@@ -390,9 +390,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
                 "action": evidence_store.replay_one_emergency_wal_record(),
                 "status": evidence_store.emergency_wal_runtime_status(),
             }
-        # Receipt bootstrap must not be starved: invent stays empty BUILDING
-        # while WAITING_RECEIPT_BOOTSTRAP. Prefer one bounded bootstrap step
-        # before lifecycle so TIMEOUT cycles still publish progress/receipts.
+        # Bootstrap before lifecycle so invent is not starved by TIMEOUT.
         emergency_bootstrap = None
         if request.get("_epoch_id"):
             emergency_bootstrap = (
