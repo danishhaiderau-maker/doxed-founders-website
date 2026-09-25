@@ -281,7 +281,7 @@ jobs:
           echo "entrypoint_cont_attempted machine=${machine_id}"
 
       - name: Wait invent publish then resume paper
-        if: always() && inputs.apply == 'true'
+        if: success() && inputs.apply == 'true'
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ inputs.expected_revision }}
@@ -298,48 +298,55 @@ jobs:
           deadline = time.time() + 1200
           last = None
           invent_ok = False
-          while time.time() < deadline:
-              try:
-                  ready = call("/ready")
-                  if ready.get("ok") is not True:
-                      time.sleep(5); continue
-                  call("/api/pause", {})
-                  last = call("/api/status")
-                  man = call("/api/data-sync/manifest?page=0&page_size=5")
-                  boot = (last.get("lifecycle_pipeline") or {}).get("receipt_bootstrap") or {}
-                  print(json.dumps({
-                      "t": time.strftime("%H:%M:%S"),
-                      "boot": boot.get("status"),
-                      "boot_complete": boot.get("complete"),
-                      "recs": boot.get("records_indexed"),
-                      "invent": man.get("inventory_status"),
-                      "ack": man.get("inventory_ack_eligible"),
-                      "auth": man.get("inventory_authoritative"),
-                      "files": man.get("file_count"),
-                      "mib": round((man.get("total_bytes") or 0)/1048576, 2),
-                      "gen": str(man.get("inventory_generation_id") or "")[:12],
-                      "phase": ((man.get("inventory_worker") or {}).get("phase")),
-                      "paused": last.get("execution_paused"),
-                  }, sort_keys=True), flush=True)
-                  if (
-                      str(last.get("source_git_rev") or "").lower() == expected
-                      and last.get("live_armed") is False
-                      and boot.get("complete") is True
-                      and man.get("inventory_status") in {"CURRENT", "STALE_REVALIDATING"}
-                      and int(man.get("file_count") or 0) > 0
-                  ):
-                      invent_ok = True
-                      break
-              except Exception as exc:
-                  print(f"wait: {type(exc).__name__}: {exc}", flush=True)
-              time.sleep(10)
-          if not invent_ok:
-              raise SystemExit("invent did not publish after bootstrap: " + json.dumps(last or {}, sort_keys=True)[:4000])
-          resumed = call("/api/resume", {"clear_admin_manual_pause": True})
+          try:
+            while time.time() < deadline:
+                try:
+                    ready = call("/ready")
+                    if ready.get("ok") is not True:
+                        time.sleep(5); continue
+                    call("/api/pause", {})
+                    last = call("/api/status")
+                    man = call("/api/data-sync/manifest?page=0&page_size=5")
+                    boot = (last.get("lifecycle_pipeline") or {}).get("receipt_bootstrap") or {}
+                    print(json.dumps({
+                        "t": time.strftime("%H:%M:%S"),
+                        "boot": boot.get("status"),
+                        "boot_complete": boot.get("complete"),
+                        "recs": boot.get("records_indexed"),
+                        "invent": man.get("inventory_status"),
+                        "ack": man.get("inventory_ack_eligible"),
+                        "auth": man.get("inventory_authoritative"),
+                        "files": man.get("file_count"),
+                        "mib": round((man.get("total_bytes") or 0)/1048576, 2),
+                        "gen": str(man.get("inventory_generation_id") or "")[:12],
+                        "phase": ((man.get("inventory_worker") or {}).get("phase")),
+                        "paused": last.get("execution_paused"),
+                    }, sort_keys=True), flush=True)
+                    if (
+                        str(last.get("source_git_rev") or "").lower() == expected
+                        and last.get("live_armed") is False
+                        and boot.get("complete") is True
+                        and man.get("inventory_status") in {"CURRENT", "STALE_REVALIDATING"}
+                        and int(man.get("file_count") or 0) > 0
+                    ):
+                        invent_ok = True
+                        break
+                except Exception as exc:
+                    print(f"wait: {type(exc).__name__}: {exc}", flush=True)
+                time.sleep(10)
+            if not invent_ok:
+                raise SystemExit("invent did not publish after bootstrap: " + json.dumps(last or {}, sort_keys=True)[:4000])
+          finally:
+            try:
+              resumed = call("/api/resume", {"clear_admin_manual_pause": True})
+              final = call("/api/status")
+              print(json.dumps({"resume": resumed, "paused": final.get("execution_paused"), "paper": final.get("force_paper_mode"), "NO_SAFE": True}, sort_keys=True), flush=True)
+            except Exception as exc:
+              print(f"resume_failed: {type(exc).__name__}: {exc}", flush=True)
+              raise
           final = call("/api/status")
           if not (
-              resumed.get("status") == "resumed"
-              and final.get("execution_paused") is False
+              final.get("execution_paused") is False
               and final.get("manual_admin_pause") is False
               and final.get("force_paper_mode") is True
               and final.get("live_armed") is False
@@ -347,4 +354,28 @@ jobs:
           ):
               raise SystemExit("resume not proven")
           print(json.dumps({"resume":"ok","NO_SAFE":True,"never_arm":True}, sort_keys=True))
+          PY
+
+      - name: Resume paper if force did not finish invent wait
+        if: always() && inputs.apply == 'true'
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache", "Content-Type": "application/json"}
+          def call(path, payload=None, timeout=60):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(base+path, data=data, headers=headers, method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          try:
+              status = call("/api/status")
+          except Exception as exc:
+              print(f"status_unavailable: {exc}"); raise SystemExit(0)
+          if status.get("execution_paused") is True or status.get("manual_admin_pause") is True:
+              resumed = call("/api/resume", {"clear_admin_manual_pause": True})
+              print(json.dumps({"emergency_resume": resumed}, sort_keys=True))
+          else:
+              print(json.dumps({"emergency_resume": "already_running", "paper": status.get("force_paper_mode"), "live": status.get("live_armed")}, sort_keys=True))
           PY
