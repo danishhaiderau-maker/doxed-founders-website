@@ -6,6 +6,7 @@ true on closed evidence. Missing worlds stay visible as EMPTY / NO_SAFE.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
 from research_v3_ranking import REQUIRED_GATES
@@ -426,6 +427,126 @@ def build_equal_rights_ranking(
     return _payload_from_groups(groups, report)
 
 
+_WORLD_TAGS = (
+    "OBSERVED_PAPER",
+    "IDEAL_TOUCH",
+    "CONSERVATIVE_BBO",
+    "SHADOW_BLOCKED",
+    "CF",
+    "MISSED",
+)
+
+MIN_EPISODES_FOR_ADEQUATE_SAMPLE = 30
+
+
+def _freshness_age_sec(report: Mapping[str, Any] | None) -> float | None:
+    gen = (report or {}).get("generated_at")
+    if not gen:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(gen).replace("Z", "+00:00"))
+        return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _freshness_label(age_sec: float | None) -> str:
+    if age_sec is None:
+        return "UNKNOWN"
+    if age_sec < 3600:
+        return "FRESH"
+    if age_sec < 86400:
+        return "STALE"
+    return "FROZEN"
+
+
+def _exit_leakage_tile(report: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Summarise exit leakage from the report collection or a co-located file."""
+    collection = (report or {}).get("collection") or {}
+    outcomes = collection.get("decision_outcomes") or {}
+    leakage_count = 0
+    for key, count in (outcomes if isinstance(outcomes, Mapping) else {}).items():
+        token = str(key or "").upper()
+        if "LEAK" in token or "EARLY_EXIT" in token or "PREMATURE" in token:
+            leakage_count += _int_or_zero(count)
+    return {
+        "id": "exit_leakage",
+        "label": "Exit leakage",
+        "count": leakage_count,
+        "role": "EVIDENCE_ONLY",
+        "qualification": "NOT_A_STRATEGY_RANK",
+        "safe_badge": None,
+        "state": "EMPTY" if leakage_count <= 0 else "EVIDENCE",
+    }
+
+
+def _regime_progress(report: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Read regime coverage from the V3 ranking or candidate screen."""
+    ranking = (report or {}).get("safe_policy_ranking") or {}
+    gates = ranking.get("gates") or {}
+    regime_pass = gates.get("regime_coverage_pass")
+    candidates = ((report or {}).get("candidate_screen") or {}).get("candidates") or []
+    regime_sets: set[str] = set()
+    for cand in (candidates if isinstance(candidates, list) else []):
+        if isinstance(cand, Mapping):
+            for regime in (cand.get("regimes") or []):
+                if regime:
+                    regime_sets.add(str(regime))
+    min_required = 3
+    return {
+        "regimes_observed": sorted(regime_sets),
+        "regime_count": len(regime_sets),
+        "min_required": min_required,
+        "regime_coverage_pass": bool(regime_pass) if regime_pass is not None else None,
+        "progress_pct": round(min(100.0, 100.0 * len(regime_sets) / max(1, min_required)), 1),
+    }
+
+
+def _banners(qualification: str, total_closed: int, report: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    banners: list[dict[str, Any]] = []
+    if qualification != "QUALIFIED":
+        banners.append({
+            "id": "NO_SAFE",
+            "severity": "warning",
+            "text": "NO_SAFE — no strategy passed every safety gate.",
+        })
+    if 0 < total_closed < MIN_EPISODES_FOR_ADEQUATE_SAMPLE:
+        banners.append({
+            "id": "SAMPLE_POOR",
+            "severity": "warning",
+            "text": f"SAMPLE_POOR — only {total_closed} closed episodes; minimum {MIN_EPISODES_FOR_ADEQUATE_SAMPLE} needed.",
+        })
+    live_allowed = (report or {}).get("live_policy_change_allowed")
+    if live_allowed is False:
+        banners.append({
+            "id": "LIVE_LOCKED",
+            "severity": "info",
+            "text": "live_policy_change_allowed = false. No live arm.",
+        })
+    return banners
+
+
+def _frozen_digest(
+    report: Mapping[str, Any] | None,
+    qualification: str,
+    total_closed: int,
+) -> dict[str, Any]:
+    age_sec = _freshness_age_sec(report)
+    return {
+        "generated_at": (report or {}).get("generated_at"),
+        "freshness": _freshness_label(age_sec),
+        "freshness_age_sec": age_sec,
+        "world_tags": list(_WORLD_TAGS),
+        "banners": _banners(qualification, total_closed, report),
+        "exit_leakage": _exit_leakage_tile(report),
+        "regime_progress": _regime_progress(report),
+        "fixed_watch": "ATR_TRAIL + CHANDELIER_3",
+        "regime_dynamic": False,
+        "live_arm": False,
+        "copy": "Fixed watch ATR_TRAIL + CHANDELIER_3. No regime-dynamic. No live arm.",
+    }
+
+
 def _payload_from_groups(
     groups: Mapping[str, Mapping[str, _Accumulator]],
     report: Mapping[str, Any] | None,
@@ -435,6 +556,7 @@ def _payload_from_groups(
     safe_rows = [row for row in comparison if row["safe_badge"] == "SAFE"]
     number_one = safe_rows[0] if safe_rows else None
     any_closed = any(surface["closed_n"] > 0 for surface in surfaces)
+    total_closed = sum(s["closed_n"] for s in surfaces)
     if number_one:
         qualification = "QUALIFIED"
         headline = "QUALIFIED — one policy passed every safety gate. Rank remains after-cost expectancy."
@@ -460,6 +582,7 @@ def _payload_from_groups(
         "surfaces": surfaces,
         "comparison_rows": comparison,
         "evidence": _evidence_strips(report),
+        "digest": _frozen_digest(report, qualification, total_closed),
         "mirror_ready": True,
     }
 
@@ -533,39 +656,92 @@ function renderEqualRights(d) {
       headline: 'NO_SAFE — no closed after-cost evidence in paper, shadow, or counterfactual.',
       surfaces: emptySurfaces,
       comparison_rows: [],
-      evidence: [
-        {id:'microstructure', label:'Microstructure', count:0, qualification:'NOT_A_STRATEGY_RANK', safe_badge:null},
-        {id:'funnel', label:'Funnel', count:0, qualification:'NOT_A_STRATEGY_RANK', safe_badge:null},
-        {id:'blocked', label:'Blocked', count:0, qualification:'NOT_A_STRATEGY_RANK', safe_badge:null}
-      ]
+      evidence: [],
+      digest: null
     };
   }
-  const money = (v) => (v == null || v === '' || Number.isNaN(Number(v))) ? '—' : ((Number(v) >= 0 ? '+' : '') + Number(v).toFixed(4));
-  const badge = (row) => (row && row.safe_badge === 'SAFE')
-    ? '<span class="er-safe">SAFE</span>'
-    : '<span class="er-nosafe">NO_SAFE</span>';
-  const tiles = d.surfaces.map(s => (
-    '<article class="er-tile">'
+  const noSafe = d.qualification !== 'QUALIFIED';
+  const money = (v) => (v == null || v === '' || Number.isNaN(Number(v))) ? '---' : ((Number(v) >= 0 ? '+' : '') + Number(v).toFixed(4));
+  const badge = (row) => {
+    if (row && row.safe_badge === 'SAFE' && !noSafe)
+      return '<span class="er-safe">SAFE</span>';
+    return '<span class="er-nosafe">NO_SAFE</span>';
+  };
+  const dig = d.digest || {};
+  const banners = (dig.banners || []).map(b =>
+    '<div class="er-banner er-banner-' + (b.severity || 'warning') + '">' + (b.text || '') + '</div>'
+  ).join('');
+  const freshness = dig.freshness || 'UNKNOWN';
+  const freshCls = freshness === 'FRESH' ? 'er-chip-fresh' : (freshness === 'FROZEN' ? 'er-chip-frozen' : 'er-chip-stale');
+  const freshChip = '<span class="er-chip ' + freshCls + '">' + freshness + '</span>';
+  const worldTags = (dig.world_tags || ['OBSERVED_PAPER','IDEAL_TOUCH','CONSERVATIVE_BBO','SHADOW_BLOCKED','CF','MISSED'])
+    .map(t => '<span class="er-tag">' + t + '</span>').join(' ');
+  const fixedCopy = dig.copy || 'Fixed watch ATR_TRAIL + CHANDELIER_3. No regime-dynamic. No live arm.';
+  const tiles = d.surfaces.map(s => {
+    const profitableOnly = (s.after_cost_expectancy_usd != null && Number(s.after_cost_expectancy_usd) > 0);
+    const evClass = profitableOnly ? 'er-profitable-hypothesis' : '';
+    return '<article class="er-tile">'
     + '<div class="er-kicker">' + (s.label || '') + ' · ' + (s.world || '') + '</div>'
-    + '<div class="er-metric"><span>After-cost expectancy</span><strong>' + money(s.after_cost_expectancy_usd) + '</strong></div>'
+    + '<div class="er-metric"><span>After-cost expectancy</span><strong class="' + evClass + '">' + money(s.after_cost_expectancy_usd) + '</strong></div>'
     + '<div class="er-sub">Closed n ' + (s.closed_n || 0) + ' · ' + (s.qualification || 'EMPTY') + ' · ' + badge(s) + '</div>'
-    + ((s.closed_n || 0) > 0 ? '' : '<div class="er-empty">EMPTY — no closed after-cost evidence</div>')
-    + '</article>'
-  )).join('');
+    + ((s.closed_n || 0) > 0 ? '' : '<div class="er-empty">EMPTY --- no closed after-cost evidence</div>')
+    + '</article>';
+  }).join('');
   const cell = (world) => '<td>' + (world.closed_n || 0) + '</td><td>' + money(world.after_cost_expectancy_usd) + '</td>';
   const body = (d.comparison_rows || []).map(r => {
     const worlds = r.worlds || {};
-    return '<tr><td>' + (r.rank == null ? '—' : r.rank) + '</td><td>' + (r.policy_id || '—') + '</td>'
+    return '<tr><td>' + (r.rank == null ? '---' : r.rank) + '</td><td>' + (r.policy_id || '---') + '</td>'
       + cell(worlds.paper || {}) + cell(worlds.shadow || {}) + cell(worlds.counterfactual || {})
       + '<td>' + badge(r) + ' ' + (r.qualification || 'NO_SAFE_QUALIFIED_POLICY') + '</td></tr>';
-  }).join('') || '<tr><td colspan="9">EMPTY — no closed after-cost evidence in paper, shadow, or counterfactual.</td></tr>';
-  const evidence = (d.evidence || []).map(e => (
+  }).join('') || '<tr><td colspan="9">EMPTY --- no closed after-cost evidence in paper, shadow, or counterfactual.</td></tr>';
+  const evidenceItems = (d.evidence || []).concat(dig.exit_leakage ? [dig.exit_leakage] : []);
+  const evidence = evidenceItems.map(e => (
     '<article class="er-tile"><div class="er-kicker">' + (e.label || '') + '</div>'
     + '<div class="er-sub">n ' + (e.count || 0) + ' · ' + (e.qualification || 'NOT_A_STRATEGY_RANK') + '</div>'
     + '<div class="er-empty">Evidence only. Not a strategy rank and not SAFE.</div></article>'
   )).join('');
-  const style = '<style>.er-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:12px 0}.er-tile{border:1px solid #30363d;background:#161b22;border-radius:8px;padding:12px}.er-kicker{color:#8b949e;font-size:12px;letter-spacing:.04em;text-transform:uppercase}.er-metric{display:flex;flex-direction:column;gap:4px;margin-top:8px}.er-metric span{color:#8b949e;font-size:12px}.er-metric strong{font-size:1.35rem}.er-sub,.er-empty,.er-note{color:#8b949e;font-size:13px}.er-safe{color:#3fb950;font-weight:700}.er-nosafe{color:#d29922;font-weight:700}.er-scroll{overflow-x:auto}.er-table{width:100%;border-collapse:collapse}.er-table th,.er-table td{border:1px solid #30363d;padding:8px;text-align:right}.er-table th:first-child,.er-table td:first-child,.er-table th:nth-child(2),.er-table td:nth-child(2){text-align:left}@media(max-width:800px){.er-grid{grid-template-columns:1fr}}</style>';
-  return style + '<p class="er-note">' + (d.headline || 'NO_SAFE — no strategy is crowned.') + '</p>'
+  const rp = dig.regime_progress || {};
+  const regimeBar = '<div class="er-regime">'
+    + '<span class="er-regime-label">Regime cells: ' + (rp.regime_count || 0) + ' / ' + (rp.min_required || 3)
+    + (rp.regime_coverage_pass === true ? ' <span class="er-safe">PASS</span>' : ' <span class="er-nosafe">PENDING</span>') + '</span>'
+    + '<div class="er-regime-bar"><div class="er-regime-fill" style="width:' + Math.min(100, rp.progress_pct || 0) + '%"></div></div>'
+    + '</div>';
+  const wrSecondary = noSafe ? '<p class="er-sub">Win rate is secondary. After-cost expectancy is the rank.</p>' : '';
+  const style = '<style>'
+    + '.er-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:12px 0}'
+    + '.er-tile{border:1px solid #30363d;background:#161b22;border-radius:8px;padding:12px}'
+    + '.er-kicker{color:#8b949e;font-size:12px;letter-spacing:.04em;text-transform:uppercase}'
+    + '.er-metric{display:flex;flex-direction:column;gap:4px;margin-top:8px}'
+    + '.er-metric span{color:#8b949e;font-size:12px}.er-metric strong{font-size:1.35rem}'
+    + '.er-sub,.er-empty,.er-note{color:#8b949e;font-size:13px}'
+    + '.er-safe{color:#3fb950;font-weight:700}.er-nosafe{color:#d29922;font-weight:700}'
+    + '.er-scroll{overflow-x:auto}'
+    + '.er-table{width:100%;border-collapse:collapse}'
+    + '.er-table th,.er-table td{border:1px solid #30363d;padding:8px;text-align:right}'
+    + '.er-table th:first-child,.er-table td:first-child,.er-table th:nth-child(2),.er-table td:nth-child(2){text-align:left}'
+    + '.er-banner{padding:8px 12px;border-radius:6px;margin:6px 0;font-size:13px}'
+    + '.er-banner-warning{background:#3d2a1f;border:1px solid #d29922;color:#f8e3a1}'
+    + '.er-banner-info{background:#1f2d3d;border:1px solid #58a6ff;color:#c9d1d9}'
+    + '.er-chip{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:.04em}'
+    + '.er-chip-fresh{background:#1a3a2a;color:#3fb950}.er-chip-stale{background:#3d2a1f;color:#d29922}.er-chip-frozen{background:#3d1f1f;color:#f85149}'
+    + '.er-tag{display:inline-block;padding:1px 6px;border:1px solid #30363d;border-radius:4px;font-size:11px;color:#8b949e;margin:2px}'
+    + '.er-digest{margin:10px 0;padding:10px 14px;border:1px solid #30363d;border-radius:8px;background:#0d1117}'
+    + '.er-profitable-hypothesis{color:#58a6ff}'
+    + '.er-regime{margin:8px 0}'
+    + '.er-regime-label{font-size:12px;color:#8b949e}'
+    + '.er-regime-bar{height:6px;background:#21262d;border-radius:3px;margin-top:4px}'
+    + '.er-regime-fill{height:100%;background:#58a6ff;border-radius:3px;transition:width .3s}'
+    + '@media(max-width:800px){.er-grid{grid-template-columns:1fr}}'
+    + '</style>';
+  return style + banners
+    + '<div class="er-digest">'
+    + '<span style="font-size:12px;color:#8b949e">Freshness </span>' + freshChip
+    + ' <span style="font-size:12px;color:#8b949e;margin-left:12px">Worlds </span>' + worldTags
+    + '<div style="margin-top:6px;font-size:12px;color:#8b949e">' + fixedCopy + '</div>'
+    + regimeBar
+    + '</div>'
+    + '<p class="er-note">' + (d.headline || 'NO_SAFE --- no strategy is crowned.') + '</p>'
+    + wrSecondary
     + '<div class="er-grid">' + tiles + '</div>'
     + '<div class="er-scroll"><table class="er-table"><thead><tr>'
     + '<th>Rank</th><th>Policy</th>'
@@ -573,7 +749,7 @@ function renderEqualRights(d) {
     + '<th>Shadow n</th><th>Shadow after-cost EV</th>'
     + '<th>CF n</th><th>CF after-cost EV</th>'
     + '<th>Qualification</th></tr></thead><tbody>' + body + '</tbody></table></div>'
-    + '<h3>Microstructure, funnel, and blocked evidence</h3><div class="er-grid">' + evidence + '</div>';
+    + '<h3>Evidence (not strategy ranks)</h3><div class="er-grid">' + evidence + '</div>';
 }
 async function loadEqualRights() {
   const roots = ['equal-rights-root', 'equalRightsRoot']

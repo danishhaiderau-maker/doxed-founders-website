@@ -223,6 +223,66 @@ def test_rank_order_ignores_win_rate_fields():
     assert "win_rate" not in json.dumps(rows[0])
 
 
+def test_frozen_digest_has_banners_freshness_worlds_regime_leakage():
+    from equal_rights_ranking import _WORLD_TAGS, MIN_EPISODES_FOR_ADEQUATE_SAMPLE
+    payload = build_equal_rights_ranking(
+        report={
+            "generated_at": "2026-09-22T01:00:00Z",
+            "live_policy_change_allowed": False,
+            "collection": {
+                "outcome_states": {"REALIZED_PROFIT": 10, "REALIZED_LOSS": 5},
+                "market_segments": 3,
+                "decision_branches": 8,
+                "decision_outcomes": {"REJECTED_SPREAD": 2},
+            },
+            "candidate_screen": {"descriptive_top_100": []},
+        },
+    )
+    digest = payload["digest"]
+    assert digest is not None
+    assert digest["freshness"] in ("FROZEN", "STALE")
+    assert digest["world_tags"] == list(_WORLD_TAGS)
+    assert digest["fixed_watch"] == "ATR_TRAIL + CHANDELIER_3"
+    assert digest["regime_dynamic"] is False
+    assert digest["live_arm"] is False
+    banner_ids = [b["id"] for b in digest["banners"]]
+    assert "NO_SAFE" in banner_ids
+    assert "SAMPLE_POOR" in banner_ids
+    assert "LIVE_LOCKED" in banner_ids
+    assert digest["exit_leakage"]["id"] == "exit_leakage"
+    assert digest["exit_leakage"]["role"] == "EVIDENCE_ONLY"
+    rp = digest["regime_progress"]
+    assert rp["min_required"] == 3
+    assert 0 <= rp["progress_pct"] <= 100
+    assert "copy" in digest
+
+
+def test_profitable_hypothesis_decoupled_from_safe():
+    payload = build_equal_rights_ranking(
+        lifecycles=[{
+            "terminal": True,
+            "effective_execution_mode": "PAPER_OBSERVED",
+            "outcome_state": "REALIZED_PROFIT",
+            "policy_id": "PROFITABLE_NOT_SAFE",
+            "net_pnl_usd": 5.0,
+        }],
+    )
+    paper = payload["surfaces"][0]
+    assert paper["after_cost_expectancy_usd"] == 5.0
+    assert paper["safe_badge"] is None
+    assert paper["qualification"] == "NO_SAFE_QUALIFIED_POLICY"
+    assert payload["qualification"] == "NO_SAFE_QUALIFIED_POLICY"
+
+
+def test_safe_badge_demoted_under_no_safe():
+    from equal_rights_ranking import EQUAL_RIGHTS_CLIENT_JS
+    assert "noSafe" in EQUAL_RIGHTS_CLIENT_JS
+    assert "er-profitable-hypothesis" in EQUAL_RIGHTS_CLIENT_JS
+    assert "er-banner" in EQUAL_RIGHTS_CLIENT_JS
+    assert "er-chip" in EQUAL_RIGHTS_CLIENT_JS
+    assert "regime_progress" in EQUAL_RIGHTS_CLIENT_JS or "regime" in EQUAL_RIGHTS_CLIENT_JS
+
+
 def main() -> None:
     tests = (
         test_empty_report_keeps_three_empty_worlds_and_no_crown,
@@ -233,6 +293,9 @@ def main() -> None:
         test_dashboard_and_bot_expose_the_same_equal_rights_surface,
         test_dashboard_api_is_honest_when_the_report_is_missing,
         test_rank_order_ignores_win_rate_fields,
+        test_frozen_digest_has_banners_freshness_worlds_regime_leakage,
+        test_profitable_hypothesis_decoupled_from_safe,
+        test_safe_badge_demoted_under_no_safe,
     )
     for test in tests:
         test()
