@@ -8858,19 +8858,60 @@ _WATCH_FILES = (
     "research_session.json",
 )
 
+ANALYZER_MIRROR_SYNC_MAX_AGE_SEC = int(
+    os.getenv("ANALYZER_MIRROR_SYNC_MAX_AGE_SEC", "7200")
+)
+
+_FLY_HEARTBEAT_FILE = ".fly-data-sync-loop.heartbeat.json"
+
 _DATA_CHANGE_MIN_QUIET_SEC = 10
 
 
+def _read_heartbeat_identity(path: str) -> str | None:
+    """Extract a stable identity from the sync-loop heartbeat JSON.
+
+    Returns sourceRevision when available, else syncedAt so mtime-only
+    rewrites (skip heartbeats) do not trigger spurious re-analysis.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            import json as _json
+            hb = _json.load(fh)
+        rev = hb.get("sourceRevision")
+        if rev and str(rev).strip():
+            return str(rev).strip()
+        synced = hb.get("syncedAt")
+        if synced and not hb.get("skipped"):
+            return str(synced).strip()
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
 def _start_data_watcher():
-    """Poll key data files every 5 s; set _DATA_CHANGE_EVENT on mtime change."""
+    """Poll key data files every 5 s; set _DATA_CHANGE_EVENT on mtime change.
+
+    For the fly-data-sync-loop heartbeat, detection is content-based
+    (sourceRevision change) so skip-heartbeats do not cause spurious wakes.
+    """
     mtimes: dict[str, float] = {}
     for name in _WATCH_FILES:
         try:
             mtimes[name] = os.path.getmtime(name)
         except OSError:
             mtimes[name] = 0.0
+    last_heartbeat_id = _read_heartbeat_identity(_FLY_HEARTBEAT_FILE)
+
+    def _trigger(reason: str) -> None:
+        print(
+            f"  📂 Data change detected: {reason} — "
+            f"triggering early re-analysis {PIPELINE_ENFORCEMENT_TAG}"
+        )
+        time.sleep(_DATA_CHANGE_MIN_QUIET_SEC)
+        _DATA_CHANGE_EVENT.set()
 
     def _watch():
+        nonlocal last_heartbeat_id
         while True:
             time.sleep(5)
             for name in _WATCH_FILES:
@@ -8880,12 +8921,17 @@ def _start_data_watcher():
                     current = 0.0
                 if current > mtimes.get(name, 0.0):
                     mtimes[name] = current
-                    print(
-                        f"  📂 Data change detected: {name} — "
-                        f"triggering early re-analysis {PIPELINE_ENFORCEMENT_TAG}"
-                    )
-                    time.sleep(_DATA_CHANGE_MIN_QUIET_SEC)
-                    _DATA_CHANGE_EVENT.set()
+                    _trigger(name)
+            try:
+                hb_mtime = os.path.getmtime(_FLY_HEARTBEAT_FILE)
+            except OSError:
+                hb_mtime = 0.0
+            if hb_mtime > mtimes.get(_FLY_HEARTBEAT_FILE, 0.0):
+                mtimes[_FLY_HEARTBEAT_FILE] = hb_mtime
+                new_id = _read_heartbeat_identity(_FLY_HEARTBEAT_FILE)
+                if new_id and new_id != last_heartbeat_id:
+                    last_heartbeat_id = new_id
+                    _trigger(f"{_FLY_HEARTBEAT_FILE} (rev {new_id[:16]}...)")
 
     thread = threading.Thread(target=_watch, daemon=True, name="data-watcher")
     thread.start()

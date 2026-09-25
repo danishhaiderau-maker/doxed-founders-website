@@ -567,6 +567,9 @@ def _regime_progress(report: Mapping[str, Any] | None) -> dict[str, Any]:
     }
 
 
+MIRROR_SYNC_RECEIPT_STALE_SEC = 7200
+
+
 def _banners(qualification: str, total_closed: int, report: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     banners: list[dict[str, Any]] = []
     if qualification != "QUALIFIED":
@@ -587,6 +590,17 @@ def _banners(qualification: str, total_closed: int, report: Mapping[str, Any] | 
             "id": "LIVE_LOCKED",
             "severity": "info",
             "text": "live_policy_change_allowed = false. No live arm.",
+        })
+    age_sec = _freshness_age_sec(report)
+    if age_sec is not None and age_sec > MIRROR_SYNC_RECEIPT_STALE_SEC:
+        banners.append({
+            "id": "MIRROR_STALE",
+            "severity": "info",
+            "text": (
+                f"Mirror receipt is {age_sec / 3600:.1f}h old "
+                f"(threshold {MIRROR_SYNC_RECEIPT_STALE_SEC / 3600:.0f}h). "
+                "Re-analysis still runs on compatible collection shape."
+            ),
         })
     return banners
 

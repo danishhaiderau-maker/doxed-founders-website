@@ -371,6 +371,33 @@ def test_comparison_rows_include_fills_and_drawdown():
     assert cf_world["max_drawdown_usd"] == -2.0
 
 
+def test_heartbeat_identity_reader():
+    import tempfile
+    src = Path(__file__).resolve().parent / "analyzer_research_engine_v62.py"
+    text = src.read_text(encoding="utf-8")
+    assert "_read_heartbeat_identity" in text
+    assert "_FLY_HEARTBEAT_FILE" in text
+    assert "sourceRevision" in text
+    assert "skipped" in text
+    assert "ANALYZER_MIRROR_SYNC_MAX_AGE_SEC" in text
+
+
+def test_mirror_stale_banner():
+    payload = build_equal_rights_ranking(
+        report={"generated_at": "2020-01-01T00:00:00Z"},
+    )
+    banner_ids = [b["id"] for b in payload["digest"]["banners"]]
+    assert "MIRROR_STALE" in banner_ids
+
+
+def test_data_watcher_watches_heartbeat_file():
+    src = Path(__file__).resolve().parent / "analyzer_research_engine_v62.py"
+    text = src.read_text(encoding="utf-8")
+    assert ".fly-data-sync-loop.heartbeat.json" in text
+    assert "_DATA_CHANGE_EVENT" in text
+    assert "Event.wait" in text or "_DATA_CHANGE_EVENT.wait" in text
+
+
 def main() -> None:
     tests = (
         test_empty_report_keeps_three_empty_worlds_and_no_crown,
@@ -390,6 +417,9 @@ def main() -> None:
         test_genome_surface_in_digest,
         test_post_fresh_diff_in_digest,
         test_comparison_rows_include_fills_and_drawdown,
+        test_heartbeat_identity_reader,
+        test_mirror_stale_banner,
+        test_data_watcher_watches_heartbeat_file,
     )
     for test in tests:
         test()
