@@ -119,23 +119,17 @@ jobs:
 
           # Resolve live collector epoch from research_session.json when input is auto.
           if epoch_in in {"", "auto", "AUTO"}:
-              _rc, live_body = exec_cmd(
-                  "sh -lc 'python - <<\"PY\"\\n"
-                  "import json\\n"
-                  "from pathlib import Path\\n"
-                  "for p in ("
-                  "Path(\"/app/data/runtime/research_session.json\"),"
-                  "Path(\"/app/data/research_session.json\"),"
-                  "Path(\"/app/research_session.json\"),"
-                  "):\\n"
-                  "  try:\\n"
-                  "    m=json.loads(p.read_text()); e=str(m.get(\"collector_v22_epoch_id\") or \"\").strip()\\n"
-                  "    if e.startswith(\"epoch-\"): print(e); raise SystemExit(0)\\n"
-                  "  except Exception: pass\\n"
-                  "raise SystemExit(\"no_live_epoch\")\\n"
-                  "PY'",
-                  timeout=30,
+              detect = (
+                  "python -c \"import json;from pathlib import Path;"
+                  "paths=[Path('/app/data/runtime/research_session.json'),"
+                  "Path('/app/data/research_session.json'),Path('/app/research_session.json')];"
+                  "import sys;"
+                  "[(print(e),sys.exit(0)) for p in paths "
+                  "for e in [str(json.loads(p.read_text()).get('collector_v22_epoch_id') or '').strip()] "
+                  "if p.is_file() and e.startswith('epoch-')];"
+                  "raise SystemExit('no_live_epoch')\""
               )
+              _rc, live_body = exec_cmd(f"sh -lc {json.dumps(detect)}", timeout=30)
               epoch = ""
               for line in live_body.splitlines():
                   s = line.strip()
