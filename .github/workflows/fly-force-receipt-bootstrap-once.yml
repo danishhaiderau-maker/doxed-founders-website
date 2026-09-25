@@ -269,8 +269,19 @@ jobs:
           raise SystemExit("budget exhausted without BOOTSTRAP_FORCED")
           PY
 
+      - name: Always CONT entrypoint after force chunks
+        if: always()
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "${machine_id}" \
+            "sh -lc 'kill -CONT 1 2>/dev/null || true; for p in /proc/[0-9]*; do c=$(tr \"\\0\" \" \" < \"$p/cmdline\" 2>/dev/null || true); case \"$c\" in *fly-force-receipt-bootstrap*) kill -9 $(basename \"$p\") 2>/dev/null || true;; esac; done; true'"
+          echo "entrypoint_cont_attempted machine=${machine_id}"
+
       - name: Wait invent publish then resume paper
-        if: inputs.apply == 'true'
+        if: always() && inputs.apply == 'true'
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
           EXPECTED_REVISION: ${{ inputs.expected_revision }}

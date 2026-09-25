@@ -202,9 +202,13 @@ def main() -> int:
     import research_v3_store as store_module  # type: ignore
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
 
-    # Keep batches small: force process shares a tiny Fly VM with entrypoint.
-    store_module._BOOTSTRAP_RECORDS_PER_STEP = 64
-    store_module._BOOTSTRAP_BYTES_PER_STEP = 2 * 1024 * 1024
+    # Entrypoint is SIGSTOP'd so larger batches are safe and finish sooner.
+    if MAX_SECONDS <= 45:
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 128
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 4 * 1024 * 1024
+    else:
+        store_module._BOOTSTRAP_RECORDS_PER_STEP = 512
+        store_module._BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
 
     probe = {
         "data_root": str(DATA_ROOT),
