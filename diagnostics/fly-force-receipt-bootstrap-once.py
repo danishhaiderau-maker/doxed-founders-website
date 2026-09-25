@@ -26,11 +26,13 @@ from pathlib import Path
 DATA_ROOT = Path(os.environ.get("DATA_ROOT", "/app/data")).resolve()
 EXPECTED_EPOCH = str(os.environ.get("EXPECTED_EPOCH") or "").strip()
 APPLY = os.environ.get("APPLY", "false").strip().lower() in {"1", "true", "yes"}
-MAX_SECONDS = max(60, int(os.environ.get("MAX_SECONDS") or "1200"))
+MAX_SECONDS = max(15, int(os.environ.get("MAX_SECONDS") or "1200"))
 RUNTIME = DATA_ROOT / "runtime"
 _KILL_MATCHES = (
     "btc_conservative_agent.py",
+    "btc_conservative_agent",
     "lifecycle_pipeline_worker.py",
+    "lifecycle_pipeline_worker",
 )
 
 
@@ -69,6 +71,18 @@ def _kill_bots() -> int:
             pass
         except PermissionError:
             pass
+    # Broader pkill fallback — ps args can truncate the script path.
+    try:
+        subprocess.run(
+            ["pkill", "-9", "-f", "btc_conservative_agent"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["pkill", "-9", "-f", "lifecycle_pipeline_worker"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
     return killed
 
 
