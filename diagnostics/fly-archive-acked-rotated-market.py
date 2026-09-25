@@ -40,8 +40,13 @@ EXPECTED_EPOCH = os.environ.get("EXPECTED_EPOCH", "epoch-281be253d7ee19636c6bf48
 MODE = os.environ.get("MODE", "closed_family").strip().lower()
 
 STEMS = (
+    # Market closed rotations (often exhausted after prior archives).
     "market_microstructure_1s.jsonl",
     "source_order_market_evidence.jsonl",
+    # Dominant invent bloat after market archive: closed signal/chase rotations
+    # (~21 MiB each). Active unsuffixed writers stay on disk.
+    "signal_replay.jsonl",
+    "chase_offset_touch_grid.jsonl",
 )
 CLOSED_RE = re.compile(r"^(?P<stem>.+\.jsonl)\.(?P<n>\d+)$")
 SKIP_DIR_NAMES = frozenset(
