@@ -7,7 +7,12 @@ name: Fly force receipt bootstrap once
 # - ssh console hangs without starting freezer
 # - nohup under machine-exec is reaped when exec returns
 # - machine-exec HTTP 408 ~60s if streaming a long kill+bootstrap
-# So: short chunks (35s), guest redirects to /tmp, then cat results.
+# So: file-buffered chunks (guest budget clamped to <=150s so the guest stays
+# on 256-record / 8MiB steps; larger budgets flip to 1024 / 16MiB and OOM),
+# guest redirects to /tmp, then cat results.
+# stdout phases (store_ready, advance_timeout, advance_error) are progress,
+# not chunk results. Wait until a fresh STATUS_FILE is BOOTSTRAP_FORCED /
+# BOOTSTRAP_PARTIAL / dry_run, or RC is terminal and output has stopped.
 
 on:
   workflow_dispatch:
@@ -31,6 +36,11 @@ on:
       max_seconds:
         required: true
         default: "1200"
+        type: string
+      chunk_seconds:
+        description: Guest chunk budget seconds. Clamped to at most 150 so bootstrap stays on 256-record/8MiB steps.
+        required: false
+        default: "180"
         type: string
 
 jobs:
@@ -81,6 +91,7 @@ jobs:
           APPLY: ${{ inputs.apply }}
           EXPECTED_EPOCH: ${{ inputs.expected_epoch }}
           MAX_SECONDS: ${{ inputs.max_seconds }}
+          CHUNK_SECONDS: ${{ inputs.chunk_seconds }}
         run: |
           set -euo pipefail
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
@@ -101,7 +112,16 @@ jobs:
           apply = os.environ["APPLY"].strip().lower() in {"1", "true", "yes"}
           epoch = os.environ["EXPECTED_EPOCH"]
           total = max(60, int(os.environ["MAX_SECONDS"]))
-          chunk_s = 120
+          # Default input is "180", but guest MAX_SECONDS > 150 switches the
+          # bootstrap step to 1024 records / 16MiB and the machine OOMs.
+          raw_chunk = str(os.environ.get("CHUNK_SECONDS") or "").strip() or "180"
+          try:
+              requested_chunk = int(raw_chunk)
+          except ValueError:
+              requested_chunk = 180
+          if requested_chunk <= 0:
+              requested_chunk = 180
+          chunk_s = min(150, requested_chunk)
           elapsed = 0
           chunk = 0
           out_path = "/tmp/force_bootstrap_out.txt"
@@ -115,6 +135,8 @@ jobs:
               )
               text = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
               return proc.returncode, text
+
+          _PROGRESS_PHASES = {"store_ready", "advance_timeout", "advance_error"}
 
           def last_status(text: str):
               last = None
@@ -135,12 +157,102 @@ jobs:
                       last_with_status = obj
               return last_with_status or last
 
+          def _rc_token(text: str):
+              for line in text.splitlines():
+                  if line.startswith("RC="):
+                      return line.split("=", 1)[1].strip()
+              return None
+
+          def _rc_terminal(token) -> bool:
+              if not token or token == "missing":
+                  return False
+              try:
+                  int(token)
+              except ValueError:
+                  return False
+              return True
+
+          def _out_bytes(text: str):
+              for line in text.splitlines():
+                  parts = line.split()
+                  if len(parts) >= 2 and parts[0].isdigit() and parts[1].endswith("force_chunk_out.txt"):
+                      return int(parts[0])
+              return None
+
+          def _terminal_status(obj) -> bool:
+              return isinstance(obj, dict) and (
+                  obj.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
+                  or obj.get("dry_run") is True
+              )
+
+          def _progress_obj(obj) -> bool:
+              # Intermediate guest phases are not a chunk result.
+              if not isinstance(obj, dict) or _terminal_status(obj):
+                  return False
+              phase = obj.get("phase")
+              if phase in _PROGRESS_PHASES or (isinstance(phase, str) and phase):
+                  return True
+              return any(key in obj for key in ("probe", "freezer_started", "round", "progress"))
+
+          def _defer_provisional(obj, rc_token) -> bool:
+              # pre_advance BOOTSTRAP_PARTIAL is a crash sentinel. Keep waiting
+              # while the guest is still running so a live chunk is not cut off.
+              return (
+                  isinstance(obj, dict)
+                  and obj.get("provisional") is True
+                  and obj.get("status") == "BOOTSTRAP_PARTIAL"
+                  and not _rc_terminal(rc_token)
+              )
+
+          def _fresh_status(text: str):
+              if "STATUS_FILE={" not in text:
+                  return None
+              try:
+                  raw = text.split("STATUS_FILE=", 1)[1].splitlines()[0].strip()
+                  cand = json.loads(raw)
+              except Exception:
+                  return None
+              if _terminal_status(cand):
+                  return cand
+              return None
+
+          def _partial_from_dead_chunk(last, rc_token) -> dict:
+              phase = last.get("phase") if isinstance(last, dict) else None
+              if isinstance(last, dict) and last.get("status") == "BOOTSTRAP_PARTIAL" and last.get("provisional") is not True:
+                  return last
+              return {
+                  "ok": True,
+                  "status": "BOOTSTRAP_PARTIAL",
+                  "deadline": True,
+                  "rc": rc_token,
+                  "phase": phase,
+                  "observed": last if isinstance(last, dict) else None,
+                  "reason": "terminal_rc_no_progress",
+                  "source_cleanup_authorized": False,
+              }
+
           def wait_chunk_result(timeout_s: int = 90):
               deadline = time.time() + timeout_s
+              # If the guest is still in a progress phase and has not exited,
+              # do not stop at the first deadline and hand store_ready upward.
+              hard_stop = deadline + max(600, timeout_s)
               body = ""
               last = None
               saw_missing_status = False
-              while time.time() < deadline:
+              prev_fp = None
+              stable_polls = 0
+              while time.time() < hard_stop:
+                  if time.time() >= deadline:
+                      rc_now = _rc_token(body)
+                      # Slide the deadline only while progress can still arrive.
+                      if (
+                          not _rc_terminal(rc_now)
+                          and (_progress_obj(last) or last is None or _defer_provisional(last, rc_now))
+                          and deadline < hard_stop
+                      ):
+                          deadline = min(hard_stop, time.time() + 30)
+                      else:
+                          break
                   _rc2, body = exec_cmd(
                       "sh -lc 'echo RC=$(cat /tmp/force_chunk_rc.txt 2>/dev/null || echo missing); "
                       "echo STATUS_FILE=$(cat /tmp/force_chunk_status.json 2>/dev/null || echo missing); "
@@ -149,39 +261,60 @@ jobs:
                       timeout=60,
                   )
                   print(body[-6000:], flush=True)
+                  # Freshness: STATUS_FILE=missing proves this chunk's rm ran.
+                  # Only a later STATUS_FILE={...} belongs to this chunk.
                   if "STATUS_FILE=missing" in body:
                       saw_missing_status = True
-                  if "STATUS_FILE={" in body and saw_missing_status:
-                      try:
-                          raw = body.split("STATUS_FILE=", 1)[1].splitlines()[0].strip()
-                          cand = json.loads(raw)
-                          if cand.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"} or cand.get("dry_run") is True:
-                              return body, cand
-                      except Exception:
-                          pass
+                  rc_token = _rc_token(body)
+                  if saw_missing_status:
+                      cand = _fresh_status(body)
+                      if cand is not None and not _defer_provisional(cand, rc_token):
+                          return body, cand
                   last = last_status(body)
-                  if "RC=missing" in body:
+                  fp = (
+                      rc_token,
+                      _out_bytes(body),
+                      json.dumps(last, sort_keys=True, default=str) if isinstance(last, dict) else None,
+                  )
+                  if fp == prev_fp:
+                      stable_polls += 1
+                  else:
+                      stable_polls = 0
+                      prev_fp = fp
+                  if not _rc_terminal(rc_token):
+                      # Still running. store_ready / advance_* are not terminal.
+                      if time.time() + 5 >= deadline and deadline < hard_stop and (
+                          _progress_obj(last) or last is None or _defer_provisional(last, rc_token)
+                      ):
+                          deadline = min(hard_stop, deadline + 30)
                       time.sleep(5)
                       continue
                   # Only accept terminal JSON after we observed status missing
                   # (proves this chunk's rm ran) or after RC exists with status.
-                  if saw_missing_status and last and (
-                      last.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
-                      or last.get("dry_run") is True
-                  ):
+                  if saw_missing_status and _terminal_status(last) and not _defer_provisional(last, rc_token):
                       return body, last
-                  if ("RC=0" in body or "RC=1" in body) and last and last.get("status") in {
+                  # Exact RC (do not substring-match RC=137 as RC=1). A killed
+                  # guest that already printed BOOTSTRAP_* is terminal.
+                  if _rc_terminal(rc_token) and isinstance(last, dict) and last.get("status") in {
                       "BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"
-                  }:
+                  } and not _defer_provisional(last, rc_token):
                       return body, last
+                  # RC is terminal and output stopped. Do not surface the phase JSON.
+                  if stable_polls >= 1 and (
+                      _progress_obj(last) or _defer_provisional(last, rc_token) or not _terminal_status(last)
+                  ):
+                      return body, _partial_from_dead_chunk(last, rc_token)
                   time.sleep(5)
+              rc_token = _rc_token(body)
+              if _rc_terminal(rc_token) and not (_terminal_status(last) and not _defer_provisional(last, rc_token)):
+                  return body, _partial_from_dead_chunk(last, rc_token)
               return body, last
 
 
           while elapsed < total:
               chunk += 1
               this = min(chunk_s, max(60, total - elapsed))
-              print(f"CHUNK={chunk} THIS={this} ELAPSED={elapsed} BUDGET={total}", flush=True)
+              print(f"CHUNK={chunk} THIS={this} ELAPSED={elapsed} BUDGET={total} CHUNK_S={chunk_s}", flush=True)
               run_cmd = (
                   "sh -lc "
                   f"'rm -f /tmp/force_chunk_out.txt /tmp/force_chunk_rc.txt /tmp/force_chunk.pid /tmp/force_chunk_status.json; "
@@ -213,8 +346,14 @@ jobs:
                   print(json.dumps({"force_bootstrap": "ok", "rounds": last.get("rounds"), "chunks": chunk}, sort_keys=True), flush=True)
                   sys.exit(0)
               if last.get("status") == "BOOTSTRAP_PARTIAL":
-                  print(json.dumps({"chunk_partial": True, "chunk": chunk, "final": last.get("final")}, sort_keys=True, default=str), flush=True)
+                  print(json.dumps({"chunk_partial": True, "chunk": chunk, "phase": last.get("phase"), "final": last.get("final"), "reason": last.get("reason")}, sort_keys=True, default=str), flush=True)
                   continue
+              phase = last.get("phase") if isinstance(last, dict) else None
+              if phase in _PROGRESS_PHASES or (isinstance(phase, str) and phase and not _terminal_status(last)):
+                  raise SystemExit(
+                      f"chunk {chunk} progress phase {phase!r} is not terminal; "
+                      "no fresh BOOTSTRAP_FORCED/BOOTSTRAP_PARTIAL/dry_run"
+                  )
               raise SystemExit(f"unexpected chunk status: {last}")
           raise SystemExit("budget exhausted without BOOTSTRAP_FORCED")
           PY

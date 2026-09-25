@@ -25,6 +25,9 @@ _KILL_TOKENS = (
     "btc_conservative_agent",
     "lifecycle_pipeline_worker",
 )
+# Mutable so the SIGTERM handler can stamp whatever progress exists.
+# SIGKILL (OOM, RC=137) cannot be caught; the pre-advance status write covers that.
+_RUN = {"rounds": 0, "last": None, "phase": "startup"}
 
 
 def _write_status(payload: dict) -> None:
@@ -32,8 +35,49 @@ def _write_status(payload: dict) -> None:
     payload["pid"] = os.getpid()
     payload["written_at"] = time.time()
     text = json.dumps(payload, sort_keys=True, default=str) + "\n"
-    STATUS_PATH.write_text(text, encoding="utf-8")
+    tmp = STATUS_PATH.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, STATUS_PATH)
     print(text, end="", flush=True)
+
+
+def _partial_status(**extra: object) -> dict:
+    payload = {
+        "ok": True,
+        "status": "BOOTSTRAP_PARTIAL",
+        "rounds": _RUN.get("rounds") or 0,
+        "final": _RUN.get("last"),
+        "phase": _RUN.get("phase"),
+        "source_cleanup_authorized": False,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _on_terminate(signum: int, _frame) -> None:
+    # Leave a real STATUS_FILE before exit. Never arm Bitfinex and never claim SAFE.
+    try:
+        _write_status(_partial_status(
+            provisional=False,
+            deadline=True,
+            reason="signal",
+            signal=int(signum),
+        ))
+    except Exception:
+        pass
+    code = 128 + int(signum)
+    os._exit(code if code <= 255 else 1)
+
+
+def _install_terminate_handlers() -> None:
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _on_terminate)
+        except (ValueError, OSError):
+            pass
 
 
 def _proc_cmdlines() -> list[tuple[int, str]]:
@@ -133,6 +177,7 @@ def _freezer(stop: threading.Event) -> None:
 def main() -> int:
     if not EXPECTED_EPOCH.startswith("epoch-"):
         raise SystemExit("EXPECTED_EPOCH required")
+    _install_terminate_handlers()
     sys.path.insert(0, "/app")
     import research_v3_store as store_module  # type: ignore
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
@@ -179,8 +224,13 @@ def main() -> int:
     # Give kernel a beat to release flock after SIGKILL before store init.
     time.sleep(1.5)
 
+    _RUN["phase"] = "store_init"
     store = store_module.V3EvidenceStore(RUNTIME, epoch_id=EXPECTED_EPOCH)
+    _RUN["phase"] = "store_ready"
     print(json.dumps({"phase": "store_ready"}, sort_keys=True), flush=True)
+    # Crash sentinel before the heavy advance loop. OOM is SIGKILL and cannot
+    # run the handler; this file is what the waiter reads after RC=137.
+    _write_status(_partial_status(provisional=True, deadline=False, reason="pre_advance"))
 
     started = time.time()
     rounds = 0
@@ -207,6 +257,8 @@ def main() -> int:
             worker.join(timeout=max(15.0, remaining - 2.0))
             if worker.is_alive():
                 hit_deadline = True
+                _RUN["phase"] = "advance_timeout"
+                _RUN["rounds"] = rounds
                 print(json.dumps({
                     "phase": "advance_timeout",
                     "rounds": rounds,
@@ -215,11 +267,15 @@ def main() -> int:
                 }, sort_keys=True), flush=True)
                 break
             if "error" in box:
+                _RUN["phase"] = "advance_error"
                 print(json.dumps({"phase": "advance_error", "error": box["error"]}, sort_keys=True), flush=True)
                 hit_deadline = True
                 break
             last = box.get("last")
             rounds += 1
+            _RUN["rounds"] = rounds
+            _RUN["last"] = last
+            _RUN["phase"] = "advance"
             print(json.dumps({
                 "round": rounds,
                 "progress": last,
@@ -235,24 +291,34 @@ def main() -> int:
         thr.join(timeout=1.0)
 
     if hit_deadline and not (isinstance(last, dict) and last.get("all_complete") is True):
+        _RUN["rounds"] = rounds
+        _RUN["last"] = last
         _write_status({
             "ok": True,
             "status": "BOOTSTRAP_PARTIAL",
+            "provisional": False,
             "rounds": rounds,
             "final": last,
+            "phase": _RUN.get("phase"),
             "bot_pids_after": _bot_pids(),
             "deadline": True,
+            "reason": "deadline",
             "source_cleanup_authorized": False,
         })
         # Hard-exit so a stuck LOCK_EX worker thread cannot keep the process alive.
         os._exit(0)
 
     final = store.advance_one_emergency_bootstrap_round_robin()
+    _RUN["phase"] = "forced"
+    _RUN["rounds"] = rounds
+    _RUN["last"] = final
     _write_status({
         "ok": True,
         "status": "BOOTSTRAP_FORCED",
+        "provisional": False,
         "rounds": rounds,
         "final": final,
+        "phase": "forced",
         "bot_pids_after": _bot_pids(),
         "source_cleanup_authorized": False,
     })
