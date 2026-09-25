@@ -1,0 +1,24 @@
+name: Fly invent size breakdown once
+
+# Read-only invent composition dump. Never moves/deletes; never arms Bitfinex.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  breakdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Dump invent size buckets
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          echo "MACHINE_ID=${machine_id}"
+          script_b64="$(base64 -w0 diagnostics/fly-invent-size-breakdown-once.py)"
+          flyctl machine exec --app doxed-btc-bot --timeout 120 "${machine_id}" \
+            "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-invent-size-breakdown-once.py && DATA_ROOT=/app/data python /tmp/fly-invent-size-breakdown-once.py'"
