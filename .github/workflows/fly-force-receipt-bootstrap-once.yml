@@ -21,8 +21,9 @@ on:
           - "false"
           - "true"
       expected_epoch:
+        description: Live collector epoch (auto-detected when blank/auto)
         required: true
-        default: epoch-281be253d7ee19636c6bf487
+        default: auto
         type: string
       expected_revision:
         required: true
@@ -30,7 +31,7 @@ on:
         type: string
       max_seconds:
         required: true
-        default: "1200"
+        default: "3600"
         type: string
 
 jobs:
@@ -99,9 +100,9 @@ jobs:
           assert len(active) == 1, active
           machine = active[0]["id"]
           apply = os.environ["APPLY"].strip().lower() in {"1", "true", "yes"}
-          epoch = os.environ["EXPECTED_EPOCH"]
+          epoch_in = os.environ["EXPECTED_EPOCH"].strip()
           total = max(60, int(os.environ["MAX_SECONDS"]))
-          chunk_s = 120
+          chunk_s = 90
           elapsed = 0
           chunk = 0
           out_path = "/tmp/force_bootstrap_out.txt"
@@ -116,6 +117,37 @@ jobs:
               text = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
               return proc.returncode, text
 
+          # Resolve live collector epoch from research_session.json when input is auto.
+          if epoch_in in {"", "auto", "AUTO"}:
+              _rc, live_body = exec_cmd(
+                  "sh -lc 'python - <<\"PY\"\\n"
+                  "import json\\n"
+                  "from pathlib import Path\\n"
+                  "for p in ("
+                  "Path(\"/app/data/runtime/research_session.json\"),"
+                  "Path(\"/app/data/research_session.json\"),"
+                  "Path(\"/app/research_session.json\"),"
+                  "):\\n"
+                  "  try:\\n"
+                  "    m=json.loads(p.read_text()); e=str(m.get(\"collector_v22_epoch_id\") or \"\").strip()\\n"
+                  "    if e.startswith(\"epoch-\"): print(e); raise SystemExit(0)\\n"
+                  "  except Exception: pass\\n"
+                  "raise SystemExit(\"no_live_epoch\")\\n"
+                  "PY'",
+                  timeout=30,
+              )
+              epoch = ""
+              for line in live_body.splitlines():
+                  s = line.strip()
+                  if s.startswith("epoch-"):
+                      epoch = s
+                      break
+              if not epoch:
+                  raise SystemExit(f"live epoch detect failed: {live_body[-1500:]}")
+              print(json.dumps({"live_epoch": epoch}, sort_keys=True), flush=True)
+          else:
+              epoch = epoch_in
+
           def last_status(text: str):
               last = None
               last_with_status = None
@@ -129,7 +161,7 @@ jobs:
                       continue
                   last = obj
                   if isinstance(obj, dict) and (
-                      obj.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
+                      obj.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL", "BOOTSTRAP_STARTING"}
                       or obj.get("dry_run") is True
                   ):
                       last_with_status = obj
@@ -156,25 +188,39 @@ jobs:
                           raw = body.split("STATUS_FILE=", 1)[1].splitlines()[0].strip()
                           cand = json.loads(raw)
                           if cand.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"} or cand.get("dry_run") is True:
-                              return body, cand
+                              # STARTING/PARTIAL mid-flight: keep waiting unless FORCED or deadline PARTIAL.
+                              if cand.get("status") == "BOOTSTRAP_FORCED" or cand.get("deadline") is True or cand.get("dry_run") is True:
+                                  return body, cand
+                              if cand.get("status") == "BOOTSTRAP_PARTIAL" and cand.get("phase") in {None, "advancing"} and "RC=missing" not in body:
+                                  last = cand
                       except Exception:
                           pass
-                  last = last_status(body)
+                  last = last_status(body) or last
+                  # OOM / SIGKILL of the force process: treat as retryable PARTIAL.
+                  if "Killed" in body and "RC=missing" not in body:
+                      return body, {"ok": True, "status": "BOOTSTRAP_PARTIAL", "phase": "oom_killed", "rounds": 0, "final": None, "deadline": True}
                   if "RC=missing" in body:
                       time.sleep(5)
                       continue
-                  # Only accept terminal JSON after we observed status missing
-                  # (proves this chunk's rm ran) or after RC exists with status.
                   if saw_missing_status and last and (
                       last.get("status") in {"BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"}
                       or last.get("dry_run") is True
                   ):
-                      return body, last
+                      if last.get("status") == "BOOTSTRAP_FORCED" or last.get("deadline") is True or last.get("dry_run") is True:
+                          return body, last
+                      if last.get("status") == "BOOTSTRAP_PARTIAL" and ("RC=0" in body or "RC=1" in body):
+                          return body, last
                   if ("RC=0" in body or "RC=1" in body) and last and last.get("status") in {
                       "BOOTSTRAP_FORCED", "BOOTSTRAP_PARTIAL"
                   }:
                       return body, last
                   time.sleep(5)
+              # Timed out waiting: if we saw progress, continue as PARTIAL.
+              if last and last.get("status") in {"BOOTSTRAP_PARTIAL", "BOOTSTRAP_STARTING"}:
+                  last = dict(last)
+                  last["status"] = "BOOTSTRAP_PARTIAL"
+                  last["deadline"] = True
+                  return body, last
               return body, last
 
 
@@ -182,6 +228,15 @@ jobs:
               chunk += 1
               this = min(chunk_s, max(60, total - elapsed))
               print(f"CHUNK={chunk} THIS={this} ELAPSED={elapsed} BUDGET={total}", flush=True)
+              # Ensure prior force leftovers and invent workers are gone before launch.
+              exec_cmd(
+                  "sh -lc 'for p in /proc/[0-9]*; do "
+                  "c=$(tr \"\\0\" \" \" < \"$p/cmdline\" 2>/dev/null || true); "
+                  "case \"$c\" in *fly-force-receipt-bootstrap*|*data_sync_inventory_worker*|*lifecycle_pipeline_worker*|*research_v3_future_paths_worker*) "
+                  "kill -9 $(basename \"$p\") 2>/dev/null || true;; esac; done; "
+                  "kill -CONT 1 2>/dev/null || true; true'",
+                  timeout=30,
+              )
               run_cmd = (
                   "sh -lc "
                   f"'rm -f /tmp/force_chunk_out.txt /tmp/force_chunk_rc.txt /tmp/force_chunk.pid /tmp/force_chunk_status.json; "
@@ -193,17 +248,18 @@ jobs:
                   "</dev/null >/dev/null 2>&1 & "
                   "echo $! > /tmp/force_chunk.pid; sleep 2; "
                   "echo LAUNCHED=$(cat /tmp/force_chunk.pid); "
-                  "ps -p $(cat /tmp/force_chunk.pid) -o pid=,args= || echo DEAD; "
-                  "head -n 3 /tmp/force_chunk_out.txt 2>/dev/null || true'"
+                  "head -n 5 /tmp/force_chunk_out.txt 2>/dev/null || true'"
               )
               # Short launch exec; setsid should keep guest work alive after return.
               rc, text = exec_cmd(run_cmd, timeout=30)
               print(f"launch_rc={rc} launch_tail={text[-800:]}", flush=True)
               time.sleep(2)
-              body, last = wait_chunk_result(timeout_s=max(180, this + 60))
+              body, last = wait_chunk_result(timeout_s=max(150, this + 45))
               with open(out_path, "a", encoding="utf-8") as fh:
                   fh.write(body + ("\n" if not body.endswith("\n") else ""))
               elapsed += this
+              # Always CONT entrypoint between chunks so API can breathe.
+              exec_cmd("sh -lc 'kill -CONT 1 2>/dev/null || true'", timeout=20)
               if last is None:
                   raise SystemExit(f"no JSON from chunk {chunk}; launch_rc={rc}")
               if not apply and last.get("dry_run") is True:
@@ -213,7 +269,7 @@ jobs:
                   print(json.dumps({"force_bootstrap": "ok", "rounds": last.get("rounds"), "chunks": chunk}, sort_keys=True), flush=True)
                   sys.exit(0)
               if last.get("status") == "BOOTSTRAP_PARTIAL":
-                  print(json.dumps({"chunk_partial": True, "chunk": chunk, "final": last.get("final")}, sort_keys=True, default=str), flush=True)
+                  print(json.dumps({"chunk_partial": True, "chunk": chunk, "final": last.get("final"), "phase": last.get("phase")}, sort_keys=True, default=str), flush=True)
                   continue
               raise SystemExit(f"unexpected chunk status: {last}")
           raise SystemExit("budget exhausted without BOOTSTRAP_FORCED")

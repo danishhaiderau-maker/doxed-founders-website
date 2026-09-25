@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Force receipt-bootstrap while keeping trading-bot writers off ledger locks.
+"""Force receipt-bootstrap while holding entrypoint restarts frozen.
 
-Fly guest image may lack `ps`/`pkill`; scan /proc instead. Advance calls can
-block forever on LOCK_EX, so each round runs in a worker thread with a join
-timeout and hard-exits the chunk with BOOTSTRAP_PARTIAL on stall.
+Fly entrypoint auto-restarts the bot every 3s. A continuous freezer that
+SIGKILLs the bot without SIGSTOP on PID 1 OOMs the force process. Sequence:
+
+1. SIGSTOP PID 1 (entrypoint restart loop)
+2. SIGKILL bot + lifecycle + invent + future_paths
+3. Bounded bootstrap rounds with early status heartbeats
+4. SIGCONT PID 1 in finally so HTTP/paper revive
+
+Never arms Bitfinex. Disk all_complete alone is not enough for invent; after
+this returns, a live lifecycle SUCCESS must project receipt_bootstrap COMPLETE.
 """
 from __future__ import annotations
 
@@ -24,7 +31,10 @@ STATUS_PATH = Path("/tmp/force_chunk_status.json")
 _KILL_TOKENS = (
     "btc_conservative_agent",
     "lifecycle_pipeline_worker",
+    "data_sync_inventory_worker",
+    "research_v3_future_paths_worker",
 )
+_entrypoint_stopped = False
 
 
 def _write_status(payload: dict) -> None:
@@ -32,7 +42,10 @@ def _write_status(payload: dict) -> None:
     payload["pid"] = os.getpid()
     payload["written_at"] = time.time()
     text = json.dumps(payload, sort_keys=True, default=str) + "\n"
-    STATUS_PATH.write_text(text, encoding="utf-8")
+    try:
+        STATUS_PATH.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        print(json.dumps({"status_write_error": str(exc)}, sort_keys=True), flush=True)
     print(text, end="", flush=True)
 
 
@@ -60,7 +73,7 @@ def _bot_pids() -> list[int]:
     me = os.getpid()
     found = []
     for pid, cmd in _proc_cmdlines():
-        if pid == me:
+        if pid == me or pid == 1:
             continue
         if "fly-force-receipt-bootstrap" in cmd:
             continue
@@ -72,7 +85,7 @@ def _bot_pids() -> list[int]:
 def _ps_snapshot() -> list[str]:
     out = []
     for pid, cmd in _proc_cmdlines():
-        if any(tok in cmd for tok in ("python", "btc", "lifecycle", "7002", "agent")):
+        if any(tok in cmd for tok in ("python", "btc", "lifecycle", "7002", "agent", "entrypoint")):
             out.append(f"{pid} {cmd[:200]}")
     return out[:40]
 
@@ -82,14 +95,15 @@ def _fuser_kill_ledgers() -> int:
     if not ledgers.is_dir():
         return 0
     n = 0
+    me = os.getpid()
     for path in ledgers.glob("*.jsonl*"):
-        # Best-effort: open+fcntl unlock isn't enough across processes; try
-        # killing whoever has the file open via /proc/pid/fd.
         try:
             target = str(path.resolve())
         except OSError:
             continue
         for pid, _cmd in _proc_cmdlines():
+            if pid in (me, 1):
+                continue
             fd_dir = Path(f"/proc/{pid}/fd")
             if not fd_dir.is_dir():
                 continue
@@ -117,40 +131,86 @@ def _kill_bots() -> int:
         try:
             os.kill(pid, signal.SIGKILL)
             killed += 1
-        except ProcessLookupError:
-            pass
-        except PermissionError:
+        except (ProcessLookupError, PermissionError):
             pass
     killed += _fuser_kill_ledgers()
     return killed
 
 
+def _stop_entrypoint() -> bool:
+    global _entrypoint_stopped
+    try:
+        os.kill(1, signal.SIGSTOP)
+        _entrypoint_stopped = True
+        return True
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        print(json.dumps({"entrypoint_sigstop_failed": f"{type(exc).__name__}:{exc}"}, sort_keys=True), flush=True)
+        return False
+
+
+def _cont_entrypoint() -> None:
+    global _entrypoint_stopped
+    if not _entrypoint_stopped:
+        return
+    try:
+        os.kill(1, signal.SIGCONT)
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        print(json.dumps({"entrypoint_sigcont_failed": f"{type(exc).__name__}:{exc}"}, sort_keys=True), flush=True)
+    _entrypoint_stopped = False
+
+
 def _freezer(stop: threading.Event) -> None:
-    while not stop.wait(0.35):
+    while not stop.wait(0.5):
         _kill_bots()
+
+
+def _resolve_epoch() -> str:
+    session_paths = (
+        RUNTIME / "research_session.json",
+        DATA_ROOT / "research_session.json",
+        Path("/app/research_session.json"),
+    )
+    for path in session_paths:
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        bound = str(meta.get("collector_v22_epoch_id") or "").strip()
+        if bound.startswith("epoch-"):
+            return bound
+    return EXPECTED_EPOCH
 
 
 def main() -> int:
     if not EXPECTED_EPOCH.startswith("epoch-"):
         raise SystemExit("EXPECTED_EPOCH required")
+    live_epoch = _resolve_epoch()
+    if live_epoch and live_epoch != EXPECTED_EPOCH:
+        # Prefer the live bound epoch; refuse silent mismatch only when both set.
+        print(json.dumps({
+            "epoch_resolve": {"expected": EXPECTED_EPOCH, "live": live_epoch},
+        }, sort_keys=True), flush=True)
+        epoch = live_epoch
+    else:
+        epoch = EXPECTED_EPOCH or live_epoch
+    if not epoch.startswith("epoch-"):
+        raise SystemExit("no live epoch resolved")
+
+    _write_status({"ok": True, "status": "BOOTSTRAP_STARTING", "epoch": epoch, "phase": "import"})
+
     sys.path.insert(0, "/app")
     import research_v3_store as store_module  # type: ignore
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
 
-    if MAX_SECONDS <= 45:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 64
-        store_module._BOOTSTRAP_BYTES_PER_STEP = 2 * 1024 * 1024
-    elif MAX_SECONDS <= 150:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 256
-        store_module._BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024
-    else:
-        store_module._BOOTSTRAP_RECORDS_PER_STEP = 1024
-        store_module._BOOTSTRAP_BYTES_PER_STEP = 16 * 1024 * 1024
+    # Keep batches small: force process shares a tiny Fly VM with entrypoint.
+    store_module._BOOTSTRAP_RECORDS_PER_STEP = 64
+    store_module._BOOTSTRAP_BYTES_PER_STEP = 2 * 1024 * 1024
 
     probe = {
         "data_root": str(DATA_ROOT),
         "runtime": str(RUNTIME),
-        "epoch": EXPECTED_EPOCH,
+        "epoch": epoch,
+        "expected_epoch_input": EXPECTED_EPOCH,
         "apply": APPLY,
         "bot_pids_before": _bot_pids(),
         "ps_snapshot": _ps_snapshot(),
@@ -162,8 +222,15 @@ def main() -> int:
     }
     print(json.dumps({"probe": probe}, sort_keys=True), flush=True)
     if not APPLY:
-        _write_status({"ok": True, "dry_run": True})
+        _write_status({"ok": True, "dry_run": True, "epoch": epoch})
         return 0
+
+    stopped = _stop_entrypoint()
+    _write_status({
+        "ok": True, "status": "BOOTSTRAP_PARTIAL", "phase": "entrypoint_stopped",
+        "entrypoint_stopped": stopped, "rounds": 0, "final": None, "deadline": False,
+        "source_cleanup_authorized": False,
+    })
 
     stop = threading.Event()
     thr = threading.Thread(target=_freezer, args=(stop,), daemon=True)
@@ -172,15 +239,20 @@ def main() -> int:
     killed = _kill_bots()
     print(json.dumps({
         "freezer_started": True,
+        "entrypoint_stopped": stopped,
         "killed": killed,
         "alive_after": _bot_pids(),
         "ps_after_kill": _ps_snapshot(),
     }, sort_keys=True), flush=True)
-    # Give kernel a beat to release flock after SIGKILL before store init.
-    time.sleep(1.5)
+    time.sleep(1.0)
 
-    store = store_module.V3EvidenceStore(RUNTIME, epoch_id=EXPECTED_EPOCH)
-    print(json.dumps({"phase": "store_ready"}, sort_keys=True), flush=True)
+    _write_status({
+        "ok": True, "status": "BOOTSTRAP_PARTIAL", "phase": "store_init",
+        "entrypoint_stopped": stopped, "rounds": 0, "final": None, "deadline": False,
+        "source_cleanup_authorized": False,
+    })
+    store = store_module.V3EvidenceStore(RUNTIME, epoch_id=epoch)
+    print(json.dumps({"phase": "store_ready", "epoch": epoch}, sort_keys=True), flush=True)
 
     started = time.time()
     rounds = 0
@@ -202,8 +274,6 @@ def main() -> int:
 
             worker = threading.Thread(target=_worker, daemon=True)
             worker.start()
-            # One emergency bootstrap round can exceed 20s under fsync load.
-            # Allow nearly the full chunk budget so rounds can actually complete.
             worker.join(timeout=max(15.0, remaining - 2.0))
             if worker.is_alive():
                 hit_deadline = True
@@ -226,6 +296,16 @@ def main() -> int:
                 "killed_bots": _kill_bots(),
                 "elapsed_s": round(time.time() - started, 1),
             }, sort_keys=True, default=str), flush=True)
+            _write_status({
+                "ok": True,
+                "status": "BOOTSTRAP_PARTIAL",
+                "phase": "advancing",
+                "rounds": rounds,
+                "final": last,
+                "deadline": False,
+                "entrypoint_stopped": stopped,
+                "source_cleanup_authorized": False,
+            })
             if isinstance(last, dict) and last.get("all_complete") is True:
                 break
             if isinstance(last, dict) and last.get("blocked") is True:
@@ -233,6 +313,7 @@ def main() -> int:
     finally:
         stop.set()
         thr.join(timeout=1.0)
+        _cont_entrypoint()
 
     if hit_deadline and not (isinstance(last, dict) and last.get("all_complete") is True):
         _write_status({
@@ -242,9 +323,9 @@ def main() -> int:
             "final": last,
             "bot_pids_after": _bot_pids(),
             "deadline": True,
+            "entrypoint_stopped": False,
             "source_cleanup_authorized": False,
         })
-        # Hard-exit so a stuck LOCK_EX worker thread cannot keep the process alive.
         os._exit(0)
 
     final = store.advance_one_emergency_bootstrap_round_robin()
@@ -254,6 +335,7 @@ def main() -> int:
         "rounds": rounds,
         "final": final,
         "bot_pids_after": _bot_pids(),
+        "entrypoint_stopped": False,
         "source_cleanup_authorized": False,
     })
     if final.get("all_complete") is not True:
@@ -262,4 +344,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        _cont_entrypoint()
