@@ -85,8 +85,6 @@ def main() -> int:
     from lifecycle_pipeline_worker import LEDGER_NAMES  # type: ignore
 
     # Raise cooperative caps for this one-shot only (module clamps use these).
-    # Incident needs multi-GB ledger indexing; default 64/8MiB is too slow under
-    # a single wall clock.
     store_module._BOOTSTRAP_RECORDS_PER_STEP = 4096
     store_module._BOOTSTRAP_BYTES_PER_STEP = 64 * 1024 * 1024
 
@@ -115,30 +113,44 @@ def main() -> int:
     time.sleep(0.5)
 
     store = store_module.V3EvidenceStore(RUNTIME, epoch_id=EXPECTED_EPOCH)
-    deadline = time.time() + MAX_SECONDS
+    started = time.time()
+    deadline = started + MAX_SECONDS
     rounds = 0
     last = None
+    hit_deadline = False
     try:
-        while time.time() < deadline:
+        while True:
+            if time.time() >= deadline:
+                hit_deadline = True
+                break
             last = store.advance_one_emergency_bootstrap_round_robin()
             rounds += 1
-            # Print every round so machine-exec pollers see live progress.
             print(json.dumps({
                 "round": rounds,
                 "progress": last,
                 "killed_bots": _kill_bots(),
-                "elapsed_s": round(time.time() - (deadline - MAX_SECONDS), 1),
+                "elapsed_s": round(time.time() - started, 1),
             }, sort_keys=True, default=str), flush=True)
             if last.get("all_complete") is True:
                 break
             if last.get("blocked") is True:
                 time.sleep(0.2)
-                continue
-        else:
-            raise SystemExit("BOOTSTRAP_DEADLINE:" + json.dumps(last or {}, sort_keys=True, default=str)[:2000])
     finally:
         stop.set()
         thr.join(timeout=2.0)
+
+    if hit_deadline and not (isinstance(last, dict) and last.get("all_complete") is True):
+        # Soft deadline for Fly machine-exec 600s hard cap; callers re-chunk.
+        print(json.dumps({
+            "ok": True,
+            "status": "BOOTSTRAP_PARTIAL",
+            "rounds": rounds,
+            "final": last,
+            "bot_pids_after": _bot_pids(),
+            "deadline": True,
+            "source_cleanup_authorized": False,
+        }, sort_keys=True, default=str), flush=True)
+        return 0
 
     final = store.advance_one_emergency_bootstrap_round_robin()
     print(json.dumps({
