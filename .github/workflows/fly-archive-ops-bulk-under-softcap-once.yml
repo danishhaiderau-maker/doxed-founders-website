@@ -1,0 +1,72 @@
+name: Fly archive ops bulk under softcap once
+
+# Quarantine ops logs + rebuildable qualification index into invent-excluded
+# research_archive/. Never arms Bitfinex. Soft-cap unchanged.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Must be true to move; false = list-only probe
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+jobs:
+  archive-ops:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Quarantine ops bulk under softcap
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+        run: |
+          set -euo pipefail
+          mid="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
+          echo "MACHINE_ID=$mid APPLY=$APPLY"
+          base64 -w0 diagnostics/fly-archive-ops-bulk-under-softcap-once.py > /tmp/ops_arch.b64
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+            "sh -lc 'rm -f /tmp/fly-archive-ops-bulk.py /tmp/ops_arch.b64 /tmp/ops_arch_out.json /tmp/ops_arch_rc.txt'"
+          split -b 3000 -d /tmp/ops_arch.b64 /tmp/ops_arch_part_
+          for part in /tmp/ops_arch_part_*; do
+            chunk="$(cat "$part")"
+            flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+              "sh -lc 'printf %s ${chunk} >> /tmp/ops_arch.b64'"
+          done
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+            "sh -lc 'base64 -d /tmp/ops_arch.b64 > /tmp/fly-archive-ops-bulk.py && wc -c /tmp/fly-archive-ops-bulk.py'"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$mid" \
+            "sh -lc 'rm -f /tmp/ops_arch_out.json /tmp/ops_arch_rc.txt; setsid nohup sh -c \"APPLY=${APPLY} DATA_ROOT=/app/data PYTHONUNBUFFERED=1 python -u /tmp/fly-archive-ops-bulk.py > /tmp/ops_arch_out.json 2>&1; echo \\$? > /tmp/ops_arch_rc.txt\" </dev/null >/dev/null 2>&1 & echo LAUNCHED=\$!'"
+          python - <<'PY'
+          import json, subprocess, time, sys
+          mid = subprocess.check_output(["flyctl","machines","list","--app","doxed-btc-bot","--json"], text=True)
+          rows=json.loads(mid)
+          machine=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}][0]["id"]
+          deadline=time.time()+480
+          while time.time()<deadline:
+              p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","45",machine,
+                "sh -lc 'echo RC=$(cat /tmp/ops_arch_rc.txt 2>/dev/null || echo missing); wc -c /tmp/ops_arch_out.json 2>/dev/null; tail -c 500 /tmp/ops_arch_out.json 2>/dev/null || true'"],
+                text=True, capture_output=True)
+              body=(p.stdout or "")+(("\n"+p.stderr) if p.stderr else "")
+              print(body[-2000:], flush=True)
+              if "RC=0" in body or "RC=1" in body or "RC=2" in body:
+                  break
+              time.sleep(5)
+          else:
+              raise SystemExit("ops archive timed out")
+          p=subprocess.run(["flyctl","machine","exec","--app","doxed-btc-bot","--timeout","60",machine,
+            "sh -lc 'python -c \"import json; d=json.load(open(\\\"/tmp/ops_arch_out.json\\\")); print(json.dumps({k:d.get(k) for k in [\\\"ok\\\",\\\"apply\\\",\\\"candidate_count\\\",\\\"eligible_mib\\\",\\\"bytes_moved_mib\\\",\\\"noop_reason\\\",\\\"archive_root\\\",\\\"error\\\",\\\"candidates\\\"]}, sort_keys=True))\"'"],
+            text=True, capture_output=True)
+          summary=(p.stdout or "")+(("\n"+p.stderr) if p.stderr else "")
+          print(summary, flush=True)
+          start=summary.find("{"); end=summary.rfind("}")
+          obj=json.loads(summary[start:end+1])
+          if obj.get("ok") is not True:
+              raise SystemExit("archive not ok")
+          PY
