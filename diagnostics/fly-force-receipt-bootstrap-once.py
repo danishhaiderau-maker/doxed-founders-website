@@ -2,7 +2,7 @@
 """Force receipt-bootstrap while keeping the trading bot from holding ledger locks.
 
 Fly entrypoint auto-restarts the bot every ~3s. This script:
-1) continuously SIGKILLs btc_conservative_agent.py so locks release
+1) continuously SIGKILLs bot/lifecycle writers so locks release
 2) advances emergency idempotency bootstrap round-robin until all_complete
 3) exits so the entrypoint can revive the bot
 
@@ -28,18 +28,22 @@ EXPECTED_EPOCH = str(os.environ.get("EXPECTED_EPOCH") or "").strip()
 APPLY = os.environ.get("APPLY", "false").strip().lower() in {"1", "true", "yes"}
 MAX_SECONDS = max(60, int(os.environ.get("MAX_SECONDS") or "1200"))
 RUNTIME = DATA_ROOT / "runtime"
+_KILL_MATCHES = (
+    "btc_conservative_agent.py",
+    "lifecycle_pipeline_worker.py",
+)
 
 
-def _bot_pids() -> list[int]:
+def _matching_pids(*needles: str) -> list[int]:
     try:
         out = subprocess.check_output(["ps", "-eo", "pid,args"], text=True, stderr=subprocess.DEVNULL)
     except Exception:
         return []
-    pids = []
+    pids: list[int] = []
     for line in out.splitlines():
-        if "btc_conservative_agent.py" not in line:
-            continue
         if "fly-force-receipt-bootstrap" in line:
+            continue
+        if not any(n in line for n in needles):
             continue
         parts = line.strip().split(None, 1)
         if not parts:
@@ -49,6 +53,10 @@ def _bot_pids() -> list[int]:
         except ValueError:
             pass
     return pids
+
+
+def _bot_pids() -> list[int]:
+    return _matching_pids(*_KILL_MATCHES)
 
 
 def _kill_bots() -> int:
@@ -78,7 +86,7 @@ def main() -> int:
 
     # Raise cooperative caps for this one-shot only (module clamps use these).
     # Incident needs multi-GB ledger indexing; default 64/8MiB is too slow under
-    # a single SSH wall clock.
+    # a single wall clock.
     store_module._BOOTSTRAP_RECORDS_PER_STEP = 4096
     store_module._BOOTSTRAP_BYTES_PER_STEP = 64 * 1024 * 1024
 
@@ -91,6 +99,7 @@ def main() -> int:
         "ledgers": list(LEDGER_NAMES),
         "records_cap": store_module._BOOTSTRAP_RECORDS_PER_STEP,
         "bytes_cap": store_module._BOOTSTRAP_BYTES_PER_STEP,
+        "pid": os.getpid(),
     }
     print(json.dumps({"probe": probe}, sort_keys=True), flush=True)
     if not APPLY:
@@ -101,7 +110,8 @@ def main() -> int:
     thr = threading.Thread(target=_freezer, args=(stop,), daemon=True)
     thr.start()
     time.sleep(1.0)
-    _kill_bots()
+    killed = _kill_bots()
+    print(json.dumps({"freezer_started": True, "killed": killed, "alive_after": _bot_pids()}, sort_keys=True), flush=True)
     time.sleep(0.5)
 
     store = store_module.V3EvidenceStore(RUNTIME, epoch_id=EXPECTED_EPOCH)
@@ -112,8 +122,13 @@ def main() -> int:
         while time.time() < deadline:
             last = store.advance_one_emergency_bootstrap_round_robin()
             rounds += 1
-            if rounds == 1 or rounds % 25 == 0 or last.get("all_complete") is True or last.get("blocked") is True:
-                print(json.dumps({"round": rounds, "progress": last}, sort_keys=True, default=str), flush=True)
+            # Print every round so machine-exec pollers see live progress.
+            print(json.dumps({
+                "round": rounds,
+                "progress": last,
+                "killed_bots": _kill_bots(),
+                "elapsed_s": round(time.time() - (deadline - MAX_SECONDS), 1),
+            }, sort_keys=True, default=str), flush=True)
             if last.get("all_complete") is True:
                 break
             if last.get("blocked") is True:
