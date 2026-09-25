@@ -3,8 +3,8 @@ name: Fly force receipt bootstrap once
 # Freeze bot writers, force emergency idempotency bootstrap to all_complete,
 # then let entrypoint revive the bot. Never arms Bitfinex.
 #
-# Uses fly machine exec + nohup (not ssh console) — ssh console has hung for
-# 15+ minutes without ever starting the freezer on this incident.
+# Fly machine-exec hard-caps at 600s. We chunk ≤480s foreground execs until
+# all_complete. ssh console hung on this incident; nohup-under-exec was reaped.
 
 on:
   workflow_dispatch:
@@ -72,7 +72,7 @@ jobs:
           print(json.dumps({"maintenance":"flat_paused","revision":expected}, sort_keys=True))
           PY
 
-      - name: Force receipt bootstrap via long machine exec
+      - name: Force receipt bootstrap via chunked machine exec
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           APPLY: ${{ inputs.apply }}
@@ -83,43 +83,81 @@ jobs:
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, active; print(active[0]["id"])')"
           echo "MACHINE_ID=${machine_id}"
           script_b64="$(base64 -w0 diagnostics/fly-force-receipt-bootstrap-once.py)"
-          # Drop script with a short exec, then run bootstrap in the FOREGROUND.
-          # Prior nohup-under-machine-exec was reaped when exec returned (bot PID
-          # stayed stable; freezer never ran). ssh console also hung on this app.
           flyctl machine exec --app doxed-btc-bot --timeout 60 "${machine_id}" \
             "sh -lc 'echo ${script_b64} | base64 -d > /tmp/fly-force-receipt-bootstrap-once.py && wc -c /tmp/fly-force-receipt-bootstrap-once.py'"
-          exec_timeout=$(( MAX_SECONDS + 180 ))
-          echo "EXEC_TIMEOUT=${exec_timeout}"
-          set +e
-          repair_output="$(flyctl machine exec --app doxed-btc-bot --timeout "${exec_timeout}" "${machine_id}" \
-            "sh -lc 'APPLY=${APPLY} EXPECTED_EPOCH=${EXPECTED_EPOCH} MAX_SECONDS=${MAX_SECONDS} DATA_ROOT=/app/data PYTHONUNBUFFERED=1 python -u /tmp/fly-force-receipt-bootstrap-once.py'" 2>&1)"
-          rc=$?
-          set -e
-          printf '%s\n' "$repair_output" | tee /tmp/force_bootstrap_out.txt
+
           python - <<'PY'
-          import json, os
-          apply = os.environ.get("APPLY", "false").strip().lower() in {"1", "true", "yes"}
-          text = open("/tmp/force_bootstrap_out.txt", encoding="utf-8", errors="replace").read()
-          last = None
-          for line in text.splitlines():
-              if not line.lstrip().startswith("{"):
+          import json, os, subprocess, sys, time
+          machine_id = subprocess.check_output(
+              ["flyctl", "machines", "list", "--app", "doxed-btc-bot", "--json"],
+              text=True,
+          )
+          rows = json.loads(machine_id)
+          active = [r for r in rows if str(r.get("state") or "").lower() not in {"destroyed", "stopped"}]
+          assert len(active) == 1, active
+          mid = active[0]["id"]
+          apply = os.environ["APPLY"].strip().lower() in {"1", "true", "yes"}
+          epoch = os.environ["EXPECTED_EPOCH"]
+          total = max(60, int(os.environ["MAX_SECONDS"]))
+          chunk_s = 480
+          elapsed = 0
+          chunk = 0
+          out_path = "/tmp/force_bootstrap_out.txt"
+          open(out_path, "w", encoding="utf-8").close()
+
+          def last_status(text: str):
+              last = None
+              for line in text.splitlines():
+                  s = line.strip()
+                  if not s.startswith("{"):
+                      continue
+                  try:
+                      last = json.loads(s)
+                  except Exception:
+                      pass
+              return last
+
+          while elapsed < total:
+              chunk += 1
+              this = min(chunk_s, max(60, total - elapsed))
+              print(f"CHUNK={chunk} THIS={this} ELAPSED={elapsed} BUDGET={total}", flush=True)
+              cmd = [
+                  "flyctl", "machine", "exec",
+                  "--app", "doxed-btc-bot",
+                  "--timeout", "600",
+                  mid,
+                  (
+                      "sh -lc "
+                      f"'APPLY={str(apply).lower()} EXPECTED_EPOCH={epoch} MAX_SECONDS={this} "
+                      "DATA_ROOT=/app/data PYTHONUNBUFFERED=1 "
+                      "python -u /tmp/fly-force-receipt-bootstrap-once.py'"
+                  ),
+              ]
+              proc = subprocess.run(cmd, text=True, capture_output=True)
+              text = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+              with open(out_path, "a", encoding="utf-8") as fh:
+                  fh.write(text)
+                  if not text.endswith("\n"):
+                      fh.write("\n")
+              print(text[-6000:], flush=True)
+              elapsed += this
+              last = last_status(text)
+              if last is None:
+                  raise SystemExit(f"no JSON from chunk {chunk}; rc={proc.returncode}")
+              if not apply and last.get("dry_run") is True:
+                  print(json.dumps({"dry_run": "ok"}, sort_keys=True), flush=True)
+                  sys.exit(0)
+              if last.get("status") == "BOOTSTRAP_FORCED" and (last.get("final") or {}).get("all_complete") is True:
+                  print(json.dumps({"force_bootstrap": "ok", "rounds": last.get("rounds"), "chunks": chunk}, sort_keys=True), flush=True)
+                  sys.exit(0)
+              if last.get("status") == "BOOTSTRAP_PARTIAL":
+                  print(json.dumps({"chunk_partial": True, "chunk": chunk, "final": last.get("final")}, sort_keys=True, default=str), flush=True)
                   continue
-              try:
-                  last = json.loads(line)
-              except Exception:
-                  pass
-          if last is None:
-              raise SystemExit("no JSON from force-bootstrap script")
-          if apply:
-              assert last.get("ok") is True and last.get("status") == "BOOTSTRAP_FORCED", last
-              final = last.get("final") or {}
-              assert final.get("all_complete") is True, last
-              print(json.dumps({"force_bootstrap": "ok", "rounds": last.get("rounds")}, sort_keys=True))
-          else:
-              assert last.get("ok") is True and last.get("dry_run") is True, last
-              print(json.dumps({"dry_run": "ok"}, sort_keys=True))
+              if proc.returncode != 0:
+                  raise SystemExit(f"chunk {chunk} failed rc={proc.returncode}: {last}")
+              raise SystemExit(f"unexpected chunk status: {last}")
+          raise SystemExit("budget exhausted without BOOTSTRAP_FORCED")
           PY
-          if [ "$rc" -ne 0 ]; then exit "$rc"; fi
 
       - name: Wait invent publish then resume paper
         if: inputs.apply == 'true'
@@ -136,7 +174,6 @@ jobs:
               data = None if payload is None else json.dumps(payload).encode()
               req = urllib.request.Request(base+path, data=data, headers={**headers, **({"Content-Type":"application/json"} if data else {})}, method="POST" if data is not None else "GET")
               with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
-          # Entrypoint revives bot; re-pause until invent leaves empty BUILDING.
           deadline = time.time() + 1200
           last = None
           invent_ok = False
