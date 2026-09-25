@@ -396,6 +396,38 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
             emergency_bootstrap = (
                 evidence_store.advance_one_emergency_bootstrap_round_robin()
             )
+        # When disk bootstrap is already all_complete, publish SUCCESS *before*
+        # process_incremental_lifecycle_pipeline. That scan can hang past the
+        # parent 300s wall (0 rows); the kill drops an in-memory bootstrap
+        # result that was never written — invent stays WAITING forever.
+        if (
+            isinstance(emergency_bootstrap, dict)
+            and emergency_bootstrap.get("all_complete") is True
+        ):
+            payload = {
+                "schema": RESULT_SCHEMA,
+                "status": "SUCCESS",
+                "nonce": nonce,
+                "source_revision": str(request.get("source_revision") or ""),
+                "launched_unix": float(request.get("launched_unix") or 0.0),
+                "started_unix": started,
+                "generated_unix": time.time(),
+                "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "request_sha256": request["_request_sha256"],
+                "pipeline": {
+                    "scan": {
+                        "caught_up": False,
+                        "pending_dirty_lifecycles": 0,
+                    },
+                    "bootstrap_early_exit": True,
+                },
+                "emergency_wal": emergency_wal,
+                "emergency_idempotency_bootstrap": emergency_bootstrap,
+                "hard_runtime_result_deadline_enforced": True,
+                "source_cleanup_authorized": False,
+            }
+            _write_result(result_path, payload)
+            return 0
         pipeline = process_incremental_lifecycle_pipeline(
             request["_data_root"], now=request["_now"],
             current_epoch_id=request.get("_epoch_id"),
