@@ -59,13 +59,27 @@ jobs:
               data = None if payload is None else json.dumps(payload).encode()
               req = urllib.request.Request(base+path, data=data, headers={**headers, **({"Content-Type":"application/json"} if data else {})}, method="POST" if data is not None else "GET")
               with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          # After prior SIGSTOP/cancel, wait for HTTP to return before safety checks.
+          for _ in range(36):
+              try:
+                  ready = call("/ready", timeout=20)
+                  status = call("/api/status", timeout=30)
+              except Exception as exc:
+                  print(f"wait_ready: {type(exc).__name__}: {exc}", flush=True)
+                  time.sleep(5)
+                  continue
+              if ready.get("ok") is True and str(status.get("source_git_rev") or "").lower() == expected:
+                  break
+              time.sleep(5)
+          else:
+              raise SystemExit("bot not ready after restore wait")
           status = call("/api/status")
           if str(status.get("source_git_rev") or "").lower() != expected:
               raise SystemExit(f"revision mismatch: {status.get('source_git_rev')}")
           if not (status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False):
               raise SystemExit("paper-only disarmed safety not proven")
           call("/api/pause", {})
-          for _ in range(12):
+          for _ in range(20):
               status = call("/api/status"); progress = status.get("strategy_progress") or {}
               if (status.get("execution_paused") is True and status.get("manual_admin_pause") is True
                   and int(progress.get("pending_orders") or 0) == 0 and int(progress.get("open_positions") or 0) == 0):
