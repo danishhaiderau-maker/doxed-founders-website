@@ -14,13 +14,14 @@ on:
   workflow_dispatch:
     inputs:
       recover_stalled_paper_boundary:
-        description: "Deploy the lock repair when the old runtime is provably paper-only, disarmed, and deadlocked"
+        description: "Path C only: disarmed force-paper book, open=0, pending>0, and a proven >=2h flat-check pending stall. Does not arm."
         required: false
         default: false
         type: boolean
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: fly-btc-production
@@ -69,6 +70,7 @@ jobs:
           python test_platform_relay_lane_isolation.py
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
+          python ${{ github.workspace }}/scripts/test_prove_stalled_paper_boundary.py
 
       - uses: actions/setup-node@v4
         with:
@@ -92,37 +94,17 @@ jobs:
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
         run: node scripts/check-relay-flat.mjs
 
-      - name: Prove emergency recovery is restricted to a stalled paper-only boundary
+      # Path C paper pending stall. Eligibility is /ready only. The stall
+      # window is a >=2h flat-check failure streak from this workflow's logs.
+      # Soft B, Force, and arm stay no-go. This step does not widen to live.
+      - name: Prove emergency recovery is restricted to a paper pending stall
         if: ${{ inputs.recover_stalled_paper_boundary }}
-        run: |
-          python - <<'PY'
-          import json
-          import urllib.request
-
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
-              health = json.load(response)
-          progress = health.get("strategy_progress") or {}
-          reasons = set(progress.get("reasons") or [])
-          incident = health.get("strategy_progress_incident") or {}
-          assert response.status == 200 and health.get("process_alive") is True, health
-          assert health.get("force_paper_mode") is True, health
-          assert health.get("live_armed") is False, health
-          assert health.get("bitfinex_live_enabled") is False, health
-          assert incident.get("new_entries_suppressed") is True, incident
-          assert progress.get("trade_lock_available") is False, progress
-          assert "TRADE_LOCK_UNAVAILABLE" in reasons, progress
-          assert int(progress.get("open_positions") or 0) > 0 or int(progress.get("pending_orders") or 0) > 0, progress
-          print(json.dumps({
-              "recovery": "stalled_paper_boundary",
-              "revision": health.get("source_git_rev"),
-              "paper_only": health.get("force_paper_mode"),
-              "live_armed": health.get("live_armed"),
-              "bitfinex_live_enabled": health.get("bitfinex_live_enabled"),
-              "positions": progress.get("open_positions"),
-              "pending": progress.get("pending_orders"),
-              "reasons": sorted(reasons),
-          }, sort_keys=True))
-          PY
+        working-directory: ${{ github.workspace }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/prove_stalled_paper_boundary.py
 
       - uses: superfly/flyctl-actions/setup-flyctl@master
 

@@ -122,6 +122,28 @@ test('manual Fly deployment is pinned to the BTC service context and flat bounda
   assert.doesNotMatch(helper, /Push-Location \$repoRoot/);
 });
 
+test('Path C recover gate reads /ready and proves a flat-check pending stall', async () => {
+  const workflow = await readFile(flyDeployPath, 'utf8');
+  const provePath = new URL('./prove_stalled_paper_boundary.py', import.meta.url);
+  const prove = await readFile(provePath, 'utf8');
+
+  assert.match(workflow, /if: \$\{\{ !inputs\.recover_stalled_paper_boundary \}\}/);
+  assert.match(workflow, /node scripts\/check-relay-flat\.mjs/);
+  assert.match(workflow, /python scripts\/prove_stalled_paper_boundary\.py/);
+  assert.match(workflow, /actions: read/);
+  assert.match(prove, /https:\/\/doxed-btc-bot\.fly\.dev\/ready/);
+  assert.doesNotMatch(prove, /doxed-btc-bot\.fly\.dev\/health/);
+  assert.doesNotMatch(prove, /relay-execution-state/);
+  assert.doesNotMatch(prove, /new_entries_suppressed/);
+  assert.doesNotMatch(prove, /TRADE_LOCK_UNAVAILABLE/);
+
+  const python = process.platform === 'win32' ? 'python.exe' : 'python3';
+  const result = spawnSync(python, [fileURLToPath(new URL('./test_prove_stalled_paper_boundary.py', import.meta.url))], {
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+});
+
 test('Fly deploy proves a disarmed paper-signal owner, never a direct live executor', async () => {
   const workflow = await readFile(flyDeployPath, 'utf8');
 
