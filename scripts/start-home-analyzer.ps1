@@ -1,7 +1,19 @@
 # Run the read-only desktop analyzer (30-min loop, or --Once) against the
 # canonical Fly data mirror. It binds to loopback and receives no trading,
 # exchange, Fly, Railway, or AI credentials.
-param([switch]$Once, [switch]$NoWait, [int]$Port = 0)
+#
+# Usage (from the repo root):
+#   .\scripts\start-home-analyzer.ps1 -Port 9001 -NoWait
+#   .\scripts\start-home-analyzer.ps1 -Port 9001 -NoWait -Restart
+#   .\scripts\start-home-analyzer.ps1 -Once -Port 9001
+#
+# -Port    Dashboard port. Defaults to the home-stack analyzer port (9001).
+# -NoWait  Start the engine detached and return. Stays compatible with -Restart.
+# -Once    Single analyzer pass instead of the 30-minute loop.
+# -Restart Stop any home-analyzer engine for this port and the listener on
+#          -Port, then start clean. Local only: no Fly deploy, no live arm,
+#          no research-data wipe.
+param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0)
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir "home-stack-mode.ps1") -ErrorAction SilentlyContinue 2>$null
@@ -172,6 +184,59 @@ function Get-CanonicalAnalyzerEnginePids([int]$P) {
   # Legacy launchers did not put the port in argv. Treat every legacy engine as
   # a possible :9001 owner and fail closed instead of spawning over it.
   return @(($owned + $legacy) | Sort-Object -Unique)
+}
+
+function Stop-HomeAnalyzerOwners([int]$P) {
+  # Stop the research engine and the loopback dashboard on this port only.
+  # Command lines are checked before a recorded PID is killed so a recycled
+  # PID cannot take down an unrelated process.
+  $stopped = New-Object System.Collections.Generic.List[int]
+  foreach ($procId in @(Get-CanonicalAnalyzerEnginePids $P)) {
+    if (Stop-ProcessIdFast -ProcessId $procId) { [void]$stopped.Add([int]$procId) }
+  }
+  foreach ($name in @(".home-analyzer.pid", ".home-analyzer-dashboard.pid")) {
+    $pidFile = Join-Path $repoRoot $name
+    if (-not (Test-Path -LiteralPath $pidFile)) { continue }
+    $recorded = 0
+    try { $recorded = [int](Get-Content -LiteralPath $pidFile -Raw) } catch { $recorded = 0 }
+    if ($recorded -le 0 -or $stopped.Contains($recorded)) { continue }
+    $commandLine = ""
+    try { $commandLine = [string](Get-ProcessCommandLineFast -ProcessId $recorded) } catch { $commandLine = "" }
+    $owned = (
+      ($commandLine -match 'analyzer_research_engine_v62\.py') -or
+      ($commandLine -match 'research_dashboard\.py')
+    )
+    if ($owned -and (Stop-ProcessIdFast -ProcessId $recorded)) { [void]$stopped.Add($recorded) }
+  }
+  foreach ($procId in @(Stop-ListenPortFast $P)) {
+    $id = [int]$procId
+    if ($id -gt 0 -and -not $stopped.Contains($id)) { [void]$stopped.Add($id) }
+  }
+  foreach ($name in @(".home-analyzer.pid", ".home-analyzer-dashboard.pid")) {
+    Remove-Item -LiteralPath (Join-Path $repoRoot $name) -Force -ErrorAction SilentlyContinue
+  }
+}
+
+if ($Restart) {
+  Write-Host "Restart: stopping any home-analyzer engine and the listener on :$AnalyzerPort, then starting clean." -ForegroundColor Yellow
+  Write-Host "Local only. Does not deploy Fly, arm trading, or wipe research data." -ForegroundColor Yellow
+  Stop-HomeAnalyzerOwners $AnalyzerPort
+  $deadline = (Get-Date).AddSeconds(8)
+  while ((Test-PortOpen $AnalyzerPort) -and (Get-Date) -lt $deadline) {
+    Start-Sleep -Milliseconds 250
+    Stop-ListenPortFast $AnalyzerPort | Out-Null
+  }
+  $remaining = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)
+  if ((Test-PortOpen $AnalyzerPort) -or $remaining.Count -gt 0) {
+    Write-Host "REFUSED: -Restart could not clear :$AnalyzerPort. No new engine was started." -ForegroundColor Red
+    if ($remaining.Count -gt 0) {
+      Write-Host "Still running engine PIDs: $($remaining -join ', ')" -ForegroundColor Yellow
+    }
+    if ($lockHandle) { $lockHandle.Dispose() }
+    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
+    if (-not $NoWait) { Wait-ForKey }
+    exit 2
+  }
 }
 
 $discoveredEnginePids = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)

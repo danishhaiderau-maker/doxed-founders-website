@@ -12,7 +12,7 @@ from policy_search_manifest import POLICY_SEARCH_MANIFEST
 from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
 from research_v3_candidates import evaluate_protection_screen, load_candidate_inputs
 from research_v3_ranking import rank_safe_policies
-from equal_rights_ranking import build_equal_rights_ranking
+from equal_rights_ranking import build_equal_rights_ranking, load_analyzer_companions
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
 
@@ -400,6 +400,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         report=report,
         lifecycles=terminal_lifecycles,
         candidates=(candidate_screen or {}).get("candidates") or candidates or [],
+        companions=load_analyzer_companions(str(report_dir), str(data_dir)),
     )
     _atomic_json(Path(report_dir) / REPORT_FILE, report)
     return report

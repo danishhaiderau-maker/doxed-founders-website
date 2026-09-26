@@ -390,6 +390,118 @@ def test_mirror_stale_banner():
     assert "MIRROR_STALE" in banner_ids
 
 
+def test_compatible_analyzer_counts_are_not_spuriously_zero():
+    """FRESH digest n and shadow/CF/missed artifacts must show up when the genome embed is empty."""
+    empty = build_equal_rights_ranking(report={})
+    payload = equal_rights_from_report(
+        {
+            "generated_at": "2026-09-26T01:00:00Z",
+            "data_scope": "FRESH-COLLECTION",
+            "live_policy_change_allowed": False,
+            "collection": {},
+            "equal_rights": empty,
+        },
+        companions={
+            "compact": {
+                "schema": "research_hierarchy_v1",
+                "data_scope": "session",
+                "performance": {"trades": 57, "net_pnl_usd": -12.5, "expectancy_usd": -0.22},
+            },
+            "shadow_fill": {"shadow_cohort": 20, "shadow_filled": 11},
+            "counterfactual": {
+                "schema": "counterfactual_coverage_v1",
+                "n_shadow": 20,
+                "n_cf_in": 8,
+                "n_compact_out": 28,
+            },
+            "missed": {"schema": "missed_opportunity_heatmap_v1", "totals": {"events": 4}},
+            "paused_shadow": {"overall": {"closed": 3, "filled": 2, "net_pnl_usd": 1.5}},
+        },
+    )
+    by_id = {row["id"]: row for row in payload["surfaces"]}
+    assert by_id["paper"]["closed_n"] == 57
+    assert by_id["paper"]["fills"] == 57
+    assert by_id["paper"]["after_cost_expectancy_usd"] == round(-12.5 / 57, 6)
+    assert by_id["paper"]["safe_badge"] is None
+    assert by_id["shadow"]["closed_n"] == 11
+    assert by_id["shadow"]["after_cost_expectancy_usd"] is None
+    assert by_id["shadow"]["safe_badge"] is None
+    assert by_id["counterfactual"]["closed_n"] == 0
+    assert by_id["counterfactual"]["qualification"] == "EMPTY"
+    assert by_id["counterfactual"]["safe_badge"] is None
+    secondary = {row["id"]: row for row in payload["digest"]["secondary_worlds"]}
+    assert secondary["cf_evidence"]["closed_n"] == 8
+    assert secondary["cf_evidence"]["world"] == "CF"
+    assert secondary["cf_evidence"]["safe_badge"] is None
+    assert secondary["cf_evidence"]["qualification"] == "NOT_A_STRATEGY_RANK"
+    assert secondary["missed"]["closed_n"] == 4
+    assert secondary["shadow_blocked"]["closed_n"] == 3
+    assert secondary["missed"]["safe_badge"] is None
+    assert secondary["missed"]["qualification"] == "NOT_A_STRATEGY_RANK"
+    assert payload["safe_badge"] is None
+    assert payload["number_one"] is None
+    assert payload["qualification"] == "NO_SAFE_QUALIFIED_POLICY"
+    assert payload["comparison_rows"][0]["rank"] is None
+
+
+def test_missing_companion_artifacts_stay_empty():
+    payload = equal_rights_from_report(
+        {"equal_rights": build_equal_rights_ranking(report={})},
+        companions={
+            "compact": {},
+            "real_edge": {},
+            "shadow_fill": {"shadow_cohort": 9, "shadow_filled": 0},
+            "counterfactual": {"n_cf_in": 0, "n_compact_out": 9},
+            "missed": {"totals": {"events": 0}, "heatmap": []},
+            "paused_shadow": {"overall": {"closed": 0}},
+        },
+    )
+    assert all(row["closed_n"] == 0 for row in payload["surfaces"])
+    assert all(row["qualification"] == "EMPTY" for row in payload["surfaces"])
+    assert all(row["closed_n"] == 0 for row in payload["digest"]["secondary_worlds"])
+    assert payload["safe_badge"] is None
+    assert payload["number_one"] is None
+
+
+def test_genome_counts_are_not_replaced_by_digest_trades():
+    payload = equal_rights_from_report(
+        {"collection": {"outcome_states": {"REALIZED_PROFIT": 2}}},
+        companions={"compact": {"performance": {"trades": 57, "net_pnl_usd": 100.0}}},
+    )
+    paper = payload["surfaces"][0]
+    assert paper["closed_n"] == 2
+    assert paper["after_cost_expectancy_usd"] is None
+    assert paper["safe_badge"] is None
+    assert payload["number_one"] is None
+
+
+def test_digest_fallback_uses_real_edge_executed_when_trades_missing():
+    payload = equal_rights_from_report(
+        {},
+        companions={"real_edge": {"executed": 57, "executed_pnl_usd": 3.0}},
+    )
+    paper = payload["surfaces"][0]
+    assert paper["closed_n"] == 57
+    assert paper["after_cost_expectancy_usd"] == round(3.0 / 57, 6)
+    assert paper["safe_badge"] is None
+    assert payload["number_one"] is None
+
+
+def test_dashboard_binds_the_same_digest_artifacts():
+    dashboard = (ROOT / "research" / "research_dashboard.py").read_text(encoding="utf-8")
+    api = dashboard.split("def api_equal_rights_ranking", 1)[1].split("\ndef ", 1)[0]
+    assert "companions" in api
+    assert "COMPACT_SUMMARY_FILE" in api
+    assert "shadow_fill_outcome_report.json" in api
+    assert "counterfactual_coverage_report.json" in api
+    assert "missed_opportunity_heatmap.json" in api
+    bot = (ROOT / "bot.py").read_text(encoding="utf-8")
+    bot_api = bot.split("def api_equal_rights_ranking", 1)[1].split("\ndef ", 1)[0]
+    assert "load_analyzer_companions" in bot_api
+    report = (ROOT / "research" / "research_v3_report.py").read_text(encoding="utf-8")
+    assert "load_analyzer_companions(str(report_dir), str(data_dir))" in report
+
+
 def test_data_watcher_watches_heartbeat_file():
     src = Path(__file__).resolve().parent / "analyzer_research_engine_v62.py"
     text = src.read_text(encoding="utf-8")
@@ -419,6 +531,11 @@ def main() -> None:
         test_comparison_rows_include_fills_and_drawdown,
         test_heartbeat_identity_reader,
         test_mirror_stale_banner,
+        test_compatible_analyzer_counts_are_not_spuriously_zero,
+        test_missing_companion_artifacts_stay_empty,
+        test_genome_counts_are_not_replaced_by_digest_trades,
+        test_digest_fallback_uses_real_edge_executed_when_trades_missing,
+        test_dashboard_binds_the_same_digest_artifacts,
         test_data_watcher_watches_heartbeat_file,
     )
     for test in tests:

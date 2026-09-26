@@ -2011,7 +2011,22 @@ def api_equal_rights_ranking():
     report = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE, {}) or {}
     if not isinstance(report, dict):
         report = {}
-    return jsonify(equal_rights_from_report(report))
+
+    def _companion(name):
+        payload = _read_json(name, {}) or {}
+        return payload if isinstance(payload, dict) else {}
+
+    # Same artifacts the FRESH digest reads. Empty files stay empty; this does
+    # not invent fills or mint SAFE.
+    companions = {
+        "compact": _companion(COMPACT_SUMMARY_FILE),
+        "real_edge": _companion("real_edge_summary.json"),
+        "shadow_fill": _companion("shadow_fill_outcome_report.json"),
+        "counterfactual": _companion("counterfactual_coverage_report.json"),
+        "missed": _companion("missed_opportunity_heatmap.json"),
+        "paused_shadow": _companion("paused_shadow_research_report.json"),
+    }
+    return jsonify(equal_rights_from_report(report, companions=companions))
 
 
 @app.route("/api/conservative-fill-research")

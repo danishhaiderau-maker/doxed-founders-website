@@ -6,7 +6,9 @@ true on closed evidence. Missing worlds stay visible as EMPTY / NO_SAFE.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_v3_ranking import REQUIRED_GATES
@@ -376,16 +378,22 @@ def _comparison_rows(by_surface: Mapping[str, Mapping[str, _Accumulator]]) -> li
                 "safe_badge": "SAFE" if row_safe else None,
             }
             closed_n += acc.closed_n
-            if acc.expectancy is not None:
+            if acc.closed_n > 0 and acc.expectancy is None:
+                # A world with closes but no after-cost net cannot be ranked.
+                # Ignoring it would crown a partial bind.
+                expectancies.append(None)
+            elif acc.expectancy is not None:
                 expectancies.append(acc.expectancy)
             if row_safe:
                 safe = True
                 gates = {name: True for name in REQUIRED_GATES}
+        known = [value for value in expectancies if value is not None]
+        incomplete = any(value is None for value in expectancies)
         rendered.append({
             "policy_id": policy_id,
             "rank": None,
             "closed_n": closed_n,
-            "min_after_cost_expectancy_usd": min(expectancies) if expectancies else None,
+            "min_after_cost_expectancy_usd": None if incomplete or not known else min(known),
             "qualification": _qualify(closed_n, safe),
             "safe_badge": "SAFE" if safe else None,
             "gates": gates,
@@ -428,6 +436,7 @@ def build_equal_rights_ranking(
     report: Mapping[str, Any] | None = None,
     lifecycles: Iterable[Mapping[str, Any]] | None = None,
     candidates: Iterable[Mapping[str, Any]] | None = None,
+    companions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the three-world ranking. Empty worlds stay in the payload."""
     groups = _empty_groups()
@@ -452,7 +461,11 @@ def build_equal_rights_ranking(
                 "net": None,
                 "gates": None,
             })
-    return _payload_from_groups(groups, report)
+    return apply_companion_world_counts(
+        _payload_from_groups(groups, report),
+        companions,
+        report,
+    )
 
 
 _WORLD_TAGS = (
@@ -743,15 +756,162 @@ def _candidates_from_report(report: Mapping[str, Any]) -> list[Mapping[str, Any]
     return []
 
 
-def equal_rights_from_report(report: Mapping[str, Any] | None) -> dict[str, Any]:
+_COMPANION_FILES = (
+    ("compact", "research_compact_summary.json"),
+    ("real_edge", "real_edge_summary.json"),
+    ("shadow_fill", "shadow_fill_outcome_report.json"),
+    ("counterfactual", "counterfactual_coverage_report.json"),
+    ("missed", "missed_opportunity_heatmap.json"),
+    ("paused_shadow", "paused_shadow_research_report.json"),
+)
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def extract_companion_world_counts(companions: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Read world counts from the same analyzer artifacts the FRESH digest uses.
+
+    Counts stay absent when the artifact is missing. Nets are copied only when
+    the artifact already stored one. Nothing here mints SAFE or a fill.
+    """
+    companions = _as_mapping(companions)
+    performance = _as_mapping(_as_mapping(companions.get("compact")).get("performance"))
+    real_edge = _as_mapping(companions.get("real_edge"))
+    shadow_fill = _as_mapping(companions.get("shadow_fill"))
+    counterfactual = _as_mapping(companions.get("counterfactual"))
+    missed = _as_mapping(companions.get("missed"))
+    paused_overall = _as_mapping(_as_mapping(companions.get("paused_shadow")).get("overall"))
+
+    found: dict[str, dict[str, Any]] = {}
+    paper_n = _int_or_zero(performance.get("trades"))
+    paper_net = _float_or_none(performance.get("net_pnl_usd"))
+    if paper_n <= 0:
+        # Same fallback the research digest uses when performance.trades is empty.
+        paper_n = _int_or_zero(real_edge.get("executed"))
+        paper_net = _float_or_none(real_edge.get("executed_pnl_usd"))
+    if paper_n > 0:
+        found["paper"] = {"closed_n": paper_n, "net": paper_net, "fills": paper_n}
+
+    # shadow_filled is the analyzer shadow-outcome cohort (not a new fill).
+    # Net is omitted unless that report stored one, so expectancy stays unavailable.
+    shadow_n = _int_or_zero(shadow_fill.get("shadow_filled"))
+    if shadow_n > 0:
+        found["shadow"] = {"closed_n": shadow_n, "net": None, "fills": shadow_n}
+
+    # Generic counterfactual.jsonl rows are CF evidence. They are not a
+    # CONSERVATIVE_BBO fill-model rank unless a candidate names that world.
+    cf_n = _int_or_zero(counterfactual.get("n_cf_in"))
+    if cf_n > 0:
+        found["cf_evidence"] = {"closed_n": cf_n}
+
+    blocked_n = _int_or_zero(paused_overall.get("closed"))
+    if blocked_n > 0:
+        found["shadow_blocked"] = {"closed_n": blocked_n}
+
+    missed_totals = _as_mapping(missed.get("totals"))
+    missed_n = _int_or_zero(missed_totals.get("events"))
+    if missed_n <= 0:
+        heat = missed.get("heatmap") or missed.get("rows") or []
+        if isinstance(heat, list):
+            missed_n = sum(
+                _int_or_zero(row.get("count"))
+                for row in heat
+                if isinstance(row, Mapping)
+            )
+    if missed_n > 0:
+        found["missed"] = {"closed_n": missed_n}
+    return found
+
+
+def load_analyzer_companions(*roots: str) -> dict[str, Any]:
+    """Load digest companion JSON from report or mirror roots. Missing files stay empty."""
+    loaded: dict[str, Any] = {key: {} for key, _name in _COMPANION_FILES}
+    for root in roots:
+        if not root:
+            continue
+        base = Path(root)
+        for key, name in _COMPANION_FILES:
+            if loaded[key]:
+                continue
+            for path in (base / name, base / "reports" / name):
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(payload, dict) and payload:
+                    loaded[key] = payload
+                    break
+    return loaded
+
+
+def apply_companion_world_counts(
+    payload: dict[str, Any],
+    companions: Mapping[str, Any] | None,
+    report: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Fill still-empty worlds from compatible analyzer counts. Never overwrite evidence."""
+    counts = extract_companion_world_counts(companions)
+    if not counts:
+        return payload
+    groups = _groups_from_payload(payload)
+    filled = False
+    for surface_id in SURFACE_IDS:
+        spec = counts.get(surface_id)
+        if not spec or _int_or_zero(spec.get("closed_n")) <= 0:
+            continue
+        current = sum(acc.closed_n for acc in groups[surface_id].values())
+        if current > 0:
+            continue
+        _add_observation(groups, {
+            "surface": surface_id,
+            "policy_id": "UNATTRIBUTED",
+            "closed_n": spec.get("closed_n"),
+            "net": spec.get("net"),
+            "fills": spec.get("fills"),
+            "gates": None,
+        })
+        filled = True
+    if filled:
+        payload = _payload_from_groups(groups, report)
+    secondary = ((payload.get("digest") or {}).get("secondary_worlds") or [])
+    for row in secondary:
+        if not isinstance(row, dict) or _int_or_zero(row.get("closed_n")) > 0:
+            continue
+        spec = counts.get(str(row.get("id") or ""))
+        if not spec or _int_or_zero(spec.get("closed_n")) <= 0:
+            continue
+        row["closed_n"] = _int_or_zero(spec.get("closed_n"))
+        row["after_cost_expectancy_usd"] = None
+        row["safe_badge"] = None
+        row["qualification"] = "NOT_A_STRATEGY_RANK"
+        row["role"] = "EVIDENCE_ONLY"
+    return payload
+
+
+def equal_rights_from_report(
+    report: Mapping[str, Any] | None,
+    companions: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Prefer a stored view, then derive one. Both paths fail closed on SAFE."""
     report = report if isinstance(report, Mapping) else {}
     embedded = report.get("equal_rights")
     if isinstance(embedded, Mapping) and embedded.get("schema") == SCHEMA:
-        return sanitize_equal_rights(embedded, report)
+        payload = sanitize_equal_rights(embedded, report)
+        if not any(_int_or_zero(row.get("closed_n")) > 0 for row in payload.get("surfaces") or []):
+            payload = build_equal_rights_ranking(
+                report=report,
+                candidates=_candidates_from_report(report),
+                companions=companions,
+            )
+        else:
+            payload = apply_companion_world_counts(payload, companions, report)
+        return payload
     return build_equal_rights_ranking(
         report=report,
         candidates=_candidates_from_report(report),
+        companions=companions,
     )
 
 

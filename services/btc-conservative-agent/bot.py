@@ -33724,7 +33724,7 @@ def api_build():
 @app.route('/api/equal-rights-ranking')
 def api_equal_rights_ranking():
     """Read-only paper, shadow, and counterfactual ranks. Never arms trading."""
-    from equal_rights_ranking import equal_rights_from_report
+    from equal_rights_ranking import equal_rights_from_report, load_analyzer_companions
     report = {}
     roots = [os.getcwd()]
     for env_name in ("BTC_AGENT_REPORT_DIR", "DOXXED_FLY_MIRROR_DIR"):
@@ -33746,7 +33746,10 @@ def api_equal_rights_ranking():
                 break
         if report:
             break
-    return jsonify(equal_rights_from_report(report))
+    return jsonify(equal_rights_from_report(
+        report,
+        companions=load_analyzer_companions(*roots),
+    ))
 
 
 # ---- Read-only analyzer proxy (exposes :9001 research dashboard through the
