@@ -42,6 +42,7 @@ Everything in `docs/` is **safe to commit** — no production secrets.
 | [HYBRID_CONTROL_PLANE.md](./HYBRID_CONTROL_PLANE.md) | Control plane / Autopilot |
 | [PROJECT_AGENT_ARCHITECTURE.md](./PROJECT_AGENT_ARCHITECTURE.md) | Project agents, vault, BYOK brain |
 | [FOUNDER_COPILOT_SETUP.md](./FOUNDER_COPILOT_SETUP.md) | Copilot setup |
+| [FOUNDER-IDE-ASAP-PLAN.md](./FOUNDER-IDE-ASAP-PLAN.md) | Founder IDE audit + ASAP plan (Nucleus, providers, local agents) |
 
 ---
 
