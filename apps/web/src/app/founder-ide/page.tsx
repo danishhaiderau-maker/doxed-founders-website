@@ -250,8 +250,11 @@ export default function FounderIdePage() {
           </div>
         </section>
 
-        {/* DECISION LOG LINK */}
-        <section className='border-t border-zinc-800 pt-8'>
+        {/* DECISION LOG + NUCLEUS */}
+        <section className='flex flex-wrap gap-6 border-t border-zinc-800 pt-8'>
+          <Link href='/founder-ide/nucleus' className='text-sm text-violet-400 underline-offset-4 hover:underline'>
+            Open Nucleus (Founder Graph) →
+          </Link>
           <Link href='/founder-ide/decisions' className='text-sm text-violet-400 underline-offset-4 hover:underline'>
             View routing decision log →
           </Link>

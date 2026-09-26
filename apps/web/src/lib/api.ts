@@ -6253,6 +6253,19 @@ export function fetchFounderGraph(token: string) {
   return apiFetch<FounderGraphResponse>('/copilot/founder-graph', undefined, token);
 }
 
+/**
+ * Nucleus graph. Session JWT (`Bearer <accessToken>`) works here and on
+ * `GET /copilot/founder-graph`. The extension uses the same path with
+ * `Authorization: FounderNode {nodeId}:{nodeToken}` — see docs/NUCLEUS-FOUNDER-GRAPH.md.
+ */
+export function fetchIdeNucleus(token: string) {
+  return apiFetch<FounderGraphResponse & { auth?: 'jwt' | 'founder-node' }>(
+    '/ide/nucleus',
+    undefined,
+    token,
+  );
+}
+
 export type ProjectTimelineResponse = {
   days: number;
   entries: import('@dcf/utils').ProjectTimelineEntry[];

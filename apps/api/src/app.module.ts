@@ -75,6 +75,7 @@ import { DeploymentModesModule } from './deployment-modes/deployment-modes.modul
 import { FounderEconomicsModule } from './founder-economics/founder-economics.module';
 import { IntentEngineModule } from './intent-engine/intent-engine.module';
 import { SecondBrainModule } from './second-brain/second-brain.module';
+import { IdeNucleusModule } from './ide-nucleus/ide-nucleus.module';
 // Shared rate-limit store so every Railway replica sees the same counter.
 // Without this, @nestjs/throttler keeps an in-memory counter per replica and
 // the effective limit becomes ~N*config (e.g. @Throttle(5/min) -> ~5*N). With
@@ -166,6 +167,7 @@ const throttlerStorage = throttlerRedisUrl
     FounderEconomicsModule,
     IntentEngineModule,
     SecondBrainModule,
+    IdeNucleusModule,
   
   ],
   providers: [

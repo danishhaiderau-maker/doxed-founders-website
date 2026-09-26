@@ -43,6 +43,7 @@ Everything in `docs/` is **safe to commit** — no production secrets.
 | [PROJECT_AGENT_ARCHITECTURE.md](./PROJECT_AGENT_ARCHITECTURE.md) | Project agents, vault, BYOK brain |
 | [FOUNDER_COPILOT_SETUP.md](./FOUNDER_COPILOT_SETUP.md) | Copilot setup |
 | [FOUNDER-IDE-ASAP-PLAN.md](./FOUNDER-IDE-ASAP-PLAN.md) | Founder IDE audit + ASAP plan (Nucleus, providers, local agents) |
+| [NUCLEUS-FOUNDER-GRAPH.md](./NUCLEUS-FOUNDER-GRAPH.md) | Nucleus click → Founder Graph chat (P0) |
 
 ---
 

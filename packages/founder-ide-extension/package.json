@@ -132,6 +132,10 @@
         "title": "Founder OS: Manage connection"
       },
       {
+        "command": "founderOs.openNucleus",
+        "title": "Founder OS: Open Nucleus"
+      },
+      {
         "command": "founderOs.pair",
         "title": "Founder OS: Pair with Founder Node"
       },
@@ -160,6 +164,23 @@
         "title": "Founder OS: Open node-config.json"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "founder-os",
+          "title": "Founder OS",
+          "icon": "media/nucleus.svg"
+        }
+      ]
+    },
+    "views": {
+      "founder-os": [
+        {
+          "id": "founderOs.nucleus",
+          "name": "Nucleus"
+        }
+      ]
+    },
     "configuration": {
       "title": "Founder OS",
       "properties": {

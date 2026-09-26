@@ -90,9 +90,16 @@ The gateway owns routing, DDollar metering, and Flight Recorder logging. This ex
 | Command | Title |
 |--|--|
 | `founderOs.manage` | Founder OS: Manage connection |
+| `founderOs.openNucleus` | Founder OS: Open Nucleus |
 | `founderOs.pair` | Founder OS: Pair with Founder Node |
 | `founderOs.selectModel` | Founder OS: Select model alias |
 | `founderOs.openVaultConfig` | Founder OS: Open node-config.json |
+
+## Nucleus (Founder Graph)
+
+The activity bar **Founder OS → Nucleus** view (command `Founder OS: Open Nucleus`) loads `GET /api/ide/nucleus` with `Authorization: FounderNode {nodeId}:{nodeToken}` from `~/FounderVault/node-config.json`. Clicking a node highlights it, shows the context packet in the sidebar, and opens `@FounderOS` chat with that packet in the message and in the system prompt. The chat still calls `POST /api/v1/chat/completions` as **founder-os-auto** (or the active alias). The packet is kept in memory only — not in `localStorage` or extension global state.
+
+The same packet shape is used by the signed-in web route `/founder-ide/nucleus` (session JWT). See `docs/NUCLEUS-FOUNDER-GRAPH.md`.
 
 ## Test plan
 
