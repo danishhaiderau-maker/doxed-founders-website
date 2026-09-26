@@ -41,6 +41,7 @@ def format_melbourne_dt(value) -> str:
 
 
 from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
+from equal_rights_ranking import EQUAL_RIGHTS_CLIENT_JS, equal_rights_from_report
 
 try:
     from collector_v22_schema import RESEARCH_EVENTS_FILE
@@ -1177,8 +1178,20 @@ def _current_policy_grid_rows(limit: int = 100) -> dict:
     current = _policy_detail_is_current(detail, best)
     challenger = (detail.get("descriptive_challenger") or {}) if current else {}
     statistics = challenger.get("policy_search_statistics") or {}
+    def _expectancy_sort_key(item):
+        oos = item.get("oos") or {}
+        raw = oos.get("expectancy_usd")
+        try:
+            expectancy = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            expectancy = None
+        episodes = int(oos.get("independent_episodes") or 0)
+        # Missing expectancy sorts after real after-cost results, never as zero.
+        return (expectancy is None, -(expectancy or 0.0), -episodes, str(item.get("policy_id") or ""))
+
+    ranked_items = sorted(challenger.get("profitable_static_policies") or [], key=_expectancy_sort_key)
     rows = []
-    for rank, item in enumerate(challenger.get("profitable_static_policies") or [], start=1):
+    for rank, item in enumerate(ranked_items, start=1):
         train = item.get("train") or {}
         oos = item.get("oos") or {}
         episodes = int(oos.get("independent_episodes") or 0)
@@ -1983,9 +1996,22 @@ def api_safe_policy_genome_v3():
 def safe_policy_genome_v3_page():
     return render_template_string("""
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Safe Policy Genome V3.1</title>
-<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{max-width:1500px;margin:auto}.banner,.card{border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre{white-space:pre-wrap}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{overflow:auto}.muted{color:#8b949e}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div id="grid" class="grid"></div><div class="card"><h2>Number one complete safe strategy</h2><pre id="winner"></pre></div><div class="card"><h2>Profit-capture leaders by family</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are evaluated as complete entry-to-terminal paths.</p><div id="families"></div></div><div class="card"><h2>Drawdown-control leaders</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
-<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{},cs=d.candidate_screen||{},rows=cs.descriptive_top_100||[],dd=cs.drawdown_control_leaders||[],families=cs.profit_capture_leaders||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=[['Independent episodes',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Complete policies evaluated',cs.unique_policies_evaluated||s.unique_policies_evaluated||0],['Nominal search space',s.nominal_full_cartesian||0]];document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');document.getElementById('winner').textContent=JSON.stringify(d.number_one_strategy||{status:'NO SAFE QUALIFIED POLICY'},null,2);document.getElementById('families').innerHTML=Object.entries(families).map(([name,items])=>'<h3>'+name+'</h3><ol>'+items.slice(0,10).map(r=>'<li>'+r.policy_id+' · OOS $'+String(r.sealed_oos_net_usd??'—')+' · DD $'+String(r.max_drawdown_usd??'—')+'</li>').join('')+'</ol>').join('')||'<p>No matured family evidence yet.</p>';document.getElementById('drawdown').innerHTML=dd.length?dd.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.mean_underwater_observation_ratio??'—')+'</td></tr>').join(''):'<tr><td colspan="6">No matured drawdown evidence yet.</td></tr>';document.getElementById('descriptive').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+r.episodes_total+'</td><td>'+r.oos_episodes+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.cvar95_usd??'—')+'</td><td>'+Object.entries(r.gates||{}).filter(x=>x[1]!==true).map(x=>x[0]).join(', ')+'</td></tr>').join(''):'<tr><td colspan="9">No matured V3.1 policy evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,epoch_scope:d.epoch_scope,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search,candidate_warning:cs.warning},null,2);});</script></body></html>
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;padding:24px}a{color:#58a6ff}.wrap{max-width:1500px;margin:auto}.banner,.card{border:1px solid #30363d;background:#161b22;border-radius:9px;padding:14px;margin:12px 0}.bad{border-color:#d29922}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.value{font-size:24px;font-weight:700}pre{white-space:pre-wrap}table{width:100%;border-collapse:collapse;font-size:13px}th,td{border-bottom:1px solid #30363d;padding:8px;text-align:right}th:first-child,td:first-child{text-align:left}.scroll{overflow:auto}.muted{color:#8b949e}</style></head><body><div class="wrap"><a href="/">← Research Dashboard</a><h1>Research Collector V3.1 — Adaptive Exit and Drawdown Lab</h1><div id="banner" class="banner bad">Loading signed V3.1 report…</div><div id="grid" class="grid"></div><div class="card"><h2>Equal-rights ranks</h2><p class="muted">Paper (OBSERVED_PAPER), shadow (IDEAL_TOUCH), and counterfactual (CONSERVATIVE_BBO) use the same columns. Rank is after-cost expectancy. Win rate is not the rank. SAFE appears only when every safety gate passes.</p><div id="equal-rights-root">Loading equal-rights ranks…</div><h2>Qualified number one</h2><pre id="winner"></pre></div><div class="card"><h2>Descriptive profit-capture screen</h2><p class="muted">Fixed target, ATR trail, chandelier, MFE giveback and hybrid runner policies are descriptive only. Not a crown and not SAFE.</p><div id="families"></div></div><div class="card"><h2>Descriptive drawdown screen</h2><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>OOS net</th><th>Max DD</th><th>Retention</th><th>Underwater</th></tr></thead><tbody id="drawdown"></tbody></table></div></div><div class="card"><h2>Descriptive complete-policy screen (top 100)</h2><p class="muted">Visible for transparency only. These rows cannot authorize live trading until every safety gate passes.</p><div class="scroll"><table><thead><tr><th>Policy</th><th>Family</th><th>Episodes</th><th>OOS</th><th>Net USD</th><th>Max DD</th><th>Retention</th><th>CVaR95</th><th>Blocked gates</th></tr></thead><tbody id="descriptive"></tbody></table></div></div><div class="card"><h2>Search and blockers</h2><pre id="detail"></pre></div></div>
+<script>fetch('/api/safe-policy-genome-v3.1').then(r=>r.json()).then(d=>{const c=d.collection||{},s=d.search_progress||{},cs=d.candidate_screen||{},rows=cs.descriptive_top_100||[],dd=cs.drawdown_control_leaders||[],families=cs.profit_capture_leaders||{};document.getElementById('banner').textContent=(d.status||'—')+' · '+(d.qualification||'—')+' · Real Bitfinex allowed: '+(d.real_bitfinex_trading_allowed?'YES':'NO')+' · '+(d.note||'');const cards=[['Independent episodes',c.independent_opportunities||0],['Decision branches',c.decision_branches||0],['Terminal lifecycles',c.terminal_lifecycles||0],['Market segments',c.market_segments||0],['Complete policies evaluated',cs.unique_policies_evaluated||s.unique_policies_evaluated||0],['Nominal search space',s.nominal_full_cartesian||0]];document.getElementById('grid').innerHTML=cards.map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');const required=((d.safe_policy_ranking||{}).required_gates)||[];const gates=(((d.number_one_strategy||{}).gates)||{});const crowned=d.qualification==='QUALIFIED'&&required.length>0&&required.every(name=>gates[name]===true);document.getElementById('winner').textContent=crowned?JSON.stringify(d.number_one_strategy,null,2):'NO_SAFE — no strategy is crowned. A SAFE result requires every safety gate to pass on real evidence.';document.getElementById('families').innerHTML=Object.entries(families).map(([name,items])=>'<h3>'+name+'</h3><ul>'+items.slice(0,10).map(r=>'<li>'+r.policy_id+' · OOS $'+String(r.sealed_oos_net_usd??'—')+' · DD $'+String(r.max_drawdown_usd??'—')+' · NO_SAFE unless every gate passes</li>').join('')+'</ul>').join('')||'<p>No matured family evidence yet.</p>';document.getElementById('drawdown').innerHTML=dd.length?dd.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.mean_underwater_observation_ratio??'—')+'</td></tr>').join(''):'<tr><td colspan="6">No matured drawdown evidence yet.</td></tr>';document.getElementById('descriptive').innerHTML=rows.length?rows.map(r=>'<tr><td>'+r.policy_id+'</td><td>'+r.policy_family+'</td><td>'+r.episodes_total+'</td><td>'+r.oos_episodes+'</td><td>'+String(r.sealed_oos_net_usd??'—')+'</td><td>'+String(r.max_drawdown_usd??'—')+'</td><td>'+String(r.mean_profit_retention_ratio??'—')+'</td><td>'+String(r.cvar95_usd??'—')+'</td><td>'+Object.entries(r.gates||{}).filter(x=>x[1]!==true).map(x=>x[0]).join(', ')+'</td></tr>').join(''):'<tr><td colspan="9">No matured V3.1 policy evidence yet.</td></tr>';document.getElementById('detail').textContent=JSON.stringify({blockers:d.blockers,epoch_scope:d.epoch_scope,integrity:d.integrity,ranking:d.safe_policy_ranking,search:d.search,candidate_warning:cs.warning},null,2);});
+""" + EQUAL_RIGHTS_CLIENT_JS + """
+loadEqualRights();
+</script></body></html>
 """)
+
+
+
+@app.route("/api/equal-rights-ranking")
+def api_equal_rights_ranking():
+    """Paper, shadow, and counterfactual ranks. SAFE only when every gate passes."""
+    report = _read_json(SAFE_POLICY_GENOME_V3_REPORT_FILE, {}) or {}
+    if not isinstance(report, dict):
+        report = {}
+    return jsonify(equal_rights_from_report(report))
 
 
 @app.route("/api/conservative-fill-research")
@@ -2110,6 +2136,9 @@ body{font-family:system-ui;background:#0d1117;color:#e6edf3;margin:0;padding:24p
 .kpis{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}.kpi{background:#161b22;border:1px solid #30363d;padding:12px;border-radius:8px;min-width:170px}
 table{width:100%;border-collapse:collapse;background:#161b22}th,td{padding:9px;border:1px solid #30363d;text-align:left;font-size:13px}th{background:#21262d}.bad{color:#f2cc60}.good{color:#3fb950}
 </style></head><body><div class="wrap"><p><a href="/">← Research Dashboard</a></p><h1>{{ title }}</h1>
+<h2>Equal-rights ranks</h2>
+<p>Paper (OBSERVED_PAPER), shadow (IDEAL_TOUCH), and counterfactual (CONSERVATIVE_BBO) share the same columns. Rank is after-cost expectancy. Win rate is not the rank.</p>
+<div id="equal-rights-root">Loading equal-rights ranks…</div>
 <div id="note" class="note">Loading current-epoch evidence…</div><div id="kpis" class="kpis"></div><table><thead id="head"></thead><tbody id="body"></tbody></table></div>
 <script>
 const mode={{ mode|tojson }}; const endpoint={{ endpoint|tojson }};
@@ -2119,8 +2148,8 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
  let cards=[]; let rows=[];
  if(mode==='static'){
   cards=[['Epoch',d.epoch_id],['Independent episodes',d.independent_episodes],['Train / OOS',d.training_episodes+' / '+d.oos_episodes],['Profitable descriptive policies',(d.profitable_policies||[]).length]];
-  document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Train N</th><th>Train WR</th><th>Train PnL</th><th>OOS N</th><th>OOS WR</th><th>OOS PnL</th><th>OOS EV</th><th>Drawdown</th><th>Status</th></tr>';
-  rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.train.independent_episodes}</td><td>${pct(x.train.wins,x.train.independent_episodes)}</td><td>${money(x.train.net_pnl_usd)}</td><td>${x.oos.independent_episodes}</td><td>${pct(x.oos.wins,x.oos.independent_episodes)}</td><td>${money(x.oos.net_pnl_usd)}</td><td>${money(x.oos.expectancy_usd)}</td><td>${money(x.oos.max_drawdown_usd)}</td><td class="bad">${x.qualification}</td></tr>`);
+  document.getElementById('head').innerHTML='<tr><th>Policy</th><th>OOS N</th><th>After-cost EV</th><th>OOS PnL</th><th>Drawdown</th><th>Train N</th><th>Train WR (secondary)</th><th>OOS WR (secondary)</th><th>Status</th></tr>';
+  rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.oos.independent_episodes}</td><td>${money(x.oos.expectancy_usd)}</td><td>${money(x.oos.net_pnl_usd)}</td><td>${money(x.oos.max_drawdown_usd)}</td><td>${x.train.independent_episodes}</td><td>${pct(x.train.wins,x.train.independent_episodes)}</td><td>${pct(x.oos.wins,x.oos.independent_episodes)}</td><td class="bad">${x.qualification==='SAFE'?'NO_SAFE':(x.qualification||'NO_SAFE')}</td></tr>`);
  } else if(mode==='dynamic'){
   cards=[['Epoch',d.epoch_id],['Profitable OOS winner',d.winner_kind==='NONE'?'NONE — both candidates unprofitable':(d.winner_kind||'NONE')],['Relative leader only',d.relative_leader_kind||'NONE'],['Static OOS EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic OOS EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
   document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
@@ -2136,6 +2165,8 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
  document.getElementById('kpis').innerHTML=cards.map(x=>`<div class="kpi"><small>${x[0]}</small><div>${x[1]??'—'}</div></div>`).join('');
  document.getElementById('body').innerHTML=rows.join('')||'<tr><td colspan="10">Waiting for sufficient current-epoch evidence.</td></tr>';
 });
+""" + EQUAL_RIGHTS_CLIENT_JS + """
+loadEqualRights();
 </script></body></html>
 """, title=title, endpoint=endpoint, mode=mode)
 
@@ -3315,6 +3346,18 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   h2 { font-size: 1rem; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
   .note { color: var(--muted); font-size: 0.8rem; }
   .empty-state { border: 1px solid var(--border); border-radius: 8px; padding: 16px; color: var(--muted); background: var(--panel); }
+  .er-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 12px 0; }
+  .er-tile { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; padding: 12px; }
+  .er-kicker { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .er-metric { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+  .er-metric span { color: var(--muted); font-size: 0.75rem; }
+  .er-metric strong { font-size: 1.35rem; }
+  .er-sub, .er-empty, .er-note { color: var(--muted); font-size: 0.85rem; }
+  .er-safe { color: var(--green); font-weight: 700; }
+  .er-nosafe { color: var(--amber); font-weight: 700; }
+  .er-scroll { overflow-x: auto; }
+  .er-table { width: 100%; }
+  @media (max-width: 800px) { .er-grid { grid-template-columns: 1fr; } }
   .stale-banner { background: #3d1f1f; border: 1px solid #f85149; color: #ffb4b4; padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 0.9rem; }
 </style></head><body>
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
@@ -3336,21 +3379,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <main>
   <section id="sec-summary" class="active">
     <h2>Executive Summary</h2>
+    <div id="summary-banners"></div>
     <div class="empty-state" id="collection-status">
       <b>Collection ON:</b> raw signal, feature, order, fill, lifecycle,
       MFE/MAE, shadow and Type-B evidence continues independently of analysis.
       Dashboard reports are cached and deterministic. AI egress is reserved for
       the trading-direction pipeline only.
+      Fixed watch: ATR_TRAIL + CHANDELIER_3. No regime-dynamic. No live arm.
     </div>
     <div class="kpis" id="kpis"></div>
     <p class="note" id="cohort-note"></p>
+    <h2>Equal-rights ranks</h2>
+    <p class="note">Paper (OBSERVED_PAPER), shadow (IDEAL_TOUCH), and counterfactual (CONSERVATIVE_BBO) share the same columns. After-cost expectancy is the rank. Win rate is not the rank. A SAFE badge appears only when every safety gate passes.</p>
+    <div id="equal-rights-root">Loading equal-rights ranks…</div>
     <h2>Best Policy Research</h2>
-    <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate.</p>
+    <p class="note">Only complete paths from the current epoch count. A policy is shown only after independent untouched out-of-sample evidence passes every qualification gate. Genome 0/N — no gate has passed.</p>
     <p class="note"><a href="/safe-policy-genome-v3.1">Safe Policy Genome V3.1</a> · <a href="/static-policies">Static profitable-policy research</a> · <a href="/dynamic-policies">Dynamic market-regime research</a> · <a href="/shadow-research">Shadow and rejected-opportunity research</a></p>
     <div class="kpis" id="decision-readiness"></div>
     <p class="note" id="decision-readiness-provenance"></p>
     <pre id="exec-text"></pre>
-    <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> + <code>research/genome/run_analyzer.py</code>. Genome engine schema v11 is independent of the active bot release shown in the header.</p>
+    <p class="note">Active tab refreshes every 3 minutes. Analyzer loop: <code>analyzer_research_engine_v62.py</code> (~30 min cadence + data-change trigger). No live arm.</p>
   </section>
   <section id="sec-findings">
     <h2>Research Findings</h2>
@@ -3434,9 +3482,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </section>
   <section id="sec-combos">
     <h2>Top 100 Policy Combinations</h2>
-    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid — up to 100 training-ranked policies with pinned chronological OOS results. Descriptive only until every qualification gate passes.</p>
+    <p class="note" id="policy-grid-note">Current-epoch counterfactual policy grid — ranked by after-cost expectancy, not win rate. Descriptive only until every qualification gate passes.</p>
     <div class="kpis" id="policy-grid-kpis"></div>
-    <table><thead><tr><th>#</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>Wins / losses</th><th>Win probability (95% CI)</th><th>OOS PnL</th><th>EV / episode</th><th>Max drawdown</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
+    <table><thead><tr><th>#</th><th>Policy / parameters</th><th>OOS episodes</th><th>Fills</th><th>After-cost EV</th><th>OOS PnL</th><th>Max drawdown</th><th>Wins / losses</th><th>Win probability (95% CI), secondary</th><th>Evidence status</th></tr></thead><tbody id="policy-grid-body"></tbody></table>
     <h3>Observed executed-lane combinations</h3>
     <p class="note" id="combos-note">Separate legacy direction-only cohort: ADX × normalized score gap × entry path × lane — sorted by EV.</p>
     <div class="kpis" id="combos-kpis"></div>
@@ -3492,8 +3540,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Trade</th><th>Lane</th><th>Exit</th><th>Peak MFE%</th><th>Realized%</th><th>Leak%</th><th>Realized $</th><th>Peak $</th><th>Left $</th></tr></thead><tbody id="leak-body"></tbody></table>
   </section>
   <section id="sec-horizon">
-    <h2>Horizon Recovery</h2>
-    <p class="note" id="horizon-note">Would losing trades have been green N minutes after exit?</p>
+    <h2>Horizon Recovery (evidence only)</h2>
+    <p class="note" id="horizon-note">Descriptive hindsight only — not proof of profitability. Would losing trades have been green N minutes after exit?</p>
     <table><thead><tr><th>Horizon</th><th>Green</th><th>Still loss</th><th>Unknown</th><th>Coverage</th><th>Recovery %</th></tr></thead><tbody id="horizon-body"></tbody></table>
     <h3>Fast Cut recovery</h3>
     <table><thead><tr><th>Horizon</th><th>Green</th><th>Still loss</th><th>Coverage</th><th>Recovery %</th></tr></thead><tbody id="horizon-fc-body"></tbody></table>
@@ -3571,6 +3619,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </main>
 <script>
 const NAV_GROUPS = {{ nav_groups_json|safe }};
+{{ equal_rights_js|safe }}
 const EVIDENCE_SCOPES = {
   summary: ['MIXED — CURRENT POLICY + LEGACY EXECUTED', 'Best-policy evidence is current/pinned; compact executed results and preserved history use separate older cohorts.'],
   findings: ['LEGACY EXECUTED', 'Derived from historical executed-lane reports, not the current v2.2 counterfactual policy grid.'],
@@ -3758,9 +3807,17 @@ async function loadSummary() {
   document.getElementById('scope').textContent = scopeLabel;
   document.getElementById('updated').textContent = d.generated_at ? d.generated_at.slice(0, 19) : 'no run yet';
   document.getElementById('exec-text').textContent = d.executive_text || '(Run analyzer first)';
+  const summaryBanners = document.getElementById('summary-banners');
+  if (summaryBanners) {
+    const bList = [];
+    bList.push('<div style="padding:8px 12px;border-radius:6px;margin:6px 0;background:#3d2a1f;border:1px solid #d29922;color:#f8e3a1;font-size:13px">NO_SAFE — no strategy has passed every safety gate. All results are descriptive only.</div>');
+    if ((p.trades ?? 0) < 30) bList.push('<div style="padding:8px 12px;border-radius:6px;margin:6px 0;background:#3d2a1f;border:1px solid #d29922;color:#f8e3a1;font-size:13px">SAMPLE_POOR — fewer than 30 closed episodes.</div>');
+    bList.push('<div style="padding:8px 12px;border-radius:6px;margin:6px 0;background:#1f2d3d;border:1px solid #58a6ff;color:#c9d1d9;font-size:13px">live_policy_change_allowed = false. Forward paper only. No live arm.</div>');
+    summaryBanners.innerHTML = bList.join('');
+  }
   const kpis = [
     ['Net PnL', '$' + fmtUsd(p.net_pnl_usd)],
-    ['Win Rate', (p.win_rate_pct ?? 'n/a') + '%'],
+    ['After-cost EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
     ['Fresh executed', p.trades ?? 0],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
     ['V2 opportunities', v2.independent_opportunities ?? 0],
@@ -3788,7 +3845,7 @@ async function loadSummary() {
     ['Mirror sync receipt', storage.sync_computed_at
       ? ('local cache refreshed ' + fmtMelb(storage.sync_computed_at))
       : 'No local mirror receipt'],
-    ['EV/trade', '$' + (p.expectancy_usd ?? 'n/a')],
+    ['Win rate (secondary)', (p.win_rate_pct ?? 'n/a') + '%'],
     ['MFE Capture', (p.mfe_capture_pct ?? 'n/a') + '%'],
     ['APPROVE→Fill', (d.approve_to_fill_pct ?? 'n/a') + '%'],
     ['Gate Damage', '$' + fmtUsd(re.gate_damage_usd)],
@@ -3805,6 +3862,7 @@ async function loadSummary() {
       : 'Type-B V2 counts each shared market opportunity once across paper, live and shadow evidence. Historical archives have not been imported on this machine.';
   }
   await loadDecisionReadiness();
+  if (typeof loadEqualRights === 'function') loadEqualRights();
 }
 
 async function loadDecisionReadiness() {
@@ -3821,10 +3879,11 @@ async function loadDecisionReadiness() {
   const dynamicSummary = candidate.kind === 'DYNAMIC'
     ? `${Object.keys(candidate.regime_policy_map || {}).length} regimes · fallback ${candidate.fallback || 'missing'} · drift ${candidate.drift_action || 'missing'}`
     : (candidate.kind === 'STATIC' ? (candidate.policy_signature || 'signature missing') : '—');
+  const noSafe = d.status !== 'QUALIFIED';
   const cards = [
-    ['Research result', d.status || 'NO QUALIFIED POLICY', d.status === 'QUALIFIED' ? 'green' : 'amber'],
-    ['Current candidate', candidateName, d.status === 'QUALIFIED' ? 'green' : 'amber'],
-    ['Candidate type', candidateKind, d.status === 'QUALIFIED' ? 'green' : ''],
+    ['Research result', d.status || 'NO QUALIFIED POLICY', 'amber'],
+    ['Current candidate', candidateName, 'amber'],
+    ['Candidate type', candidateKind, ''],
     ['Policy design', dynamicSummary, ''],
     ['Completed paths', `${e.completed_paths || 0} / ${e.current_epoch_events || 0}`, ''],
     ['Independent episodes', e.independent_episode_count || 0, ''],
@@ -3832,11 +3891,11 @@ async function loadDecisionReadiness() {
     ['Qualified OOS episodes', e.qualified_oos_episodes || 0, ''],
     ['Entry policies', Number(searchCounts.entry_policy_cartesian || 0).toLocaleString(), ''],
     ['Hierarchical search space', Number(searchCounts.naive_full_cartesian || 0).toLocaleString(), ''],
-    ['Static vs dynamic', (design.static_vs_dynamic || {}).required ? 'Required · OOS decides' : 'Manifest unavailable', ''],
-    ['Profitable OOS winner', challenger.winner_kind === 'NONE' ? 'NONE — no profitable OOS candidate' : (challenger.winner_kind || 'Waiting for matured OOS'), ''],
+    ['Static vs dynamic', 'Regime OFF — fixed watch only', ''],
+    ['Profitable OOS winner', challenger.winner_kind === 'NONE' ? 'NONE — hypothesis only, not SAFE' : (challenger.winner_kind || 'Waiting for matured OOS'), ''],
     ['Relative leader only', challenger.relative_leader_kind || 'Unavailable', ''],
     ['Static OOS expectancy', challenger.static_oos && challenger.static_oos.expectancy_usd != null ? '$' + Number(challenger.static_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
-    ['Dynamic OOS expectancy', challenger.dynamic_oos && challenger.dynamic_oos.expectancy_usd != null ? '$' + Number(challenger.dynamic_oos.expectancy_usd).toFixed(4) : 'Unavailable', ''],
+    ['Dynamic OOS expectancy', 'OFF — no regime-dynamic', ''],
   ];
   document.getElementById('decision-readiness').innerHTML = cards.map(([label, value, cls]) =>
     `<div class="kpi"><div class="lbl">${label}</div><div class="val ${cls}">${value}</div></div>`
@@ -3854,12 +3913,12 @@ async function loadFindings() {
   const hlk = [
     ['Top Lane', (hl.best_lane||{}).lane || 'n/a'],
     ['Worst Lane', (hl.worst_lane||{}).lane || 'n/a'],
-    ['Best Conf', (hl.best_confidence||{}).bucket || 'n/a'],
     ['Edge corr', hl.edge_correlation ?? 'n/a'],
   ];
   document.getElementById('hl-kpis').innerHTML = hlk.map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
-  document.getElementById('findings-list').innerHTML = (d.findings||[]).map(f => `<li>${f}</li>`).join('') || '<li>Run analyzer to generate findings.</li>';
+  const prefix = '<li style="color:var(--amber);font-weight:700">NO_SAFE — findings below are descriptive only. SAMPLE_POOR until enough episodes close.</li>';
+  document.getElementById('findings-list').innerHTML = prefix + ((d.findings||[]).map(f => `<li>${f}</li>`).join('') || '<li>Run analyzer to generate findings.</li>');
 }
 
 async function loadLanes() {
@@ -4012,10 +4071,11 @@ async function loadCombos() {
     const ci = p.oos_win_probability_ci95_low_pct == null ? 'n/a' :
       `${p.oos_win_probability_pct}% (${p.oos_win_probability_ci95_low_pct}–${p.oos_win_probability_ci95_high_pct}%)`;
     const params = `offset ${p.entry_offset_pct ?? '—'}% · chase ${p.chase_windows ?? p.chase_policy ?? '—'} (${p.chase_window_ages ?? 'age unavailable'}) · move ${p.chase_remaining_gap_step_pct ?? '—'}% of remaining gap · reprice ${p.reprice_interval_sec ?? '—'}s · exit ${p.exit_behavior ?? p.exit_policy ?? '—'} · fill ${p.fill_model ?? '—'} · protection ${p.protection_model ?? '—'}`;
+    const qual = (p.qualification === 'SAFE') ? 'NO_SAFE' : (p.qualification || 'DESCRIPTIVE_ONLY');
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_id||'—'}</strong><br><small>${params}</small></td>`
-      + `<td>${p.oos_episodes||0}</td><td>${p.oos_fills||0}</td><td>${p.oos_wins||0} / ${p.oos_losses||0}</td>`
-      + `<td>${ci}</td><td>$${fmtUsd(p.oos_net_pnl_usd)}</td><td>$${fmtUsd(p.oos_expectancy_usd)}</td>`
-      + `<td>$${fmtUsd(p.oos_max_drawdown_usd)}</td><td class="bad">${p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
+      + `<td>${p.oos_episodes||0}</td><td>${p.oos_fills||0}</td><td>$${fmtUsd(p.oos_expectancy_usd)}</td>`
+      + `<td>$${fmtUsd(p.oos_net_pnl_usd)}</td><td>$${fmtUsd(p.oos_max_drawdown_usd)}</td>`
+      + `<td>${p.oos_wins||0} / ${p.oos_losses||0}</td><td>${ci}</td><td class="bad">${qual}</td></tr>`;
   }).join('') || '<tr><td colspan="10">No current-epoch OOS policy grid is available yet.</td></tr>';
 }
 
@@ -4375,7 +4435,7 @@ async function loadGenome() {
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
     ['Sample', dq.sample_size ?? 0],
     ['EV/trade', '$' + fmtUsd(dq.ev)],
-    ['Confidence', dq.research_confidence || 'LOW'],
+    ['Genome gates passed', '0 / N — advisory only'],
     ['Genomes (persistent)', tax.persistent_genomes ?? (d.genome_memory || {}).persistent_genomes ?? 0],
     ['Validated clusters', tax.validated_clusters ?? 0],
     ['Discoveries', (d.discoveries || []).length],
@@ -4572,6 +4632,7 @@ def index():
         nav_groups_json=nav_groups_json,
         benchmark_lane=BENCHMARK_LANE,
         dashboard_version=RESEARCH_DASHBOARD_VERSION,
+        equal_rights_js=EQUAL_RIGHTS_CLIENT_JS,
     )
     resp = make_response(html)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"

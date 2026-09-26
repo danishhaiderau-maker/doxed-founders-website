@@ -28998,6 +28998,7 @@ __ADMIN_ACCESS_CONTROLS__
 <nav class="section-nav" aria-label="Dashboard sections">
   <a href="#marketOverview">Overview</a>
   <a href="#pathwayLab">Decisions</a>
+  <a href="#equalRightsRanks">Ranks</a>
   <a href="#activityTables">Data</a>
 </nav>
 <p>
@@ -29170,6 +29171,15 @@ __ADMIN_ACCESS_CONTROLS__
     Local mirror: <code>services/btc-conservative-agent/fly-data-mirror/</code> &middot; sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
 </div>
+
+<h2 id="equalRightsRanks">Equal-rights research ranks</h2>
+<p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
+  Paper (OBSERVED_PAPER), shadow (IDEAL_TOUCH), and counterfactual (CONSERVATIVE_BBO)
+  share the same columns: Paper n, Paper after-cost EV, Shadow n, Shadow after-cost EV, CF n, CF after-cost EV.
+  Rank is after-cost expectancy. Empty and NO_SAFE stay visible.
+  SAFE appears only when every safety gate passes. Win rate is not the rank.
+</p>
+<div id="equal-rights-root">Loading equal-rights ranks…</div>
 
 <h2 id="activityTables">Virtual Chase Candidates</h2>
 <p style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">
@@ -30236,6 +30246,7 @@ DASHBOARD_JS = """(function () {
           throw new Error('API HTTP ' + r.status);
         }
         const d = await r.json();
+        if (typeof loadEqualRights === "function") loadEqualRights();
         if (d.api_state_error) {
           throw new Error(d.api_state_error);
         }
@@ -31163,11 +31174,17 @@ def build_dashboard_js(ai_payload=None) -> str:
     payload = LAST_AI_PAYLOAD if ai_payload is None else ai_payload
     if not isinstance(payload, dict):
         payload = {}
-    return (
+    from equal_rights_ranking import EQUAL_RIGHTS_CLIENT_JS
+    js = (
         DASHBOARD_JS.replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__DASHBOARD_URL__", dashboard_public_url())
         .replace("__LAST_AI_PAYLOAD_JSON__", json_for_js(payload))
     )
+    marker = 'console.info("dashboard.js loaded: true");'
+    if marker in js:
+        js = js.replace(marker, EQUAL_RIGHTS_CLIENT_JS + "\n  loadEqualRights();\n  " + marker, 1)
+    # renderEqualRights is defined by EQUAL_RIGHTS_CLIENT_JS.
+    return js
 
 
 @app.route('/static/dashboard.js')
@@ -33701,6 +33718,35 @@ def api_build():
         "features": RESEARCH_STACK_FEATURES,
         "server_ts": utc_iso(),
     }), 200
+
+
+
+@app.route('/api/equal-rights-ranking')
+def api_equal_rights_ranking():
+    """Read-only paper, shadow, and counterfactual ranks. Never arms trading."""
+    from equal_rights_ranking import equal_rights_from_report
+    report = {}
+    roots = [os.getcwd()]
+    for env_name in ("BTC_AGENT_REPORT_DIR", "DOXXED_FLY_MIRROR_DIR"):
+        env_value = os.getenv(env_name, "").strip()
+        if env_value:
+            roots.insert(0, env_value)
+    for root in roots:
+        for name in ("safe_policy_genome_v3_report.json", os.path.join("research", "safe_policy_genome_v3_report.json")):
+            path = os.path.join(root, name)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            if isinstance(loaded, dict):
+                report = loaded
+                break
+        if report:
+            break
+    return jsonify(equal_rights_from_report(report))
 
 
 # ---- Read-only analyzer proxy (exposes :9001 research dashboard through the
