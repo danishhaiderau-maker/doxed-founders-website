@@ -3,12 +3,18 @@
 
 from __future__ import annotations
 
+import io
 import unittest
+import urllib.error
+import zipfile
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from prove_stalled_paper_boundary import (
     STALL_WINDOW,
     FlatCheckObservation,
+    _fetch_job_log_bytes,
+    _showcase_from_job_logs,
     parse_showcase_counts,
     ready_eligibility_failures,
     stall_window_failures,
@@ -217,6 +223,70 @@ class LogParseTest(unittest.TestCase):
     def test_null_showcase_counts_are_not_evidence(self):
         log = '"showcase": { "positions": null, "pendingOrders": 13 }'
         self.assertIsNone(parse_showcase_counts(log))
+
+
+_SHOWCASE_LOG = "\n".join(
+    [
+        'test-and-deploy\tUNKNOWN STEP\t2026-09-26T08:26:09.5131000Z   "showcase": {',
+        'test-and-deploy\tUNKNOWN STEP\t2026-09-26T08:26:09.5132000Z     "positions": 0,',
+        'test-and-deploy\tUNKNOWN STEP\t2026-09-26T08:26:09.5133000Z     "pendingOrders": 13',
+        "test-and-deploy\tUNKNOWN STEP\t2026-09-26T08:26:09.5134000Z   }",
+    ]
+)
+
+
+def _zip_bytes(text: str) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as bundle:
+        bundle.writestr("job/", "")
+        bundle.writestr("job/0_flat.txt", text)
+    return buffer.getvalue()
+
+
+class JobLogDownloadTest(unittest.TestCase):
+    def test_plain_text_log_parses_showcase(self):
+        self.assertEqual(_showcase_from_job_logs(_SHOWCASE_LOG.encode("utf-8")), (0, 13))
+
+    def test_zip_log_still_parses_showcase(self):
+        body = _zip_bytes(_SHOWCASE_LOG)
+        self.assertTrue(body.startswith(b"PK\x03\x04"))
+        self.assertEqual(_showcase_from_job_logs(body), (0, 13))
+
+    def test_bad_zip_or_non_showcase_fails_closed(self):
+        with self.assertRaises(SystemExit) as bad_zip:
+            _showcase_from_job_logs(b"PK\x03\x04this-is-not-a-zip")
+        self.assertIn("failed closed", str(bad_zip.exception))
+        self.assertIn("not a readable zip", str(bad_zip.exception))
+
+        with self.assertRaises(SystemExit) as html_page:
+            _showcase_from_job_logs(b"<html><body>Not Found</body></html>")
+        self.assertIn("HTML or JSON error page", str(html_page.exception))
+
+        with self.assertRaises(SystemExit) as json_page:
+            _showcase_from_job_logs(
+                b'{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}'
+            )
+        self.assertIn("HTML or JSON error page", str(json_page.exception))
+
+        self.assertIsNone(
+            _showcase_from_job_logs(b"flat check crashed before output")
+        )
+
+    @patch("prove_stalled_paper_boundary.time.sleep", return_value=None)
+    @patch("prove_stalled_paper_boundary._github_request")
+    def test_log_get_retries_then_fails_closed(self, request, _sleep):
+        request.side_effect = [
+            b"",
+            urllib.error.URLError("timed out"),
+            b"<html>error</html>",
+        ]
+        with self.assertRaises(SystemExit) as caught:
+            _fetch_job_log_bytes("https://example.test/logs", "token", attempts=3, sleep_sec=0)
+        self.assertEqual(request.call_count, 3)
+        message = str(caught.exception)
+        self.assertIn("failed closed after 3 attempts", message)
+        self.assertIn("HTML or JSON error page", message)
+        self.assertNotIn("BadZipFile", message)
 
 
 if __name__ == "__main__":
