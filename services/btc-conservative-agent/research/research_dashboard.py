@@ -41,7 +41,12 @@ def format_melbourne_dt(value) -> str:
 
 
 from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
-from equal_rights_ranking import EQUAL_RIGHTS_CLIENT_JS, equal_rights_from_report
+from equal_rights_ranking import (
+    EQUAL_RIGHTS_CLIENT_JS,
+    equal_rights_from_report,
+    extract_companion_world_counts,
+    load_analyzer_companions,
+)
 
 try:
     from collector_v22_schema import RESEARCH_EVENTS_FILE
@@ -1795,11 +1800,33 @@ def api_status():
 
 
 def _read_research_events_v22() -> list[dict]:
-    """Read the freshest mirror without locking it during JSON parsing."""
+    """Read the session ledger on the configured data root.
+
+    An empty newer copy beside the analyzer must not hide a non-empty
+    ``research_events_v22.jsonl`` on ``BTC_AGENT_DATA_DIR``. When every copy
+    is empty, the row count stays zero.
+    """
     candidates = [path for path in _data_file_candidates(RESEARCH_EVENTS_FILE) if path.is_file()]
     if not candidates:
         return []
-    path = max(candidates, key=lambda item: item.stat().st_mtime)
+
+    def _under_data_root(path: Path) -> bool:
+        try:
+            path.resolve().relative_to(DATA_ROOT.resolve())
+        except ValueError:
+            return False
+        return True
+
+    def _has_bytes(path: Path) -> bool:
+        try:
+            return path.stat().st_size > 0
+        except OSError:
+            return False
+
+    nonempty_data = [path for path in candidates if _under_data_root(path) and _has_bytes(path)]
+    nonempty_any = [path for path in candidates if _has_bytes(path)]
+    pool = nonempty_data or nonempty_any or candidates
+    path = max(pool, key=lambda item: item.stat().st_mtime)
     rows = []
     try:
         # Close the Windows source handle before parsing a large ledger. The
@@ -2012,20 +2039,10 @@ def api_equal_rights_ranking():
     if not isinstance(report, dict):
         report = {}
 
-    def _companion(name):
-        payload = _read_json(name, {}) or {}
-        return payload if isinstance(payload, dict) else {}
-
-    # Same artifacts the FRESH digest reads. Empty files stay empty; this does
-    # not invent fills or mint SAFE.
-    companions = {
-        "compact": _companion(COMPACT_SUMMARY_FILE),
-        "real_edge": _companion("real_edge_summary.json"),
-        "shadow_fill": _companion("shadow_fill_outcome_report.json"),
-        "counterfactual": _companion("counterfactual_coverage_report.json"),
-        "missed": _companion("missed_opportunity_heatmap.json"),
-        "paused_shadow": _companion("paused_shadow_research_report.json"),
-    }
+    # Report dir and the configured data/mirror root. A zero compact in the
+    # worktree does not hide session paper fills or non-zero companions there.
+    # Missing files stay empty; this does not invent fills or mint SAFE.
+    companions = load_analyzer_companions(str(DATA_ROOT), str(ROOT))
     return jsonify(equal_rights_from_report(report, companions=companions))
 
 
@@ -2225,6 +2242,16 @@ def api_summary():
             p["net_pnl_usd"] = re.get("executed_pnl_usd")
         if p.get("expectancy_usd") is None and re.get("per_approve_ev_executed") is not None:
             p["expectancy_usd"] = re.get("per_approve_ev_executed")
+    if not int(p.get("trades") or 0):
+        observed = extract_companion_world_counts(
+            load_analyzer_companions(str(DATA_ROOT), str(ROOT))
+        ).get("paper") or {}
+        observed_n = int(observed.get("closed_n") or 0)
+        if observed_n > 0:
+            p["trades"] = observed_n
+            if observed.get("net") is not None:
+                p["net_pnl_usd"] = observed["net"]
+                p["expectancy_usd"] = observed["net"] / observed_n
     approves = int(re.get("approve_attempts") or 0)
     executed = int(re.get("executed") or p.get("trades") or 0)
     fill_pct = round(100.0 * executed / approves, 1) if approves else None

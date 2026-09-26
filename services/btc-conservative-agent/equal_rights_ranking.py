@@ -6,6 +6,7 @@ true on closed evidence. Missing worlds stay visible as EMPTY / NO_SAFE.
 """
 from __future__ import annotations
 
+import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -770,11 +771,108 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _companion_positive_count(key: str, payload: Mapping[str, Any]) -> int:
+    """Positive closed-count already stored in one companion file. Zero is not evidence."""
+    if key == "compact":
+        return _int_or_zero(_as_mapping(payload.get("performance")).get("trades"))
+    if key == "real_edge":
+        return _int_or_zero(payload.get("executed"))
+    if key == "shadow_fill":
+        return _int_or_zero(payload.get("shadow_filled"))
+    if key == "counterfactual":
+        return _int_or_zero(payload.get("n_cf_in"))
+    if key == "paused_shadow":
+        return _int_or_zero(_as_mapping(payload.get("overall")).get("closed"))
+    if key == "missed":
+        missed_n = _int_or_zero(_as_mapping(payload.get("totals")).get("events"))
+        if missed_n <= 0:
+            heat = payload.get("heatmap") or payload.get("rows") or []
+            if isinstance(heat, list):
+                missed_n = sum(
+                    _int_or_zero(row.get("count"))
+                    for row in heat
+                    if isinstance(row, Mapping)
+                )
+        return missed_n
+    return 0
+
+
+def _epoch_seconds(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def session_paper_observation(root: str | Path | None) -> dict[str, Any] | None:
+    """Closed paper fills from one data root, scoped by that root's own session.
+
+    The worktree compact can be an honest zero while ``trades_3factor.csv`` on
+    the configured mirror still holds the FRESH session. A session file from a
+    different directory is not applied. Missing ledger, missing session, or no
+    in-session closes stay absent — this does not invent fills.
+    """
+    if not root:
+        return None
+    base = Path(root)
+    ledger = base / "trades_3factor.csv"
+    session_path = base / "research_session.json"
+    if not ledger.is_file() or not session_path.is_file():
+        return None
+    try:
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(session, dict):
+        return None
+    start = _epoch_seconds(session.get("fresh_collection_start_time"))
+    if start is None:
+        start = _epoch_seconds(session.get("bot_start_time"))
+    closed_n = 0
+    net = 0.0
+    try:
+        with ledger.open(newline="", encoding="utf-8", errors="replace") as handle:
+            for row in csv.DictReader(handle):
+                if not isinstance(row, dict):
+                    continue
+                pnl = _float_or_none(row.get("net_pnl_usd"))
+                if pnl is None or pnl != pnl:
+                    continue
+                if start is not None:
+                    stamp = None
+                    for field in ("close_ts", "ts", "timestamp", "entry_ts", "open_ts"):
+                        stamp = _epoch_seconds(row.get(field))
+                        if stamp is not None:
+                            break
+                    if stamp is None or stamp < start:
+                        continue
+                closed_n += 1
+                net += pnl
+    except OSError:
+        return None
+    if closed_n <= 0:
+        return None
+    return {"closed_n": closed_n, "net": net, "fills": closed_n}
+
+
 def extract_companion_world_counts(companions: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
     """Read world counts from the same analyzer artifacts the FRESH digest uses.
 
-    Counts stay absent when the artifact is missing. Nets are copied only when
-    the artifact already stored one. Nothing here mints SAFE or a fill.
+    Counts stay absent when the artifact is missing. A compact or real-edge
+    file that stored zero is not authoritative when the same session root has
+    closed paper fills. Nets are copied only when the artifact already stored
+    one. Nothing here mints SAFE or a fill.
     """
     companions = _as_mapping(companions)
     performance = _as_mapping(_as_mapping(companions.get("compact")).get("performance"))
@@ -791,6 +889,10 @@ def extract_companion_world_counts(companions: Mapping[str, Any] | None) -> dict
         # Same fallback the research digest uses when performance.trades is empty.
         paper_n = _int_or_zero(real_edge.get("executed"))
         paper_net = _float_or_none(real_edge.get("executed_pnl_usd"))
+    if paper_n <= 0:
+        session_paper = _as_mapping(companions.get("session_paper"))
+        paper_n = _int_or_zero(session_paper.get("closed_n"))
+        paper_net = _float_or_none(session_paper.get("net"))
     if paper_n > 0:
         found["paper"] = {"closed_n": paper_n, "net": paper_net, "fills": paper_n}
 
@@ -826,23 +928,38 @@ def extract_companion_world_counts(companions: Mapping[str, Any] | None) -> dict
 
 
 def load_analyzer_companions(*roots: str) -> dict[str, Any]:
-    """Load digest companion JSON from report or mirror roots. Missing files stay empty."""
+    """Load digest companions from report and mirror roots.
+
+    An empty zero file in the analyzer cwd does not hide a later root that
+    actually stored counts. Session paper fills are read from the same root
+    as that root's ``research_session.json``. Missing files stay empty.
+    """
     loaded: dict[str, Any] = {key: {} for key, _name in _COMPANION_FILES}
+    session_paper: dict[str, Any] | None = None
     for root in roots:
         if not root:
             continue
         base = Path(root)
         for key, name in _COMPANION_FILES:
-            if loaded[key]:
+            if _companion_positive_count(key, _as_mapping(loaded.get(key))) > 0:
                 continue
             for path in (base / name, base / "reports" / name):
                 try:
                     payload = json.loads(path.read_text(encoding="utf-8"))
                 except (OSError, ValueError):
                     continue
-                if isinstance(payload, dict) and payload:
+                if not isinstance(payload, dict) or not payload:
+                    continue
+                current = _as_mapping(loaded.get(key))
+                if not current or _companion_positive_count(key, payload) > 0:
                     loaded[key] = payload
+                if _companion_positive_count(key, payload) > 0:
                     break
+        observed = session_paper_observation(base)
+        if observed and session_paper is None:
+            session_paper = observed
+    if session_paper:
+        loaded["session_paper"] = session_paper
     return loaded
 
 
