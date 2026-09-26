@@ -43,6 +43,7 @@ def format_melbourne_dt(value) -> str:
 from flask import Flask, jsonify, render_template_string, send_file, abort, request, make_response
 from equal_rights_ranking import (
     EQUAL_RIGHTS_CLIENT_JS,
+    canonical_analyzer_roots,
     equal_rights_from_report,
     extract_companion_world_counts,
     load_analyzer_companions,
@@ -1747,6 +1748,7 @@ def api_health():
         "pid": os.getpid(),
         "data_root": str(DATA_ROOT),
         "report_root": str(ROOT),
+        "canonical_analyzer_roots": [str(path) for path in canonical_analyzer_roots()],
     })
 
 

@@ -8,6 +8,7 @@ from research_v3_ranking import REQUIRED_GATES
 
 from equal_rights_ranking import (
     build_equal_rights_ranking,
+    canonical_analyzer_roots,
     equal_rights_from_report,
     load_analyzer_companions,
     sanitize_equal_rights,
@@ -695,6 +696,139 @@ def test_report_root_empty_uses_data_root_mirror_counts():
     assert snapshot["receipt"]["epoch_id"] == "epoch-fresh"
 
 
+def _fresh_compact(trades: int, *, epoch: str | None, generated_at: str, net: float = -12.5) -> dict:
+    payload = {
+        "generated_at": generated_at,
+        "session_scope": "FRESH-COLLECTION",
+        "data_scope": "session",
+        "performance": {"trades": trades, "net_pnl_usd": net},
+    }
+    if epoch:
+        payload["analysis_provenance"] = {"fresh_epoch_id": epoch}
+    return payload
+
+
+def test_canonical_analyzer_tree_supplies_fresh_counts_when_mirror_is_empty():
+    """Empty fly mirror and empty worktree must not hide the current checkout digest."""
+    import os
+    import tempfile
+
+    previous = os.environ.get("BTC_CANONICAL_ANALYZER_DATA")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            report_root = base / "btc-v31-analyzer-121" / "services" / "btc-conservative-agent"
+            mirror = base / "fly-data-mirror"
+            canonical = (
+                base / "btc-v31-current" / "services" / "btc-conservative-agent"
+                / "canonical-research-data" / "analyzer"
+            )
+            report_root.mkdir(parents=True)
+            mirror.mkdir()
+            (mirror / "v3" / "ledgers").mkdir(parents=True)
+            (mirror / "v3" / "emergency_evidence_wal_v2").mkdir()
+            (report_root / "research_compact_summary.json").write_text(
+                json.dumps({"performance": {"trades": 0}, "data_scope": "session"}),
+                encoding="utf-8",
+            )
+            archive = canonical / "research_session_archives" / "2026-09-26"
+            archive.mkdir(parents=True)
+            (archive / "research_compact_summary.json").write_text(
+                json.dumps(_fresh_compact(
+                    57,
+                    epoch="epoch-fresh",
+                    generated_at="2026-09-26T04:00:00+00:00",
+                )),
+                encoding="utf-8",
+            )
+            (archive / "shadow_fill_outcome_report.json").write_text(
+                json.dumps({"shadow_filled": 4}),
+                encoding="utf-8",
+            )
+            (canonical / "published_reports" / "latest").mkdir(parents=True)
+            (canonical / "published_reports" / "latest" / "research_compact_summary.json").write_text(
+                json.dumps({
+                    "session_scope": "ALL-DATA",
+                    "data_scope": "all",
+                    "generated_at": "2026-09-26T05:00:00+00:00",
+                    "performance": {"trades": 200, "net_pnl_usd": 99},
+                }),
+                encoding="utf-8",
+            )
+            (canonical / "research_session.json").write_text(
+                json.dumps({
+                    "fresh_collection_mode": True,
+                    "fresh_collection_start_time": 1_758_800_000,
+                    "collector_v22_epoch_id": "epoch-fresh",
+                }),
+                encoding="utf-8",
+            )
+            agent = report_root
+            found = canonical_analyzer_roots(agent)
+            assert canonical in found
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = str(canonical)
+            payload = equal_rights_from_report(
+                {},
+                companions=load_analyzer_companions(str(report_root), str(mirror)),
+            )
+        by_id = {row["id"]: row for row in payload["surfaces"]}
+        assert by_id["paper"]["closed_n"] == 57
+        assert by_id["paper"]["world"] == "OBSERVED_PAPER"
+        assert by_id["paper"]["safe_badge"] is None
+        assert by_id["shadow"]["closed_n"] == 4
+        assert by_id["counterfactual"]["closed_n"] == 0
+        assert payload["safe_badge"] is None
+        assert payload["number_one"] is None
+        assert payload["digest"]["live_arm"] is False
+        launcher = (ROOT.parent.parent / "scripts" / "start-home-analyzer.ps1").read_text(encoding="utf-8")
+        assert "BTC_CANONICAL_ANALYZER_DATA" in launcher
+        assert "canonical-research-data\\analyzer" in launcher
+    finally:
+        if previous is None:
+            os.environ.pop("BTC_CANONICAL_ANALYZER_DATA", None)
+        else:
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = previous
+
+
+def test_incompatible_canonical_epoch_is_not_bound():
+    import os
+    import tempfile
+
+    previous = os.environ.get("BTC_CANONICAL_ANALYZER_DATA")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = Path(tmp) / "analyzer"
+            other = canonical / "research_session_archives" / "other"
+            other.mkdir(parents=True)
+            (other / "research_compact_summary.json").write_text(
+                json.dumps(_fresh_compact(
+                    90,
+                    epoch="epoch-other",
+                    generated_at="2026-09-26T06:00:00+00:00",
+                    net=40,
+                )),
+                encoding="utf-8",
+            )
+            (canonical / "research_session.json").write_text(
+                json.dumps({
+                    "fresh_collection_mode": True,
+                    "collector_v22_epoch_id": "epoch-fresh",
+                    "fresh_collection_start_time": 1_758_800_000,
+                }),
+                encoding="utf-8",
+            )
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = str(canonical)
+            payload = equal_rights_from_report({}, companions=load_analyzer_companions())
+        assert all(row["closed_n"] == 0 for row in payload["surfaces"])
+        assert payload["safe_badge"] is None
+        assert payload["digest"]["live_arm"] is False
+    finally:
+        if previous is None:
+            os.environ.pop("BTC_CANONICAL_ANALYZER_DATA", None)
+        else:
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = previous
+
+
 def test_all_sources_empty_stay_empty():
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -766,6 +900,8 @@ def main() -> None:
         test_empty_cwd_compact_uses_session_mirror_paper_counts,
         test_wal_identity_invalid_keeps_companion_counts,
         test_report_root_empty_uses_data_root_mirror_counts,
+        test_canonical_analyzer_tree_supplies_fresh_counts_when_mirror_is_empty,
+        test_incompatible_canonical_epoch_is_not_bound,
         test_all_sources_empty_stay_empty,
         test_data_watcher_watches_heartbeat_file,
     )

@@ -13,6 +13,18 @@
 # -Restart Stop any home-analyzer engine for this port and the listener on
 #          -Port, then start clean. Local only: no Fly deploy, no live arm,
 #          no research-data wipe.
+#
+# FRESH digest root for :9001 equal-rights and /api/summary.
+# BTC_AGENT_DATA_DIR stays the fly mirror (often only empty v3\ dirs).
+# BTC_AGENT_REPORT_DIR stays this worktree. Neither one is the cited session.
+# The FRESH compact (performance.trades) lives under the current checkout:
+#   C:\DoxxedCrypto\btc-v31-current\services\btc-conservative-agent\canonical-research-data\analyzer
+# including published_reports, reports, and research_session_archives.
+# Set the env before -Restart so both surfaces read that same tree. When the
+# sibling checkout exists, the launcher fills the env if it is still empty.
+# Do not point BTC_AGENT_DATA_DIR at that tree.
+#   $env:BTC_CANONICAL_ANALYZER_DATA = "C:\DoxxedCrypto\btc-v31-current\services\btc-conservative-agent\canonical-research-data\analyzer"
+#   .\scripts\start-home-analyzer.ps1 -Port 9001 -NoWait -Restart
 param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0)
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -157,6 +169,15 @@ $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://127.0.0.1:$AnalyzerPort/"
 $env:ANALYZER_EMBEDDED_DASHBOARD = "0"
 $env:BTC_AGENT_DATA_DIR = $analyzerDataDir
+if (-not $env:BTC_CANONICAL_ANALYZER_DATA) {
+  $siblingCanonical = Join-Path (Split-Path -Parent $repoRoot) "btc-v31-current\services\btc-conservative-agent\canonical-research-data\analyzer"
+  $localCanonical = Join-Path $agentDir "canonical-research-data\analyzer"
+  if (Test-Path -LiteralPath $siblingCanonical) {
+    $env:BTC_CANONICAL_ANALYZER_DATA = $siblingCanonical
+  } elseif (Test-Path -LiteralPath $localCanonical) {
+    $env:BTC_CANONICAL_ANALYZER_DATA = $localCanonical
+  }
+}
 $env:PLATFORM_RELAY_EVIDENCE_FILE = Join-Path $analyzerDataDir "relay_lifecycle_evidence_v1.json"
 $sourceRevision = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {

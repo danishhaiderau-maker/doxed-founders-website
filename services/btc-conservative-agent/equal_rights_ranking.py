@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -927,35 +928,258 @@ def extract_companion_world_counts(companions: Mapping[str, Any] | None) -> dict
     return found
 
 
-def load_analyzer_companions(*roots: str) -> dict[str, Any]:
-    """Load digest companions from report and mirror roots.
+def canonical_analyzer_roots(search_from: str | Path | None = None) -> list[Path]:
+    """Directories that hold the FRESH analyzer digest.
 
-    An empty zero file in the analyzer cwd does not hide a later root that
-    actually stored counts. Session paper fills are read from the same root
-    as that root's ``research_session.json``. Missing files stay empty.
+    The fly mirror can be an empty ``v3`` shell, and a worktree report root can
+    hold a zero compact. The cited session is the current checkout's
+    ``canonical-research-data/analyzer`` tree (published reports and session
+    archives included). ``BTC_CANONICAL_ANALYZER_DATA`` overrides discovery.
     """
-    loaded: dict[str, Any] = {key: {} for key, _name in _COMPANION_FILES}
-    session_paper: dict[str, Any] | None = None
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved in seen or not resolved.is_dir():
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    env = os.getenv("BTC_CANONICAL_ANALYZER_DATA", "").strip()
+    if env:
+        add(Path(env))
+    agent = Path(search_from).resolve() if search_from else Path(__file__).resolve().parent
+    add(agent / "canonical-research-data" / "analyzer")
+    if agent.name == "btc-conservative-agent" and agent.parent.name == "services":
+        checkout = agent.parent.parent
+        add(
+            checkout.parent
+            / "btc-v31-current"
+            / "services"
+            / "btc-conservative-agent"
+            / "canonical-research-data"
+            / "analyzer"
+        )
+    return roots
+
+
+def _iter_companion_dirs(root: Path) -> list[Path]:
+    """Compact locations under one analyzer tree, including session archives."""
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved in seen or not resolved.is_dir():
+            return
+        seen.add(resolved)
+        found.append(path)
+
+    add(root)
+    for name in ("reports", "published_reports", "research_session_archives"):
+        base = root / name
+        if not base.is_dir():
+            continue
+        add(base)
+        try:
+            children = list(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            add(child)
+            nested = child / "reports"
+            if nested.is_dir():
+                add(nested)
+    return found
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) and payload else None
+
+
+def _bundle_epoch(payload: Mapping[str, Any]) -> str | None:
+    provenance = _as_mapping(payload.get("analysis_provenance"))
+    fresh = _as_mapping(payload.get("fresh_epoch"))
+    for value in (
+        provenance.get("fresh_epoch_id"),
+        fresh.get("epoch_id"),
+        payload.get("fresh_epoch_id"),
+        payload.get("epoch_id"),
+    ):
+        text = str(value or "").strip()
+        if text and text.upper() not in {"NONE", "NULL", "UNAVAILABLE"}:
+            return text
+    return None
+
+
+def _bundle_is_fresh(payload: Mapping[str, Any]) -> bool:
+    scope = " ".join(
+        str(payload.get(key) or "")
+        for key in ("session_scope", "data_scope", "scope")
+    ).upper()
+    if "ALL-DATA" in scope or "ALL-TIME" in scope:
+        return False
+    return "FRESH" in scope or "SESSION" in scope
+
+
+def _session_along(roots: Iterable[Path]) -> dict[str, Any]:
+    """Session file for these roots. A foreign epoch is not borrowed later."""
+    seen: set[Path] = set()
     for root in roots:
+        current = root
+        for _ in range(5):
+            candidate = current / "research_session.json"
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                break
+            if resolved not in seen:
+                seen.add(resolved)
+                payload = _read_json_object(candidate)
+                if payload and (
+                    payload.get("fresh_collection_mode")
+                    or payload.get("collector_v22_epoch_id")
+                    or payload.get("fresh_epoch_id")
+                    or payload.get("fresh_collection_start_time")
+                ):
+                    return payload
+            if current.parent == current:
+                break
+            current = current.parent
+    return {}
+
+
+def _select_fresh_bundle(
+    bundles: list[dict[str, Any]],
+    session: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Pick one FRESH generation. Never mix a second epoch into that bind."""
+    session_epoch = str(
+        session.get("collector_v22_epoch_id") or session.get("fresh_epoch_id") or ""
+    ).strip() or None
+    session_start = _epoch_seconds(
+        session.get("fresh_collection_start_time") or session.get("collector_v22_epoch_ts")
+    )
+    positive = [bundle for bundle in bundles if int(bundle["trades"]) > 0]
+    if any(_bundle_is_fresh(bundle["compact"]) for bundle in positive) or session.get("fresh_collection_mode"):
+        positive = [bundle for bundle in positive if _bundle_is_fresh(bundle["compact"])]
+    if session_start is not None:
+        dated = []
+        for bundle in positive:
+            generated = _epoch_seconds(bundle["compact"].get("generated_at"))
+            if generated is None or generated + 30 >= session_start:
+                dated.append(bundle)
+        if dated:
+            positive = dated
+    if session_epoch and any(bundle["epoch"] for bundle in positive):
+        matched = [bundle for bundle in positive if bundle["epoch"] == session_epoch]
+        if matched:
+            positive = matched
+        elif all(bundle["epoch"] for bundle in positive):
+            return None
+        else:
+            positive = [
+                bundle for bundle in positive
+                if bundle["epoch"] in (None, session_epoch)
+            ]
+    if not positive:
+        return None
+    positive.sort(key=lambda bundle: (
+        1 if _bundle_is_fresh(bundle["compact"]) else 0,
+        _epoch_seconds(bundle["compact"].get("generated_at")) or 0.0,
+    ))
+    return positive[-1]
+
+
+def _load_directory_companions(directory: Path) -> dict[str, Any]:
+    loaded: dict[str, Any] = {key: {} for key, _name in _COMPANION_FILES}
+    for key, name in _COMPANION_FILES:
+        payload = _read_json_object(directory / name)
+        if payload:
+            loaded[key] = payload
+    return loaded
+
+
+def load_analyzer_companions(*roots: str) -> dict[str, Any]:
+    """Load one compatible FRESH digest from report, mirror, and canonical roots.
+
+    Empty zero files in the worktree or the fly mirror do not hide a non-empty
+    FRESH compact under ``canonical-research-data/analyzer``. Companions are
+    taken from that same directory so a second epoch cannot mix in. Missing
+    data stays empty.
+    """
+    expanded: list[Path] = []
+    seen: set[Path] = set()
+    for root in (*roots, *[str(path) for path in canonical_analyzer_roots()]):
         if not root:
             continue
-        base = Path(root)
+        path = Path(root)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        expanded.append(path)
+
+    bundles: list[dict[str, Any]] = []
+    for root in expanded:
+        for directory in _iter_companion_dirs(root):
+            compact = _read_json_object(directory / "research_compact_summary.json")
+            if not compact:
+                continue
+            bundles.append({
+                "directory": directory,
+                "compact": compact,
+                "epoch": _bundle_epoch(compact),
+                "trades": _companion_positive_count("compact", compact),
+            })
+    chosen = _select_fresh_bundle(bundles, _session_along(expanded))
+    if chosen is not None:
+        loaded = _load_directory_companions(chosen["directory"])
+        loaded["source_root"] = str(chosen["directory"])
+        if chosen["epoch"]:
+            loaded["source_epoch_id"] = chosen["epoch"]
+        observed = session_paper_observation(chosen["directory"])
+        if observed:
+            loaded["session_paper"] = observed
+        return loaded
+    if any(int(bundle["trades"]) > 0 for bundle in bundles):
+        # Positive digests existed and none were epoch-compatible. Do not
+        # fall through to a different generation.
+        return {key: {} for key, _name in _COMPANION_FILES}
+
+    loaded = {key: {} for key, _name in _COMPANION_FILES}
+    session_paper: dict[str, Any] | None = None
+    for root in expanded:
         for key, name in _COMPANION_FILES:
             if _companion_positive_count(key, _as_mapping(loaded.get(key))) > 0:
                 continue
-            for path in (base / name, base / "reports" / name):
-                try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
-                if not isinstance(payload, dict) or not payload:
-                    continue
-                current = _as_mapping(loaded.get(key))
-                if not current or _companion_positive_count(key, payload) > 0:
-                    loaded[key] = payload
-                if _companion_positive_count(key, payload) > 0:
-                    break
-        observed = session_paper_observation(base)
+            payload = _read_json_object(root / name) or _read_json_object(root / "reports" / name)
+            if not payload:
+                continue
+            current = _as_mapping(loaded.get(key))
+            if not current or _companion_positive_count(key, payload) > 0:
+                loaded[key] = payload
+        observed = session_paper_observation(root)
         if observed and session_paper is None:
             session_paper = observed
     if session_paper:
