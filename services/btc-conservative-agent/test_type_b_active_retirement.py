@@ -14,14 +14,14 @@ import pathway_lane_roster as roster
 def test_type_b_is_historical_but_not_active() -> None:
     lane = config.RESEARCH_LANE_TYPE_B_HUNTER_V1
 
-    assert lane in config.COMBO_LANE_SPECS
-    assert config.COMBO_LANE_SPECS[lane]["is_legacy"] is True
-    assert config.COMBO_LANE_SPECS[lane]["is_research_candidate"] is False
+    assert lane == "TYPE_B_HUNTER_V1"
+    assert lane not in config.COMBO_LANE_SPECS
     assert lane not in config.COMBO_EXECUTION_LANES
     assert lane not in config.COMBO_TILE_DISPLAY_ORDER
+    assert lane not in config.ACTIVE_TILE_REGISTRY
     assert config.is_combo_execution_lane(lane) is False
-    assert lane in roster.RETIRED_PATHWAY_LANES
     assert lane not in roster.DASHBOARD_PRIMARY_LANES
+    assert config.RESEARCH_STACK_VERSION != "v15-typeb-opportunity-v2"
 
 
 def test_shared_ai_path_cannot_spawn_type_b() -> None:

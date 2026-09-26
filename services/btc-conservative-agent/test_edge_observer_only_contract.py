@@ -66,9 +66,10 @@ def test_current_two_tile_roster_survives_edge_retirement() -> None:
     lanes = {row["lane"] for row in payload["lanes"]}
     assert lanes == {
         config.COMPARISON_BENCHMARK_LANE,
-        config.RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+        *config.COMBO_EXECUTION_LANES,
     }
     assert payload["benchmark_lane"] == config.COMPARISON_BENCHMARK_LANE
+    assert "v15-typeb-opportunity-v2" not in {config.RESEARCH_STACK_VERSION, config.ANALYZER_SYNC_ID}
 
 
 def test_only_one_ai_evaluator_call_site_remains() -> None:
