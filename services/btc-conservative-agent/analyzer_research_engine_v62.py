@@ -19293,6 +19293,10 @@ def _report_source_evidence_provenance():
 def _fresh_epoch_provenance():
     """Return one stable collection epoch identity without mutating data."""
     session = load_research_session()
+    # Prefer the durable official bind. Rehashing from float timestamps loses
+    # sub-microsecond precision (…760ns → …044ns) and mints a divergent
+    # epoch-d171* id that can never MATCH Fly/mirror epoch-281be253*.
+    bound = str(session.get("collector_v22_epoch_id") or "").strip()
     cutoff = None
     kind = None
     if session.get("fresh_collection_start_iso") or session.get("fresh_collection_start_time"):
@@ -19310,6 +19314,14 @@ def _fresh_epoch_provenance():
                 kind = "NO_BACKFILL_RESEARCH_ACCUMULATOR"
         except (OSError, ValueError, TypeError):
             cutoff = None
+    if bound:
+        return {
+            "fresh_epoch_schema": "fresh_research_epoch_v1",
+            "fresh_epoch_status": "BOUND",
+            "fresh_epoch_id": bound,
+            "fresh_epoch_cutoff_utc": cutoff,
+            "fresh_epoch_kind": kind or "SHOWCASE_FRESH_COLLECTION",
+        }
     if cutoff is None:
         return {
             "fresh_epoch_schema": "fresh_research_epoch_v1",
