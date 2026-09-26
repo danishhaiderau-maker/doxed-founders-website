@@ -954,6 +954,12 @@ def canonical_analyzer_roots(search_from: str | Path | None = None) -> list[Path
     env = os.getenv("BTC_CANONICAL_ANALYZER_DATA", "").strip()
     if env:
         add(Path(env))
+    # Pytest must not bind a developer machine's btc-v31-current tree.
+    # Explicit search_from still resolves a fixture layout. An explicit
+    # BTC_CANONICAL_ANALYZER_DATA (set by a test to a temp dir, or by Ops
+    # for the smoke) is the only host path honored under pytest.
+    if search_from is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return roots
     agent = Path(search_from).resolve() if search_from else Path(__file__).resolve().parent
     add(agent / "canonical-research-data" / "analyzer")
     if agent.name == "btc-conservative-agent" and agent.parent.name == "services":

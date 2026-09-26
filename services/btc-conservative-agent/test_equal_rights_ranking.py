@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from research_v3_ranking import REQUIRED_GATES
 
@@ -16,6 +19,17 @@ from equal_rights_ranking import (
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_canonical_analyzer(monkeypatch):
+    """Host FRESH digests must not leak into empty fixtures.
+
+    Ops machines set BTC_CANONICAL_ANALYZER_DATA or have a sibling
+    btc-v31-current tree. Tests that need a canonical root set the env to a
+    temp directory themselves.
+    """
+    monkeypatch.delenv("BTC_CANONICAL_ANALYZER_DATA", raising=False)
 
 
 def _passing_gates() -> dict[str, bool]:
@@ -829,6 +843,13 @@ def test_incompatible_canonical_epoch_is_not_bound():
             os.environ["BTC_CANONICAL_ANALYZER_DATA"] = previous
 
 
+def test_pytest_does_not_discover_host_canonical_trees():
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    assert os.environ.get("BTC_CANONICAL_ANALYZER_DATA") in (None, "")
+    assert canonical_analyzer_roots() == []
+
+
 def test_all_sources_empty_stay_empty():
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
@@ -902,6 +923,7 @@ def main() -> None:
         test_report_root_empty_uses_data_root_mirror_counts,
         test_canonical_analyzer_tree_supplies_fresh_counts_when_mirror_is_empty,
         test_incompatible_canonical_epoch_is_not_bound,
+        test_pytest_does_not_discover_host_canonical_trees,
         test_all_sources_empty_stay_empty,
         test_data_watcher_watches_heartbeat_file,
     )
