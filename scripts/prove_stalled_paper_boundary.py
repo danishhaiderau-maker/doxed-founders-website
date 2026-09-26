@@ -273,15 +273,93 @@ def _flat_check_step(job: dict) -> dict | None:
     return None
 
 
+_ZIP_MAGIC = b"PK\x03\x04"
+_LOG_FETCH_ATTEMPTS = 3
+_LOG_FETCH_SLEEP_SEC = 2
+
+
+def _obvious_log_error_page(body: bytes) -> bool:
+    """True for an HTML document or a GitHub JSON error, not a job log."""
+    sample = body.lstrip()[:64].lower()
+    if sample.startswith((b"<!doctype", b"<html", b"<head", b"<?xml")):
+        return True
+    if len(body) > 65536 or not sample.startswith((b"{", b"[")):
+        return False
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict) or "showcase" in payload:
+        return False
+    if "documentation_url" in payload:
+        return True
+    return isinstance(payload.get("message"), str)
+
+
+def _log_text_from_bytes(log_bytes: bytes) -> str:
+    """Decode a job-log download that is either a zip bundle or plain text.
+
+    GitHub's logs redirect returns a zip when the body starts with the ZIP
+    local-file magic, and plain text otherwise. A corrupt zip raises
+    SystemExit instead of zipfile.BadZipFile.
+    """
+    if not log_bytes:
+        raise SystemExit("job logs download failed closed: empty body")
+    if _obvious_log_error_page(log_bytes):
+        raise SystemExit("job logs download failed closed: HTML or JSON error page")
+    if log_bytes.startswith(_ZIP_MAGIC):
+        try:
+            with zipfile.ZipFile(io.BytesIO(log_bytes)) as bundle:
+                chunks = []
+                for name in bundle.namelist():
+                    if name.endswith("/"):
+                        continue
+                    chunks.append(bundle.read(name).decode("utf-8", "replace"))
+        except zipfile.BadZipFile:
+            raise SystemExit(
+                "job logs download failed closed: file is not a readable zip"
+            ) from None
+        return "\n".join(chunks)
+    return log_bytes.decode("utf-8", "replace")
+
+
 def _showcase_from_job_logs(log_bytes: bytes) -> tuple[int, int] | None:
-    with zipfile.ZipFile(io.BytesIO(log_bytes)) as bundle:
-        names = bundle.namelist()
-        chunks = []
-        for name in names:
-            if name.endswith("/"):
-                continue
-            chunks.append(bundle.read(name).decode("utf-8", "replace"))
-    return parse_showcase_counts("\n".join(chunks))
+    return parse_showcase_counts(_log_text_from_bytes(log_bytes))
+
+
+def _fetch_job_log_bytes(
+    url: str,
+    token: str,
+    *,
+    attempts: int = _LOG_FETCH_ATTEMPTS,
+    sleep_sec: float = _LOG_FETCH_SLEEP_SEC,
+) -> bytes:
+    """GET job logs, retrying empty, error-page, and transient responses."""
+    last = "no attempt"
+    for attempt in range(1, attempts + 1):
+        try:
+            body = _github_request(url, token, "application/vnd.github+json")
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = f"transient failure: {exc}"
+        else:
+            if not isinstance(body, (bytes, bytearray)):
+                last = "transient failure: logs response was not bytes"
+            else:
+                body = bytes(body)
+                if not body:
+                    last = "empty body"
+                else:
+                    try:
+                        _log_text_from_bytes(body)
+                    except SystemExit as exc:
+                        last = str(exc)
+                    else:
+                        return body
+        if attempt < attempts:
+            time.sleep(sleep_sec)
+    raise SystemExit(
+        f"job logs download failed closed after {attempts} attempts: {last}"
+    )
 
 
 def fetch_flat_check_observations(
@@ -337,10 +415,9 @@ def fetch_flat_check_observations(
         if conclusion == "failure":
             if not isinstance(job_id, int):
                 raise SystemExit(f"run {run_id} flat-check failure has no job id")
-            log_bytes = _github_request(
+            log_bytes = _fetch_job_log_bytes(
                 f"https://api.github.com/repos/{repository}/actions/jobs/{job_id}/logs",
                 token,
-                "application/vnd.github+json",
             )
             parsed = _showcase_from_job_logs(log_bytes)
             if parsed is not None:
