@@ -1020,8 +1020,31 @@ def _file_time_span(path: str, ts_cols=(), json_ts_key="ts"):
     return fmt(min_ts), fmt(max_ts), rows, mtime
 
 
+def _trades_evidence_root() -> str | None:
+    """Directory that actually holds the paper ledger, if one exists.
+
+    Session scope has to come from this same directory. A fresh worktree
+    ``research_session.json`` must not cutoff a mirror ledger that lives under
+    ``BTC_AGENT_DATA_DIR``.
+    """
+    env_root = os.getenv("BTC_AGENT_DATA_DIR")
+    if env_root and os.path.isfile(os.path.join(env_root, TRADES_FILE)):
+        return env_root
+    if os.path.isfile(TRADES_FILE):
+        return os.getcwd()
+    parent = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    if os.path.isfile(os.path.join(parent, TRADES_FILE)):
+        return parent
+    return None
+
+
 def load_research_session() -> dict:
-    path = _agent_data_path(RESEARCH_SESSION_FILE)
+    root = _trades_evidence_root()
+    path = (
+        os.path.join(root, RESEARCH_SESSION_FILE)
+        if root is not None
+        else _agent_data_path(RESEARCH_SESSION_FILE)
+    )
     if not os.path.isfile(path):
         return {}
     try:

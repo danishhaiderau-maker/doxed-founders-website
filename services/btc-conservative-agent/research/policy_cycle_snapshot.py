@@ -98,8 +98,54 @@ def _microstructure_evidence(events, tape_snapshot) -> dict:
     }
 
 
-def load_policy_cycle_snapshot(data_dir=".") -> dict:
-    path = Path(data_dir) / RESEARCH_EVENTS_FILE
+def resolve_research_events_path(data_dir=".", *also_roots: str) -> Path:
+    """Prefer a non-empty events ledger on the configured data root.
+
+    Health exposes ``data_root`` (fly mirror) and ``report_root`` (worktree).
+    An empty file beside the analyzer must not hide mirror session events.
+    When every copy is missing or empty, the data-root path is returned so
+    the row count stays zero instead of borrowing another tree.
+    """
+    ordered: list[Path] = []
+    seen: set[Path] = set()
+    for root in (data_dir, *also_roots):
+        if not root:
+            continue
+        path = (Path(root) / RESEARCH_EVENTS_FILE).resolve()
+        if path in seen:
+            continue
+        seen.add(path)
+        ordered.append(path)
+    existing = [path for path in ordered if path.is_file()]
+    data_root = Path(data_dir).resolve() if data_dir else None
+
+    def _under_data_root(path: Path) -> bool:
+        if data_root is None:
+            return False
+        try:
+            path.relative_to(data_root)
+        except ValueError:
+            return False
+        return True
+
+    nonempty = [path for path in existing if path.stat().st_size > 0]
+    data_nonempty = [path for path in nonempty if _under_data_root(path)]
+    if data_nonempty:
+        return data_nonempty[0]
+    if nonempty:
+        return nonempty[0]
+    if existing:
+        return existing[0]
+    return (Path(data_dir) / RESEARCH_EVENTS_FILE) if data_dir else Path(RESEARCH_EVENTS_FILE)
+
+
+def load_policy_cycle_snapshot(data_dir=".", also_roots=()) -> dict:
+    path = resolve_research_events_path(data_dir, *tuple(also_roots or ()))
+    data_root = Path(data_dir).resolve() if data_dir else None
+    try:
+        source_root = "data_root" if data_root is not None and path.resolve().is_relative_to(data_root) else "also_root"
+    except ValueError:
+        source_root = "also_root"
     events = []
     digest = hashlib.sha256()
     for line in _read_snapshot_lines(path):
@@ -122,6 +168,7 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
         "snapshot_id": "policy-snapshot-" + digest.hexdigest()[:24],
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "source_file": RESEARCH_EVENTS_FILE,
+        "source_root": source_root,
         "source_read_mode": "BYTES_THEN_PARSE_V1",
         "row_count": len(events),
         "last_event_id": last.get("event_id"),
@@ -146,7 +193,7 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
     from research.best_policy_research import build_best_policy_research_report
     from research.conservative_fill_cohort import build_conservative_fill_cohort
 
-    snapshot = load_policy_cycle_snapshot(data_dir)
+    snapshot = load_policy_cycle_snapshot(data_dir, also_roots=(report_dir,))
     candidate = build_policy_candidate_oos_report(
         data_dir=data_dir, report_dir=report_dir,
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],

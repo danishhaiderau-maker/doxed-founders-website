@@ -2,18 +2,34 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from research_v3_ranking import REQUIRED_GATES
 
 from equal_rights_ranking import (
     build_equal_rights_ranking,
+    canonical_analyzer_roots,
     equal_rights_from_report,
+    load_analyzer_companions,
     sanitize_equal_rights,
 )
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+@pytest.fixture(autouse=True)
+def _isolate_host_canonical_analyzer(monkeypatch):
+    """Host FRESH digests must not leak into empty fixtures.
+
+    Ops machines set BTC_CANONICAL_ANALYZER_DATA or have a sibling
+    btc-v31-current tree. Tests that need a canonical root set the env to a
+    temp directory themselves.
+    """
+    monkeypatch.delenv("BTC_CANONICAL_ANALYZER_DATA", raising=False)
 
 
 def _passing_gates() -> dict[str, bool]:
@@ -390,6 +406,484 @@ def test_mirror_stale_banner():
     assert "MIRROR_STALE" in banner_ids
 
 
+def test_compatible_analyzer_counts_are_not_spuriously_zero():
+    """FRESH digest n and shadow/CF/missed artifacts must show up when the genome embed is empty."""
+    empty = build_equal_rights_ranking(report={})
+    payload = equal_rights_from_report(
+        {
+            "generated_at": "2026-09-26T01:00:00Z",
+            "data_scope": "FRESH-COLLECTION",
+            "live_policy_change_allowed": False,
+            "collection": {},
+            "equal_rights": empty,
+        },
+        companions={
+            "compact": {
+                "schema": "research_hierarchy_v1",
+                "data_scope": "session",
+                "performance": {"trades": 57, "net_pnl_usd": -12.5, "expectancy_usd": -0.22},
+            },
+            "shadow_fill": {"shadow_cohort": 20, "shadow_filled": 11},
+            "counterfactual": {
+                "schema": "counterfactual_coverage_v1",
+                "n_shadow": 20,
+                "n_cf_in": 8,
+                "n_compact_out": 28,
+            },
+            "missed": {"schema": "missed_opportunity_heatmap_v1", "totals": {"events": 4}},
+            "paused_shadow": {"overall": {"closed": 3, "filled": 2, "net_pnl_usd": 1.5}},
+        },
+    )
+    by_id = {row["id"]: row for row in payload["surfaces"]}
+    assert by_id["paper"]["closed_n"] == 57
+    assert by_id["paper"]["fills"] == 57
+    assert by_id["paper"]["after_cost_expectancy_usd"] == round(-12.5 / 57, 6)
+    assert by_id["paper"]["safe_badge"] is None
+    assert by_id["shadow"]["closed_n"] == 11
+    assert by_id["shadow"]["after_cost_expectancy_usd"] is None
+    assert by_id["shadow"]["safe_badge"] is None
+    assert by_id["counterfactual"]["closed_n"] == 0
+    assert by_id["counterfactual"]["qualification"] == "EMPTY"
+    assert by_id["counterfactual"]["safe_badge"] is None
+    secondary = {row["id"]: row for row in payload["digest"]["secondary_worlds"]}
+    assert secondary["cf_evidence"]["closed_n"] == 8
+    assert secondary["cf_evidence"]["world"] == "CF"
+    assert secondary["cf_evidence"]["safe_badge"] is None
+    assert secondary["cf_evidence"]["qualification"] == "NOT_A_STRATEGY_RANK"
+    assert secondary["missed"]["closed_n"] == 4
+    assert secondary["shadow_blocked"]["closed_n"] == 3
+    assert secondary["missed"]["safe_badge"] is None
+    assert secondary["missed"]["qualification"] == "NOT_A_STRATEGY_RANK"
+    assert payload["safe_badge"] is None
+    assert payload["number_one"] is None
+    assert payload["qualification"] == "NO_SAFE_QUALIFIED_POLICY"
+    assert payload["comparison_rows"][0]["rank"] is None
+
+
+def test_missing_companion_artifacts_stay_empty():
+    payload = equal_rights_from_report(
+        {"equal_rights": build_equal_rights_ranking(report={})},
+        companions={
+            "compact": {},
+            "real_edge": {},
+            "shadow_fill": {"shadow_cohort": 9, "shadow_filled": 0},
+            "counterfactual": {"n_cf_in": 0, "n_compact_out": 9},
+            "missed": {"totals": {"events": 0}, "heatmap": []},
+            "paused_shadow": {"overall": {"closed": 0}},
+        },
+    )
+    assert all(row["closed_n"] == 0 for row in payload["surfaces"])
+    assert all(row["qualification"] == "EMPTY" for row in payload["surfaces"])
+    assert all(row["closed_n"] == 0 for row in payload["digest"]["secondary_worlds"])
+    assert payload["safe_badge"] is None
+    assert payload["number_one"] is None
+
+
+def test_genome_counts_are_not_replaced_by_digest_trades():
+    payload = equal_rights_from_report(
+        {"collection": {"outcome_states": {"REALIZED_PROFIT": 2}}},
+        companions={"compact": {"performance": {"trades": 57, "net_pnl_usd": 100.0}}},
+    )
+    paper = payload["surfaces"][0]
+    assert paper["closed_n"] == 2
+    assert paper["after_cost_expectancy_usd"] is None
+    assert paper["safe_badge"] is None
+    assert payload["number_one"] is None
+
+
+def test_digest_fallback_uses_real_edge_executed_when_trades_missing():
+    payload = equal_rights_from_report(
+        {},
+        companions={"real_edge": {"executed": 57, "executed_pnl_usd": 3.0}},
+    )
+    paper = payload["surfaces"][0]
+    assert paper["closed_n"] == 57
+    assert paper["after_cost_expectancy_usd"] == round(3.0 / 57, 6)
+    assert paper["safe_badge"] is None
+    assert payload["number_one"] is None
+
+
+def test_dashboard_binds_the_same_digest_artifacts():
+    dashboard = (ROOT / "research" / "research_dashboard.py").read_text(encoding="utf-8")
+    api = dashboard.split("def api_equal_rights_ranking", 1)[1].split("\ndef ", 1)[0]
+    assert "load_analyzer_companions" in api
+    assert "DATA_ROOT" in api
+    assert "companions" in api
+    bot = (ROOT / "bot.py").read_text(encoding="utf-8")
+    bot_api = bot.split("def api_equal_rights_ranking", 1)[1].split("\ndef ", 1)[0]
+    assert "load_analyzer_companions" in bot_api
+    report = (ROOT / "research" / "research_v3_report.py").read_text(encoding="utf-8")
+    assert "load_analyzer_companions(str(report_dir), str(data_dir))" in report
+
+
+def _write_session_ledger(root: Path, rows: list[tuple[float, float]], *, start: float) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "research_session.json").write_text(
+        json.dumps({
+            "fresh_collection_mode": True,
+            "fresh_collection_start_time": start,
+        }),
+        encoding="utf-8",
+    )
+    lines = ["trade_id,net_pnl_usd,close_ts"]
+    for index, (stamp, pnl) in enumerate(rows, start=1):
+        lines.append(f"t{index},{pnl},{stamp}")
+    (root / "trades_3factor.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_empty_cwd_compact_uses_session_mirror_paper_counts():
+    """Zero worktree compact must not hide FRESH closes on the session/mirror root."""
+    import tempfile
+    start = 1_700_000_000.0
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = Path(tmp) / "cwd"
+        mirror = Path(tmp) / "mirror"
+        cwd.mkdir()
+        (cwd / "research_compact_summary.json").write_text(
+            json.dumps({"performance": {"trades": 0, "net_pnl_usd": 0}, "data_scope": "session"}),
+            encoding="utf-8",
+        )
+        (cwd / "shadow_fill_outcome_report.json").write_text(
+            json.dumps({"shadow_filled": 0, "shadow_cohort": 9}),
+            encoding="utf-8",
+        )
+        (cwd / "counterfactual_coverage_report.json").write_text(
+            json.dumps({"n_cf_in": 0, "n_compact_out": 9}),
+            encoding="utf-8",
+        )
+        in_session = [(start + 60, -12.5)] + [(start + 60 + index, 0.0) for index in range(1, 57)]
+        _write_session_ledger(
+            mirror,
+            [(start - 100, 50.0), (start - 1, 25.0), *in_session],
+            start=start,
+        )
+        (mirror / "shadow_fill_outcome_report.json").write_text(
+            json.dumps({"shadow_filled": 11}),
+            encoding="utf-8",
+        )
+        (mirror / "counterfactual_coverage_report.json").write_text(
+            json.dumps({"n_cf_in": 8, "n_compact_out": 20}),
+            encoding="utf-8",
+        )
+        payload = equal_rights_from_report(
+            {},
+            companions=load_analyzer_companions(str(cwd), str(mirror)),
+        )
+    by_id = {row["id"]: row for row in payload["surfaces"]}
+    assert by_id["paper"]["closed_n"] == 57
+    assert by_id["paper"]["world"] == "OBSERVED_PAPER"
+    assert by_id["paper"]["after_cost_expectancy_usd"] == round(-12.5 / 57, 6)
+    assert by_id["paper"]["safe_badge"] is None
+    assert by_id["shadow"]["closed_n"] == 11
+    assert by_id["shadow"]["after_cost_expectancy_usd"] is None
+    assert by_id["counterfactual"]["closed_n"] == 0
+    assert by_id["counterfactual"]["qualification"] == "EMPTY"
+    secondary = {row["id"]: row for row in payload["digest"]["secondary_worlds"]}
+    assert secondary["cf_evidence"]["closed_n"] == 8
+    assert payload["safe_badge"] is None
+    assert payload["number_one"] is None
+    assert payload["digest"]["live_arm"] is False
+
+
+def test_wal_identity_invalid_keeps_companion_counts():
+    """EMERGENCY_WAL_IDENTITY_INVALID must not blank honest companion counts."""
+    import os
+    import tempfile
+
+    import research_v3_store as store_mod
+    from emergency_evidence_wal import EmergencyEvidenceWal
+    from research.research_v3_report import build_safe_policy_genome_v3_report
+
+    previous = os.environ.get("SOURCE_GIT_REV")
+    os.environ["SOURCE_GIT_REV"] = "a" * 40
+    store_mod._provenance_cache = None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            reports = Path(tmp) / "reports"
+            data.mkdir()
+            reports.mkdir()
+            (reports / "research_compact_summary.json").write_text(
+                json.dumps({
+                    "data_scope": "session",
+                    "performance": {"trades": 57, "net_pnl_usd": -12.5},
+                }),
+                encoding="utf-8",
+            )
+            store = store_mod.V3EvidenceStore(data, epoch_id="V3_NOT_STARTED")
+            try:
+                EmergencyEvidenceWal._validate_identity(store._identity_binding())
+                identity_rejected = False
+            except ValueError as exc:
+                identity_rejected = str(exc) == "EMERGENCY_WAL_IDENTITY_INVALID"
+            assert identity_rejected
+            assert store._emergency_wal_identity_available() is False
+            assert not (data / "v3" / "emergency_evidence_wal_v2").exists()
+            report = build_safe_policy_genome_v3_report(
+                str(data),
+                str(reports),
+                candidates=[],
+            )
+        paper = {row["id"]: row for row in report["equal_rights"]["surfaces"]}["paper"]
+        assert paper["closed_n"] == 57
+        assert paper["after_cost_expectancy_usd"] == round(-12.5 / 57, 6)
+        assert paper["safe_badge"] is None
+        assert report["equal_rights"]["safe_badge"] is None
+        assert report["equal_rights"]["number_one"] is None
+        assert report["equal_rights"]["digest"]["live_arm"] is False
+        assert report["live_policy_change_allowed"] is False
+        assert report["real_bitfinex_trading_allowed"] is False
+        assert report["emergency_wal"]["status"] == "EMERGENCY_WAL_IDENTITY_INVALID"
+        assert report["emergency_wal"]["effect"] == "RANKING_CONTINUES"
+        assert report["emergency_wal"]["identity_accepted"] is False
+    finally:
+        if previous is None:
+            os.environ.pop("SOURCE_GIT_REV", None)
+        else:
+            os.environ["SOURCE_GIT_REV"] = previous
+        store_mod._provenance_cache = None
+
+
+def test_report_root_empty_uses_data_root_mirror_counts():
+    """Health split: empty report_root must not hide mirror data_root fills."""
+    import tempfile
+    from datetime import datetime, timezone
+
+    from research.policy_cycle_snapshot import load_policy_cycle_snapshot
+
+    generated = datetime.now(timezone.utc).isoformat()
+    with tempfile.TemporaryDirectory() as tmp:
+        report_root = Path(tmp) / "report"
+        data_root = Path(tmp) / "fly-data-mirror"
+        report_root.mkdir()
+        data_root.mkdir()
+        (report_root / "research_compact_summary.json").write_text(
+            json.dumps({
+                "performance": {"trades": 0, "net_pnl_usd": 0},
+                "data_scope": "session",
+            }),
+            encoding="utf-8",
+        )
+        (report_root / "research_events_v22.jsonl").write_text("", encoding="utf-8")
+        (data_root / "research_compact_summary.json").write_text(
+            json.dumps({
+                "generated_at": generated,
+                "data_scope": "FRESH-COLLECTION",
+                "performance": {"trades": 57, "net_pnl_usd": -12.5},
+            }),
+            encoding="utf-8",
+        )
+        (data_root / "shadow_fill_outcome_report.json").write_text(
+            json.dumps({"shadow_filled": 4}),
+            encoding="utf-8",
+        )
+        (data_root / "counterfactual_coverage_report.json").write_text(
+            json.dumps({"n_cf_in": 6}),
+            encoding="utf-8",
+        )
+        (data_root / "research_events_v22.jsonl").write_text(
+            '{"event_id":"e1","epoch_id":"epoch-fresh"}\n',
+            encoding="utf-8",
+        )
+        # Genome order is report_root then data_root. Dashboard order is the reverse.
+        for roots in (
+            (str(report_root), str(data_root)),
+            (str(data_root), str(report_root)),
+        ):
+            payload = equal_rights_from_report({}, companions=load_analyzer_companions(*roots))
+            by_id = {row["id"]: row for row in payload["surfaces"]}
+            assert by_id["paper"]["closed_n"] == 57
+            assert by_id["paper"]["world"] == "OBSERVED_PAPER"
+            assert by_id["paper"]["after_cost_expectancy_usd"] == round(-12.5 / 57, 6)
+            assert by_id["paper"]["safe_badge"] is None
+            assert by_id["shadow"]["closed_n"] == 4
+            assert by_id["counterfactual"]["closed_n"] == 0
+            secondary = {row["id"]: row for row in payload["digest"]["secondary_worlds"]}
+            assert secondary["cf_evidence"]["closed_n"] == 6
+            assert payload["safe_badge"] is None
+            assert payload["number_one"] is None
+            assert payload["digest"]["live_arm"] is False
+            assert payload["digest"]["freshness"] == "FRESH"
+        snapshot = load_policy_cycle_snapshot(str(data_root), also_roots=(str(report_root),))
+    assert snapshot["receipt"]["row_count"] == 1
+    assert snapshot["receipt"]["source_root"] == "data_root"
+    assert snapshot["receipt"]["epoch_id"] == "epoch-fresh"
+
+
+def _fresh_compact(trades: int, *, epoch: str | None, generated_at: str, net: float = -12.5) -> dict:
+    payload = {
+        "generated_at": generated_at,
+        "session_scope": "FRESH-COLLECTION",
+        "data_scope": "session",
+        "performance": {"trades": trades, "net_pnl_usd": net},
+    }
+    if epoch:
+        payload["analysis_provenance"] = {"fresh_epoch_id": epoch}
+    return payload
+
+
+def test_canonical_analyzer_tree_supplies_fresh_counts_when_mirror_is_empty():
+    """Empty fly mirror and empty worktree must not hide the current checkout digest."""
+    import os
+    import tempfile
+
+    previous = os.environ.get("BTC_CANONICAL_ANALYZER_DATA")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            report_root = base / "btc-v31-analyzer-121" / "services" / "btc-conservative-agent"
+            mirror = base / "fly-data-mirror"
+            canonical = (
+                base / "btc-v31-current" / "services" / "btc-conservative-agent"
+                / "canonical-research-data" / "analyzer"
+            )
+            report_root.mkdir(parents=True)
+            mirror.mkdir()
+            (mirror / "v3" / "ledgers").mkdir(parents=True)
+            (mirror / "v3" / "emergency_evidence_wal_v2").mkdir()
+            (report_root / "research_compact_summary.json").write_text(
+                json.dumps({"performance": {"trades": 0}, "data_scope": "session"}),
+                encoding="utf-8",
+            )
+            archive = canonical / "research_session_archives" / "2026-09-26"
+            archive.mkdir(parents=True)
+            (archive / "research_compact_summary.json").write_text(
+                json.dumps(_fresh_compact(
+                    57,
+                    epoch="epoch-fresh",
+                    generated_at="2026-09-26T04:00:00+00:00",
+                )),
+                encoding="utf-8",
+            )
+            (archive / "shadow_fill_outcome_report.json").write_text(
+                json.dumps({"shadow_filled": 4}),
+                encoding="utf-8",
+            )
+            (canonical / "published_reports" / "latest").mkdir(parents=True)
+            (canonical / "published_reports" / "latest" / "research_compact_summary.json").write_text(
+                json.dumps({
+                    "session_scope": "ALL-DATA",
+                    "data_scope": "all",
+                    "generated_at": "2026-09-26T05:00:00+00:00",
+                    "performance": {"trades": 200, "net_pnl_usd": 99},
+                }),
+                encoding="utf-8",
+            )
+            (canonical / "research_session.json").write_text(
+                json.dumps({
+                    "fresh_collection_mode": True,
+                    "fresh_collection_start_time": 1_758_800_000,
+                    "collector_v22_epoch_id": "epoch-fresh",
+                }),
+                encoding="utf-8",
+            )
+            agent = report_root
+            found = canonical_analyzer_roots(agent)
+            assert canonical in found
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = str(canonical)
+            payload = equal_rights_from_report(
+                {},
+                companions=load_analyzer_companions(str(report_root), str(mirror)),
+            )
+        by_id = {row["id"]: row for row in payload["surfaces"]}
+        assert by_id["paper"]["closed_n"] == 57
+        assert by_id["paper"]["world"] == "OBSERVED_PAPER"
+        assert by_id["paper"]["safe_badge"] is None
+        assert by_id["shadow"]["closed_n"] == 4
+        assert by_id["counterfactual"]["closed_n"] == 0
+        assert payload["safe_badge"] is None
+        assert payload["number_one"] is None
+        assert payload["digest"]["live_arm"] is False
+        launcher = (ROOT.parent.parent / "scripts" / "start-home-analyzer.ps1").read_text(encoding="utf-8")
+        assert "BTC_CANONICAL_ANALYZER_DATA" in launcher
+        assert "canonical-research-data\\analyzer" in launcher
+    finally:
+        if previous is None:
+            os.environ.pop("BTC_CANONICAL_ANALYZER_DATA", None)
+        else:
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = previous
+
+
+def test_incompatible_canonical_epoch_is_not_bound():
+    import os
+    import tempfile
+
+    previous = os.environ.get("BTC_CANONICAL_ANALYZER_DATA")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = Path(tmp) / "analyzer"
+            other = canonical / "research_session_archives" / "other"
+            other.mkdir(parents=True)
+            (other / "research_compact_summary.json").write_text(
+                json.dumps(_fresh_compact(
+                    90,
+                    epoch="epoch-other",
+                    generated_at="2026-09-26T06:00:00+00:00",
+                    net=40,
+                )),
+                encoding="utf-8",
+            )
+            (canonical / "research_session.json").write_text(
+                json.dumps({
+                    "fresh_collection_mode": True,
+                    "collector_v22_epoch_id": "epoch-fresh",
+                    "fresh_collection_start_time": 1_758_800_000,
+                }),
+                encoding="utf-8",
+            )
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = str(canonical)
+            payload = equal_rights_from_report({}, companions=load_analyzer_companions())
+        assert all(row["closed_n"] == 0 for row in payload["surfaces"])
+        assert payload["safe_badge"] is None
+        assert payload["digest"]["live_arm"] is False
+    finally:
+        if previous is None:
+            os.environ.pop("BTC_CANONICAL_ANALYZER_DATA", None)
+        else:
+            os.environ["BTC_CANONICAL_ANALYZER_DATA"] = previous
+
+
+def test_pytest_does_not_discover_host_canonical_trees():
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    assert os.environ.get("BTC_CANONICAL_ANALYZER_DATA") in (None, "")
+    assert canonical_analyzer_roots() == []
+
+
+def test_all_sources_empty_stay_empty():
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        cwd = Path(tmp) / "cwd"
+        mirror = Path(tmp) / "mirror"
+        cwd.mkdir()
+        mirror.mkdir()
+        (cwd / "research_compact_summary.json").write_text(
+            json.dumps({"performance": {"trades": 0, "net_pnl_usd": 0}}),
+            encoding="utf-8",
+        )
+        (mirror / "research_session.json").write_text(
+            json.dumps({
+                "fresh_collection_mode": True,
+                "fresh_collection_start_time": 1_700_000_000,
+            }),
+            encoding="utf-8",
+        )
+        (mirror / "trades_3factor.csv").write_text(
+            "trade_id,net_pnl_usd,close_ts\n",
+            encoding="utf-8",
+        )
+        payload = equal_rights_from_report(
+            {},
+            companions=load_analyzer_companions(str(cwd), str(mirror)),
+        )
+    assert all(row["closed_n"] == 0 for row in payload["surfaces"])
+    assert all(row["qualification"] == "EMPTY" for row in payload["surfaces"])
+    assert all(row["closed_n"] == 0 for row in payload["digest"]["secondary_worlds"])
+    assert payload["safe_badge"] is None
+    assert payload["number_one"] is None
+    assert payload["digest"]["live_arm"] is False
+
+
 def test_data_watcher_watches_heartbeat_file():
     src = Path(__file__).resolve().parent / "analyzer_research_engine_v62.py"
     text = src.read_text(encoding="utf-8")
@@ -419,6 +913,18 @@ def main() -> None:
         test_comparison_rows_include_fills_and_drawdown,
         test_heartbeat_identity_reader,
         test_mirror_stale_banner,
+        test_compatible_analyzer_counts_are_not_spuriously_zero,
+        test_missing_companion_artifacts_stay_empty,
+        test_genome_counts_are_not_replaced_by_digest_trades,
+        test_digest_fallback_uses_real_edge_executed_when_trades_missing,
+        test_dashboard_binds_the_same_digest_artifacts,
+        test_empty_cwd_compact_uses_session_mirror_paper_counts,
+        test_wal_identity_invalid_keeps_companion_counts,
+        test_report_root_empty_uses_data_root_mirror_counts,
+        test_canonical_analyzer_tree_supplies_fresh_counts_when_mirror_is_empty,
+        test_incompatible_canonical_epoch_is_not_bound,
+        test_pytest_does_not_discover_host_canonical_trees,
+        test_all_sources_empty_stay_empty,
         test_data_watcher_watches_heartbeat_file,
     )
     for test in tests:

@@ -99,6 +99,15 @@ checks = {
             start_analyzer.index("# Publish the read-only dashboard")
         ]
     ),
+    "restart switch stops the port listener before a clean start": (
+        "param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0)" in start_analyzer
+        and "function Stop-HomeAnalyzerOwners" in start_analyzer
+        and "if ($Restart)" in start_analyzer
+        and "Stop-ListenPortFast $AnalyzerPort" in start_analyzer
+        and "Get-CanonicalAnalyzerEnginePids $AnalyzerPort" in start_analyzer
+        and "-Port 9001 -NoWait -Restart" in start_analyzer
+        and "Does not deploy Fly, arm trading, or wipe research data." in start_analyzer
+    ),
     "all launchers use the canonical tested analyzer": (
         '@("analyzer_research_engine_v62.py")' in start_analyzer
         and '@("analyzer_research_engine_v62.py")' in local_analyzer

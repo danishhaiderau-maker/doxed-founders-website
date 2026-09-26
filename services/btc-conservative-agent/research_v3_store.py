@@ -405,11 +405,21 @@ class V3EvidenceStore:
         return self.__emergency_wal
 
     def _emergency_wal_identity_available(self) -> bool:
-        identity = self._identity_binding()
-        return all(
-            value not in {"", "UNKNOWN", "UNAVAILABLE", "NOT_DEPLOYED_LOCAL"}
-            for value in identity.values()
-        )
+        """True only when the WAL would accept this identity.
+
+        A lowercase ``unavailable`` tile signature, ``V3_NOT_STARTED``, or any
+        other rejected field used to look "present" here and then raise
+        ``EMERGENCY_WAL_IDENTITY_INVALID`` while the store was opening. That
+        abort blanked equal-rights before companion counts were attached.
+        Invalid identity stays fail-closed for the reserve itself: the store
+        still opens so ranking can read honest companion evidence, and a later
+        mandatory write does not provision a misleading reserve.
+        """
+        try:
+            EmergencyEvidenceWal._validate_identity(self._identity_binding())
+        except ValueError:
+            return False
+        return True
 
     def _defer_mandatory_to_wal(
         self, ledger: str, record_id: str, material: dict[str, Any], line: str,

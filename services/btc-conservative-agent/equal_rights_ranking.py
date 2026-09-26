@@ -6,7 +6,11 @@ true on closed evidence. Missing worlds stay visible as EMPTY / NO_SAFE.
 """
 from __future__ import annotations
 
+import csv
+import json
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_v3_ranking import REQUIRED_GATES
@@ -376,16 +380,22 @@ def _comparison_rows(by_surface: Mapping[str, Mapping[str, _Accumulator]]) -> li
                 "safe_badge": "SAFE" if row_safe else None,
             }
             closed_n += acc.closed_n
-            if acc.expectancy is not None:
+            if acc.closed_n > 0 and acc.expectancy is None:
+                # A world with closes but no after-cost net cannot be ranked.
+                # Ignoring it would crown a partial bind.
+                expectancies.append(None)
+            elif acc.expectancy is not None:
                 expectancies.append(acc.expectancy)
             if row_safe:
                 safe = True
                 gates = {name: True for name in REQUIRED_GATES}
+        known = [value for value in expectancies if value is not None]
+        incomplete = any(value is None for value in expectancies)
         rendered.append({
             "policy_id": policy_id,
             "rank": None,
             "closed_n": closed_n,
-            "min_after_cost_expectancy_usd": min(expectancies) if expectancies else None,
+            "min_after_cost_expectancy_usd": None if incomplete or not known else min(known),
             "qualification": _qualify(closed_n, safe),
             "safe_badge": "SAFE" if safe else None,
             "gates": gates,
@@ -428,6 +438,7 @@ def build_equal_rights_ranking(
     report: Mapping[str, Any] | None = None,
     lifecycles: Iterable[Mapping[str, Any]] | None = None,
     candidates: Iterable[Mapping[str, Any]] | None = None,
+    companions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the three-world ranking. Empty worlds stay in the payload."""
     groups = _empty_groups()
@@ -452,7 +463,11 @@ def build_equal_rights_ranking(
                 "net": None,
                 "gates": None,
             })
-    return _payload_from_groups(groups, report)
+    return apply_companion_world_counts(
+        _payload_from_groups(groups, report),
+        companions,
+        report,
+    )
 
 
 _WORLD_TAGS = (
@@ -743,15 +758,531 @@ def _candidates_from_report(report: Mapping[str, Any]) -> list[Mapping[str, Any]
     return []
 
 
-def equal_rights_from_report(report: Mapping[str, Any] | None) -> dict[str, Any]:
+_COMPANION_FILES = (
+    ("compact", "research_compact_summary.json"),
+    ("real_edge", "real_edge_summary.json"),
+    ("shadow_fill", "shadow_fill_outcome_report.json"),
+    ("counterfactual", "counterfactual_coverage_report.json"),
+    ("missed", "missed_opportunity_heatmap.json"),
+    ("paused_shadow", "paused_shadow_research_report.json"),
+)
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _companion_positive_count(key: str, payload: Mapping[str, Any]) -> int:
+    """Positive closed-count already stored in one companion file. Zero is not evidence."""
+    if key == "compact":
+        return _int_or_zero(_as_mapping(payload.get("performance")).get("trades"))
+    if key == "real_edge":
+        return _int_or_zero(payload.get("executed"))
+    if key == "shadow_fill":
+        return _int_or_zero(payload.get("shadow_filled"))
+    if key == "counterfactual":
+        return _int_or_zero(payload.get("n_cf_in"))
+    if key == "paused_shadow":
+        return _int_or_zero(_as_mapping(payload.get("overall")).get("closed"))
+    if key == "missed":
+        missed_n = _int_or_zero(_as_mapping(payload.get("totals")).get("events"))
+        if missed_n <= 0:
+            heat = payload.get("heatmap") or payload.get("rows") or []
+            if isinstance(heat, list):
+                missed_n = sum(
+                    _int_or_zero(row.get("count"))
+                    for row in heat
+                    if isinstance(row, Mapping)
+                )
+        return missed_n
+    return 0
+
+
+def _epoch_seconds(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def session_paper_observation(root: str | Path | None) -> dict[str, Any] | None:
+    """Closed paper fills from one data root, scoped by that root's own session.
+
+    The worktree compact can be an honest zero while ``trades_3factor.csv`` on
+    the configured mirror still holds the FRESH session. A session file from a
+    different directory is not applied. Missing ledger, missing session, or no
+    in-session closes stay absent — this does not invent fills.
+    """
+    if not root:
+        return None
+    base = Path(root)
+    ledger = base / "trades_3factor.csv"
+    session_path = base / "research_session.json"
+    if not ledger.is_file() or not session_path.is_file():
+        return None
+    try:
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(session, dict):
+        return None
+    start = _epoch_seconds(session.get("fresh_collection_start_time"))
+    if start is None:
+        start = _epoch_seconds(session.get("bot_start_time"))
+    closed_n = 0
+    net = 0.0
+    try:
+        with ledger.open(newline="", encoding="utf-8", errors="replace") as handle:
+            for row in csv.DictReader(handle):
+                if not isinstance(row, dict):
+                    continue
+                pnl = _float_or_none(row.get("net_pnl_usd"))
+                if pnl is None or pnl != pnl:
+                    continue
+                if start is not None:
+                    stamp = None
+                    for field in ("close_ts", "ts", "timestamp", "entry_ts", "open_ts"):
+                        stamp = _epoch_seconds(row.get(field))
+                        if stamp is not None:
+                            break
+                    if stamp is None or stamp < start:
+                        continue
+                closed_n += 1
+                net += pnl
+    except OSError:
+        return None
+    if closed_n <= 0:
+        return None
+    return {"closed_n": closed_n, "net": net, "fills": closed_n}
+
+
+def extract_companion_world_counts(companions: Mapping[str, Any] | None) -> dict[str, dict[str, Any]]:
+    """Read world counts from the same analyzer artifacts the FRESH digest uses.
+
+    Counts stay absent when the artifact is missing. A compact or real-edge
+    file that stored zero is not authoritative when the same session root has
+    closed paper fills. Nets are copied only when the artifact already stored
+    one. Nothing here mints SAFE or a fill.
+    """
+    companions = _as_mapping(companions)
+    performance = _as_mapping(_as_mapping(companions.get("compact")).get("performance"))
+    real_edge = _as_mapping(companions.get("real_edge"))
+    shadow_fill = _as_mapping(companions.get("shadow_fill"))
+    counterfactual = _as_mapping(companions.get("counterfactual"))
+    missed = _as_mapping(companions.get("missed"))
+    paused_overall = _as_mapping(_as_mapping(companions.get("paused_shadow")).get("overall"))
+
+    found: dict[str, dict[str, Any]] = {}
+    paper_n = _int_or_zero(performance.get("trades"))
+    paper_net = _float_or_none(performance.get("net_pnl_usd"))
+    if paper_n <= 0:
+        # Same fallback the research digest uses when performance.trades is empty.
+        paper_n = _int_or_zero(real_edge.get("executed"))
+        paper_net = _float_or_none(real_edge.get("executed_pnl_usd"))
+    if paper_n <= 0:
+        session_paper = _as_mapping(companions.get("session_paper"))
+        paper_n = _int_or_zero(session_paper.get("closed_n"))
+        paper_net = _float_or_none(session_paper.get("net"))
+    if paper_n > 0:
+        found["paper"] = {"closed_n": paper_n, "net": paper_net, "fills": paper_n}
+
+    # shadow_filled is the analyzer shadow-outcome cohort (not a new fill).
+    # Net is omitted unless that report stored one, so expectancy stays unavailable.
+    shadow_n = _int_or_zero(shadow_fill.get("shadow_filled"))
+    if shadow_n > 0:
+        found["shadow"] = {"closed_n": shadow_n, "net": None, "fills": shadow_n}
+
+    # Generic counterfactual.jsonl rows are CF evidence. They are not a
+    # CONSERVATIVE_BBO fill-model rank unless a candidate names that world.
+    cf_n = _int_or_zero(counterfactual.get("n_cf_in"))
+    if cf_n > 0:
+        found["cf_evidence"] = {"closed_n": cf_n}
+
+    blocked_n = _int_or_zero(paused_overall.get("closed"))
+    if blocked_n > 0:
+        found["shadow_blocked"] = {"closed_n": blocked_n}
+
+    missed_totals = _as_mapping(missed.get("totals"))
+    missed_n = _int_or_zero(missed_totals.get("events"))
+    if missed_n <= 0:
+        heat = missed.get("heatmap") or missed.get("rows") or []
+        if isinstance(heat, list):
+            missed_n = sum(
+                _int_or_zero(row.get("count"))
+                for row in heat
+                if isinstance(row, Mapping)
+            )
+    if missed_n > 0:
+        found["missed"] = {"closed_n": missed_n}
+    return found
+
+
+def canonical_analyzer_roots(search_from: str | Path | None = None) -> list[Path]:
+    """Directories that hold the FRESH analyzer digest.
+
+    The fly mirror can be an empty ``v3`` shell, and a worktree report root can
+    hold a zero compact. The cited session is the current checkout's
+    ``canonical-research-data/analyzer`` tree (published reports and session
+    archives included). ``BTC_CANONICAL_ANALYZER_DATA`` overrides discovery.
+    """
+    roots: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved in seen or not resolved.is_dir():
+            return
+        seen.add(resolved)
+        roots.append(resolved)
+
+    env = os.getenv("BTC_CANONICAL_ANALYZER_DATA", "").strip()
+    if env:
+        add(Path(env))
+    # Pytest must not bind a developer machine's btc-v31-current tree.
+    # Explicit search_from still resolves a fixture layout. An explicit
+    # BTC_CANONICAL_ANALYZER_DATA (set by a test to a temp dir, or by Ops
+    # for the smoke) is the only host path honored under pytest.
+    if search_from is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return roots
+    agent = Path(search_from).resolve() if search_from else Path(__file__).resolve().parent
+    add(agent / "canonical-research-data" / "analyzer")
+    if agent.name == "btc-conservative-agent" and agent.parent.name == "services":
+        checkout = agent.parent.parent
+        add(
+            checkout.parent
+            / "btc-v31-current"
+            / "services"
+            / "btc-conservative-agent"
+            / "canonical-research-data"
+            / "analyzer"
+        )
+    return roots
+
+
+def _iter_companion_dirs(root: Path) -> list[Path]:
+    """Compact locations under one analyzer tree, including session archives."""
+    if not root.is_dir():
+        return []
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved in seen or not resolved.is_dir():
+            return
+        seen.add(resolved)
+        found.append(path)
+
+    add(root)
+    for name in ("reports", "published_reports", "research_session_archives"):
+        base = root / name
+        if not base.is_dir():
+            continue
+        add(base)
+        try:
+            children = list(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir():
+                continue
+            add(child)
+            nested = child / "reports"
+            if nested.is_dir():
+                add(nested)
+    return found
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) and payload else None
+
+
+def _bundle_epoch(payload: Mapping[str, Any]) -> str | None:
+    provenance = _as_mapping(payload.get("analysis_provenance"))
+    fresh = _as_mapping(payload.get("fresh_epoch"))
+    for value in (
+        provenance.get("fresh_epoch_id"),
+        fresh.get("epoch_id"),
+        payload.get("fresh_epoch_id"),
+        payload.get("epoch_id"),
+    ):
+        text = str(value or "").strip()
+        if text and text.upper() not in {"NONE", "NULL", "UNAVAILABLE"}:
+            return text
+    return None
+
+
+def _bundle_is_fresh(payload: Mapping[str, Any]) -> bool:
+    scope = " ".join(
+        str(payload.get(key) or "")
+        for key in ("session_scope", "data_scope", "scope")
+    ).upper()
+    if "ALL-DATA" in scope or "ALL-TIME" in scope:
+        return False
+    return "FRESH" in scope or "SESSION" in scope
+
+
+def _session_along(roots: Iterable[Path]) -> dict[str, Any]:
+    """Session file for these roots. A foreign epoch is not borrowed later."""
+    seen: set[Path] = set()
+    for root in roots:
+        current = root
+        for _ in range(5):
+            candidate = current / "research_session.json"
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                break
+            if resolved not in seen:
+                seen.add(resolved)
+                payload = _read_json_object(candidate)
+                if payload and (
+                    payload.get("fresh_collection_mode")
+                    or payload.get("collector_v22_epoch_id")
+                    or payload.get("fresh_epoch_id")
+                    or payload.get("fresh_collection_start_time")
+                ):
+                    return payload
+            if current.parent == current:
+                break
+            current = current.parent
+    return {}
+
+
+def _select_fresh_bundle(
+    bundles: list[dict[str, Any]],
+    session: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Pick one FRESH generation. Never mix a second epoch into that bind."""
+    session_epoch = str(
+        session.get("collector_v22_epoch_id") or session.get("fresh_epoch_id") or ""
+    ).strip() or None
+    session_start = _epoch_seconds(
+        session.get("fresh_collection_start_time") or session.get("collector_v22_epoch_ts")
+    )
+    positive = [bundle for bundle in bundles if int(bundle["trades"]) > 0]
+    if any(_bundle_is_fresh(bundle["compact"]) for bundle in positive) or session.get("fresh_collection_mode"):
+        positive = [bundle for bundle in positive if _bundle_is_fresh(bundle["compact"])]
+    if session_start is not None:
+        dated = []
+        for bundle in positive:
+            generated = _epoch_seconds(bundle["compact"].get("generated_at"))
+            if generated is None or generated + 30 >= session_start:
+                dated.append(bundle)
+        if dated:
+            positive = dated
+    if session_epoch and any(bundle["epoch"] for bundle in positive):
+        matched = [bundle for bundle in positive if bundle["epoch"] == session_epoch]
+        if matched:
+            positive = matched
+        elif all(bundle["epoch"] for bundle in positive):
+            return None
+        else:
+            positive = [
+                bundle for bundle in positive
+                if bundle["epoch"] in (None, session_epoch)
+            ]
+    if not positive:
+        return None
+    positive.sort(key=lambda bundle: (
+        1 if _bundle_is_fresh(bundle["compact"]) else 0,
+        _epoch_seconds(bundle["compact"].get("generated_at")) or 0.0,
+    ))
+    return positive[-1]
+
+
+def _load_directory_companions(directory: Path) -> dict[str, Any]:
+    loaded: dict[str, Any] = {key: {} for key, _name in _COMPANION_FILES}
+    for key, name in _COMPANION_FILES:
+        payload = _read_json_object(directory / name)
+        if payload:
+            loaded[key] = payload
+    return loaded
+
+
+def load_analyzer_companions(*roots: str) -> dict[str, Any]:
+    """Load one compatible FRESH digest from report, mirror, and canonical roots.
+
+    Empty zero files in the worktree or the fly mirror do not hide a non-empty
+    FRESH compact under ``canonical-research-data/analyzer``. Companions are
+    taken from that same directory so a second epoch cannot mix in. Missing
+    data stays empty.
+    """
+    expanded: list[Path] = []
+    seen: set[Path] = set()
+    for root in (*roots, *[str(path) for path in canonical_analyzer_roots()]):
+        if not root:
+            continue
+        path = Path(root)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        expanded.append(path)
+
+    bundles: list[dict[str, Any]] = []
+    for root in expanded:
+        for directory in _iter_companion_dirs(root):
+            compact = _read_json_object(directory / "research_compact_summary.json")
+            if not compact:
+                continue
+            bundles.append({
+                "directory": directory,
+                "compact": compact,
+                "epoch": _bundle_epoch(compact),
+                "trades": _companion_positive_count("compact", compact),
+            })
+    chosen = _select_fresh_bundle(bundles, _session_along(expanded))
+    if chosen is not None:
+        loaded = _load_directory_companions(chosen["directory"])
+        loaded["source_root"] = str(chosen["directory"])
+        if chosen["epoch"]:
+            loaded["source_epoch_id"] = chosen["epoch"]
+        observed = session_paper_observation(chosen["directory"])
+        if observed:
+            loaded["session_paper"] = observed
+        return loaded
+    if any(int(bundle["trades"]) > 0 for bundle in bundles):
+        # Positive digests existed and none were epoch-compatible. Do not
+        # fall through to a different generation.
+        return {key: {} for key, _name in _COMPANION_FILES}
+
+    loaded = {key: {} for key, _name in _COMPANION_FILES}
+    session_paper: dict[str, Any] | None = None
+    for root in expanded:
+        for key, name in _COMPANION_FILES:
+            if _companion_positive_count(key, _as_mapping(loaded.get(key))) > 0:
+                continue
+            payload = _read_json_object(root / name) or _read_json_object(root / "reports" / name)
+            if not payload:
+                continue
+            current = _as_mapping(loaded.get(key))
+            if not current or _companion_positive_count(key, payload) > 0:
+                loaded[key] = payload
+        observed = session_paper_observation(root)
+        if observed and session_paper is None:
+            session_paper = observed
+    if session_paper:
+        loaded["session_paper"] = session_paper
+    return loaded
+
+
+def apply_companion_world_counts(
+    payload: dict[str, Any],
+    companions: Mapping[str, Any] | None,
+    report: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Fill still-empty worlds from compatible analyzer counts. Never overwrite evidence."""
+    counts = extract_companion_world_counts(companions)
+    if not counts:
+        return payload
+    groups = _groups_from_payload(payload)
+    filled = False
+    for surface_id in SURFACE_IDS:
+        spec = counts.get(surface_id)
+        if not spec or _int_or_zero(spec.get("closed_n")) <= 0:
+            continue
+        current = sum(acc.closed_n for acc in groups[surface_id].values())
+        if current > 0:
+            continue
+        _add_observation(groups, {
+            "surface": surface_id,
+            "policy_id": "UNATTRIBUTED",
+            "closed_n": spec.get("closed_n"),
+            "net": spec.get("net"),
+            "fills": spec.get("fills"),
+            "gates": None,
+        })
+        filled = True
+    if filled:
+        payload = _payload_from_groups(groups, report)
+    secondary = ((payload.get("digest") or {}).get("secondary_worlds") or [])
+    for row in secondary:
+        if not isinstance(row, dict) or _int_or_zero(row.get("closed_n")) > 0:
+            continue
+        spec = counts.get(str(row.get("id") or ""))
+        if not spec or _int_or_zero(spec.get("closed_n")) <= 0:
+            continue
+        row["closed_n"] = _int_or_zero(spec.get("closed_n"))
+        row["after_cost_expectancy_usd"] = None
+        row["safe_badge"] = None
+        row["qualification"] = "NOT_A_STRATEGY_RANK"
+        row["role"] = "EVIDENCE_ONLY"
+    return payload
+
+
+def _with_companion_clock(
+    report: Mapping[str, Any] | None,
+    companions: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Use the data-root digest clock when the genome report has none.
+
+    A WAL abort used to leave equal-rights without ``generated_at``, so the
+    tile stayed freshness=UNKNOWN even after mirror counts were available.
+    Only a compact that actually holds closes may supply that clock.
+    """
+    base = dict(report or {})
+    if base.get("generated_at"):
+        return base
+    compact = _as_mapping(_as_mapping(companions).get("compact"))
+    if _companion_positive_count("compact", compact) <= 0:
+        return base
+    generated = compact.get("generated_at")
+    if generated:
+        base["generated_at"] = generated
+    if not base.get("data_scope") and compact.get("data_scope"):
+        base["data_scope"] = compact.get("data_scope")
+    return base
+
+
+def equal_rights_from_report(
+    report: Mapping[str, Any] | None,
+    companions: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Prefer a stored view, then derive one. Both paths fail closed on SAFE."""
-    report = report if isinstance(report, Mapping) else {}
+    report = _with_companion_clock(report, companions)
     embedded = report.get("equal_rights")
     if isinstance(embedded, Mapping) and embedded.get("schema") == SCHEMA:
-        return sanitize_equal_rights(embedded, report)
+        payload = sanitize_equal_rights(embedded, report)
+        if not any(_int_or_zero(row.get("closed_n")) > 0 for row in payload.get("surfaces") or []):
+            payload = build_equal_rights_ranking(
+                report=report,
+                candidates=_candidates_from_report(report),
+                companions=companions,
+            )
+        else:
+            payload = apply_companion_world_counts(payload, companions, report)
+        return payload
     return build_equal_rights_ranking(
         report=report,
         candidates=_candidates_from_report(report),
+        companions=companions,
     )
 
 
