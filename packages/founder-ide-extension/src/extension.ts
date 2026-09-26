@@ -30,6 +30,7 @@ import { ProfileManager } from './profile-manager';
 import { CostTracker } from './cost-tracker';
 import { registerFounderOsChatParticipant } from './chat-participant';
 import { createDebugSquasherStatus } from './debug-squasher-status';
+import { NucleusViewProvider } from './nucleus-webview';
 
 let connectionStatusBar: vscode.StatusBarItem | undefined;
 let registeredProvider: vscode.Disposable | undefined;
@@ -38,6 +39,7 @@ let profileManager: ProfileManager | undefined;
 let costTracker: CostTracker | undefined;
 let debugSquasherDisposable: vscode.Disposable | undefined;
 let currentCreds: FounderOsCredentials | null = null;
+let nucleusProvider: NucleusViewProvider | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
   // Status bar (connection state) ----------------------------------------------------
@@ -77,8 +79,18 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   // Commands -------------------------------------------------------------------------
+  nucleusProvider = new NucleusViewProvider();
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(NucleusViewProvider.viewId, nucleusProvider, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand('founderOs.manage', () => manageConnection(context)),
+    vscode.commands.registerCommand('founderOs.openNucleus', () =>
+      vscode.commands.executeCommand(`${NucleusViewProvider.viewId}.focus`),
+    ),
     vscode.commands.registerCommand('founderOs.pair', () => pairWithFounderNode(context)),
     vscode.commands.registerCommand('founderOs.connectFounderOs', () =>
       connectFounderOsAccount(context),
@@ -143,6 +155,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
     debugSquasherDisposable = undefined;
     currentCreds = null;
     setStatusNotPaired();
+    void nucleusProvider?.refresh();
     void showPairPrompt(context);
     return;
   }
@@ -220,6 +233,7 @@ function registerOrNotify(context: vscode.ExtensionContext): void {
 
   currentCreds = creds;
   setStatusConnected(creds);
+  void nucleusProvider?.refresh();
 }
 
 function setStatusConnected(creds: FounderOsCredentials): void {

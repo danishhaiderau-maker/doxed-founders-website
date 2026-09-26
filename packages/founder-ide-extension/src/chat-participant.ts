@@ -25,6 +25,7 @@ import {
   type GatewayClient,
   callGateway,
 } from './gateway-client';
+import { nucleusChatPreface, withNucleusSystem } from './nucleus-session';
 
 export interface ParticipantDeps {
   creds: FounderOsCredentials;
@@ -86,10 +87,13 @@ async function handleParticipantRequest(
     ? `${memoryText}\n\nYou are Founder OS, the founder's AI pair-programmer. Be concise and direct.`
     : 'You are Founder OS, the founder\'s AI pair-programmer routed via their own gateway. Be concise and direct.';
 
-  const gatewayMessages: GatewayMessage[] = [
+  const gatewayMessages: GatewayMessage[] = withNucleusSystem([
     { role: 'system', content: systemContent },
     { role: 'user', content: prompt },
-  ];
+  ]);
+
+  const preface = nucleusChatPreface(prompt);
+  if (preface) stream.markdown(`${preface}\n\n`);
 
   const client: GatewayClient = {
     baseUrl: proxyBaseUrl(deps.creds.apiBaseUrl),

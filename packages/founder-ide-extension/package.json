@@ -37,7 +37,7 @@
       {
         "name": "founder.editFile",
         "displayName": "Edit File",
-        "modelDescription": "Edit a file in the workspace by replacing oldText with newText. Use absolute paths. Set createIfMissing=true to create the file if it does not exist. The change is applied via vscode.workspace.applyEdit and is reviewable in the editor.",
+        "modelDescription": "Edit a file in the workspace by replacing oldText with newText. Use absolute paths. Set createIfMissing=true to create the file if it does not exist. The change is applied via vscode.workspace.applyEdit and is reviewable in the editor. When a Nucleus delivery address is active, filePath must be that path and oldText must sit inside its line range. Do not search the repo for another file.",
         "userDescription": "Edit or create a workspace file (Founder OS)",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "editFile",
@@ -70,7 +70,7 @@
       {
         "name": "founder.runCommand",
         "displayName": "Run Command",
-        "modelDescription": "Run a shell command in a VS Code terminal and return its combined stdout+stderr output. The command runs in the workspace root by default. Use for build, test, lint, and inspection commands. Confirm with the user before destructive commands.",
+        "modelDescription": "Run a shell command in a VS Code terminal and return its combined stdout+stderr output. The command runs in the workspace root by default. Use for build, test, lint, and inspection commands. Confirm with the user before destructive commands. When a Nucleus delivery address is active, this tool refuses the command so the agent cannot search the repository. Read or edit only the delivery path.",
         "userDescription": "Run a terminal command and capture output (Founder OS)",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "runCommand",
@@ -99,7 +99,7 @@
       {
         "name": "founder.readWorkspace",
         "displayName": "Read Workspace",
-        "modelDescription": "Walk the current workspace file tree and return a compact summary (respecting common ignore patterns like node_modules and .git). Optionally include the full contents of a small set of files via readFiles. Use this to ground yourself in the repo structure before editing.",
+        "modelDescription": "Walk the current workspace file tree and return a compact summary (respecting common ignore patterns like node_modules and .git). Optionally include the full contents of a small set of files via readFiles. When a Nucleus delivery address is active, this tool returns only that file and line range and refuses a repository walk.",
         "userDescription": "Read the workspace file tree (Founder OS)",
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "readWorkspace",
@@ -132,6 +132,10 @@
         "title": "Founder OS: Manage connection"
       },
       {
+        "command": "founderOs.openNucleus",
+        "title": "Founder OS: Open Nucleus"
+      },
+      {
         "command": "founderOs.pair",
         "title": "Founder OS: Pair with Founder Node"
       },
@@ -160,6 +164,23 @@
         "title": "Founder OS: Open node-config.json"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "founder-os",
+          "title": "Founder OS",
+          "icon": "media/nucleus.svg"
+        }
+      ]
+    },
+    "views": {
+      "founder-os": [
+        {
+          "id": "founderOs.nucleus",
+          "name": "Nucleus"
+        }
+      ]
+    },
     "configuration": {
       "title": "Founder OS",
       "properties": {

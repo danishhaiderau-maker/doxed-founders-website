@@ -27,6 +27,7 @@ import {
   callGateway,
 } from './gateway-client';
 import { buildSystemPrompt } from './memory';
+import { withNucleusSystem } from './nucleus-session';
 
 type ChatInformation = vscode.LanguageModelChatInformation;
 
@@ -166,6 +167,8 @@ export class FounderOsChatProvider
       // Memory fetch must never block the chat.
     }
 
+    const routedMessages = withNucleusSystem(gatewayMessages);
+
     let ok = false;
     let errorMessage: string | undefined;
     try {
@@ -181,7 +184,7 @@ export class FounderOsChatProvider
         this.client,
         {
           model: alias.id,
-          messages: gatewayMessages,
+          messages: routedMessages,
           executionProfile: alias.executionProfile,
           founderOsMetadata: this.founderOsMetadata,
           timeoutMs: this.requestTimeoutMs,

@@ -63,6 +63,10 @@ Reload the window after installing (`Developer: Reload Window`).
 3. Pick a model from the dropdown — `Founder OS Auto`, `Founder OS Code`, `Founder OS Reasoning`, or `Founder OS Fast`.
 4. Type a message. Tokens should stream in real time from your Founder OS gateway.
 
+## Nucleus
+
+**Founder OS: Open Nucleus** (activity bar → Nucleus) loads the live Founder Graph from `GET /api/ide/nucleus`. Click a node to open `@FounderOS` with a delivery address (file path, symbol, line range, intent) in the system prompt. While that node is selected, edit and read tools stay on that path and the run-command tool refuses a repository search. See `docs/NUCLEUS-FOUNDER-GRAPH.md`.
+
 ## Architecture
 
 ```
@@ -90,9 +94,16 @@ The gateway owns routing, DDollar metering, and Flight Recorder logging. This ex
 | Command | Title |
 |--|--|
 | `founderOs.manage` | Founder OS: Manage connection |
+| `founderOs.openNucleus` | Founder OS: Open Nucleus |
 | `founderOs.pair` | Founder OS: Pair with Founder Node |
 | `founderOs.selectModel` | Founder OS: Select model alias |
 | `founderOs.openVaultConfig` | Founder OS: Open node-config.json |
+
+## Nucleus (Founder Graph)
+
+The activity bar **Founder OS → Nucleus** view (command `Founder OS: Open Nucleus`) loads `GET /api/ide/nucleus` with `Authorization: FounderNode {nodeId}:{nodeToken}` from `~/FounderVault/node-config.json`. Clicking a node highlights it, shows the context packet in the sidebar, and opens `@FounderOS` chat with that packet in the message and in the system prompt. The chat still calls `POST /api/v1/chat/completions` as **founder-os-auto** (or the active alias). The packet is kept in memory only — not in `localStorage` or extension global state.
+
+The same packet shape is used by the signed-in web route `/founder-ide/nucleus` (session JWT). See `docs/NUCLEUS-FOUNDER-GRAPH.md`.
 
 ## Test plan
 

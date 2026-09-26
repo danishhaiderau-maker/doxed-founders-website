@@ -149,6 +149,7 @@ export * from './founder-onboarding-paths';
 export * from './platform-connections';
 export * from './provider-adapters';
 export * from './founder-graph';
+export * from './nucleus-context';
 export * from './founder-publish-pipeline';
 export * from './founder-import-wizard';
 export * from './founder-cloud-runtime';

@@ -80,7 +80,7 @@ export class FounderGraphService {
         : founder.projects[0]?.githubRepoFullName ?? null;
 
     const weekAgo = new Date(Date.now() - 14 * 86400000);
-    const [commits, pullRequests, deployEvents, agentRun] = await Promise.all([
+    const [commits, listedPullRequests, deployEvents, agentRun] = await Promise.all([
       repo ? this.github.listCommits(userId, repo, 40) : Promise.resolve([]),
       repo ? this.github.listPullRequests(userId, repo) : Promise.resolve([]),
       this.prisma.founderEvent.findMany({
@@ -94,6 +94,21 @@ export class FounderGraphService {
       }),
       this.agentRuns.getActive(userId),
     ]);
+
+    const openPulls = listedPullRequests.filter((pr) => pr.state === 'open').slice(0, 5);
+    const deliveries = repo
+      ? await Promise.all(
+          openPulls.map(async (pr) => ({
+            number: pr.number,
+            delivery: await this.github.pullRequestDelivery(userId, repo, pr.number),
+          })),
+        )
+      : [];
+    const deliveryByNumber = new Map(deliveries.map((item) => [item.number, item.delivery]));
+    const pullRequests = listedPullRequests.map((pr) => ({
+      ...pr,
+      delivery: deliveryByNumber.get(pr.number) ?? null,
+    }));
 
     const input: FounderGraphBuildInput = {
       projectName: founder.projects[0]?.name ?? founder.name,

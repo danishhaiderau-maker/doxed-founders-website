@@ -5,6 +5,7 @@ import type { CommitSignal } from './commit-intelligence';
 import { filterCommitsForIntelligence } from './commit-intelligence';
 import type { FounderMemoryGraph } from './founder-memory-graph';
 import type { FounderDecisionEntry } from './founder-decision-log';
+import type { NucleusDeliveryRange } from './nucleus-context';
 
 export type FounderGraphNodeType =
   | 'initiative'
@@ -25,6 +26,11 @@ export type FounderGraphNode = {
   href?: string;
   at?: string;
   source?: string;
+  /** Optional file anchor for Nucleus delivery. Absent on historical chain nodes. */
+  path?: string;
+  symbol?: string;
+  range?: { startLine: number; endLine: number };
+  intent?: string;
 };
 
 export type FounderGraphEdgeRel = 'contains' | 'led_to' | 'merged_into' | 'deployed' | 'published' | 'informed';
@@ -48,7 +54,14 @@ export type FounderGraphBuildInput = {
   memoryGraph: FounderMemoryGraph | null;
   currentInitiative?: string | null;
   commits: CommitSignal[];
-  pullRequests: { title: string; state: string; url: string; number: number }[];
+  pullRequests: {
+    title: string;
+    state: string;
+    url: string;
+    number: number;
+    /** Primary changed file for an open PR. Closed PRs omit this. */
+    delivery?: { path: string; symbol?: string; range?: NucleusDeliveryRange } | null;
+  }[];
   recentDeploys: { title: string; at: string; source?: string }[];
   founderUpdates: { headline: string; at: string; id?: string }[];
   decisions: FounderDecisionEntry[];
@@ -131,6 +144,7 @@ export function buildFounderGraph(input: FounderGraphBuildInput): FounderGraph {
 
     for (const pr of input.pullRequests.slice(0, 8)) {
       const id = nodeId('pr', String(pr.number));
+      const delivery = pr.delivery?.path ? pr.delivery : null;
       nodes.push({
         id,
         type: 'pr',
@@ -138,13 +152,27 @@ export function buildFounderGraph(input: FounderGraphBuildInput): FounderGraph {
         href: pr.url,
         detail: pr.state,
         source: 'github',
+        ...(delivery
+          ? {
+              path: delivery.path,
+              ...(delivery.symbol ? { symbol: delivery.symbol } : {}),
+              ...(delivery.range ? { range: delivery.range } : {}),
+            }
+          : {}),
       });
       link(edges, initiativeId, id, 'led_to');
       const relatedCommit = signalCommits.find((c) =>
         c.message.toLowerCase().includes(`#${pr.number}`),
       );
       if (relatedCommit?.sha) {
-        link(edges, nodeId('commit', relatedCommit.sha.slice(0, 12)), id, 'merged_into');
+        const commitId = nodeId('commit', relatedCommit.sha.slice(0, 12));
+        link(edges, commitId, id, 'merged_into');
+        const commit = delivery ? nodes.find((node) => node.id === commitId) : undefined;
+        if (commit && delivery && !commit.path) {
+          commit.path = delivery.path;
+          if (delivery.symbol) commit.symbol = delivery.symbol;
+          if (delivery.range) commit.range = delivery.range;
+        }
       }
     }
   }
