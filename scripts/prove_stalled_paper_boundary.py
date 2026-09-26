@@ -12,27 +12,28 @@ that reason first when force-paper is active). strategy_progress.live_armed
 is the live disarm flag. If a payload also carries force_paper_mode or
 top-level live_armed, those must agree and stay disarmed.
 
-Stall window, accepted evidence only:
-  * Newest 30 completed runs of .github/workflows/fly-bot-deploy.yml.
-  * A run counts only when the step "Prove the current Fly owner and every
-    relay account are flat" finished success or failure. Skipped steps
-    (recover dispatches) are ignored.
-  * The latest such step must be a failure whose deploy log contains the
-    flat-check JSON showcase.positions == 0 and showcase.pendingOrders > 0.
-    That is the tip-block class. Other flat-check failures do not qualify.
-  * That newest qualifying failure must be at most 6 hours old.
-  * The oldest qualifying failure in the same streak (newer than the latest
-    flat-check success, if any) must be at least 2 hours old.
-  * When two or more qualifying logs exist, newest showcase pendingOrders
-    must be >= the oldest. A drop is a net drain and is refused. One log
-    cannot show an integer change; the 2 hour age plus a current /ready
-    book that is still open=0 and pending>0 is the window.
-  * Showcase counts are taken only from those already recorded deploy logs.
-    This gate does not call the showcase relay route. Open and pending for
-    eligibility come only from /ready strategy_progress.
+Recover authorization is the Boss workflow_dispatch
+(recover_stalled_paper_boundary). That GO replaces a tip-block showcase
+deploy log. Flat-check job logs are not consulted. A newer flat-check that
+failed without showcase JSON must not eclipse a live /ready book.
+
+All of the following must be true or the gate refuses:
+  * workflow_dispatch recover (GITHUB_EVENT_NAME=workflow_dispatch)
+  * force-paper (force_paper_mode true, or both block reasons FORCE_PAPER_MODE)
+  * live_armed false, including the existing disarm checks
+  * strategy_progress.open_positions == 0
+  * strategy_progress.pending_orders > 0
+
+pending>0 alone is refused. live_armed true is always refused.
+This gate does not call the showcase relay route. Open and pending come
+only from /ready strategy_progress.
+
+The showcase stall-window helper below still classifies deploy logs. It is
+not the recover decision: that window requires showcase counts, and a
+skipped or non-showcase flat-check never produces them. No separate time
+gate is applied.
 
 This class does not require an incident latch or a trade-lock reason.
-pending>0 alone is refused. live_armed true is always refused.
 """
 
 from __future__ import annotations
@@ -116,6 +117,26 @@ def ready_eligibility_failures(ready: object) -> list[str]:
     return reasons
 
 
+def paper_pending_stall_recover_failures(
+    ready: object,
+    *,
+    recover_authorized: bool,
+) -> list[str]:
+    """Path C recover decision. Showcase deploy logs are not an input.
+
+    recover_authorized is true only for the Boss workflow_dispatch recover.
+    That GO replaces the tip-block log. Eligibility still requires a disarmed
+    force-paper book with open_positions == 0 and pending_orders > 0.
+    """
+    reasons = ready_eligibility_failures(ready)
+    if not recover_authorized:
+        reasons.append(
+            "Boss recover GO requires workflow_dispatch; "
+            "a showcase deploy log is not recover authorization"
+        )
+    return reasons
+
+
 def _qualifies(obs: FlatCheckObservation) -> bool:
     return (
         obs.conclusion == "failure"
@@ -129,7 +150,11 @@ def stall_window_failures(
     observations: list[FlatCheckObservation],
     now: datetime,
 ) -> tuple[list[str], dict]:
-    """Prove the tip-block stall window. Empty reasons means proven."""
+    """Classify a tip-block showcase stall in deploy logs.
+
+    Not the recover decision. paper_pending_stall_recover_failures does not
+    call this: the window needs showcase counts from flat-check job logs.
+    """
     if now.tzinfo is None:
         return ["stall clock must be timezone-aware"], {}
     ran = [
@@ -464,33 +489,36 @@ def fetch_ready(url: str = READY_URL) -> dict:
     raise SystemExit(f"unable to read ready strategy_progress: {last}")
 
 
-def main() -> None:
-    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
-    repository = (os.environ.get("GITHUB_REPOSITORY") or "").strip()
-    if not token:
-        raise SystemExit("GITHUB_TOKEN missing; stall window cannot be proven")
-    if not repository or repository.count("/") != 1:
-        raise SystemExit("GITHUB_REPOSITORY missing; stall window cannot be proven")
+def recover_dispatch_authorized() -> bool:
+    """True when Actions invoked this step from workflow_dispatch.
 
-    now = datetime.now(timezone.utc)
+    That dispatch, with recover_stalled_paper_boundary, is the Boss recover
+    GO. It replaces a tip-block showcase deploy log. Push runs do not set
+    this event name, and the workflow skips this step unless the input is set.
+    """
+    return (os.environ.get("GITHUB_EVENT_NAME") or "").strip() == "workflow_dispatch"
+
+
+def main() -> None:
     ready = fetch_ready()
-    observations = fetch_flat_check_observations(repository, token)
-    reasons = ready_eligibility_failures(ready)
-    stall_reasons, evidence = stall_window_failures(observations, now)
-    reasons.extend(stall_reasons)
+    reasons = paper_pending_stall_recover_failures(
+        ready,
+        recover_authorized=recover_dispatch_authorized(),
+    )
     if reasons:
         raise SystemExit("paper pending-stall recover refused: " + "; ".join(reasons))
 
     progress = ready["strategy_progress"]
     summary = {
         "recovery": "paper_pending_stall",
+        "authorization": "workflow_dispatch_recover",
+        "evidence": "live_ready",
         "ready_url": READY_URL,
         "source_git_rev": ready.get("source_git_rev"),
         "live_armed": progress.get("live_armed"),
         "force_paper_mode": ready.get("force_paper_mode", FORCE_PAPER_REASON),
         "open_positions": progress.get("open_positions"),
         "pending_orders": progress.get("pending_orders"),
-        "stall": evidence,
     }
     print(json.dumps(summary, sort_keys=True))
 

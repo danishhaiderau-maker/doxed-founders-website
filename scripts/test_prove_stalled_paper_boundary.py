@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import io
+import json
+import os
 import unittest
 import urllib.error
 import zipfile
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -15,6 +18,8 @@ from prove_stalled_paper_boundary import (
     FlatCheckObservation,
     _fetch_job_log_bytes,
     _showcase_from_job_logs,
+    main,
+    paper_pending_stall_recover_failures,
     parse_showcase_counts,
     ready_eligibility_failures,
     stall_window_failures,
@@ -128,6 +133,143 @@ class ReadyEligibilityTest(unittest.TestCase):
     def test_armable_live_entry_is_refused(self):
         reasons = ready_eligibility_failures(live_ready(trading_ready=True))
         self.assertIn("live entry must stay disarmed", reasons)
+
+
+class RecoverDecisionTest(unittest.TestCase):
+    """workflow_dispatch plus live /ready. No showcase tip-block log."""
+
+    def test_ready_eligible_recover_without_showcase_tip_block_log(self):
+        reasons = paper_pending_stall_recover_failures(
+            live_ready(),
+            recover_authorized=True,
+        )
+        self.assertEqual(reasons, [])
+
+    def test_non_showcase_flat_check_is_not_required_and_not_consulted(self):
+        # Run 36234376760 failed with HTTP 503 and no showcase JSON. The
+        # recover decision has no log argument, so that failure cannot eclipse
+        # an eligible /ready book.
+        reasons = paper_pending_stall_recover_failures(
+            live_ready(),
+            recover_authorized=True,
+        )
+        self.assertEqual(reasons, [])
+        log_reasons, _evidence = stall_window_failures(
+            [obs(36234376760, hours_ago=1, positions=None, pending=None)],
+            NOW,
+        )
+        self.assertTrue(log_reasons)
+
+    def test_live_armed_is_refused_without_a_log(self):
+        payload = live_ready()
+        payload["strategy_progress"]["live_armed"] = True
+        reasons = paper_pending_stall_recover_failures(
+            payload,
+            recover_authorized=True,
+        )
+        self.assertTrue(any("live_armed" in reason for reason in reasons))
+
+    def test_open_positions_are_refused_without_a_log(self):
+        payload = live_ready()
+        payload["strategy_progress"]["open_positions"] = 1
+        reasons = paper_pending_stall_recover_failures(
+            payload,
+            recover_authorized=True,
+        )
+        self.assertEqual(reasons, ["strategy_progress.open_positions must be 0"])
+
+    def test_pending_zero_is_refused_without_a_log(self):
+        payload = live_ready()
+        payload["strategy_progress"]["pending_orders"] = 0
+        reasons = paper_pending_stall_recover_failures(
+            payload,
+            recover_authorized=True,
+        )
+        self.assertEqual(reasons, ["strategy_progress.pending_orders must be > 0"])
+
+    def test_not_force_paper_is_refused_without_a_log(self):
+        payload = live_ready(
+            live_entry_arm_block_reason="WS_NOT_READY",
+            trading_block_reason="WS_NOT_READY",
+        )
+        reasons = paper_pending_stall_recover_failures(
+            payload,
+            recover_authorized=True,
+        )
+        self.assertTrue(any("force-paper" in reason for reason in reasons))
+
+    def test_pending_alone_stays_insufficient(self):
+        payload = live_ready()
+        payload["strategy_progress"] = {
+            "live_armed": True,
+            "open_positions": 1,
+            "pending_orders": 8,
+        }
+        payload["live_entry_arm_block_reason"] = "PRIVATE_API_KEYS_MISSING"
+        payload["trading_block_reason"] = "PRIVATE_API_KEYS_MISSING"
+        reasons = paper_pending_stall_recover_failures(
+            payload,
+            recover_authorized=True,
+        )
+        self.assertTrue(any("live_armed" in reason for reason in reasons))
+        self.assertTrue(any("open_positions" in reason for reason in reasons))
+        self.assertTrue(any("force-paper" in reason for reason in reasons))
+
+    def test_missing_dispatch_go_is_refused_when_ready_matches(self):
+        reasons = paper_pending_stall_recover_failures(
+            live_ready(),
+            recover_authorized=False,
+        )
+        self.assertTrue(any("workflow_dispatch" in reason for reason in reasons))
+
+
+class MainRecoverTest(unittest.TestCase):
+    def test_main_prints_live_ready_and_does_not_read_deploy_logs(self):
+        env = {"GITHUB_EVENT_NAME": "workflow_dispatch"}
+        with patch.dict(os.environ, env, clear=False):
+            with patch(
+                "prove_stalled_paper_boundary.fetch_ready",
+                return_value=live_ready(),
+            ):
+                with patch(
+                    "prove_stalled_paper_boundary.fetch_flat_check_observations",
+                    side_effect=AssertionError("deploy logs are not the recover gate"),
+                ):
+                    buf = io.StringIO()
+                    with redirect_stdout(buf):
+                        main()
+        summary = json.loads(buf.getvalue())
+        self.assertEqual(summary["authorization"], "workflow_dispatch_recover")
+        self.assertEqual(summary["evidence"], "live_ready")
+        self.assertEqual(summary["open_positions"], 0)
+        self.assertGreater(summary["pending_orders"], 0)
+        self.assertIs(summary["live_armed"], False)
+        self.assertNotIn("stall", summary)
+
+    def test_main_refuses_unless_workflow_dispatch(self):
+        env = {"GITHUB_EVENT_NAME": "push"}
+        with patch.dict(os.environ, env, clear=False):
+            with patch(
+                "prove_stalled_paper_boundary.fetch_ready",
+                return_value=live_ready(),
+            ):
+                with patch(
+                    "prove_stalled_paper_boundary.fetch_flat_check_observations",
+                    side_effect=AssertionError("deploy logs are not the recover gate"),
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        main()
+        self.assertIn("workflow_dispatch", str(caught.exception))
+
+    def test_main_refuses_live_armed_on_dispatch(self):
+        payload = live_ready()
+        payload["strategy_progress"]["live_armed"] = True
+        env = {"GITHUB_EVENT_NAME": "workflow_dispatch"}
+        with patch.dict(os.environ, env, clear=False):
+            with patch("prove_stalled_paper_boundary.fetch_ready", return_value=payload):
+                with self.assertRaises(SystemExit) as caught:
+                    main()
+        self.assertIn("live_armed", str(caught.exception))
 
 
 class StallWindowTest(unittest.TestCase):
