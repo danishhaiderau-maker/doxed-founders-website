@@ -1007,12 +1007,36 @@ def apply_companion_world_counts(
     return payload
 
 
+def _with_companion_clock(
+    report: Mapping[str, Any] | None,
+    companions: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Use the data-root digest clock when the genome report has none.
+
+    A WAL abort used to leave equal-rights without ``generated_at``, so the
+    tile stayed freshness=UNKNOWN even after mirror counts were available.
+    Only a compact that actually holds closes may supply that clock.
+    """
+    base = dict(report or {})
+    if base.get("generated_at"):
+        return base
+    compact = _as_mapping(_as_mapping(companions).get("compact"))
+    if _companion_positive_count("compact", compact) <= 0:
+        return base
+    generated = compact.get("generated_at")
+    if generated:
+        base["generated_at"] = generated
+    if not base.get("data_scope") and compact.get("data_scope"):
+        base["data_scope"] = compact.get("data_scope")
+    return base
+
+
 def equal_rights_from_report(
     report: Mapping[str, Any] | None,
     companions: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Prefer a stored view, then derive one. Both paths fail closed on SAFE."""
-    report = report if isinstance(report, Mapping) else {}
+    report = _with_companion_clock(report, companions)
     embedded = report.get("equal_rights")
     if isinstance(embedded, Mapping) and embedded.get("schema") == SCHEMA:
         payload = sanitize_equal_rights(embedded, report)

@@ -618,12 +618,81 @@ def test_wal_identity_invalid_keeps_companion_counts():
         assert report["equal_rights"]["digest"]["live_arm"] is False
         assert report["live_policy_change_allowed"] is False
         assert report["real_bitfinex_trading_allowed"] is False
+        assert report["emergency_wal"]["status"] == "EMERGENCY_WAL_IDENTITY_INVALID"
+        assert report["emergency_wal"]["effect"] == "RANKING_CONTINUES"
+        assert report["emergency_wal"]["identity_accepted"] is False
     finally:
         if previous is None:
             os.environ.pop("SOURCE_GIT_REV", None)
         else:
             os.environ["SOURCE_GIT_REV"] = previous
         store_mod._provenance_cache = None
+
+
+def test_report_root_empty_uses_data_root_mirror_counts():
+    """Health split: empty report_root must not hide mirror data_root fills."""
+    import tempfile
+    from datetime import datetime, timezone
+
+    from research.policy_cycle_snapshot import load_policy_cycle_snapshot
+
+    generated = datetime.now(timezone.utc).isoformat()
+    with tempfile.TemporaryDirectory() as tmp:
+        report_root = Path(tmp) / "report"
+        data_root = Path(tmp) / "fly-data-mirror"
+        report_root.mkdir()
+        data_root.mkdir()
+        (report_root / "research_compact_summary.json").write_text(
+            json.dumps({
+                "performance": {"trades": 0, "net_pnl_usd": 0},
+                "data_scope": "session",
+            }),
+            encoding="utf-8",
+        )
+        (report_root / "research_events_v22.jsonl").write_text("", encoding="utf-8")
+        (data_root / "research_compact_summary.json").write_text(
+            json.dumps({
+                "generated_at": generated,
+                "data_scope": "FRESH-COLLECTION",
+                "performance": {"trades": 57, "net_pnl_usd": -12.5},
+            }),
+            encoding="utf-8",
+        )
+        (data_root / "shadow_fill_outcome_report.json").write_text(
+            json.dumps({"shadow_filled": 4}),
+            encoding="utf-8",
+        )
+        (data_root / "counterfactual_coverage_report.json").write_text(
+            json.dumps({"n_cf_in": 6}),
+            encoding="utf-8",
+        )
+        (data_root / "research_events_v22.jsonl").write_text(
+            '{"event_id":"e1","epoch_id":"epoch-fresh"}\n',
+            encoding="utf-8",
+        )
+        # Genome order is report_root then data_root. Dashboard order is the reverse.
+        for roots in (
+            (str(report_root), str(data_root)),
+            (str(data_root), str(report_root)),
+        ):
+            payload = equal_rights_from_report({}, companions=load_analyzer_companions(*roots))
+            by_id = {row["id"]: row for row in payload["surfaces"]}
+            assert by_id["paper"]["closed_n"] == 57
+            assert by_id["paper"]["world"] == "OBSERVED_PAPER"
+            assert by_id["paper"]["after_cost_expectancy_usd"] == round(-12.5 / 57, 6)
+            assert by_id["paper"]["safe_badge"] is None
+            assert by_id["shadow"]["closed_n"] == 4
+            assert by_id["counterfactual"]["closed_n"] == 0
+            secondary = {row["id"]: row for row in payload["digest"]["secondary_worlds"]}
+            assert secondary["cf_evidence"]["closed_n"] == 6
+            assert payload["safe_badge"] is None
+            assert payload["number_one"] is None
+            assert payload["digest"]["live_arm"] is False
+            assert payload["digest"]["freshness"] == "FRESH"
+        snapshot = load_policy_cycle_snapshot(str(data_root), also_roots=(str(report_root),))
+    assert snapshot["receipt"]["row_count"] == 1
+    assert snapshot["receipt"]["source_root"] == "data_root"
+    assert snapshot["receipt"]["epoch_id"] == "epoch-fresh"
 
 
 def test_all_sources_empty_stay_empty():
@@ -696,6 +765,7 @@ def main() -> None:
         test_dashboard_binds_the_same_digest_artifacts,
         test_empty_cwd_compact_uses_session_mirror_paper_counts,
         test_wal_identity_invalid_keeps_companion_counts,
+        test_report_root_empty_uses_data_root_mirror_counts,
         test_all_sources_empty_stay_empty,
         test_data_watcher_watches_heartbeat_file,
     )

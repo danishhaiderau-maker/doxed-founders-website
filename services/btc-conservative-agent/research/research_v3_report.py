@@ -396,6 +396,16 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
+    # WAL identity is the process binding (epoch, git revision, tile signature),
+    # not the mirror fill ledger. V3_NOT_STARTED and a non-hex tile signature
+    # are rejected by EmergencyEvidenceWal. That rejection must not skip the
+    # equal-rights bind of data_root companions.
+    wal_identity_ok = store._emergency_wal_identity_available()
+    report["emergency_wal"] = {
+        "identity_accepted": wal_identity_ok,
+        "status": "READY" if wal_identity_ok else "EMERGENCY_WAL_IDENTITY_INVALID",
+        "effect": "RESERVE_AVAILABLE" if wal_identity_ok else "RANKING_CONTINUES",
+    }
     report["equal_rights"] = build_equal_rights_ranking(
         report=report,
         lifecycles=terminal_lifecycles,
