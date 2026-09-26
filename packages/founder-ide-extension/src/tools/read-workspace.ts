@@ -10,6 +10,8 @@
 import * as vscode from 'vscode';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { evaluateDeliveryToolUse, sliceTextToDeliveryRange } from '../nucleus-context';
+import { getActiveNucleusPacket } from '../nucleus-session';
 
 export interface ReadWorkspaceInput {
   /** Optional sub-directory to walk (workspace-relative). Default = workspace root. */
@@ -127,6 +129,38 @@ export const readWorkspaceTool: vscode.LanguageModelTool<ReadWorkspaceInput> = {
     _token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelToolResult> {
     const input = options.input;
+    const packet = getActiveNucleusPacket();
+    if (packet) {
+      const pinned = evaluateDeliveryToolUse(packet, packet.delivery.path, 'read');
+      if (!pinned.allow) {
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart(pinned.message),
+        ]);
+      }
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) {
+        return new vscode.LanguageModelToolResult([
+          new vscode.LanguageModelTextPart('Error: no workspace folder is open.'),
+        ]);
+      }
+      const content = readWorkspaceFile(root, pinned.path);
+      const sliced = sliceTextToDeliveryRange(content ?? '', pinned.range);
+      const rangeLabel = pinned.range
+        ? `L${pinned.range.startLine}-L${pinned.range.endLine}`
+        : 'whole file';
+      return new vscode.LanguageModelToolResult([
+        new vscode.LanguageModelTextPart(
+          [
+            `Nucleus delivery path: ${pinned.path}`,
+            `Range: ${rangeLabel}`,
+            `Intent: ${pinned.intent}`,
+            '',
+            sliced || '(empty range)',
+          ].join('\n'),
+        ),
+      ]);
+    }
+
     const root = resolveSubdir(input.subdir);
     if (!root) {
       return new vscode.LanguageModelToolResult([

@@ -63,6 +63,10 @@ Reload the window after installing (`Developer: Reload Window`).
 3. Pick a model from the dropdown — `Founder OS Auto`, `Founder OS Code`, `Founder OS Reasoning`, or `Founder OS Fast`.
 4. Type a message. Tokens should stream in real time from your Founder OS gateway.
 
+## Nucleus
+
+**Founder OS: Open Nucleus** (activity bar → Nucleus) loads the live Founder Graph from `GET /api/ide/nucleus`. Click a node to open `@FounderOS` with a delivery address (file path, symbol, line range, intent) in the system prompt. While that node is selected, edit and read tools stay on that path and the run-command tool refuses a repository search. See `docs/NUCLEUS-FOUNDER-GRAPH.md`.
+
 ## Architecture
 
 ```

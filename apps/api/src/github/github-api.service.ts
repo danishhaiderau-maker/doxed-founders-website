@@ -3,6 +3,7 @@ import {
   mergeCommitsDeduped,
   filterCommitsSince,
   TWO_HOURS_MS,
+  deliveryAnchorFromGitHubPatch,
   type WorkspaceActivity,
   type WorkspaceCommit,
 } from '@dcf/utils';
@@ -16,6 +17,8 @@ export type GitHubPullRequest = {
   state: string;
   number: number;
   createdAt?: string;
+  /** Primary changed file. Set only for open PRs when Nucleus rebuilds the live map. */
+  delivery?: { path: string; symbol?: string; range?: { startLine: number; endLine: number } } | null;
 };
 export type GitHubIssueResult = { number: number; url: string; title: string };
 
@@ -232,6 +235,44 @@ export class GitHubApiService {
       state: pr.state,
       createdAt: pr.created_at ?? undefined,
     }));
+  }
+
+  /**
+   * One file address for an open pull request: the changed file with the
+   * largest diff, plus the first hunk's symbol and line range when the patch
+   * includes them. Does not list the repository.
+   */
+  async pullRequestDelivery(
+    userId: string,
+    repo: string,
+    prNumber: number,
+  ): Promise<GitHubPullRequest['delivery']> {
+    const token = await this.getToken(userId);
+    try {
+      const res = await fetch(
+        `https://api.github.com/repos/${repo}/pulls/${prNumber}/files?per_page=20`,
+        { headers: this.headers(token) },
+      );
+      if (!res.ok) return null;
+      const data = (await res.json()) as {
+        filename?: string;
+        patch?: string;
+        additions?: number;
+        deletions?: number;
+      }[];
+      if (!Array.isArray(data)) return null;
+      const ranked = [...data].sort(
+        (a, b) =>
+          (b.additions ?? 0) + (b.deletions ?? 0) - ((a.additions ?? 0) + (a.deletions ?? 0)),
+      );
+      for (const file of ranked) {
+        const anchor = deliveryAnchorFromGitHubPatch(file.filename ?? '', file.patch);
+        if (anchor) return anchor;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   async createIssue(

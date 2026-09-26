@@ -10,6 +10,7 @@ import {
   extractSseCompletionText,
   formatNucleusPacketForPrompt,
   formatNucleusPacketVisible,
+  projectLiveNucleusGraph,
   type NucleusContextPacket,
   type NucleusGraph,
 } from '@dcf/utils';
@@ -50,13 +51,12 @@ async function readAssistantText(res: Response): Promise<string> {
  */
 export function NucleusPanel({ accessToken }: Props) {
   const [graph, setGraph] = useState<NucleusGraph | null>(null);
-  const [excerpt, setExcerpt] = useState<string | null>(null);
   const [auth, setAuth] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [packet, setPacket] = useState<NucleusContextPacket | null>(null);
-  const [draft, setDraft] = useState('What should change?');
+  const [draft, setDraft] = useState('Apply the intent at this delivery address.');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [chatError, setChatError] = useState<string | null>(null);
@@ -66,8 +66,7 @@ export function NucleusPanel({ accessToken }: Props) {
     setError(null);
     try {
       const body = await fetchIdeNucleus(accessToken);
-      setGraph(body.graph);
-      setExcerpt(body.excerpt);
+      setGraph(projectLiveNucleusGraph(body.graph));
       setAuth(body.auth ?? 'jwt');
     } catch (err) {
       setGraph(null);
@@ -89,7 +88,7 @@ export function NucleusPanel({ accessToken }: Props) {
   const selectNode = useCallback(
     (nodeId: string) => {
       if (!graph) return;
-      const next = buildNucleusContextPacket(graph, nodeId, { chainExcerpt: excerpt });
+      const next = buildNucleusContextPacket(projectLiveNucleusGraph(graph), nodeId);
       setSelectedId(nodeId);
       setPacket(next);
       setChatError(null);
@@ -99,7 +98,7 @@ export function NucleusPanel({ accessToken }: Props) {
         { id: nextTurnId(), role: 'context', text: formatNucleusPacketVisible(next) },
       ]);
     },
-    [excerpt, graph],
+    [graph],
   );
 
   const send = useCallback(async () => {
@@ -165,7 +164,7 @@ export function NucleusPanel({ accessToken }: Props) {
               {loading
                 ? 'Loading…'
                 : graph
-                  ? `${graph.nodes?.length ?? 0} nodes · auth ${auth ?? 'jwt'}`
+                  ? `${graph.nodes?.length ?? 0} live nodes · auth ${auth ?? 'jwt'}`
                   : 'No graph'}
             </p>
           </div>
@@ -220,7 +219,7 @@ export function NucleusPanel({ accessToken }: Props) {
           </div>
         ) : (
           <p className="mb-3 text-sm text-zinc-500">
-            Click a node to highlight it and open this chat with that node&apos;s context.
+            Click a live node. Chat opens with its delivery address: file, symbol, line range, and intent.
           </p>
         )}
 

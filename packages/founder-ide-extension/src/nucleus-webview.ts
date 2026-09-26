@@ -14,6 +14,7 @@ import {
   buildNucleusContextPacket,
   formatNucleusPacketVisible,
   layoutNucleusGraph,
+  projectLiveNucleusGraph,
   type NucleusGraph,
   type NucleusLayout,
 } from './nucleus-context';
@@ -174,7 +175,6 @@ export class NucleusViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | undefined;
   private listeners: vscode.Disposable[] = [];
   private graph: NucleusGraph | null = null;
-  private excerpt: string | null = null;
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
@@ -232,9 +232,8 @@ export class NucleusViewProvider implements vscode.WebviewViewProvider {
         });
         return;
       }
-      const body = (await res.json()) as NucleusPayload;
-      this.graph = body.graph ?? null;
-      this.excerpt = typeof body.excerpt === 'string' ? body.excerpt : null;
+      const body = (await res.json()) as NucleusPayload & { liveGraph?: NucleusGraph };
+      this.graph = projectLiveNucleusGraph(body.liveGraph ?? body.graph ?? null);
       this.post({ type: 'graph', layout: layoutNucleusGraph(this.graph) });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not load Nucleus.';
@@ -248,9 +247,7 @@ export class NucleusViewProvider implements vscode.WebviewViewProvider {
 
   private async select(nodeId: string): Promise<void> {
     if (!this.graph) return;
-    const packet = buildNucleusContextPacket(this.graph, nodeId, {
-      chainExcerpt: this.excerpt,
-    });
+    const packet = buildNucleusContextPacket(projectLiveNucleusGraph(this.graph), nodeId);
     if (!packet) return;
     setActiveNucleusPacket(packet);
     this.post({

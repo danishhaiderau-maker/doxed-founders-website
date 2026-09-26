@@ -44,5 +44,5 @@ export function nucleusChatPreface(userPrompt: string): string | null {
 
 /** Query passed to the built-in chat view so the node context is on screen. */
 export function nucleusVisibleQuery(packet: NucleusContextPacket): string {
-  return `@FounderOS\n${escapeNucleusHtml(formatNucleusPacketVisible(packet))}\n\nWhat should change?`;
+  return `@FounderOS\n${escapeNucleusHtml(formatNucleusPacketVisible(packet))}\n\nApply the intent at this delivery address only. Do not search the repository.`;
 }

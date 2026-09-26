@@ -53,6 +53,8 @@ test('selecting a node injects its label into the founder-os-auto prompt', () =>
   assert.match(messages[0].content, /label: <script>alert\(1\)<\/script>/);
   assert.match(messages[0].content, /task:xss/);
   assert.equal(messages[0].content.split('</nucleus-context>').length - 1, 1);
+  assert.match(messages[0].content, /<nucleus-delivery>/);
+  assert.equal(messages[0].content.split('</nucleus-delivery>').length - 1, 1);
   assert.equal(messages[1].content, 'What should change?');
   const page = readFileSync(new URL('../../app/founder-ide/nucleus/page.tsx', import.meta.url), 'utf8');
   const panel = readFileSync(new URL('./nucleus-panel.tsx', import.meta.url), 'utf8');
