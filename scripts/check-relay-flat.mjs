@@ -256,6 +256,53 @@ export function isRelayPausedAndDisarmed(row) {
   );
 }
 
+/** Exact env string only. Missing, false, and any other value stay fail-closed. */
+export function paperTipExceptionEnabled(env = process.env) {
+  return env?.PAPER_TIP_EXCEPTION === 'true';
+}
+
+function orphanIdsClear(row) {
+  return Array.isArray(row?.orphanOrderIds)
+    && row.orphanOrderIds.length === 0
+    && Array.isArray(row?.orphanPositionIds)
+    && row.orphanPositionIds.length === 0;
+}
+
+function cheetahProofOk(row, paperTipException, nowMs) {
+  const nullCheetahProofOk = paperTipException === true;
+  const reconcileOk = isStrictRawFlatReconcileSnapshot(row.reconcile, nowMs)
+    || (nullCheetahProofOk && row.reconcile == null);
+  const auditOk = isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit, nowMs)
+    || (nullCheetahProofOk && row.exchangeOrderAudit == null);
+  return reconcileOk && auditOk && orphanIdsClear(row);
+}
+
+/**
+ * Money-path flat gate. paperTipException is the one-shot exit-75 paper tip:
+ * a null Cheetah reconcile or exchangeOrderAudit does not fail when showcase
+ * is flat and relays are paused/disarmed. Default false keeps the ≤60s proof.
+ */
+export function evaluateRelayFlatGate({
+  showcasePositions,
+  showcasePendingOrders,
+  rows,
+  paperTipException = false,
+  nowMs = Date.now(),
+}) {
+  const showcaseFlat = showcasePositions === 0 && showcasePendingOrders === 0;
+  const trackedFlat = Array.isArray(rows)
+    && rows.every((row) => row.activeParticipants === 0);
+  const cheetahRows = (Array.isArray(rows) ? rows : [])
+    .filter((row) => String(row?.user ?? '').toLowerCase().includes('cheetah'));
+  const relayPausedAndDisarmed = cheetahRows.length > 0
+    && cheetahRows.every(isRelayPausedAndDisarmed);
+  const cheetahProofFlat = cheetahRows.length > 0
+    && cheetahRows.every((row) => cheetahProofOk(row, paperTipException, nowMs));
+  return showcaseFlat && trackedFlat && relayPausedAndDisarmed && cheetahProofFlat
+    ? 0
+    : 2;
+}
+
 async function main() {
   const { bot, baseUrl: botUrl } = await fetchOwnerState();
   const pendingOrders = (bot.orders ?? bot.pending_orders ?? []).filter(
@@ -326,25 +373,24 @@ async function main() {
   };
   console.log(JSON.stringify(output, null, 2));
 
-  const showcaseFlat =
-    output.showcase.positions === 0
-    && output.showcase.pendingOrders === 0;
-  const trackedFlat = rows.every((row) => row.activeParticipants === 0);
-  const cheetahRows = rows
-    .filter((row) => String(row.user).toLowerCase().includes('cheetah'));
-  const relayPausedAndDisarmed = cheetahRows.length > 0
-    && cheetahRows.every(isRelayPausedAndDisarmed);
-  const reconciledFlat = cheetahRows.length > 0
-    && cheetahRows.every((row) => {
-      return (
-        isStrictRawFlatReconcileSnapshot(row.reconcile)
-        && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
-        && row.orphanOrderIds.length === 0
-        && row.orphanPositionIds.length === 0
-      );
-    });
-  process.exitCode =
-    showcaseFlat && trackedFlat && relayPausedAndDisarmed && reconciledFlat ? 0 : 2;
+  const paperTipException = paperTipExceptionEnabled();
+  const gateInput = {
+    showcasePositions: output.showcase.positions,
+    showcasePendingOrders: output.showcase.pendingOrders,
+    rows,
+    nowMs: Date.now(),
+  };
+  const exitCode = evaluateRelayFlatGate({ ...gateInput, paperTipException });
+  if (
+    paperTipException
+    && exitCode === 0
+    && evaluateRelayFlatGate({ ...gateInput, paperTipException: false }) !== 0
+  ) {
+    console.error(
+      'PAPER_TIP_EXCEPTION: one-shot exit-75 paper tip. Showcase flat and relays paused/disarmed; null Cheetah reconcile/exchangeOrderAudit accepted. Does not arm.',
+    );
+  }
+  process.exitCode = exitCode;
 }
 
 const isDirectRun =

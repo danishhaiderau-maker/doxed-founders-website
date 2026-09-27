@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   describeOwnerFetchError,
+  evaluateRelayFlatGate,
   hasFullOwnerOrderState,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
   isRelayPausedAndDisarmed,
   ownerFetchErrorChain,
+  paperTipExceptionEnabled,
 } from './check-relay-flat.mjs';
 
 test('paused relay accepts legacy null mode only when arming timestamps are clear', () => {
@@ -132,6 +134,124 @@ test('owner fetch diagnosis includes nested undici socket cause and attempts', (
   assert.match(described.message, /after 3 attempts/);
   assert.match(described.message, /UND_ERR_SOCKET/);
   assert.match(described.message, /route\/socket reset/);
+});
+
+function pausedCheetah(overrides = {}) {
+  return {
+    user: 'Cheetah · undefined',
+    status: 'PAUSED',
+    relayExecutionMode: null,
+    relayArmedAt: null,
+    realTradingConfirmedAt: null,
+    activeParticipants: 0,
+    reconcile: null,
+    exchangeOrderAudit: null,
+    orphanOrderIds: [],
+    orphanPositionIds: [],
+    ...overrides,
+  };
+}
+
+function flatAudit(overrides = {}) {
+  return {
+    known: true,
+    activeOrderCount: 0,
+    managedActiveOrderCount: 0,
+    foreignActiveOrderCount: 0,
+    checkedAt: '2026-07-24T05:44:50.000Z',
+    ...overrides,
+  };
+}
+
+function gate(overrides = {}) {
+  return evaluateRelayFlatGate({
+    showcasePositions: 0,
+    showcasePendingOrders: 0,
+    rows: [pausedCheetah()],
+    paperTipException: false,
+    nowMs: now,
+    ...overrides,
+  });
+}
+
+test('paper tip exception is off unless the env value is exactly true', () => {
+  assert.equal(paperTipExceptionEnabled({}), false);
+  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: 'false' }), false);
+  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: '1' }), false);
+  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: 'TRUE' }), false);
+  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: 'true' }), true);
+});
+
+test('paper tip exception stays fail-closed when the flag is off', () => {
+  assert.equal(gate(), 2);
+  assert.equal(gate({ paperTipException: false }), 2);
+});
+
+test('paper tip exception passes a flat paused book with null Cheetah proof', () => {
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [
+      pausedCheetah({ user: 'Viper · Canada' }),
+      pausedCheetah(),
+    ],
+  }), 0);
+});
+
+test('paper tip exception fails closed when showcase is not flat', () => {
+  assert.equal(gate({ paperTipException: true, showcasePositions: 1 }), 2);
+  assert.equal(gate({ paperTipException: true, showcasePendingOrders: 1 }), 2);
+});
+
+test('paper tip exception fails closed when relays are not paused or disarmed', () => {
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({ status: 'ACTIVE' })],
+  }), 2);
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({ relayArmedAt: '2026-08-09T00:00:00Z' })],
+  }), 2);
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({ relayExecutionMode: 'LIVE' })],
+  }), 2);
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({ realTradingConfirmedAt: '2026-08-09T00:00:00Z' })],
+  }), 2);
+  assert.equal(gate({ paperTipException: true, rows: [] }), 2);
+});
+
+test('paper tip exception does not accept a stale or partial Cheetah proof', () => {
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({
+      reconcile: rawFlat({ updatedAt: '2026-07-24T05:43:59.999Z' }),
+    })],
+  }), 2);
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({
+      exchangeOrderAudit: flatAudit({ activeOrderCount: 1 }),
+    })],
+  }), 2);
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({ orphanOrderIds: ['ord-1'] })],
+  }), 2);
+  assert.equal(gate({
+    paperTipException: true,
+    rows: [pausedCheetah({ activeParticipants: 1 })],
+  }), 2);
+});
+
+test('strict Cheetah freshness still passes when the paper tip exception is off', () => {
+  assert.equal(gate({
+    rows: [pausedCheetah({
+      reconcile: rawFlat(),
+      exchangeOrderAudit: flatAudit(),
+    })],
+  }), 0);
 });
 
 test('strict exchange order proof requires a fresh known zero-order snapshot', () => {

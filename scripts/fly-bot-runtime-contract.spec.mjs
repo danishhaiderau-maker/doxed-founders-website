@@ -144,6 +144,22 @@ test('Path C recover gate reads /ready and proves a flat-check pending stall', a
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
 
+test('paper tip exception defaults false and does not skip the strict flat proof', async () => {
+  const workflow = await readFile(flyDeployPath, 'utf8');
+  const input = workflow.match(/paper_tip_exception:[\s\S]*?type:\s*boolean/)?.[0] ?? '';
+
+  assert.match(input, /default:\s*false/);
+  assert.doesNotMatch(input, /default:\s*true/);
+  assert.match(
+    workflow,
+    /PAPER_TIP_EXCEPTION:\s*\$\{\{\s*\(inputs\.paper_tip_exception == true \|\| inputs\.paper_tip_exception == 'true'\) && 'true' \|\| 'false'\s*\}\}/,
+  );
+  assert.match(workflow, /if: \$\{\{ !inputs\.recover_stalled_paper_boundary \}\}/);
+  assert.match(workflow, /node scripts\/check-relay-flat\.mjs/);
+  assert.match(workflow, /health\.get\("live_armed"\) is False/);
+  assert.match(workflow, /health\.get\("force_paper_mode"\) is True/);
+});
+
 test('Fly deploy proves a disarmed paper-signal owner, never a direct live executor', async () => {
   const workflow = await readFile(flyDeployPath, 'utf8');
 

@@ -18,6 +18,11 @@ on:
         required: false
         default: false
         type: boolean
+      paper_tip_exception:
+        description: "One-shot exit-75 paper tip only: null Cheetah reconcile/exchangeOrderAudit may pass when showcase is flat and relays are paused/disarmed. Does not arm."
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -92,6 +97,8 @@ jobs:
           REQUIRE_BOT_ADMIN_TOKEN: "YES"
           REQUIRE_CANONICAL_FLY_OWNER: "YES"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+          # Default false. Exact "true" only when this dispatch sets paper_tip_exception.
+          PAPER_TIP_EXCEPTION: ${{ (inputs.paper_tip_exception == true || inputs.paper_tip_exception == 'true') && 'true' || 'false' }}
         run: node scripts/check-relay-flat.mjs
 
       # Path C paper pending stall. Eligibility is /ready only. The stall
