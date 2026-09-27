@@ -310,8 +310,47 @@ function bootLoopError(body = { ok: false, boot: 'starting', error: 'dashboard l
     + 'root cause: Error: HTTP 503; check Fly /health, machine status, and public routing',
   );
   error.cause = new Error('HTTP 503');
+  error.cause.status = 503;
   error.cause.body = JSON.stringify(body);
   return error;
+}
+
+function relayEdgeError({
+  status = 502,
+  body = '',
+  url = 'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
+} = {}) {
+  const error = new Error(
+    'canonical owner state request failed after 3 attempts at '
+    + `${url}; `
+    + `root cause: Error: HTTP ${status}; check Fly /health, machine status, and public routing`,
+  );
+  error.cause = new Error(`HTTP ${status}`);
+  error.cause.status = status;
+  error.cause.body = body;
+  return error;
+}
+
+/** Boss live capture ~22:09Z: Fly edge 502, empty body. */
+function liveFlyEdge502EmptyError() {
+  return relayEdgeError({ status: 502, body: '' });
+}
+
+/** /health at the same capture: early-boot, rev 5790d091, no arm flags. */
+function liveEarlyBootHealth(overrides = {}) {
+  return {
+    ok: true,
+    boot: 'starting',
+    bot_pid: 4076,
+    dashboard_pid: 4076,
+    dashboard_port: 7002,
+    dashboard_owner: true,
+    source_git_rev: '5790d0919fc2',
+    bot_version: 'v31-five-family-score-led-paper-v1',
+    server_ts: '2026-09-27T22:09:36.144597+00:00',
+    status: 'starting',
+    ...overrides,
+  };
 }
 
 function earlyBootHealth(overrides = {}) {
@@ -580,4 +619,183 @@ test('pathway lab tip exception stays fail-closed when the 401 alternate proof i
     logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
     logsUnauthorized: false,
   }).reason, 'paper disarm log missing');
+});
+
+test('pathway lab 401 alternate accepts the live Fly-edge 502 empty body with early-boot health', () => {
+  const relayError = liveFlyEdge502EmptyError();
+  assert.equal(isPathwayLabBootLoop503(relayError), true);
+  assert.equal(relayError.cause.status, 502);
+  assert.equal(relayError.cause.body, '');
+  const decision = pathwayDecision({
+    relayError,
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+  });
+  assert.equal(decision.pass, true);
+  assert.equal(decision.exitCode, 0);
+  assert.equal(decision.reason, 'pathway lab 401 alternate proof');
+  assert.equal(paperDisarmedHealth(liveEarlyBootHealth()).mode, 'early_boot');
+  assert.equal(healthRevisionMatches(liveEarlyBootHealth(), '5790d091'), true);
+  const encoded = pathwayDecision({
+    relayError,
+    health: liveEarlyBootHealth({ v1_post_ai: 'FAIL' }),
+    logText: '',
+    logsUnauthorized: true,
+  });
+  assert.equal(encoded.pass, true);
+  assert.equal(encoded.reason, 'pathway lab 401 alternate proof with encoded v1_post_ai=FAIL');
+  assert.equal(pathwayDecision({
+    relayError,
+    health: liveEarlyBootHealth(),
+    logText: startupFailLog,
+    logsUnauthorized: false,
+  }).reason, 'pathway lab boot-loop tip');
+});
+
+test('pathway lab boot loop still accepts app 503 JSON and an empty edge 503', () => {
+  const restoring = bootLoopError({
+    boot: 'starting',
+    error: 'dashboard state is restoring',
+    ok: false,
+  });
+  assert.equal(isPathwayLabBootLoop503(restoring), true);
+  assert.equal(pathwayDecision({
+    relayError: restoring,
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+  }).pass, true);
+  const empty503 = relayEdgeError({ status: 503, body: '' });
+  assert.equal(isPathwayLabBootLoop503(empty503), true);
+  assert.equal(pathwayDecision({
+    relayError: empty503,
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+  }).reason, 'pathway lab 401 alternate proof');
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 503, body: '   ' })), true);
+});
+
+test('pathway lab boot loop stays fail-closed on non-edge bodies and other statuses', () => {
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 502, body: 'Bad Gateway' })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 502,
+    body: '<html><title>502 Bad Gateway</title></html>',
+  })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 502,
+    body: JSON.stringify({ ok: false, boot: 'starting', error: 'dashboard loading' }),
+  })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 200, body: '' })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 200,
+    body: JSON.stringify({ ok: true, boot: 'ready', positions: [], orders: [] }),
+  })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 500, body: '' })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 504, body: '' })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 503,
+    body: '<html><title>503 Service Unavailable</title></html>',
+  })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 503,
+    body: JSON.stringify({ ok: false, boot: 'ready', error: 'dashboard loading' }),
+  })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 503,
+    body: JSON.stringify({ ok: false, boot: 'starting', error: 'dashboard_busy' }),
+  })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 503,
+    body: JSON.stringify({
+      api_state_error: 'canonical execution snapshot unavailable or stale',
+    }),
+  })), false);
+  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
+    status: 502,
+    body: '',
+    url: 'https://doxed-btc-bot.fly.dev/health',
+  })), false);
+  assert.equal(pathwayDecision({
+    relayError: relayEdgeError({ status: 200, body: '' }),
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+  }).reason, 'not the pathway boot-loop 503');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth({ source_git_rev: '538a39e6c366' }),
+    logText: '',
+    logsUnauthorized: true,
+  }).reason, 'failing revision proof missing');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth({ live_armed: true }),
+    logText: '',
+    logsUnauthorized: true,
+  }).reason, 'paper-disarmed proof missing (live_armed)');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth({
+      live_armed: false,
+      force_paper_mode: false,
+      bitfinex_live_enabled: false,
+    }),
+    logText: '',
+    logsUnauthorized: true,
+  }).reason, 'paper-disarmed proof missing (not_paper)');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth({ v1_post_ai: 'PASS' }),
+    logText: '',
+    logsUnauthorized: true,
+  }).reason, 'startup FAIL proof contradicted');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+    recoverStalled: true,
+  }).reason, 'recover stalled path');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+    enabled: false,
+  }).reason, 'flag off');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: false,
+  }).reason, 'startup FAIL proof missing');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth(),
+    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
+    logsUnauthorized: false,
+  }).reason, 'paper disarm log missing');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+    rows: [pausedCheetah({ status: 'ACTIVE' })],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+    rows: [pausedCheetah({ orphanOrderIds: ['ord-1'] })],
+  }).reason, 'relays are not paused and disarmed');
+  assert.equal(pathwayDecision({
+    relayError: liveFlyEdge502EmptyError(),
+    health: liveEarlyBootHealth(),
+    logText: '',
+    logsUnauthorized: true,
+    rows: [],
+  }).exitCode, 2);
 });
