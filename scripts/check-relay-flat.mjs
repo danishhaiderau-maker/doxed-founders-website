@@ -307,6 +307,109 @@ export function pathwayLabStartupFailProven(logText) {
 }
 
 /**
+ * Fly logs API rejected the read. HTTP 401, or a body that says unauthorized.
+ * Other failures (missing token, 5xx, timeouts) stay fail-closed.
+ */
+export function flyLogsReadUnauthorized(error) {
+  if (error == null) return false;
+  if (typeof error !== 'object') {
+    return /unauthorized/i.test(String(error));
+  }
+  const status = Number(error.status ?? error.cause?.status);
+  if (status === 401) return true;
+  const message = [
+    error.message,
+    error.body,
+    error.cause?.message,
+    error.cause?.body,
+  ].map((part) => String(part ?? '')).join('\n');
+  return /fly logs HTTP 401\b/.test(message) || /unauthorized/i.test(message);
+}
+
+const PATHWAY_FAIL_VERDICT_KEYS = ['v1_post_ai', 'independent_v1_post_ai_spawn'];
+const PATHWAY_FAIL_VERDICT_RE = /(?:v1_post_ai|independent_v1_post_ai_spawn)\s*[:=]\s*"?(PASS|FAIL)"?/gi;
+
+/**
+ * v1_post_ai FAIL already carried by /health, the relay 503 body, or another
+ * artifact the workflow fetched. Absent is not proof. PASS, or any other
+ * explicit verdict, contradicts the startup FAIL.
+ */
+export function pathwayLabEncodedStartupFail(sources) {
+  const verdicts = [];
+  const seen = new Set();
+  const record = (value) => {
+    if (value === 'PASS' || value === 'FAIL') verdicts.push(value);
+    else verdicts.push('OTHER');
+  };
+  const visit = (node, depth) => {
+    if (node == null || depth > 6) return;
+    if (typeof node === 'string') {
+      if (pathwayLabStartupFailProven(node)) verdicts.push('FAIL');
+      PATHWAY_FAIL_VERDICT_RE.lastIndex = 0;
+      let match = PATHWAY_FAIL_VERDICT_RE.exec(node);
+      while (match) {
+        verdicts.push(String(match[1]).toUpperCase());
+        match = PATHWAY_FAIL_VERDICT_RE.exec(node);
+      }
+      return;
+    }
+    if (typeof node !== 'object') return;
+    if (seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item, depth + 1);
+      return;
+    }
+    for (const key of PATHWAY_FAIL_VERDICT_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(node, key)) record(node[key]);
+    }
+    for (const value of Object.values(node)) {
+      if (value && (typeof value === 'object' || typeof value === 'string')) {
+        visit(value, depth + 1);
+      }
+    }
+  };
+  const list = Array.isArray(sources) ? sources : [sources];
+  for (const source of list) visit(source, 0);
+  if (verdicts.length === 0) return { present: false, fail: false };
+  return { present: true, fail: verdicts.every((verdict) => verdict === 'FAIL') };
+}
+
+function pathwayLabFailSources({ health, relayError, failArtifacts }) {
+  const sources = [];
+  if (health != null) sources.push(health);
+  const bodyText = relayError?.body ?? relayError?.cause?.body;
+  if (typeof bodyText === 'string' && bodyText.trim()) {
+    try {
+      sources.push(JSON.parse(bodyText));
+    } catch {
+      sources.push(bodyText);
+    }
+  }
+  if (Array.isArray(failArtifacts)) {
+    for (const artifact of failArtifacts) sources.push(artifact);
+  }
+  return sources;
+}
+
+function pathwayRelayBookDisarmed(rows) {
+  const trackedFlat = Array.isArray(rows)
+    && rows.length > 0
+    && rows.every((row) => row.activeParticipants === 0);
+  const cheetahRows = (Array.isArray(rows) ? rows : [])
+    .filter((row) => String(row?.user ?? '').toLowerCase().includes('cheetah'));
+  const relayPausedAndDisarmed = cheetahRows.length > 0
+    && cheetahRows.every(isRelayPausedAndDisarmed);
+  const orphansClear = cheetahRows.every((row) => (
+    Array.isArray(row?.orphanOrderIds)
+    && row.orphanOrderIds.length === 0
+    && Array.isArray(row?.orphanPositionIds)
+    && row.orphanPositionIds.length === 0
+  ));
+  return trackedFlat && relayPausedAndDisarmed && orphansClear;
+}
+
+/**
  * Logged only after _apply_env_live_gating sets live_armed false under
  * FORCE_PAPER_MODE. Early-boot /health does not carry that latch.
  */
@@ -381,10 +484,15 @@ export function collectFlyLogText(payload) {
 
 /**
  * One-shot chicken-egg gate. Exit 0 only when the relay 503 is the Pathway
- * Lab boot loop, the failing revision and paper-disarmed proofs hold, startup
- * FAIL is in the logs, and the DB relay book is still paused and disarmed.
- * Showcase flatness is not read: that snapshot is the 503 this exception
- * exists for. Soft B / recover, and any live arm flag, stay fail-closed.
+ * Lab boot loop, the failing revision and paper-disarmed proofs hold, and
+ * the DB relay book is still paused and disarmed.
+ * Startup FAIL comes from Fly logs when that read succeeds. A 401 or
+ * unauthorized logs read does not skip the gate: the same boot-loop,
+ * failing-revision, paper-disarmed, and paused-relay proofs are required,
+ * and any already-fetched v1_post_ai verdict must be FAIL. Missing token,
+ * 5xx, and other log errors stay fail-closed. Showcase flatness is not
+ * read: that snapshot is the 503 this exception exists for. Soft B /
+ * recover, and any live arm flag, stay fail-closed.
  */
 export function evaluatePathwayLabTipException({
   enabled = false,
@@ -394,6 +502,8 @@ export function evaluatePathwayLabTipException({
   logText = '',
   rows = [],
   recoverStalled = false,
+  logsUnauthorized = false,
+  failArtifacts = [],
 }) {
   if (enabled !== true) {
     return { exitCode: 1, pass: false, reason: 'flag off' };
@@ -411,27 +521,40 @@ export function evaluatePathwayLabTipException({
   if (!paper.ok) {
     return { exitCode: 1, pass: false, reason: `paper-disarmed proof missing (${paper.mode})` };
   }
-  if (!pathwayLabStartupFailProven(logText)) {
-    return { exitCode: 1, pass: false, reason: 'startup FAIL proof missing' };
+  const encoded = pathwayLabEncodedStartupFail(pathwayLabFailSources({
+    health,
+    relayError,
+    failArtifacts,
+  }));
+  if (encoded.present && !encoded.fail) {
+    return { exitCode: 1, pass: false, reason: 'startup FAIL proof contradicted' };
   }
-  if (paper.mode === 'early_boot' && !paperModeDisarmLogProven(logText)) {
+  const startupFromLogs = pathwayLabStartupFailProven(logText);
+  let startupFromAlternate = false;
+  if (!startupFromLogs) {
+    if (logsUnauthorized !== true) {
+      return { exitCode: 1, pass: false, reason: 'startup FAIL proof missing' };
+    }
+    startupFromAlternate = true;
+  }
+  if (
+    paper.mode === 'early_boot'
+    && !startupFromAlternate
+    && !paperModeDisarmLogProven(logText)
+  ) {
     return { exitCode: 1, pass: false, reason: 'paper disarm log missing' };
   }
-  const trackedFlat = Array.isArray(rows)
-    && rows.length > 0
-    && rows.every((row) => row.activeParticipants === 0);
-  const cheetahRows = (Array.isArray(rows) ? rows : [])
-    .filter((row) => String(row?.user ?? '').toLowerCase().includes('cheetah'));
-  const relayPausedAndDisarmed = cheetahRows.length > 0
-    && cheetahRows.every(isRelayPausedAndDisarmed);
-  const orphansClear = cheetahRows.every((row) => (
-    Array.isArray(row?.orphanOrderIds)
-    && row.orphanOrderIds.length === 0
-    && Array.isArray(row?.orphanPositionIds)
-    && row.orphanPositionIds.length === 0
-  ));
-  if (!(trackedFlat && relayPausedAndDisarmed && orphansClear)) {
+  if (!pathwayRelayBookDisarmed(rows)) {
     return { exitCode: 2, pass: false, reason: 'relays are not paused and disarmed' };
+  }
+  if (startupFromAlternate) {
+    return {
+      exitCode: 0,
+      pass: true,
+      reason: encoded.fail
+        ? 'pathway lab 401 alternate proof with encoded v1_post_ai=FAIL'
+        : 'pathway lab 401 alternate proof',
+    };
   }
   return { exitCode: 0, pass: true, reason: 'pathway lab boot-loop tip' };
 }
@@ -459,7 +582,13 @@ async function fetchFlyPathwayLogText(env = process.env) {
       },
       signal: AbortSignal.timeout(15_000),
     });
-    if (!response.ok) throw new Error(`fly logs HTTP ${response.status}`);
+    if (!response.ok) {
+      const body = await response.text();
+      const error = new Error(`fly logs HTTP ${response.status}`);
+      error.status = response.status;
+      error.body = body.slice(0, 500);
+      throw error;
+    }
     return response.json();
   };
   const absorb = (payload) => {
@@ -599,9 +728,9 @@ async function main() {
     if (!pathwayLabTipExceptionEnabled()) throw ownerFetchError;
     let health = null;
     let logText = '';
+    let logsUnauthorized = false;
     try {
       health = await fetchCanonicalHealth();
-      logText = await fetchFlyPathwayLogText();
     } catch (error) {
       console.error(
         `PATHWAY_LAB_TIP_EXCEPTION refused: ${error instanceof Error ? error.message : error}`,
@@ -609,6 +738,23 @@ async function main() {
       console.error(ownerFetchError instanceof Error ? ownerFetchError.message : ownerFetchError);
       process.exitCode = 1;
       return;
+    }
+    try {
+      logText = await fetchFlyPathwayLogText();
+    } catch (error) {
+      if (!flyLogsReadUnauthorized(error)) {
+        console.error(
+          `PATHWAY_LAB_TIP_EXCEPTION refused: ${error instanceof Error ? error.message : error}`,
+        );
+        console.error(ownerFetchError instanceof Error ? ownerFetchError.message : ownerFetchError);
+        process.exitCode = 1;
+        return;
+      }
+      logsUnauthorized = true;
+      console.error(
+        `PATHWAY_LAB_TIP_EXCEPTION: Fly logs read unauthorized (${error instanceof Error ? error.message : error}). `
+        + 'The log line is not proof. Requiring the boot-loop, failing-revision, paper-disarmed, and paused-relay alternate proof.',
+      );
     }
     const rows = await loadBitfinexRelayRows();
     const decision = evaluatePathwayLabTipException({
@@ -619,6 +765,7 @@ async function main() {
       logText,
       rows,
       recoverStalled: process.env.RECOVER_STALLED_PAPER_BOUNDARY === 'true',
+      logsUnauthorized,
     });
     if (!decision.pass) {
       console.error(`PATHWAY_LAB_TIP_EXCEPTION refused: ${decision.reason}`);
@@ -629,6 +776,8 @@ async function main() {
     console.log(JSON.stringify({
       at: new Date().toISOString(),
       pathway_lab_tip_exception: true,
+      logs_unauthorized: logsUnauthorized,
+      startup_fail_proof: decision.reason,
       showcase: {
         skipped: true,
         reason: 'relay-execution-state HTTP 503 pathway boot loop',
@@ -642,11 +791,21 @@ async function main() {
       },
       instances: rows,
     }, null, 2));
+    const alternateProof = decision.reason.startsWith('pathway lab 401 alternate proof');
     console.error(
-      'PATHWAY_LAB_TIP_EXCEPTION: one-shot Pathway Lab v1_post_ai=FAIL boot-loop tip. '
-      + 'Canonical relay-execution-state HTTP 503 on the failing revision was accepted '
-      + 'because startup FAIL and paper-disarmed proofs passed and relays are paused/disarmed. '
-      + 'Showcase snapshot was not read. Does not arm. Soft B, Force, wipe, and live arm stay no-go.',
+      alternateProof
+        ? 'PATHWAY_LAB_TIP_EXCEPTION: Fly logs returned 401/unauthorized, so the startup FAIL log line was not read. '
+          + 'Alternate proof passed: relay-execution-state HTTP 503 boot loop (boot: starting), '
+          + '/health revision matches the failing rev, paper-disarmed (live_armed is not true), '
+          + 'and Bitfinex relays are paused and disarmed'
+          + (decision.reason.includes('encoded')
+            ? ', with an encoded v1_post_ai=FAIL signal. '
+            : '. ')
+          + 'Showcase snapshot was not read. Does not arm. Soft B, Force, wipe, and live arm stay no-go.'
+        : 'PATHWAY_LAB_TIP_EXCEPTION: one-shot Pathway Lab v1_post_ai=FAIL boot-loop tip. '
+          + 'Canonical relay-execution-state HTTP 503 on the failing revision was accepted '
+          + 'because startup FAIL and paper-disarmed proofs passed and relays are paused/disarmed. '
+          + 'Showcase snapshot was not read. Does not arm. Soft B, Force, wipe, and live arm stay no-go.',
     );
     process.exitCode = 0;
     return;

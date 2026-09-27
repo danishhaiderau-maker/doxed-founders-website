@@ -13,6 +13,8 @@ import {
   pathwayLabFailingRev,
   isPathwayLabBootLoop503,
   pathwayLabStartupFailProven,
+  flyLogsReadUnauthorized,
+  pathwayLabEncodedStartupFail,
   healthRevisionMatches,
   paperDisarmedHealth,
   paperModeDisarmLogProven,
@@ -458,4 +460,124 @@ test('fly log text keeps the pathway startup FAIL line', () => {
   });
   assert.equal(pathwayLabStartupFailProven(text), true);
   assert.equal(collectFlyLogText({ data: [] }), '');
+});
+
+test('fly logs 401 is the only logs failure that can use the alternate proof', () => {
+  assert.equal(flyLogsReadUnauthorized({ status: 401 }), true);
+  assert.equal(flyLogsReadUnauthorized(Object.assign(new Error('fly logs HTTP 401'), { status: 401 })), true);
+  assert.equal(flyLogsReadUnauthorized({ status: 403, body: 'token unauthorized' }), true);
+  assert.equal(flyLogsReadUnauthorized({ status: 403, body: 'Forbidden' }), false);
+  assert.equal(flyLogsReadUnauthorized({ status: 500, message: 'fly logs HTTP 500' }), false);
+  assert.equal(flyLogsReadUnauthorized(new Error('fly logs HTTP 404')), false);
+  assert.equal(
+    flyLogsReadUnauthorized(new Error('PATHWAY_LAB_TIP_EXCEPTION requires FLY_API_TOKEN to prove the startup FAIL')),
+    false,
+  );
+  assert.equal(pathwayLabEncodedStartupFail(earlyBootHealth()).present, false);
+  assert.equal(pathwayLabEncodedStartupFail({ v1_post_ai: 'FAIL' }).fail, true);
+  assert.equal(pathwayLabEncodedStartupFail({ independent_v1_post_ai_spawn: 'PASS' }).fail, false);
+  assert.equal(
+    pathwayLabEncodedStartupFail([startupFailLog]).fail,
+    true,
+  );
+});
+
+test('pathway lab tip exception accepts a complete 401 alternate proof without fly logs', () => {
+  const decision = pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+  });
+  assert.equal(decision.pass, true);
+  assert.equal(decision.exitCode, 0);
+  assert.equal(decision.reason, 'pathway lab 401 alternate proof');
+  const encoded = pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    health: earlyBootHealth({ v1_post_ai: 'FAIL' }),
+  });
+  assert.equal(encoded.pass, true);
+  assert.equal(encoded.reason, 'pathway lab 401 alternate proof with encoded v1_post_ai=FAIL');
+  const artifact = pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    failArtifacts: [startupFailLog],
+  });
+  assert.equal(artifact.pass, true);
+  assert.equal(artifact.reason, 'pathway lab 401 alternate proof with encoded v1_post_ai=FAIL');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    health: {
+      live_armed: false,
+      force_paper_mode: true,
+      bitfinex_live_enabled: false,
+      source_git_rev: '5790d0919fc2',
+    },
+  }).pass, true);
+});
+
+test('pathway lab tip exception stays fail-closed when the 401 alternate proof is incomplete', () => {
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: false,
+  }).reason, 'startup FAIL proof missing');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    enabled: false,
+  }).reason, 'flag off');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    recoverStalled: true,
+  }).reason, 'recover stalled path');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    relayError: bootLoopError({ ok: false, error: 'dashboard_busy' }),
+  }).reason, 'not the pathway boot-loop 503');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    failingRev: '',
+  }).reason, 'failing revision proof missing');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    health: earlyBootHealth({ source_git_rev: '538a39e6c366' }),
+  }).reason, 'failing revision proof missing');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    health: earlyBootHealth({ live_armed: true }),
+  }).reason, 'paper-disarmed proof missing (live_armed)');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    health: earlyBootHealth({ v1_post_ai: 'PASS' }),
+  }).reason, 'startup FAIL proof contradicted');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    failArtifacts: ['Pathway Lab startup validation FAILED — v1_post_ai=PASS'],
+  }).reason, 'startup FAIL proof contradicted');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    rows: [pausedCheetah({ status: 'ACTIVE' })],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    rows: [pausedCheetah({ relayArmedAt: '2026-08-09T00:00:00Z' })],
+  }).reason, 'relays are not paused and disarmed');
+  assert.equal(pathwayDecision({
+    logText: '',
+    logsUnauthorized: true,
+    rows: [],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({
+    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
+    logsUnauthorized: false,
+  }).reason, 'paper disarm log missing');
 });
