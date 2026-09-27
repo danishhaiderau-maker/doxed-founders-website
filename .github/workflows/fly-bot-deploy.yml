@@ -24,7 +24,7 @@ on:
         default: false
         type: boolean
       pathway_lab_tip_exception:
-        description: "One-shot chicken-egg tip only: Pathway Lab v1_post_ai=FAIL restart loop may pass the pre-deploy flat check when relay-execution-state is the boot-loop HTTP 503 and the owner is paper-disarmed. Does not arm. Soft B, Force, wipe, and live arm stay no-go."
+        description: "One-shot chicken-egg tip only: Pathway Lab v1_post_ai=FAIL restart loop may pass the pre-deploy flat check when relay-execution-state is the boot-loop HTTP 503 and the owner is paper-disarmed. Fly logs 401 uses that same boot-loop, failing-revision, paper-disarmed, and paused-relay proof instead of the log line. Does not arm. Soft B, Force, wipe, and live arm stay no-go."
         required: false
         default: false
         type: boolean
@@ -105,7 +105,10 @@ jobs:
           # Default false. Exact "true" only when this dispatch sets paper_tip_exception.
           PAPER_TIP_EXCEPTION: ${{ (inputs.paper_tip_exception == true || inputs.paper_tip_exception == 'true') && 'true' || 'false' }}
           # Default false. Exact "true" only for the Pathway Lab v1_post_ai boot-loop 503.
-          # Does not skip the post-deploy disarmed-paper proof. Does not arm.
+          # A Fly logs HTTP 401 does not skip this gate. check-relay-flat accepts
+          # that read only when the boot-loop, failing revision, paper-disarmed,
+          # and paused-relay proofs are all present. Does not skip the post-deploy
+          # disarmed-paper proof. Does not arm.
           PATHWAY_LAB_TIP_EXCEPTION: ${{ (inputs.pathway_lab_tip_exception == true || inputs.pathway_lab_tip_exception == 'true') && 'true' || 'false' }}
           PATHWAY_LAB_FAILING_REV: ${{ (inputs.pathway_lab_tip_exception == true || inputs.pathway_lab_tip_exception == 'true') && '5790d091' || '' }}
           FLY_API_TOKEN: ${{ (inputs.pathway_lab_tip_exception == true || inputs.pathway_lab_tip_exception == 'true') && secrets.FLY_API_TOKEN || '' }}

@@ -152,6 +152,7 @@ test('pathway lab tip exception defaults false and leaves the disarmed paper pro
   assert.doesNotMatch(input, /default:\s*true/);
   assert.match(input, /Does not arm/);
   assert.match(input, /Soft B, Force, wipe, and live arm stay no-go/);
+  assert.match(input, /Fly logs 401 uses that same boot-loop, failing-revision, paper-disarmed, and paused-relay proof/);
   assert.match(
     workflow,
     /PATHWAY_LAB_TIP_EXCEPTION:\s*\$\{\{\s*\(inputs\.pathway_lab_tip_exception == true \|\| inputs\.pathway_lab_tip_exception == 'true'\) && 'true' \|\| 'false'\s*\}\}/,
@@ -173,6 +174,7 @@ test('pathway lab tip exception defaults false and leaves the disarmed paper pro
   const proveStep = workflow.match(/- name: Prove liveness, execution safety, and exact revision[\s\S]*$/)?.[0] ?? '';
   assert.doesNotMatch(deployStep, /pathway_lab_tip_exception/);
   assert.doesNotMatch(proveStep, /pathway_lab_tip_exception|PATHWAY_LAB_TIP_EXCEPTION/);
+  assert.doesNotMatch(proveStep, /Fly logs 401/);
 });
 
 test('paper tip exception defaults false and does not skip the strict flat proof', async () => {
