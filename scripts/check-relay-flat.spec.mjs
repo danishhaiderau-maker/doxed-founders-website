@@ -9,6 +9,15 @@ import {
   isRelayPausedAndDisarmed,
   ownerFetchErrorChain,
   paperTipExceptionEnabled,
+  pathwayLabTipExceptionEnabled,
+  pathwayLabFailingRev,
+  isPathwayLabBootLoop503,
+  pathwayLabStartupFailProven,
+  healthRevisionMatches,
+  paperDisarmedHealth,
+  paperModeDisarmLogProven,
+  collectFlyLogText,
+  evaluatePathwayLabTipException,
 } from './check-relay-flat.mjs';
 
 test('paused relay accepts legacy null mode only when arming timestamps are clear', () => {
@@ -284,4 +293,169 @@ test('strict exchange order proof requires a fresh known zero-order snapshot', (
     ),
     false,
   );
+});
+
+const startupFailLog = [
+  '[PAPER MODE] FORCE_PAPER_MODE active: live arming and Bitfinex execution disabled',
+  'Pathway Lab startup validation FAILED — type_b=PASS tiles=PASS',
+  'ai_scan=PASS ai_scan_role=PASS v1_post_ai=FAIL sync=PASS',
+].join(' ');
+
+function bootLoopError(body = { ok: false, boot: 'starting', error: 'dashboard loading' }) {
+  const error = new Error(
+    'canonical owner state request failed after 3 attempts at '
+    + 'https://doxed-btc-bot.fly.dev/api/relay-execution-state; '
+    + 'root cause: Error: HTTP 503; check Fly /health, machine status, and public routing',
+  );
+  error.cause = new Error('HTTP 503');
+  error.cause.body = JSON.stringify(body);
+  return error;
+}
+
+function earlyBootHealth(overrides = {}) {
+  return {
+    ok: true,
+    boot: 'starting',
+    dashboard_owner: true,
+    source_git_rev: '5790d0919fc2',
+    bot_version: 'v31-five-family-score-led-paper-v1',
+    ...overrides,
+  };
+}
+
+function pathwayDecision(overrides = {}) {
+  return evaluatePathwayLabTipException({
+    enabled: true,
+    failingRev: '5790d091',
+    relayError: bootLoopError(),
+    health: earlyBootHealth(),
+    logText: startupFailLog,
+    rows: [pausedCheetah()],
+    recoverStalled: false,
+    ...overrides,
+  });
+}
+
+test('pathway lab tip exception is off unless the env value is exactly true', () => {
+  assert.equal(pathwayLabTipExceptionEnabled({}), false);
+  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: 'false' }), false);
+  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: '1' }), false);
+  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: 'TRUE' }), false);
+  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: 'true' }), true);
+  assert.equal(pathwayLabFailingRev({}), '');
+  assert.equal(pathwayLabFailingRev({ PATHWAY_LAB_FAILING_REV: '5790d091' }), '5790d091');
+  assert.equal(pathwayLabFailingRev({ PATHWAY_LAB_FAILING_REV: 'not-a-rev' }), '');
+});
+
+test('pathway lab tip exception passes only the proven boot-loop 503', () => {
+  const decision = pathwayDecision();
+  assert.equal(decision.pass, true);
+  assert.equal(decision.exitCode, 0);
+  assert.equal(isPathwayLabBootLoop503(bootLoopError()), true);
+  assert.equal(pathwayLabStartupFailProven(startupFailLog), true);
+  assert.equal(healthRevisionMatches(earlyBootHealth(), '5790d091'), true);
+  assert.deepEqual(paperDisarmedHealth(earlyBootHealth()), { ok: true, mode: 'early_boot' });
+});
+
+test('pathway lab tip exception stays fail-closed without the flag or the FAIL proof', () => {
+  assert.equal(pathwayDecision({ enabled: false }).pass, false);
+  assert.equal(pathwayDecision({ enabled: false }).exitCode, 1);
+  assert.equal(pathwayDecision({
+    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=PASS',
+  }).reason, 'startup FAIL proof missing');
+  assert.equal(pathwayDecision({ logText: 'v1_post_ai=FAIL' }).pass, false);
+  assert.equal(pathwayDecision({
+    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
+  }).reason, 'paper disarm log missing');
+  assert.equal(paperModeDisarmLogProven(startupFailLog), true);
+  assert.equal(pathwayDecision({ recoverStalled: true }).reason, 'recover stalled path');
+  assert.equal(pathwayDecision({ failingRev: '' }).pass, false);
+  assert.equal(pathwayDecision({
+    health: earlyBootHealth({ source_git_rev: '538a39e6c366' }),
+  }).reason, 'failing revision proof missing');
+});
+
+test('pathway lab tip exception rejects 503s that are not the boot loop', () => {
+  assert.equal(pathwayDecision({
+    relayError: bootLoopError({ ok: false, error: 'dashboard_busy' }),
+  }).reason, 'not the pathway boot-loop 503');
+  assert.equal(pathwayDecision({
+    relayError: bootLoopError({
+      api_state_error: 'canonical execution snapshot unavailable or stale',
+    }),
+  }).pass, false);
+  const timeout = new Error(
+    'canonical owner state timed out after 15000ms per attempt after 3 attempts at '
+    + 'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
+  );
+  assert.equal(isPathwayLabBootLoop503(timeout), false);
+  assert.equal(pathwayDecision({ relayError: timeout }).pass, false);
+});
+
+test('pathway lab tip exception fails closed when the owner is armed or not paper', () => {
+  assert.equal(pathwayDecision({
+    health: {
+      live_armed: true,
+      force_paper_mode: true,
+      bitfinex_live_enabled: false,
+      source_git_rev: '5790d0919fc2',
+    },
+  }).reason, 'paper-disarmed proof missing (live_armed)');
+  assert.equal(pathwayDecision({
+    health: {
+      live_armed: false,
+      force_paper_mode: false,
+      bitfinex_live_enabled: false,
+      source_git_rev: '5790d0919fc2',
+    },
+  }).reason, 'paper-disarmed proof missing (not_paper)');
+  assert.equal(pathwayDecision({
+    health: {
+      live_armed: false,
+      force_paper_mode: true,
+      bitfinex_live_enabled: true,
+      git_rev: '5790d0919fc2',
+    },
+  }).reason, 'paper-disarmed proof missing (bitfinex_live)');
+  assert.deepEqual(paperDisarmedHealth({
+    live_armed: false,
+    force_paper_mode: true,
+    bitfinex_live_enabled: false,
+  }), { ok: true, mode: 'explicit' });
+  assert.equal(pathwayDecision({
+    health: {
+      live_armed: false,
+      force_paper_mode: true,
+      bitfinex_live_enabled: false,
+      source_git_rev: '5790d0919fc2',
+    },
+    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
+  }).pass, true);
+});
+
+test('pathway lab tip exception still requires paused disarmed relays', () => {
+  assert.equal(pathwayDecision({
+    rows: [pausedCheetah({ status: 'ACTIVE' })],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({
+    rows: [pausedCheetah({ relayArmedAt: '2026-08-09T00:00:00Z' })],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({
+    rows: [pausedCheetah({ relayExecutionMode: 'LIVE' })],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({
+    rows: [pausedCheetah({ activeParticipants: 1 })],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({
+    rows: [pausedCheetah({ orphanOrderIds: ['ord-1'] })],
+  }).exitCode, 2);
+  assert.equal(pathwayDecision({ rows: [] }).exitCode, 2);
+});
+
+test('fly log text keeps the pathway startup FAIL line', () => {
+  const text = collectFlyLogText({
+    data: [{ attributes: { message: startupFailLog } }],
+  });
+  assert.equal(pathwayLabStartupFailProven(text), true);
+  assert.equal(collectFlyLogText({ data: [] }), '');
 });

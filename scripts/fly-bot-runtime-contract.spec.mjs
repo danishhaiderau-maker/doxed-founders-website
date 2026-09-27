@@ -144,6 +144,37 @@ test('Path C recover gate reads /ready and proves a flat-check pending stall', a
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
 
+test('pathway lab tip exception defaults false and leaves the disarmed paper proof', async () => {
+  const workflow = await readFile(flyDeployPath, 'utf8');
+  const input = workflow.match(/pathway_lab_tip_exception:[\s\S]*?type:\s*boolean/)?.[0] ?? '';
+
+  assert.match(input, /default:\s*false/);
+  assert.doesNotMatch(input, /default:\s*true/);
+  assert.match(input, /Does not arm/);
+  assert.match(input, /Soft B, Force, wipe, and live arm stay no-go/);
+  assert.match(
+    workflow,
+    /PATHWAY_LAB_TIP_EXCEPTION:\s*\$\{\{\s*\(inputs\.pathway_lab_tip_exception == true \|\| inputs\.pathway_lab_tip_exception == 'true'\) && 'true' \|\| 'false'\s*\}\}/,
+  );
+  assert.match(
+    workflow,
+    /PATHWAY_LAB_FAILING_REV:\s*\$\{\{\s*\(inputs\.pathway_lab_tip_exception == true \|\| inputs\.pathway_lab_tip_exception == 'true'\) && '5790d091' \|\| ''\s*\}\}/,
+  );
+  assert.match(
+    workflow,
+    /FLY_API_TOKEN:\s*\$\{\{\s*\(inputs\.pathway_lab_tip_exception == true \|\| inputs\.pathway_lab_tip_exception == 'true'\) && secrets\.FLY_API_TOKEN \|\| ''\s*\}\}/,
+  );
+  assert.match(workflow, /if: \$\{\{ !inputs\.recover_stalled_paper_boundary \}\}/);
+  assert.match(workflow, /node scripts\/check-relay-flat\.mjs/);
+  assert.match(workflow, /health\.get\("live_armed"\) is False/);
+  assert.match(workflow, /health\.get\("bitfinex_live_enabled"\) is False/);
+  assert.match(workflow, /health\.get\("force_paper_mode"\) is True/);
+  const deployStep = workflow.match(/- name: Deploy the exact source revision[\s\S]*?(?=\n      - name:)/)?.[0] ?? '';
+  const proveStep = workflow.match(/- name: Prove liveness, execution safety, and exact revision[\s\S]*$/)?.[0] ?? '';
+  assert.doesNotMatch(deployStep, /pathway_lab_tip_exception/);
+  assert.doesNotMatch(proveStep, /pathway_lab_tip_exception|PATHWAY_LAB_TIP_EXCEPTION/);
+});
+
 test('paper tip exception defaults false and does not skip the strict flat proof', async () => {
   const workflow = await readFile(flyDeployPath, 'utf8');
   const input = workflow.match(/paper_tip_exception:[\s\S]*?type:\s*boolean/)?.[0] ?? '';
