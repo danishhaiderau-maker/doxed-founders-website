@@ -22,6 +22,11 @@ from combo_pathway_config import (
     EXPECTED_EXCHANGE,
     RESEARCH_CANDIDATE_LANE,
     RESEARCH_LANE_AI_SCAN,
+    RESEARCH_LANE_FAMILY_ATR_TARGET,
+    RESEARCH_LANE_FAMILY_ATR_TRAIL,
+    RESEARCH_LANE_FAMILY_CHANDELIER,
+    RESEARCH_LANE_FAMILY_HYBRID_RUNNER,
+    RESEARCH_LANE_FAMILY_MFE_GIVEBACK,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
@@ -892,16 +897,85 @@ def verify_repo_version_sync() -> dict:
 
 
 
+def five_family_execution_lanes() -> tuple:
+    """Active paper combo roster. Score-led admission does not change membership."""
+    return (
+        RESEARCH_LANE_FAMILY_CHANDELIER,
+        RESEARCH_LANE_FAMILY_ATR_TARGET,
+        RESEARCH_LANE_FAMILY_ATR_TRAIL,
+        RESEARCH_LANE_FAMILY_HYBRID_RUNNER,
+        RESEARCH_LANE_FAMILY_MFE_GIVEBACK,
+    )
+
+
+def build_v1_post_ai_checks(generic_spawn_src: str, process_signal_src: str) -> list:
+    """Roster and source checks for the five-family shared-direction contract."""
+    family_lanes = five_family_execution_lanes()
+    family_shared = all(
+        is_shared_ai_direction_lane(lane) and not is_independent_ai_lane(lane)
+        for lane in family_lanes
+    )
+    return [
+        {
+            "check": "five-family tiles are the only executable combo lanes",
+            "passed": tuple(COMBO_EXECUTION_LANES) == family_lanes,
+            "detail": f"execution_lanes={tuple(COMBO_EXECUTION_LANES)}",
+        },
+        {
+            "check": "retired offset and Type B are outside the executable roster",
+            "passed": (
+                RESEARCH_LANE_OFFSET_029_ATR_TP_25 not in COMBO_EXECUTION_LANES
+                and RESEARCH_LANE_TYPE_B_HUNTER_V1 not in COMBO_EXECUTION_LANES
+                and RESEARCH_LANE_OFFSET_029_ATR_TP_25 not in COMBO_LANE_SPECS
+                and RESEARCH_LANE_TYPE_B_HUNTER_V1 not in COMBO_LANE_SPECS
+            ),
+            "detail": "OFFSET_029_ATR_TP_25 and TYPE_B_HUNTER_V1 stay historical",
+        },
+        {
+            "check": "each family tile consumes shared AI direction without its own prompt",
+            "passed": family_shared and len(family_lanes) == 5,
+            "detail": "one AI_SCAN direction feeds all five paper tiles",
+        },
+        {
+            "check": "generic fan-out routes only the executable allowlist",
+            "passed": (
+                "for lane in COMBO_EXECUTION_LANES" in generic_spawn_src
+                and "_spawn_combo_lane" in generic_spawn_src
+            ),
+            "detail": "spawn_combo_lanes_from_ai_scan iterates COMBO_EXECUTION_LANES and can call _spawn_combo_lane",
+        },
+        {
+            "check": "process_signal contains one shared AI evaluator call",
+            "passed": (
+                process_signal_src.count("evaluate_signal_with_ai(") == 1
+            ),
+            "detail": "one direction call feeds Continuous and the five family paper tiles",
+        },
+        {
+            "check": "retired Type B has no process_signal fan-out",
+            "passed": "spawn_type_b_lane_from_shared_ai" not in process_signal_src,
+            "detail": "Type B history remains readable and receives no new work",
+        },
+        {
+            "check": "legacy dispatchers are absent from active shared fan-out",
+            "passed": (
+                "spawn_experimental_lanes_from_ai_scan" not in generic_spawn_src
+                and "spawn_shadow_collecting_lanes_from_ai_scan" not in generic_spawn_src
+            ),
+            "detail": "history is analyzer-only and cannot alter execution",
+        },
+    ]
+
+
 def run_independent_v1_post_ai_spawn_validation() -> dict:
     """
-    Prove the active offset candidate consumes the shared direction call once.
+    Prove the five FAMILY_* paper tiles consume the shared direction call once.
 
-    The legacy function/artifact name is preserved for report compatibility.
-    Catches duplicate DeepSeek calls, alternate prompt paths and accidental
-    reanimation of Type B or another retired lane.
+    The legacy function and artifact name are preserved for report compatibility.
+    The offset-only and Type B contracts are retired. This catches a second
+    DeepSeek call, an alternate prompt path, and accidental reanimation of
+    Type B, OFFSET_029, or another retired lane.
     """
-    checks = []
-
     try:
         import bot
     except Exception as exc:
@@ -919,49 +993,7 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
         except Exception as exc:
             generic_spawn_src = f"inspect_error:{exc}"
 
-    checks.extend([
-        {
-            "check": "offset candidate is the only executable combo lane",
-            "passed": tuple(COMBO_EXECUTION_LANES) == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,),
-            "detail": f"execution_lanes={tuple(COMBO_EXECUTION_LANES)}",
-        },
-        {
-            "check": "offset candidate is declared as a shared-direction lane",
-            "passed": (
-                is_shared_ai_direction_lane(RESEARCH_LANE_OFFSET_029_ATR_TP_25)
-                and not is_independent_ai_lane(RESEARCH_LANE_OFFSET_029_ATR_TP_25)
-            ),
-            "detail": "candidate consumes AI_SCAN direction; no independent prompt",
-        },
-        {
-            "check": "generic fan-out routes only the executable allowlist",
-            "passed": (
-                "for lane in COMBO_EXECUTION_LANES" in generic_spawn_src
-                and "_spawn_combo_lane" in generic_spawn_src
-            ),
-            "detail": "CONTINUOUS and offset candidate share the completed AI payload",
-        },
-        {
-            "check": "process_signal contains one shared AI evaluator call",
-            "passed": (
-                process_signal_src.count("evaluate_signal_with_ai(") == 1
-            ),
-            "detail": "one direction call feeds the two active paper strategies",
-        },
-        {
-            "check": "retired Type B has no process_signal fan-out",
-            "passed": "spawn_type_b_lane_from_shared_ai" not in process_signal_src,
-            "detail": "Type B history remains readable but cannot receive new work",
-        },
-        {
-            "check": "legacy dispatchers are absent from active shared fan-out",
-            "passed": (
-                "spawn_experimental_lanes_from_ai_scan" not in generic_spawn_src
-                and "spawn_shadow_collecting_lanes_from_ai_scan" not in generic_spawn_src
-            ),
-            "detail": "history is analyzer-only and cannot alter execution",
-        },
-    ])
+    checks = build_v1_post_ai_checks(generic_spawn_src, process_signal_src)
 
     if import_err:
         checks.append(
@@ -974,15 +1006,16 @@ def run_independent_v1_post_ai_spawn_validation() -> dict:
 
     passed = all(c["passed"] for c in checks)
     payload = {
-        "schema": "shared_direction_post_ai_spawn_validation_v2",
+        "schema": "five_family_shared_direction_post_ai_spawn_validation_v3",
         "generated_at": _utc_now(),
         "bot_version": EXECUTION_FIX_VERSION,
         "verdict": "PASS" if passed else "FAIL",
-        "lanes": [RESEARCH_LANE_TYPE_B_HUNTER_V1],
+        "lanes": list(five_family_execution_lanes()),
         "checks": checks,
         "policy": (
-            "One direction-only AI_SCAN result feeds Continuous and Type B. Type B "
-            "keeps its own fixed gate and order book without issuing another AI request."
+            "One direction-only AI_SCAN result feeds Continuous and the five "
+            "FAMILY_* paper tiles. Each tile keeps its own paper order book. "
+            "OFFSET_029 and Type B stay retired and receive no new work."
         ),
     }
     _write_json(INDEPENDENT_V1_POST_AI_SPAWN_FILE, payload)
