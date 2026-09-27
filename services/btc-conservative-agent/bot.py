@@ -77,6 +77,11 @@ from combo_pathway_config import (
     RESEARCH_LANE_COMBO_65_SP5_DIRECT,
     RESEARCH_LANE_TYPE_B_HUNTER_V1,
     RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+    RESEARCH_LANE_FAMILY_CHANDELIER,
+    RESEARCH_LANE_FAMILY_ATR_TARGET,
+    RESEARCH_LANE_FAMILY_ATR_TRAIL,
+    RESEARCH_LANE_FAMILY_HYBRID_RUNNER,
+    RESEARCH_LANE_FAMILY_MFE_GIVEBACK,
     RESEARCH_LANE_SR_MICRO_TILE_V1,
     RESEARCH_LANE_SR_MICRO_TILE_V2,
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
@@ -389,7 +394,12 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_AI60_SP3_VIRTUAL_CHASE: "DATA_RETIRED",
     RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2: "DATA_RETIRED",
     RESEARCH_LANE_TYPE_B_HUNTER_V1: "RETIRED",
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_OFFSET_029_ATR_TP_25: "RETIRED",
+    RESEARCH_LANE_FAMILY_CHANDELIER: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_FAMILY_ATR_TARGET: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_FAMILY_ATR_TRAIL: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_FAMILY_HYBRID_RUNNER: "RESEARCH_CANDIDATE",
+    RESEARCH_LANE_FAMILY_MFE_GIVEBACK: "RESEARCH_CANDIDATE",
     RESEARCH_LANE_SR_MICRO_TILE_V1: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2: "DATA_RETIRED",
     RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: "RETIRED",
@@ -432,8 +442,7 @@ RESEARCH_SPAWN_LANES = ()
 # v11.8: the persisted toggle map is deliberately an allowlist.  Historical rows
 # remain readable, but a stale config flag cannot revive a retired lane.
 _RESEARCH_LANE_TOGGLE_DEFAULTS = {
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25: True,
-    RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC: False,
+    lane: False for lane in COMBO_EXECUTION_LANES
 }
 
 # The showcase tile toggle and the platform relay switch are deliberately
@@ -446,9 +455,7 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = {
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
 })
-PAPER_ONLY_RESEARCH_LANES = frozenset({
-    RESEARCH_LANE_OFFSET_029_ATR_TP_25,
-})
+PAPER_ONLY_RESEARCH_LANES = frozenset(COMBO_EXECUTION_LANES)
 # A relay event must prove both its declared lane and its trade-id namespace.
 # Keep this deliberately smaller than the research lane prefix registry: adding a
 # paper lane must never silently make it eligible for real-money mirroring.
@@ -27355,7 +27362,7 @@ def build_static_pathway_lane_specs() -> dict:
         "entry_limit_policy": DETERMINISTIC_ENTRY_POLICY_VERSION,
         "shared_call_consumers": [
             RESEARCH_LANE_CONTINUOUS,
-            RESEARCH_LANE_OFFSET_029_ATR_TP_25,
+            *COMBO_EXECUTION_LANES,
         ],
     }
     lanes.append({

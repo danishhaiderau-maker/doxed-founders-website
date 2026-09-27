@@ -51,17 +51,24 @@ def test_atr_target_and_path_end_are_exact():
 
 
 def test_active_roster_contains_only_new_candidate_and_not_retired_type_b():
-    assert COMBO_EXECUTION_LANES == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,)
-    assert COMBO_TILE_DISPLAY_ORDER == (RESEARCH_LANE_OFFSET_029_ATR_TP_25,)
-    assert RESEARCH_CANDIDATE_LANE == RESEARCH_LANE_OFFSET_029_ATR_TP_25
-    spec = COMBO_LANE_SPECS[RESEARCH_LANE_OFFSET_029_ATR_TP_25]
-    assert spec["raw_policy_id"] == policy.POLICY_ID
-    assert spec["paper_only"] is True
-    assert spec["uses_shared_ai_direction"] is True
-    assert spec["is_independent_ai"] is False
-    assert spec["is_legacy"] is False
+    assert COMBO_EXECUTION_LANES == (
+        "FAMILY_CHANDELIER_3",
+        "FAMILY_ATR_TARGET_2_5",
+        "FAMILY_ATR_TRAIL",
+        "FAMILY_HYBRID_RUNNER",
+        "FAMILY_MFE_GIVEBACK",
+    )
+    assert COMBO_TILE_DISPLAY_ORDER == COMBO_EXECUTION_LANES
+    assert RESEARCH_CANDIDATE_LANE == "FAMILY_CHANDELIER_3"
+    assert RESEARCH_LANE_OFFSET_029_ATR_TP_25 not in COMBO_EXECUTION_LANES
     assert RESEARCH_LANE_TYPE_B_HUNTER_V1 not in COMBO_EXECUTION_LANES
-    assert COMBO_LANE_SPECS[RESEARCH_LANE_TYPE_B_HUNTER_V1]["is_legacy"] is True
+    assert RESEARCH_LANE_TYPE_B_HUNTER_V1 not in COMBO_LANE_SPECS
+    for lane in COMBO_EXECUTION_LANES:
+        spec = COMBO_LANE_SPECS[lane]
+        assert spec["paper_only"] is True
+        assert spec["uses_shared_ai_direction"] is True
+        assert spec["is_independent_ai"] is False
+        assert spec["is_legacy"] is False
 
 
 def test_bot_adapter_is_paper_only_and_never_relay_allowlisted():

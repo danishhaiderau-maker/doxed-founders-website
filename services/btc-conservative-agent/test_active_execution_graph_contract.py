@@ -1,8 +1,8 @@
 """Fail-closed contract for the production paper-research execution graph.
 
-Historical lane implementations and their immutable evidence may remain readable,
-but only CONTINUOUS and OFFSET_029_ATR_TP_25 may produce new paper orders.  Both
-must consume the single shared AI_SCAN result; an alternate prompt/call path is a
+Historical lane implementations and their immutable evidence may remain readable.
+The active paper stack is CONTINUOUS plus the five FAMILY_* tiles. Every active
+tile consumes the single shared AI_SCAN result; an alternate prompt/call path is a
 release-blocking regression.
 """
 
@@ -19,7 +19,14 @@ import pathway_lane_roster as roster
 
 SERVICE_DIR = Path(__file__).resolve().parent
 BOT_PATH = SERVICE_DIR / "bot.py"
-ACTIVE_PAPER_LANES = {"CONTINUOUS", "OFFSET_029_ATR_TP_25"}
+FIVE_FAMILY_LANES = {
+    "FAMILY_CHANDELIER_3",
+    "FAMILY_ATR_TARGET_2_5",
+    "FAMILY_ATR_TRAIL",
+    "FAMILY_HYBRID_RUNNER",
+    "FAMILY_MFE_GIVEBACK",
+}
+ACTIVE_PAPER_LANES = {"CONTINUOUS", *FIVE_FAMILY_LANES}
 
 
 def _bot_tree() -> ast.Module:
@@ -37,15 +44,25 @@ def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str |
 
 def test_exactly_two_active_order_producing_lanes() -> None:
     configured = set(config.COMBO_EXECUTION_LANES)
-    assert configured == {config.RESEARCH_LANE_OFFSET_029_ATR_TP_25}
+    assert configured == FIVE_FAMILY_LANES
 
     active = {config.COMPARISON_BENCHMARK_LANE, *configured}
     assert active == ACTIVE_PAPER_LANES
-    assert set(roster.DASHBOARD_PRIMARY_LANES) == ACTIVE_PAPER_LANES
+    assert set(roster.DASHBOARD_PRIMARY_LANES) == configured
+    source = (SERVICE_DIR / "combo_pathway_config.py").read_text(encoding="utf-8")
+    assert 'RESEARCH_STACK_VERSION = "v31-five-family-analyzer-hypothesis-paper"' in source
+    assert 'RESEARCH_STACK_VERSION = "v31-five-family-score-led-paper-v1"' in source
+    assert "v15-typeb-opportunity-v2" not in source
+    assert config.ANALYZER_SYNC_ID == config.RESEARCH_STACK_VERSION
+    assert config.EXECUTION_FIX_VERSION == config.RESEARCH_STACK_VERSION
+    assert config.RESEARCH_DASHBOARD_VERSION == config.RESEARCH_STACK_VERSION
+    assert config.EXPECTED_BOT_VERSION == config.EXECUTION_FIX_VERSION
 
     for lane in configured:
         spec = config.COMBO_LANE_SPECS[lane]
         assert spec.get("is_legacy") is False
+        assert spec.get("paper_only") is True
+        assert spec.get("platform_relay_eligible") is False
         assert spec.get("is_independent_ai") is False
         assert spec.get("uses_shared_ai_direction") is True
 
