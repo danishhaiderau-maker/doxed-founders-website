@@ -281,22 +281,67 @@ export function pathwayLabFailingRev(env = process.env) {
   return /^[0-9a-f]{7,40}$/.test(rev) ? rev : '';
 }
 
-export function isPathwayLabBootLoop503(error) {
-  const message = String(error?.message ?? '');
-  if (!/HTTP 503/.test(message)) return false;
-  if (!/\/api\/relay-execution-state/.test(message)) return false;
-  const bodyText = String(error?.body ?? error?.cause?.body ?? '');
+const PATHWAY_BOOT_LOOP_ERRORS = new Set([
+  'dashboard loading',
+  'dashboard state is restoring',
+]);
+
+function pathwayRelayStatus(error) {
+  for (const candidate of [error?.status, error?.cause?.status, error?.cause?.cause?.status]) {
+    const status = Number(candidate);
+    if (status === 502 || status === 503) return status;
+  }
+  const blob = [error?.message, error?.cause?.message, error?.cause?.cause?.message]
+    .map((part) => String(part ?? ''))
+    .join('\n');
+  const found502 = /\bHTTP 502\b/.test(blob);
+  const found503 = /\bHTTP 503\b/.test(blob);
+  if (found502 && found503) return 0;
+  if (found502) return 502;
+  if (found503) return 503;
+  return 0;
+}
+
+function pathwayRelayBodyText(error) {
+  for (const candidate of [error?.body, error?.cause?.body, error?.cause?.cause?.body]) {
+    if (typeof candidate === 'string') return candidate;
+  }
+  return '';
+}
+
+function isPathwayBootLoopJson(bodyText) {
+  const text = String(bodyText ?? '').trim();
+  if (!text) return false;
   let parsed = null;
   try {
-    parsed = JSON.parse(bodyText);
+    parsed = JSON.parse(text);
   } catch {
     return false;
   }
-  if (parsed == null || typeof parsed !== 'object' || parsed.boot !== 'starting') {
-    return false;
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (parsed.boot !== 'starting') return false;
+  return PATHWAY_BOOT_LOOP_ERRORS.has(String(parsed.error ?? ''));
+}
+
+/**
+ * Pathway Lab boot-loop relay failure on /api/relay-execution-state.
+ * App JSON is HTTP 503 with boot "starting" and error "dashboard loading"
+ * or "dashboard state is restoring". The same flap also hits the Fly edge
+ * as HTTP 502 or HTTP 503 with an empty body (no boot JSON to parse).
+ * A non-empty 502, a non-boot 503 body, HTTP 200, and any other status
+ * stay fail-closed.
+ */
+export function isPathwayLabBootLoop503(error) {
+  const message = String(error?.message ?? '');
+  if (!/\/api\/relay-execution-state/.test(message)) return false;
+  const status = pathwayRelayStatus(error);
+  const bodyText = pathwayRelayBodyText(error);
+  if (status === 502) return bodyText.trim() === '';
+  if (status === 503) {
+    if (bodyText.trim() === '') return true;
+    return isPathwayBootLoopJson(bodyText);
   }
-  const detail = String(parsed.error ?? '');
-  return detail === 'dashboard loading' || detail === 'dashboard state is restoring';
+  return false;
 }
 
 /** The SystemExit string from run_startup_pathway_validation. rc=1 is that raise. */
@@ -483,8 +528,9 @@ export function collectFlyLogText(payload) {
 }
 
 /**
- * One-shot chicken-egg gate. Exit 0 only when the relay 503 is the Pathway
- * Lab boot loop, the failing revision and paper-disarmed proofs hold, and
+ * One-shot chicken-egg gate. Exit 0 only when the relay failure is the
+ * Pathway Lab boot loop (Fly-edge 502/503 with an empty body, or HTTP 503
+ * boot JSON), the failing revision and paper-disarmed proofs hold, and
  * the DB relay book is still paused and disarmed.
  * Startup FAIL comes from Fly logs when that read succeeds. A 401 or
  * unauthorized logs read does not skip the gate: the same boot-loop,
@@ -780,7 +826,7 @@ async function main() {
       startup_fail_proof: decision.reason,
       showcase: {
         skipped: true,
-        reason: 'relay-execution-state HTTP 503 pathway boot loop',
+        reason: 'relay-execution-state pathway boot loop',
       },
       health: {
         source_git_rev: health?.source_git_rev ?? health?.git_rev ?? null,
@@ -795,15 +841,16 @@ async function main() {
     console.error(
       alternateProof
         ? 'PATHWAY_LAB_TIP_EXCEPTION: Fly logs returned 401/unauthorized, so the startup FAIL log line was not read. '
-          + 'Alternate proof passed: relay-execution-state HTTP 503 boot loop (boot: starting), '
-          + '/health revision matches the failing rev, paper-disarmed (live_armed is not true), '
-          + 'and Bitfinex relays are paused and disarmed'
+          + 'Alternate proof passed: relay-execution-state is the Pathway Lab boot loop '
+          + '(Fly-edge HTTP 502 or HTTP 503 with an empty body, or HTTP 503 JSON boot: starting '
+          + 'and dashboard loading/restoring), /health revision matches the failing rev, '
+          + 'paper-disarmed (live_armed is not true), and Bitfinex relays are paused and disarmed'
           + (decision.reason.includes('encoded')
             ? ', with an encoded v1_post_ai=FAIL signal. '
             : '. ')
           + 'Showcase snapshot was not read. Does not arm. Soft B, Force, wipe, and live arm stay no-go.'
         : 'PATHWAY_LAB_TIP_EXCEPTION: one-shot Pathway Lab v1_post_ai=FAIL boot-loop tip. '
-          + 'Canonical relay-execution-state HTTP 503 on the failing revision was accepted '
+          + 'Canonical relay-execution-state boot loop on the failing revision was accepted '
           + 'because startup FAIL and paper-disarmed proofs passed and relays are paused/disarmed. '
           + 'Showcase snapshot was not read. Does not arm. Soft B, Force, wipe, and live arm stay no-go.',
     );
