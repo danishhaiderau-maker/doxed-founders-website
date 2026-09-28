@@ -63,6 +63,30 @@ def main():
         out[name] = sorted(os.listdir(path))[:12] if path.is_dir() else None
     active = work / "transport-maintenance-receipts" / "active-maintenance.json"
     out["active_maintenance_present"] = active.exists()
+    if active.is_file() and active.stat().st_size <= 65536:
+        intent = json.loads(active.read_text(encoding="utf-8"))
+        candidate = str(intent.get("candidate") or "")
+        token = str(intent.get("fence_token") or "")
+        out["active_maintenance"] = {
+            **{k: intent.get(k) for k in ("schema", "complete", "abandoned_unfenced",
+                                          "candidate", "target_generation", "current_identity")},
+            "fence_token_prefix": token[:16],
+            "retirement_receipt_present": bool(token) and (
+                work / "transport-maintenance-receipts" / f"r-{token}.json").exists(),
+            "candidate_derivative_present": bool(candidate) and (
+                work / "transport-bundles" / f"g-{candidate[:16]}").exists(),
+        }
+        pin = work / "transport-download-pins" / f"{candidate}.json"
+        if H64.fullmatch(candidate) and pin.is_file() and pin.stat().st_size <= 65536:
+            state = json.loads(pin.read_text(encoding="utf-8"))
+            fence = state.get("fence")
+            out["candidate_pin"] = {
+                "fence_present": fence is not None,
+                "fence_token_prefix": str((fence or {}).get("token") or "")[:16],
+                "session_count": len(state.get("sessions") or {}),
+                "session_expiries": sorted((state.get("sessions") or {}).values())[-3:],
+                "now_unix": time.time(),
+            }
     target = None
     admission = work / "bundle-admission-state.json"
     if admission.is_file() and admission.stat().st_size <= 65536:
