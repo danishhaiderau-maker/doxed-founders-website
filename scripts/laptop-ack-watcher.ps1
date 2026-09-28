@@ -18,6 +18,8 @@ param(
   [int]$SyncTimeoutMin = 240,
   [int]$StaleInProgressMin = 15,
   [int]$MaxIterations = 0,
+  [int]$InventoryRefreshMinIntervalSec = 600,
+  [int]$RevalidatingPollSec = 15,
   [switch]$SkipAnalyzerRefresh
 )
 
@@ -76,6 +78,46 @@ function Get-ManifestPage($Token, [string]$Cursor = '', [int]$PageSize = 250) {
   if ($Cursor) { $uri += "?page_size=$PageSize&cursor=$([uri]::EscapeDataString($Cursor))" }
   return Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 180 -UseBasicParsing
 }
+
+# A retained generation answers by id as CURRENT/ack-eligible even after the
+# live inventory TTL marks it STALE. 410 means Fly no longer retains it.
+function Get-GenerationManifest($Token, [string]$GenerationId) {
+  $headers = @{ 'X-Bot-Admin-Token' = $Token; Accept = 'application/json' }
+  $uri = "$($cfg.SourceUrl)/api/data-sync/manifest?paged=1&generation_id=$GenerationId&page_size=250"
+  try {
+    return Invoke-RestMethod -Uri $uri -Headers $headers -TimeoutSec 180 -UseBasicParsing
+  } catch {
+    $response = $_.Exception.Response
+    if ($response -and [int]$response.StatusCode -eq 410) { return $null }
+    throw
+  }
+}
+
+# A partially downloaded, unacknowledged generation stays in custody so a
+# killed or timed-out child resumes it instead of waiting for a new CURRENT.
+function Get-CustodyGeneration($AckedSet) {
+  $heartbeat = Read-JsonFile $cfg.HeartbeatFile
+  if ($null -eq $heartbeat -or $heartbeat.inProgress -eq $true -or $heartbeat.ackFinalized -eq $true) { return $null }
+  $generation = [string]$heartbeat.inventoryGenerationId
+  if ($generation -notmatch '^[0-9a-f]{64}$' -or $AckedSet.Contains($generation)) { return $null }
+  return $generation
+}
+
+# Plain manifest GETs are read-only on Fly; once the CURRENT cache ages out
+# nothing rebuilds it unless a client asks (single-flight on Fly).
+function Request-InventoryRefresh($Token) {
+  $headers = @{ 'X-Bot-Admin-Token' = $Token; Accept = 'application/json' }
+  $body = @{ nonce = [guid]::NewGuid().ToString('N') } | ConvertTo-Json -Compress
+  return Invoke-RestMethod -Method Post -Uri "$($cfg.SourceUrl)/api/data-sync/manifest/refresh" `
+    -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 60 -UseBasicParsing
+}
+
+function Test-InventoryRefreshNeeded($Manifest, [string]$InventoryStatus) {
+  if ($InventoryStatus -notin @('STALE', 'EMPTY')) { return $false }
+  if ([string]$Manifest.inventory_build_status -eq 'BUILDING') { return $false }
+  return ([datetime]::UtcNow - $script:lastInventoryRefreshRequest).TotalSeconds -ge $InventoryRefreshMinIntervalSec
+}
+$script:lastInventoryRefreshRequest = [datetime]::MinValue
 
 # Bytes the local mirror still lacks; the soft cap bounds transfer, not the
 # inventory size.
@@ -225,6 +267,23 @@ try {
           $status.lastAckGeneration = $acked.Last.generation
           $status.lastAckAt = $acked.Last.writtenAt
         }
+        $liveManifest = $manifest
+        $liveStatus = $inventoryStatus
+        $custodyGeneration = if ($inventoryStatus -eq 'CURRENT' -and $ackEligible -and $authoritative) { $null } else { Get-CustodyGeneration $acked.Set }
+        if ($custodyGeneration) {
+          $retained = Get-GenerationManifest -Token $token -GenerationId $custodyGeneration
+          if ($null -eq $retained) {
+            Write-ChainLog -Config $cfg -Name $logName -Message ("CUSTODY_EXPIRED gen={0}" -f $custodyGeneration.Substring(0, 16))
+          } elseif ([string]$retained.inventory_generation_id -eq $custodyGeneration) {
+            Write-ChainLog -Config $cfg -Name $logName -Message ("CUSTODY_RESUME gen={0} live={1}" -f $custodyGeneration.Substring(0, 16), $liveStatus)
+            $manifest = $retained
+            $generation = $custodyGeneration
+            $inventoryStatus = [string]$manifest.inventory_status
+            $ackEligible = $manifest.inventory_ack_eligible -eq $true
+            $authoritative = $manifest.inventory_authoritative -eq $true
+            $manifestRevision = [string]$manifest.source_git_rev
+          }
+        }
         $status.inventory = [ordered]@{
           generation = $generation; status = $inventoryStatus; ackEligible = $ackEligible
           authoritative = $authoritative; sourceGitRev = $manifestRevision
@@ -239,6 +298,15 @@ try {
         } elseif ($inventoryStatus -ne 'CURRENT' -or -not $ackEligible -or -not $authoritative -or $generation -notmatch '^[0-9a-f]{64}$') {
           $status.state = 'WAIT_INVENTORY_NOT_ACK_ELIGIBLE'
           $status.detail = "status=$inventoryStatus ackEligible=$ackEligible authoritative=$authoritative"
+          if ($liveStatus -in @('STALE_REVALIDATING', 'BUILDING')) {
+            $sleepSec = [Math]::Min($PollSec, $RevalidatingPollSec)
+          } elseif (Test-InventoryRefreshNeeded -Manifest $liveManifest -InventoryStatus $liveStatus) {
+            $script:lastInventoryRefreshRequest = [datetime]::UtcNow
+            $refresh = Request-InventoryRefresh $token
+            $status.detail += " refresh=$($refresh.status)"
+            Write-ChainLog -Config $cfg -Name $logName -Message ("INVENTORY_REFRESH_REQUESTED live={0} result={1}" -f $liveStatus, $refresh.status)
+            $sleepSec = [Math]::Min($PollSec, $RevalidatingPollSec)
+          }
         } elseif (-not (Test-RevisionPrefixMatch $manifestRevision ([string]$expected.source_git_rev))) {
           $status.state = 'WAIT_REVISION_DRIFT'
           $status.detail = "manifest=$manifestRevision health=$($expected.source_git_rev)"
