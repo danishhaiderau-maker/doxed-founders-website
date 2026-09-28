@@ -106,6 +106,101 @@ def _completed_mirror_identity(data_root: Path, revision: object) -> tuple[str, 
     return hashlib.sha256(canonical).hexdigest(), epoch
 
 
+def _sync_receipt_is_stale(
+    payload: dict,
+    *,
+    mirror: Path,
+    now: datetime | None,
+    max_age_seconds: int | None,
+    previous: MirrorCoherenceToken | None,
+    held_lease: object | None,
+) -> bool:
+    """True when the receipt is outside the sync-age SLA."""
+
+    age_limit = int(
+        max_age_seconds
+        if max_age_seconds is not None
+        else os.getenv("ANALYZER_MIRROR_SYNC_MAX_AGE_SEC", "600")
+    )
+    observed_now = now or datetime.now(timezone.utc)
+    age = (
+        observed_now.astimezone(timezone.utc) - _parse_utc(payload.get("syncedAt"))
+    ).total_seconds()
+    same_held_generation = bool(
+        previous is not None
+        and held_lease is not None
+        and getattr(held_lease, "held", False)
+        and Path(getattr(held_lease, "path", "")).resolve()
+        == (mirror / ".fly-mirror-generation.lease").resolve()
+    )
+    return age < -60 or (age > age_limit and not same_held_generation)
+
+
+def _process_creation_utc(pid: int) -> datetime | None:
+    """Creation time of a running process, or None when it is not running."""
+
+    if pid <= 0:
+        return None
+    unknown = datetime.min.replace(tzinfo=timezone.utc)
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            # ERROR_ACCESS_DENIED means the pid exists under another account.
+            return unknown if ctypes.get_last_error() == 5 else None
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:
+                return None  # 259 == STILL_ACTIVE
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            if not kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user),
+            ):
+                return unknown
+            ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            return datetime.fromtimestamp(ticks / 1e7 - 11644473600, tz=timezone.utc)
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    return unknown
+
+
+def _in_progress_owner_is_dead(payload: dict) -> bool:
+    """True when an in-progress receipt names an owner that no longer runs.
+
+    A reused pid is detected by comparing the recorded owner start time. A
+    receipt without owner identity cannot prove a dead owner; its staleness
+    is then decided by receipt age alone.
+    """
+
+    try:
+        pid = int(payload.get("ownerPid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    created = _process_creation_utc(pid)
+    if created is None:
+        return True
+    recorded = payload.get("ownerStartedAt")
+    if not recorded or created == datetime.min.replace(tzinfo=timezone.utc):
+        return False
+    try:
+        return abs((created - _parse_utc(recorded)).total_seconds()) > 5
+    except MirrorCoherenceError:
+        return False
+
+
 def assert_mirror_coherent(
     *,
     repo_root: str | os.PathLike[str],
@@ -136,7 +231,22 @@ def assert_mirror_coherent(
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_INVALID") from exc
     if not isinstance(payload, dict):
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_INVALID")
+    # Age before the in-progress gate. A crashed sync can leave inProgress
+    # true; once the receipt is expired that flag must not hide a failed or
+    # stale mirror forever.
+    receipt_stale = _sync_receipt_is_stale(
+        payload,
+        mirror=mirror,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        previous=previous,
+        held_lease=held_lease,
+    )
     if payload.get("inProgress") is True:
+        # A dead owner or an expired receipt can never complete this sync; the
+        # distinct code lets the next sync owner take the receipt over.
+        if receipt_stale or _in_progress_owner_is_dead(payload):
+            raise MirrorCoherenceError("MIRROR_SYNC_STALE_IN_PROGRESS")
         raise MirrorCoherenceError("MIRROR_SYNC_IN_PROGRESS")
     if payload.get("ok") is not True:
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_FAILED")
@@ -163,24 +273,10 @@ def assert_mirror_coherent(
     if not str(deployed_revision or "").strip():
         deployed_revision = values[2]
 
-    age_limit = int(
-        max_age_seconds
-        if max_age_seconds is not None
-        else os.getenv("ANALYZER_MIRROR_SYNC_MAX_AGE_SEC", "600")
-    )
-    observed_now = now or datetime.now(timezone.utc)
-    age = (observed_now.astimezone(timezone.utc) - _parse_utc(payload.get("syncedAt"))).total_seconds()
-    same_held_generation = bool(
-        previous is not None
-        and held_lease is not None
-        and getattr(held_lease, "held", False)
-        and Path(getattr(held_lease, "path", "")).resolve()
-        == (mirror / ".fly-mirror-generation.lease").resolve()
-    )
     # Freshness is mandatory when an iteration starts.  At publication a long
     # calculation may legitimately outlive the receipt-age SLA, but only the
     # still-held cross-process lease plus the same token can waive age alone.
-    if age < -60 or (age > age_limit and not same_held_generation):
+    if receipt_stale:
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_STALE")
 
     # Heartbeat timestamps and relay-health observations can refresh while the
