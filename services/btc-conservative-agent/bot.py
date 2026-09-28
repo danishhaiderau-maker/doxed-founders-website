@@ -3224,8 +3224,12 @@ def _pathway_receipt_identity() -> dict:
 
 
 def _publish_pathway_receipt(name: str, payload: dict) -> bool:
-    """Atomically publish one receipt into the canonical Fly data directory."""
-    root = _data_sync_volume_root()
+    """Atomically publish one receipt under BOT_DATA_DIR/runtime only.
+
+    A volume-root copy shares the inventory basename with the same file under
+    runtime and raises CheckpointError "conflicting inventory row".
+    """
+    root = _data_sync_runtime_root()
     root.mkdir(parents=True, exist_ok=True)
     target = root / Path(name).name
     return _atomic_file_replace(
@@ -40080,15 +40084,16 @@ _DATA_SYNC_OPTIONAL_FILES = ({
     ),
     "canonical_replacement": "paper_lifecycle_v1.json",
 },)
-_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES = frozenset({
-    "tile_independence_report.json",
-    "ai_scan_independence_report.json",
-    "ai_scan_role_validation.json",
-    "exit_reports_validation.json",
-    "lane_memory_validation.json",
-    "lane_memory_violation.json",
-    "runtime_pathway_integrity.json",
-})
+# Validation and independence receipts are published only under runtime
+# (BOT_DATA_DIR/runtime). Advertising the same basename from the volume root
+# made /app/data/<name> and /app/data/runtime/<name> one inventory path and
+# raised CheckpointError "conflicting inventory row". Keep this empty so the
+# inventory worker does not open volume-root copies of:
+# tile_independence_report.json, ai_scan_independence_report.json,
+# ai_scan_role_validation.json, exit_reports_validation.json,
+# lane_memory_validation.json, lane_memory_violation.json,
+# runtime_pathway_integrity.json.
+_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES = frozenset()
 _DATA_SYNC_EXCLUDED_NAMES = frozenset({
     "manifest.json", "genome_cluster_library.json",
     # Server-owned, atomically published inventory acceleration. It describes
@@ -40775,10 +40780,7 @@ def _data_sync_is_linked_directory(path: Path) -> bool:
 
 def _data_sync_relpath(path: Path) -> str:
     runtime = _data_sync_runtime_root()
-    volume = _data_sync_volume_root()
     resolved = path.resolve()
-    if resolved.parent == volume and resolved.name in _DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES:
-        return resolved.name
     try:
         return resolved.relative_to(runtime).as_posix()
     except ValueError:
@@ -40861,10 +40863,7 @@ def _data_sync_resolve_relpath(raw_rel: str) -> Path:
         raise ValueError("invalid relative path")
     runtime = _data_sync_runtime_root()
     parts = rel.split("/")
-    if len(parts) == 1 and parts[0] in _DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES:
-        candidate = _data_sync_volume_root() / parts[0]
-    else:
-        candidate = runtime.joinpath(*parts)
+    candidate = runtime.joinpath(*parts)
     if not _data_sync_path_allowed(candidate):
         raise ValueError("path is not an allowed runtime data file")
     return candidate.resolve()
@@ -41647,13 +41646,8 @@ def _data_sync_inventory(*, include_sqlite_snapshots: bool = False) -> list:
         except (OSError, ValueError):
             return
 
-    # Runtime executes from BOT_DATA_DIR/runtime on Fly, while current pathway
-    # receipts are atomically published at BOT_DATA_DIR itself. Advertise only
-    # the explicit receipt allowlist from that parent boundary.
-    volume = _data_sync_volume_root()
-    for name in sorted(_DATA_SYNC_TOP_LEVEL_RECEIPT_NAMES):
-        append_path(volume / name)
-
+    # Pathway receipts are published under runtime only. Do not also advertise
+    # a volume-root copy: that basename collides with runtime/<name>.
     for root in _data_sync_allowed_roots():
         for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
             _dirnames[:] = [
