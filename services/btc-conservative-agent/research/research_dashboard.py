@@ -95,11 +95,15 @@ try:
         is_ai_focused_lane,
     )
     ALL_PATHWAY_LANES = ANALYZER_COMPARE_LANES
-except ImportError:
+    REGISTRY_IMPORT_ERROR = None
+except ImportError as _registry_exc:
+    # Without the canonical registry no roster, sync id or signature is known.
+    # Every status surface reports REGISTRY_UNAVAILABLE and ready=false.
+    REGISTRY_IMPORT_ERROR = f"{type(_registry_exc).__name__}: {_registry_exc}"
     BENCHMARK_LANE = "CONTINUOUS"
     COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-    EXPECTED_BOT_VERSION = "unknown"
-    EXPECTED_ANALYZER_SYNC_ID = "unknown"
+    EXPECTED_BOT_VERSION = "REGISTRY_UNAVAILABLE"
+    EXPECTED_ANALYZER_SYNC_ID = "REGISTRY_UNAVAILABLE"
     RESEARCH_DASHBOARD_VERSION = "v9.83-quality-roster-4-tiles-2026-06-21"
     ALL_PATHWAY_LANES = tuple(sorted(CURRENT_RESEARCH_LANES))
     DASHBOARD_PATHWAY_LANES = ALL_PATHWAY_LANES
@@ -107,7 +111,7 @@ except ImportError:
     ACTIVE_TILE_REGISTRY = {}
 
     def active_tile_registry_signature() -> str:
-        return "unknown"
+        return "REGISTRY_UNAVAILABLE"
 
     def is_ai_focused_lane(lane: str) -> bool:
         u = str(lane or "").upper().strip()
@@ -3195,6 +3199,69 @@ def api_runtime_incidents():
     ))
 
 
+UPSTREAM_IDENTITY_FILE = ".fly-upstream-identity.json"
+SYNC_HEARTBEAT_FILE = ".fly-data-sync-loop.heartbeat.json"
+
+
+def _read_data_root_json(name: str) -> dict:
+    try:
+        payload = json.loads((Path(DATA_ROOT) / name).read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _upstream_sync_identity() -> dict:
+    """The sync id and tile-registry signature Fly reported for the mirror.
+
+    The sync heartbeat binds the mirrored generation; the watcher's /health
+    snapshot supplies whatever the heartbeat does not carry.
+    """
+
+    heartbeat = _read_data_root_json(SYNC_HEARTBEAT_FILE)
+    health = _read_data_root_json(UPSTREAM_IDENTITY_FILE)
+    sync_id = heartbeat.get("analyzerSyncId") or heartbeat.get("botVersion")
+    sync_source = "sync_heartbeat" if sync_id else None
+    if not sync_id and health.get("analyzer_sync_id"):
+        sync_id, sync_source = health.get("analyzer_sync_id"), "fly_health_snapshot"
+    registry = heartbeat.get("tileRegistrySignature")
+    registry_source = "sync_heartbeat" if registry else None
+    if not registry and health.get("tile_registry_signature"):
+        registry, registry_source = health.get("tile_registry_signature"), "fly_health_snapshot"
+    return {
+        "sync_id": str(sync_id) if sync_id else None,
+        "sync_id_source": sync_source,
+        "tile_registry_signature": str(registry) if registry else None,
+        "tile_registry_signature_source": registry_source,
+        "fly_health_observed_at": health.get("observed_at"),
+    }
+
+
+def _analyzer_upstream_match(report_sync_ok: bool | None) -> tuple[bool | None, list[str]]:
+    """Match only when the analyzer, its report and Fly agree on identity."""
+
+    blockers: list[str] = []
+    if REGISTRY_IMPORT_ERROR:
+        blockers.append("REGISTRY_UNAVAILABLE")
+    upstream = _upstream_sync_identity()
+    local_registry = active_tile_registry_signature()
+    if not upstream["sync_id"]:
+        blockers.append("UPSTREAM_SYNC_ID_UNAVAILABLE")
+    elif upstream["sync_id"] != EXPECTED_ANALYZER_SYNC_ID:
+        blockers.append("UPSTREAM_SYNC_ID_MISMATCH")
+    if not upstream["tile_registry_signature"]:
+        blockers.append("UPSTREAM_TILE_REGISTRY_UNAVAILABLE")
+    elif upstream["tile_registry_signature"] != local_registry:
+        blockers.append("UPSTREAM_TILE_REGISTRY_MISMATCH")
+    if report_sync_ok is False:
+        blockers.append("REPORT_SYNC_ID_MISMATCH")
+    if any(b.endswith("MISMATCH") for b in blockers):
+        return False, blockers
+    if blockers or report_sync_ok is None:
+        return None, blockers or ["REPORT_SYNC_ID_UNAVAILABLE"]
+    return True, []
+
+
 @app.route("/api/status")
 def api_status():
     manifest = _read_json(REPORT_MANIFEST_FILE)
@@ -3207,6 +3274,8 @@ def api_status():
     if not run_state.get("last_completed_at") and previous_report_at:
         run_state["last_completed_at"] = previous_report_at
     runtime_sync_ok = RESEARCH_DASHBOARD_VERSION == EXPECTED_ANALYZER_SYNC_ID
+    upstream_identity = _upstream_sync_identity()
+    analyzer_sync_match, analyzer_sync_blockers = _analyzer_upstream_match(report_sync_ok)
     report_pending = bool(
         report_sync_ok is not True
         and run_state.get("in_progress")
@@ -3261,10 +3330,14 @@ def api_status():
         and report_generated_dt
         and dashboard_started_dt > report_generated_dt
     )
+    upstream_ok = analyzer_sync_match is True or (
+        report_pending and not any(b.endswith("MISMATCH") or b == "REGISTRY_UNAVAILABLE" for b in analyzer_sync_blockers)
+    )
     return jsonify({
         "ok": bool(
             runtime_sync_ok
             and (report_sync_ok is True or report_pending)
+            and upstream_ok
             and freshness["current"]
             and required_reports_ok
         ),
@@ -3272,9 +3345,19 @@ def api_status():
         "ready": bool(
             runtime_sync_ok
             and report_sync_ok is True
+            and analyzer_sync_match is True
             and freshness["current"]
             and required_reports_ok
         ),
+        "registry_available": REGISTRY_IMPORT_ERROR is None,
+        "registry_error": REGISTRY_IMPORT_ERROR,
+        "analyzer_tile_registry_signature": active_tile_registry_signature(),
+        "upstream_sync_id": upstream_identity["sync_id"],
+        "upstream_sync_id_source": upstream_identity["sync_id_source"],
+        "upstream_tile_registry_signature": upstream_identity["tile_registry_signature"],
+        "upstream_tile_registry_signature_source": upstream_identity["tile_registry_signature_source"],
+        "upstream_fly_health_observed_at": upstream_identity["fly_health_observed_at"],
+        "analyzer_sync_blockers": analyzer_sync_blockers,
         "read_only": True,
         "dashboard_version": RESEARCH_DASHBOARD_VERSION,
         "runtime_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
@@ -3282,7 +3365,7 @@ def api_status():
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "expected_analyzer_sync_id": EXPECTED_ANALYZER_SYNC_ID,
         "benchmark_lane": BENCHMARK_LANE,
-        "analyzer_sync_match": report_sync_ok,
+        "analyzer_sync_match": analyzer_sync_match,
         "report_sync_match": report_sync_ok,
         "report_sync_pending": report_pending,
         "required_reports_ok": required_reports_ok,
@@ -6745,6 +6828,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .receipt-details summary { cursor: pointer; font-weight: 600; }
   .receipt-details pre { margin: 8px 0 0; max-height: 220px; overflow: auto; color: inherit; background: rgba(0,0,0,.18); }
 </style></head><body>
+{% if registry_error %}<div id="registry-unavailable-banner" class="stale-banner" style="display:block"><strong>REGISTRY UNAVAILABLE</strong> — the canonical tile registry could not be imported, so no roster, sync id or signature can be verified. Every figure on this page is unverified. ({{ registry_error }})</div>{% endif %}
 <div id="integrity-banner" class="stale-banner" style="display:none;background:#3d2a1f;border-color:#d29922;color:#f8e3a1;"></div>
 <div id="stale-banner" class="stale-banner" style="display:none;"></div>
 <header>
@@ -7141,6 +7225,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </main>
 <script>
 const NAV_GROUPS = {{ nav_groups_json|safe }};
+const PANEL_LOADING_TIMEOUT_MS = 45000;
+const nativeFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  if (init.signal) return nativeFetch(input, init);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PANEL_LOADING_TIMEOUT_MS - 5000);
+  return nativeFetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+};
+const loadingSeenAt = new WeakMap();
+function sweepStuckLoadingPanels(now = Date.now()) {
+  document.body.querySelectorAll('*').forEach(el => {
+    if (el.children.length || !/^Loading\b/.test((el.textContent || '').trim())) {
+      loadingSeenAt.delete(el);
+      return;
+    }
+    const since = loadingSeenAt.get(el);
+    if (since === undefined) { loadingSeenAt.set(el, now); return; }
+    if (now - since < PANEL_LOADING_TIMEOUT_MS) return;
+    loadingSeenAt.delete(el);
+    el.textContent = `UNAVAILABLE — no response within ${PANEL_LOADING_TIMEOUT_MS / 1000}s (endpoint failed or timed out)`;
+    el.classList.add('panel-unavailable');
+  });
+}
+setInterval(sweepStuckLoadingPanels, 5000);
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, ch => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -7468,8 +7576,8 @@ async function loadSummary() {
     ['Fresh executed', p.trades ?? 'UNAVAILABLE'],
     ['Historical dedup', hist.unique_trades ?? histPerf.trades ?? 'not imported'],
     ['Storage cleanup', retention.status === 'COMPLETED'
-      ? ((retention.rotated_raw_deleted ?? 0) + ' rotations · '
-        + (retention.raw_db_rows_deleted ?? 0) + ' raw rows · '
+      ? ((retention.rotated_raw_deleted ?? 'NO DATA') + ' rotations · '
+        + (retention.raw_db_rows_deleted ?? 'NO DATA') + ' raw rows · '
         + (Number(retention.deleted_bytes || 0) / 1048576).toFixed(1) + ' MB')
       : 'Pending first run'],
     ['Raw mirror cap', retention.raw_mirror_cap_status
@@ -7483,7 +7591,7 @@ async function loadSummary() {
       : (Number(storage.local_size_mb).toFixed(1) + ' MiB / '
         + (storage.local_limit_mb == null ? 'cap unavailable' : Number(storage.local_limit_mb / 1024).toFixed(2) + ' GiB cap') + ' · '
         + (storage.local_limit_pct == null ? 'usage unavailable' : Number(storage.local_limit_pct).toFixed(2) + '%') + ' · '
-        + (storage.local_file_count ?? 0) + ' files')],
+        + (storage.local_file_count ?? 'NO DATA') + ' files')],
     ['Fly transferable runtime payload', storage.fly_size_mb == null
       ? 'No Fly size report'
       : (Number(storage.fly_size_mb).toFixed(1) + ' MiB · excludes other volume usage')],
@@ -7512,14 +7620,14 @@ async function loadSummary() {
     const unavailable = lifecycleBundles.status !== 'AVAILABLE_CURRENT_GENERATION';
     const parity = lifecycleBundles.parity || {};
     const rows = [
-      ['manifest-verified qualification bundles', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.qualification_count ?? 0)],
-      ['transfer-ready audit copies', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.transfer_audit_count ?? 0)],
+      ['manifest-verified qualification bundles', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.qualification_count ?? 'NO DATA')],
+      ['transfer-ready audit copies', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.transfer_audit_count ?? 'NO DATA')],
       ['Bundle parity', unavailable ? 'UNAVAILABLE' : (
-        (parity.intersection_count ?? 0) + ' matched · '
-        + (parity.qualification_only_count ?? 0) + ' qualification only · '
-        + (parity.transfer_only_count ?? 0) + ' transfer only'
+        (parity.intersection_count ?? 'NO DATA') + ' matched · '
+        + (parity.qualification_only_count ?? 'NO DATA') + ' qualification only · '
+        + (parity.transfer_only_count ?? 'NO DATA') + ' transfer only'
       )],
-      ['Invalid bundle manifests', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.invalid_count ?? 0)],
+      ['Invalid bundle manifests', unavailable ? 'UNAVAILABLE' : (lifecycleBundles.invalid_count ?? 'NO DATA')],
     ];
     bundleKpis.innerHTML = rows.map(([label, value]) =>
       `<div class="kpi"><div class="lbl">${label}</div><div class="val">${value}</div></div>`
@@ -7674,8 +7782,8 @@ async function loadLanes() {
     ['Assisted', (t.chase_assisted_fills||0) + '/' + (t.total_fills||0)],
     ['Saved', t.saved_fills_heuristic||0],
     ['TTL expired', t.ttl_expired||0],
-    ['Executed terminal', (d.coverage||{}).executed_terminal_outcomes ?? 0],
-    ['Shadow terminal', (d.coverage||{}).shadow_terminal_outcomes ?? 0],
+    ['Executed terminal', (d.coverage||{}).executed_terminal_outcomes ?? 'NO DATA'],
+    ['Shadow terminal', (d.coverage||{}).shadow_terminal_outcomes ?? 'NO DATA'],
   ];
   document.getElementById('chase-kpis').innerHTML = ck.map(([l,v], i) => [l, sources[i < 3 ? 'totals' : 'shadow'] === false ? 'UNAVAILABLE' : v]).map(([l,v]) =>
     `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
@@ -7738,20 +7846,20 @@ async function loadCombos() {
   document.getElementById('policy-grid-kpis').innerHTML = [
     ['Profitable conservative rows', Number(policyStats.profitable_conservative_rows_displayed ?? policyRows.length).toLocaleString()],
     ['Positive ideal-touch hypotheses', Number(policyStats.positive_ideal_touch_hypotheses_displayed ?? diagnosticRows.length).toLocaleString()],
-    ['Policy-grid families materialized', Number(selection.families_evaluated ?? 0).toLocaleString()],
-    ['Conservative shortlist families', Number(selection.families_represented ?? 0).toLocaleString()],
+    ['Policy-grid families materialized', ((selection.families_evaluated) == null ? 'NO DATA' : Number(selection.families_evaluated).toLocaleString())],
+    ['Conservative shortlist families', ((selection.families_represented) == null ? 'NO DATA' : Number(selection.families_represented).toLocaleString())],
     ['Diagnostic families represented', new Set(diagnosticRows.map(row => row.policy_family || 'UNKNOWN')).size.toLocaleString()],
-    ['Maximum rows per family', Number(selection.per_family_cap ?? 0).toLocaleString()],
-    ['Configured family-balanced capacity', (Number(selection.families_evaluated ?? 0) * Number(selection.per_family_cap ?? 0)).toLocaleString()],
-    ['Policy specs enumerated', Number(policyStats.policy_specs_enumerated ?? pg.rows_available ?? 0).toLocaleString()],
+    ['Maximum rows per family', ((selection.per_family_cap) == null ? 'NO DATA' : Number(selection.per_family_cap).toLocaleString())],
+    ['Configured family-balanced capacity', (selection.families_evaluated == null || selection.per_family_cap == null) ? 'NO DATA' : (Number(selection.families_evaluated) * Number(selection.per_family_cap)).toLocaleString()],
+    ['Policy specs enumerated', ((policyStats.policy_specs_enumerated ?? pg.rows_available) == null ? 'NO DATA' : Number(policyStats.policy_specs_enumerated ?? pg.rows_available).toLocaleString())],
     ['Policies with terminal OOS fills', Number(policyStats.terminal_oos_policies_tested || 0).toLocaleString()],
     ['Profitable terminal OOS policies', Number(policyStats.profitable_terminal_oos_policies || 0).toLocaleString()],
-    ['Entry configurations', Number(searchCounts.entry_cartesian ?? searchCounts.entry_policy_cartesian ?? 0).toLocaleString()],
-    ['Theoretical search space', Number(searchCounts.nominal_full_cartesian ?? searchCounts.naive_full_cartesian ?? 0).toLocaleString()],
-    ['Independent opportunities (shared episodes)', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 0],
-    ['Policy episode split (train / OOS)', `${policySplit.training_episodes ?? 0} / ${policySplit.oos_episodes ?? 0}`],
+    ['Entry configurations', ((searchCounts.entry_cartesian ?? searchCounts.entry_policy_cartesian) == null ? 'NO DATA' : Number(searchCounts.entry_cartesian ?? searchCounts.entry_policy_cartesian).toLocaleString())],
+    ['Theoretical search space', ((searchCounts.nominal_full_cartesian ?? searchCounts.naive_full_cartesian) == null ? 'NO DATA' : Number(searchCounts.nominal_full_cartesian ?? searchCounts.naive_full_cartesian).toLocaleString())],
+    ['Independent opportunities (shared episodes)', pe.independent_opportunities ?? pe.independent_episodes ?? searchCounts.independent_episodes ?? 'NO DATA'],
+    ['Policy episode split (train / OOS)', `${policySplit.training_episodes ?? 'NO DATA'} / ${policySplit.oos_episodes ?? 'NO DATA'}`],
     ['Cross-family comparison', comparison.status || 'INSUFFICIENT_SHARED_COHORT'],
-    ['Same-cohort policies', Number(comparison.eligible_policy_count ?? 0).toLocaleString()],
+    ['Same-cohort policies', ((comparison.eligible_policy_count) == null ? 'NO DATA' : Number(comparison.eligible_policy_count).toLocaleString())],
     ['Qualification', pg.live_policy_change_allowed ? 'QUALIFIED' : 'DESCRIPTIVE ONLY'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('policy-grid-body').innerHTML = policyRows.map(p => {
@@ -7759,8 +7867,8 @@ async function loadCombos() {
     const fillRate = p.conservative_fill_rate == null ? 'UNAVAILABLE' : `${(Number(p.conservative_fill_rate) * 100).toFixed(2)}%`;
     const executionWinsLosses = p.oos_wins == null ? 'UNAVAILABLE' : `${p.oos_wins} / ${p.oos_losses}`;
     return `<tr><td>${p.rank}</td><td><strong>${p.policy_family||'UNKNOWN'}</strong></td><td>${p.family_rank||'—'}</td><td><strong>${p.policy_id||'—'}</strong><br><small>global rank ${p.global_rank||'—'} · ${params}</small></td>`
-      + `<td>${p.oos_episodes||0}</td><td>${p.supported_conservative_episodes ?? 0}</td>`
-      + `<td>${p.full_fills ?? 0}</td><td>${p.partial_fills ?? 0}</td><td>${p.no_fills ?? 0}</td><td>${p.unsupported_episodes ?? 0}</td>`
+      + `<td>${p.oos_episodes||0}</td><td>${p.supported_conservative_episodes ?? 'NO DATA'}</td>`
+      + `<td>${p.full_fills ?? 'NO DATA'}</td><td>${p.partial_fills ?? 'NO DATA'}</td><td>${p.no_fills ?? 'NO DATA'}</td><td>${p.unsupported_episodes ?? 'NO DATA'}</td>`
       + `<td>${fillRate}</td><td>${executionWinsLosses}</td>`
       + `<td>${fmtExecutionUsd(p.oos_net_pnl_usd)}</td><td>${fmtExecutionUsd(p.oos_expectancy_usd)}</td><td>${fmtExecutionUsd(p.oos_max_drawdown_usd)}</td>`
       + `<td class="bad">${p.execution_metric_status||p.metric_evidence||p.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`;
@@ -7801,7 +7909,7 @@ async function loadSpreadPerf() {
   const totalTrades = (d.buckets||[]).reduce((s,b)=>s+(b.trades||0),0);
   document.getElementById('spread-perf-kpis').innerHTML = [
     ['Buckets', (d.buckets||[]).length],
-    ['Combos aggregated', d.total_combos ?? 0],
+    ['Combos aggregated', d.total_combos ?? 'NO DATA'],
     ['Total trades', totalTrades],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   document.getElementById('spread-perf-body').innerHTML = (d.buckets||[]).map(b => {
@@ -7859,10 +7967,10 @@ async function loadChaseThreshold() {
   if (note) note.textContent = [d.warning, d.question, d.evidence_contract].filter(Boolean).join(' · ') || 'Executed and shadow chase evidence.';
   const coverage = d.coverage || {};
   document.getElementById('chase-threshold-kpis').innerHTML = [
-    ['Executed terminal outcomes', coverage.executed_terminal_outcomes ?? 0],
-    ['Shadow terminal outcomes', coverage.shadow_terminal_outcomes ?? 0],
-    ['Generic shadows', coverage.generic_shadow_counterfactuals ?? 0],
-    ['Tile LAB shadows', coverage.tile_lab_shadow_outcomes ?? 0],
+    ['Executed terminal outcomes', coverage.executed_terminal_outcomes ?? 'NO DATA'],
+    ['Shadow terminal outcomes', coverage.shadow_terminal_outcomes ?? 'NO DATA'],
+    ['Generic shadows', coverage.generic_shadow_counterfactuals ?? 'NO DATA'],
+    ['Tile LAB shadows', coverage.tile_lab_shadow_outcomes ?? 'NO DATA'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
   const completeThresholdBuckets = rows => {
     const byBucket = new Map((rows || []).map(row => [String(row.threshold), row]));
@@ -7941,7 +8049,7 @@ async function loadChasePolicyLab() {
     const coverage = row.coverage || {};
     return `<tr><td><strong>${row.classification}</strong></td><td>${row.episode_id||'—'}<br><small>${row.policy_id||'—'}</small></td><td>${row.direction||'—'}</td>`
       + `<td>${missedProofTouchLabel(row)} / net ${row.net_terminal_return_pct == null ? 'UNAVAILABLE' : row.net_terminal_return_pct+'%'} / USD ${row.net_pnl_usd == null ? 'UNAVAILABLE' : fmtExecutionUsd(row.net_pnl_usd)}</td>`
-      + `<td>${fmtPct(row.mfe_pct)} / ${fmtPct(row.mae_pct)}</td><td>${coverage.status||'INSUFFICIENT'} (stages ${coverage.stage_ratio ?? 0}; tape ${coverage.tape_status||'UNAVAILABLE'}; missing seconds ${coverage.missing_seconds ?? 'UNAVAILABLE'})</td>`
+      + `<td>${fmtPct(row.mfe_pct)} / ${fmtPct(row.mae_pct)}</td><td>${coverage.status||'INSUFFICIENT'} (stages ${coverage.stage_ratio ?? 'NO DATA'}; tape ${coverage.tape_status||'UNAVAILABLE'}; missing seconds ${coverage.missing_seconds ?? 'UNAVAILABLE'})</td>`
       + `<td>${row.regime||'UNAVAILABLE'} / ${row.adx ?? 'UNAVAILABLE'}</td><td>${(row.contraindications||[]).join('; ')||'none recorded'}</td></tr>`;
   }).join('') || `<tr><td colspan="8">${proof.empty_reason || 'No proof rows exist.'}</td></tr>`;
 }
@@ -7962,7 +8070,7 @@ async function loadChaseDelay() {
     const lane = row.lane || '';
     const cls = lane === (d.benchmark_lane || '') ? 'amber' : (lane === (d.direct_reference_lane || '') ? 'green' : '');
     const label = row.label ? `${lane} · ${row.label}` : lane;
-    return `<tr class="${cls}"><td>${label}</td><td>${row.approves ?? 0}</td><td>${row.fills ?? 0}</td><td>${fmtPct(row.fill_pct)}</td><td>${fmtPct(row.wr_pct)}</td><td>${fmtExecutionUsd(row.pnl_usd)}</td><td>${fmtExecutionUsd(row.ev_per_approve)}</td><td>${fmtExecutionUsd(row.ev_usd)}</td><td>${row.avg_signal_age_sec ?? 'n/a'}</td></tr>`;
+    return `<tr class="${cls}"><td>${label}</td><td>${row.approves ?? 'NO DATA'}</td><td>${row.fills ?? 'NO DATA'}</td><td>${fmtPct(row.fill_pct)}</td><td>${fmtPct(row.wr_pct)}</td><td>${fmtExecutionUsd(row.pnl_usd)}</td><td>${fmtExecutionUsd(row.ev_per_approve)}</td><td>${fmtExecutionUsd(row.ev_usd)}</td><td>${row.avg_signal_age_sec ?? 'n/a'}</td></tr>`;
   }).join('') || '<tr><td colspan="9">No delay report data.</td></tr>';
 }
 
@@ -7973,7 +8081,7 @@ async function loadExitCombos() {
   if (!executionPanelSource('exit-combos', d)) return;
   const money = value => value == null ? 'n/a' : fmtExecutionUsd(value);
   document.getElementById('exit-combos-kpis').innerHTML = [
-    ['Total combos', d.total_combos ?? 0],
+    ['Total combos', d.total_combos ?? 'NO DATA'],
     ['Left on table', money(d.overall_left_on_table_usd)],
     ['Benchmark', d.benchmark_lane || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
@@ -8195,7 +8303,7 @@ async function loadHorizon() {
     const reason = d.coverage_reason ? ` ${d.coverage_reason}` : '';
     note.textContent = d.conclusions_allowed
       ? (d.note || 'Coverage sufficient for recovery conclusions.')
-      : `⚠ Coverage ${d.max_horizon_coverage_pct ?? 0}% — recovery rates hidden until ≥${d.min_coverage_pct_for_conclusions ?? 80}%. ${d.note || ''}${reason}`;
+      : `⚠ Coverage ${d.max_horizon_coverage_pct ?? 'NO DATA'}% — recovery rates hidden until ≥${d.min_coverage_pct_for_conclusions ?? 80}%. ${d.note || ''}${reason}`;
     note.style.color = d.conclusions_allowed ? '' : 'var(--amber)';
   }
   const row = h => {
@@ -8433,11 +8541,11 @@ async function loadGenome() {
     document.getElementById('genome-kpis').innerHTML = [
       ['Collector generation', 'V3.1'],
       ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
-      ['Independent opportunities', c.independent_opportunities ?? 0],
-      ['Decision branches', c.decision_branches ?? 0],
-      ['Terminal lifecycles', c.terminal_lifecycles ?? 0],
-      ['Market segments', c.market_segments ?? 0],
-      ['Policies evaluated', cs.unique_policies_evaluated ?? s.unique_policies_evaluated ?? 0],
+      ['Independent opportunities', c.independent_opportunities ?? 'NO DATA'],
+      ['Decision branches', c.decision_branches ?? 'NO DATA'],
+      ['Terminal lifecycles', c.terminal_lifecycles ?? 'NO DATA'],
+      ['Market segments', c.market_segments ?? 'NO DATA'],
+      ['Policies evaluated', cs.unique_policies_evaluated ?? s.unique_policies_evaluated ?? 'NO DATA'],
       ['Qualification', d.qualification || 'NO SAFE QUALIFIED POLICY'],
     ].map(([l,v]) => {
       const visibleValue = l === 'Qualification' ? String(v).replaceAll('_', ' ') : v;
@@ -8450,19 +8558,19 @@ async function loadGenome() {
     // Full evidence remains available through the declared report route.
     const resolution = c.entry_resolution_integrity || {};
     const compactCollection = {
-      independent_opportunities: c.independent_opportunities ?? 0,
-      decision_branches: c.decision_branches ?? 0,
-      terminal_lifecycles: c.terminal_lifecycles ?? 0,
-      market_segments: c.market_segments ?? 0,
+      independent_opportunities: c.independent_opportunities ?? 'NO DATA',
+      decision_branches: c.decision_branches ?? 'NO DATA',
+      terminal_lifecycles: c.terminal_lifecycles ?? 'NO DATA',
+      market_segments: c.market_segments ?? 'NO DATA',
       decision_dispositions: c.decision_dispositions || {},
       decision_outcomes: c.decision_outcomes || {},
       effective_paper_execution_identity_count: Array.isArray(c.effective_paper_execution_identities)
         ? c.effective_paper_execution_identities.length : 0,
       entry_resolution_integrity: {
-        expected: resolution.expected ?? 0,
-        awaiting_within_deadline: resolution.awaiting_within_deadline ?? 0,
+        expected: resolution.expected ?? 'NO DATA',
+        awaiting_within_deadline: resolution.awaiting_within_deadline ?? 'NO DATA',
         orphan_expected_order_count: Array.isArray(resolution.orphan_expected_orders)
-          ? resolution.orphan_expected_orders.length : (resolution.orphan_expected_order_count ?? 0),
+          ? resolution.orphan_expected_orders.length : (resolution.orphan_expected_order_count ?? 'NO DATA'),
         status: resolution.status || 'UNKNOWN',
       },
     };
@@ -8501,7 +8609,7 @@ async function loadGenome() {
     }, null, 2);
     document.getElementById('genome-replay').textContent = JSON.stringify({integrity:d.integrity, safe_policy_ranking:d.safe_policy_ranking}, null, 2);
     document.getElementById('genome-discoveries').innerHTML = rows.length ? rows.slice(0, 20).map(row =>
-      `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 0} · OOS=${row.oos_episodes ?? 0} · diagnostic net ${fmtExecutionUsd(row.diagnostic_replay_net_pnl_usd)} · diagnostic max DD ${fmtExecutionUsd(row.diagnostic_replay_max_drawdown_usd)} · ${row.metric_evidence || 'IDEAL_TOUCH_DIAGNOSTIC_ONLY'} · ${row.qualification_eligibility || 'NOT QUALIFICATION ELIGIBLE'} · blockers=${(row.descriptive_blockers || []).join(', ') || 'none reported'}</div></div>`
+      `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px"><div class="lbl"><strong>${row.policy_id || 'policy'}</strong> · ${row.policy_family || ''}</div><div class="note">episodes=${row.episodes_total ?? 'NO DATA'} · OOS=${row.oos_episodes ?? 'NO DATA'} · diagnostic net ${fmtExecutionUsd(row.diagnostic_replay_net_pnl_usd)} · diagnostic max DD ${fmtExecutionUsd(row.diagnostic_replay_max_drawdown_usd)} · ${row.metric_evidence || 'IDEAL_TOUCH_DIAGNOSTIC_ONLY'} · ${row.qualification_eligibility || 'NOT QUALIFICATION ELIGIBLE'} · blockers=${(row.descriptive_blockers || []).join(', ') || 'none reported'}</div></div>`
     ).join('') : '<p class="note">No matured V3.1 policy rows yet. See the blockers above.</p>';
     return;
   }
@@ -8511,11 +8619,11 @@ async function loadGenome() {
     ['Genome schema (not release)', d.architecture_frozen || d.schema_version || 'n/a'],
     ['Generated', d.generated_at ? new Date(d.generated_at).toLocaleString('en-AU', {timeZone:'Australia/Melbourne'}) : 'n/a'],
     ['DNA Quality', dq.dna_quality ?? 'n/a'],
-    ['Sample', dq.sample_size ?? 0],
+    ['Sample', dq.sample_size ?? 'NO DATA'],
     ['EV/trade', fmtExecutionUsd(dq.ev)],
     ['Confidence', dq.research_confidence || 'LOW'],
-    ['Genomes (persistent)', tax.persistent_genomes ?? (d.genome_memory || {}).persistent_genomes ?? 0],
-    ['Validated clusters', tax.validated_clusters ?? 0],
+    ['Genomes (persistent)', tax.persistent_genomes ?? (d.genome_memory || {}).persistent_genomes ?? 'NO DATA'],
+    ['Validated clusters', tax.validated_clusters ?? 'NO DATA'],
     ['Discoveries', (d.discoveries || []).length],
     ['Validation', (d.validation || {}).verdict || 'n/a'],
   ].map(([l,v]) => `<div class="kpi"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join('');
@@ -8524,9 +8632,9 @@ async function loadGenome() {
     taxNote.innerHTML = `<strong>Running release</strong> = {{ dashboard_version }}. `
       + `<strong>Genome schema</strong> = ${d.architecture_frozen || d.schema_version || 'n/a'} `
       + `(independent frozen research-data contract, not the bot release). `
-      + `<strong>Genome</strong> = persistent fingerprint (${tax.persistent_genomes ?? 0} collecting). `
-      + `<strong>Cluster</strong> = validated identity (${tax.validated_clusters ?? 0} validated, `
-      + `${tax.candidate_genomes ?? 0} candidates). `
+      + `<strong>Genome</strong> = persistent fingerprint (${tax.persistent_genomes ?? 'NO DATA'} collecting). `
+      + `<strong>Cluster</strong> = validated identity (${tax.validated_clusters ?? 'NO DATA'} validated, `
+      + `${tax.candidate_genomes ?? 'NO DATA'} candidates). `
       + `UNKNOWN at high similarity is correct when validated_clusters=0.`;
   }
   const rec = d.recommendation || {};
@@ -8555,7 +8663,7 @@ async function loadGenome() {
     return `<div class="kpi" style="margin-bottom:12px;text-align:left;padding:10px">`
       + `<div class="lbl"><strong>${disc.identity || disc.discovery_id || ''}</strong> · ${disc.status || ''} · ${disc.research_confidence || ''}</div>`
       + `<div class="note">${fp.session || ''} · ADX ${fp.adx_bucket || ''} · spread ${fp.spread_bucket || ''} · ${fp.direction || ''}</div>`
-      + `<div class="note">n=${se.sample_size ?? disc.observed_trades ?? 0} · EV ${fmtExecutionUsd(se.expected_value_usd ?? m.ev_usd)} · CI [${fmtExecutionUsd(ci.low)}–${fmtExecutionUsd(ci.high)}] · DNA ${fmtPct(se.dna_quality ?? m.dna_quality)}</div>`
+      + `<div class="note">n=${se.sample_size ?? disc.observed_trades ?? 'NO DATA'} · EV ${fmtExecutionUsd(se.expected_value_usd ?? m.ev_usd)} · CI [${fmtExecutionUsd(ci.low)}–${fmtExecutionUsd(ci.high)}] · DNA ${fmtPct(se.dna_quality ?? m.dna_quality)}</div>`
       + `<div class="note">p=${se.p_value_ev_gt_zero ?? 'n/a'} · sig=${se.statistically_significant ? 'yes' : 'no'} · trend ${stab.trend || 'n/a'} · stable=${stab.stable ? 'yes' : 'no'}</div>`
       + (ledger ? `<div class="note">Ledger: ${ledger}</div>` : '')
       + (explDisc.why ? `<div class="note">${explDisc.why}</div>` : '')
@@ -8832,6 +8940,7 @@ def index():
         dashboard_version=RESEARCH_DASHBOARD_VERSION,
         tile_lanes=tuple(DASHBOARD_PRIMARY_LANES),
         tile_lane_names=", ".join(DASHBOARD_PRIMARY_LANES),
+        registry_error=REGISTRY_IMPORT_ERROR,
     )
     resp = make_response(html)
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
