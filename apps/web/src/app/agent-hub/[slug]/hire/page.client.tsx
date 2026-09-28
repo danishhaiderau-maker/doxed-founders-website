@@ -162,7 +162,7 @@ export default function AgentHireClient({ slug }: { slug: string }) {
         <p className="mt-2 text-sm text-zinc-400">
           {refreshMode
             ? 'Replace credentials and run a read-only account audit. This does not renew, charge, transfer funds, resume, or arm the relay.'
-            : 'Link your Bitfinex Derivatives API — the platform mirrors admin showcase signals on your account with $20 virtual lots, Scenario C exits, and full order transparency. No AI key required.'}
+            : 'Link your Bitfinex Derivatives API — the platform mirrors admin showcase signals on your account with $0.25 max margin per virtual lot, Scenario C exits, and full order transparency. No AI key required.'}
         </p>
 
         <div className="mt-4 rounded-xl border border-sky-500/25 bg-sky-950/15 px-4 py-3 text-sm text-sky-100/90">
