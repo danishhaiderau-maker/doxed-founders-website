@@ -150,6 +150,16 @@ def test_receipt_bootstrap_pending_is_retryable_but_remains_bounded():
     assert "$preflightInventoryWaitMaxSec = 1800" in source
 
 
+def test_sync_failure_receipt_is_terminal_not_in_progress():
+    source = _source()
+    start = source.index("ok = $false\n          inProgress = $false\n          phase = \"failed\"")
+    block = source[start:source.index("inventoryDiagnostic = $lastInventoryDiagnostic", start)]
+    assert "ok = $false" in block
+    assert "inProgress = $false" in block
+    assert 'phase = "failed"' in block
+    assert "syncedAt = $failureAt" in block
+
+
 def test_transient_poll_failure_retains_only_a_qualified_completed_match():
     source = _source()
 
