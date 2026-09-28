@@ -1374,6 +1374,12 @@ jobs:
                   if reconciled.get("ok") is not True:
                       raise SystemExit(f"maintenance paper reconciliation was not confirmed for {trade_id}")
                   generation = reconciled.get("money_state_generation")
+                  if reconciled.get("already_cancelled") is True and generation is None:
+                      # Stale exposure named a position that already closed.  No
+                      # mutation happened, so nothing advances; the next round must
+                      # still observe fresh flat authority at the required generation.
+                      print(f"Maintenance position already absent trade_id={trade_id}", flush=True)
+                      continue
                   if exposure.get("_legacy_exact_revision_bootstrap") is True:
                       if isinstance(generation, int) and not isinstance(generation, bool):
                           raise SystemExit("relay generation appeared without a legacy mutation baseline")
