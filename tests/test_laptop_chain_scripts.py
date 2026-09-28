@@ -90,6 +90,23 @@ def test_watcher_resumes_custody_generation_and_requests_stale_refresh():
     assert "$RevalidatingPollSec" in wait
 
 
+def test_watcher_opts_into_bundles_only_when_fly_publishes_an_index():
+    watcher = _source("laptop-ack-watcher.ps1")
+    probe = _watcher_function("Test-BundleTransportOffered")
+    assert "/api/data-sync/bundles?generation_id=$GenerationId" in probe
+    assert "if ($DisableTransportBundles) { return $false }" in probe
+    assert "fly_runtime_transport_bundle_index_v1" in probe
+    assert "[string]$index.generation_id -eq $GenerationId" in probe
+    # Unreachable or unpublished index keeps the serial path.
+    assert "} catch {\n    return $false\n  }" in probe
+    loop = watcher[watcher.index("$iteration = 0"):]
+    probe_call = loop.index("Test-BundleTransportOffered -Token $token -GenerationId $generation")
+    assert probe_call < loop.index("Invoke-GenerationSync -Manifest $manifest -FullRevision $fullRevision -TransportBundles $bundles")
+    sync = _watcher_function("Invoke-GenerationSync")
+    assert "`$env:FLY_SYNC_TRANSPORT_BUNDLES = '$bundleFlag'" in sync
+    assert sync.index("FLY_SYNC_TRANSPORT_BUNDLES") < sync.index("& '$SyncScript'")
+
+
 def _watcher_function(name: str) -> str:
     source = _source("laptop-ack-watcher.ps1")
     match = re.search(r"^function " + re.escape(name) + r"\b.*?^}\r?\n", source, re.S | re.M)

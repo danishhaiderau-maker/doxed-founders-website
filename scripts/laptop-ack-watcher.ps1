@@ -20,7 +20,8 @@ param(
   [int]$MaxIterations = 0,
   [int]$InventoryRefreshMinIntervalSec = 600,
   [int]$RevalidatingPollSec = 15,
-  [switch]$SkipAnalyzerRefresh
+  [switch]$SkipAnalyzerRefresh,
+  [switch]$DisableTransportBundles
 )
 
 $ErrorActionPreference = 'Stop'
@@ -162,9 +163,29 @@ function Test-GenerationAckProven([string]$GenerationId) {
   )
 }
 
-function Invoke-GenerationSync($Manifest, [string]$FullRevision) {
+# Verified TAR packages cut one request per small file to one per package.
+# The client treats a missing index as a failure (never a silent serial
+# fallback), so opt in only when Fly already publishes one for this generation.
+function Test-BundleTransportOffered($Token, [string]$GenerationId) {
+  if ($DisableTransportBundles) { return $false }
+  $headers = @{ 'X-Bot-Admin-Token' = $Token; Accept = 'application/json' }
+  try {
+    $index = Invoke-RestMethod -Uri "$($cfg.SourceUrl)/api/data-sync/bundles?generation_id=$GenerationId" `
+      -Headers $headers -TimeoutSec 120 -UseBasicParsing
+  } catch {
+    return $false
+  }
+  return (
+    [string]$index.schema -eq 'fly_runtime_transport_bundle_index_v1' -and
+    [string]$index.generation_id -eq $GenerationId -and
+    [string]$index.status -in @('BUILDING', 'COMPLETE')
+  )
+}
+
+function Invoke-GenerationSync($Manifest, [string]$FullRevision, [bool]$TransportBundles = $false) {
   $generation = [string]$Manifest.inventory_generation_id
   $stamp = [datetime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+  $bundleFlag = if ($TransportBundles) { '1' } else { '0' }
   $pinned = Join-Path $cfg.RunDir "pinned-manifest-$($generation.Substring(0, 16))-$stamp.json"
   ($Manifest | ConvertTo-Json -Depth 60) | Set-Content -LiteralPath $pinned -Encoding UTF8
   $wrapper = Join-Path $cfg.RunDir "sync-child-$stamp.ps1"
@@ -179,6 +200,7 @@ try {
     `$env:BOT_ADMIN_TOKEN = `$Matches[1].Trim().Trim('"').Trim("'")
   }
   `$manifest = Get-Content -LiteralPath '$pinned' -Raw | ConvertFrom-Json
+  `$env:FLY_SYNC_TRANSPORT_BUNDLES = '$bundleFlag'
   & '$SyncScript' -SourceUrl '$($cfg.SourceUrl)' -AdminToken `$env:BOT_ADMIN_TOKEN -InitialManifest `$manifest ``
     -MirroredSourceRevision '$FullRevision' -ProgressHeartbeatFile '$($cfg.HeartbeatFile)' -MaxLocalMirrorGiB 30 | Out-Null
   exit 0
@@ -195,7 +217,7 @@ try {
     return [pscustomobject]@{ Ok = $false; Deferred = $true; Code = $null; Detail = 'ANALYZER_OWNS_GENERATION_LEASE' }
   }
   try {
-    Write-ChainLog -Config $cfg -Name $logName -Message ("SYNC_START gen={0} rev={1} files={2} bytes={3}" -f $generation.Substring(0, 16), $FullRevision.Substring(0, 12), $Manifest.file_count, $Manifest.total_bytes)
+    Write-ChainLog -Config $cfg -Name $logName -Message ("SYNC_START gen={0} rev={1} files={2} bytes={3} bundles={4}" -f $generation.Substring(0, 16), $FullRevision.Substring(0, 12), $Manifest.file_count, $Manifest.total_bytes, $bundleFlag)
     $script:child = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
       -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper) `
       -WorkingDirectory $cfg.CanonicalRoot -WindowStyle Hidden -PassThru `
@@ -325,7 +347,8 @@ try {
               $status.state = 'SYNCING'
               $status.detail = $generation
               Save-WatcherStatus
-              $result = Invoke-GenerationSync -Manifest $manifest -FullRevision $fullRevision
+              $bundles = Test-BundleTransportOffered -Token $token -GenerationId $generation
+              $result = Invoke-GenerationSync -Manifest $manifest -FullRevision $fullRevision -TransportBundles $bundles
               $status.lastSyncResult = [ordered]@{ at = Get-UtcNowIso; generation = $generation; ok = $result.Ok; deferred = $result.Deferred; exitCode = $result.Code; detail = $result.Detail }
               if ($result.Deferred) {
                 $status.state = 'DEFER_ANALYZER_LEASE'
