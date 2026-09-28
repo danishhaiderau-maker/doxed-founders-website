@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+import re
+from typing import Any, Callable, Mapping, Sequence
 
 
 class MonitorContractError(ValueError):
@@ -50,6 +51,45 @@ def require_strategy_progress(payload: Mapping[str, Any]) -> Mapping[str, Any]:
             f"pending={progress.get('pending_orders')}"
         )
     return progress
+
+
+DEPLOY_JOB_NAME = "test-and-deploy"
+
+
+def resolve_deployed_revision(
+    runs: Sequence[Mapping[str, Any]],
+    jobs_for_run: Callable[[Any], Sequence[Mapping[str, Any]]],
+) -> tuple[str, str]:
+    """Return (latest successfully deployed SHA, in-flight deploy SHA or "").
+
+    ``runs`` are fly-bot-deploy workflow runs, newest first. Only runs whose
+    deploy job succeeded shipped an image; inspect/restart/flatten dispatches
+    can succeed without deploying anything.
+    """
+    in_flight = ""
+    for run in runs:
+        sha = str(run.get("head_sha") or "")
+        jobs = [j for j in jobs_for_run(run.get("id")) if j.get("name") == DEPLOY_JOB_NAME]
+        if not jobs:
+            continue
+        job = jobs[0]
+        if run.get("status") != "completed":
+            if not in_flight and job.get("conclusion") != "skipped":
+                in_flight = sha
+            continue
+        if run.get("conclusion") == "success" and job.get("conclusion") == "success":
+            if not re.fullmatch(r"[0-9a-f]{40}", sha):
+                raise MonitorContractError(f"Deploy run {run.get('id')} has an invalid head SHA")
+            return sha, in_flight
+    raise MonitorContractError("No successful Fly deploy run found")
+
+
+def require_deployed_revision(actual: str, *, deployed: str, in_flight: str = "") -> None:
+    if actual == deployed or (in_flight and actual == in_flight):
+        return
+    raise MonitorContractError(
+        f"Fly revision drift: latest successful deploy {deployed[:12]}, Fly reports {actual[:12]}"
+    )
 
 
 def require_tile_registry(

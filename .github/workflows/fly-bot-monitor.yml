@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   revision-drift:
@@ -17,36 +18,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # Scheduled workflow definition lives on master, but Fly production
-          # source_git_rev is the canonical tip below. Check out that SHA so
-          # revision-drift stays on the deployed history instead of later
-          # master commits that have not shipped.
-          ref: aac5940abcbdacaf71a79d9534cd69adedd924ea
-          # Resolve the newest commit that could have triggered a Fly deploy.
-          # The deploy workflow also runs when its own safety contract or the
-          # canonical flat-boundary checker changes, so service-only history
-          # would report a false revision drift after those releases.
+          ref: master
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Resolve expected Fly bot revision
+      - name: Resolve latest successfully deployed Fly revision
         id: expected
-        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
-          revision="$(git log -1 --format=%H -- \
-            services/btc-conservative-agent \
-            scripts/check-relay-flat.mjs \
-            .github/workflows/fly-bot-deploy.yml \
-            ':(exclude,glob)services/btc-conservative-agent/test*.py')"
-          if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "Unable to resolve latest btc-conservative-agent revision" >&2
-            exit 1
-          fi
-          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.request
+
+          sys.path.insert(0, "scripts")
+          from fly_monitor_contract import resolve_deployed_revision
+
+          api = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}"
+          headers = {
+              "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+          }
+
+          def get(path):
+              request = urllib.request.Request(api + path, headers=headers)
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  return json.load(response)
+
+          runs = get("/actions/workflows/fly-bot-deploy.yml/runs?branch=master&per_page=30")["workflow_runs"]
+          deployed, in_flight = resolve_deployed_revision(
+              runs, lambda run_id: get(f"/actions/runs/{run_id}/jobs?per_page=100")["jobs"]
+          )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"revision={deployed}\nin_flight={in_flight}\n")
+          print(f"latest successful deploy: {deployed}; in-flight deploy: {in_flight or 'none'}")
+          PY
       - name: Verify Fly is alive, safe, and running current bot source
         env:
           EXPECTED_REVISION: ${{ steps.expected.outputs.revision }}
+          IN_FLIGHT_REVISION: ${{ steps.expected.outputs.in_flight }}
         run: |
           python - <<'PY'
           import json
@@ -60,7 +73,12 @@ jobs:
           sys.path.insert(0, "services/btc-conservative-agent")
           import combo_pathway_config as registry
           sys.path.insert(0, "scripts")
-          from fly_monitor_contract import require_health, require_ready, require_tile_registry
+          from fly_monitor_contract import (
+              require_deployed_revision,
+              require_health,
+              require_ready,
+              require_tile_registry,
+          )
 
           required = os.environ["EXPECTED_REVISION"]
           with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
@@ -78,24 +96,15 @@ jobs:
           actual = resolved.stdout.strip()
           if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", actual):
               raise SystemExit(f"Fly returned an invalid source revision: {actual}")
-          # A path-filtered push deploys the push HEAD, which may be a metadata
-          # descendant of the newest bot-source commit. Exact equality creates
-          # false drift alarms. Prove both ancestry directions instead: the
-          # deployed revision contains the latest required bot source, and it
-          # belongs to the current production-pin history.
-          if subprocess.run(
-              ["git", "merge-base", "--is-ancestor", required, actual],
-              check=False,
-          ).returncode != 0:
-              raise SystemExit(
-                  f"Fly bot source is stale: required ancestor {required[:12]}, got {actual[:12]}"
-              )
+          require_deployed_revision(
+              actual, deployed=required, in_flight=os.environ.get("IN_FLIGHT_REVISION", "")
+          )
           if subprocess.run(
               ["git", "merge-base", "--is-ancestor", actual, "HEAD"],
               check=False,
           ).returncode != 0:
               raise SystemExit(
-                  f"Fly revision is not on production pin history: {actual[:12]}"
+                  f"Fly revision is not on master history: {actual[:12]}"
               )
           with urllib.request.urlopen(
               "https://doxed-btc-bot.fly.dev/ready", timeout=12
@@ -110,7 +119,7 @@ jobs:
           )
           print(
               f"Fly process healthy, disarmed, and current: {actual} "
-              f"(contains bot source {required[:12]})"
+              f"(latest successful deploy {required[:12]})"
           )
           print(f"Strict readiness sample: {json.dumps(ready, sort_keys=True)}")
           PY
