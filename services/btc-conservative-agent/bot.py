@@ -43155,6 +43155,40 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             "PYTHONNOUSERSITE": "1",
             "PYTHONHASHSEED": "0",
         })
+        stagnant_building_slices = 0
+        fresh_inventory_build_forced = False
+
+        def _abandon_dead_inventory_checkpoint(payload) -> bool:
+            """Quarantine one derived inventory checkpoint, never research evidence."""
+            abandoned = False
+            root = work_root.resolve()
+            for key in ("checkpoint_path", "spool_path"):
+                raw = str((payload or {}).get(key) or "")
+                if not raw:
+                    continue
+                raw_path = Path(raw)
+                if raw_path.is_symlink() or not raw_path.is_file():
+                    continue
+                try:
+                    info = raw_path.stat()
+                    if int(getattr(info, "st_nlink", 1) or 1) != 1:
+                        continue
+                    candidate = raw_path.resolve(strict=True)
+                    candidate.relative_to(root)
+                except (OSError, ValueError):
+                    continue
+                if not re.fullmatch(
+                    r"inventory-worker-v2-[0-9a-f]{32}\.(?:checkpoint\.json|progress\.json|sqlite3)",
+                    candidate.name,
+                ):
+                    continue
+                os.replace(
+                    candidate,
+                    candidate.with_name(f"{candidate.name}.dead-{uuid.uuid4().hex}"),
+                )
+                abandoned = True
+            return abandoned
+
         while True:
             with _data_sync_inventory_cache_condition:
                 _data_sync_async_inventory["worker_active"] = True
@@ -43234,6 +43268,25 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
                         "worker_active": False,
                     })
                     _data_sync_inventory_cache_condition.notify_all()
+                if advanced:
+                    stagnant_building_slices = 0
+                else:
+                    stagnant_building_slices += 1
+                # A dead package that never advances must not stay
+                # STALE_REVALIDATING. Drop only its derived checkpoint and
+                # take the fresh CURRENT build on the next slice.
+                if stagnant_building_slices >= 2 and not fresh_inventory_build_forced:
+                    if not _abandon_dead_inventory_checkpoint(result):
+                        raise RuntimeError(
+                            "dead inventory package revalidation made no progress"
+                        )
+                    fresh_inventory_build_forced = True
+                    stagnant_building_slices = 0
+                    continue
+                if stagnant_building_slices >= 2:
+                    raise RuntimeError(
+                        "fresh inventory build made no progress after dead package"
+                    )
                 time.sleep(retry_after)
                 continue
             if completed.returncode != 0 or result.get("status") != "COMPLETE":
