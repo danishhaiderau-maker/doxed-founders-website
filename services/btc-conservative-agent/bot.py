@@ -31297,6 +31297,7 @@ def _strategy_progress_hard_restart(progress: dict, incident: dict) -> bool:
 
 def watchdog_loop():
     last_progress_dump_ts = 0.0
+    pending_restart_block_alerted = False
     while not shutdown_event.is_set():
         with state_lock:
             hb_ts = state.get("last_heartbeat") or last_heartbeat
@@ -31357,6 +31358,30 @@ def watchdog_loop():
                         "for supervisor recovery"
                     )
                     os._exit(75)
+                pending_blocks_restart = bool(
+                    _force_paper_mode_active()
+                    and not progress["live_armed"]
+                    and progress["open_positions"] == 0
+                    and progress["pending_orders"] != 0
+                    and _strategy_progress_hard_restart(progress, incident)
+                )
+                if pending_blocks_restart and not pending_restart_block_alerted:
+                    # Receipt only. Pending orders stay in place and the process
+                    # does not exit, wipe state, or clear them.
+                    dump_system_state(
+                        trigger="PENDING_ORDERS_BLOCK_RESTART",
+                        progress=progress,
+                        incident=incident,
+                        restart_allowed=False,
+                    )
+                    logger.critical(
+                        "[WATCHDOG] pending orders block restart pending=%s; "
+                        "alert only, orders kept",
+                        progress["pending_orders"],
+                    )
+                    pending_restart_block_alerted = True
+                elif not pending_blocks_restart:
+                    pending_restart_block_alerted = False
                 if flat_paper:
                     logger.error(
                         "[WATCHDOG] paper flat stall fail-soft reasons=%s; "

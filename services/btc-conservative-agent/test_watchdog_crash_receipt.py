@@ -307,8 +307,12 @@ def test_pending_paper_order_blocks_watchdog_exit_and_dump_cadence_is_300_second
     assert exits == []
     assert [item["trigger"] for item in dumps] == [
         "STRATEGY_PROGRESS_INCIDENT",
+        "PENDING_ORDERS_BLOCK_RESTART",
         "STRATEGY_PROGRESS_INCIDENT",
     ]
+    pending_receipt = dumps[1]
+    assert pending_receipt["restart_allowed"] is False
+    assert pending_receipt["progress"]["pending_orders"] == 1
 
 
 def test_flat_paper_process_emits_receipt_then_exits_exactly_75():
