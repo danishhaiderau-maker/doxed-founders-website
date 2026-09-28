@@ -292,7 +292,7 @@ def test_generationless_bootstrap_is_bound_to_one_exact_safe_revision():
         DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
         DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
     ]
-    assert 'legacy_bootstrap_revision = "e5e61229871744a062ae75651d3c442bae910b5d"' in maintenance
+    assert 'legacy_bootstrap_revision = "4ed032bb9be4b45995b9a74b4bc855d28dd4fb08"' in maintenance
     assert "legacy_status_revision = legacy_bootstrap_revision[:12]" in maintenance
     assert 'str(legacy_status.get("source_git_rev") or "") == legacy_status_revision' in maintenance
     assert 'str(legacy_status.get("source_git_rev") or "").startswith' not in maintenance
