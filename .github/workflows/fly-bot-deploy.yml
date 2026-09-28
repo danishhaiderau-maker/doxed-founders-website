@@ -813,6 +813,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Capture current machine status and recent logs without mutation
@@ -836,6 +837,9 @@ jobs:
           machine_json="$(timeout --signal=TERM --kill-after=5s 30s flyctl machines list --app doxed-btc-bot --json)"
           machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
           run_probe MACHINE_STATUS flyctl machine status --app doxed-btc-bot "$machine_id"
+          bundle_probe_b64="$(base64 -w0 scripts/fly_bundle_maintenance_probe.py)"
+          run_probe BUNDLE_MAINTENANCE_INPUTS flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c \"import base64; exec(base64.b64decode('${bundle_probe_b64}'))\""
           run_probe RECENT_PLATFORM_LOGS flyctl logs --app doxed-btc-bot --no-tail
           # Machine Exec uses the Fly Machines guest-agent path rather than
           # the application's Flask worker or SSH service.  Keep this probe
