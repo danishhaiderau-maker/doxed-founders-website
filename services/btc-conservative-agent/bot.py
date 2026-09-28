@@ -38586,6 +38586,7 @@ def status():
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
+        "data_sync_transport_bundles": _data_sync_bundle_public_status(),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
@@ -42590,6 +42591,7 @@ _DATA_SYNC_BUNDLE_REGISTRY_RETRY_AT = 0.0
 _DATA_SYNC_BUNDLE_EXTERNAL_PROTECTED = frozenset()
 _DATA_SYNC_BUNDLE_PROCESS_INCARNATION = uuid.uuid4().hex
 _DATA_SYNC_BUNDLE_ADMISSION_STATUS = {"outcome": "NOT_OBSERVED"}
+_DATA_SYNC_BUNDLE_LAST_RECONCILE = {"outcome": "NOT_OBSERVED"}
 
 
 def _data_sync_bundle_retention_allowed_locked(generation_id: str) -> bool:
@@ -42784,6 +42786,22 @@ def _data_sync_bundle_admission_publish(store, identity, outcome: str, **kwargs)
         return False
 
 
+def _data_sync_bundle_public_status() -> dict:
+    """Read-only producer diagnostics; never starts, hydrates, or mutates anything."""
+    registry = _DATA_SYNC_BUNDLE_REGISTRY
+    coordinator = dict(_DATA_SYNC_BUNDLE_LAST_STATUS or {})
+    return {
+        "enabled": os.getenv("DATA_SYNC_TRANSPORT_BUNDLES_ENABLED", "0") == "1",
+        "registry_ready": bool(registry is not None and registry.ready),
+        "registry_hydrating": bool(_DATA_SYNC_BUNDLE_REGISTRY_HYDRATING),
+        "last_reconcile": dict(_DATA_SYNC_BUNDLE_LAST_RECONCILE or {}),
+        "admission": dict(_DATA_SYNC_BUNDLE_ADMISSION_STATUS or {}),
+        "coordinator": {key: coordinator.get(key) for key in (
+            "status", "error", "generation_id", "updated_at", "packages_built",
+            "members_packaged", "reason")},
+    }
+
+
 def _admit_data_sync_bundle_generation(generation_id: str) -> dict:
     """Attempt one bounded producer owner start; never called from HTTP."""
     global _DATA_SYNC_BUNDLE_ADMISSION_STATUS
@@ -42949,12 +42967,26 @@ def _start_data_sync_bundle_generation(generation_id: str) -> bool:
 
 def _reconcile_data_sync_bundle_generation() -> dict:
     """Ordinary bounded cadence hook; HTTP routes never invoke this function."""
+    global _DATA_SYNC_BUNDLE_LAST_RECONCILE
     with _data_sync_inventory_cache_condition:
         generation_id = str(_data_sync_async_inventory.get("generation_id") or "")
         current = _data_sync_async_inventory.get("status") == "CURRENT"
     if not current or not re.fullmatch(r"[0-9a-f]{64}", generation_id):
-        return {"outcome": "NO_CURRENT_GENERATION", "started": False}
-    return _admit_data_sync_bundle_generation(generation_id)
+        result = {"outcome": "NO_CURRENT_GENERATION", "started": False}
+    else:
+        try:
+            result = _admit_data_sync_bundle_generation(generation_id)
+        except Exception as exc:
+            _DATA_SYNC_BUNDLE_LAST_RECONCILE = {
+                "outcome": "EXCEPTION", "error": type(exc).__name__, "started": False,
+                "generation_id": generation_id, "at": utc_iso(),
+            }
+            raise
+    _DATA_SYNC_BUNDLE_LAST_RECONCILE = {
+        "outcome": str(result.get("outcome") or ""), "started": result.get("started") is True,
+        "generation_id": generation_id or None, "at": utc_iso(),
+    }
+    return result
 
 
 def _data_sync_gc_disk_inventory_generations(
