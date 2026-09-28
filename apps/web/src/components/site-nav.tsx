@@ -358,7 +358,7 @@ function MobileNavDrawer({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[120] lg:hidden">
+    <div className="fixed inset-0 z-[120] min-[1025px]:hidden">
       <button
         type="button"
         aria-label="Close menu"
@@ -512,7 +512,7 @@ function MobileSectionDropdown({
   return (
     <div
       className={cn(
-        'absolute right-0 top-full z-[110] mt-1.5 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/97 shadow-2xl backdrop-blur-md lg:hidden',
+        'absolute right-0 top-full z-[110] mt-1.5 w-[min(24rem,calc(100vw-2rem))] overflow-hidden rounded-xl border bg-zinc-950/97 shadow-2xl backdrop-blur-md min-[1025px]:hidden',
         accent.panel,
       )}
       role="menu"
@@ -653,8 +653,8 @@ function SiteNavInner() {
         <FounderChatLauncher />
         <DownloadAppLauncher />
 
-        {/* Desktop dropdowns — lg+ only; below that the section tabs + drawer avoid horizontal overflow */}
-        <div className="hidden items-center gap-0.5 lg:flex">
+        {/* Desktop dropdowns — above 1024px only; at or below that the section tabs + drawer avoid horizontal overflow */}
+        <div className="hidden items-center gap-0.5 min-[1025px]:flex">
           {HUB_NAV_ROWS.map((row) => (
             <NavDropdown
               key={row.id}
@@ -669,7 +669,7 @@ function SiteNavInner() {
         </div>
 
         {/* Desktop actions */}
-        <div className="hidden items-center gap-2 pl-2 lg:flex">
+        <div className="hidden items-center gap-2 pl-2 min-[1025px]:flex">
           <div className="h-5 w-px bg-zinc-800" aria-hidden />
           <PlatformMessagesBell />
           <NotificationBell />
@@ -698,7 +698,7 @@ function SiteNavInner() {
         <button
           type="button"
           onClick={() => setMobileOpen(true)}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2 text-sm font-medium text-zinc-200 lg:hidden"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/80 px-3 py-2 text-sm font-medium text-zinc-200 min-[1025px]:hidden"
           aria-label="Open menu"
         >
           <Menu className="h-4 w-4" />
@@ -708,7 +708,7 @@ function SiteNavInner() {
 
       {/* Mobile section tabs — each opens its own dropdown, always visible */}
       <div
-        className="flex max-w-full items-center gap-1.5 overflow-x-auto pb-1 lg:hidden"
+        className="flex max-w-full items-center gap-1.5 overflow-x-auto pb-1 min-[1025px]:hidden"
         aria-label="Sections"
       >
         {HUB_NAV_ROWS.map((row) => {

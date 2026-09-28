@@ -5,18 +5,18 @@ import { FOUNDER_IDE_WINDOWS_DOWNLOAD_URL } from '../lib/founder-ide-download';
 
 const read = (name: string) => readFileSync(new URL(name, import.meta.url), 'utf8');
 
-test('site nav wraps instead of overflowing and only shows desktop groups at lg+', () => {
+test('site nav wraps instead of overflowing and only shows desktop groups above 1024px', () => {
   const nav = read('./site-nav.tsx');
 
   assert.match(nav, /ref=\{navRef\} className="relative flex min-w-0 max-w-full flex-auto flex-col/);
   assert.doesNotMatch(nav, /ref=\{navRef\} className="[^"]*\bflex-1\b/);
   assert.match(nav, /<nav className="[^"]*\bflex-wrap\b[^"]*\bjustify-end\b/);
 
-  assert.match(nav, /hidden items-center gap-0\.5 lg:flex/);
-  assert.match(nav, /hidden items-center gap-2 pl-2 lg:flex/);
-  assert.doesNotMatch(nav, /\bmd:flex\b/);
-  assert.match(nav, /fixed inset-0 z-\[120\] lg:hidden/);
-  assert.match(nav, /overflow-x-auto pb-1 lg:hidden/);
+  assert.match(nav, /hidden items-center gap-0\.5 min-\[1025px\]:flex/);
+  assert.match(nav, /hidden items-center gap-2 pl-2 min-\[1025px\]:flex/);
+  assert.doesNotMatch(nav, /\b(md|lg):flex\b/);
+  assert.match(nav, /fixed inset-0 z-\[120\] min-\[1025px\]:hidden/);
+  assert.match(nav, /overflow-x-auto pb-1 min-\[1025px\]:hidden/);
 });
 
 test('section dropdown panels anchor to the trigger right edge and clamp to the viewport', () => {
