@@ -4,6 +4,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import pickle
 import threading
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from relay_event_outbox import RelayEventOutbox
 
 
 def fixture(tmp_path, lane):
-    names = {"_commit_local_paper_lifecycle_transition", "_commit_paper_lifecycle_transition", "_commit_relay_limit_chase", "_apply_family_policy_chase"}
+    names = {"_fast_state_copy", "_commit_local_paper_lifecycle_transition", "_commit_paper_lifecycle_transition", "_commit_relay_limit_chase", "_apply_family_policy_chase"}
     tree = ast.parse(Path(__file__).with_name("bot.py").read_text(encoding="utf-8"))
     functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     order = {"trade_id": COMBO_LANE_SPECS[lane]["id_prefix"] + "-test", "research_lane": lane,
@@ -26,7 +27,7 @@ def fixture(tmp_path, lane):
         return {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
                 "pending_orders": [copy.deepcopy(order)], "positions": [], "reason": reason}
     outbox._atomic_write(outbox.decorate_lifecycle(build("initial")))
-    ns = {"copy": copy, "COMBO_LANE_SPECS": COMBO_LANE_SPECS,
+    ns = {"copy": copy, "pickle": pickle, "COMBO_LANE_SPECS": COMBO_LANE_SPECS,
           "PLATFORM_RELAY_ELIGIBLE_LANES": frozenset({"CONTINUOUS"}),
           "RELAY_CANONICAL_TRANSITION_EVENTS": frozenset({"ORDER_PLACED", "LIMIT_UPDATED", "POSITION_OPENED", "POSITION_REDUCED", "POSITION_CLOSED", "ORDER_CANCELLED", "ORDER_EXPIRED"}),
           "state": {"live_armed": False, "bitfinex_live_enabled": False, "bid": 99, "ask": 101},

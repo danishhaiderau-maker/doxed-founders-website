@@ -21,6 +21,7 @@ import glob
 import itertools
 import re
 import copy
+import pickle
 import functools
 import importlib
 import shutil
@@ -302,6 +303,15 @@ WATCHDOG_HEARTBEAT_STALE_SEC = float(os.getenv("WATCHDOG_HEARTBEAT_STALE_SEC", "
 WATCHDOG_WS_STALE_SEC = float(os.getenv("WATCHDOG_WS_STALE_SEC", "30"))
 WATCHDOG_TRADE_LOCK_TIMEOUT_SEC = float(
     os.getenv("WATCHDOG_TRADE_LOCK_TIMEOUT_SEC", "2")
+)
+# Upper bound on how long a zero-wait /ready probe treats a live, identified
+# trade_lock owner as progressing. Capped so a wedge still fails readiness.
+READY_TRADE_LOCK_BUSY_GRACE_SEC = min(
+    60.0,
+    max(
+        WATCHDOG_TRADE_LOCK_TIMEOUT_SEC,
+        float(os.getenv("READY_TRADE_LOCK_BUSY_GRACE_SEC", "10")),
+    ),
 )
 WATCHDOG_PROGRESS_FAILURES_BEFORE_RECOVERY = max(
     3,
@@ -9527,7 +9537,7 @@ def _commit_local_paper_lifecycle_transition(
                 with paper_lifecycle_file_lock:
                     with trade_lock:
                         before = _build_paper_lifecycle_payload(f"local_paper_transition:{event}")
-                        target = copy.deepcopy(before)
+                        target = _fast_state_copy(before)
                         target_mutator(target)
                         for snapshot in (before, target):
                             if snapshot.get("paper_only") is not True or snapshot.get("live_armed") is not False:
@@ -28023,10 +28033,34 @@ def _emergency_api_guard():
 
     return None
 
+def _fast_state_copy(value):
+    """Deep-copy plain runtime state in one C-level pass.
+
+    ``copy.deepcopy`` walks nested position/order dictionaries in Python and
+    was the dominant ``trade_lock`` hold on the shared-CPU Fly VM. A pickle
+    round-trip produces an equivalent independent structure for builtin data.
+    A concurrent size change still raises ``RuntimeError`` so callers' bounded
+    retry semantics are unchanged; unpicklable values fall back to deepcopy.
+    """
+    try:
+        return pickle.loads(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+    except RecursionError:
+        return copy.deepcopy(value)
+    except (pickle.PicklingError, TypeError, AttributeError):
+        return copy.deepcopy(value)
+
+
+TRADE_LOCK_HOLD_BUDGET_MS = max(
+    50.0,
+    float(os.getenv("TRADE_LOCK_HOLD_BUDGET_MS", "500")),
+)
+_TRACKED_LOCK_SITE_MAX = 128
+
+
 class _TrackedRLock:
     """RLock with bounded owner diagnostics for production stall evidence."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, hold_budget_ms: float = TRADE_LOCK_HOLD_BUDGET_MS):
         self._lock = threading.RLock()
         self._name = name
         self._meta_lock = threading.Lock()
@@ -28041,6 +28075,74 @@ class _TrackedRLock:
         self._owner_at_last_timeout = None
         self._owner_ident_at_last_timeout = None
         self._owner_transition_since = 0.0
+        self._acquired_mono = 0.0
+        self._acquire_site = None
+        self._hold_budget_ms = float(hold_budget_ms)
+        self._hold_count = 0
+        self._hold_over_budget = 0
+        self._hold_max_ms = 0.0
+        self._hold_max_site = None
+        self._hold_sites = {}
+
+    @staticmethod
+    def _caller_site():
+        frame = sys._getframe(2)
+        while frame is not None and frame.f_code in _TRACKED_LOCK_INTERNAL_CODES:
+            frame = frame.f_back
+        if frame is None:
+            return "unknown"
+        return f"{frame.f_code.co_name}:{frame.f_lineno}"
+
+    def _record_hold_locked(self, site, held_ms):
+        self._hold_count += 1
+        over = held_ms > self._hold_budget_ms
+        if over:
+            self._hold_over_budget += 1
+        if held_ms > self._hold_max_ms:
+            self._hold_max_ms = held_ms
+            self._hold_max_site = site
+        key = site or "unknown"
+        stats = self._hold_sites.get(key)
+        if stats is None:
+            if len(self._hold_sites) >= _TRACKED_LOCK_SITE_MAX:
+                key = "OTHER"
+                stats = self._hold_sites.get(key)
+            if stats is None:
+                stats = {"count": 0, "total_ms": 0.0, "max_ms": 0.0,
+                         "over_budget": 0, "last_over_budget_at": None}
+                self._hold_sites[key] = stats
+        stats["count"] += 1
+        stats["total_ms"] += held_ms
+        if held_ms > stats["max_ms"]:
+            stats["max_ms"] = held_ms
+        if over:
+            stats["over_budget"] += 1
+            stats["last_over_budget_at"] = time.time()
+
+    def hold_stats(self, top: int = 8) -> dict:
+        with self._meta_lock:
+            sites = [
+                {
+                    "site": site,
+                    "count": row["count"],
+                    "max_ms": round(row["max_ms"], 1),
+                    "mean_ms": round(row["total_ms"] / row["count"], 2) if row["count"] else 0.0,
+                    "over_budget": row["over_budget"],
+                    "last_over_budget_at": row["last_over_budget_at"],
+                }
+                for site, row in self._hold_sites.items()
+            ]
+            summary = {
+                "name": self._name,
+                "budget_ms": self._hold_budget_ms,
+                "holds": self._hold_count,
+                "over_budget": self._hold_over_budget,
+                "max_ms": round(self._hold_max_ms, 1),
+                "max_site": self._hold_max_site,
+            }
+        sites.sort(key=lambda row: (row["over_budget"], row["max_ms"]), reverse=True)
+        summary["top_sites"] = sites[:max(0, int(top))]
+        return summary
 
     def acquire(self, blocking=True, timeout=-1):
         acquired = self._lock.acquire(blocking, timeout)
@@ -28053,6 +28155,8 @@ class _TrackedRLock:
                     self._owner_ident = ident
                     self._owner_name = threading.current_thread().name
                     self._acquired_at = time.time()
+                    self._acquired_mono = time.monotonic()
+                    self._acquire_site = self._caller_site()
                     self._depth = 1
                     self._acquire_sequence += 1
                 self._owner_transition_since = 0.0
@@ -28084,9 +28188,13 @@ class _TrackedRLock:
             # though another thread still could not acquire the lock.
             self._lock.release()
             if self._depth == 0:
+                held_ms = max(0.0, (time.monotonic() - self._acquired_mono) * 1000.0)
+                self._record_hold_locked(self._acquire_site, held_ms)
                 self._owner_ident = None
                 self._owner_name = None
                 self._acquired_at = 0.0
+                self._acquired_mono = 0.0
+                self._acquire_site = None
 
     def __enter__(self):
         self.acquire()
@@ -28112,6 +28220,7 @@ class _TrackedRLock:
             owner_at_last_timeout = self._owner_at_last_timeout
             owner_ident_at_last_timeout = self._owner_ident_at_last_timeout
             owner_transition_since = self._owner_transition_since
+            acquire_site = self._acquire_site
         held_sec = max(0.0, float(now or time.time()) - acquired_at) if acquired_at else 0.0
         transition_age_sec = (
             max(0.0, float(now or time.time()) - owner_transition_since)
@@ -28145,8 +28254,14 @@ class _TrackedRLock:
                 if transition_age_sec is not None else None
             ),
             "stack_tail": stack_tail,
+            "acquire_site": acquire_site,
         }
 
+
+_TRACKED_LOCK_INTERNAL_CODES = frozenset({
+    _TrackedRLock.acquire.__code__,
+    _TrackedRLock.__enter__.__code__,
+})
 
 state_lock = _TrackedRLock("state_lock")
 trade_lock = _TrackedRLock("trade_lock")
@@ -31082,8 +31197,14 @@ def _trade_lock_probe_status(
     lock_available: bool,
     lock_diagnostics: dict,
     trade_lock_timeout_sec: float | None,
+    busy_grace_sec: float | None = None,
 ) -> tuple[bool, bool]:
     """Classify zero-wait contention without hiding a genuinely stuck lock."""
+    busy_bound = (
+        WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
+        if busy_grace_sec is None
+        else max(float(WATCHDOG_TRADE_LOCK_TIMEOUT_SEC), float(busy_grace_sec))
+    )
     held_seconds = lock_diagnostics.get("held_seconds")
     valid_held_seconds = bool(
         isinstance(held_seconds, (int, float))
@@ -31097,7 +31218,7 @@ def _trade_lock_probe_status(
         and lock_diagnostics.get("owner_ident") is not None
         and lock_diagnostics.get("owner_active") is True
         and valid_held_seconds
-        and float(held_seconds) <= WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
+        and float(held_seconds) <= busy_bound
     )
     # ``RLock.acquire()`` succeeds before Python can publish the new owner
     # metadata.  A zero-wait readiness probe can lose in that tiny handoff and
@@ -31228,10 +31349,18 @@ def _strategy_progress_health_snapshot(
     # the strict bounded acquire used by the watchdog and failing closed once
     # the same ownership exceeds its watchdog allowance.  Without this grace,
     # ordinary cancel/reprice work produced intermittent /ready 503 responses.
+    # Readiness probes (zero-wait) tolerate a live, identified owner for the
+    # longer READY grace; the watchdog's strict bounded acquire is unchanged.
+    lock_busy_grace_sec = (
+        READY_TRADE_LOCK_BUSY_GRACE_SEC
+        if trade_lock_timeout_sec is not None and float(trade_lock_timeout_sec) <= 0.0
+        else WATCHDOG_TRADE_LOCK_TIMEOUT_SEC
+    )
     lock_busy_transient, lock_progressing = _trade_lock_probe_status(
         lock_available,
         lock_diagnostics,
         trade_lock_timeout_sec,
+        busy_grace_sec=lock_busy_grace_sec,
     )
 
     transport_progressing = bool(
@@ -31311,6 +31440,8 @@ def _strategy_progress_health_snapshot(
         "trade_lock_busy_transient": lock_busy_transient,
         "trade_lock_progressing": lock_progressing,
         "trade_lock_diagnostics": lock_diagnostics,
+        "trade_lock_busy_grace_sec": lock_busy_grace_sec,
+        "trade_lock_hold_stats": getattr(trade_lock, "hold_stats", lambda top=5: {})(top=5),
         "ws_progressing": ws_progressing,
         "ws_age_sec": ws_age,
         "ws_heartbeat_age_sec": ws_hb_age,
@@ -35506,11 +35637,11 @@ def _dashboard_signal_ref_lite(sig: dict) -> dict:
     """Copy only fields required by active-signal and relay rendering."""
     if not isinstance(sig, dict):
         return {}
-    return {
-        key: copy.deepcopy(value)
+    return _fast_state_copy({
+        key: value
         for key, value in sig.items()
         if key in _DASHBOARD_ACTIVE_SIGNAL_KEYS
-    }
+    })
 
 
 def _snapshot_bounded_trades_map_locked(
@@ -35950,7 +36081,31 @@ def _position_protection_view(row: dict) -> dict:
     }
 
 
-def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
+_PAPER_BOOK_CLOSED_KEYS = (
+    "trade_id", "dir", "final_direction", "qty", "entry", "leverage", "entry_ts",
+    "exit", "net_pnl_usd", "net", "exit_reason", "research_lane", "research_model",
+)
+
+
+def _paper_book_closed_rows_locked(limit: int) -> list:
+    """Scalar projection of recent closed legs; caller holds ``trade_lock``."""
+    count = max(0, int(limit))
+    if not count:
+        return []
+    return [
+        {key: row.get(key) for key in _PAPER_BOOK_CLOSED_KEYS}
+        for row in trades[-count:]
+        if isinstance(row, dict)
+    ]
+
+
+def build_paper_order_book(
+    closed_limit: int = _DASHBOARD_TRADES_MAX,
+    *,
+    open_snapshot: list | None = None,
+    pending_snapshot: list | None = None,
+    closed_snapshot: list | None = None,
+) -> dict:
     """Per-leg paper order book — the accounting ledger that Bitfinex live cannot
     give us once it merges multiple small orders into one netted position.
 
@@ -35966,10 +36121,16 @@ def build_paper_order_book(closed_limit: int = _DASHBOARD_TRADES_MAX) -> dict:
     legs = []
     now = time.time()
     price = float(state.get("price") or 0)
-    with trade_lock:
-        open_copy = copy.deepcopy(open_positions)
-        pending_copy = copy.deepcopy(pending_orders)
-        closed_recent = list(reversed(trades))[:max(0, int(closed_limit))]
+    limit = max(0, int(closed_limit))
+    if open_snapshot is not None and pending_snapshot is not None and closed_snapshot is not None:
+        open_copy = open_snapshot
+        pending_copy = pending_snapshot
+        closed_recent = list(reversed(closed_snapshot[-limit:])) if limit else []
+    else:
+        with trade_lock:
+            open_copy = _fast_state_copy(open_positions)
+            pending_copy = _fast_state_copy(pending_orders)
+            closed_recent = list(reversed(trades[-limit:])) if limit else []
     for p in open_copy:
         if not isinstance(p, dict):
             continue
@@ -36514,8 +36675,8 @@ def _build_relay_execution_state_snapshot() -> dict:
         raise TimeoutError("relay execution snapshot timed out waiting for trade_lock")
     phase_started = time.perf_counter()
     try:
-        pending_copy = copy.deepcopy(pending_orders)
-        positions_copy = copy.deepcopy(open_positions)
+        pending_copy = _fast_state_copy(pending_orders)
+        positions_copy = _fast_state_copy(open_positions)
         money_state_generation = _RELAY_EXECUTION_MONEY_STATE_GENERATION
         (
             raw_recent_trades,
@@ -36808,8 +36969,8 @@ def api_relay_state(force_rebuild: bool = False):
         if not trade_acquired:
             raise TimeoutError("relay state snapshot timed out waiting for trade_lock")
         try:
-            pending_orders_copy = copy.deepcopy(pending_orders)
-            positions_copy = copy.deepcopy(open_positions)
+            pending_orders_copy = _fast_state_copy(pending_orders)
+            positions_copy = _fast_state_copy(open_positions)
             (
                 raw_trades_for_relay,
                 relay_trades_copy,
@@ -36819,11 +36980,14 @@ def api_relay_state(force_rebuild: bool = False):
                 pending_orders_copy,
                 positions_copy,
             )
-            expired_orders_copy = copy.deepcopy(
+            expired_orders_copy = _fast_state_copy(
                 expired_orders[-_DASHBOARD_HISTORY_MAX:]
             )
+            paper_book_closed = _paper_book_closed_rows_locked(_DASHBOARD_TRADES_MAX)
         finally:
             trade_lock.release()
+        paper_book_open = _fast_state_copy(positions_copy)
+        paper_book_pending = _fast_state_copy(pending_orders_copy)
         enriched_trades_for_relay = _enrich_dashboard_trade_rows(
             raw_trades_for_relay,
             split_execution_truth,
@@ -36876,7 +37040,12 @@ def api_relay_state(force_rebuild: bool = False):
             bounded_trades_map,
             relay_trades_copy,
         )
-        snapshot["paper_book"] = build_paper_order_book(_DASHBOARD_TRADES_MAX)
+        snapshot["paper_book"] = build_paper_order_book(
+            _DASHBOARD_TRADES_MAX,
+            open_snapshot=paper_book_open,
+            pending_snapshot=paper_book_pending,
+            closed_snapshot=paper_book_closed,
+        )
         snapshot["server_ts"] = utc_iso()
         bridge = get_genome_bridge()
         if bridge:
@@ -37395,9 +37564,13 @@ def _build_api_state_snapshot():
             expired_orders_copy, expired_orders_total = (
                 _snapshot_expired_rows_locked(_DASHBOARD_HISTORY_MAX)
             )
-            positions_copy = copy.deepcopy(open_positions)
-            pending_orders_copy = copy.deepcopy(pending_orders)
-            relay_trades_copy = copy.deepcopy(trades[-_RELAY_TRADES_MAP_MAX:])
+            positions_copy = _fast_state_copy(open_positions)
+            pending_orders_copy = _fast_state_copy(pending_orders)
+            relay_trades_copy = [
+                _relay_trade_row_lite(row)
+                for row in trades[-_RELAY_TRADES_MAP_MAX:]
+                if isinstance(row, dict)
+            ]
             bounded_trades_map = _snapshot_bounded_trades_map_locked(
                 pending_orders_copy,
                 positions_copy,
@@ -38628,34 +38801,104 @@ def api_pause():
         pause_owner = PAUSE_OWNER_OPERATOR if already_operator else requested_owner
         state["manual_admin_pause"] = True
         state["pause_intent"] = pause_owner
+        # Entry gates read these flags; they must be true before this request
+        # can wait on trade_lock or exchange I/O.
+        state["live_armed"] = False
+        state["bitfinex_live_enabled"] = False
+        priority = PAUSE_PRIORITIES.get("ADMIN_MANUAL", 0)
+        if priority >= state.get("_pause_priority", 0):
+            state["execution_paused"] = True
+            state["execution_reason"] = "ADMIN_MANUAL"
+            state["_pause_priority"] = priority
+        execution_reason = str(state.get("execution_reason") or "ADMIN_MANUAL")
     # Persist before any cancel/trade_lock work so true-flat survives a stalled
     # response or process restart without requiring another /api/pause.
     save_persistent_config()
-    disarm = _disarm_live_control("ADMIN_MANUAL")
-    set_execution_paused("ADMIN_MANUAL")
-    with trade_lock:
-        paper_orders = copy.deepcopy(pending_orders)
-        paper_positions = copy.deepcopy(open_positions)
     _patch_api_state_cache_fields(
         execution_paused=True,
-        execution_reason="ADMIN_MANUAL",
+        execution_reason=execution_reason,
         manual_admin_pause=True,
         live_armed=False,
         bitfinex_live_enabled=False,
-        orders=paper_orders,
-        positions=paper_positions,
     )
     logger.warning(f"[ADMIN] Manual pause via /api/pause owner={pause_owner} [PIPELINE ENFORCEMENT]")
-    response = jsonify({
+    worker, result = _start_pause_finalization()
+    worker.join(timeout=PAUSE_FINALIZE_WAIT_SEC)
+    payload = {
         "status": "paused",
         "execution_paused": True,
-        "execution_reason": "ADMIN_MANUAL",
+        "execution_reason": execution_reason,
         "pause_owner": pause_owner,
+        "pause_intent_durable": True,
+    }
+    if worker.is_alive() or not result.get("done"):
+        payload.update({
+            "finalization": "IN_PROGRESS",
+            "finalization_wait_sec": PAUSE_FINALIZE_WAIT_SEC,
+            "live_pending_cancel": None,
+            "exit_only_lanes": [],
+        })
+        response = jsonify(payload)
+        response.status_code = 202
+        return response
+    if result.get("error"):
+        payload.update({"finalization": "FAILED", "finalization_error": result["error"]})
+        response = jsonify(payload)
+        response.status_code = 500
+        return response
+    disarm = result["disarm"]
+    payload.update({
+        "finalization": "COMPLETE",
         "live_pending_cancel": disarm["cancel"],
         "exit_only_lanes": list(disarm["exit_only"].keys()),
     })
+    response = jsonify(payload)
     response.status_code = 409 if disarm["cancel"]["failed"] else 200
     return response
+
+
+PAUSE_FINALIZE_WAIT_SEC = min(
+    25.0, max(0.5, float(os.getenv("PAUSE_FINALIZE_WAIT_SEC", "8")))
+)
+_pause_finalization_lock = threading.Lock()
+_pause_finalization_current: dict = {"thread": None, "result": None}
+
+
+def _finalize_admin_pause(result: dict) -> None:
+    """Cancel and disarm after the durable pause intent is already committed."""
+    try:
+        disarm = _disarm_live_control("ADMIN_MANUAL")
+        set_execution_paused("ADMIN_MANUAL")
+        with trade_lock:
+            paper_orders = _fast_state_copy(pending_orders)
+            paper_positions = _fast_state_copy(open_positions)
+        _patch_api_state_cache_fields(orders=paper_orders, positions=paper_positions)
+        result["disarm"] = disarm
+    except Exception as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        logger.error(f"[ADMIN] pause finalization failed: {exc} [PIPELINE ENFORCEMENT]")
+    finally:
+        result["done"] = True
+        result["finished_at"] = time.time()
+
+
+def _start_pause_finalization() -> tuple:
+    """Start one finalizer; concurrent pause requests share the in-flight one."""
+    with _pause_finalization_lock:
+        current = _pause_finalization_current.get("thread")
+        if current is not None and current.is_alive():
+            return current, _pause_finalization_current["result"]
+        result = {"done": False, "started_at": time.time()}
+        worker = threading.Thread(
+            target=_finalize_admin_pause,
+            args=(result,),
+            name="admin-pause-finalize",
+            daemon=True,
+        )
+        _pause_finalization_current["thread"] = worker
+        _pause_finalization_current["result"] = result
+        worker.start()
+        return worker, result
 
 # Pause reasons that /api/resume is allowed to clear even when the readiness
 # latch (system_ready) is still stabilizing. system_ready can't stabilize while
@@ -38873,9 +39116,9 @@ def api_close_showcase_position():
     if still_open:
         return jsonify({"error": "showcase close did not complete", "trade_id": trade_id}), 409
     with trade_lock:
-        paper_orders = copy.deepcopy(pending_orders)
-        paper_positions = copy.deepcopy(open_positions)
-        paper_trades = copy.deepcopy(trades[-50:])
+        paper_orders = _fast_state_copy(pending_orders)
+        paper_positions = _fast_state_copy(open_positions)
+        paper_trades = _fast_state_copy(trades[-50:])
     _patch_api_state_cache_fields(
         orders=paper_orders,
         positions=paper_positions,
@@ -38926,8 +39169,8 @@ def api_cancel_showcase_pending_order():
     if not result.get("finalized"):
         return jsonify({"error": "pending cancel unconfirmed", "trade_id": trade_id, "result": result}), 409
     with trade_lock:
-        paper_orders = copy.deepcopy(pending_orders)
-        paper_positions = copy.deepcopy(open_positions)
+        paper_orders = _fast_state_copy(pending_orders)
+        paper_positions = _fast_state_copy(open_positions)
     _patch_api_state_cache_fields(orders=paper_orders, positions=paper_positions)
     cache_generation = _invalidate_relay_execution_snapshot()
     logger.warning("[ADMIN] Showcase pending order cancelled trade_id=%s", trade_id)
@@ -39263,9 +39506,9 @@ def api_reconcile_phantom_cancel():
     # poll reflects the cancellation immediately (otherwise the stale cache
     # can show the phantom OPEN for up to API_STATE_REFRESH_INTERVAL_SEC).
     with trade_lock:
-        paper_orders = copy.deepcopy(pending_orders)
-        paper_positions = copy.deepcopy(open_positions)
-        paper_trades = copy.deepcopy(trades[-50:])
+        paper_orders = _fast_state_copy(pending_orders)
+        paper_positions = _fast_state_copy(open_positions)
+        paper_trades = _fast_state_copy(trades[-50:])
     _patch_api_state_cache_fields(
         orders=paper_orders,
         positions=paper_positions,
@@ -47894,7 +48137,7 @@ def _stable_paper_lifecycle_copy(row: dict, attempts: int = 3) -> dict:
     last_error = None
     for attempt in range(max(1, int(attempts))):
         try:
-            return copy.deepcopy(row) if isinstance(row, dict) else {}
+            return _fast_state_copy(row) if isinstance(row, dict) else {}
         except RuntimeError as exc:
             if "changed size during iteration" not in str(exc).lower():
                 raise
@@ -48053,7 +48296,7 @@ def save_paper_lifecycle(reason: str = "mutation") -> bool:
                 _build_paper_lifecycle_payload(reason)
             )
             return _atomic_file_replace(PAPER_LIFECYCLE_FILE,
-                lambda f: json.dump(payload, f, default=str, sort_keys=True),
+                lambda f: f.write(json.dumps(payload, default=str, sort_keys=True)),
                 paper_lifecycle_file_lock, "PAPER_LIFECYCLE")
     except RuntimeError as exc:
         logger.warning(
@@ -48260,10 +48503,10 @@ def capture_emergency_paper_lifecycle_snapshot() -> dict:
 
 def save_positions(*, persist_lifecycle: bool = True):
     with state_lock:
-        snapshot = copy.deepcopy(open_positions)
+        snapshot = _fast_state_copy(open_positions)
     _atomic_file_replace(
         POSITIONS_FILE,
-        lambda f: json.dump(snapshot, f),
+        lambda f: f.write(json.dumps(snapshot)),
         positions_file_lock,
         "POSITIONS",
     )

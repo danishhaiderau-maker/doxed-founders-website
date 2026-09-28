@@ -87,6 +87,10 @@ def compile_snapshot(namespace):
     namespace.setdefault("traceback", __import__("traceback"))
     namespace.setdefault("Path", Path)
     namespace.setdefault("WATCHDOG_SCHEDULED_AI_CYCLE_MAX_SEC", 600.0)
+    namespace.setdefault(
+        "READY_TRADE_LOCK_BUSY_GRACE_SEC",
+        namespace.get("WATCHDOG_TRADE_LOCK_TIMEOUT_SEC", 2.0),
+    )
     module = ast.Module(body=[LOCK_PROBE_FUNCTION, FUNCTION], type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
@@ -100,11 +104,17 @@ def compile_tracked_lock():
         "sys": __import__("sys"),
         "traceback": __import__("traceback"),
         "Path": Path,
+        "TRADE_LOCK_HOLD_BUDGET_MS": 500.0,
+        "_TRACKED_LOCK_SITE_MAX": 128,
     }
     module = ast.Module(body=[TRACKED_LOCK_CLASS], type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
-    return namespace["_TrackedRLock"]
+    cls = namespace["_TrackedRLock"]
+    namespace["_TRACKED_LOCK_INTERNAL_CODES"] = frozenset(
+        {cls.acquire.__code__, cls.__enter__.__code__}
+    )
+    return cls
 
 
 def test_tracked_rlock_reports_and_clears_owner_diagnostics():
