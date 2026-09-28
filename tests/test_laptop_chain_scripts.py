@@ -271,7 +271,7 @@ def _fake_repo(tmp_path, launcher_body: str) -> Path:
 def _run_runner(repo, chain, *extra):
     return _ps(
         f"& '{repo / 'scripts' / 'run-analyzer-once.ps1'}' -RepoRoot '{repo}' -CanonicalRoot '{chain['canonical']}' "
-        f"-StateDir '{chain['state']}' -Port 59431 -Reason test {' '.join(extra)}; exit $LASTEXITCODE",
+        f"-StateDir '{chain['state']}' -Port 59431 -DashboardReadySec 0 -Reason test {' '.join(extra)}; exit $LASTEXITCODE",
         {**chain["env"], "DOXXED_LAPTOP_CHAIN_OFFLINE": "1"},
         timeout=180,
     )
@@ -299,6 +299,35 @@ def test_runner_zero_exit_without_new_generation_is_not_success(tmp_path, chain)
     status = json.loads((chain["state"] / "analyzer-run.status.json").read_text(encoding="utf-8-sig"))
     assert status["lastSuccessAt"] is None
     assert "NO_NEW_COMPLETED_GENERATION" in status["detail"]
+
+
+@windows_only
+def test_runner_waits_for_dashboard_before_single_pass():
+    runner = _source("run-analyzer-once.ps1")
+    wait = runner.index("while (-not (Get-AnalyzerStatus)")
+    single_pass = runner.index("'-Once'")
+    assert wait < single_pass
+
+
+@windows_only
+def test_research_mode_probe_matches_score_led_upstream(chain):
+    repo_root = SCRIPTS.parent
+    agent = repo_root / "services" / "btc-conservative-agent"
+    probe = "import combo_pathway_config as c; print(c.ANALYZER_SYNC_ID); print(c.active_tile_registry_signature())"
+    env = {k: v for k, v in os.environ.items() if k != "SCORE_LED_PAPER_RESEARCH_ENABLED"}
+    env["SCORE_LED_PAPER_RESEARCH_ENABLED"] = "1"
+    sync_id, signature = subprocess.run(
+        [sys.executable, "-c", probe], cwd=agent, env=env, capture_output=True, text=True, check=True,
+    ).stdout.split()[-2:]
+    result = _ps(
+        _common_prelude(chain)
+        + f"$h = [pscustomobject]@{{ analyzer_sync_id = '{sync_id}'; tile_registry_signature = '{signature}' }}; "
+        + f"$m = Resolve-AnalyzerResearchMode -RepoRoot '{repo_root}' -Health $h; "
+        + "if ($m.Matched -and $m.Flag -eq '1') { exit 0 } else { exit 9 }",
+        chain["env"],
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @windows_only

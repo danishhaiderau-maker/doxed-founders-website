@@ -13,6 +13,7 @@ param(
   [string]$StateDir = '',
   [int]$Port = 9001,
   [int]$TimeoutMin = 240,
+  [int]$DashboardReadySec = 90,
   [string]$Reason = 'manual',
   [switch]$EnsureDashboardOnly
 )
@@ -123,6 +124,13 @@ try {
     $dash = Invoke-Launcher -LauncherArgs @('-DashboardOnly', '-NoWait', "-Port $Port") -Tag 'dashboard' -TimeoutMs 120000
     Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_START exit={0} {1}" -f $dash.ExitCode, $dash.Tail)
     if ($dash.ExitCode -ne 0) { throw "DASHBOARD_START_FAILED exit=$($dash.ExitCode) $($dash.Tail)" }
+    # The launcher replaces a listener that is not answering yet as stale, so
+    # the single pass must not start until the dashboard responds.
+    $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
+    while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
+    if (-not (Get-AnalyzerStatus)) {
+      Write-ChainLog -Config $cfg -Name $logName -Message "DASHBOARD_NOT_READY after ${DashboardReadySec}s"
+    }
   }
   if ($EnsureDashboardOnly) {
     $status.state = 'DASHBOARD_ENSURED'

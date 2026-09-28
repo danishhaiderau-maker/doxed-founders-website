@@ -287,7 +287,8 @@ function Test-RevisionPrefixMatch([string]$Left, [string]$Right) {
 function Resolve-AnalyzerResearchMode {
   param([Parameter(Mandatory = $true)][string]$RepoRoot, $Health)
   $agentDir = Join-Path $RepoRoot 'services\btc-conservative-agent'
-  $probe = 'import json, combo_pathway_config as c; print(json.dumps({"sync_id": c.ANALYZER_SYNC_ID, "signature": c.active_tile_registry_signature()}))'
+  # Windows PowerShell strips embedded double quotes from native arguments; keep the probe quote-free.
+  $probe = 'import combo_pathway_config as c; print(c.ANALYZER_SYNC_ID); print(c.active_tile_registry_signature())'
   $previous = $env:SCORE_LED_PAPER_RESEARCH_ENABLED
   $candidates = @()
   try {
@@ -295,9 +296,9 @@ function Resolve-AnalyzerResearchMode {
       $env:SCORE_LED_PAPER_RESEARCH_ENABLED = $flag
       Push-Location $agentDir
       try { $out = Invoke-NativeQuiet { & python -c $probe } } finally { Pop-Location }
-      if ($LASTEXITCODE -eq 0 -and $out) {
-        $local = ($out | Select-Object -Last 1) | ConvertFrom-Json
-        $candidates += [pscustomobject]@{ Flag = $flag; SyncId = [string]$local.sync_id; Signature = [string]$local.signature }
+      $lines = @($out | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() })
+      if ($LASTEXITCODE -eq 0 -and $lines.Count -ge 2) {
+        $candidates += [pscustomobject]@{ Flag = $flag; SyncId = $lines[-2].Trim(); Signature = $lines[-1].Trim() }
       }
     }
   } finally {
