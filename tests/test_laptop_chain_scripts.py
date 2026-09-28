@@ -304,9 +304,12 @@ def test_runner_zero_exit_without_new_generation_is_not_success(tmp_path, chain)
 @windows_only
 def test_runner_waits_for_dashboard_before_single_pass():
     runner = _source("run-analyzer-once.ps1")
-    wait = runner.index("while (-not (Get-AnalyzerStatus)")
+    assert "while (-not (Get-AnalyzerStatus)" in runner
     single_pass = runner.index("'-Once'")
-    assert wait < single_pass
+    ensures = [m.start() for m in re.finditer(r"Confirm-AnalyzerDashboard\s*(\n|\})", runner)]
+    assert any(pos < single_pass for pos in ensures)
+    assert any(pos > single_pass for pos in ensures)
+    assert runner.index("'-Once'") < runner.index("$after = Get-AnalyzerStatus")
 
 
 @windows_only

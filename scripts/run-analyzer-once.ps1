@@ -120,18 +120,21 @@ try {
   $status.researchModeMatchesFly = $mode.Matched
   Assert-CanonicalDataLink
 
-  if (-not (Get-AnalyzerStatus)) {
+  # The launcher's single pass replaces any dashboard that has no persistent
+  # engine behind it, so the dashboard is ensured before and again after it.
+  function Confirm-AnalyzerDashboard {
+    if (Get-AnalyzerStatus) { return }
     $dash = Invoke-Launcher -LauncherArgs @('-DashboardOnly', '-NoWait', "-Port $Port") -Tag 'dashboard' -TimeoutMs 120000
     Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_START exit={0} {1}" -f $dash.ExitCode, $dash.Tail)
     if ($dash.ExitCode -ne 0) { throw "DASHBOARD_START_FAILED exit=$($dash.ExitCode) $($dash.Tail)" }
-    # The launcher replaces a listener that is not answering yet as stale, so
-    # the single pass must not start until the dashboard responds.
     $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
     while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
     if (-not (Get-AnalyzerStatus)) {
       Write-ChainLog -Config $cfg -Name $logName -Message "DASHBOARD_NOT_READY after ${DashboardReadySec}s"
     }
   }
+
+  Confirm-AnalyzerDashboard
   if ($EnsureDashboardOnly) {
     $status.state = 'DASHBOARD_ENSURED'
     $exitCode = 0
@@ -144,6 +147,9 @@ try {
     $status.stderrLog = $run.Stderr
     $exitCode = $run.ExitCode
     $status.detail = $run.Tail
+    try { Confirm-AnalyzerDashboard } catch {
+      Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_RESTORE_FAILED {0}" -f $_.Exception.Message)
+    }
     if ($exitCode -eq 0) {
       $after = Get-AnalyzerStatus
       $afterCompleted = if ($after -and $after.analysis_run) { ConvertTo-UtcDate $after.analysis_run.last_completed_at } else { $null }
