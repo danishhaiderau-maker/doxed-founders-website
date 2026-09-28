@@ -22,6 +22,7 @@ def test_export_is_authenticated_user_scoped_and_event_complete():
     assert "canonicalTradeId" in SERVICE
     assert "eventType: event.eventType" in SERVICE
     assert "generatingRevision" in SERVICE and "runIdentity" in SERVICE
+    assert "process.env.SOURCE_GIT_REV" in SERVICE
 
 
 def test_sync_is_atomic_and_fails_closed_on_missing_provenance():
@@ -46,6 +47,20 @@ def test_sync_never_accepts_or_outputs_token_on_command_line():
     assert "throw \"[RELAY_EVIDENCE_$Code]\"" in SCRIPT
 
 
+def test_forward_failures_are_sanitized_without_request_details():
+    assert "Get-RelayForwardFailureCode" in SCRIPT
+    assert 'return "FORWARD_HTTP_$([int]$cursor.Response.StatusCode)"' in SCRIPT
+    assert "return 'FORWARD_TIMEOUT'" in SCRIPT
+    assert "return 'FORWARD_NETWORK_FAILED'" in SCRIPT
+    assert "System.Threading.Tasks.TaskCanceledException" in SCRIPT
+    assert "System.Net.Http.HttpRequestException" in SCRIPT
+    assert "System.Net.Sockets.SocketException" in SCRIPT
+    forward_catch = SCRIPT.split("'/api/data-sync/platform-relay-evidence'", 1)[1]
+    forward_catch = forward_catch.split("if ($forward.ok", 1)[0]
+    assert "Get-RelayForwardFailureCode $_.Exception" in forward_catch
+    assert "$_.Exception.Message" not in forward_catch
+
+
 def test_continuous_fly_mirror_also_schedules_platform_evidence_join():
     assert 'sync-platform-relay-evidence.ps1' in LOOP
     assert 'relay_lifecycle_evidence_v1.json' in LOOP
@@ -57,11 +72,56 @@ def test_continuous_fly_mirror_also_schedules_platform_evidence_join():
     assert 'relayEvidence = $relayEvidenceStatus' in LOOP
     assert 'lastSuccessAt = $relayEvidenceLastSuccessAt' in LOOP
     assert 'relay-evidence=$safeCode' in LOOP
+    assert "[A-Z0-9_]+" in LOOP
     relay_log = LOOP.split('Add-Content -LiteralPath $logFile -Value (', 1)[1].split(')', 1)[0]
     assert '$_.Exception.Message' not in relay_log
 
 
-def _run_sync(tmp_path: Path, payload: dict, token: str = "secret-never-print"):
+def test_optional_relay_status_distinguishes_not_attempted_deferred_and_missing_config():
+    initial = LOOP.split("$relayEvidenceStatus = [ordered]@{", 1)[1].split("}", 1)[0]
+    assert 'ok = $null' in initial
+    assert 'errorCode = "NOT_ATTEMPTED"' in initial
+    assert 'errorCode = "CONFIG_MISSING"' not in initial
+
+    classification = LOOP.split("$relayEvidenceConfigMissing = -not (", 1)[1]
+    classification = classification.split("$currentTotalBytes", 1)[0]
+    for key in (
+        "PLATFORM_API_BASE_URL",
+        "PLATFORM_RELAY_AGENT_SLUG",
+        "PLATFORM_RELAY_USER_ID",
+    ):
+        assert f"$env:{key}" in classification
+    assert 'if ($relayEvidenceConfigMissing)' in classification
+    assert '$relayEvidenceStatus.errorCode = "CONFIG_MISSING"' in classification
+    assert 'elseif ($needsFullInventory)' in classification
+    assert '$relayEvidenceStatus.errorCode = "DEFERRED_REQUIRED_SYNC"' in classification
+
+
+def test_forced_revision_sync_can_succeed_independently_of_optional_relay_status():
+    # A revision mismatch contributes to the mandatory inventory decision and
+    # is classified before the child sync starts. The relay status is passed
+    # through as receipt metadata only; it is never a success/parity gate.
+    assert "$needsFullInventory = $forceByTime -or $forceFresh -or $forceByRevision -or $forceByGrowth" in LOOP
+    full_sync = LOOP[
+        LOOP.index("$syncArgs = @{"):
+        LOOP.index("$failureAt = (Get-Date).ToUniversalTime()")
+    ]
+    assert "ProgressRelayEvidenceJson = ($relayEvidenceStatus | ConvertTo-Json -Compress)" in full_sync
+    assert "if ($forceByRevision) { $syncArgs.ForceFullRefresh = $true }" in full_sync
+    assert "$result = & (Join-Path $scriptDir \"sync-fly-bot-data.ps1\") @syncArgs" in full_sync
+    assert "ok = $true" in full_sync
+    assert "revisionParity = $(" in full_sync
+    assert "relayEvidence = $relayEvidenceStatus" in full_sync
+    assert "if ($relayEvidenceStatus" not in full_sync
+    assert "if (-not $relayEvidenceStatus" not in full_sync
+
+
+def _run_sync(
+    tmp_path: Path,
+    payload: dict,
+    token: str = "secret-never-print",
+    post_status: int = 200,
+):
     body = json.dumps(payload).encode()
 
     class Handler(BaseHTTPRequestHandler):
@@ -76,13 +136,26 @@ def _run_sync(tmp_path: Path, payload: dict, token: str = "secret-never-print"):
         def do_POST(self):
             assert self.path == "/api/data-sync/platform-relay-evidence"
             assert self.headers.get("X-Bot-Admin-Token") == token
+            assert self.headers.get("X-Content-SHA256") == __import__("hashlib").sha256(body).hexdigest()
+            semantic_digest = self.headers.get("X-Relay-Semantic-SHA256")
+            assert semantic_digest and len(semantic_digest) == 64
             forwarded = self.rfile.read(int(self.headers.get("Content-Length") or 0))
             assert forwarded == body
+            if post_status != 200:
+                error = b"upstream detail must not escape"
+                self.send_response(post_status)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(error)))
+                self.end_headers()
+                self.wfile.write(error)
+                return
             ack = json.dumps({
                 "ok": True,
                 "schema": "relay_lifecycle_evidence_v1",
                 "sha256": __import__("hashlib").sha256(body).hexdigest(),
                 "records": len(payload["records"]),
+                "semanticSha256": semantic_digest,
+                "duplicate": False,
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -150,3 +223,37 @@ def test_mocked_authenticated_sync_is_atomic_and_preserves_old_on_scope_failure(
     assert "RELAY_EVIDENCE_SCOPE_MISMATCH" in combined
     assert "secret-never-print" not in combined
     assert "user-scope" not in combined
+
+
+def test_forward_http_status_is_classified_without_leaking_request_or_body(tmp_path):
+    result, destination = _run_sync(tmp_path, _valid_payload(), post_status=503)
+    assert result.returncode != 0
+    assert not destination.exists()
+    combined = result.stdout + result.stderr
+    assert "RELAY_EVIDENCE_FORWARD_HTTP_503" in combined
+    assert "upstream detail must not escape" not in combined
+    assert "secret-never-print" not in combined
+    assert "user-scope" not in combined
+    assert "/api/data-sync/platform-relay-evidence" not in combined
+
+
+def test_sync_declares_exact_body_checksum_for_idempotent_retry():
+    assert "'X-Content-SHA256' = $digest" in SCRIPT
+    assert "'X-Relay-Semantic-SHA256' = $incomingSemanticDigest" in SCRIPT
+    assert SCRIPT.index("$digest =") < SCRIPT.index("'X-Content-SHA256' = $digest")
+    assert "-TimeoutSec 105" in SCRIPT
+
+
+def test_semantic_digest_ignores_envelope_time_and_nested_property_order(tmp_path):
+    first = _valid_payload()
+    first["records"][0]["events"][0]["payload"] = {"b": 2, "a": 1}
+    result, destination = _run_sync(tmp_path, first)
+    assert result.returncode == 0, result.stderr
+    second = json.loads(json.dumps(first))
+    second["generatedAt"] = datetime.now(timezone.utc).isoformat()
+    second["records"][0]["events"][0]["payload"] = {"a": 1, "b": 2}
+    # Existing raw bytes differ, while semantic lifecycle evidence does not.
+    destination.write_text(json.dumps(first), encoding="utf-8")
+    result, _ = _run_sync(tmp_path, second)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(destination.read_text(encoding="utf-8"))["generatedAt"] == first["generatedAt"]

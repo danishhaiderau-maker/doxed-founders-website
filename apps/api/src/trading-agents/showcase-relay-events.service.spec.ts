@@ -1,19 +1,82 @@
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import test from 'node:test';
 import {
   ShowcaseRelayEventsService,
   canClaimExpiredCycleForCurrentGeneration,
   exactLifecycleRevisionMatches,
+  exactSourceRelayReplayMatches,
   relayIntentEnvelope,
+  resolveSignedShowcaseSizing,
+  positionReducedEvidence,
+  isReductionEvidenceIdentity,
+  reductionAuditMatches,
+  isReductionSequenceStale,
   shouldApplyExactLifecycleUpdate,
 } from './showcase-relay-events.service';
+
+test('signed source replay is exact and conflicting identity or hash fails closed', () => {
+  const existing = {
+    cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED',
+    sourcePayloadSha256: 'a'.repeat(64), sourceEventSeq: 4,
+  };
+  assert.equal(exactSourceRelayReplayMatches(existing, {
+    cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED', payloadSha256: 'a'.repeat(64), eventSeq: 4,
+  }), true);
+  for (const incoming of [
+    { cycleId: 'cycle-2', eventType: 'LIMIT_UPDATED', payloadSha256: 'a'.repeat(64), eventSeq: 4 },
+    { cycleId: 'cycle-1', eventType: 'POSITION_CLOSED', payloadSha256: 'a'.repeat(64), eventSeq: 4 },
+    { cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED', payloadSha256: 'b'.repeat(64), eventSeq: 4 },
+    { cycleId: 'cycle-1', eventType: 'LIMIT_UPDATED', payloadSha256: 'a'.repeat(64), eventSeq: 3 },
+  ]) assert.equal(exactSourceRelayReplayMatches(existing, incoming), false);
+});
+
+test('POSITION_REDUCED accepts only reconciled reduce-only evidence', () => {
+  const valid = positionReducedEvidence({
+    schema: 'dcf-showcase-intent-v1',
+    event: 'POSITION_REDUCED',
+    event_id: 'reduce-event-1',
+    event_seq: 4,
+    ts: new Date().toISOString(),
+    prior_qty: 0.03, reduced_qty: 0.01, remaining_qty: 0.02,
+    fill_price: 64_250, reduction_id: 'reduce-command-1',
+  });
+  assert.equal(valid?.reductionId, 'reduce-command-1');
+  assert.equal(valid?.remainingQty, 0.02);
+
+  assert.equal(positionReducedEvidence({
+    schema: 'dcf-showcase-intent-v1', event: 'POSITION_REDUCED',
+    event_id: 'bad', reduction_id: 'bad-command', event_seq: 1,
+    ts: new Date().toISOString(), prior_qty: 0.03, reduced_qty: 0.01,
+    remaining_qty: 0.025, fill_price: 64_250,
+  }), undefined);
+  assert.equal(positionReducedEvidence({
+    schema: 'dcf-showcase-intent-v1', event: 'POSITION_REDUCED',
+    event_id: 'missing-reduction-id', event_seq: 1,
+    ts: new Date().toISOString(), prior_qty: 0.03, reduced_qty: 0.01,
+    remaining_qty: 0.02, fill_price: 64_250,
+  }), undefined);
+  assert.equal(isReductionEvidenceIdentity('retired-a', 'RETIRED'), false);
+  assert.equal(isReductionEvidenceIdentity('cont-a', 'CONTINUOUS'), false);
+  assert.equal(reductionAuditMatches({
+    tradeId: 'o29ps-a', eventSeq: 4, priorQty: 0.03, reducedQty: 0.01,
+    remainingQty: 0.02, fillPrice: 64250,
+  }, valid!, 'o29ps-a'), true);
+  assert.equal(reductionAuditMatches({
+    tradeId: 'o29ps-a', eventSeq: 4, priorQty: 0.03, reducedQty: 0.02,
+    remainingQty: 0.01, fillPrice: 64250,
+  }, valid!, 'o29ps-a'), false);
+  assert.equal(isReductionSequenceStale(4, 3), true);
+  assert.equal(isReductionSequenceStale(4, 4), true);
+  assert.equal(isReductionSequenceStale(4, 5), false);
+});
 
 test('durable receipt matches the exact canonical event id, sequence, and limit', () => {
   const current = {
     action: 'ENTER',
     trade_id: 'cont-race',
-    entry: { exact_limit_price: 63_167, exact_qty_btc: 0.02361 },
+    entry: { exact_limit_price: 63_167, exact_qty_btc: 25 / 63_167 },
+    risk: { max_margin_usd: 0.25 },
     context: {
       showcase_event: 'LIMIT_UPDATED',
       showcase_event_id: 'revision-a',
@@ -27,7 +90,7 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
       event_id: 'revision-a',
       event_seq: 4,
       limit_price: 63_167,
-      qty: 0.02361,
+      qty: 25 / 63_167, margin_usdt: 0.25, leverage: 100,
     }),
     true,
   );
@@ -38,7 +101,7 @@ test('durable receipt matches the exact canonical event id, sequence, and limit'
       event_id: 'revision-b',
       event_seq: 4,
       limit_price: 63_166,
-      qty: 0.02361,
+      qty: 25 / 63_166, margin_usdt: 0.25, leverage: 100,
     }),
     false,
   );
@@ -55,9 +118,37 @@ test('signed executable envelope preserves the exact showcase quantity', () => {
     executable: true,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
     limit_price: 63_614.55,
-    qty: 0.02361832782239017,
-  }) as { entry?: { exact_qty_btc?: number } };
-  assert.equal(envelope.entry?.exact_qty_btc, 0.02361832782239017);
+    qty: 25 / 63_614.55,
+    margin_usdt: 0.25,
+    leverage: 100,
+  }) as {
+    entry?: { exact_qty_btc?: number };
+    risk?: { max_margin_usd?: number };
+    context?: Record<string, unknown>;
+  };
+  assert.equal(envelope.entry?.exact_qty_btc, 25 / 63_614.55);
+  assert.equal(envelope.risk?.max_margin_usd, 0.25);
+  assert.equal(envelope.context?.requested_margin_source, 'SIGNED_SHOWCASE_MARGIN_USDT');
+  assert.equal(envelope.context?.requested_notional_usd, 25);
+});
+
+test('signed showcase sizing binds exact margin provenance and fails closed above 25 cents', () => {
+  const valid = resolveSignedShowcaseSizing({
+    marginUsd: 0.2, leverage: 100, limitPrice: 64_000, qtyBtc: 20 / 64_000,
+  });
+  assert.deepEqual(valid, {
+    ok: true, marginUsd: 0.2, leverage: 100, requestedNotionalUsd: 20,
+    provenance: 'SIGNED_SHOWCASE_MARGIN_USDT',
+  });
+  assert.equal(resolveSignedShowcaseSizing({
+    marginUsd: 0.250001, leverage: 100, limitPrice: 64_000, qtyBtc: 25 / 64_000,
+  }).ok, false);
+  assert.equal(resolveSignedShowcaseSizing({
+    marginUsd: 0, leverage: 100, limitPrice: 64_000, qtyBtc: 0,
+  }).ok, false);
+  assert.equal(resolveSignedShowcaseSizing({
+    marginUsd: 0.25, leverage: 100, limitPrice: 64_000, qtyBtc: 0.01,
+  }).ok, false);
 });
 
 test('terminal fallback marker survives only on its signed exact-limit revision', () => {
@@ -72,6 +163,9 @@ test('terminal fallback marker survives only on its signed exact-limit revision'
     executable: true,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
     limit_price: 63_167,
+    qty: 25 / 63_167,
+    margin_usdt: 0.25,
+    leverage: 100,
   };
   const terminal = relayIntentEnvelope('cycle-1', 'cont-settle', {
     ...base,
@@ -211,6 +305,7 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
     action: string;
     direction: string;
     entry: Record<string, unknown>;
+    risk?: Record<string, unknown>;
     context: Record<string, unknown>;
   };
   let storedEnvelope: StoredEnvelope = {
@@ -220,7 +315,9 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
       mode: 'EXACT_LIMIT',
       reference: 'SHOWCASE_EXACT_LIMIT',
       exact_limit_price: 63_940,
+      exact_qty_btc: 0.00039,
     },
+    risk: { max_margin_usd: 0.25 },
     context: {
       showcase_event: 'LIMIT_UPDATED',
       showcase_event_id: 'cont-race:LIMIT_UPDATED:4',
@@ -327,7 +424,9 @@ test('concurrent relay revisions stay monotonic across API replicas', async () =
     ts: `2026-07-30T01:00:0${seq}.000Z`,
     direction: 'LONG',
     limit_price: price,
-    qty: 0.02361,
+    qty: 0.00039,
+    margin_usdt: (0.00039 * price) / 100,
+    leverage: 100,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
     entry_reason: 'LOCAL_SUPPORT_LIMIT',
     executable: true,
@@ -476,15 +575,15 @@ test('accepts a correctly signed intent-bearing payload', async () => {
   assert.equal(result.intentCreated, false);
 });
 
-test('rejects a signed Type B lifecycle before persistence or execution wake', async () => {
+test('rejects an unknown signed lifecycle before persistence or execution wake', async () => {
   const secret = 'test-webhook-secret';
   const trace: string[] = [];
   const service = createService('dashboard-active', secret, { trace });
   const body = {
     schema: 'dcf-showcase-intent-v1',
     event: 'ORDER_PLACED' as const,
-    trade_id: 'tbhv1-paper-only',
-    research_lane: 'TYPE_B_HUNTER_V1',
+    trade_id: 'retired-paper-only',
+    research_lane: 'RETIRED_EXPERIMENT',
     direction: 'SHORT',
     limit_price: 64_100,
     entry_limit_policy: 'micro_sr_structural_limit_v1',
@@ -509,7 +608,7 @@ test('rejects a signed Type B lifecycle before persistence or execution wake', a
   assert.deepEqual(trace, []);
 });
 
-test('rejects signed Type B chase and close events before persistence or execution wake', async () => {
+test('rejects unknown signed chase and close events before persistence or execution wake', async () => {
   const secret = 'test-webhook-secret';
   for (const lifecycle of [
     {
@@ -528,8 +627,8 @@ test('rejects signed Type B chase and close events before persistence or executi
     const service = createService('dashboard-active', secret, { trace });
     const body = {
       schema: 'dcf-showcase-intent-v1',
-      trade_id: 'tbhv1-paper-lifecycle',
-      research_lane: 'TYPE_B_HUNTER_V1',
+      trade_id: 'retired-paper-lifecycle',
+      research_lane: 'RETIRED_EXPERIMENT',
       direction: 'SHORT',
       dashboard_owner: true,
       bot_instance_id: 'dashboard-active',
@@ -810,6 +909,13 @@ test('signed ORDER_PLACED persists the exact limit before non-blocking execution
 
   assert.equal(result.ok, true);
   assert.equal(result.persisted, true);
+  const ack = result.durable_ack as Record<string, unknown>;
+  assert.equal(ack.event_id, body.event_id);
+  assert.equal(ack.event_type, body.event);
+  assert.equal(ack.trade_id, body.trade_id);
+  assert.equal(ack.event_seq, body.event_seq);
+  assert.equal(ack.payload_sha256, createHash('sha256').update(rawBody).digest('hex'));
+  assert.equal(Boolean(ack.signal_cycle_event_id), true);
   assert.deepEqual(trace, ['prewake', 'persist', 'execution']);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(trace, ['prewake', 'persist', 'execution', 'canonical']);

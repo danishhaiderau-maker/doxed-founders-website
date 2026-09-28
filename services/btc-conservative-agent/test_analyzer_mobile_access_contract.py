@@ -38,6 +38,13 @@ def test_fly_dashboard_link_uses_same_origin_mobile_analysis_route():
     assert helper.index('os.getenv("FLY_APP_NAME")') < helper.index('return "http://127.0.0.1:9001/"')
 
 
+def test_four_tile_dashboard_cards_do_not_expand_the_mobile_page():
+    assert "#pathwayLaneTiles > div { min-width:0; max-width:100%; overflow:hidden; }" in SOURCE
+    assert "#pathwayLaneTiles > div > div:first-child { flex-wrap:wrap; }" in SOURCE
+    assert '#pathwayLaneTiles [style*="grid-template-columns:repeat(6,1fr)"]' in SOURCE
+    assert "grid-template-columns:repeat(2,minmax(0,1fr)) !important" in SOURCE
+
+
 def test_expired_order_hint_explains_zero_age_duplicate_rejection():
     assert "Age 0.0 with DUPLICATE_LIMIT_PRICE" in SOURCE
     assert "rejected before placement" in SOURCE
@@ -130,13 +137,17 @@ def test_legacy_analyzer_is_a_minimal_fail_closed_stub():
 
 
 def test_report_manifest_exposes_cohort_provenance_and_revision():
+    provenance = CANONICAL_ANALYZER_SOURCE.split(
+        "def _lifecycle_inventory_analysis_provenance(", 1
+    )[1].split("def write_report_manifest", 1)[0]
     manifest = CANONICAL_ANALYZER_SOURCE.split(
         "def write_report_manifest(", 1
     )[1].split("def _manifest_category", 1)[0]
-    assert '"cohort_schema": "analysis_cohorts_v1"' in manifest
-    assert '"generation_revision": generation_revision' in manifest
-    assert '"included_row_count": len(eligible)' in manifest
-    assert '"exclusion_reason_counts": exclusions' in manifest
+    assert '"cohort_schema": "analysis_cohorts_v1"' in provenance
+    assert '"generation_revision": generation_revision' in provenance
+    assert '"included_row_count": len(eligible)' in provenance
+    assert '"exclusion_reason_counts": exclusions' in provenance
+    assert "analysis_provenance = _lifecycle_inventory_analysis_provenance()" in manifest
     assert '"analysis_provenance": analysis_provenance' in manifest
     assert '"cohort_schema": analysis_provenance["cohort_schema"]' in manifest
     assert '"generation_revision": analysis_provenance["generation_revision"]' in manifest
@@ -149,6 +160,12 @@ def test_report_manifest_exposes_cohort_provenance_and_revision():
     assert '"REPORT_NOT_COHORT_GATED"' in CANONICAL_ANALYZER_SOURCE
     assert 'report["source_data_revision"] = analysis_provenance["source_data_revision"]' in CANONICAL_ANALYZER_SOURCE
     assert 'report.setdefault("live_policy_change_allowed", False)' in CANONICAL_ANALYZER_SOURCE
+    assert "manifest_started_at = datetime.now(timezone.utc)" in manifest
+    assert '"generation_started_at": manifest_started_at.isoformat()' in manifest
+    for current_generator in ("build_policy_cycle_reports(",):
+        assert manifest.index("manifest_generated_at = datetime.now(timezone.utc)") > manifest.index(
+            current_generator
+        )
 
 
 def test_demo_harness_runs_canonical_analyzer_and_propagates_failure():

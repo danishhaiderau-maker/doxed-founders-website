@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collector_v22_schema import OBS_DATA_ERROR, OBS_INSUFFICIENT_PATH, RESEARCH_EVENTS_FILE
+from collector_v22 import research_event_generation_paths
 from replay_eligibility import validate_replay_eligibility
 from replay_event_report import replay_event_report
 from research.best_policy_research import (
@@ -142,16 +143,18 @@ def _oos_policy_comparison(static_oos, dynamic_oos) -> dict:
 
 def _read_events(path: Path) -> list[dict]:
     rows = []
-    try:
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-    except OSError:
-        pass
+    paths = research_event_generation_paths(str(path.parent)) if path.name == RESEARCH_EVENTS_FILE else [str(path)]
+    for candidate in paths:
+        try:
+            for line in Path(candidate).read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+        except OSError:
+            pass
     return rows
 
 
@@ -220,7 +223,14 @@ def _policy_outcomes(event: dict) -> dict[str, float]:
 
 
 def _evaluate(policy_id: str, rows: list[dict], cache: dict[str, dict[str, float]]) -> dict:
-    values = [cache[row["event_id"]].get(policy_id, 0.0) for row in rows]
+    values = []
+    unknown_outcomes = 0
+    for row in rows:
+        outcomes = cache.get(row["event_id"], {})
+        if policy_id not in outcomes:
+            unknown_outcomes += 1
+            continue
+        values.append(float(outcomes[policy_id]))
     running = 0.0
     peak = 0.0
     max_drawdown = 0.0
@@ -231,16 +241,43 @@ def _evaluate(policy_id: str, rows: list[dict], cache: dict[str, dict[str, float
     return {
         "policy_id": policy_id,
         "independent_episodes": len(values),
+        "approved_opportunities": len(rows),
+        "supported_outcomes": len(values),
+        "unknown_outcomes": unknown_outcomes,
+        "coverage_complete": unknown_outcomes == 0,
         "fills": sum(1 for value in values if value != 0),
         "wins": sum(1 for value in values if value > 0),
         "losses": sum(1 for value in values if value < 0),
-        "net_pnl_usd": round(sum(values), 4),
-        "expectancy_usd": None if not values else round(sum(values) / len(values), 6),
-        "max_drawdown_usd": round(max_drawdown, 4),
+        "net_pnl_usd": None if unknown_outcomes else round(sum(values), 4),
+        "expectancy_usd": (
+            None if unknown_outcomes or not values
+            else round(sum(values) / len(rows), 6)
+        ),
+        "max_drawdown_usd": None if unknown_outcomes else round(max_drawdown, 4),
     }
 
 
-def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
+def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None, genome=None) -> dict:
+    from research.v3_policy_report_adapter import (
+        candidate_from_genome,
+        has_v3_evidence,
+        load_or_build_genome,
+        load_v3_cycle_snapshot,
+    )
+
+    if has_v3_evidence(data_dir):
+        snapshot = cycle_snapshot or load_v3_cycle_snapshot(data_dir)
+        report = candidate_from_genome(
+            genome if genome is not None else load_or_build_genome(data_dir, report_dir),
+            snapshot,
+            microstructure_evidence,
+        )
+        target = Path(report_dir) / POLICY_CANDIDATE_OOS_REPORT_FILE
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_suffix(target.suffix + ".tmp")
+        temp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        temp.replace(target)
+        return report
     events = list(events) if events is not None else _read_events(Path(data_dir) / RESEARCH_EVENTS_FILE)
     latest = max(events, key=_signal_ts, default={})
     epoch = str(latest.get("epoch_id") or (latest.get("envelope") or {}).get("epoch_id") or "")
@@ -264,7 +301,14 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
     split = max(1, int(len(episodes) * 0.7)) if episodes else 0
     train, oos = episodes[:split], episodes[split:]
     policies = sorted({policy for values in cache.values() for policy in values})
-    train_rank = sorted((_evaluate(policy, train, cache) for policy in policies), key=lambda row: (row["expectancy_usd"] or -1e9, row["net_pnl_usd"]), reverse=True)
+    train_rank = sorted(
+        (_evaluate(policy, train, cache) for policy in policies),
+        key=lambda row: (
+            row["expectancy_usd"] if row["expectancy_usd"] is not None else -1e9,
+            row["net_pnl_usd"] if row["net_pnl_usd"] is not None else -1e9,
+        ),
+        reverse=True,
+    )
     static_id = train_rank[0]["policy_id"] if train_rank else None
     static_oos = _evaluate(static_id, oos, cache) if static_id else None
     static_train = _evaluate(static_id, train, cache) if static_id else None
@@ -311,17 +355,31 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
         if ranked:
             regime_map[regime] = ranked[0]["policy_id"]
     dynamic_values = []
+    dynamic_unknown_outcomes = 0
     per_regime_oos = defaultdict(list)
     for row in oos:
         regime = _regime_key(row)
         policy = regime_map.get(regime, "CONTROL")
-        value = cache[row["event_id"]].get(policy, 0.0)
+        outcomes = cache.get(row["event_id"], {})
+        if policy not in outcomes:
+            dynamic_unknown_outcomes += 1
+            continue
+        value = float(outcomes[policy])
         dynamic_values.append(value)
         per_regime_oos[regime].append(value)
     dynamic_oos = {
         "independent_episodes": len(dynamic_values),
-        "net_pnl_usd": round(sum(dynamic_values), 4),
-        "expectancy_usd": None if not dynamic_values else round(sum(dynamic_values) / len(dynamic_values), 6),
+        "approved_opportunities": len(oos),
+        "supported_outcomes": len(dynamic_values),
+        "unknown_outcomes": dynamic_unknown_outcomes,
+        "coverage_complete": dynamic_unknown_outcomes == 0,
+        "net_pnl_usd": (
+            None if dynamic_unknown_outcomes else round(sum(dynamic_values), 4)
+        ),
+        "expectancy_usd": (
+            None if dynamic_unknown_outcomes or not dynamic_values
+            else round(sum(dynamic_values) / len(oos), 6)
+        ),
     }
     dynamic_regimes = []
     for regime, train_rows in sorted(regime_train.items()):
@@ -376,8 +434,8 @@ def build_policy_candidate_oos_report(data_dir=".", report_dir=".", *, events=No
     shadow_rank = sorted(
         (_evaluate(policy, shadow_rows, shadow_cache) for policy in shadow_policies),
         key=lambda row: (
-            row["expectancy_usd"] or -1e9,
-            row["net_pnl_usd"],
+            row["expectancy_usd"] if row["expectancy_usd"] is not None else -1e9,
+            row["net_pnl_usd"] if row["net_pnl_usd"] is not None else -1e9,
         ),
         reverse=True,
     )

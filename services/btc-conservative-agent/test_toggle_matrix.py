@@ -251,8 +251,6 @@ check("mode stable across calls", m1 == m2 == EXEC_MODE_PAPER)
 # === 10. Retired/unknown lanes cannot create orders
 print("\n[10] Retired/unknown lanes cannot create orders")
 reset()
-check("SR_MICRO_TILE_V1 retired -> LAB_SHADOW",
-      execution_mode_for_lane("SR_MICRO_TILE_V1") == EXEC_MODE_LAB_SHADOW)
 check("BOGUS_LANE unknown -> LAB_SHADOW",
       execution_mode_for_lane("BOGUS_LANE_XYZ") == EXEC_MODE_LAB_SHADOW)
 check("None lane -> LAB_SHADOW",

@@ -1,31 +1,8 @@
 # Run the read-only desktop analyzer (30-min loop, or --Once) against the
 # canonical Fly data mirror. It binds to loopback and receives no trading,
 # exchange, Fly, Railway, or AI credentials.
-#
-# Usage (from the repo root):
-#   .\scripts\start-home-analyzer.ps1 -Port 9001 -NoWait
-#   .\scripts\start-home-analyzer.ps1 -Port 9001 -NoWait -Restart
-#   .\scripts\start-home-analyzer.ps1 -Once -Port 9001
-#
-# -Port    Dashboard port. Defaults to the home-stack analyzer port (9001).
-# -NoWait  Start the engine detached and return. Stays compatible with -Restart.
-# -Once    Single analyzer pass instead of the 30-minute loop.
-# -Restart Stop any home-analyzer engine for this port and the listener on
-#          -Port, then start clean. Local only: no Fly deploy, no live arm,
-#          no research-data wipe.
-#
-# FRESH digest root for :9001 equal-rights and /api/summary.
-# BTC_AGENT_DATA_DIR stays the fly mirror (often only empty v3\ dirs).
-# BTC_AGENT_REPORT_DIR stays this worktree. Neither one is the cited session.
-# The FRESH compact (performance.trades) lives under the current checkout:
-#   C:\DoxxedCrypto\btc-v31-current\services\btc-conservative-agent\canonical-research-data\analyzer
-# including published_reports, reports, and research_session_archives.
-# Set the env before -Restart so both surfaces read that same tree. When the
-# sibling checkout exists, the launcher fills the env if it is still empty.
-# Do not point BTC_AGENT_DATA_DIR at that tree.
-#   $env:BTC_CANONICAL_ANALYZER_DATA = "C:\DoxxedCrypto\btc-v31-current\services\btc-conservative-agent\canonical-research-data\analyzer"
-#   .\scripts\start-home-analyzer.ps1 -Port 9001 -NoWait -Restart
-param([switch]$Once, [switch]$NoWait, [switch]$Restart, [int]$Port = 0)
+param([switch]$Once, [switch]$NoWait, [switch]$Restart, [switch]$DashboardOnly, [int]$Port = 0,
+      [string]$ShadowScenarioConfig = '')
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir "home-stack-mode.ps1") -ErrorAction SilentlyContinue 2>$null
@@ -37,16 +14,19 @@ $AnalyzerPort = $Port
 
 $Host.UI.RawUI.WindowTitle = if ($Once) { "Doxed Analyzer (once)" } else { "Doxed Analyzer :$AnalyzerPort" }
 $ErrorActionPreference = "Stop"
+if ($DashboardOnly -and ($Once -or $Restart)) { throw 'DASHBOARD_ONLY_INCOMPATIBLE_MODE' }
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 $agentDir = Join-Path $repoRoot "services\btc-conservative-agent"
 . (Join-Path $scriptDir "fly-data-paths.ps1")
+. (Join-Path $scriptDir "local-generation-fence.ps1")
 $flyCanonicalLock = Join-Path $repoRoot "config\fly-canonical.lock.json"
 $analyzerDataDir = if (Test-Path -LiteralPath $flyCanonicalLock) {
   Get-DoxxedFlyMirrorDir
 } else {
   $agentDir
 }
+Assert-LocalGenerationUnfenced -DataRoot $analyzerDataDir -Stage 'analyzer_launcher_start'
 $vaultEnv = Join-Path (Split-Path -Parent $repoRoot) "doxedcryptofounder-secrets\vault\home-bot.env"
 $machineStateBase = if ($env:LOCALAPPDATA) {
   $env:LOCALAPPDATA
@@ -164,33 +144,115 @@ if (Test-Path -LiteralPath $vaultEnv) {
   }
 }
 
+# Explicit durable nonsecret opt-in; never load model economics from the vault.
+# An absent config preserves the disabled default or a validated inherited pin.
+. (Join-Path $scriptDir 'analyzer-scenario-launch-config.ps1')
+if (-not $ShadowScenarioConfig) {
+  $defaultScenarioConfig = Join-Path $repoRoot 'config\analyzer-shadow-scenario.launch.json'
+  if (Test-Path -LiteralPath $defaultScenarioConfig) { $ShadowScenarioConfig = $defaultScenarioConfig }
+}
+$scenarioLaunch = Get-AnalyzerScenarioLaunchConfig -ConfigPath $ShadowScenarioConfig `
+  -ModelFile ([string]$env:BTC_ANALYZER_SHADOW_MODEL_FILE) -ModelSha256 ([string]$env:BTC_ANALYZER_SHADOW_MODEL_SHA256)
+if ($scenarioLaunch.enabled) {
+  $env:BTC_ANALYZER_SHADOW_MODEL_FILE = [string]$scenarioLaunch.model_file
+  $env:BTC_ANALYZER_SHADOW_MODEL_SHA256 = [string]$scenarioLaunch.model_sha256
+}
+
 $env:RESEARCH_DASHBOARD_BIND_HOST = "127.0.0.1"
 $env:RESEARCH_DASHBOARD_PORT = "$AnalyzerPort"
 $env:RESEARCH_DASHBOARD_PUBLIC_URL = "http://127.0.0.1:$AnalyzerPort/"
 $env:ANALYZER_EMBEDDED_DASHBOARD = "0"
 $env:BTC_AGENT_DATA_DIR = $analyzerDataDir
-if (-not $env:BTC_CANONICAL_ANALYZER_DATA) {
-  $siblingCanonical = Join-Path (Split-Path -Parent $repoRoot) "btc-v31-current\services\btc-conservative-agent\canonical-research-data\analyzer"
-  $localCanonical = Join-Path $agentDir "canonical-research-data\analyzer"
-  if (Test-Path -LiteralPath $siblingCanonical) {
-    $env:BTC_CANONICAL_ANALYZER_DATA = $siblingCanonical
-  } elseif (Test-Path -LiteralPath $localCanonical) {
-    $env:BTC_CANONICAL_ANALYZER_DATA = $localCanonical
-  }
-}
 $env:PLATFORM_RELAY_EVIDENCE_FILE = Join-Path $analyzerDataDir "relay_lifecycle_evidence_v1.json"
 $sourceRevision = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or $sourceRevision -notmatch '^[0-9a-fA-F]{40}$') {
   throw "Analyzer source revision could not be resolved to a full Git SHA."
 }
+# A Git SHA is truthful executable provenance only when the analyzer and its
+# import surface match that commit.  Refuse tracked edits or untracked Python
+# modules in the analyzer dependency roots instead of publishing mixed code
+# under the clean HEAD marker.
+$analyzerProvenancePaths = @(
+  "scripts/start-home-analyzer.ps1",
+  "scripts/analyzer-scenario-launch-config.ps1",
+  "scripts/analyzer-scenario-launch-config.py",
+  "services/btc-conservative-agent/analyzer_research_engine_v62.py",
+  "services/btc-conservative-agent/research_dashboard.py",
+  "services/btc-conservative-agent/research_v3_store.py",
+  "services/btc-conservative-agent/dynamic_policy_analyzer.py",
+  "services/btc-conservative-agent/combo_pathway_config.py",
+  "services/btc-conservative-agent/research"
+)
+$dirtyAnalyzerSources = @(
+  & git -C $repoRoot status --porcelain=v1 --untracked-files=all -- @analyzerProvenancePaths 2>$null |
+    Where-Object {
+      $path = ([string]$_).Substring([Math]::Min(3, ([string]$_).Length)).Trim('"')
+      $path -match '\.py$' -or $path -eq 'scripts/start-home-analyzer.ps1' -or $path -eq 'scripts/analyzer-scenario-launch-config.ps1'
+    }
+)
+if ($LASTEXITCODE -ne 0) {
+  throw "Analyzer executable provenance could not be verified against Git HEAD."
+}
+if ($dirtyAnalyzerSources.Count -gt 0) {
+  throw (
+    "REFUSED: analyzer executable provenance is dirty relative to $sourceRevision; " +
+    "commit/revert the imported analyzer source or launch from a clean exact-revision worktree."
+  )
+}
+# This revision identifies the analyzer code that is actually executing.  The
+# deployed Fly/data revision is recorded independently by the canonical sync
+# receipt and report source-data provenance.  Stamping local HEAD as the old
+# Fly revision makes a new analyzer binary falsely appear to be old code.
 $env:SOURCE_GIT_REV = $sourceRevision.ToLowerInvariant()
 # Pin report discovery as well as raw-data discovery. The bridge and desktop
 # launcher are long-lived and can otherwise pass an obsolete report directory
 # into a freshly restarted dashboard.
-$env:BTC_AGENT_REPORT_DIR = $agentDir
+$analyzerReportDir = Join-Path $analyzerDataDir "analyzer"
+New-Item -ItemType Directory -Path $analyzerReportDir -Force | Out-Null
+$env:BTC_AGENT_REPORT_DIR = $analyzerReportDir
 
 . (Join-Path $scriptDir "home-stack-common.ps1") -AnalyzerPort $AnalyzerPort -BridgePort 7810
 . (Join-Path $scriptDir "home-stack-health.ps1")
+
+function Restart-OwnedAnalyzerDashboard {
+  $receiptPath = Join-Path $repoRoot '.home-analyzer-dashboard.pid'
+  $owner = [int](Get-Content -LiteralPath $receiptPath -Raw -ErrorAction Stop)
+  if ($owner -le 0) { throw 'DASHBOARD_OWNER_INVALID' }
+  $listeners = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction Stop)
+  if ($listeners.Count -eq 0 -or @($listeners | Where-Object {
+      [int]$_.OwningProcess -ne $owner -or $_.LocalAddress -notin @('127.0.0.1','::1')
+    }).Count -gt 0) { throw 'DASHBOARD_LISTENER_NOT_EXCLUSIVELY_OWNED_LOOPBACK' }
+  $command = [string](Get-ProcessCommandLineFast -ProcessId $owner)
+  if ($command -notmatch '(^|[\\/\s])research_dashboard\.py(["''\s]|$)' -or
+      $command -notmatch '(^|\s)--standalone(\s|$)' -or
+      $command -match 'analyzer_research_engine') { throw 'DASHBOARD_COMMAND_NOT_OWNED' }
+  $process = Get-Process -Id $owner -ErrorAction Stop
+  $start = $process.StartTime
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+  $again = @(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction Stop)
+  if ($again.Count -eq 0 -or @($again | Where-Object {
+      [int]$_.OwningProcess -ne $owner -or $_.LocalAddress -notin @('127.0.0.1','::1')
+    }).Count -gt 0 -or (Get-Process -Id $owner -ErrorAction Stop).StartTime -ne $start -or
+      [string](Get-ProcessCommandLineFast -ProcessId $owner) -cne $command) { throw 'DASHBOARD_OWNER_CHANGED' }
+  Stop-Process -Id $owner -Force -ErrorAction Stop
+  Wait-Process -Id $owner -Timeout 10 -ErrorAction SilentlyContinue
+  if (@(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction SilentlyContinue).Count -ne 0) {
+    throw 'DASHBOARD_PORT_NOT_RELEASED'
+  }
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+  $dashboard = Start-Process -FilePath 'python' -ArgumentList @('research_dashboard.py','--standalone') `
+    -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+  if ($null -eq $dashboard -or $dashboard.Id -le 0) { throw 'DASHBOARD_START_FAILED' }
+  Set-Content -LiteralPath $receiptPath -Value ([string]$dashboard.Id) -NoNewline -Encoding UTF8
+}
+
+if ($DashboardOnly) {
+  try { Restart-OwnedAnalyzerDashboard } finally {
+    if ($lockHandle) { $lockHandle.Dispose() }
+    Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+  }
+  exit 0
+}
 
 function Get-CanonicalAnalyzerEnginePids([int]$P) {
   $ownedMarker = "--owner-port=$P"
@@ -207,60 +269,17 @@ function Get-CanonicalAnalyzerEnginePids([int]$P) {
   return @(($owned + $legacy) | Sort-Object -Unique)
 }
 
-function Stop-HomeAnalyzerOwners([int]$P) {
-  # Stop the research engine and the loopback dashboard on this port only.
-  # Command lines are checked before a recorded PID is killed so a recycled
-  # PID cannot take down an unrelated process.
-  $stopped = New-Object System.Collections.Generic.List[int]
-  foreach ($procId in @(Get-CanonicalAnalyzerEnginePids $P)) {
-    if (Stop-ProcessIdFast -ProcessId $procId) { [void]$stopped.Add([int]$procId) }
-  }
-  foreach ($name in @(".home-analyzer.pid", ".home-analyzer-dashboard.pid")) {
-    $pidFile = Join-Path $repoRoot $name
-    if (-not (Test-Path -LiteralPath $pidFile)) { continue }
-    $recorded = 0
-    try { $recorded = [int](Get-Content -LiteralPath $pidFile -Raw) } catch { $recorded = 0 }
-    if ($recorded -le 0 -or $stopped.Contains($recorded)) { continue }
-    $commandLine = ""
-    try { $commandLine = [string](Get-ProcessCommandLineFast -ProcessId $recorded) } catch { $commandLine = "" }
-    $owned = (
-      ($commandLine -match 'analyzer_research_engine_v62\.py') -or
-      ($commandLine -match 'research_dashboard\.py')
-    )
-    if ($owned -and (Stop-ProcessIdFast -ProcessId $recorded)) { [void]$stopped.Add($recorded) }
-  }
-  foreach ($procId in @(Stop-ListenPortFast $P)) {
-    $id = [int]$procId
-    if ($id -gt 0 -and -not $stopped.Contains($id)) { [void]$stopped.Add($id) }
-  }
-  foreach ($name in @(".home-analyzer.pid", ".home-analyzer-dashboard.pid")) {
-    Remove-Item -LiteralPath (Join-Path $repoRoot $name) -Force -ErrorAction SilentlyContinue
-  }
-}
-
-if ($Restart) {
-  Write-Host "Restart: stopping any home-analyzer engine and the listener on :$AnalyzerPort, then starting clean." -ForegroundColor Yellow
-  Write-Host "Local only. Does not deploy Fly, arm trading, or wipe research data." -ForegroundColor Yellow
-  Stop-HomeAnalyzerOwners $AnalyzerPort
-  $deadline = (Get-Date).AddSeconds(8)
-  while ((Test-PortOpen $AnalyzerPort) -and (Get-Date) -lt $deadline) {
-    Start-Sleep -Milliseconds 250
-    Stop-ListenPortFast $AnalyzerPort | Out-Null
-  }
-  $remaining = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)
-  if ((Test-PortOpen $AnalyzerPort) -or $remaining.Count -gt 0) {
-    Write-Host "REFUSED: -Restart could not clear :$AnalyzerPort. No new engine was started." -ForegroundColor Red
-    if ($remaining.Count -gt 0) {
-      Write-Host "Still running engine PIDs: $($remaining -join ', ')" -ForegroundColor Yellow
-    }
-    if ($lockHandle) { $lockHandle.Dispose() }
-    Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
-    if (-not $NoWait) { Wait-ForKey }
-    exit 2
-  }
-}
-
 $discoveredEnginePids = @(Get-CanonicalAnalyzerEnginePids $AnalyzerPort)
+if ($Once -and $discoveredEnginePids.Count -gt 0) {
+  Write-Host (
+    "REFUSED: ONCE_ANALYZER_INCUMBENT_EXISTS for :$AnalyzerPort " +
+    "(PIDs $($discoveredEnginePids -join ', ')). No process was stopped or started. " +
+    "Use the normal controlled launcher to reconcile the existing engine."
+  ) -ForegroundColor Red
+  if ($lockHandle) { $lockHandle.Dispose() }
+  Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+  exit 2
+}
 if ($discoveredEnginePids.Count -gt 1) {
   Write-Host (
     "REFUSED: multiple analyzer engines already exist for :$AnalyzerPort " +
@@ -272,6 +291,37 @@ if ($discoveredEnginePids.Count -gt 1) {
   if (-not $NoWait) { Wait-ForKey }
   exit 2
 }
+$expectedRevisionMarker = "--source-revision=$($sourceRevision.ToLowerInvariant())"
+if ($Restart -and $discoveredEnginePids.Count -eq 1 -and -not $Once) {
+  $incumbentPid = [int]$discoveredEnginePids[0]
+  $incumbentCommandLine = [string](Get-ProcessCommandLineFast -ProcessId $incumbentPid)
+  if (-not $incumbentCommandLine.Contains("--owner-port=$AnalyzerPort") -or
+      -not $incumbentCommandLine.Contains($expectedRevisionMarker)) {
+    throw "REFUSED: analyzer restart target does not match the owned port and source revision."
+  }
+  Write-Host "Restarting verified analyzer engine PID $incumbentPid; dashboard remains available." -ForegroundColor Yellow
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+  Stop-Process -Id $incumbentPid -Force -ErrorAction Stop
+  Remove-Item -LiteralPath (Join-Path $repoRoot ".home-analyzer.pid") -Force -ErrorAction SilentlyContinue
+  $discoveredEnginePids = @()
+}
+if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
+  $incumbentPid = [int]$discoveredEnginePids[0]
+  $incumbentCommandLine = [string](Get-ProcessCommandLineFast -ProcessId $incumbentPid)
+  if (-not $incumbentCommandLine.Contains($expectedRevisionMarker)) {
+    Write-Host (
+      "Analyzer engine PID $incumbentPid belongs to another or unproven source revision; " +
+      "replacing the engine while preserving the independent dashboard."
+    ) -ForegroundColor Yellow
+    Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+    Stop-Process -Id $incumbentPid -Force -ErrorAction SilentlyContinue
+    $pidFile = Join-Path $repoRoot ".home-analyzer.pid"
+    if (Test-Path -LiteralPath $pidFile) {
+      Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+    }
+    $discoveredEnginePids = @()
+  }
+}
 if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
   Set-Content -Path (Join-Path $repoRoot ".home-analyzer.pid") `
     -Value "$($discoveredEnginePids[0])" -NoNewline -Encoding UTF8
@@ -280,23 +330,25 @@ if ($discoveredEnginePids.Count -eq 1 -and -not $Once) {
 # Avoid duplicate on THIS port only (local lab :9001 may run in parallel on another port).
 if (Test-PortOpen $AnalyzerPort) {
   $listenerPids = @(Get-AnalyzerListenerPids $AnalyzerPort)
-  $dashboardHealthy = (Test-AnalyzerHealthy)
+  $dashboardAlive = (Test-AnalyzerAlive)
+  $dashboardReady = (Test-AnalyzerHealthy)
   $engineAlive = (Test-AnalyzerEngineAlive)
-  if ($dashboardHealthy -and $listenerPids.Count -eq 1 -and $engineAlive) {
-    Write-Host "Analyzer dashboard and research engine are healthy on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
+  if ($dashboardAlive -and $listenerPids.Count -eq 1 -and $engineAlive) {
+    $state = if ($dashboardReady) { "ready" } else { "alive; generation readiness pending" }
+    Write-Host "Analyzer dashboard is $state and the research engine is alive on :$AnalyzerPort - not starting a duplicate." -ForegroundColor Yellow
     if ($lockHandle) { $lockHandle.Dispose() }
     Remove-Item $lockFile -Force -ErrorAction SilentlyContinue
     if (-not $NoWait) { Wait-ForKey }
     exit 0
   }
-  if ($dashboardHealthy -and $listenerPids.Count -eq 1 -and -not $engineAlive) {
-    Write-Host "Analyzer dashboard is healthy but the research engine is absent - preserving the dashboard and restarting collection." -ForegroundColor Yellow
+  if ($dashboardAlive -and $listenerPids.Count -eq 1 -and -not $engineAlive) {
+    Write-Host "Analyzer dashboard is alive but the research engine is absent - preserving the dashboard and restarting collection." -ForegroundColor Yellow
   } elseif ($listenerPids.Count -gt 1) {
     Write-Host "Port $AnalyzerPort has $($listenerPids.Count) listeners - replacing them with one loopback dashboard owner..." -ForegroundColor Yellow
   } else {
     Write-Host "Port $AnalyzerPort has a stale dashboard listener - clearing and starting the analyzer..." -ForegroundColor Yellow
   }
-  if (-not ($dashboardHealthy -and $listenerPids.Count -eq 1)) {
+  if (-not ($dashboardAlive -and $listenerPids.Count -eq 1)) {
     # The engine and dashboard have separate owners. A stale HTTP listener must
     # never terminate the healthy analyzer engine recorded in
     # .home-analyzer.pid; doing so leaves reports permanently stale until a
@@ -306,6 +358,7 @@ if (Test-PortOpen $AnalyzerPort) {
     if (Test-Path -LiteralPath $dashboardPidFile) {
       Remove-Item -LiteralPath $dashboardPidFile -Force -ErrorAction SilentlyContinue
     }
+    Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
     Stop-ListenPortFast $AnalyzerPort | Out-Null
     Start-Sleep -Seconds 2
   }
@@ -315,6 +368,7 @@ if (Test-PortOpen $AnalyzerPort) {
 # pandas/scikit imports can take several minutes when the bot is busy; making
 # Flask wait behind those imports caused blank pages and false watchdog kills.
 if (-not $Once -and -not (Test-PortOpen $AnalyzerPort)) {
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   $dashboardProc = Start-Process -FilePath "python" `
     -ArgumentList @("research_dashboard.py", "--standalone") `
     -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
@@ -342,9 +396,11 @@ Write-Host ""
 $pyArgs = @("analyzer_research_engine_v62.py")
 if ($Once) { $pyArgs += "--once" }
 $pyArgs += "--owner-port=$AnalyzerPort"
+$pyArgs += $expectedRevisionMarker
 
 if ($NoWait) {
   Write-Host "Starting analyzer detached on :$AnalyzerPort ..."
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   $analyzerProc = Start-Process -FilePath "python" -ArgumentList $pyArgs -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
   # The retired analyzer-auto-restart monitor is intentionally not launched.
   # The explicit launcher/supervisor owns recovery; two independent restart
@@ -369,6 +425,7 @@ $exitCode = 0
 try {
   Write-Host "Starting analyzer in $agentDir ..."
   Write-Host ""
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
   python @pyArgs
   if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { $exitCode = $LASTEXITCODE }
 } catch {

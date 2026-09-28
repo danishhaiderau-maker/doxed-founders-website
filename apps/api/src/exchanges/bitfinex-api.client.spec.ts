@@ -12,9 +12,20 @@ import {
   parseOpenPositionPayload,
   parseOrderHistoryEvidence,
   parseOrderTrade,
+  parseBitfinexBtcPerpConstraints,
   normalizeBitfinexOrderPrice,
   resetBitfinexNonceLanesForTests,
 } from './bitfinex-api.client';
+
+test('public futures config parses exact BTC perpetual venue constraints', () => {
+  assert.deepEqual(parseBitfinexBtcPerpConstraints([[['BTCF0:USTF0', [null, null, null, '0.00004', '100.0', null, null, null, 0.01, 0.005]]]], '2026-08-24T00:00:00.000Z'), {
+    symbol: BITFINEX_BTC_PERP_SYMBOL, minQtyBtc: 0.00004, maxQtyBtc: 100,
+    initialMarginFraction: 0.01, maintenanceMarginFraction: 0.005,
+    priceSignificantDigits: 5, amountDecimals: 8,
+    observedAt: '2026-08-24T00:00:00.000Z', source: 'BITFINEX_PUBLIC_FUTURES_CONFIG',
+  });
+  assert.equal(parseBitfinexBtcPerpConstraints([[['ETHF0:USTF0', []]]]), null);
+});
 
 test('Bitfinex stop prices use the authenticated five-significant-digit venue value', () => {
   assert.equal(normalizeBitfinexOrderPrice(63_066.88), 63_066);

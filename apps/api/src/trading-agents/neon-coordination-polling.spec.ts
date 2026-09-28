@@ -11,8 +11,12 @@ test('coordination status uses a bounded JSON projection', async () => {
     $queryRaw: async (query: { strings?: readonly string[] }) => {
       sqlText = query.strings?.join('?') ?? String(query);
       return [{
-        status: 'PAUSED', exchangeProvider: 'bitfinex', instanceMode: 'live',
-        relayArmedAt: null, copyRelaySimActive: false, lastError: null,
+        status: 'PAUSED',
+        exchangeProvider: 'bitfinex',
+        instanceMode: 'live',
+        relayArmedAt: null,
+        copyRelaySimActive: false,
+        lastError: null,
       }];
     },
   };

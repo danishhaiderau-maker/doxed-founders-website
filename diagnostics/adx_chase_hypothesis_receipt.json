@@ -1,0 +1,74 @@
+{
+  "bitfinex_arm_allowed": false,
+  "blockers": [
+    "INSUFFICIENT_COMPLETE_EPISODES_FOR_PURGED_WF",
+    "INSUFFICIENT_COMPLETE_EPISODES_FOR_PURGED_WF"
+  ],
+  "complete_episode_count": 0,
+  "episode_count": 889,
+  "evaluated_at_unix": 1788432380.1303093,
+  "execution_class": "RESEARCH_ONLY",
+  "hypothesis": {
+    "claim": "When signal-time ADX is HIGH (adx_bucket=STRONG, ADX>=30), an initial limit offset of 0.30% beats closer starts (0.10% / 0.20%) on conservative E[PnL|opportunity] and/or fill-adjusted expectancy.",
+    "evidence_worlds": {
+      "diagnostic": "IDEAL_TOUCH",
+      "observed": "OBSERVED_PAPER",
+      "pnl_sum_across_worlds": false,
+      "primary": "CONSERVATIVE_BBO"
+    },
+    "feature_definitions": {
+      "adx_bucket": {
+        "STRONG": "ADX >= 30",
+        "source": "_adx_bucket"
+      },
+      "leakage_rule": "observed_ts must be <= signal_ts",
+      "observed_ts_required": true,
+      "primary_feature": "trend_strength_bucket"
+    },
+    "hypothesis_id": "HIGH_ADX_FARTHER_CHASE_0_30",
+    "promotion_gates": {
+      "auto_arm_bitfinex": false,
+      "live_policy_change_allowed": false,
+      "relay_eligible_from_this_receipt": false
+    },
+    "schema": "adx_chase_offset_hypothesis_v1",
+    "treatment_cells": {
+      "chase_policies": [
+        "no_chase",
+        "w234_s50_i180",
+        "compressed_0_1_2_4_7_10"
+      ],
+      "offsets_pct": [
+        0.1,
+        0.2,
+        0.27,
+        0.3
+      ],
+      "primary_contrast": {
+        "control_offset_pct": 0.1,
+        "treatment_offset_pct": 0.3
+      }
+    },
+    "validation_protocol": {
+      "fail_closed_statuses": [
+        "UNKNOWN",
+        "INSUFFICIENT_EPISODES",
+        "MISSING_PRE_ENTRY"
+      ],
+      "freeze_once": true,
+      "min_support_per_cell": 20,
+      "reject_n1_perfect_green": true,
+      "screen_on": "inner_purged_walk_forward_training_blocks_only",
+      "sealed_holdout_evaluations": 1
+    }
+  },
+  "hypothesis_id": "HIGH_ADX_FARTHER_CHASE_0_30",
+  "hypothesis_signature": "hyp-e870171cb5f8015f7c8ebaa2",
+  "live_policy_change_allowed": false,
+  "purged_walk_forward": null,
+  "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE",
+  "relay_eligible": false,
+  "schema": "adx_chase_hypothesis_evaluation_receipt_v1",
+  "sealed_holdout": null,
+  "status": "UNKNOWN"
+}

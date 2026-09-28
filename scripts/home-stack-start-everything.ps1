@@ -148,7 +148,7 @@ if ($botUpgradeDeferred) {
 }
 
 # Step 2 — analyzer
-if (-not (Test-AnalyzerHealthy)) {
+if (-not (Test-AnalyzerAlive)) {
   if (Test-AnalyzerHung) {
     Write-Step "[2/4] Clearing hung analyzer on :$AnalyzerPort..."
     $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"

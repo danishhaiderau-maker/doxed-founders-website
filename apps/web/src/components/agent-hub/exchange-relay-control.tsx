@@ -181,7 +181,7 @@ export function ExchangeRelayControl({
           <strong className="text-zinc-400">Start real trading</strong> resumes copy from where you left off
           {rentalExpired
             ? ' after you renew your rental.'
-            : '. It mirrors only the canonical live-eligible Continuous pathway\'s limits, chases, fills, and exits. Type B remains paper/research-only.'}
+            : '. It mirrors only explicitly live-eligible two-lane policy lifecycles; every unknown lane remains fail-closed.'}
         </p>
       )}
     </div>

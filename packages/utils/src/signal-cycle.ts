@@ -116,6 +116,9 @@ export type SignalIntentEnvelope = {
     entry_limit_policy?: string;
     research_venue: string;
     disclaimer: string;
+    requested_margin_source?: string;
+    requested_margin_usd?: number;
+    requested_notional_usd?: number;
   };
 };
 

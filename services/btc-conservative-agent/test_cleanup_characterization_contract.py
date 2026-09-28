@@ -208,34 +208,61 @@ def test_nested_lock_order_has_no_new_inversions():
     visitor = _NestedLockVisitor()
     visitor.visit(_tree())
     expected = {tuple(row) for row in _manifest()["known_nested_lock_exception"]}
+    # Paper-local durable dispatch uses exactly the already-reviewed relay
+    # transaction lock order, not a new inverse edge or relaxed global graph.
+    local_name = "_commit_local_paper_lifecycle_transition"
+    local_pairs = {
+        (local_name, "paper_lifecycle_transition_lock", "paper_lifecycle_file_lock"),
+        (local_name, "paper_lifecycle_transition_lock", "trade_lock"),
+        (local_name, "paper_lifecycle_file_lock", "trade_lock"),
+    }
+    relay_pairs = {(outer, inner) for function, outer, inner in expected
+                   if function == "_commit_paper_lifecycle_transition"}
+    assert {(outer, inner) for _, outer, inner in local_pairs} == relay_pairs
+    assert {row for row in visitor.pairs if row[0] == local_name} == local_pairs
     assert visitor.pairs == expected
 
 
-def test_historical_ui_candidates_are_inventory_only():
+def test_chase_preflight_releases_trade_lock_before_durable_commit():
+    function = next(node for node in _tree().body
+                    if isinstance(node, ast.FunctionDef)
+                    and node.name == "_commit_relay_limit_chase")
+    parents = {child: parent for parent in ast.walk(function)
+               for child in ast.iter_child_nodes(parent)}
+    commits = [node for node in ast.walk(function)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+               and node.func.id == "_commit_paper_lifecycle_transition"]
+    assert len(commits) == 1
+    contexts = []
+    ancestor = parents[commits[0]]
+    while ancestor is not function:
+        if isinstance(ancestor, ast.With):
+            contexts.extend(ast.unparse(item.context_expr) for item in ancestor.items)
+        ancestor = parents[ancestor]
+    assert "paper_lifecycle_transition_lock" in contexts
+    assert "trade_lock" not in contexts
+    visitor = _NestedLockVisitor()
+    visitor.visit(function)
+    assert visitor.pairs == {
+        (function.name, "paper_lifecycle_transition_lock", "trade_lock"),
+    }
+
+
+def test_retired_ui_candidates_are_not_registered():
     candidates = _manifest()["historical_ui_tile_candidates"]
-    assert candidates
-    assert all(row["action"] in {"inventory-only", "preserve-evidence"} for row in candidates)
+    assert candidates == []
     source = SOURCE.read_text(encoding="utf-8")
-    for label in ("Edge Acceleration", "Profit Gates", "tile2_counters"):
-        assert label in source
+    for label in ("Profit Gates", "tile2_counters"):
+        assert label not in source
 
 
-def test_retired_research_controls_are_read_only_and_truthfully_labelled():
+def test_retired_research_controls_are_physically_removed():
     functions = {
         node.name: node
         for node in _tree().body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    profit_toggle = ast.unparse(functions["toggle_profit_gates"])
-    tile_reset = ast.unparse(functions["api_tile2_reset_counters"])
-    tile_metrics = ast.unparse(functions["api_tile2_metrics"])
-    assert "RETIRED_RESEARCH_CONTROL" in profit_toggle
-    assert "save_persistent_config" not in profit_toggle
-    assert "state[" not in profit_toggle
-    assert "RETIRED_RESEARCH_CONTROL" in tile_reset
-    assert "reset_tile2_counters_for_fresh_holdout" not in tile_reset
-    assert "RETIRED_HISTORICAL" in tile_metrics
-    assert "mutable" in tile_metrics
+    assert {"toggle_profit_gates", "api_tile2_reset_counters", "api_tile2_metrics"}.isdisjoint(functions)
     source = SOURCE.read_text(encoding="utf-8")
     assert "safeText('tile2Metrics'" not in source
     assert "safeText('tile2DecisionSummary'" not in source

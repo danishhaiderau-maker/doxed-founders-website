@@ -10,6 +10,8 @@ from __future__ import annotations
 import os
 import time
 
+import pytest
+
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
@@ -158,6 +160,34 @@ def test_booked_exit_is_not_a_better_book_walk(monkeypatch):
     assert abs(booked - trigger) < 0.02
     assert abs(walk - (ENTRY + 5)) < 1.0
     assert abs(booked - walk) > 50
+    assert sim["source"] == "exit_trigger_side_correct"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "PHYSICAL_HARD_STOP_30PCT",
+        "INITIAL_ATR_STOP",
+        "PROFIT_PROTECTION_STOP",
+        "PATH_END_120M",
+    ],
+)
+def test_family_policy_exits_book_the_tick_that_triggered_them(monkeypatch, reason):
+    pos = _short_pos()
+    trigger = _margin_price(-30.0)
+    pos["_exit_eval_price"] = trigger
+    with bot.state_lock:
+        bot.state["bid"] = ENTRY - 5
+        bot.state["ask"] = ENTRY + 500
+        bot.state["price"] = ENTRY
+        bot.state["order_book"] = {
+            "bids": [[ENTRY - 5, 1, 2.0]],
+            "asks": [[ENTRY + 500, 1, 2.0]],
+        }
+    monkeypatch.setattr(bot, "refresh_bbo_state", lambda *a, **k: None)
+    monkeypatch.setattr(bot, "refresh_order_book_state", lambda *a, **k: None)
+    booked, sim = bot.resolve_sim_exit_price(pos, False, reason)
+    assert abs(booked - trigger) < 0.02
     assert sim["source"] == "exit_trigger_side_correct"
 
 

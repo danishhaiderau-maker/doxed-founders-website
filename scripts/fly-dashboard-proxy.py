@@ -18,6 +18,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CANONICAL_UPSTREAM = "https://doxed-btc-bot.fly.dev"
 MIRROR_MUTATION_ALLOWLIST = {
+    "/admin/login",
+    "/admin/logout",
     "/api/set_ai_bands",
     "/api/set_chase_buckets",
     "/api/set_edge_range",
@@ -37,7 +39,6 @@ MIRROR_MUTATION_ALLOWLIST = {
     "/api/toggle_fresh_collection",
     "/api/fresh_epoch_reset",
     "/api/toggle_invert_signal",
-    "/api/toggle_profit_gates",
     "/api/toggle_research_lane",
 }
 FORWARDED_REQUEST_HEADERS = {

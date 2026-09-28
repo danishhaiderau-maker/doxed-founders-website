@@ -6,7 +6,7 @@ import { ExchangeRelayControl } from './exchange-relay-control';
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
-test('active Bitfinex relay identifies Continuous as the only live lane', () => {
+test('active Bitfinex relay identifies the explicit two-lane roster', () => {
   const html = renderToStaticMarkup(
     React.createElement(ExchangeRelayControl, {
       slug: 'conservative-btc',
@@ -22,7 +22,7 @@ test('active Bitfinex relay identifies Continuous as the only live lane', () => 
 
   assert.match(html, /Copying Continuous showcase orders on Bitfinex/);
   assert.equal(html.includes('Continuous + Type B'), false);
-  assert.match(html, /Type B remains paper\/research-only/);
+  assert.match(html, /explicitly live-eligible two-lane policy lifecycles/);
 });
 
 test('renders the durable relay transition without claiming an open position was closed', () => {

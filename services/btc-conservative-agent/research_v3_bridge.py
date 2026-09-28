@@ -1,22 +1,174 @@
 """Dual-write bridge from immutable v2.2 events into normalized V3 ledgers."""
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 import copy
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 import hashlib
 import json
 from pathlib import Path
+import math
 import time
 
 from research_v3_contract import COLLECTOR_VERSION
 from research_v3_store import V3EvidenceStore
 from research_v3_contract import canonical_json, normalize_lifecycle_outcome
+from lifecycle_qualification_horizon import (
+    canonical_path_extrema_usd,
+    canonical_terminal_economics,
+    qualification_post_observation,
+)
+from policy_search_manifest import compact_search_receipt
 
 
 _OHLCV_FIELDS = ("t", "o", "h", "l", "c", "v")
 DEFAULT_DECLARED_ENTRY_TTL_SEC = 30 * 60
 ENTRY_RECONCILIATION_ALLOWANCE_SEC = 3 * 60
+PRE_SIGNAL_CONTEXT_SEC = 3 * 60
+PRE_ENTRY_FEATURES_SCHEMA = "pre_entry_features_v1"
+_POST_DECISION_FEATURE_KEYS = frozenset({
+    "entry_fill_price", "execution_outcome", "exit_price", "exit_reason",
+    "exit_ts", "fees_paid", "fill_price", "filled_qty", "funding_paid",
+    "mae", "mae_usd", "mfe", "mfe_usd", "net_pnl", "net_pnl_usd",
+    "outcome_state", "post_exit", "post_exit_path", "realized_pnl",
+    "slippage", "slippage_usd", "terminal_outcome",
+})
+
+
+@lru_cache(maxsize=4096)
+def _existing_pre_entry_payload_hash(
+    ledger_path_text: str, ledger_size: int, ledger_mtime_ns: int, record_id: str,
+) -> str | None:
+    """Resolve a duplicate receipt without rescanning once per sibling lane."""
+    ledger_path = Path(ledger_path_text)
+    with ledger_path.open("r", encoding="utf-8") as handle:
+        for line_no, line in enumerate(handle, 1):
+            if not line.endswith("\n"):
+                raise ValueError(
+                    f"TRUNCATED_JSONL_LINE:pre_entry_features:{line_no}"
+                )
+            existing = json.loads(line)
+            if existing.get("record_id") == record_id:
+                return str(existing.get("receipt_payload_sha256") or "")
+    return None
+
+
+def _assert_pre_decision_feature_snapshot(value: Any, *, path: str = "features") -> None:
+    """Fail closed if terminal/execution facts leak into a causal feature row."""
+    if isinstance(value, Mapping):
+        for key, child in value.items():
+            normalized = str(key or "").strip().lower()
+            if normalized in _POST_DECISION_FEATURE_KEYS:
+                raise ValueError(f"POST_DECISION_FEATURE_LEAK:{path}.{normalized}")
+            _assert_pre_decision_feature_snapshot(child, path=f"{path}.{normalized}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _assert_pre_decision_feature_snapshot(child, path=f"{path}[{index}]")
+
+
+def _pre_entry_features_receipt(
+    *, store: V3EvidenceStore, source: Mapping[str, Any],
+    identity: Mapping[str, Any], causal_ids: Mapping[str, Any], signal_ts: float,
+    segment_refs: list[dict[str, Any]], features: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Append one immutable, lane-independent pre-decision feature receipt."""
+    features = copy.deepcopy(dict(features))
+    _assert_pre_decision_feature_snapshot(features)
+    search = compact_search_receipt()
+    feature_schema = str(_first(
+        features.get("research_feature_schema_version"),
+        features.get("feature_schema_version"),
+        source.get("feature_schema_version"),
+        "UNVERSIONED_SOURCE_FEATURES",
+    ))
+    feature_sha256 = hashlib.sha256(
+        canonical_json(features).encode("utf-8")
+    ).hexdigest()
+    row = {
+        "record_id": f"pre-entry-features:{identity['episode_id']}",
+        "receipt_schema": PRE_ENTRY_FEATURES_SCHEMA,
+        "capture_schema": features.get("capture_schema"),
+        "captured_at_ts": features.get("captured_at_ts")
+        if features.get("capture_schema") == "measured_feature_capture_v1" else None,
+        "captured_at_timezone": "UTC"
+        if features.get("capture_schema") == "measured_feature_capture_v1" else "UNKNOWN",
+        "source_event_ts": float(signal_ts),
+        "availability_boundary": "PRE_DECISION_ONLY",
+        "episode_id": identity["episode_id"],
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "symbol": identity["symbol"],
+        "opportunity_id": causal_ids["opportunity_id"],
+        "feature_schema_version": feature_schema,
+        "bucket_definition_schema": search["schema"],
+        "bucket_definition_version": search["version"],
+        "bucket_definition_signature": search["signature"],
+        "features": features,
+        "source_evidence_refs": {
+            "feature_snapshot_sha256": feature_sha256,
+            "market_context_segment_refs": copy.deepcopy(segment_refs),
+        },
+    }
+    row["receipt_payload_sha256"] = hashlib.sha256(
+        canonical_json(row).encode("utf-8")
+    ).hexdigest()
+    write = store.append("pre_entry_features", row)
+    if write.get("duplicate"):
+        ledger_path = store.ledger_path("pre_entry_features")
+        stat = ledger_path.stat()
+        existing_hash = _existing_pre_entry_payload_hash(
+            str(ledger_path.resolve()), int(stat.st_size), int(stat.st_mtime_ns),
+            row["record_id"],
+        )
+        if existing_hash != row["receipt_payload_sha256"]:
+            raise ValueError(
+                f"PRE_ENTRY_FEATURE_RECEIPT_COLLISION:{row['record_id']}"
+            )
+    return write
+
+
+def write_pre_entry_evidence_failure(
+    source: Mapping[str, Any], *, lane: str, epoch_id: str, data_dir: str,
+    failure_class: str,
+) -> dict[str, Any]:
+    """Best-effort durable dead letter for a blocked pre-entry evidence write.
+
+    The error message is deliberately excluded: it can contain paths, payloads,
+    or provider text.  This receipt proves that order eligibility was denied;
+    it never substitutes for the missing pre-entry feature evidence.
+    """
+    lane_name = str(lane or "").strip().upper()
+    call_id = str(_first(source.get("shared_ai_call_id"), source.get("trade_id")) or "").strip()
+    if not lane_name or not call_id:
+        raise ValueError("V3_EVIDENCE_FAILURE_IDENTITY_INCOMPLETE")
+    material = dict(source)
+    material["research_lane"] = lane_name
+    event_id = f"lane-decision:{lane_name}:{call_id}"
+    identity = _causal_identity(event_id, material)
+    policy = _paper_policy_identity(str(epoch_id), material)
+    return V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append(
+        "evidence_failure",
+        {
+            "record_id": (
+                f"evidence-failure:{identity['episode_id']}:"
+                f"{policy['policy_signature']}:PRE_ENTRY_FEATURES"
+            ),
+            "receipt_schema": "evidence_write_failure_v1",
+            "failed_ledger": "pre_entry_features",
+            "failure_stage": "LANE_POLICY_VERDICT",
+            "failure_class": str(failure_class or "UNKNOWN")[:80],
+            "resolution": "ORDER_ELIGIBILITY_BLOCKED",
+            "order_eligibility_blocked": True,
+            "observed_ts": time.time(),
+            "episode_id": identity["episode_id"],
+            "event_id": event_id,
+            "shared_ai_call_id": identity["shared_ai_call_id"],
+            "research_lane": lane_name,
+            "opportunity_id": f"opportunity:{identity['episode_id']}",
+            **policy,
+        },
+    )
 
 
 def _normalize_market_rows(rows: list[Any], *, timeframe: str) -> list[dict[str, Any]]:
@@ -36,6 +188,73 @@ def _first(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), None)
 
 
+def _opportunity_market(*sources: Mapping[str, Any]) -> str:
+    """Return only an explicitly observed venue/market label."""
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        feature = source.get("research_feature_snapshot")
+        feature = feature if isinstance(feature, Mapping) else source.get("feature_snapshot_at_signal")
+        feature = feature if isinstance(feature, Mapping) else {}
+        source_features = feature.get("source_features")
+        source_features = source_features if isinstance(source_features, Mapping) else {}
+        market_context = feature.get("market_context")
+        market_context = market_context if isinstance(market_context, Mapping) else {}
+        value = _first(
+            source.get("market"), source.get("exchange"), source.get("venue"),
+            source_features.get("market"), source_features.get("exchange"),
+            source_features.get("venue"), market_context.get("market"),
+            market_context.get("exchange"), market_context.get("venue"),
+        )
+        if value not in (None, ""):
+            return str(value).upper()
+    return "UNKNOWN"
+
+
+def _signal_time_baseline_inputs(*sources: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only explicitly signal/pre-signal reference and BBO evidence."""
+    result: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        declaration = source.get("research_baseline_context_declaration")
+        for timing_key in ('research_timing_config', 'research_timing_config_sha256'):
+            if timing_key in source:
+                if timing_key not in result:
+                    result[timing_key] = copy.deepcopy(source[timing_key])
+                elif result[timing_key] != source[timing_key]:
+                    # A conflict must not silently select a timing assumption.
+                    result[timing_key] = None
+        for context_key in ("original_context_signal_ts", "research_baseline_context_status", "research_fanout_plan_reference"):
+            if context_key in source and context_key not in result:
+                result[context_key] = copy.deepcopy(source[context_key])
+        if isinstance(declaration, Mapping):
+            key = "research_baseline_context_declaration"
+            if key not in result:
+                result[key] = copy.deepcopy(dict(declaration))
+            elif result[key] != declaration:
+                # Never silently select sizing/ATR assumptions from conflicting
+                # signal and order inputs. The consumer rejects this schema.
+                result[key] = {
+                    "schema": "research_baseline_context_conflict_v1",
+                    "reason": "CONFLICTING_RESEARCH_CONTEXT_DECLARATIONS",
+                }
+        features = source.get("research_feature_snapshot")
+        features = features if isinstance(features, Mapping) else source.get("feature_snapshot_at_signal")
+        features = features if isinstance(features, Mapping) else {}
+        bbo = _first(
+            source.get("signal_time_bbo"), source.get("pre_signal_bbo"),
+            features.get("signal_time_bbo"), features.get("pre_signal_bbo"),
+            features.get("bbo"),
+        )
+        if isinstance(bbo, Mapping) and "signal_time_bbo" not in result:
+            result["signal_time_bbo"] = copy.deepcopy(dict(bbo))
+        signal_price = _first(source.get("signal_price"), features.get("signal_price"))
+        if signal_price not in (None, "") and "signal_price" not in result:
+            result["signal_price"] = signal_price
+    return result
+
+
 def _timestamp(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -48,11 +267,257 @@ def _timestamp(value: Any) -> float | None:
             return None
 
 
+def _positive_finite(value: Any) -> float | None:
+    """Return a usable market value, never raising on hostile tape rows."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _paper_atr14_selection(*sources: Mapping[str, Any]):
+    """Preserve legacy numeric precedence, without implying observation time."""
+    for source_index, source in enumerate(sources):
+        if not isinstance(source, Mapping):
+            continue
+        context = source.get("context") if isinstance(source.get("context"), Mapping) else {}
+        ai_input = source.get("ai_input") if isinstance(source.get("ai_input"), Mapping) else {}
+        # Persisted AI inputs wrap this receipt under ``context``. Shared
+        # in-process child-lane signals carry the same observed receipt at the
+        # top level. Accept both shapes without deriving or fabricating ATR.
+        direct_cycle = source.get("cycle_3m_universe")
+        nested_cycle = context.get("cycle_3m_universe")
+        ai_input_cycle = ai_input.get("cycle_3m_universe")
+        cycle = (
+            direct_cycle
+            if isinstance(direct_cycle, Mapping)
+            else nested_cycle
+            if isinstance(nested_cycle, Mapping)
+            else ai_input_cycle
+            if isinstance(ai_input_cycle, Mapping)
+            else {}
+        )
+        research = source.get("research_feature_snapshot") if isinstance(source.get("research_feature_snapshot"), Mapping) else {}
+        market = research.get("market_context") if isinstance(research.get("market_context"), Mapping) else {}
+        cycle_path = "cycle_3m_universe" if isinstance(direct_cycle, Mapping) else "context.cycle_3m_universe" if isinstance(nested_cycle, Mapping) else "ai_input.cycle_3m_universe"
+        for path, value in (
+            ("atr14_pct_at_fill", source.get("atr14_pct_at_fill")),
+            ("atr14_pct_3m", source.get("atr14_pct_3m")),
+            ("atr14_pct", source.get("atr14_pct")),
+            (f"{cycle_path}.atr14_pct_3m", cycle.get("atr14_pct_3m")),
+            ("research_feature_snapshot.atr14_pct_3m", research.get("atr14_pct_3m")),
+            ("research_feature_snapshot.market_context.atr14_pct_3m", market.get("atr14_pct_3m")),
+        ):
+            number = None if isinstance(value, bool) else _positive_finite(value)
+            if number is not None:
+                return number, source_index, path
+    return None, None, None
+
+
+def _paper_atr14_pct_3m(*sources: Mapping[str, Any]) -> float | None:
+    """Legacy ATR value reader; source selection is not fill-time proof."""
+    return _paper_atr14_selection(*sources)[0]
+
+
+def _exact_positive_time(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return result if result.is_finite() and result > 0 else None
+
+
+def _paper_fill_atr_evidence(position, order, *, fill_ts, event_id):
+    value, source_index, source_path = _paper_atr14_selection(position, order)
+    result = {"atr14_pct_at_fill": value,
+              "atr14_pct_basis": "UNVERIFIED_TIMING_FALLBACK" if value is not None else "UNAVAILABLE",
+              "atr14_pct_source": None if source_index is None else f"{('position', 'order')[source_index]}.{source_path}",
+              "atr14_fill_observation": None, "atr14_fill_observation_verified": False,
+              "atr14_provenance_blockers": ["FILL_TIME_ATR_OBSERVATION_MISSING"]}
+    if value is None:
+        return result
+    source = (position, order)[source_index]
+    observation = source.get("atr14_fill_observation")
+    if not isinstance(observation, Mapping):
+        return result
+    # A numeric field name, signal snapshot, or policy's atr_source label does
+    # not prove a measurement at the fill. Require the actual causal receipt.
+    defects = []
+    unsigned = {k: v for k, v in observation.items() if k != "receipt_sha256"}
+    if observation.get("receipt_sha256") != hashlib.sha256(canonical_json(unsigned).encode()).hexdigest():
+        defects.append("FILL_TIME_ATR_RECEIPT_HASH_INVALID")
+    if (observation.get("schema") != "paper_fill_atr_observation_v1"
+            or observation.get("atr_basis") != "EXPLICIT_AT_FILL_OBSERVATION"
+            or observation.get("timeframe_sec") != 180 or observation.get("period") != 14
+            or not isinstance(observation.get("provenance"), str) or not observation["provenance"].strip()
+            or not isinstance(event_id, str) or not event_id.strip()
+            or observation.get("event_id") != event_id):
+        defects.append("FILL_TIME_ATR_PROVENANCE_INVALID")
+    source_sha = observation.get("source_candles_sha256")
+    if not isinstance(source_sha, str) or len(source_sha) != 64 or any(c not in "0123456789abcdef" for c in source_sha):
+        defects.append("FILL_TIME_ATR_SOURCE_HASH_MISSING")
+    filled, observed, available, candle_end = (_exact_positive_time(item) for item in (
+        fill_ts, observation.get("observed_ts"), observation.get("available_at_ts"), observation.get("last_closed_candle_ts")))
+    if (filled is None or observed != filled or available is None or available > filled
+            or candle_end is None or candle_end > filled or available < candle_end
+            or filled - candle_end >= Decimal(180)):
+        defects.append("FILL_TIME_ATR_NOT_EXACT_CAUSAL_OBSERVATION")
+    observed_value = _positive_finite(observation.get("atr_pct"))
+    if (isinstance(observation.get("atr_pct"), bool) or observed_value != value
+            or _exact_positive_time(observation.get("atr_pct")) != Decimal(str(value))):
+        defects.append("FILL_TIME_ATR_VALUE_MISMATCH")
+    result["atr14_provenance_blockers"] = sorted(set(defects))
+    if not defects:
+        result.update(atr14_pct_basis="FILL_TIME_3M_ATR14",
+                      atr14_fill_observation=copy.deepcopy(dict(observation)),
+                      atr14_fill_observation_verified=True)
+    return result
+
+
+def _paper_fill_execution_receipt(
+    order: Mapping[str, Any], position: Mapping[str, Any], signal: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Freeze the exact conservative fill evidence instead of implying it."""
+    evidence = order.get("source_order_market_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    observation = evidence.get("latest_observation")
+    observation = observation if isinstance(observation, Mapping) else {}
+    gate = order.get("venue_fill_gate")
+    gate = gate if isinstance(gate, Mapping) else {}
+    source = observation or gate
+    verdict = str(_first(source.get("verdict"), source.get("gate_verdict")) or "").upper()
+
+    def number(*values: Any) -> float | None:
+        value = _first(*values)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    schedule = order.get("research_chase_schedule")
+    schedule = schedule if isinstance(schedule, Mapping) else {}
+    requested = number(
+        order.get("requested_qty"), schedule.get("requested_qty"), order.get("qty")
+    )
+    filled = number(position.get("qty"), order.get("filled_qty"), order.get("qty"))
+    remaining = max(0.0, requested - filled) if requested is not None and filled is not None else None
+    required = (
+        source.get("best_bid"), source.get("best_ask"),
+        source.get("side_correct_executable_quote"), source.get("visible_executable_qty"),
+        source.get("book_ts"),
+    )
+    supported = verdict == "EXECUTABLE" and all(value not in (None, "") for value in required)
+    fill_sim = order.get("fill_sim") if isinstance(order.get("fill_sim"), Mapping) else {}
+    return {
+        "execution_basis": "CONSERVATIVE_BBO_DEPTH" if supported else "UNSUPPORTED",
+        "conservative_fill_supported": supported,
+        "fill_gate_policy": _first(source.get("gate_policy"), evidence.get("gate_policy")),
+        "fill_gate_verdict": verdict or None,
+        "activation_ts": _first(source.get("activation_ts"), evidence.get("activation_ts")),
+        "limit_generation": _first(source.get("generation"), order.get("limit_generation"), 0),
+        "original_limit_price": number(source.get("original_limit_price"), order.get("orig_limit")),
+        "current_limit_price": number(source.get("current_limit_price"), order.get("limit_price")),
+        "requested_qty": requested,
+        "filled_qty": filled,
+        "remaining_qty": remaining,
+        "partial_fill": bool(order.get("partial_fill")) or bool(remaining and remaining > 0),
+        "book_ts": _first(source.get("book_ts"), source.get("market_ts")),
+        "book_age_sec": number(source.get("book_age_sec")),
+        "best_bid": number(source.get("best_bid")),
+        "best_ask": number(source.get("best_ask")),
+        "side_correct_executable_quote": number(source.get("side_correct_executable_quote")),
+        "visible_executable_qty": number(source.get("visible_executable_qty")),
+        "recent_aggressor_qty": number(source.get("recent_aggressor_qty")),
+        "entry_slippage_from_signal_usd": number(
+            position.get("entry_slippage"), order.get("entry_slippage")
+        ),
+        "book_walk_slippage_usd": number(fill_sim.get("slippage_usd"), order.get("book_slippage_usd")),
+        "fill_time_revalidation": copy.deepcopy(
+            order.get("fill_time_revalidation")
+            if isinstance(order.get("fill_time_revalidation"), Mapping)
+            else {"performed": False, "result": "UNAVAILABLE"}
+        ),
+    }
+
+
+def _normalized_partial_exits(outcome: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Keep reduce-only legs comparable without guessing missing quantities/PnL."""
+    rows: list[dict[str, Any]] = []
+    for index, raw in enumerate(outcome.get("partial_exit_receipts") or []):
+        if not isinstance(raw, Mapping):
+            continue
+        rows.append({
+            "sequence": index + 1, "ts": _first(raw.get("ts"), raw.get("observed_ts")),
+            "reason": _first(raw.get("reason"), raw.get("exit_reason"), raw.get("action")),
+            "price": raw.get("price"), "closed_qty": raw.get("closed_qty"),
+            "remaining_fraction": raw.get("remaining_fraction"),
+            "realized_gross_usd": raw.get("realized_gross_usd"),
+            "realized_net_usd": raw.get("realized_net_usd"),
+        })
+    return rows
+
+
+def _observed_context(source: Mapping[str, Any], *, phase: str) -> dict[str, Any]:
+    """Normalize already-observed context; unavailable values remain null."""
+    prefix = "entry" if phase == "ENTRY" else "exit"
+    nested = source.get(f"{prefix}_context")
+    nested = nested if isinstance(nested, Mapping) else {}
+    return {
+        "phase": phase,
+        "observed_ts": _first(nested.get("observed_ts"), source.get(f"{prefix}_context_ts")),
+        "atr14_pct_3m": _first(nested.get("atr14_pct_3m"), source.get(f"atr14_pct_at_{prefix}")),
+        "regime": _first(nested.get("regime"), source.get(f"{prefix}_regime"), source.get("regime") if phase == "ENTRY" else None),
+        "adx": _first(nested.get("adx"), source.get(f"adx_at_{prefix}")),
+        "sr_state": _first(nested.get("sr_state"), source.get(f"sr_state_at_{prefix}"), source.get("sr_state") if phase == "ENTRY" else None),
+        "dist_to_support": _first(nested.get("dist_to_support"), source.get(f"distance_to_support_at_{prefix}"), source.get("distance_to_support") if phase == "ENTRY" else None),
+        "dist_to_resistance": _first(nested.get("dist_to_resistance"), source.get(f"distance_to_resistance_at_{prefix}"), source.get("distance_to_resistance") if phase == "ENTRY" else None),
+        "ema9": _first(nested.get("ema9"), source.get(f"ema9_at_{prefix}")),
+        "ema21": _first(nested.get("ema21"), source.get(f"ema21_at_{prefix}")),
+        "ema200": _first(nested.get("ema200"), source.get(f"ema200_at_{prefix}")),
+    }
+
+
+def _paper_path_receipt(rows: list[Mapping[str, Any]], *, direction: str, entry_price: Any, fill_ts: Any) -> dict[str, Any]:
+    """Derive extrema timing only from the frozen observed path."""
+    empty = {"basis": "UNAVAILABLE", "mfe_pct": None, "mae_pct": None,
+             "time_to_mfe_sec": None, "time_to_mae_sec": None}
+    try:
+        entry, start = float(entry_price), float(fill_ts)
+    except (TypeError, ValueError):
+        return empty
+    if entry <= 0 or not rows:
+        return empty
+    sign = 1.0 if str(direction).upper() == "LONG" else -1.0
+    samples = []
+    for row in rows:
+        ts = _timestamp(_first(row.get("ts"), row.get("bucket_ts")))
+        try:
+            price = float(_first(row.get("price"), row.get("last")))
+        except (TypeError, ValueError):
+            continue
+        if ts is not None and ts >= start:
+            samples.append((ts, ((price - entry) / entry) * 100.0 * sign))
+    if not samples:
+        return empty
+    mfe_ts, mfe = max(samples, key=lambda item: item[1])
+    mae_ts, mae = min(samples, key=lambda item: item[1])
+    return {"basis": "OBSERVED_1S_PRICE_PATH", "mfe_pct": round(mfe, 6),
+            "mae_pct": round(mae, 6), "time_to_mfe_sec": round(mfe_ts - start, 3),
+            "time_to_mae_sec": round(mae_ts - start, 3)}
+
+
 def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Load the immutable one-second tape covering one observed paper path."""
     source = Path(data_dir) / "market_microstructure_1s.jsonl"
     rows_by_ts: dict[float, dict[str, Any]] = {}
     parse_errors = 0
+    invalid_timestamp_rows = 0
+    invalid_price_rows = 0
+    invalid_bbo_rows = 0
+    invalid_depth_rows = 0
     if source.is_file() and end_ts >= start_ts:
         with source.open("r", encoding="utf-8-sig") as handle:
             for line in handle:
@@ -64,19 +529,41 @@ def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> t
                 if not isinstance(raw, Mapping):
                     continue
                 ts = _timestamp(_first(raw.get("bucket_ts"), raw.get("ts"), raw.get("t")))
-                price = _first(raw.get("last"), raw.get("price"), raw.get("mark"))
-                if ts is None or price in (None, "") or ts < start_ts or ts > end_ts:
+                if ts is None or not math.isfinite(ts):
+                    invalid_timestamp_rows += 1
+                    continue
+                if ts < start_ts or ts > end_ts:
+                    continue
+                price = _positive_finite(_first(raw.get("last"), raw.get("price"), raw.get("mark")))
+                if price is None:
+                    invalid_price_rows += 1
                     continue
                 row = dict(raw)
                 # Candidate replay consumes explicit ts/price while the full
                 # BBO/depth row remains available for conservative fills.
                 row["ts"] = ts
-                row["price"] = float(price)
+                row["price"] = price
                 rows_by_ts[ts] = row
     rows = [rows_by_ts[key] for key in sorted(rows_by_ts)]
     times = list(sorted(rows_by_ts))
     gaps = [right - left for left, right in zip(times, times[1:])]
     max_gap = max(gaps) if gaps else None
+    requested_bounds_complete = bool(times) and times[0] <= start_ts + 2.0 and times[-1] >= end_ts - 2.0
+    bbo_rows = []
+    depth_rows = []
+    for row in rows:
+        bid = _positive_finite(row.get("bid"))
+        ask = _positive_finite(row.get("ask"))
+        if bid is None or ask is None or ask < bid:
+            invalid_bbo_rows += 1
+            continue
+        bbo_rows.append(row)
+        bid_qty = _positive_finite(_first(row.get("bid_qty"), row.get("bid_size")))
+        ask_qty = _positive_finite(_first(row.get("ask_qty"), row.get("ask_size")))
+        if bid_qty is None or ask_qty is None:
+            invalid_depth_rows += 1
+            continue
+        depth_rows.append(row)
     coverage = {
         "schema": "paper_market_segment_coverage_v1",
         "requested_start_ts": float(start_ts),
@@ -86,9 +573,45 @@ def _paper_market_segment(data_dir: str, *, start_ts: float, end_ts: float) -> t
         "row_count": len(rows),
         "max_gap_sec": max_gap,
         "two_second_or_better": bool(rows) and (max_gap is None or max_gap <= 2.0),
+        "requested_bounds_complete": requested_bounds_complete,
+        "bbo_row_count": len(bbo_rows),
+        "depth_row_count": len(depth_rows),
+        "all_rows_have_valid_bbo": bool(rows) and len(bbo_rows) == len(rows),
+        "all_rows_have_visible_depth": bool(rows) and len(depth_rows) == len(rows),
         "parse_errors": parse_errors,
+        "invalid_timestamp_rows": invalid_timestamp_rows,
+        "invalid_price_rows": invalid_price_rows,
+        "invalid_bbo_rows": invalid_bbo_rows,
+        "invalid_depth_rows": invalid_depth_rows,
     }
     return rows, coverage
+
+
+@lru_cache(maxsize=512)
+def _pre_signal_market_segment(
+    data_dir: str, signal_ts: float,
+) -> tuple[tuple[dict[str, Any], ...], dict[str, Any]]:
+    """Freeze one shared, causal lookback without implying future path data."""
+    rows, coverage = _paper_market_segment(
+        data_dir,
+        start_ts=float(signal_ts) - PRE_SIGNAL_CONTEXT_SEC,
+        end_ts=float(signal_ts),
+    )
+    receipt = dict(coverage)
+    receipt.update({
+        "context_role": "PRE_SIGNAL_ONLY",
+        "lookback_sec": PRE_SIGNAL_CONTEXT_SEC,
+        "entry_path_included": False,
+        "future_exit_path_included": False,
+        "future_path_status": "NOT_CAPTURED_AT_DECISION_TIME",
+        "horizon_coverage": {
+            "pre_signal_context": bool(coverage.get("requested_bounds_complete")),
+            "decision_to_entry_terminal": False,
+            "entry_to_exit_terminal": False,
+            "post_exit": False,
+        },
+    })
+    return tuple(rows), receipt
 
 
 def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
@@ -116,6 +639,30 @@ def _causal_identity(event_id: str, *sources: Mapping[str, Any]) -> dict[str, An
             "grouping_basis": grouping_basis}
 
 
+def _explicit_causal_ids(
+    *, epoch_id: str, event_id: str, episode_id: str,
+    include_schedule: bool = False, include_fill: bool = False,
+    tape_id: str | None = None,
+) -> dict[str, Any]:
+    """Name real causal objects without inferring equivalence from time/price.
+
+    These IDs identify the already-existing opportunity, paper-order schedule,
+    primary fill slot and immutable tape object.  They are deliberately based
+    only on their durable causal owner; a missing schedule/tape/fill remains
+    missing rather than being reconstructed heuristically downstream.
+    """
+    ids: dict[str, Any] = {
+        "opportunity_id": f"opportunity:{episode_id}",
+    }
+    if include_schedule:
+        ids["schedule_id"] = f"schedule:{epoch_id}:{event_id}:paper-primary"
+    if include_fill:
+        ids["fill_id"] = f"fill:{epoch_id}:{event_id}:paper-primary"
+    if tape_id:
+        ids["tape_id"] = str(tape_id)
+    return ids
+
+
 def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[str, Any]:
     """Derive a lane-scoped identity instead of reusing the live CONTROL tag."""
     for source in sources:
@@ -123,18 +670,37 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         if (
             source.get("policy_identity_schema") == "paper_policy_identity_v3"
             and isinstance(frozen_spec, Mapping)
-            and source.get("policy_id")
-            and source.get("policy_signature")
-            and source.get("policy_epoch_id")
+            and frozen_spec.get("policy_id")
         ):
+            # The immutable spec is the authority.  Sparse lifecycle merges can
+            # accidentally combine that spec with the base CONTROL signature
+            # carried by a master signal.  Trusting the mismatched top-level
+            # fields contaminated a terminal NO_ORDER row even though its
+            # policy material still described the correct Patient lane.
+            spec = copy.deepcopy(dict(frozen_spec))
+            signature = "paper-policy-" + hashlib.sha256(
+                canonical_json(spec).encode("utf-8")
+            ).hexdigest()[:20]
+            policy_epoch_id = "paper-policy-epoch-" + hashlib.sha256(
+                f"{epoch_id}|{signature}".encode("utf-8")
+            ).hexdigest()[:20]
             return {
                 "policy_identity_schema": "paper_policy_identity_v3",
-                "policy_id": str(source["policy_id"]),
-                "policy_signature": str(source["policy_signature"]),
-                "policy_epoch_id": str(source["policy_epoch_id"]),
-                "base_policy_signature": source.get("base_policy_signature"),
+                "policy_id": str(spec["policy_id"]),
+                "policy_signature": signature,
+                "policy_epoch_id": policy_epoch_id,
+                "base_policy_signature": (
+                    spec.get("base_policy_signature")
+                    or source.get("base_policy_signature")
+                ),
                 "base_policy_epoch_id": source.get("base_policy_epoch_id"),
-                "paper_policy_spec": copy.deepcopy(dict(frozen_spec)),
+                "paper_policy_spec": spec,
+                "policy_execution_scope": "PAPER_RESEARCH_ONLY",
+                "relay_capability": (
+                    "RELAY_ELIGIBLE"
+                    if bool(spec.get("relay_eligible"))
+                    else "NOT_RELAY_ELIGIBLE"
+                ),
             }
     research_lane = str(_first(*(source.get("research_lane") for source in sources)) or "").strip()
     policy_id = str(_first(
@@ -165,7 +731,13 @@ def _paper_policy_identity(epoch_id: str, *sources: Mapping[str, Any]) -> dict[s
         "declared_entry_ttl_sec": float(declared_entry_ttl_sec),
         "entry_reconciliation_allowance_sec": ENTRY_RECONCILIATION_ALLOWANCE_SEC,
         "exit_config": _first(*(source.get("exit_config") for source in sources)),
-        "paper_only": bool(_first(*(source.get("paper_only") for source in sources), True)),
+        # V3 policy evidence describes the canonical local paper lifecycle.
+        # Whether that lifecycle is eligible for a separately armed relay is
+        # represented only by ``relay_eligible``.  Deriving this signed field
+        # from sparse order dictionaries allowed a relay-capable lane to flip
+        # from paper_only=true at decision time to false at submit time,
+        # minting two policy signatures for one episode.
+        "paper_only": True,
         "relay_eligible": bool(_first(*(source.get("relay_eligible") for source in sources), relay_default)),
         "base_policy_signature": base_signature or None,
     }
@@ -222,6 +794,10 @@ def dual_write_lane_entry_resolution(
     material["research_lane"] = lane_name
     identity = _causal_identity(f"lane-entry:{lane_name}:{call_id}", material)
     policy = _paper_policy_identity(str(epoch_id), material)
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=identity["event_id"],
+        episode_id=identity["episode_id"],
+    )
     now_ts = float(observed_ts if observed_ts is not None else time.time())
     signal_ts = float(_first(
         source.get("signal_ts"), source.get("shared_ai_call_ts_epoch"),
@@ -235,6 +811,8 @@ def dual_write_lane_entry_resolution(
         "AWAITING": "awaiting", "ORDER_SUBMITTED": "submitted", "NO_ORDER": "no-order",
     }[resolution]
     terminal_no_order = resolution == "NO_ORDER"
+    segment_refs = list(source.get("market_context_segment_refs") or [])
+    segment_coverage = dict(source.get("market_context_segment_coverage") or {})
     row = {
         "record_id": (
             f"lifecycle:{identity['episode_id']}:{policy['policy_signature']}:"
@@ -245,6 +823,7 @@ def dual_write_lane_entry_resolution(
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "research_lane": lane_name,
         "resolution_scope": "LANE_ENTRY",
+        "research_fanout_plan_reference": copy.deepcopy(source.get("research_fanout_plan_reference")),
         "entry_resolution": resolution,
         "entry_resolution_terminal": resolution in {"ORDER_SUBMITTED", "NO_ORDER"},
         "exact_reason": str(exact_reason or "UNSPECIFIED"),
@@ -255,6 +834,14 @@ def dual_write_lane_entry_resolution(
         "terminal": terminal_no_order,
         "ranking_eligible": False,
         "ranking_blocker": "NO_ORDER" if terminal_no_order else "PATH_NOT_MATURED",
+        "restart_recovery_provenance": copy.deepcopy(
+            source.get("_restart_recovery_provenance")
+            or source.get("restart_recovery_provenance")
+            or {}
+        ),
+        "market_context_segment_refs": segment_refs,
+        "market_context_segment_coverage": segment_coverage,
+        **causal_ids,
         **policy,
     }
     write = V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append("lifecycle", row)
@@ -262,6 +849,75 @@ def dual_write_lane_entry_resolution(
         "schema": "v3_lane_entry_resolution_receipt_v1", "epoch_id": str(epoch_id),
         **identity, "entry_resolution": resolution, "write": write,
     }
+
+
+def _bounded_pre_ai_skip_reason(value):
+    """Only enumerated gate labels and bounded numeric gate measurements."""
+    import re
+    if not isinstance(value, str) or len(value) > 64:
+        return None
+    if value in {'RESEARCH_OBSERVATION_DISABLED', 'NO_PERIODIC_TRIGGER'}:
+        return value
+    if re.fullmatch(r'(?:AI_COOLDOWN_[0-9]{1,6}(?:\.[0-9]{1,6})?s|RESEARCH_QUALITY_-?[0-9]{1,6})', value):
+        return value
+    return None
+
+
+def write_pre_ai_scan_opportunity(source, *, epoch_id, data_dir):
+    """Observed research scan, not an AI verdict or executable lane decision."""
+    scan=str(source.get('research_scan_id') or '')
+    if not scan.startswith('scan-census-'): raise ValueError('PRE_AI_SCAN_ID_MISSING')
+    material={**source,'shared_ai_call_id':scan,'raw_direction':'UNKNOWN','executed_direction':'UNKNOWN'}
+    event_id='pre-ai-scan:'+scan
+    identity=_causal_identity(event_id,material)
+    causal_ids=_explicit_causal_ids(epoch_id=epoch_id,event_id=event_id,episode_id=identity['episode_id'])
+    signal_ts=_positive_finite(source.get('signal_ts'))
+    features=source.get('feature_snapshot_at_signal') or {}
+    if (signal_ts is None or isinstance(source.get('signal_ts'),bool) or not isinstance(features,Mapping)
+            or features.get('capture_schema')!='measured_feature_capture_v1'):
+        raise ValueError('PRE_AI_MEASURED_CONTEXT_MISSING')
+    captured=_positive_finite(features.get('captured_at_ts'))
+    if captured is None or isinstance(features.get('captured_at_ts'),bool) or captured>signal_ts:
+        raise ValueError('PRE_AI_CAPTURE_TIME_INVALID_OR_FUTURE')
+    store=V3EvidenceStore(data_dir,epoch_id=epoch_id)
+    segment_rows,coverage=_pre_signal_market_segment(str(Path(data_dir).resolve()),signal_ts)
+    refs=[]
+    if segment_rows:
+        refs.append(store.put_market_segment(source='LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL',
+            symbol=identity['symbol'],timeframe='1s',start_ts=signal_ts-PRE_SIGNAL_CONTEXT_SEC,
+            end_ts=signal_ts,rows=segment_rows))
+        if 'signal_time_bbo' not in _signal_time_baseline_inputs(material):
+            for quote in reversed(segment_rows):
+                source_at=_positive_finite(quote.get('source_ts'))
+                observed_at=_positive_finite(quote.get('observed_at_ts'))
+                if (source_at is not None and observed_at is not None
+                        and max(source_at,observed_at)<=signal_ts
+                        and all(_positive_finite(quote.get(k)) is not None for k in ('bid','ask','bid_qty','ask_qty'))):
+                    material['signal_time_bbo']={k:quote[k] for k in
+                        ('bid','ask','bid_qty','ask_qty','source_ts','observed_at_ts')}
+                    break
+    feature_write=_pre_entry_features_receipt(store=store,source=material,identity=identity,
+        causal_ids=causal_ids,signal_ts=signal_ts,segment_refs=refs,features=features)
+    if (feature_write.get('blocked') or feature_write.get('deferred')
+            or not (feature_write.get('written') is True or feature_write.get('duplicate') is True)):
+        raise ValueError('PRE_AI_FEATURE_RECEIPT_NOT_DURABLE')
+    opportunity=store.append('opportunity',{
+        'record_id':causal_ids['opportunity_id'],**causal_ids,'episode_id':identity['episode_id'],
+        'shared_ai_call_id':scan,'research_scan_id':scan,'actual_ai_call_id':None,
+        'ai_evaluated':False,'raw_ai_decision':'AI_NOT_CALLED',
+        'raw_direction':'UNKNOWN','executed_direction':'UNKNOWN','grouping_basis':'SHARED_RESEARCH_SCAN',
+        'signal_ts':signal_ts,'symbol':identity['symbol'],'market':_opportunity_market(material),
+        'feature_snapshot_at_signal':features,'market_context_segment_refs':refs,
+        'market_context_segment_coverage':coverage,'research_skip_reason':source.get('research_skip_reason'),
+        'research_skip_exact_reason':_bounded_pre_ai_skip_reason(source.get('research_skip_exact_reason')),
+        **_signal_time_baseline_inputs(material)})
+    from research_scan_census import observe_opportunity
+    observe_opportunity(store,opportunity,'AI_NOT_CALLED')
+    if (opportunity.get('blocked') or opportunity.get('deferred')
+            or not (opportunity.get('written') is True or opportunity.get('duplicate') is True)):
+        raise ValueError('PRE_AI_OPPORTUNITY_NOT_DURABLE')
+    return {'opportunity':opportunity,'feature_receipt':feature_write,'ai_evaluated':False,
+            'qualification_eligible':False}
 
 
 def dual_write_lane_decision(
@@ -291,6 +947,9 @@ def dual_write_lane_decision(
     event_id = f"lane-decision:{lane_name}:{call_id}"
     identity = _causal_identity(event_id, material)
     policy = _paper_policy_identity(str(epoch_id), material)
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+    )
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     signal_ts = float(_first(
         source.get("signal_ts"), source.get("shared_ai_call_ts_epoch"),
@@ -303,17 +962,120 @@ def dual_write_lane_decision(
         else "NO_TRADE" if execution_disposition != "ORDER_ELIGIBLE"
         else "CENSORED"
     )
+    segment_refs: list[dict[str, Any]] = []
+    segment_writes: list[dict[str, Any]] = []
+    baseline_inputs = _signal_time_baseline_inputs(source)
+    pre_entry_features = copy.deepcopy(_first(
+        source.get("feature_snapshot_at_signal"),
+        source.get("research_feature_snapshot"),
+    ) or {})
+    if not isinstance(pre_entry_features, Mapping):
+        raise ValueError("PRE_ENTRY_FEATURE_SNAPSHOT_NOT_MAPPING")
+    pre_entry_features = dict(pre_entry_features)
+    _assert_pre_decision_feature_snapshot(pre_entry_features)
+    segment_coverage: dict[str, Any] = {
+        "context_role": "PRE_SIGNAL_ONLY",
+        "lookback_sec": PRE_SIGNAL_CONTEXT_SEC,
+        "entry_path_included": False,
+        "future_exit_path_included": False,
+        "future_path_status": "NOT_CAPTURED_AT_DECISION_TIME",
+        "horizon_coverage": {
+            "pre_signal_context": False,
+            "decision_to_entry_terminal": False,
+            "entry_to_exit_terminal": False,
+            "post_exit": False,
+        },
+        "row_count": 0,
+        "two_second_or_better": False,
+        "reason": "SIGNAL_TIMESTAMP_MISSING",
+    }
+
+
+    if signal_ts > 0:
+        segment_rows, segment_coverage = _pre_signal_market_segment(
+            str(Path(data_dir).resolve()), signal_ts,
+        )
+        segment_coverage = dict(segment_coverage)
+        segment_coverage["entry_path_included"] = False
+        segment_coverage["future_path_status"] = "NOT_CAPTURED_AT_DECISION_TIME"
+        segment_coverage["horizon_coverage"] = {
+            "pre_signal_context": bool(segment_coverage.get("requested_bounds_complete")),
+            "decision_to_entry_terminal": False,
+            "entry_to_exit_terminal": False,
+            "post_exit": False,
+        }
+        if segment_rows:
+            if "signal_time_bbo" not in baseline_inputs:
+                last_pre_signal = next((
+                    row for row in reversed(segment_rows)
+                    if _timestamp(_first(row.get("ts"), row.get("bucket_ts"))) is not None
+                    and _timestamp(_first(row.get("ts"), row.get("bucket_ts"))) <= signal_ts
+                    and _positive_finite(row.get("bid")) is not None
+                    and _positive_finite(row.get("ask")) is not None
+                    and _positive_finite(_first(row.get("bid_qty"), row.get("bid_size"))) is not None
+                    and _positive_finite(_first(row.get("ask_qty"), row.get("ask_size"))) is not None
+                ), None)
+                if last_pre_signal is not None:
+                    baseline_inputs["signal_time_bbo"] = {
+                        "bid": last_pre_signal.get("bid"),
+                        "ask": last_pre_signal.get("ask"),
+                        "bid_qty": _first(last_pre_signal.get("bid_qty"), last_pre_signal.get("bid_size")),
+                        "ask_qty": _first(last_pre_signal.get("ask_qty"), last_pre_signal.get("ask_size")),
+                        "observed_ts": _timestamp(_first(
+                            last_pre_signal.get("ts"), last_pre_signal.get("bucket_ts"),
+                        )),
+                        "capture_basis": "IMMUTABLE_PRE_SIGNAL_MARKET_SEGMENT",
+                    }
+                    baseline_inputs.setdefault(
+                        "signal_price",
+                        _first(last_pre_signal.get("price"), last_pre_signal.get("last")),
+                    )
+            segment_ref = store.put_market_segment(
+                source="LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL",
+                symbol=identity["symbol"], timeframe="1s",
+                start_ts=signal_ts - PRE_SIGNAL_CONTEXT_SEC,
+                end_ts=signal_ts, rows=segment_rows,
+            )
+            segment_refs.append(segment_ref)
+            context_event_id = f"market-context:{identity['episode_id']}"
+            context_causal_ids = _explicit_causal_ids(
+                epoch_id=str(epoch_id), event_id=context_event_id,
+                episode_id=identity["episode_id"],
+                tape_id=f"tape:{segment_ref['sha256']}",
+            )
+            segment_writes.append(store.append("market_segment", {
+                "record_id": f"market-context:{identity['episode_id']}:{segment_ref['sha256']}",
+                "event_id": context_event_id,
+                "episode_id": identity["episode_id"],
+                "shared_ai_call_id": identity["shared_ai_call_id"],
+                "context_role": "PRE_SIGNAL_ONLY",
+                "segment_ref": segment_ref,
+                "coverage": segment_coverage,
+                **context_causal_ids,
+            }))
+    feature_receipt = _pre_entry_features_receipt(
+        store=store, source=source, identity=identity, causal_ids=causal_ids,
+        signal_ts=signal_ts, segment_refs=segment_refs, features=pre_entry_features,
+    )
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{identity['episode_id']}",
         "episode_id": identity["episode_id"],
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(source),
         "symbol": identity["symbol"],
         "raw_direction": identity["raw_direction"],
-        "feature_snapshot_at_signal": source.get("feature_snapshot_at_signal") or {},
+        "feature_snapshot_at_signal": pre_entry_features,
+        "market_context_segment_refs": segment_refs,
+        "market_context_segment_coverage": segment_coverage,
         "grouping_basis": identity["grouping_basis"],
         "collector_version": COLLECTOR_VERSION,
+        **baseline_inputs,
+        **causal_ids,
     })
+    from research_scan_census import observe_opportunity
+    observe_opportunity(store, opportunity, policy_decision)
     decision = store.append("decision", {
         "record_id": f"decision:{identity['episode_id']}:{policy['policy_signature']}:LANE_POLICY_VERDICT",
         "episode_id": identity["episode_id"],
@@ -326,7 +1088,21 @@ def dual_write_lane_decision(
         "outcome_state": outcome_state,
         "exact_reason": str(exact_reason or "UNSPECIFIED"),
         "executed_direction": identity["executed_direction"],
+        "raw_direction": identity["raw_direction"],
         "raw_ai_decision": source.get("raw_ai_decision"),
+        "admission_treatment": _first(
+            source.get("admission_treatment"),
+            material.get("admission_treatment"),
+            policy["paper_policy_spec"].get("admission_treatment"),
+        ),
+        "effective_research_direction": source.get("effective_research_direction"),
+        "effective_research_admission": copy.deepcopy(
+            source.get("effective_research_admission")
+        ),
+        "effective_research_admission_policy_id": source.get(
+            "effective_research_admission_policy_id"
+        ),
+        "original_ai_snapshot": source.get("original_ai_snapshot"),
         "long_score": source.get("long_score"),
         "short_score": source.get("short_score"),
         "score_gap": source.get("score_gap"),
@@ -335,10 +1111,16 @@ def dual_write_lane_decision(
         "order_intent_expected": execution_disposition == "ORDER_ELIGIBLE",
         "decision_ts": signal_ts,
         "resolution_deadline_ts": signal_ts + float(policy["paper_policy_spec"]["declared_entry_ttl_sec"]) + float(policy["paper_policy_spec"]["entry_reconciliation_allowance_sec"]),
+        "market_context_segment_refs": segment_refs,
+        "market_context_segment_coverage": segment_coverage,
+        **causal_ids,
         **policy,
     })
+    resolution_material = dict(material)
+    resolution_material["market_context_segment_refs"] = segment_refs
+    resolution_material["market_context_segment_coverage"] = segment_coverage
     resolution = dual_write_lane_entry_resolution(
-        material, lane=lane_name,
+        resolution_material, lane=lane_name,
         entry_resolution="AWAITING" if execution_disposition == "ORDER_ELIGIBLE" else "NO_ORDER",
         exact_reason="ORDER_ELIGIBLE_AWAITING_EXECUTION" if execution_disposition == "ORDER_ELIGIBLE" else exact_reason,
         epoch_id=str(epoch_id), data_dir=data_dir, lane_policy=lane_policy,
@@ -348,9 +1130,115 @@ def dual_write_lane_decision(
         "schema": "v3_lane_decision_receipt_v1",
         "epoch_id": str(epoch_id),
         **identity,
-        "writes": [opportunity, decision, resolution["write"]],
-        "store_verification": store.verify(),
+        "writes": [feature_receipt, opportunity, *segment_writes, decision, resolution["write"]],
+        "store_verification": store.verify_write_set(
+            ledgers=(
+                "opportunity",
+                "pre_entry_features",
+                *(('market_segment',) if segment_writes else ()),
+                "decision",
+                "lifecycle",
+            ),
+            segment_refs=segment_refs,
+        ),
     }
+
+
+def reconcile_overdue_expected_order_decisions(
+    *, epoch_id: str, data_dir: str, active_rows: Iterable[Mapping[str, Any]] = (),
+    observed_ts: float | None = None, runtime_revision: str = "",
+) -> dict[str, int]:
+    """Close durable pre-order expectations lost by a runtime interruption."""
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+
+    def rows(name: str) -> Iterator[dict[str, Any]]:
+        """Stream one validated JSONL row at a time.
+
+        These ledgers contain rich evidence payloads and can be hundreds of
+        megabytes even when they contain relatively few identities.  Startup
+        reconciliation needs only identity keys from order/lifecycle rows, so
+        materializing every decoded object can exceed the Fly machine's RSS
+        limit before the dashboard finishes bootstrapping.
+        """
+        path = store.ledger_path(name)
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8") as handle:
+            for line_no, line in enumerate(handle, 1):
+                if not line.endswith("\n"):
+                    raise ValueError(f"TRUNCATED_JSONL_LINE:{name}:{line_no}")
+                yield json.loads(line)
+
+    def key(row: Mapping[str, Any]) -> tuple[str, str, str]:
+        return (str(row.get("episode_id") or ""), str(row.get("policy_signature") or ""),
+                str(row.get("research_lane") or "").upper())
+
+    intent_keys = {key(row) for row in rows("order_intent")
+                   if str(row.get("epoch_id") or "") == str(epoch_id)}
+    terminal_keys = {key(row) for row in rows("lifecycle")
+                     if str(row.get("epoch_id") or "") == str(epoch_id)
+                     and row.get("resolution_scope") == "LANE_ENTRY"
+                     and str(row.get("entry_resolution") or "").upper()
+                     in {"ORDER_SUBMITTED", "NO_ORDER"}}
+    active_keys = {key(row) for row in active_rows if all(key(row))}
+    now_ts = float(observed_ts if observed_ts is not None else time.time())
+    result = {"expected": 0, "reconciled": 0, "duplicates": 0,
+              "deferred": 0, "blocked": 0, "unwritten": 0,
+              "not_overdue": 0, "resolved_or_active": 0}
+    for decision in rows("decision"):
+        if (
+            str(decision.get("epoch_id") or "") != str(epoch_id)
+            or decision.get("order_intent_expected") is not True
+        ):
+            continue
+        result["expected"] += 1
+        identity = key(decision)
+        if not all(identity):
+            continue
+        if identity in intent_keys or identity in terminal_keys or identity in active_keys:
+            result["resolved_or_active"] += 1
+            continue
+        deadline = float(decision.get("resolution_deadline_ts") or 0)
+        if deadline > now_ts:
+            result["not_overdue"] += 1
+            continue
+        episode_id, policy_signature, lane = identity
+        row = {
+            "record_id": f"lifecycle:{episode_id}:{policy_signature}:{lane}:lane-entry:no-order",
+            "episode_id": episode_id, "event_id": str(decision.get("event_id") or ""),
+            "shared_ai_call_id": str(decision.get("shared_ai_call_id") or ""),
+            "research_lane": lane, "policy_signature": policy_signature,
+            "resolution_scope": "LANE_ENTRY", "entry_resolution": "NO_ORDER",
+            "entry_resolution_terminal": True,
+            "exact_reason": "RUNTIME_RESTART_LEDGER_RECONCILIATION",
+            "observed_ts": now_ts, "resolution_deadline_ts": deadline,
+            "observation_status": "NO_ORDER", "outcome_state": "NO_TRADE",
+            "terminal": True, "ranking_eligible": False, "ranking_blocker": "NO_ORDER",
+            "restart_recovery_provenance": {
+                "schema": "v3_restart_ledger_reconciliation_v1",
+                "source_decision_record_id": str(decision.get("record_id") or ""),
+                "source_epoch_id": str(epoch_id), "source_resolution_deadline_ts": deadline,
+                "reconciled_at": now_ts, "runtime_revision": str(runtime_revision or "UNKNOWN"),
+            },
+        }
+        for field in ("collection_epoch_id", "opportunity_id", "policy_epoch_id",
+                      "policy_comparability_key", "paper_policy_spec", "policy_execution_scope",
+                      "relay_capability", "market_context_segment_refs", "market_context_segment_coverage"):
+            if field in decision:
+                row[field] = copy.deepcopy(decision[field])
+        write = store.append("lifecycle", row)
+        if write.get("deferred") is True:
+            result["deferred"] += 1
+        elif write.get("blocked") is True:
+            result["blocked"] += 1
+        elif write.get("written") is True:
+            result["reconciled"] += 1
+            terminal_keys.add(identity)
+        elif write.get("duplicate") is True:
+            result["duplicates"] += 1
+        else:
+            result["unwritten"] += 1
+    return result
 
 
 def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
@@ -358,26 +1246,98 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     event_id = str(_first(order.get("trade_id"), signal.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, order)
     policy = _paper_policy_identity(str(epoch_id), signal, order)
+    schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+    schedule_available = isinstance(schedule, Mapping) and schedule.get("authoritative") is True
+    schedule_sha256 = (
+        hashlib.sha256(canonical_json(schedule).encode("utf-8")).hexdigest()
+        if schedule_available else None
+    )
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+        include_schedule=schedule_available,
+    )
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     signal_ts = float(_first((signal.get("timing") or {}).get("signal_ts"), signal.get("created_ts_ts"), order.get("signal_created_ts"), order.get("created_ts"), 0) or 0)
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{identity['episode_id']}", "episode_id": identity["episode_id"],
         "shared_ai_call_id": identity["shared_ai_call_id"], "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(signal, order),
         "symbol": identity["symbol"], "raw_direction": identity["raw_direction"],
         "feature_snapshot_at_signal": signal.get("research_feature_snapshot") or {},
         "grouping_basis": identity["grouping_basis"], "collector_version": COLLECTOR_VERSION,
+        **_signal_time_baseline_inputs(signal, order),
+        **causal_ids,
     })
+    atr14_pct_at_signal = _paper_atr14_pct_3m(order, signal)
+    signal_price = _first(order.get("signal_price"), signal.get("signal_price"))
+    limit_price = _first(order.get("limit_price"), order.get("price"))
+    entry_policy_id = str(
+        policy["paper_policy_spec"].get("entry_limit_policy")
+        or policy.get("policy_id")
+        or ""
+    )
+    offset_fraction = _first(
+        policy["paper_policy_spec"].get("entry_offset_fraction"),
+        order.get("entry_offset_fraction"),
+        signal.get("entry_offset_fraction"),
+    )
+    if offset_fraction is None:
+        try:
+            if float(signal_price) > 0:
+                offset_fraction = abs(float(limit_price) - float(signal_price)) / float(signal_price)
+        except (TypeError, ValueError):
+            offset_fraction = None
+    entry_children = []
+    if entry_policy_id:
+        entry_children.append({
+            "entry_policy_id": entry_policy_id,
+            "offset_pct": (float(offset_fraction) * 100.0) if offset_fraction is not None else None,
+            "chase_id": entry_policy_id,
+            "fill_ts": None,
+            "fill_price": None,
+            "fill_model": None,
+        })
     intent = store.append("order_intent", {
         "record_id": f"order-intent:{event_id}:paper-submit", "episode_id": identity["episode_id"], "event_id": event_id,
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "intent_kind": "ACTUAL_PAPER_LIMIT_SUBMIT", "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
-        "signal_price": _first(order.get("signal_price"), signal.get("signal_price")),
-        "limit_price": _first(order.get("limit_price"), order.get("price")), "requested_qty": order.get("qty"),
+        "signal_price": signal_price,
+        "limit_price": limit_price,
+        "requested_qty": _first(order.get("requested_qty"), order.get("qty")),
+        "execution_basis": {
+            "schema": "research_execution_basis_v1",
+            "requested_qty": _first(order.get("requested_qty"), order.get("qty")),
+            "requested_qty_provenance": "SOURCE_TICKET_QTY",
+            "market_microstructure_symbol": _first(
+                order.get("market_microstructure_symbol"),
+                signal.get("market_microstructure_symbol"),
+                identity["symbol"],
+            ),
+            "signed_quantity_constraints": copy.deepcopy(
+                _first(
+                    order.get("signed_quantity_constraints"),
+                    signal.get("signed_quantity_constraints"),
+                )
+            ),
+            "quantity_constraints_status": copy.deepcopy(
+                _first(
+                    order.get("quantity_constraints_status"),
+                    signal.get("quantity_constraints_status"),
+                ) or {"supported": False, "receipt": None, "reasons": ["VENUE_QUANTITY_CONSTRAINTS_UNAVAILABLE"]}
+            ),
+        },
         "executed_direction": identity["executed_direction"], "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
         "paper_only": bool(policy["paper_policy_spec"]["paper_only"]),
         "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
         "chase_schedule": order.get("research_chase_schedule") or signal.get("research_chase_schedule") or {},
         "chase_schedule_authoritative": bool(order.get("chase_schedule_authoritative") or signal.get("chase_schedule_authoritative")),
+        "schedule_sha256": schedule_sha256,
+        "entry_children": entry_children,
+        "entry_children_count": len(entry_children),
+        "atr14_pct_at_signal": atr14_pct_at_signal,
+        "atr14_pct_basis": "SIGNAL_TIME_3M_ATR14" if atr14_pct_at_signal is not None else "UNAVAILABLE",
+        **causal_ids,
         **policy,
         "effective_execution_mode": "PAPER_OBSERVED",
     })
@@ -390,6 +1350,7 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
         "terminal": False,
         "ranking_eligible": False, "ranking_blocker": "PATH_NOT_MATURED",
         "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
+        **causal_ids,
         **policy,
     })
     resolution = None
@@ -406,28 +1367,142 @@ def dual_write_paper_order_intent(order: Mapping[str, Any], signal: Mapping[str,
     if resolution is not None:
         writes.append(resolution["write"])
     return {"schema": "v3_paper_order_intent_receipt_v1", "epoch_id": str(epoch_id), **identity,
+            **causal_ids, **policy,
             "writes": writes, "store_verification": store.verify()}
+
+
+def dual_write_terminal_paper_schedule(
+    order: Mapping[str, Any], signal: Mapping[str, Any], *, epoch_id: str,
+    data_dir: str, lifecycle_final: bool = False,
+) -> dict[str, Any] | None:
+    """Append the exact terminal paper chase schedule as evidence only.
+
+    Submit-time order intents are immutable and therefore cannot contain later
+    reprices or the terminal interval boundary.  This append-only snapshot is
+    emitted only after the established schedule recorder has closed the
+    schedule.  It does not decide, submit, reprice, fill, or cancel an order.
+    """
+    # A chase-gate pull temporarily closes the currently resting order before
+    # the same signal resumes at a later enabled bucket.  Persisting that
+    # boundary as the final schedule would create multiple authoritative
+    # hashes for one policy lifecycle.  Only the caller that has already made
+    # the whole lifecycle terminal may publish the selectable snapshot.
+    if lifecycle_final is not True:
+        return None
+    schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+    if not isinstance(schedule, Mapping) or schedule.get("authoritative") is not True:
+        return None
+    if schedule.get("terminal_ts") is None or not schedule.get("terminal_reason"):
+        return None
+    intervals = schedule.get("intervals")
+    if not isinstance(intervals, list) or not intervals:
+        return None
+    if any(not isinstance(row, Mapping) or row.get("end_ts") is None for row in intervals):
+        return None
+    event_id = str(_first(order.get("trade_id"), signal.get("trade_id")) or "")
+    identity = _causal_identity(event_id, signal, order)
+    policy = _paper_policy_identity(str(epoch_id), order, signal)
+    frozen_schedule = copy.deepcopy(dict(schedule))
+    requested_qty = _positive_finite(_first(
+        order.get("requested_qty"), frozen_schedule.get("requested_qty"), order.get("qty"),
+    ))
+    schedule_sha256 = hashlib.sha256(
+        canonical_json(frozen_schedule).encode("utf-8")
+    ).hexdigest()
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id,
+        episode_id=identity["episode_id"], include_schedule=True,
+    )
+    row = {
+        "record_id": f"order-intent:{event_id}:paper-schedule-terminal:{schedule_sha256[:16]}",
+        "episode_id": identity["episode_id"],
+        "event_id": event_id,
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "intent_kind": "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL",
+        "submitted_ts": _first(order.get("created_ts"), order.get("order_created_ts")),
+        "observed_ts": schedule.get("terminal_ts_exact") or schedule.get("terminal_ts"),
+        "signal_price": _first(order.get("signal_price"), signal.get("signal_price")),
+        "limit_price": order.get("limit_price"),
+        "requested_qty": requested_qty,
+        "requested_qty_provenance": "SOURCE_TICKET_QTY" if requested_qty is not None else "UNKNOWN",
+        "execution_basis": {
+            "schema": "research_execution_basis_v1",
+            "requested_qty": requested_qty,
+            "requested_qty_provenance": "SOURCE_TICKET_QTY" if requested_qty is not None else "UNKNOWN",
+            "market_microstructure_symbol": _first(
+                order.get("market_microstructure_symbol"),
+                signal.get("market_microstructure_symbol"),
+                identity["symbol"],
+            ),
+            "signed_quantity_constraints": copy.deepcopy(
+                _first(order.get("signed_quantity_constraints"), signal.get("signed_quantity_constraints"))
+            ),
+        },
+        "final_quantity_state": copy.deepcopy(
+            frozen_schedule.get("final_quantity_state")
+            if isinstance(frozen_schedule.get("final_quantity_state"), Mapping)
+            else {"status": "UNKNOWN", "reason": "FINAL_QUANTITY_STATE_MISSING"}
+        ),
+        "quantity_events": copy.deepcopy(
+            frozen_schedule.get("quantity_events")
+            if isinstance(frozen_schedule.get("quantity_events"), list) else []
+        ),
+        "signed_quantity_constraints": copy.deepcopy(
+            _first(order.get("signed_quantity_constraints"), signal.get("signed_quantity_constraints"))
+        ),
+        "executed_direction": identity["executed_direction"],
+        "research_lane": _first(order.get("research_lane"), signal.get("research_lane")),
+        "paper_only": True,
+        "relay_eligible": bool(policy["paper_policy_spec"]["relay_eligible"]),
+        "chase_schedule": frozen_schedule,
+        "chase_schedule_authoritative": True,
+        "schedule_lifecycle_final": True,
+        "schedule_sha256": schedule_sha256,
+        **causal_ids,
+        **policy,
+        "effective_execution_mode": "PAPER_OBSERVED",
+        "evidence_only": True,
+    }
+    write = V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append("order_intent", row)
+    return {
+        "schema": "v3_terminal_paper_schedule_receipt_v1",
+        "epoch_id": str(epoch_id), **identity, **causal_ids, **policy,
+        "schedule_sha256": schedule_sha256, "write": write,
+    }
 
 
 def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], position: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
     """Write an observed paper fill once, without claiming exchange execution."""
     event_id = str(_first(position.get("trade_id"), order.get("trade_id"), signal.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, order, position)
-    policy = _paper_policy_identity(str(epoch_id), signal, order, position)
+    # The lane-owned position/order is authoritative.  ``signal`` is shared
+    # across sibling lanes and may carry only the base/control identity.
+    policy = _paper_policy_identity(str(epoch_id), position, order, signal)
+    schedule = order.get("research_chase_schedule") or signal.get("research_chase_schedule")
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+        include_schedule=isinstance(schedule, Mapping) and schedule.get("authoritative") is True,
+        include_fill=True,
+    )
     lifecycle_identity = {
         "shared_ai_call_id": identity["shared_ai_call_id"],
         "research_lane": policy["paper_policy_spec"].get("research_lane"),
+        **causal_ids,
         **policy,
     }
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    fill_ts = _first(position.get("entry_ts"), order.get("fill_ts"))
+    atr_evidence = _paper_fill_atr_evidence(position, order, fill_ts=fill_ts, event_id=event_id)
+    execution_receipt = _paper_fill_execution_receipt(order, position, signal)
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:primary-fill", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "fill_ts": _first(position.get("entry_ts"), order.get("fill_ts")),
-        "fill_price": _first(position.get("entry"), order.get("fill_price")), "filled_qty": _first(position.get("qty"), order.get("qty")),
-        "requested_qty": order.get("qty"), "partial_fill": bool(order.get("partial_fill")),
+        "fill_price": _first(position.get("entry"), order.get("fill_price")),
         "fill_model": _first(position.get("fill_model"), order.get("fill_model")),
+        **atr_evidence,
         "authenticated_exchange_actual": False, "paper_observation": True,
         "source_market_evidence_required_for_conservative_claim": True,
+        **execution_receipt,
         **lifecycle_identity,
     })
     lifecycle = store.append("lifecycle", {
@@ -438,6 +1513,7 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         **lifecycle_identity,
     })
     return {"schema": "v3_paper_fill_receipt_v1", "epoch_id": str(epoch_id), **identity,
+            **causal_ids, **policy,
             "writes": [execution, lifecycle], "store_verification": store.verify()}
 
 
@@ -445,20 +1521,25 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
     """Write the observed terminal paper result while replay paths continue."""
     event_id = str(_first(position.get("trade_id"), signal.get("trade_id"), outcome.get("trade_id")) or "")
     identity = _causal_identity(event_id, signal, position, outcome)
-    policy = _paper_policy_identity(str(epoch_id), signal, position, outcome)
-    lifecycle_identity = {
-        "shared_ai_call_id": identity["shared_ai_call_id"],
-        "research_lane": policy["paper_policy_spec"].get("research_lane"),
-        **policy,
-    }
+    # Preserve the identity frozen on the lane-owned position.  A shared AI
+    # signal must never override it during terminal attribution.
+    policy = _paper_policy_identity(str(epoch_id), position, outcome, signal)
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    schedule = (
+        position.get("research_chase_schedule")
+        or signal.get("research_chase_schedule")
+        or outcome.get("research_chase_schedule")
+    )
+    schedule_available = isinstance(schedule, Mapping) and schedule.get("authoritative") is True
     start_ts = _timestamp(_first(
         signal.get("created_ts_ts"), signal.get("signal_ts"),
         position.get("signal_created_ts"), position.get("entry_ts"),
     ))
     close_ts = _timestamp(_first(outcome.get("close_ts"), outcome.get("ts")))
+    fill_ts_observed = _timestamp(_first(position.get("entry_ts"), outcome.get("entry_ts")))
     segment_refs = []
     segment_writes = []
+    segment_rows = []
     segment_coverage = {
         "schema": "paper_market_segment_coverage_v1",
         "row_count": 0,
@@ -469,6 +1550,44 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         segment_rows, segment_coverage = _paper_market_segment(
             data_dir, start_ts=start_ts, end_ts=close_ts,
         )
+        segment_coverage.update({
+            "context_role": "ENTRY_AND_EXIT_PATH",
+            "entry_path_included": bool(
+                fill_ts_observed is not None
+                and start_ts <= fill_ts_observed <= close_ts
+                and segment_coverage.get("requested_bounds_complete")
+            ),
+            "future_exit_path_included": bool(segment_coverage.get("requested_bounds_complete")),
+            "future_path_status": "CAPTURED_THROUGH_TERMINAL_CLOSE"
+            if segment_coverage.get("requested_bounds_complete") else "INCOMPLETE_THROUGH_TERMINAL_CLOSE",
+            # A signal-to-close segment proves only the named horizons below.
+            # It never silently proves an arbitrary post-exit or policy horizon.
+            "horizon_coverage": {
+                "pre_signal_context": False,
+                "decision_to_entry_terminal": bool(
+                    fill_ts_observed is not None
+                    and start_ts <= fill_ts_observed <= close_ts
+                    and segment_coverage.get("requested_bounds_complete")
+                ),
+                "entry_to_exit_terminal": bool(
+                    fill_ts_observed is not None
+                    and start_ts <= fill_ts_observed <= close_ts
+                    and segment_coverage.get("requested_bounds_complete")
+                ),
+                "post_exit": False,
+            },
+            "conservative_bbo_depth_eligible": bool(
+                segment_coverage.get("two_second_or_better")
+                and segment_coverage.get("requested_bounds_complete")
+                and segment_coverage.get("all_rows_have_valid_bbo")
+                and segment_coverage.get("all_rows_have_visible_depth")
+                and not segment_coverage.get("parse_errors")
+                and not segment_coverage.get("invalid_timestamp_rows")
+                and not segment_coverage.get("invalid_price_rows")
+                and not segment_coverage.get("invalid_bbo_rows")
+                and not segment_coverage.get("invalid_depth_rows")
+            ),
+        })
         if segment_rows:
             segment_ref = store.put_market_segment(
                 source="LIVE_MICROSTRUCTURE_1S",
@@ -479,21 +1598,82 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
                 rows=segment_rows,
             )
             segment_refs.append(segment_ref)
+            tape_id = f"tape:{segment_ref['sha256']}"
+            causal_ids = _explicit_causal_ids(
+                epoch_id=str(epoch_id), event_id=event_id,
+                episode_id=identity["episode_id"], include_schedule=schedule_available,
+                include_fill=True, tape_id=tape_id,
+            )
+            lifecycle_identity = {
+                "shared_ai_call_id": identity["shared_ai_call_id"],
+                "research_lane": policy["paper_policy_spec"].get("research_lane"),
+                **causal_ids, **policy,
+            }
             segment_writes.append(store.append("market_segment", {
                 "record_id": f"market-segment:{event_id}:{segment_ref['sha256']}",
                 "episode_id": identity["episode_id"],
                 "event_id": event_id,
                 "segment_ref": segment_ref,
+                "context_role": "ENTRY_AND_EXIT_PATH",
                 "coverage": segment_coverage,
                 **lifecycle_identity,
             }))
+    if not segment_refs:
+        causal_ids = _explicit_causal_ids(
+            epoch_id=str(epoch_id), event_id=event_id,
+            episode_id=identity["episode_id"], include_schedule=schedule_available,
+            include_fill=True,
+        )
+        lifecycle_identity = {
+            "shared_ai_call_id": identity["shared_ai_call_id"],
+            "research_lane": policy["paper_policy_spec"].get("research_lane"),
+            **causal_ids, **policy,
+        }
+    entry_price = _first(outcome.get("entry"), position.get("entry"))
+    fill_ts = _first(position.get("entry_ts"), outcome.get("entry_ts"))
+    path_receipt = _paper_path_receipt(
+        segment_rows, direction=identity["executed_direction"],
+        entry_price=entry_price, fill_ts=fill_ts,
+    )
+    path_receipt.update(canonical_path_extrema_usd(
+        path_receipt,
+        entry_price=entry_price,
+        filled_quantity=_first(outcome.get("execution_qty"), position.get("qty")),
+    ))
+    economics = canonical_terminal_economics(outcome)
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
-        "entry_price": _first(outcome.get("entry"), position.get("entry")), "exit_price": outcome.get("exit"),
+        "entry_price": entry_price, "exit_price": outcome.get("exit"),
         "filled_qty": _first(outcome.get("execution_qty"), position.get("qty")), "net_pnl_usd": outcome.get("net_pnl_usd"),
         "gross_pnl_usd": outcome.get("gross_pnl_usd"), "trading_fees_usd": outcome.get("trading_fees_usd"),
         "funding_fees_usd": outcome.get("funding_fees_usd"), "exit_reason": outcome.get("exit_reason"),
+        "slippage_cost_usd": economics.get("slippage_cost_usd"),
+        "latency_cost_usd": economics.get("latency_cost_usd"),
+        "canonical_economics": economics,
+        "entry_context": _observed_context(outcome, phase="ENTRY"),
+        "exit_context": _observed_context(outcome, phase="EXIT"),
+        "path_extrema": path_receipt,
+        "protection_trajectory": {
+            "basis": "TERMINAL_STATE_PLUS_PARTIAL_RECEIPTS",
+            "exit_config": copy.deepcopy(_first(position.get("exit_config"), signal.get("exit_config"))),
+            "initial_stop_price": _first(position.get("initial_sl"), position.get("sl_at_entry")),
+            "terminal_stop_price": position.get("sl"),
+            "terminal_target_price": position.get("tp"),
+            "terminal_trailing_stop_price": _first(position.get("trailing_stop"), position.get("trail_stop")),
+            "terminal_peak_margin_pct": _first(outcome.get("max_profit"), position.get("max_pnl_pct")),
+            "terminal_mae_margin_pct": _first(outcome.get("max_drawdown"), position.get("max_drawdown")),
+            "terminal_tp_stage": _first(outcome.get("tp_stage"), position.get("tp_stage")),
+            "terminal_remaining_fraction": _first(outcome.get("policy_remaining_fraction"), position.get("policy_remaining_fraction")),
+            "partial_exit_count": len(outcome.get("partial_exit_receipts") or []),
+            "terminal_exit_reason": outcome.get("exit_reason"),
+        },
+        "partial_exits": _normalized_partial_exits(outcome),
+        "exit_market_receipt": copy.deepcopy(
+            outcome.get("exit_market_receipt")
+            if isinstance(outcome.get("exit_market_receipt"), Mapping)
+            else {"basis": "UNAVAILABLE"}
+        ),
         "authenticated_exchange_actual": False, "paper_observation": True, **lifecycle_identity,
     })
     lifecycle = store.append("lifecycle", {
@@ -515,7 +1695,129 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         **lifecycle_identity,
     })
     return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
+            **causal_ids, **policy,
             "writes": [execution, *segment_writes, lifecycle], "store_verification": store.verify()}
+
+
+def dual_write_lifecycle_qualification_horizon(
+    subject: Mapping[str, Any], signal: Mapping[str, Any], terminal: Mapping[str, Any], *,
+    entry_outcome: str, epoch_id: str, data_dir: str,
+    lifecycle_horizon_sec: float = 7200.0,
+) -> dict[str, Any]:
+    """Freeze explicit post-terminal BBO/depth coverage for one paper lifecycle.
+
+    This is a bridge API for the bounded runtime worker.  Calling it after two
+    hours is not itself proof: the source tape must cover both boundaries,
+    contain no cadence/parse/BBO/depth gaps, and remain hash-addressable.
+    """
+    requested_outcome = str(entry_outcome or "").upper()
+    canonical_outcome = (
+        requested_outcome
+        if requested_outcome in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN"}
+        else "UNKNOWN"
+    )
+    event_id = str(_first(
+        subject.get("trade_id"), terminal.get("trade_id"), signal.get("trade_id")
+    ) or "")
+    identity = _causal_identity(event_id, signal, subject, terminal)
+    policy = _paper_policy_identity(str(epoch_id), subject, terminal, signal)
+    schedule = _first(
+        subject.get("research_chase_schedule"), terminal.get("research_chase_schedule"),
+        signal.get("research_chase_schedule"),
+    )
+    schedule_available = isinstance(schedule, Mapping) and schedule.get("authoritative") is True
+    terminal_ts = _timestamp(_first(
+        terminal.get("close_ts"), terminal.get("terminal_ts_exact"), terminal.get("terminal_ts"),
+        schedule.get("terminal_ts_exact") if isinstance(schedule, Mapping) else None,
+        schedule.get("terminal_ts") if isinstance(schedule, Mapping) else None,
+    ))
+    rows: list[dict[str, Any]] = []
+    coverage: dict[str, Any]
+    if terminal_ts is None:
+        coverage = {
+            "schema": "paper_market_segment_coverage_v1",
+            "requested_start_ts": None, "requested_end_ts": None,
+            "observed_start_ts": None, "observed_end_ts": None,
+            "requested_bounds_complete": False, "two_second_or_better": False,
+            "all_rows_have_valid_bbo": False, "all_rows_have_visible_depth": False,
+            "parse_errors": 0, "invalid_timestamp_rows": 0, "invalid_price_rows": 0,
+            "invalid_bbo_rows": 0, "invalid_depth_rows": 0,
+        }
+    else:
+        rows, coverage = _paper_market_segment(
+            data_dir, start_ts=terminal_ts,
+            end_ts=terminal_ts + max(0.0, float(lifecycle_horizon_sec)),
+        )
+    post_observation = qualification_post_observation(
+        coverage, terminal_ts=terminal_ts,
+        lifecycle_horizon_sec=lifecycle_horizon_sec,
+    )
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    segment_ref = None
+    if rows and terminal_ts is not None:
+        segment_ref = store.put_market_segment(
+            source="LIVE_MICROSTRUCTURE_1S", symbol=identity["symbol"], timeframe="1s",
+            start_ts=terminal_ts,
+            end_ts=terminal_ts + max(0.0, float(lifecycle_horizon_sec)), rows=rows,
+        )
+    causal_ids = _explicit_causal_ids(
+        epoch_id=str(epoch_id), event_id=event_id, episode_id=identity["episode_id"],
+        include_schedule=schedule_available,
+        include_fill=canonical_outcome in {"FULL_FILL", "PARTIAL_FILL"},
+        tape_id=f"tape:{segment_ref['sha256']}" if segment_ref else None,
+    )
+    lifecycle_identity = {
+        "shared_ai_call_id": identity["shared_ai_call_id"],
+        "research_lane": policy["paper_policy_spec"].get("research_lane"),
+        **causal_ids, **policy,
+    }
+    writes = []
+    if segment_ref:
+        writes.append(store.append("market_segment", {
+            "record_id": f"market-segment:{event_id}:post-exit:{segment_ref['sha256']}",
+            "episode_id": identity["episode_id"], "event_id": event_id,
+            "segment_ref": segment_ref, "context_role": "POST_EXIT_PATH",
+            "coverage": {**coverage, **post_observation}, **lifecycle_identity,
+        }))
+    writes.append(store.append("lifecycle", {
+        "record_id": (
+            f"lifecycle:{event_id}:qualification-horizon:"
+            f"{segment_ref['sha256'][:16] if segment_ref else 'unknown'}"
+        ),
+        "episode_id": identity["episode_id"], "event_id": event_id,
+        "terminal": True, "observation_status": "QUALIFICATION_HORIZON_OBSERVED",
+        "outcome_state": canonical_outcome,
+        "unknown_reason": (
+            _first(terminal.get("unknown_reason"), "ENTRY_OUTCOME_INVALID")
+            if canonical_outcome == "UNKNOWN" else None
+        ),
+        "post_observation": post_observation,
+        "market_segment_ref": segment_ref,
+        "ranking_eligible": False,
+        "ranking_blocker": None if post_observation["complete"] else "POST_OBSERVATION_INCOMPLETE",
+        **lifecycle_identity,
+    }))
+    return {
+        "schema": "v3_lifecycle_qualification_horizon_receipt_v1",
+        "epoch_id": str(epoch_id), **identity, **causal_ids, **policy,
+        "entry_outcome": canonical_outcome,
+        "post_observation": post_observation,
+        "segment_ref": segment_ref, "writes": writes,
+        "store_verification": store.verify(),
+    }
+
+
+def _validated_signal_snapshot_fields(
+    source: Mapping[str, Any], *, event_id: str, epoch_id: str, signal_ts: float, data_dir: str,
+) -> dict[str, Any]:
+    """Carry only verified immutable dependencies; never reconstruct missing evidence."""
+    reference = source.get("research_signal_snapshot_ref")
+    if reference is None:
+        return {}
+    from collector_signal_snapshot import load_signal_snapshot
+    load_signal_snapshot(reference, data_dir=data_dir, event_id=event_id,
+                         epoch_id=epoch_id, signal_ts=signal_ts)
+    return {"research_signal_snapshot_ref": copy.deepcopy(reference), "signal_ts": float(signal_ts)}
 
 
 def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, epoch_id: str, data_dir: str) -> dict[str, Any]:
@@ -544,21 +1846,28 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
     else:
         episode_id = stable_episode_id
         grouping_basis = "STABLE_EVENT_EPISODE"
+    snapshot_fields = _validated_signal_snapshot_fields(
+        source, event_id=event_id, epoch_id=epoch_id, signal_ts=signal_ts, data_dir=data_dir,
+    )
     store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
     opportunity = store.append("opportunity", {
         "record_id": f"opportunity:{episode_id}",
         "episode_id": episode_id,
         "shared_ai_call_id": shared or None,
         "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(source),
         "symbol": symbol,
         "raw_direction": direction,
         "feature_snapshot_at_signal": source.get("research_feature_snapshot") or {},
         "first_observed_as_provisional": True,
         "grouping_basis": grouping_basis,
         "collector_version": COLLECTOR_VERSION,
+        **_signal_time_baseline_inputs(source),
     })
     lifecycle = store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:opened",
+        **snapshot_fields,
         "episode_id": episode_id,
         "event_id": str(event_id),
         "observation_status": str(source.get("observation_status") or "PENDING"),
@@ -572,7 +1881,16 @@ def dual_write_provisional_source(event_id: str, source: Mapping[str, Any], *, e
         "event_id": str(event_id),
         "episode_id": episode_id,
         "writes": [opportunity, lifecycle],
-        "store_verification": store.verify(),
+        # This runs on the synchronous entry/collector path while the fresh-
+        # epoch serializer is held.  A full-store verification walks every
+        # immutable market segment and can therefore block all family lanes
+        # behind historical data growth.  The provisional write touches only
+        # these two ledgers; verify those durable writes here.  Startup,
+        # analyzer, and qualification flows continue to run ``store.verify``
+        # across the complete store.
+        "store_verification": store.verify_write_set(
+            ledgers=("opportunity", "lifecycle"),
+        ),
     }
 
 
@@ -588,6 +1906,35 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         event_episode.get("shared_ai_call_id"), record.get("shared_ai_call_id"),
         source_features.get("shared_ai_call_id"), envelope.get("shared_ai_call_id"),
     ) or "").strip()
+    policy_identity = record.get("policy_identity") if isinstance(record.get("policy_identity"), Mapping) else {}
+    envelope_policy_identity = envelope.get("policy_identity") if isinstance(envelope.get("policy_identity"), Mapping) else {}
+    policy_id = str(_first(
+        record.get("base_policy_id"), record.get("policy_id"),
+        envelope.get("base_policy_id"), envelope.get("policy_id"),
+        policy_identity.get("base_policy_id"), envelope_policy_identity.get("base_policy_id"),
+    ) or "").strip()
+    policy_signature = str(_first(
+        record.get("policy_signature"), envelope.get("policy_signature"),
+        policy_identity.get("policy_signature"), envelope_policy_identity.get("policy_signature"),
+    ) or "").strip()
+    policy_epoch_id = str(_first(
+        record.get("policy_epoch_id"), envelope.get("policy_epoch_id"),
+        policy_identity.get("policy_epoch_id"), envelope_policy_identity.get("policy_epoch_id"),
+    ) or "").strip()
+    # The durable V2.2 writer did not always record a lane name.  Its explicit
+    # base policy is still a truthful source-policy scope, but an event-episode
+    # fallback is not a shared AI-call ID and must never be relabelled as one.
+    research_lane = str(_first(
+        record.get("research_lane"), envelope.get("research_lane"), policy_id,
+    ) or "").strip()
+    policy_provenance = {
+        "policy_id": policy_id or None,
+        "policy_signature": policy_signature or None,
+        "policy_epoch_id": policy_epoch_id or None,
+        "research_lane": research_lane or None,
+        "shared_ai_call_id": shared_ai_call_id or None,
+    }
+    complete_execution_identity = all(policy_provenance.values())
     stable_episode_id = str(_first(record.get("event_episode_id"), envelope.get("event_episode_id")) or "")
     identity_symbol = str(_first(record.get("symbol"), record.get("pair"), envelope.get("symbol"), "BTCUSD")).upper()
     identity_direction = str(_first(envelope.get("raw_direction"), record.get("raw_direction"), record.get("direction"), "UNKNOWN")).upper()
@@ -598,6 +1945,10 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         episode_id = stable_episode_id
     if not epoch_id or not event_id or not episode_id:
         raise ValueError("V3_IDENTITY_INCOMPLETE")
+    signal_ts = float(_first(envelope.get("signal_ts"), record.get("signal_ts"), 0) or 0)
+    snapshot_fields = _validated_signal_snapshot_fields(
+        record, event_id=event_id, epoch_id=epoch_id, signal_ts=signal_ts, data_dir=data_dir,
+    )
     store = V3EvidenceStore(data_dir, epoch_id=epoch_id)
     tape = record.get("canonical_tape") if isinstance(record.get("canonical_tape"), Mapping) else {}
     path_1m = tape.get("path_1m") if isinstance(tape.get("path_1m"), list) else []
@@ -627,11 +1978,14 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "episode_id": episode_id,
         "shared_ai_call_id": shared_ai_call_id or None,
         "signal_ts": signal_ts,
+        "signal_timezone": "UTC" if signal_ts > 0 else "UNKNOWN",
+        "market": _opportunity_market(record, envelope),
         "symbol": symbol,
         "raw_direction": _first(envelope.get("raw_direction"), record.get("raw_direction")),
         "feature_snapshot_at_signal": record.get("feature_snapshot_at_signal") or {},
         "pre_signal_context": record.get("pre_signal_context") or {},
         "collector_version": COLLECTOR_VERSION,
+        **_signal_time_baseline_inputs(record, envelope),
     }))
     writes.append(store.append("decision", {
         "record_id": f"decision:{event_id}",
@@ -643,8 +1997,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "exact_reason": record.get("exact_reason"),
         "would_block": record.get("would_block"),
         "would_block_reason": record.get("would_block_reason"),
-        "policy_signature": _first(record.get("policy_signature"), envelope.get("policy_signature")),
-        "policy_epoch_id": _first(record.get("policy_epoch_id"), envelope.get("policy_epoch_id")),
+        **policy_provenance,
     }))
     writes.append(store.append("order_intent", {
         "record_id": f"order-intent:{event_id}",
@@ -661,10 +2014,12 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "executed_direction": _first(envelope.get("executed_direction"), record.get("direction")),
         "atr14_pct": _first(record.get("atr14_pct"), envelope.get("atr14_pct")),
         "leverage": _first((record.get("research_execution_basis") or {}).get("leverage"), (envelope.get("control_cell") or {}).get("leverage"), 100.0),
-        "margin_usd": _first((record.get("research_execution_basis") or {}).get("margin_usd"), (envelope.get("control_cell") or {}).get("margin_usd"), 20.0),
+        "margin_usd": _first((record.get("research_execution_basis") or {}).get("margin_usd"), (envelope.get("control_cell") or {}).get("margin_usd"), 0.25),
         "search_receipt": envelope.get("policy_search") or {},
+        **policy_provenance,
     }))
-    if record.get("live_fill_ts") is not None or record.get("live_fill_price") is not None:
+    source_fill_present = record.get("live_fill_ts") is not None or record.get("live_fill_price") is not None
+    if source_fill_present and complete_execution_identity:
         writes.append(store.append("execution", {
             "record_id": f"execution:{event_id}:primary-fill",
             "episode_id": episode_id,
@@ -674,6 +2029,7 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             "fill_price": record.get("live_fill_price"),
             "quantity_basis": record.get("research_execution_basis") or {},
             "authenticated_exchange_actual": False,
+            **policy_provenance,
         }))
     for ref in segment_refs:
         writes.append(store.append("market_segment", {
@@ -683,11 +2039,28 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             "segment_ref": ref,
             "coverage": tape.get("coverage") or {},
         }))
+    ranking_eligible = bool(record.get("ranking_eligible")) and (
+        not source_fill_present or complete_execution_identity
+    )
     writes.append(store.append("lifecycle", {
         "record_id": f"lifecycle:{event_id}:terminal",
+        **snapshot_fields,
         "episode_id": episode_id,
         "event_id": event_id,
         "observation_status": record.get("observation_status"),
+        "terminal_reason": _first(
+            record.get("exact_reason"), record.get("terminal_provenance"),
+            record.get("primary_outcome"),
+        ),
+        "terminal_no_fill": record.get("primary_outcome") == "ACCEPTED_UNFILLED",
+        "terminal_ttl_expired": "TTL_EXPIRED" in str(_first(
+            record.get("exact_reason"), record.get("terminal_provenance"), "",
+        )).upper(),
+        "fill_time_revalidation": copy.deepcopy(
+            record.get("fill_time_revalidation")
+            if isinstance(record.get("fill_time_revalidation"), Mapping)
+            else {"performed": False, "result": "UNAVAILABLE"}
+        ),
         "terminal": True,
         "outcome_state": (
             "DATA_ERROR" if record.get("observation_status") == "DATA_ERROR"
@@ -697,9 +2070,15 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
             else "NO_FILL" if record.get("primary_outcome") == "ACCEPTED_UNFILLED"
             else "UNSUPPORTED"
         ),
-        "ranking_eligible": bool(record.get("ranking_eligible")),
+        "ranking_eligible": ranking_eligible,
+        "ranking_blocker": (
+            None if ranking_eligible
+            else "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE" if source_fill_present and not complete_execution_identity
+            else "SOURCE_NOT_RANKING_ELIGIBLE"
+        ),
         "replay_eligibility": record.get("replay_eligibility") or {},
         "market_segment_refs": segment_refs,
+        **policy_provenance,
     }))
     return {
         "schema": "v22_to_v3_dual_write_receipt_v1",
@@ -707,6 +2086,12 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         "event_id": event_id,
         "episode_id": episode_id,
         "writes": writes,
+        "source_fill_recorded": source_fill_present,
+        "execution_normalized": bool(source_fill_present and complete_execution_identity),
+        "execution_normalization_blocker": (
+            None if not source_fill_present or complete_execution_identity
+            else "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE"
+        ),
         "store_verification": store.verify(),
     }
 
@@ -724,14 +2109,15 @@ def reconcile_terminal_v22_into_v3(
     eligible for repair.  Corrupt/truncated source or V3 ledgers fail closed.
     """
     root = Path(data_dir)
-    source = root / events_file
+    from collector_v22 import research_event_generation_paths
+    sources = [Path(path) for path in research_event_generation_paths(str(root), events_file)]
     store = V3EvidenceStore(root, epoch_id=str(epoch_id))
     lifecycle_path = store.ledger_path("lifecycle")
     durable_lifecycle_ids = V3EvidenceStore._load_ids(lifecycle_path)
     terminal_statuses = {"COMPLETE", "FUNNEL_COMPLETE", "DATA_ERROR", "INSUFFICIENT_PATH"}
     scanned = current_epoch_terminal = backfilled = already_present = foreign_epoch = 0
     errors: list[dict[str, Any]] = []
-    if not source.exists():
+    if not any(source.exists() for source in sources):
         return {
             "schema": "v3_terminal_reconciliation_v1",
             "epoch_id": str(epoch_id),
@@ -745,39 +2131,42 @@ def reconcile_terminal_v22_into_v3(
             "passed": True,
             "store_verification": store.verify(),
         }
-    with source.open("r", encoding="utf-8") as handle:
-        for line_no, line in enumerate(handle, 1):
-            if not line.endswith("\n"):
-                raise ValueError(f"TRUNCATED_V22_JSONL_LINE:{line_no}")
-            scanned += 1
-            record = json.loads(line)
-            envelope = record.get("envelope") if isinstance(record.get("envelope"), Mapping) else {}
-            row_epoch = str(_first(record.get("epoch_id"), envelope.get("epoch_id")) or "")
-            if row_epoch != str(epoch_id):
-                foreign_epoch += 1
-                continue
-            status = str(record.get("observation_status") or "")
-            if status not in terminal_statuses:
-                continue
-            current_epoch_terminal += 1
-            event_id = str(_first(record.get("event_id"), record.get("trade_id")) or "")
-            terminal_id = f"lifecycle:{event_id}:terminal"
-            if not event_id:
-                errors.append({"line": line_no, "reason": "MISSING_EVENT_ID"})
-                continue
-            if terminal_id in durable_lifecycle_ids:
-                already_present += 1
-                continue
-            try:
-                receipt = dual_write_v22_record(record, data_dir=str(root))
-                verification = receipt.get("store_verification") or {}
-                if not verification.get("passed"):
-                    errors.append({"line": line_no, "event_id": event_id, "reason": "V3_STORE_VERIFICATION_FAILED"})
+    for source in sources:
+        if not source.exists():
+            continue
+        with source.open("r", encoding="utf-8") as handle:
+            for line_no, line in enumerate(handle, 1):
+                if not line.endswith("\n"):
+                    raise ValueError(f"TRUNCATED_V22_JSONL_LINE:{line_no}")
+                scanned += 1
+                record = json.loads(line)
+                envelope = record.get("envelope") if isinstance(record.get("envelope"), Mapping) else {}
+                row_epoch = str(_first(record.get("epoch_id"), envelope.get("epoch_id")) or "")
+                if row_epoch != str(epoch_id):
+                    foreign_epoch += 1
                     continue
-                durable_lifecycle_ids.add(terminal_id)
-                backfilled += 1
-            except Exception as exc:
-                errors.append({"line": line_no, "event_id": event_id, "reason": f"{type(exc).__name__}:{exc}"})
+                status = str(record.get("observation_status") or "")
+                if status not in terminal_statuses:
+                    continue
+                current_epoch_terminal += 1
+                event_id = str(_first(record.get("event_id"), record.get("trade_id")) or "")
+                terminal_id = f"lifecycle:{event_id}:terminal"
+                if not event_id:
+                    errors.append({"line": line_no, "reason": "MISSING_EVENT_ID"})
+                    continue
+                if terminal_id in durable_lifecycle_ids:
+                    already_present += 1
+                    continue
+                try:
+                    receipt = dual_write_v22_record(record, data_dir=str(root))
+                    verification = receipt.get("store_verification") or {}
+                    if not verification.get("passed"):
+                        errors.append({"line": line_no, "event_id": event_id, "reason": "V3_STORE_VERIFICATION_FAILED"})
+                        continue
+                    durable_lifecycle_ids.add(terminal_id)
+                    backfilled += 1
+                except Exception as exc:
+                    errors.append({"line": line_no, "event_id": event_id, "reason": f"{type(exc).__name__}:{exc}"})
     verification = store.verify()
     return {
         "schema": "v3_terminal_reconciliation_v1",

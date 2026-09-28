@@ -13,6 +13,7 @@ from cycle_3m_indicators import (
     compute_3m_universe_snapshot,
     donchian_channel,
     resample_1m_to_3m,
+    realized_volatility_state,
     stoch_rsi,
     wilder_atr,
     wilder_rsi,
@@ -113,6 +114,8 @@ class Cycle3mIndicatorTests(unittest.TestCase):
             "donchian_loc_3m",
             "bb_width_3m", "delta_3m", "imbalance_3m", "dist_to_support",
             "dist_to_resistance", "session_utc", "hour_utc",
+            "realized_volatility_30m_pct", "volatility_of_volatility_30m_pct",
+            "realized_volatility_basis", "realized_volatility_return_count",
         ):
             self.assertIn(key, snap)
         self.assertEqual(snap["rsi_3m"], snap["rsi14"])
@@ -121,6 +124,19 @@ class Cycle3mIndicatorTests(unittest.TestCase):
         self.assertEqual(snap["delta_3m"], 12.5)
         self.assertEqual(snap["cycle_outcome"], "SKIPPED")
         self.assertIsNotNone(bollinger_width([c[4] for c in resample_1m_to_3m(rows)]))
+
+    def test_realized_volatility_is_causal_fixed_window_and_missing_is_explicit(self):
+        short = realized_volatility_state([_1m_row(i, 100 + i) for i in range(5)])
+        self.assertIsNone(short["realized_volatility_30m_pct"])
+        self.assertEqual(short["realized_volatility_basis"], "UNAVAILABLE_INSUFFICIENT_1M_CLOSES")
+        rows = [_1m_row(i, 100 + (i % 4) * 0.3 + i * 0.05) for i in range(40)]
+        first = realized_volatility_state(rows)
+        # Values older than the fixed 31-close window cannot affect the receipt.
+        replaced_prefix = [_1m_row(i, 5000 + i) for i in range(9)] + rows[9:]
+        second = realized_volatility_state(replaced_prefix)
+        self.assertAlmostEqual(first["realized_volatility_30m_pct"], second["realized_volatility_30m_pct"])
+        self.assertAlmostEqual(first["volatility_of_volatility_30m_pct"], second["volatility_of_volatility_30m_pct"])
+        self.assertEqual(first["realized_volatility_return_count"], 30)
 
 
 if __name__ == "__main__":

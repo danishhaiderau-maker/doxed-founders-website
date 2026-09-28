@@ -148,13 +148,14 @@ def test_chase_2_does_not_advance_to_3_at_60s():
     assert reprice(900) is True
 
 
-def test_five_plus_off_does_not_cancel_chase_4_order_at_9_min():
+def test_early_disabled_window_pulls_resting_order_but_late_disabled_holds():
     ns = _gate_namespace()
     should_cancel = ns["chase_age_window_should_cancel"]
     reprice = ns["chase_age_window_may_reprice"]
-    # 9 min: still chase-1 window. 5+ being OFF must not expire a resting order.
-    assert should_cancel(9 * 60) is False
-    assert should_cancel(540) is False
+    # 9 min: still chase-1 window. A resting order is no longer eligible and
+    # must be pulled back into virtual wait until chase 2 becomes active.
+    assert should_cancel(9 * 60) is True
+    assert should_cancel(540) is True
     # A chase-4 rest (20–25 min) is allowed; 5+ OFF at 25–30 min holds, does not cancel.
     assert should_cancel(20 * 60) is False
     assert reprice(20 * 60) is True

@@ -316,7 +316,7 @@ test('showcase reports a healthy REST fallback and renders canonical AI decision
       snapshot_seq: 177,
       snapshot_ts: '2026-07-30T03:36:23.000Z',
       snapshot_age_sec: 2,
-      bot_version: 'v15-typeb-opportunity-v2',
+      bot_version: 'v31-two-lane-safe-policy',
       exchange: 'bitfinex',
       symbol: 'tBTCF0:USTF0',
       ws_connected: false,

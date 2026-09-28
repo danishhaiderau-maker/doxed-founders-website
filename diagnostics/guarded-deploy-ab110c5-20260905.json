@@ -1,0 +1,35 @@
+{
+  "workflow_run_id": "33949302458",
+  "candidate_sha": "ab110c59fbf627d78140e601572dd887e0b5949a",
+  "observed_utc": "2026-09-05T06:20:42.6067724Z",
+  "installed_public_revision": "ab110c59fbf6",
+  "dashboard_pid": 664,
+  "force_paper_mode": true,
+  "live_armed": false,
+  "bitfinex_live_enabled": false,
+  "execution_paused": true,
+  "execution_reason": "ADMIN_MANUAL",
+  "pending_orders": 0,
+  "open_positions": 0,
+  "workflow_active_step": "Complete receipt bootstrap inside exact-revision maintenance",
+  "receipt_bootstrap_complete": false,
+  "advancing_bootstrap_observation": {
+    "utc": "2026-09-05T06:22:37.6305155Z",
+    "ledger": "decision",
+    "cursor": 1761469,
+    "records_indexed_this_slice": 64,
+    "blocked": false,
+    "last_failure_code": null,
+    "workflow_status": "in_progress"
+  },
+  "acceptance": "PENDING_NOT_DEPLOYMENT_COMPLETION",
+  "downloader": "PARKED_SCHEDULED_TASK_DISABLED",
+  "download_ack_analyzer_qualification": "NOT_COMPLETE",
+  "qa_export_cleanup": {
+    "path": "C:/DoxxedCrypto/btc-v31-current/.qa-inventory-cap-20260905",
+    "bytes": 62417189,
+    "files": 2583,
+    "status": "DELETE_TOOL_REJECTED_NO_RETRY_NO_BYTES_RECLAIMED",
+    "reproducible_source": "ab110c59fbf627d78140e601572dd887e0b5949a"
+  }
+}

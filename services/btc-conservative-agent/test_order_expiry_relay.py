@@ -15,7 +15,7 @@ def load_predicate():
     return namespace["_is_executable_order_expiry"]
 
 
-def expiry_push_uses_durable_receipt():
+def expiry_commit_uses_durable_receipt():
     source = pathlib.Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
     module = ast.parse(source)
     recorder = next(
@@ -26,10 +26,7 @@ def expiry_push_uses_durable_receipt():
         node for node in ast.walk(recorder)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "_push_showcase_relay_event"
-        and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and node.args[0].value == "ORDER_EXPIRED"
+        and node.func.id == "_commit_paper_lifecycle_transition"
     ]
     assert len(pushes) == 1
     return any(
@@ -145,7 +142,17 @@ class OrderExpiryRelayTests(unittest.TestCase):
         ))
 
     def test_real_expiry_waits_for_durable_platform_receipt(self):
-        self.assertTrue(expiry_push_uses_durable_receipt())
+        self.assertTrue(expiry_commit_uses_durable_receipt())
+
+    def test_terminal_state_and_pending_removal_are_inside_live_mutator(self):
+        source = pathlib.Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
+        module = ast.parse(source)
+        recorder = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_record_expired_order")
+        live = next(node for node in ast.walk(recorder) if isinstance(node, ast.FunctionDef) and node.name == "live_mutator")
+        live_source = ast.get_source_segment(source, live)
+        assert 'source["status"]' in live_source
+        assert "pending_orders.remove(item)" in live_source
+        assert "_commit_paper_lifecycle_transition(" in ast.get_source_segment(source, recorder)
 
 
 if __name__ == "__main__":

@@ -543,6 +543,46 @@ def test_missing_exchange_evidence_and_horizons_fail_closed_without_invention():
     assert "REQUIRED_POST_EXIT_HORIZON_INCOMPLETE" in fields["analysis_exclusion_reasons"]
 
 
+def test_counterfactual_propagates_only_explicit_causal_identity():
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    snapshot["shared_ai_call_id"] = "scan-causal-1"
+    snapshot["policy_signature"] = "policy-causal-1"
+    snapshot["epoch_id"] = "epoch-causal-1"
+    replay["collection_epoch_id"] = "epoch-causal-1"
+    replay["schedule_id"] = "schedule:epoch-causal-1:event-1:paper-primary"
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    expected_episode = "episode-" + hashlib.sha256(b"shared:scan-causal-1").hexdigest()[:20]
+    assert fields["epoch_id"] == "epoch-causal-1"
+    assert fields["opportunity_id"] == f"opportunity:{expected_episode}"
+    assert fields["policy_signature"] == "policy-causal-1"
+    assert fields["schedule_id"] == "schedule:epoch-causal-1:event-1:paper-primary"
+    assert "tape_id" not in fields
+    assert "fill_id" not in fields
+
+
+def test_counterfactual_never_invents_opportunity_from_trade_id():
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    snapshot.pop("shared_ai_call_id", None)
+    replay.pop("shared_ai_call_id", None)
+    buf.pop("shared_ai_call_id", None)
+    snapshot["trade_id"] = "trade-is-not-a-shared-call"
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    assert fields["opportunity_id"] is None
+    assert "schedule_id" not in fields
+    assert "tape_id" not in fields
+    assert "fill_id" not in fields
+
+
 def test_policy_key_changes_with_execution_cost_or_ladder():
     namespace = _load_evidence_functions()
     buf, snapshot, _replay, _outcome = _complete_fixture()
@@ -561,6 +601,52 @@ def test_policy_key_changes_with_execution_cost_or_ladder():
         buf["exit_config"], buf, changed_profile
     )
     assert key_one != key_three
+
+
+def test_policy_key_uses_explicit_durable_replay_identity_after_snapshot_join_loss():
+    """A rotated/reloaded replay must remain comparable without current-state inference."""
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    for key in (
+        "fee_model", "execution_profile", "source_git_rev", "executor_revision",
+        "epoch_id", "fill_gate_rev",
+    ):
+        snapshot.pop(key, None)
+    replay.update({
+        "fee_model": "bitfinex-fees-v1",
+        "execution_profile": "bitfinex-live-limit-v1",
+        "chase": {"enabled": True, "mode": "BOUNDED", "max_chases": 4},
+        "source_git_rev": "b99aceffb91a",
+        "executor_revision": "af5b912f3de5",
+        "collection_epoch_id": "epoch-d93cddc91653a5c7bba07162",
+        "fill_gate_rev": "VENUE_EXECUTABLE_SHOWCASE_FILL_GATE_V2",
+        "correlated_cluster_boundary_pct": 0.0025,
+    })
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    assert fields["policy_comparability_key"].startswith("policy_comparability_v1:")
+    assert "POLICY_COMPARABILITY_KEY_MISSING" not in fields["analysis_exclusion_reasons"]
+
+
+def test_legacy_replay_without_explicit_identity_remains_excluded():
+    namespace = _load_evidence_functions()
+    buf, snapshot, replay, outcome = _complete_fixture()
+    for key in (
+        "fee_model", "execution_profile", "source_git_rev", "executor_revision",
+        "epoch_id", "fill_gate_rev",
+    ):
+        snapshot.pop(key, None)
+    replay.pop("chase", None)
+
+    fields = namespace["build_counterfactual_observability_fields"](
+        buf, snapshot, replay, outcome
+    )
+
+    assert fields["policy_comparability_key"] is None
+    assert "POLICY_COMPARABILITY_KEY_MISSING" in fields["analysis_exclusion_reasons"]
 
 
 def test_semantic_profiles_are_stable_and_sensitive_to_execution_facts():

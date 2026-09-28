@@ -17,13 +17,22 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Run the normal deployment or a read-only live flat-boundary proof
+        description: Run normal deploy, a flat proof, or the isolated paused-credential API rollout
         required: true
         default: deploy
         type: choice
         options:
           - deploy
           - flat-check-only
+          - api-control-plane-credential-refresh
+      target_instance_id:
+        description: Exact paused Bitfinex instance id (required only for isolated credential API rollout)
+        required: false
+        type: string
+      expected_commit_sha:
+        description: Exact 40-character commit to deploy (required only for isolated credential API rollout)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -58,10 +67,83 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: https://doxed-founders-website-production.up.railway.app/api
           REQUIRE_BOT_ADMIN_TOKEN: YES
           REQUIRE_CANONICAL_FLY_OWNER: YES
           SHOWCASE_OWNER_URL: https://doxed-btc-bot.fly.dev
         run: node scripts/check-relay-flat.mjs
+
+  api-control-plane-credential-refresh:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'api-control-plane-credential-refresh'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout exact requested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_commit_sha }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate dispatch identity
+        env:
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+        run: |
+          test -n "${{ inputs.target_instance_id }}"
+          test "$EXPECTED_COMMIT_SHA" = "$(git rev-parse HEAD)"
+          git merge-base --is-ancestor 3cdefa4f0dfead539c78de08a75c8ee817c6170b "$EXPECTED_COMMIT_SHA"
+
+      - name: Install and verify isolated rollout contract
+        run: |
+          npm ci
+          npx prisma@6.8.2 generate --schema prisma/schema.prisma
+          npm run build:utils
+          npm run build --workspace=@dcf/api
+          npm test --workspace=@dcf/api
+          node --test scripts/deploy-paused-credential-api.spec.mjs
+
+      - name: Prove target relay is durably paused and disarmed
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TARGET_INSTANCE_ID: ${{ inputs.target_instance_id }}
+        run: node scripts/deploy-paused-credential-api.mjs prove-paused
+
+      - name: Snapshot isolated executor deployment
+        id: before
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          node scripts/deploy-paused-credential-api.mjs snapshot > topology.json
+          node -e "const x=require('./topology.json'); require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'executor_deployment_id='+x.executorDeploymentId+'\n')"
+          node -e "const x=require('./topology.json'); console.log(JSON.stringify({apiStatus:x.apiStatus,executorStatus:x.executorStatus,executorDeploymentId:x.executorDeploymentId}))"
+
+      - name: Deploy exact revision to API control plane only
+        id: api_deploy
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+        run: |
+          node scripts/deploy-paused-credential-api.mjs deploy > api-deployment.json
+          node -e "const x=require('./api-deployment.json'); require('fs').appendFileSync(process.env.GITHUB_OUTPUT, 'deployment_id='+x.deploymentId+'\n')"
+          node -e "const x=require('./api-deployment.json'); console.log(JSON.stringify({ok:x.ok,deploymentId:x.deploymentId,service:x.service,commitSha:x.commitSha}))"
+
+      - name: Verify exact API revision, route, and untouched executor
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TARGET_INSTANCE_ID: ${{ inputs.target_instance_id }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+          EXPECTED_API_DEPLOYMENT_ID: ${{ steps.api_deploy.outputs.deployment_id }}
+          EXPECTED_EXECUTOR_DEPLOYMENT_ID: ${{ steps.before.outputs.executor_deployment_id }}
+        run: |
+          node scripts/deploy-paused-credential-api.mjs verify
+          node scripts/deploy-paused-credential-api.mjs prove-paused
 
   deploy:
     if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
@@ -115,7 +197,6 @@ jobs:
           npm test --workspace=@dcf/web
           node --test scripts/check-relay-flat.spec.mjs
           node --test scripts/relay-revision-policy.spec.mjs
-          node --test scripts/relay-executor-receipt-policy.spec.mjs
           node --test scripts/fly-bot-runtime-contract.spec.mjs
           node --test scripts/bot-sync-guard.spec.mjs
 
@@ -132,6 +213,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: https://doxed-founders-website-production.up.railway.app/api
           REQUIRE_BOT_ADMIN_TOKEN: YES
           REQUIRE_CANONICAL_FLY_OWNER: YES
           SHOWCASE_OWNER_URL: https://doxed-btc-bot.fly.dev

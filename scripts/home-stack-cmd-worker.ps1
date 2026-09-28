@@ -1,12 +1,13 @@
 ﻿# Runs slow bridge commands off the :7810 listener thread (prevents bridge freeze).
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-global", "start-all-local", "reset-home-stack", "wipe-research", "pause-trading", "resume-trading")]
+  [ValidateSet("stop-bot", "stop-analyzer", "stop-all", "stop-all-global", "stop-all-local", "start-bot", "start-analyzer", "start-all-global", "start-all-local", "reset-home-stack", "wipe-research", "fresh-collection-local-run", "pause-trading", "resume-trading")]
   [string]$Action,
   [int]$BotPort = 7002,
   [int]$AnalyzerPort = 0,
   [ValidateSet("production", "local-collection")]
-  [string]$StackMode = "production"
+  [string]$StackMode = "production",
+  [string]$OperationId = ""
 )
 
 $ErrorActionPreference = "Continue"
@@ -69,7 +70,7 @@ switch ($Action) {
       Stop-ListenPortFast $AnalyzerPort | Out-Null
       Start-Sleep -Seconds 1
     }
-    if (-not (Test-AnalyzerHealthy)) {
+    if (-not (Test-AnalyzerAlive)) {
       if ($isLocal) {
         Start-DetachedPs1 (Join-Path $scriptDir "start-local-collection-analyzer.ps1") @("-NoWait") -NoExit -WindowTitle $analyzerTitle -Show Normal
       } else {
@@ -149,9 +150,13 @@ switch ($Action) {
     ) -Title "Doxed Start Everything"
   }
   "wipe-research" {
-    if (Test-PortOpen $BotPort) {
-      Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/reset" -Method POST -UseBasicParsing -TimeoutSec 180 | Out-Null
-    }
+    throw "LEGACY_WIPE_RESEARCH_RETIRED_USE_LAPTOP_ONLY_API"
+  }
+  "fresh-collection-local-run" {
+    if ($OperationId -notmatch '^[0-9a-f]{32}$') { throw "LOCAL_RESET_OPERATION_ID_INVALID" }
+    $cli = Join-Path $repoRoot "services\btc-conservative-agent\local_fresh_collection_cli.py"
+    & python $cli run --operation-id $OperationId | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "LOCAL_RESET_WORKER_FAILED" }
   }
   "pause-trading" {
     if (Test-PortOpen $BotPort) {

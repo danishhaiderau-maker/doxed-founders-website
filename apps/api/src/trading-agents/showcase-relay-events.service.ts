@@ -7,11 +7,10 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { SignalCycleStatus, TradingAgentInstanceStatus } from '@prisma/client';
 import type { Prisma } from '@prisma/client';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import type { SignalIntentEnvelope } from '@dcf/utils';
 import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
-  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   isExecutableEntryPolicy,
   isMirrorableLaneTradeId,
   SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
@@ -30,8 +29,10 @@ export type ShowcaseRelayEventType =
   | 'APPROVE_PENDING'
   | 'ORDER_PLACED'
   | 'POSITION_OPENED'
+  | 'POSITION_REDUCED'
   | 'POSITION_CLOSED'
   | 'ORDER_EXPIRED'
+  | 'ORDER_CANCELLED'
   | 'LIMIT_UPDATED';
 
 export type ShowcaseRelayEventBody = {
@@ -45,6 +46,11 @@ export type ShowcaseRelayEventBody = {
   limit_price?: number | null;
   fill_price?: number | null;
   qty?: number | null;
+  reduction_id?: string | null;
+  prior_qty?: number | null;
+  reduced_qty?: number | null;
+  remaining_qty?: number | null;
+  reduce_only?: boolean | null;
   exit_price?: number | null;
   reason?: string | null;
   exit_reason?: string | null;
@@ -80,6 +86,68 @@ export type ShowcaseRelayEventBody = {
   platform_received_at?: string | null;
 };
 
+export type PositionReducedEvidence = {
+  eventId: string;
+  reductionId: string;
+  eventSeq: number;
+  priorQty: number;
+  reducedQty: number;
+  remainingQty: number;
+  fillPrice: number;
+  sourceEventAt: Date;
+};
+
+/** Strict audit-only contract. It deliberately carries no execution request. */
+export function positionReducedEvidence(
+  body: ShowcaseRelayEventBody,
+): PositionReducedEvidence | undefined {
+  if (body.event !== 'POSITION_REDUCED' || body.schema !== 'dcf-showcase-intent-v1') return;
+  const eventId = body.event_id?.trim() ?? '';
+  const reductionId = body.reduction_id?.trim() ?? '';
+  const ts = Date.parse(String(body.ts ?? ''));
+  const prior = Number(body.prior_qty);
+  const reduced = Number(body.reduced_qty);
+  const remaining = Number(body.remaining_qty);
+  const fill = Number(body.fill_price);
+  if (
+    !eventId || eventId.length > 255 || !reductionId || reductionId.length > 255
+    || !Number.isInteger(body.event_seq) || Number(body.event_seq) < 0
+    || !Number.isFinite(ts) || ts > Date.now() + 5_000
+    || !Number.isFinite(prior) || prior <= 0
+    || !Number.isFinite(reduced) || reduced <= 0
+    || !Number.isFinite(remaining) || remaining < 0
+    || reduced > prior || Math.abs(prior - reduced - remaining) > 1e-8
+    || !Number.isFinite(fill) || fill <= 0
+  ) return;
+  return {
+    eventId, reductionId, eventSeq: Number(body.event_seq), priorQty: prior,
+    reducedQty: reduced, remainingQty: remaining, fillPrice: fill,
+    sourceEventAt: new Date(ts),
+  };
+}
+
+export function isReductionEvidenceIdentity(tradeId: string, lane: string): boolean {
+  void tradeId;
+  void lane;
+  return false;
+}
+
+export function reductionAuditMatches(
+  stored: { tradeId: string; eventSeq: number; priorQty: unknown; reducedQty: unknown; remainingQty: unknown; fillPrice: unknown },
+  incoming: PositionReducedEvidence,
+  tradeId: string,
+): boolean {
+  return stored.tradeId === tradeId && stored.eventSeq === incoming.eventSeq
+    && btcQuantityMatches(Number(stored.priorQty), incoming.priorQty)
+    && btcQuantityMatches(Number(stored.reducedQty), incoming.reducedQty)
+    && btcQuantityMatches(Number(stored.remainingQty), incoming.remainingQty)
+    && Math.abs(Number(stored.fillPrice) - incoming.fillPrice) < 0.005;
+}
+
+export function isReductionSequenceStale(latestSeq: number | undefined, incomingSeq: number): boolean {
+  return Number.isInteger(latestSeq) && incomingSeq <= Number(latestSeq);
+}
+
 type RelayLifecycleEnvelope = {
   action?: unknown;
   trade_id?: unknown;
@@ -102,7 +170,55 @@ type RelayPersistenceReceipt = {
 
 type CanonicalRelayPersistenceReceipt = RelayPersistenceReceipt & {
   cycleId?: string;
+  signalCycleEventId?: string;
+  replayed?: boolean;
 };
+
+export function exactSourceRelayReplayMatches(
+  existing: { cycleId: string; eventType: string; sourcePayloadSha256: string | null; sourceEventSeq: number | null },
+  incoming: { cycleId: string; eventType: string; payloadSha256: string; eventSeq: number | null | undefined },
+): boolean {
+  return existing.cycleId === incoming.cycleId
+    && existing.eventType === incoming.eventType
+    && existing.sourcePayloadSha256 === incoming.payloadSha256
+    && existing.sourceEventSeq === (Number.isInteger(incoming.eventSeq) ? incoming.eventSeq : null);
+}
+
+export const SIGNED_SHOWCASE_MAX_MARGIN_USD = 0.25;
+const SIGNED_SHOWCASE_LEVERAGE = 100;
+const SIGNED_SHOWCASE_MARGIN_EQUALITY_EPSILON_USD = 1e-8;
+
+export function resolveSignedShowcaseSizing(input: {
+  marginUsd: unknown;
+  leverage: unknown;
+  qtyBtc: unknown;
+  limitPrice: unknown;
+}) {
+  const marginUsd = Number(input.marginUsd);
+  const leverage = Number(input.leverage);
+  const qtyBtc = Number(input.qtyBtc);
+  const limitPrice = Number(input.limitPrice);
+  if (!Number.isFinite(marginUsd) || marginUsd <= 0 || marginUsd > SIGNED_SHOWCASE_MAX_MARGIN_USD) {
+    return { ok: false as const, reason: 'SIGNED_MARGIN_OUT_OF_RANGE' };
+  }
+  if (leverage !== SIGNED_SHOWCASE_LEVERAGE) {
+    return { ok: false as const, reason: 'SIGNED_LEVERAGE_MISMATCH' };
+  }
+  if (!Number.isFinite(qtyBtc) || qtyBtc <= 0 || !Number.isFinite(limitPrice) || limitPrice <= 0) {
+    return { ok: false as const, reason: 'SIGNED_SIZING_FIELDS_INVALID' };
+  }
+  const impliedMarginUsd = qtyBtc * limitPrice / leverage;
+  if (Math.abs(impliedMarginUsd - marginUsd) > SIGNED_SHOWCASE_MARGIN_EQUALITY_EPSILON_USD) {
+    return { ok: false as const, reason: 'SIGNED_MARGIN_QTY_MISMATCH' };
+  }
+  return {
+    ok: true as const,
+    marginUsd,
+    leverage,
+    requestedNotionalUsd: marginUsd * leverage,
+    provenance: 'SIGNED_SHOWCASE_MARGIN_USDT' as const,
+  };
+}
 
 /** Prove that the exact incoming revision is the cycle's canonical envelope. */
 export function exactLifecycleRevisionMatches(
@@ -113,6 +229,12 @@ export function exactLifecycleRevisionMatches(
   const incomingLimit = Number(incoming.limit_price);
   const currentQty = Number(current?.entry?.exact_qty_btc);
   const incomingQty = Number(incoming.qty);
+  const sizing = resolveSignedShowcaseSizing({
+    marginUsd: incoming.margin_usdt,
+    leverage: incoming.leverage,
+    qtyBtc: incomingQty,
+    limitPrice: incomingLimit,
+  });
   return Boolean(
     current?.action === 'ENTER'
     && String(current?.trade_id ?? '') === String(incoming.trade_id ?? '')
@@ -126,7 +248,9 @@ export function exactLifecycleRevisionMatches(
     && currentQty > 0
     && Number.isFinite(incomingQty)
     && incomingQty > 0
-    && btcQuantityMatches(currentQty, incomingQty),
+    && btcQuantityMatches(currentQty, incomingQty)
+    && sizing.ok
+    && Number((current as { risk?: { max_margin_usd?: unknown } }).risk?.max_margin_usd) === sizing.marginUsd,
   );
 }
 
@@ -244,6 +368,12 @@ export function relayIntentEnvelope(
     && body.qty > 0
       ? body.qty
       : null;
+  const signedSizing = resolveSignedShowcaseSizing({
+    marginUsd: body?.margin_usdt,
+    leverage: body?.leverage,
+    qtyBtc: exactQtyBtc,
+    limitPrice: exactLimitPrice,
+  });
   const settleNotBeforeMs = Date.parse(
     String(body?.relay_settle_not_before_ts ?? ''),
   );
@@ -292,7 +422,7 @@ export function relayIntentEnvelope(
       ? { source_expires_at: body.source_expires_at }
       : {}),
   };
-  if (exactLimitPrice == null) {
+  if (exactLimitPrice == null || exactQtyBtc == null || !signedSizing.ok) {
     return {
       cycle_id: cycleId,
       trade_id: tradeId,
@@ -301,6 +431,7 @@ export function relayIntentEnvelope(
       direction: dir,
       version: body?.bot_version ?? 'showcase-relay-v2',
       context: lifecycleContext,
+      sizing_blocker: signedSizing.ok ? undefined : signedSizing.reason,
     };
   }
   const envelope: SignalIntentEnvelope & {
@@ -349,7 +480,7 @@ export function relayIntentEnvelope(
         }),
       ),
       leverage_hint: DEFAULT_SUBSCRIBER_LEVERAGE,
-      max_margin_usd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
+      max_margin_usd: signedSizing.marginUsd,
     },
     context: {
       regime: 'UNKNOWN',
@@ -359,6 +490,9 @@ export function relayIntentEnvelope(
       research_venue: 'bitfinex',
       disclaimer:
         'Signed exact showcase limit. Subscriber execution remains subject to platform and exchange safety gates.',
+      requested_margin_source: signedSizing.provenance,
+      requested_margin_usd: signedSizing.marginUsd,
+      requested_notional_usd: signedSizing.requestedNotionalUsd,
       ...lifecycleContext,
     },
     ...(body?.intent_source ? { intent_source: body.intent_source } : {}),
@@ -583,14 +717,19 @@ export class ShowcaseRelayEventsService {
       context?.signatureHeader,
       body,
     );
+    const sourcePayloadSha256 = verifiedSignedPayload && context?.rawBody
+      ? createHash('sha256').update(context.rawBody).digest('hex')
+      : undefined;
     this.assertActiveDashboardOwner(body);
 
     const tradeId = (body.trade_id ?? '').trim();
     const researchLane = (body.research_lane ?? '').trim().toUpperCase();
-    if (
+    const reductionEvidenceIdentity = body.event === 'POSITION_REDUCED'
+      && isReductionEvidenceIdentity(tradeId, researchLane);
+    if (!reductionEvidenceIdentity && (
       !isMirrorableLaneTradeId(tradeId)
       || (researchLane && researchLane !== 'CONTINUOUS')
-    ) {
+    )) {
       this.logger.warn(
         `Rejected non-mirrorable showcase relay event=${body.event} ` +
         `trade=${tradeId || '?'} lane=${researchLane || 'UNKNOWN'}`,
@@ -625,6 +764,48 @@ export class ShowcaseRelayEventsService {
       && body.schema === 'dcf-showcase-intent-v1'
       && (body.direction?.toUpperCase() === 'LONG'
         || body.direction?.toUpperCase() === 'SHORT');
+    if (event === 'POSITION_REDUCED') {
+      const evidence = signedLifecycleEvent ? positionReducedEvidence(body) : undefined;
+      if (!evidence) {
+        throw new BadRequestException(
+          'Signed position reduction requires an idempotent reduce-only quantity reconciliation',
+        );
+      }
+      const receivedMs = Date.parse(String(persistBody.platform_received_at));
+      if (receivedMs < evidence.sourceEventAt.getTime() - 5_000) {
+        throw new BadRequestException('Position reduction evidence is future-dated');
+      }
+      const receipt = await this.persistRelayEvent(slug, persistBody, undefined, sourcePayloadSha256);
+      let subscribersProcessed = 0;
+      if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true') {
+        const processed = await this.execution.processAuditedPositionReductionEvent(
+          tradeId,
+          {
+            eventId: evidence.eventId,
+            reductionId: evidence.reductionId,
+            eventSeq: evidence.eventSeq,
+            priorQty: evidence.priorQty,
+            reducedQty: evidence.reducedQty,
+            remainingQty: evidence.remainingQty,
+          },
+        );
+        subscribersProcessed = processed.processed;
+      }
+      return {
+        ok: true,
+        accepted: true,
+        action: 'POSITION_REDUCTION_AUDITED',
+        exchange_mutation: false,
+        event,
+        trade_id: tradeId,
+        persisted: receipt.persisted,
+        subscribers_processed: subscribersProcessed,
+        intentCreated: false,
+        platform_received_at: persistBody.platform_received_at ?? null,
+        durable_ack: this.durableAck(persistBody, receipt, sourcePayloadSha256),
+        ingest_ms: Date.now() - ingestStartedAt,
+      };
+    }
     const directExecutableIntent =
       signedLifecycleEvent
       && (event === 'ORDER_PLACED' || event === 'LIMIT_UPDATED')
@@ -748,8 +929,17 @@ export class ShowcaseRelayEventsService {
       && signedExpiryEvidence.eventId.length <= 255
       && ORDER_EXPIRED_FLATTEN_REASONS.has(signedExpiryEvidence.reason),
     );
+    const signedCancelEvidence = event === 'ORDER_CANCELLED' && signedLifecycleEvent
+      && body.ts && Number.isFinite(Date.parse(body.ts))
+      && typeof body.event_id === 'string' && Boolean(body.event_id.trim())
+      && typeof body.event_seq === 'number' && Number.isInteger(body.event_seq) && body.event_seq >= 0
+      && typeof body.limit_price === 'number' && Number.isFinite(body.limit_price) && body.limit_price > 0
+      && typeof body.reason === 'string' && Boolean(body.reason.trim());
+    if (event === 'ORDER_CANCELLED' && !signedCancelEvidence) {
+      throw new BadRequestException('Signed order cancellation requires exact source order evidence');
+    }
     if (event === 'ORDER_EXPIRED' && signedLifecycleEvent && !expiryFlattenable) {
-      await this.persistRelayEvent('conservative-btc', persistBody);
+      const expiryReceipt = await this.persistRelayEvent('conservative-btc', persistBody, undefined, sourcePayloadSha256);
       return {
         ok: true,
         accepted: true,
@@ -761,6 +951,7 @@ export class ShowcaseRelayEventsService {
         intentCreated: false,
         persisted: true,
         platform_received_at: persistBody.platform_received_at ?? null,
+        durable_ack: this.durableAck(persistBody, expiryReceipt, sourcePayloadSha256),
         ingest_ms: Date.now() - ingestStartedAt,
       };
     }
@@ -777,7 +968,7 @@ export class ShowcaseRelayEventsService {
     if (
       !noCopyClose
       && signedLifecycleEvent
-      && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED' || event === 'ORDER_EXPIRED')
+      && (event === 'ORDER_PLACED' || event === 'POSITION_OPENED' || event === 'POSITION_CLOSED' || event === 'ORDER_EXPIRED' || event === 'ORDER_CANCELLED')
     ) {
       this.execution.requestExecutorPreWake?.(
         event,
@@ -802,6 +993,7 @@ export class ShowcaseRelayEventsService {
     let persisted = false;
     let canonicalRevisionApplied = false;
     let executionWakeQueued = false;
+    let persistenceReceipt: CanonicalRelayPersistenceReceipt = { persisted: false, intentApplied: false };
     try {
       const receipt = await this.persistRelayEvent(slug, persistBody, () => {
         // Canonical signed state is committed before this callback. Start the
@@ -816,9 +1008,10 @@ export class ShowcaseRelayEventsService {
           );
           executionWakeQueued = true;
         }
-      });
+      }, sourcePayloadSha256);
       persisted = receipt.persisted;
       canonicalRevisionApplied = receipt.intentApplied;
+      persistenceReceipt = receipt;
     } catch (err) {
       this.logger.error(
         `Showcase relay persist failed: ${err instanceof Error ? err.message : err}`,
@@ -863,6 +1056,7 @@ export class ShowcaseRelayEventsService {
           persisted: noCopyAck.persisted || persisted,
           negative_evidence: 'SHOWCASE_ONLY_RELAY_PAUSED',
           platform_received_at: persistBody.platform_received_at ?? null,
+          durable_ack: this.durableAck(persistBody, persistenceReceipt, sourcePayloadSha256),
           ingest_ms: Date.now() - ingestStartedAt,
         };
       }
@@ -881,7 +1075,26 @@ export class ShowcaseRelayEventsService {
         canonicalRevisionApplied ? persistBody.limit_price ?? null : null,
       canonical_trade_id: canonicalRevisionApplied ? persistBody.trade_id ?? null : null,
       platform_received_at: persistBody.platform_received_at ?? null,
+      durable_ack: this.durableAck(persistBody, persistenceReceipt, sourcePayloadSha256),
       ingest_ms: Date.now() - ingestStartedAt,
+    };
+  }
+
+  private durableAck(
+    body: ShowcaseRelayEventBody,
+    receipt: CanonicalRelayPersistenceReceipt,
+    payloadSha256?: string,
+  ) {
+    if (!receipt.persisted || !receipt.signalCycleEventId || !payloadSha256) return null;
+    return {
+      event_id: body.event_id ?? null,
+      event_type: body.event,
+      trade_id: body.trade_id ?? null,
+      event_seq: body.event_seq ?? null,
+      payload_sha256: payloadSha256,
+      signal_cycle_event_id: receipt.signalCycleEventId,
+      platform_received_at: body.platform_received_at ?? null,
+      replayed: Boolean(receipt.replayed),
     };
   }
 
@@ -1062,7 +1275,8 @@ export class ShowcaseRelayEventsService {
     slug: string,
     body: ShowcaseRelayEventBody,
     onCanonicalPersisted?: (receipt: CanonicalRelayPersistenceReceipt) => void,
-  ): Promise<RelayPersistenceReceipt> {
+    sourcePayloadSha256?: string,
+  ): Promise<CanonicalRelayPersistenceReceipt> {
     const tradeId = (body.trade_id ?? '').trim();
     if (!tradeId) return { persisted: false, intentApplied: false };
     const eventId =
@@ -1113,29 +1327,103 @@ export class ShowcaseRelayEventsService {
         if (!cycleReceipt) return { persisted: false, intentApplied: false };
         const { cycleId, intentApplied } = cycleReceipt;
 
+        const existingSourceEvent = sourcePayloadSha256
+          ? await (typeof tx.signalCycleEvent.findUnique === 'function'
+            ? tx.signalCycleEvent.findUnique({
+              where: { sourceEventId: eventId },
+              select: {
+                id: true, cycleId: true, eventType: true,
+                sourcePayloadSha256: true, sourceEventSeq: true,
+              },
+            })
+            : Promise.resolve(null))
+          : null;
+        if (existingSourceEvent) {
+          if (!exactSourceRelayReplayMatches(existingSourceEvent, {
+            cycleId, eventType: eventBody.event, payloadSha256: sourcePayloadSha256!,
+            eventSeq: eventBody.event_seq,
+          })) {
+            throw new BadRequestException('Conflicting signed relay event replay');
+          }
+          return {
+            persisted: true, intentApplied, cycleId,
+            signalCycleEventId: existingSourceEvent.id, replayed: true,
+          };
+        }
+
+        if (eventBody.event === 'POSITION_REDUCED') {
+          const reduction = positionReducedEvidence(eventBody);
+          if (!reduction) throw new BadRequestException('Invalid position reduction evidence');
+          const existingReduction = await tx.relayPositionReductionAudit.findFirst({
+            where: { OR: [
+              { eventId: reduction.eventId }, { reductionId: reduction.reductionId },
+              { tradeId, eventSeq: reduction.eventSeq },
+            ] },
+          });
+          if (existingReduction) {
+            if (!reductionAuditMatches(existingReduction, reduction, tradeId)) {
+              throw new BadRequestException('Conflicting position reduction replay');
+            }
+          } else {
+            const latest = await tx.relayPositionReductionAudit.findFirst({
+              where: { tradeId }, orderBy: { eventSeq: 'desc' }, select: { eventSeq: true },
+            });
+            if (latest && isReductionSequenceStale(latest.eventSeq, reduction.eventSeq)) {
+              throw new BadRequestException('Out-of-order position reduction evidence');
+            }
+            await tx.relayPositionReductionAudit.create({ data: {
+              eventId: reduction.eventId,
+              reductionId: reduction.reductionId,
+              cycleId,
+              tradeId,
+              eventSeq: reduction.eventSeq,
+              priorQty: reduction.priorQty,
+              reducedQty: reduction.reducedQty,
+              remainingQty: reduction.remainingQty,
+              fillPrice: reduction.fillPrice,
+              sourceEventAt: reduction.sourceEventAt,
+              platformReceivedAt: new Date(String(eventBody.platform_received_at)),
+              payload: eventBody as unknown as Prisma.InputJsonValue,
+            } });
+          }
+        }
+
         // The showcase ORDER_PLACED event is audit evidence, not proof that
         // this subscriber has an exchange order. Only the subscriber execution
         // path may transition a participant/cycle to PENDING_ENTRY after
         // Bitfinex has accepted its own order.
         if (eventBody.event === 'POSITION_CLOSED') {
           const cycle = await tx.signalCycle.findUnique({ where: { id: cycleId } });
-          if (!cycle || cycle.status === SignalCycleStatus.CLOSED) {
-            return { persisted: true, intentApplied, cycleId };
+          if (cycle && cycle.status !== SignalCycleStatus.CLOSED) {
+            await tx.signalCycle.update({
+              where: { id: cycleId },
+              data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
+            });
           }
-          await tx.signalCycle.update({
-            where: { id: cycleId },
-            data: { status: SignalCycleStatus.CLOSED, closedAt: new Date() },
-          });
         }
 
-        return { persisted: true, intentApplied, cycleId };
+        let signalCycleEventId: string | undefined;
+        if (sourcePayloadSha256) {
+          const audit = await tx.signalCycleEvent.create({ data: {
+            cycleId,
+            eventType: eventBody.event,
+            payload: eventBody as unknown as Prisma.InputJsonValue,
+            sourceEventId: eventId,
+            sourcePayloadSha256,
+            sourceEventSeq: Number.isInteger(eventBody.event_seq) ? eventBody.event_seq : null,
+            platformReceivedAt: eventBody.platform_received_at
+              ? new Date(eventBody.platform_received_at) : null,
+          }, select: { id: true } });
+          signalCycleEventId = audit.id || eventId;
+        }
+        return { persisted: true, intentApplied, cycleId, signalCycleEventId, replayed: false };
       }),
     );
     if (!canonical.persisted || !canonical.cycleId) return canonical;
 
     onCanonicalPersisted?.(canonical);
 
-    await this.withRelayPersistenceLock(lockKey, () =>
+    if (!sourcePayloadSha256) await this.withRelayPersistenceLock(lockKey, () =>
       this.prisma.$transaction(async (tx) => {
         await tx.$executeRaw`
           SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0::bigint))
@@ -1159,7 +1447,12 @@ export class ShowcaseRelayEventsService {
         }
       }),
     );
-    return { persisted: true, intentApplied: canonical.intentApplied };
+    return {
+      persisted: true, intentApplied: canonical.intentApplied,
+      cycleId: canonical.cycleId,
+      signalCycleEventId: canonical.signalCycleEventId,
+      replayed: canonical.replayed,
+    };
   }
 
   private async withRelayPersistenceLock<T>(
@@ -1254,6 +1547,9 @@ export class ShowcaseRelayEventsService {
         body?.event === 'ORDER_EXPIRED'
         && Boolean(body.platform_received_at)
         && Boolean(body.source_expires_at);
+      const carriesSignedCancel =
+        body?.event === 'ORDER_CANCELLED'
+        && Boolean(body.platform_received_at);
       const applyExactLimit =
         carriesExactLimit
         && existing.status !== SignalCycleStatus.CLOSED
@@ -1263,7 +1559,7 @@ export class ShowcaseRelayEventsService {
       );
       if (
         signedIntent
-        && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose || carriesSignedExpiry)
+        && (current?.action !== 'ENTER' || applyExactLimit || carriesSignedClose || carriesSignedExpiry || carriesSignedCancel)
       ) {
         const incoming = relayIntentEnvelope(existing.id, tradeId, body) as Record<
           string,
@@ -1273,7 +1569,7 @@ export class ShowcaseRelayEventsService {
           context?: Record<string, unknown>;
         };
         const intentEnvelope =
-          current?.action === 'ENTER' && (applyExactLimit || carriesSignedClose || carriesSignedExpiry)
+          current?.action === 'ENTER' && (applyExactLimit || carriesSignedClose || carriesSignedExpiry || carriesSignedCancel)
             ? {
                 ...current,
                 direction: incoming.direction,

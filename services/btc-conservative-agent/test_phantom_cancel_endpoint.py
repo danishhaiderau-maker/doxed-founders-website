@@ -48,7 +48,8 @@ def main() -> None:
     assert "ambiguous open position" in body
 
     # Capacity release — the phantom must release its lane slot.
-    assert "lane_unregister_open_position(pos)" in body
+    assert "open_positions.remove(pos)" in body
+    assert "lane_open_positions.get(" in body
 
     # $0 PnL outcome recorded with the phantom reason.
     assert '"net_pnl_usd": 0.0' in body
@@ -57,24 +58,24 @@ def main() -> None:
 
     # Persists state + refreshes the cached /api/state snapshot so Railway's
     # next poll reflects the cancellation.
-    assert "save_positions()" in body
+    assert "save_positions(persist_lifecycle=False)" in body
     assert "save_persistent_config()" in body
     assert "_patch_api_state_cache_fields(" in body
 
     # Emits a POSITION_CLOSED relay event so downstream subscribers learn the
     # trade is no longer open.
-    assert "_push_showcase_relay_event(" in body
+    assert "_commit_paper_lifecycle_transition(" in body
     assert '"POSITION_CLOSED"' in body
 
     # Uses the same close lock as close_position — no race with the strategy.
-    assert "with position_close_lock:" in body
+    assert "canonical_lock=position_close_lock" in body
 
     # Re-validates under the close lock (concurrent close_position race).
-    assert "closed under lock" in body
+    assert "phantom-close source changed before commit" in body
 
     # Marks the position dict consistently.
-    assert 'pos["status"] = "CLOSED"' in body
-    assert 'pos["exit_reason"] = PHANTOM_CANCEL_REASON' in body
+    assert '"status": "CLOSED"' in body
+    assert '"exit_reason": PHANTOM_CANCEL_REASON' in body
 
     # Response shape.
     assert '"ok": True' in body
