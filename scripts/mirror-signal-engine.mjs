@@ -73,14 +73,26 @@ if (existsSync(combosAgent)) {
   writeFileSync(combosEngine, comboSrc, 'utf8');
   console.log(`Mirrored combo_pathway_config.py → combos.py (${sha256(comboSrc)})`);
 
+  let previous = {};
+  if (existsSync(manifestPath)) {
+    try {
+      previous = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } catch {
+      previous = {};
+    }
+  }
+  const engineVersion = extractEngineVersion(comboSrc);
+  // CI runs this mirror and requires a clean `git diff`; timestamps may only
+  // move when the mirrored content identity actually changes.
+  const unchanged = previous.signal_hash === botHash && previous.engine_version === engineVersion;
   const manifest = {
-    engine_version: extractEngineVersion(comboSrc),
-    combo_version: new Date().toISOString().slice(0, 10),
+    engine_version: engineVersion,
+    combo_version: unchanged && previous.combo_version ? previous.combo_version : new Date().toISOString().slice(0, 10),
     exit_version: 'five-family-exits-v1',
     benchmark_lane: 'CONTINUOUS_ANALYTICAL_ONLY',
     signal_hash: botHash,
     source: 'services/btc-conservative-agent/bot.py',
-    updated_at: new Date().toISOString(),
+    updated_at: unchanged && previous.updated_at ? previous.updated_at : new Date().toISOString(),
   };
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   console.log(`Updated manifest (engine=${manifest.engine_version} hash=${botHash})`);

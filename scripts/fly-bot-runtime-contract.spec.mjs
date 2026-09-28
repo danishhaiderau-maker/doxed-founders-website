@@ -79,14 +79,15 @@ const overnightGuardPath = new URL(
   import.meta.url,
 );
 
-test('Fly monitor compares against the latest bot-source revision', async () => {
+test('Fly monitor compares against the latest successful deploy revision', async () => {
   const workflow = await readFile(monitorPath, 'utf8');
 
+  assert.match(workflow, /ref:\s*master/);
+  assert.doesNotMatch(workflow, /ref:\s*[0-9a-f]{40}/);
   assert.match(workflow, /fetch-depth:\s*0/);
-  assert.match(
-    workflow,
-    /git log -1 --format=%H --[\s\S]*services\/btc-conservative-agent[\s\S]*scripts\/check-relay-flat\.mjs[\s\S]*\.github\/workflows\/fly-bot-deploy\.yml/,
-  );
+  assert.match(workflow, /actions:\s*read/);
+  assert.match(workflow, /actions\/workflows\/fly-bot-deploy\.yml\/runs\?branch=master/);
+  assert.match(workflow, /resolve_deployed_revision\(/);
   assert.match(
     workflow,
     /EXPECTED_REVISION:\s*\$\{\{\s*steps\.expected\.outputs\.revision\s*\}\}/,
@@ -94,7 +95,7 @@ test('Fly monitor compares against the latest bot-source revision', async () => 
   assert.doesNotMatch(workflow, /EXPECTED_REVISION:\s*\$\{\{\s*github\.sha\s*\}\}/);
   assert.match(workflow, /re\.fullmatch\(r"\[0-9a-f\]\{7,40\}", reported\)/);
   assert.match(workflow, /"git",\s*"rev-parse",\s*"--verify",\s*f"\{reported\}\^\{\{commit\}\}"/);
-  assert.match(workflow, /merge-base",\s*"--is-ancestor",\s*required,\s*actual/);
+  assert.match(workflow, /require_deployed_revision\(/);
   assert.match(workflow, /merge-base",\s*"--is-ancestor",\s*actual,\s*"HEAD"/);
   assert.doesNotMatch(workflow, /actual\.startswith\(expected\)/);
 });

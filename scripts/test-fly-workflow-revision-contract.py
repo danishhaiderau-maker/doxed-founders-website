@@ -12,19 +12,24 @@ PREDEPLOY_ABORT_HELPER = (ROOT / "scripts/fly_resume_predeploy_abort.py").read_t
 TEST_PATH = "services/btc-conservative-agent/test*.py"
 
 
-def test_test_only_changes_are_excluded_from_deploy_and_expected_revision():
+def test_test_only_changes_are_excluded_from_deploy():
     assert f'- "!{TEST_PATH}"' in DEPLOY
-    assert f"':(exclude,glob){TEST_PATH}'" in MONITOR
 
 
-def test_runtime_and_deploy_contract_changes_remain_revision_relevant():
+def test_runtime_and_deploy_contract_changes_remain_deploy_triggers():
     for path in (
         "services/btc-conservative-agent/**",
         "scripts/check-relay-flat.mjs",
         ".github/workflows/fly-bot-deploy.yml",
     ):
         assert path in DEPLOY
-        assert path.replace("/**", "") in MONITOR
+
+
+def test_monitor_expects_latest_successful_deploy_on_master():
+    assert "ref: master" in MONITOR
+    assert "resolve_deployed_revision(" in MONITOR
+    assert "require_deployed_revision(" in MONITOR
+    assert "ref: aac5940" not in MONITOR
 
 
 def test_monitor_splits_fast_liveness_from_full_readiness_fail_closed():
