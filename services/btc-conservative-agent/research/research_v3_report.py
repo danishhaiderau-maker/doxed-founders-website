@@ -1,8 +1,12 @@
 """Analyzer-facing Safe Policy Genome V3 status and ranking report."""
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
+import math
 import os
+import csv
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,11 +16,211 @@ from policy_search_manifest import POLICY_SEARCH_MANIFEST
 from research_v3_contract import SAFE_POLICY_GENOME_CONTRACT, normalize_lifecycle_outcome
 from research_v3_candidates import evaluate_protection_screen, load_candidate_inputs
 from research_v3_ranking import rank_safe_policies
-from equal_rights_ranking import build_equal_rights_ranking, load_analyzer_companions
 from research_v3_search import build_search_plan, search_progress
 from research_v3_store import V3EvidenceStore
+from research_dynamic_entry_policy import DEFAULT_CAUSAL_FEATURES
+from combo_pathway_config import (
+    ACTIVE_TILE_ORDER,
+    ACTIVE_TILE_REGISTRY,
+    active_tile_registry_signature,
+)
 
 REPORT_FILE = "safe_policy_genome_v3_report.json"
+EXHAUSTIVE_POLICY_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
+EXHAUSTIVE_POLICY_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
+
+
+_PRE_ENTRY_FEATURE_PATHS = {
+    "atr_bucket": (("atr_bucket",), ("research_buckets", "atr_bucket")),
+    "realized_volatility_bucket": (
+        ("realized_volatility_bucket",),
+        ("research_buckets", "realized_volatility_bucket"),
+        ("market_context", "realized_volatility_bucket"),
+    ),
+    "spread_bucket": (
+        ("spread_bucket",), ("directional_spread_bucket",),
+        ("research_buckets", "spread_bucket"),
+        ("research_buckets", "directional_spread_bucket"),
+    ),
+    "depth_bucket": (
+        ("depth_bucket",), ("research_buckets", "depth_bucket"),
+        ("market_context", "depth_bucket"),
+    ),
+    "liquidity_bucket": (
+        ("liquidity_bucket",), ("research_buckets", "liquidity_bucket"),
+        ("market_context", "liquidity_bucket"),
+    ),
+    "regime": (
+        ("regime",), ("entry_regime",), ("market_regime",),
+        ("market_context", "regime"), ("market_context", "regime_label"),
+    ),
+    "direction": (
+        ("direction",), ("final_direction",), ("raw_direction",),
+        ("executed_direction",),
+    ),
+    "trend_strength_bucket": (
+        ("trend_strength_bucket",),
+        ("research_buckets", "trend_strength_bucket"),
+        ("market_context", "trend_strength_bucket"),
+    ),
+}
+
+
+def _nested_feature(features: dict[str, Any], paths) -> Any:
+    for path in paths:
+        value: Any = features
+        for key in path:
+            if not isinstance(value, dict) or key not in value:
+                value = None
+                break
+            value = value[key]
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def normalize_pre_entry_feature_receipt(
+    receipt: dict[str, Any], *, signal_ts: Any,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Project one immutable receipt into the dynamic-policy causal schema.
+
+    Scalars are timestamped only at the receipt's explicit pre-decision capture
+    boundary. Explicit observation timestamps are retained and rejected when
+    they cross the signal boundary. Missing dimensions stay missing so the
+    dynamic-policy evaluator reports UNKNOWN rather than inventing a bucket.
+    """
+    if str(receipt.get("availability_boundary") or "") != "PRE_DECISION_ONLY":
+        return {}, ["PRE_ENTRY_AVAILABILITY_BOUNDARY_INVALID"]
+    if receipt.get("capture_schema") != "measured_feature_capture_v1":
+        return {}, ["PRE_ENTRY_MEASURED_CAPTURE_MISSING"]
+    features = receipt.get("features")
+    if not isinstance(features, dict):
+        return {}, ["PRE_ENTRY_FEATURE_PAYLOAD_INVALID"]
+    try:
+        if isinstance(receipt.get("captured_at_ts"), bool) or isinstance(signal_ts, bool):
+            raise ValueError("boolean timestamp")
+        captured_at = float(receipt.get("captured_at_ts"))
+        signal_at = float(signal_ts)
+        if (not math.isfinite(captured_at) or not math.isfinite(signal_at)
+                or captured_at <= 0 or signal_at <= 0):
+            raise ValueError("nonfinite timestamp")
+    except (TypeError, ValueError, OverflowError):
+        return {}, ["PRE_ENTRY_CAPTURE_TIMESTAMP_INVALID"]
+    if captured_at > signal_at:
+        return {}, ["PRE_ENTRY_CAPTURE_AFTER_SIGNAL"]
+
+    normalized: dict[str, dict[str, Any]] = {}
+    blockers: list[str] = []
+    for name in DEFAULT_CAUSAL_FEATURES:
+        value = _nested_feature(features, _PRE_ENTRY_FEATURE_PATHS[name])
+        if value in (None, ""):
+            blockers.append(f"MISSING_PRE_ENTRY_FEATURE:{name}")
+            continue
+        if isinstance(value, dict) and "value" in value:
+            observation = value.get("value")
+            try:
+                if isinstance(value.get("observed_ts"), bool):
+                    raise ValueError("boolean timestamp")
+                observed_at = float(value.get("observed_ts"))
+                if not math.isfinite(observed_at) or observed_at <= 0:
+                    raise ValueError("nonfinite timestamp")
+            except (TypeError, ValueError, OverflowError):
+                blockers.append(f"FEATURE_TIMESTAMP_MISSING:{name}")
+                continue
+        else:
+            observation = value
+            observed_at = captured_at
+        valid_scalar = isinstance(observation, (str, int, float)) and not isinstance(observation, bool)
+        if isinstance(observation, str):
+            valid_scalar = bool(observation.strip()) and observation.strip().lower() not in {
+                "nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity",
+            }
+        elif valid_scalar:
+            try:
+                valid_scalar = math.isfinite(float(observation))
+            except OverflowError:
+                valid_scalar = False
+        if not valid_scalar:
+            blockers.append(f"MISSING_PRE_ENTRY_FEATURE:{name}")
+            continue
+        if observed_at > signal_at:
+            blockers.append(f"POST_ENTRY_FEATURE_LEAKAGE:{name}")
+            continue
+        normalized[name] = {"value": observation, "observed_ts": observed_at}
+    return normalized, blockers
+
+
+def join_pre_entry_feature_receipts(
+    opportunities: list[dict[str, Any]], receipts: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Join exactly one causal receipt per opportunity; ambiguity is UNKNOWN."""
+    by_episode: dict[str, list[dict[str, Any]]] = {}
+    for receipt in receipts:
+        by_episode.setdefault(str(receipt.get("episode_id") or ""), []).append(receipt)
+    joined, blocker_counts = [], Counter()
+    receipt_joined = schema_complete = 0
+    for opportunity in opportunities:
+        row = dict(opportunity)
+        episode_id = str(row.get("episode_id") or "")
+        matches = by_episode.get(episode_id, [])
+        blockers: list[str]
+        normalized: dict[str, dict[str, Any]] = {}
+        opportunity_id = str(row.get("opportunity_id") or row.get("record_id") or "").strip()
+        if not episode_id.strip() or not opportunity_id:
+            blockers = ["PRE_ENTRY_OPPORTUNITY_IDENTITY_MISSING"]
+        elif len(matches) == 0:
+            blockers = ["PRE_ENTRY_FEATURE_RECEIPT_MISSING"]
+        elif len(matches) != 1:
+            blockers = ["PRE_ENTRY_FEATURE_RECEIPT_AMBIGUOUS"]
+        else:
+            receipt = matches[0]
+            if str(receipt.get("opportunity_id") or "") != str(
+                row.get("opportunity_id") or row.get("record_id") or ""
+            ):
+                blockers = ["PRE_ENTRY_OPPORTUNITY_ID_MISMATCH"]
+            else:
+                normalized, blockers = normalize_pre_entry_feature_receipt(
+                    receipt, signal_ts=row.get("signal_ts"),
+                )
+                receipt_joined += 1
+                if not blockers:
+                    schema_complete += 1
+        row["pre_entry_features"] = normalized
+        row["pre_entry_feature_status"] = (
+            "COMPLETE" if not blockers else "UNKNOWN"
+        )
+        row["pre_entry_feature_blockers"] = blockers
+        blocker_counts.update(blockers)
+        joined.append(row)
+    return joined, {
+        "opportunities": len(opportunities),
+        "receipt_rows": len(receipts),
+        "receipt_joined_opportunities": receipt_joined,
+        "dynamic_schema_complete_opportunities": schema_complete,
+        "unknown_opportunities": len(opportunities) - schema_complete,
+        "blocker_counts": dict(sorted(blocker_counts.items())),
+    }
+
+
+def _deployed_policy_collection() -> dict[str, Any]:
+    """Describe deployed paper policies independently of observed evidence."""
+    policies = [
+        {
+            "lane": lane,
+            "policy_id": ACTIVE_TILE_REGISTRY[lane]["raw_policy_id"],
+            "policy_signature": ACTIVE_TILE_REGISTRY[lane]["policy_signature"],
+            "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
+            "qualification_status": "NOT_QUALIFIED",
+        }
+        for lane in ACTIVE_TILE_ORDER
+    ]
+    epochs = {ACTIVE_TILE_REGISTRY[lane]["policy_epoch"] for lane in ACTIVE_TILE_ORDER}
+    return {
+        "policy_epoch": next(iter(epochs)) if len(epochs) == 1 else None,
+        "policies": policies,
+        "policy_count": len(policies),
+        "qualification_allowed": False,
+    }
 
 
 def _read_ledger(path: Path) -> list[dict[str, Any]]:
@@ -32,6 +236,75 @@ def _read_ledger(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _recover_expired_order_resolutions(
+    data_dir: str | Path,
+    expected_decisions: list[dict[str, Any]],
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Index exact expired-order receipts without inventing execution outcomes.
+
+    Older collector builds could persist a paper order and its later expiry in
+    ``expired_orders_3factor.csv`` while missing the normalized V3 order-intent
+    append.  A unique expiry receipt proves that an order was submitted, so it
+    resolves the decision-to-order integrity edge.  It does *not* prove a fill
+    or no-fill: those classifications still require execution-grade BBO/depth
+    and trade evidence.
+    """
+    path = Path(data_dir) / "expired_orders_3factor.csv"
+    if not path.is_file():
+        return {}
+    decision_by_call_lane: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for decision in expected_decisions:
+        shared_call = str(decision.get("shared_ai_call_id") or "").strip()
+        lane = str(decision.get("research_lane") or "").strip().upper()
+        if shared_call and lane:
+            decision_by_call_lane.setdefault((shared_call, lane), []).append(decision)
+    candidates: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                shared_call = str(row.get("shared_ai_call_id") or "").strip()
+                lane = str(row.get("research_lane") or "").strip().upper()
+                trade_id = str(row.get("trade_id") or "").strip()
+                reason = str(row.get("reason") or "").strip().upper()
+                decisions = decision_by_call_lane.get((shared_call, lane), [])
+                if len(decisions) != 1 or not trade_id or not reason.endswith("TTL_EXPIRED"):
+                    continue
+                decision = decisions[0]
+                key = (
+                    str(decision.get("episode_id") or ""),
+                    str(decision.get("policy_signature") or ""),
+                    lane,
+                )
+                candidates.setdefault(key, []).append({
+                    "trade_id": trade_id,
+                    "shared_ai_call_id": shared_call,
+                    "research_lane": lane,
+                    "expired_at": row.get("time") or None,
+                    "expired_ts": row.get("expired_ts") or None,
+                    "reason": reason,
+                    "touched_limit_diagnostic": str(row.get("touched_limit") or "").upper() == "TRUE",
+                })
+    except (OSError, csv.Error):
+        return {}
+    recovered: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for key, rows in candidates.items():
+        unique = {row["trade_id"]: row for row in rows}
+        if len(unique) != 1:
+            continue
+        receipt = next(iter(unique.values()))
+        recovered[key] = {
+            **receipt,
+            "resolution": "ORDER_SUBMITTED_THEN_EXPIRED",
+            "execution_classification": "UNKNOWN",
+            "unknown_reason_codes": [
+                "UNKNOWN_EXECUTION_LEDGER_MISSING",
+                "UNKNOWN_EXECUTION_GRADE_MARKET_EVIDENCE_MISSING",
+            ],
+            "source_path": "expired_orders_3factor.csv",
+        }
+    return recovered
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
@@ -40,6 +313,334 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def _source_revision(data_dir: str | Path) -> str:
+    """Resolve the mirrored source identity without invoking Git or the runtime."""
+    runtime_revision = str(
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or ""
+    ).strip()
+    for name in ("canonical_dataset_current.json", ".fly-sync-state.json"):
+        try:
+            payload = json.loads((Path(data_dir) / name).read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        revision = str(
+            payload.get("source_revision")
+            or payload.get("source_git_rev")
+            or payload.get("revision")
+            or ""
+        ).strip()
+        if revision:
+            # The canonical manifest may intentionally store Fly's 12-character
+            # display revision while the analyzer process is pinned to the full
+            # commit. Preserve the full identity only when it proves the same
+            # revision; otherwise fail closed to the canonical mirror value.
+            if runtime_revision and runtime_revision.startswith(revision):
+                return runtime_revision
+            return revision
+    return runtime_revision or "UNKNOWN"
+
+
+def _exhaustive_policy_row(
+    candidate: dict[str, Any],
+    *,
+    epoch_id: str,
+    source_revision: str,
+    analyzer_generation_revision: str,
+    tile_config_signature: str,
+) -> dict[str, Any]:
+    """Project one evaluated policy into a stable, compact audit contract."""
+    validation = candidate.get("validation") or {}
+    risk = validation.get("risk") or {}
+    bootstrap = validation.get("bootstrap") or {}
+    ideal = candidate.get("ideal_touch_diagnostic") or {}
+    full = int(candidate.get("full_fills") or 0)
+    partial = int(candidate.get("partial_fills") or 0)
+    no_fill = int(candidate.get("no_fills") or 0)
+    unknown = int(candidate.get("unsupported_episodes") or 0)
+    supported = int(candidate.get("supported_conservative_episodes") or 0)
+    independent = int(candidate.get("oos_episodes") or 0)
+    unavailable_reasons = []
+    if supported == 0:
+        unavailable_reasons.append("NO_SUPPORTED_CONSERVATIVE_EPISODES")
+    if full + partial == 0:
+        unavailable_reasons.append("NO_CONSERVATIVE_FILLS")
+    if unknown:
+        unavailable_reasons.append("UNSUPPORTED_OR_MISSING_EXECUTION_EVIDENCE")
+    if candidate.get("comparison_cohort_key") is None:
+        unavailable_reasons.append("COMPARISON_COHORT_IDENTITY_INCOMPLETE")
+    policy_identity_verified = not str(candidate.get("policy_signature") or "").startswith("UNVERIFIED-")
+    if not policy_identity_verified:
+        unavailable_reasons.append("POLICY_SIGNATURE_MISSING")
+    metrics_available = full + partial > 0 and risk.get("net_pnl_usd") is not None
+    if metrics_available and (
+        bootstrap.get("mean_lcb95") is None or bootstrap.get("mean_ucb95") is None
+    ):
+        unavailable_reasons.append("CONFIDENCE_INTERVAL_UNAVAILABLE")
+    if metrics_available and all(
+        candidate.get(field) is None
+        for field in ("funding_cost_usd", "slippage_usd", "fee_cost_usd")
+    ):
+        unavailable_reasons.append("FUNDING_SLIPPAGE_FEE_AGGREGATES_UNAVAILABLE")
+    return {
+        "schema": "safe_policy_exhaustive_row_v1",
+        "source_revision": source_revision,
+        "analyzer_generation_revision": analyzer_generation_revision,
+        "epoch_id": epoch_id,
+        "tile_config_signature": tile_config_signature,
+        "policy_id": candidate.get("policy_id"),
+        "policy_signature": candidate.get("policy_signature"),
+        "policy_identity_verified": policy_identity_verified,
+        "policy_family": candidate.get("policy_family") or "UNKNOWN",
+        "policy_spec": candidate.get("policy_spec") or {},
+        "evidence_world": candidate.get("evidence_world") or "CONSERVATIVE_BBO_DEPTH_V1",
+        "qualification": candidate.get("qualification") or "DESCRIPTIVE_ONLY",
+        "qualification_gates": candidate.get("gates") or validation.get("gates") or {},
+        "independent_episode_count": independent,
+        "episodes_total": int(candidate.get("episodes_total") or 0),
+        "supported_episode_count": supported,
+        "full_fill_count": full,
+        "partial_fill_count": partial,
+        "no_fill_count": no_fill,
+        "unknown_count": unknown,
+        "fill_count": full + partial,
+        "fill_rate": candidate.get("conservative_fill_rate"),
+        "wins": risk.get("wins") if metrics_available else None,
+        "losses": risk.get("losses") if metrics_available else None,
+        "net_pnl_usd": risk.get("net_pnl_usd") if metrics_available else None,
+        "ev_per_independent_episode_usd": (
+            round(float(risk["net_pnl_usd"]) / independent, 8)
+            if metrics_available and independent else None
+        ),
+        "max_drawdown_usd": risk.get("max_drawdown_usd") if metrics_available else None,
+        "max_drawdown_pct": risk.get("max_drawdown_pct") if metrics_available else None,
+        "cvar95_usd": risk.get("cvar95_usd") if metrics_available else None,
+        "expected_shortfall_usd": risk.get("cvar95_usd") if metrics_available else None,
+        "longest_losing_sequence": risk.get("longest_loss_streak") if metrics_available else None,
+        "expectancy_lcb95_usd": bootstrap.get("mean_lcb95") if metrics_available else None,
+        "expectancy_ucb95_usd": bootstrap.get("mean_ucb95") if metrics_available else None,
+        "confidence_interval_available": bool(
+            metrics_available
+            and bootstrap.get("mean_lcb95") is not None
+            and bootstrap.get("mean_ucb95") is not None
+        ),
+        # The current protection evaluator does not aggregate these costs at
+        # candidate level. Retain explicit nulls rather than silently implying
+        # zero cost; unavailable_reasons below explains the evidence gap.
+        "funding_cost_usd": candidate.get("funding_cost_usd") if metrics_available else None,
+        "slippage_usd": candidate.get("slippage_usd") if metrics_available else None,
+        "fee_cost_usd": candidate.get("fee_cost_usd") if metrics_available else None,
+        "ideal_touch_diagnostic": {
+            "evidence_world": ideal.get("evidence_world") or "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "touches": int(ideal.get("touches") or 0),
+            "no_touches": int(ideal.get("no_touches") or 0),
+            "wins": ideal.get("wins"),
+            "losses": ideal.get("losses"),
+            "net_pnl_usd": ideal.get("oos_net_usd"),
+            "max_drawdown_usd": ideal.get("max_drawdown_usd"),
+            "qualification_eligible": False,
+        },
+        "comparison_cohort": candidate.get("comparison_cohort") or {},
+        "receipt_identity": candidate.get("receipt_identity") or {},
+        "regime_breakdown": candidate.get("regime_breakdown") or {},
+        "risk_metrics_available": metrics_available,
+        "unavailable_reasons": sorted(set(unavailable_reasons)),
+    }
+
+
+def _persist_exhaustive_policies(
+    report_dir: str | Path,
+    candidates: list[dict[str, Any]],
+    *,
+    epoch_id: str,
+    source_revision: str,
+    analyzer_generation_revision: str,
+    tile_config_signature: str,
+) -> dict[str, Any]:
+    """Atomically persist every unique evaluated policy as compressed JSONL."""
+    unique: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate in candidates:
+        policy_id = str(candidate.get("policy_id") or "").strip()
+        signature = str(candidate.get("policy_signature") or "").strip()
+        if not policy_id:
+            raise ValueError("exhaustive policy row missing policy_id")
+        if not signature:
+            # Externally supplied compatibility candidates in focused tests or
+            # migrations can predate signed policy identities. Retain them
+            # under an explicit non-qualified deterministic identity rather
+            # than silently dropping the evaluated row.
+            signature = "UNVERIFIED-" + hashlib.sha256(policy_id.encode("utf-8")).hexdigest()[:24]
+            candidate = {**candidate, "policy_signature": signature}
+        key = (policy_id, signature)
+        projected = _exhaustive_policy_row(
+            candidate,
+            epoch_id=epoch_id,
+            source_revision=source_revision,
+            analyzer_generation_revision=analyzer_generation_revision,
+            tile_config_signature=tile_config_signature,
+        )
+        previous = unique.get(key)
+        if previous is not None and previous != projected:
+            raise ValueError(f"conflicting duplicate exhaustive policy row: {policy_id}")
+        unique[key] = projected
+
+    destination = Path(report_dir) / EXHAUSTIVE_POLICY_FILE
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + f".{os.getpid()}.tmp")
+    with temporary.open("wb") as raw:
+        with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:
+            for key in sorted(unique):
+                compressed.write(
+                    (json.dumps(unique[key], sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+                )
+        raw.flush()
+        os.fsync(raw.fileno())
+    os.replace(temporary, destination)
+    checksum = hashlib.sha256(destination.read_bytes()).hexdigest()
+    manifest = {
+        "schema": "safe_policy_exhaustive_manifest_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_revision": source_revision,
+        "analyzer_generation_revision": analyzer_generation_revision,
+        "epoch_id": epoch_id,
+        "tile_config_signature": tile_config_signature,
+        "artifact": EXHAUSTIVE_POLICY_FILE,
+        "compression": "gzip",
+        "row_schema": "safe_policy_exhaustive_row_v1",
+        "row_count": len(unique),
+        "sha256": checksum,
+        "size_bytes": destination.stat().st_size,
+        "deduplication_key": ["policy_id", "policy_signature"],
+        "independence_basis": "ONE_SHARED_OPPORTUNITY_EPISODE_NOT_SIBLING_LANE_COUNT",
+    }
+    _atomic_json(Path(report_dir) / EXHAUSTIVE_POLICY_MANIFEST_FILE, manifest)
+    return manifest
+
+
+def _strategy_leader_projection(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Bounded public identity/metrics for one explicitly labelled truth tier."""
+    if not isinstance(candidate, dict):
+        return None
+    validation = candidate.get("validation") or {}
+    risk = validation.get("risk") or {}
+    ideal = candidate.get("ideal_touch_diagnostic") or {}
+    full = int(candidate.get("full_fills") or 0)
+    partial = int(candidate.get("partial_fills") or 0)
+    supported = int(candidate.get("supported_conservative_episodes") or 0)
+    unknown = int(candidate.get("unsupported_episodes") or 0)
+    return {
+        "policy_id": candidate.get("policy_id"),
+        "policy_signature": candidate.get("policy_signature"),
+        "policy_family": candidate.get("policy_family") or "UNKNOWN",
+        "policy_spec": candidate.get("policy_spec") or {},
+        "independent_oos_opportunities": int(candidate.get("oos_episodes") or 0),
+        "supported_conservative_episodes": supported,
+        "full_fills": full,
+        "partial_fills": partial,
+        "no_fills": int(candidate.get("no_fills") or 0),
+        "unknown_evidence_count": unknown,
+        "conservative_fill_rate": candidate.get("conservative_fill_rate"),
+        "execution_net_pnl_usd": risk.get("net_pnl_usd") if full + partial else None,
+        "execution_expectancy_per_independent_opportunity_usd": (
+            round(float(risk["net_pnl_usd"]) / int(candidate.get("oos_episodes") or 0), 8)
+            if full + partial and risk.get("net_pnl_usd") is not None
+            and int(candidate.get("oos_episodes") or 0) else None
+        ),
+        "execution_max_drawdown_usd": risk.get("max_drawdown_usd") if full + partial else None,
+        "execution_cvar95_usd": risk.get("cvar95_usd") if full + partial else None,
+        "ideal_touch_diagnostic": {
+            "evidence_world": ideal.get("evidence_world") or "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "touches": int(ideal.get("touches") or 0),
+            "net_pnl_usd": ideal.get("oos_net_usd"),
+            "max_drawdown_usd": ideal.get("max_drawdown_usd"),
+            "qualification_eligible": False,
+        },
+        "failed_gates": sorted(
+            str(name) for name, passed in (candidate.get("gates") or {}).items()
+            if passed is not True
+        ),
+        "ranking_blockers": sorted(set(candidate.get("ranking_blockers") or [])),
+    }
+
+
+def build_three_tier_strategy_leaders(
+    candidates: list[dict[str, Any]], ranking: dict[str, Any], *,
+    generated_at: str, source_revision: str, analyzer_revision: str,
+    epoch_id: str | None, tile_config_signature: str, report_blockers: list[str],
+) -> dict[str, Any]:
+    """Keep diagnostic, execution, and qualification claims visibly separate."""
+    rows = [row for row in candidates if isinstance(row, dict)]
+    descriptive_candidates = [
+        row for row in rows
+        if (row.get("ideal_touch_diagnostic") or {}).get("oos_net_usd") is not None
+    ]
+    descriptive = max(
+        descriptive_candidates,
+        key=lambda row: float((row.get("ideal_touch_diagnostic") or {}).get("oos_net_usd") or 0),
+        default=None,
+    )
+    execution_candidates = [
+        row for row in rows
+        if int(row.get("supported_conservative_episodes") or 0) > 0
+        and not row.get("runtime_identity_incident_reason_codes")
+        and int(row.get("full_fills") or 0) + int(row.get("partial_fills") or 0) > 0
+        and ((row.get("validation") or {}).get("risk") or {}).get("net_pnl_usd") is not None
+    ]
+    execution = max(
+        execution_candidates,
+        key=lambda row: (
+            float(((row.get("validation") or {}).get("risk") or {}).get("net_pnl_usd") or 0)
+            / max(1, int(row.get("oos_episodes") or 0))
+        ),
+        default=None,
+    )
+    qualified = ranking.get("number_one")
+    unknown_blocker_counts = Counter(
+        blocker
+        for row in rows if int(row.get("unsupported_episodes") or 0) > 0
+        for blocker in (
+            row.get("unknown_reason_codes")
+            or row.get("evidence_blockers")
+            or ["UNKNOWN_EXECUTION_EVIDENCE"]
+        )
+    )
+    currency = {
+        "generated_at": generated_at,
+        "source_revision": source_revision,
+        "analyzer_revision": analyzer_revision,
+        "dataset_epoch_id": epoch_id,
+        "tile_config_signature": tile_config_signature,
+    }
+    return {
+        "schema": "three_tier_strategy_leaders_v1",
+        "currency": currency,
+        "unknown_evidence": {
+            "episode_count": sum(int(row.get("unsupported_episodes") or 0) for row in rows),
+            "blocker_counts": dict(sorted(unknown_blocker_counts.items())),
+        },
+        "descriptive_ideal_touch": {
+            "status": "AVAILABLE" if descriptive else "NO_EVALUATED_DIAGNOSTIC_POLICY",
+            "claim_label": "IDEAL_TOUCH_DIAGNOSTIC_ONLY · NOT EXECUTION VERIFIED · DOES NOT SHOW THAT IT WORKS",
+            "leader": _strategy_leader_projection(descriptive),
+            "blockers": sorted(set(report_blockers + (["NO_IDEAL_TOUCH_DIAGNOSTIC_RESULT"] if not descriptive else []))),
+        },
+        "execution_supported": {
+            "status": "AVAILABLE" if execution else "NO_EXECUTION_SUPPORTED_POLICY",
+            "claim_label": "EXECUTION-SUPPORTED OBSERVATION · NOT FULLY QUALIFIED · NOT LIVE READY",
+            "leader": _strategy_leader_projection(execution),
+            "blockers": sorted(set(report_blockers + (["NO_SUPPORTED_CONSERVATIVE_FILL_POLICY"] if not execution else []))),
+        },
+        "fully_qualified": {
+            "status": "AVAILABLE" if qualified else "NO_FULLY_QUALIFIED_POLICY",
+            "claim_label": "FULLY QUALIFIED RESEARCH POLICY · LIVE ARM STILL REQUIRES EXPLICIT AUTHORIZATION",
+            "leader": _strategy_leader_projection(qualified),
+            "blockers": [] if qualified else sorted(set(report_blockers + ["NO_SAFE_QUALIFIED_POLICY"])),
+        },
+    }
 
 
 def _fresh_cutoff(data_dir: str | Path) -> float | None:
@@ -119,7 +720,52 @@ def _exclude_identity_aliases(opportunities: list[dict[str, Any]]) -> tuple[list
     return kept, excluded
 
 
+def _shared_call_independence_clusters(
+    opportunities: list[dict[str, Any]],
+    decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Describe the causal clusters used for independent-opportunity counts.
+
+    A shared AI call may fan out into several policy/lane decisions.  Those
+    children remain useful paired evidence, but they are not independent
+    observations.  Keep that distinction explicit in the report contract.
+    """
+    decisions_by_episode: dict[str, list[dict[str, Any]]] = {}
+    for row in decisions:
+        episode_id = str(row.get("episode_id") or "").strip()
+        if episode_id:
+            decisions_by_episode.setdefault(episode_id, []).append(row)
+
+    clusters = []
+    for row in opportunities:
+        episode_id = str(row.get("episode_id") or "").strip()
+        shared_call_id = str(row.get("shared_ai_call_id") or "").strip()
+        grouping_basis = "SHARED_AI_CALL" if shared_call_id else str(
+            row.get("grouping_basis") or "EPISODE_ID_FALLBACK"
+        )
+        children = decisions_by_episode.get(episode_id, [])
+        child_identities = {
+            (
+                str(child.get("research_lane") or "UNKNOWN"),
+                str(child.get("policy_signature") or child.get("policy_id") or "UNKNOWN"),
+            )
+            for child in children
+        }
+        clusters.append({
+            "cluster_id": shared_call_id or episode_id,
+            "grouping_basis": grouping_basis,
+            "episode_id": episode_id,
+            "shared_ai_call_id": shared_call_id or None,
+            "child_decision_count": len(children),
+            "child_lane_count": len(child_identities),
+        })
+    return clusters
+
+
 def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidates=None) -> dict[str, Any]:
+    from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex, REASON
+    incident_input = load_incident_input()
+    incident_index = IncidentEpisodeIndex(incident_input)
     v3_root = Path(data_dir) / "v3"
     all_opportunities = _read_ledger(v3_root / "ledgers" / "opportunity.jsonl")
     cutoff = _fresh_cutoff(data_dir)
@@ -135,11 +781,34 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         opportunities = [row for row in opportunities if float(row.get("signal_ts") or 0) >= cutoff]
     opportunities, identity_aliases = _exclude_identity_aliases(opportunities)
     allowed_episodes = {str(row.get("episode_id") or "") for row in opportunities}
+    pre_entry_feature_receipts = [
+        row for row in scoped(_read_ledger(store.ledger_path("pre_entry_features")))
+        if str(row.get("episode_id") or "") in allowed_episodes
+    ]
+    opportunities, pre_entry_feature_coverage = join_pre_entry_feature_receipts(
+        opportunities, pre_entry_feature_receipts,
+    )
     decisions = [row for row in scoped(_read_ledger(store.ledger_path("decision"))) if str(row.get("episode_id") or "") in allowed_episodes]
+    independence_clusters = _shared_call_independence_clusters(opportunities, decisions)
     order_intents = [row for row in scoped(_read_ledger(store.ledger_path("order_intent"))) if str(row.get("episode_id") or "") in allowed_episodes]
     lifecycles = [row for row in scoped(_read_ledger(store.ledger_path("lifecycle"))) if str(row.get("episode_id") or "") in allowed_episodes]
     terminal_lifecycles = [row for row in lifecycles if row.get("terminal") is True]
     executions = [row for row in scoped(_read_ledger(store.ledger_path("execution"))) if str(row.get("episode_id") or "") in allowed_episodes]
+    market_segment_rows = [
+        row for row in scoped(_read_ledger(store.ledger_path("market_segment")))
+        if str(row.get("episode_id") or "") in allowed_episodes
+    ]
+    for incident_rows in (opportunities, decisions, order_intents, lifecycles, executions,
+                          market_segment_rows, pre_entry_feature_receipts):
+        incident_index.add(incident_rows)
+    pre_signal_context_segments = [
+        row for row in market_segment_rows
+        if str(row.get("context_role") or "").upper() == "PRE_SIGNAL_ONLY"
+        or (row.get("coverage") or {}).get("future_exit_path_included") is False
+    ]
+    terminal_path_segments = [
+        row for row in market_segment_rows if row not in pre_signal_context_segments
+    ]
     observed_epochs = sorted({str(row.get("epoch_id")) for row in all_opportunities if row.get("epoch_id")})
     excluded_opportunities = len(all_opportunities) - len(opportunities)
     policy_ids_by_signature: dict[str, set[str]] = {}
@@ -220,9 +889,30 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         for (episode_id, policy_id), signatures in signatures_by_episode_policy.items()
         if len(signatures) > 1
     }
+    paper_world_contradiction_rows = []
+    policy_provenance_rows = [
+        *immediate_lane_decisions,
+        *order_intents,
+        *executions,
+        *policy_attributable_lifecycles,
+    ]
+    for row in policy_provenance_rows:
+        if str(row.get("policy_execution_scope") or "") != "PAPER_RESEARCH_ONLY":
+            continue
+        spec = row.get("paper_policy_spec")
+        spec_paper_only = spec.get("paper_only") if isinstance(spec, dict) else None
+        if row.get("paper_only") is not False and spec_paper_only is not False:
+            continue
+        paper_world_contradiction_rows.append({
+            "record_id": str(row.get("record_id") or ""),
+            "episode_id": str(row.get("episode_id") or ""),
+            "policy_id": str(row.get("policy_id") or ""),
+            "top_level_paper_only": row.get("paper_only"),
+            "spec_paper_only": spec_paper_only,
+        })
     policy_identity_contamination = bool(
         policy_signature_collisions or policy_signature_divergence
-        or missing_policy_identity_rows
+        or missing_policy_identity_rows or paper_world_contradiction_rows
     )
     contamination = bool(
         excluded_opportunities or identity_aliases or len(observed_epochs) > 1
@@ -255,12 +945,16 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         row for row in immediate_lane_decisions if row.get("order_intent_expected") is True
     ]
     intent_keys = {resolution_key(row) for row in order_intents}
+    recovered_expired_orders = _recover_expired_order_resolutions(
+        data_dir, expected_order_decisions,
+    )
     entry_resolutions: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
     for row in lifecycles:
         if row.get("resolution_scope") == "LANE_ENTRY":
             entry_resolutions.setdefault(resolution_key(row), []).append(row)
     entry_resolution_counts = Counter()
     orphan_expected_orders = []
+    applied_expired_order_recoveries: dict[tuple[str, str, str], dict[str, Any]] = {}
     for decision in expected_order_decisions:
         key = resolution_key(decision)
         rows = entry_resolutions.get(key, [])
@@ -269,6 +963,13 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             entry_resolution_counts["submitted"] += 1
         elif "NO_ORDER" in states:
             entry_resolution_counts["terminal_no_order"] += 1
+        elif key in recovered_expired_orders:
+            # The expiry receipt proves the missing order-intent edge, while
+            # deliberately leaving the execution result UNKNOWN. Existing V3
+            # intent/lifecycle resolutions always remain authoritative.
+            entry_resolution_counts["submitted"] += 1
+            entry_resolution_counts["recovered_expired_order"] += 1
+            applied_expired_order_recoveries[key] = recovered_expired_orders[key]
         else:
             deadline = float(decision.get("resolution_deadline_ts") or 0)
             awaiting_deadlines = [float(row.get("resolution_deadline_ts") or 0) for row in rows if row.get("entry_resolution") == "AWAITING"]
@@ -284,10 +985,23 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     entry_resolution_integrity = {
         "expected": len(expected_order_decisions),
         "submitted": entry_resolution_counts["submitted"],
+        "recovered_expired_order": entry_resolution_counts["recovered_expired_order"],
         "terminal_no_order": entry_resolution_counts["terminal_no_order"],
         "awaiting_within_deadline": entry_resolution_counts["awaiting_within_deadline"],
         "overdue_orphan": entry_resolution_counts["overdue_orphan"],
         "orphan_expected_orders": orphan_expected_orders,
+        "recovered_expired_orders": [
+            {
+                "episode_id": key[0],
+                "policy_signature": key[1],
+                **receipt,
+            }
+            for key, receipt in sorted(applied_expired_order_recoveries.items())
+        ],
+        "recovery_semantics": (
+            "A unique expired-order receipt proves ORDER_SUBMITTED only; "
+            "execution remains UNKNOWN without execution-grade market evidence."
+        ),
         "passed": entry_resolution_counts["overdue_orphan"] == 0,
     }
     effective_paper_execution_identities = []
@@ -317,12 +1031,39 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
     })
     candidate_screen = None
     if candidates is None:
-        candidate_screen = evaluate_protection_screen(load_candidate_inputs(
-            data_dir,
-            epoch_id=selected_epoch,
-            minimum_signal_ts=cutoff,
-        ))
+        def emit_candidate_progress(receipt):
+            print(
+                "  V3.1 protection replay: "
+                f"{receipt.get('input_events_completed', 0)}/"
+                f"{receipt.get('input_events_total', 0)} events; "
+                f"{receipt.get('protection_variants', 0)} protection variants; "
+                f"{receipt.get('policies_materialized', 0)} policies",
+                flush=True,
+            )
+
+        candidate_inputs = load_candidate_inputs(
+            data_dir, epoch_id=selected_epoch, minimum_signal_ts=cutoff,
+        )
+        incident_index.add(candidate_inputs)
+        candidate_screen = evaluate_protection_screen(
+            candidate_inputs,
+            progress_callback=emit_candidate_progress,
+        )
         candidates = candidate_screen["candidates"]
+    incident_episodes = sorted({str(row.get("episode_id") or "") for row in opportunities
+                                if incident_index.reasons(row)})
+    if incident_episodes:
+        # These aggregate candidates were assessed on this entire selected
+        # opportunity cohort. Preserve their descriptive statistics, but none
+        # may qualify using an affected or temporally unresolved episode.
+        candidates = [dict(row) for row in candidates or []]
+        for candidate in candidates:
+            candidate["gates"] = {**(candidate.get("gates") or {}),
+                                  "integrity_pass": False, "conservative_execution_pass": False}
+            candidate["runtime_identity_incident_reason_codes"] = [REASON]
+            candidate["qualification"] = "DESCRIPTIVE_ONLY"
+        if candidate_screen is not None:
+            candidate_screen["candidates"] = candidates
     ranking = rank_safe_policies(candidates or [])
     if not entry_resolution_integrity["passed"]:
         # Preserve descriptive rows, but never surface a qualified winner from
@@ -330,21 +1071,91 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         ranking = dict(ranking)
         ranking["number_one"] = None
         ranking["qualification"] = "BLOCKED_ORDER_RESOLUTION_INTEGRITY"
+    exhaustive_manifest = _persist_exhaustive_policies(
+        report_dir,
+        list(candidates or []),
+        epoch_id=epoch_id,
+        source_revision=_source_revision(data_dir),
+        analyzer_generation_revision=str(
+            os.getenv("SOURCE_GIT_REV")
+            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or os.getenv("GIT_REVISION")
+            or "UNKNOWN"
+        ),
+        tile_config_signature=active_tile_registry_signature(),
+    )
+    # The replay engine may assess tens of thousands of complete policies.  The
+    # full candidate rows are working memory, not a report contract: persisting
+    # them under both candidate_screen.candidates and ranking.blocked made a
+    # small V3.1 cohort produce a ~200 MB artifact and held the scheduled
+    # analyzer in JSON serialization for minutes.  Keep the auditable counts,
+    # blocker distribution, bounded leaderboards and at most the public top 100
+    # qualified policies.  This is also the dashboard's documented exposure.
+    persisted_candidate_screen = dict(candidate_screen or {
+        "schema": "externally_supplied_safe_policy_candidates_v3",
+        "unique_policies_evaluated": len(candidates or []),
+        "descriptive_top_100": [],
+        "profit_capture_leaders": {},
+        "drawdown_control_leaders": [],
+        "dynamic_regime_leaders": {},
+    })
+    persisted_candidate_screen.pop("candidates", None)
+    blocked_rows = list(ranking.get("blocked") or [])
+    blocker_counts = Counter(
+        blocker
+        for row in blocked_rows
+        for blocker in (row.get("ranking_blockers") or [])
+    )
+    persisted_ranking = dict(ranking)
+    persisted_ranking.pop("blocked", None)
+    persisted_ranking["ranked"] = list(ranking.get("ranked") or [])[:100]
+    persisted_ranking["blocked_policy_count"] = len(blocked_rows)
+    persisted_ranking["blocked_gate_counts"] = dict(sorted(blocker_counts.items()))
     progress_receipts = []
     if candidate_screen is not None:
         progress_receipts.append({
             "unique_policies_evaluated": candidate_screen.get("unique_policies_evaluated", 0),
             "independent_episodes": len({row.get("episode_id") for row in opportunities if row.get("episode_id")}),
         })
+    generated_at = datetime.now(timezone.utc).isoformat()
+    source_revision = _source_revision(data_dir)
+    analyzer_revision = str(
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    report_blockers = (
+        ([REASON] if incident_episodes else [])
+        + (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else [])
+        + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else [])
+        + (["PRE_ENTRY_FEATURE_EVIDENCE_INCOMPLETE"] if pre_entry_feature_coverage["unknown_opportunities"] else [])
+        + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else [])
+        + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else [])
+        + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else [])
+        + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else [])
+    )
+    strategy_leaders = build_three_tier_strategy_leaders(
+        list(candidates or []), ranking,
+        generated_at=generated_at,
+        source_revision=source_revision,
+        analyzer_revision=analyzer_revision,
+        epoch_id=epoch_id,
+        tile_config_signature=active_tile_registry_signature(),
+        report_blockers=report_blockers,
+    )
+    from research.shared_context_coverage import build_shared_context_coverage
     report = {
+        "shared_context_coverage": build_shared_context_coverage(data_dir, epoch_id, lifecycles),
         "schema": "safe_policy_genome_v3_1_report_v1",
         "extension": "ADAPTIVE_EXIT_AND_DRAWDOWN_LAB_V3_1",
         "data_scope": "FRESH-COLLECTION" if selected_epoch is not None else "SESSION",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at,
         "status": "V3_INTEGRITY_FAILED" if not verification["passed"] else "V3_ORDER_RESOLUTION_INTEGRITY_FAILED" if not entry_resolution_integrity["passed"] else "V3_EPOCH_CONTAMINATION_BLOCKED" if contamination else "V3_COLLECTING" if opportunities else "V3_READY_FOR_FRESH_EPOCH",
         "live_policy_change_allowed": False,
         "real_bitfinex_trading_allowed": False,
         "epoch_id": epoch_id,
+        "deployed_policy_collection": _deployed_policy_collection(),
         "contract": SAFE_POLICY_GENOME_CONTRACT,
         "integrity": verification,
         "epoch_scope": {
@@ -360,10 +1171,18 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "pending_policy_identity_rows": pending_policy_identity_rows,
             "policy_signature_collisions": policy_signature_collisions,
             "policy_signature_divergence": policy_signature_divergence,
+            "paper_world_contradiction_count": len(paper_world_contradiction_rows),
+            "paper_world_contradiction_rows": paper_world_contradiction_rows,
             "contamination_detected": contamination,
         },
         "collection": {
             "independent_opportunities": len({row.get("episode_id") for row in opportunities if row.get("episode_id")}),
+            "independence_grouping_basis": "SHARED_AI_CALL_WITH_EPISODE_ID_FALLBACK",
+            "independence_clusters": independence_clusters,
+            "independent_cluster_count": len(independence_clusters),
+            "correlated_child_decision_count": sum(
+                cluster["child_decision_count"] for cluster in independence_clusters
+            ),
             "decision_branches": len(decisions),
             "execution_rows": len(executions),
             "terminal_lifecycles": len(terminal_lifecycles),
@@ -376,41 +1195,38 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             },
             "outcome_states": dict(sorted(outcome_counts.items())),
             "ledger_counts": verification["ledger_counts"],
-            "market_segments": verification["market_segment_count"],
+            "pre_entry_feature_evidence": pre_entry_feature_coverage,
+            # Qualification requires a signal-to-terminal market path.  A
+            # frozen pre-signal context segment makes rejected/NO_TRADE regime
+            # analysis auditable, but must never satisfy the execution-path
+            # maturity gate merely because it is stored in the same
+            # content-addressed segment library.
+            "market_segments": len(terminal_path_segments),
+            "terminal_path_market_segments": len(terminal_path_segments),
+            "pre_signal_context_segments": len(pre_signal_context_segments),
+            "market_segment_ledger_rows": len(market_segment_rows),
+            "market_segment_objects_verified": verification["market_segment_count"],
             "entry_resolution_integrity": entry_resolution_integrity,
             "effective_paper_execution_identities": effective_paper_execution_identities,
         },
         "search": search,
         "search_progress": search_progress(search, progress_receipts),
-        "candidate_screen": candidate_screen or {
-            "schema": "externally_supplied_safe_policy_candidates_v3",
-            "unique_policies_evaluated": len(candidates or []),
-            "descriptive_top_100": [],
-            "profit_capture_leaders": {},
-            "drawdown_control_leaders": [],
-            "dynamic_regime_leaders": {},
-        },
-        "safe_policy_ranking": ranking,
+        "candidate_screen": persisted_candidate_screen,
+        "exhaustive_policy_results": exhaustive_manifest,
+        "safe_policy_ranking": persisted_ranking,
         "number_one_strategy": ranking["number_one"],
+        "strategy_leaders": strategy_leaders,
         "qualification": ranking["qualification"],
-        "blockers": (["V3_DATA_INTEGRITY_FAILED"] if not verification["passed"] else []) + (["ORPHAN_EXPECTED_ORDER"] if not entry_resolution_integrity["passed"] else []) + (["MIXED_OR_PRE_CUTOFF_V3_EVIDENCE_EXCLUDED"] if excluded_opportunities or len(observed_epochs) > 1 else []) + (["CAUSAL_IDENTITY_ALIAS_EXCLUDED"] if identity_aliases else []) + (["POLICY_IDENTITY_CONTAMINATION"] if policy_identity_contamination else []) + (["NO_SAFE_QUALIFIED_POLICY"] if not ranking["number_one"] else []),
+        "blockers": report_blockers,
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
-    # WAL identity is the process binding (epoch, git revision, tile signature),
-    # not the mirror fill ledger. V3_NOT_STARTED and a non-hex tile signature
-    # are rejected by EmergencyEvidenceWal. That rejection must not skip the
-    # equal-rights bind of data_root companions.
-    wal_identity_ok = store._emergency_wal_identity_available()
-    report["emergency_wal"] = {
-        "identity_accepted": wal_identity_ok,
-        "status": "READY" if wal_identity_ok else "EMERGENCY_WAL_IDENTITY_INVALID",
-        "effect": "RESERVE_AVAILABLE" if wal_identity_ok else "RANKING_CONTINUES",
-    }
-    report["equal_rights"] = build_equal_rights_ranking(
-        report=report,
-        lifecycles=terminal_lifecycles,
-        candidates=(candidate_screen or {}).get("candidates") or candidates or [],
-        companions=load_analyzer_companions(str(report_dir), str(data_dir)),
-    )
+    if incident_input.enabled:
+        report["runtime_identity_incident_input"] = incident_input.provenance()
+        report["runtime_identity_incident_coverage"] = {
+            **incident_index.coverage(), "affected_selected_episodes": len(incident_episodes),
+            "affected_episode_ids_preview": incident_episodes[:100],
+            "descriptive_statistics_preserved": True,
+        }
+    incident_input.assert_unchanged()
     _atomic_json(Path(report_dir) / REPORT_FILE, report)
     return report

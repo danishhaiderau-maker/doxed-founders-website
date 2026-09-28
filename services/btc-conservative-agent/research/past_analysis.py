@@ -35,7 +35,6 @@ CORE_FILES = (
     "research_retention_status.json",
     "historical_trade_cohort_report.json",
     "paused_shadow_research_report.json",
-    "type_b_adx_v3_shadow_report.json",
     "lane_definition_report.json",
     "lane_retirement_report.json",
 )

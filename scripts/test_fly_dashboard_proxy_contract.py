@@ -30,6 +30,10 @@ class FlyDashboardProxyContractTests(unittest.TestCase):
 
     def test_fresh_epoch_reset_is_an_allowed_mirror_mutation(self):
         self.assertIn("/api/fresh_epoch_reset", MODULE.MIRROR_MUTATION_ALLOWLIST)
+
+    def test_admin_session_can_be_established_through_loopback_mirror(self):
+        self.assertIn("/admin/login", MODULE.MIRROR_MUTATION_ALLOWLIST)
+        self.assertIn("/admin/logout", MODULE.MIRROR_MUTATION_ALLOWLIST)
         self.assertIn("/api/toggle_invert_signal", MODULE.MIRROR_MUTATION_ALLOWLIST)
 
 

@@ -431,6 +431,7 @@ while ($true) {
     $botRuntime.Flat
   )
   $botServing = $botRuntime.Responding
+  $analyzerAlive = Test-AnalyzerAlive
   $analyzerOk = Test-AnalyzerHealthy
   $bridgeOk = Test-BridgeHealthy
   $pusherOk = Test-RelayStatePusherFresh
@@ -444,7 +445,7 @@ while ($true) {
   $botStarting = (-not $botServing -and $botStartupAgeSec -lt $BotStartupGraceSec)
 
   if ($botOk -or $botRevisionDeferred -or $botStarting) { $fail.bot = 0 } else { $fail.bot++ }
-  if ($analyzerOk) { $fail.analyzer = 0 } else { $fail.analyzer++ }
+  if ($analyzerAlive) { $fail.analyzer = 0 } else { $fail.analyzer++ }
   if ($bridgeOk) { $fail.bridge = 0 } else { $fail.bridge++ }
   if ($tunnelOk) { $fail.tunnel = 0 } else { $fail.tunnel++ }
   if ($pusherOk) { $fail.pusher = 0 } else { $fail.pusher++ }
@@ -471,7 +472,7 @@ while ($true) {
   } else {
     "revision=unproven"
   }
-  Log ("tick bot=$botOk serving=$botServing analyzer=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk pusher=$pusherOk cf=$cfState hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge)/p$($fail.pusher) $revisionTag $startupTag $backoffTag url=$tunnelUrl")
+  Log ("tick bot=$botOk serving=$botServing analyzer_alive=$analyzerAlive analyzer_ready=$analyzerOk bridge=$bridgeOk tunnel=$tunnelOk pusher=$pusherOk cf=$cfState hung=$botHung fails=b$($fail.bot)/a$($fail.analyzer)/t$($fail.tunnel)/br$($fail.bridge)/p$($fail.pusher) $revisionTag $startupTag $backoffTag url=$tunnelUrl")
 
   if ($botServing -and $fail.pusher -ge 2) {
     $lastRecover.pusher = Invoke-Recovery "relay-state-pusher" { Restart-RelayStatePusher } $lastRecover.pusher $RelayPusherCooldownSec

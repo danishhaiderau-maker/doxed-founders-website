@@ -135,19 +135,28 @@ function Test-AnalyzerHealthyQuick {
   return (Test-HttpOk "http://127.0.0.1:$AnalyzerPort/api/health" 2)
 }
 
-function Test-AnalyzerHealthy {
+function Get-AnalyzerRuntimeStatus {
+  $result = [ordered]@{
+    Alive = $false
+    Ready = $false
+    Responding = $false
+    CanonicalReportRoot = $false
+    RuntimeSync = $false
+    Status = $null
+  }
   $analyzerPidFile = Join-Path $repoRoot ".home-analyzer.pid"
-  if (-not (Test-Path -LiteralPath $analyzerPidFile)) { return $false }
+  if (-not (Test-Path -LiteralPath $analyzerPidFile)) { return [pscustomobject]$result }
   try {
     $analyzerPid = [int]((Get-Content -LiteralPath $analyzerPidFile -Raw -ErrorAction Stop).Trim())
-    if ($analyzerPid -le 0) { return $false }
+    if ($analyzerPid -le 0) { return [pscustomobject]$result }
   } catch {
-    return $false
+    return [pscustomobject]$result
   }
-  if (-not (Test-PortOpen $AnalyzerPort)) { return $false }
+  if (-not (Test-PortOpen $AnalyzerPort)) { return [pscustomobject]$result }
   try {
     $s = Invoke-RestMethod -Uri "http://127.0.0.1:$AnalyzerPort/api/status" -TimeoutSec 12
-    if (-not $s.ok) { return $false }
+    $result.Responding = $true
+    $result.Status = $s
     # Serve one canonical report tree from the agent data root. The analyzer
     # source lives in research\, but BTC_AGENT_REPORT_DIR intentionally points
     # at $agentDir where the current report manifest and exports are written.
@@ -155,20 +164,45 @@ function Test-AnalyzerHealthy {
     $reportRoot = [string]$s.report_root
     if (-not $reportRoot) { $reportRoot = [string]$s.cwd }
     $expectedReportRoot = [System.IO.Path]::GetFullPath($agentDir).TrimEnd('\', '/')
-    try { $actualReportRoot = [System.IO.Path]::GetFullPath($reportRoot).TrimEnd('\', '/') } catch { return $false }
-    if (-not $actualReportRoot.Equals($expectedReportRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
-    if ($s.runtime_sync_match -ne $true) { return $false }
-    if ([string]$s.runtime_analyzer_sync_id -ne [string]$s.expected_analyzer_sync_id) { return $false }
+    try { $actualReportRoot = [System.IO.Path]::GetFullPath($reportRoot).TrimEnd('\', '/') } catch { return [pscustomobject]$result }
+    $result.CanonicalReportRoot = $actualReportRoot.Equals($expectedReportRoot, [System.StringComparison]::OrdinalIgnoreCase)
+    if (-not $result.CanonicalReportRoot) { return [pscustomobject]$result }
+    $result.RuntimeSync = (
+      $s.runtime_sync_match -eq $true -and
+      [string]$s.runtime_analyzer_sync_id -eq [string]$s.expected_analyzer_sync_id
+    )
+    if (-not $result.RuntimeSync) { return [pscustomobject]$result }
+
+    # Liveness deliberately ignores report-generation revision/epoch parity.
+    # A responsive canonical dashboard must survive mirror sync and analysis;
+    # readiness below remains fail closed until that generation is current.
+    $result.Alive = ($s.alive -eq $true)
+    if (-not $result.Alive) { return [pscustomobject]$result }
 
     # A completed current-version report is ideal.  Immediately after Start,
     # allow a current-version pass that is actively replacing an older
     # manifest.  /api/status limits this grace to 45 minutes.
-    if ($s.report_sync_match -eq $true) { return $true }
-    if ($s.report_sync_pending -eq $true -and $s.analysis_in_progress -eq $true) { return $true }
-    return $false
+    $result.Ready = (
+      $s.ok -eq $true -and
+      $s.ready -eq $true -and
+      (
+        $s.report_sync_match -eq $true -or
+        ($s.report_sync_pending -eq $true -and $s.analysis_in_progress -eq $true)
+      )
+    )
+    return [pscustomobject]$result
   } catch {
-    return $false
+    return [pscustomobject]$result
   }
+}
+
+function Test-AnalyzerAlive {
+  return [bool](Get-AnalyzerRuntimeStatus).Alive
+}
+
+function Test-AnalyzerHealthy {
+  # Historical name retained for callers that mean qualification readiness.
+  return [bool](Get-AnalyzerRuntimeStatus).Ready
 }
 
 function Test-BridgeHealthy {
@@ -226,6 +260,7 @@ function Test-BotHung {
 }
 
 function Test-AnalyzerHung {
-  if (Test-AnalyzerHealthy) { return $false }
+  # Stale/mismatched/in-progress is not hung when the canonical API responds.
+  if (Test-AnalyzerAlive) { return $false }
   return (Test-PortBound $AnalyzerPort)
 }

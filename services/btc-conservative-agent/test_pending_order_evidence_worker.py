@@ -1,4 +1,5 @@
 import ast
+import copy
 import threading
 import time
 from collections import defaultdict
@@ -45,6 +46,9 @@ def _load_lane_registration(*, worker, trade_lock, pending, lane_pending, observ
         "initialize_research_order_schedule": initialize,
         "_sync_canonical_source_pending_order": hydrate,
         "_get_pending_order_evidence_worker": lambda: worker,
+        "paper_policy_identity_for_sources": lambda *_args, **_kwargs: {},
+        "_collector_v22_epoch_id": lambda: "test-epoch",
+        "copy": copy,
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(BOT_PATH), "exec"), namespace)
     return namespace["lane_register_pending_order"], namespace

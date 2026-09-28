@@ -199,7 +199,6 @@ export class DemoHarnessService {
       demoMode: process.env.DEMO_MODE_ENABLED === 'true',
       cassetteMode: (process.env.DEMO_CASSETTE_MODE ?? 'replay') === 'capture' ? 'capture' : 'replay',
       laneSizePatch: true, // [LANE_SIZE_MULT_PATCH_2026-07-08] shipped
-      labShadowTiles: process.env.LAB_SHADOW_SL_AVOIDANCE_V1 === '1' && process.env.LAB_SHADOW_SIZED_CONTINUOUS_V1 === '1',
       executionPaused: true,
     };
   }

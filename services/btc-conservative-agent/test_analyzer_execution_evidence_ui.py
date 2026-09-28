@@ -1,0 +1,276 @@
+"""Truthful execution/diagnostic evidence contracts for the analyzer UI."""
+
+from research import research_dashboard as dashboard
+
+
+def _source_with(candidate):
+    report = {
+        "collection": {"independent_opportunities": 12},
+        "search": {"counts": {"entry_cartesian": 1}},
+        "candidate_screen": {
+            "unique_policies_evaluated": 1,
+            "descriptive_top_100": [candidate],
+            "profitable_conservative_top_100": [candidate],
+            "profitable_ideal_touch_diagnostic_top_100": [candidate],
+        },
+    }
+    return {
+        "report": report,
+        "screen": report["candidate_screen"],
+        "ranking": {},
+        "epoch_id": "epoch-execution-ui",
+        "qualified": False,
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+    }
+
+
+def test_policy_grid_exposes_exact_conservative_fill_classifications(monkeypatch):
+    candidate = {
+        "policy_id": "p-supported",
+        "policy_family": "FIXED_TARGET",
+        "episodes_total": 12,
+        "oos_episodes": 10,
+        "supported_conservative_episodes": 8,
+        "full_fills": 3,
+        "partial_fills": 1,
+        "no_fills": 4,
+        "unsupported_episodes": 2,
+        "conservative_fill_rate": 0.5,
+        "oos_wins": 3,
+        "oos_losses": 1,
+        "sealed_oos_net_usd": 2.0,
+        "expectancy_lcb_usd": 0.05,
+        "max_drawdown_usd": -0.75,
+        "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO_DEPTH_V1"}},
+        "ideal_touch_diagnostic": {
+            "touches": 9,
+            "no_touches": 1,
+            "wins": 7,
+            "losses": 2,
+            "oos_net_usd": 3.0,
+            "max_drawdown_usd": -0.5,
+        },
+    }
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: _source_with(candidate))
+
+    payload = dashboard._current_policy_grid_rows()
+    row = payload["rows"][0]
+
+    assert row["supported_conservative_episodes"] == 8
+    assert row["full_fills"] == 3
+    assert row["partial_fills"] == 1
+    assert row["no_fills"] == 4
+    assert row["unsupported_episodes"] == 2
+    assert row["conservative_fill_rate"] == 0.5
+    assert row["oos_expectancy_usd"] == 0.2
+    assert row["oos_expectancy_lcb_usd"] == 0.05
+    assert row["execution_metric_status"] == "SUPPORTED_TERMINAL_FILLS"
+    assert payload["diagnostic_evidence_warnings"] == [
+        "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        "NOT EXECUTION VERIFIED",
+        "NOT QUALIFICATION ELIGIBLE",
+    ]
+
+
+def test_no_supported_terminal_fill_never_publishes_zero_execution_metrics():
+    row = dashboard._public_policy_evidence_row({
+        "policy_id": "p-no-fill",
+        "supported_conservative_episodes": 7,
+        "full_fills": 0,
+        "partial_fills": 0,
+        "no_fills": 7,
+        "unsupported_episodes": 3,
+        "conservative_fill_rate": 0.0,
+        "sealed_oos_net_usd": 4.25,
+        "expectancy_lcb_usd": 0.2,
+        "max_drawdown_usd": 0.0,
+        "cvar95_usd": 0.0,
+        "oos_wins": 7,
+        "oos_losses": 0,
+    })
+
+    assert row["supported_terminal_fills"] == 0
+    assert row["sealed_oos_net_usd"] is None
+    assert row["expectancy_lcb_usd"] is None
+    assert row["max_drawdown_usd"] is None
+    assert row["cvar95_usd"] is None
+    assert row["oos_wins"] is None
+    assert row["oos_losses"] is None
+    assert row["execution_metric_status"] == "UNAVAILABLE_NO_SUPPORTED_TERMINAL_FILLS"
+    assert row["qualification"] == "INSUFFICIENT_EXECUTION_EVIDENCE"
+
+
+def test_unsupported_only_policy_is_unknown_not_no_fill(monkeypatch):
+    candidate = {
+        "policy_id": "p-missing-market-data",
+        "policy_family": "CHANDELIER",
+        "episodes_total": 14,
+        "oos_episodes": 14,
+        "supported_conservative_episodes": 0,
+        "full_fills": 0,
+        "partial_fills": 0,
+        "no_fills": 0,
+        "unsupported_episodes": 14,
+        "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO_DEPTH_V1"}},
+        "ideal_touch_diagnostic": {
+            "touches": 9,
+            "no_touches": 5,
+            "wins": 6,
+            "losses": 3,
+            "oos_net_usd": 1.76,
+        },
+    }
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: _source_with(candidate))
+
+    row = dashboard._current_policy_grid_rows()["rows"][0]
+
+    assert row["oos_episodes"] == 14
+    assert row["no_fills"] == 0
+    assert row["unsupported_episodes"] == 14
+    assert row["execution_metric_status"] == "UNKNOWN_UNVERIFIABLE_EXECUTION_EVIDENCE"
+    assert row["oos_net_pnl_usd"] is None
+    assert row["diagnostic_replay_net_pnl_usd"] == 1.76
+
+
+def test_public_leader_payload_excludes_zero_information_grid_rows():
+    empty = {
+        "policy_id": "exhaustive-zero-information",
+        "policy_family": "FIXED_TARGET",
+        "supported_conservative_episodes": 0,
+        "full_fills": 0,
+        "partial_fills": 0,
+        "no_fills": 0,
+        "sealed_oos_net_usd": None,
+        "max_drawdown_usd": None,
+        "ranking_score": 0,
+        "gates": {"execution": False, "oos": False},
+    }
+    supported_no_fill = {
+        **empty,
+        "policy_id": "supported-no-fill",
+        "supported_conservative_episodes": 1,
+        "no_fills": 1,
+    }
+    payload = dashboard._bounded_safe_policy_payload({
+        "candidate_screen": {
+            "descriptive_top_100": [empty, supported_no_fill],
+            "drawdown_control_leaders": [empty, supported_no_fill],
+            "profit_capture_leaders": {
+                "EMPTY": [empty],
+                "SUPPORTED": [supported_no_fill],
+            },
+        },
+        "safe_policy_ranking": {"ranked_policies": [empty, supported_no_fill]},
+    })
+
+    screen = payload["candidate_screen"]
+    assert [row["policy_id"] for row in screen["descriptive_top_100"]] == ["supported-no-fill"]
+    assert [row["policy_id"] for row in screen["drawdown_control_leaders"]] == ["supported-no-fill"]
+    assert set(screen["profit_capture_leaders"]) == {"SUPPORTED"}
+    assert [row["policy_id"] for row in payload["safe_policy_ranking"]["ranked_policies"]] == ["supported-no-fill"]
+
+
+def test_bounded_payload_uses_modern_diagnostic_fallback_without_promotion():
+    diagnostic = {
+        "policy_id": "diagnostic-only",
+        "policy_family": "HYBRID_RUNNER",
+        "oos_episodes": 2,
+        "unsupported_episodes": 2,
+        "supported_conservative_episodes": 99,
+        "full_fills": 99,
+        "sealed_oos_net_usd": 9999.0,
+        "max_drawdown_usd": -1.0,
+        "qualification": "QUALIFIED",
+        "ranking_eligible": True,
+        "gates": {"integrity_pass": False, "measured_costs_pass": True},
+        "ranking_blockers": ["NO_SUPPORTED_CONSERVATIVE_FILL_POLICY"],
+        "ideal_touch_diagnostic": {
+            "touches": 2,
+            "oos_net_usd": 1.25,
+            "expectancy_lcb_usd": 0.4,
+            "max_drawdown_usd": -0.2,
+            "cvar95_usd": -0.1,
+        },
+    }
+    payload = dashboard._bounded_safe_policy_payload({
+        "candidate_screen": {
+            "descriptive_top_100": [{
+                "policy_id": "zero-information-regular-row",
+                "supported_conservative_episodes": 0,
+            }],
+            "profitable_ideal_touch_diagnostic_top_100": [diagnostic],
+            "drawdown_control_leaders": [],
+            "profit_capture_leaders": {},
+        },
+        "safe_policy_ranking": {"ranked_policies": []},
+    })
+
+    row = payload["candidate_screen"]["descriptive_top_100"][0]
+    assert row["diagnostic_replay_net_pnl_usd"] == 1.25
+    assert row["diagnostic_replay_expectancy_lcb_usd"] == 0.4
+    assert row["diagnostic_replay_max_drawdown_usd"] == -0.2
+    assert row["diagnostic_replay_cvar95_usd"] == -0.1
+    assert row["sealed_oos_net_usd"] is None
+    assert row["max_drawdown_usd"] is None
+    assert row["supported_conservative_episodes"] == 0
+    assert row["supported_terminal_fills"] == 0
+    assert row["full_fills"] == 0
+    assert row["ranking_eligible"] is False
+    assert row["qualification"] == "INSUFFICIENT_EXECUTION_EVIDENCE"
+    assert row["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert row["execution_verification"] == "NOT EXECUTION VERIFIED"
+    assert row["qualification_eligibility"] == "NOT QUALIFICATION ELIGIBLE"
+    assert row["descriptive_blockers"] == [
+        "NOT_EXECUTION_VERIFIED", "NOT_QUALIFICATION_ELIGIBLE",
+        "NO_SUPPORTED_CONSERVATIVE_FILL_POLICY", "integrity_pass",
+    ]
+    assert all(row["gates"][blocker] is False for blocker in row["descriptive_blockers"])
+    assert payload["candidate_screen"]["drawdown_control_leaders"] == []
+    assert payload["candidate_screen"]["profit_capture_leaders"] == {}
+    assert "ranked_policies" not in payload["safe_policy_ranking"]
+
+    absent_nested = dashboard._public_policy_diagnostic_row({
+        "policy_id": "no-nested-diagnostic",
+        "sealed_oos_net_usd": 12345.0,
+        "max_drawdown_usd": -99.0,
+        "cvar95_usd": -88.0,
+    })
+    assert absent_nested["diagnostic_replay_net_pnl_usd"] is None
+    assert absent_nested["diagnostic_replay_max_drawdown_usd"] is None
+    assert absent_nested["diagnostic_replay_cvar95_usd"] is None
+
+
+def test_dashboard_visibly_labels_diagnostic_and_execution_evidence():
+    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    safe_html = dashboard.app.test_client().get("/safe-policy-genome-v3.1").get_data(as_text=True)
+
+    for warning in (
+        "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+        "NOT EXECUTION VERIFIED",
+        "NOT QUALIFICATION ELIGIBLE",
+    ):
+        assert warning in html
+        assert warning in safe_html
+    for rendered_field in (
+        "diagnostic_replay_net_pnl_usd",
+        "diagnostic_replay_max_drawdown_usd",
+        "descriptive_blockers",
+    ):
+        assert rendered_field in html
+        assert rendered_field in safe_html
+    for heading in (
+        "Supported episodes",
+        "Full fills",
+        "Partial fills",
+        "No fills",
+        "Unsupported",
+        "Fill rate",
+        "Execution EV / episode",
+        "OOS candidate opportunities",
+        "Unknown / unverifiable",
+    ):
+        assert heading in html
+    assert "Execution PnL, EV, wins/losses, and drawdown are UNAVAILABLE" in html
+    assert "#genome-kpis { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }" in html
+    assert "#genome-kpis .val { font-size: 1rem; overflow-wrap: break-word; word-break: normal; }" in html
+    assert "l === 'Qualification' ? String(v).replaceAll('_', ' ') : v" in html

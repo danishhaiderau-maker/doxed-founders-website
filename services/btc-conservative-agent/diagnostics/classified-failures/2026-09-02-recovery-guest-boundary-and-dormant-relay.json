@@ -1,0 +1,26 @@
+{
+  "schema": "classified_failure_receipt_v1",
+  "observed_at_utc": "2026-09-02T16:00:40Z",
+  "deployed_revision": "db64abb89989",
+  "workflow_revision": "b8d36663f33e",
+  "workflow_run_id": 33651900553,
+  "error_code": "RECOVERY_GUEST_BOUNDARY_ASSERTION_AND_DORMANT_RELAY_AUDIT_ABSENT",
+  "scope": "guarded_recovery_safe_boundary",
+  "guest_verified": {
+    "source_revision": true,
+    "paper_only": true,
+    "live_disarmed": true,
+    "open_positions_zero": true,
+    "pending_orders_zero": true,
+    "module_failure_present": true
+  },
+  "dormant_relay": {
+    "paused": true,
+    "active_participants_zero": true,
+    "orphan_ids_empty": true,
+    "reconciliation_absent": true,
+    "exchange_order_audit_absent": true
+  },
+  "mutation_reached": false,
+  "secrets_included": false
+}

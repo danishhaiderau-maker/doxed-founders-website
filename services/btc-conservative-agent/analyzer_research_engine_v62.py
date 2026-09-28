@@ -27,7 +27,7 @@ thesis fast-cut -28%, MFE protect 8%. Sole-AI funnel unchanged (edge 0.0+, perio
 v81: Sole-AI research funnel — edge min 0.0+, periodic AI every 300s, post-AI gates log
 WOULD_BLOCK_* (zero-block mode for full replay dataset). Session-only dashboard AI history.
 v80: Edge histogram + funnel by bucket, monotonicity, spread/SR/AI cohort tables,
-Type-A vs Type-B, first-3-candle report; pairs with research_buckets + edge_census.jsonl.
+First-3-candle and generic feature reports; pairs with research_buckets + edge_census.jsonl.
 v72: Blocked APPROVE shadow PnL (shadow_outcome.jsonl), real-edge report, counterfactual v2.
 v71: Live defaults synced to v70 sweet-spot (pullback 0.2%, ladder 10→6%, thesis cut -6%).
 v70: Thesis fast-cut / ladder-first-rung sweet-spot sweeps, research data coverage audit,
@@ -43,6 +43,7 @@ exit forensics, TIME_EXIT deep dive, edge×structure×MTF combos, factor-gate fu
 import pandas as pd
 import numpy as np
 import time
+import math
 import threading
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -53,6 +54,7 @@ import glob
 import shutil
 import sys
 import traceback
+import faulthandler
 import re
 import csv
 import io
@@ -79,21 +81,13 @@ from research.shadow_outcome_reconstruction import (
     attach_market_evidence as _attach_market_evidence,
     reconstruct_row as _reconstruct_research_row,
 )
-from research_opportunity_v2 import (
-    EVENT_FILE as TYPE_B_RESEARCH_V2_EVENT_FILE,
-    REPORT_FILE as TYPE_B_RESEARCH_V2_REPORT_NAME,
-    load_events as load_type_b_research_v2_events,
-    materialize as materialize_type_b_research_v2,
-    summarize as summarize_type_b_research_v2,
-    summarize_lane_verdicts,
+from research.conservative_limit_fill import evaluate_limit_fill as _evaluate_conservative_limit_fill
+from research.quantity_execution import (
+    validate_signed_quantity_constraints as _validate_signed_quantity_constraints,
 )
-
+from research.lifecycle_bundle_inventory import build_lifecycle_bundle_inventory
 ADX_RESEARCH_LOW_MAX = 18.0
 ADX_RESEARCH_MID_MAX = 30.0
-TYPE_B_DISCOVERY_MIN_TRADES = 120
-TYPE_B_GATE_MIN_TRADES = 220
-TYPE_B_RULE_MIN_TRAIN_N = 8
-TYPE_B_RULE_MIN_HOLDOUT_N = 5
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -101,6 +95,7 @@ except Exception:
     pass
 
 ANALYZER_RUN_LOG_FILE = "analyzer_run.log"
+ANALYZER_NATIVE_CRASH_LOG_FILE = "analyzer_native_crash.log"
 RESEARCH_COMPACT_SUMMARY_FILE = "research_compact_summary.json"
 EXECUTIVE_SUMMARY_FILE = "executive_summary.txt"
 RESEARCH_HIGHLIGHTS_FILE = "research_highlights.txt"
@@ -108,8 +103,18 @@ RESEARCH_FINDINGS_FILE = "research_findings.txt"
 RESEARCH_COVERAGE_FILE = "research_coverage.txt"
 DEEP_DIVE_INDEX_FILE = "research_deep_dive_index.txt"
 REPORT_MANIFEST_FILE = "report_manifest.json"
+ENTRY_BASELINE_REPLAY_REPORT_FILE = "entry_baseline_replay_report.json"
+DISCOVERY_COHORT_SCORECARD_REPORT_FILE = "discovery_cohort_scorecard_report.json"
+CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE = "conservative_shadow_terminal_report.json"
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 SAFE_POLICY_GENOME_V3_REPORT_FILE = "safe_policy_genome_v3_report.json"
+SAFE_POLICY_EXHAUSTIVE_FILE = "safe_policy_genome_v3_exhaustive.jsonl.gz"
+SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE = "safe_policy_genome_v3_exhaustive_manifest.json"
+POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE = "policy_evidence_library_manifest.json"
+POLICY_EVIDENCE_BINDING_REPORT_FILE = "policy_evidence_binding_report.json"
+EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE = "evidence_coverage_triage_report.json"
+LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE = "lifecycle_bundle_inventory.json"
+DYNAMIC_POLICY_ANALYSIS_REPORT_FILE = "dynamic_policy_analysis_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
 SESSION_ARCHIVE_DIR = "research_session_archives"
 SESSION_ARCHIVE_INDEX_FILE = "research_session_index.json"
@@ -117,7 +122,6 @@ REAL_EDGE_SUMMARY_FILE = "real_edge_summary.json"
 HORIZON_PROFITABILITY_REPORT_FILE = "horizon_profitability_report.json"
 HORIZON_PROFIT_HORIZONS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600, "120m": 7200}
 TOP_LEAKAGE_REPORT_FILE = "top_leakage_report.json"
-LANE_RETIREMENT_REPORT_FILE = "lane_retirement_report.json"
 FEATURE_IMPORTANCE_REPORT_FILE = "feature_importance_report.json"
 CHASE_PROFIT_REPORT_FILE = "chase_profit_report.json"
 CONFIDENCE_BAND_CROSS_REPORT_FILE = "confidence_band_cross_report.json"
@@ -126,18 +130,13 @@ BENCHMARK_CONTRIBUTION_REPORT_FILE = "benchmark_contribution_report.json"
 LANE_OVERLAP_REPORT_FILE = "lane_overlap_report.json"
 FAST_CUT_SWEEP_REPORT_FILE = "fast_cut_sweep_report.json"
 QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE = "qualified_exit_policy_grid_report.json"
-LANE_DEFINITION_REPORT_FILE = "lane_definition_report.json"
-URGENT_CHASE_REPORT_FILE = "urgent_chase_report.json"
-LANE_CHASE_ISOLATION_REPORT_FILE = "lane_chase_isolation_report.json"
 TOP_COMBINATIONS_REPORT_FILE = "top_combinations_report.json"
 CHASE_EFFICIENCY_MATRIX_REPORT_FILE = "chase_efficiency_matrix_report.json"
-TYPE_B_PREDICTOR_REPORT_FILE = "type_b_predictor_report.json"
-TYPE_B_ADX_V3_SHADOW_REPORT_FILE = "type_b_adx_v3_shadow_report.json"
-TYPE_B_RESEARCH_V2_REPORT_FILE = TYPE_B_RESEARCH_V2_REPORT_NAME
 CHASE_THRESHOLD_REPORT_FILE = "chase_threshold_report.json"
 CHASE_DELAY_REPORT_FILE = "chase_delay_report.json"
 EXIT_COMBINATIONS_REPORT_FILE = "exit_combinations_report.json"
 EXIT_LEAKAGE_BY_REASON_REPORT_FILE = "exit_leakage_by_reason_report.json"
+EXIT_REPORTS_VALIDATION_FILE = "exit_reports_validation.json"
 EXIT_LADDER_SIMULATOR_REPORT_FILE = "exit_ladder_simulator_report.json"
 CORRELATED_PRICE_CLUSTER_REPORT_FILE = "correlated_price_cluster_report.json"
 ANALYZER_INTEGRITY_REPORT_FILE = "analyzer_integrity_report.json"
@@ -154,8 +153,11 @@ RESEARCH_HORIZON_MATURITY_REPORT_FILE = "research_horizon_maturity_report.json"
 COUNTERFACTUAL_COVERAGE_REPORT_FILE = "counterfactual_coverage_report.json"
 POLICY_RESEARCH_REPORT_FILE = "policy_research_reports.json"
 CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE = "conservative_fill_descriptive_report.json"
+CROSS_WORLD_EVIDENCE_REPORT_FILE = "cross_world_evidence_report.json"
+FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE = "fill_time_guard_counterfactual_report.json"
 ROSTER_POLICY_FILE = "roster_policy.json"
 REPORTS_DIR = "reports"
+PUBLISHED_REPORTS_DIR = "published_reports"
 ANALYSIS_DASHBOARD_HTML = "analysis_dashboard.html"
 REPORTS_HISTORY_DIR = os.path.join("reports", "history")
 HORIZON_MIN_COVERAGE_PCT = 80
@@ -316,6 +318,33 @@ def _setup_analyzer_output(verbose_console=False, enable_log=True):
     return tee, log_handle
 
 
+def _enable_native_fault_log():
+    """Persist native interpreter faults that bypass Python exception handling."""
+    try:
+        handle = open(ANALYZER_NATIVE_CRASH_LOG_FILE, "a", encoding="utf-8", buffering=1)
+        handle.write(
+            f"\n--- analyzer native fault tracing enabled {datetime.now(timezone.utc).isoformat()} ---\n"
+        )
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
+        return handle
+    except Exception as exc:
+        print(f"  WARNING: native fault tracing unavailable: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+        return None
+
+
+def _close_native_fault_log(handle):
+    try:
+        faulthandler.disable()
+    except Exception:
+        pass
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+
 def _restore_analyzer_output(tee, log_handle):
     sys.stdout = _CONSOLE_STDOUT
     if log_handle is not None:
@@ -343,6 +372,120 @@ def _load_json_report(path, default=None):
     return default if default is not None else {}
 
 
+def _auxiliary_report_generation_context(session=None):
+    """Identity required before an auxiliary report may enter a new summary."""
+    session = session or load_research_session()
+    revision = (
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    epoch = _fresh_epoch_provenance()
+    source = _report_source_evidence_provenance()
+    return {
+        "generation_revision": str(revision),
+        "analyzer_revision": str(revision),
+        "session_scope": _shadow_scope_label(session),
+        "fresh_epoch_id": epoch.get("fresh_epoch_id"),
+        "source_data_revision": source.get("source_data_revision"),
+        "source_revision": source.get("source_revision"),
+        "deployed_revision": source.get("deployed_revision"),
+        "dataset_epoch": source.get("dataset_epoch"),
+        "config_signature": source.get("config_signature"),
+    }
+
+
+def _load_current_auxiliary_report(path, context):
+    """Load a report only when its revision, session, epoch and snapshot match.
+
+    Returning the exclusion receipt with the empty payload prevents an older
+    on-disk report from silently contributing KPIs to a newer compact summary.
+    """
+    payload = _load_json_report(path)
+    receipt = {
+        "file": os.path.basename(str(path)),
+        "included": False,
+        "exclusion_reasons": [],
+    }
+    if not isinstance(payload, dict) or not payload:
+        receipt["exclusion_reasons"] = ["MISSING_OR_INVALID_JSON"]
+        return {}, receipt
+
+    provenance = payload.get("analysis_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    observed = {
+        "generation_revision": payload.get("generation_revision") or provenance.get("generation_revision"),
+        "analyzer_revision": payload.get("analyzer_revision") or provenance.get("analyzer_revision"),
+        "session_scope": payload.get("session_scope") or provenance.get("session_scope"),
+        "fresh_epoch_id": (
+            payload.get("epoch_id")
+            or payload.get("fresh_epoch_id")
+            or provenance.get("fresh_epoch_id")
+        ),
+        "source_data_revision": payload.get("source_data_revision") or provenance.get("source_data_revision"),
+        "source_revision": payload.get("source_revision") or provenance.get("source_revision"),
+        "deployed_revision": payload.get("deployed_revision") or provenance.get("deployed_revision"),
+        "dataset_epoch": payload.get("dataset_epoch") or provenance.get("dataset_epoch"),
+        "config_signature": payload.get("config_signature") or provenance.get("config_signature"),
+    }
+    for field, expected in context.items():
+        found = observed.get(field)
+        if not expected or str(expected).upper() == "UNKNOWN":
+            receipt["exclusion_reasons"].append(f"EXPECTED_{field.upper()}_UNAVAILABLE")
+        elif found is None or str(found).strip() == "":
+            receipt["exclusion_reasons"].append(f"{field.upper()}_MISSING")
+        elif str(found) != str(expected):
+            receipt["exclusion_reasons"].append(f"{field.upper()}_MISMATCH")
+    receipt["observed_identity"] = observed
+    receipt["expected_identity"] = dict(context)
+    receipt["included"] = not receipt["exclusion_reasons"]
+    return (payload if receipt["included"] else {}), receipt
+
+
+def _stamp_current_iteration_auxiliary_report(path, context):
+    """Stamp only a file written during this in-memory analyzer iteration."""
+    started_at = globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
+    if started_at is None:
+        return False
+    candidates = [path]
+    if not os.path.dirname(str(path)):
+        alternate = analyzer_report_path(path)
+        if alternate != path:
+            candidates.append(alternate)
+    target = next((candidate for candidate in candidates if os.path.isfile(candidate)), None)
+    if target is None or os.path.getmtime(target) < float(started_at):
+        return False
+    payload = _load_json_report(target)
+    if not isinstance(payload, dict) or not payload:
+        return False
+    provenance = payload.get("analysis_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    payload["generation_revision"] = context["generation_revision"]
+    payload["analyzer_revision"] = context["analyzer_revision"]
+    payload["session_scope"] = context["session_scope"]
+    payload["source_data_revision"] = context["source_data_revision"]
+    for field in ("source_revision", "deployed_revision", "dataset_epoch", "config_signature"):
+        payload[field] = context[field]
+    provenance.update({
+        "generation_revision": context["generation_revision"],
+        "analyzer_revision": context["analyzer_revision"],
+        "session_scope": context["session_scope"],
+        "fresh_epoch_id": context["fresh_epoch_id"],
+        "source_data_revision": context["source_data_revision"],
+        "source_revision": context["source_revision"],
+        "deployed_revision": context["deployed_revision"],
+        "dataset_epoch": context["dataset_epoch"],
+        "config_signature": context["config_signature"],
+    })
+    payload["analysis_provenance"] = provenance
+    temporary = f"{target}.generation.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    os.replace(temporary, target)
+    return True
+
+
 def _fmt_pct(val, digits=1):
     if val is None:
         return "n/a"
@@ -356,7 +499,10 @@ def _fmt_usd(val, digits=2):
     if val is None:
         return "n/a"
     try:
-        return f"${float(val):.{digits}f}"
+        value = float(val)
+        if round(value, digits) == 0:
+            value = 0.0
+        return f"${value:.{digits}f}"
     except (TypeError, ValueError):
         return "n/a"
 
@@ -373,10 +519,17 @@ SIGNAL_PERSIST_FILE = "signal_persist.log"
 NEAR_EDGE_FILE = "near_edge.log"
 MIN_TRADES = 1
 MIN_TRADES_FOR_RULES = 10
+CURRENT_RESEARCH_LANES = ()
 # Single source: combo_pathway_config (bot + dashboard import the same contract).
 try:
     from combo_pathway_config import (
         ANALYZER_SYNC_ID,
+        ACTIVE_TILE_ORDER,
+        ACTIVE_TILE_REGISTRY,
+        TILE_ARCHITECTURE_VERSION,
+        TILE_REGISTRY_SCHEMA,
+        active_tile_lifecycle_manifest,
+        active_tile_registry_signature,
         BENCHMARK_LANE,
         COMPARISON_BENCHMARK_LANE,
         CONTINUOUS_PROXY_LANES,
@@ -392,86 +545,22 @@ try:
         EXPECTED_EXCHANGE,
         PRIMARY_PRODUCTION_LANE,
         RESEARCH_STACK_VERSION,
-        RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2,
     )
     from scenario_c_config import SCENARIO_C_LADDER_LABEL, TRAIL_LADDER_SCENARIO_C
     PATHWAY_STATUS_SHADOW_COLLECTING = "SHADOW_COLLECTING"
     SHADOW_COLLECTING_LANES = ()
     EXPERIMENTAL_EXECUTION_LANES = ()
     EXPERIMENTAL_LANE_LABELS = {}
-    RESEARCH_LANE_AI_DISAGREEMENT_ALPHA = "AI_DISAGREEMENT_ALPHA"
-    RESEARCH_LANE_AI_DISAGREEMENT_REPLAY = "AI_DISAGREEMENT_REPLAY"
-    RESEARCH_LANE_RECOVERY_MONSTER_V1 = "RECOVERY_MONSTER_V1"
-    RESEARCH_LANE_TYPE_B_PREDICTOR_V1 = "TYPE_B_PREDICTOR_V1"
-    ACTIVE_PATHWAY_LANES = tuple(COMBO_EXECUTION_LANES) + tuple(EXPERIMENTAL_EXECUTION_LANES)
+    CURRENT_RESEARCH_LANES = tuple(ACTIVE_TILE_ORDER)
+    ACTIVE_PATHWAY_LANES = CURRENT_RESEARCH_LANES
     from pathway_lane_roster import ANALYZER_COMPARE_LANES, RETIRED_PATHWAY_LANES as _ROSTER_RETIRED
     RETIRED_PATHWAY_LANES = _ROSTER_RETIRED
-except ImportError:
-    EXPECTED_BOT_VERSION = "v10.2-ai-chase-bands-desk-2026-06-23"
-    EXPECTED_EXCHANGE = "bitfinex"
-    ANALYZER_SYNC_ID = "v10.2-ai-chase-bands-desk-2026-06-23"
-    RESEARCH_STACK_VERSION = ANALYZER_SYNC_ID
-    SCENARIO_C_LADDER_LABEL = "12→8, 15→10, 25→18, 40→28, 60→45, 80→60, 100→75, 150→120"
-    TRAIL_LADDER_SCENARIO_C = [
-        (12, 8), (15, 10), (25, 18), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120),
-    ]
-    PATHWAY_STATUS_SHADOW_COLLECTING = "SHADOW_COLLECTING"
-    SHADOW_COLLECTING_LANES = ()
-    BENCHMARK_LANE = "CONTINUOUS"
-    COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-    CONTINUOUS_PROXY_LANES = (
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-    )
-    PRIMARY_PRODUCTION_LANE = "COMBO_65_SP5_CHASE_3PLUS"
-    COMBO_CHASE_DELAY_LANES = (
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-    )
-    COMBO_CHASE_ISOLATION_PAIRS = (
-        ("COMBO_604_SP4_DIRECT", "COMBO_604_SP4_CHASE_3PLUS"),
-        ("COMBO_65_SP5_DIRECT", "COMBO_65_SP5_CHASE_3PLUS"),
-    )
-    ACTIVE_CHASE_ISOLATION_PAIRS = (
-        ("CONTINUOUS", "AI60_SP3_VIRTUAL_CHASE"),
-    )
-    ACTIVE_CHASE_ISOLATION_LANES = (
-        "CONTINUOUS",
-        "AI60_SP3_VIRTUAL_CHASE",
-        "A160_CONTEXT_CHASE_EXIT_V2",
-    )
-    COMBO_LANE_SPECS = {}
-    COMBO_CHASE_DIRECT_REFERENCE = "COMBO_604_SP4_DIRECT"
-    ACTIVE_PATHWAY_LANES = (
-        "COMBO_65_SP5_CHASE_3PLUS",
-        "COMBO_604_SP4_CHASE_3PLUS",
-        "AI_DISAGREEMENT_REPLAY",
-    )
-    _COMBO_LANE_LABELS = {}
-    ANALYZER_COMPARE_LANES = ACTIVE_PATHWAY_LANES + (
-        "CONTINUOUS",
-        "COMBO_65_SP5_DIRECT",
-        "COMBO_604_SP4_DIRECT",
-        "RECOVERY_MONSTER_V1",
-        "TYPE_B_PREDICTOR_V1",
-        "AI_DISAGREEMENT_ALPHA",
-        "EXTREME_EDGE",
-        "EDGE_PLUS_STACK",
-        "AI_SCAN",
-        "HIGH_EDGE_RUNNER",
-        "SHADOW_RUNNER",
-        "EDGE_ALPHA_4",
-        "TYPE_B_HUNTER",
-        "SHORT_BEAR_ALPHA",
-        "AI_60_65_ALPHA",
-        "URGENT_CHASE_ALPHA",
-        "CHASE_3PLUS_ALPHA",
-    )
-    RETIRED_PATHWAY_LANES = frozenset({
-        "EXTREME_EDGE", "EDGE_PLUS_STACK",
-        "COMBO_65_SP5_DIRECT", "COMBO_604_SP4_DIRECT",
-        "RECOVERY_MONSTER_V1", "TYPE_B_PREDICTOR_V1", "AI_DISAGREEMENT_ALPHA",
-    })
+except ImportError as exc:
+    raise RuntimeError(
+        "authoritative tile registry unavailable; analyzer publication is fail-closed"
+    ) from exc
+ANALYZER_COMPARE_LANES = CURRENT_RESEARCH_LANES
+ACTIVE_PATHWAY_LANES = CURRENT_RESEARCH_LANES
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
 EXPECTED_FEE_PROFILE = "BITFINEX_ZERO"
 BOT_VERSION = EXPECTED_BOT_VERSION
@@ -490,6 +579,13 @@ AI_DECISION_FINGERPRINT_REPORT_FILE = "ai_decision_fingerprint_report.json"
 APPROVE_OUTCOME_CONF_DIRECTION_FILE = "approve_outcome_confidence_direction.json"
 BENCHMARK_RELATIVE_SCORECARD_FILE = "benchmark_relative_scorecard.json"
 MISSED_OPPORTUNITY_HEATMAP_FILE = "missed_opportunity_heatmap.json"
+MISSED_OPPORTUNITY_PROOF_REPORT_FILE = "missed_opportunity_proof_report.json"
+CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
+COMPRESSED_SHADOW_SCHEDULE_FILES = (
+    "chase_offset_touch_grid.jsonl",
+    "compressed_shadow_schedule.jsonl",
+    "signed_compressed_shadow_schedule.jsonl",
+)
 CHASE_ATTRIBUTION_REPORT_FILE = "chase_attribution_report.json"
 CHASE_EFFECTIVENESS_REPORT_FILE = "chase_effectiveness_report.json"
 QUALIFIED_CHASE_POLICY_REPORT_FILE = "qualified_chase_policy_report.json"
@@ -525,27 +621,7 @@ REALISM_ERA_LABELS = {
     "DEPTH_REALISM": "v1.1.18+ — BBO + order-book VWAP fills",
     "UNKNOWN": "Unknown sim era",
 }
-RESEARCH_LANE_LABELS = {
-    "CONTINUOUS": "Continuous AI Research",
-    "HIGH_EDGE_RUNNER": "High Edge Runner",
-    "EXTREME_EDGE": "Extreme Edge",
-    "EDGE_PLUS_STACK": "Edge Plus Stack",
-    "SHADOW_RUNNER": "Shadow Runner",
-    "EDGE_ALPHA_4": "Edge Alpha 4",
-    "TYPE_B_HUNTER": "Type B Hunter",
-    "SHORT_BEAR_ALPHA": "Short Bear Alpha",
-    "AI_60_65_ALPHA": "AI 60-65 Alpha",
-    "URGENT_CHASE_ALPHA": "Urgent Chase Alpha",
-    "CHASE_3PLUS_ALPHA": "Chase 3+ Alpha",
-    "COMBO_65_SP5_CHASE_3PLUS": "AI65+ · Spread5+ · Chase 3+",
-    "COMBO_65_SP5_DIRECT": "AI65+ · Spread5+ · Direct",
-    "COMBO_604_SP4_CHASE_3PLUS": "AI60-65 · Spread4 · Chase 3+",
-    "COMBO_604_SP4_DIRECT": "AI60-65 · Spread4 · Direct",
-    # Legacy — historical CSV/JSON only; excluded from active scorecards
-    "EDGE_ACCELERATION": "Edge Acceleration (legacy)",
-    "PROFIT_GATES": "Profit Gates (legacy)",
-    "STABILITY": "Stability (legacy)",
-}
+RESEARCH_LANE_LABELS = {}
 if _COMBO_LANE_LABELS:
     RESEARCH_LANE_LABELS.update(_COMBO_LANE_LABELS)
 try:
@@ -569,53 +645,9 @@ CONFIDENCE_BAND_BUCKET_ORDER = ["0-45", "45-50", "50-55", "55-60", "60-65", "65+
 AI_MATRIX_CONF_BUCKETS = ["50-55", "55-60"]
 AI_MATRIX_EDGE_BUCKETS = ["2-3", "3-4", "4+"]
 HORIZON_30M_SEC = 1800
-EXPERIMENT_LANES = (
-    "COMBO_65_SP5_DIRECT",
-    "COMBO_604_SP4_CHASE_3PLUS",
-    "COMBO_604_SP4_DIRECT",
-    "HIGH_EDGE_RUNNER",
-    "SHADOW_RUNNER",
-    "EDGE_ALPHA_4",
-    "TYPE_B_HUNTER",
-    "SHORT_BEAR_ALPHA",
-    "AI_60_65_ALPHA",
-    "URGENT_CHASE_ALPHA",
-    "CHASE_3PLUS_ALPHA",
-    "TYPE_B_PREDICTOR_V1",
-    "RECOVERY_MONSTER_V1",
-    "AI_DISAGREEMENT_ALPHA",
-    "AI_DISAGREEMENT_REPLAY",
-    "CONTINUOUS",
-)
-PATHWAY_LANE_STATUS = {
-    "COMBO_65_SP5_CHASE_3PLUS": "PRIMARY_PRODUCTION",
-    "COMBO_65_SP5_DIRECT": "RETIRED",
-    "COMBO_604_SP4_CHASE_3PLUS": "ACTIVE",
-    "COMBO_604_SP4_DIRECT": "RETIRED",
-    "CONTINUOUS": "BENCHMARK",
-    "TYPE_B_PREDICTOR_V1": "RETIRED",
-    "RECOVERY_MONSTER_V1": "RETIRED",
-    "AI_DISAGREEMENT_ALPHA": "RETIRED",
-    "AI_DISAGREEMENT_REPLAY": "ACTIVE",
-    "HIGH_EDGE_RUNNER": "SHADOW_COLLECTING",
-    "EXTREME_EDGE": "RETIRED",
-    "EDGE_PLUS_STACK": "RETIRED",
-    "SHADOW_RUNNER": "SHADOW_COLLECTING",
-    "EDGE_ALPHA_4": "SHADOW_COLLECTING",
-    "TYPE_B_HUNTER": "SHADOW_COLLECTING",
-    "SHORT_BEAR_ALPHA": "SHADOW_COLLECTING",
-    "AI_60_65_ALPHA": "SHADOW_COLLECTING",
-    "URGENT_CHASE_ALPHA": "SHADOW_COLLECTING",
-    "CHASE_3PLUS_ALPHA": "SHADOW_COLLECTING",
-    "AI_SCAN": "ACTIVE",
-}
-# The roster is the current execution authority. Historical comparison lanes
-# remain in analyzer reports so immutable evidence can still be decoded, but a
-# retired lane must never inherit the status helper's ACTIVE default.
-for _retired_lane in RETIRED_PATHWAY_LANES:
-    PATHWAY_LANE_STATUS[str(_retired_lane).upper()] = "RETIRED"
+ACTIVE_ANALYSIS_LANES = CURRENT_RESEARCH_LANES
 BENCHMARK_LANES = ANALYZER_COMPARE_LANES
-LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "PROFIT_GATES", "STABILITY", "EXEC_5M"})
+LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
 ANALYZER_JSON_REPORT_FILES = (
     AI_CALIBRATION_REPORT_FILE,
@@ -641,6 +673,8 @@ ANALYZER_JSON_REPORT_FILES = (
     LANE_OPPORTUNITY_REPORT_FILE,
     COLLECTOR_V21_REPORT_FILE,
     MISSED_OPPORTUNITY_HEATMAP_FILE,
+    MISSED_OPPORTUNITY_PROOF_REPORT_FILE,
+    CHASE_POLICY_LAB_REPORT_FILE,
     PATHWAY_SURVIVAL_REPORT_FILE,
     REAL_EDGE_SUMMARY_FILE,
     SCENARIO_C_CAPTURE_RATIO_REPORT_FILE,
@@ -651,7 +685,6 @@ ANALYZER_JSON_REPORT_FILES = (
     EXIT_LEAKAGE_BY_REASON_REPORT_FILE,
     EXIT_LADDER_SIMULATOR_REPORT_FILE,
     CORRELATED_PRICE_CLUSTER_REPORT_FILE,
-    LANE_RETIREMENT_REPORT_FILE,
     FEATURE_IMPORTANCE_REPORT_FILE,
     CHASE_PROFIT_REPORT_FILE,
     CONFIDENCE_BAND_CROSS_REPORT_FILE,
@@ -659,14 +692,8 @@ ANALYZER_JSON_REPORT_FILES = (
     BENCHMARK_CONTRIBUTION_REPORT_FILE,
     LANE_OVERLAP_REPORT_FILE,
     FAST_CUT_SWEEP_REPORT_FILE,
-    LANE_DEFINITION_REPORT_FILE,
-    URGENT_CHASE_REPORT_FILE,
-    LANE_CHASE_ISOLATION_REPORT_FILE,
     TOP_COMBINATIONS_REPORT_FILE,
     CHASE_EFFICIENCY_MATRIX_REPORT_FILE,
-    TYPE_B_PREDICTOR_REPORT_FILE,
-    TYPE_B_ADX_V3_SHADOW_REPORT_FILE,
-    TYPE_B_RESEARCH_V2_REPORT_FILE,
     CHASE_THRESHOLD_REPORT_FILE,
     CHASE_DELAY_REPORT_FILE,
     EXIT_COMBINATIONS_REPORT_FILE,
@@ -682,13 +709,17 @@ ANALYZER_JSON_REPORT_FILES = (
     BEST_POLICY_RESEARCH_REPORT_FILE,
     SAFE_POLICY_GENOME_V3_REPORT_FILE,
     CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
+    CROSS_WORLD_EVIDENCE_REPORT_FILE,
+    FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
-    ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current matured v2.2 epoch joined to independent chronological OOS qualification"),
+    ("Best Policy Research", BEST_POLICY_RESEARCH_REPORT_FILE, "Current signed V3.1 epoch joined to independent chronological OOS qualification"),
     ("Conservative Fill Receipts", CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "Descriptive-only fill, partial, no-fill, and unsupported receipts from pinned microstructure evidence"),
+    ("Cross-World Evidence", CROSS_WORLD_EVIDENCE_REPORT_FILE, "Explicit-identity-only agreement and disagreement across ideal-touch, conservative, shadow, paper, and Bitfinex-copy evidence"),
+    ("Fill-Time Guard Counterfactual", FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE, "Research-only adverse-momentum, EMA/DMI, and microstructure order-flow fill revalidation candidates"),
     ("Policy Search Manifest", POLICY_SEARCH_MANIFEST_FILE, "Versioned static/dynamic hierarchical parameter search space"),
     ("AI Calibration", AI_CALIBRATION_REPORT_FILE, "Confidence buckets, expected vs actual WR, calibration error"),
     ("AI Funnel", AI_FUNNEL_REPORT_FILE, "AI decision funnel stages and drop-offs"),
@@ -714,6 +745,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Lane Opportunity", LANE_OPPORTUNITY_REPORT_FILE, "Missed lane capture vs shadow fills"),
     ("collector_v2.1 Opportunity Capture", COLLECTOR_V21_REPORT_FILE, "Four cohorts: actual / unfilled / rejected / hypothetical; CONTROL vs Stage-1"),
     ("Missed Opportunities", MISSED_OPPORTUNITY_HEATMAP_FILE, "Blocked signals by reason and $ left"),
+    ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
+    ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
     ("Pathway Survival", PATHWAY_SURVIVAL_REPORT_FILE, "Pathway stage survival and drop rates"),
     ("Real Edge / Gate Damage", REAL_EDGE_SUMMARY_FILE, "APPROVE funnel, executed vs blocked shadow PnL"),
     ("Scenario C Capture", SCENARIO_C_CAPTURE_RATIO_REPORT_FILE, "MFE capture % distribution"),
@@ -721,7 +754,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("AI Direction Bias", AI_DIRECTION_BIAS_REPORT_FILE, "AI directional skew vs outcomes"),
     ("Compact Summary", RESEARCH_COMPACT_SUMMARY_FILE, "Machine-readable rollup of all KPIs"),
     ("Top Leakage Trades", TOP_LEAKAGE_REPORT_FILE, "Top 50 trades — peak vs booked, money left on table"),
-    ("Lane Retirement", LANE_RETIREMENT_REPORT_FILE, "KEEP / RETIRE / COLLECT MORE per pathway lane"),
     ("Feature Importance", FEATURE_IMPORTANCE_REPORT_FILE, "Which trading features correlate with PnL"),
     ("Chase Profit", CHASE_PROFIT_REPORT_FILE, "Incremental PnL from chase-assisted vs static fills"),
     ("Confidence × Lane", CONFIDENCE_BAND_CROSS_REPORT_FILE, "Performance by AI band per lane"),
@@ -729,9 +761,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Benchmark Contribution", BENCHMARK_CONTRIBUTION_REPORT_FILE, "% of session PnL from each lane"),
     ("Lane Overlap", LANE_OVERLAP_REPORT_FILE, "Overlap vs CONTINUOUS — unique alpha signals"),
     ("Fast Cut Sweep", FAST_CUT_SWEEP_REPORT_FILE, "Replay sweep at -6/-8/-10/-12 vs booked PnL"),
-    ("Lane Definitions", LANE_DEFINITION_REPORT_FILE, "Entry conditions, dependencies, and status per pathway lane"),
-    ("Urgent Chase Alpha", URGENT_CHASE_REPORT_FILE, "Legacy URGENT_CHASE_ALPHA vs CONTINUOUS (historical)"),
-    ("Lane Chase Isolation", LANE_CHASE_ISOLATION_REPORT_FILE, "COMBO Direct vs Chase 3+ fill_model and chase policy"),
     ("Top Combinations", TOP_COMBINATIONS_REPORT_FILE, "AI × spread × type × lane ranked cohorts"),
     ("Exit Combinations", EXIT_COMBINATIONS_REPORT_FILE, "Exit reason × entry combo — leakage and best exit paths"),
     ("Exit Leakage by Reason", EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "Which exit reasons destroy the most value"),
@@ -741,14 +770,10 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("AI Scan Independence", "ai_scan_independence_report.json", "AI pipeline vs production tile ON/OFF"),
     ("Lane Memory", "lane_memory_validation.json", "Retired lane exposure + bucket bounds"),
     ("Bot↔Analyzer Sync", "bot_analyzer_sync.json", "SYSTEM_NOT_READY gate at startup"),
-    ("TYPE_B Execution Audit", "type_b_execution_audit.json", "Proof TYPE_B is not an entry gate"),
-    ("Exit Reports Validation", "exit_reports_validation.json", "Analyzer gate — exit reports populated"),
+    ("Exit Reports Validation", EXIT_REPORTS_VALIDATION_FILE, "Current-generation exit report identity and evidence status"),
     ("Chase Efficiency Matrix", CHASE_EFFICIENCY_MATRIX_REPORT_FILE, "Chase count × AI × spread × lane EV matrix"),
-    ("Type B Predictor", TYPE_B_PREDICTOR_REPORT_FILE, "Pre-entry feature separators for Type B runners"),
-    ("Type B ADX V3 Shadow", TYPE_B_ADX_V3_SHADOW_REPORT_FILE, "Replay-only challenger decisions, direction balance, ADX bands, and promotion gate"),
-    ("Type B Research V2", TYPE_B_RESEARCH_V2_REPORT_FILE, "One row per independent opportunity across paper, live and shadow evidence"),
-    ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Relay-ineligible outcomes collected during ADMIN_MANUAL pause, by lane and ADX band"),
     ("Historical Trade Cohort", HISTORICAL_COHORT_REPORT_FILE, "Deduplicated executed trades across downloaded 3factor archives; never mixed into current-session P&L"),
+    ("Paused Shadow Research", PAUSED_SHADOW_REPORT_FILE, "Generic quarantined outcomes collected during administrative pauses; never mixed into current qualification"),
     ("Showcase Strategy Outcomes", SHOWCASE_STRATEGY_OUTCOMES_REPORT_FILE, "Paper Showcase strategy outcomes only; copy fills never rewrite source truth"),
     ("Bitfinex Copy-Fidelity Lifecycles", BITFINEX_COPY_FIDELITY_REPORT_FILE, "Authenticated source-to-copy execution fidelity, including chase and protection"),
     ("Correlated Cluster Blocked", CORRELATED_CLUSTER_BLOCKED_REPORT_FILE, "Counterfactual 0.09% cluster-blocked opportunities; not missed copy failures"),
@@ -756,10 +781,11 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Qualified Real-Copy Optimisation", REAL_COPY_PARAMETER_OPTIMISATION_REPORT_FILE, "Fail-closed real-copy rows with complete policy, costs, and mature horizons"),
     ("Showcase Losing Cluster", SHOWCASE_LOSING_CLUSTER_REPORT_FILE, "PRELIMINARY_DESCRIPTIVE fresh Showcase losses; no live parameter recommendation"),
     ("Research Horizon Maturity", RESEARCH_HORIZON_MATURITY_REPORT_FILE, "1/5/15/30/60/120m horizon completeness for Showcase, unfilled, cluster-blocked, and copy-only rows"),
+    ("Dynamic Policy Analysis", DYNAMIC_POLICY_ANALYSIS_REPORT_FILE, "Checksum-bound canonical nested dynamic-policy research; UNKNOWN unless sealed evidence is complete"),
 )
 AI_INPUT_LOG_FILE = "ai_input_log.jsonl"
 RESEARCH_FREE_RUN_LIVE = True  # v78: bot disables post-AI MTF/chop — sweeps use strict reference thresholds
-FLAT_MARGIN_LIVE_USD = 20.0
+FLAT_MARGIN_LIVE_USD = 0.25
 EDGE_CENSUS_FILE = "edge_census.jsonl"
 MARGIN_SIZE_SWEEP_USD = [5.0, 10.0, 15.0, 20.0, 25.0]
 RESEARCH_SESSION_FILE = "research_session.json"
@@ -837,8 +863,6 @@ SIGNAL_REPLAY_FILE = "signal_replay.jsonl"
 TRADE_OUTCOME_FILE = "trade_outcome.jsonl"
 SHADOW_OUTCOME_FILE = "shadow_outcome.jsonl"
 SHADOW_LANE_OUTCOME_FILE = "shadow_lane_outcome.jsonl"
-V2_SHADOW_OUTCOME_FILE = "v2_shadow_outcome.jsonl"
-V2_CHECKER_LOG_FILE = "v2_checker_log.jsonl"
 
 COUNTERFACTUAL_FILE = "counterfactual.jsonl"
 SIGNAL_SNAPSHOT_FILE = "signal_snapshot.jsonl"
@@ -846,13 +870,11 @@ SOURCE_ORDER_MARKET_EVIDENCE_FILE = "source_order_market_evidence.jsonl"
 APPROVED_BUT_REJECTED_FILE = "approved_but_rejected.jsonl"
 NEAR_MISS_FILE = "near_miss.jsonl"
 SOFT_REJECT_SHADOW_FILE = "soft_reject_shadow.jsonl"
-TYPE_B_ADX_V3_DECISION_FILE = "type_b_adx_v3_shadow_decisions.jsonl"
 EXPORT_ZIP_FILES = (
     TRADES_FILE, BLOCKED_FILE, DECISIONS_FILE, AI_TRANCHE_FILE, SETUP_LOG_FILE, CANDLES_FILE,
     PIPELINE_EVENTS_FILE, AI_ERRORS_FILE, SIGNAL_PERSIST_FILE, NEAR_EDGE_FILE,
     SIGNAL_REPLAY_FILE, TRADE_OUTCOME_FILE, SHADOW_OUTCOME_FILE, SIGNAL_SNAPSHOT_FILE, COUNTERFACTUAL_FILE,
     APPROVED_BUT_REJECTED_FILE, NEAR_MISS_FILE, SOFT_REJECT_SHADOW_FILE,
-    TYPE_B_ADX_V3_DECISION_FILE,
     EDGE_CENSUS_FILE,
 )
 RESEARCH_CSV_FILES = (
@@ -1020,31 +1042,8 @@ def _file_time_span(path: str, ts_cols=(), json_ts_key="ts"):
     return fmt(min_ts), fmt(max_ts), rows, mtime
 
 
-def _trades_evidence_root() -> str | None:
-    """Directory that actually holds the paper ledger, if one exists.
-
-    Session scope has to come from this same directory. A fresh worktree
-    ``research_session.json`` must not cutoff a mirror ledger that lives under
-    ``BTC_AGENT_DATA_DIR``.
-    """
-    env_root = os.getenv("BTC_AGENT_DATA_DIR")
-    if env_root and os.path.isfile(os.path.join(env_root, TRADES_FILE)):
-        return env_root
-    if os.path.isfile(TRADES_FILE):
-        return os.getcwd()
-    parent = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-    if os.path.isfile(os.path.join(parent, TRADES_FILE)):
-        return parent
-    return None
-
-
 def load_research_session() -> dict:
-    root = _trades_evidence_root()
-    path = (
-        os.path.join(root, RESEARCH_SESSION_FILE)
-        if root is not None
-        else _agent_data_path(RESEARCH_SESSION_FILE)
-    )
+    path = _agent_data_path(RESEARCH_SESSION_FILE)
     if not os.path.isfile(path):
         return {}
     try:
@@ -1266,6 +1265,64 @@ def _agent_data_path(filename: str) -> str:
     return filename
 
 
+_CANONICAL_JSON_INPUT_NAMES = frozenset({
+    "execution_funnel_summary.json",
+    "pathway_lane_specs.json",
+    "research_session.json",
+})
+
+
+def _bind_existing_canonical_input_paths(data_root: str) -> dict:
+    """Bind legacy relative evidence constants to the canonical data store.
+
+    Derived reports intentionally remain relative to the isolated report cwd.
+    Only raw CSV/JSONL/log evidence and the small explicit runtime JSON inputs
+    are rebound. This prevents old loaders that predate ``_agent_data_path``
+    from silently treating present canonical evidence as missing.
+    """
+    root = os.path.realpath(data_root)
+    rebound = {}
+
+    def canonical_candidate(value):
+        if not isinstance(value, str) or os.path.dirname(value):
+            return None
+        basename = os.path.basename(value)
+        lower = basename.lower()
+        if not (
+            lower.endswith((".csv", ".jsonl", ".log"))
+            or lower in _CANONICAL_JSON_INPUT_NAMES
+        ):
+            return None
+        candidate = os.path.realpath(os.path.join(root, basename))
+        try:
+            if os.path.commonpath([candidate, root]) != root:
+                raise ValueError("canonical evidence path escaped data root")
+        except ValueError as exc:
+            raise RuntimeError(f"CANONICAL_INPUT_PATH_ESCAPE:{basename}") from exc
+        return candidate if os.path.isfile(candidate) else None
+
+    for name, value in list(globals().items()):
+        if name.endswith("_FILE"):
+            candidate = canonical_candidate(value)
+            if candidate:
+                globals()[name] = candidate
+                rebound[name] = candidate
+        elif name.endswith("_FILES") and isinstance(value, tuple):
+            updated = tuple(canonical_candidate(item) or item for item in value)
+            if updated != value:
+                globals()[name] = updated
+                rebound[name] = updated
+    return rebound
+
+
+def _canonical_genome_source_db_path() -> str:
+    """Return the configured mirror DB path even before that source exists."""
+    data_root = (os.getenv("BTC_AGENT_DATA_DIR") or "").strip()
+    if data_root:
+        return os.path.join(os.path.abspath(data_root), "research.db")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "research.db")
+
+
 def robust_read_csv(filepath, name="file"):
     filepath = _agent_data_path(filepath)
     if not os.path.exists(filepath):
@@ -1353,6 +1410,21 @@ def validate_feature_variance(df):
                 numeric = pd.to_numeric(df[f], errors='coerce')
                 std_val = numeric.std()
                 if pd.isna(std_val) or std_val < 1e-9:
+                    if f == "momentum":
+                        velocity = None
+                        for alias in ("features_velocity", "feature_velocity", "velocity"):
+                            if alias in df.columns:
+                                candidate = pd.to_numeric(df[alias], errors="coerce")
+                                if candidate.notna().sum() >= 2 and candidate.std() >= 1e-9:
+                                    velocity = alias
+                                    break
+                        if velocity:
+                            print(
+                                f"⚠️ momentum is a constant legacy/coarse label; "
+                                f"current momentum analytics use {velocity} (non-zero variance) "
+                                f"{PIPELINE_ENFORCEMENT_TAG}"
+                            )
+                            continue
                     print(f"🚨 CRITICAL: {f} has zero variance → upstream broken {PIPELINE_ENFORCEMENT_TAG}")
                 else:
                     print(f"✅ {f} variance OK (std={std_val:.4f}) {PIPELINE_ENFORCEMENT_TAG}")
@@ -2362,6 +2434,12 @@ def research_jsonl_summary(datasets=None):
 def _paper_trade_index():
     """Map trades_3factor.csv paper fills by trade_id. Missing file → empty."""
     index = {}
+    # A clean epoch with no terminal paper trades legitimately has no CSV yet.
+    # Treat that as an empty terminal cohort without sending the generic robust
+    # reader through dozens of report builders that each log a false pipeline
+    # warning.  Once the writer creates the file, normal schema validation runs.
+    if not os.path.exists(TRADES_FILE):
+        return index
     try:
         frame = robust_read_csv(TRADES_FILE, "paper trade index")
         if frame is None or getattr(frame, "empty", True) or "trade_id" not in frame.columns:
@@ -2416,8 +2494,20 @@ def _research_opportunity_universe():
 
 def _analysis_eligible_trade_ids(cohort=REAL_COPY_PARAMETER_OPTIMISATION):
     """Canonical cohort allow-list for research and policy optimizers."""
+    from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex, REASON
+    incident_input = load_incident_input()
     rows = _research_opportunity_universe()
     eligible, exclusions = _cohort_eligible_trade_ids(rows, cohort)
+    if incident_input.enabled:
+        incident_index = IncidentEpisodeIndex(incident_input)
+        incident_index.add(rows)
+        affected_ids = {str(row.get("trade_id") or "") for row in rows if incident_index.reasons(row)}
+        excluded = eligible & affected_ids
+        eligible = eligible - affected_ids
+        exclusions = dict(exclusions)
+        if excluded:
+            exclusions[REASON] = len(excluded)
+    incident_input.assert_unchanged()
     return eligible, exclusions, len(rows)
 
 
@@ -2433,10 +2523,16 @@ def _filter_policy_analysis_df(
         print(f"  {label}: blocked — trade_id missing; no policy conclusions allowed. {PIPELINE_ENFORCEMENT_TAG}")
         return df.iloc[0:0].copy()
     before = len(df)
-    filtered = df[df["trade_id"].astype(str).isin(eligible)].copy()
+    contamination = df.apply(_family_terminal_double_count_detail, axis=1)
+    contaminated = contamination.apply(lambda item: bool(item.get("contaminated")))
+    filtered = df[
+        df["trade_id"].astype(str).isin(eligible) & ~contaminated
+    ].copy()
+    contaminated_n = int(contaminated.sum())
     print(
         f"  {label}: {cohort} eligibility {len(filtered)}/{before} rows "
-        f"(evidence={evidence_rows}, exclusions={exclusions}). {PIPELINE_ENFORCEMENT_TAG}"
+        f"(evidence={evidence_rows}, exclusions={exclusions}, "
+        f"terminal-double-count-excluded={contaminated_n}). {PIPELINE_ENFORCEMENT_TAG}"
     )
     return filtered
 
@@ -2990,7 +3086,7 @@ def research_counterfactual_coverage_report():
         "live_params_unchanged": {
             "cluster_bps": 9,
             "thesis_cut": -12,
-            "hard_stop_pct": 13,
+            "hard_stop_pct": HARD_STOP_MARGIN_PCT,
             "ladder": "SCENARIO_C",
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -3141,93 +3237,6 @@ def paused_shadow_research_report(session: dict = None):
     return payload
 
 
-def _load_v2_shadow_outcome_df(session: dict = None):
-    """A160 V2 tile-OFF simulated fills/exits (v2_shadow_outcome.jsonl)."""
-    rows = _load_jsonl_rows(V2_SHADOW_OUTCOME_FILE)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    if session and _session_start_ts(session) is not None:
-        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
-    return df
-
-
-def _load_v2_checker_approves_df(session: dict = None):
-    """V2 checker accepts — independent of AI_SCAN signal_snapshot approves."""
-    rows = _load_jsonl_rows(V2_CHECKER_LOG_FILE)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    if "accepted" in df.columns:
-        df = df[df["accepted"].apply(_truthy)]
-    if session and _session_start_ts(session) is not None:
-        df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
-    return df
-
-
-def _v2_outcome_is_reject_counterfactual(row) -> bool:
-    """Reject-path counterfactual sims must not count as checker-pass paper fills."""
-    if hasattr(row, "get"):
-        mode = str(row.get("collection_mode") or "").upper()
-        checker_accepted = row.get("checker_accepted", True)
-    else:
-        mode = str((row or {}).get("collection_mode") or "").upper()
-        checker_accepted = (row or {}).get("checker_accepted", True)
-    if mode == "V2_CHECKER_REJECT":
-        return True
-    if mode == "V2_SHADOW":
-        return False
-    return not _truthy(checker_accepted)
-
-
-def _v2_lane_metrics_from_logs(session: dict = None) -> dict:
-    """Aggregate V2 checker approves + shadow outcomes for benchmark_vs_lanes."""
-    checker = _load_v2_checker_approves_df(session)
-    outcomes = _load_v2_shadow_outcome_df(session)
-    approves = len(checker) if checker is not None and not checker.empty else 0
-    checker_pass_sims = 0
-    checker_pass_pnl = 0.0
-    wins = 0
-    reject_counterfactual_sims = 0
-    reject_counterfactual_pnl = 0.0
-    if outcomes is not None and not outcomes.empty:
-        work = outcomes.copy()
-        if "filled" in work.columns:
-            work["filled"] = work["filled"].apply(_truthy)
-        else:
-            work["filled"] = True
-        reject_mask = work.apply(_v2_outcome_is_reject_counterfactual, axis=1)
-        reject_work = work[reject_mask]
-        work = work[~reject_mask]
-        filled = work[work["filled"]]
-        checker_pass_sims = len(filled)
-        checker_pass_pnl = round(
-            float(pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
-        )
-        pnl_series = pd.to_numeric(filled.get("net_pnl_usd"), errors="coerce").fillna(0)
-        wins = int((pnl_series >= 0).sum())
-        reject_filled = reject_work[reject_work["filled"]] if not reject_work.empty else reject_work
-        reject_counterfactual_sims = len(reject_filled)
-        reject_counterfactual_pnl = round(
-            float(pd.to_numeric(reject_filled.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 2
-        ) if reject_counterfactual_sims else 0.0
-    per_ev = round(checker_pass_pnl / approves, 2) if approves else 0.0
-    win_rate = round(100.0 * wins / checker_pass_sims, 1) if checker_pass_sims else 0.0
-    return {
-        "approves": approves,
-        "checker_pass_sims": checker_pass_sims,
-        "checker_pass_pnl": checker_pass_pnl,
-        "sim_fills": checker_pass_sims,
-        "sim_pnl": checker_pass_pnl,
-        "per_approve_ev": per_ev,
-        "win_rate_pct": win_rate,
-        "reject_counterfactual_sims": reject_counterfactual_sims,
-        "reject_counterfactual_pnl": reject_counterfactual_pnl,
-        "reject_sim_fills": reject_counterfactual_sims,
-        "reject_sim_pnl": reject_counterfactual_pnl,
-    }
-
-
 def _load_shadow_lane_outcome_df(session: dict = None):
     """Off-dashboard shadow-collecting lane sim outcomes (no live orders)."""
     rows = _load_jsonl_rows(SHADOW_LANE_OUTCOME_FILE)
@@ -3235,17 +3244,22 @@ def _load_shadow_lane_outcome_df(session: dict = None):
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     if "research_lane" in df.columns:
-        # OFFSET_029 is paper-only. Historical rows in this shadow file were
-        # emitted by an invalid generic Scenario-C replay route and are kept on
-        # disk as immutable evidence, but can never qualify for policy ranking.
-        mismatch = (
-            df["research_lane"].fillna("").astype(str).str.upper()
-            == "OFFSET_029_ATR_TP_25"
-        )
-        mismatch_count = int(mismatch.sum())
+        lanes = df["research_lane"].fillna("").astype(str).str.upper()
+        policies = df.get(
+            "policy_version", pd.Series(index=df.index, dtype=object)
+        ).fillna("").astype(str)
+        mismatch = pd.Series(False, index=df.index)
+        mismatch_by_lane = {}
+        for lane, spec in ACTIVE_TILE_REGISTRY.items():
+            expected = str(spec.get("raw_policy_id") or "")
+            lane_rows = lanes.eq(str(lane).upper())
+            lane_mismatch = lane_rows & policies.ne(expected)
+            mismatch_by_lane[lane] = int(lane_mismatch.sum())
+            mismatch |= lane_mismatch
         df = df[~mismatch].copy()
-        df.attrs["policy_mismatch_rows_excluded"] = mismatch_count
-        df.attrs["policy_mismatch_reason"] = "OFFSET029_PAPER_ONLY_FORBIDS_SHADOW_OUTCOME"
+        df.attrs["policy_mismatch_rows_excluded"] = int(mismatch.sum())
+        df.attrs["policy_mismatch_rows_by_lane"] = mismatch_by_lane
+        df.attrs["policy_mismatch_reason"] = "ACTIVE_TILE_SHADOW_POLICY_IDENTITY_MISMATCH"
     if session and _session_start_ts(session) is not None:
         df = filter_df_since_session(df, session, ts_cols=("ts", "timestamp"))
     return df
@@ -3287,21 +3301,6 @@ def _policy_filtered_research_lane_metrics(shadow_lane_df, lane: str) -> dict:
     if work.empty:
         return empty
 
-    lane_u = str(lane or "").upper()
-    if lane_u == "TYPE_B_HUNTER_V1" and "policy_version" in work.columns:
-        try:
-            from type_b_hunter_v1 import POLICY_VERSION as active_policy
-            work = work[work["policy_version"].astype(str) == str(active_policy)]
-        except Exception:
-            pass
-    elif lane_u == "SR_MICRO_TILE_V2_STATIC":
-        try:
-            from sr_micro_tile_v2 import POLICY_ID as active_policy
-            policy_col = "policy_id" if "policy_id" in work.columns else "policy_version"
-            if policy_col in work.columns:
-                work = work[work[policy_col].astype(str) == str(active_policy)]
-        except Exception:
-            pass
     if work.empty:
         return empty
 
@@ -3421,8 +3420,6 @@ def _shadow_block_prefix(br) -> str:
         return "WOULD_BLOCK"
     if s.startswith("WOULD_FAIL"):
         return "WOULD_FAIL"
-    if s.startswith("PROFIT_GATE"):
-        return "PROFIT_GATE"
     if s.startswith("CLUSTER"):
         return "CLUSTER"
     if s.startswith("SOFT_REJECT"):
@@ -3436,7 +3433,6 @@ def _is_blocked_approve_lane(br) -> bool:
     return (
         s.startswith("WOULD_BLOCK")
         or s.startswith("WOULD_FAIL")
-        or s.startswith("PROFIT_GATE")
         or s.startswith("CLUSTER")
     )
 
@@ -3451,14 +3447,14 @@ def _assign_shadow_lane(block_reason_series: pd.Series) -> pd.Series:
 
 
 def _print_block_prefix_subtotals(df: pd.DataFrame, pnl_col: str = "net_pnl_usd", label: str = "Blocked APPROVE"):
-    """Subtotals by WOULD_BLOCK / WOULD_FAIL / CLUSTER / PROFIT_GATE for REAL EDGE reporting."""
+    """Subtotals by active generic block prefixes for REAL EDGE reporting."""
     if df is None or df.empty or "block_reason" not in df.columns:
         return
     work = df.copy()
     work["_prefix"] = work["block_reason"].map(_shadow_block_prefix)
     work[pnl_col] = pd.to_numeric(work.get(pnl_col), errors="coerce")
     rows = []
-    for prefix in ("WOULD_BLOCK", "WOULD_FAIL", "CLUSTER", "PROFIT_GATE", "other"):
+    for prefix in ("WOULD_BLOCK", "WOULD_FAIL", "CLUSTER", "other"):
         sub = work[work["_prefix"] == prefix]
         if sub.empty:
             continue
@@ -3567,7 +3563,7 @@ def shadow_approve_pnl_analysis(decisions, trades, blocked, session: dict = None
     soft_shadow = blocked_shadow[blocked_shadow["shadow_lane"] == "soft_reject"]
     other_shadow = blocked_shadow[blocked_shadow["shadow_lane"] == "other"]
     print(
-        f"  Split: blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER/PROFIT_GATE): {len(gate_shadow)} | "
+        f"  Split: blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER): {len(gate_shadow)} | "
         f"soft rejects (SOFT_REJECT:*): {len(soft_shadow)} | other: {len(other_shadow)} {PIPELINE_ENFORCEMENT_TAG}"
     )
     if len(soft_shadow) > 0:
@@ -3575,7 +3571,7 @@ def shadow_approve_pnl_analysis(decisions, trades, blocked, session: dict = None
             f"  ℹ️ SOFT_REJECT shadows simulate AI-rejected signals — not blocked APPROVEs. "
             f"Use WOULD_BLOCK_* rows for gate-cost analysis. {PIPELINE_ENFORCEMENT_TAG}"
         )
-    _print_shadow_pnl_summary(gate_shadow, "Blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER/PROFIT_GATE)")
+    _print_shadow_pnl_summary(gate_shadow, "Blocked APPROVE gates (WOULD_BLOCK/WOULD_FAIL/CLUSTER)")
     if not soft_shadow.empty:
         _print_shadow_pnl_summary(soft_shadow, "Soft rejects (SOFT_REJECT:*)")
     if not other_shadow.empty:
@@ -4244,9 +4240,11 @@ def stop_ladder_mfe_3d_sweep_all_replays(trades_df=None, top_n=12):
 def qualified_exit_policy_grid_report():
     """Costed, chronological, real-copy-only thesis/ladder/MFE grid.
 
-    The physical hard stop is an invariant (13%), not an optimisation axis.
+    The physical hard stop is an invariant (30%), not an optimisation axis.
     Actual exchange results remain separate from counterfactual simulations.
     """
+    from research.runtime_identity_incidents import load_incident_input, REASON
+    incident_input = load_incident_input()
     all_replays = _load_jsonl_replays()
     cohort_assessments = {}
     for cohort_name in (
@@ -4283,6 +4281,15 @@ def qualified_exit_policy_grid_report():
     for trade_id in sorted(eligible_ids):
         replay = all_replays.get(trade_id)
         row = evidence.get(trade_id) or {}
+        if incident_input.enabled and (
+            incident_input.affected(row) or incident_input.affected({
+                key: value for key, value in (replay or {}).items() if key != "ticks"
+            })
+        ):
+            # Tick t values in this legacy replay are relative offsets, not
+            # absolute UTC proof. Missing absolute replay timing stays UNKNOWN.
+            local_exclusions[REASON] += 1
+            continue
         if not replay:
             local_exclusions["REPLAY_ROW_MISSING"] += 1
             continue
@@ -4440,7 +4447,10 @@ def qualified_exit_policy_grid_report():
                 "ladder_first_lock_pct": selected["ladder_first_lock_pct"],
                 "mfe_protect_pct": selected["mfe_protect_pct"],
             } if conclusions_allowed else None),
-            "note": "The physical hard stop remains the fixed 13% invariant; this report never widens it.",
+            "note": (
+                f"The physical hard stop remains the fixed {HARD_STOP_MARGIN_PCT:g}% "
+                "invariant; this report never widens it."
+            ),
         },
         "question_outputs": {
             "hard_stop": {"status": "FIXED_SAFETY_INVARIANT", "value_pct": HARD_STOP_MARGIN_PCT},
@@ -4450,6 +4460,9 @@ def qualified_exit_policy_grid_report():
         },
         "note": "Actual Bitfinex P&L is never overwritten by counterfactual outcomes. Missing replay, costs, horizons, or cohort evidence fails closed.",
     }
+    if incident_input.enabled:
+        report["runtime_identity_incident_input"] = incident_input.provenance()
+    incident_input.assert_unchanged()
     with open(analyzer_report_path(QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE), "w", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2)
     return report
@@ -6665,65 +6678,6 @@ def edge_monotonicity_report(df):
     print(f"  Verdict: {verdict} {PIPELINE_ENFORCEMENT_TAG}")
 
 
-def type_a_vs_type_b_report(df, trade_outcomes):
-    print("\n=== V80 TYPE-A vs TYPE-B CLASSIFICATION ===")
-    print("Type A: MFE < 10% | Type B: MFE >= 15% | MIXED: between")
-    work = _enrich_trades_with_buckets(df) if df is not None and not df.empty else pd.DataFrame()
-    if trade_outcomes is not None and not trade_outcomes.empty:
-        tout = trade_outcomes.copy()
-        if "trade_mfe_type" in tout.columns:
-            for _, row in tout.iterrows():
-                tid = row.get("trade_id")
-                if tid and work.empty:
-                    continue
-        if not work.empty and "trade_id" in tout.columns:
-            tout = tout.set_index("trade_id", drop=False)
-    if work.empty:
-        print(f"No executed trades for Type A/B. {PIPELINE_ENFORCEMENT_TAG}")
-        return
-    mfe = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
-    work["trade_mfe_type"] = np.where(mfe >= 15, "TYPE_B", np.where(mfe < 10, "TYPE_A", "MIXED"))
-    feature_cols = [
-        ("edge_score_at_entry", "edge_score"),
-        ("directional_spread", "spread"),
-        ("structure_score_at_entry", "structure"),
-        ("support_resistance_bucket", "sr_bucket"),
-        ("adx_at_entry", "adx"),
-        ("features_volume_ratio", "volume_ratio"),
-        ("features_imbalance", "imbalance"),
-        ("features_delta", "delta"),
-        ("features_velocity", "velocity"),
-        ("ai_win_prob", "ai_prob"),
-    ]
-    for ttype in ("TYPE_A", "TYPE_B", "MIXED"):
-        sub = work[work["trade_mfe_type"] == ttype]
-        print(f"\n{ttype}: n={len(sub)} sum_pnl=${pd.to_numeric(sub.get('net_pnl_usd',0), errors='coerce').sum():.2f}")
-        if sub.empty:
-            continue
-        if "edge_score_bucket" in sub.columns:
-            print(f"  edge buckets: {sub['edge_score_bucket'].value_counts().to_dict()}")
-        avgs = {}
-        for col, label in feature_cols:
-            src = col if col in sub.columns else None
-            if src:
-                avgs[label] = round(pd.to_numeric(sub[src], errors="coerce").mean(), 3)
-        if avgs:
-            print(f"  feature averages: {avgs}")
-    if len(work) >= 3:
-        a = work[work["trade_mfe_type"] == "TYPE_A"]
-        b = work[work["trade_mfe_type"] == "TYPE_B"]
-        if not a.empty and not b.empty:
-            sep = {}
-            for col, label in feature_cols:
-                if col not in work.columns:
-                    continue
-                am = pd.to_numeric(a[col], errors="coerce").mean()
-                bm = pd.to_numeric(b[col], errors="coerce").mean()
-                sep[label] = round(abs(float(bm) - float(am)), 3)
-            ranked = sorted(sep.items(), key=lambda x: x[1], reverse=True)
-            print(f"\n  Top separators (|TYPE_B mean - TYPE_A mean|): {ranked[:5]} {PIPELINE_ENFORCEMENT_TAG}")
-
-
 def _normalize_first_3_candles(raw):
     """Parse first_3_candles from JSONL/CSV — skip NaN floats from empty DataFrame cells."""
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
@@ -7407,11 +7361,6 @@ def profitable_ranges_report(trades):
         _top_bucket("entry_mode", "Entry mode")
     if "exit_reason" in work.columns:
         _top_bucket("exit_reason", "Exit reason")
-    if "mfe_margin_pct" in work.columns:
-        work["mfe_type"] = work["mfe_margin_pct"].apply(
-            lambda m: "TYPE_A" if float(m or 0) < 10 else ("TYPE_B" if float(m or 0) >= 15 else "MIXED")
-        )
-        _top_bucket("mfe_type", "MFE type (TYPE_A/B)")
     print(PIPELINE_ENFORCEMENT_TAG)
 
 
@@ -7447,7 +7396,6 @@ def v80_research_intelligence_report(df, decisions, ai_log, trades, near_edge, p
     else:
         print(f"\nNo executed trades — bucket performance tables skipped. {PIPELINE_ENFORCEMENT_TAG}")
 
-    type_a_vs_type_b_report(work, trade_outcomes)
     ladder_booking_slip_report(work if not work.empty else df)
     entry_health_exit_report(work if not work.empty else df)
     ema_hybrid_entry_report(work if not work.empty else df, trade_outcomes)
@@ -7902,9 +7850,13 @@ def _bot_version_era(bot_version) -> str:
     bv = str(bot_version or "").strip().lower()
     if not bv:
         return "LEGACY_LAST_PRICE"
-    if "data-collection" in bv or "v1.1.20" in bv:
+    # V3.1 is the current BBO/depth-aware collector family.  The old parser
+    # understood only v1.1.x tags and therefore mislabeled every current trade
+    # as pre-realism legacy evidence even when explicit execution receipts and
+    # book-slippage fields were present.
+    if "v31-" in bv or "v3.1" in bv or "five-family-atomic" in bv:
         return "DEPTH_REALISM"
-    if "profit-gates" in bv or "v1.1.19" in bv:
+    if "data-collection" in bv or "v1.1.20" in bv:
         return "DEPTH_REALISM"
     if "realism-complete" in bv or "v1.1.18" in bv:
         return "DEPTH_REALISM"
@@ -7931,6 +7883,74 @@ def _attach_realism_era(df: pd.DataFrame) -> pd.DataFrame:
     else:
         out["sim_era"] = "LEGACY_LAST_PRICE"
     return out
+
+
+def _partial_exit_receipts(value):
+    """Decode the immutable receipt list without accepting arbitrary syntax."""
+    if isinstance(value, list):
+        return [row for row in value if isinstance(row, dict)]
+    if not isinstance(value, str) or not value.strip():
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [row for row in parsed if isinstance(row, dict)] if isinstance(parsed, list) else []
+
+
+def _family_terminal_double_count_detail(row) -> dict:
+    """Identify the pre-fix family terminal receipt accounting defect."""
+    receipts = _partial_exit_receipts(row.get("partial_exit_receipts"))
+    prior_cumulative = 0.0
+    terminal = None
+    for receipt in receipts:
+        remaining = pd.to_numeric(receipt.get("remaining_fraction"), errors="coerce")
+        cumulative = pd.to_numeric(receipt.get("cumulative_realized_net_usd"), errors="coerce")
+        if pd.notna(remaining) and float(remaining) <= 0:
+            if pd.notna(cumulative) and abs(float(cumulative) - prior_cumulative) > 1e-8:
+                terminal = receipt
+            break
+        if pd.notna(cumulative):
+            prior_cumulative = float(cumulative)
+    if terminal is None:
+        return {"contaminated": False}
+
+    entry = pd.to_numeric(
+        row.get("execution_entry_price") if row.get("execution_entry_price") is not None else row.get("entry"),
+        errors="coerce",
+    )
+    exit_price = pd.to_numeric(
+        row.get("execution_exit_price") if row.get("execution_exit_price") is not None else row.get("exit"),
+        errors="coerce",
+    )
+    qty = pd.to_numeric(
+        row.get("execution_qty") if row.get("execution_qty") is not None else row.get("qty"),
+        errors="coerce",
+    )
+    direction = str(row.get("final_direction") or row.get("dir") or "").upper()
+    corrected_gross = None
+    if pd.notna(entry) and pd.notna(exit_price) and pd.notna(qty) and direction in {"LONG", "SHORT"}:
+        sign = 1.0 if direction == "LONG" else -1.0
+        runner_gross = (float(exit_price) - float(entry)) * sign * float(qty)
+        genuine_partial_gross = 0.0
+        for receipt in receipts:
+            remaining = pd.to_numeric(receipt.get("remaining_fraction"), errors="coerce")
+            if pd.notna(remaining) and float(remaining) <= 0:
+                break
+            realized = pd.to_numeric(receipt.get("realized_gross_usd"), errors="coerce")
+            if pd.notna(realized):
+                genuine_partial_gross += float(realized)
+        corrected_gross = round(genuine_partial_gross + runner_gross, 8)
+    return {
+        "contaminated": True,
+        "reason": "PRE_FIX_TERMINAL_ACTION_COUNTED_AS_PARTIAL_AND_RUNNER",
+        "corrected_quantity_price_gross_usd": corrected_gross,
+        "raw_net_pnl_usd": safe_float(row.get("net_pnl_usd")),
+        "raw_gross_pnl_usd": safe_float(
+            row.get("gross_pnl_usd") if row.get("gross_pnl_usd") is not None
+            else row.get("outcome_gross_pnl_usd")
+        ),
+    }
 
 
 def _realism_era_summary(df: pd.DataFrame, pnl_col: str = "net_pnl_usd") -> pd.DataFrame:
@@ -7986,10 +8006,15 @@ def realism_sim_audit(trades, analysis_df):
         elif depth_n == 0:
             print(f"\n  ⚠️ No v1.1.18+ trades yet — stats may be optimistic until bot restarts. {PIPELINE_ENFORCEMENT_TAG}")
 
-    book_entry = pd.to_numeric(work.get("book_slippage_usd_entry"), errors="coerce")
-    book_exit = pd.to_numeric(work.get("book_slippage_usd_exit"), errors="coerce")
-    book_total = pd.to_numeric(work.get("book_slippage_usd_total"), errors="coerce")
-    has_book = book_total.notna().any() and book_total.fillna(0).abs().sum() >= 0
+    def _numeric_column(name):
+        source = work[name] if name in work.columns else pd.Series(index=work.index, dtype="float64")
+        return pd.to_numeric(source, errors="coerce")
+
+    book_entry = _numeric_column("book_slippage_usd_entry")
+    book_exit = _numeric_column("book_slippage_usd_exit")
+    book_total = _numeric_column("book_slippage_usd_total")
+    book_observed = int(book_total.notna().sum())
+    has_book = book_observed > 0
 
     report = {
         "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -7997,22 +8022,60 @@ def realism_sim_audit(trades, analysis_df):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "trade_count": int(len(work)),
         "era_breakdown": era_df.to_dict(orient="records") if not era_df.empty else [],
-        "book_slippage": {},
+        "book_slippage": {
+            "evidence_status": "MISSING",
+            "observed_trades": 0,
+            "missing_trades": int(len(work)),
+        },
         "execution_types": {},
         "partial_fills": 0,
+        "family_terminal_double_count": {
+            "evidence_status": "NOT_DETECTED",
+            "contaminated_rows": 0,
+            "rows": [],
+            "ranking_treatment": "RAW_EVIDENCE_PRESERVED",
+        },
         "replay_note": (
             "signal_replay ticks from v1.1.18+ use executable depth marks; "
             "legacy replay used last-trade unreal — counterfactual sweeps may differ."
         ),
     }
 
-    if has_book or "book_slippage_usd_total" in work.columns:
+    contamination_rows = []
+    for _, row in work.iterrows():
+        detail = _family_terminal_double_count_detail(row)
+        if detail.get("contaminated"):
+            contamination_rows.append({
+                "trade_id": row.get("trade_id"),
+                "research_lane": row.get("research_lane"),
+                **detail,
+            })
+    if contamination_rows:
+        report["family_terminal_double_count"] = {
+            "evidence_status": "CONTAMINATED_RAW_EXCLUDED",
+            "contaminated_rows": len(contamination_rows),
+            "rows": contamination_rows,
+            "ranking_treatment": (
+                "RAW_ROWS_PRESERVED_BUT_EXCLUDED; corrected quantity-price gross is "
+                "separately labelled and is not a fee-adjusted replacement net PnL"
+            ),
+        }
+        print(
+            f"\n  ⚠️ Excluded {len(contamination_rows)} pre-fix family terminal "
+            f"double-count row(s) from policy rankings; raw evidence remains unchanged. "
+            f"{PIPELINE_ENFORCEMENT_TAG}"
+        )
+
+    if has_book:
         depth_work = work[work["sim_era"] == "DEPTH_REALISM"] if "sim_era" in work.columns else work
         if depth_work.empty:
             depth_work = work[book_total.notna()]
-        be = pd.to_numeric(depth_work.get("book_slippage_usd_entry"), errors="coerce").fillna(0)
-        bx = pd.to_numeric(depth_work.get("book_slippage_usd_exit"), errors="coerce").fillna(0)
-        bt = pd.to_numeric(depth_work.get("book_slippage_usd_total"), errors="coerce").fillna(0)
+        be_raw = pd.to_numeric(depth_work.get("book_slippage_usd_entry"), errors="coerce")
+        bx_raw = pd.to_numeric(depth_work.get("book_slippage_usd_exit"), errors="coerce")
+        bt_raw = pd.to_numeric(depth_work.get("book_slippage_usd_total"), errors="coerce")
+        be = be_raw
+        bx = bx_raw
+        bt = bt_raw
         print("\n  --- Order-book slippage (USD) ---")
         print(f"  Entry avg: ${be.mean():.4f} | Exit avg: ${bx.mean():.4f} | Total avg: ${bt.mean():.4f} {PIPELINE_ENFORCEMENT_TAG}")
         print(f"  Total book slippage (all trades): ${bt.sum():.2f} {PIPELINE_ENFORCEMENT_TAG}")
@@ -8033,6 +8096,9 @@ def realism_sim_audit(trades, analysis_df):
             print("\n  --- PnL by book_slippage_usd_total bucket ---")
             print(pd.DataFrame(buckets).to_string(index=False))
         report["book_slippage"] = {
+            "evidence_status": "OBSERVED_ZERO" if bt.abs().sum() == 0 else "OBSERVED_NONZERO",
+            "observed_trades": int(bt_raw.notna().sum()),
+            "missing_trades": int(len(depth_work) - bt_raw.notna().sum()),
             "entry_avg_usd": round(float(be.mean()), 4),
             "exit_avg_usd": round(float(bx.mean()), 4),
             "total_avg_usd": round(float(bt.mean()), 4),
@@ -8090,8 +8156,8 @@ def realism_sim_audit(trades, analysis_df):
                     f"(v1.1.19+ uses taker book walk). {PIPELINE_ENFORCEMENT_TAG}"
                 )
 
-    signal_slip = pd.to_numeric(work.get("slippage"), errors="coerce")
-    exec_slip = pd.to_numeric(work.get("execution_slippage"), errors="coerce")
+    signal_slip = _numeric_column("slippage")
+    exec_slip = _numeric_column("execution_slippage")
     if signal_slip.notna().any():
         print(f"\n  Signal-vs-limit slippage (price units): mean={signal_slip.mean():.4f} max={signal_slip.max():.4f} {PIPELINE_ENFORCEMENT_TAG}")
         report["signal_slippage_mean"] = round(float(signal_slip.mean()), 6)
@@ -8141,7 +8207,25 @@ def momentum_edge(df):
     if "momentum" not in df.columns:
         return
     df = df.copy()
-    df["mom_bucket"] = pd.cut(pd.to_numeric(df["momentum"], errors='coerce'), bins=[-2, -1, 0, 1, 2, 5])
+    momentum = pd.to_numeric(df["momentum"], errors="coerce")
+    if momentum.nunique(dropna=True) <= 1:
+        varying_alias = next(
+            (
+                alias
+                for alias in ("features_velocity", "feature_velocity", "velocity")
+                if alias in df.columns
+                and pd.to_numeric(df[alias], errors="coerce").nunique(dropna=True) > 1
+            ),
+            None,
+        )
+        if varying_alias:
+            print(
+                f"Legacy/coarse momentum is constant; skip legacy momentum buckets. "
+                f"Current continuous evidence is available as {varying_alias}. "
+                f"{PIPELINE_ENFORCEMENT_TAG}"
+            )
+        return
+    df["mom_bucket"] = pd.cut(momentum, bins=[-2, -1, 0, 1, 2, 5])
     stats = df.groupby("mom_bucket")["net_pnl_usd"].mean().round(2)
     print(stats)
 
@@ -8869,105 +8953,88 @@ def _write_analyzer_crash_log(iteration: int, tb: str):
         pass
 
 
-_DATA_CHANGE_EVENT = threading.Event()
+def _mirror_coherence_retry_delay_seconds(
+    error: Exception,
+    scheduled_delay_seconds: int,
+    *,
+    now: datetime | None = None,
+    heartbeat_path: Path | None = None,
+) -> tuple[int, str]:
+    """Respect a verified sync-loop backoff while remaining fail closed.
 
-_WATCH_FILES = (
-    TRADES_FILE,
-    BLOCKED_FILE,
-    DECISIONS_FILE,
-    AI_TRANCHE_FILE,
-    PIPELINE_EVENTS_FILE,
-    SAFE_POLICY_GENOME_V3_REPORT_FILE,
-    "research_session.json",
-)
-
-ANALYZER_MIRROR_SYNC_MAX_AGE_SEC = int(
-    os.getenv("ANALYZER_MIRROR_SYNC_MAX_AGE_SEC", "7200")
-)
-
-_FLY_HEARTBEAT_FILE = ".fly-data-sync-loop.heartbeat.json"
-
-_DATA_CHANGE_MIN_QUIET_SEC = 10
-
-
-def _read_heartbeat_identity(path: str) -> str | None:
-    """Extract a stable identity from the sync-loop heartbeat JSON.
-
-    Returns sourceRevision when available, else syncedAt so mtime-only
-    rewrites (skip heartbeats) do not trigger spurious re-analysis.
+    A failed mirror receipt cannot authorize analysis.  Retrying the analyzer
+    every minute during the sync loop's deterministic outage backoff only
+    reacquires the generation lease and emits another identical crash receipt.
+    This helper trusts only the canonical mirror heartbeat and only a bounded,
+    internally consistent future ``nextRetryAt``.  Malformed or unrelated
+    receipts retain the conservative one-minute retry.
     """
+    fallback = min(60, max(1, int(scheduled_delay_seconds)))
+    if str(error) not in {"MIRROR_SYNC_RECEIPT_FAILED", "MIRROR_SYNC_IN_PROGRESS"}:
+        return fallback, "mirror coherence/lease retry"
+    path = heartbeat_path
+    if path is None:
+        selected = Path(os.environ.get("BTC_AGENT_DATA_DIR", "")).resolve()
+        if selected.name != "canonical-research-data":
+            return fallback, "mirror coherence/lease retry"
+        path = selected / ".fly-data-sync-loop.heartbeat.json"
     try:
-        with open(path, encoding="utf-8") as fh:
-            import json as _json
-            hb = _json.load(fh)
-        rev = hb.get("sourceRevision")
-        if rev and str(rev).strip():
-            return str(rev).strip()
-        synced = hb.get("syncedAt")
-        if synced and not hb.get("skipped"):
-            return str(synced).strip()
-    except (OSError, ValueError, KeyError):
-        pass
-    return None
+        if path.parent.resolve().name != "canonical-research-data":
+            raise ValueError("non-canonical heartbeat")
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(payload, dict) or payload.get("ok") is not False:
+            raise ValueError("heartbeat is not a failed sync receipt")
+        if payload.get("pollOk") is not False:
+            raise ValueError("sync poll failure is not proven")
+        failures = int(payload.get("consecutiveFailures") or 0)
+        backoff = int(payload.get("backoffSec") or 0)
+        if failures < 1 or not 60 <= backoff <= 1800:
+            raise ValueError("invalid bounded backoff")
+
+        def parse_time(value) -> datetime:
+            text = str(value or "").strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            # PowerShell emits seven fractional digits; Python accepts six.
+            text = re.sub(r"(\.\d{6})\d+(?=[+-]\d\d:\d\d$)", r"\1", text)
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                raise ValueError("timezone missing")
+            return parsed.astimezone(timezone.utc)
+
+        failed_at = parse_time(payload.get("pollFailedAt") or payload.get("syncedAt"))
+        next_retry = parse_time(payload.get("nextRetryAt"))
+        declared_span = (next_retry - failed_at).total_seconds()
+        if declared_span < backoff - 2 or declared_span > backoff + 2:
+            raise ValueError("next retry does not match declared backoff")
+        observed_now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        remaining = (next_retry - observed_now).total_seconds()
+        if remaining <= 0:
+            raise ValueError("sync backoff has elapsed")
+        grace = max(0, min(300, int(os.getenv("ANALYZER_SYNC_RETRY_GRACE_SEC", "30"))))
+        delay = max(fallback, min(backoff + grace, int(math.ceil(remaining)) + grace))
+        return delay, "canonical sync heartbeat backoff"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return fallback, "mirror coherence/lease retry"
 
 
-def _start_data_watcher():
-    """Poll key data files every 5 s; set _DATA_CHANGE_EVENT on mtime change.
+def _assert_local_generation_unfenced(stage):
+    from research.local_generation_fence import assert_local_generation_available
 
-    For the fly-data-sync-loop heartbeat, detection is content-based
-    (sourceRevision change) so skip-heartbeats do not cause spurious wakes.
-    """
-    mtimes: dict[str, float] = {}
-    for name in _WATCH_FILES:
-        try:
-            mtimes[name] = os.path.getmtime(name)
-        except OSError:
-            mtimes[name] = 0.0
-    last_heartbeat_id = _read_heartbeat_identity(_FLY_HEARTBEAT_FILE)
-
-    def _trigger(reason: str) -> None:
-        print(
-            f"  📂 Data change detected: {reason} — "
-            f"triggering early re-analysis {PIPELINE_ENFORCEMENT_TAG}"
-        )
-        time.sleep(_DATA_CHANGE_MIN_QUIET_SEC)
-        _DATA_CHANGE_EVENT.set()
-
-    def _watch():
-        nonlocal last_heartbeat_id
-        while True:
-            time.sleep(5)
-            for name in _WATCH_FILES:
-                try:
-                    current = os.path.getmtime(name)
-                except OSError:
-                    current = 0.0
-                if current > mtimes.get(name, 0.0):
-                    mtimes[name] = current
-                    _trigger(name)
-            try:
-                hb_mtime = os.path.getmtime(_FLY_HEARTBEAT_FILE)
-            except OSError:
-                hb_mtime = 0.0
-            if hb_mtime > mtimes.get(_FLY_HEARTBEAT_FILE, 0.0):
-                mtimes[_FLY_HEARTBEAT_FILE] = hb_mtime
-                new_id = _read_heartbeat_identity(_FLY_HEARTBEAT_FILE)
-                if new_id and new_id != last_heartbeat_id:
-                    last_heartbeat_id = new_id
-                    _trigger(f"{_FLY_HEARTBEAT_FILE} (rev {new_id[:16]}...)")
-
-    thread = threading.Thread(target=_watch, daemon=True, name="data-watcher")
-    thread.start()
-    return thread
+    configured = (os.environ.get("BTC_AGENT_DATA_DIR") or "").strip()
+    if not configured:
+        raise RuntimeError("BTC_AGENT_DATA_DIR_REQUIRED_FOR_LOCAL_GENERATION_FENCE")
+    assert_local_generation_available(configured, stage=stage)
 
 
 def run(interval_min=30, session_only=True, max_iterations=None):
     iteration = 0
     sleep_sec = max(60, int(interval_min) * 60)
-    _start_data_watcher()
     while True:
         iteration += 1
         crashed = False
+        retry_sec = sleep_sec
+        retry_reason = "scheduled interval"
         print(f"\n=== ANALYZER {ANALYZER_VERSION} ITERATION {iteration} START {PIPELINE_ENFORCEMENT_TAG} ===")
         try:
             _run_analyzer_iteration(iteration, interval_min, session_only)
@@ -8975,31 +9042,74 @@ def run(interval_min=30, session_only=True, max_iterations=None):
             raise
         except Exception as exc:
             crashed = True
+            try:
+                from research.mirror_coherence import MirrorCoherenceError
+                from research.mirror_generation_lease import MirrorGenerationLeaseTimeout
+                if isinstance(exc, (MirrorCoherenceError, MirrorGenerationLeaseTimeout)):
+                    retry_sec, retry_reason = _mirror_coherence_retry_delay_seconds(
+                        exc, sleep_sec
+                    )
+            except Exception:
+                pass
             tb = traceback.format_exc()
             print(
                 f"\n❌ ANALYZER ITERATION {iteration} FAILED: {exc} {PIPELINE_ENFORCEMENT_TAG}\n{tb}"
             )
             _write_analyzer_crash_log(iteration, tb)
         crash_note = " (recovered from error)" if crashed else ""
-        early = _DATA_CHANGE_EVENT.is_set()
-        _DATA_CHANGE_EVENT.clear()
-        if early:
-            print(
-                f"\n🔄 Data changed during iteration {iteration}{crash_note} — "
-                f"re-running immediately {PIPELINE_ENFORCEMENT_TAG}\n"
-            )
-        else:
-            print(
-                f"\n⏳ Next run in {interval_min} minutes (or earlier on data change)... "
-                f"Iteration {iteration} complete{crash_note} {PIPELINE_ENFORCEMENT_TAG}\n"
-            )
+        retry_label = (
+            f"{retry_sec // 60} minute{'s' if retry_sec != 60 else ''}"
+            if retry_sec % 60 == 0
+            else f"{retry_sec} seconds"
+        )
+        print(
+            f"\n⏳ Next run in {retry_label} ({retry_reason})... "
+            f"Iteration {iteration} complete{crash_note} {PIPELINE_ENFORCEMENT_TAG}\n"
+        )
         if max_iterations is not None and iteration >= max_iterations:
             break
-        _DATA_CHANGE_EVENT.wait(timeout=sleep_sec)
-        _DATA_CHANGE_EVENT.clear()
+        time.sleep(retry_sec)
 
 
 def _run_analyzer_iteration(iteration, interval_min, session_only):
+        global _CURRENT_MIRROR_GENERATION_LEASE
+        from research.mirror_generation_lease import MirrorGenerationLease
+
+        _assert_local_generation_unfenced("analyzer_iteration_start")
+        lease = MirrorGenerationLease(
+            Path(os.environ["BTC_AGENT_DATA_DIR"]),
+            owner=f"analyzer-iteration-{iteration}",
+        )
+        wait_sec = float(os.getenv("ANALYZER_MIRROR_LEASE_WAIT_SEC", "1200"))
+        with lease.acquire(timeout_seconds=wait_sec):
+            _assert_local_generation_unfenced("analyzer_iteration_under_lease")
+            _CURRENT_MIRROR_GENERATION_LEASE = lease
+            try:
+                return _run_analyzer_iteration_with_lease(iteration, interval_min, session_only)
+            finally:
+                _CURRENT_MIRROR_GENERATION_LEASE = None
+
+
+def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
+        global _CURRENT_ANALYZER_GENERATION_STARTED_AT
+        global _CURRENT_MIRROR_COHERENCE_TOKEN
+        from research.mirror_coherence import assert_mirror_coherent
+        from research.canonical_data_store import current_analyzer_dataset_identity
+
+        dataset_identity = current_analyzer_dataset_identity(
+            os.environ["BTC_AGENT_DATA_DIR"]
+        )
+
+        _CURRENT_MIRROR_COHERENCE_TOKEN = assert_mirror_coherent(
+            repo_root=Path(__file__).resolve().parents[2],
+            data_root=os.environ["BTC_AGENT_DATA_DIR"],
+            expected_revision=str(dataset_identity["source_revision"]),
+            expected_deployed_revision=str(dataset_identity["deployed_revision"]),
+            expected_manifest_entry_hash=str(dataset_identity["entry_hash"]),
+            expected_dataset_checksum=str(dataset_identity["dataset_checksum"]),
+            require_canonical_manifest=True,
+        )
+        _CURRENT_ANALYZER_GENERATION_STARTED_AT = time.time()
         session = load_research_session()
         print_data_provenance_banner(session)
         trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
@@ -9057,7 +9167,6 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             )
             direction_attribution_report(trades=trades, decisions=decisions, session=session)
             confidence_band_report(trades=trades, decisions=decisions, session=session)
-            pathway_lane_specs_report(trades, session=session, benchmark_report=benchmark_report, shadow_report=shadow_report)
             horizon_counterfactual_report(trades=trades, session=session, shadow_report=shadow_report, blocked=blocked)
             shadow_vs_live_fill_audit(blocked)
             shadow_vs_live_entry_report()
@@ -9167,7 +9276,6 @@ def _run_analyzer_iteration(iteration, interval_min, session_only):
             shadow_report=shadow_report,
             blocked=blocked,
         )
-        pathway_lane_specs_report(trades, session=session, shadow_report=shadow_report)
         horizon_counterfactual_report(trades=trades, session=session, shadow_report=shadow_report, blocked=blocked)
         ai_calibration_report(trades, session=session)
         direction_attribution_report(trades, decisions=decisions, session=session)
@@ -9263,16 +9371,81 @@ def _build_funnel_trade_index():
     return index
 
 
+_EXPIRED_ORDER_RECORD_START = re.compile(
+    r"(?=(?:19|20)\d{2}-\d{2}-\d{2}T[^,\r\n]+,[^,\r\n]+,(?:LONG|SHORT)(?:,|$))"
+)
+
+
+def _load_expired_orders_csv(path=EXPIRED_ORDERS_FILE, usecols=None):
+    """Load the append-only expiry ledger without discarding damaged records.
+
+    The historical writer used CR record separators. A crash once omitted that
+    separator and joined two otherwise identifiable rows inside the final
+    quoted evidence field. Recover only boundaries carrying the complete
+    timestamp/trade/direction prefix; every other over-wide row fails closed.
+    Older rows missing trailing schema fields retain their identity and receive
+    explicit UNKNOWN values rather than being silently skipped.
+    """
+    raw = Path(path).read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("latin1")
+    physical = text.splitlines()
+    if not physical:
+        return pd.DataFrame(columns=list(usecols or ()))
+    header_rows = list(csv.reader([physical[0]]))
+    if len(header_rows) != 1 or not header_rows[0]:
+        raise ValueError("EXPIRED_ORDERS_HEADER_INVALID")
+    header = header_rows[0]
+    if len(set(header)) != len(header):
+        raise ValueError("EXPIRED_ORDERS_HEADER_DUPLICATE_COLUMNS")
+    normalized = []
+    for source_line, physical_row in enumerate(physical[1:], start=2):
+        starts = [match.start() for match in _EXPIRED_ORDER_RECORD_START.finditer(physical_row)]
+        if not starts or starts[0] != 0:
+            raise ValueError(f"EXPIRED_ORDERS_RECORD_BOUNDARY_UNKNOWN:{source_line}")
+        starts.append(len(physical_row))
+        recovered_boundary = len(starts) > 2
+        for part_index, (begin, end) in enumerate(zip(starts, starts[1:]), start=1):
+            segment = physical_row[begin:end]
+            row = next(csv.reader([segment]))
+            if len(row) > len(header):
+                raise ValueError(
+                    f"EXPIRED_ORDERS_SCHEMA_OVERFLOW:{source_line}:{part_index}:"
+                    f"{len(row)}:{len(header)}"
+                )
+            missing = len(header) - len(row)
+            row.extend(["UNKNOWN"] * missing)
+            material = dict(zip(header, row))
+            material["_csv_source_line"] = source_line
+            material["_csv_parse_status"] = (
+                "RECOVERED_MISSING_RECORD_SEPARATOR" if recovered_boundary else
+                ("NORMALIZED_MISSING_FIELDS" if missing else "EXACT")
+            )
+            material["_csv_missing_fields"] = missing
+            normalized.append(material)
+    frame = pd.DataFrame(normalized)
+    # Match pandas' established CSV contract for fields that are present but
+    # empty. This is distinct from an absent schema field, which remains the
+    # explicit string UNKNOWN above.
+    if not frame.empty:
+        frame.loc[:, header] = frame.loc[:, header].replace("", np.nan)
+    if usecols is not None:
+        missing_columns = [column for column in usecols if column not in frame.columns]
+        if missing_columns:
+            raise ValueError("EXPIRED_ORDERS_REQUIRED_COLUMNS_MISSING:" + ",".join(missing_columns))
+        return frame.loc[:, list(usecols)]
+    return frame
+
+
 def _build_missed_by_usd_index():
     """Merge fill_quality.jsonl + expired_orders CSV into trade_id → missed_by_usd."""
     rows = []
     if os.path.exists(FILL_QUALITY_JSONL_FILE):
         rows.extend(_load_jsonl_rows(FILL_QUALITY_JSONL_FILE))
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8")
-        except UnicodeDecodeError:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1")
+        exp = _load_expired_orders_csv(EXPIRED_ORDERS_FILE)
         if not exp.empty:
             seen_ids = {str(r.get("trade_id")) for r in rows if r.get("trade_id")}
             for _, r in exp.iterrows():
@@ -9324,7 +9497,7 @@ def _shadow_fill_capacity_hit(funnel_rec, block_reason) -> bool:
 
 def _shadow_fill_gate_hit(block_reason) -> bool:
     br = str(block_reason or "")
-    if br.startswith(("WOULD_FAIL", "WOULD_BLOCK", "PROFIT_GATE", "LONG_BLOCKED")):
+    if br.startswith(("WOULD_FAIL", "WOULD_BLOCK", "LONG_BLOCKED")):
         return True
     u = br.upper()
     return any(tok in u for tok in ("CHOP", "MOMENTUM", "SPREAD", "GOLDEN_STACK", "ADX", "STRUCTURE"))
@@ -9407,15 +9580,9 @@ def shadow_fill_outcome_matrix(trades=None, session=None, blocked=None):
     expired_lanes = {}
     expired_reasons = {}
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8", usecols=["trade_id", "reason", "research_lane"])
-        except (UnicodeDecodeError, ValueError):
-            try:
-                exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1", usecols=["trade_id", "reason", "research_lane"])
-            except Exception:
-                exp = pd.DataFrame()
-        except Exception:
-            exp = pd.DataFrame()
+        exp = _load_expired_orders_csv(
+            EXPIRED_ORDERS_FILE, usecols=["trade_id", "reason", "research_lane"]
+        )
         for _, r in exp.iterrows():
             tid = str(r.get("trade_id") or "").strip()
             if not tid:
@@ -9557,14 +9724,15 @@ def _empty_lane_benchmark_metrics():
     return {
         "approves": 0,
         "real_fills": 0,
-        "approve_to_fill_pct": 0.0,
+        "approve_to_fill_pct": None,
         "shadow_filled": 0,
-        "shadow_fill_pct": 0.0,
-        "net_pnl_real": 0.0,
-        "net_pnl_shadow_blocked": 0.0,
-        "per_approve_ev": 0.0,
-        "costly_blocks_usd": 0.0,
-        "good_blocks_saved_usd": 0.0,
+        "shadow_fill_pct": None,
+        "net_pnl_real": None,
+        "net_pnl_shadow_blocked": None,
+        "per_approve_ev": None,
+        "counterfactual_ev_per_approve": None,
+        "costly_blocks_usd": None,
+        "good_blocks_saved_usd": None,
     }
 
 
@@ -9587,31 +9755,61 @@ def _lane_fills_pnl_from_trades(trade_df, lane: str) -> tuple[int, float]:
 def _all_time_lane_metrics(all_trades, lane: str) -> dict:
     """Full CSV history stats — shown when session has no activity on a paused lane."""
     fills, pnl = _lane_fills_pnl_from_trades(all_trades, lane)
-    ev = round(pnl / fills, 2) if fills else 0.0
+    ev = round(pnl / fills, 2) if fills else None
     return {
         "real_fills": fills,
-        "net_pnl_real": pnl,
+        "net_pnl_real": pnl if fills else None,
         "ev_usd": ev,
     }
 
 
 def _ordered_lane_catalog(lanes_with_approves, trade_df=None) -> list:
-    """Every lane in ANALYZER_COMPARE_LANES plus any lane seen in data."""
-    lanes_from_trades = set()
-    if trade_df is not None and not trade_df.empty and "research_lane" in trade_df.columns:
-        lanes_from_trades = {
-            str(x).strip()
-            for x in trade_df["research_lane"].dropna().unique()
-            if str(x).strip() and str(x).strip() not in ("EXEC_5M", "UNKNOWN", "nan")
+    """Current qualified reports contain exactly the authoritative tile roster."""
+    del lanes_with_approves, trade_df
+    return list(ACTIVE_TILE_ORDER)
+
+
+def _write_benchmark_vs_lanes_payload(scope: str, lane_metrics: dict, status: str) -> dict:
+    """Write one explicit lane-evidence receipt, including honest empty cohorts."""
+    current_scope = str(scope or "").upper() in {"SESSION", "FRESH-COLLECTION"}
+    report = {
+        "schema": "current_lane_evidence_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "analyzer_version": ANALYZER_VERSION,
+        "benchmark_lane": BENCHMARK_LANE,
+        "session_scope": scope,
+        "data_scope": "session" if current_scope else "all",
+        "evidence_scope": "CURRENT_SESSION" if current_scope else "HISTORICAL_ALL_DATA",
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "lanes": lane_metrics,
+    }
+    target = analyzer_report_path(BENCHMARK_VS_LANES_REPORT_FILE)
+    try:
+        temporary = f"{target}.tmp"
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        os.replace(temporary, target)
+        print(f"\n  ✅ Wrote {BENCHMARK_VS_LANES_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
+    except Exception as exc:
+        print(f"\n  ⚠️ Could not write {BENCHMARK_VS_LANES_REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    print(PIPELINE_ENFORCEMENT_TAG)
+    return report
+
+
+def _empty_current_lane_metrics(reason: str) -> dict:
+    """Canonical zero rows are evidence receipts, not missing/stale history."""
+    return {
+        lane: {
+            **_empty_lane_benchmark_metrics(),
+            "wins": 0,
+            "losses": 0,
+            "win_rate_pct": None,
+            "verdict": "no current-session terminal execution evidence",
+            "evidence_status": reason,
         }
-    catalog = []
-    seen = set()
-    for ln in list(BENCHMARK_LANES) + sorted(lanes_with_approves or []) + sorted(lanes_from_trades):
-        if not ln or ln in seen or ln == "EXEC_5M":
-            continue
-        seen.add(ln)
-        catalog.append(ln)
-    return catalog
+        for lane in ACTIVE_TILE_ORDER
+    }
 
 
 def _benchmark_lane_verdict(lane: str, delta: dict, bench: dict) -> str:
@@ -9643,14 +9841,14 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
 
     snapshots_all = _load_signal_snapshots()
     snapshots = _filter_snapshots_by_session(snapshots_all, session)
-    shared_verdict_summary = summarize_lane_verdicts(
-        load_type_b_research_v2_events(TYPE_B_RESEARCH_V2_EVENT_FILE),
-        since_epoch=_session_start_ts(session) or 0.0,
-    )
-    shared_verdict_lanes = shared_verdict_summary.get("lanes") or {}
-    if not snapshots and not shared_verdict_lanes:
+    shared_verdict_lanes = {}
+    if not snapshots:
         print(f"  No APPROVE snapshots for {scope.lower()} scope. {PIPELINE_ENFORCEMENT_TAG}")
-        return None
+        return _write_benchmark_vs_lanes_payload(
+            scope,
+            _empty_current_lane_metrics("NO_CURRENT_APPROVE_SNAPSHOTS"),
+            "CURRENT_SESSION_NO_APPROVE_SNAPSHOTS" if scope != "ALL-TIME" else "ALL_DATA_NO_APPROVE_SNAPSHOTS",
+        )
 
     approve_rows = []
     for tid, snap in snapshots.items():
@@ -9662,9 +9860,13 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         approve_rows,
         columns=["trade_id", "research_lane"],
     )
-    if approve_df.empty and not shared_verdict_lanes:
+    if approve_df.empty:
         print(f"  No lane-tagged APPROVE snapshots. {PIPELINE_ENFORCEMENT_TAG}")
-        return None
+        return _write_benchmark_vs_lanes_payload(
+            scope,
+            _empty_current_lane_metrics("NO_CURRENT_LANE_APPROVE_SNAPSHOTS"),
+            "CURRENT_SESSION_NO_LANE_APPROVE_SNAPSHOTS" if scope != "ALL-TIME" else "ALL_DATA_NO_LANE_APPROVE_SNAPSHOTS",
+        )
 
     if trades is not None and not trades.empty and "trade_id" in trades.columns:
         executed_ids = set(trades["trade_id"].dropna().astype(str))
@@ -9692,15 +9894,9 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
     funnel_index = _build_funnel_trade_index()
     expired_lanes = {}
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8", usecols=["trade_id", "research_lane"])
-        except (UnicodeDecodeError, ValueError):
-            try:
-                exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1", usecols=["trade_id", "research_lane"])
-            except Exception:
-                exp = pd.DataFrame()
-        except Exception:
-            exp = pd.DataFrame()
+        exp = _load_expired_orders_csv(
+            EXPIRED_ORDERS_FILE, usecols=["trade_id", "research_lane"]
+        )
         for _, r in exp.iterrows():
             tid = str(r.get("trade_id") or "").strip()
             if tid and pd.notna(r.get("research_lane")):
@@ -9711,18 +9907,12 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
         shadow_by_lane = shadow_report["by_lane"]
 
     shadow_lane_df = _load_shadow_lane_outcome_df(session)
-    v2_log_metrics = _v2_lane_metrics_from_logs(session)
-    if v2_log_metrics.get("approves"):
-        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
-        lanes_with_approves_seed.add(RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2)
-    else:
-        lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
+    lanes_with_approves_seed = set(approve_df["research_lane"].unique()) - {"EXEC_5M"}
     lanes_with_approves_seed.update(shared_verdict_lanes.keys())
 
     lane_metrics = {}
     lanes_with_approves = lanes_with_approves_seed
-    all_trade_df = all_trades if all_trades is not None else trade_df
-    lanes_ordered = _ordered_lane_catalog(lanes_with_approves, all_trade_df)
+    lanes_ordered = _ordered_lane_catalog(lanes_with_approves, trade_df)
 
     for lane in lanes_ordered:
         if lane == "EXEC_5M":
@@ -9746,42 +9936,21 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             pd.to_numeric(lane_trades.get("net_pnl_usd"), errors="coerce").fillna(0)
             if not lane_trades.empty else pd.Series(dtype=float)
         )
-        net_pnl_real = round(float(lane_real_pnl.sum()), 2) if not lane_real_pnl.empty else 0.0
+        net_pnl_real = round(float(lane_real_pnl.sum()), 2) if not lane_real_pnl.empty else None
         real_wins = int((lane_real_pnl > 0).sum()) if not lane_real_pnl.empty else 0
         real_losses = int((lane_real_pnl < 0).sum()) if not lane_real_pnl.empty else 0
         real_win_rate_pct = (
             round(100.0 * real_wins / real_fills, 1)
-            if real_fills else 0.0
+            if real_fills else None
         )
         lane_research_metrics = _policy_filtered_research_lane_metrics(
             shadow_lane_df, lane
         )
 
-        v2_lane_extra = {}
-        if lane == RESEARCH_LANE_A160_CONTEXT_CHASE_EXIT_V2 and v2_log_metrics:
-            v2_approves = int(v2_log_metrics.get("approves") or 0)
-            if v2_approves:
-                approves_n = max(approves_n, v2_approves)
-            v2_lane_extra = {
-                "v2_checker_approves": v2_approves,
-                "v2_checker_pass_sims": int(v2_log_metrics.get("checker_pass_sims") or v2_log_metrics.get("sim_fills") or 0),
-                "v2_reject_counterfactual_sims": int(
-                    v2_log_metrics.get("reject_counterfactual_sims") or v2_log_metrics.get("reject_sim_fills") or 0
-                ),
-                "v2_checker_pass_pnl": float(v2_log_metrics.get("checker_pass_pnl") or v2_log_metrics.get("sim_pnl") or 0.0),
-                "v2_reject_counterfactual_pnl": float(
-                    v2_log_metrics.get("reject_counterfactual_pnl") or v2_log_metrics.get("reject_sim_pnl") or 0.0
-                ),
-                "v2_metrics_note": (
-                    "Tile-OFF lane: Approves=checker pass; Checker-pass sims=paper shadow fills; "
-                    "Reject sims=checker-reject counterfactuals (not session fills)."
-                ),
-            }
-            if real_fills == 0 and v2_lane_extra["v2_checker_pass_sims"] > 0:
-                net_pnl_real = float(v2_lane_extra["v2_checker_pass_pnl"])
-        elif lane == "AI_SCAN":
+        lane_extra = {}
+        if lane == "AI_SCAN":
             coord = _ai_scan_coordinator_stats(decisions, ai_log)
-            v2_lane_extra = {
+            lane_extra = {
                 "coordinator_note": "Coordinator — 0 fills by design",
                 "ai_scan_coordinator": coord,
                 "coordinator_rejects": coord.get("rejects", 0),
@@ -9789,7 +9958,7 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                 "coordinator_timeouts": coord.get("timeouts", 0),
             }
 
-        if _pathway_lane_status(lane) == PATHWAY_STATUS_SHADOW_COLLECTING:
+        if lane in SHADOW_COLLECTING_LANES:
             if shadow_lane_df is not None and not shadow_lane_df.empty and "research_lane" in shadow_lane_df.columns:
                 lane_sl = shadow_lane_df[shadow_lane_df["research_lane"].astype(str) == lane]
                 sim_n = len(lane_sl)
@@ -9850,9 +10019,9 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
                 pass
 
         shadow_filled = 0
-        net_pnl_shadow_blocked = 0.0
-        costly_blocks_usd = 0.0
-        good_blocks_saved_usd = 0.0
+        net_pnl_shadow_blocked = None
+        costly_blocks_usd = None
+        good_blocks_saved_usd = None
         if shadow_df is not None and not shadow_df.empty:
             work = shadow_df.copy()
             if "filled" in work.columns:
@@ -9868,23 +10037,27 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             shadow_filled = int(lane_shadow["filled"].sum()) if not lane_shadow.empty else 0
             blocked_shadow = lane_shadow[~lane_shadow["trade_id"].astype(str).isin(executed_ids)]
             blocked_pnl = pd.to_numeric(blocked_shadow.get("net_pnl_usd"), errors="coerce")
-            net_pnl_shadow_blocked = round(float(blocked_pnl.sum()), 2) if not blocked_pnl.empty else 0.0
-            costly_blocks_usd = round(float(blocked_pnl[blocked_pnl > 0].sum()), 2) if not blocked_pnl.empty else 0.0
-            good_blocks_saved_usd = round(float(-blocked_pnl[blocked_pnl <= 0].sum()), 2) if not blocked_pnl.empty else 0.0
+            if not blocked_pnl.empty:
+                net_pnl_shadow_blocked = round(float(blocked_pnl.sum()), 2)
+                costly_blocks_usd = round(float(blocked_pnl[blocked_pnl > 0].sum()), 2)
+                good_blocks_saved_usd = round(float(-blocked_pnl[blocked_pnl <= 0].sum()), 2)
         elif lane in shadow_by_lane:
             shadow_filled = int(shadow_by_lane[lane].get("shadow_filled") or 0)
             costly_blocks_usd = float(shadow_by_lane[lane].get("missed_winner_usd") or 0.0)
             good_blocks_saved_usd = float(shadow_by_lane[lane].get("good_block_saved") or 0.0)
             net_pnl_shadow_blocked = round(costly_blocks_usd - good_blocks_saved_usd, 2)
 
-        approve_to_fill_pct = round(100.0 * real_fills / approves_n, 1) if approves_n else 0.0
-        shadow_fill_pct = round(100.0 * shadow_filled / approves_n, 1) if approves_n else 0.0
+        approve_to_fill_pct = round(100.0 * real_fills / approves_n, 1) if approves_n else None
+        shadow_fill_pct = round(100.0 * shadow_filled / approves_n, 1) if approves_n else None
         # The tile labels this as real EV/approve and displays counterfactual
         # P&L separately. Never blend shadow outcomes into the real figure.
-        per_approve_ev = round(net_pnl_real / approves_n, 2) if approves_n else 0.0
+        per_approve_ev = (
+            round(net_pnl_real / approves_n, 2)
+            if approves_n and net_pnl_real is not None else None
+        )
         counterfactual_ev_per_approve = (
             round(net_pnl_shadow_blocked / approves_n, 2)
-            if approves_n else 0.0
+            if approves_n and net_pnl_shadow_blocked is not None else None
         )
 
         lane_metrics[lane] = {
@@ -9904,26 +10077,20 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             "good_blocks_saved_usd": good_blocks_saved_usd,
             "lane_gate_evaluated": int(shared_verdict_metrics.get("evaluated") or 0),
             "lane_gate_rejected": int(shared_verdict_metrics.get("rejected") or 0),
-            "approval_source": (
-                "type_b_research_v2_lane_verdict"
-                if has_shared_verdict_truth
-                else "signal_snapshot"
-            ),
+            "approval_source": "lane_verdict" if has_shared_verdict_truth else "signal_snapshot",
             **lane_research_metrics,
-            **v2_lane_extra,
+            **lane_extra,
         }
-        if all_trade_df is not None:
-            lane_metrics[lane]["all_time"] = _all_time_lane_metrics(all_trade_df, lane)
-
     _inject_continuous_benchmark_lane(lane_metrics, lanes_ordered)
 
     bench = lane_metrics.get(BENCHMARK_LANE) or _empty_lane_benchmark_metrics()
     for lane, metrics in lane_metrics.items():
         if lane == BENCHMARK_LANE:
-            metrics["delta_approve_to_fill_pct"] = 0.0
-            metrics["delta_net_pnl_real"] = 0.0
-            metrics["delta_per_approve_ev"] = 0.0
-            metrics["delta_costly_blocks_usd"] = 0.0
+            has_execution = int(metrics.get("real_fills") or 0) > 0
+            metrics["delta_approve_to_fill_pct"] = 0.0 if metrics.get("approve_to_fill_pct") is not None else None
+            metrics["delta_net_pnl_real"] = 0.0 if has_execution else None
+            metrics["delta_per_approve_ev"] = 0.0 if has_execution else None
+            metrics["delta_costly_blocks_usd"] = 0.0 if metrics.get("costly_blocks_usd") is not None else None
             metrics["verdict"] = _benchmark_lane_verdict(lane, {}, bench)
             continue
         if metrics["approves"] == 0:
@@ -9933,16 +10100,31 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             metrics["delta_costly_blocks_usd"] = None
             metrics["verdict"] = "no session approves"
             continue
+        comparable = all(
+            metrics.get(field) is not None and bench.get(field) is not None
+            for field in ("approve_to_fill_pct", "net_pnl_real", "per_approve_ev")
+        )
+        if not comparable:
+            metrics["delta_approve_to_fill_pct"] = None
+            metrics["delta_net_pnl_real"] = None
+            metrics["delta_per_approve_ev"] = None
+            metrics["delta_costly_blocks_usd"] = None
+            metrics["verdict"] = "insufficient comparable terminal execution evidence"
+            continue
         metrics["delta_approve_to_fill_pct"] = round(metrics["approve_to_fill_pct"] - bench["approve_to_fill_pct"], 1)
         metrics["delta_net_pnl_real"] = round(metrics["net_pnl_real"] - bench["net_pnl_real"], 2)
         metrics["delta_per_approve_ev"] = round(metrics["per_approve_ev"] - bench["per_approve_ev"], 2)
-        metrics["delta_costly_blocks_usd"] = round(metrics["costly_blocks_usd"] - bench["costly_blocks_usd"], 2)
+        metrics["delta_costly_blocks_usd"] = (
+            round(metrics["costly_blocks_usd"] - bench["costly_blocks_usd"], 2)
+            if metrics.get("costly_blocks_usd") is not None and bench.get("costly_blocks_usd") is not None
+            else None
+        )
         metrics["verdict"] = _benchmark_lane_verdict(
             lane,
             {
                 "delta_approve_to_fill_pct": metrics["delta_approve_to_fill_pct"],
                 "delta_per_approve_ev": metrics["delta_per_approve_ev"],
-                "delta_costly_blocks_usd": metrics["delta_costly_blocks_usd"],
+                "delta_costly_blocks_usd": metrics["delta_costly_blocks_usd"] or 0.0,
             },
             bench,
         )
@@ -9960,10 +10142,13 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             delta_str = "n/a"
         else:
             delta_str = f"Δ fill {m['delta_approve_to_fill_pct']:+.0f}%  Δ PnL ${m['delta_net_pnl_real']:+.2f}"
+        fill_text = f"{m['approve_to_fill_pct']:.1f}%" if m.get("approve_to_fill_pct") is not None else "n/a"
+        real_text = f"{m['net_pnl_real']:.2f}" if m.get("net_pnl_real") is not None else "n/a"
+        shadow_text = f"{m['net_pnl_shadow_blocked']:.2f}" if m.get("net_pnl_shadow_blocked") is not None else "n/a"
+        ev_text = f"{m['per_approve_ev']:.2f}" if m.get("per_approve_ev") is not None else "n/a"
         print(
-            f"{label:<16}{m['approves']:>9}{m['real_fills']:>7}{m['approve_to_fill_pct']:>6.1f}%"
-            f"{m['net_pnl_real']:>9.2f}{m['net_pnl_shadow_blocked']:>11.2f}{m['per_approve_ev']:>11.2f}"
-            f"{delta_str:>14}"
+            f"{label:<16}{m['approves']:>9}{m['real_fills']:>7}{fill_text:>7}"
+            f"{real_text:>9}{shadow_text:>11}{ev_text:>11}{delta_str:>14}"
         )
 
     print(f"\n--- vs {BENCHMARK_LANE} benchmark ---")
@@ -9979,459 +10164,11 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             f"Δ PnL ${m['delta_net_pnl_real']:+.2f}  ({m['verdict']}) {PIPELINE_ENFORCEMENT_TAG}"
         )
 
-    report = {
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "analyzer_version": ANALYZER_VERSION,
-        "benchmark_lane": BENCHMARK_LANE,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "lanes": lane_metrics,
-    }
-    try:
-        with open(analyzer_report_path(BENCHMARK_VS_LANES_REPORT_FILE), "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
-        print(f"\n  ✅ Wrote {BENCHMARK_VS_LANES_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"\n  ⚠️ Could not write {BENCHMARK_VS_LANES_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    print(PIPELINE_ENFORCEMENT_TAG)
-    return report
-
-
-def _static_pathway_lane_specs():
-    """Frozen lane definitions — entry/exit params and explicit diff vs CONTINUOUS benchmark."""
-    scenario_c_exit = {
-        "profile": "Scenario C",
-        "ladder": SCENARIO_C_LADDER_LABEL,
-        "thesis_stop_margin_pct": THESIS_FAST_EXIT_DEFAULT,
-        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_DEFAULT,
-        "thesis_pause_above_margin_pct": THESIS_EXIT_ABOVE_DEFAULT,
-        "type_a_stall": "OFF",
-        "fixed_time_exit": "2h global (7200s)",
-    }
-    runner_exit = {
-        "profile": "Scenario C Runner Variant",
-        "ladder": "18→14, 25→18, 40→28, 55→38",
-        "thesis_stop_margin_pct": THESIS_FAST_EXIT_DEFAULT,
-        "mfe_protect_margin_pct": THESIS_MFE_PROTECT_DEFAULT,
-        "thesis_pause_above_margin_pct": THESIS_EXIT_ABOVE_DEFAULT,
-        "type_a_stall": "OFF",
-        "fixed_time_exit": "2h global (7200s)",
-    }
-    ai_direct = {
-        "entry_path": "AI_DIRECT",
-        "fill_path": "AI_DIRECT_CHASE",
-        "ai_path": "same as CONTINUOUS benchmark",
-        "execution": "fills-first, chase 0s",
-        "post_ai_gates": "log-only telemetry",
-        "margin_usd": FLAT_MARGIN_LIVE_USD,
-    }
-    promote = "Per-trade EV > CONTINUOUS; session PnL > CONTINUOUS"
-    kill = "EV <= CONTINUOUS benchmark over rolling window"
-    return {
-        BENCHMARK_LANE: {
-            "lane": BENCHMARK_LANE,
-            "label": RESEARCH_LANE_LABELS.get(BENCHMARK_LANE, BENCHMARK_LANE),
-            "subtitle": "FROZEN SCENARIO C BENCHMARK",
-            "role": "yardstick — all experiments compared to this",
-            "is_benchmark": True,
-            "badge": "★ BENCHMARK",
-            "toggle_key": "continuous_ai_research_enabled",
-            "hypothesis": "Periodic AI + AI_DIRECT is the minimum viable research baseline.",
-            "research_question": "What is baseline approve→fill→PnL under frozen Scenario C?",
-            "entry": {"trigger": "~180s AI when edge > 0", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": "N/A — benchmark",
-            "kill_criteria": "N/A — benchmark",
-            "expected_advantage": "Reference yardstick",
-            "expected_risk": "Baseline drawdown profile",
-            "benchmark_comparison": "Self",
-            "diff_vs_benchmark": [],
-        },
-        "TYPE_B_HUNTER_V1": {
-            "lane": "TYPE_B_HUNTER_V1",
-            "label": RESEARCH_LANE_LABELS.get("TYPE_B_HUNTER_V1", "Type B Hunter V1"),
-            "subtitle": "SHARED DIRECTION - FIXED DETERMINISTIC ENTRY POLICY",
-            "role": "shared-direction candidate lane with deterministic ADX, score-gap, and composite-score gates",
-            "parent_lane": BENCHMARK_LANE,
-            "toggle_key": "type_b_hunter_enabled",
-            "hypothesis": "A fixed market-strength gate can improve the shared AI direction without requesting a second AI call.",
-            "research_question": "Does the fixed Type B ADX/score-gap policy beat the CONTINUOUS shared-direction baseline?",
-            "entry": {
-                "trigger": (
-                    "reuse the shared LONG/SHORT direction; raw score gap >=20/100; normalized spread >=2; "
-                    "ADX >=20 (BULL >=28); composite score >=3.0"
-                ),
-                "entry_path": "SHARED_AI_DIRECTION_DETERMINISTIC_GATE",
-                "fill_path": "BOUNDED_LIMIT_CHASE",
-                "ai_path": "same shared direction call as CONTINUOUS; confidence not requested",
-                "execution": "fixed Type B policy; one accepted paper order per signal",
-                "policy_version": "type_b_shared_candidate_direction_v2_20260719",
-                "margin_usd": FLAT_MARGIN_LIVE_USD,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Type B frozen ladder policy",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Filters weak shared-direction calls without an extra AI request",
-            "expected_risk": "Deterministic gates reduce opportunity count",
-            "benchmark_comparison": "vs CONTINUOUS shared-direction baseline",
-            "diff_vs_benchmark": [
-                "Activation: fixed ADX, raw score-gap, normalized-spread, and composite-score gates",
-                "AI: one shared direction call; no independent confidence request",
-            ],
-        },
-        "SR_MICRO_TILE_V2_STATIC": {
-            "lane": "SR_MICRO_TILE_V2_STATIC",
-            "label": RESEARCH_LANE_LABELS.get("SR_MICRO_TILE_V2_STATIC", "S/R Micro Tile V2 Static"),
-            "subtitle": "DUAL RESTING S/R LIMITS - 30M TTL - NO CHASE",
-            "role": "deterministic dual-ended wick-capture lane with one resting order per direction",
-            "parent_lane": BENCHMARK_LANE,
-            "toggle_key": "sr_micro_tile_v2_enabled",
-            "hypothesis": "Resting at both micro-S/R extremes captures wicks without repricing or a separate AI call.",
-            "research_question": "Do dual static S/R limits add EV while preserving exact entry-price fidelity?",
-            "entry": {
-                "trigger": (
-                    "one LONG resting limit at micro-support and one SHORT resting limit at micro-resistance; "
-                    "one active slot per direction; ADX present and <=40; London 08:00-12:59 UTC excluded"
-                ),
-                "entry_path": "DETERMINISTIC_DUAL_SR_BRACKET",
-                "fill_path": "STATIC_RESTING_LIMIT",
-                "ai_path": "none",
-                "execution": "two independent paper slots; 30m unfilled TTL; no chase or repricing (max chases=0)",
-                "policy_version": "sr_micro_static_dual_leg_normalized_adx_vol_v2_20260720",
-                "margin_usd_per_leg": FLAT_MARGIN_LIVE_USD,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C 12->10 provisional cohort",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Captures either support or resistance wick with exact resting-limit entries",
-            "expected_risk": "Two opposing paper legs cannot be simultaneously copied into one merged Bitfinex net position",
-            "benchmark_comparison": "vs CONTINUOUS directional entry",
-            "diff_vs_benchmark": [
-                "Entry: deterministic dual S/R bracket, one active LONG and one active SHORT",
-                "Lifetime: 30m unfilled TTL; static price with zero replacements",
-                "AI: none",
-            ],
-        },
-        "HIGH_EDGE_RUNNER": {
-            "lane": "HIGH_EDGE_RUNNER",
-            "label": RESEARCH_LANE_LABELS["HIGH_EDGE_RUNNER"],
-            "subtitle": "EDGE≥3.5 · VOL≥1.5 · RUNNER EXIT PROFILE",
-            "role": "high-edge + volume continuation with wider runner exits",
-            "parent_lane": BENCHMARK_LANE,
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Strong edge + elevated volume deserves wider profit ladder rungs.",
-            "research_question": "Does runner exit capture more tail on high-edge/high-volume approves?",
-            "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥3.5 & vol_ratio≥1.5", **ai_direct},
-            "exit": runner_exit,
-            "exit_path": "Scenario C Runner Variant (18→14 first rung)",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Higher MFE capture on runners",
-            "expected_risk": "Wider ladder gives back more peak profit",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge≥3.5 & vol_ratio≥1.5", "Exit: runner ladder 18→14 vs 12→8"],
-        },
-        "EXTREME_EDGE": {
-            "lane": "EXTREME_EDGE",
-            "label": RESEARCH_LANE_LABELS["EXTREME_EDGE"],
-            "subtitle": "EDGE≥4.5 ONLY · RETIRED",
-            "role": "retired — edge has no predictive value; historical analytics only",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "RETIRED",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Tail-edge approves outperform average edge band.",
-            "research_question": "Is edge≥4.5 sufficient alone for superior EV?",
-            "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge≥4.5", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": "N/A — retired",
-            "kill_criteria": "RETIRED — edge hypothesis failed validation",
-            "expected_advantage": "N/A",
-            "expected_risk": "N/A",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge≥4.5 only", "Exit: frozen Scenario C"],
-        },
-        "SHORT_BEAR_ALPHA": {
-            "lane": "SHORT_BEAR_ALPHA",
-            "label": RESEARCH_LANE_LABELS["SHORT_BEAR_ALPHA"],
-            "subtitle": "SHORT · struct≤-3 · bear>bull · spread≥3 · AI≥55",
-            "role": "bearish regime asymmetry — highest session edge cohort",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Short + bear structure + wide spread beats broad CONTINUOUS.",
-            "research_question": "Can directional/regime filter beat benchmark EV?",
-            "entry": {
-                "trigger": "spawn SHORT when structure≤-3, bear>bull, spread≥3, AI≥55%",
-                **ai_direct,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Session data: SHORT 71% WR vs LONG 56%",
-            "expected_risk": "Direction filter reduces spawn rate",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: SHORT bear-alpha fingerprint", "Exit: frozen Scenario C"],
-        },
-        "AI_60_65_ALPHA": {
-            "lane": "AI_60_65_ALPHA",
-            "label": RESEARCH_LANE_LABELS["AI_60_65_ALPHA"],
-            "subtitle": "AI 60-65 · spread≥3 · edge≥3",
-            "role": "strongest AI confidence band (82% WR in session)",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "AI 60-65 band outperforms 65+ and 55-60 bands.",
-            "research_question": "Does mid-high confidence alone beat benchmark?",
-            "entry": {"trigger": "spawn when 60≤AI<65, spread≥3, edge≥3", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Session 60-65 band: 82% WR, +$122",
-            "expected_risk": "Narrow AI band — sparse spawns",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: AI 60-65 + spread≥3 + edge≥3", "Exit: frozen Scenario C"],
-        },
-        "EDGE_PLUS_STACK": {
-            "lane": "EDGE_PLUS_STACK",
-            "label": RESEARCH_LANE_LABELS["EDGE_PLUS_STACK"],
-            "subtitle": "EDGE≥3.5 · GS PASS · RETIRED",
-            "role": "retired — edge + extra filters; historical analytics only",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "RETIRED",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Golden-stack pass filters noise without blocking benchmark.",
-            "research_question": "Does GS-pass subset beat raw edge≥3.5?",
-            "entry": {"trigger": "spawn when edge≥3.5 AND golden_stack_eval pass", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": "N/A — retired",
-            "kill_criteria": "RETIRED — edge stack adds complexity without alpha",
-            "expected_advantage": "N/A",
-            "expected_risk": "N/A",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge≥3.5 + GS eval pass", "Exit: frozen Scenario C"],
-        },
-        "SHADOW_RUNNER": {
-            "lane": "SHADOW_RUNNER",
-            "label": RESEARCH_LANE_LABELS["SHADOW_RUNNER"],
-            "subtitle": "POST-EXIT HORIZON STUDY · PROBATION",
-            "role": "shadow-only — retire if no unique EV contribution",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "PROBATION",
-            "live_trading": False,
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Post-approve price paths reveal missed runner opportunity.",
-            "research_question": "What is +15/+30/+60/+90m outcome after APPROVE at edge≥3.5?",
-            "entry": {"trigger": "shadow log on CONTINUOUS APPROVE edge≥3.5", "entry_path": "SHADOW", "fill_path": "NONE"},
-            "exit": {"profile": "horizon study", "horizons_min": "15, 30, 60, 90"},
-            "exit_path": "Horizon counterfactual (+15/+30/+60/+90m)",
-            "promotion_criteria": "Inform runner exit design — not promoted to live",
-            "kill_criteria": "N/A — observational",
-            "expected_advantage": "Counterfactual insight",
-            "expected_risk": "None — shadow only",
-            "benchmark_comparison": "vs CONTINUOUS post-approve paths",
-            "diff_vs_benchmark": ["Live trading OFF", "Measures post-approve horizons"],
-        },
-        "EDGE_ALPHA_4": {
-            "lane": "EDGE_ALPHA_4",
-            "label": RESEARCH_LANE_LABELS["EDGE_ALPHA_4"],
-            "subtitle": "EDGE >= 4.0 · NEAR_SUPPORT · Scenario C",
-            "role": "high-edge concentration near support",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Edge 4+ near support outperforms the broad CONTINUOUS cohort.",
-            "research_question": "Can Edge 4+ outperform benchmark?",
-            "entry": {"trigger": "spawn on CONTINUOUS APPROVE when edge>=4.0 & NEAR_SUPPORT", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Elite edge band (session WR ~74% on edge 4+)",
-            "expected_risk": "Lower spawn rate vs CONTINUOUS",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: edge>=4.0 & NEAR_SUPPORT", "Exit: frozen Scenario C"],
-        },
-        "TYPE_B_HUNTER": {
-            "lane": "TYPE_B_HUNTER",
-            "label": RESEARCH_LANE_LABELS["TYPE_B_HUNTER"],
-            "subtitle": "Edge>=3.5 · Vol>1.2 · NEAR_SUPPORT · AI 50-55",
-            "role": "pre-Type-B fingerprint before entry",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "LIVE TEST",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Type-B winners share edge, volume, SR, and AI-prob fingerprints.",
-            "research_question": "Can we predict Type B before entry?",
-            "entry": {"trigger": "spawn when edge>=3.5, vol_ratio>1.2, NEAR_SUPPORT, AI 50-55%", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Capture Type-B runner profile early",
-            "expected_risk": "Strict filter — sparse samples",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": [
-                "Activation: edge>=3.5, vol>1.2, NEAR_SUPPORT, AI 50-55",
-                "Exit: frozen Scenario C",
-            ],
-        },
-        "URGENT_CHASE_ALPHA": {
-            "lane": "URGENT_CHASE_ALPHA",
-            "label": RESEARCH_LANE_LABELS["URGENT_CHASE_ALPHA"],
-            "subtitle": "VELOCITY-AWARE CHASE · SAME ENTRY/EXIT AS BENCHMARK",
-            "role": "execution experiment — velocity-aware chase vs benchmark 25% step",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Velocity-aware chase captures more profitable fills than fixed 25% step.",
-            "research_question": "Does market-velocity chase beat CONTINUOUS on EV or net PnL?",
-            "entry": {
-                "trigger": "spawn on every CONTINUOUS APPROVE — same AI, same limit plan",
-                "fill_path": "URGENT_VELOCITY_CHASE",
-                **{k: v for k, v in ai_direct.items() if k != "fill_path"},
-                "execution": "normal 25% · medium 50% · high 75% · extreme marketable",
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
-            "expected_advantage": "Better fills in fast markets without changing AI or exits",
-            "expected_risk": "Over-chasing in chop",
-            "benchmark_comparison": "vs CONTINUOUS chase (25% fixed step)",
-            "diff_vs_benchmark": [
-                "Chase only: normal 25% / medium 50% / high 75% / extreme marketable",
-                "Entry, AI, Scenario C exits, TTL: frozen same as CONTINUOUS",
-            ],
-        },
-        "CHASE_3PLUS_ALPHA": {
-            "lane": "CHASE_3PLUS_ALPHA",
-            "label": RESEARCH_LANE_LABELS["CHASE_3PLUS_ALPHA"],
-            "subtitle": "DELAYED ENTRY · VIRTUAL CHASE ≥3 OR 180s",
-            "role": "late-entry experiment — observe persistence before first limit",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Trades that would reach chase #3+ are stronger; delayed entry avoids weak early fills.",
-            "research_question": "Does waiting for virtual chase persistence beat immediate CONTINUOUS entry?",
-            "entry": {
-                "trigger": "spawn on every CONTINUOUS APPROVE — observe, do not submit immediately",
-                "entry_path": "AI_DIRECT",
-                "fill_path": "AI_DIRECT_CHASE",
-                "ai_path": "same as CONTINUOUS benchmark",
-                "execution": "activate when virtual_chase≥3 OR age≥180s OR signal distance threshold; then normal chase",
-                "post_ai_gates": "log-only telemetry",
-                "margin_usd": FLAT_MARGIN_LIVE_USD,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": "Retire if EV and net PnL do not beat CONTINUOUS after adequate sample",
-            "expected_advantage": "Skip 0–2 chase noise cohort; enter demonstrated trends",
-            "expected_risk": "Miss early fills; correlation≠causation on chase buckets",
-            "benchmark_comparison": "vs CONTINUOUS immediate entry",
-            "diff_vs_benchmark": [
-                "Entry delay: virtual chase observation before first limit",
-                "After activation: same AI limit, 25% chase, Scenario C, TTL",
-            ],
-        },
-        "TYPE_B_PREDICTOR_V1": {
-            "lane": "TYPE_B_PREDICTOR_V1",
-            "label": RESEARCH_LANE_LABELS.get("TYPE_B_PREDICTOR_V1", "Type B Predictor v1"),
-            "subtitle": "AI≥60 · spread≥4 · ADX≥20 · vol≥1.8 · struct≤-3",
-            "role": "pre-entry Type-B fingerprint test",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Entry features matching Type-B averages predict outsized MFE at entry.",
-            "research_question": "Can we identify Type-B runners before peak MFE is known?",
-            "entry": {
-                "trigger": "spawn on AI_SCAN APPROVE when predictor filters pass",
-                **ai_direct,
-            },
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "TYPE_B cohort historically +$56 vs TYPE_A −$69 on session sample",
-            "expected_risk": "Filter stack may over-constrain spawn rate",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Entry: Type-B predictor fingerprint", "Exit: frozen Scenario C"],
-        },
-        "RECOVERY_MONSTER_V1": {
-            "lane": "RECOVERY_MONSTER_V1",
-            "label": RESEARCH_LANE_LABELS.get("RECOVERY_MONSTER_V1", "Recovery Monster v1"),
-            "subtitle": "Benchmark entry · thesis −40% · ladder 18→14",
-            "role": "exit-only experiment — wide thesis + runner ladder",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "−12% thesis fast-cut kills recoverable trades; replay sweep favors −40%.",
-            "research_question": "Do exits (not entries) explain benchmark underperformance?",
-            "entry": {"trigger": "spawn on every AI_SCAN APPROVE (benchmark entry)", **ai_direct},
-            "exit": {
-                "profile": "Recovery Monster v1",
-                "ladder": "18→14, 25→18, 40→28, 55→38",
-                "thesis_stop_margin_pct": -40.0,
-                "mfe_protect_margin_pct": THESIS_MFE_PROTECT_DEFAULT,
-                "thesis_pause_above_margin_pct": THESIS_EXIT_ABOVE_DEFAULT,
-                "type_a_stall": "OFF",
-                "fixed_time_exit": "2h global (7200s)",
-            },
-            "exit_path": "Thesis −40% · ladder 18→14 · MFE protect 2%",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Replay grid: +$79 vs live −12% on sample",
-            "expected_risk": "Wider stop increases tail loss on true failures",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C entry",
-            "diff_vs_benchmark": ["Entry: same as benchmark", "Exit: −40% thesis + runner ladder"],
-        },
-        "AI_DISAGREEMENT_ALPHA": {
-            "lane": "AI_DISAGREEMENT_ALPHA",
-            "label": RESEARCH_LANE_LABELS.get("AI_DISAGREEMENT_ALPHA", "AI Disagreement · AI Wins"),
-            "subtitle": "AI APPROVE + replay REJECT",
-            "role": "disagreement cohort — AI approves, replay scorecard rejects",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "AI may outperform deterministic replay on disagreement.",
-            "research_question": "Does AI APPROVE + replay REJECT still carry edge?",
-            "entry": {"trigger": "spawn when AI APPROVE and replay_approve=False", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "Tests LLM vs replay where they diverge",
-            "expected_risk": "Replay may be right — AI false positives",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: AI/replay disagreement (AI side)"],
-        },
-        "AI_DISAGREEMENT_REPLAY": {
-            "lane": "AI_DISAGREEMENT_REPLAY",
-            "label": RESEARCH_LANE_LABELS.get("AI_DISAGREEMENT_REPLAY", "AI Disagreement · Replay Wins"),
-            "subtitle": "AI REJECT + replay APPROVE",
-            "role": "disagreement cohort — replay approves, AI rejected",
-            "parent_lane": BENCHMARK_LANE,
-            "status": "ACTIVE",
-            "toggle_key": "research_lane_enabled",
-            "hypothesis": "Replay-approved signals that AI skipped are hidden alpha.",
-            "research_question": "Does replay find winners the LLM rejects?",
-            "entry": {"trigger": "spawn when AI REJECT and replay_approve=True", **ai_direct},
-            "exit": scenario_c_exit,
-            "exit_path": "Scenario C frozen",
-            "promotion_criteria": promote,
-            "kill_criteria": kill,
-            "expected_advantage": "201/242 AI calls disagreed with replay in session",
-            "expected_risk": "Replay model may be overfit to features",
-            "benchmark_comparison": "vs CONTINUOUS Scenario C",
-            "diff_vs_benchmark": ["Activation: AI/replay disagreement (replay side)"],
-        },
-    }
+    return _write_benchmark_vs_lanes_payload(
+        scope,
+        lane_metrics,
+        "CURRENT_SESSION_EVIDENCE" if scope != "ALL-TIME" else "HISTORICAL_ALL_DATA_EVIDENCE",
+    )
 
 
 def _horizon_outcome_30m_pct(trade_id, snapshots, reversal_index, shadow_row=None, replay=None):
@@ -10559,10 +10296,9 @@ def horizon_counterfactual_report(trades=None, session=None, shadow_report=None,
     block_map = _blocked_reason_by_trade_id(blocked)
     expired_lanes = {}
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8", usecols=["trade_id", "research_lane"])
-        except Exception:
-            exp = pd.DataFrame()
+        exp = _load_expired_orders_csv(
+            EXPIRED_ORDERS_FILE, usecols=["trade_id", "research_lane"]
+        )
         for _, r in exp.iterrows():
             tid = str(r.get("trade_id") or "").strip()
             if tid and pd.notna(r.get("research_lane")):
@@ -10835,12 +10571,12 @@ def _regime_attribution_bucket(regime_label):
 def _ai_calib_cohort_stats(sub):
     """Return trades, WR, avg PnL, EV for a cohort sub-frame."""
     if sub is None or sub.empty:
-        return {"trades": 0, "win_rate_pct": 0.0, "avg_pnl_usd": 0.0, "ev_usd": 0.0, "sum_pnl_usd": 0.0}
+        return {"trades": 0, "win_rate_pct": None, "avg_pnl_usd": None, "ev_usd": None, "sum_pnl_usd": None}
     pnl = pd.to_numeric(sub.get("net_pnl_usd"), errors="coerce")
     valid = pnl.notna()
     n = int(valid.sum())
     if n == 0:
-        return {"trades": 0, "win_rate_pct": 0.0, "avg_pnl_usd": 0.0, "ev_usd": 0.0, "sum_pnl_usd": 0.0}
+        return {"trades": 0, "win_rate_pct": None, "avg_pnl_usd": None, "ev_usd": None, "sum_pnl_usd": None}
     wins = int((pnl[valid] > 0).sum())
     avg = float(pnl[valid].mean())
     total = float(pnl[valid].sum())
@@ -11030,13 +10766,13 @@ def _confidence_band_label(conf, confidence_requested=None) -> str:
 def _direction_cohort_stats(sub):
     base = _ai_calib_cohort_stats(sub)
     if sub is None or sub.empty:
-        base.update({"avg_edge": 0.0, "avg_ai_confidence": 0.0})
+        base.update({"avg_edge": None, "avg_ai_confidence": None})
         return base
     missing = pd.Series(np.nan, index=sub.index, dtype=float)
     edge = pd.to_numeric(sub.get("edge_score_at_entry", sub.get("edge_score", missing)), errors="coerce")
     ai = pd.to_numeric(sub.get("ai_win_prob", sub.get("conf", missing)), errors="coerce")
-    base["avg_edge"] = round(float(edge.mean()), 2) if edge.notna().any() else 0.0
-    base["avg_ai_confidence"] = round(float(ai.mean()), 1) if ai.notna().any() else 0.0
+    base["avg_edge"] = round(float(edge.mean()), 2) if edge.notna().any() else None
+    base["avg_ai_confidence"] = round(float(ai.mean()), 1) if ai.notna().any() else None
     return base
 
 
@@ -11075,10 +10811,10 @@ def direction_attribution_report(trades=None, decisions=None, session=None):
             "short_calls": ai_call_stats["short_calls"],
             "no_trade_calls": ai_call_stats["no_trade_calls"],
             "total_ai_calls": ai_call_stats["total_calls"],
-            "long_wr": 0,
-            "short_wr": 0,
-            "long_pnl": 0,
-            "short_pnl": 0,
+            "long_wr": None,
+            "short_wr": None,
+            "long_pnl": None,
+            "short_pnl": None,
             "by_regime_direction": [],
             "ai_recommendations": {"long": {}, "short": {}},
             "ai_call_stats": ai_call_stats,
@@ -11121,13 +10857,13 @@ def direction_attribution_report(trades=None, decisions=None, session=None):
             ai_call_stats["no_trade_calls"] += 1
 
     print(
-        f"  LONG: n={long_stats['trades']} WR={long_stats['win_rate_pct']:.1f}% "
-        f"net=${long_stats['sum_pnl_usd']:.2f} avg_edge={long_stats['avg_edge']} "
+        f"  LONG: n={long_stats['trades']} WR={_fmt_pct(long_stats['win_rate_pct'])} "
+        f"net={_fmt_usd(long_stats['sum_pnl_usd'])} avg_edge={long_stats['avg_edge']} "
         f"avg_ai={long_stats['avg_ai_confidence']} {PIPELINE_ENFORCEMENT_TAG}"
     )
     print(
-        f"  SHORT: n={short_stats['trades']} WR={short_stats['win_rate_pct']:.1f}% "
-        f"net=${short_stats['sum_pnl_usd']:.2f} avg_edge={short_stats['avg_edge']} "
+        f"  SHORT: n={short_stats['trades']} WR={_fmt_pct(short_stats['win_rate_pct'])} "
+        f"net={_fmt_usd(short_stats['sum_pnl_usd'])} avg_edge={short_stats['avg_edge']} "
         f"avg_ai={short_stats['avg_ai_confidence']} {PIPELINE_ENFORCEMENT_TAG}"
     )
     print(
@@ -11174,10 +10910,10 @@ def direction_attribution_report(trades=None, decisions=None, session=None):
         "short_calls": ai_call_stats["short_calls"],
         "no_trade_calls": ai_call_stats["no_trade_calls"],
         "total_ai_calls": ai_call_stats["total_calls"],
-        "long_wr": long_stats.get("win_rate_pct", 0),
-        "short_wr": short_stats.get("win_rate_pct", 0),
-        "long_pnl": long_stats.get("sum_pnl_usd", 0),
-        "short_pnl": short_stats.get("sum_pnl_usd", 0),
+        "long_wr": long_stats.get("win_rate_pct"),
+        "short_wr": short_stats.get("win_rate_pct"),
+        "long_pnl": long_stats.get("sum_pnl_usd"),
+        "short_pnl": short_stats.get("sum_pnl_usd"),
         "by_regime_direction": by_regime,
         "ai_recommendations": ai_recs,
         "ai_call_stats": ai_call_stats,
@@ -11319,7 +11055,7 @@ def confidence_band_report(trades=None, decisions=None, session=None):
 
 def _build_confidence_edge_matrix(with_outcome):
     """2D matrix: AI buckets (50-55, 55-60) × edge buckets (2-3, 3-4, 4+) with WR and n."""
-    empty_cell = {"trades": 0, "win_rate_pct": 0.0}
+    empty_cell = {"trades": 0, "win_rate_pct": None}
     matrix = {
         edge_b: {conf_b: dict(empty_cell) for conf_b in AI_MATRIX_CONF_BUCKETS}
         for edge_b in AI_MATRIX_EDGE_BUCKETS
@@ -12249,16 +11985,24 @@ def benchmark_relative_scorecard_report(
     bench_m = lane_metrics.get(BENCHMARK_LANE) or {}
     bench_trade = _lane_trade_stats(trades, BENCHMARK_LANE)
     bench_wr = bench_trade["win_rate_pct"]
-    bench_pnl = float(bench_m.get("net_pnl_real") or bench_trade["sum_pnl_usd"] or 0)
-    bench_ev = float(bench_m.get("per_approve_ev") or 0)
+    bench_pnl = bench_m.get("net_pnl_real")
+    if bench_pnl is None:
+        bench_pnl = bench_trade["sum_pnl_usd"]
+    bench_pnl = float(bench_pnl) if bench_pnl is not None else None
+    bench_ev_raw = bench_m.get("per_approve_ev")
+    bench_ev = float(bench_ev_raw) if bench_ev_raw is not None else None
 
     lanes_out = []
     for lane in BENCHMARK_LANES:
         m = lane_metrics.get(lane) or {}
         lane_trade = _lane_trade_stats(trades, lane)
         wr = lane_trade["win_rate_pct"]
-        pnl = float(m.get("net_pnl_real") or lane_trade["sum_pnl_usd"] or 0)
-        ev = float(m.get("per_approve_ev") or 0)
+        pnl = m.get("net_pnl_real")
+        if pnl is None:
+            pnl = lane_trade["sum_pnl_usd"]
+        pnl = float(pnl) if pnl is not None else None
+        ev_raw = m.get("per_approve_ev")
+        ev = float(ev_raw) if ev_raw is not None else None
         entry = {
             "lane": lane,
             "label": RESEARCH_LANE_LABELS.get(lane, lane),
@@ -12266,27 +12010,33 @@ def benchmark_relative_scorecard_report(
             "approves": m.get("approves", 0),
             "fills": m.get("real_fills", lane_trade["trades"]),
             "win_rate_pct": wr,
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve_usd": round(ev, 2),
+            "pnl_usd": round(pnl, 2) if pnl is not None else None,
+            "ev_per_approve_usd": round(ev, 2) if ev is not None else None,
         }
         if lane == BENCHMARK_LANE:
             entry["vs_benchmark"] = {
-                "pnl_delta": 0.0,
-                "wr_delta": 0.0,
-                "ev_delta": 0.0,
-                "fill_pct_delta": 0.0,
+                "pnl_delta": 0.0 if pnl is not None else None,
+                "wr_delta": 0.0 if wr is not None else None,
+                "ev_delta": 0.0 if ev is not None else None,
+                "fill_pct_delta": 0.0 if m.get("approve_to_fill_pct") is not None else None,
                 "beats_benchmark": None,
             }
         else:
             vs = {
-                "pnl_delta": round(pnl - bench_pnl, 2),
-                "wr_delta": round(wr - bench_wr, 1),
-                "ev_delta": round(ev - bench_ev, 2),
+                "pnl_delta": round(pnl - bench_pnl, 2) if pnl is not None and bench_pnl is not None else None,
+                "wr_delta": round(wr - bench_wr, 1) if wr is not None and bench_wr is not None else None,
+                "ev_delta": round(ev - bench_ev, 2) if ev is not None and bench_ev is not None else None,
                 "fill_pct_delta": m.get("delta_approve_to_fill_pct"),
-                "beats_benchmark": bool(pnl > bench_pnl or ev > bench_ev),
+                "beats_benchmark": (
+                    bool(pnl > bench_pnl or ev > bench_ev)
+                    if pnl is not None and bench_pnl is not None and ev is not None and bench_ev is not None
+                    else None
+                ),
             }
             entry["vs_benchmark"] = vs
-            if m.get("approves", 0):
+            if m.get("approves", 0) and all(
+                value is not None for value in (pnl, bench_pnl, wr, bench_wr, ev, bench_ev)
+            ):
                 print(
                     f"  {lane}: PnL ${pnl:.2f} (Δ ${vs['pnl_delta']:+.2f}) "
                     f"WR {wr:.1f}% (Δ {vs['wr_delta']:+.1f}pp) "
@@ -12308,9 +12058,9 @@ def benchmark_relative_scorecard_report(
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "benchmark_summary": {
-            "pnl_usd": round(bench_pnl, 2),
+            "pnl_usd": round(bench_pnl, 2) if bench_pnl is not None else None,
             "win_rate_pct": bench_wr,
-            "ev_per_approve_usd": round(bench_ev, 2),
+            "ev_per_approve_usd": round(bench_ev, 2) if bench_ev is not None else None,
             "approves": bench_m.get("approves", 0),
         },
         "lanes": lanes_out,
@@ -12360,7 +12110,13 @@ def missed_opportunity_heatmap_report(trades=None, session=None):
         })
         rec["count"] += 1
         if pnl is not None:
-            pnl = float(pnl)
+            try:
+                pnl = float(pnl)
+            except (TypeError, ValueError):
+                pnl = None
+            if pnl is not None and not math.isfinite(pnl):
+                pnl = None
+        if pnl is not None:
             rec["shadow_pnl_total_usd"] = round(rec["shadow_pnl_total_usd"] + pnl, 2)
             if pnl > 0:
                 rec["missed_profit_usd"] = round(rec["missed_profit_usd"] + pnl, 2)
@@ -12424,10 +12180,1013 @@ def missed_opportunity_heatmap_report(trades=None, session=None):
     }
     try:
         with open(MISSED_OPPORTUNITY_HEATMAP_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+            json.dump(payload, f, indent=2, allow_nan=False)
         print(f"  ✅ Wrote {MISSED_OPPORTUNITY_HEATMAP_FILE} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {MISSED_OPPORTUNITY_HEATMAP_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
+_MISSED_PROOF_CLASSES = (
+    "PROVEN_MISSED_PROFIT",
+    "PROVEN_AVOIDED_LOSS",
+    "AMBIGUOUS",
+    "INSUFFICIENT_EVIDENCE",
+)
+_EXECUTION_OUTCOME_CLASSES = ("FULL_FILL", "PARTIAL_FILL", "NO_FILL", "UNKNOWN")
+
+
+def _normalized_execution_outcome(fill_status):
+    """Project detailed evaluator states onto the canonical evidence taxonomy."""
+    normalized = str(fill_status or "").strip().upper()
+    return normalized if normalized in _EXECUTION_OUTCOME_CLASSES[:-1] else "UNKNOWN"
+
+
+def _first_number(*values):
+    for value in values:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(number):
+            return number
+    return None
+
+
+def _v3_ledger_rows(name):
+    configured_root = os.getenv("BTC_AGENT_DATA_DIR")
+    candidates = (
+        [Path(configured_root) / "v3" / "ledgers" / f"{name}.jsonl"]
+        if configured_root
+        else [Path("v3") / "ledgers" / f"{name}.jsonl"]
+    )
+    seen = set()
+    for path in candidates:
+        resolved = str(path.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if path.is_file():
+            try:
+                from research_v3_store import V3EvidenceStore
+                store = V3EvidenceStore.open_read_only(path.parent.parent.parent)
+                rows = []
+                by_record_id = {}
+                for _ref, generation_path in store.ledger_generation_paths(name):
+                    for row in _load_jsonl_rows(str(generation_path)):
+                        record_id = str(row.get("record_id") or "")
+                        if not record_id:
+                            raise ValueError("V3 analyzer row missing record identity")
+                        prior = by_record_id.get(record_id)
+                        if prior is not None:
+                            if prior != row:
+                                raise ValueError("V3 analyzer duplicate record conflict")
+                            continue
+                        by_record_id[record_id] = row
+                        rows.append(row)
+                return rows
+            except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
+                print(f"  ⚠️ V3 ledger authority unavailable for {name}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+                return []
+    return []
+
+
+def _compressed_shadow_rows(session=None):
+    rows = []
+    seen = set()
+    configured_root = os.getenv("BTC_AGENT_DATA_DIR")
+    roots = (Path(configured_root),) if configured_root else (Path("."),)
+    for filename in COMPRESSED_SHADOW_SCHEDULE_FILES:
+        for root in roots:
+            path = root / filename
+            resolved = str(path.resolve())
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            for row in _load_jsonl_rows(str(path)):
+                if str(row.get("schema") or "") == "compressed_chase_shadow_v1":
+                    rows.append(row)
+    return _filter_jsonl_rows_by_session(rows, session)
+
+
+def _compressed_shadow_arm_receipts(session=None):
+    """Load arm-attempt receipts without promoting them to schedule evidence."""
+    rows = []
+    seen = set()
+    configured_root = os.getenv("BTC_AGENT_DATA_DIR")
+    roots = (Path(configured_root),) if configured_root else (Path("."),)
+    for filename in COMPRESSED_SHADOW_SCHEDULE_FILES:
+        for root in roots:
+            path = root / filename
+            resolved = str(path.resolve())
+            if resolved in seen or not path.is_file():
+                continue
+            seen.add(resolved)
+            for row in _load_jsonl_rows(str(path)):
+                if str(row.get("schema") or "") == "compressed_chase_arm_receipt_v1":
+                    rows.append(row)
+    return _filter_jsonl_rows_by_session(rows, session)
+
+
+def _shadow_checkpoint_price(row, direction, *, entry=True):
+    bbo = row.get("bbo") if isinstance(row.get("bbo"), dict) else {}
+    if direction == "LONG":
+        side = "ask" if entry else "bid"
+        return _first_number(bbo.get(side), row.get(side))
+    if direction == "SHORT":
+        side = "bid" if entry else "ask"
+        return _first_number(bbo.get(side), row.get(side))
+    return None
+
+
+def _shadow_return_pct(direction, entry, mark):
+    if not entry or mark is None:
+        return None
+    raw = (mark / entry - 1.0) * 100.0
+    return raw if direction == "LONG" else -raw if direction == "SHORT" else None
+
+
+def _compressed_stage_observation_supported(row):
+    """Accept signed analyzer receipts and timely runtime observations.
+
+    Runtime emits ``OBSERVED`` only for checkpoints captured within its strict
+    observation-delay window.  Keep that compatibility local to stage
+    coverage; terminal tape, depth, quantity, and cost proof remain separate
+    fail-closed requirements below.
+    """
+    if not isinstance(row, dict):
+        return False
+    # Eligibility is a policy outcome, not an evidence-quality requirement.
+    # A timely, signed INVALID/NO_TRADE observation is still a supported stage
+    # and must be retained when proving a true no-fill.  Touch/fill evaluation
+    # below separately requires ``eligible_at_stage is True``.
+    if not (
+        row.get("identity_complete") is True
+        and isinstance(row.get("eligible_at_stage"), bool)
+        and row.get("bbo_fresh") is True
+        and row.get("bbo_valid") is True
+    ):
+        return False
+    status = str(row.get("coverage_status") or "").upper()
+    if status in {"COMPLETE", "SUPPORTED"}:
+        return True
+    if status != "OBSERVED":
+        return False
+    observed_ts = _first_number(row.get("observed_ts"))
+    scheduled_due_ts = _first_number(row.get("scheduled_due_ts"))
+    observed_delay_sec = _first_number(row.get("observed_delay_sec"))
+    return bool(
+        observed_ts is not None
+        and scheduled_due_ts is not None
+        and observed_delay_sec is not None
+        and 0.0 <= observed_delay_sec <= 15.0
+        and abs((observed_ts - scheduled_due_ts) - observed_delay_sec) <= 0.001
+    )
+
+
+def _one_second_tape_by_bucket():
+    """Load the canonical tape plus numeric rotations, failing closed on conflicts."""
+    configured_root = Path(os.getenv("BTC_AGENT_DATA_DIR") or ".")
+    base = configured_root / "market_microstructure_1s.jsonl"
+    paths = []
+    if base.is_file():
+        paths.append(base)
+    paths.extend(sorted(
+        (
+            path for path in base.parent.glob(base.name + ".*")
+            if path.name[len(base.name) + 1:].isdigit()
+        ),
+        key=lambda path: int(path.name.rsplit(".", 1)[-1]),
+    ))
+    by_bucket = {}
+    for path in paths:
+        for row in _load_jsonl_rows(str(path)):
+            if (
+                row.get("bucket_ts") is None
+                or str(row.get("schema") or "") != "market_microstructure_1s_v1"
+                or str(row.get("symbol") or "") != EXPECTED_SYMBOL
+            ):
+                continue
+            try:
+                bucket_number = float(row["bucket_ts"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(bucket_number) or not bucket_number.is_integer():
+                continue
+            bucket = int(bucket_number)
+            supplied_hash = str(row.get("row_sha256") or "")
+            canonical_row = {key: value for key, value in row.items() if key != "row_sha256"}
+            try:
+                computed_hash = hashlib.sha256(json.dumps(
+                    canonical_row, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8")).hexdigest()
+            except (TypeError, ValueError):
+                computed_hash = ""
+            if not supplied_hash or supplied_hash != computed_hash:
+                by_bucket[bucket] = {
+                    "schema": "market_microstructure_1s_integrity_failure_v1",
+                    "symbol": EXPECTED_SYMBOL, "bucket_ts": bucket,
+                    "fresh": False, "valid_bbo": False,
+                    "row_integrity_failure": True,
+                }
+                continue
+            prior = by_bucket.get(bucket)
+            if prior is None:
+                by_bucket[bucket] = row
+                continue
+            prior_hash = str(prior.get("row_sha256") or "")
+            row_hash = supplied_hash
+            if prior.get("duplicate_conflict") or not prior_hash or not row_hash or prior_hash != row_hash:
+                by_bucket[bucket] = {
+                    "schema": "market_microstructure_1s_conflict_v1",
+                    "symbol": EXPECTED_SYMBOL,
+                    "bucket_ts": bucket,
+                    "fresh": False,
+                    "valid_bbo": False,
+                    "duplicate_conflict": True,
+                }
+    return by_bucket
+
+
+def _joined_tape_evidence(first, expiry, touch_row, direction, tape_by_bucket):
+    if not touch_row or not expiry:
+        return {}
+    touch_ts = _first_number(touch_row.get("observed_ts"), touch_row.get("ts"))
+    start_values = [value for value in (
+        touch_ts,
+        _first_number(first.get("tape_window_start_ts")),
+    ) if value is not None]
+    if not start_values:
+        return {}
+    start_ts = max(start_values)
+    end_ts = _first_number(
+        expiry.get("tape_window_end_ts"),
+        first.get("tape_window_end_ts"),
+        expiry.get("observed_ts"),
+        expiry.get("ts"),
+    )
+    if end_ts is None or end_ts < start_ts:
+        return {}
+    expected = list(range(int(math.ceil(start_ts)), int(math.floor(end_ts)) + 1))
+    points = []
+    missing = []
+    for second in expected:
+        row = tape_by_bucket.get(second)
+        if not row or row.get("fresh") is not True or row.get("valid_bbo") is not True:
+            missing.append(second)
+            continue
+        points.append({
+            "bucket_ts": second,
+            "bbo": {"bid": row.get("bid"), "ask": row.get("ask"), "last": row.get("last")},
+            "bid_qty": row.get("bid_qty"),
+            "ask_qty": row.get("ask_qty"),
+            "row_sha256": row.get("row_sha256"),
+        })
+    requested_qty = _first_number(first.get("requested_qty"), first.get("quantity"))
+    entry_bucket = tape_by_bucket.get(int(math.ceil(touch_ts))) if touch_ts is not None else None
+    available_qty = _first_number(
+        (entry_bucket or {}).get("ask_qty") if direction == "LONG" else (entry_bucket or {}).get("bid_qty")
+    )
+    execution_supported = bool(
+        requested_qty is not None and available_qty is not None and available_qty >= requested_qty
+    )
+    entry_execution_price = _first_number(
+        (entry_bucket or {}).get("ask") if direction == "LONG" else (entry_bucket or {}).get("bid")
+    )
+    entry_fee_rate = _first_number(first.get("entry_fee_rate"))
+    exit_fee_rate = _first_number(first.get("exit_fee_rate"))
+    slippage_model = str(first.get("slippage_model") or "")
+    virtual_limit_price = _first_number(touch_row.get("virtual_limit_price"))
+    terminal_bucket = tape_by_bucket.get(int(math.floor(end_ts)))
+    terminal_execution_price = _first_number(
+        (terminal_bucket or {}).get("bid") if direction == "LONG"
+        else (terminal_bucket or {}).get("ask")
+    )
+    explicit_cost_basis = bool(
+        requested_qty is not None and requested_qty > 0
+        and entry_execution_price is not None and entry_execution_price > 0
+        and terminal_execution_price is not None and terminal_execution_price > 0
+        and entry_fee_rate is not None and entry_fee_rate >= 0
+        and exit_fee_rate is not None and exit_fee_rate >= 0
+        and slippage_model == "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
+        and virtual_limit_price is not None and virtual_limit_price > 0
+    )
+    notional_usd = requested_qty * entry_execution_price if explicit_cost_basis else None
+    exit_notional_usd = requested_qty * terminal_execution_price if explicit_cost_basis else None
+    fee_usd = (
+        notional_usd * entry_fee_rate + exit_notional_usd * exit_fee_rate
+        if explicit_cost_basis else None
+    )
+    adverse_entry_delta = None
+    if explicit_cost_basis:
+        adverse_entry_delta = (
+            max(0.0, entry_execution_price - virtual_limit_price)
+            if direction == "LONG"
+            else max(0.0, virtual_limit_price - entry_execution_price)
+        )
+    slippage_usd = requested_qty * adverse_entry_delta if explicit_cost_basis else None
+    receipt_material = "|".join(
+        [str(int(math.ceil(start_ts))), str(int(math.floor(end_ts)))]
+        + [str(point.get("row_sha256") or "") for point in points]
+    )
+    return {
+        "schema": "analyzer_one_second_tape_join_v1",
+        "receipt_id": "tape-join-sha256-" + hashlib.sha256(receipt_material.encode("utf-8")).hexdigest(),
+        "source_path": first.get("tape_evidence_path") or "market_microstructure_1s.jsonl",
+        "timeframe": "1s",
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+        "coverage_status": "COMPLETE" if expected and not missing else "INSUFFICIENT",
+        "expected_seconds": len(expected),
+        "observed_seconds": len(points),
+        "missing_seconds": len(missing),
+        "missing_second_sample": missing[:20],
+        "conservative_execution_supported": execution_supported,
+        "fill_status": "FULL_FILL" if execution_supported else "UNSUPPORTED",
+        "entry_execution_price": entry_execution_price,
+        "terminal_execution_price": terminal_execution_price,
+        "quantity": requested_qty,
+        "notional_usd": notional_usd,
+        "fee_usd": fee_usd,
+        "slippage_usd": slippage_usd,
+        "slippage_model": slippage_model or None,
+        "fee_profile": first.get("fee_profile"),
+        "entry_fee_rate": entry_fee_rate,
+        "exit_fee_rate": exit_fee_rate,
+        "points": points,
+        # Costs are derived only from signed runtime rates/model plus joined
+        # conservative BBO tape. Missing inputs remain absent and fail closed.
+    }
+
+
+def _joined_compressed_chase_tape_evidence(first, expiry, stages, direction, tape_by_bucket):
+    """Replay the signed virtual limit over the complete one-second path.
+
+    Unlike the legacy helper, this can prove both fills between checkpoints and
+    true no-fills.  Any missing second keeps the outcome UNKNOWN/UNVERIFIABLE;
+    it is never silently converted to NO_FILL.
+    """
+    if not expiry or not stages:
+        return {}
+    start_ts = _first_number(first.get("tape_window_start_ts"), first.get("signal_ts"))
+    end_ts = _first_number(
+        expiry.get("tape_window_end_ts"), first.get("tape_window_end_ts"),
+        expiry.get("observed_ts"), expiry.get("ts"),
+    )
+    if start_ts is None or end_ts is None or end_ts < start_ts:
+        return {}
+    # Canonical tape windows are [start, end): never consume the expiry bucket.
+    expected = list(range(int(math.ceil(start_ts)), int(math.floor(end_ts))))
+    points = []
+    missing = []
+    for second in expected:
+        row = tape_by_bucket.get(second)
+        if not row or row.get("fresh") is not True or row.get("valid_bbo") is not True:
+            missing.append(second)
+            continue
+        points.append({
+            "bucket_ts": second,
+            "bbo": {"bid": row.get("bid"), "ask": row.get("ask"), "last": row.get("last")},
+            "bid_qty": row.get("bid_qty"), "ask_qty": row.get("ask_qty"),
+            "row_sha256": row.get("row_sha256"),
+        })
+
+    ordered_stages = sorted(
+        (row for row in stages.values() if _compressed_stage_observation_supported(row)),
+        key=lambda row: _first_number(row.get("observed_ts"), row.get("ts")) or float("inf"),
+    )
+    complete = bool(expected and not missing)
+    requested_qty = _first_number(first.get("requested_qty"), first.get("quantity"))
+    signed_quantity_constraints = first.get("signed_quantity_constraints")
+    normalized_quantity_constraints, quantity_constraint_reasons = (
+        _validate_signed_quantity_constraints(
+            signed_quantity_constraints, symbol=EXPECTED_SYMBOL,
+        )
+    )
+    direction = str(direction or "").upper()
+    eligible_intervals = []
+    logical_end = int(math.floor(end_ts))
+    for index, stage in enumerate(ordered_stages):
+        if stage.get("eligible_at_stage") is not True:
+            continue
+        stage_ts = _first_number(stage.get("observed_ts"), stage.get("ts"))
+        interval_start = int(math.ceil(stage_ts)) if stage_ts is not None else None
+        next_ts = None
+        if index + 1 < len(ordered_stages):
+            next_ts = _first_number(
+                ordered_stages[index + 1].get("observed_ts"),
+                ordered_stages[index + 1].get("ts"),
+            )
+        interval_end = min(
+            logical_end,
+            int(math.ceil(next_ts)) if next_ts is not None else logical_end,
+        )
+        limit_price = _first_number(stage.get("virtual_limit_price"))
+        if interval_start is not None and limit_price is not None and interval_end > interval_start:
+            eligible_intervals.append({
+                "bucket_id": f"stage-{stage.get('stage_index')}",
+                "start_ts": interval_start, "end_ts": interval_end,
+                "limit_price": limit_price,
+                "generation": first.get("schedule_generation_id"),
+            })
+
+    evaluator = None
+    if (
+        direction in {"LONG", "SHORT"}
+        and requested_qty is not None
+        and normalized_quantity_constraints is not None
+        and eligible_intervals
+    ):
+        evaluator = _evaluate_conservative_limit_fill(
+            tape_by_bucket.values(), direction=direction,
+            requested_qty=requested_qty, chase_schedule=eligible_intervals,
+            aggressor_window_sec=1, symbol=EXPECTED_SYMBOL,
+            quantity_constraints=signed_quantity_constraints,
+        )
+    evaluator = evaluator or {}
+    evaluator_outcome = str(evaluator.get("outcome") or "").upper()
+    fill_status = "UNKNOWN_UNVERIFIABLE"
+    if direction not in {"LONG", "SHORT"}:
+        outcome_code = "UNKNOWN_INVALID_DIRECTION"
+    elif not complete:
+        outcome_code = "UNKNOWN_MISSING_OR_CONFLICTING_1S_TAPE"
+    elif normalized_quantity_constraints is None:
+        outcome_code = "UNKNOWN_" + "_".join(
+            quantity_constraint_reasons or ["SIGNED_QUANTITY_CONSTRAINTS_INVALID"]
+        )
+    elif not eligible_intervals:
+        # No executable counterfactual was eligible.  This is not a true
+        # no-fill observation and must never enter NO_FILL denominators.
+        fill_status = "INELIGIBLE"
+        outcome_code = "INELIGIBLE_NO_ENTRY_AT_ANY_STAGE"
+    elif evaluator.get("supported") is not True:
+        reasons = evaluator.get("negative_reasons") or ["UNSPECIFIED"]
+        outcome_code = "UNKNOWN_CONSERVATIVE_EVALUATOR_" + "_".join(str(x) for x in reasons)
+    elif evaluator_outcome == "FILL":
+        fill_status = "FULL_FILL"
+        outcome_code = "FULL_FILL_AVAILABLE_DEPTH"
+    elif evaluator_outcome == "PARTIAL_FILL":
+        fill_status = "PARTIAL_FILL"
+        outcome_code = "PARTIAL_FILL_AVAILABLE_DEPTH"
+    elif evaluator_outcome == "NO_FILL":
+        fill_status = "NO_FILL"
+        outcome_code = "TRUE_NO_FILL_" + "_".join(
+            str(x) for x in (evaluator.get("negative_reasons") or ["NO_PROVABLE_FILL"])
+        )
+    else:
+        outcome_code = "UNKNOWN_CONSERVATIVE_EVALUATOR_OUTCOME"
+
+    accepted_qty = _first_number(evaluator.get("filled_qty"))
+    if fill_status == "NO_FILL":
+        accepted_qty = 0.0
+    available_qty = _first_number(evaluator.get("visible_executable_qty"))
+    entry_execution_price = _first_number(evaluator.get("fill_price"))
+    touch_ts = _first_number(evaluator.get("trigger_bucket_ts"))
+    touch_stage_index = None
+    chase_bucket_id = str(evaluator.get("chase_bucket_id") or "")
+    if chase_bucket_id.startswith("stage-"):
+        try:
+            touch_stage_index = int(chase_bucket_id.split("-", 1)[1])
+        except (TypeError, ValueError):
+            touch_stage_index = None
+
+    terminal_point = points[-1] if points else None
+    terminal_bbo = (terminal_point or {}).get("bbo") or {}
+    terminal_execution_price = _first_number(
+        terminal_bbo.get("bid") if direction == "LONG" else terminal_bbo.get("ask")
+    )
+    entry_fee_rate = _first_number(first.get("entry_fee_rate"))
+    exit_fee_rate = _first_number(first.get("exit_fee_rate"))
+    slippage_model = str(first.get("slippage_model") or "")
+    executable_qty = accepted_qty if fill_status in {"FULL_FILL", "PARTIAL_FILL"} else None
+    explicit_cost_basis = bool(
+        executable_qty is not None and executable_qty > 0
+        and entry_execution_price is not None and entry_execution_price > 0
+        and terminal_execution_price is not None and terminal_execution_price > 0
+        and entry_fee_rate is not None and entry_fee_rate >= 0
+        and exit_fee_rate is not None and exit_fee_rate >= 0
+        and slippage_model == "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
+    )
+    notional_usd = executable_qty * entry_execution_price if explicit_cost_basis else None
+    exit_notional_usd = executable_qty * terminal_execution_price if explicit_cost_basis else None
+    fee_usd = (
+        notional_usd * entry_fee_rate + exit_notional_usd * exit_fee_rate
+        if explicit_cost_basis else None
+    )
+    # The shared conservative evaluator books at the declared limit and makes
+    # no price-improvement claim; therefore additional entry slippage is zero.
+    slippage_usd = 0.0 if explicit_cost_basis else None
+    # Bind the join receipt to both source tape and the complete evaluator
+    # decision.  The latter includes direction, requested quantity, declared
+    # limits, quantity-constraint payload hash, and selected evidence bucket;
+    # otherwise different execution claims could share one tape-only ID.
+    evaluator_material = json.dumps(
+        evaluator, sort_keys=True, separators=(",", ":"), default=str,
+    )
+    receipt_material = "|".join(
+        [
+            str(int(math.ceil(start_ts))), str(int(math.floor(end_ts))),
+            hashlib.sha256(evaluator_material.encode("utf-8")).hexdigest(),
+        ]
+        + [str(point.get("row_sha256") or "") for point in points]
+    )
+    return {
+        "schema": "analyzer_compressed_chase_tape_join_v2",
+        "receipt_id": "tape-join-sha256-" + hashlib.sha256(receipt_material.encode("utf-8")).hexdigest(),
+        "source_path": first.get("tape_evidence_path") or "market_microstructure_1s.jsonl",
+        "timeframe": "1s", "start_ts": start_ts, "end_ts": end_ts,
+        "coverage_status": "COMPLETE" if complete else "INSUFFICIENT",
+        "expected_seconds": len(expected), "observed_seconds": len(points),
+        "missing_seconds": len(missing), "missing_second_sample": missing[:20],
+        "conservative_execution_supported": fill_status in {"FULL_FILL", "PARTIAL_FILL"},
+        "fill_status": fill_status, "outcome_code": outcome_code,
+        "touch_ts": touch_ts,
+        "touch_stage_index": touch_stage_index,
+        "entry_execution_price": entry_execution_price,
+        "terminal_execution_price": terminal_execution_price,
+        "requested_quantity": requested_qty, "available_quantity": available_qty,
+        "accepted_quantity": accepted_qty, "quantity": executable_qty,
+        "raw_partial_quantity": evaluator.get("raw_partial_qty"),
+        "rounded_executable_quantity": evaluator.get("rounded_executable_qty"),
+        "accumulated_quantity": evaluator.get("accumulated_qty"),
+        "minimum_lot_decision": evaluator.get("minimum_lot_decision") or "UNKNOWN",
+        "minimum_notional_decision": evaluator.get("minimum_notional_decision") or "UNKNOWN",
+        "quantity_attempts": evaluator.get("quantity_attempts") or [],
+        "signed_quantity_constraints": normalized_quantity_constraints,
+        "quantity_constraint_reasons": quantity_constraint_reasons,
+        "notional_usd": notional_usd, "fee_usd": fee_usd,
+        "slippage_usd": slippage_usd, "slippage_model": slippage_model or None,
+        "fee_profile": first.get("fee_profile"), "entry_fee_rate": entry_fee_rate,
+        "exit_fee_rate": exit_fee_rate, "points": points,
+        "conservative_evaluator_receipt": evaluator,
+    }
+
+
+def build_missed_opportunity_proof_report(session=None):
+    """Build fail-closed proof rows from the signed compressed shadow schedule.
+
+    The artifact is descriptive shadow evidence only.  A positive/negative proof
+    requires a complete signed identity join, every scheduled checkpoint plus
+    expiry, a conservative BBO touch, and an executable terminal BBO mark.
+    """
+    schedules = _compressed_shadow_rows(session=session)
+    opportunities = _v3_ledger_rows("opportunity")
+    decisions = _v3_ledger_rows("decision")
+    executions = _v3_ledger_rows("execution")
+    tape_by_bucket = _one_second_tape_by_bucket() if schedules else {}
+    opp_by_id = {str(r.get("opportunity_id")): r for r in opportunities if r.get("opportunity_id")}
+    opp_by_call = {str(r.get("shared_ai_call_id")): r for r in opportunities if r.get("shared_ai_call_id")}
+    decision_by_call = {}
+    for row in decisions:
+        call_id = str(row.get("shared_ai_call_id") or "")
+        if call_id:
+            decision_by_call.setdefault(call_id, []).append(row)
+    execution_keys = {
+        (str(r.get("episode_id") or ""), str(r.get("policy_id") or ""))
+        for r in executions
+    }
+    grouped = {}
+    for row in schedules:
+        key = (
+            str(row.get("episode_id") or row.get("trade_id") or ""),
+            str(row.get("policy_id") or ""),
+            str(row.get("policy_signature") or ""),
+            str(row.get("schedule_generation_id") or ""),
+        )
+        grouped.setdefault(key, []).append(row)
+
+    proofs = []
+    for (episode_id, policy_id, policy_signature, schedule_generation_id), rows in grouped.items():
+        rows.sort(key=lambda r: _first_number(r.get("observed_ts"), r.get("ts")) or 0.0)
+        first = rows[0]
+        call_id = str(first.get("shared_ai_call_id") or "")
+        opportunity_id = str(first.get("opportunity_id") or "")
+        opportunity = opp_by_id.get(opportunity_id) or opp_by_call.get(call_id) or {}
+        decision_rows = decision_by_call.get(call_id, [])
+        decision = next((r for r in decision_rows if str(r.get("episode_id") or "") == episode_id), None)
+        decision = decision or (decision_rows[0] if decision_rows else {})
+        direction = str(first.get("direction") or opportunity.get("raw_direction") or "").upper()
+        expected = [int(x) for x in (first.get("schedule_seconds") or [0, 60, 120, 240, 420, 600])]
+        expiry_sec = int(_first_number(first.get("terminal_expiry_sec"), 780) or 780)
+        stage_rows = [
+            r for r in rows
+            if str(r.get("event") or "").upper() == "STAGE"
+            and r.get("stage_index") is not None
+        ]
+        stage_index_counts = Counter(int(r.get("stage_index")) for r in stage_rows)
+        duplicate_stage_indexes = sorted(
+            index for index, count in stage_index_counts.items() if count != 1
+        )
+        stages = {}
+        for stage in stage_rows:
+            stages.setdefault(int(stage.get("stage_index")), stage)
+        expiry_rows = [r for r in rows if str(r.get("event") or "").upper() == "EXPIRED"]
+        expiry = expiry_rows[-1] if len(expiry_rows) == 1 else None
+        checkpoints = []
+        touch_row = None
+        for index, due_sec in enumerate(expected):
+            row = stages.get(index)
+            price = _shadow_checkpoint_price(row or {}, direction)
+            limit_price = _first_number((row or {}).get("virtual_limit_price"))
+            stage_supported = _compressed_stage_observation_supported(row)
+            touched = bool(
+                stage_supported and
+                price is not None and limit_price is not None and (
+                    (direction == "LONG" and price <= limit_price)
+                    or (direction == "SHORT" and price >= limit_price)
+                )
+            )
+            if touch_row is None and touched:
+                touch_row = row
+            checkpoints.append({
+                "stage_index": index,
+                "due_sec": due_sec,
+                "enabled": row is not None,
+                "eligible_at_stage": (row or {}).get("eligible_at_stage"),
+                "coverage_status": (row or {}).get("coverage_status"),
+                "direction_revalidation_result": (row or {}).get("direction_revalidation_result"),
+                "direction_revalidation_reason": (row or {}).get("direction_revalidation_reason"),
+                "observed_delay_sec": _first_number((row or {}).get("observed_delay_sec")),
+                "observed_ts": (row or {}).get("observed_ts"),
+                "reference_price": _first_number((row or {}).get("reference_price")),
+                "virtual_limit_price": limit_price,
+                "conservative_bbo_price": price,
+                "conservative_touch": touched,
+            })
+        entry_price = None
+        # Embedded terminal evidence is not an execution authority.  Historical
+        # rows may contain diagnostic summaries produced under older or looser
+        # fill contracts, so always rebuild from the canonical signed 1s tape
+        # through the shared conservative evaluator.  Missing tape therefore
+        # remains UNKNOWN/UNVERIFIABLE instead of falling back to a receipt that
+        # cannot be independently reproduced.
+        tape = _joined_compressed_chase_tape_evidence(
+            first, expiry, stages, direction, tape_by_bucket,
+        )
+        fill_status = str(tape.get("fill_status") or "").upper()
+        entry_price = _first_number(
+            tape.get("entry_execution_price"),
+            tape.get("conservative_fill_price"),
+        )
+        tape_points = tape.get("points") or tape.get("bbo_points") or []
+        if not isinstance(tape_points, list):
+            tape_points = []
+        tape_receipt = tape.get("receipt_id") or tape.get("sha256") or (expiry or {}).get("tape_receipt_id")
+        tape_touch_ts = _first_number(tape.get("touch_ts"))
+        if touch_row is None and tape_touch_ts is not None:
+            touch_row = {
+                "observed_ts": tape_touch_ts,
+                "stage_index": tape.get("touch_stage_index"),
+            }
+        path_prices = [
+            _shadow_checkpoint_price(point, direction, entry=False)
+            for point in tape_points if isinstance(point, dict)
+        ]
+        path_prices = [price for price in path_prices if price is not None]
+        expiry_mark = _first_number(tape.get("terminal_execution_price"))
+        if expiry_mark is None:
+            expiry_mark = path_prices[-1] if path_prices else None
+        post_touch_returns = []
+        if touch_row is not None:
+            post_touch_returns = [
+                value for value in (
+                    _shadow_return_pct(direction, entry_price, price) for price in path_prices
+                ) if value is not None
+            ]
+        gross_terminal_return = _shadow_return_pct(direction, entry_price, expiry_mark)
+        fee_usd = _first_number(tape.get("fee_usd"), (expiry or {}).get("fee_usd"))
+        slippage_usd = _first_number(tape.get("slippage_usd"), (expiry or {}).get("slippage_usd"))
+        quantity = _first_number(tape.get("quantity"), first.get("quantity"), first.get("requested_qty"))
+        notional_usd = _first_number(tape.get("notional_usd"))
+        if notional_usd is None and quantity is not None and entry_price is not None:
+            notional_usd = quantity * entry_price
+        explicit_costs = fee_usd is not None and slippage_usd is not None and notional_usd not in (None, 0)
+        total_cost_usd = (fee_usd + slippage_usd) if explicit_costs else None
+        net_terminal_return = (
+            gross_terminal_return - total_cost_usd / notional_usd * 100.0
+            if gross_terminal_return is not None and explicit_costs else None
+        )
+        net_pnl_usd = (
+            net_terminal_return / 100.0 * notional_usd
+            if net_terminal_return is not None else None
+        )
+        feature = opportunity.get("feature_snapshot_at_signal") if isinstance(opportunity.get("feature_snapshot_at_signal"), dict) else {}
+        scores = decision.get("scores") if isinstance(decision.get("scores"), dict) else {}
+        if not scores:
+            scores = {
+                "long": _first_number(decision.get("long_score"), decision.get("score_long")),
+                "short": _first_number(decision.get("short_score"), decision.get("score_short")),
+                "confidence": _first_number(decision.get("confidence"), decision.get("ai_confidence")),
+            }
+        contraindications = decision.get("contraindications") or decision.get("reasons") or decision.get("reason") or []
+        if not isinstance(contraindications, list):
+            contraindications = [str(contraindications)] if contraindications else []
+        identity_missing = [name for name, value in (
+            ("shared_ai_call_id", call_id), ("opportunity", opportunity),
+            ("episode_id", episode_id), ("policy_id", policy_id),
+            ("policy_signature", policy_signature),
+            ("schedule_generation_id", schedule_generation_id),
+            ("tape_receipt", tape_receipt),
+        ) if not value]
+        for row in rows:
+            if row.get("identity_complete") is not True:
+                identity_missing.extend(row.get("missing_identity_fields") or ["runtime_identity_complete"])
+        identity_missing = sorted({str(value) for value in identity_missing if value})
+        expected_stage_indexes = set(range(len(expected)))
+        stage_coverage_complete = (
+            not duplicate_stage_indexes
+            and set(stages) == expected_stage_indexes
+            and all(
+            _compressed_stage_observation_supported(r) for r in stages.values()
+            )
+        )
+        supported_no_fill = fill_status == "NO_FILL"
+        supported_fill = bool(
+            tape.get("conservative_execution_supported") is True
+            and fill_status in {"FULL_FILL", "PARTIAL_FILL"}
+            and entry_price is not None
+            and touch_row is not None
+        )
+        tape_coverage_complete = bool(
+            tape_receipt and tape_points
+            and str(tape.get("coverage_status") or "").upper() in {"COMPLETE", "SUPPORTED"}
+            and int(tape.get("missing_seconds") or 0) == 0
+            and (supported_fill or supported_no_fill)
+            and str(tape.get("timeframe") or "").lower() == "1s"
+            and _first_number(tape.get("start_ts")) is not None
+            and _first_number(tape.get("end_ts")) is not None
+            and _first_number(tape.get("end_ts")) >= (
+                _first_number(
+                    first.get("expires_ts"), first.get("tape_window_end_ts"),
+                    (expiry or {}).get("observed_ts"), (expiry or {}).get("ts"),
+                )
+                or float("inf")
+            )
+        )
+        if supported_fill:
+            tape_coverage_complete = bool(
+                tape_coverage_complete
+                and _first_number(tape.get("start_ts")) <= (
+                    _first_number(touch_row.get("observed_ts"), touch_row.get("ts"))
+                    or float("-inf")
+                )
+            )
+        coverage_complete = stage_coverage_complete and expiry is not None and tape_coverage_complete
+        rejection_codes = []
+        if identity_missing:
+            rejection_codes.append("IDENTITY_INCOMPLETE")
+        if not stage_coverage_complete:
+            rejection_codes.append("STAGE_COVERAGE_INCOMPLETE")
+        if duplicate_stage_indexes:
+            rejection_codes.append("DUPLICATE_STAGE_INDEX")
+        if set(stages) != expected_stage_indexes:
+            rejection_codes.append("STAGE_INDEX_SET_MISMATCH")
+        if len(expiry_rows) > 1:
+            rejection_codes.append("DUPLICATE_TERMINAL_RECEIPT")
+        if expiry is None:
+            rejection_codes.append("TERMINAL_RECEIPT_MISSING")
+        if not tape_coverage_complete:
+            rejection_codes.append(
+                str(tape.get("outcome_code") or "TAPE_OR_EXECUTION_EVIDENCE_INCOMPLETE")
+            )
+        proof_class = "INSUFFICIENT_EVIDENCE"
+        if not identity_missing and coverage_complete and touch_row is not None and net_terminal_return is not None:
+            if net_terminal_return > 0:
+                proof_class = "PROVEN_MISSED_PROFIT"
+            elif net_terminal_return < 0:
+                proof_class = "PROVEN_AVOIDED_LOSS"
+            else:
+                proof_class = "AMBIGUOUS"
+        proofs.append({
+            "classification": proof_class,
+            "evidence_world": "SIGNED_COMPRESSED_SHADOW",
+            "qualification_eligible": False,
+            "execution_class": "SHADOW_ONLY",
+            "trade_id": first.get("trade_id"),
+            "shared_ai_call_id": call_id or None,
+            "opportunity_id": opportunity_id or opportunity.get("opportunity_id"),
+            "episode_id": episode_id or None,
+            "epoch_id": first.get("epoch_id") or opportunity.get("epoch_id"),
+            "policy_id": policy_id or None,
+            "policy_signature": policy_signature or None,
+            "schedule_generation_id": schedule_generation_id or None,
+            "direction": direction or None,
+            "signal_ts": opportunity.get("signal_ts"),
+            "scores": scores,
+            "regime": feature.get("regime") or feature.get("market_regime"),
+            "adx": _first_number(feature.get("adx"), feature.get("adx14"), decision.get("adx")),
+            "contraindications": contraindications,
+            "schedule": {
+                "checkpoint_seconds": expected,
+                "terminal_expiry_sec": expiry_sec,
+                "stages_expected": len(expected),
+                "stages_observed": len(stages),
+                "enabled_states": [bool(c["enabled"]) for c in checkpoints],
+            },
+            "checkpoint_market_counterfactuals": checkpoints,
+            "conservative_touch": touch_row is not None,
+            "conservative_fill_status": fill_status or "UNKNOWN_UNVERIFIABLE",
+            # Keep the detailed evaluator status above for diagnosis, while
+            # exposing the exact four-state evidence contract for aggregation.
+            # Ineligible, unsupported, and missing evidence are UNKNOWN; they
+            # must never silently inflate NO_FILL.
+            "execution_outcome": _normalized_execution_outcome(fill_status),
+            "touch_ts": tape_touch_ts or (touch_row or {}).get("observed_ts"),
+            "conservative_entry_price": entry_price,
+            "terminal_ts": _first_number(first.get("expires_ts"), (expiry or {}).get("observed_ts")),
+            "terminal_receipt_observed_ts": (expiry or {}).get("observed_ts"),
+            "terminal_mark_price": expiry_mark,
+            "gross_terminal_return_pct": gross_terminal_return,
+            "net_terminal_return_pct": net_terminal_return,
+            "net_pnl_usd": net_pnl_usd,
+            "mfe_pct": max(post_touch_returns) if post_touch_returns else None,
+            "mae_pct": min(post_touch_returns) if post_touch_returns else None,
+            "coverage": {
+                "status": "COMPLETE" if coverage_complete else "INSUFFICIENT",
+                "stage_ratio": round((len(stages) + int(expiry is not None)) / (len(expected) + 1), 6),
+                "tape_status": tape.get("coverage_status") or "UNAVAILABLE",
+                "missing_seconds": tape.get("missing_seconds"),
+                "tape_receipt": tape_receipt,
+                "requested_quantity": tape.get("requested_quantity", first.get("requested_qty")),
+                "available_quantity": tape.get("available_quantity"),
+                "accepted_quantity": tape.get("accepted_quantity"),
+                "raw_partial_quantity": tape.get("raw_partial_quantity"),
+                "rounded_executable_quantity": tape.get("rounded_executable_quantity"),
+                "accumulated_quantity": tape.get("accumulated_quantity"),
+                "minimum_lot_decision": tape.get("minimum_lot_decision") or "UNKNOWN",
+                "minimum_notional_decision": tape.get("minimum_notional_decision") or "UNKNOWN",
+                "quantity_attempts": tape.get("quantity_attempts") or [],
+                "signed_quantity_constraints": tape.get("signed_quantity_constraints"),
+                "quantity_constraint_reasons": tape.get("quantity_constraint_reasons") or [],
+                "identity_missing": identity_missing,
+                "rejection_codes": rejection_codes,
+            },
+            "cost_assumption": {
+                "fee_profile": EXPECTED_FEE_PROFILE,
+                "fee_usd": fee_usd,
+                "slippage_usd": slippage_usd,
+                "total_cost_usd": total_cost_usd,
+                "notional_usd": notional_usd,
+                "slippage_model": tape.get("slippage_model") or "UNAVAILABLE",
+                "explicit_costs_complete": explicit_costs,
+                "note": "A PROVEN classification requires explicit fee and slippage amounts; gross-only paths fail closed.",
+            },
+            "matching_executed_record": (episode_id, policy_id) in execution_keys,
+        })
+    counts = {name: 0 for name in _MISSED_PROOF_CLASSES}
+    execution_outcome_counts = {name: 0 for name in _EXECUTION_OUTCOME_CLASSES}
+    for row in proofs:
+        counts[row["classification"]] += 1
+        execution_outcome_counts[row["execution_outcome"]] += 1
+    arm_receipts = _compressed_shadow_arm_receipts(session=session)
+    arm_status_counts = {}
+    arm_reason_counts = {}
+    for receipt in arm_receipts:
+        status = str(receipt.get("status") or "UNKNOWN").upper()
+        reason = str(receipt.get("reason") or "UNKNOWN")
+        arm_status_counts[status] = arm_status_counts.get(status, 0) + 1
+        arm_reason_counts[reason] = arm_reason_counts.get(reason, 0) + 1
+    empty_reason = None if proofs else "SOURCE_EMPTY_OR_UNAVAILABLE: no compressed_chase_shadow_v1 rows"
+    return {
+        "schema": "missed_opportunity_proof_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "expected_bot_version": EXPECTED_BOT_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "evidence_world": "SIGNED_COMPRESSED_SHADOW",
+        "qualification_eligible": False,
+        "classification_contract": list(_MISSED_PROOF_CLASSES),
+        "execution_outcome_contract": list(_EXECUTION_OUTCOME_CLASSES),
+        "empty_reason": empty_reason,
+        "proof_count": len(proofs),
+        "classification_counts": counts,
+        "execution_outcome_counts": execution_outcome_counts,
+        "arm_receipt_count": len(arm_receipts),
+        "arm_status_counts": arm_status_counts,
+        "arm_reason_counts": arm_reason_counts,
+        "arm_receipts": arm_receipts,
+        "proofs": proofs,
+    }
+
+
+def missed_opportunity_proof_report(session=None):
+    payload = build_missed_opportunity_proof_report(session=session)
+    with open(MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return payload
+
+
+def _wilson_lower_bound(wins, total, z=1.96):
+    if total <= 0:
+        return None
+    p = wins / total
+    denominator = 1.0 + z * z / total
+    centre = p + z * z / (2.0 * total)
+    margin = z * math.sqrt((p * (1.0 - p) + z * z / (4.0 * total)) / total)
+    return (centre - margin) / denominator
+
+
+def chase_policy_lab_report(session=None, proof_payload=None):
+    proof_payload = proof_payload or build_missed_opportunity_proof_report(session=session)
+    groups = {}
+    for row in proof_payload.get("proofs") or []:
+        policy_id = str(row.get("policy_id") or "UNKNOWN")
+        group = groups.setdefault(policy_id, {"rows": [], "episodes": set()})
+        group["rows"].append(row)
+        if row.get("episode_id"):
+            group["episodes"].add(row["episode_id"])
+    ranked = []
+    for policy_id, group in groups.items():
+        rows = group["rows"]
+        supported = [r for r in rows if (r.get("coverage") or {}).get("status") == "COMPLETE"]
+        fills = [r for r in supported if r.get("conservative_touch")]
+        full_fills = [r for r in fills if r.get("conservative_fill_status") == "FULL_FILL"]
+        partial_fills = [r for r in fills if r.get("conservative_fill_status") == "PARTIAL_FILL"]
+        returns = [r.get("net_terminal_return_pct") for r in fills if r.get("net_terminal_return_pct") is not None]
+        pnls = [r.get("net_pnl_usd") for r in fills if r.get("net_pnl_usd") is not None]
+        wins = sum(1 for value in returns if value > 0)
+        losses = sum(1 for value in returns if value < 0)
+        executed_matches = len({
+            r.get("episode_id") for r in rows
+            if r.get("matching_executed_record") and r.get("episode_id")
+        })
+        running = peak = max_dd = 0.0
+        for value in returns:
+            running += value
+            peak = max(peak, running)
+            max_dd = min(max_dd, running - peak)
+        running_usd = peak_usd = max_dd_usd = 0.0
+        for value in pnls:
+            running_usd += value
+            peak_usd = max(peak_usd, running_usd)
+            max_dd_usd = min(max_dd_usd, running_usd - peak_usd)
+        first = rows[0]
+        status = "DESCRIPTIVE_LEADER" if len(supported) >= 30 and returns else "INSUFFICIENT_EVIDENCE"
+        ranked.append({
+            "policy_id": policy_id,
+            "policy_signature": first.get("policy_signature"),
+            "checkpoint_seconds": (first.get("schedule") or {}).get("checkpoint_seconds") or [],
+            "terminal_expiry_sec": (first.get("schedule") or {}).get("terminal_expiry_sec"),
+            "independent_opportunities": len(group["episodes"]),
+            "supported": len(supported),
+            "full_fills": len(full_fills),
+            "partial_fills": len(partial_fills),
+            "no_fills": len(supported) - len(fills),
+            "unsupported": len(rows) - len(supported),
+            "fill_rate_pct": round(len(fills) / len(supported) * 100.0, 3) if supported else None,
+            "shadow": {
+                "wins": wins, "losses": losses,
+                "net_pnl_usd": round(sum(pnls), 6) if pnls else None,
+                "ev_usd": round(sum(pnls) / len(pnls), 6) if pnls else None,
+                "net_return_pct": round(sum(returns), 6) if returns else None,
+                "ev_return_pct": round(sum(returns) / len(returns), 6) if returns else None,
+                "max_drawdown_pct": round(max_dd, 6) if returns else None,
+                "tail_loss_pct": round(min(returns), 6) if returns else None,
+                "max_drawdown_usd": round(max_dd_usd, 6) if pnls else None,
+                "tail_loss_usd": round(min(pnls), 6) if pnls else None,
+                "avg_mfe_pct": round(sum(r["mfe_pct"] for r in fills if r.get("mfe_pct") is not None) / max(1, sum(r.get("mfe_pct") is not None for r in fills)), 6) if any(r.get("mfe_pct") is not None for r in fills) else None,
+                "avg_mae_pct": round(sum(r["mae_pct"] for r in fills if r.get("mae_pct") is not None) / max(1, sum(r.get("mae_pct") is not None for r in fills)), 6) if any(r.get("mae_pct") is not None for r in fills) else None,
+            },
+            "executed": {
+                "independent_opportunities": executed_matches,
+                "pnl_usd": None,
+                "ev_usd": None,
+                "status": (
+                    "MATCHED_EXECUTION_WITHOUT_TERMINAL_PNL"
+                    if executed_matches else "NO_MATCHING_EXECUTED_POLICY_EVIDENCE"
+                ),
+            },
+            "coverage_pct": round(len(supported) / len(rows) * 100.0, 3) if rows else None,
+            "confidence": {
+                "label": "INSUFFICIENT" if len(supported) < 30 else "DESCRIPTIVE_ONLY",
+                "fill_rate_wilson_lower_95_pct": round((_wilson_lower_bound(len(fills), len(supported)) or 0.0) * 100.0, 3) if supported else None,
+            },
+            "regimes": sorted({str(r.get("regime")) for r in supported if r.get("regime")}),
+            "evidence_status": status,
+            "qualification_status": "NOT_QUALIFICATION_ELIGIBLE_SHADOW_ONLY",
+        })
+    ranked.sort(key=lambda r: (
+        r.get("evidence_status") == "DESCRIPTIVE_LEADER",
+        r.get("shadow", {}).get("ev_return_pct") is not None,
+        r.get("shadow", {}).get("ev_return_pct") or float("-inf"),
+        r.get("supported") or 0,
+    ), reverse=True)
+    top = ranked[0] if ranked else None
+    payload = {
+        "schema": "chase_policy_lab_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "expected_bot_version": EXPECTED_BOT_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "evidence_worlds_separate": True,
+        "qualification_eligible": False,
+        "empty_reason": None if ranked else proof_payload.get("empty_reason"),
+        "leader_label": (top or {}).get("evidence_status") or "INSUFFICIENT_EVIDENCE",
+        "top_schedule": top,
+        "ranked_schedules": ranked,
+        "all_schedule_count": len(ranked),
+        "full_artifact_note": "All signed schedule permutations are retained in ranked_schedules and Missed Opportunity Proof rows.",
+    }
+    with open(CHASE_POLICY_LAB_REPORT_FILE, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
     return payload
 
 
@@ -12535,26 +13294,41 @@ def run_integrity_checks(
             f"total_trades={total}",
         )
 
-    # AI funnel: approvals + rejects + skipped + timeout reconcile on AI-involved rows
+    # AI funnel: reconcile rows that actually carry AI outcome evidence.
+    # Generic BLOCKED rows can be pre-AI context failures and therefore must
+    # not be classified as AI-involved without an AI outcome/cooldown marker.
     if decisions is not None and not decisions.empty:
         d = decisions.copy()
         ai_txt = d["ai_decision_text"].fillna("").astype(str).str.upper() if "ai_decision_text" in d.columns else pd.Series([""] * len(d))
         dec = d["decision"].fillna("").astype(str).str.upper() if "decision" in d.columns else pd.Series([""] * len(d))
         skip_st = d["skip_stage"].fillna("").astype(str).str.upper() if "skip_stage" in d.columns else pd.Series([""] * len(d))
-        ai_involved = d[dec.isin(["AI", "BLOCKED"]) | ai_txt.isin(["APPROVE", "REJECT"]) | skip_st.eq("COOLDOWN")]
+        ai_mask = (
+            dec.eq("AI")
+            | ai_txt.isin(["APPROVE", "REJECT"])
+            | ai_txt.str.contains("ERROR|TIMEOUT", regex=True)
+            | skip_st.eq("COOLDOWN")
+        )
+        ai_involved = d[ai_mask].copy()
         sub_txt = ai_involved["ai_decision_text"].fillna("").astype(str).str.upper()
-        appr = int((sub_txt == "APPROVE").sum())
-        rej = int((sub_txt == "REJECT").sum())
-        timeout = int(sub_txt.str.contains("ERROR|TIMEOUT", regex=True).sum())
-        skipped = int(ai_involved["skip_stage"].fillna("").astype(str).str.upper().eq("COOLDOWN").sum()) if "skip_stage" in ai_involved.columns else 0
+        timeout_mask = sub_txt.str.contains("ERROR|TIMEOUT", regex=True)
+        reject_mask = sub_txt.eq("REJECT") & ~timeout_mask
+        approve_mask = sub_txt.eq("APPROVE") & ~timeout_mask
+        cooldown_mask = ai_involved["skip_stage"].fillna("").astype(str).str.upper().eq("COOLDOWN") if "skip_stage" in ai_involved.columns else pd.Series([False] * len(ai_involved), index=ai_involved.index)
+        cooldown_mask &= ~(approve_mask | reject_mask | timeout_mask)
+        unclassified_mask = ~(approve_mask | reject_mask | cooldown_mask | timeout_mask)
+        appr = int(approve_mask.sum())
+        rej = int(reject_mask.sum())
+        skipped = int(cooldown_mask.sum())
+        timeout = int(timeout_mask.sum())
+        unclassified = int(unclassified_mask.sum())
         funnel = appr + rej + skipped + timeout
         n_ai = int(len(ai_involved))
         _add(
             "ai_decision_funnel",
-            abs(funnel - n_ai) <= max(10, int(0.05 * n_ai)),
+            funnel == n_ai and unclassified == 0,
             f"approvals+rejects+skipped+timeout={appr}+{rej}+{skipped}+{timeout}={funnel}",
-            f"ai_involved_rows={n_ai} (total decisions={len(d)})",
-            "decisions_3factor: AI/BLOCKED + ai_decision_text APPROVE/REJECT + COOLDOWN skip_stage",
+            f"ai_involved_rows={n_ai}; unclassified={unclassified} (all rows={len(d)})",
+            "decisions_3factor: actual AI outcomes/errors plus explicit COOLDOWN; pre-AI BLOCKED rows excluded",
         )
 
     # Chase buckets: compare the same completed-trade IDs in both sources.
@@ -12681,11 +13455,23 @@ def chase_attribution_report(trades=None, session=None):
     print(f"\n=== CHASE ATTRIBUTION REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
     rows = _filter_jsonl_rows_by_session(_load_jsonl_rows(EXECUTION_FUNNEL_FILE), session)
+    # Identity rows do not consistently repeat the fresh-epoch/session marker.
+    # Load the identity ledger unfiltered and join only by the already in-scope,
+    # globally unique canonical trade ID. This recovers metadata without
+    # importing any out-of-session PnL, fill, or outcome evidence.
+    intent_rows = _load_jsonl_rows("duplicate_intent_audit.jsonl")
+    intent_lane = {}
+    for intent in intent_rows:
+        intent_tid = str(intent.get("trade_id") or "")
+        intent_research_lane = _normalize_lane_label(intent.get("research_lane"))
+        if intent_tid and intent_research_lane != "UNKNOWN":
+            intent_lane[intent_tid] = intent_research_lane
     trade_pnl = {}
     trade_wr = {}
     trade_chase = {}
     trade_lane = {}
     trade_hold = {}
+    trade_settings_epoch = {}
     if trades is not None and not trades.empty and "trade_id" in trades.columns:
         work = trades.copy()
         if "trade_id" in work.columns:
@@ -12701,16 +13487,37 @@ def chase_attribution_report(trades=None, session=None):
                 if pd.notna(pnl):
                     trade_pnl[tid] = float(pnl)
                     trade_wr[tid] = float(pnl) > 0
-        if "limit_chase_count" in work.columns:
-            for _, t in work.iterrows():
-                tid = str(t.get("trade_id") or "")
-                if tid:
+                    raw_settings_ts = next(
+                        (
+                            t.get(name) for name in ("entry_ts", "open_ts", "ts")
+                            if name in work.columns and t.get(name) not in (None, "")
+                        ),
+                        None,
+                    )
+                    try:
+                        numeric_settings_ts = float(raw_settings_ts)
+                    except (TypeError, ValueError, OverflowError):
+                        numeric_settings_ts = None
+                    if numeric_settings_ts is not None and math.isfinite(numeric_settings_ts):
+                        trade_settings_epoch[tid] = numeric_settings_ts
+                    else:
+                        parsed_settings_ts = pd.to_datetime(raw_settings_ts, utc=True, errors="coerce")
+                        if pd.notna(parsed_settings_ts):
+                            trade_settings_epoch[tid] = float(parsed_settings_ts.timestamp())
+        for _, t in work.iterrows():
+            tid = str(t.get("trade_id") or "")
+            if tid:
+                # Lane and hold identity are independent of whether this
+                # particular trade export has the legacy chase-count column.
+                # Keeping them inside that optional branch made signed V3.1
+                # family trades render as UNKNOWN in chase attribution.
+                if "research_lane" in work.columns:
+                    trade_lane[tid] = _normalize_lane_label(t.get("research_lane"))
+                hold = t.get("dur_min") if "dur_min" in work.columns else t.get("duration_min")
+                if hold is not None and pd.notna(hold):
+                    trade_hold[tid] = round(float(hold), 2)
+                if "limit_chase_count" in work.columns:
                     trade_chase[tid] = int(pd.to_numeric(t.get("limit_chase_count"), errors="coerce") or 0)
-                    if "research_lane" in work.columns:
-                        trade_lane[tid] = _normalize_lane_label(t.get("research_lane"))
-                    hold = t.get("dur_min") if "dur_min" in work.columns else t.get("duration_min")
-                    if hold is not None and pd.notna(hold):
-                        trade_hold[tid] = round(float(hold), 2)
 
     by_tid = {}
     for row in rows:
@@ -12723,6 +13530,30 @@ def chase_attribution_report(trades=None, session=None):
         relay_index = _platform_relay_evidence_index(_agent_data_path("relay_lifecycle_evidence_v1.json"))
     except Exception:
         relay_index = {}
+
+    # The platform relay export is cumulative and can contain months of
+    # lifecycles. Fresh-collection reports must never seed relay-only rows
+    # from before the active epoch. Existing current-epoch funnel/trade IDs
+    # may still join their matching relay receipt below.
+    session_start = _session_start_ts(session)
+
+    def _relay_join_is_in_session(joined_relay):
+        if session_start is None or pd.isna(session_start):
+            return True
+        newest = None
+        for record in (joined_relay or {}).get("records") or []:
+            values = [record.get("createdAt"), record.get("closedAt")]
+            values.extend(
+                event.get("createdAt") or event.get("created_at")
+                for event in (record.get("events") or [])
+                if isinstance(event, dict)
+            )
+            for value in values:
+                parsed = pd.to_datetime(value, utc=True, errors="coerce")
+                if pd.isna(parsed):
+                    continue
+                newest = parsed if newest is None or parsed > newest else newest
+        return newest is not None and newest >= session_start
 
     attributions = []
     chase_events_total = 0
@@ -12756,13 +13587,22 @@ def chase_attribution_report(trades=None, session=None):
             funnel_cc = int(expire_row.get("limit_chase_count") or 0)
         chase_count, chase_count_source = _resolve_chase_count(tid, funnel_cc, trade_chase)
 
-        lane = _normalize_lane_label(
-            (order_row or {}).get("research_lane")
-            or (fill_row or {}).get("research_lane")
-            or (chase_rows[0].get("research_lane") if chase_rows else None)
-            or (expire_row or {}).get("research_lane")
-            or trade_lane.get(tid)
-            or "UNKNOWN"
+        lane_candidates = [
+            (order_row or {}).get("research_lane"),
+            (fill_row or {}).get("research_lane"),
+            intent_lane.get(tid),
+            (chase_rows[0].get("research_lane") if chase_rows else None),
+            (expire_row or {}).get("research_lane"),
+        ]
+        lane_candidates.extend(event.get("research_lane") for event in events)
+        lane_candidates.append(trade_lane.get(tid))
+        lane = next(
+            (
+                normalized
+                for candidate in lane_candidates
+                if (normalized := _normalize_lane_label(candidate)) != "UNKNOWN"
+            ),
+            "UNKNOWN",
         )
         original_limit = (
             (order_row or {}).get("original_limit_price")
@@ -12824,6 +13664,11 @@ def chase_attribution_report(trades=None, session=None):
             "fill_price": fill_price,
             "net_pnl_usd": trade_pnl.get(tid),
             "win": trade_wr.get(tid),
+            "settings_observation_epoch": (
+                order_epoch
+                or (_funnel_row_epoch(fill_row) if fill_row else None)
+                or trade_settings_epoch.get(tid)
+            ),
             "ttl_expired": expire_row is not None and not filled,
         }
         joined_relay = relay_index.get(tid) if isinstance(relay_index, dict) else None
@@ -12899,6 +13744,7 @@ def chase_attribution_report(trades=None, session=None):
             "fill_price": None,
             "net_pnl_usd": pnl,
             "win": trade_wr.get(tid),
+            "settings_observation_epoch": trade_settings_epoch.get(tid),
             "ttl_expired": False,
             "chase_count_source": "trades_3factor.limit_chase_count",
         })
@@ -12906,6 +13752,8 @@ def chase_attribution_report(trades=None, session=None):
     seen_tids = {a.get("trade_id") for a in attributions}
     for tid, joined_relay in (relay_index or {}).items():
         if tid in seen_tids or not joined_relay:
+            continue
+        if not _relay_join_is_in_session(joined_relay):
             continue
         copy_evidence = _normalize_platform_bitfinex_evidence(
             joined_relay.get("records") or [], tid
@@ -13079,6 +13927,43 @@ def _chase_bucket_integrity_cohorts(trades, chase_payload) -> dict:
     }
 
 
+def _current_execution_settings_binding(session) -> dict | None:
+    """Return the latest canonical runtime settings epoch in this collection."""
+    session_start = _session_start_ts(session)
+    if session_start is None or pd.isna(session_start):
+        return None
+    cutoff = float(session_start.timestamp())
+    candidates = []
+    for row in _load_jsonl_rows("execution_settings_history.jsonl"):
+        if not isinstance(row, dict):
+            continue
+        try:
+            effective_epoch = float(row.get("epoch"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        gap_buckets = row.get("gap_buckets")
+        chase_buckets = row.get("chase_buckets")
+        if (not math.isfinite(effective_epoch) or effective_epoch < cutoff
+                or not isinstance(gap_buckets, list)
+                or not isinstance(chase_buckets, list)
+                or any(not isinstance(value, str) for value in [*gap_buckets, *chase_buckets])):
+            continue
+        expected = "gap=" + ",".join(gap_buckets) + "|chase=" + ",".join(chase_buckets)
+        if row.get("signature") != expected:
+            continue
+        candidates.append((effective_epoch, expected, gap_buckets, chase_buckets))
+    if not candidates:
+        return None
+    effective_epoch, signature, gap_buckets, chase_buckets = max(candidates, key=lambda row: row[0])
+    return {
+        "schema": "execution_settings_binding_v1",
+        "signature": signature,
+        "effective_epoch": effective_epoch,
+        "gap_buckets": gap_buckets,
+        "chase_buckets": chase_buckets,
+    }
+
+
 def _chase_bucket_stats(attributions):
     order = ["0", "1", "2", "3", "4", "5+"]
     buckets = {
@@ -13089,14 +13974,17 @@ def _chase_bucket_stats(attributions):
         for k in order
     }
     for row in attributions or []:
-        if row.get("net_pnl_usd") is None and row.get("win") is None:
+        try:
+            pnl = float(row.get("net_pnl_usd"))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(pnl):
             continue
         key = _chase_count_bucket(row.get("chase_count"))
         b = buckets[key]
         b["trades"] += 1
-        pnl = float(row.get("net_pnl_usd") or 0)
         b["sum_pnl_usd"] = round(b["sum_pnl_usd"] + pnl, 2)
-        if row.get("win") or pnl > 0:
+        if pnl > 0:
             b["wins"] += 1
         hold = row.get("avg_hold_min")
         if hold is not None:
@@ -13134,7 +14022,35 @@ def chase_effectiveness_report(trades=None, session=None, chase_payload=None):
     if chase_payload is None:
         chase_payload = chase_attribution_report(trades=trades, session=session)
     attributions = (chase_payload or {}).get("trades") or []
-    buckets = _chase_bucket_stats(attributions)
+    settings_binding = _current_execution_settings_binding(session)
+    eligible = []
+    exclusions = {
+        "MISSING_OR_NONFINITE_NET_PNL": 0,
+        "MISSING_OR_INVALID_SETTINGS_TIME": 0,
+        "BEFORE_CURRENT_SETTINGS_EPOCH": 0,
+    }
+    for row in attributions:
+        try:
+            pnl = float(row.get("net_pnl_usd"))
+        except (TypeError, ValueError, OverflowError):
+            exclusions["MISSING_OR_NONFINITE_NET_PNL"] += 1
+            continue
+        if not math.isfinite(pnl):
+            exclusions["MISSING_OR_NONFINITE_NET_PNL"] += 1
+            continue
+        try:
+            settings_epoch = float(row.get("settings_observation_epoch"))
+        except (TypeError, ValueError, OverflowError):
+            exclusions["MISSING_OR_INVALID_SETTINGS_TIME"] += 1
+            continue
+        if not math.isfinite(settings_epoch):
+            exclusions["MISSING_OR_INVALID_SETTINGS_TIME"] += 1
+            continue
+        if settings_binding is None or settings_epoch < settings_binding["effective_epoch"]:
+            exclusions["BEFORE_CURRENT_SETTINGS_EPOCH"] += 1
+            continue
+        eligible.append(row)
+    buckets = _chase_bucket_stats(eligible)
     for key, b in buckets.items():
         if b["trades"]:
             print(
@@ -13148,6 +14064,22 @@ def chase_effectiveness_report(trades=None, session=None, chase_payload=None):
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "question": "Are heavily chased trades profitable or rescue fills?",
+        "metric_basis": {
+            "pnl_field": "net_pnl_usd",
+            "pnl_basis": "AFTER_COST_NET_PNL",
+            "ev_denominator": "current_settings_bucket_attributions_with_finite_net_pnl",
+            "bucket_field": "chase_count",
+        },
+        "metrics_status": (
+            "VERIFIED_CURRENT_SETTINGS_COHORT"
+            if settings_binding is not None else "UNAVAILABLE_SETTINGS_BINDING"
+        ),
+        "execution_settings_binding": settings_binding,
+        "cohort_counts": {
+            "input_attributions": len(attributions),
+            "included_finite_net_pnl": len(eligible),
+            "exclusions": exclusions,
+        },
         "buckets": buckets,
     }
     try:
@@ -13189,6 +14121,63 @@ def _exact_chase_bucket_stats(attributions):
     return _chase_bucket_stats(attributions)
 
 
+def _shadow_chase_attributions(session=None):
+    """Return terminal shadow/lab outcomes with an explicit evidence class.
+
+    Generic shadows/counterfactuals and per-tile LAB outcomes are intentionally
+    kept as separate records.  They broaden research coverage, but they never
+    become paper fills or exchange executions merely because they appear in a
+    chase table.
+    """
+    generic = dict(_load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {})
+    # The richer shadow receipt wins on an overlapping trade id.
+    generic.update(_load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {})
+    generic_df = pd.DataFrame(list(generic.values())) if generic else pd.DataFrame()
+    if session and not generic_df.empty and _session_start_ts(session) is not None:
+        generic_df = filter_df_since_session(generic_df, session, ts_cols=("ts", "timestamp"))
+
+    lane_df = _load_shadow_lane_outcome_df(session)
+    rows = []
+
+    def append_frame(frame, evidence_class):
+        if frame is None or frame.empty:
+            return
+        id_col = "trade_id" if "trade_id" in frame.columns else (
+            "study_id" if "study_id" in frame.columns else None
+        )
+        work = frame.copy()
+        if id_col:
+            work = work.drop_duplicates(subset=[id_col], keep="last")
+        for index, record in work.iterrows():
+            pnl = pd.to_numeric(record.get("net_pnl_usd"), errors="coerce")
+            if pd.isna(pnl):
+                continue
+            chase = record.get("limit_chase_count")
+            if chase is None or pd.isna(chase):
+                chase = record.get("chase_count")
+            if chase is None or pd.isna(chase):
+                ref = record.get("market_path_ref")
+                chase = ref.get("chase_count") if isinstance(ref, dict) else 0
+            hold = record.get("duration_min")
+            if hold is None or pd.isna(hold):
+                hold = record.get("dur_min")
+            rows.append({
+                "trade_id": str(record.get(id_col) if id_col else index),
+                "source_trade_id": record.get("source_trade_id"),
+                "lane": _normalize_lane_label(record.get("research_lane") or record.get("lane")),
+                "chase_count": int(pd.to_numeric(chase, errors="coerce") or 0),
+                "net_pnl_usd": float(pnl),
+                "win": float(pnl) > 0,
+                "avg_hold_min": None if hold is None or pd.isna(hold) else float(hold),
+                "evidence_class": evidence_class,
+                "executed": False,
+            })
+
+    append_frame(generic_df, "GENERIC_SHADOW_COUNTERFACTUAL")
+    append_frame(lane_df, "TILE_LAB_SHADOW")
+    return rows
+
+
 def chase_threshold_report(trades=None, session=None, chase_payload=None):
     """Exact chase-count buckets — EV/WR/PnL at each limit_chase_count (0, 1, 2, 3, 4, 5+)."""
     if session is None:
@@ -13205,6 +14194,14 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
         chase_payload = chase_attribution_report(trades=trades, session=session)
     attributions = (chase_payload or {}).get("trades") or []
     thresholds = _exact_chase_bucket_stats(attributions)
+    shadow_attributions = _shadow_chase_attributions(session)
+    shadow_thresholds = _exact_chase_bucket_stats(shadow_attributions)
+    shadow_thresholds_by_lane = {
+        lane: _exact_chase_bucket_stats([
+            row for row in shadow_attributions if row.get("lane") == lane
+        ])
+        for lane in sorted({row.get("lane") for row in shadow_attributions if row.get("lane")})
+    }
     for key, block in thresholds.items():
         if block["trades"]:
             print(
@@ -13212,13 +14209,14 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
                 f"PnL=${block['sum_pnl_usd']:.2f} EV=${block['ev_usd']:.2f} {PIPELINE_ENFORCEMENT_TAG}"
             )
     payload = {
-        "schema": "chase_threshold_v2",
-        "evidence_scope": "LEGACY_EXECUTED",
+        "schema": "chase_threshold_v3",
+        "evidence_scope": "SEPARATED_EXECUTED_AND_SHADOW",
         "qualified_v3_1": False,
         "ranking_eligible": False,
         "warning": (
-            "Historical executed-lane cohort only; excluded from the active "
-            "V3.1 safe-policy rankings."
+            "All available terminal chase evidence is included, but executed "
+            "paper outcomes and shadow/lab counterfactuals remain separate. "
+            "Shadow PnL is not a fill or realized profit."
         ),
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
@@ -13227,6 +14225,25 @@ def chase_threshold_report(trades=None, session=None, chase_payload=None):
         "question": "Per exact limit_chase_count bucket (0, 1, 2, 3, 4, 5+) — EV/WR/PnL.",
         "chase_count_source": "trades_3factor.limit_chase_count when execution_funnel lacks LIMIT_CHASE rows",
         "thresholds": thresholds,
+        "executed_thresholds": thresholds,
+        "shadow_thresholds": shadow_thresholds,
+        "shadow_thresholds_by_lane": shadow_thresholds_by_lane,
+        "coverage": {
+            "executed_terminal_outcomes": sum(int(b.get("trades") or 0) for b in thresholds.values()),
+            "shadow_terminal_outcomes": len(shadow_attributions),
+            "generic_shadow_counterfactuals": sum(
+                1 for row in shadow_attributions
+                if row.get("evidence_class") == "GENERIC_SHADOW_COUNTERFACTUAL"
+            ),
+            "tile_lab_shadow_outcomes": sum(
+                1 for row in shadow_attributions
+                if row.get("evidence_class") == "TILE_LAB_SHADOW"
+            ),
+        },
+        "evidence_contract": (
+            "Compare the cohorts side by side. Do not add executed and shadow PnL "
+            "or use shadow rows as execution qualification evidence."
+        ),
     }
     try:
         with open(analyzer_report_path(CHASE_THRESHOLD_REPORT_FILE), "w", encoding="utf-8") as f:
@@ -13497,7 +14514,26 @@ def scenario_c_leakage_report(trades=None, session=None):
     print(f"\n=== SCENARIO C LEAKAGE REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
     if trades is None or trades.empty:
         print(f"  No trades {PIPELINE_ENFORCEMENT_TAG}")
-        return {}
+        payload = {
+            "schema": "scenario_c_leakage_v1",
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "expected_bot_version": EXPECTED_BOT_VERSION,
+            "session_scope": scope,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "evidence_status": "INSUFFICIENT_CURRENT_EPOCH_TERMINALS",
+            "overall": {
+                "trades": 0,
+                "peak_profit_usd": 0.0,
+                "booked_profit_usd": 0.0,
+                "left_on_table_usd": None,
+                "capture_ratio_pct": None,
+                "avg_mfe_margin_pct": None,
+            },
+            "by_exit_reason": {},
+        }
+        with open(analyzer_report_path(SCENARIO_C_LEAKAGE_REPORT_FILE), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
     work = trades.copy()
     if "trade_id" in work.columns:
         work = work.drop_duplicates(subset=["trade_id"], keep="last")
@@ -14091,14 +15127,29 @@ def edge_incremental_value_report(trades=None, session=None):
     baseline = filters[0] if filters else {}
     best_ev = baseline
     for row in filters[1:]:
-        if row["approves"] >= 10 and row.get("ev_usd", 0) > best_ev.get("ev_usd", -999):
+        row_ev = row.get("ev_usd")
+        best_ev_value = best_ev.get("ev_usd")
+        if (
+            row["approves"] >= 10
+            and row_ev is not None
+            and (best_ev_value is None or row_ev > best_ev_value)
+        ):
             best_ev = row
 
     improves_wr = any(
-        f["min_edge"] > 0 and f["approves"] >= 10 and f["win_rate_pct"] > baseline.get("win_rate_pct", 0) + 2
+        f["min_edge"] > 0
+        and f["approves"] >= 10
+        and f.get("win_rate_pct") is not None
+        and baseline.get("win_rate_pct") is not None
+        and f["win_rate_pct"] > baseline["win_rate_pct"] + 2
         for f in filters
     )
-    improves_ev = best_ev.get("min_edge", 0) > 0 and best_ev.get("ev_usd", 0) > baseline.get("ev_usd", 0) + 0.15
+    improves_ev = (
+        best_ev.get("min_edge", 0) > 0
+        and best_ev.get("ev_usd") is not None
+        and baseline.get("ev_usd") is not None
+        and best_ev["ev_usd"] > baseline["ev_usd"] + 0.15
+    )
     improves_ladder = any(
         f["min_edge"] > 0 and f["ladder_known_fills"] >= 5
         and f["ladder_hit_pct"] > baseline.get("ladder_hit_pct", 0) + 3
@@ -14118,16 +15169,29 @@ def edge_incremental_value_report(trades=None, session=None):
         recommendation = "Edge moves ladder hit rate but not EV/WR — review manually."
 
     for row in filters:
-        b_ev = baseline.get("ev_usd") or 0
-        b_wr = baseline.get("win_rate_pct") or 0
-        row["delta_ev_vs_ai_only"] = round(row["ev_usd"] - b_ev, 2) if row["min_edge"] > 0 else 0.0
-        row["delta_wr_vs_ai_only"] = round(row["win_rate_pct"] - b_wr, 1) if row["min_edge"] > 0 else 0.0
+        b_ev = baseline.get("ev_usd")
+        b_wr = baseline.get("win_rate_pct")
+        row["delta_ev_vs_ai_only"] = (
+            round(row["ev_usd"] - b_ev, 2)
+            if row["min_edge"] > 0 and row.get("ev_usd") is not None and b_ev is not None
+            else (0.0 if row["min_edge"] == 0 and b_ev is not None else None)
+        )
+        row["delta_wr_vs_ai_only"] = (
+            round(row["win_rate_pct"] - b_wr, 1)
+            if row["min_edge"] > 0 and row.get("win_rate_pct") is not None and b_wr is not None
+            else (0.0 if row["min_edge"] == 0 and b_wr is not None else None)
+        )
         row["label"] = "AI_only" if row["min_edge"] == 0 else f"AI_and_edge_ge_{row['min_edge']}"
         if row["approves"] >= 5:
+            fill_text = f"{row['fill_pct']:.1f}%" if row.get("fill_pct") is not None else "n/a"
+            wr_text = f"{row['win_rate_pct']:.1f}%" if row.get("win_rate_pct") is not None else "n/a"
+            ev_text = f"${row['ev_usd']:.2f}" if row.get("ev_usd") is not None else "$n/a"
+            ladder_text = (
+                f"{row['ladder_hit_pct']:.1f}%" if row.get("ladder_hit_pct") is not None else "n/a"
+            )
             print(
-                f"  {row['label']}: approves={row['approves']} fill={row['fill_pct']:.1f}% "
-                f"WR={row['win_rate_pct']:.1f}% EV=${row['ev_usd']:.2f} "
-                f"ladder={row['ladder_hit_pct']:.1f}% {PIPELINE_ENFORCEMENT_TAG}"
+                f"  {row['label']}: approves={row['approves']} fill={fill_text} "
+                f"WR={wr_text} EV={ev_text} ladder={ladder_text} {PIPELINE_ENFORCEMENT_TAG}"
             )
 
     print(f"  Verdict: {verdict} | live edge min={LIVE_EDGE_THRESHOLD_DEFAULT} {PIPELINE_ENFORCEMENT_TAG}")
@@ -14166,7 +15230,23 @@ def scenario_c_capture_ratio_report(trades=None, session=None):
 
     if trades is None or trades.empty:
         print(f"  No trades {PIPELINE_ENFORCEMENT_TAG}")
-        return {}
+        payload = {
+            "schema": "scenario_c_capture_ratio_v1",
+            "analyzer_sync_id": ANALYZER_SYNC_ID,
+            "expected_bot_version": EXPECTED_BOT_VERSION,
+            "session_scope": scope,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "evidence_status": "INSUFFICIENT_CURRENT_EPOCH_TERMINALS",
+            "method": "capture_pct = net_pnl_usd / (max_profit_margin_pct * margin_usdt / 100) per trade",
+            "overall_mfe_positive": {"trades": 0},
+            "winners_only": {"trades": 0},
+            "ladder_exits_only": {"trades": 0},
+            "capture_distribution": [],
+            "by_exit_reason": {},
+        }
+        with open(analyzer_report_path(SCENARIO_C_CAPTURE_RATIO_REPORT_FILE), "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        return payload
 
     work = trades.copy()
     if "trade_id" in work.columns:
@@ -14909,6 +15989,36 @@ def _normalize_research_lane(val):
     return lane
 
 
+def _dedupe_funnel_stage_rows(rows):
+    """Return one logical stage per trade plus transparent duplicate metrics."""
+    logical = []
+    seen = set()
+    duplicates_by_stage = Counter()
+    raw_stage_rows = 0
+    for index, row in enumerate(rows):
+        stage = str(row.get("stage") or "").strip().upper()
+        tid = str(row.get("trade_id") or "").strip()
+        if not stage:
+            logical.append(row)
+            continue
+        raw_stage_rows += 1
+        # Missing identities cannot safely be merged; retain them so the
+        # integrity layer can report them independently.
+        key = (tid, stage) if tid else (f"__missing_trade_id__:{index}", stage)
+        if key in seen:
+            duplicates_by_stage[stage] += 1
+            continue
+        seen.add(key)
+        logical.append(row)
+    duplicate_count = int(sum(duplicates_by_stage.values()))
+    return logical, {
+        "raw_stage_rows": int(raw_stage_rows),
+        "logical_stage_rows": int(raw_stage_rows - duplicate_count),
+        "duplicate_stage_rows_excluded": duplicate_count,
+        "duplicates_by_stage": dict(sorted(duplicates_by_stage.items())),
+    }
+
+
 def pathway_survival_report(trades=None, session=None):
     """Full funnel per pathway: approve → order → fill → closed → wins → PnL."""
     if session is None:
@@ -14928,7 +16038,8 @@ def pathway_survival_report(trades=None, session=None):
             lane = _normalize_research_lane(t.get("research_lane"))
             if tid and lane:
                 trade_lane[tid] = lane
-    rows = _filter_jsonl_rows_by_session(all_rows, session)
+    filtered_rows = _filter_jsonl_rows_by_session(all_rows, session)
+    rows, stage_integrity = _dedupe_funnel_stage_rows(filtered_rows)
     lanes = list(BENCHMARK_LANES)
     survival = {}
     for lane in lanes:
@@ -14943,10 +16054,10 @@ def pathway_survival_report(trades=None, session=None):
             "order_expired": 0,
             "wins": 0,
             "losses": 0,
-            "net_pnl_usd": 0.0,
-            "win_rate_pct": 0.0,
-            "approve_to_fill_pct": 0.0,
-            "ev_per_fill_usd": 0.0,
+            "net_pnl_usd": None,
+            "win_rate_pct": None,
+            "approve_to_fill_pct": None,
+            "ev_per_fill_usd": None,
         }
 
     for row in rows:
@@ -14960,8 +16071,8 @@ def pathway_survival_report(trades=None, session=None):
                 "label": RESEARCH_LANE_LABELS.get(lane, lane),
                 "approves": 0, "orders": 0, "fills": 0, "closed": 0,
                 "signal_expired": 0, "order_expired": 0,
-                "wins": 0, "losses": 0, "net_pnl_usd": 0.0,
-                "win_rate_pct": 0.0, "approve_to_fill_pct": 0.0, "ev_per_fill_usd": 0.0,
+                "wins": 0, "losses": 0, "net_pnl_usd": None,
+                "win_rate_pct": None, "approve_to_fill_pct": None, "ev_per_fill_usd": None,
             }
         stage = str(row.get("stage") or "").upper()
         bucket = survival[lane]
@@ -14989,29 +16100,32 @@ def pathway_survival_report(trades=None, session=None):
                     "label": RESEARCH_LANE_LABELS.get(lane, lane),
                     "approves": 0, "orders": 0, "fills": 0, "closed": 0,
                     "signal_expired": 0, "order_expired": 0,
-                    "wins": 0, "losses": 0, "net_pnl_usd": 0.0,
-                    "win_rate_pct": 0.0, "approve_to_fill_pct": 0.0, "ev_per_fill_usd": 0.0,
+                    "wins": 0, "losses": 0, "net_pnl_usd": None,
+                    "win_rate_pct": None, "approve_to_fill_pct": None, "ev_per_fill_usd": None,
                 }
-            survival[lane]["wins"] = int((sub[pnl_col] > 0).sum())
-            survival[lane]["losses"] = int((sub[pnl_col] <= 0).sum())
-            survival[lane]["net_pnl_usd"] = round(float(sub[pnl_col].sum()), 2)
-            n = len(sub)
+            valid_pnl = sub[pnl_col].dropna()
+            survival[lane]["wins"] = int((valid_pnl > 0).sum())
+            survival[lane]["losses"] = int((valid_pnl <= 0).sum())
+            n = len(valid_pnl)
             if n:
+                survival[lane]["net_pnl_usd"] = round(float(valid_pnl.sum()), 2)
                 survival[lane]["win_rate_pct"] = round(100.0 * survival[lane]["wins"] / n, 1)
 
     bench_ev = None
     for lane, b in survival.items():
-        if b["approves"]:
+        terminal_entry_outcomes = b["fills"] + b["signal_expired"] + b["order_expired"]
+        if b["approves"] and terminal_entry_outcomes:
             b["approve_to_fill_pct"] = round(100.0 * b["fills"] / b["approves"], 1)
-        if b["fills"]:
+        if b["fills"] and b["net_pnl_usd"] is not None:
             b["ev_per_fill_usd"] = round(b["net_pnl_usd"] / b["fills"], 2)
-        if lane == BENCHMARK_LANE and b["fills"]:
+        if lane == BENCHMARK_LANE and b["ev_per_fill_usd"] is not None:
             bench_ev = b["ev_per_fill_usd"]
         if b["approves"] or b["fills"]:
             print(
                 f"  {lane}: approve={b['approves']} order={b['orders']} fill={b['fills']} "
-                f"closed={b['closed']} win={b['wins']} pnl=${b['net_pnl_usd']:.2f} "
-                f"fill_rate={b['approve_to_fill_pct']:.1f}% {PIPELINE_ENFORCEMENT_TAG}"
+                f"closed={b['closed']} win={b['wins']} pnl={_fmt_usd(b['net_pnl_usd'])} "
+                f"fill_rate={b['approve_to_fill_pct'] if b['approve_to_fill_pct'] is not None else 'n/a'}% "
+                f"{PIPELINE_ENFORCEMENT_TAG}"
             )
 
     payload = {
@@ -15022,6 +16136,7 @@ def pathway_survival_report(trades=None, session=None):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "benchmark_lane": BENCHMARK_LANE,
         "benchmark_ev_per_fill_usd": bench_ev,
+        "stage_integrity": stage_integrity,
         "lanes": survival,
     }
     try:
@@ -15049,7 +16164,9 @@ def top_leakage_report(trades=None, session=None, top_n=50):
             "session_scope": scope,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "top_n": top_n,
-            "overall_left_usd": 0.0,
+            "eligible_terminal_trades": 0,
+            "overall_left_usd": None,
+            "by_exit_reason": {},
             "trades": [],
         }
         try:
@@ -15063,19 +16180,31 @@ def top_leakage_report(trades=None, session=None, top_n=50):
     if "trade_id" in work.columns:
         work = work.drop_duplicates(subset=["trade_id"], keep="last")
     pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
-    work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0.0)
-    mfe = pd.to_numeric(work.get("max_profit", work.get("mfe_margin_pct")), errors="coerce")
-    final_margin = pd.to_numeric(work.get("pnl", work.get("final_pnl_margin_pct")), errors="coerce")
-    margin_usd = pd.to_numeric(work.get("margin_usdt", FLAT_MARGIN_LIVE_USD), errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
+    work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce")
+    missing = pd.Series(np.nan, index=work.index, dtype=float)
+    mfe = pd.to_numeric(work.get("max_profit", work.get("mfe_margin_pct", missing)), errors="coerce")
+    final_margin = pd.to_numeric(work.get("pnl", work.get("final_pnl_margin_pct", missing)), errors="coerce")
+    default_margin = pd.Series(FLAT_MARGIN_LIVE_USD, index=work.index, dtype=float)
+    margin_usd = pd.to_numeric(work.get("margin_usdt", default_margin), errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
     peak_usd = (mfe / 100.0) * margin_usd
     booked_usd = work[pnl_col]
     left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
 
     rows = []
+    eligible_terminal_trades = 0
     for _, row in work.iterrows():
-        peak = float(peak_usd.loc[row.name]) if row.name in peak_usd.index else 0.0
+        if (
+            row.name not in peak_usd.index
+            or row.name not in left_usd.index
+            or pd.isna(peak_usd.loc[row.name])
+            or pd.isna(booked_usd.loc[row.name])
+            or pd.isna(left_usd.loc[row.name])
+        ):
+            continue
+        peak = float(peak_usd.loc[row.name])
         booked = float(booked_usd.loc[row.name])
-        left = float(left_usd.loc[row.name]) if row.name in left_usd.index else 0.0
+        left = float(left_usd.loc[row.name])
+        eligible_terminal_trades += 1
         mfe_pct = float(mfe.loc[row.name]) if pd.notna(mfe.loc[row.name]) else None
         final_pct = float(final_margin.loc[row.name]) if pd.notna(final_margin.loc[row.name]) else None
         leak_pct = round(mfe_pct - final_pct, 2) if mfe_pct is not None and final_pct is not None else None
@@ -15103,9 +16232,19 @@ def top_leakage_report(trades=None, session=None, top_n=50):
         by_exit[ex]["trades"] += 1
         by_exit[ex]["left_usd"] = round(by_exit[ex]["left_usd"] + r["left_on_table_usd"], 2)
 
-    overall_left = round(sum(r["left_on_table_usd"] for r in rows), 2)
-    top_leak = top_rows[0]["left_on_table_usd"] if top_rows else 0.0
-    print(f"  Overall left: ${overall_left:.2f} | top trade left: ${top_leak:.2f} {PIPELINE_ENFORCEMENT_TAG}")
+    overall_left = (
+        round(sum(r["left_on_table_usd"] for r in rows), 2)
+        if eligible_terminal_trades else None
+    )
+    top_leak = top_rows[0]["left_on_table_usd"] if top_rows else None
+    if overall_left is None:
+        print(f"  No leakage-eligible terminal evidence. {PIPELINE_ENFORCEMENT_TAG}")
+    else:
+        top_leak_text = f"${top_leak:.2f}" if top_leak is not None else "n/a"
+        print(
+            f"  Overall left: ${overall_left:.2f} | top trade left: {top_leak_text} "
+            f"{PIPELINE_ENFORCEMENT_TAG}"
+        )
     if top_rows:
         t0 = top_rows[0]
         print(
@@ -15122,6 +16261,7 @@ def top_leakage_report(trades=None, session=None, top_n=50):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "question": "Which trades left the most profit on the table?",
         "top_n": top_n,
+        "eligible_terminal_trades": eligible_terminal_trades,
         "overall_left_usd": overall_left,
         "by_exit_reason": by_exit,
         "trades": top_rows,
@@ -15135,294 +16275,28 @@ def top_leakage_report(trades=None, session=None, top_n=50):
     return payload
 
 
-def _pathway_lane_status(lane_key: str) -> str:
-    return PATHWAY_LANE_STATUS.get(str(lane_key or "").upper(), "ACTIVE")
-
-
-def _lane_entry_conditions(spec: dict) -> list:
-    entry = spec.get("entry") or {}
-    conditions = []
-    trigger = entry.get("trigger")
-    if trigger:
-        conditions.append(str(trigger))
-    for line in spec.get("diff_vs_benchmark") or []:
-        conditions.append(str(line))
-    return conditions
-
-
-def _lane_depends_on_edge(lane_key: str, spec: dict) -> bool:
-    if lane_key in ("URGENT_CHASE_ALPHA", "CHASE_3PLUS_ALPHA"):
-        return False
-    text = " ".join(_lane_entry_conditions(spec)).lower()
-    return any(m in text for m in ("edge≥", "edge>=", "edge >=", "edge≥3", "edge>=3", "edge>=4"))
-
-
-def _lane_depends_on_ai(lane_key: str, spec: dict) -> bool:
-    if lane_key == "SHADOW_RUNNER":
-        return False
-    if lane_key == "SR_MICRO_TILE_V2_STATIC":
-        return False
-    text = " ".join(_lane_entry_conditions(spec)).lower()
-    return "ai" in text or lane_key in ("CONTINUOUS", "AI_60_65_ALPHA", "TYPE_B_HUNTER", "SHORT_BEAR_ALPHA")
-
-
-def _lane_depends_on_chase(lane_key: str, spec: dict) -> bool:
-    if lane_key == "SR_MICRO_TILE_V2_STATIC":
-        return False
-    if lane_key == "TYPE_B_HUNTER_V1":
-        return True
-    if lane_key in ("URGENT_CHASE_ALPHA", "CHASE_3PLUS_ALPHA"):
-        return True
-    entry = spec.get("entry") or {}
-    blob = " ".join([
-        str(entry.get("fill_path") or ""),
-        str(entry.get("execution") or ""),
-        " ".join(spec.get("diff_vs_benchmark") or []),
-    ]).lower()
-    return "chase" in blob or lane_key == "CONTINUOUS"
-
-
-def lane_definition_report(trades=None, session=None, benchmark_report=None):
-    """Structured inventory — what each lane actually tests (names may drift from logic)."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== LANE DEFINITION REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        benchmark_report = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    lanes_metrics = (benchmark_report or {}).get("lanes") or {}
-    static = _static_pathway_lane_specs()
-    rows = []
-    for lane_key in BENCHMARK_LANES:
-        spec = static.get(lane_key) or {}
-        metrics = lanes_metrics.get(lane_key) or {}
-        all_time = metrics.get("all_time") or {}
-        fills = int(metrics.get("real_fills") or metrics.get("fills") or 0)
-        approves = int(metrics.get("approves") or 0)
-        pnl = float(metrics.get("net_pnl_real") or metrics.get("net_pnl_usd") or 0)
-        ev = float(metrics.get("per_approve_ev") or 0)
-        at_fills = int(all_time.get("real_fills") or 0)
-        at_pnl = float(all_time.get("net_pnl_real") or 0)
-        rows.append({
-            "lane": lane_key,
-            "label": RESEARCH_LANE_LABELS.get(lane_key, lane_key),
-            "pathway_status": _pathway_lane_status(lane_key),
-            "entry_conditions": _lane_entry_conditions(spec),
-            "depends_on_edge": _lane_depends_on_edge(lane_key, spec),
-            "depends_on_ai": _lane_depends_on_ai(lane_key, spec),
-            "depends_on_chase": _lane_depends_on_chase(lane_key, spec),
-            "sample_size": fills,
-            "approves": approves,
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve": round(ev, 2),
-            "all_time_fills": at_fills,
-            "all_time_pnl_usd": round(at_pnl, 2),
-            "role": spec.get("role"),
-            "research_question": spec.get("research_question"),
-        })
-        print(
-            f"  {lane_key} [{_pathway_lane_status(lane_key)}]: edge={_lane_depends_on_edge(lane_key, spec)} "
-            f"ai={_lane_depends_on_ai(lane_key, spec)} chase={_lane_depends_on_chase(lane_key, spec)} "
-            f"n={fills} PnL=${pnl:+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-    payload = {
-        "schema": "lane_definition_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "active_roster": list(ACTIVE_PATHWAY_LANES),
-        "retired_lanes": sorted(RETIRED_PATHWAY_LANES),
-        "probation_lanes": [ln for ln, st in PATHWAY_LANE_STATUS.items() if st == "PROBATION"],
-        "lanes": rows,
-    }
-    try:
-        with open(LANE_DEFINITION_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {LANE_DEFINITION_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {LANE_DEFINITION_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def urgent_chase_report(trades=None, session=None, benchmark_report=None, chase_payload=None):
-    """URGENT_CHASE_ALPHA vs CONTINUOUS — velocity-aware chase experiment metrics."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== URGENT CHASE REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        benchmark_report = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    lanes = (benchmark_report or {}).get("lanes") or {}
-    bench = lanes.get("CONTINUOUS") or {}
-    urgent = lanes.get("URGENT_CHASE_ALPHA") or {}
-
-    def _lane_block(m):
-        fills = int(m.get("real_fills") or m.get("fills") or 0)
-        approves = int(m.get("approves") or 0)
-        pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or 0)
-        ev = float(m.get("per_approve_ev") or 0)
-        fill_pct = float(m.get("approve_to_fill_pct") or 0)
-        return {
-            "fills": fills,
-            "approves": approves,
-            "fill_pct": round(fill_pct, 1),
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve": round(ev, 2),
-        }
-
-    bench_block = _lane_block(bench)
-    urgent_block = _lane_block(urgent)
-
-    if chase_payload is None and os.path.isfile(CHASE_ATTRIBUTION_REPORT_FILE):
-        chase_payload = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
-    attrs = (chase_payload or {}).get("attributions") or (chase_payload or {}).get("trades") or []
-    chase_assisted = 0
-    ttl_prevented = 0
-    for a in attrs:
-        if str(a.get("research_lane") or "").upper() != "URGENT_CHASE_ALPHA":
-            continue
-        cc = int(a.get("chase_count") or a.get("limit_chase_count") or 0)
-        if cc > 0 or a.get("filled_after_chase"):
-            chase_assisted += 1
-        if a.get("ttl_saved") or a.get("chase_prevented_ttl"):
-            ttl_prevented += 1
-
-    delta_ev = round(urgent_block["ev_per_approve"] - bench_block["ev_per_approve"], 2)
-    delta_pnl = round(urgent_block["pnl_usd"] - bench_block["pnl_usd"], 2)
-    delta_fill = round(urgent_block["fill_pct"] - bench_block["fill_pct"], 1)
-    adequate = urgent_block["fills"] >= MIN_LANE_FILLS_FOR_RETIREMENT
-    beats_bench = (
-        urgent_block["ev_per_approve"] > bench_block["ev_per_approve"]
-        or urgent_block["pnl_usd"] > bench_block["pnl_usd"]
-    )
-
-    forensics = {}
-    if trades is not None and not trades.empty and "research_lane" in trades.columns:
-        work = _enrich_trades_with_buckets(trades.copy())
-        chase_by_tid = _chase_attr_by_trade_id(chase_payload)
-        for lane_key, label in (("CONTINUOUS", "continuous"), ("URGENT_CHASE_ALPHA", "urgent")):
-            sub = work[work["research_lane"].astype(str).str.upper() == lane_key]
-            if sub.empty:
-                continue
-            stats = _combo_stats_from_df(sub)
-            mfe = pd.to_numeric(sub.get("max_profit", sub.get("mfe_margin_pct")), errors="coerce")
-            mae = pd.to_numeric(sub.get("max_drawdown", sub.get("mae_margin_pct")), errors="coerce")
-            sa = pd.to_numeric(sub.get("signal_age_sec", sub.get("execution_fill_delay_sec")), errors="coerce")
-            slip = pd.to_numeric(sub.get("slippage"), errors="coerce")
-            chase_n = []
-            for _, row in sub.iterrows():
-                tid = str(row.get("trade_id") or "")
-                cc = chase_by_tid.get(tid, {}).get("chase_count")
-                if cc is None and "limit_chase_count" in row.index:
-                    cc = row.get("limit_chase_count")
-                try:
-                    chase_n.append(int(cc or 0))
-                except (TypeError, ValueError):
-                    chase_n.append(0)
-            forensics[label] = {
-                **stats,
-                "avg_mfe_margin_pct": round(float(mfe.mean()), 2) if mfe.notna().any() else None,
-                "avg_mae_margin_pct": round(float(mae.mean()), 2) if mae.notna().any() else None,
-                "avg_signal_age_sec": round(float(sa.mean()), 1) if sa.notna().any() else None,
-                "avg_entry_slippage_usd": round(float(slip.mean()), 2) if slip.notna().any() else None,
-                "avg_chase_count": round(float(np.mean(chase_n)), 2) if chase_n else 0.0,
-            }
-        if forensics.get("continuous") and forensics.get("urgent"):
-            fc, fu = forensics["continuous"], forensics["urgent"]
-            forensics["delta"] = {
-                "ev_usd": round(fu.get("ev_usd", 0) - fc.get("ev_usd", 0), 2),
-                "wr_pct": round(fu.get("wr_pct", 0) - fc.get("wr_pct", 0), 1),
-                "avg_signal_age_sec": (
-                    round(fu.get("avg_signal_age_sec", 0) - fc.get("avg_signal_age_sec", 0), 1)
-                    if fu.get("avg_signal_age_sec") is not None and fc.get("avg_signal_age_sec") is not None
-                    else None
-                ),
-                "avg_chase_count": round(fu.get("avg_chase_count", 0) - fc.get("avg_chase_count", 0), 2),
-                "avg_mfe_margin_pct": (
-                    round(fu.get("avg_mfe_margin_pct", 0) - fc.get("avg_mfe_margin_pct", 0), 2)
-                    if fu.get("avg_mfe_margin_pct") is not None and fc.get("avg_mfe_margin_pct") is not None
-                    else None
-                ),
-            }
-            forensics["question"] = "Did faster URGENT fill improve MFE? Compare avg_mfe_margin_pct."
-    if urgent_block["fills"] == 0:
-        verdict = "COLLECTING"
-    elif adequate and beats_bench:
-        verdict = "PROMISING"
-    elif adequate and not beats_bench:
-        verdict = "RETIRE_CANDIDATE"
-    else:
-        verdict = "INSUFFICIENT_SAMPLE"
-
-    payload = {
-        "schema": "urgent_chase_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "experiment_lane": "URGENT_CHASE_ALPHA",
-        "benchmark_lane": "CONTINUOUS",
-        "purpose": "Test whether velocity-aware chase improves benchmark performance",
-        "chase_tiers": {
-            "normal": "25% gap closure",
-            "medium": "50% gap closure",
-            "high": "75% gap closure",
-            "extreme": "immediate marketable limit",
-        },
-        "urgent_chase_alpha": {
-            **urgent_block,
-            "chase_assisted_fills": chase_assisted,
-            "ttl_prevented": ttl_prevented,
-        },
-        "continuous_benchmark": bench_block,
-        "benchmark_delta": {
-            "delta_ev_per_approve": delta_ev,
-            "delta_pnl_usd": delta_pnl,
-            "delta_fill_pct": delta_fill,
-        },
-        "forensics": forensics,
-        "success_criteria": "Must outperform CONTINUOUS on EV or net PnL after adequate sample",
-        "verdict": verdict,
-        "min_fills_for_decision": MIN_LANE_FILLS_FOR_RETIREMENT,
-    }
-    print(
-        f"  URGENT: fills={urgent_block['fills']} EV=${urgent_block['ev_per_approve']:+.2f} "
-        f"PnL=${urgent_block['pnl_usd']:+.2f} | BENCH: EV=${bench_block['ev_per_approve']:+.2f} "
-        f"ΔEV=${delta_ev:+.2f} verdict={verdict} {PIPELINE_ENFORCEMENT_TAG}"
-    )
-    try:
-        with open(URGENT_CHASE_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {URGENT_CHASE_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {URGENT_CHASE_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
 def _combo_stats_from_df(sub: pd.DataFrame) -> dict:
     if sub is None or sub.empty:
-        return {"trades": 0, "wins": 0, "wr_pct": 0.0, "pnl_usd": 0.0, "ev_usd": 0.0}
+        return {"trades": 0, "wins": None, "losses": None, "wr_pct": None, "pnl_usd": None, "ev_usd": None, "pnl_available_rows": 0}
     pnl_col = "net_pnl_usd" if "net_pnl_usd" in sub.columns else "outcome_net_pnl_usd"
-    pnl = pd.to_numeric(sub.get(pnl_col, 0), errors="coerce").fillna(0)
+    if pnl_col not in sub.columns:
+        return {"trades": len(sub), "wins": None, "losses": None, "wr_pct": None, "pnl_usd": None, "ev_usd": None, "pnl_available_rows": 0}
+    pnl = pd.to_numeric(sub[pnl_col], errors="coerce").dropna()
+    if pnl.empty:
+        return {"trades": len(sub), "wins": None, "losses": None, "wr_pct": None, "pnl_usd": None, "ev_usd": None, "pnl_available_rows": 0}
     wins = int((pnl > 0).sum())
-    n = len(sub)
+    losses = int((pnl <= 0).sum())
+    n = len(pnl)
     total = round(float(pnl.sum()), 2)
     return {
-        "trades": n,
+        "trades": len(sub),
         "wins": wins,
+        "losses": losses,
         "wr_pct": round(100.0 * wins / n, 1) if n else 0.0,
         "pnl_usd": total,
         "ev_usd": round(total / n, 2) if n else 0.0,
+        "pnl_available_rows": n,
     }
-
-
-def _trade_mfe_type_series(work: pd.DataFrame) -> pd.Series:
-    mfe = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
-    return pd.Series(
-        np.where(mfe >= 15, "TYPE_B", np.where(mfe < 10, "TYPE_A", "MIXED")),
-        index=work.index,
-    )
 
 
 def _chase_attr_by_trade_id(chase_payload) -> dict:
@@ -15432,169 +16306,6 @@ def _chase_attr_by_trade_id(chase_payload) -> dict:
         if tid:
             out[tid] = row
     return out
-
-
-def lane_chase_isolation_report(trades=None, session=None, chase_payload=None):
-    """COMBO Direct vs Chase 3+ — fill_model and chase policy per combo tile pair."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== LANE CHASE ISOLATION — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if chase_payload is None and os.path.isfile(CHASE_ATTRIBUTION_REPORT_FILE):
-        chase_payload = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
-    if chase_payload is None:
-        chase_payload = chase_attribution_report(trades=trades, session=session)
-
-    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
-    chase_by_tid = _chase_attr_by_trade_id(chase_payload)
-
-    def _lane_audit(lane_key: str) -> dict:
-        sub = work[work["research_lane"].astype(str).str.upper() == lane_key] if not work.empty and "research_lane" in work.columns else pd.DataFrame()
-        stats = _combo_stats_from_df(sub)
-        fill_models = sub["fill_model"].value_counts().to_dict() if not sub.empty and "fill_model" in sub.columns else {}
-        entry_paths = sub["entry_path"].value_counts().to_dict() if not sub.empty and "entry_path" in sub.columns else {}
-        chase_counts = []
-        for _, row in sub.iterrows():
-            tid = str(row.get("trade_id") or "")
-            cc = chase_by_tid.get(tid, {}).get("chase_count")
-            if cc is None and "limit_chase_count" in row.index:
-                cc = row.get("limit_chase_count")
-            try:
-                chase_counts.append(int(cc or 0))
-            except (TypeError, ValueError):
-                chase_counts.append(0)
-        avg_chase = round(float(np.mean(chase_counts)), 2) if chase_counts else 0.0
-        avg_signal_age = None
-        if not sub.empty and "signal_age_sec" in sub.columns:
-            sa = pd.to_numeric(sub["signal_age_sec"], errors="coerce").dropna()
-            if len(sa):
-                avg_signal_age = round(float(sa.mean()), 1)
-        avg_slip = None
-        if not sub.empty and "slippage" in sub.columns:
-            sl = pd.to_numeric(sub["slippage"], errors="coerce").dropna()
-            if len(sl):
-                avg_slip = round(float(sl.mean()), 2)
-        chase_assisted = sum(1 for c in chase_counts if c > 0)
-        static_fills = len(chase_counts) - chase_assisted
-        return {
-            **stats,
-            "fill_model": fill_models,
-            "entry_path": entry_paths,
-            "chase_assisted_fills": chase_assisted,
-            "static_limit_fills": static_fills,
-            "avg_chase_count": avg_chase,
-            "avg_signal_age_sec": avg_signal_age,
-            "avg_entry_slippage_usd": avg_slip,
-        }
-
-    global_fill = work["fill_model"].value_counts().to_dict() if not work.empty and "fill_model" in work.columns else {}
-    pairs_out = []
-    isolation_pairs = list(ACTIVE_CHASE_ISOLATION_PAIRS) + list(COMBO_CHASE_ISOLATION_PAIRS)
-
-    for direct_lane, chase_lane in isolation_pairs:
-        direct_a = _lane_audit(direct_lane)
-        chase_a = _lane_audit(chase_lane)
-        combo_retired = bool(COMBO_LANE_SPECS.get(direct_lane, {}).get("is_legacy"))
-        session_inactive = (direct_a.get("trades") or 0) == 0 and (chase_a.get("trades") or 0) == 0
-        pairs_out.append({
-            "direct_lane": direct_lane,
-            "chase_lane": chase_lane,
-            "direct_label": RESEARCH_LANE_LABELS.get(direct_lane, direct_lane),
-            "chase_label": RESEARCH_LANE_LABELS.get(chase_lane, chase_lane),
-            "combo_retired": combo_retired,
-            "session_inactive": session_inactive,
-            "direct": {
-                **direct_a,
-                "chase_policy": "immediate limit (COMBO Direct)" if combo_retired else "CONTINUOUS immediate limit",
-                "virtual_chase_gate": False,
-            },
-            "chase": {
-                **chase_a,
-                "chase_policy": (
-                    "virtual chase 3+ gate before fill"
-                    if combo_retired
-                    else "virtual chase 3+ (AI60 SP3 tile)"
-                ),
-                "virtual_chase_gate": True,
-            },
-            "delta": {
-                "ev_usd": round(chase_a.get("ev_usd", 0) - direct_a.get("ev_usd", 0), 2),
-                "wr_pct": round(chase_a.get("wr_pct", 0) - direct_a.get("wr_pct", 0), 1),
-                "avg_chase_count": round(chase_a.get("avg_chase_count", 0) - direct_a.get("avg_chase_count", 0), 2),
-                "avg_signal_age_sec": (
-                    round(chase_a.get("avg_signal_age_sec", 0) - direct_a.get("avg_signal_age_sec", 0), 1)
-                    if chase_a.get("avg_signal_age_sec") is not None and direct_a.get("avg_signal_age_sec") is not None
-                    else None
-                ),
-            },
-        })
-        print(
-            f"  {direct_lane} vs {chase_lane}: direct_n={direct_a.get('trades')} chase_n={chase_a.get('trades')} "
-            f"inactive={session_inactive} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-
-    active_pairs = [p for p in pairs_out if not p.get("session_inactive")]
-    primary = active_pairs[0] if active_pairs else (pairs_out[0] if pairs_out else {})
-    direct_primary = primary.get("direct") or {}
-    chase_primary = primary.get("chase") or {}
-    has_primary_evidence = bool(
-        primary
-        and (
-            int(direct_primary.get("trades") or 0) > 0
-            or int(chase_primary.get("trades") or 0) > 0
-        )
-    )
-    isolated = has_primary_evidence
-    notes = []
-    if not primary:
-        notes.append("No current direct/chase comparison pair has observations yet — continue collecting.")
-    elif primary.get("session_inactive"):
-        notes.append(
-            "COMBO tiles inactive this session (retired 2026-06-26) — compare CONTINUOUS vs AI60_SP3 instead."
-        )
-    else:
-        notes.append(
-            f"Primary pair: {primary.get('direct_label')} vs {primary.get('chase_label')} "
-            f"(direct n={direct_primary.get('trades', 0)}, chase n={chase_primary.get('trades', 0)})."
-        )
-    notes.extend([
-        "COMBO Direct lanes use immediate limit entry; COMBO Chase lanes require virtual chase 3+ (or age/dist) before fill.",
-        "fill_model=AI_DIRECT_CHASE tags limit_chase_count>0 on AI_DIRECT path — expected on both when chase steps fire.",
-        "Global fill_model counts all session fills — not limited to the primary isolation pair.",
-    ])
-    if direct_primary.get("fill_model") and chase_primary.get("fill_model"):
-        if direct_primary["fill_model"].keys() == chase_primary["fill_model"].keys():
-            notes.append("Primary pair fill_model keys match — parallel tagging, not cross-lane contamination.")
-
-    payload = {
-        "schema": "lane_chase_isolation_v2",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "verdict": "ISOLATED" if isolated else "COLLECTING",
-        "isolation_notes": notes,
-        "global_fill_model": global_fill,
-        "active_lanes": list(ACTIVE_CHASE_ISOLATION_LANES),
-        "pairs": pairs_out,
-        "primary_pair": primary,
-        "primary_inactive": not has_primary_evidence or bool(primary.get("session_inactive")),
-        "benchmark_lane": BENCHMARK_LANE,
-        "continuous_benchmark": direct_primary,
-        "urgent_chase_alpha": chase_primary,
-        "benchmark_delta": primary.get("delta") or {},
-    }
-    print(
-        f"  Primary {primary.get('direct_lane')} vs {primary.get('chase_lane')} "
-        f"verdict={payload['verdict']} {PIPELINE_ENFORCEMENT_TAG}"
-    )
-    try:
-        with open(LANE_CHASE_ISOLATION_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {LANE_CHASE_ISOLATION_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {LANE_CHASE_ISOLATION_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
 
 
 def _direction_only_trade_cohort(trades: pd.DataFrame) -> pd.DataFrame:
@@ -15670,79 +16381,707 @@ def top_combinations_report(trades=None, session=None, min_trades=3, top_n=100):
     return payload
 
 
-def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
-    """Exit × entry combo cohorts — find leakage (left on table) and best exit paths."""
+def _descriptive_terminal_exit_df(df, label):
+    """Closed-path evidence without the real-copy qualification allow-list."""
+    if df is None or df.empty or "trade_id" not in df.columns:
+        return pd.DataFrame(), 0
+    work = df.copy()
+    # Shadow files may contain provisional observations alongside terminal
+    # outcomes.  Only accept a row when it has an explicit close/exit fact;
+    # never infer a terminal from a touch or an approval.
+    terminal_markers = [
+        column for column in (
+            "exit_reason", "close_reason", "closed_at", "close_ts",
+            "exit_ts", "terminal_ts", "terminal_event_id",
+        ) if column in work.columns
+    ]
+    if terminal_markers:
+        terminal_mask = pd.Series(False, index=work.index)
+        for column in terminal_markers:
+            terminal_mask |= work[column].notna() & work[column].astype(str).str.strip().ne("")
+        work = work.loc[terminal_mask].copy()
+    contamination = work.apply(_family_terminal_double_count_detail, axis=1)
+    contaminated = contamination.apply(lambda item: bool(item.get("contaminated")))
+    clean = work.loc[~contaminated].copy()
+    # One causal opportunity can legitimately produce one terminal child per
+    # policy family. Only collapse rows carrying a complete explicit child
+    # lifecycle identity; incomplete legacy rows remain distinct.
+    identity_groups = (
+        ("epoch_id", "opportunity_id", "policy_signature", "lifecycle_id"),
+        ("epoch_id", "opportunity_id", "policy_signature", "terminal_event_id"),
+        ("epoch_id", "opportunity_id", "policy_signature", "event_id"),
+        ("epoch_id", "opportunity_id", "policy_signature", "record_id"),
+    )
+    duplicate_rows_excluded = 0
+    def explicit_child_key(row):
+        for columns in identity_groups:
+            values = [row.get(column) for column in columns]
+            if all(value is not None and str(value).strip() for value in values):
+                return "|".join(str(value).strip() for value in values)
+        return None
+
+    if not clean.empty:
+        child_keys = clean.apply(explicit_child_key, axis=1)
+        complete_identity = child_keys.notna()
+        identified = clean.loc[complete_identity].copy().assign(
+            _explicit_child_key=child_keys.loc[complete_identity]
+        )
+        unidentified = clean.loc[~complete_identity].copy()
+        before = len(identified)
+        identified = identified.drop_duplicates(subset=["_explicit_child_key"], keep="last")
+        duplicate_rows_excluded = before - len(identified)
+        identified = identified.drop(columns=["_explicit_child_key"])
+        clean = pd.concat([identified, unidentified], axis=0).sort_index(kind="stable")
+    print(
+        f"  {label}: descriptive terminals {len(clean)}/{len(df)}; "
+        f"terminal-double-count-excluded={int(contaminated.sum())}; "
+        f"exact-child-duplicates-excluded={duplicate_rows_excluded}. "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return clean, int(contaminated.sum())
+
+
+def _load_descriptive_shadow_exit_df(session: dict = None):
+    """Raw shadow/lab rows for exit analysis, without live-copy eligibility."""
+    rows = dict(_load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {})
+    rows.update(_load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {})
+    rows.update(_load_jsonl_by_trade_id(SHADOW_LANE_OUTCOME_FILE) or {})
+    if not rows:
+        return None
+    df = pd.DataFrame(list(rows.values()))
+    if session and not df.empty and _session_start_ts(session) is not None:
+        df = filter_df_since_session(df, session, ts_cols=(
+            "exit_ts", "closed_at", "close_ts", "terminal_ts", "ts", "timestamp",
+        ))
+    return df
+
+
+def _report_exit_rows(filename: str, *paths: str) -> pd.DataFrame:
+    """Load only explicit report row collections; never recursively guess rows."""
+    report = _load_json_report(filename) or {}
+    rows = _cross_world_list(report, *paths)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def _load_exit_evidence_worlds(trades=None, session: dict = None) -> dict:
+    """Return exit evidence as non-additive worlds with explicit provenance."""
+    return {
+        "executed_paper": {
+            "evidence_class": "EXECUTED_PAPER_DESCRIPTIVE",
+            "source_files": [TRADES_FILE],
+            "frame": trades if trades is not None else pd.DataFrame(),
+            "pnl_semantics": "OBSERVED_PAPER_NET_PNL_USD",
+        },
+        "shadow_lab": {
+            "evidence_class": "SHADOW_LAB_DESCRIPTIVE",
+            "source_files": [COUNTERFACTUAL_FILE, SHADOW_OUTCOME_FILE, SHADOW_LANE_OUTCOME_FILE],
+            "frame": _load_descriptive_shadow_exit_df(session=session),
+            "pnl_semantics": "SIMULATED_SHADOW_PNL_USD",
+        },
+        "conservative_bbo_depth": {
+            "evidence_class": "CONSERVATIVE_BBO_DEPTH_DESCRIPTIVE",
+            "source_files": [CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE],
+            "frame": _report_exit_rows(CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE, "receipts"),
+            "pnl_semantics": "CONSERVATIVE_REPLAY_PNL_USD",
+        },
+        "ideal_touch_diagnostic": {
+            "evidence_class": "IDEAL_TOUCH_DIAGNOSTIC_ONLY",
+            "source_files": [SAFE_POLICY_GENOME_V3_REPORT_FILE],
+            "frame": _report_exit_rows(
+                SAFE_POLICY_GENOME_V3_REPORT_FILE,
+                "ideal_touch_receipts",
+                "candidate_screen.ideal_touch_receipts",
+            ),
+            "pnl_semantics": "DIAGNOSTIC_TOUCH_PNL_USD",
+        },
+    }
+
+
+def _exit_identity_labels(sub):
+    def values(column):
+        if column not in sub.columns:
+            return []
+        return sorted({str(value) for value in sub[column].dropna() if str(value).strip()})
+    epochs = values("epoch_id")
+    settings = values("settings_period_id")
+    signatures = values("policy_signature")
+    opportunities = values("opportunity_id") or values("shared_ai_call_id") or values("scan_id")
+    return {
+        "epoch_ids": epochs,
+        "settings_period_ids": settings,
+        "policy_signatures": signatures,
+        "independent_ai_episodes": len(opportunities),
+        "terminal_child_rows": int(len(sub)),
+        "correlated_family_children_separated": True,
+    }
+
+
+def _exit_sample_status(independent_n: int) -> str:
+    if independent_n < 5:
+        return "LOW_SAMPLE_LT5_INDEPENDENT"
+    if independent_n < 30:
+        return "DESCRIPTIVE_5_TO_29_INDEPENDENT"
+    return "DESCRIPTIVE_30PLUS_INDEPENDENT"
+
+
+def _family_balanced_exit_rows(rows, *, top_n: int, max_per_family: int = 2):
+    """Keep a single prolific family from hiding other explicit families."""
+    selected = []
+    family_counts = {}
+    for row in rows:
+        family = str(row.get("family") or row.get("lane") or "UNKNOWN").strip().upper()
+        family = family or "UNKNOWN"
+        if family_counts.get(family, 0) >= max_per_family:
+            continue
+        selected.append(row)
+        family_counts[family] = family_counts.get(family, 0) + 1
+        if len(selected) >= top_n:
+            break
+    return selected
+
+
+def _exit_numeric_series(work: pd.DataFrame, names, default=np.nan) -> pd.Series:
+    for name in names:
+        if name in work.columns:
+            return pd.to_numeric(work[name], errors="coerce")
+    return pd.Series(default, index=work.index, dtype="float64")
+
+
+def _exit_missing_identity_rows(work: pd.DataFrame) -> int:
+    identity_columns = [
+        name for name in ("opportunity_id", "shared_ai_call_id", "scan_id")
+        if name in work.columns
+    ]
+    if not identity_columns:
+        return int(len(work))
+    present = pd.Series(False, index=work.index)
+    for name in identity_columns:
+        present |= work[name].notna() & work[name].astype(str).str.strip().ne("")
+    return int((~present).sum())
+
+
+def _exit_family_and_stop_summaries(work: pd.DataFrame, evidence_class: str) -> dict:
+    """Truthful low-dimensional exit summaries for one evidence world only."""
+    if work is None or work.empty:
+        return {"exit_family_scorecard": [], "stop_effectiveness_matrix": []}
+
+    frame = work.copy()
+    lane_source = frame.get("research_lane", pd.Series("", index=frame.index)).fillna("").astype(str)
+    family_source = frame.get("cfg_family", pd.Series("", index=frame.index)).fillna("").astype(str)
+    family_source = family_source.where(family_source.str.strip().ne(""), lane_source)
+    frame["_exit_family"] = family_source.fillna("").astype(str).str.strip().str.upper()
+    frame.loc[frame["_exit_family"].eq(""), "_exit_family"] = "UNKNOWN"
+    pnl = _exit_numeric_series(frame, ("net_pnl_usd", "outcome_net_pnl_usd"))
+    gross = _exit_numeric_series(frame, ("gross_pnl_usd", "outcome_gross_pnl_usd"))
+    fees = _exit_numeric_series(frame, ("trading_fees_usd", "outcome_trading_fees_usd", "fees_usd"))
+    funding = _exit_numeric_series(frame, ("funding_fees_usd", "outcome_funding_fees_usd", "funding_fees"))
+    slippage = _exit_numeric_series(frame, ("book_slippage_usd_total", "execution_slippage", "slippage"))
+    mae = _exit_numeric_series(frame, ("mae_margin_pct", "max_drawdown"))
+    frame["_pnl"] = pnl
+    frame["_gross"] = gross
+    frame["_fees"] = fees
+    frame["_funding"] = funding
+    frame["_slippage"] = slippage
+    frame["_mae"] = mae
+
+    family_rows = []
+    for family, sub in frame.groupby("_exit_family", observed=True, dropna=False):
+        identity = _exit_identity_labels(sub)
+        independent_n = int(identity["independent_ai_episodes"])
+        chronological = sub.copy()
+        time_column = next((name for name in ("close_ts", "ts", "terminal_ts") if name in chronological.columns), None)
+        if time_column:
+            chronological["_exit_order_ts"] = pd.to_datetime(chronological[time_column], errors="coerce", utc=True)
+            chronological = chronological.sort_values("_exit_order_ts", kind="stable", na_position="last")
+        valid_pnl = chronological["_pnl"].dropna()
+        cumulative = valid_pnl.cumsum()
+        max_drawdown = float((cumulative.cummax() - cumulative).max()) if not cumulative.empty else None
+        family_rows.append({
+            "exit_family": str(family),
+            "evidence_class": evidence_class,
+            "terminal_rows": int(len(sub)),
+            "independent_episodes": independent_n,
+            "missing_identity_rows": _exit_missing_identity_rows(sub),
+            "missing_pnl_rows": int(sub["_pnl"].isna().sum()),
+            "missing_cost_rows": int((sub["_fees"].isna() | sub["_funding"].isna()).sum()),
+            "missing_slippage_rows": int(sub["_slippage"].isna().sum()),
+            "wins": int((valid_pnl > 0).sum()),
+            "losses": int((valid_pnl <= 0).sum()),
+            "net_pnl_usd": round(float(valid_pnl.sum()), 4) if not valid_pnl.empty else None,
+            "gross_pnl_usd": round(float(sub["_gross"].dropna().sum()), 4) if sub["_gross"].notna().any() else None,
+            "fees_usd": round(float(sub["_fees"].dropna().sum()), 4) if sub["_fees"].notna().any() else None,
+            "funding_usd": round(float(sub["_funding"].dropna().sum()), 4) if sub["_funding"].notna().any() else None,
+            "slippage_usd": round(float(sub["_slippage"].dropna().sum()), 4) if sub["_slippage"].notna().any() else None,
+            "ev_per_independent_episode_usd": round(float(valid_pnl.sum()) / independent_n, 4) if independent_n and not valid_pnl.empty else None,
+            "max_drawdown_usd": round(max_drawdown, 4) if max_drawdown is not None else None,
+            "evidence_status": _exit_sample_status(independent_n),
+            "qualification_eligible": False,
+        })
+    family_rows.sort(key=lambda row: (row["net_pnl_usd"] is not None, row["net_pnl_usd"] or 0), reverse=True)
+
+    policy_text = frame.get("cfg_raw_policy_id", frame.get("policy_signature", pd.Series("", index=frame.index))).fillna("").astype(str).str.upper()
+    configured_atr = _exit_numeric_series(frame, ("cfg_initial_stop_atr_k",))
+    hard_pct = _exit_numeric_series(frame, ("cfg_hard_stop_margin_pct",))
+    frame["_stop_type"] = np.select(
+        [configured_atr.notna(), hard_pct.notna()],
+        ["INITIAL_ATR_STOP", "PHYSICAL_HARD_STOP"],
+        default="UNSPECIFIED",
+    )
+    frame.loc[policy_text.str.contains("ATR_SL", regex=False) & frame["_stop_type"].eq("UNSPECIFIED"), "_stop_type"] = "INITIAL_ATR_STOP"
+    frame["_stop_distance_atr"] = configured_atr
+    frame["_hard_stop_margin_pct"] = hard_pct
+    exit_reason = frame.get("exit_reason", pd.Series("UNKNOWN", index=frame.index)).fillna("UNKNOWN").astype(str).str.upper()
+    frame["_exit_reason"] = exit_reason
+    chase = _exit_numeric_series(frame, ("limit_chase_count",), 0.0).fillna(0)
+    frame["_chase_bucket"] = chase.apply(lambda value: "5+" if value >= 5 else str(int(value)))
+
+    stop_rows = []
+    stop_dims = ["_stop_type", "_stop_distance_atr", "_hard_stop_margin_pct", "_exit_reason", "_chase_bucket"]
+    for keys, sub in frame.groupby(stop_dims, observed=True, dropna=False):
+        stop_type, atr_distance, hard_stop_pct, reason, chase_bucket = keys
+        identity = _exit_identity_labels(sub)
+        independent_n = int(identity["independent_ai_episodes"])
+        valid_pnl = sub["_pnl"].dropna()
+        stop_rows.append({
+            "stop_type": str(stop_type),
+            "stop_distance_atr": None if pd.isna(atr_distance) else round(float(atr_distance), 3),
+            "hard_stop_margin_pct": None if pd.isna(hard_stop_pct) else round(float(hard_stop_pct), 3),
+            "exit_reason": str(reason),
+            "chase_bucket": str(chase_bucket),
+            "evidence_class": evidence_class,
+            "terminal_rows": int(len(sub)),
+            "independent_episodes": independent_n,
+            "missing_identity_rows": _exit_missing_identity_rows(sub),
+            "missing_pnl_rows": int(sub["_pnl"].isna().sum()),
+            "missing_mae_rows": int(sub["_mae"].isna().sum()),
+            "missing_stop_slippage_rows": int(sub["_slippage"].isna().sum()),
+            "wins": int((valid_pnl > 0).sum()),
+            "losses": int((valid_pnl <= 0).sum()),
+            "net_pnl_usd": round(float(valid_pnl.sum()), 4) if not valid_pnl.empty else None,
+            "ev_per_independent_episode_usd": round(float(valid_pnl.sum()) / independent_n, 4) if independent_n and not valid_pnl.empty else None,
+            "avg_mae_margin_pct": round(float(sub["_mae"].dropna().mean()), 3) if sub["_mae"].notna().any() else None,
+            "avg_stop_slippage": round(float(sub["_slippage"].dropna().mean()), 6) if sub["_slippage"].notna().any() else None,
+            "evidence_status": _exit_sample_status(independent_n),
+            "qualification_eligible": False,
+        })
+    stop_rows.sort(key=lambda row: (-row["terminal_rows"], row["stop_type"], row["exit_reason"]))
+    return {"exit_family_scorecard": family_rows, "stop_effectiveness_matrix": stop_rows}
+
+
+def _exit_causal_combination_views(work: pd.DataFrame, evidence_class: str, top_n: int = 100) -> dict:
+    """Low-dimensional, within-world exit slices; missing dimensions stay unavailable."""
+    if work is None or work.empty:
+        return {}
+    frame = work.copy()
+
+    def first_series(names, *, numeric=False):
+        for name in names:
+            if name in frame.columns:
+                series = frame[name]
+                return pd.to_numeric(series, errors="coerce") if numeric else series
+        return pd.Series(np.nan if numeric else None, index=frame.index)
+
+    def nested_series(parents, keys, *, numeric=False):
+        def value_at(raw):
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return np.nan if numeric else None
+            if not isinstance(raw, dict):
+                return np.nan if numeric else None
+            for key in keys:
+                value = raw.get(key)
+                if value is not None:
+                    return value
+            return np.nan if numeric else None
+
+        result = pd.Series(np.nan if numeric else None, index=frame.index)
+        for parent in parents:
+            if parent not in frame.columns:
+                continue
+            candidate = frame[parent].apply(value_at)
+            result = result.where(result.notna(), candidate)
+        return pd.to_numeric(result, errors="coerce") if numeric else result
+
+    def prefer_observed(primary, fallback):
+        return primary.where(primary.notna(), fallback)
+
+    family = first_series(("cfg_family", "exit_family", "research_lane")).fillna("").astype(str).str.upper()
+    profile = first_series(("cfg_exit_profile_id", "exit_profile_id", "cfg_raw_policy_id", "policy_id")).fillna("").astype(str)
+    reason = prefer_observed(
+        first_series(("exit_reason", "close_reason")), first_series(("terminal_reason",))
+    ).fillna("").astype(str).str.upper()
+    direction = first_series(("final_direction", "dir", "direction")).fillna("").astype(str).str.upper()
+    regime = prefer_observed(
+        first_series(("regime", "market_regime", "regime_at_entry")),
+        nested_series(("entry_context",), ("regime",)),
+    ).fillna("").astype(str).str.upper()
+    exit_regime = nested_series(("exit_context",), ("regime",)).fillna("").astype(str).str.upper()
+    fill_status = first_series(("source_fill_status", "fill_status", "outcome_state")).fillna("").astype(str).str.upper()
+    chase = first_series(("limit_chase_count", "chase_count"), numeric=True)
+    stop_atr = first_series(("cfg_initial_stop_atr_k", "initial_stop_atr_k"), numeric=True)
+    hard_stop = first_series(("cfg_hard_stop_margin_pct", "hard_stop_margin_pct"), numeric=True)
+    offset = first_series(("entry_offset_pct",), numeric=True)
+    if offset.isna().all():
+        offset = first_series(("cfg_entry_offset_fraction", "entry_offset_fraction"), numeric=True) * 100.0
+    delay = first_series(("entry_delay_min",), numeric=True)
+    if delay.isna().all():
+        delay = first_series(("signal_age_sec", "entry_delay_sec"), numeric=True) / 60.0
+    volatility = first_series(("volatility_percentile", "atr_percentile"), numeric=True)
+    session_bucket = first_series(("session_bucket", "market_session")).fillna("").astype(str).str.upper()
+    sr_state = prefer_observed(
+        first_series(("sr_state", "support_resistance_state")),
+        nested_series(("entry_context",), ("sr_state",)),
+    ).fillna("").astype(str).str.upper()
+    mae = first_series(("mae_margin_pct", "max_drawdown"), numeric=True).abs()
+    path_mae = nested_series(("path_extrema",), ("mae_pct",), numeric=True).abs()
+    path_mfe = nested_series(("path_extrema",), ("mfe_pct",), numeric=True)
+    time_to_mae = nested_series(("path_extrema",), ("time_to_mae_sec",), numeric=True) / 60.0
+    time_to_mfe = nested_series(("path_extrema",), ("time_to_mfe_sec",), numeric=True) / 60.0
+    slippage = prefer_observed(
+        first_series(("book_slippage_usd_total", "execution_slippage", "slippage"), numeric=True),
+        nested_series(("exit_market_receipt",), ("slippage_usd",), numeric=True),
+    ).abs()
+    fees = first_series(("trading_fees_usd", "outcome_trading_fees_usd", "fees_usd"), numeric=True).abs()
+    adx = prefer_observed(
+        first_series(("adx_at_entry", "adx"), numeric=True),
+        nested_series(("entry_context",), ("adx",), numeric=True),
+    )
+    exit_adx = nested_series(("exit_context",), ("adx",), numeric=True)
+    mtf = first_series(("mtf_agreement_at_entry", "mtf_agreement"), numeric=True)
+    structure = first_series(("structure_bias_at_entry", "structure_bias")).fillna("").astype(str).str.upper()
+    distance_support = prefer_observed(
+        first_series(("distance_to_support", "context_dist_to_support"), numeric=True),
+        nested_series(("entry_context",), ("dist_to_support",), numeric=True),
+    ).abs()
+    distance_resistance = prefer_observed(
+        first_series(("distance_to_resistance", "context_dist_to_resistance"), numeric=True),
+        nested_series(("entry_context",), ("dist_to_resistance",), numeric=True),
+    ).abs()
+    entry_type = first_series(("execution_entry_type",)).fillna("").astype(str).str.upper()
+    exit_type = first_series(("execution_exit_type",)).fillna("").astype(str).str.upper()
+    fill_model = first_series(("fill_model",)).fillna("").astype(str).str.upper()
+    urgent_tier = first_series(("urgent_chase_tier",)).fillna("").astype(str).str.upper()
+    partial_fill = first_series(("entry_partial_fill", "partial_fill"))
+    remaining_fraction = prefer_observed(
+        first_series(("policy_remaining_fraction",), numeric=True),
+        nested_series(("protection_trajectory",), ("terminal_remaining_fraction",), numeric=True),
+    )
+    partial_receipts = prefer_observed(
+        first_series(("partial_exit_receipts",)), first_series(("partial_exits",))
+    )
+    partial_count = nested_series(("protection_trajectory",), ("partial_exit_count",), numeric=True)
+    revalidation_result = nested_series(("fill_time_revalidation",), ("result",)).fillna("").astype(str).str.upper()
+    revalidation_reason = nested_series(("fill_time_revalidation",), ("reason",)).fillna("").astype(str).str.upper()
+    revalidation_age = nested_series(("fill_time_revalidation",), ("signal_age_sec",), numeric=True) / 60.0
+    terminal_no_fill = first_series(("terminal_no_fill",))
+    terminal_ttl = first_series(("terminal_ttl_expired",))
+    terminal_reason = first_series(("terminal_reason",)).fillna("").astype(str).str.upper()
+    exit_depth = nested_series(("exit_market_receipt",), ("visible_executable_qty",), numeric=True)
+    exit_levels = nested_series(("exit_market_receipt",), ("levels_consumed",), numeric=True)
+    exit_basis = nested_series(("exit_market_receipt",), ("basis",)).fillna("").astype(str).str.upper()
+    funding = first_series(("funding_fees_usd", "outcome_funding_fees_usd", "funding_usd"), numeric=True).abs()
+
+    frame["_exit_family_view"] = family.replace("", np.nan)
+    frame["_exit_profile_view"] = profile.replace("", np.nan)
+    frame["_exit_reason_view"] = reason.replace("", np.nan)
+    frame["_direction_view"] = direction.replace("", np.nan)
+    frame["_regime_view"] = regime.replace("", np.nan)
+    frame["_exit_regime_view"] = exit_regime.replace("", np.nan)
+    frame["_fill_status_view"] = fill_status.replace("", np.nan)
+    frame["_chase_view"] = chase.apply(lambda value: "5+" if pd.notna(value) and value >= 5 else (str(int(value)) if pd.notna(value) else np.nan))
+    frame["_stop_atr_view"] = stop_atr.round(3)
+    frame["_hard_stop_view"] = hard_stop.round(3)
+    frame["_offset_view"] = offset.round(4)
+    frame["_delay_view"] = pd.cut(delay, [-np.inf, 5, 10, 20, 30, np.inf], labels=["0-5m", "5-10m", "10-20m", "20-30m", "30m+"])
+    frame["_volatility_view"] = pd.cut(volatility, [-np.inf, 20, 50, 80, np.inf], labels=["LOW", "NORMAL", "HIGH", "EXTREME"])
+    frame["_session_view"] = session_bucket.replace("", np.nan)
+    frame["_sr_state_view"] = sr_state.replace("", np.nan)
+    frame["_mae_view"] = pd.cut(mae, [-np.inf, 10, 30, 60, np.inf], labels=["<=10%", "10-30%", "30-60%", "60%+"])
+    frame["_path_mae_view"] = pd.cut(path_mae, [-np.inf, .1, .3, 1, np.inf], labels=["<=0.1%", "0.1-0.3%", "0.3-1%", "1%+"])
+    frame["_path_mfe_view"] = pd.cut(path_mfe, [-np.inf, .1, .3, 1, np.inf], labels=["<=0.1%", "0.1-0.3%", "0.3-1%", "1%+"])
+    frame["_time_to_mae_view"] = pd.cut(time_to_mae, [-np.inf, 1, 5, 15, 30, np.inf], labels=["<=1m", "1-5m", "5-15m", "15-30m", "30m+"])
+    frame["_time_to_mfe_view"] = pd.cut(time_to_mfe, [-np.inf, 1, 5, 15, 30, np.inf], labels=["<=1m", "1-5m", "5-15m", "15-30m", "30m+"])
+    frame["_slippage_view"] = pd.cut(slippage, [-np.inf, 0, .0025, .01, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH"])
+    frame["_fee_view"] = pd.cut(fees, [-np.inf, 0, .0025, .01, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH"])
+    frame["_adx_entry_view"] = pd.cut(adx, [-np.inf, 18, 30, np.inf], labels=["LT18", "18-30", "30+"])
+    frame["_adx_exit_view"] = pd.cut(exit_adx, [-np.inf, 18, 30, np.inf], labels=["LT18", "18-30", "30+"])
+    frame["_mtf_view"] = pd.cut(mtf, [-np.inf, .34, .67, np.inf], labels=["LOW", "MIXED", "HIGH"])
+    frame["_structure_view"] = structure.replace("", np.nan)
+    frame["_distance_support_view"] = pd.cut(distance_support, [-np.inf, .25, .75, 1.5, np.inf], labels=["<=0.25%", "0.25-0.75%", "0.75-1.5%", "1.5%+"])
+    frame["_distance_resistance_view"] = pd.cut(distance_resistance, [-np.inf, .25, .75, 1.5, np.inf], labels=["<=0.25%", "0.25-0.75%", "0.75-1.5%", "1.5%+"])
+    frame["_entry_type_view"] = entry_type.replace("", np.nan)
+    frame["_exit_type_view"] = exit_type.replace("", np.nan)
+    frame["_fill_model_view"] = fill_model.replace("", np.nan)
+    frame["_urgent_tier_view"] = urgent_tier.replace("", np.nan)
+    def explicit_partial_bucket(value):
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return np.nan
+        if isinstance(value, str):
+            normalized = value.strip().upper()
+            if normalized in {"TRUE", "1", "YES", "PARTIAL", "PARTIALLY_FILLED"}:
+                return "PARTIAL"
+            if normalized in {"FALSE", "0", "NO", "FULL", "FILLED"}:
+                return "FULL"
+            return np.nan
+        if isinstance(value, (bool, np.bool_)):
+            return "PARTIAL" if bool(value) else "FULL"
+        return np.nan
+
+    frame["_partial_fill_view"] = partial_fill.apply(explicit_partial_bucket)
+    frame["_remaining_fraction_view"] = pd.cut(remaining_fraction, [-np.inf, 0, .25, .75, .999999, np.inf], labels=["CLOSED", "<=25%", "25-75%", "75-99%", "100%+"])
+    frame["_partial_exit_count_view"] = prefer_observed(
+        partial_receipts.apply(lambda value: len(value) if isinstance(value, list) else np.nan),
+        partial_count,
+    )
+    frame["_revalidation_result_view"] = revalidation_result.replace("", np.nan)
+    frame["_revalidation_reason_view"] = revalidation_reason.replace("", np.nan)
+    frame["_revalidation_age_view"] = pd.cut(revalidation_age, [-np.inf, 5, 15, 30, np.inf], labels=["0-5m", "5-15m", "15-30m", "30m+"])
+    frame["_terminal_no_fill_view"] = terminal_no_fill.apply(explicit_partial_bucket).map({"PARTIAL": "YES", "FULL": "NO"})
+    frame["_terminal_ttl_view"] = terminal_ttl.apply(explicit_partial_bucket).map({"PARTIAL": "YES", "FULL": "NO"})
+    frame["_terminal_reason_view"] = terminal_reason.replace("", np.nan)
+    frame["_path_order_view"] = np.select(
+        [time_to_mae.notna() & time_to_mfe.notna() & (time_to_mae < time_to_mfe),
+         time_to_mae.notna() & time_to_mfe.notna() & (time_to_mfe < time_to_mae),
+         time_to_mae.notna() & time_to_mfe.notna() & (time_to_mfe == time_to_mae)],
+        ["MAE_FIRST", "MFE_FIRST", "SAME_TICK"], default=None,
+    )
+    frame["_exit_depth_view"] = pd.cut(exit_depth, [-np.inf, 0, .01, .1, 1, np.inf], labels=["ZERO", "<=0.01", "0.01-0.1", "0.1-1", "1+"])
+    frame["_exit_levels_view"] = pd.cut(exit_levels, [-np.inf, 0, 1, 3, np.inf], labels=["ZERO", "ONE", "2-3", "4+"])
+    frame["_exit_basis_view"] = exit_basis.replace("", np.nan)
+    total_cost = fees.where(fees.notna(), 0) + funding.where(funding.notna(), 0) + slippage.where(slippage.notna(), 0)
+    total_cost = total_cost.where(fees.notna() | funding.notna() | slippage.notna())
+    frame["_cost_drag_view"] = pd.cut(total_cost, [-np.inf, 0, .0025, .01, .05, np.inf], labels=["ZERO", "LOW", "MEDIUM", "HIGH", "EXTREME"])
+
+    definitions = {
+        "exit_policy": ["_exit_family_view", "_exit_profile_view", "_exit_reason_view"],
+        "risk_and_chase": ["_stop_atr_view", "_hard_stop_view", "_chase_view", "_exit_reason_view"],
+        "market_context": ["_regime_view", "_direction_view", "_exit_family_view", "_exit_reason_view"],
+        "entry_execution": ["_offset_view", "_chase_view", "_delay_view", "_fill_status_view", "_exit_reason_view"],
+        "market_microstructure": ["_regime_view", "_volatility_view", "_session_view", "_sr_state_view", "_direction_view", "_exit_reason_view"],
+        "profit_path": ["_exit_profile_view", "_mae_view", "_delay_view", "_exit_reason_view"],
+        "cost_and_fill": ["_fill_status_view", "_slippage_view", "_fee_view", "_exit_reason_view"],
+        "direction_quality": ["_adx_entry_view", "_mtf_view", "_structure_view", "_direction_view", "_exit_reason_view"],
+        "sr_geometry": ["_sr_state_view", "_distance_support_view", "_distance_resistance_view", "_direction_view", "_exit_family_view", "_exit_reason_view"],
+        "execution_quality": ["_entry_type_view", "_exit_type_view", "_partial_fill_view", "_fill_model_view", "_slippage_view", "_exit_reason_view"],
+        "partial_profit_path": ["_partial_exit_count_view", "_remaining_fraction_view", "_exit_family_view", "_exit_reason_view"],
+        "chase_detail": ["_chase_view", "_urgent_tier_view", "_delay_view", "_offset_view", "_exit_family_view", "_exit_profile_view", "_exit_reason_view"],
+        "excursion_timing": ["_path_mae_view", "_path_mfe_view", "_time_to_mae_view", "_time_to_mfe_view", "_exit_family_view", "_exit_reason_view"],
+        "regime_transition": ["_regime_view", "_exit_regime_view", "_adx_entry_view", "_adx_exit_view", "_direction_view", "_exit_reason_view"],
+        "fill_revalidation": ["_revalidation_result_view", "_revalidation_reason_view", "_revalidation_age_view", "_chase_view", "_exit_reason_view"],
+        "terminal_order_outcome": ["_terminal_no_fill_view", "_terminal_ttl_view", "_terminal_reason_view", "_chase_view", "_exit_reason_view"],
+        "path_sequence": ["_path_order_view", "_path_mae_view", "_path_mfe_view", "_exit_family_view", "_exit_reason_view"],
+        "protection_activation": ["_partial_exit_count_view", "_remaining_fraction_view", "_exit_profile_view", "_exit_reason_view"],
+        "stop_execution_quality": ["_stop_atr_view", "_hard_stop_view", "_slippage_view", "_partial_fill_view", "_exit_reason_view"],
+        "liquidity_at_exit": ["_exit_basis_view", "_exit_depth_view", "_exit_levels_view", "_slippage_view", "_exit_reason_view"],
+        "cost_drag": ["_cost_drag_view", "_fee_view", "_slippage_view", "_exit_family_view", "_exit_reason_view"],
+    }
+    required_any = {
+        "direction_quality": {"_adx_entry_view", "_mtf_view", "_structure_view"},
+        "sr_geometry": {"_sr_state_view", "_distance_support_view", "_distance_resistance_view"},
+        "execution_quality": {"_entry_type_view", "_exit_type_view", "_partial_fill_view", "_fill_model_view", "_slippage_view"},
+        "partial_profit_path": {"_partial_exit_count_view", "_remaining_fraction_view"},
+        "chase_detail": {"_chase_view", "_urgent_tier_view", "_delay_view", "_offset_view"},
+        "excursion_timing": {"_path_mae_view", "_path_mfe_view", "_time_to_mae_view", "_time_to_mfe_view"},
+        "regime_transition": {"_regime_view", "_exit_regime_view", "_adx_entry_view", "_adx_exit_view"},
+        "fill_revalidation": {"_revalidation_result_view", "_revalidation_reason_view", "_revalidation_age_view"},
+        "terminal_order_outcome": {"_terminal_no_fill_view", "_terminal_ttl_view", "_terminal_reason_view"},
+        "path_sequence": {"_path_order_view"},
+        "protection_activation": {"_partial_exit_count_view", "_remaining_fraction_view"},
+        "stop_execution_quality": {"_stop_atr_view", "_hard_stop_view", "_slippage_view", "_partial_fill_view"},
+        "liquidity_at_exit": {"_exit_basis_view", "_exit_depth_view", "_exit_levels_view"},
+        "cost_drag": {"_cost_drag_view"},
+    }
+    views = {}
+    for view_name, dimensions in definitions.items():
+        available = [name for name in dimensions if frame[name].notna().any()]
+        missing = [name for name in dimensions if name not in available]
+        # Exit reason is causal terminal metadata and mandatory for every view.
+        has_required_detail = not required_any.get(view_name) or bool(
+            set(available).intersection(required_any[view_name])
+        )
+        if "_exit_reason_view" not in available or len(available) < 2 or not has_required_detail:
+            views[view_name] = {
+                "rows": [], "available_dimensions": available,
+                "missing_dimensions": missing, "empty_reason": "INSUFFICIENT_EXPLICIT_DIMENSIONS",
+                "source_terminal_rows": int(len(frame)), "eligible_rows": 0,
+                "coverage_pct": 0.0,
+            }
+            continue
+        rows = []
+        eligible = frame.dropna(subset=available)
+        for keys, sub in eligible.groupby(available, observed=True, dropna=False):
+            keys = keys if isinstance(keys, tuple) else (keys,)
+            values = {dimension.lstrip("_").removesuffix("_view"): value for dimension, value in zip(available, keys)}
+            stats = _combo_stats_from_df(sub)
+            rows.append({
+                "combination": " + ".join(f"{key}={value}" for key, value in values.items()),
+                "dimensions": values, "evidence_class": evidence_class,
+                "qualification_eligible": False, **_exit_identity_labels(sub), **stats,
+            })
+        rows.sort(key=lambda row: (row["ev_usd"] is not None, row["ev_usd"] or 0, row["trades"]), reverse=True)
+        views[view_name] = {
+            "rows": rows[:top_n], "available_dimensions": available,
+            "missing_dimensions": missing,
+            "empty_reason": None if rows else "NO_ROWS_WITH_COMPLETE_VIEW_DIMENSIONS",
+            "source_terminal_rows": int(len(frame)), "eligible_rows": int(len(eligible)),
+            "coverage_pct": round(100.0 * len(eligible) / len(frame), 1) if len(frame) else 0.0,
+        }
+    return views
+
+
+def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100):
+    """Four exit evidence worlds, always separate and never PnL-additive."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT COMBINATIONS — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    trades = _filter_policy_analysis_df(trades, "exit combinations report")
-    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
-    if work.empty:
-        payload = {"schema": "exit_combinations_v1", "top": [], "worst_leakage": [], "session_scope": scope}
-        with open(analyzer_report_path(EXIT_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
-
-    work["trade_mfe_type"] = _trade_mfe_type_series(work)
-    if "exit_reason" not in work.columns:
-        work["exit_reason"] = "UNKNOWN"
-    work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
-    lot_col = None
-    for c in ("profit_left_on_table", "left_on_table_usd", "left_on_table"):
-        if c in work.columns:
-            lot_col = c
-            break
-    if lot_col:
-        work["left_on_table_usd"] = pd.to_numeric(work[lot_col], errors="coerce").fillna(0)
-    else:
-        peak = pd.to_numeric(work.get("mfe_margin_pct", work.get("max_profit")), errors="coerce").fillna(0)
-        booked = pd.to_numeric(work.get("net_pnl_usd", 0), errors="coerce").fillna(0)
-        work["left_on_table_usd"] = (peak - booked).clip(lower=0)
-
     dims = [
         "exit_reason",
         "ai_probability_bucket",
         "directional_spread_bucket",
         "peak_mfe_bucket",
         "time_in_trade_bucket",
-        "trade_mfe_type",
         "research_lane",
     ]
-    combos = []
-    for keys, sub in work.groupby(dims, observed=True, dropna=False):
-        ex, ai_b, sp_b, mfe_b, time_b, ttype, lane = keys
-        if str(ttype).upper() == "TYPE_B":
-            continue
-        stats = _combo_stats_from_df(sub)
-        if stats["trades"] < min_trades:
-            continue
-        left = round(float(sub["left_on_table_usd"].sum()), 2)
-        avg_left = round(float(sub["left_on_table_usd"].mean()), 2)
-        combos.append({
-            "combo": f"EXIT_{ex}+AI{ai_b}+SPREAD{sp_b}+MFE{mfe_b}+TIME{time_b}+{ttype}+{str(lane).upper()}",
-            "exit_reason": ex,
-            "ai_bucket": ai_b,
-            "spread_bucket": sp_b,
-            "peak_mfe_bucket": mfe_b,
-            "time_in_trade_bucket": time_b,
-            "type": ttype,
-            "lane": str(lane).upper(),
-            "left_on_table_usd": left,
-            "avg_left_usd": avg_left,
-            **stats,
-        })
-    by_ev = sorted(combos, key=lambda x: (x["ev_usd"], x["pnl_usd"]), reverse=True)
-    by_leak = sorted(combos, key=lambda x: (x["left_on_table_usd"], -x["ev_usd"]), reverse=True)
-    top = by_ev[:top_n]
-    worst_leak = by_leak[:top_n]
+    def build(source, evidence_class, source_files=None, pnl_semantics=None):
+        source_rows = int(len(source)) if isinstance(source, pd.DataFrame) else 0
+        clean, contaminated_n = _descriptive_terminal_exit_df(source, f"{evidence_class} exit combinations")
+        work = _enrich_trades_with_buckets(clean.copy()) if not clean.empty else pd.DataFrame()
+        if work.empty:
+            return {
+                "evidence_class": evidence_class, "source_files": source_files or [],
+                "source_rows": source_rows, "terminal_rows": 0,
+                "contaminated_rows_excluded": contaminated_n,
+                "empty_reason": "NO_EXPLICIT_TERMINAL_EXIT_ROWS" if source_rows else "SOURCE_EMPTY_OR_UNAVAILABLE",
+                "pnl_semantics": pnl_semantics, "pnl_aggregation_allowed": False,
+                "top": [], "worst_leakage": [], "overall_left_on_table_usd": None,
+                "exit_family_scorecard": [], "stop_effectiveness_matrix": [],
+                "causal_combination_views": {}, "top_family_balanced": [],
+                "family_balance": {"max_per_family": 2, "families_represented": 0},
+            }
+        if "exit_reason" not in work.columns:
+            work["exit_reason"] = "UNKNOWN"
+        work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
+        # A shadow terminal may predate per-family lane metadata.  Pandas can
+        # misinterpret a list of six missing/available column labels as a
+        # six-row grouping vector when the frame also has six rows, producing
+        # nonsensical variable-length keys rather than a clear KeyError.
+        # Materialize every dimension explicitly so grouping is deterministic.
+        missing_dimension_counts = {}
+        complete_dimensions = pd.Series(True, index=work.index)
+        unavailable_labels = {"", "UNKNOWN", "UNAVAILABLE", "NONE", "NAN", "NULL"}
+        for dimension in dims:
+            if dimension not in work.columns:
+                work[dimension] = np.nan
+            else:
+                work[dimension] = work[dimension].replace(r"^\s*$", np.nan, regex=True)
+            present = work[dimension].notna() & ~work[dimension].astype(str).str.strip().str.upper().isin(unavailable_labels)
+            missing_dimension_counts[dimension] = int((~present).sum())
+            complete_dimensions &= present
+        lot_col = next((c for c in ("profit_left_on_table", "left_on_table_usd", "left_on_table") if c in work.columns), None)
+        if lot_col:
+            work["left_on_table_usd"] = pd.to_numeric(work[lot_col], errors="coerce").fillna(0)
+        else:
+            # Sparse shadow/lab terminal rows legitimately omit MFE and/or
+            # booked-PnL fields.  Always supply an index-aligned Series here;
+            # pd.to_numeric(None/0) returns a scalar numpy value, which cannot
+            # be fillna'd and previously aborted the entire analyzer run.
+            peak_source = (
+                work["mfe_margin_pct"] if "mfe_margin_pct" in work.columns
+                else work["max_profit"] if "max_profit" in work.columns
+                else pd.Series(np.nan, index=work.index)
+            )
+            booked_source = (
+                work["net_pnl_usd"] if "net_pnl_usd" in work.columns
+                else pd.Series(np.nan, index=work.index)
+            )
+            peak_margin_pct = pd.to_numeric(peak_source, errors="coerce")
+            booked = pd.to_numeric(booked_source, errors="coerce")
+            margin_source = (
+                work["margin_usdt"] if "margin_usdt" in work.columns
+                else work["margin_usd"] if "margin_usd" in work.columns
+                else pd.Series(np.nan, index=work.index)
+            )
+            margin_usd = pd.to_numeric(margin_source, errors="coerce")
+            peak_usd = (peak_margin_pct / 100.0) * margin_usd
+            work["left_on_table_usd"] = (peak_usd - booked).clip(lower=0)
+        combo_work = work.loc[complete_dimensions].copy()
+        combos = []
+        for keys, sub in combo_work.groupby(dims, observed=True, dropna=False):
+            ex, ai_b, sp_b, mfe_b, time_b, lane = keys
+            stats = _combo_stats_from_df(sub)
+            if stats["trades"] < min_trades:
+                continue
+            explicit_families = []
+            if "cfg_family" in sub.columns:
+                explicit_families = sorted({
+                    str(value).strip().upper()
+                    for value in sub["cfg_family"].dropna()
+                    if str(value).strip()
+                })
+            family = explicit_families[0] if len(explicit_families) == 1 else str(lane).upper()
+            combos.append({
+                "combo": f"EXIT_{ex}+AI{ai_b}+SPREAD{sp_b}+MFE{mfe_b}+TIME{time_b}+{str(lane).upper()}",
+                "exit_reason": ex, "ai_bucket": ai_b, "spread_bucket": sp_b,
+                "peak_mfe_bucket": mfe_b, "time_in_trade_bucket": time_b,
+                "lane": str(lane).upper(), "family": family,
+                "evidence_class": evidence_class,
+                "left_on_table_usd": round(float(sub["left_on_table_usd"].dropna().sum()), 2) if sub["left_on_table_usd"].notna().any() else None,
+                "avg_left_usd": round(float(sub["left_on_table_usd"].dropna().mean()), 2) if sub["left_on_table_usd"].notna().any() else None,
+                "sample_status": "LOW_SAMPLE_N1" if stats["trades"] == 1 else "DESCRIPTIVE_SAMPLE",
+                "qualification_eligible": False,
+                **_exit_identity_labels(sub), **stats,
+            })
+        by_ev = sorted(combos, key=lambda x: (x["ev_usd"] is not None, x["ev_usd"] or 0, x["pnl_usd"] or 0), reverse=True)
+        by_leak = sorted(combos, key=lambda x: (x["left_on_table_usd"] is not None, x["left_on_table_usd"] or 0), reverse=True)
+        balanced = _family_balanced_exit_rows(by_ev, top_n=top_n, max_per_family=2)
+        return {
+            "evidence_class": evidence_class, "source_files": source_files or [],
+            "source_rows": source_rows, "terminal_rows": int(len(work)),
+            "contaminated_rows_excluded": contaminated_n, "total_combos": len(combos),
+            "empty_reason": None if combos else (
+                "NO_ROWS_WITH_COMPLETE_COMBINATION_DIMENSIONS"
+                if len(work) and combo_work.empty else "NO_COMBINATIONS_MEET_MIN_TRADES"
+            ),
+            "rows_with_complete_combination_dimensions": int(len(combo_work)),
+            "rows_excluded_incomplete_combination_dimensions": int(len(work) - len(combo_work)),
+            "missing_dimension_counts": missing_dimension_counts,
+            "missing_margin_rows": int(pd.to_numeric(
+                work.get("margin_usdt", work.get("margin_usd", pd.Series(np.nan, index=work.index))),
+                errors="coerce",
+            ).isna().sum()),
+            "pnl_semantics": pnl_semantics,
+            "pnl_aggregation_allowed": False,
+            "overall_left_on_table_usd": round(float(work["left_on_table_usd"].dropna().sum()), 2) if work["left_on_table_usd"].notna().any() else None,
+            "top": by_ev[:top_n], "worst_leakage": by_leak[:top_n],
+            "top_family_balanced": balanced,
+            "family_balance": {
+                "max_per_family": 2,
+                "families_represented": len({
+                    str(row.get("family") or "UNKNOWN") for row in balanced
+                }),
+            },
+            **_exit_family_and_stop_summaries(work, evidence_class),
+            "causal_combination_views": _exit_causal_combination_views(work, evidence_class, top_n),
+        }
+
+    sources = _load_exit_evidence_worlds(trades=trades, session=session)
+    worlds = {
+        name: build(spec.get("frame"), spec["evidence_class"], spec.get("source_files"), spec.get("pnl_semantics"))
+        for name, spec in sources.items()
+    }
+    executed = worlds["executed_paper"]
+    shadow = worlds["shadow_lab"]
+    top, worst_leak = executed["top"], executed["worst_leakage"]
     for row in top[:6]:
         print(
-            f"  TOP {row['combo']}: n={row['trades']} EV=${row['ev_usd']:+.2f} "
-            f"left=${row['left_on_table_usd']:+.0f} {PIPELINE_ENFORCEMENT_TAG}"
+            f"  TOP {row['combo']}: n={row['trades']} EV={row['ev_usd']} "
+            f"left={row['left_on_table_usd']} {PIPELINE_ENFORCEMENT_TAG}"
         )
     payload = {
-        "schema": "exit_combinations_v1",
+        "schema": "exit_combinations_v4",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
@@ -15750,16 +17089,22 @@ def exit_combinations_report(trades=None, session=None, min_trades=3, top_n=80):
         "benchmark_lane": BENCHMARK_LANE,
         "min_trades_per_combo": min_trades,
         "dimensions": dims,
-        "total_combos": len(combos),
-        "overall_left_on_table_usd": round(float(work["left_on_table_usd"].sum()), 2),
-        "filter_note": "TYPE_B excluded — not predictable enough for exit combo optimization.",
+        "total_combos": executed.get("total_combos", 0),
+        "overall_left_on_table_usd": executed["overall_left_on_table_usd"],
+        "filter_note": "Paper, shadow/lab, conservative BBO/depth replay, and ideal-touch diagnostic terminals are descriptive, separated, and never PnL-additive. N=1 rows are visibly low sample.",
+        "qualification_eligible": False,
+        "evidence_worlds": worlds,
+        "evidence_classes": worlds,
         "top": top,
         "worst_leakage": worst_leak,
     }
     try:
-        with open(analyzer_report_path(EXIT_COMBINATIONS_REPORT_FILE), "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {EXIT_COMBINATIONS_REPORT_FILE} ({len(combos)} exit combos) {PIPELINE_ENFORCEMENT_TAG}")
+        target = analyzer_report_path(EXIT_COMBINATIONS_REPORT_FILE)
+        temp = f"{target}.tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, allow_nan=False)
+        os.replace(temp, target)
+        print(f"  ✅ Wrote {EXIT_COMBINATIONS_REPORT_FILE} ({executed.get('total_combos', 0)} executed exit combos) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {EXIT_COMBINATIONS_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
@@ -15837,94 +17182,126 @@ def _exit_leak_recommendations(reasons: list) -> list:
 
 
 def exit_leakage_by_reason_report(trades=None, session=None):
-    """Aggregate hindsight MFE-to-close gaps by exit reason."""
+    """Aggregate same-path exit gaps within four strictly separated worlds."""
     if session is None:
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== EXIT LEAKAGE BY REASON — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    trades = _filter_policy_analysis_df(trades, "exit leakage report")
-    if trades is None or trades.empty:
-        payload = {
-            "schema": "exit_leakage_by_reason_v1",
-            "session_scope": scope,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "overall_left_usd": 0.0,
-            "reasons": [],
+    def build(source, evidence_class, source_files=None, pnl_semantics=None):
+        source_rows = int(len(source)) if isinstance(source, pd.DataFrame) else 0
+        work, contaminated_n = _descriptive_terminal_exit_df(source, f"{evidence_class} exit leakage")
+        if work.empty:
+            return {
+                "evidence_class": evidence_class, "source_files": source_files or [],
+                "source_rows": source_rows, "terminal_rows": 0,
+                "contaminated_rows_excluded": contaminated_n, "overall_left_usd": None,
+                "overall_booked_usd": None, "overall_peak_usd": None,
+                "empty_reason": "NO_EXPLICIT_TERMINAL_EXIT_ROWS" if source_rows else "SOURCE_EMPTY_OR_UNAVAILABLE",
+                "pnl_semantics": pnl_semantics, "pnl_aggregation_allowed": False,
+                "reasons": [], "recommendations": [], "qualification_eligible": False,
+                "causal_combination_views": {},
+            }
+        pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
+        if pnl_col not in work.columns:
+            work[pnl_col] = np.nan
+        work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce")
+        mfe_source = work["max_profit"] if "max_profit" in work.columns else work.get("mfe_margin_pct", pd.Series(np.nan, index=work.index))
+        final_source = work["pnl"] if "pnl" in work.columns else work.get("final_pnl_margin_pct", pd.Series(np.nan, index=work.index))
+        mfe = pd.to_numeric(mfe_source, errors="coerce")
+        final_margin = pd.to_numeric(final_source, errors="coerce")
+        margin_source = work.get(
+            "margin_usdt",
+            work.get("margin_usd", pd.Series(np.nan, index=work.index)),
+        )
+        margin_usd = pd.to_numeric(margin_source, errors="coerce")
+        peak_usd = (mfe / 100.0) * margin_usd
+        booked_usd = work[pnl_col]
+        left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
+        capture = (booked_usd / peak_usd.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+        work = work.assign(_left=left_usd, _peak=peak_usd, _booked=booked_usd, _capture=capture)
+        reason_col = "exit_reason" if "exit_reason" in work.columns else "close_reason"
+        if reason_col not in work.columns:
+            work["exit_reason"] = "UNKNOWN"
+        elif reason_col != "exit_reason":
+            work["exit_reason"] = work[reason_col]
+        work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
+        reasons = []
+        for reason, sub in work.groupby("exit_reason", observed=True):
+            n = int(len(sub))
+            sub_mfe, sub_final = mfe.loc[sub.index], final_margin.loc[sub.index]
+            reasons.append({
+                "exit_reason": str(reason), "trades": n,
+                "left_on_table_usd": round(float(sub["_left"].dropna().sum()), 2) if sub["_left"].notna().any() else None,
+                "avg_left_usd": round(float(sub["_left"].dropna().mean()), 2) if sub["_left"].notna().any() else None,
+                "avg_mfe_margin_pct": round(float(sub_mfe.mean()), 2) if sub_mfe.notna().any() else None,
+                "avg_realized_margin_pct": round(float(sub_final.mean()), 2) if sub_final.notna().any() else None,
+                "avg_leakage_margin_pct": round(float((sub_mfe - sub_final).mean()), 2) if sub_mfe.notna().any() else None,
+                "booked_profit_usd": round(float(sub["_booked"].dropna().sum()), 2) if sub["_booked"].notna().any() else None,
+                "peak_profit_usd": round(float(sub["_peak"].dropna().sum()), 2) if sub["_peak"].notna().any() else None,
+                "capture_ratio_pct": round(float(sub["_capture"].mean(skipna=True) * 100), 1) if sub["_capture"].notna().any() else None,
+                "evidence_class": evidence_class,
+                "sample_status": "LOW_SAMPLE_N1" if n == 1 else "DESCRIPTIVE_SAMPLE",
+                "qualification_eligible": False,
+                **_exit_identity_labels(sub),
+            })
+        reasons.sort(key=lambda x: (x["left_on_table_usd"] is not None, x["left_on_table_usd"] or 0, x["trades"]), reverse=True)
+        return {
+            "evidence_class": evidence_class, "source_files": source_files or [],
+            "source_rows": source_rows, "terminal_rows": int(len(work)),
+            "contaminated_rows_excluded": contaminated_n,
+            "missing_margin_rows": int(margin_usd.isna().sum()),
+            "missing_pnl_rows": int(booked_usd.isna().sum()),
+            "empty_reason": None, "pnl_semantics": pnl_semantics,
+            "pnl_aggregation_allowed": False,
+            "overall_left_usd": round(float(left_usd.dropna().sum()), 2) if left_usd.notna().any() else None,
+            "overall_booked_usd": round(float(booked_usd.dropna().sum()), 2) if booked_usd.notna().any() else None,
+            "overall_peak_usd": round(float(peak_usd.dropna().sum()), 2) if peak_usd.notna().any() else None,
+            "reasons": reasons, "recommendations": _exit_leak_recommendations(reasons),
+            "causal_combination_views": _exit_causal_combination_views(work, evidence_class),
+            "qualification_eligible": False,
         }
-        with open(EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
 
-    work = trades.copy()
-    if "trade_id" in work.columns:
-        work = work.drop_duplicates(subset=["trade_id"], keep="last")
-    pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
-    work[pnl_col] = pd.to_numeric(work[pnl_col], errors="coerce").fillna(0.0)
-    mfe = pd.to_numeric(work.get("max_profit", work.get("mfe_margin_pct")), errors="coerce")
-    final_margin = pd.to_numeric(work.get("pnl", work.get("final_pnl_margin_pct")), errors="coerce")
-    margin_usd = pd.to_numeric(work.get("margin_usdt", FLAT_MARGIN_LIVE_USD), errors="coerce").fillna(FLAT_MARGIN_LIVE_USD)
-    peak_usd = (mfe / 100.0) * margin_usd
-    booked_usd = work[pnl_col]
-    left_usd = (peak_usd - (final_margin / 100.0) * margin_usd).clip(lower=0)
-    capture = (booked_usd / peak_usd.replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
-
-    work = work.assign(_left=left_usd, _peak=peak_usd, _booked=booked_usd, _capture=capture)
-    if "exit_reason" not in work.columns:
-        work["exit_reason"] = "UNKNOWN"
-    work["exit_reason"] = work["exit_reason"].fillna("UNKNOWN").astype(str)
-
-    reasons = []
-    for reason, sub in work.groupby("exit_reason", observed=True):
-        if sub.empty:
-            continue
-        n = int(len(sub))
-        left_sum = round(float(sub["_left"].sum()), 2)
-        avg_left = round(float(sub["_left"].mean()), 2)
-        avg_mfe = round(float(mfe.loc[sub.index].mean()), 2) if mfe.loc[sub.index].notna().any() else None
-        avg_realized = round(float(final_margin.loc[sub.index].mean()), 2) if final_margin.loc[sub.index].notna().any() else None
-        avg_leak_pct = round(float((mfe.loc[sub.index] - final_margin.loc[sub.index]).mean()), 2) if mfe.loc[sub.index].notna().any() else None
-        reasons.append({
-            "exit_reason": str(reason),
-            "trades": n,
-            "left_on_table_usd": left_sum,
-            "avg_left_usd": avg_left,
-            "avg_mfe_margin_pct": avg_mfe,
-            "avg_realized_margin_pct": avg_realized,
-            "avg_leakage_margin_pct": avg_leak_pct,
-            "booked_profit_usd": round(float(sub["_booked"].sum()), 2),
-            "peak_profit_usd": round(float(sub["_peak"].sum()), 2),
-            "capture_ratio_pct": round(float(sub["_capture"].mean(skipna=True) * 100), 1)
-            if sub["_capture"].notna().any() else 0.0,
-        })
-    reasons.sort(key=lambda x: (-x["left_on_table_usd"], -x["trades"]))
-    overall_left = round(float(left_usd.sum()), 2)
-    for row in reasons[:6]:
+    sources = _load_exit_evidence_worlds(trades=trades, session=session)
+    worlds = {
+        name: build(spec.get("frame"), spec["evidence_class"], spec.get("source_files"), spec.get("pnl_semantics"))
+        for name, spec in sources.items()
+    }
+    executed = worlds["executed_paper"]
+    shadow = worlds["shadow_lab"]
+    for row in executed["reasons"][:6]:
         print(
-            f"  {row['exit_reason']}: n={row['trades']} left=${row['left_on_table_usd']:.2f} "
+            f"  {row['exit_reason']}: n={row['trades']} left={row['left_on_table_usd']} "
             f"avg_leak={row['avg_leakage_margin_pct']}% {PIPELINE_ENFORCEMENT_TAG}"
         )
 
     payload = {
-        "schema": "exit_leakage_by_reason_v3",
+        "schema": "exit_leakage_by_reason_v5",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "expected_bot_version": EXPECTED_BOT_VERSION,
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "overall_left_usd": overall_left,
-        "overall_booked_usd": round(float(booked_usd.sum()), 2),
-        "overall_peak_usd": round(float(peak_usd.sum()), 2),
+        "overall_left_usd": executed["overall_left_usd"],
+        "overall_booked_usd": executed["overall_booked_usd"],
+        "overall_peak_usd": executed["overall_peak_usd"],
         "metric_label": "hindsight_peak_to_close_gap",
         "metric_warning": (
             "Peak MFE minus realized close is a hindsight excursion gap, not directly "
             "capturable profit and not evidence that a ladder change will improve PnL."
         ),
-        "reasons": reasons,
-        "recommendations": _exit_leak_recommendations(reasons),
+        "filter_note": "Four terminal evidence worlds are descriptive, separated, and never PnL-additive; terminal-double-count contaminated rows are excluded.",
+        "qualification_eligible": False,
+        "evidence_worlds": worlds,
+        "evidence_classes": worlds,
+        "reasons": executed["reasons"],
+        "recommendations": executed["recommendations"],
     }
     try:
-        with open(EXIT_LEAKAGE_BY_REASON_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {EXIT_LEAKAGE_BY_REASON_REPORT_FILE} ({len(reasons)} reasons) {PIPELINE_ENFORCEMENT_TAG}")
+        target = analyzer_report_path(EXIT_LEAKAGE_BY_REASON_REPORT_FILE)
+        temp = f"{target}.tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, allow_nan=False)
+        os.replace(temp, target)
+        print(f"  ✅ Wrote {EXIT_LEAKAGE_BY_REASON_REPORT_FILE} ({len(executed['reasons'])} executed reasons) {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {EXIT_LEAKAGE_BY_REASON_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
@@ -15970,9 +17347,11 @@ def exit_ladder_simulator_report(trades=None, session=None):
     print(f"\n=== EXIT LADDER SIMULATOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
 
     trades = _filter_policy_analysis_df(trades, "exit ladder simulator")
+    raw_replays = _load_jsonl_replays()
     replays = _filter_policy_analysis_replays(
-        _load_jsonl_replays(), "exit ladder simulator"
+        raw_replays, "exit ladder simulator"
     )
+    raw_replays_available = len(raw_replays)
     executed_ids = set()
     actual_sum = 0.0
     actual_n = 0
@@ -16100,8 +17479,13 @@ def exit_ladder_simulator_report(trades=None, session=None):
         data_status = "OK"
         empty_reason = None
     elif not replays:
-        data_status = "NO_REPLAYS"
-        empty_reason = f"No {SIGNAL_REPLAY_FILE} — run bot to collect tick replays."
+        data_status = "NO_ELIGIBLE_REPLAYS" if raw_replays_available else "NO_REPLAYS"
+        empty_reason = (
+            f"{raw_replays_available} replay path(s) exist, but none belongs to a current-epoch "
+            "eligible executed trade with the required causal identity."
+            if raw_replays_available
+            else f"No replay paths were found in {SIGNAL_REPLAY_FILE}."
+        )
         disclaimer += f" {empty_reason}"
     else:
         data_status = "OK"
@@ -16114,7 +17498,7 @@ def exit_ladder_simulator_report(trades=None, session=None):
             f"delta=${best.get('delta_vs_matched_actual_usd')}){flag} {PIPELINE_ENFORCEMENT_TAG}"
         )
     elif not replays:
-        print(f"  No {SIGNAL_REPLAY_FILE} — run bot to collect tick replays. {PIPELINE_ENFORCEMENT_TAG}")
+        print(f"  {empty_reason} {PIPELINE_ENFORCEMENT_TAG}")
 
     payload = {
         "schema": "exit_ladder_simulator_v3",
@@ -16129,6 +17513,8 @@ def exit_ladder_simulator_report(trades=None, session=None):
         "matched_actual_realized_usd": matched_actual_sum,
         "matched_actual_trades": len(matched_executed_ids),
         "comparison_scope": "matched_executed_trade_replay_cohort",
+        "raw_replays_available": raw_replays_available,
+        "eligible_replays_available": replays_considered,
         "replays_available": replays_considered,
         "replays_considered": replays_considered,
         "replays_matched_executed": replays_matched,
@@ -16536,12 +17922,6 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
 
     overall = {k: v for k, v in matrix.items() if "|" not in k}
     by_lane = {k: v for k, v in matrix.items() if k.split("|")[0] in ("0", "1", "2", "3", "4", "5+") and "|lane=" in k and "|ai=" not in k}
-    golden = sorted(
-        [v for k, v in matrix.items() if "|ai=60-65|spread=4|lane=" in k],
-        key=lambda x: x.get("ev_usd", 0),
-        reverse=True,
-    )[:10]
-
     payload = {
         "schema": "chase_efficiency_matrix_v1",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
@@ -16550,7 +17930,6 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "overall_by_chase_count": overall,
         "by_lane_and_chase_count": by_lane,
-        "golden_ai60_spread4": golden,
         "full_matrix": dict(matrix),
     }
     for key in ("0", "1", "2", "3", "4", "5+"):
@@ -16566,800 +17945,6 @@ def chase_efficiency_matrix_report(trades=None, session=None, chase_payload=None
         print(f"  ✅ Wrote {CHASE_EFFICIENCY_MATRIX_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {CHASE_EFFICIENCY_MATRIX_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def _type_b_bucket(val, kind: str) -> str:
-    try:
-        v = float(val)
-    except (TypeError, ValueError):
-        return "unknown"
-    if kind == "adx":
-        if v < ADX_RESEARCH_LOW_MAX:
-            return "adx<18"
-        if v < ADX_RESEARCH_MID_MAX:
-            return "adx18-30"
-        return "adx30+"
-    if kind == "spread":
-        if v <= 2:
-            return "spread0-2"
-        if v <= 4:
-            return "spread3-4"
-        return "spread5+"
-    if kind == "conf":
-        if v < 55:
-            return "conf<55"
-        if v < 65:
-            return "conf55-65"
-        return "conf65+"
-    if kind == "vol":
-        if v < 80:
-            return "vol_low"
-        if v < 150:
-            return "vol_mid"
-        return "vol_high"
-    return "unknown"
-
-
-def _type_b_probability_table(work: pd.DataFrame) -> list:
-    """Historical P(TYPE_B | feature bucket) — discovery only, not an entry gate."""
-    if work is None or work.empty:
-        return []
-    df = work.copy()
-    df["trade_mfe_type"] = _trade_mfe_type_series(df)
-    df["is_type_b"] = df["trade_mfe_type"].eq("TYPE_B")
-    if "adx_at_entry" in df.columns:
-        df["_adx_b"] = df["adx_at_entry"].map(lambda x: _type_b_bucket(x, "adx"))
-    if "conviction_spread" in df.columns:
-        df["_spread_b"] = df["conviction_spread"].map(lambda x: _type_b_bucket(x, "spread"))
-    elif "directional_spread" in df.columns:
-        df["_spread_b"] = df["directional_spread"].map(lambda x: _type_b_bucket(x, "spread"))
-    if "ai_win_prob" in df.columns:
-        df["_conf_b"] = df["ai_win_prob"].map(lambda x: _type_b_bucket(x, "conf"))
-    if "volatility" in df.columns:
-        df["_vol_b"] = df["volatility"].map(lambda x: _type_b_bucket(x, "vol"))
-    if "context_ema_slope" in df.columns:
-        df["_ema_b"] = pd.to_numeric(df["context_ema_slope"], errors="coerce").map(
-            lambda x: "ema_up" if (x or 0) > 0 else ("ema_down" if (x or 0) < 0 else "ema_flat")
-        )
-    if "research_lane" in df.columns:
-        df["_lane_b"] = df["research_lane"].fillna("").astype(str).str.upper()
-    dim_cols = {
-        "adx": "_adx_b", "spread": "_spread_b", "confidence": "_conf_b",
-        "volatility": "_vol_b", "ema_slope": "_ema_b", "lane": "_lane_b",
-    }
-    rows = []
-    for dim, col in dim_cols.items():
-        if col not in df.columns:
-            continue
-        for bucket, sub in df.groupby(col, observed=True):
-            if str(bucket) in ("unknown", "nan", ""):
-                continue
-            n = int(len(sub))
-            if n < 3:
-                continue
-            b_n = int(sub["is_type_b"].sum())
-            wr = round(100.0 * (sub["net_pnl_usd"].astype(float) > 0).mean(), 1) if "net_pnl_usd" in sub.columns else None
-            rows.append({
-                "dimension": dim,
-                "bucket": str(bucket),
-                "trades": n,
-                "type_b_count": b_n,
-                "type_b_probability_pct": round(100.0 * b_n / n, 1),
-                "wr_pct": wr,
-            })
-    rows.sort(key=lambda r: (-r["type_b_probability_pct"], -r["trades"]))
-    return rows[:40]
-
-
-def _type_b_entry_feature_frame(work: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """Build a leak-free entry feature frame for Type-B outcome discovery."""
-    if work is None or work.empty:
-        return pd.DataFrame(), {}
-    frame = pd.DataFrame(index=work.index)
-    mfe_raw = work["mfe_margin_pct"] if "mfe_margin_pct" in work else (
-        work["max_profit"] if "max_profit" in work else pd.Series(np.nan, index=work.index)
-    )
-    mfe = pd.to_numeric(mfe_raw, errors="coerce")
-    frame["is_type_b"] = mfe.ge(15)
-
-    timestamp = pd.Series(pd.NaT, index=work.index, dtype="datetime64[ns, UTC]")
-    for name in ("close_ts", "ts", "timestamp", "ts_melbourne"):
-        if name not in work.columns:
-            continue
-        missing = timestamp.isna()
-        if not missing.any():
-            break
-        parsed = pd.to_datetime(work.loc[missing, name], errors="coerce", utc=True)
-        timestamp.loc[missing] = parsed
-    frame["_time"] = timestamp
-    frame["_order"] = np.arange(len(frame))
-
-    adx_raw = work["adx_at_entry"] if "adx_at_entry" in work else pd.Series(np.nan, index=work.index)
-    adx = pd.to_numeric(adx_raw, errors="coerce")
-    frame["adx"] = adx.map(lambda v: _type_b_bucket(v, "adx"))
-
-    if "directional_spread" in work.columns:
-        spread_raw = work["directional_spread"]
-    else:
-        spread_raw = work["conviction_spread"] if "conviction_spread" in work else pd.Series(np.nan, index=work.index)
-    spread = pd.to_numeric(spread_raw, errors="coerce")
-    frame["spread"] = spread.map(lambda v: _type_b_bucket(v, "spread"))
-
-    volume_raw = work["features_volume_ratio"] if "features_volume_ratio" in work else (
-        work["feature_volume_ratio"] if "feature_volume_ratio" in work else pd.Series(np.nan, index=work.index)
-    )
-    volume = pd.to_numeric(volume_raw, errors="coerce")
-    frame["volume_ratio"] = pd.cut(
-        volume,
-        [-np.inf, 0.5, 0.75, np.inf],
-        right=False,
-        labels=["volume<0.50", "volume0.50-0.75", "volume0.75+"],
-    ).astype(str)
-
-    ema_raw = work["context_ema_slope"] if "context_ema_slope" in work else pd.Series(np.nan, index=work.index)
-    ema = pd.to_numeric(ema_raw, errors="coerce")
-    frame["ema_slope"] = ema.map(
-        lambda v: "ema_unknown" if pd.isna(v) else ("ema_up" if v > 0 else ("ema_down" if v < 0 else "ema_flat"))
-    )
-
-    structure_raw = work["structure_score_at_entry"] if "structure_score_at_entry" in work else (
-        work["structure"] if "structure" in work else pd.Series(np.nan, index=work.index)
-    )
-    structure = pd.to_numeric(structure_raw, errors="coerce")
-    frame["structure"] = pd.cut(
-        structure,
-        [-np.inf, -4, -1, np.inf],
-        right=False,
-        labels=["structure<-4", "structure-4--1", "structure>=-1"],
-    ).astype(str)
-
-    entry_raw = work["entry_mode_bucket"] if "entry_mode_bucket" in work else pd.Series("unknown", index=work.index)
-    frame["entry_mode"] = entry_raw.fillna("unknown").astype(str).str.upper()
-    direction_raw = work["final_direction"] if "final_direction" in work else (
-        work["dir"] if "dir" in work else pd.Series("unknown", index=work.index)
-    )
-    frame["direction"] = direction_raw.fillna("unknown").astype(str).str.upper()
-
-    raw_by_feature = {
-        "adx": adx,
-        "spread": spread,
-        "volume_ratio": volume,
-        "ema_slope": ema,
-        "structure": structure,
-        "entry_mode": entry_raw.replace("", np.nan),
-        "direction": direction_raw.replace("", np.nan),
-    }
-    coverage = {}
-    total = len(frame)
-    for feature, raw in raw_by_feature.items():
-        available = int(pd.Series(raw, index=frame.index).notna().sum())
-        coverage[feature] = {
-            "available": available,
-            "total": total,
-            "pct": round(100.0 * available / total, 1) if total else 0.0,
-        }
-    frame = frame[mfe.notna()].copy()
-    frame = frame.sort_values(["_time", "_order"], na_position="last")
-    return frame, coverage
-
-
-def _type_b_rule_part(feature: str, bucket: str) -> str:
-    labels = {
-        ("adx", "adx<18"): "ADX <18",
-        ("adx", "adx18-30"): "ADX 18–<30",
-        ("adx", "adx30+"): "ADX ≥30",
-        ("spread", "spread0-2"): "score gap 0–2",
-        ("spread", "spread3-4"): "score gap 3–4",
-        ("spread", "spread5+"): "score gap ≥5",
-        ("volume_ratio", "volume<0.50"): "volume ratio <0.50",
-        ("volume_ratio", "volume0.50-0.75"): "volume ratio 0.50–<0.75",
-        ("volume_ratio", "volume0.75+"): "volume ratio ≥0.75",
-        ("ema_slope", "ema_up"): "EMA slope up",
-        ("ema_slope", "ema_down"): "EMA slope down",
-        ("ema_slope", "ema_flat"): "EMA slope flat",
-        ("structure", "structure<-4"): "structure score <-4",
-        ("structure", "structure-4--1"): "structure score -4–<-1",
-        ("structure", "structure>=-1"): "structure score ≥-1",
-    }
-    if (feature, bucket) in labels:
-        return labels[(feature, bucket)]
-    if feature == "entry_mode":
-        return f"entry {bucket.replace('_', ' ')}"
-    if feature == "direction":
-        return f"direction {bucket}"
-    return f"{feature}={bucket}"
-
-
-def _type_b_entry_rule_analysis(work: pd.DataFrame) -> dict:
-    """Train on older outcomes and evaluate candidate entry rules on the newest 30%."""
-    frame, coverage = _type_b_entry_feature_frame(work)
-    total = len(frame)
-    if total < 20:
-        return {
-            "predictor_rules": [],
-            "feature_coverage": coverage,
-            "predictor_readiness": {
-                "status": "EARLY_COLLECTION",
-                "total_trades": total,
-                "type_b_trades": int(frame["is_type_b"].sum()) if total else 0,
-                "baseline_type_b_pct": round(100.0 * frame["is_type_b"].mean(), 1) if total else None,
-                "validated_rules": 0,
-                "note": f"Only {total} outcome-labelled trades; at least {TYPE_B_DISCOVERY_MIN_TRADES} are required for holdout discovery.",
-            },
-        }
-
-    holdout_n = max(20, int(round(total * 0.30)))
-    holdout_n = min(holdout_n, max(1, total - 12))
-    train = frame.iloc[:-holdout_n].copy()
-    holdout = frame.iloc[-holdout_n:].copy()
-    train_base = float(train["is_type_b"].mean()) if len(train) else 0.0
-    holdout_base = float(holdout["is_type_b"].mean()) if len(holdout) else 0.0
-    dimensions = ("adx", "spread", "volume_ratio", "ema_slope", "structure", "entry_mode", "direction")
-    rules = []
-    for width in (1, 2):
-        for dims in itertools.combinations(dimensions, width):
-            for raw_keys, sub in train.groupby(list(dims), observed=True, dropna=False):
-                keys = raw_keys if isinstance(raw_keys, tuple) else (raw_keys,)
-                if len(sub) < TYPE_B_RULE_MIN_TRAIN_N:
-                    continue
-                if any(str(value).lower() in ("unknown", "nan", "ema_unknown", "") for value in keys):
-                    continue
-                train_rate = float(sub["is_type_b"].mean())
-                train_lift = train_rate / train_base if train_base > 0 else 0.0
-                if train_lift < 1.05:
-                    continue
-                mask = pd.Series(True, index=holdout.index)
-                for dim, value in zip(dims, keys):
-                    mask &= holdout[dim].eq(value)
-                check = holdout[mask]
-                check_rate = float(check["is_type_b"].mean()) if len(check) else 0.0
-                check_lift = check_rate / holdout_base if holdout_base > 0 else 0.0
-                if len(check) < TYPE_B_RULE_MIN_HOLDOUT_N:
-                    status = "INSUFFICIENT_HOLDOUT"
-                elif train_lift >= 1.20 and check_lift >= 1.15 and int(check["is_type_b"].sum()) >= 3:
-                    status = "HOLDOUT_POSITIVE"
-                elif check_lift < 0.90:
-                    status = "FAILED_HOLDOUT"
-                else:
-                    status = "COLLECTING"
-                rules.append({
-                    "rule": " AND ".join(_type_b_rule_part(dim, str(value)) for dim, value in zip(dims, keys)),
-                    "features": list(dims),
-                    "train_n": int(len(sub)),
-                    "train_type_b_pct": round(100.0 * train_rate, 1),
-                    "train_lift": round(train_lift, 2),
-                    "holdout_n": int(len(check)),
-                    "holdout_type_b_pct": round(100.0 * check_rate, 1) if len(check) else None,
-                    "holdout_lift": round(check_lift, 2) if len(check) else None,
-                    "status": status,
-                    "out_of_sample": True,
-                })
-
-    # Candidate ordering uses training evidence only. Holdout outcomes are an
-    # independent falsification check; include every positive holdout result in
-    # the displayed set so a valid check is not hidden below sparse train-only
-    # combinations.
-    rules.sort(key=lambda row: (-row["train_lift"], -row["train_n"], row["rule"]))
-    holdout_positive = sum(1 for row in rules if row["status"] == "HOLDOUT_POSITIVE")
-    shown = list(rules[:8])
-    for row in rules:
-        if row["status"] == "HOLDOUT_POSITIVE" and row not in shown:
-            shown.append(row)
-    for row in rules:
-        if len(shown) >= 12:
-            break
-        if row not in shown:
-            shown.append(row)
-    shown = shown[:12]
-    if total < TYPE_B_DISCOVERY_MIN_TRADES:
-        status = "EARLY_COLLECTION"
-    elif total < TYPE_B_GATE_MIN_TRADES:
-        status = "COLLECTING"
-    elif not holdout_positive:
-        status = "NO_STABLE_RULE"
-    else:
-        status = "RESEARCH_CANDIDATE_READY"
-    note = (
-        f"{total} outcome-labelled trades: {len(train)} older trades select candidates and "
-        f"{len(holdout)} newest trades are untouched holdout evidence. "
-        f"{holdout_positive} rule(s) are holdout-positive. No live entry gate before "
-        f"≥{TYPE_B_GATE_MIN_TRADES} total outcomes and repeated rolling-window confirmation."
-    )
-    return {
-        "predictor_rules": shown,
-        "feature_coverage": coverage,
-        "predictor_readiness": {
-            "status": status,
-            "total_trades": total,
-            "type_b_trades": int(frame["is_type_b"].sum()),
-            "baseline_type_b_pct": round(100.0 * frame["is_type_b"].mean(), 1),
-            "train_trades": int(len(train)),
-            "train_baseline_type_b_pct": round(100.0 * train_base, 1),
-            "holdout_trades": int(len(holdout)),
-            "holdout_baseline_type_b_pct": round(100.0 * holdout_base, 1),
-            "validated_rules": holdout_positive,
-            "minimum_total_for_gate": TYPE_B_GATE_MIN_TRADES,
-            "note": note,
-        },
-    }
-
-
-def type_b_predictor_report(trades=None, session=None):
-    """Pre-entry feature separators — TYPE_A vs TYPE_B averages and ranked deltas."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== TYPE B PREDICTOR — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    work = _enrich_trades_with_buckets(trades.copy()) if trades is not None and not trades.empty else pd.DataFrame()
-    feature_cols = [
-        ("edge_score_at_entry", "edge_score"),
-        ("directional_spread", "spread"),
-        ("structure_score_at_entry", "structure"),
-        ("support_resistance_bucket", "sr_bucket"),
-        ("adx_at_entry", "adx"),
-        ("features_volume_ratio", "volume_ratio"),
-        ("features_imbalance", "imbalance"),
-        ("features_delta", "delta"),
-        ("features_velocity", "velocity"),
-        ("ai_win_prob", "ai_prob"),
-        ("conviction_spread", "conviction_spread"),
-    ]
-    if work.empty:
-        payload = {"schema": "type_b_predictor_v1", "separators": [], "session_scope": scope}
-        with open(TYPE_B_PREDICTOR_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
-
-    mfe_source = work["mfe_margin_pct"] if "mfe_margin_pct" in work else (
-        work["max_profit"] if "max_profit" in work else pd.Series(np.nan, index=work.index)
-    )
-    valid_mfe = pd.to_numeric(mfe_source, errors="coerce")
-    work = work[valid_mfe.notna()].copy()
-    if work.empty:
-        payload = {
-            "schema": "type_b_predictor_v3",
-            "session_scope": scope,
-            "classification": "TYPE_A: MFE<10% | TYPE_B: MFE>=15% | MIXED: between",
-            "cohorts": {},
-            "separators_ranked": [],
-            "top_separators": [],
-            "probability_table": [],
-            "predictor_rules": [],
-            "predictor_readiness": {
-                "status": "EARLY_COLLECTION",
-                "total_trades": 0,
-                "type_b_trades": 0,
-                "validated_rules": 0,
-                "note": "No trades have a valid MFE outcome yet.",
-            },
-        }
-        with open(TYPE_B_PREDICTOR_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        return payload
-
-    work["trade_mfe_type"] = _trade_mfe_type_series(work)
-    cohort_stats = {}
-    for ttype in ("TYPE_A", "TYPE_B", "MIXED"):
-        sub = work[work["trade_mfe_type"] == ttype]
-        stats = _combo_stats_from_df(sub)
-        sub_mfe_source = sub["mfe_margin_pct"] if "mfe_margin_pct" in sub else (
-            sub["max_profit"] if "max_profit" in sub else pd.Series(np.nan, index=sub.index)
-        )
-        sub_mfe = pd.to_numeric(sub_mfe_source, errors="coerce")
-        stats["avg_mfe_pct"] = round(float(sub_mfe.mean()), 2) if sub_mfe.notna().any() else None
-        avgs = {}
-        for col, label in feature_cols:
-            if col not in sub.columns:
-                continue
-            val = pd.to_numeric(sub[col], errors="coerce").mean()
-            if pd.notna(val):
-                avgs[label] = round(float(val), 3)
-        cohort_stats[ttype] = {**stats, "feature_averages": avgs}
-
-    separators = []
-    a = work[work["trade_mfe_type"] == "TYPE_A"]
-    b = work[work["trade_mfe_type"] == "TYPE_B"]
-    if not a.empty and not b.empty:
-        for col, label in feature_cols:
-            if col not in work.columns:
-                continue
-            am = pd.to_numeric(a[col], errors="coerce").mean()
-            bm = pd.to_numeric(b[col], errors="coerce").mean()
-            if pd.notna(am) and pd.notna(bm):
-                separators.append({
-                    "feature": label,
-                    "type_a_mean": round(float(am), 3),
-                    "type_b_mean": round(float(bm), 3),
-                    "delta_abs": round(abs(float(bm) - float(am)), 3),
-                    "direction": "higher_in_B" if bm > am else "lower_in_B",
-                })
-        separators.sort(key=lambda x: x["delta_abs"], reverse=True)
-
-    prob_table = _type_b_probability_table(work)
-    entry_analysis = _type_b_entry_rule_analysis(work)
-    predictor_rules = entry_analysis.get("predictor_rules") or []
-    payload = {
-        "schema": "type_b_predictor_v3",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "classification": "TYPE_A: MFE<10% | TYPE_B: MFE>=15% | MIXED: between",
-        "cohorts": cohort_stats,
-        "separators_ranked": separators,
-        "top_separators": separators[:10],
-        "probability_table": prob_table,
-        "predictor_rules": predictor_rules,
-        "predictor_readiness": entry_analysis.get("predictor_readiness") or {},
-        "feature_coverage": entry_analysis.get("feature_coverage") or {},
-        "method": (
-            "Only entry-time fields are eligible. Candidates are selected on the older 70% "
-            "of outcome-labelled trades and evaluated on the newest 30% chronological holdout."
-        ),
-        "hypothesis": (
-            predictor_rules[0]["rule"]
-            if predictor_rules
-            else "No entry-time fingerprint has enough holdout evidence yet."
-        ),
-    }
-    if separators:
-        print(f"  Top separator: {separators[0]['feature']} Δ={separators[0]['delta_abs']} {PIPELINE_ENFORCEMENT_TAG}")
-    try:
-        with open(TYPE_B_PREDICTOR_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {TYPE_B_PREDICTOR_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {TYPE_B_PREDICTOR_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def type_b_research_v2_report():
-    """Build the independent-opportunity Type-B collection report."""
-    event_path = TYPE_B_RESEARCH_V2_EVENT_FILE
-    report_path = analyzer_report_path(TYPE_B_RESEARCH_V2_REPORT_FILE)
-    try:
-        events_all = load_type_b_research_v2_events(event_path)
-        invalid_ids = {
-            str(event.get("opportunity_id") or "")
-            for event in events_all
-            if event.get("opportunity_id")
-            and str(event.get("lane") or "").upper() == "OFFSET_029_ATR_TP_25"
-        }
-        events = [
-            event for event in events_all
-            if str(event.get("opportunity_id") or "") not in invalid_ids
-        ]
-        opportunities = materialize_type_b_research_v2(events)
-        payload = summarize_type_b_research_v2(opportunities)
-        payload.update({
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "expected_bot_version": EXPECTED_BOT_VERSION,
-            "events_total": len(events),
-            "policy_mismatch_events_excluded": len(events_all) - len(events),
-            "policy_mismatch_opportunities_excluded": len(invalid_ids),
-            "policy_mismatch_reason": "OFFSET029_PAPER_ONLY_FORBIDS_TYPE_B_SHADOW_EVENTS",
-            "quality_gate": {
-                "minimum_independent_opportunities": TYPE_B_GATE_MIN_TRADES,
-                "minimum_feature_coverage_pct": 90,
-                "rolling_holdouts_required": 3,
-                "auto_apply": False,
-            },
-            # Bound dashboard/API payload size; the JSONL remains the canonical audit stream.
-            "recent_opportunities": opportunities[-200:],
-        })
-    except Exception as exc:
-        payload = {
-            "schema": "type_b_research_v2_report_v1",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "analyzer_sync_id": ANALYZER_SYNC_ID,
-            "expected_bot_version": EXPECTED_BOT_VERSION,
-            "independent_opportunities": 0,
-            "valid_holdout_opportunities": 0,
-            "completed_opportunities": 0,
-            "filled_opportunities": 0,
-            "type_b_outcomes": 0,
-            "readiness": "COLLECTING",
-            "execution_policy": "ADVISORY_ONLY_NEVER_AUTO_APPLY",
-            "error": f"{type(exc).__name__}: {exc}",
-            "recent_opportunities": [],
-        }
-    Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-    print(
-        "  Type B Research V2: "
-        f"opportunities={payload.get('independent_opportunities', 0)} "
-        f"valid={payload.get('valid_holdout_opportunities', 0)} "
-        f"status={payload.get('readiness')} {PIPELINE_ENFORCEMENT_TAG}"
-    )
-    return payload
-
-
-def type_b_adx_v3_shadow_report(session=None):
-    """Evaluate the non-monotonic ADX Type B challenger without promoting it."""
-    if session is None:
-        session = load_research_session()
-    decisions = pd.DataFrame(_load_jsonl_rows(TYPE_B_ADX_V3_DECISION_FILE))
-    outcomes = pd.DataFrame(_load_jsonl_rows(SHADOW_LANE_OUTCOME_FILE))
-    if not decisions.empty:
-        decisions = filter_df_since_session(decisions, session, ts_cols=("ts", "timestamp"))
-        if "study_id" in decisions.columns:
-            decisions = decisions.drop_duplicates(subset=["study_id"], keep="last")
-    if not outcomes.empty:
-        outcomes = filter_df_since_session(outcomes, session, ts_cols=("ts", "timestamp"))
-        if "research_lane" in outcomes.columns:
-            outcomes = outcomes[
-                outcomes["research_lane"].fillna("").astype(str).str.upper()
-                == "TYPE_B_HUNTER_ADX_V3_SHADOW"
-            ]
-        if "study_id" in outcomes.columns:
-            outcomes = outcomes.drop_duplicates(subset=["study_id"], keep="last")
-
-    def outcome_summary(work):
-        if work is None or work.empty:
-            return {
-                "closed": 0, "filled": 0, "wins": 0, "losses": 0,
-                "win_rate_pct": None, "net_pnl_usd": 0.0, "ev_per_fill_usd": None,
-            }
-        filled = work.copy()
-        if "filled" in filled.columns:
-            filled = filled[filled["filled"].apply(_truthy)]
-        pnl_source = (
-            filled["net_pnl_usd"]
-            if "net_pnl_usd" in filled.columns
-            else pd.Series(0.0, index=filled.index, dtype=float)
-        )
-        pnl = pd.to_numeric(pnl_source, errors="coerce").fillna(0.0)
-        wins = int((pnl > 0).sum())
-        losses = int((pnl < 0).sum())
-        decided = wins + losses
-        net = float(pnl.sum())
-        return {
-            "closed": int(len(work)),
-            "filled": int(len(filled)),
-            "wins": wins,
-            "losses": losses,
-            "win_rate_pct": round(wins / decided * 100, 1) if decided else None,
-            "net_pnl_usd": round(net, 4),
-            "ev_per_fill_usd": round(net / len(filled), 4) if len(filled) else None,
-        }
-
-    accepted_mask = pd.Series(False, index=decisions.index)
-    if not decisions.empty and "accepted" in decisions.columns:
-        accepted_mask = decisions["accepted"].apply(_truthy)
-    accepted_ids = set(
-        decisions.loc[accepted_mask, "study_id"].dropna().astype(str)
-        if not decisions.empty and "study_id" in decisions.columns else []
-    )
-    rejected_ids = set(
-        decisions.loc[~accepted_mask, "study_id"].dropna().astype(str)
-        if not decisions.empty and "study_id" in decisions.columns else []
-    )
-    outcome_ids = outcomes["study_id"].fillna("").astype(str) if not outcomes.empty and "study_id" in outcomes.columns else pd.Series([], dtype=str)
-    accepted_outcomes = outcomes[outcome_ids.isin(accepted_ids)] if not outcomes.empty else outcomes
-    rejected_outcomes = outcomes[outcome_ids.isin(rejected_ids)] if not outcomes.empty else outcomes
-
-    rejection_reasons = {}
-    if not decisions.empty and "block_reason" in decisions.columns:
-        rejected = decisions[~accepted_mask]
-        rejection_reasons = {
-            str(key or "UNKNOWN"): int(value)
-            for key, value in rejected["block_reason"].fillna("UNKNOWN").value_counts().items()
-        }
-    direction_balance = {}
-    if not decisions.empty and "direction" in decisions.columns:
-        direction_balance = {
-            str(key or "UNKNOWN"): int(value)
-            for key, value in decisions.loc[accepted_mask, "direction"].fillna("UNKNOWN").value_counts().items()
-        }
-
-    accepted_metrics = outcome_summary(accepted_outcomes)
-    min_each_direction = min(direction_balance.get("LONG", 0), direction_balance.get("SHORT", 0))
-    promotion_ready = bool(
-        accepted_metrics["closed"] >= 50
-        and min_each_direction >= 15
-        and (accepted_metrics["ev_per_fill_usd"] or 0) > 0
-    )
-    payload = {
-        "schema": "type_b_adx_v3_shadow_report_v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "session_scope": _shadow_scope_label(session),
-        "policy": "type_b_adx_nonmonotonic_shadow_v3_20260721",
-        "safety": "SHADOW_ONLY_NEVER_RELAY_ELIGIBLE",
-        "decisions": {
-            "total": int(len(decisions)),
-            "accepted": int(accepted_mask.sum()) if len(accepted_mask) else 0,
-            "rejected": int((~accepted_mask).sum()) if len(accepted_mask) else 0,
-            "accepted_direction_balance": direction_balance,
-            "rejection_reasons": rejection_reasons,
-        },
-        "accepted_policy_outcomes": accepted_metrics,
-        "rejected_counterfactual_outcomes": outcome_summary(rejected_outcomes),
-        "promotion_gate": {
-            "status": "ELIGIBLE_FOR_MANUAL_REVIEW" if promotion_ready else "COLLECT_MORE",
-            "automatic_promotion": False,
-            "requirements": "at least 50 closed accepted replays, >=15 LONG and >=15 SHORT accepts, positive EV, then walk-forward review",
-        },
-    }
-    with open(analyzer_report_path(TYPE_B_ADX_V3_SHADOW_REPORT_FILE), "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
-    print(
-        f"  Type B ADX v3 shadow: decisions={len(decisions)} "
-        f"accepted={payload['decisions']['accepted']} closed={accepted_metrics['closed']} "
-        f"EV={accepted_metrics['ev_per_fill_usd']} status={payload['promotion_gate']['status']} "
-        f"{PIPELINE_ENFORCEMENT_TAG}"
-    )
-    return payload
-
-
-def lane_retirement_report(trades=None, session=None, benchmark_report=None):
-    """Automatic KEEP / RETIRE / COLLECT MORE recommendations per pathway lane."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== LANE RETIREMENT REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        benchmark_report = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    lanes = (benchmark_report or {}).get("lanes") or {}
-    bench = lanes.get("CONTINUOUS") or {}
-    bench_ev = float(bench.get("per_approve_ev") or 0)
-    bench_pnl = float(bench.get("net_pnl_real") or 0)
-
-    recommendations = []
-    for lane_key in BENCHMARK_LANES:
-        if lane_key == "CONTINUOUS":
-            continue
-        pathway_status = _pathway_lane_status(lane_key)
-        m = lanes.get(lane_key) or {}
-        all_time = m.get("all_time") or {}
-        fills = int(m.get("real_fills") or m.get("fills") or 0)
-        approves = int(m.get("approves") or 0)
-        pnl = float(m.get("net_pnl_real") or m.get("net_pnl_usd") or 0)
-        ev = float(m.get("per_approve_ev") or 0)
-        at_fills = int(all_time.get("real_fills") or 0)
-        at_pnl = float(all_time.get("net_pnl_real") or 0)
-        hist_note = ""
-        if at_fills and (fills != at_fills or abs(pnl - at_pnl) > 0.01):
-            hist_note = f" · all-time: {at_fills} fills ${at_pnl:+.2f}"
-        if pathway_status == "RETIRED":
-            recommendations.append({
-                "lane": lane_key,
-                "trades": fills,
-                "approves": approves,
-                "pnl_usd": round(pnl, 2),
-                "ev_per_approve": round(ev, 2),
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": at_fills,
-                "all_time_pnl_usd": round(at_pnl, 2),
-                "recommendation": "RETIRED",
-                "reason": f"Paused — no new orders{hist_note}" if at_fills else "Frozen — no active research budget; historical analytics only",
-            })
-            continue
-        if pathway_status == PATHWAY_STATUS_SHADOW_COLLECTING:
-            recommendations.append({
-                "lane": lane_key,
-                "trades": fills,
-                "approves": approves,
-                "pnl_usd": round(pnl, 2),
-                "ev_per_approve": round(ev, 2),
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": at_fills,
-                "all_time_pnl_usd": round(at_pnl, 2),
-                "recommendation": "COLLECTING",
-                "reason": f"Shadow-only off-dashboard lane — simulated PnL, no live orders{hist_note}",
-            })
-            continue
-        if fills == 0 and approves == 0 and at_fills == 0:
-            recommendations.append({
-                "lane": lane_key,
-                "trades": 0,
-                "approves": 0,
-                "pnl_usd": 0.0,
-                "ev_per_approve": 0.0,
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": 0,
-                "all_time_pnl_usd": 0.0,
-                "recommendation": "NO_DATA",
-                "reason": "No session or historical fills in CSV for this lane",
-            })
-            continue
-        if fills == 0 and approves == 0 and at_fills > 0:
-            recommendations.append({
-                "lane": lane_key,
-                "trades": 0,
-                "approves": 0,
-                "pnl_usd": 0.0,
-                "ev_per_approve": 0.0,
-                "benchmark_ev": round(bench_ev, 2),
-                "pathway_status": pathway_status,
-                "all_time_fills": at_fills,
-                "all_time_pnl_usd": round(at_pnl, 2),
-                "recommendation": "HISTORICAL_ONLY",
-                "reason": f"No session activity — all-time: {at_fills} fills ${at_pnl:+.2f}",
-            })
-            continue
-        if pathway_status == "PROBATION":
-            rec = "PROBATION"
-            reason = "Collect unique trades/PnL/EV — retire if overlap with CONTINUOUS remains insignificant"
-        elif fills < MIN_LANE_FILLS_FOR_RETIREMENT and approves < MIN_LANE_APPROVES_FOR_RETIREMENT:
-            rec = "INSUFFICIENT_SAMPLE"
-            reason = f"only {fills} fills / {approves} approves — need ≥{MIN_LANE_FILLS_FOR_RETIREMENT} fills"
-        elif fills >= MIN_LANE_FILLS_FOR_RETIREMENT and (pnl <= -10 or (ev < 0 and fills >= 20)):
-            rec = "RETIRE"
-            reason = f"negative PnL ${pnl:+.2f} with {fills} fills or EV ${ev:+.2f}/approve"
-        elif fills >= MIN_LANE_FILLS_FOR_RETIREMENT and bench_ev > 0 and ev < bench_ev * 0.45 and pnl < bench_pnl * 0.05:
-            rec = "RETIRE"
-            reason = f"dominated by CONTINUOUS — EV ${ev:+.2f} vs benchmark ${bench_ev:+.2f}"
-        elif pnl > 0 and ev >= bench_ev * 0.85:
-            rec = "KEEP"
-            reason = f"beats benchmark EV (${ev:+.2f} vs ${bench_ev:+.2f})"
-        elif pnl > 0 and (ev < bench_ev * 0.85 or fills < MIN_LANE_FILLS_FOR_RETIREMENT):
-            rec = "WATCH"
-            reason = f"profitable but below benchmark EV (${ev:+.2f} vs ${bench_ev:+.2f}) — collect more or demote"
-        elif pnl <= 0 and fills >= MIN_LANE_FILLS_FOR_RETIREMENT:
-            rec = "WATCH"
-            reason = f"enough sample ({fills}) but weak PnL ${pnl:+.2f} — monitor"
-        elif pnl > 0:
-            rec = "WATCH"
-            reason = "positive PnL but thin sample"
-        else:
-            rec = "WATCH"
-            reason = "mixed signals — manual review"
-        recommendations.append({
-            "lane": lane_key,
-            "trades": fills,
-            "approves": approves,
-            "pnl_usd": round(pnl, 2),
-            "ev_per_approve": round(ev, 2),
-            "benchmark_ev": round(bench_ev, 2),
-            "pathway_status": pathway_status,
-            "all_time_fills": at_fills,
-            "all_time_pnl_usd": round(at_pnl, 2),
-            "recommendation": rec,
-            "reason": reason + hist_note if hist_note and hist_note not in reason else reason,
-        })
-
-    cont_fills = int(bench.get("real_fills") or bench.get("fills") or 0)
-    recommendations.insert(0, {
-        "lane": "CONTINUOUS",
-        "trades": cont_fills,
-        "approves": int(bench.get("approves") or 0),
-        "pnl_usd": round(bench_pnl, 2),
-        "ev_per_approve": round(bench_ev, 2),
-        "benchmark_ev": round(bench_ev, 2),
-        "recommendation": "KEEP (BENCHMARK)",
-        "reason": "baseline lane — do not retire",
-    })
-    retire = [r for r in recommendations if r["recommendation"] == "RETIRE"]
-    for r in recommendations:
-        print(
-            f"  {r['lane']}: {r['recommendation']} n={r['trades']} "
-            f"PnL=${r['pnl_usd']:+.2f} EV=${r['ev_per_approve']:+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-
-    payload = {
-        "schema": "lane_retirement_v2",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "benchmark_lane": "CONTINUOUS",
-        "active_roster": list(ACTIVE_PATHWAY_LANES),
-        "retired_lanes": sorted(RETIRED_PATHWAY_LANES),
-        "min_fills_for_decision": MIN_LANE_FILLS_FOR_RETIREMENT,
-        "retire_candidates": [r["lane"] for r in retire],
-        "lanes": recommendations,
-    }
-    try:
-        with open(LANE_RETIREMENT_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {LANE_RETIREMENT_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {LANE_RETIREMENT_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
 
 
@@ -17595,7 +18180,10 @@ def feature_importance_report(trades=None, session=None):
         ("spread", ("factor_spread",)),
         ("mtf_alignment", ("directional_factor_spread",)),
         ("adx", ("adx_at_entry", "adx")),
-        ("momentum", ("momentum",)),
+        # `momentum` is a legacy/coarse direction label in current V3.1 trade
+        # rows and can legitimately be constant. Prefer the continuously-valued
+        # entry velocity captured by the current feature schema.
+        ("momentum", ("features_velocity", "feature_velocity", "velocity", "momentum")),
         ("volatility", ("volatility",)),
         ("participation", ("features_volume_ratio",)),
         ("velocity", ("features_velocity", "velocity")),
@@ -17967,7 +18555,7 @@ def lane_overlap_report(trades=None, session=None, benchmark_report=None):
                 continuous_keys.add(k)
 
     lanes_out = []
-    for lane_key in EXPERIMENT_LANES:
+    for lane_key in ACTIVE_ANALYSIS_LANES:
         if lane_key in LEGACY_LANES:
             continue
         lane_snaps = [(tid, s) for tid, s in snapshots.items() if str(s.get("research_lane") or "") == lane_key]
@@ -18188,27 +18776,22 @@ def pre_test_analytics_reports(
         shadow_report=shadow_report,
     )
     missed_opportunity_heatmap_report(trades=trades, session=session)
+    missed_proof = missed_opportunity_proof_report(session=session)
+    chase_policy_lab_report(session=session, proof_payload=missed_proof)
     chase_payload = chase_attribution_report(trades=trades, session=session)
     chase_effectiveness_report(trades=trades, session=session, chase_payload=chase_payload)
     qualified_chase_policy_report()
     chase_threshold_report(trades=trades, session=session, chase_payload=chase_payload)
     chase_profit_report(trades=trades, session=session, chase_payload=chase_payload)
-    urgent_chase_report(
-        trades=trades, session=session, benchmark_report=benchmark_report, chase_payload=chase_payload,
-    )
     chase_delay_report(
         trades=trades, session=session, benchmark_report=benchmark_report, chase_payload=chase_payload,
     )
-    lane_chase_isolation_report(trades=trades, session=session, chase_payload=chase_payload)
     top_combinations_report(trades=trades, session=session)
     exit_combinations_report(trades=trades, session=session)
     exit_leakage_by_reason_report(trades=trades, session=session)
     exit_ladder_simulator_report(trades=trades, session=session)
     correlated_price_cluster_report(session=session)
     chase_efficiency_matrix_report(trades=trades, session=session, chase_payload=chase_payload)
-    type_b_predictor_report(trades=trades, session=session)
-    type_b_research_v2_report()
-    type_b_adx_v3_shadow_report(session=session)
     first_15m_outcome_report(trades=trades, session=session)
     scenario_c_leakage_report(trades=trades, session=session)
     ai_direction_bias_report(trades=trades, decisions=decisions, session=session)
@@ -18220,39 +18803,6 @@ def pre_test_analytics_reports(
     fast_cut_survivor_report(trades=trades, session=session)
     pathway_survival_report(trades=trades, session=session)
     top_leakage_report(trades=trades, session=session)
-    try:
-        from pathway_lab_validation import (
-            audit_type_b_not_in_execution,
-            run_ai_scan_independence_self_test,
-            run_ai_scan_role_validation,
-            run_tile_independence_self_test,
-            validate_exit_reports_populated,
-            verify_repo_version_sync,
-        )
-        audit_type_b_not_in_execution()
-        run_tile_independence_self_test(retired_status=dict(PATHWAY_LANE_STATUS))
-        run_ai_scan_independence_self_test(retired_status=dict(PATHWAY_LANE_STATUS))
-        run_ai_scan_role_validation()
-        verify_repo_version_sync()
-        if trades is None or trades.empty:
-            trade_n = 0
-        elif "trade_id" in trades.columns:
-            trade_n = len(trades.drop_duplicates(subset=["trade_id"]))
-        else:
-            trade_n = len(trades)
-        exit_val = validate_exit_reports_populated(trade_count=int(trade_n))
-        if exit_val.get("verdict") == "INSUFFICIENT_DATA":
-            print(
-                f"  ⚠️ Exit report validation {exit_val.get('verdict')}: "
-                f"{'; '.join(exit_val.get('errors') or [])} — reports still written; finalize continues "
-                f"{PIPELINE_ENFORCEMENT_TAG}"
-            )
-    except SystemExit as exc:
-        print(f"  ⚠️ Pathway validation halted: {exc} — continuing to finalize {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as exc:
-        print(f"  ⚠️ Pathway validation skipped: {exc} {PIPELINE_ENFORCEMENT_TAG}")
-    lane_definition_report(trades=trades, session=session, benchmark_report=benchmark_report)
-    lane_retirement_report(trades=trades, session=session, benchmark_report=benchmark_report)
     regime_payload = regime_leaderboard_report(trades=trades, session=session)
     roster_policy_report(trades=trades, session=session, regime_payload=regime_payload, benchmark_report=benchmark_report)
     feature_importance_report(trades=trades, session=session)
@@ -18264,6 +18814,10 @@ def pre_test_analytics_reports(
     research_cohort_split_reports()
     showcase_losing_cluster_descriptive_report(trades=trades, session=session)
     research_horizon_maturity_report()
+    try:
+        fill_time_guard_counterfactual_report(trades=trades)
+    except Exception as exc:
+        print(f"  ⚠️ fill-time guard counterfactual skipped: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     try:
         research_counterfactual_coverage_report()
     except Exception as exc:
@@ -18280,116 +18834,6 @@ def pre_test_analytics_reports(
     )
 
 
-def pathway_lane_specs_report(trades=None, session=None, benchmark_report=None, shadow_report=None):
-    """Write pathway_lane_specs.json — static lane params + session stats for Pathway Lab tiles."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== PATHWAY LANE SPECS — {scope.lower()} {PIPELINE_ENFORCEMENT_TAG} ===")
-
-    if benchmark_report is None and os.path.isfile(BENCHMARK_VS_LANES_REPORT_FILE):
-        try:
-            with open(BENCHMARK_VS_LANES_REPORT_FILE, encoding="utf-8") as f:
-                benchmark_report = json.load(f)
-        except Exception:
-            benchmark_report = None
-    if benchmark_report is None:
-        benchmark_report = benchmark_vs_lanes_report(trades=trades, session=session, shadow_report=shadow_report)
-
-    lane_metrics = (benchmark_report or {}).get("lanes") or {}
-    shadow_by_lane = (shadow_report or {}).get("by_lane") or {}
-    if not shadow_by_lane and os.path.isfile(SHADOW_FILL_OUTCOME_REPORT_FILE):
-        try:
-            with open(SHADOW_FILL_OUTCOME_REPORT_FILE, encoding="utf-8") as f:
-                shadow_by_lane = json.load(f).get("by_lane") or {}
-        except Exception:
-            pass
-
-    static = _static_pathway_lane_specs()
-    tiles = []
-    for lane_key in BENCHMARK_LANES:
-        base = dict(static.get(lane_key) or {})
-        if not base:
-            continue
-        metrics = lane_metrics.get(lane_key) or {}
-        shadow = shadow_by_lane.get(lane_key) or {}
-        ttl = int((shadow.get("counts") or {}).get("Shadow fill + TTL expired") or 0)
-        gate_blocks = int((shadow.get("counts") or {}).get("Shadow fill + blocked (gates)") or 0)
-        session_line = (
-            f"n={metrics.get('approves', 0)} approves · "
-            f"{metrics.get('real_fills', 0)} trades · "
-            f"{metrics.get('approve_to_fill_pct', 0):.0f}% fill · "
-            f"${metrics.get('net_pnl_real', 0):.2f} real · "
-            f"EV ${metrics.get('per_approve_ev', 0):.2f}/approve"
-        )
-        if ttl:
-            session_line += f" · {ttl} TTL expired"
-        if gate_blocks:
-            session_line += f" · {gate_blocks} gate blocks"
-        base["session_stats"] = {
-            "approves": metrics.get("approves", 0),
-            "real_fills": metrics.get("real_fills", 0),
-            "approve_to_fill_pct": metrics.get("approve_to_fill_pct", 0),
-            "shadow_fill_pct": metrics.get("shadow_fill_pct", 0),
-            "net_pnl_real": metrics.get("net_pnl_real", 0),
-            "per_approve_ev": metrics.get("per_approve_ev", 0),
-            "wins": metrics.get("wins", 0),
-            "losses": metrics.get("losses", 0),
-            "win_rate_pct": metrics.get("win_rate_pct", 0),
-            "lab_mode": metrics.get("lab_mode", False),
-            "lab_closes": metrics.get("lab_closes", 0),
-            "lab_net_pnl": metrics.get("lab_net_pnl", 0),
-            "lab_wins": metrics.get("lab_wins", 0),
-            "lab_losses": metrics.get("lab_losses", 0),
-            "lab_win_rate": metrics.get("lab_win_rate", 0),
-            "lab_per_close_ev": metrics.get("lab_per_close_ev", 0),
-            "lab_pnl_source": metrics.get("lab_pnl_source"),
-            "approval_source": metrics.get("approval_source"),
-            "lane_gate_evaluated": metrics.get("lane_gate_evaluated", 0),
-            "lane_gate_rejected": metrics.get("lane_gate_rejected", 0),
-            "verdict": metrics.get("verdict"),
-            "summary_line": session_line,
-        }
-        if lane_key != BENCHMARK_LANE:
-            base["delta_vs_benchmark"] = {
-                "delta_approve_to_fill_pct": metrics.get("delta_approve_to_fill_pct", 0),
-                "delta_net_pnl_real": metrics.get("delta_net_pnl_real", 0),
-                "delta_per_approve_ev": metrics.get("delta_per_approve_ev", 0),
-                "verdict": metrics.get("verdict"),
-            }
-        tiles.append(base)
-
-    payload = {
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "analyzer_version": ANALYZER_VERSION,
-        "bot_version": EXPECTED_BOT_VERSION,
-        "benchmark_lane": BENCHMARK_LANE,
-        "benchmark_profile_id": "PRIMARY_PRODUCTION_v1",
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "lanes": tiles,
-    }
-    try:
-        candidate = f"{PATHWAY_LANE_SPECS_FILE}.{os.getpid()}.tmp"
-        try:
-            with open(candidate, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-                f.write("\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(candidate, PATHWAY_LANE_SPECS_FILE)
-        finally:
-            try:
-                if os.path.exists(candidate):
-                    os.remove(candidate)
-            except OSError:
-                pass
-        print(f"  ✅ Wrote {PATHWAY_LANE_SPECS_FILE} ({len(tiles)} lane tiles) {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {PATHWAY_LANE_SPECS_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
 def fill_distance_report():
     """Histogram missed_by_usd from expired orders + fill_quality.jsonl."""
     print(f"\n=== FILL DISTANCE REPORT — {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
@@ -18399,10 +18843,7 @@ def fill_distance_report():
         rows.extend(_load_jsonl_rows(fq_path))
         print(f"  fill_quality.jsonl rows: {len(rows)} {PIPELINE_ENFORCEMENT_TAG}")
     if os.path.exists(EXPIRED_ORDERS_FILE):
-        try:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="utf-8")
-        except UnicodeDecodeError:
-            exp = pd.read_csv(EXPIRED_ORDERS_FILE, encoding="latin1")
+        exp = _load_expired_orders_csv(EXPIRED_ORDERS_FILE)
         if not exp.empty:
             seen_ids = {r.get("trade_id") for r in rows}
             for _, r in exp.iterrows():
@@ -18566,16 +19007,23 @@ def _best_worst_lanes(bench):
     ranked = []
     for lane in BENCHMARK_LANES:
         m = lanes.get(lane) or {}
+        approves = int(m.get("approves") or 0)
+        fills = int(m.get("real_fills") or m.get("fills") or 0)
+        if approves <= 0 or fills <= 0:
+            continue
         pnl = m.get("net_pnl_real")
         if pnl is None:
             pnl = m.get("net_pnl_usd")
         if pnl is None:
             continue
+        pnl = safe_float(pnl)
+        if not np.isfinite(pnl):
+            continue
         ranked.append({
             "lane": lane,
             "pnl": float(pnl),
-            "fills": int(m.get("real_fills") or m.get("fills") or 0),
-            "approves": int(m.get("approves") or 0),
+            "fills": fills,
+            "approves": approves,
         })
     if not ranked:
         return None, None
@@ -18613,15 +19061,17 @@ def _lane_table_rows(bench):
     for lane in BENCHMARK_LANES:
         m = lanes.get(lane) or {}
         pnl = m.get("net_pnl_real", m.get("net_pnl_usd"))
-        if pnl is None and not m.get("approves"):
+        if not m:
             continue
+        fill_pct = m.get("approve_to_fill_pct")
+        ev = m.get("per_approve_ev")
         rows.append({
             "lane": lane,
             "approves": int(m.get("approves") or 0),
             "fills": int(m.get("real_fills") or m.get("fills") or 0),
-            "fill_pct": round(float(m.get("approve_to_fill_pct") or 0), 0),
-            "pnl": round(float(pnl or 0), 2),
-            "ev": round(float(m.get("per_approve_ev") or 0), 2),
+            "fill_pct": round(float(fill_pct), 0) if fill_pct is not None else None,
+            "pnl": round(float(pnl), 2) if pnl is not None else None,
+            "ev": round(float(ev), 2) if ev is not None else None,
         })
     return rows
 
@@ -18661,14 +19111,25 @@ def _edge_decile_counts(edge_val):
 
 def _blocked_opportunity_usd(missed_list, real_edge):
     total = 0.0
+    observed = False
     for row in missed_list or []:
         try:
-            total += float(row.get("missed_profit_usd") or 0)
+            value = row.get("missed_profit_usd")
+            if value is None:
+                continue
+            total += float(value)
+            observed = True
         except (TypeError, ValueError):
             pass
-    if total:
+    if observed:
         return round(total, 2)
-    return round(float(real_edge.get("blocked_shadow_pnl_usd") or 0), 2)
+    fallback = real_edge.get("blocked_shadow_pnl_usd")
+    if fallback is None:
+        fallback = real_edge.get("net_pnl_shadow_blocked")
+    try:
+        return round(float(fallback), 2) if fallback is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _best_exit_from_mix(exit_mix):
@@ -18704,11 +19165,11 @@ def _generate_research_findings(payload):
     if bl.get("lane") and net:
         share = 100.0 * float(bl.get("pnl") or 0) / net if net else 0
         findings.append(
-            f"{bl['lane']} lane accounts for {share:.0f}% of net profit (${float(bl.get('pnl', 0)):+.2f})."
+            f"{bl['lane']} lane accounts for {share:.0f}% of net profit (${_fmt_usd(bl.get('pnl'))})."
         )
     if wl.get("lane"):
         findings.append(
-            f"Lowest lane: {wl['lane']} at ${float(wl.get('pnl', 0)):+.2f} "
+            f"Lowest lane: {wl['lane']} at ${_fmt_usd(wl.get('pnl'))} "
             f"({int(wl.get('fills', 0))} fills) — review if sample grows."
         )
     if bc.get("bucket"):
@@ -18728,7 +19189,7 @@ def _generate_research_findings(payload):
     fc_loss = sum(float(x.get("pnl_usd") or 0) for x in exit_mix if "FAST_CUT" in str(x.get("reason", "")))
     if fc_n:
         findings.append(
-            f"Fast-cut exits: {fc_n} trades, ${fc_loss:+.2f} booked"
+            f"Fast-cut exits: {fc_n} trades, ${_fmt_usd(fc_loss)} booked"
             f" — {'not a major leak' if fc_loss > -10 else 'review thesis cut threshold'}."
         )
     else:
@@ -18738,19 +19199,21 @@ def _generate_research_findings(payload):
     if best_exit:
         findings.append(
             f"Dominant exit: {best_exit.get('reason')} "
-            f"({best_exit.get('n')} trades, ${float(best_exit.get('pnl_usd', 0)):+.2f})."
+            f"({best_exit.get('n')} trades, ${_fmt_usd(best_exit.get('pnl_usd'))})."
         )
 
-    gate = float(re.get("gate_damage_usd") or 0)
-    if abs(gate) < 5:
-        findings.append(f"Gate damage ${gate:+.2f} — post-AI gates are not the main PnL leak.")
-    else:
-        findings.append(f"Gate damage ${gate:+.2f} — investigate blocked APPROVEs.")
+    gate_raw = re.get("gate_damage_usd")
+    if int(re.get("approve_attempts") or 0) > 0 and gate_raw is not None:
+        gate = float(gate_raw)
+        if abs(gate) < 5:
+            findings.append(f"Gate damage ${_fmt_usd(gate)} — post-AI gates are not the main PnL leak.")
+        else:
+            findings.append(f"Gate damage ${_fmt_usd(gate)} — investigate blocked APPROVEs.")
 
     left = sc.get("leakage_left_usd")
     if left is not None:
         findings.append(
-            f"Scenario C left ${float(left):.1f} on table vs peak — exit timing is the bigger lever than entry gates."
+            f"Scenario C left ${_fmt_usd(left)} on table vs peak — exit timing is the bigger lever than entry gates."
         )
 
     edge_verdict = payload.get("edge_verdict")
@@ -18772,7 +19235,7 @@ def _generate_research_findings(payload):
 
     blocked_usd = payload.get("blocked_opportunity_usd")
     if blocked_usd is not None:
-        findings.append(f"Blocked shadow opportunity (heuristic): ${float(blocked_usd):+.2f}.")
+        findings.append(f"Blocked shadow opportunity (heuristic): ${_fmt_usd(blocked_usd)}.")
 
     top_leak = payload.get("top_leakage") or {}
     if top_leak.get("overall_left_usd"):
@@ -18868,6 +19331,12 @@ def _report_source_evidence_provenance():
                         "schema": payload.get("schema"),
                         "generated_at": payload.get("generatedAt"),
                         "generating_revision": payload.get("generatingRevision"),
+                        # This artifact is exported by the platform API (Railway),
+                        # then forwarded to the Fly collector.  Its revision is
+                        # therefore the exporter revision and must not be compared
+                        # with the Fly bot's source_data/generation revision.
+                        "producer_service": "PLATFORM_RELAY_EXPORTER",
+                        "producer_revision_role": "EXPORTER_DEPLOYMENT_REVISION",
                         "run_identity": payload.get("runIdentity"),
                     })
                 except (OSError, ValueError, TypeError):
@@ -18900,8 +19369,34 @@ def _report_source_evidence_provenance():
         evidence[name].get("sha256", "MISSING")
         for name in ("relay_lifecycle_evidence_v1.json", "counterfactual.jsonl")
     )
+    canonical_identity = {
+        "source_revision": "UNKNOWN",
+        "deployed_revision": "UNKNOWN",
+        "dataset_epoch": "UNKNOWN",
+        "config_signature": "UNKNOWN",
+        "manifest_entry_hash": "UNKNOWN",
+        "dataset_checksum": "UNKNOWN",
+    }
+    try:
+        manifest = json.loads(
+            (Path(data_root) / "canonical_dataset_current.json").read_text(
+                encoding="utf-8-sig"
+            )
+        )
+        if isinstance(manifest, dict):
+            source_fields = {
+                "config_signature": "tile_config_signature",
+                "manifest_entry_hash": "entry_hash",
+            }
+            for field in canonical_identity:
+                value = manifest.get(source_fields.get(field, field))
+                if value is not None and str(value).strip():
+                    canonical_identity[field] = str(value).strip()
+    except (OSError, ValueError, TypeError):
+        pass
     return {
         "data_root_kind": "CANONICAL_LOCAL_FLY_MIRROR",
+        **canonical_identity,
         "source_data_revision": hashlib.sha256(revision_material.encode("utf-8")).hexdigest(),
         "evidence_inputs": evidence,
         "policy_comparability_key": next(iter(policy_keys)) if len(policy_keys) == 1 else None,
@@ -18962,7 +19457,14 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
     report["analysis_provenance"] = analysis_provenance
     report["cohort_schema"] = analysis_provenance["cohort_schema"]
     report["generation_revision"] = analysis_provenance["generation_revision"]
+    report["analyzer_revision"] = analysis_provenance["analyzer_revision"]
+    report["source_revision"] = analysis_provenance["source_revision"]
+    report["deployed_revision"] = analysis_provenance["deployed_revision"]
+    report["dataset_epoch"] = analysis_provenance["dataset_epoch"]
+    report["config_signature"] = analysis_provenance["config_signature"]
     report["source_data_revision"] = analysis_provenance["source_data_revision"]
+    if analysis_provenance.get("fresh_epoch_id"):
+        report["epoch_id"] = analysis_provenance["fresh_epoch_id"]
     report["policy_comparability_key"] = report.get(
         "selected_policy_comparability_key",
         analysis_provenance.get("policy_comparability_key"),
@@ -19017,33 +19519,491 @@ def _stamp_report_analysis_provenance(path, analysis_provenance):
     os.replace(temp, path)
 
 
-def write_report_manifest(payload=None):
-    manifest_generated_at = datetime.now(timezone.utc)
-    current_run_cutoff = manifest_generated_at.timestamp() - (15 * 60)
-    """Manifest for research dashboard — no hardcoded report list in UI."""
+def _atomic_mirror_analyzer_report(source_name):
+    """Atomically mirror a completed report into the archive authority tree."""
+    _assert_local_generation_unfenced("analyzer_report_mirror")
+    source = Path(source_name)
+    if not source.is_file() or source.name != str(source_name):
+        raise ValueError("ANALYZER_REPORT_SOURCE_MUST_BE_LOCAL_BASENAME")
+    destination_dir = Path(REPORTS_DIR)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / source.name
+    temporary = destination_dir / f".{source.name}.{os.getpid()}.{time.time_ns()}.tmp"
     try:
-        from research.policy_cycle_snapshot import build_policy_cycle_reports
-        from research.shadow_lane_comprehensive import build_shadow_lane_comprehensive_report
-        from research.research_v3_report import build_safe_policy_genome_v3_report
+        shutil.copy2(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
-        policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
-        policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
-        build_policy_cycle_reports(
-            data_dir=policy_data_dir,
-            report_dir=policy_report_dir,
+
+def _write_evidence_coverage_triage_report(canonical_root, binding_status, conservative_status):
+    """Build one fail-closed coverage receipt from this exact generation."""
+    import gzip
+    from research.evidence_coverage_triage import (
+        build_evidence_coverage_triage_report, ledger_source_counts,
+        load_archive_verification_index, verify_archive_receipts,
+    )
+
+    root = Path(canonical_root).resolve()
+    if root.name != "canonical-research-data":
+        raise ValueError("EVIDENCE_COVERAGE_ROOT_NOT_CANONICAL")
+    binding_generation = binding_status.get("generation") or {}
+    conservative_generation = conservative_status.get("generation") or {}
+    if not binding_generation or binding_generation != conservative_generation:
+        raise ValueError("EVIDENCE_COVERAGE_GENERATION_MISMATCH")
+
+    def resolve_artifact(relative_path, expected_sha256, label):
+        candidate = (root / Path(str(relative_path or ""))).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"{label}_OUTSIDE_CANONICAL_ROOT") from exc
+        if not candidate.is_file():
+            raise FileNotFoundError(f"{label}_MISSING")
+        actual = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        if actual != str(expected_sha256 or "").lower():
+            raise ValueError(f"{label}_CHECKSUM_MISMATCH")
+        return candidate, actual
+
+    binding_path, binding_sha = resolve_artifact(
+        binding_status.get("exhaustive_relative_path"),
+        binding_status.get("exhaustive_sha256"), "EVIDENCE_BINDING_INDEX",
+    )
+    results_path, results_sha = resolve_artifact(
+        conservative_status.get("relative_path"),
+        conservative_status.get("artifact_sha256"), "CONSERVATIVE_RESULTS",
+    )
+    if binding_path.parent != results_path.parent:
+        raise ValueError("EVIDENCE_COVERAGE_GENERATION_DIRECTORY_MISMATCH")
+
+    def read_gzip_jsonl(path):
+        with gzip.open(path, "rt", encoding="utf-8-sig") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+    # Consume only the canonical checksum-bound archive verification index.
+    # A raw legacy archive participates only through the explicit fallback.
+    archive_index = root / "archive" / "legacy-archive-verification" / "verification_index.json"
+    archive_root = os.getenv("BTC_VERIFIED_LEGACY_ARCHIVE_ROOT")
+    archive_summary = (
+        load_archive_verification_index(archive_index)
+        if archive_index.is_file()
+        else verify_archive_receipts(archive_root)
+    )
+    if archive_root and not archive_index.is_file() and (
+        archive_summary.get("invalid_session_count", 0)
+        or archive_summary.get("unverifiable_session_count", 0)
+    ):
+        raise ValueError("CONFIGURED_LEGACY_ARCHIVE_NOT_FULLY_VERIFIED")
+    report = build_evidence_coverage_triage_report(
+        {"bindings": read_gzip_jsonl(binding_path)}, read_gzip_jsonl(results_path),
+        archive_summary=archive_summary,
+        source_counts=ledger_source_counts(root / "v3"),
+        input_artifacts=(
+            {"path": binding_path.relative_to(root).as_posix(), "sha256": binding_sha},
+            {"path": results_path.relative_to(root).as_posix(), "sha256": results_sha},
+        ),
+    )
+    report["generation"] = binding_generation
+    material = dict(report)
+    material.pop("report_payload_sha256", None)
+    from research.policy_evidence_schema import canonical_json
+    report["report_payload_sha256"] = hashlib.sha256(
+        canonical_json(material).encode("utf-8")
+    ).hexdigest()
+    target = Path(EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temporary.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return report, _atomic_mirror_analyzer_report(target.name)
+
+
+def _stamp_policy_evaluator_status(path, status):
+    """Attach bounded evaluator coverage to the status manifest atomically."""
+    target = Path(path)
+    payload = json.loads(target.read_text(encoding="utf-8-sig"))
+    payload["evaluation_triggered"] = True
+    payload["conservative_evaluator"] = {
+        key: status.get(key) for key in (
+            "schema", "row_count", "classification_counts", "results_sha256",
+            "relative_path", "artifact_sha256", "artifact_size_bytes",
+            "cache_rows_ingested", "cache_rows_skipped_missing_identity",
+            "cache_skip_reason_counts", "regime_feature_coverage",
         )
-        build_shadow_lane_comprehensive_report(
-            data_dir=policy_data_dir,
-            report_dir=policy_report_dir,
+    }
+    temporary = target.with_name(
+        f".{target.name}.{os.getpid()}.{time.time_ns()}.tmp"
+    )
+    try:
+        temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return payload
+
+
+def _cross_world_list(payload, *paths):
+    """Return the first explicit list at a known report path."""
+    for path in paths:
+        current = payload
+        for name in path.split("."):
+            current = current.get(name) if isinstance(current, dict) else None
+        if isinstance(current, list):
+            return [row for row in current if isinstance(row, dict)]
+    return []
+
+
+def _cross_world_bitfinex_rows():
+    """Flatten authenticated relay events without manufacturing join fields."""
+    path = _agent_data_path("relay_lifecycle_evidence_v1.json")
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return []
+    documents = payload if isinstance(payload, list) else [payload]
+    rows = []
+    for document in documents:
+        if not isinstance(document, dict):
+            continue
+        for record in document.get("records") or []:
+            if not isinstance(record, dict):
+                continue
+            for event in record.get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                event_payload = event.get("payload")
+                event_payload = event_payload if isinstance(event_payload, dict) else {}
+                rows.append({
+                    **record,
+                    **event,
+                    **event_payload,
+                    "relay_evidence_revision": document.get("evidence_revision"),
+                    "relay_generating_revision": document.get("generating_revision"),
+                })
+    return rows
+
+
+def cross_world_evidence_report():
+    """Publish an explicit-identity-only cross-world agreement audit."""
+    from research.cross_world_evidence import build_cross_world_evidence_report
+
+    safe = _load_json_report(SAFE_POLICY_GENOME_V3_REPORT_FILE) or {}
+    conservative = _load_json_report(CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE) or {}
+    # These are deliberately known paths, not heuristic recursive extraction.
+    # Aggregate policy rows lacking causal identities remain NOT_COMPUTABLE.
+    ideal_rows = _cross_world_list(
+        safe,
+        "ideal_touch_receipts",
+        "candidate_screen.ideal_touch_receipts",
+        "candidate_screen.profitable_ideal_touch_diagnostic_top_100",
+        "candidate_screen.descriptive_top_100",
+        "safe_policy_ranking.rows",
+        "candidate_screen.rows",
+    )
+    conservative_rows = _cross_world_list(conservative, "receipts")
+    shadow_rows = [
+        *_load_jsonl_rows(SHADOW_OUTCOME_FILE),
+        *_load_jsonl_rows(SHADOW_LANE_OUTCOME_FILE),
+        *_load_jsonl_rows(COUNTERFACTUAL_FILE),
+    ]
+    paper = robust_read_csv(TRADES_FILE, "cross-world observed paper")
+    paper_rows = paper.to_dict("records") if paper is not None and not paper.empty else []
+    bitfinex_rows = _cross_world_bitfinex_rows()
+    epoch = _fresh_epoch_provenance()
+    revision = (
+        os.getenv("SOURCE_GIT_REV")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_REVISION")
+        or "UNKNOWN"
+    )
+    report = build_cross_world_evidence_report(
+        {
+            "IDEAL_TOUCH_DIAGNOSTIC": ideal_rows,
+            "CONSERVATIVE_BBO_DEPTH": conservative_rows,
+            "SHADOW_COUNTERFACTUAL": shadow_rows,
+            "OBSERVED_PAPER": paper_rows,
+            "BITFINEX_COPY": bitfinex_rows,
+        },
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        source_revision=revision,
+        epoch_id=epoch.get("fresh_epoch_id"),
+    )
+    report["source_inventory"] = {
+        "ideal_touch": SAFE_POLICY_GENOME_V3_REPORT_FILE,
+        "conservative_bbo_depth": CONSERVATIVE_FILL_DESCRIPTIVE_REPORT_FILE,
+        "shadow_counterfactual": [
+            SHADOW_OUTCOME_FILE,
+            SHADOW_LANE_OUTCOME_FILE,
+            COUNTERFACTUAL_FILE,
+        ],
+        "observed_paper": TRADES_FILE,
+        "bitfinex_copy": "relay_lifecycle_evidence_v1.json",
+    }
+    target = analyzer_report_path(CROSS_WORLD_EVIDENCE_REPORT_FILE)
+    temp = f"{target}.tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    os.replace(temp, target)
+    print(
+        "  ✅ Cross-world evidence: "
+        f"status={report['join_summary']['status']} "
+        f"computable={report['join_summary']['pairwise_computable_comparisons']} "
+        f"disagreements={report['join_summary']['pairwise_disagreements']} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return report
+
+
+def fill_time_guard_counterfactual_report(trades=None):
+    """Build research-only fill revalidation grids from the signed epoch.
+
+    Historical/quarantine rows are intentionally not backfilled here: an
+    execution receipt, exact epoch, AI payload, and pre-fill tape are all
+    required.  Missing joins are reported as insufficiency, never synthesized.
+    """
+    from research.fill_time_guard_counterfactual import build_fill_time_guard_counterfactual
+
+    execution_rows = _v3_ledger_rows("execution")
+    primary_fills = [row for row in execution_rows if row.get("fill_ts") is not None]
+    epoch_ids = sorted({str(row.get("epoch_id") or "") for row in primary_fills if row.get("epoch_id")})
+    # A mixed ledger must not silently choose an epoch. Current mirrors normally
+    # contain one signed epoch after verified quarantine.
+    if len(epoch_ids) == 1:
+        epoch_id = epoch_ids[0]
+    else:
+        epoch_id = ""
+        primary_fills = []
+    trade_rows = []
+    if trades is not None and not trades.empty:
+        trade_rows = trades.where(pd.notna(trades), None).to_dict("records")
+    report = build_fill_time_guard_counterfactual(
+        trades=trade_rows,
+        executions=primary_fills,
+        ai_inputs=_load_jsonl_rows(AI_INPUT_LOG_FILE),
+        tape_rows=_load_jsonl_rows("market_microstructure_1s.jsonl"),
+        source_observations=_load_jsonl_rows(SOURCE_ORDER_MARKET_EVIDENCE_FILE),
+        epoch_id=epoch_id,
+    )
+    if len(epoch_ids) != 1:
+        report["insufficiency"] = sorted(set(report.get("insufficiency", [])) | {"SIGNED_EPOCH_NOT_UNIQUE"})
+        report["qualification"] = "INSUFFICIENT_RESEARCH_ONLY"
+        report["observed_epoch_ids"] = epoch_ids
+    target = analyzer_report_path(FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE)
+    temp = f"{target}.tmp"
+    with open(temp, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    os.replace(temp, target)
+    print(
+        f"  ✅ Fill-time guard counterfactual: trades={report['observed_trades']} "
+        f"clusters={report['independent_clusters']} status={report['qualification']} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return report
+
+
+def _exit_report_identity(payload):
+    provenance = payload.get("analysis_provenance") or {}
+    fresh_epoch = payload.get("fresh_epoch") or {}
+    return {
+        "generation_revision": (
+            payload.get("generation_revision")
+            or provenance.get("generation_revision")
+        ),
+        "epoch_id": (
+            payload.get("epoch_id")
+            or fresh_epoch.get("epoch_id")
+            or provenance.get("fresh_epoch_id")
+            or provenance.get("epoch_id")
+        ),
+    }
+
+
+def _exit_report_evidence_counts(payload):
+    worlds = payload.get("evidence_worlds") or {}
+    source_rows = 0
+    terminal_rows = 0
+    if isinstance(worlds, dict):
+        for world in worlds.values():
+            if not isinstance(world, dict):
+                continue
+            source_rows += int(world.get("source_rows") or 0)
+            terminal_rows += int(world.get("terminal_rows") or 0)
+    result_rows = max(
+        int(payload.get("total_combos") or 0),
+        len(payload.get("reasons") or []),
+        len(payload.get("best_combos") or []),
+        len(payload.get("worst_leakage") or []),
+    )
+    return source_rows, terminal_rows, result_rows
+
+
+def build_exit_reports_validation(manifest, report_dir="."):
+    """Validate current exit artifacts without imposing a qualification sample gate."""
+    expected_revision = manifest.get("generation_revision")
+    expected_epoch = (manifest.get("fresh_epoch") or {}).get("epoch_id")
+    declared = {
+        str(row.get("file"))
+        for row in (manifest.get("reports") or [])
+        if isinstance(row, dict) and row.get("file")
+    }
+    rows = []
+    errors = []
+    maximum_source_rows = 0
+    maximum_terminal_rows = 0
+    maximum_result_rows = 0
+    for name in (EXIT_COMBINATIONS_REPORT_FILE, EXIT_LEAKAGE_BY_REASON_REPORT_FILE):
+        path = Path(report_dir) / name
+        row = {
+            "file": name,
+            "declared_in_manifest": name in declared,
+            "exists": path.is_file(),
+            "parseable": False,
+            "revision_match": False,
+            "epoch_match": False,
+            "source_rows": 0,
+            "terminal_rows": 0,
+            "result_rows": 0,
+        }
+        payload = None
+        if path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                row["parseable"] = isinstance(payload, dict)
+            except Exception as exc:
+                row["parse_error"] = f"{type(exc).__name__}: {exc}"
+        if isinstance(payload, dict):
+            identity = _exit_report_identity(payload)
+            row.update(identity)
+            row["revision_match"] = bool(expected_revision) and identity["generation_revision"] == expected_revision
+            row["epoch_match"] = bool(expected_epoch) and identity["epoch_id"] == expected_epoch
+            source_rows, terminal_rows, result_rows = _exit_report_evidence_counts(payload)
+            row.update({
+                "source_rows": source_rows,
+                "terminal_rows": terminal_rows,
+                "result_rows": result_rows,
+            })
+            maximum_source_rows = max(maximum_source_rows, source_rows)
+            maximum_terminal_rows = max(maximum_terminal_rows, terminal_rows)
+            maximum_result_rows = max(maximum_result_rows, result_rows)
+        row["identity_match"] = row["revision_match"] and row["epoch_match"]
+        row["valid"] = (
+            row["declared_in_manifest"]
+            and row["exists"]
+            and row["parseable"]
+            and row["identity_match"]
         )
-        build_safe_policy_genome_v3_report(
-            data_dir=policy_data_dir,
-            report_dir=policy_report_dir,
+        if not row["valid"]:
+            errors.append(f"{name}:CURRENT_GENERATION_VALIDATION_FAILED")
+        rows.append(row)
+
+    current_generation_valid = not errors
+    if not current_generation_valid:
+        status = "INSUFFICIENT"
+    elif maximum_source_rows == 0 and maximum_terminal_rows == 0 and maximum_result_rows == 0:
+        status = "EMPTY"
+    elif maximum_terminal_rows == 0 and maximum_result_rows == 0:
+        status = "INSUFFICIENT"
+    else:
+        status = "POPULATED"
+    return {
+        "schema": "exit_reports_validation_v2",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generation_id": manifest.get("generation_id"),
+        "generation_revision": expected_revision,
+        "epoch_id": expected_epoch,
+        "source_data_revision": manifest.get("source_data_revision"),
+        "analysis_provenance": manifest.get("analysis_provenance") or {},
+        "validation_basis": "CURRENT_GENERATION_MANIFEST",
+        "status": status,
+        "verdict": status,
+        "current_generation_valid": current_generation_valid,
+        "parseable": all(row["parseable"] for row in rows),
+        "identity_match": all(row["identity_match"] for row in rows),
+        "minimum_trade_gate_applied": False,
+        "qualification_eligible": False,
+        "counts": {
+            "maximum_report_source_rows": maximum_source_rows,
+            "maximum_report_terminal_rows": maximum_terminal_rows,
+            "maximum_report_result_rows": maximum_result_rows,
+        },
+        "reports": rows,
+        "errors": errors,
+        "status_definition": {
+            "EMPTY": "Current reports are parseable and identity-matched, with no exit evidence.",
+            "INSUFFICIENT": "Current reports are incomplete, invalid, or contain source evidence without terminal results.",
+            "POPULATED": "Current reports are parseable and identity-matched and contain terminal or result rows.",
+        },
+        "note": "POPULATED is an evidence-presence state only; it is not strategy qualification or live-trading approval.",
+    }
+
+
+def _write_current_exit_reports_validation(manifest):
+    receipt = build_exit_reports_validation(manifest)
+    target = Path(EXIT_REPORTS_VALIDATION_FILE)
+    temp = Path(f"{target}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+    os.replace(temp, target)
+    reports_dir = Path(REPORTS_DIR)
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(target, reports_dir / target.name)
+    return receipt
+
+
+def _stamp_integrity_generation_identity(manifest, reports):
+    """Bind the final integrity receipt to the immutable generation identity.
+
+    The base integrity checks run before the expensive policy replay.  Preserve
+    that diagnostic timestamp separately, but expose the completed generation's
+    timestamp and identities on the public receipt so manifest/API/dashboard
+    parity is exact rather than appearing to mix two analyzer generations.
+    """
+    target = Path(analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE))
+    try:
+        payload = _load_json_report(str(target)) if target.is_file() else {}
+        if not isinstance(payload, dict) or not payload:
+            return False
+        previous_generated_at = payload.get("generated_at")
+        if previous_generated_at and not payload.get("checks_generated_at"):
+            payload["checks_generated_at"] = previous_generated_at
+        payload.update({
+            "generated_at": manifest.get("generated_at"),
+            "generation_id": manifest.get("generation_id"),
+            "generation_revision": manifest.get("generation_revision"),
+            "source_data_revision": manifest.get("source_data_revision"),
+            "epoch_id": (manifest.get("fresh_epoch") or {}).get("epoch_id"),
+            "tile_registry_signature": manifest.get("tile_registry_signature"),
+        })
+        temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+        temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(temp, target)
+        reports_dir = Path(REPORTS_DIR)
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        mirrored = reports_dir / target.name
+        shutil.copy2(target, mirrored)
+        for row in reports:
+            if row.get("file") == ANALYZER_INTEGRITY_REPORT_FILE:
+                row["size_bytes"] = mirrored.stat().st_size
+                row["modified_at"] = datetime.fromtimestamp(
+                    mirrored.stat().st_mtime, tz=timezone.utc
+                ).isoformat()
+                break
+        return True
+    except (OSError, TypeError, ValueError) as exc:
+        print(
+            f"  ⚠️ Could not bind {ANALYZER_INTEGRITY_REPORT_FILE} to final "
+            f"generation: {exc} {PIPELINE_ENFORCEMENT_TAG}"
         )
-    except Exception as exc:
-        # A missing/corrupt v2.2 input must degrade to no report, never interrupt
-        # the established analyzer cycle or leak a stale policy candidate.
-        print(f"  ⚠️ Best Policy Research unavailable: {type(exc).__name__}: {exc}")
+        return False
+
+
+def _lifecycle_inventory_analysis_provenance():
+    """Build the generation identity once before any lifecycle presentation."""
     cohort_summary = {}
     for cohort in (
         SHOWCASE_STRATEGY,
@@ -19064,6 +20024,354 @@ def write_report_manifest(payload=None):
         or os.getenv("GIT_REVISION")
         or "UNKNOWN"
     )
+    return {
+        "cohort_schema": "analysis_cohorts_v1",
+        "generation_revision": generation_revision,
+        "analyzer_revision": generation_revision,
+        "cohorts": cohort_summary,
+        **_report_source_evidence_provenance(),
+        **_fresh_epoch_provenance(),
+    }
+
+
+def _write_conservative_shadow_report(
+    canonical_root, policy_report_dir, baseline_report, *,
+    policy_cycle_succeeded, research_model=None,
+):
+    """Stage current-input terminal research, never reuse an older outcome file."""
+    from research.conservative_shadow_report import (
+        SCHEMA, build_conservative_shadow_report, build_conditional_shadow_report, load_current_policy_candidates,
+    )
+    from research.policy_evidence_schema import generation_identity
+    from research.shadow_result_stream import ShadowResultStreamWriter, digest as stream_digest
+
+    generation = (baseline_report or {}).get("generation") or {}
+    stream_temporary = None
+    variant_temporaries = []
+    try:
+        if not policy_cycle_succeeded:
+            raise ValueError("POLICY_CYCLE_NOT_SUCCESSFUL")
+        manifest_path = Path(canonical_root) / "canonical_dataset_current.json"
+        manifest_bytes = manifest_path.read_bytes()
+        current_generation = generation_identity(
+            json.loads(manifest_bytes.decode("utf-8-sig")),
+            analyzer_revision=str(generation.get("analyzer_revision") or ""),
+            evaluator_version=str(generation.get("evaluator_version") or ""),
+        )
+        if current_generation != generation:
+            raise ValueError("SHADOW_CANONICAL_GENERATION_MISMATCH")
+        candidates, candidate_receipt = load_current_policy_candidates(
+            policy_report_dir, generation, policy_cycle_succeeded=policy_cycle_succeeded,
+        )
+        stream_temporary = Path(f".shadow-results-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp")
+        with ShadowResultStreamWriter(Path.cwd(), str(stream_temporary), generation) as sink:
+            report = build_conservative_shadow_report(
+                canonical_root, expected_generation=generation,
+                baseline_report=baseline_report or {}, policy_candidates=candidates,
+                policy_artifact_receipt=candidate_receipt, research_model=research_model,
+                result_sink=sink,
+            )
+            from research.entry_baseline_replay import delayed_variant_cohorts
+            report['delayed_variant_reports'] = []
+            report['conditional_delayed_variant_reports'] = []
+            variants = [(timing_hash, cohort, conditional)
+                        for timing_hash, cohort in delayed_variant_cohorts(baseline_report or {}).items()
+                        for conditional in (False, True)]
+            for timing_hash, cohort, conditional in variants:
+                variant_temporary = Path(f'.shadow-variant-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp')
+                variant_temporaries.append(variant_temporary)
+                with ShadowResultStreamWriter(Path.cwd(), str(variant_temporary), generation) as variant_sink:
+                    variant_report = (build_conditional_shadow_report if conditional else build_conservative_shadow_report)(
+                        canonical_root, expected_generation=generation, baseline_report=cohort,
+                        policy_candidates=candidates, policy_artifact_receipt=candidate_receipt,
+                        research_model=research_model, result_sink=variant_sink)
+                    variant_receipt = variant_sink.finalize(variant_report)
+                variant_target = Path(('conditional_shadow_variant_' if conditional else 'shadow_variant_') + timing_hash[:12] + '_' +
+                                      variant_receipt['artifact_sha256'] + '.jsonl.gz')
+                os.replace(variant_temporary, variant_target)
+                _atomic_mirror_analyzer_report(variant_target.name)
+                variant_receipt['relative_path'] = variant_target.name
+                variant_receipt['receipt_sha256'] = stream_digest({
+                    key: value for key, value in variant_receipt.items() if key != 'receipt_sha256'})
+                variant_report['result_stream'] = variant_receipt
+                report['conditional_delayed_variant_reports' if conditional else 'delayed_variant_reports'].append({
+                    'timing_model_sha256': timing_hash, 'report': variant_report,
+                    'qualification_eligible': False})
+            stream_receipt = sink.finalize(report)
+        conditional_temporary = Path(f'.shadow-conditional-{os.getpid()}-{time.time_ns()}.jsonl.gz.tmp')
+        variant_temporaries.append(conditional_temporary)
+        with ShadowResultStreamWriter(Path.cwd(), str(conditional_temporary), generation) as conditional_sink:
+            conditional_report = build_conditional_shadow_report(
+                canonical_root, expected_generation=generation,
+                baseline_report=baseline_report or {}, policy_candidates=candidates,
+                policy_artifact_receipt=candidate_receipt, research_model=research_model,
+                result_sink=conditional_sink)
+            conditional_receipt = conditional_sink.finalize(conditional_report)
+        if manifest_path.read_bytes() != manifest_bytes:
+            raise ValueError("SHADOW_CANONICAL_GENERATION_CHANGED_DURING_REPLAY")
+        conditional_target = Path('conditional_shadow_results.jsonl.gz')
+        os.replace(conditional_temporary, conditional_target)
+        conditional_receipt['relative_path'] = conditional_target.name
+        conditional_receipt['receipt_sha256'] = stream_digest({
+            key: value for key, value in conditional_receipt.items() if key != 'receipt_sha256'})
+        conditional_report['result_stream'] = conditional_receipt
+        report['conditional_report'] = conditional_report
+        # Bind the parent stream to the complete report, including the new
+        # separately verified conditional child receipt.
+        stream_receipt['report_sha256'] = stream_digest({
+            key: value for key, value in report.items() if key != 'result_stream'})
+        _atomic_mirror_analyzer_report(conditional_target.name)
+        # Working files are replaced just like the other analyzer artifacts;
+        # the visible generation retains its separate immutable copy. Never
+        # accumulate one potentially large source stream per analyzer cycle.
+        stream_target = Path("conservative_shadow_results.jsonl.gz")
+        os.replace(stream_temporary, stream_target)
+        stream_receipt["relative_path"] = stream_target.name
+        stream_receipt["receipt_sha256"] = stream_digest({
+            key: value for key, value in stream_receipt.items() if key != "receipt_sha256"
+        })
+        report["result_stream"] = stream_receipt
+        _atomic_mirror_analyzer_report(stream_target.name)
+    except Exception as exc:
+        # Publish an explicit current-generation failure instead of an old leader.
+        code = str(exc).split(":", 1)[0]
+        if not isinstance(exc, ValueError) or not code or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789" for character in code
+        ):
+            code = "SHADOW_REPORT_BUILD_FAILED"
+        report = {
+            "schema": SCHEMA, "generation": generation, "status": "UNKNOWN",
+            "blockers": [code],
+            "failure_class": type(exc).__name__,
+            "profitability_supported": False, "ranking_eligible": False,
+            "live_qualification": False, "results": [],
+        }
+    finally:
+        for variant_temporary in variant_temporaries:
+            variant_temporary.unlink(missing_ok=True)
+        if stream_temporary is not None:
+            stream_temporary.unlink(missing_ok=True)
+    target = Path(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    os.replace(temporary, target)
+    mirrored = _atomic_mirror_analyzer_report(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE)
+    return report, mirrored
+
+
+def _write_discovery_scorecard_report(
+    canonical_root, conservative_status, baseline_report, shadow_terminal_report=None,
+):
+    """Stage one fresh scorecard for the existing atomic manifest publisher."""
+    from research.discovery_scorecard_publication import build_discovery_scorecard_publication
+
+    report = build_discovery_scorecard_publication(
+        canonical_root,
+        expected_generation=(conservative_status or {}).get("generation") or {},
+        evaluator_status=conservative_status or {},
+        baseline_report=baseline_report or {},
+        shadow_terminal_report=shadow_terminal_report,
+        stream_artifact_root=Path.cwd(),
+    )
+    try:
+        from research.local_scan_reconciliation import reconcile_scans, diagnostic_code
+        import sqlite3
+        from research.local_dynamic_input import _source
+        generation=report.get('generation') or {}
+        report['scan_census_observed_coverage']=reconcile_scans(
+            repo_root=Path(__file__).resolve().parents[2],data_root=canonical_root,
+            source_revision=generation.get('source_revision'),
+            config_signature=generation.get('tile_config_signature'),
+            held_lease=_CURRENT_MIRROR_GENERATION_LEASE,
+            expected_source=_source(_CURRENT_MIRROR_COHERENCE_TOKEN))
+    except (OSError,ValueError,RuntimeError,TypeError,sqlite3.Error) as error:
+        report['scan_census_observed_coverage']={'status':'UNKNOWN','qualification_eligible':False,
+            'exhaustive_fanout':False,'blockers':[diagnostic_code(error)]}
+    target = Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(report, indent=2, allow_nan=False), encoding="utf-8")
+    os.replace(temporary, target)
+    mirrored = _atomic_mirror_analyzer_report(DISCOVERY_COHORT_SCORECARD_REPORT_FILE)
+    return report, mirrored
+
+
+def _report_artifact_digest(path):
+    """Hash the staged report bytes for the atomic publication manifest."""
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _same_publication_dynamic_report(legacy_report, scorecard, expected_generation, analysis_provenance):
+    """Project verified discovery cohorts without copying their episode arrays.
+
+    The legacy builder is invoked in this run and verifies its own sealed input;
+    retain that result, if present, rather than demoting it to an unsealed cohort.
+    No previously published dynamic report is read here.
+    """
+    import hashlib
+    from research.policy_evidence_schema import canonical_json
+
+    report = dict(legacy_report or {})
+    if report.get("sealed_holdout") is not None or report.get("status") == "PASS":
+        identity_fields = ("source_revision", "dataset_epoch", "generation_revision")
+        known_current_identity = all(
+            isinstance(analysis_provenance.get(field), str)
+            and bool(analysis_provenance[field].strip())
+            and analysis_provenance[field].strip().upper() != "UNKNOWN"
+            and report.get(field) == analysis_provenance[field]
+            for field in identity_fields
+        )
+        receipt = report.get("input_receipt")
+        if (not known_current_identity or not isinstance(receipt, dict)
+                or receipt.get("verification") != "CHECKSUM_VERIFIED_CANONICAL_MIRROR"):
+            # Preserve the original experiment without rebinding its result to
+            # this publication. This runs before the discovery failure return.
+            historical = report
+            report = {
+                "schema": "dynamic_policy_analyzer_orchestration_v1", "status": "UNKNOWN",
+                "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE", "execution_class": "RESEARCH_ONLY",
+                "relay_eligible": False, "live_policy_change_allowed": False,
+                "live_qualification": False, "comparison_complete": False,
+                "sealed_holdout": None, "nested_protocol": None, "fold_local_taxonomy_bindings": [],
+                "input_receipt": {}, "blockers": ["LEGACY_SEALED_CURRENT_IDENTITY_UNVERIFIED"],
+                "historical_legacy_diagnostic": {
+                    "status": "HISTORICAL_UNVERIFIED_NOT_CURRENT", "current_generation_eligible": False,
+                    "qualification_eligible": False, "original_report": historical,
+                },
+            }
+    cohorts = (scorecard or {}).get("dynamic_cohorts") or {}
+    expected = dict(expected_generation or {})
+    fields = ("manifest_entry_hash", "epoch_id", "source_revision", "deployed_revision",
+              "tile_config_signature", "analyzer_revision", "evaluator_version", "generation_key")
+    valid = (all(expected.get(field) not in (None, "", "UNKNOWN") for field in fields)
+             and (scorecard or {}).get("generation") == expected
+             and cohorts.get("expected_generation") == expected
+             and cohorts.get("schema") == "same_publication_dynamic_cohorts_v1"
+             and expected.get("source_revision") == analysis_provenance.get("source_revision")
+             and expected.get("epoch_id") == analysis_provenance.get("dataset_epoch")
+             and expected.get("analyzer_revision") == str(analysis_provenance.get("generation_revision")))
+    digest_body = {key: value for key, value in cohorts.items() if key != "publication_sha256"}
+    valid = valid and cohorts.get("publication_sha256") == hashlib.sha256(
+        canonical_json(digest_body).encode()).hexdigest()
+    if not valid:
+        report["same_publication_diagnostic"] = {
+            "status": "UNKNOWN", "blockers": ["SAME_PUBLICATION_DYNAMIC_BINDING_UNAVAILABLE"],
+        }
+        return report
+    summary = {key: value for key, value in cohorts.items()
+               if key not in {"groups", "candidate_universe"}}
+    summary["groups"] = [
+        {key: value for key, value in group.items() if key not in {"episodes", "candidates"}}
+        for group in cohorts.get("groups") or []
+    ]
+    summary["candidate_universe_count"] = len(cohorts.get("candidate_universe") or [])
+    summary["detail_artifact"] = DISCOVERY_COHORT_SCORECARD_REPORT_FILE
+    summary["detail_artifact_canonical_sha256"] = hashlib.sha256(canonical_json(scorecard).encode()).hexdigest()
+    summary["episode_arrays_omitted"] = True
+    report["same_publication_diagnostic"] = summary
+    if report.get("sealed_holdout") is not None:
+        # Even an unsuccessful sealed experiment is a separate immutable claim.
+        return report
+    legacy_blockers = list(report.get("blockers") or [])
+    evaluations = cohorts.get("nested_research_evaluations") or []
+    report.update({
+        "schema": "dynamic_policy_analyzer_orchestration_v1",
+        "status": "RESEARCH_DIAGNOSTIC" if (cohorts.get("counts") or {}).get("supported_outcomes", 0) > 0 else "UNKNOWN",
+        "purpose": "RESEARCH_ONLY_NOT_RELAY_ELIGIBLE", "execution_class": "RESEARCH_ONLY",
+        "relay_eligible": False, "live_policy_change_allowed": False, "live_qualification": False,
+        "comparison_complete": False, "sealed_holdout": None,
+        "nested_protocol": evaluations[0].get("nested_protocol") if len(evaluations) == 1 else None,
+        "nested_protocol_scope": "SINGLE_AVAILABLE_COHORT_ONLY" if len(evaluations) == 1 else "SEPARATE_COHORTS_NO_AGGREGATE_WINNER",
+        "fold_local_taxonomy_bindings": [],
+        "generation_revision": analysis_provenance.get("generation_revision"),
+        "dataset_epoch": analysis_provenance.get("dataset_epoch"),
+        "source_revision": analysis_provenance.get("source_revision"),
+        "legacy_input_blockers": legacy_blockers,
+        "input_receipt": {"verification": "SAME_PUBLICATION_VERIFIED_DISCOVERY_INPUTS",
+                          "generation": expected, "publication_sha256": cohorts["publication_sha256"],
+                          "detail_artifact": DISCOVERY_COHORT_SCORECARD_REPORT_FILE},
+        "blockers": sorted(set(list(cohorts.get("blockers") or []) + [
+            "SEALED_HOLDOUT_EVIDENCE_MISSING", "CANDIDATE_UNIVERSE_COMPARISON_INCOMPLETE"])),
+    })
+    return report
+
+
+def write_report_manifest(
+    payload=None, *, analysis_provenance=None,
+    lifecycle_bundle_inventory=None, lifecycle_bundle_inventory_error=None,
+    shadow_research_model=None,
+):
+    from research.runtime_identity_incidents import load_incident_input
+    from research.shadow_model_input import load_shadow_model_input
+    incident_input = load_incident_input()
+    shadow_model_input = load_shadow_model_input(shadow_research_model)
+    manifest_started_at = datetime.now(timezone.utc)
+    current_run_cutoff = float(
+        globals().get("_CURRENT_ANALYZER_GENERATION_STARTED_AT")
+        or (manifest_started_at.timestamp() - (15 * 60))
+    )
+    """Manifest for research dashboard — no hardcoded report list in UI."""
+    policy_data_dir = os.getenv("BTC_AGENT_DATA_DIR") or "."
+    policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."
+    policy_cycle_error = None
+    try:
+        from research.policy_cycle_snapshot import build_policy_cycle_reports
+
+        policy_cycle_reports = build_policy_cycle_reports(
+            data_dir=policy_data_dir,
+            report_dir=policy_report_dir,
+        )
+        # The ordinary analyzer integrity pass happens before the expensive
+        # policy replay. Reconcile its receipt against the just-built reports
+        # so lifecycle/order-resolution defects cannot leave /api/integrity
+        # falsely VALID for this generation.
+        from research.analyzer_integrity_reconciliation import (
+            reconcile_analyzer_integrity_with_policy_reports,
+        )
+
+        policy_reports = [
+            (BEST_POLICY_RESEARCH_REPORT_FILE, policy_cycle_reports.get("best") or {}),
+        ]
+        safe_policy_path = Path(policy_report_dir) / SAFE_POLICY_GENOME_V3_REPORT_FILE
+        if safe_policy_path.is_file():
+            policy_reports.append(
+                (SAFE_POLICY_GENOME_V3_REPORT_FILE, _load_json_report(str(safe_policy_path)))
+            )
+        reconciled_integrity = reconcile_analyzer_integrity_with_policy_reports(
+            analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE),
+            policy_reports,
+        )
+        print(
+            f"  Integrity after policy cycle: {reconciled_integrity['report_status']} "
+            f"({len(reconciled_integrity['failed_checks'])} failed) {PIPELINE_ENFORCEMENT_TAG}"
+        )
+        # The policy-cycle orchestrator already builds the V3.1 Safe Policy
+        # Genome through the best-policy adapter from the same
+        # pinned cycle snapshot. Rebuilding it here duplicated every replay and
+        # bootstrap calculation, delaying manifest publication by many minutes
+        # and allowing the dashboard to look stale while collection advanced.
+    except Exception as exc:
+        # A missing/corrupt v2.2 input must degrade to no report, never interrupt
+        # the established analyzer cycle or leak a stale policy candidate.
+        print(f"  ⚠️ Best Policy Research unavailable: {type(exc).__name__}: {exc}")
+        policy_cycle_error = f"{type(exc).__name__}: {exc}"
+    try:
+        cross_world_evidence_report()
+    except Exception as exc:
+        print(f"  ⚠️ Cross-world evidence unavailable: {type(exc).__name__}: {exc}")
+    if analysis_provenance is None:
+        analysis_provenance = _lifecycle_inventory_analysis_provenance()
+    if incident_input.enabled:
+        analysis_provenance = dict(analysis_provenance)
+        analysis_provenance["runtime_identity_incident_input"] = incident_input.provenance()
+    if shadow_model_input.enabled:
+        analysis_provenance = dict(analysis_provenance)
+        analysis_provenance["shadow_model_input"] = shadow_model_input.provenance()
+    generation_revision = analysis_provenance["generation_revision"]
     # This grid must belong to this run or be explicitly absent. A stale file
     # from an earlier revision must never appear current merely because it is
     # still on disk.
@@ -19072,17 +20380,103 @@ def write_report_manifest(payload=None):
         qualified_exit_policy_grid_report()
     except Exception as exc:
         qualified_grid_error = f"{type(exc).__name__}: {exc}"
-    source_provenance = _report_source_evidence_provenance()
-    epoch_provenance = _fresh_epoch_provenance()
-    analysis_provenance = {
-        "cohort_schema": "analysis_cohorts_v1",
-        "generation_revision": generation_revision,
-        "cohorts": cohort_summary,
-        **source_provenance,
-        **epoch_provenance,
-    }
     reports = []
+    dynamic_policy_error = None
+    dynamic_policy_report = None
+    try:
+        from dynamic_policy_analyzer import build_dynamic_policy_analysis_report
+
+        dynamic_policy_report = build_dynamic_policy_analysis_report(
+            policy_data_dir,
+            generation_revision=str(generation_revision),
+            dataset_epoch=analysis_provenance.get("dataset_epoch"),
+            source_revision=analysis_provenance.get("source_revision"),
+        )
+    except Exception as exc:
+        dynamic_policy_error = f"{type(exc).__name__}: {exc}"
+    baseline_replay_error = None
+    baseline_replay = None
+    try:
+        from research.entry_baseline_replay import materialize_v3_opportunity_replay
+        from research.policy_evidence_schema import generation_identity
+
+        baseline_manifest_path = Path(policy_data_dir) / "canonical_dataset_current.json"
+        baseline_manifest_bytes = baseline_manifest_path.read_bytes()
+        baseline_manifest = json.loads(baseline_manifest_bytes.decode("utf-8-sig"))
+        baseline_generation = generation_identity(
+            baseline_manifest,
+            analyzer_revision=str(generation_revision),
+        )
+        baseline_replay = materialize_v3_opportunity_replay(
+            policy_data_dir, incident_input=incident_input,
+            generation=baseline_generation, canonical_manifest=baseline_manifest,
+        )
+        if baseline_manifest_path.read_bytes() != baseline_manifest_bytes:
+            raise ValueError("BASELINE_GENERATION_CHANGED_DURING_REPLAY")
+        baseline_replay["generation"] = baseline_generation
+        baseline_replay["generated_at"] = datetime.now(timezone.utc).isoformat()
+        baseline_replay["generation_revision"] = str(generation_revision)
+        target = Path(ENTRY_BASELINE_REPLAY_REPORT_FILE)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(baseline_replay, indent=2), encoding="utf-8")
+        os.replace(temporary, target)
+        replay_mirror = _atomic_mirror_analyzer_report(ENTRY_BASELINE_REPLAY_REPORT_FILE)
+        reports.append({
+            "title": "Same-Opportunity Entry Baseline Replay",
+            "file": ENTRY_BASELINE_REPLAY_REPORT_FILE,
+            "category": "Chase",
+            "description": "Signed baseline outcomes and truthful UNKNOWN schedule coverage",
+            "size_bytes": replay_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "same_opportunity_count": baseline_replay.get("same_opportunity_count"),
+            "summaries": baseline_replay.get("summaries"),
+        })
+    except Exception as exc:
+        baseline_replay_error = f"{type(exc).__name__}: {exc}"
+    try:
+        if lifecycle_bundle_inventory is None and lifecycle_bundle_inventory_error is None:
+            lifecycle_bundle_inventory = build_lifecycle_bundle_inventory(
+                policy_data_dir,
+                Path(policy_report_dir) / LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE,
+                analysis_provenance=analysis_provenance,
+            )
+        if lifecycle_bundle_inventory is None:
+            raise ValueError(lifecycle_bundle_inventory_error or "LIFECYCLE_INVENTORY_UNAVAILABLE")
+        lifecycle_inventory_mirror = _atomic_mirror_analyzer_report(
+            LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE
+        )
+        reports.append({
+            "title": "Lifecycle Evidence Bundle Inventory",
+            "file": LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": (
+                "Manifest-verified qualification bundles and transfer-ready audit copies; "
+                "payload files are not scanned, and neither count is ranking or profitability evidence"
+            ),
+            "size_bytes": lifecycle_inventory_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                Path(LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE).stat().st_mtime,
+                tz=timezone.utc,
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "qualification_bundle_count": (
+                lifecycle_bundle_inventory.get("qualification") or {}
+            ).get("unique_lifecycle_count"),
+            "transfer_audit_bundle_count": (
+                lifecycle_bundle_inventory.get("transfer") or {}
+            ).get("unique_lifecycle_count"),
+        })
+    except Exception as exc:
+        lifecycle_bundle_inventory_error = f"{type(exc).__name__}: {exc}"
     for title, fname, desc in DEEP_DIVE_REPORT_CATALOG:
+        if fname == DYNAMIC_POLICY_ANALYSIS_REPORT_FILE:
+            # Built below from this invocation's discovery, never a stale file.
+            continue
+        if fname == EXIT_REPORTS_VALIDATION_FILE:
+            # This receipt is derived from the completed current manifest below;
+            # never publish a leftover receipt from an earlier analyzer pass.
+            continue
         # Catalog files can survive from an older iteration when current data
         # cannot regenerate that report. Keep them for local history, but do
         # not qualify them as members of this immutable generation.
@@ -19102,19 +20496,299 @@ def write_report_manifest(payload=None):
                 ).isoformat(),
                 "analysis_provenance": analysis_provenance,
             })
+    # Publish derived-library status only after binding it to the current
+    # canonical manifest. This does not evaluate or ingest policy rows.
+    policy_evidence_library_error = None
+    conservative_evaluator_status = None
+    evidence_coverage_triage_error = None
+    try:
+        from research.policy_evidence_bindings import persist_v3_binding_index
+        from research.policy_evidence_evaluator import persist_v3_conservative_results
+        from research.policy_evidence_library import build_library_manifest
+
+        binding_status = persist_v3_binding_index(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            analyzer_revision=str(generation_revision),
+            summary_destination=POLICY_EVIDENCE_BINDING_REPORT_FILE,
+        )
+        binding_report_mirror = _atomic_mirror_analyzer_report(
+            POLICY_EVIDENCE_BINDING_REPORT_FILE
+        )
+        reports.append({
+            "title": "Policy Evidence Binding Coverage",
+            "file": POLICY_EVIDENCE_BINDING_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": "Exact V3 identity, schedule and content-addressed path coverage",
+            "size_bytes": binding_report_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                os.path.getmtime(POLICY_EVIDENCE_BINDING_REPORT_FILE), tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "exactly_bound_count": binding_status.get("exactly_bound_count"),
+        })
+        conservative_evaluator_status = persist_v3_conservative_results(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            analyzer_revision=str(generation_revision),
+            incident_input=incident_input,
+        )
+        library_status = build_library_manifest(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            analyzer_revision=str(generation_revision),
+            destination=POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+        )
+        library_status = _stamp_policy_evaluator_status(
+            POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+            conservative_evaluator_status,
+        )
+        library_manifest_mirror = _atomic_mirror_analyzer_report(
+            POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE
+        )
+        reports.append({
+            "title": "Policy Evidence Library Manifest",
+            "file": POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE,
+            "category": "Genome & Reports",
+            "description": "Manifest-bound status for the disposable derived policy evidence query cache",
+            "size_bytes": library_manifest_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                os.path.getmtime(POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE), tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "derived_cache_status": library_status.get("cache_status"),
+            "conservative_classification_counts": conservative_evaluator_status.get(
+                "classification_counts"
+            ),
+            "conservative_result_artifact": conservative_evaluator_status.get("relative_path"),
+        })
+        try:
+            coverage_report, coverage_mirror = _write_evidence_coverage_triage_report(
+                os.environ["BTC_AGENT_DATA_DIR"], binding_status, conservative_evaluator_status,
+            )
+            reports.append({
+                "title": "Evidence Coverage Triage",
+                "file": EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE,
+                "category": "Genome & Reports",
+                "description": "Checksum-bound canonical evidence coverage, unknowns and archive triage",
+                "size_bytes": coverage_mirror.stat().st_size,
+                "modified_at": datetime.fromtimestamp(
+                    Path(EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE).stat().st_mtime, tz=timezone.utc
+                ).isoformat(),
+                "analysis_provenance": analysis_provenance,
+                "coverage_totals": coverage_report.get("totals"),
+            })
+        except Exception as exc:
+            evidence_coverage_triage_error = f"{type(exc).__name__}: {exc}"
+    except Exception as exc:
+        policy_evidence_library_error = f"{type(exc).__name__}: {exc}"
+        if evidence_coverage_triage_error is None:
+            evidence_coverage_triage_error = policy_evidence_library_error
+    shadow_terminal_error = None
+    shadow_terminal = None
+    try:
+        from research.shadow_model_input import first_signal_ts_from_baseline
+        shadow_terminal, shadow_terminal_mirror = _write_conservative_shadow_report(
+            policy_data_dir, policy_report_dir,
+            None if baseline_replay_error else baseline_replay,
+            policy_cycle_succeeded=policy_cycle_error is None,
+            research_model=shadow_model_input.resolve((baseline_replay or {}).get("generation") or {},
+                first_signal_ts=first_signal_ts_from_baseline(baseline_replay)),
+        )
+        reports.append({
+            "title": "Conservative Shadow Terminal Outcomes",
+            "file": CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": "Current-generation exit/cost replay; explicit missing model and coverage blockers",
+            "size_bytes": shadow_terminal_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(
+                Path(CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE).stat().st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "shadow_terminal_status": shadow_terminal.get("status"),
+        })
+        stream_receipt = shadow_terminal.get("result_stream")
+        conditional_stream = (shadow_terminal.get("conditional_report") or {}).get("result_stream")
+        if conditional_stream:
+            reports.append({
+                "title": "Conditional Simulation Results — Venue Acceptance Unknown",
+                "file": conditional_stream["relative_path"],
+                "category": "Genome & Reports",
+                "description": "Declared conditional economics only; not exchange-qualified or live eligible",
+                "size_bytes": conditional_stream["compressed_bytes"],
+                "artifact_sha256": conditional_stream["artifact_sha256"],
+                "stream_receipt_sha256": conditional_stream["receipt_sha256"],
+                "analysis_provenance": analysis_provenance,
+            })
+        for variant in (shadow_terminal.get("delayed_variant_reports", []) +
+                        shadow_terminal.get("conditional_delayed_variant_reports", [])):
+            variant_stream = variant["report"]["result_stream"]
+            reports.append({
+                "title": ("Conditional Delayed Shadow Results — venue acceptance UNKNOWN "
+                          if variant["report"].get("venue_acceptance") == "UNKNOWN" else
+                          "Complete Delayed Shadow Results ") + variant["timing_model_sha256"],
+                "file": variant_stream["relative_path"],
+                "category": "Genome & Reports",
+                "description": "Complete separate declared timing cohort; not a sample or live qualification",
+                "size_bytes": variant_stream["compressed_bytes"],
+                "artifact_sha256": variant_stream["artifact_sha256"],
+                "stream_receipt_sha256": variant_stream["receipt_sha256"],
+                "analysis_provenance": analysis_provenance,
+            })
+        if stream_receipt:
+            reports.append({
+                "title": "Complete Conservative Shadow Results",
+                "file": stream_receipt["relative_path"],
+                "category": "Genome & Reports",
+                "description": "Complete generation-bound compressed results and explicit UNKNOWN ranges; not a sample",
+                "size_bytes": stream_receipt["compressed_bytes"],
+                "artifact_sha256": stream_receipt["artifact_sha256"],
+                "stream_receipt_sha256": stream_receipt["receipt_sha256"],
+                "analysis_provenance": analysis_provenance,
+            })
+    except Exception as exc:
+        shadow_terminal_error = f"{type(exc).__name__}: {exc}"
+    discovery_scorecard_error = None
+    scorecard = None
+    try:
+        # Use only this invocation's replay objects, never a prior saved report.
+        scorecard, scorecard_mirror = _write_discovery_scorecard_report(
+            policy_data_dir, conservative_evaluator_status,
+            None if baseline_replay_error else baseline_replay,
+            shadow_terminal_report={} if shadow_terminal_error else shadow_terminal,
+        )
+        reports.append({
+            "title": "Matched Paper and Shadow Research",
+            "file": DISCOVERY_COHORT_SCORECARD_REPORT_FILE,
+            "category": "Genome & Reports",
+            "description": "Exact-generation simulation cohorts, unmatched evidence and model differences",
+            "size_bytes": scorecard_mirror.stat().st_size,
+            "artifact_sha256": _report_artifact_digest(scorecard_mirror),
+            "modified_at": datetime.fromtimestamp(
+                Path(DISCOVERY_COHORT_SCORECARD_REPORT_FILE).stat().st_mtime, tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+            "scorecard_status": scorecard.get("status"),
+        })
+    except Exception as exc:
+        discovery_scorecard_error = f"{type(exc).__name__}: {exc}"
+    try:
+        dynamic_policy_report = _same_publication_dynamic_report(
+            dynamic_policy_report, scorecard,
+            (conservative_evaluator_status or {}).get("generation"), analysis_provenance,
+        )
+        if not dynamic_policy_report.get("schema"):
+            raise ValueError("DYNAMIC_REPORT_CURRENT_INPUT_UNAVAILABLE")
+        target = Path(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(dynamic_policy_report, indent=2, allow_nan=False), encoding="utf-8")
+        os.replace(temporary, target)
+        _stamp_report_analysis_provenance(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE, analysis_provenance)
+        dynamic_mirror = _atomic_mirror_analyzer_report(DYNAMIC_POLICY_ANALYSIS_REPORT_FILE)
+        reports.append({
+            "title": "Dynamic Policy Research", "file": DYNAMIC_POLICY_ANALYSIS_REPORT_FILE,
+            "category": "Genome & Reports", "description": "Same-publication static/dynamic research; sealed qualification remains separate",
+            "size_bytes": dynamic_mirror.stat().st_size,
+            "modified_at": datetime.fromtimestamp(target.stat().st_mtime, tz=timezone.utc).isoformat(),
+            "analysis_provenance": analysis_provenance,
+        })
+        dynamic_policy_error = None
+    except Exception as exc:
+        dynamic_policy_error = f"{type(exc).__name__}: {exc}"
+    # The exhaustive policy grid is intentionally separate from the bounded
+    # dashboard JSON. It is compressed, immutable for this generation, and is
+    # copied without JSON stamping so its manifest checksum remains verifiable.
+    for title, fname, desc in (
+        (
+            "Exhaustive Policy Results",
+            SAFE_POLICY_EXHAUSTIVE_FILE,
+            "Every deduplicated evaluated entry+exit policy, including losing, unsupported and non-shortlisted rows",
+        ),
+        (
+            "Exhaustive Policy Results Manifest",
+            SAFE_POLICY_EXHAUSTIVE_MANIFEST_FILE,
+            "Row count, revision, epoch, tile signature and checksum for the exhaustive compressed policy artifact",
+        ),
+    ):
+        source = Path(policy_report_dir) / fname
+        if source.is_file() and source.stat().st_mtime >= current_run_cutoff:
+            os.makedirs(REPORTS_DIR, exist_ok=True)
+            mirrored_report = Path(REPORTS_DIR) / fname
+            shutil.copy2(source, mirrored_report)
+            reports.append({
+                "title": title,
+                "file": fname,
+                "category": "Genome & Reports",
+                "description": desc,
+                "size_bytes": mirrored_report.stat().st_size,
+                "modified_at": datetime.fromtimestamp(
+                    source.stat().st_mtime, tz=timezone.utc
+                ).isoformat(),
+                "analysis_provenance": analysis_provenance,
+            })
+    # Publication time must describe the completed immutable generation, not
+    # the instant before the expensive policy builders ran.  The old timestamp
+    # could precede report files by several minutes and made API/file/dashboard
+    # parity look stale even when one analyzer generation had completed.
+    manifest_generated_at = datetime.now(timezone.utc)
     manifest = {
         "schema": "report_manifest_v1",
         "analyzer_sync_id": ANALYZER_SYNC_ID,
         "analyzer_version": ANALYZER_VERSION,
         "generated_at": manifest_generated_at.isoformat(),
+        "generation_started_at": manifest_started_at.isoformat(),
         "expected_bot_version": EXPECTED_BOT_VERSION,
+        "tile_registry_schema": TILE_REGISTRY_SCHEMA,
+        "tile_architecture_version": TILE_ARCHITECTURE_VERSION,
+        "tile_registry_signature": active_tile_registry_signature(),
+        "active_tiles": active_tile_lifecycle_manifest(),
         "analysis_provenance": analysis_provenance,
         "cohort_schema": analysis_provenance["cohort_schema"],
         "generation_revision": analysis_provenance["generation_revision"],
+        "analyzer_revision": analysis_provenance["analyzer_revision"],
+        "source_revision": analysis_provenance["source_revision"],
+        "deployed_revision": analysis_provenance["deployed_revision"],
+        "dataset_epoch": analysis_provenance["dataset_epoch"],
+        "config_signature": analysis_provenance["config_signature"],
         "source_data_revision": analysis_provenance["source_data_revision"],
+        "manifest_entry_hash": analysis_provenance["manifest_entry_hash"],
+        "dataset_checksum": analysis_provenance["dataset_checksum"],
         "policy_comparability_key": analysis_provenance["policy_comparability_key"],
         "policy_comparability_status": analysis_provenance["policy_comparability_status"],
         "cohorts": analysis_provenance["cohorts"],
+        "lifecycle_bundles": {
+            "available_in_generation": lifecycle_bundle_inventory is not None,
+            "generation_error": lifecycle_bundle_inventory_error,
+            "complete": (
+                lifecycle_bundle_inventory.get("complete")
+                if isinstance(lifecycle_bundle_inventory, dict) else False
+            ),
+            "complete_scope": (
+                lifecycle_bundle_inventory.get("complete_scope")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "payload_verification_status": (
+                lifecycle_bundle_inventory.get("payload_verification_status")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "payload_files_read": (
+                lifecycle_bundle_inventory.get("payload_files_read")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "qualification": (
+                lifecycle_bundle_inventory.get("qualification")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "transfer": (
+                lifecycle_bundle_inventory.get("transfer")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "parity": (
+                lifecycle_bundle_inventory.get("parity")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+            "invalid_manifest_count": (
+                lifecycle_bundle_inventory.get("invalid_manifest_count")
+                if isinstance(lifecycle_bundle_inventory, dict) else None
+            ),
+        },
         "fresh_epoch": {
             "schema": analysis_provenance["fresh_epoch_schema"],
             "status": analysis_provenance["fresh_epoch_status"],
@@ -19123,12 +20797,71 @@ def write_report_manifest(payload=None):
             "kind": analysis_provenance["fresh_epoch_kind"],
         },
         "required_report_status": {
+            CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == CONSERVATIVE_SHADOW_TERMINAL_REPORT_FILE for row in reports
+                ),
+                "generation_error": shadow_terminal_error,
+            },
+            DISCOVERY_COHORT_SCORECARD_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == DISCOVERY_COHORT_SCORECARD_REPORT_FILE for row in reports
+                ),
+                "generation_error": discovery_scorecard_error,
+            },
+            ENTRY_BASELINE_REPLAY_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == ENTRY_BASELINE_REPLAY_REPORT_FILE for row in reports
+                ),
+                "generation_error": baseline_replay_error,
+            },
+            POLICY_EVIDENCE_BINDING_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == POLICY_EVIDENCE_BINDING_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_evidence_library_error,
+            },
+            POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == POLICY_EVIDENCE_LIBRARY_MANIFEST_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_evidence_library_error,
+            },
+            EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == EVIDENCE_COVERAGE_TRIAGE_REPORT_FILE for row in reports
+                ),
+                "generation_error": evidence_coverage_triage_error,
+            },
+            BEST_POLICY_RESEARCH_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == BEST_POLICY_RESEARCH_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_cycle_error,
+            },
+            SAFE_POLICY_GENOME_V3_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == SAFE_POLICY_GENOME_V3_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": policy_cycle_error,
+            },
             QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE: {
                 "available_in_generation": any(
                     row.get("file") == QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE
                     for row in reports
                 ),
                 "generation_error": qualified_grid_error,
+            },
+            DYNAMIC_POLICY_ANALYSIS_REPORT_FILE: {
+                "available_in_generation": any(
+                    row.get("file") == DYNAMIC_POLICY_ANALYSIS_REPORT_FILE
+                    for row in reports
+                ),
+                "generation_error": dynamic_policy_error,
             },
         },
         "data_scope": (payload or {}).get("data_scope"),
@@ -19150,12 +20883,176 @@ def write_report_manifest(payload=None):
             "RESEARCH_DASHBOARD_PUBLIC_URL", "http://127.0.0.1:9001/"
         ),
     }
+    manifest["generation_id"] = hashlib.sha256(
+        json.dumps(
+            {
+                "generated_at": manifest["generated_at"],
+                "revision": manifest["generation_revision"],
+                "source_revision": manifest["source_revision"],
+                "deployed_revision": manifest["deployed_revision"],
+                "dataset_epoch": manifest["dataset_epoch"],
+                "config_signature": manifest["config_signature"],
+                "fresh_epoch": manifest["fresh_epoch"].get("epoch_id"),
+                **({"runtime_identity_incident_input": analysis_provenance["runtime_identity_incident_input"]}
+                   if "runtime_identity_incident_input" in analysis_provenance else {}),
+                **({"shadow_model_input": analysis_provenance["shadow_model_input"]}
+                   if "shadow_model_input" in analysis_provenance else {}),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    _stamp_integrity_generation_identity(manifest, reports)
     try:
-        with open(REPORT_MANIFEST_FILE, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
+        exit_validation = _write_current_exit_reports_validation(manifest)
+        reports.append({
+            "title": "Exit Reports Validation",
+            "file": EXIT_REPORTS_VALIDATION_FILE,
+            "category": "Exits",
+            "description": "Current-generation exit report identity and evidence status",
+            "size_bytes": os.path.getsize(EXIT_REPORTS_VALIDATION_FILE),
+            "modified_at": datetime.fromtimestamp(
+                os.path.getmtime(EXIT_REPORTS_VALIDATION_FILE), tz=timezone.utc
+            ).isoformat(),
+            "analysis_provenance": analysis_provenance,
+        })
+        manifest["report_count"] = len(reports)
+        manifest["required_report_status"][EXIT_REPORTS_VALIDATION_FILE] = {
+            "available_in_generation": True,
+            "status": exit_validation["status"],
+            "current_generation_valid": exit_validation["current_generation_valid"],
+        }
+    except Exception as exc:
+        manifest["required_report_status"][EXIT_REPORTS_VALIDATION_FILE] = {
+            "available_in_generation": False,
+            "generation_error": f"{type(exc).__name__}: {exc}",
+        }
+    if isinstance(payload, dict):
+        # The filesystem can retain optional/stale JSON artifacts which are
+        # intentionally excluded from this immutable generation.  The summary
+        # must therefore quote the completed manifest, not count files on disk.
+        payload["manifest_report_count"] = manifest["report_count"]
+        try:
+            Path(EXECUTIVE_SUMMARY_FILE).write_text(
+                format_executive_summary_short(payload), encoding="utf-8"
+            )
+        except OSError as exc:
+            print(
+                f"  ⚠️ Could not align executive summary report count: {exc} "
+                f"{PIPELINE_ENFORCEMENT_TAG}"
+            )
+    try:
+        incident_input.assert_unchanged()
+        shadow_model_input.assert_unchanged()
+        _publish_completed_report_generation(manifest)
     except Exception as exc:
         print(f"  ⚠️ Could not write {REPORT_MANIFEST_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+        from research.mirror_coherence import MirrorCoherenceError
+        if isinstance(exc, MirrorCoherenceError):
+            # Stop this iteration before snapshots/archives can combine the
+            # retained manifest with working files from an incoherent mirror.
+            raise
     return manifest
+
+
+def _publish_completed_report_generation(manifest):
+    """Atomically expose one completed analyzer generation.
+
+    Analyzer builders intentionally write their potentially large artifacts to
+    the working directory.  The dashboard must never observe those files while
+    a pass is still replacing them.  Copy the completed set to a sibling
+    staging directory, include its manifest, then atomically exchange the
+    published directory.  The top-level manifest remains a compatibility copy
+    and is also replaced atomically only after publication succeeds.
+    """
+    from research.mirror_coherence import assert_mirror_coherent
+
+    _assert_local_generation_unfenced("analyzer_generation_publish")
+
+    from research.runtime_identity_incidents import assert_publication_incident_input
+    from research.shadow_model_input import assert_publication_shadow_model_input
+    assert_publication_incident_input(manifest)
+    assert_publication_shadow_model_input(manifest)
+
+    assert_mirror_coherent(
+        repo_root=Path(__file__).resolve().parents[2],
+        data_root=os.environ["BTC_AGENT_DATA_DIR"],
+        expected_revision=str(manifest.get("source_revision") or ""),
+        expected_deployed_revision=str(manifest.get("deployed_revision") or ""),
+        expected_manifest_entry_hash=str(manifest.get("manifest_entry_hash") or ""),
+        expected_dataset_checksum=str(manifest.get("dataset_checksum") or ""),
+        previous=globals().get("_CURRENT_MIRROR_COHERENCE_TOKEN"),
+        held_lease=globals().get("_CURRENT_MIRROR_GENERATION_LEASE"),
+        require_canonical_manifest=True,
+    )
+    published = Path(PUBLISHED_REPORTS_DIR)
+    staging = Path(f".{PUBLISHED_REPORTS_DIR}.staging-{os.getpid()}-{time.time_ns()}")
+    backup = Path(f".{PUBLISHED_REPORTS_DIR}.previous-{os.getpid()}-{time.time_ns()}")
+    staging.mkdir(parents=True, exist_ok=False)
+    try:
+        names = {
+            str(row.get("file"))
+            for row in (manifest.get("reports") or [])
+            if isinstance(row, dict) and row.get("file")
+        }
+        names.update(
+            str(name) for name in (manifest.get("text_artifacts") or []) if name
+        )
+        for name in sorted(names):
+            source = Path(name)
+            destination = staging / name
+            # Validate before copy: checking only the copied binary afterward
+            # would allow a malformed manifest name to write outside staging.
+            if (source.is_absolute() or ".." in source.parts
+                    or not source.resolve().is_relative_to(Path.cwd().resolve())
+                    or not destination.resolve().is_relative_to(staging.resolve())):
+                raise ValueError("ANALYZER_ARTIFACT_PATH_INVALID")
+            if source.is_file():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+        (staging / REPORT_MANIFEST_FILE).write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8"
+        )
+        # Large binary result streams must be present and match the immutable
+        # receipt after copying, before the visible generation can be replaced.
+        for row in manifest.get("reports") or []:
+            expected_hash = row.get("artifact_sha256") if isinstance(row, dict) else None
+            if not expected_hash:
+                continue
+            artifact = (staging / row["file"]).resolve()
+            if not artifact.is_relative_to(staging.resolve()):
+                raise ValueError("ANALYZER_ARTIFACT_PATH_INVALID")
+            actual_hash = hashlib.sha256()
+            with artifact.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    actual_hash.update(chunk)
+            if actual_hash.hexdigest() != expected_hash or artifact.stat().st_size != row["size_bytes"]:
+                raise ValueError("ANALYZER_ARTIFACT_COPY_HASH_MISMATCH")
+        assert_publication_incident_input(manifest)
+        assert_publication_shadow_model_input(manifest)
+        _assert_local_generation_unfenced("analyzer_generation_atomic_swap")
+        if published.exists():
+            os.replace(published, backup)
+        try:
+            os.replace(staging, published)
+        except Exception:
+            if backup.exists() and not published.exists():
+                os.replace(backup, published)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        manifest_tmp = Path(f"{REPORT_MANIFEST_FILE}.published.tmp")
+        manifest_tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        os.replace(manifest_tmp, REPORT_MANIFEST_FILE)
+        from research.canonical_data_store import record_analyzer_completion
+        record_analyzer_completion(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            report_manifest_path=os.path.abspath(REPORT_MANIFEST_FILE),
+            analyzer_schema_version="v62",
+            completed_at=str(manifest.get("generated_at") or datetime.now(timezone.utc).isoformat()),
+        )
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _manifest_category(title: str) -> str:
@@ -19178,6 +21075,7 @@ def _manifest_category(title: str) -> str:
 def archive_research_session(payload):
     """Atomically store one exact, hash-bound analyzer generation."""
     try:
+        _assert_local_generation_unfenced("analyzer_session_archive")
         from research.immutable_archive import create_archive
         return str(
             create_archive(
@@ -19217,24 +21115,31 @@ def build_executive_summary_payload(
         ev = float(net / n_trades) if n_trades else 0.0
         exit_mix = _exit_mix_from_df(analysis_df)
 
-    real_edge = _load_json_report(REAL_EDGE_SUMMARY_FILE)
-    bench = _load_json_report(BENCHMARK_VS_LANES_REPORT_FILE)
-    ai_cal = _load_json_report(AI_CALIBRATION_REPORT_FILE)
-    conf_band = _load_json_report(CONFIDENCE_BAND_REPORT_FILE)
-    chase = _load_json_report(CHASE_ATTRIBUTION_REPORT_FILE)
-    leakage = _load_json_report(SCENARIO_C_LEAKAGE_REPORT_FILE)
-    capture = _load_json_report(SCENARIO_C_CAPTURE_RATIO_REPORT_FILE)
-    missed = _load_json_report(MISSED_OPPORTUNITY_HEATMAP_FILE)
-    horizon = _load_json_report(HORIZON_PROFITABILITY_REPORT_FILE)
-    fast_cut = _load_json_report(FAST_CUT_SURVIVOR_REPORT_FILE)
-    edge_inc = _load_json_report(EDGE_INCREMENTAL_VALUE_REPORT_FILE)
-    edge_val = _load_json_report(EDGE_SCORE_DECILE_REPORT_FILE)
-    dir_rep = _load_json_report(DIRECTION_REPORT_FILE)
-    chase_buckets = _load_json_report(CHASE_EFFECTIVENESS_REPORT_FILE)
-    top_leak = _load_json_report(TOP_LEAKAGE_REPORT_FILE)
-    lane_ret = _load_json_report(LANE_RETIREMENT_REPORT_FILE)
-    feat_imp = _load_json_report(FEATURE_IMPORTANCE_REPORT_FILE)
-    paused_shadow = _load_json_report(PAUSED_SHADOW_REPORT_FILE)
+    auxiliary_context = _auxiliary_report_generation_context(session)
+    auxiliary_receipts = []
+
+    def current_auxiliary(path):
+        _stamp_current_iteration_auxiliary_report(path, auxiliary_context)
+        report, receipt = _load_current_auxiliary_report(path, auxiliary_context)
+        auxiliary_receipts.append(receipt)
+        return report
+
+    real_edge = current_auxiliary(REAL_EDGE_SUMMARY_FILE)
+    bench = current_auxiliary(BENCHMARK_VS_LANES_REPORT_FILE)
+    ai_cal = current_auxiliary(AI_CALIBRATION_REPORT_FILE)
+    conf_band = current_auxiliary(CONFIDENCE_BAND_REPORT_FILE)
+    chase = current_auxiliary(CHASE_ATTRIBUTION_REPORT_FILE)
+    leakage = current_auxiliary(SCENARIO_C_LEAKAGE_REPORT_FILE)
+    capture = current_auxiliary(SCENARIO_C_CAPTURE_RATIO_REPORT_FILE)
+    missed = current_auxiliary(MISSED_OPPORTUNITY_HEATMAP_FILE)
+    horizon = current_auxiliary(HORIZON_PROFITABILITY_REPORT_FILE)
+    fast_cut = current_auxiliary(FAST_CUT_SURVIVOR_REPORT_FILE)
+    edge_inc = current_auxiliary(EDGE_INCREMENTAL_VALUE_REPORT_FILE)
+    edge_val = current_auxiliary(EDGE_SCORE_DECILE_REPORT_FILE)
+    dir_rep = current_auxiliary(DIRECTION_REPORT_FILE)
+    chase_buckets = current_auxiliary(CHASE_EFFECTIVENESS_REPORT_FILE)
+    top_leak = current_auxiliary(TOP_LEAKAGE_REPORT_FILE)
+    feat_imp = current_auxiliary(FEATURE_IMPORTANCE_REPORT_FILE)
 
     best_lane, worst_lane = _best_worst_lanes(bench)
     lane_rows = _lane_table_rows(bench)
@@ -19279,10 +21184,9 @@ def build_executive_summary_payload(
     eva = ai_cal.get("expected_vs_actual") or {}
     ai_verdict = _ai_calibration_verdict(ai_cal)
 
-    pathway_specs = _load_json_report(PATHWAY_LANE_SPECS_FILE) or {}
     bench_profile = (
         bench.get("benchmark_profile_id")
-        or pathway_specs.get("benchmark_profile_id")
+        or ACTIVE_TILE_REGISTRY.get(BENCHMARK_LANE, {}).get("raw_policy_id")
         or "CONTINUOUS_SCENARIO_C_v2"
     )
 
@@ -19309,10 +21213,12 @@ def build_executive_summary_payload(
     best_exit = _best_exit_from_mix(exit_mix_dicts)
     worst_exit = _worst_exit_from_mix(exit_mix_dicts)
     fc_sum = fast_cut.get("summary") or {}
-    fast_cut_damage = round(
-        sum(float(x.get("pnl_usd") or 0) for x in exit_mix_dicts if "FAST_CUT" in str(x.get("reason", ""))),
-        2,
+    fast_cut_rows = [x for x in exit_mix_dicts if "FAST_CUT" in str(x.get("reason", ""))]
+    fast_cut_damage = (
+        round(sum(float(x["pnl_usd"]) for x in fast_cut_rows if x.get("pnl_usd") is not None), 2)
+        if fast_cut_rows else None
     )
+    gate_damage = real_edge.get("gate_damage_usd") if n_approves > 0 else None
 
     payload = {
         "schema": "research_hierarchy_v1",
@@ -19348,7 +21254,7 @@ def build_executive_summary_payload(
             "edge_correlation": (edge_val.get("overall") or {}).get("correlation_edge_vs_pnl"),
             "best_exit": best_exit,
             "worst_exit": worst_exit,
-            "gate_damage_usd": round(float(real_edge.get("gate_damage_usd") or 0), 2),
+            "gate_damage_usd": round(float(gate_damage), 2) if gate_damage is not None else None,
             "leakage_left_usd": round(float(left_usd), 2) if left_usd is not None else None,
         },
         "coverage": {
@@ -19390,12 +21296,17 @@ def build_executive_summary_payload(
         "edge_verdict": edge_inc.get("verdict"),
         "edge_validation": edge_val,
         "top_leakage": top_leak,
-        "lane_retirement": lane_ret,
         "feature_importance": feat_imp,
-        "paused_shadow_research": paused_shadow,
         "recovery_summary": horizon.get("recovery_summary") or [],
         "blocked_opportunity_usd": blocked_opp,
         "json_reports_written": _count_json_reports_written(),
+        "auxiliary_report_ingestion": {
+            "schema": "auxiliary_report_ingestion_v1",
+            "required_identity": auxiliary_context,
+            "included_count": sum(bool(row.get("included")) for row in auxiliary_receipts),
+            "excluded_count": sum(not bool(row.get("included")) for row in auxiliary_receipts),
+            "reports": auxiliary_receipts,
+        },
         "artifacts": {
             "executive_summary_txt": os.path.abspath(EXECUTIVE_SUMMARY_FILE),
             "research_highlights_txt": os.path.abspath(RESEARCH_HIGHLIGHTS_FILE),
@@ -19415,9 +21326,27 @@ def _fmt_usd(val, default="n/a"):
     if val is None:
         return default
     try:
-        return f"{float(val):+.2f}"
+        value = float(val)
+        if round(value, 2) == 0:
+            return "0.00"
+        return f"{value:+.2f}"
     except (TypeError, ValueError):
         return default
+
+
+def _fmt_number(val, decimals=1, default="n/a"):
+    """Format a derived metric without turning unavailable evidence into zero."""
+    if val is None:
+        return default
+    try:
+        return f"{float(val):.{decimals}f}"
+    except (TypeError, ValueError):
+        return default
+
+
+def _fmt_pct(val, decimals=1, default="n/a"):
+    rendered = _fmt_number(val, decimals=decimals, default=default)
+    return f"{rendered}%" if rendered != default else default
 
 
 def format_executive_summary_short(payload):
@@ -19447,7 +21376,9 @@ def format_executive_summary_short(payload):
         f"  • {RESEARCH_HIGHLIGHTS_FILE} — detailed tables",
         f"  • {RESEARCH_FINDINGS_FILE} — auto conclusions",
         f"  • {RESEARCH_COVERAGE_FILE} — bucket counts & statistical health",
-        f"  • {DEEP_DIVE_INDEX_FILE} — all {payload.get('json_reports_written', 0)} JSON reports",
+        f"  • {DEEP_DIVE_INDEX_FILE} — all "
+        f"{payload.get('manifest_report_count', payload.get('json_reports_written', 0))} "
+        "JSON reports",
         f"  • {ANALYSIS_DASHBOARD_HTML} | {ANALYZER_RUN_LOG_FILE} (full verbose)",
         "=" * 72,
     ]
@@ -19476,6 +21407,7 @@ def format_research_highlights_text(payload):
         missed_list = [payload.get("top_missed_opportunity")]
     direction = payload.get("direction") or {}
     edge_val = payload.get("edge_validation") or {}
+    has_terminal_evidence = int(p.get("trades") or 0) > 0
 
     lines = [
         "=" * W,
@@ -19485,33 +21417,34 @@ def format_research_highlights_text(payload):
         "",
     ]
     hl = payload.get("highlights") or {}
+    best_lane_hl = hl.get("best_lane") or {}
+    worst_lane_hl = hl.get("worst_lane") or {}
+    best_conf_hl = hl.get("best_confidence") or {}
+    worst_conf_hl = hl.get("worst_confidence") or {}
+    best_exit_hl = hl.get("best_exit") or {}
     lines.extend([
         "=== RESEARCH HIGHLIGHTS (at-a-glance) ===",
-        f"Top Lane:     {(hl.get('best_lane') or {}).get('lane', 'n/a')}  "
-        f"${float((hl.get('best_lane') or {}).get('pnl', 0)):+.2f}",
-        f"Worst Lane:   {(hl.get('worst_lane') or {}).get('lane', 'n/a')}  "
-        f"${float((hl.get('worst_lane') or {}).get('pnl', 0)):+.2f}",
-        f"Best Conf:    {(hl.get('best_confidence') or {}).get('bucket', 'n/a')}  "
-        f"{(hl.get('best_confidence') or {}).get('wr', 0):.1f}% WR",
-        f"Worst Conf:   {(hl.get('worst_confidence') or {}).get('bucket', 'n/a')}  "
-        f"{(hl.get('worst_confidence') or {}).get('wr', 0):.1f}% WR",
-        f"Fast-Cut PnL: ${float(hl.get('fast_cut_damage_usd', 0)):+.2f}",
-        f"Blocked Opp:  ${float(hl.get('blocked_opportunity_usd', 0)):+.2f}",
+        f"Top Lane:     {best_lane_hl.get('lane', 'n/a')}  ${_fmt_usd(best_lane_hl.get('pnl'))}",
+        f"Worst Lane:   {worst_lane_hl.get('lane', 'n/a')}  ${_fmt_usd(worst_lane_hl.get('pnl'))}",
+        f"Best Conf:    {best_conf_hl.get('bucket', 'n/a')}  {_fmt_pct(best_conf_hl.get('wr'))} WR",
+        f"Worst Conf:   {worst_conf_hl.get('bucket', 'n/a')}  {_fmt_pct(worst_conf_hl.get('wr'))} WR",
+        f"Fast-Cut PnL: ${_fmt_usd(hl.get('fast_cut_damage_usd') if has_terminal_evidence else None)}",
+        f"Blocked Opp:  ${_fmt_usd(hl.get('blocked_opportunity_usd') if has_terminal_evidence else None)}",
         f"Edge corr:    {hl.get('edge_correlation', 'n/a')}",
-        f"Best Exit:    {(hl.get('best_exit') or {}).get('reason', 'n/a')}  "
-        f"${float((hl.get('best_exit') or {}).get('pnl_usd', 0)):+.2f}",
+        f"Best Exit:    {best_exit_hl.get('reason', 'n/a')}  ${_fmt_usd(best_exit_hl.get('pnl_usd'))}",
         "",
     ])
     if re:
+        approve_evidence = int(re.get("approve_attempts") or 0) > 0
         lines.extend([
             "--- APPROVE funnel ---",
             _fmt_row(["APPROVE", "Executed", "Exec PnL", "All-APPROVE CF", "Gate damage"], [10, 10, 12, 16, 14]),
             _fmt_row([
                 re.get("approve_attempts", "n/a"),
                 re.get("executed", "n/a"),
-                f"{re.get('executed_pnl_usd', 0):+.2f}",
-                f"{re.get('counterfactual_all_approve_usd', 0):+.2f}",
-                f"{re.get('gate_damage_usd', 0):+.2f}",
+                _fmt_usd(re.get("executed_pnl_usd") if approve_evidence else None),
+                _fmt_usd(re.get("counterfactual_all_approve_usd") if approve_evidence else None),
+                _fmt_usd(re.get("gate_damage_usd") if approve_evidence else None),
             ], [10, 10, 12, 16, 14]),
             "",
         ])
@@ -19525,14 +21458,14 @@ def format_research_highlights_text(payload):
                 row.get("lane"),
                 row.get("approves"),
                 row.get("fills"),
-                f"{row.get('fill_pct', 0)}%",
-                f"{row.get('pnl', 0):+.2f}",
-                f"{row.get('ev', 0):+.2f}",
+                _fmt_pct(row.get("fill_pct"), decimals=0),
+                _fmt_usd(row.get("pnl")),
+                _fmt_usd(row.get("ev")),
             ], [22, 6, 6, 7, 10, 10]))
         if bl or wl:
             lines.append(
-                f"  Best: {bl.get('lane', 'n/a')} ${bl.get('pnl', 0):+.2f} | "
-                f"Worst: {wl.get('lane', 'n/a')} ${wl.get('pnl', 0):+.2f}"
+                f"  Best: {bl.get('lane', 'n/a')} ${_fmt_usd(bl.get('pnl'))} | "
+                f"Worst: {wl.get('lane', 'n/a')} ${_fmt_usd(wl.get('pnl'))}"
             )
         lines.append("")
 
@@ -19545,13 +21478,13 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 row.get("reason"),
                 row.get("n"),
-                f"{row.get('wr_pct', 0)}%",
-                f"{row.get('pnl_usd', 0):+.2f}",
+                _fmt_pct(row.get("wr_pct")),
+                _fmt_usd(row.get("pnl_usd")),
             ], [28, 6, 8, 12]))
         lines.append("")
 
     ai_bands = ai_cal.get("bands") or []
-    if not ai_bands:
+    if "bands" not in ai_cal:
         ai_bands = _load_json_report(AI_CALIBRATION_REPORT_FILE).get("confidence_buckets") or []
     if ai_bands:
         lines.extend([
@@ -19564,17 +21497,17 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 b.get("bucket"),
                 b.get("trades"),
-                f"{b.get('win_rate_pct', b.get('wr', 0))}%",
-                f"{float(b.get('sum_pnl_usd', b.get('pnl', 0)) or 0):+.2f}",
+                _fmt_pct(b.get("win_rate_pct", b.get("wr"))),
+                _fmt_usd(b.get("sum_pnl_usd", b.get("pnl"))),
             ], [10, 6, 8, 12]))
         if bc or wc:
             lines.append(
-                f"  Best: {bc.get('bucket', 'n/a')} WR {bc.get('wr', 0):.1f}% | "
-                f"Worst: {wc.get('bucket', 'n/a')} WR {wc.get('wr', 0):.1f}%"
+                f"  Best: {bc.get('bucket', 'n/a')} WR {_fmt_pct(bc.get('wr'))} | "
+                f"Worst: {wc.get('bucket', 'n/a')} WR {_fmt_pct(wc.get('wr'))}"
             )
         lines.append("")
 
-    if not conf_bands:
+    if "confidence_bands" not in payload:
         conf_bands = _load_json_report(CONFIDENCE_BAND_REPORT_FILE).get("filled_trades_by_band") or []
     if conf_bands:
         lines.extend([
@@ -19587,8 +21520,8 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 b.get("bucket"),
                 b.get("trades"),
-                f"{b.get('win_rate_pct', b.get('wr', 0))}%",
-                f"{float(b.get('sum_pnl_usd', b.get('pnl', 0)) or 0):+.2f}",
+                _fmt_pct(b.get("win_rate_pct", b.get("wr"))),
+                _fmt_usd(b.get("sum_pnl_usd", b.get("pnl"))),
             ], [10, 6, 8, 12]))
         lines.append("")
 
@@ -19604,17 +21537,17 @@ def format_research_highlights_text(payload):
             lines.append(_fmt_row([
                 b.get("bucket"),
                 b.get("trades"),
-                f"{b.get('win_rate_pct', 0)}%",
-                f"{float(b.get('sum_pnl_usd', 0)):+.2f}",
-                f"{b.get('ev_usd', 0):+.2f}",
+                _fmt_pct(b.get("win_rate_pct")),
+                _fmt_usd(b.get("sum_pnl_usd")),
+                _fmt_usd(b.get("ev_usd")),
             ], [14, 6, 8, 12, 10]))
     lines.append("")
 
     cap_dist = sc.get("capture_distribution") or {}
     lines.extend([
         "--- Scenario C / exits ---",
-        f"Leakage left on table: ${sc.get('leakage_left_usd', 'n/a')} | "
-        f"MFE capture: {sc.get('capture_pct', p.get('mfe_capture_pct', 'n/a'))}% | "
+        f"Leakage left on table: ${_fmt_usd(sc.get('leakage_left_usd'))} | "
+        f"MFE capture: {_fmt_pct(sc.get('capture_pct', p.get('mfe_capture_pct')))} | "
         f"Fast-cut trades: {sc.get('fast_cut_trades', 0)}",
     ])
     if cap_dist:
@@ -19798,7 +21731,7 @@ def format_terminal_status(payload):
     return "\n".join(lines)
 
 
-def write_analysis_dashboard_html(payload):
+def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
     """Self-contained HTML dashboard — open in browser instead of scrolling terminal."""
     p = payload.get("performance") or {}
     re = payload.get("real_edge") or {}
@@ -19808,18 +21741,41 @@ def write_analysis_dashboard_html(payload):
     leakage = _load_json_report(SCENARIO_C_LEAKAGE_REPORT_FILE)
     horizon = _load_json_report(HORIZON_PROFITABILITY_REPORT_FILE)
     fast_cut = _load_json_report(FAST_CUT_SURVIVOR_REPORT_FILE)
+    if lifecycle_inventory is None:
+        try:
+            lifecycle_inventory = build_lifecycle_bundle_inventory(
+                os.environ["BTC_AGENT_DATA_DIR"],
+                analysis_provenance=payload.get("analysis_provenance") or {},
+            )
+        except Exception:
+            lifecycle_inventory = {}
 
     def esc(x):
         return str(x).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    def html_usd(value, signed=False):
+        if value is None:
+            return "$n/a"
+        try:
+            value = float(value)
+            if round(value, 2) == 0:
+                return "$0.00"
+            spec = "+.2f" if signed else ".2f"
+            return f"${format(value, spec)}"
+        except (TypeError, ValueError):
+            return "$n/a"
+
+    def html_pct(value):
+        return f"{esc(value)}%" if value is not None else "n/a"
+
     lane_rows = ""
     for lane in BENCHMARK_LANES:
         m = (bench.get("lanes") or {}).get(lane) or {}
-        pnl = m.get("net_pnl_real", m.get("net_pnl_usd", 0))
+        pnl = m.get("net_pnl_real", m.get("net_pnl_usd"))
         lane_rows += (
             f"<tr><td>{esc(lane)}</td><td>{m.get('real_fills', m.get('fills', 0))}</td>"
-            f"<td>{m.get('approves', 0)}</td><td>${float(pnl or 0):.2f}</td>"
-            f"<td>${float(m.get('per_approve_ev') or 0):.2f}</td></tr>\n"
+            f"<td>{m.get('approves', 0)}</td><td>{html_usd(pnl)}</td>"
+            f"<td>{html_usd(m.get('per_approve_ev'))}</td></tr>\n"
         )
 
     cal_rows = ""
@@ -19828,7 +21784,7 @@ def write_analysis_dashboard_html(payload):
             continue
         cal_rows += (
             f"<tr><td>{esc(b.get('bucket'))}</td><td>{b.get('trades')}</td>"
-            f"<td>{b.get('win_rate_pct')}%</td><td>${float(b.get('sum_pnl_usd') or 0):.2f}</td></tr>\n"
+            f"<td>{b.get('win_rate_pct')}%</td><td>{html_usd(b.get('sum_pnl_usd'))}</td></tr>\n"
         )
 
     ch = payload.get("chase") or {}
@@ -19846,6 +21802,22 @@ def write_analysis_dashboard_html(payload):
     cov = payload.get("coverage") or {}
     findings = payload.get("key_findings") or []
     findings_html = "".join(f"<li>{esc(f)}</li>" for f in findings[:10])
+    lifecycle_qualification = lifecycle_inventory.get("qualification") or {}
+    lifecycle_transfer = lifecycle_inventory.get("transfer") or {}
+    lifecycle_parity = lifecycle_inventory.get("parity") or {}
+    lifecycle_current = bool(
+        lifecycle_inventory.get("schema") == "lifecycle_bundle_inventory_v1"
+        and lifecycle_inventory.get("inventory_scope") == "MANIFEST_ONLY"
+        and lifecycle_inventory.get("complete") is True
+        and lifecycle_inventory.get("complete_scope") == "MANIFEST_INVENTORY"
+        and lifecycle_inventory.get("payload_verification_status") == "UNKNOWN_NOT_SCANNED"
+        and lifecycle_inventory.get("payload_files_read") == 0
+        and lifecycle_parity.get("scope") == "MANIFEST_INVENTORY"
+        and lifecycle_transfer.get("audit_only") is True
+        and lifecycle_transfer.get("profitability_supported") is False
+        and lifecycle_transfer.get("ranking_eligible") is False
+        and lifecycle_transfer.get("source_cleanup_authorized") is False
+    )
     provenance = payload.get("analysis_provenance") or {}
     generation_revision = payload.get("generation_revision") or provenance.get("generation_revision") or "UNKNOWN"
     cohort_schema = payload.get("cohort_schema") or provenance.get("cohort_schema") or "UNKNOWN"
@@ -19900,19 +21872,27 @@ def write_analysis_dashboard_html(payload):
 <p class="meta">Generating revision: <b>{esc(generation_revision)}</b> · cohort schema: <b>{esc(cohort_schema)}</b>. UNKNOWN means this snapshot is unqualified for live-policy conclusions.</p>
 <div class="kpis">
   <div class="kpi"><div class="lbl">Trades</div><div class="val">{p.get('trades', 0)}</div></div>
-  <div class="kpi"><div class="lbl">Win Rate</div><div class="val">{p.get('win_rate_pct', 'n/a')}%</div></div>
-  <div class="kpi"><div class="lbl">Net PnL</div><div class="val">${float(p.get('net_pnl_usd') or 0):+.2f}</div></div>
-  <div class="kpi"><div class="lbl">Expectancy</div><div class="val">${esc(p.get('expectancy_usd', 'n/a'))}</div></div>
-  <div class="kpi"><div class="lbl">MFE Capture</div><div class="val">{esc(p.get('mfe_capture_pct', 'n/a'))}%</div></div>
-  <div class="kpi"><div class="lbl">Gate Damage</div><div class="val">${float(re.get('gate_damage_usd') or 0):+.2f}</div></div>
+  <div class="kpi"><div class="lbl">Win Rate</div><div class="val">{html_pct(p.get('win_rate_pct'))}</div></div>
+  <div class="kpi"><div class="lbl">Net PnL</div><div class="val">{html_usd(p.get('net_pnl_usd'), signed=True)}</div></div>
+  <div class="kpi"><div class="lbl">Expectancy</div><div class="val">{html_usd(p.get('expectancy_usd'))}</div></div>
+  <div class="kpi"><div class="lbl">MFE Capture</div><div class="val">{html_pct(p.get('mfe_capture_pct'))}</div></div>
+  <div class="kpi"><div class="lbl">Gate Damage</div><div class="val">{html_usd(re.get('gate_damage_usd'), signed=True)}</div></div>
 </div>
+<section><h2>Lifecycle Evidence Bundles</h2>
+<div class="kpis">
+  <div class="kpi"><div class="lbl">manifest-verified qualification bundles</div><div class="val">{esc(lifecycle_qualification.get('unique_lifecycle_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+  <div class="kpi"><div class="lbl">transfer-ready audit copies</div><div class="val">{esc(lifecycle_transfer.get('unique_lifecycle_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+  <div class="kpi"><div class="lbl">matched lifecycle identities</div><div class="val">{esc(lifecycle_parity.get('intersection_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+  <div class="kpi"><div class="lbl">invalid manifests</div><div class="val">{esc(lifecycle_inventory.get('invalid_manifest_count', 0) if lifecycle_current else 'UNAVAILABLE')}</div></div>
+</div>
+<p class="note">Inventory completeness and parity cover manifests only. Payload verification status is UNKNOWN_NOT_SCANNED and payload files read is 0; no payload integrity or ranking qualification is claimed. Transfer-ready audit copies are audit-only=true, ranking eligible=false, profitability supported=false, and source cleanup authorized=false. They are never counted as strategies, fills, trades, or winners.</p></section>
 <section><h2>Lanes</h2><table><tr><th>Lane</th><th>Fills</th><th>Approves</th><th>Real PnL</th><th>EV/Approve</th></tr>{lane_rows}</table></section>
 <section><h2>Research Cohorts</h2><table><tr><th>Cohort</th><th>Included</th><th>Excluded</th><th>Exclusion reasons</th></tr>{cohort_rows or '<tr><td colspan="4">UNKNOWN — cohort evidence missing</td></tr>'}</table></section>
 <section><h2>AI Confidence</h2><table><tr><th>Band</th><th>Trades</th><th>WR</th><th>PnL</th></tr>{cal_rows or '<tr><td colspan="4">No data</td></tr>'}</table></section>
 <section><h2>Chase</h2><p>Assisted fills: <b>{ch.get('assisted_fills', 0)}</b> / {ch.get('total_fills', 0)} · Saved: {ch.get('saved_fills', 0)} · TTL expired: {ch.get('ttl_expired', 0)}</p></section>
 <section><h2>Scenario C — Leakage &amp; Exits</h2>
 <p>Peak ${leak.get('peak_profit_usd', leak.get('peak_usd', 'n/a'))} → Booked ${leak.get('booked_profit_usd', leak.get('booked_usd', 'n/a'))} · Left ${payload.get('scenario_c', {}).get('leakage_left_usd', 'n/a')}</p>
-<p>Fast-cut trades: {fc_sum.get('fast_cut_trades', 0)} · Missed ladder profit: ${float(fc_sum.get('missed_ladder_profit_usd') or 0):.2f}</p></section>
+<p>Fast-cut trades: {fc_sum.get('fast_cut_trades', 0)} · Missed ladder profit: {html_usd(fc_sum.get('missed_ladder_profit_usd'))}</p></section>
 <section><h2>Horizon Profitability (losers)</h2>
 <p class="note">Would losing trades have been green N minutes after exit? (tick replay)</p>
 <table><tr><th>Horizon</th><th>Profitable</th><th>Still loss</th><th>Unknown</th><th>% profitable</th></tr>{hz_rows or '<tr><td colspan="5">No losing trades</td></tr>'}</table></section>
@@ -19937,7 +21917,7 @@ def write_analysis_dashboard_html(payload):
 
 
 def generate_all_data_companion_reports(dataset_counts=None, session_trade_count=0):
-    """Always write reports/all_data/ from full CSV — dashboard uses this for paused/retired lanes."""
+    """Write generic historical reports without promoting archived lanes."""
     dataset_counts = dataset_counts or {}
     csv_n = int(dataset_counts.get("csv_trades") or 0)
     if csv_n <= 0:
@@ -19962,8 +21942,6 @@ def generate_all_data_companion_reports(dataset_counts=None, session_trade_count
         chase_threshold_report(trades=trades, session=no_filter_session)
         top_combinations_report(trades=trades, session=no_filter_session)
         exit_combinations_report(trades=trades, session=no_filter_session)
-        lane_definition_report(trades=trades, session=no_filter_session, benchmark_report=benchmark_report)
-        lane_retirement_report(trades=trades, session=no_filter_session, benchmark_report=benchmark_report)
         print(f"  ✅ ALL-DATA companion reports → {sub}/ {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as exc:
         print(f"  ⚠️ ALL-DATA companion failed: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -19996,7 +21974,9 @@ def finalize_analyzer_outputs(
     try:
         from research.genome.run_analyzer import run_genome_analyzer
 
-        genome_payload = run_genome_analyzer()
+        genome_payload = run_genome_analyzer(
+            db_path=_canonical_genome_source_db_path()
+        )
         if genome_payload.get("status") == "GENOME_SOURCE_UNAVAILABLE":
             print(
                 "  ℹ️ Trading Genome: GENOME_SOURCE_UNAVAILABLE | "
@@ -20029,7 +22009,19 @@ def finalize_analyzer_outputs(
                 f.write(content)
         except Exception as exc:
             print(f"⚠️ Could not write {path}: {exc}")
-    write_analysis_dashboard_html(payload)
+    analysis_provenance = _lifecycle_inventory_analysis_provenance()
+    payload["analysis_provenance"] = analysis_provenance
+    lifecycle_inventory = None
+    lifecycle_inventory_error = None
+    try:
+        lifecycle_inventory = build_lifecycle_bundle_inventory(
+            os.environ["BTC_AGENT_DATA_DIR"],
+            Path(os.environ["BTC_AGENT_REPORT_DIR"]) / LIFECYCLE_BUNDLE_INVENTORY_REPORT_FILE,
+            analysis_provenance=analysis_provenance,
+        )
+    except Exception as exc:
+        lifecycle_inventory_error = f"{type(exc).__name__}: {exc}"
+    write_analysis_dashboard_html(payload, lifecycle_inventory=lifecycle_inventory or {})
     try:
         with open(RESEARCH_COMPACT_SUMMARY_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -20045,7 +22037,12 @@ def finalize_analyzer_outputs(
         )
     except Exception:
         pass
-    write_report_manifest(payload)
+    write_report_manifest(
+        payload,
+        analysis_provenance=analysis_provenance,
+        lifecycle_bundle_inventory=lifecycle_inventory,
+        lifecycle_bundle_inventory_error=lifecycle_inventory_error,
+    )
     try:
         from research.research_trade_accumulator import sync_accumulator_from_analyzer_run
 
@@ -20098,7 +22095,49 @@ def finalize_analyzer_outputs(
 
 
 if __name__ == "__main__":
+    # The analyzer writes derived reports into the source/report directory.  A
+    # direct launch without the canonical mirror used to fall back to cwd and
+    # could therefore replace valid reports with an all-zero cohort.  Runtime
+    # evidence must always be explicit; fail closed instead of guessing.
+    _configured_data_root = os.getenv("BTC_AGENT_DATA_DIR", "").strip()
+    if not _configured_data_root:
+        print(
+            "ERROR: BTC_AGENT_DATA_DIR is required and must point to the "
+            "canonical Fly mirror; refusing to generate reports from cwd.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not os.path.isdir(_configured_data_root):
+        print(
+            f"ERROR: BTC_AGENT_DATA_DIR does not exist or is not a directory: "
+            f"{_configured_data_root}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    _assert_local_generation_unfenced("analyzer_process_start")
+
     _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _configured_report_root = os.getenv("BTC_AGENT_REPORT_DIR", "").strip()
+    if not _configured_report_root:
+        print("ERROR: BTC_AGENT_REPORT_DIR is required for canonical analyzer artifacts.", file=sys.stderr)
+        sys.exit(2)
+    _configured_report_root = os.path.realpath(_configured_report_root)
+    _canonical_data_root = os.path.realpath(_configured_data_root)
+    try:
+        if os.path.commonpath([_configured_report_root, _canonical_data_root]) != _canonical_data_root:
+            raise ValueError("outside canonical data root")
+    except ValueError:
+        print(
+            "ERROR: BTC_AGENT_REPORT_DIR must be contained by BTC_AGENT_DATA_DIR.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    os.makedirs(_configured_report_root, exist_ok=True)
+    _canonical_input_bindings = _bind_existing_canonical_input_paths(_canonical_data_root)
+    print(
+        f"  ℹ️ Bound {len(_canonical_input_bindings)} canonical evidence path(s) "
+        f"from {_canonical_data_root}"
+    )
     # Home-stack runs from agent/research/; pathway_lab_validation lives in agent root.
     if os.path.isfile(os.path.join(_script_dir, "pathway_lab_validation.py")):
         if _script_dir not in sys.path:
@@ -20107,9 +22146,9 @@ if __name__ == "__main__":
         _agent_root = os.path.dirname(_script_dir)
         if _agent_root and _agent_root not in sys.path:
             sys.path.insert(0, _agent_root)
-    if os.path.abspath(os.getcwd()) != _script_dir:
-        print(f"  ℹ️ Switching cwd → {_script_dir}")
-        os.chdir(_script_dir)
+    if os.path.abspath(os.getcwd()) != _configured_report_root:
+        print(f"  ℹ️ Switching report cwd → {_configured_report_root}")
+        os.chdir(_configured_report_root)
 
     interval_min = ANALYZER_LOOP_INTERVAL_MINUTES
     session_only, scope_reason = resolve_analyzer_session_scope()
@@ -20119,6 +22158,7 @@ if __name__ == "__main__":
 
     ANALYZER_CONSOLE_VERBOSE = True
     _tee, _log_handle = _setup_analyzer_output(verbose_console=True, enable_log=True)
+    _native_fault_handle = _enable_native_fault_log()
 
     if _once_mode:
         print(
@@ -20129,6 +22169,7 @@ if __name__ == "__main__":
         try:
             run(interval_min=interval_min, session_only=session_only, max_iterations=1)
         finally:
+            _close_native_fault_log(_native_fault_handle)
             _restore_analyzer_output(_tee, _log_handle)
         sys.exit(0)
 
@@ -20150,3 +22191,4 @@ if __name__ == "__main__":
             except Exception:
                 dashboard_process.kill()
         _restore_analyzer_output(_tee, _log_handle)
+        _close_native_fault_log(_native_fault_handle)

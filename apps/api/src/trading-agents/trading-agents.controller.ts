@@ -239,8 +239,7 @@ export class TradingAgentsController {
     ) {
       throw new ConflictException('Flat-audit refresh requires a paused, disarmed relay');
     }
-    await this.execution.requestExecutorWake('USER_PAUSE');
-    return { accepted: true, status: 'PAUSED', resumed: false, armed: false };
+    return this.instances.refreshPausedFlatAudit(body.userId!.trim(), slug);
   }
 
   @Public()
@@ -377,6 +376,23 @@ export class TradingAgentsController {
     },
   ) {
     return this.instances.hireAgent(user.id, id, body);
+  }
+
+  /** Repair keys for an existing paused relay without renewing or activating it. */
+  @Post(':slug/credentials/refresh-paused')
+  refreshPausedCredentials(
+    @CurrentUser() user: AuthUser,
+    @Param('slug') slug: string,
+    @Body()
+    body: {
+      exchangeProvider: string;
+      apiKey: string;
+      apiSecret: string;
+      passphrase?: string;
+      testnet?: boolean;
+    },
+  ) {
+    return this.instances.refreshPausedExchangeCredentials(user.id, slug, body);
   }
 
   @Public()

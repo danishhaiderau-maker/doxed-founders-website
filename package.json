@@ -116,7 +116,6 @@
     "stage-b:publish": "node scripts/stage-b-publish.mjs",
     "stage-c:probe": "node scripts/stage-c-vault-probe.mjs",
     "ensure:btc-bot-url": "node scripts/ensure-btc-bot-public-url.mjs",
-    "ensure:combo-pathway-pin": "node scripts/ensure-combo-pathway-pin.mjs",
     "push:showcase-bot": "node scripts/push-showcase-bot-credentials.mjs --home-only",
     "print:home-bot-env": "node scripts/print-home-bot-env.mjs",
     "wire:home-bot": "node scripts/wire-home-bot-url.mjs",

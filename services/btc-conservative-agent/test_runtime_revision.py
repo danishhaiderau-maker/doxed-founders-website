@@ -12,6 +12,14 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 import bot
 
 
+def test_watchdog_and_dashboard_snapshot_need_no_revision_global():
+    assert not hasattr(bot, "SOURCE_GIT_REV")
+    watchdog = bot._watchdog_crash_context()
+    snapshot = bot._build_api_state_snapshot()
+    assert watchdog["source_revision"] in {"unknown", bot._runtime_git_rev_exact()}
+    assert snapshot["git_rev"] in {"unknown", bot._runtime_git_rev()}
+
+
 def run():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -28,6 +36,10 @@ def run():
     rev = bot._runtime_git_rev()
     assert rev != "unknown", "checkout revision must be available without relying on launcher PATH"
     assert len(rev) == 12, f"expected 12-char runtime revision, got {rev!r}"
+    bot._RUNTIME_GIT_REV_EXACT_CACHE["value"] = ""
+    exact = bot._runtime_git_rev_exact()
+    assert len(exact) == 40, f"expected exact runtime revision, got {exact!r}"
+    assert exact.startswith(rev)
     print(f"PASS: runtime source revision {rev}")
 
 

@@ -100,6 +100,7 @@ test('analyzer mirror online only when Fly mirror is present and fresh', () => {
       mirror_available: true,
       mirror_status: {
         uploaded_at: '2026-08-07T12:57:45.423Z',
+        analyzer_generated_at: '2026-08-07T12:55:00.000Z',
         size: 5774,
       },
       source: 'Fly trading owner + uploaded desktop analyzer mirror',
@@ -113,7 +114,11 @@ test('analyzer mirror online only when Fly mirror is present and fresh', () => {
   const stale = summarizeAnalyzerMirrorHealth(
     {
       mirror_available: true,
-      mirror_status: { uploaded_at: '2026-08-01T12:00:00.000Z', size: 100 },
+      mirror_status: {
+        uploaded_at: '2026-08-01T12:00:00.000Z',
+        analyzer_generated_at: '2026-08-01T11:55:00.000Z',
+        size: 100,
+      },
     },
     now,
   );
@@ -147,4 +152,61 @@ test('analyzer mirror receipt accepts bundle-v2 status shape', () => {
   assert.equal(receipt.status, 'online');
   assert.equal(receipt.fresh, true);
   assert.equal(receipt.ageSec, 773);
+});
+
+test('recent re-upload cannot make an intrinsically old analyzer generation fresh', () => {
+  const now = Date.parse('2026-08-17T10:30:00.000Z');
+  const receipt = summarizeAnalyzerMirrorHealth({
+    available: true,
+    uploaded_at: '2026-08-17T10:29:00.000Z',
+    analyzer_generated_at: '2026-08-10T10:29:00.000Z',
+    source_data_revision: 'a'.repeat(40),
+  }, now, undefined, 'a'.repeat(12));
+  assert.equal(receipt.status, 'stale');
+  assert.equal(receipt.fresh, false);
+  assert.equal(receipt.ageSec, 60);
+  assert.equal(receipt.generationAgeSec, 604860);
+  assert.equal(receipt.revisionMatched, true);
+});
+
+test('future timestamps and missing intrinsic generation remain stale, not unreachable', () => {
+  const now = Date.parse('2026-08-17T10:30:00.000Z');
+  const future = summarizeAnalyzerMirrorHealth({
+    available: true,
+    uploaded_at: '2026-08-17T10:31:00.000Z',
+    analyzer_generated_at: '2026-08-17T10:31:00.000Z',
+  }, now);
+  assert.equal(future.status, 'stale');
+  assert.equal(future.available, true);
+  assert.equal(future.ageSec, null);
+  assert.equal(future.generationAgeSec, null);
+
+  const missing = summarizeAnalyzerMirrorHealth({
+    available: true,
+    uploaded_at: '2026-08-17T10:29:00.000Z',
+  }, now);
+  assert.equal(missing.status, 'stale');
+  assert.equal(missing.available, true);
+  assert.equal(missing.generationAgeSec, null);
+});
+
+test('fresh matched generation accepts only strict revision prefixes of at least 12 hex chars', () => {
+  const now = Date.parse('2026-08-17T10:30:00.000Z');
+  const summary = {
+    available: true,
+    uploaded_at: '2026-08-17T10:29:00.000Z',
+    analyzer_generated_at: '2026-08-17T10:28:00.000Z',
+    source_data_revision: 'abcdef1234567890abcdef1234567890abcdef12',
+  };
+  const matched = summarizeAnalyzerMirrorHealth(summary, now, undefined, 'abcdef123456');
+  assert.equal(matched.status, 'online');
+  assert.equal(matched.revisionMatched, true);
+
+  const mismatch = summarizeAnalyzerMirrorHealth(summary, now, undefined, 'bbbbbb123456');
+  assert.equal(mismatch.status, 'stale');
+  assert.equal(mismatch.revisionMatched, false);
+
+  const tooShort = summarizeAnalyzerMirrorHealth(summary, now, undefined, 'abcdef1');
+  assert.equal(tooShort.status, 'stale');
+  assert.equal(tooShort.revisionMatched, false);
 });

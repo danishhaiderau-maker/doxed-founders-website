@@ -24,7 +24,7 @@ def test_continuous_starts_at_eight_five_rung():
     assert (5, 3) not in TRAIL_LADDER_SCENARIO_C
 
 
-def test_type_b_starts_at_eight_five_rung():
+def test_legacy_generic_ladder_starts_at_eight_five_rung():
     assert TRAIL_LADDER_SCENARIO_C_LEGACY_10_6 == EXPECTED_LADDER
     assert TRAIL_LADDER_SCENARIO_C_LEGACY_10_6[0] == (8, 5)
     assert (4, 2) not in TRAIL_LADDER_SCENARIO_C_LEGACY_10_6

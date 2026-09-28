@@ -35,13 +35,12 @@ COMPACT_EVIDENCE_FILES = (
     "research_findings.txt",
     "research_coverage.txt",
     "paused_shadow_research_report.json",
-    "type_b_adx_v3_shadow_report.json",
     "historical_trade_cohort_report.json",
     "research_session_index.json",
 )
 
 # Authoritative/live inputs are deliberately inventory-only.  They remain
-# available for ADX, Type B, replay, and audit research until an explicit fresh
+# available for replay and audit research until an explicit fresh
 # collection wipe or a future writer-owned rotation protocol handles them.
 LIVE_LEDGER_FILES = (
     "trades_3factor.csv",
@@ -126,25 +125,17 @@ def _write_readable_markdown_summary(root: Path, now: datetime) -> Path:
 
 def _fingerprint(path: Path) -> dict:
     stat = path.stat()
-    sample = 1024 * 1024
     digest = hashlib.sha256()
+    chunk_size = 1024 * 1024
     with path.open("rb") as handle:
-        if stat.st_size <= sample * 2:
-            for chunk in iter(lambda: handle.read(sample), b""):
-                digest.update(chunk)
-            mode = "full_sha256"
-        else:
-            digest.update(handle.read(sample))
-            handle.seek(max(0, stat.st_size - sample))
-            digest.update(handle.read(sample))
-            digest.update(str(stat.st_size).encode("ascii"))
-            mode = "head_tail_size_sha256"
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
     return {
         "path": path.name,
         "bytes": stat.st_size,
         "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
         "fingerprint": digest.hexdigest(),
-        "fingerprint_mode": mode,
+        "fingerprint_mode": "full_sha256",
         "retention": "LIVE_LEDGER_NOT_DELETED",
     }
 
@@ -536,16 +527,50 @@ def run_analyzer_retention(
                     ),
                 ]
                 _reconcile_session_index(root)
-                return {
+                skipped = {
                     "schema": RETENTION_SCHEMA,
                     "status": "SKIPPED_INTERVAL",
                     "last_completed_at": previous_at.isoformat(),
                     "next_due_in_hours": round(interval_hours - age_hours, 2),
+                    "report_root": str(root),
+                    "data_root": str(data_root),
                     "derived_pruned": derived_pruned,
                     "derived_deleted_bytes": sum(
                         int(row.get("deleted_bytes") or 0) for row in derived_pruned
                     ),
                 }
+                # The repository or mirror may have moved since the last daily
+                # retention pass.  Leaving the prior status file untouched made
+                # the read-only dashboard advertise obsolete (notably OneDrive)
+                # paths for up to 24 hours even though the analyzer was already
+                # running from the canonical location.  Refresh public metadata
+                # on every analyzer cycle without repeating destructive cleanup.
+                prior_status: dict = {}
+                status_path = root / STATUS_FILE
+                try:
+                    prior_status = json.loads(status_path.read_text(encoding="utf-8"))
+                    if not isinstance(prior_status, dict):
+                        prior_status = {}
+                except (OSError, ValueError, TypeError):
+                    prior_status = {}
+                prior_data_root = str(prior_status.get("data_root") or "")
+                refreshed = {**prior_status, **skipped}
+                refreshed["pruned"] = derived_pruned
+                prior_snapshot = Path(str(prior_status.get("daily_snapshot") or ""))
+                try:
+                    prior_snapshot.relative_to(root)
+                    refreshed["daily_snapshot"] = str(prior_snapshot)
+                except (ValueError, OSError):
+                    refreshed["daily_snapshot"] = None
+                if prior_data_root and prior_data_root != str(data_root):
+                    for key in (
+                        "raw_mirror_bytes",
+                        "raw_mirror_usage_pct",
+                        "raw_mirror_cap_status",
+                    ):
+                        refreshed.pop(key, None)
+                _atomic_json(status_path, refreshed)
+                return refreshed
         except (OSError, ValueError, TypeError, KeyError):
             pass
 

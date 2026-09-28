@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -52,6 +53,43 @@ class ResearchRetentionTests(unittest.TestCase):
             self.assertEqual(result["status"], "FAIL_SAFE_CAP_EXCEEDED")
             self.assertTrue(active.exists())
             self.assertEqual(result["deleted"], 0)
+
+    def test_large_middle_only_mutation_is_detected_and_never_pruned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rotation = root / "signal_replay.jsonl.1"
+            rotation.write_bytes(b"a" * (3 * 1024 * 1024))
+            old_timestamp = datetime(2026, 7, 19, tzinfo=timezone.utc).timestamp()
+            os.utime(rotation, (old_timestamp, old_timestamp))
+            acknowledged = retention._fingerprint(rotation)
+            original_stat = rotation.stat()
+
+            with rotation.open("r+b") as handle:
+                handle.seek(1536 * 1024)
+                handle.write(b"b" * 4096)
+            os.utime(
+                rotation,
+                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+            )
+
+            current = retention._fingerprint(rotation)
+            self.assertEqual(acknowledged["fingerprint_mode"], "full_sha256")
+            self.assertEqual(current["fingerprint_mode"], "full_sha256")
+            self.assertEqual(current["bytes"], acknowledged["bytes"])
+            self.assertEqual(current["modified_at"], acknowledged["modified_at"])
+            self.assertNotEqual(current["fingerprint"], acknowledged["fingerprint"])
+
+            result = retention._prune_closed_rotations(
+                [rotation],
+                now=datetime(2026, 7, 21, tzinfo=timezone.utc),
+                minimum_age_hours=1,
+                keep_latest=0,
+                acknowledged_inventory=[acknowledged],
+            )
+
+            self.assertTrue(rotation.exists())
+            self.assertEqual(result["deleted"], 0)
+            self.assertEqual(result["fingerprint_mismatches"], 1)
 
     def test_daily_snapshot_preserves_live_ledgers_and_prunes_intraday_archives(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +233,42 @@ class ResearchRetentionTests(unittest.TestCase):
             self.assertEqual(result["status"], "SKIPPED_INTERVAL")
             self.assertEqual(len(list(history.iterdir())), 3)
             self.assertGreater(result["derived_deleted_bytes"], 0)
+
+    def test_interval_skip_refreshes_paths_after_repository_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            old_root = base / "OneDrive" / "old-repo"
+            new_root = base / "canonical" / "new-repo"
+            mirror = base / "canonical" / "fly-data-mirror"
+            old_root.mkdir(parents=True)
+            new_root.mkdir(parents=True)
+            mirror.mkdir(parents=True)
+            now = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+
+            retention.run_analyzer_retention(old_root, data_root=mirror, now=now, force=True)
+            shutil.copy2(
+                old_root / retention.MARKER_FILE,
+                new_root / retention.MARKER_FILE,
+            )
+            shutil.copy2(
+                old_root / retention.STATUS_FILE,
+                new_root / retention.STATUS_FILE,
+            )
+
+            result = retention.run_analyzer_retention(
+                new_root,
+                data_root=mirror,
+                now=now + timedelta(hours=1),
+            )
+
+            self.assertEqual(result["status"], "SKIPPED_INTERVAL")
+            self.assertEqual(result["report_root"], str(new_root.resolve()))
+            self.assertEqual(result["data_root"], str(mirror.resolve()))
+            self.assertIsNone(result["daily_snapshot"])
+            public_status = json.loads(
+                (new_root / retention.STATUS_FILE).read_text(encoding="utf-8")
+            )
+            self.assertNotIn("OneDrive", json.dumps(public_status))
 
 
 if __name__ == "__main__":

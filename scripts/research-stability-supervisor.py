@@ -2,17 +2,21 @@
 """Fail-closed supervisor for the desktop BTC research pipeline.
 
 This process has deliberately narrow authority.  It may start a missing Fly
-mirror loop or a missing desktop analyzer through their existing launchers.  It
-cannot stop/restart trading, call Fly mutation endpoints, wipe data, or change
-policy.  Every observation is written atomically for the dashboard/operator.
+mirror loop, start a missing desktop analyzer, or refresh one revision-stale
+analyzer after exact mirror parity through their existing launchers.  It cannot
+stop/restart trading, call Fly mutation endpoints, wipe data, or change policy.
+Every observation is written atomically for the dashboard/operator.
 """
 
 from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import hashlib
 import json
 import os
+import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -27,15 +31,72 @@ from typing import Any, Callable
 
 REPORT_MAX_AGE_SECONDS = 45 * 60
 SYNC_MAX_AGE_SECONDS = 10 * 60
+FLY_MANIFEST_TIMEOUT_SECONDS = 60
+
+
+class SupervisorLockUnavailable(RuntimeError):
+    """Raised only when another supervisor already owns the process lock."""
+
+
+@contextmanager
+def exclusive_process_lock(path: Path):
+    """Hold one cross-platform byte lock for the supervisor lifetime."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            raise SupervisorLockUnavailable(str(path)) from exc
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()).encode("ascii"))
+        handle.flush()
+        yield handle
+    finally:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, ValueError):
+            pass
+        handle.close()
+PARTIAL_ARTIFACT_STALE_SECONDS = SYNC_MAX_AGE_SECONDS
 MAX_PENDING_EVENT_DELTA = 100
 READINESS_STARVATION_THRESHOLD_SECONDS = 15 * 60
 OPPORTUNITY_STALL_THRESHOLD_SECONDS = 12 * 60
-LOCAL_MIN_FREE_PERCENT = 15.0
+LOCAL_STORAGE_GREEN_FREE_BYTES = 150 * 1024**3
+LOCAL_STORAGE_AMBER_FREE_BYTES = 100 * 1024**3
+LOCAL_TEMP_ABNORMAL_GROWTH_BYTES = 1024**3
 LOCAL_QUARANTINE_MAX_PERCENT = 10.0
 LOCAL_MIRROR_MAX_BYTES = 25 * 1024**3
 LOCAL_QUARANTINE_MAX_BYTES = 25 * 1024**3
 REQUIRED_SCHEMA = "research_event_v2.2"
 REQUIRED_COLLECTOR = "collector_v2.2"
+
+
+def local_tile_registry_contract(repo: Path) -> tuple[list[str], str]:
+    """Load the canonical registry without maintaining a monitor-side roster."""
+    values = runpy.run_path(
+        str(repo / "services" / "btc-conservative-agent" / "combo_pathway_config.py")
+    )
+    lanes = list(values["ACTIVE_TILE_ORDER"])
+    signature = str(values["active_tile_registry_signature"]())
+    return lanes, signature
 
 
 def utc_now() -> datetime:
@@ -59,6 +120,148 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def _identity_value(payload: dict[str, Any], *paths: tuple[str, ...]) -> str:
+    """Return the first non-empty identity value at one of ``paths``."""
+    for path in paths:
+        value: Any = payload
+        for part in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(part)
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def resolve_authoritative_report_generation(
+    mirror: Path,
+    fallback_report_dir: Path,
+    *,
+    expected_revision: str,
+    expected_epochs: list[str],
+    expected_config_signature: str,
+    explicit_report_dir: bool,
+) -> tuple[Path | None, dict[str, Any], dict[str, Any]]:
+    """Resolve exactly one checksum-bound, atomically published generation.
+
+    Normal operation is anchored by ``canonical_dataset_current.json``.  That
+    append-first pointer names and hashes the analyzer manifest published for
+    the completed canonical mirror.  A loose report directory, filesystem
+    recency, or a second report root is never considered.  ``--report-dir`` is
+    retained as an explicit compatibility escape hatch for offline fixtures;
+    its non-atomic status is surfaced rather than silently treated as current.
+    """
+    if explicit_report_dir:
+        return fallback_report_dir, {}, {
+            "status": "EXPLICIT_REPORT_DIR_COMPATIBILITY",
+            "report_dir": str(fallback_report_dir),
+            "atomic_current_pointer": False,
+        }
+
+    pointer_path = mirror / "canonical_dataset_current.json"
+    detail: dict[str, Any] = {
+        "status": "UNAVAILABLE",
+        "pointer": str(pointer_path),
+        "atomic_current_pointer": True,
+    }
+    try:
+        pointer = read_json(pointer_path)
+        if pointer.get("schema") != "canonical_research_manifest_v1":
+            raise ValueError("CURRENT_POINTER_SCHEMA_MISMATCH")
+        if pointer.get("analyzer_status") != "COMPLETE":
+            raise ValueError("ANALYZER_PUBLICATION_INCOMPLETE")
+        relative = str(pointer.get("analyzer_report_manifest_relative") or "").replace("\\", "/")
+        declared_hash = str(pointer.get("analyzer_report_manifest_sha256") or "").lower()
+        if not relative or not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+            raise ValueError("ANALYZER_MANIFEST_RECEIPT_MISSING")
+        manifest_path = (mirror / relative).resolve()
+        mirror_root = mirror.resolve()
+        if manifest_path == mirror_root or mirror_root not in manifest_path.parents:
+            raise ValueError("ANALYZER_MANIFEST_PATH_OUTSIDE_MIRROR")
+        raw = manifest_path.read_bytes()
+        actual_hash = hashlib.sha256(raw).hexdigest()
+        if actual_hash != declared_hash:
+            raise ValueError("ANALYZER_MANIFEST_HASH_MISMATCH")
+        manifest = json.loads(raw.decode("utf-8-sig"))
+        if not isinstance(manifest, dict) or manifest.get("schema") != "report_manifest_v1":
+            raise ValueError("ANALYZER_MANIFEST_SCHEMA_MISMATCH")
+
+        pointer_revision = str(pointer.get("source_revision") or "").lower()
+        report_revision = _identity_value(
+            manifest, ("deployed_revision",), ("source_revision",), ("generation_revision",),
+        ).lower()
+        expected_revision_lower = str(expected_revision or "").lower()
+        pointer_epoch = str(pointer.get("dataset_epoch") or "")
+        report_epoch = _identity_value(manifest, ("dataset_epoch",), ("fresh_epoch", "epoch_id"))
+        pointer_config = str(pointer.get("tile_config_signature") or "")
+        report_config = _identity_value(
+            manifest, ("config_signature",), ("tile_registry_signature",),
+        )
+        unique_expected_epochs = sorted({str(value) for value in expected_epochs if value})
+        if not expected_revision_lower or not pointer_revision or not report_revision:
+            raise ValueError("REVISION_IDENTITY_MISSING")
+        if not (
+            pointer_revision == expected_revision_lower
+            and report_revision == expected_revision_lower
+        ):
+            raise ValueError("REVISION_PARITY_MISMATCH")
+        if len(unique_expected_epochs) != 1 or not pointer_epoch or not report_epoch:
+            raise ValueError("EPOCH_IDENTITY_AMBIGUOUS_OR_MISSING")
+        if pointer_epoch != unique_expected_epochs[0] or report_epoch != pointer_epoch:
+            raise ValueError("EPOCH_PARITY_MISMATCH")
+        if not expected_config_signature or not pointer_config or not report_config:
+            raise ValueError("CONFIG_IDENTITY_MISSING")
+        if not (
+            pointer_config == expected_config_signature
+            and report_config == expected_config_signature
+        ):
+            raise ValueError("CONFIG_PARITY_MISMATCH")
+        if not str(manifest.get("generation_id") or ""):
+            raise ValueError("GENERATION_ID_MISSING")
+
+        rows = manifest.get("reports")
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("ANALYZER_REPORT_SET_EMPTY")
+        if int(manifest.get("report_count") or -1) != len(rows):
+            raise ValueError("ANALYZER_REPORT_COUNT_MISMATCH")
+        names: set[str] = set()
+        report_root = manifest_path.parent
+        resolved_report_root = report_root.resolve()
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("ANALYZER_REPORT_ROW_INVALID")
+            name = str(row.get("file") or "").replace("\\", "/")
+            if not name or name in names or name.startswith("/") or ".." in Path(name).parts:
+                raise ValueError("ANALYZER_REPORT_MEMBERSHIP_INVALID")
+            names.add(name)
+            candidate = (report_root / name).resolve()
+            if candidate == resolved_report_root or resolved_report_root not in candidate.parents:
+                raise ValueError("ANALYZER_REPORT_PATH_OUTSIDE_GENERATION")
+            if not candidate.is_file():
+                raise ValueError(f"ANALYZER_REPORT_MISSING:{name}")
+            declared_size = row.get("size_bytes")
+            if declared_size is not None and int(declared_size) != candidate.stat().st_size:
+                raise ValueError(f"ANALYZER_REPORT_SIZE_MISMATCH:{name}")
+
+        detail.update({
+            "status": "CURRENT_ATOMIC_GENERATION",
+            "manifest": str(manifest_path),
+            "manifest_sha256": actual_hash,
+            "generation_id": manifest.get("generation_id"),
+            "revision": report_revision,
+            "dataset_epoch": report_epoch,
+            "config_signature": report_config,
+            "report_count": len(rows),
+            "report_dir": str(report_root),
+        })
+        return report_root, manifest, detail
+    except Exception as exc:
+        detail.update({"status": "REJECTED", "reason": f"{type(exc).__name__}: {exc}"})
+        return None, {}, detail
+
+
 def directory_size(path: Path) -> tuple[int, int]:
     """Return best-effort file count and bytes without following directory links."""
     files = 0
@@ -80,31 +283,78 @@ def directory_size(path: Path) -> tuple[int, int]:
 def local_storage_snapshot(
     mirror: Path,
     *,
+    report_dir: Path | None = None,
+    temp_dir: Path | None = None,
+    previous_snapshot: dict[str, Any] | None = None,
     disk_usage: Callable[[str | os.PathLike[str]], Any] = shutil.disk_usage,
 ) -> tuple[bool, dict[str, Any]]:
-    """Measure active/quarantined evidence and fail before the workstation fills."""
+    """Measure known generated-data roots without deleting or modifying them.
+
+    The boolean is deliberately GREEN-only because storage health participates
+    in technical readiness.  AMBER remains usable for bounded repair and
+    collection, but it must be visible to the operator rather than passing as
+    fully healthy.
+    """
     quarantine = mirror.parent / "fly-data-quarantine"
+    reports = report_dir or mirror.parent / "analyzer-reports"
+    processing_temp = temp_dir or mirror.parent / "temp"
+    sync_staging = mirror.parent / "fly-data-staging"
     mirror_files, mirror_bytes = directory_size(mirror)
     quarantine_files, quarantine_bytes = directory_size(quarantine)
+    report_files, report_bytes = directory_size(reports)
+    temp_files, temp_bytes = directory_size(processing_temp)
+    staging_files, staging_bytes = directory_size(sync_staging)
     total, _used, free = disk_usage(mirror.parent)
     free_pct = (float(free) / float(total) * 100.0) if total else 0.0
     quarantine_pct = (float(quarantine_bytes) / float(total) * 100.0) if total else 100.0
-    ok = (
-        free_pct >= LOCAL_MIN_FREE_PERCENT
-        and mirror_bytes <= LOCAL_MIRROR_MAX_BYTES
+    if free >= LOCAL_STORAGE_GREEN_FREE_BYTES:
+        rag = "GREEN"
+    elif free >= LOCAL_STORAGE_AMBER_FREE_BYTES:
+        rag = "AMBER"
+    else:
+        rag = "RED"
+
+    previous_temp_bytes = int((previous_snapshot or {}).get("temporary_bytes") or 0)
+    temp_growth_bytes = temp_bytes - previous_temp_bytes if previous_snapshot else 0
+    abnormal_temp_growth = bool(previous_snapshot) and temp_growth_bytes >= LOCAL_TEMP_ABNORMAL_GROWTH_BYTES
+    consumers = [
+        {"name": "active_fly_mirror", "path": str(mirror), "files": mirror_files, "bytes": mirror_bytes},
+        {"name": "fly_data_quarantine", "path": str(quarantine), "files": quarantine_files, "bytes": quarantine_bytes},
+        {"name": "analyzer_reports", "path": str(reports), "files": report_files, "bytes": report_bytes},
+        {"name": "temporary_processing", "path": str(processing_temp), "files": temp_files, "bytes": temp_bytes},
+        {"name": "mirror_sync_staging", "path": str(sync_staging), "files": staging_files, "bytes": staging_bytes},
+    ]
+    consumers.sort(key=lambda row: (-int(row["bytes"]), str(row["name"])))
+    generated_roots_within_caps = (
+        mirror_bytes <= LOCAL_MIRROR_MAX_BYTES
         and quarantine_bytes <= LOCAL_QUARANTINE_MAX_BYTES
         and quarantine_pct <= LOCAL_QUARANTINE_MAX_PERCENT
     )
+    ok = rag == "GREEN" and generated_roots_within_caps and not abnormal_temp_growth
     return ok, {
+        "rag": rag,
         "mirror_files": mirror_files,
         "mirror_bytes": mirror_bytes,
         "quarantine_files": quarantine_files,
         "quarantine_bytes": quarantine_bytes,
+        "analyzer_report_files": report_files,
+        "analyzer_report_bytes": report_bytes,
+        "temporary_files": temp_files,
+        "temporary_bytes": temp_bytes,
+        "temporary_growth_bytes": temp_growth_bytes,
+        "temporary_growth_rag": "AMBER" if abnormal_temp_growth else "GREEN",
+        "temporary_growth_alert": abnormal_temp_growth,
+        "temporary_growth_alert_bytes": LOCAL_TEMP_ABNORMAL_GROWTH_BYTES,
+        "five_largest_known_generated_data_consumers": consumers[:5],
         "disk_total_bytes": int(total),
         "disk_free_bytes": int(free),
+        "disk_free_gib": round(float(free) / 1024**3, 2),
         "disk_free_percent": round(free_pct, 2),
         "quarantine_disk_percent": round(quarantine_pct, 3),
-        "minimum_free_percent": LOCAL_MIN_FREE_PERCENT,
+        "green_minimum_free_bytes": LOCAL_STORAGE_GREEN_FREE_BYTES,
+        "amber_minimum_free_bytes": LOCAL_STORAGE_AMBER_FREE_BYTES,
+        "rag_rule": "GREEN >=150 GiB; AMBER 100-149 GiB; RED <100 GiB",
+        "generated_roots_within_caps": generated_roots_within_caps,
         "maximum_mirror_bytes": LOCAL_MIRROR_MAX_BYTES,
         "maximum_quarantine_bytes": LOCAL_QUARANTINE_MAX_BYTES,
         "maximum_quarantine_percent": LOCAL_QUARANTINE_MAX_PERCENT,
@@ -267,7 +517,7 @@ def read_replace_safe_bytes(path: Path) -> bytes:
 def process_inventory() -> list[dict[str, Any]]:
     command = (
         "Get-CimInstance Win32_Process | "
-        "Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress"
+        "Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress"
     )
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", command],
@@ -282,12 +532,14 @@ def process_inventory() -> list[dict[str, Any]]:
 
 def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
     groups = {"sync": [], "analyzer": [], "dashboard": [], "supervisor": []}
+    parent_by_pid: dict[int, int] = {}
     for row in rows:
         cmd = str(row.get("CommandLine") or "").lower()
         name = str(row.get("Name") or "").lower()
         pid = int(row.get("ProcessId") or 0)
         if pid <= 0:
             continue
+        parent_by_pid[pid] = int(row.get("ParentProcessId") or 0)
         is_python = not name or "python" in name
         is_powershell = not name or "powershell" in name or name.startswith("pwsh")
         if is_powershell and "sync-fly-bot-data-loop.ps1" in cmd:
@@ -296,9 +548,40 @@ def classify_processes(rows: list[dict[str, Any]]) -> dict[str, list[int]]:
             groups["analyzer"].append(pid)
         if is_python and "research_dashboard.py" in cmd and "--standalone" in cmd:
             groups["dashboard"].append(pid)
-        if is_python and "research-stability-supervisor.py" in cmd:
+        # Only the long-running --loop instance owns continuous supervision.
+        # One-shot audits intentionally run alongside it and must not create a
+        # false duplicate-supervisor alert.
+        if (
+            is_python
+            and "research-stability-supervisor.py" in cmd
+            and "--loop" in cmd.split()
+        ):
             groups["supervisor"].append(pid)
-    return {key: sorted(set(value)) for key, value in groups.items()}
+    logical_groups: dict[str, list[int]] = {}
+    for key, values in groups.items():
+        members = set(values)
+        # A pwsh launcher commonly starts powershell.exe with the same sync
+        # script. They are one worker tree, not two independent sync loops.
+        # Count only roots whose matched parent is not another member.
+        def has_member_ancestor(pid: int) -> bool:
+            seen: set[int] = set()
+            parent = parent_by_pid.get(pid, 0)
+            while parent > 0 and parent not in seen:
+                if parent in members:
+                    return True
+                seen.add(parent)
+                parent = parent_by_pid.get(parent, 0)
+            return False
+
+        roots = [pid for pid in members if not has_member_ancestor(pid)]
+        logical_groups[key] = sorted(roots)
+    return logical_groups
+
+
+def expected_process_count(kind: str, count: int, require_loop_owner: bool) -> tuple[bool, str]:
+    if kind == "supervisor" and not require_loop_owner:
+        return count <= 1, "zero_or_one_loop_owner"
+    return count == 1, "exactly_one"
 
 
 def read_current_events(path: Path) -> dict[str, Any]:
@@ -492,6 +775,30 @@ def read_v3_evidence(mirror: Path, *, now_ts: float | None = None) -> dict[str, 
                 "record_id": str(row.get("record_id") or ""),
                 "missing_fields": missing,
             })
+    paper_scope_rows = [
+        *(("decision", row) for row in rows_by_ledger["decision"]
+          if str(row.get("decision_stage") or "") == "LANE_POLICY_VERDICT"),
+        *(("order_intent", row) for row in rows_by_ledger["order_intent"]),
+        *(("execution", row) for row in rows_by_ledger["execution"]),
+        *(("lifecycle", row) for row in rows_by_ledger["lifecycle"]
+          if str(row.get("observation_status") or "") in {
+              "PAPER_POSITION_OPEN", "PAPER_POSITION_CLOSED",
+          }),
+    ]
+    for ledger, row in paper_scope_rows:
+        if str(row.get("policy_execution_scope") or "") != "PAPER_RESEARCH_ONLY":
+            continue
+        spec = row.get("paper_policy_spec")
+        spec_paper_only = spec.get("paper_only") if isinstance(spec, dict) else None
+        if row.get("paper_only") is not False and spec_paper_only is not False:
+            continue
+        policy_provenance_defects.append({
+            "ledger": ledger,
+            "record_id": str(row.get("record_id") or ""),
+            "contradiction": "PAPER_SCOPE_WITH_FALSE_PAPER_ONLY",
+            "top_level_paper_only": row.get("paper_only"),
+            "spec_paper_only": spec_paper_only,
+        })
     return {
         "ledger_counts": counts,
         "independent_opportunities": counts["opportunity"] - len(identity_aliases),
@@ -510,7 +817,7 @@ def read_v3_evidence(mirror: Path, *, now_ts: float | None = None) -> dict[str, 
             "passed": resolution_counts["overdue_orphan"] == 0,
         },
         "policy_provenance_integrity": {
-            "checked_rows": len(attributable_rows),
+            "checked_rows": len(paper_scope_rows),
             "defect_count": len(policy_provenance_defects),
             "defects": policy_provenance_defects,
             "passed": not policy_provenance_defects,
@@ -640,30 +947,115 @@ def bounded_pending_parity(
 
 
 def runtime_counts(payload: dict[str, Any]) -> dict[str, int | None]:
-    def count(explicit: tuple[str, ...], collections: tuple[str, ...]) -> int | None:
+    def count_from_payload(
+        source: dict[str, Any],
+        explicit: tuple[str, ...],
+        collections: tuple[str, ...],
+    ) -> int | None:
         for key in explicit:
-            if payload.get(key) is not None:
+            if source.get(key) is not None:
                 try:
-                    return int(payload[key])
+                    return int(source[key])
                 except (TypeError, ValueError):
                     return None
         for key in collections:
-            if isinstance(payload.get(key), list):
-                return len(payload[key])
+            if isinstance(source.get(key), list):
+                return len(source[key])
         return None
 
-    return {
+    def count(explicit: tuple[str, ...], collections: tuple[str, ...]) -> int | None:
+        return count_from_payload(payload, explicit, collections)
+
+    strategy_progress = (
+        payload.get("strategy_progress")
+        if isinstance(payload.get("strategy_progress"), dict)
+        else {}
+    )
+    top_level = {
         "virtual_count": count(
             ("virtual_count", "virtual_candidate_count", "active_signal_count"),
             ("virtual_chase_candidates", "active_signals"),
         ),
         "pending_count": count(
-            ("pending_count", "pending_order_count"), ("pending_orders",),
+            ("pending_count", "pending_order_count"), ("pending_orders", "orders"),
         ),
         "position_count": count(
             ("position_count", "open_position_count"), ("positions",),
         ),
     }
+    nested = {
+        "virtual_count": count_from_payload(
+            strategy_progress,
+            ("virtual_count", "virtual_candidate_count", "active_signal_count"),
+            ("virtual_chase_candidates", "active_signals"),
+        ),
+        "pending_count": count_from_payload(
+            strategy_progress,
+            ("pending_count", "pending_order_count", "pending_orders"),
+            (),
+        ),
+        "position_count": count_from_payload(
+            strategy_progress,
+            ("position_count", "open_position_count", "open_positions"),
+            (),
+        ),
+    }
+    return {
+        key: top_level[key] if top_level[key] is not None else nested[key]
+        for key in top_level
+    }
+
+
+def mirror_partial_artifacts(
+    mirror: Path, *, now_ts: float | None = None,
+    stale_after_seconds: float = PARTIAL_ARTIFACT_STALE_SECONDS,
+) -> list[str]:
+    """Return abandoned atomic-sync candidates, not active transfer staging.
+
+    The sync worker downloads into a unique ``.download`` path before one
+    atomic replace.  Observing that fresh staging file mid-transfer is normal;
+    only a candidate surviving beyond a full sync window is an integrity
+    failure.  Analyzer discovery never includes either form.
+    """
+    if not mirror.is_dir():
+        return []
+    observed_now = float(now_ts if now_ts is not None else time.time())
+    artifacts: list[str] = []
+    for candidate in mirror.rglob("*"):
+        try:
+            if not candidate.is_file() or candidate.is_symlink():
+                continue
+        except OSError:
+            continue
+        name = candidate.name.lower()
+        if name.endswith(".download") or name.endswith(".download.replace-backup"):
+            try:
+                age = max(0.0, observed_now - candidate.stat().st_mtime)
+            except OSError:
+                continue
+            if age >= stale_after_seconds:
+                artifacts.append(candidate.relative_to(mirror).as_posix())
+    return sorted(artifacts)
+
+
+def mirror_transfer_artifacts(mirror: Path) -> list[str]:
+    """Return every in-flight candidate that forbids an analyzer handoff."""
+    artifacts: list[str] = []
+    roots = ((mirror, "mirror"), (mirror.parent / "fly-data-staging", "staging"))
+    for root, label in roots:
+        if not root.is_dir():
+            continue
+        for candidate in root.rglob("*"):
+            try:
+                if not candidate.is_file() or candidate.is_symlink():
+                    continue
+            except OSError:
+                artifacts.append(f"{label}:INSPECTION_FAILED")
+                continue
+            name = candidate.name.lower()
+            if label == "staging" or name.endswith(".download") or name.endswith(".download.replace-backup"):
+                artifacts.append(f"{label}:{candidate.relative_to(root).as_posix()}")
+    return sorted(artifacts)
 
 
 def evaluate_runtime_readiness(
@@ -772,6 +1164,9 @@ class Supervisor:
     runtime_repo: Path | None = None
     readiness_state_file: Path | None = None
     progress_state_file: Path | None = None
+    storage_state_file: Path | None = None
+    require_loop_owner: bool = True
+    explicit_report_dir: bool = True
 
     def launch_missing(self, kind: str) -> bool:
         if not self.repair:
@@ -794,13 +1189,32 @@ class Supervisor:
             checks.append({"name": name, "ok": bool(ok), "detail": detail})
 
         source_revision = None
+        manifest_registry_signature = None
+        manifest_tile_lanes: list[str] = []
         manifest: dict[str, Any] = {}
         try:
-            manifest = self.fetcher(self.fly_url.rstrip("/") + "/api/data-sync/manifest", self.token, 20)
+            manifest = self.fetcher(
+                self.fly_url.rstrip("/") + "/api/data-sync/manifest",
+                self.token,
+                FLY_MANIFEST_TIMEOUT_SECONDS,
+            )
+            if str(manifest.get("inventory_status") or "") != "CURRENT":
+                raise RuntimeError(
+                    "Fly collector inventory is not CURRENT: "
+                    f"{manifest.get('inventory_status') or 'UNAVAILABLE'}"
+                )
             source_revision = manifest.get("source_git_rev") or manifest.get("source_revision")
+            manifest_registry_signature = manifest.get("tile_registry_signature")
+            manifest_tile_lanes = [
+                str(row.get("lane") or "")
+                for row in (manifest.get("active_tiles") or [])
+                if isinstance(row, dict)
+            ]
             add("fly_collector_manifest", bool(manifest.get("files")) and int(manifest.get("total_bytes") or 0) > 0, {
                 "total_bytes": manifest.get("total_bytes"), "source_revision": source_revision,
-                "fresh_collection_signal_ts": manifest.get("fresh_collection_signal_ts")})
+                "fresh_collection_signal_ts": manifest.get("fresh_collection_signal_ts"),
+                "tile_registry_signature": manifest_registry_signature,
+                "active_tile_lanes": manifest_tile_lanes})
         except Exception as exc:
             add("fly_collector_manifest", False, type(exc).__name__)
         try:
@@ -810,10 +1224,28 @@ class Supervisor:
         except Exception as exc:
             add("fly_storage", False, type(exc).__name__)
         try:
-            local_ok, local_detail = local_storage_snapshot(self.mirror)
+            storage_path = self.storage_state_file or self.repo / ".research-storage-state.json"
+            previous_storage: dict[str, Any] = {}
+            if storage_path.is_file():
+                previous_storage = read_json(storage_path)
+            local_ok, local_detail = local_storage_snapshot(
+                self.mirror,
+                report_dir=self.report_dir,
+                previous_snapshot=previous_storage,
+            )
+            atomic_json(storage_path, local_detail)
             add("local_storage", local_ok, local_detail)
         except Exception as exc:
             add("local_storage", False, f"{type(exc).__name__}: {exc}")
+        try:
+            partials = mirror_partial_artifacts(self.mirror)
+            add("mirror_partial_artifacts", not partials, {
+                "count": len(partials),
+                "paths": partials[:20],
+            })
+        except Exception as exc:
+            partials = [f"INSPECTION_FAILED:{type(exc).__name__}"]
+            add("mirror_partial_artifacts", False, f"{type(exc).__name__}: {exc}")
 
         readiness_path = self.readiness_state_file or self.repo / ".research-runtime-readiness-state.json"
         status: dict[str, Any] = {}
@@ -840,15 +1272,32 @@ class Supervisor:
         except Exception as exc:
             add("persistent_runtime_readiness", False, type(exc).__name__)
 
-        heartbeat_path = (self.runtime_repo or self.repo) / ".fly-data-sync-loop.heartbeat.json"
+        heartbeat_path = self.mirror / ".fly-data-sync-loop.heartbeat.json"
         sync_revision = None
+        sync_registry_signature = None
+        sync_heartbeat_ok = False
         try:
             heartbeat = read_json(heartbeat_path)
-            stamp = parse_time(heartbeat.get("syncedAt"))
+            # Progress heartbeats emitted during a long atomic download use
+            # updatedAt.  Accept it as a backwards-compatible freshness
+            # fallback so active sync work is not reported as infinitely
+            # stale between completed-cycle heartbeats.
+            stamp = parse_time(heartbeat.get("syncedAt") or heartbeat.get("updatedAt"))
             age = (self.now() - stamp).total_seconds() if stamp else float("inf")
             sync_revision = heartbeat.get("sourceRevision") or heartbeat.get("source_revision")
-            add("atomic_sync_heartbeat", heartbeat.get("ok") is True and age <= SYNC_MAX_AGE_SECONDS,
-                {"age_seconds": round(age, 1), "ok": heartbeat.get("ok"), "sourceRevision": sync_revision})
+            sync_registry_signature = heartbeat.get("tileRegistrySignature") or heartbeat.get("tile_registry_signature")
+            sync_heartbeat_ok = bool(
+                heartbeat.get("ok") is True
+                and heartbeat.get("inProgress") is not True
+                and heartbeat.get("ackAccepted") is True
+                and str(heartbeat.get("revisionParity") or "") == "MATCH"
+                and age <= SYNC_MAX_AGE_SECONDS
+            )
+            add("atomic_sync_heartbeat", sync_heartbeat_ok,
+                {"age_seconds": round(age, 1), "ok": heartbeat.get("ok"), "sourceRevision": sync_revision,
+                 "tileRegistrySignature": sync_registry_signature,
+                 "ackAccepted": heartbeat.get("ackAccepted"),
+                 "revisionParity": heartbeat.get("revisionParity")})
         except Exception as exc:
             add("atomic_sync_heartbeat", False, type(exc).__name__)
         revision_match = bool(source_revision and sync_revision and (
@@ -860,9 +1309,43 @@ class Supervisor:
             "fly_source_revision": source_revision,
             "sync_source_revision": sync_revision,
         })
-
         try:
-            inventory = classify_processes(self.process_reader())
+            expected_lanes, expected_registry_signature = local_tile_registry_contract(self.repo)
+        except Exception as exc:
+            expected_lanes, expected_registry_signature = [], ""
+            add("local_tile_registry_contract", False, f"{type(exc).__name__}: {exc}")
+        else:
+            add("local_tile_registry_contract", bool(expected_lanes and expected_registry_signature), {
+                "lanes": expected_lanes,
+                "signature": expected_registry_signature,
+            })
+        status_registry_signature = status.get("tile_registry_signature")
+        status_tile_lanes = [
+            str(row.get("lane") or "")
+            for row in (status.get("active_tiles") or [])
+            if isinstance(row, dict)
+        ]
+        registry_parity = bool(
+            manifest_registry_signature
+            and manifest_registry_signature == expected_registry_signature
+            and status_registry_signature == manifest_registry_signature
+            and sync_registry_signature == manifest_registry_signature
+            and manifest_tile_lanes == expected_lanes
+            and status_tile_lanes == expected_lanes
+        )
+        add("tile_registry_cross_layer_parity", registry_parity, {
+            "expected_lanes": expected_lanes,
+            "manifest_lanes": manifest_tile_lanes,
+            "status_lanes": status_tile_lanes,
+            "manifest_signature": manifest_registry_signature,
+            "status_signature": status_registry_signature,
+            "sync_signature": sync_registry_signature,
+        })
+
+        process_rows: list[dict[str, Any]] = []
+        try:
+            process_rows = self.process_reader()
+            inventory = classify_processes(process_rows)
         except Exception as exc:
             inventory = {"sync": [], "analyzer": [], "dashboard": [], "supervisor": []}
             add("process_inventory", False, type(exc).__name__)
@@ -870,9 +1353,115 @@ class Supervisor:
             add("process_inventory", True, inventory)
         for kind in ("sync", "analyzer", "dashboard", "supervisor"):
             count = len(inventory[kind])
-            add(f"unique_{kind}_process", count == 1, {"count": count, "pids": inventory[kind]})
+            # A Task Scheduler invocation is intentionally one-shot. It must
+            # reject duplicate long-running owners, but absence of a --loop
+            # owner is the expected topology rather than a fault.
+            process_ok, expected = expected_process_count(
+                kind, count, self.require_loop_owner
+            )
+            add(
+                f"unique_{kind}_process",
+                process_ok,
+                {"count": count, "pids": inventory[kind], "expected": expected},
+            )
             if count == 0 and kind in {"sync", "analyzer"} and self.launch_missing(kind):
                 repairs.append(f"started_missing_{kind}_through_safe_launcher")
+
+        analyzer_process_revisions = []
+        analyzer_pids = set(inventory["analyzer"])
+        for row in process_rows:
+            row_pid = int(row.get("ProcessId") or row.get("process_id") or 0)
+            if row_pid not in analyzer_pids:
+                continue
+            command_line = str(row.get("CommandLine") or row.get("command_line") or "")
+            match = re.search(r"--source-revision=([0-9a-fA-F]{7,40})", command_line)
+            analyzer_process_revisions.append(match.group(1).lower() if match else None)
+        analyzer_revision_match = bool(
+            source_revision
+            and len(analyzer_process_revisions) == 1
+            and analyzer_process_revisions[0]
+            and (
+                str(source_revision).lower().startswith(analyzer_process_revisions[0])
+                or analyzer_process_revisions[0].startswith(str(source_revision).lower())
+            )
+        )
+        add("analyzer_process_revision_parity", analyzer_revision_match, {
+            "fly_source_revision": source_revision,
+            "analyzer_process_revisions": analyzer_process_revisions,
+        })
+        refresh_identity_ok = False
+        refresh_identity_detail: dict[str, Any] = {"status": "UNAVAILABLE"}
+        try:
+            transfer_artifacts = mirror_transfer_artifacts(self.mirror)
+            current_pointer = read_json(self.mirror / "canonical_dataset_current.json")
+            pointer_revision = str(current_pointer.get("source_revision") or "").lower()
+            pointer_deployed_revision = str(
+                current_pointer.get("deployed_revision") or pointer_revision
+            ).lower()
+            pointer_epoch = str(current_pointer.get("dataset_epoch") or "")
+            pointer_config = str(current_pointer.get("tile_config_signature") or "")
+            manifest_epoch = str(manifest.get("dataset_epoch") or "")
+            status_epoch = str(
+                status.get("dataset_epoch")
+                or (status.get("research_session") or {}).get("dataset_epoch")
+                or ""
+            )
+            normalized_source_revision = str(source_revision or "").lower()
+            normalized_sync_revision = str(sync_revision or "").lower()
+            epoch_parity = bool(
+                pointer_epoch
+                and manifest_epoch == pointer_epoch
+                and (not status_epoch or status_epoch == pointer_epoch)
+            )
+            refresh_identity_ok = bool(
+                sync_heartbeat_ok
+                and normalized_source_revision
+                and normalized_source_revision == normalized_sync_revision
+                and pointer_revision == normalized_source_revision
+                and pointer_deployed_revision == normalized_source_revision
+                and epoch_parity
+                and pointer_config
+                and pointer_config == manifest_registry_signature
+                and registry_parity
+                and not partials
+                and not transfer_artifacts
+            )
+            refresh_identity_detail = {
+                "status": "EXACT_COMPLETE_MIRROR" if refresh_identity_ok else "INCOMPLETE",
+                "heartbeat_ok": sync_heartbeat_ok,
+                "revision_parity": normalized_source_revision == normalized_sync_revision == pointer_revision == pointer_deployed_revision,
+                "epoch_parity": epoch_parity,
+                "config_and_tile_parity": bool(pointer_config and pointer_config == manifest_registry_signature and registry_parity),
+                "partial_artifact_count": len(partials),
+                "transfer_artifact_count": len(transfer_artifacts),
+            }
+        except Exception as exc:
+            refresh_identity_detail = {
+                "status": "REJECTED",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        # This gate is actionable only when the incumbent analyzer is stale.
+        # A current analyzer does not need a completed replacement boundary.
+        add(
+            "stale_analyzer_refresh_gate",
+            analyzer_revision_match or refresh_identity_ok,
+            {**refresh_identity_detail, "replacement_required": not analyzer_revision_match},
+        )
+        # A deployed revision can leave a healthy-looking long-lived analyzer
+        # pinned to the previous source marker.  Refresh it only after the
+        # completed mirror proves exact Fly parity and process ownership is
+        # singular.  The existing launcher performs the final owner/port
+        # validation and preserves the independent read-only dashboard.
+        if (
+            self.repair
+            and refresh_identity_ok
+            and len(inventory["sync"]) == 1
+            and len(inventory["analyzer"]) == 1
+            and len(inventory["dashboard"]) <= 1
+            and not analyzer_revision_match
+            and self.launch_missing("analyzer")
+        ):
+            repairs.append("refreshed_stale_analyzer_through_safe_launcher")
 
         events_path = self.mirror / "research_events_v22.jsonl"
         event_summary: dict[str, Any] | None = None
@@ -880,15 +1469,13 @@ class Supervisor:
         v3_ledger_dir = self.mirror / "v3" / "ledgers"
         v3_ledger_paths = list(v3_ledger_dir.glob("*.jsonl")) if v3_ledger_dir.is_dir() else []
         try:
-            if events_path.is_file():
-                event_summary = read_current_events(events_path)
-                mirror_age = self.now().timestamp() - events_path.stat().st_mtime
-                public_summary = {
-                    key: value for key, value in event_summary.items()
-                    if not key.startswith("_")
-                }
-                schema_source = "research_event_v2.2"
-            elif v3_ledger_paths:
+            # V3.1 is the canonical collector whenever normalized ledgers are
+            # present.  The compatibility v2.2 writer can remain on disk for
+            # old consumers, but it is intentionally append-frozen and must
+            # never drive current progress or report-parity health.  Preferring
+            # it here produced false OPPORTUNITY_PROGRESS_STALLED and stale
+            # legacy identity alarms while the V3 ledgers were advancing.
+            if v3_ledger_paths:
                 v3_summary = read_v3_evidence(self.mirror)
                 row_count = sum(v3_summary["ledger_counts"].values())
                 if row_count <= 0 or not v3_summary["epoch_ids"]:
@@ -898,6 +1485,14 @@ class Supervisor:
                 )
                 public_summary = v3_summary
                 schema_source = "research_evidence_v3"
+            elif events_path.is_file():
+                event_summary = read_current_events(events_path)
+                mirror_age = self.now().timestamp() - events_path.stat().st_mtime
+                public_summary = {
+                    key: value for key, value in event_summary.items()
+                    if not key.startswith("_")
+                }
+                schema_source = "research_event_v2.2"
             else:
                 raise FileNotFoundError(
                     "neither research_events_v22.jsonl nor V3 normalized ledgers exist"
@@ -943,11 +1538,42 @@ class Supervisor:
             atomic_json(progress_path, next_progress)
             add("independent_opportunity_progress", progress_ok, progress_detail)
 
+        expected_epochs = list((current_evidence_summary or {}).get("epoch_ids") or [])
+        if not expected_epochs and event_summary:
+            expected_epochs = [str(event_summary.get("epoch_id") or "")]
+        selected_report_dir, analyzer_manifest, generation_detail = resolve_authoritative_report_generation(
+            self.mirror,
+            self.report_dir,
+            expected_revision=str(source_revision or ""),
+            expected_epochs=expected_epochs,
+            expected_config_signature=str(manifest_registry_signature or ""),
+            explicit_report_dir=self.explicit_report_dir,
+        )
+        add(
+            "authoritative_analyzer_generation",
+            selected_report_dir is not None,
+            generation_detail,
+        )
+        declared_generation_reports = {
+            str(row.get("file") or "").replace("\\", "/")
+            for row in (analyzer_manifest.get("reports") or [])
+            if isinstance(row, dict)
+        }
+
+        def selected_report_path(filename: str) -> Path:
+            if selected_report_dir is None:
+                return Path("__unavailable__") / filename
+            if self.explicit_report_dir or filename in declared_generation_reports:
+                return selected_report_dir / filename
+            # A stale loose artifact can coexist beside an atomic generation.
+            # It is not current merely because it remains on disk.
+            return Path("__not_in_current_generation__") / filename
+
         reports: dict[str, dict[str, Any]] = {}
         report_times: dict[str, datetime] = {}
         report_freshness: dict[str, bool] = {}
         for filename in ("policy_candidate_oos_report.json", "best_policy_research_report.json"):
-            path = self.report_dir / filename
+            path = selected_report_path(filename)
             try:
                 report = read_json(path)
                 generated = parse_time(report.get("generated_at"))
@@ -1014,7 +1640,7 @@ class Supervisor:
                 "reports": {name: {key: report.get(key) for key in ("epoch_id", "policy_epoch_id", "evidence_policy_signature")}
                             for name, report in reports.items()}})
 
-        v3_report_path = self.report_dir / "safe_policy_genome_v3_report.json"
+        v3_report_path = selected_report_path("safe_policy_genome_v3_report.json")
         manifest_has_v3 = any(str(row.get("path") or "").replace("\\", "/").startswith("v3/") for row in (manifest.get("files") or []))
         if v3_report_path.is_file() or manifest_has_v3:
             try:
@@ -1038,12 +1664,25 @@ class Supervisor:
                     "market_segments": v3["market_segments"],
                 }
                 observed = {key: int(collection.get(key) or 0) for key in expected}
+                # ``market_segments`` is intentionally the terminal-path
+                # subset.  Compare the ledger total with the analyzer's
+                # explicit ledger-row total so pre-signal-only context is not
+                # misreported as a pending analyzer deficit.
+                observed["market_segments"] = int(
+                    collection.get("market_segment_ledger_rows")
+                    if collection.get("market_segment_ledger_rows") is not None
+                    else collection.get("market_segments") or 0
+                )
                 deltas = {key: expected[key] - observed[key] for key in expected}
                 exact = expected == observed
                 pending = (
                     age <= REPORT_MAX_AGE_SECONDS
                     and all(delta >= 0 for delta in deltas.values())
-                    and sum(deltas.values()) <= MAX_PENDING_EVENT_DELTA
+                    # Each ledger counts a different projection of the same
+                    # newly collected opportunities. Summing the deltas
+                    # double-counts one collection interval and falsely marks
+                    # a healthy 30-minute analyzer cadence as mismatched.
+                    and all(delta <= MAX_PENDING_EVENT_DELTA for delta in deltas.values())
                 )
                 add("v3_report_fresh_and_count_parity", age <= REPORT_MAX_AGE_SECONDS and (exact or pending), {
                     "status": "EXACT" if exact else "PENDING_NEXT_ANALYZER_CYCLE" if pending else "MISMATCH",
@@ -1062,7 +1701,7 @@ class Supervisor:
             "schema": "research_stability_supervisor_v1",
             "generated_at": self.now().isoformat(),
             "healthy": all(row["ok"] for row in checks),
-            "repair_authority": "MISSING_LOCAL_SYNC_OR_ANALYZER_ONLY",
+            "repair_authority": "LOCAL_SYNC_OR_MISSING_OR_REVISION_STALE_ANALYZER_ONLY",
             "forbidden_actions": ["TRADING_RESTART", "FLY_RESTART", "DATA_WIPE", "POLICY_CHANGE", "LIVE_TRADE_ARM"],
             "repairs": repairs,
             "checks": checks,
@@ -1070,8 +1709,8 @@ class Supervisor:
 
 
 def default_paths(repo: Path) -> tuple[Path, Path]:
-    local = Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir())
-    return local / "DoxxedCrypto" / "fly-data-mirror", repo / "services" / "btc-conservative-agent"
+    agent = repo / "services" / "btc-conservative-agent"
+    return agent / "canonical-research-data", agent
 
 
 def main() -> int:
@@ -1089,6 +1728,7 @@ def main() -> int:
     repo = args.repo.resolve()
     mirror_default, report_default = default_paths(repo)
     status_file = args.status_file or repo / ".research-stability-supervisor.json"
+    process_lock = repo / ".research-stability-supervisor.lock"
     token = os.environ.get("BOT_ADMIN_TOKEN", "")
     if not token:
         raise SystemExit("BOT_ADMIN_TOKEN is required; load it through the existing vault launcher")
@@ -1096,13 +1736,21 @@ def main() -> int:
         repo, args.mirror or mirror_default, args.report_dir or report_default,
         args.fly_url, token, repair=args.repair_missing_local,
         runtime_repo=args.runtime_repo.resolve() if args.runtime_repo else None,
+        require_loop_owner=args.loop,
+        explicit_report_dir=args.report_dir is not None,
     )
-    while True:
-        payload = supervisor.check()
-        atomic_json(status_file, payload)
-        if not args.loop:
-            return 0 if payload["healthy"] else 2
-        time.sleep(max(60, args.interval_seconds))
+    try:
+        with exclusive_process_lock(process_lock):
+            while True:
+                payload = supervisor.check()
+                atomic_json(status_file, payload)
+                if not args.loop:
+                    return 0 if payload["healthy"] else 2
+                time.sleep(max(60, args.interval_seconds))
+    except SupervisorLockUnavailable:
+        # Another verified owner already holds the lifetime lock.  Duplicate
+        # scheduled invocations are an expected no-op, not a repair failure.
+        return 0
 
 
 if __name__ == "__main__":

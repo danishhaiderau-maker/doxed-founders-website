@@ -9,6 +9,7 @@ diagnostic so a 5m chart can be reconciled against the 3m decision TF.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Optional, Sequence
 
 
@@ -51,6 +52,32 @@ def _close(candle: Sequence[Any]) -> Optional[float]:
     if not candle or len(candle) < 5:
         return None
     return _finite(candle[4])
+
+
+def realized_volatility_state(candles_1m: Sequence[Sequence[Any]]) -> dict[str, Any]:
+    """Return causal 30-minute volatility metadata; never used as a gate."""
+    closes = [value for row in candles_1m if (value := _close(row)) is not None and value > 0]
+    closes = closes[-31:]
+    if len(closes) < 6:
+        return {
+            "realized_volatility_30m_pct": None,
+            "volatility_of_volatility_30m_pct": None,
+            "realized_volatility_basis": "UNAVAILABLE_INSUFFICIENT_1M_CLOSES",
+            "realized_volatility_return_count": max(0, len(closes) - 1),
+        }
+    returns = [math.log(current / previous) * 100.0 for previous, current in zip(closes, closes[1:])]
+
+    def population_std(values: Sequence[float]) -> float:
+        mean = sum(values) / len(values)
+        return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+
+    rolling = [population_std(returns[index - 5:index]) for index in range(5, len(returns) + 1)]
+    return {
+        "realized_volatility_30m_pct": population_std(returns),
+        "volatility_of_volatility_30m_pct": population_std(rolling) if len(rolling) > 1 else 0.0,
+        "realized_volatility_basis": "CAUSAL_1M_LOG_RETURN_POPULATION_STD_UNANNUALIZED",
+        "realized_volatility_return_count": len(returns),
+    }
 
 
 def resample_1m_to_tf(candles_1m: Sequence[Sequence[Any]], bar_sec: int) -> list:
@@ -457,6 +484,7 @@ def _base_3m_snapshot(
         "donchian_low_3m": donch.get("low"),
         "bb_width_3m": bb_w,
         "ret_3m": ret_3m,
+        **realized_volatility_state(candles_1m),
         "dist_to_support": dist_to_support,
         "dist_to_resistance": dist_to_resistance,
         "structure_score": structure_score,

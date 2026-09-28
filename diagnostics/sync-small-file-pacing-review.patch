@@ -1,0 +1,23 @@
+diff --git a/scripts/sync-fly-bot-data.ps1 b/scripts/sync-fly-bot-data.ps1
+--- a/scripts/sync-fly-bot-data.ps1
++++ b/scripts/sync-fly-bot-data.ps1
+@@ -19,6 +19,7 @@
+ . (Join-Path $scriptDir "fly-data-paths.ps1")
+ . (Join-Path $scriptDir "fly-mirror-atomic.ps1")
+ . (Join-Path $scriptDir "fly-sync-backoff.ps1")
++. (Join-Path $scriptDir "fly-sync-file-pacing.ps1")
+ . (Join-Path $scriptDir "fly-lifecycle-bundle-copy.ps1")
+ $SourceUrl = Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl
+ if (-not $TargetDir) {
+@@ -1205,5 +1206,10 @@
+   # remain authoritative.
+   if ($downloadedGeneration -and $selectedFileIndex -lt $selectedFileCount) {
+-    $fileThrottleMs = [Math]::Max($baseInterFileThrottleMs, $adaptiveThrottleMs)
++    $fileThrottleMs = Get-FlySyncInterFileDelayMs `
++      -FileBytes $remoteSize `
++      -RequestElapsedMs $chunkRequestElapsedMs `
++      -AdaptiveThrottleMs $adaptiveThrottleMs `
++      -BaseInterFileThrottleMs $baseInterFileThrottleMs `
++      -BaseInterChunkThrottleMs $baseInterChunkThrottleMs
+     Start-Sleep -Milliseconds $fileThrottleMs
+   }

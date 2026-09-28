@@ -3,13 +3,81 @@ from __future__ import annotations
 
 import random
 from collections import Counter
-from statistics import mean
+from functools import lru_cache
 from typing import Any, Iterable
 
 from research_v3_risk import drawdown_budget_gate, portfolio_risk_metrics
+from research_v3_sealed_holdout import verify_evaluation_receipt
+from research_v3_liquidation_buffer import verify_liquidation_buffer_receipt
 
 
 SUPPORTED_TERMINAL_STATES = {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
+EXECUTED_TERMINAL_STATES = {"FULL_FILL", "PARTIAL_FILL", "REALIZED_ZERO_PNL"}
+REQUIRED_MEASURED_COST_FIELDS = (
+    "entry_fee_usd", "exit_fee_usd", "trading_fees_usd", "funding_usd",
+    "entry_slippage_usd", "exit_slippage_usd", "slippage_usd",
+    "latency_cost_usd", "gross_pnl_usd", "net_pnl_usd",
+)
+
+
+def _measured_cost_evidence(
+    rows: list[dict[str, Any]], policy_id: str,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Require an attributable measured-cost receipt for every execution.
+
+    A numeric zero is valid only when the receipt explicitly says it was
+    measured.  Missing values are never interpreted as zero for qualification.
+    """
+    defects: list[dict[str, Any]] = []
+    for row in rows:
+        episode_id = str(row.get("episode_id") or "")
+        outcome = (row.get("policy_outcomes") or {}).get(policy_id)
+        if not isinstance(outcome, dict):
+            continue
+        state = str(outcome.get("outcome_state") or "UNSUPPORTED")
+        if state not in EXECUTED_TERMINAL_STATES:
+            continue
+        receipt = outcome.get("cost_evidence")
+        reasons: list[str] = []
+        if not isinstance(receipt, dict):
+            reasons.append("MEASURED_COST_RECEIPT_MISSING")
+        else:
+            if receipt.get("schema") != "measured_execution_cost_receipt_v1":
+                reasons.append("MEASURED_COST_RECEIPT_SCHEMA_INVALID")
+            if receipt.get("status") != "MEASURED":
+                reasons.append("MEASURED_COST_STATUS_REQUIRED")
+            if receipt.get("blockers"):
+                reasons.append("MEASURED_COST_RECEIPT_HAS_BLOCKERS")
+            receipt_ids = receipt.get("source_receipt_ids")
+            if not isinstance(receipt_ids, list) or not any(str(value).strip() for value in receipt_ids):
+                reasons.append("MEASURED_COST_SOURCE_RECEIPT_REQUIRED")
+            for field in REQUIRED_MEASURED_COST_FIELDS:
+                value = receipt.get(field)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    reasons.append(f"{field.upper()}_MEASUREMENT_MISSING")
+                elif float(value) < 0:
+                    if field not in {"gross_pnl_usd", "net_pnl_usd"}:
+                        reasons.append(f"{field.upper()}_MEASUREMENT_NEGATIVE")
+            if receipt.get("gross_pnl_basis") != "ACTUAL_EXECUTION_PRICES_INCLUDES_PRICE_IMPACT":
+                reasons.append("MEASURED_COST_GROSS_BASIS_INVALID")
+            if receipt.get("net_pnl_reconciliation_basis") != "GROSS_MINUS_TRADING_FEES_MINUS_FUNDING_FEES":
+                reasons.append("MEASURED_COST_NET_BASIS_INVALID")
+            numeric = all(isinstance(receipt.get(key), (int, float)) and not isinstance(receipt.get(key), bool)
+                          for key in ("entry_fee_usd", "exit_fee_usd", "trading_fees_usd", "funding_usd", "gross_pnl_usd", "net_pnl_usd"))
+            if numeric:
+                if abs(receipt["entry_fee_usd"] + receipt["exit_fee_usd"] - receipt["trading_fees_usd"]) > 1e-8:
+                    reasons.append("MEASURED_COST_FEE_RECONCILIATION_MISMATCH")
+                if abs(receipt["gross_pnl_usd"] - receipt["trading_fees_usd"] - receipt["funding_usd"] - receipt["net_pnl_usd"]) > 1e-8:
+                    reasons.append("MEASURED_COST_NET_RECONCILIATION_MISMATCH")
+                if outcome.get("net_pnl_usd") is not None and abs(float(outcome["net_pnl_usd"]) - receipt["net_pnl_usd"]) > 1e-8:
+                    reasons.append("MEASURED_COST_OUTCOME_NET_MISMATCH")
+        if reasons:
+            defects.append({
+                "episode_id": episode_id,
+                "outcome_state": state,
+                "reasons": reasons,
+            })
+    return not defects, defects
 
 
 def _percentile(values: list[float], q: float) -> float | None:
@@ -50,6 +118,124 @@ def chronological_folds(episodes: Iterable[dict[str, Any]], *, outer_folds: int 
     return folds
 
 
+def validate_purged_walk_forward(
+    episodes: list[dict[str, Any]],
+    *,
+    policy_id: str,
+    outer_folds: int = 5,
+    purge_sec: float = 7200,
+    embargo_sec: float = 300,
+    minimum_valid_folds: int = 3,
+) -> dict[str, Any]:
+    """Evaluate a frozen policy on purged chronological validation folds.
+
+    This is intentionally a qualification gate, not a policy selector.  The
+    supplied ``policy_id`` must already be frozen; each fold evaluates only its
+    later validation block and never uses it to choose or alter the policy.
+    Missing/unsupported outcomes invalidate their fold instead of becoming
+    zero-PnL observations.
+    """
+    input_defects = []
+    seen_episode_ids: set[str] = set()
+    for row in episodes:
+        episode_id = str(row.get("episode_id") or "").strip()
+        try:
+            signal_ts = float(row.get("signal_ts"))
+        except (TypeError, ValueError):
+            signal_ts = None
+        try:
+            required_end_ts = float(row.get("required_end_ts"))
+        except (TypeError, ValueError):
+            required_end_ts = None
+        if not episode_id:
+            input_defects.append("MISSING_EPISODE_ID")
+        elif episode_id in seen_episode_ids:
+            input_defects.append(f"DUPLICATE_EPISODE_ID:{episode_id}")
+        else:
+            seen_episode_ids.add(episode_id)
+        if signal_ts is None or signal_ts < 0:
+            input_defects.append(f"INVALID_SIGNAL_TS:{episode_id or 'UNKNOWN'}")
+        if (
+            required_end_ts is None
+            or required_end_ts < 0
+            or (signal_ts is not None and required_end_ts < signal_ts)
+        ):
+            input_defects.append(f"INVALID_REQUIRED_END_TS:{episode_id or 'UNKNOWN'}")
+
+    folds = chronological_folds(
+        episodes,
+        outer_folds=outer_folds,
+        purge_sec=purge_sec,
+        embargo_sec=embargo_sec,
+    )
+    results = []
+    pooled_values: list[float] = []
+    for fold in folds:
+        values, states, missing = _policy_values(fold["validation"], policy_id)
+        complete = bool(fold["train"]) and bool(values) and not missing
+        expectancy = (sum(values) / len(values)) if complete else None
+        if complete:
+            pooled_values.extend(values)
+        results.append({
+            "fold": fold["fold"],
+            "train_episodes": len(fold["train"]),
+            "validation_episodes": len(fold["validation"]),
+            "validation_episodes_scored": len(values),
+            "validation_outcome_states": dict(sorted(states.items())),
+            "missing_or_unsupported_episode_ids": missing,
+            "expectancy_usd_per_opportunity": (
+                None if expectancy is None else round(expectancy, 8)
+            ),
+            "complete": complete,
+            "positive_expectancy": bool(expectancy is not None and expectancy > 0),
+        })
+    complete_results = [row for row in results if row["complete"]]
+    positive_results = [row for row in complete_results if row["positive_expectancy"]]
+    pooled_expectancy = (
+        sum(pooled_values) / len(pooled_values) if pooled_values else None
+    )
+    required = max(1, int(minimum_valid_folds))
+    passed = bool(
+        not input_defects
+        and len(complete_results) >= required
+        and len(complete_results) == len(results)
+        and len(positive_results) == len(complete_results)
+        and pooled_expectancy is not None
+        and pooled_expectancy > 0
+    )
+    blockers = []
+    if input_defects:
+        blockers.append("INVALID_WALK_FORWARD_CAUSAL_IDENTITIES_OR_TIMESTAMPS")
+    if len(complete_results) < required:
+        blockers.append("INSUFFICIENT_COMPLETE_PURGED_FOLDS")
+    if len(complete_results) != len(results):
+        blockers.append("INCOMPLETE_PURGED_FOLD_EVIDENCE")
+    if complete_results and len(positive_results) != len(complete_results):
+        blockers.append("NON_POSITIVE_PURGED_FOLD")
+    if pooled_expectancy is None or pooled_expectancy <= 0:
+        blockers.append("NON_POSITIVE_POOLED_WALK_FORWARD_EXPECTANCY")
+    return {
+        "schema": "purged_walk_forward_validation_v1",
+        "policy_id": policy_id,
+        "policy_selection_semantics": "FROZEN_BEFORE_VALIDATION_NOT_SELECTED_ON_FOLDS",
+        "outer_folds_requested": int(outer_folds),
+        "folds_materialized": len(folds),
+        "complete_folds": len(complete_results),
+        "positive_folds": len(positive_results),
+        "minimum_valid_folds": required,
+        "purge_sec": float(purge_sec),
+        "embargo_sec": float(embargo_sec),
+        "pooled_validation_episodes": len(pooled_values),
+        "pooled_expectancy_usd_per_opportunity": (
+            None if pooled_expectancy is None else round(pooled_expectancy, 8)
+        ),
+        "folds": results,
+        "input_defects": sorted(set(input_defects)),
+        "blockers": blockers,
+        "passed": passed,
+    }
+
+
 def _policy_values(rows: list[dict[str, Any]], policy_id: str) -> tuple[list[float], Counter, list[str]]:
     values, states, missing = [], Counter(), []
     for row in rows:
@@ -74,19 +260,47 @@ def _policy_values(rows: list[dict[str, Any]], policy_id: str) -> tuple[list[flo
     return values, states, missing
 
 
-def episode_block_bootstrap(values: list[float], *, samples: int = 1000, seed: int = 7) -> dict[str, Any]:
+@lru_cache(maxsize=8192)
+def _episode_block_bootstrap_cached(
+    values: tuple[float, ...], samples: int, seed: int,
+) -> tuple[int, float | None, float | None, float | None]:
     if not values:
-        return {"samples": 0, "mean_lcb95": None, "mean_ucb95": None, "probability_mean_positive": None}
+        return 0, None, None, None
     rng = random.Random(seed)
     means = []
+    value_count = len(values)
     for _ in range(samples):
-        draw = [values[rng.randrange(len(values))] for _ in values]
-        means.append(mean(draw))
+        # ``statistics.mean`` converts every float to an exact Fraction. That
+        # is needlessly expensive inside thousands of policy bootstraps and
+        # previously made a single analyzer generation exceed its 30-minute
+        # publication contract. Inputs are already normalized floats and the
+        # result is rounded to 8 decimals, so a direct floating-point sum is
+        # deterministic for this seeded, fixed-order draw.
+        total = 0.0
+        for _index in range(value_count):
+            total += float(values[rng.randrange(value_count)])
+        means.append(total / value_count)
+    return (
+        samples,
+        round(float(_percentile(means, 0.025)), 8),
+        round(float(_percentile(means, 0.975)), 8),
+        round(sum(value > 0 for value in means) / len(means), 8),
+    )
+
+
+def episode_block_bootstrap(values: list[float], *, samples: int = 1000, seed: int = 7) -> dict[str, Any]:
+    # A 21k-policy grid contains many policies with exactly the same OOS return
+    # vector.  Re-running an identical seeded bootstrap for each policy made a
+    # scheduled analyzer generation take tens of minutes. Cache the immutable
+    # evidence vector; this changes no samples, probabilities, or gates.
+    result = _episode_block_bootstrap_cached(
+        tuple(float(value) for value in values), int(samples), int(seed),
+    )
     return {
-        "samples": samples,
-        "mean_lcb95": round(float(_percentile(means, 0.025)), 8),
-        "mean_ucb95": round(float(_percentile(means, 0.975)), 8),
-        "probability_mean_positive": round(sum(value > 0 for value in means) / len(means), 8),
+        "samples": result[0],
+        "mean_lcb95": result[1],
+        "mean_ucb95": result[2],
+        "probability_mean_positive": result[3],
     }
 
 
@@ -94,6 +308,7 @@ def validate_policy(
     episodes: list[dict[str, Any]],
     *,
     policy_id: str,
+    policy_signature: str | None = None,
     starting_equity_usd: float,
     max_drawdown_usd: float,
     max_drawdown_pct: float,
@@ -101,12 +316,16 @@ def validate_policy(
     policies_tested: int,
     conservative_execution: bool,
     neighborhood_stable: bool,
-    sealed_holdout: bool,
-    liquidation_buffer_verified: bool = False,
+    sealed_holdout: Any,
+    liquidation_buffer_verified: Any = None,
+    purged_walk_forward: dict[str, Any] | None = None,
     minimum_episodes: int = 100,
     minimum_regimes: int = 3,
 ) -> dict[str, Any]:
     values, states, missing = _policy_values(episodes, policy_id)
+    measured_costs_pass, cost_evidence_defects = _measured_cost_evidence(
+        episodes, policy_id,
+    )
     risk = portfolio_risk_metrics(values, starting_equity_usd=starting_equity_usd)
     # The opportunity-level EV denominator includes explicit non-executions,
     # but the report must never rename them as realized zero-PnL trades.
@@ -120,28 +339,61 @@ def validate_policy(
     regimes = {str(row.get("regime") or "UNKNOWN") for row in episodes if str(row.get("regime") or "UNKNOWN") != "UNKNOWN"}
     adjusted_required_probability = 1.0 - (0.05 / max(1, int(policies_tested)))
     probability = float(bootstrap.get("probability_mean_positive") or 0)
+    executed_episode_ids = [
+        str(row.get("episode_id") or "")
+        for row in episodes
+        if str(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("outcome_state") or "")
+        in EXECUTED_TERMINAL_STATES
+    ]
+    liquidation_buffer = verify_liquidation_buffer_receipt(
+        liquidation_buffer_verified,
+        policy_id=policy_id,
+        executed_episode_ids=executed_episode_ids,
+    )
     gates = {
         "integrity_pass": not missing,
         "complete_paths_pass": not missing,
         "conservative_execution_pass": bool(conservative_execution),
+        "measured_costs_pass": measured_costs_pass,
         "drawdown_budget_pass": bool(budget["passed"]),
         "cvar_budget_pass": "CVAR95_BUDGET_FAILED" not in budget["reasons"],
         # A complete market path does not prove liquidation safety. Require an
         # explicit leverage/margin/liquidation-distance receipt.
-        "liquidation_buffer_pass": bool(liquidation_buffer_verified),
+        "liquidation_buffer_pass": liquidation_buffer["passed"],
+        "purged_walk_forward_pass": bool(
+            isinstance(purged_walk_forward, dict)
+            and purged_walk_forward.get("passed") is True
+        ),
         "oos_lcb_positive_pass": bool(bootstrap.get("mean_lcb95") is not None and bootstrap["mean_lcb95"] > 0),
         "neighborhood_stability_pass": bool(neighborhood_stable),
         "multiple_testing_pass": probability >= adjusted_required_probability,
         "regime_coverage_pass": len(regimes) >= int(minimum_regimes),
         "minimum_episode_pass": len(values) >= int(minimum_episodes),
-        "sealed_holdout_pass": bool(sealed_holdout),
+        # A boolean is an assertion, not evidence. Only a content-addressed,
+        # single-use evaluation receipt can satisfy this qualification gate.
+        "sealed_holdout_pass": verify_evaluation_receipt(
+            sealed_holdout,
+            policy_id=policy_id,
+            policy_signature=policy_signature,
+            holdout_episodes=episodes,
+        ),
     }
     return {
         "schema": "safe_policy_validation_v3",
         "policy_id": policy_id,
         "episodes_supplied": len(episodes),
         "episodes_scored": len(values),
+        "evidence_status": (
+            "AVAILABLE" if values else "INSUFFICIENT_EXECUTION_EVIDENCE"
+        ),
         "missing_or_unsupported_episode_ids": missing,
+        "measured_cost_evidence": {
+            "schema": "measured_execution_cost_coverage_v1",
+            "required_fields": list(REQUIRED_MEASURED_COST_FIELDS),
+            "semantics": "EXPLICIT_MEASURED_ZERO_ALLOWED_MISSING_NEVER_DEFAULTED_TO_ZERO",
+            "defects": cost_evidence_defects,
+            "passed": measured_costs_pass,
+        },
         "outcome_states": dict(sorted(states.items())),
         "regimes": sorted(regimes),
         "risk": risk,
@@ -151,6 +403,17 @@ def validate_policy(
             "policies_tested": int(policies_tested),
             "method": "BONFERRONI_FAMILYWISE_BOOTSTRAP_SCREEN",
             "required_probability_positive": round(adjusted_required_probability, 10),
+        },
+        "purged_walk_forward": purged_walk_forward or {
+            "schema": "purged_walk_forward_validation_v1",
+            "passed": False,
+            "blockers": ["PURGED_WALK_FORWARD_NOT_SUPPLIED"],
+        },
+        "liquidation_buffer": liquidation_buffer,
+        "sealed_holdout": sealed_holdout if isinstance(sealed_holdout, dict) else {
+            "schema": "sealed_holdout_evaluation_v1",
+            "passed": False,
+            "blockers": ["VALID_SEALED_HOLDOUT_RECEIPT_NOT_SUPPLIED"],
         },
         "gates": gates,
         "qualified": all(gates.values()),

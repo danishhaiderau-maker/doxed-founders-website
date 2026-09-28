@@ -10,6 +10,31 @@ def portfolio_risk_metrics(pnls: Iterable[float], *, starting_equity_usd: float)
     values = [float(value) for value in pnls]
     if starting_equity_usd <= 0:
         raise ValueError("starting_equity_usd must be positive")
+    if not values:
+        # An empty observation set has no performance or risk.  Returning
+        # numerical zeroes here used to make an unobserved policy look like it
+        # had flat PnL, perfect drawdown control, and no losing streak.
+        return {
+            "schema": "portfolio_risk_metrics_v1",
+            "episodes": 0,
+            "evidence_status": "INSUFFICIENT_EXECUTION_EVIDENCE",
+            "starting_equity_usd": round(starting_equity_usd, 6),
+            "ending_equity_usd": None,
+            "net_pnl_usd": None,
+            "max_drawdown_usd": None,
+            "max_drawdown_pct": None,
+            "ulcer_index_pct": None,
+            "cvar95_usd": None,
+            "worst_trade_usd": None,
+            "longest_loss_streak": None,
+            "max_underwater_episodes": None,
+            "max_recovery_episodes": None,
+            "profit_factor": None,
+            "recovery_factor": None,
+            "wins": None,
+            "losses": None,
+            "realized_zero": 0,
+        }
     equity = float(starting_equity_usd)
     peak = equity
     max_dd_usd = 0.0
@@ -51,6 +76,7 @@ def portfolio_risk_metrics(pnls: Iterable[float], *, starting_equity_usd: float)
     return {
         "schema": "portfolio_risk_metrics_v1",
         "episodes": len(values),
+        "evidence_status": "AVAILABLE",
         "starting_equity_usd": round(starting_equity_usd, 6),
         "ending_equity_usd": round(equity, 6),
         "net_pnl_usd": round(net, 6),
@@ -72,9 +98,11 @@ def portfolio_risk_metrics(pnls: Iterable[float], *, starting_equity_usd: float)
 
 def drawdown_budget_gate(metrics: dict, *, max_drawdown_usd: float, max_drawdown_pct: float, min_cvar95_usd: float) -> dict:
     reasons = []
-    if abs(float(metrics.get("max_drawdown_usd") or 0)) > float(max_drawdown_usd):
+    if metrics.get("max_drawdown_usd") is None or metrics.get("max_drawdown_pct") is None:
+        reasons.append("DRAWDOWN_UNAVAILABLE")
+    elif abs(float(metrics["max_drawdown_usd"])) > float(max_drawdown_usd):
         reasons.append("MAX_DRAWDOWN_USD_EXCEEDED")
-    if abs(float(metrics.get("max_drawdown_pct") or 0)) > float(max_drawdown_pct):
+    if metrics.get("max_drawdown_pct") is not None and abs(float(metrics["max_drawdown_pct"])) > float(max_drawdown_pct):
         reasons.append("MAX_DRAWDOWN_PCT_EXCEEDED")
     cvar = metrics.get("cvar95_usd")
     if cvar is None or float(cvar) < float(min_cvar95_usd):

@@ -113,6 +113,10 @@ def create_archive(
 
     provenance = report_manifest.get("analysis_provenance") or {}
     analyzer_revision = str(provenance.get("generation_revision") or "").strip()
+    source_revision = str(provenance.get("source_revision") or "UNKNOWN").strip() or "UNKNOWN"
+    deployed_revision = str(provenance.get("deployed_revision") or "UNKNOWN").strip() or "UNKNOWN"
+    dataset_epoch = str(provenance.get("dataset_epoch") or "UNKNOWN").strip() or "UNKNOWN"
+    config_signature = str(provenance.get("config_signature") or "UNKNOWN").strip() or "UNKNOWN"
     source_data_revision = str(provenance.get("source_data_revision") or "").strip()
     cohort_schema = str(provenance.get("cohort_schema") or "").strip()
     fresh_epoch = report_manifest.get("fresh_epoch") or {}
@@ -160,6 +164,10 @@ def create_archive(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "analyzer_run_id": report_manifest.get("analyzer_sync_id"),
             "analyzer_revision": analyzer_revision.lower(),
+            "source_revision": source_revision.lower() if source_revision != "UNKNOWN" else "UNKNOWN",
+            "deployed_revision": deployed_revision.lower() if deployed_revision != "UNKNOWN" else "UNKNOWN",
+            "dataset_epoch": dataset_epoch,
+            "config_signature": config_signature.lower() if config_signature != "UNKNOWN" else "UNKNOWN",
             "source_data_revision": source_data_revision.lower(),
             "cohort_schema": cohort_schema,
             "fresh_epoch": {
@@ -194,9 +202,26 @@ def create_archive(
             "win_rate_pct": performance.get("win_rate_pct"),
             "path": str(final),
             "manifest_sha256": _sha256(final / MANIFEST),
+            "analyzer_revision": manifest["analyzer_revision"],
+            "source_data_revision": manifest["source_data_revision"],
+            "cohort_schema": manifest["cohort_schema"],
+            "epoch_id": manifest["fresh_epoch"].get("epoch_id"),
+            "epoch_status": manifest["fresh_epoch"].get("status"),
+            "evidence_objects": [
+                {
+                    "name": row.get("name"),
+                    "available": bool(row.get("available")),
+                    "sha256": row.get("sha256"),
+                    "size_bytes": row.get("size_bytes"),
+                }
+                for row in manifest["evidence"]
+            ],
         })
         index_temp = archive_root / f".index-{nonce}.tmp"
-        index_temp.write_text(json.dumps({"schema": SCHEMA, "sessions": sessions[:50]}, indent=2), encoding="utf-8")
+        # This is the retrieval index for immutable generations, not a recent
+        # dashboard cache.  Never silently drop older verified sessions: Phase
+        # 4 requires every distinct generation to remain discoverable.
+        index_temp.write_text(json.dumps({"schema": SCHEMA, "sessions": sessions}, indent=2), encoding="utf-8")
         try:
             os.replace(index_temp, index_path)
         finally:

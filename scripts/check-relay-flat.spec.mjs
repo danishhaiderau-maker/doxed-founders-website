@@ -1,26 +1,164 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 import {
+  buildOwnerHttpsRequestOptions,
   describeOwnerFetchError,
-  evaluateRelayFlatGate,
   hasFullOwnerOrderState,
+  isCompleteStoredExchangeOrderAuditFlat,
+  isCompleteStoredRawFlatReconcileSnapshot,
+  isCredentialResolutionUnavailableError,
+  isNeverArmedUncredentialedRelay,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
   isRelayPausedAndDisarmed,
+  isRetryablePrismaConnectionError,
   ownerFetchErrorChain,
-  paperTipExceptionEnabled,
-  pathwayLabTipExceptionEnabled,
-  pathwayLabFailingRev,
-  isPathwayLabBootLoop503,
-  pathwayLabStartupFailProven,
-  flyLogsReadUnauthorized,
-  pathwayLabEncodedStartupFail,
-  healthRevisionMatches,
-  paperDisarmedHealth,
-  paperModeDisarmLogProven,
-  collectFlyLogText,
-  evaluatePathwayLabTipException,
+  refreshPausedRelayAudit,
 } from './check-relay-flat.mjs';
+
+test('credential resolver receipt accepts only the legacy text or an allowlisted exact code', () => {
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials missing — re-hire with API keys',
+  ), true);
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials unavailable (FINGERPRINT_REQUIRED_MISSING) — re-hire with API keys',
+  ), true);
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials unavailable (OK) — re-hire with API keys',
+  ), false);
+  assert.equal(isCredentialResolutionUnavailableError(
+    'Exchange credentials unavailable (DECRYPT_FAILED) — re-hire with API keys secret=oops',
+  ), false);
+});
+
+const inertUncredentialedRelay = {
+  credentialConfigured: false,
+  instanceCredentialId: null,
+  providerCredentialPresent: false,
+  providerCredentialId: null,
+  providerCredentialUpdatedAt: null,
+  providerCredentialReadStable: true,
+  liveDeskSessionStartedAt: null,
+  status: 'PAUSED',
+  relayExecutionMode: 'PAUSED',
+  relayArmedAt: null,
+  realTradingConfirmedAt: null,
+  activeParticipants: 0,
+  totalParticipants: 0,
+  participantReadStable: true,
+  orphanOrderIds: [],
+  orphanPositionIds: [],
+  reconcile: null,
+  exchangeOrderAudit: null,
+};
+
+test('durable recovery waives absent audits only for a never-armed uncredentialed relay', () => {
+  assert.equal(isNeverArmedUncredentialedRelay(inertUncredentialedRelay, true), true);
+  assert.equal(isNeverArmedUncredentialedRelay(inertUncredentialedRelay, false), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    liveDeskSessionStartedAt: '2026-08-01T00:00:00.000Z',
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    instanceCredentialId: 'credential-link',
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    reconcile: { rawExchangePositionQty: 1 },
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    orphanOrderIds: null,
+    totalParticipants: 1,
+  }, true), false);
+});
+
+test('durable recovery accepts a stable provider row only after an exact newer missing-credential receipt', () => {
+  const staleProviderRow = {
+    ...inertUncredentialedRelay,
+    credentialConfigured: true,
+    instanceCredentialId: 'credential-row',
+    providerCredentialPresent: true,
+    providerCredentialId: 'credential-row',
+    providerCredentialUpdatedAt: '2026-09-03T01:00:00.000Z',
+    lastError: 'Exchange credentials missing — re-hire with API keys',
+    liveFidelityGuard: {
+      status: 'IDLE',
+      lastResetReason: 'EXCHANGE_CREDENTIALS_MISSING',
+      lastObservedAt: '2026-09-03T01:00:01.000Z',
+    },
+  };
+  assert.equal(isNeverArmedUncredentialedRelay(staleProviderRow, true), true);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    providerCredentialId: 'different-row',
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    providerCredentialReadStable: false,
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    liveFidelityGuard: { ...staleProviderRow.liveFidelityGuard, lastObservedAt: '2026-09-03T00:59:59.000Z' },
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    lastError: 'different error',
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    liveFidelityGuard: { ...staleProviderRow.liveFidelityGuard, lastResetReason: 'LIVE_RELAY_INACTIVE' },
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    reconcile: {},
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    totalParticipants: 1,
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    participantReadStable: false,
+  }, true), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    orphanOrderIds: undefined,
+    orphanPositionIds: undefined,
+  }, true), true);
+});
+
+test('native HTTPS fallback preserves auth and pins the canonical proof to IPv4', () => {
+  const options = buildOwnerHttpsRequestOptions(
+    'https://doxed-btc-bot.fly.dev/api/relay-execution-state?fresh=1',
+    'redacted-test-token',
+    15_000,
+  );
+  assert.equal(options.protocol, 'https:');
+  assert.equal(options.hostname, 'doxed-btc-bot.fly.dev');
+  assert.equal(options.port, 443);
+  assert.equal(options.path, '/api/relay-execution-state?fresh=1');
+  assert.equal(options.family, 4);
+  assert.equal(options.timeout, 15_000);
+  assert.equal(options.headers['X-Bot-Admin-Token'], 'redacted-test-token');
+});
+
+test('Neon proof retries only transient connection failures', () => {
+  assert.equal(
+    isRetryablePrismaConnectionError(new Error("Can't reach database server at host:5432")),
+    true,
+  );
+  assert.equal(
+    isRetryablePrismaConnectionError(new Error('P1017: Server has closed the connection')),
+    true,
+  );
+  assert.equal(
+    isRetryablePrismaConnectionError(new Error('conservative-btc agent missing')),
+    false,
+  );
+});
 
 test('paused relay accepts legacy null mode only when arming timestamps are clear', () => {
   assert.equal(isRelayPausedAndDisarmed({
@@ -90,6 +228,16 @@ test('strict flat proof rejects one satoshi, dust, and stale observations', () =
   );
 });
 
+test('durable recovery proof accepts complete stored zeros but rejects nonzero or incomplete evidence', () => {
+  assert.equal(isCompleteStoredRawFlatReconcileSnapshot(
+    rawFlat({ updatedAt: '2025-01-01T00:00:00.000Z' }),
+  ), true);
+  assert.equal(isCompleteStoredRawFlatReconcileSnapshot(rawFlat({ pendingLots: 1 })), false);
+  const incomplete = rawFlat();
+  delete incomplete.signedLedgerOpenQty;
+  assert.equal(isCompleteStoredRawFlatReconcileSnapshot(incomplete), false);
+});
+
 test('authenticated source proof rejects a sanitized state without an order book', () => {
   assert.equal(
     hasFullOwnerOrderState({ dashboard_owner: true, positions: [] }),
@@ -147,124 +295,6 @@ test('owner fetch diagnosis includes nested undici socket cause and attempts', (
   assert.match(described.message, /route\/socket reset/);
 });
 
-function pausedCheetah(overrides = {}) {
-  return {
-    user: 'Cheetah · undefined',
-    status: 'PAUSED',
-    relayExecutionMode: null,
-    relayArmedAt: null,
-    realTradingConfirmedAt: null,
-    activeParticipants: 0,
-    reconcile: null,
-    exchangeOrderAudit: null,
-    orphanOrderIds: [],
-    orphanPositionIds: [],
-    ...overrides,
-  };
-}
-
-function flatAudit(overrides = {}) {
-  return {
-    known: true,
-    activeOrderCount: 0,
-    managedActiveOrderCount: 0,
-    foreignActiveOrderCount: 0,
-    checkedAt: '2026-07-24T05:44:50.000Z',
-    ...overrides,
-  };
-}
-
-function gate(overrides = {}) {
-  return evaluateRelayFlatGate({
-    showcasePositions: 0,
-    showcasePendingOrders: 0,
-    rows: [pausedCheetah()],
-    paperTipException: false,
-    nowMs: now,
-    ...overrides,
-  });
-}
-
-test('paper tip exception is off unless the env value is exactly true', () => {
-  assert.equal(paperTipExceptionEnabled({}), false);
-  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: 'false' }), false);
-  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: '1' }), false);
-  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: 'TRUE' }), false);
-  assert.equal(paperTipExceptionEnabled({ PAPER_TIP_EXCEPTION: 'true' }), true);
-});
-
-test('paper tip exception stays fail-closed when the flag is off', () => {
-  assert.equal(gate(), 2);
-  assert.equal(gate({ paperTipException: false }), 2);
-});
-
-test('paper tip exception passes a flat paused book with null Cheetah proof', () => {
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [
-      pausedCheetah({ user: 'Viper · Canada' }),
-      pausedCheetah(),
-    ],
-  }), 0);
-});
-
-test('paper tip exception fails closed when showcase is not flat', () => {
-  assert.equal(gate({ paperTipException: true, showcasePositions: 1 }), 2);
-  assert.equal(gate({ paperTipException: true, showcasePendingOrders: 1 }), 2);
-});
-
-test('paper tip exception fails closed when relays are not paused or disarmed', () => {
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({ status: 'ACTIVE' })],
-  }), 2);
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({ relayArmedAt: '2026-08-09T00:00:00Z' })],
-  }), 2);
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({ relayExecutionMode: 'LIVE' })],
-  }), 2);
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({ realTradingConfirmedAt: '2026-08-09T00:00:00Z' })],
-  }), 2);
-  assert.equal(gate({ paperTipException: true, rows: [] }), 2);
-});
-
-test('paper tip exception does not accept a stale or partial Cheetah proof', () => {
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({
-      reconcile: rawFlat({ updatedAt: '2026-07-24T05:43:59.999Z' }),
-    })],
-  }), 2);
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({
-      exchangeOrderAudit: flatAudit({ activeOrderCount: 1 }),
-    })],
-  }), 2);
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({ orphanOrderIds: ['ord-1'] })],
-  }), 2);
-  assert.equal(gate({
-    paperTipException: true,
-    rows: [pausedCheetah({ activeParticipants: 1 })],
-  }), 2);
-});
-
-test('strict Cheetah freshness still passes when the paper tip exception is off', () => {
-  assert.equal(gate({
-    rows: [pausedCheetah({
-      reconcile: rawFlat(),
-      exchangeOrderAudit: flatAudit(),
-    })],
-  }), 0);
-});
-
 test('strict exchange order proof requires a fresh known zero-order snapshot', () => {
   const flatAudit = {
     known: true,
@@ -297,505 +327,65 @@ test('strict exchange order proof requires a fresh known zero-order snapshot', (
   );
 });
 
-const startupFailLog = [
-  '[PAPER MODE] FORCE_PAPER_MODE active: live arming and Bitfinex execution disabled',
-  'Pathway Lab startup validation FAILED — type_b=PASS tiles=PASS',
-  'ai_scan=PASS ai_scan_role=PASS v1_post_ai=FAIL sync=PASS',
-].join(' ');
-
-function bootLoopError(body = { ok: false, boot: 'starting', error: 'dashboard loading' }) {
-  const error = new Error(
-    'canonical owner state request failed after 3 attempts at '
-    + 'https://doxed-btc-bot.fly.dev/api/relay-execution-state; '
-    + 'root cause: Error: HTTP 503; check Fly /health, machine status, and public routing',
-  );
-  error.cause = new Error('HTTP 503');
-  error.cause.status = 503;
-  error.cause.body = JSON.stringify(body);
-  return error;
-}
-
-function relayEdgeError({
-  status = 502,
-  body = '',
-  url = 'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
-} = {}) {
-  const error = new Error(
-    'canonical owner state request failed after 3 attempts at '
-    + `${url}; `
-    + `root cause: Error: HTTP ${status}; check Fly /health, machine status, and public routing`,
-  );
-  error.cause = new Error(`HTTP ${status}`);
-  error.cause.status = status;
-  error.cause.body = body;
-  return error;
-}
-
-/** Boss live capture ~22:09Z: Fly edge 502, empty body. */
-function liveFlyEdge502EmptyError() {
-  return relayEdgeError({ status: 502, body: '' });
-}
-
-/** /health at the same capture: early-boot, rev 5790d091, no arm flags. */
-function liveEarlyBootHealth(overrides = {}) {
-  return {
-    ok: true,
-    boot: 'starting',
-    bot_pid: 4076,
-    dashboard_pid: 4076,
-    dashboard_port: 7002,
-    dashboard_owner: true,
-    source_git_rev: '5790d0919fc2',
-    bot_version: 'v31-five-family-score-led-paper-v1',
-    server_ts: '2026-09-27T22:09:36.144597+00:00',
-    status: 'starting',
-    ...overrides,
+test('durable recovery order proof accepts stored known zeros but rejects unknown or nonzero state', () => {
+  const stored = {
+    known: true,
+    activeOrderCount: 0,
+    managedActiveOrderCount: 0,
+    foreignActiveOrderCount: 0,
+    checkedAt: '2025-01-01T00:00:00.000Z',
   };
-}
-
-function earlyBootHealth(overrides = {}) {
-  return {
-    ok: true,
-    boot: 'starting',
-    dashboard_owner: true,
-    source_git_rev: '5790d0919fc2',
-    bot_version: 'v31-five-family-score-led-paper-v1',
-    ...overrides,
-  };
-}
-
-function pathwayDecision(overrides = {}) {
-  return evaluatePathwayLabTipException({
-    enabled: true,
-    failingRev: '5790d091',
-    relayError: bootLoopError(),
-    health: earlyBootHealth(),
-    logText: startupFailLog,
-    rows: [pausedCheetah()],
-    recoverStalled: false,
-    ...overrides,
-  });
-}
-
-test('pathway lab tip exception is off unless the env value is exactly true', () => {
-  assert.equal(pathwayLabTipExceptionEnabled({}), false);
-  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: 'false' }), false);
-  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: '1' }), false);
-  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: 'TRUE' }), false);
-  assert.equal(pathwayLabTipExceptionEnabled({ PATHWAY_LAB_TIP_EXCEPTION: 'true' }), true);
-  assert.equal(pathwayLabFailingRev({}), '');
-  assert.equal(pathwayLabFailingRev({ PATHWAY_LAB_FAILING_REV: '5790d091' }), '5790d091');
-  assert.equal(pathwayLabFailingRev({ PATHWAY_LAB_FAILING_REV: 'not-a-rev' }), '');
+  assert.equal(isCompleteStoredExchangeOrderAuditFlat(stored), true);
+  assert.equal(isCompleteStoredExchangeOrderAuditFlat({ ...stored, known: false }), false);
+  assert.equal(isCompleteStoredExchangeOrderAuditFlat({ ...stored, foreignActiveOrderCount: 1 }), false);
 });
 
-test('pathway lab tip exception passes only the proven boot-loop 503', () => {
-  const decision = pathwayDecision();
-  assert.equal(decision.pass, true);
-  assert.equal(decision.exitCode, 0);
-  assert.equal(isPathwayLabBootLoop503(bootLoopError()), true);
-  assert.equal(pathwayLabStartupFailProven(startupFailLog), true);
-  assert.equal(healthRevisionMatches(earlyBootHealth(), '5790d091'), true);
-  assert.deepEqual(paperDisarmedHealth(earlyBootHealth()), { ok: true, mode: 'early_boot' });
-});
-
-test('pathway lab tip exception stays fail-closed without the flag or the FAIL proof', () => {
-  assert.equal(pathwayDecision({ enabled: false }).pass, false);
-  assert.equal(pathwayDecision({ enabled: false }).exitCode, 1);
-  assert.equal(pathwayDecision({
-    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=PASS',
-  }).reason, 'startup FAIL proof missing');
-  assert.equal(pathwayDecision({ logText: 'v1_post_ai=FAIL' }).pass, false);
-  assert.equal(pathwayDecision({
-    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
-  }).reason, 'paper disarm log missing');
-  assert.equal(paperModeDisarmLogProven(startupFailLog), true);
-  assert.equal(pathwayDecision({ recoverStalled: true }).reason, 'recover stalled path');
-  assert.equal(pathwayDecision({ failingRev: '' }).pass, false);
-  assert.equal(pathwayDecision({
-    health: earlyBootHealth({ source_git_rev: '538a39e6c366' }),
-  }).reason, 'failing revision proof missing');
-});
-
-test('pathway lab tip exception rejects 503s that are not the boot loop', () => {
-  assert.equal(pathwayDecision({
-    relayError: bootLoopError({ ok: false, error: 'dashboard_busy' }),
-  }).reason, 'not the pathway boot-loop 503');
-  assert.equal(pathwayDecision({
-    relayError: bootLoopError({
-      api_state_error: 'canonical execution snapshot unavailable or stale',
-    }),
-  }).pass, false);
-  const timeout = new Error(
-    'canonical owner state timed out after 15000ms per attempt after 3 attempts at '
-    + 'https://doxed-btc-bot.fly.dev/api/relay-execution-state',
+test('strict proof refresh uses only the authenticated paused wake', async () => {
+  const calls = [];
+  await refreshPausedRelayAudit(
+    'https://api.example.test/',
+    'redacted-admin-secret',
+    'private-user-id',
+    async (url, options) => {
+      calls.push({ url, options });
+      return { ok: true, status: 202 };
+    },
   );
-  assert.equal(isPathwayLabBootLoop503(timeout), false);
-  assert.equal(pathwayDecision({ relayError: timeout }).pass, false);
-});
-
-test('pathway lab tip exception fails closed when the owner is armed or not paper', () => {
-  assert.equal(pathwayDecision({
-    health: {
-      live_armed: true,
-      force_paper_mode: true,
-      bitfinex_live_enabled: false,
-      source_git_rev: '5790d0919fc2',
-    },
-  }).reason, 'paper-disarmed proof missing (live_armed)');
-  assert.equal(pathwayDecision({
-    health: {
-      live_armed: false,
-      force_paper_mode: false,
-      bitfinex_live_enabled: false,
-      source_git_rev: '5790d0919fc2',
-    },
-  }).reason, 'paper-disarmed proof missing (not_paper)');
-  assert.equal(pathwayDecision({
-    health: {
-      live_armed: false,
-      force_paper_mode: true,
-      bitfinex_live_enabled: true,
-      git_rev: '5790d0919fc2',
-    },
-  }).reason, 'paper-disarmed proof missing (bitfinex_live)');
-  assert.deepEqual(paperDisarmedHealth({
-    live_armed: false,
-    force_paper_mode: true,
-    bitfinex_live_enabled: false,
-  }), { ok: true, mode: 'explicit' });
-  assert.equal(pathwayDecision({
-    health: {
-      live_armed: false,
-      force_paper_mode: true,
-      bitfinex_live_enabled: false,
-      source_git_rev: '5790d0919fc2',
-    },
-    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
-  }).pass, true);
-});
-
-test('pathway lab tip exception still requires paused disarmed relays', () => {
-  assert.equal(pathwayDecision({
-    rows: [pausedCheetah({ status: 'ACTIVE' })],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({
-    rows: [pausedCheetah({ relayArmedAt: '2026-08-09T00:00:00Z' })],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({
-    rows: [pausedCheetah({ relayExecutionMode: 'LIVE' })],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({
-    rows: [pausedCheetah({ activeParticipants: 1 })],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({
-    rows: [pausedCheetah({ orphanOrderIds: ['ord-1'] })],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({ rows: [] }).exitCode, 2);
-});
-
-test('fly log text keeps the pathway startup FAIL line', () => {
-  const text = collectFlyLogText({
-    data: [{ attributes: { message: startupFailLog } }],
-  });
-  assert.equal(pathwayLabStartupFailProven(text), true);
-  assert.equal(collectFlyLogText({ data: [] }), '');
-});
-
-test('fly logs 401 is the only logs failure that can use the alternate proof', () => {
-  assert.equal(flyLogsReadUnauthorized({ status: 401 }), true);
-  assert.equal(flyLogsReadUnauthorized(Object.assign(new Error('fly logs HTTP 401'), { status: 401 })), true);
-  assert.equal(flyLogsReadUnauthorized({ status: 403, body: 'token unauthorized' }), true);
-  assert.equal(flyLogsReadUnauthorized({ status: 403, body: 'Forbidden' }), false);
-  assert.equal(flyLogsReadUnauthorized({ status: 500, message: 'fly logs HTTP 500' }), false);
-  assert.equal(flyLogsReadUnauthorized(new Error('fly logs HTTP 404')), false);
+  assert.equal(calls.length, 1);
   assert.equal(
-    flyLogsReadUnauthorized(new Error('PATHWAY_LAB_TIP_EXCEPTION requires FLY_API_TOKEN to prove the startup FAIL')),
-    false,
+    calls[0].url,
+    'https://api.example.test/trading-agents/conservative-btc/ops/refresh-flat-audit',
   );
-  assert.equal(pathwayLabEncodedStartupFail(earlyBootHealth()).present, false);
-  assert.equal(pathwayLabEncodedStartupFail({ v1_post_ai: 'FAIL' }).fail, true);
-  assert.equal(pathwayLabEncodedStartupFail({ independent_v1_post_ai_spawn: 'PASS' }).fail, false);
-  assert.equal(
-    pathwayLabEncodedStartupFail([startupFailLog]).fail,
-    true,
+  assert.equal(calls[0].options.method, 'POST');
+  assert.equal(calls[0].options.headers['x-bot-admin-token'], 'redacted-admin-secret');
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    userId: 'private-user-id', confirmation: 'REFRESH_PAUSED_FLAT_AUDIT',
+  });
+});
+
+test('strict proof refresh fails closed without HTTPS auth or acknowledgement', async () => {
+  await assert.rejects(refreshPausedRelayAudit('', 'secret', 'user'), /requires authenticated/);
+  await assert.rejects(
+    refreshPausedRelayAudit('http://api.internal', 'secret', 'user'),
+    /requires an HTTPS platform API URL/,
+  );
+  await assert.rejects(
+    refreshPausedRelayAudit(
+      'https://api.example.test', 'secret', 'user', async () => ({ ok: false, status: 401 }),
+    ),
+    /refresh failed HTTP 401/,
   );
 });
 
-test('pathway lab tip exception accepts a complete 401 alternate proof without fly logs', () => {
-  const decision = pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-  });
-  assert.equal(decision.pass, true);
-  assert.equal(decision.exitCode, 0);
-  assert.equal(decision.reason, 'pathway lab 401 alternate proof');
-  const encoded = pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    health: earlyBootHealth({ v1_post_ai: 'FAIL' }),
-  });
-  assert.equal(encoded.pass, true);
-  assert.equal(encoded.reason, 'pathway lab 401 alternate proof with encoded v1_post_ai=FAIL');
-  const artifact = pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    failArtifacts: [startupFailLog],
-  });
-  assert.equal(artifact.pass, true);
-  assert.equal(artifact.reason, 'pathway lab 401 alternate proof with encoded v1_post_ai=FAIL');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    health: {
-      live_armed: false,
-      force_paper_mode: true,
-      bitfinex_live_enabled: false,
-      source_git_rev: '5790d0919fc2',
-    },
-  }).pass, true);
-});
-
-test('pathway lab tip exception stays fail-closed when the 401 alternate proof is incomplete', () => {
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: false,
-  }).reason, 'startup FAIL proof missing');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    enabled: false,
-  }).reason, 'flag off');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    recoverStalled: true,
-  }).reason, 'recover stalled path');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    relayError: bootLoopError({ ok: false, error: 'dashboard_busy' }),
-  }).reason, 'not the pathway boot-loop 503');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    failingRev: '',
-  }).reason, 'failing revision proof missing');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    health: earlyBootHealth({ source_git_rev: '538a39e6c366' }),
-  }).reason, 'failing revision proof missing');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    health: earlyBootHealth({ live_armed: true }),
-  }).reason, 'paper-disarmed proof missing (live_armed)');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    health: earlyBootHealth({ v1_post_ai: 'PASS' }),
-  }).reason, 'startup FAIL proof contradicted');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    failArtifacts: ['Pathway Lab startup validation FAILED — v1_post_ai=PASS'],
-  }).reason, 'startup FAIL proof contradicted');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    rows: [pausedCheetah({ status: 'ACTIVE' })],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    rows: [pausedCheetah({ relayArmedAt: '2026-08-09T00:00:00Z' })],
-  }).reason, 'relays are not paused and disarmed');
-  assert.equal(pathwayDecision({
-    logText: '',
-    logsUnauthorized: true,
-    rows: [],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({
-    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
-    logsUnauthorized: false,
-  }).reason, 'paper disarm log missing');
-});
-
-test('pathway lab 401 alternate accepts the live Fly-edge 502 empty body with early-boot health', () => {
-  const relayError = liveFlyEdge502EmptyError();
-  assert.equal(isPathwayLabBootLoop503(relayError), true);
-  assert.equal(relayError.cause.status, 502);
-  assert.equal(relayError.cause.body, '');
-  const decision = pathwayDecision({
-    relayError,
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-  });
-  assert.equal(decision.pass, true);
-  assert.equal(decision.exitCode, 0);
-  assert.equal(decision.reason, 'pathway lab 401 alternate proof');
-  assert.equal(paperDisarmedHealth(liveEarlyBootHealth()).mode, 'early_boot');
-  assert.equal(healthRevisionMatches(liveEarlyBootHealth(), '5790d091'), true);
-  const encoded = pathwayDecision({
-    relayError,
-    health: liveEarlyBootHealth({ v1_post_ai: 'FAIL' }),
-    logText: '',
-    logsUnauthorized: true,
-  });
-  assert.equal(encoded.pass, true);
-  assert.equal(encoded.reason, 'pathway lab 401 alternate proof with encoded v1_post_ai=FAIL');
-  assert.equal(pathwayDecision({
-    relayError,
-    health: liveEarlyBootHealth(),
-    logText: startupFailLog,
-    logsUnauthorized: false,
-  }).reason, 'pathway lab boot-loop tip');
-});
-
-test('pathway lab boot loop still accepts app 503 JSON and an empty edge 503', () => {
-  const restoring = bootLoopError({
-    boot: 'starting',
-    error: 'dashboard state is restoring',
-    ok: false,
-  });
-  assert.equal(isPathwayLabBootLoop503(restoring), true);
-  assert.equal(pathwayDecision({
-    relayError: restoring,
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-  }).pass, true);
-  const empty503 = relayEdgeError({ status: 503, body: '' });
-  assert.equal(isPathwayLabBootLoop503(empty503), true);
-  assert.equal(pathwayDecision({
-    relayError: empty503,
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-  }).reason, 'pathway lab 401 alternate proof');
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 503, body: '   ' })), true);
-});
-
-test('pathway lab boot loop stays fail-closed on non-edge bodies and other statuses', () => {
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 502, body: 'Bad Gateway' })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 502,
-    body: '<html><title>502 Bad Gateway</title></html>',
-  })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 502,
-    body: JSON.stringify({ ok: false, boot: 'starting', error: 'dashboard loading' }),
-  })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 200, body: '' })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 200,
-    body: JSON.stringify({ ok: true, boot: 'ready', positions: [], orders: [] }),
-  })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 500, body: '' })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({ status: 504, body: '' })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 503,
-    body: '<html><title>503 Service Unavailable</title></html>',
-  })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 503,
-    body: JSON.stringify({ ok: false, boot: 'ready', error: 'dashboard loading' }),
-  })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 503,
-    body: JSON.stringify({ ok: false, boot: 'starting', error: 'dashboard_busy' }),
-  })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 503,
-    body: JSON.stringify({
-      api_state_error: 'canonical execution snapshot unavailable or stale',
-    }),
-  })), false);
-  assert.equal(isPathwayLabBootLoop503(relayEdgeError({
-    status: 502,
-    body: '',
-    url: 'https://doxed-btc-bot.fly.dev/health',
-  })), false);
-  assert.equal(pathwayDecision({
-    relayError: relayEdgeError({ status: 200, body: '' }),
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-  }).reason, 'not the pathway boot-loop 503');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth({ source_git_rev: '538a39e6c366' }),
-    logText: '',
-    logsUnauthorized: true,
-  }).reason, 'failing revision proof missing');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth({ live_armed: true }),
-    logText: '',
-    logsUnauthorized: true,
-  }).reason, 'paper-disarmed proof missing (live_armed)');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth({
-      live_armed: false,
-      force_paper_mode: false,
-      bitfinex_live_enabled: false,
-    }),
-    logText: '',
-    logsUnauthorized: true,
-  }).reason, 'paper-disarmed proof missing (not_paper)');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth({ v1_post_ai: 'PASS' }),
-    logText: '',
-    logsUnauthorized: true,
-  }).reason, 'startup FAIL proof contradicted');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-    recoverStalled: true,
-  }).reason, 'recover stalled path');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-    enabled: false,
-  }).reason, 'flag off');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: false,
-  }).reason, 'startup FAIL proof missing');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth(),
-    logText: 'Pathway Lab startup validation FAILED — v1_post_ai=FAIL',
-    logsUnauthorized: false,
-  }).reason, 'paper disarm log missing');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-    rows: [pausedCheetah({ status: 'ACTIVE' })],
-  }).exitCode, 2);
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-    rows: [pausedCheetah({ orphanOrderIds: ['ord-1'] })],
-  }).reason, 'relays are not paused and disarmed');
-  assert.equal(pathwayDecision({
-    relayError: liveFlyEdge502EmptyError(),
-    health: liveEarlyBootHealth(),
-    logText: '',
-    logsUnauthorized: true,
-    rows: [],
-  }).exitCode, 2);
+test('guarded deploy uses the public API and no unreachable private executor secrets', () => {
+  const workflow = fs.readFileSync(
+    new URL('../.github/workflows/fly-bot-deploy.yml', import.meta.url),
+    'utf8',
+  );
+  const strictStep = workflow.slice(
+    workflow.indexOf('Prove the current Fly owner and every relay account are flat'),
+    workflow.indexOf('Prove exact unready Fly revision'),
+  );
+  assert.match(strictStep, /PLATFORM_API_URL: "https:\/\/doxed-founders-website-production\.up\.railway\.app\/api"/);
+  assert.doesNotMatch(strictStep, /RELAY_EXECUTOR_WAKE_URL|BOT_CONTROL_SECRET/);
 });

@@ -23,6 +23,12 @@ import {
 import { BitfinexAuthTradeStream } from '../exchanges/bitfinex-auth-trade-stream';
 import {
   SignalSubscriberExecutionService,
+  relayExecutorPollDelayMs,
+  PERSISTED_WAKE_ACTIVE_POLL_MS,
+  PERSISTED_WAKE_PAUSED_POLL_MS,
+  PERSISTED_WAKE_IDLE_POLL_MS,
+  RECONCILIATION_PAUSED_POLL_MS,
+  RECONCILIATION_IDLE_POLL_MS,
   stableRelayFeeModel,
   stableRelayExecutionProfile,
   isCanonicalDuplicateEntry,
@@ -111,62 +117,65 @@ import {
   resolveEffectiveStopLossMarginPct,
   isDeterministicBitfinexSubmitRejection,
   desiredLiveCopyCoordinationState,
-  relayExecutorPollDelayMs,
-  PERSISTED_WAKE_ACTIVE_POLL_MS,
-  PERSISTED_WAKE_PAUSED_POLL_MS,
-  PERSISTED_WAKE_IDLE_POLL_MS,
-  RECONCILIATION_PAUSED_POLL_MS,
-  RECONCILIATION_IDLE_POLL_MS,
-  buildQuiescentRelayExecutorReceipt,
 } from './signal-subscriber-execution.service';
 
-test('quiescent receipt is an explicit healthy paused-flat terminal state', () => {
-  const receipt = buildQuiescentRelayExecutorReceipt({
-    healthy: false, status: 'STARTING', running: true, tickStartedAt: null,
-    lastTickCompletedAt: null, lastTickDurationMs: null, currentInstanceId: 'i',
-    currentStage: 'PERSIST_PAUSED_CAPACITY', heartbeatAgeMs: null, runningForMs: 1,
-    timeoutMs: 60_000, timeoutCount: 0, ownerId: 'owner', sourceRevision: 'a'.repeat(40),
-    executionEnabled: true,
-  });
-  assert.equal(receipt.status, 'IDLE');
-  assert.equal(receipt.healthy, true);
-  assert.equal(receipt.terminalState, 'QUIESCENT');
-  assert.equal(receipt.paused, true);
-  assert.equal(receipt.flatExposure, true);
-  assert.equal(receipt.currentStage, null);
-});
-
-test('executor stops recurring Neon polling only when disarmed and flat', () => {
+test('relay executor polling keeps direct wake latency separate from Neon backstops', () => {
+  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'ACTIVE'), PERSISTED_WAKE_ACTIVE_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'PAUSED'), PERSISTED_WAKE_PAUSED_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'IDLE'), PERSISTED_WAKE_IDLE_POLL_MS);
   assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'ACTIVE', 800), 800);
-  assert.equal(relayExecutorPollDelayMs('PERSISTED_WAKE', 'ACTIVE', 800), PERSISTED_WAKE_ACTIVE_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'PAUSED', 800), RECONCILIATION_PAUSED_POLL_MS);
+  assert.equal(relayExecutorPollDelayMs('RECONCILIATION', 'IDLE', 800), RECONCILIATION_IDLE_POLL_MS);
+  assert.ok(PERSISTED_WAKE_ACTIVE_POLL_MS > 250, 'Neon fallback must not regress to 4 Hz');
   assert.equal(PERSISTED_WAKE_PAUSED_POLL_MS, null);
   assert.equal(PERSISTED_WAKE_IDLE_POLL_MS, null);
   assert.equal(RECONCILIATION_PAUSED_POLL_MS, null);
   assert.equal(RECONCILIATION_IDLE_POLL_MS, null);
 });
 
-test('executor retains startup recovery and explicit wake re-arming without interval pollers', () => {
+test('public API pause audit wake uses private dispatch plus durable fallback', () => {
   const source = readFileSync(
-    resolve(__dirname, './signal-subscriber-execution.service.ts'),
+    resolve(__dirname, 'signal-subscriber-execution.service.ts'),
     'utf8',
   );
+  const start = source.indexOf('async requestExecutorWake(');
+  const end = source.indexOf('requestExecutorPreWake(', start);
+  const method = source.slice(start, end);
+  assert.match(method, /void this\.dispatchDirectExecutorWake\(payload\)/);
+  assert.match(method, /\{ \[RELAY_EXECUTOR_WAKE_KEY\]: payload \}/);
+  assert.match(method, /status: \{ in: \[TradingAgentInstanceStatus\.ACTIVE, TradingAgentInstanceStatus\.PAUSED\] \}/);
+});
+
+test('persisted wake backstop projects JSON in Postgres and never reinstates a 250ms full-state loop', () => {
+  const source = readFileSync(
+    resolve(__dirname, 'signal-subscriber-execution.service.ts'),
+    'utf8',
+  );
+  assert.doesNotMatch(source, /setInterval\(\(\) => void this\.pollPersistedFastWake\(\),\s*250\)/);
+  assert.match(source, /i\."dashboardState"\s*->\s*\$\{RELAY_EXECUTOR_WAKE_KEY\}\s+AS\s+"wake"/);
+  assert.match(source, /this\.prisma\.\$queryRaw<WakeProjectionRow\[\]>/);
+  assert.match(source, /this\.prisma\.\$executeRaw/);
+  assert.match(source, /"dashboardState"\s*=\s*COALESCE\("dashboardState", '\{\}'::jsonb\)\s*-\s*\$\{RELAY_EXECUTOR_WAKE_KEY\}/);
+  const wakePollSource = source.slice(
+    source.indexOf('private async consumePersistedExecutorWakes'),
+    source.indexOf('/** Cross-process signed-webhook fast lane'),
+  );
+  assert.doesNotMatch(wakePollSource, /select:\s*\{\s*id:\s*true,\s*dashboardState:\s*true/);
+  assert.doesNotMatch(wakePollSource, /dashboardState[^\n]*::boolean/);
+  assert.match(source, /delayMs == null \|\| this\.reconciliationTimer/);
+  assert.match(source, /delayMs == null \|\| this\.persistedWakeTimer/);
   const moduleInitSource = source.slice(
     source.indexOf('onModuleInit()'),
     source.indexOf('onModuleDestroy()', source.indexOf('onModuleInit()')),
   );
   assert.match(moduleInitSource, /this\.scheduleReconciliation\(POLL_MS\)/);
   assert.match(moduleInitSource, /this\.schedulePersistedWakePoll\(PERSISTED_WAKE_ACTIVE_POLL_MS\)/);
-  assert.doesNotMatch(moduleInitSource, /setInterval\(\(\) => void this\.tick/);
-  assert.doesNotMatch(moduleInitSource, /setInterval\(\(\) => void this\.pollPersistedFastWake/);
   const wakeNowSource = source.slice(
     source.indexOf('async wakeNow('),
     source.indexOf('/**\n   * F7', source.indexOf('async wakeNow(')),
   );
   assert.match(wakeNowSource, /this\.scheduleReconciliation\(POLL_MS\)/);
   assert.match(wakeNowSource, /this\.schedulePersistedWakePoll\(PERSISTED_WAKE_ACTIVE_POLL_MS\)/);
-  assert.match(source, /armedOrSimActive \|\| exposure\s*\? 'ACTIVE'/);
-  assert.match(source, /delayMs == null \|\| this\.reconciliationTimer/);
-  assert.match(source, /delayMs == null \|\| this\.persistedWakeTimer/);
 });
 
 test('Scenario C exchange stop promotion defaults on and requires an explicit rollback to disable', () => {
@@ -359,16 +368,16 @@ test('decimal-like terminal fill prices remain finite for partial-close P&L acco
 
 test('exact showcase quantity is preserved below the subscriber cap', () => {
   const result = resolveExactShowcaseEntryQty({
-    exactQtyBtc: 0.02361832782239017,
-    maxMarginUsd: 20,
+    exactQtyBtc: 20 / 63_614.55,
+    maxMarginUsd: 0.2,
     leverage: 100,
     limitPrice: 63_614.55,
   });
   assert.deepEqual(result, {
     ok: true,
-    qty: 0.02361,
-    requiredMarginUsd: 0.02361 * 63_614.55 / 100,
-    capQty: 0.03143,
+    qty: 0.00031,
+    requiredMarginUsd: 0.00031 * 63_614.55 / 100,
+    capQty: 0.00031,
   });
 });
 
@@ -453,7 +462,7 @@ test('exact showcase quantity exceeding the subscriber cap is blocked, never res
   assert.deepEqual(
     resolveExactShowcaseEntryQty({
       exactQtyBtc: 0.03143,
-      maxMarginUsd: 15,
+      maxMarginUsd: 0.2,
       leverage: 100,
       limitPrice: 63_614.55,
     }),
@@ -462,7 +471,7 @@ test('exact showcase quantity exceeding the subscriber cap is blocked, never res
   assert.deepEqual(
     resolveExactShowcaseEntryQty({
       exactQtyBtc: null,
-      maxMarginUsd: 20,
+      maxMarginUsd: 0.2,
       leverage: 100,
       limitPrice: 63_614.55,
     }),
@@ -470,23 +479,23 @@ test('exact showcase quantity exceeding the subscriber cap is blocked, never res
   );
 });
 
-test('exact showcase quantity allows only the deterministic anchor margin overhead', () => {
+test('exact showcase quantity is deterministically floored under the strict signed margin ceiling', () => {
   const canonical = resolveExactShowcaseEntryQty({
-    exactQtyBtc: 0.03143566690767344,
-    maxMarginUsd: 20,
+    exactQtyBtc: 25 / 63_685.62,
+    maxMarginUsd: 0.25,
     leverage: 100,
     limitPrice: 63_685.62,
   });
   assert.deepEqual(canonical, {
     ok: true,
-    qty: 0.03143,
-    requiredMarginUsd: 0.03143 * 63_685.62 / 100,
-    capQty: 0.0314,
+    qty: 0.00039,
+    requiredMarginUsd: 0.00039 * 63_685.62 / 100,
+    capQty: 0.00039,
   });
   assert.deepEqual(
     resolveExactShowcaseEntryQty({
-      exactQtyBtc: 0.03148,
-      maxMarginUsd: 20,
+      exactQtyBtc: 0.0004,
+      maxMarginUsd: 0.25,
       leverage: 100,
       limitPrice: 63_685.62,
     }),
@@ -547,14 +556,14 @@ test('correlated exposure uses an inclusive normalized 9 bps boundary', () => {
   const candidate = {
     participantId: 'candidate', cycleId: 'candidate-cycle', tradeId: 'cont-candidate',
     direction: 'SHORT' as const, limitPrice: 100_000, createdAtMs: 2_000,
-    qty: 0.01, marginUsd: 20,
+    qty: 0.0001, marginUsd: 0.25,
   };
   const assessDistance = (distanceUsd: number) => assessCorrelatedExposureCluster({
     candidate,
     active: [candidate, {
       participantId: 'existing', cycleId: 'existing-cycle', tradeId: 'cont-existing',
       direction: 'SHORT', limitPrice: 100_000 + distanceUsd, createdAtMs: 1_000,
-      qty: 0.02, marginUsd: 30,
+      qty: 0.0002, marginUsd: 0.25,
     }],
     riskStateAvailable: true,
   });
@@ -564,19 +573,19 @@ test('correlated exposure uses an inclusive normalized 9 bps boundary', () => {
   assert.equal(inclusive.reason, 'SAME_DIRECTION_PRICE_CLUSTER');
   assert.equal(inclusive.nearest?.priceDistanceUsd, 90);
   assert.equal(inclusive.nearest?.priceDistanceFraction, 0.0009);
-  assert.equal(inclusive.aggregateQty, 0.03);
-  assert.equal(inclusive.aggregateMarginUsd, 50);
+  assert.equal(inclusive.aggregateQty, 0.00030000000000000003);
+  assert.equal(inclusive.aggregateMarginUsd, 0.5);
   assert.equal(assessDistance(90.1).allowed, true); // 0.0901%
 });
 
 test('correlated exposure boundary ignores opposite direction and fails closed without risk state', () => {
   const candidate = {
     participantId: 'p4', cycleId: 'c4', tradeId: 'cont-4', direction: 'LONG' as const,
-    limitPrice: 64_000, createdAtMs: 4_000, qty: 0.01, marginUsd: 20,
+    limitPrice: 64_000, createdAtMs: 4_000, qty: 0.0001, marginUsd: 0.25,
   };
   const shorts = [1, 2, 3].map((n) => ({
     participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction: 'SHORT' as const,
-    limitPrice: 64_000 + n, createdAtMs: 1_000 * n, qty: 0.01, marginUsd: 20,
+    limitPrice: 64_000 + n, createdAtMs: 1_000 * n, qty: 0.0001, marginUsd: 0.25,
   }));
   assert.equal(assessCorrelatedExposureCluster({
     candidate, active: [...shorts, candidate], riskStateAvailable: true,
@@ -584,6 +593,25 @@ test('correlated exposure boundary ignores opposite direction and fails closed w
   const unknown = assessCorrelatedExposureCluster({ candidate, active: [], riskStateAvailable: false });
   assert.equal(unknown.allowed, false);
   assert.equal(unknown.reason, 'RISK_STATE_UNAVAILABLE');
+});
+
+test('aggregate copy exposure fails closed above five dollars margin and 500 dollars notional', () => {
+  const candidate = {
+    participantId: 'candidate', cycleId: 'candidate-cycle', tradeId: 'candidate-trade',
+    direction: 'LONG' as const, limitPrice: 64_000, createdAtMs: 21_000,
+    qty: 0.00039, marginUsd: 0.25,
+  };
+  const active = Array.from({ length: 20 }, (_, index) => ({
+    participantId: `p-${index}`, cycleId: `c-${index}`, tradeId: `t-${index}`,
+    direction: (index % 2 ? 'SHORT' : 'LONG') as 'LONG' | 'SHORT',
+    limitPrice: 60_000 + index * 1_000, createdAtMs: index * 1_000,
+    qty: 0.00039, marginUsd: 0.25,
+  }));
+  const result = assessCorrelatedExposureCluster({ candidate, active, riskStateAvailable: true });
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, 'AGGREGATE_MARGIN_CEILING');
+  assert.equal(result.aggregateMarginUsd, 5.25);
+  assert.equal(result.aggregateNotionalUsd, 525);
 });
 
 test('entry claim and correlated boundary snapshot are serialized by one database transaction', () => {
@@ -626,7 +654,7 @@ test('concurrent serialized nearby claims reserve the lane before exchange submi
     const run = advisoryLane.then(() => {
       const candidate = {
         participantId: `p${n}`, cycleId: `c${n}`, tradeId: `cont-${n}`, direction: 'SHORT' as const,
-        limitPrice: 64_000 + n, createdAtMs: n * 1_000, qty: 0.01, marginUsd: 20,
+        limitPrice: 64_000 + n, createdAtMs: n * 1_000, qty: 0.00039, marginUsd: 0.25,
       };
       active.push(candidate);
       return assessCorrelatedExposureCluster({ candidate, active: [...active], riskStateAvailable: true });
@@ -644,7 +672,7 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
   const createdAt = new Date(now);
   const dashboardState = {
     relayExecutionMode: 'LIVE',
-    relayPolicyVersion: 'continuous_only_v5',
+    relayPolicyVersion: 'two_lane_explicit_v6',
     realTradingConfirmedAt: new Date(now - 2_000).toISOString(),
     relayArmedAt: new Date(now - 1_000).toISOString(),
   };
@@ -666,10 +694,10 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
     entry: {
       type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0,
       exact_limit_price: 63_614.55,
-      exact_qty_btc: 0.02361832782239017,
+      exact_qty_btc: 25 / 63_614.55,
       reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1_800,
     },
-    risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+    risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     context: {
       regime: 'UNKNOWN', edge: 0, ai_win_prob: 0,
       entry_mode_source: 'test', entry_limit_policy: 'micro_sr_structural_limit_v1',
@@ -727,18 +755,18 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
     'cycle-exact-qty',
     envelope,
     { apiKey: 'redacted', apiSecret: 'redacted' },
-    20,
+    0.25,
     'cont-e0ac7001',
     'bitfinex',
     { availableUsd: 100, markPrice: 63_620, exchangeBookProvenEmpty: true },
   );
   assert.equal(placed, true);
   assert.equal(submitted.length, 1);
-  assert.equal(submitted[0].qty, 0.02361);
-  assert.notEqual(submitted[0].qty, 0.03143);
-  assert.equal(events.at(-1)?.source_exact_qty_btc, 0.02361832782239017);
-  assert.equal(events.at(-1)?.venue_qty_btc, 0.02361);
-  assert.equal(events.at(-1)?.margin_cap_usd, 20);
+  assert.equal(submitted[0].qty, 0.00039);
+  assert.notEqual(submitted[0].qty, 0.0004);
+  assert.equal(events.at(-1)?.source_exact_qty_btc, 25 / 63_614.55);
+  assert.equal(events.at(-1)?.venue_qty_btc, 0.00039);
+  assert.equal(events.at(-1)?.margin_cap_usd, 0.25);
 });
 
 test('market catch-up money path also submits the exact showcase position quantity', async () => {
@@ -776,7 +804,7 @@ test('market catch-up money path also submits the exact showcase position quanti
   };
   service.resolveExchangeTradesFillEvidence = async () => ({
     price: 63_620,
-    qty: 0.02361,
+    qty: 0.00039,
     fillIds: [501],
     fees: [],
     firstExecutedAtMs: 1,
@@ -795,24 +823,24 @@ test('market catch-up money path also submits the exact showcase position quanti
     {
       direction: 'SHORT',
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
-      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
     { apiKey: 'redacted', apiSecret: 'redacted' },
-    20,
+    0.25,
     'cont-catchup-exact',
     63_614.55,
-    0.02361832782239017,
+    25 / 63_614.55,
     63_620,
     5.45,
   );
 
   assert.equal(placed, true);
   assert.equal(submitted.length, 1);
-  assert.equal(submitted[0].qty, 0.02361);
-  assert.notEqual(submitted[0].qty, 0.03143);
-  assert.equal(events[0].source_exact_qty_btc, 0.02361832782239017);
-  assert.equal(events[0].venue_qty_btc, 0.02361);
-  assert.equal(events[0].margin_cap_usd, 20);
+  assert.equal(submitted[0].qty, 0.00039);
+  assert.notEqual(submitted[0].qty, 0.0004);
+  assert.equal(events[0].source_exact_qty_btc, 25 / 63_614.55);
+  assert.equal(events[0].venue_qty_btc, 0.00039);
+  assert.equal(events[0].margin_cap_usd, 0.25);
 });
 
 test('market catch-up accepted-timeout retains its durable claim and pauses for exact CID recovery', async () => {
@@ -854,10 +882,10 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
     {
       direction: 'SHORT',
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
-      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 20, 'cont-catchup-timeout', 63_614.55,
-    0.02361832782239017, 63_620, 5.45,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-timeout', 63_614.55,
+    25 / 63_614.55, 63_620, 5.45,
   );
 
   assert.equal(placed, false);
@@ -914,10 +942,10 @@ test('market catch-up cannot promote FILLED when exact durable stop protection f
     {
       direction: 'SHORT',
       entry: { type: 'LIMIT', mode: 'EXACT_LIMIT', offset_pct: 0, reference: 'SHOWCASE_EXACT_LIMIT', ttl_sec: 1800 },
-      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 20 },
+      risk: { stop_loss_margin_pct: -18, take_profit_ladder: [], leverage_hint: 100, max_margin_usd: 0.25 },
     },
-    { apiKey: 'redacted', apiSecret: 'redacted' }, 20, 'cont-catchup-stop-fail', 63_614.55,
-    0.02361832782239017, 63_620, 5.45,
+    { apiKey: 'redacted', apiSecret: 'redacted' }, 0.25, 'cont-catchup-stop-fail', 63_614.55,
+    25 / 63_614.55, 63_620, 5.45,
   );
 
   assert.equal(placed, false);
@@ -980,7 +1008,13 @@ test('processInstance restart recovers a stale INTENT exact CID before any recla
   let deleted = 0;
   let placed = 0;
   service.logger = { log() {}, warn() {}, error() {} };
-  service.exchanges = { getUserCredentials: async () => ({ apiKey: 'k', apiSecret: 's' }) };
+  service.exchanges = {
+    resolveUserCredentials: async () => ({
+      ok: true,
+      code: 'OK',
+      credentials: { apiKey: 'k', apiSecret: 's' },
+    }),
+  };
   service.prisma = {
     platformSettings: { findUnique: async () => null },
     tradingAgentInstance: {
@@ -2448,7 +2482,7 @@ test('signed LIMIT_UPDATED fast wake reprices only its exact owned pending order
     status: TradingAgentInstanceStatus.ACTIVE,
     dashboardState: {
       relayExecutionMode: 'LIVE',
-      relayPolicyVersion: 'continuous_only_v5',
+      relayPolicyVersion: 'two_lane_explicit_v6',
       realTradingConfirmedAt: new Date().toISOString(),
     },
   };
@@ -5702,16 +5736,16 @@ test('META_QTY_REPAIR appends only while its exact participant is nonterminal', 
   service.logger = { warn() {}, debug() {} };
   const intent = {
     direction: 'SHORT',
-    entry: { mode: 'EXACT_LIMIT', exact_limit_price: 64_000, exact_qty_btc: 0.02 },
-    risk: { max_margin_usd: 20, leverage_hint: 100 },
+    entry: { mode: 'EXACT_LIMIT', exact_limit_price: 64_000, exact_qty_btc: 0.00039 },
+    risk: { max_margin_usd: 0.25, leverage_hint: 100 },
   };
   const terminalMeta = await service.resolveLotMeta(
-    'participant', 'cycle', 'user', 'agent', intent, 20,
+    'participant', 'cycle', 'user', 'agent', intent, 0.25,
   );
-  assert.equal(terminalMeta.qty, 0.02);
+  assert.equal(terminalMeta.qty, 0.00039);
   assert.equal(events.length, 0);
   status = SignalCycleStatus.PENDING_ENTRY;
-  await service.resolveLotMeta('participant', 'cycle', 'user', 'agent', intent, 20);
+  await service.resolveLotMeta('participant', 'cycle', 'user', 'agent', intent, 0.25);
   assert.equal(events.length, 1);
   assert.equal((events[0] as unknown[])[3], 'UPDATE_STOPS');
   assert.equal(((events[0] as unknown[])[4] as { event: string }).event, 'META_QTY_REPAIR');

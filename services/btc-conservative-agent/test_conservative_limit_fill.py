@@ -1,13 +1,28 @@
 import importlib.util
 from pathlib import Path
+import sys
 
 
 MODULE = Path(__file__).parent / "research" / "conservative_limit_fill.py"
+sys.path.insert(0, str(MODULE.parent))
 spec = importlib.util.spec_from_file_location("conservative_limit_fill", MODULE)
 mod = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 spec.loader.exec_module(mod)
-evaluate = mod.evaluate_limit_fill
+_evaluate = mod.evaluate_limit_fill
+from quantity_execution import build_signed_quantity_constraints
+
+SIGNED_CONSTRAINTS = build_signed_quantity_constraints(
+    symbol="BTC", quantity_step="0.000000000000000001", quantity_precision=18,
+    min_lot="0.000000000000000001", min_notional="0.000000000000000001",
+    captured_at="2026-08-30T00:00:00Z", source_revision="test-revision",
+    source="TEST_FIXTURE",
+)
+
+
+def evaluate(*args, **kwargs):
+    kwargs.setdefault("quantity_constraints", SIGNED_CONSTRAINTS)
+    return _evaluate(*args, **kwargs)
 
 
 def row(ts, *, bid=99, ask=101, bid_qty=2, ask_qty=2, buy_qty=0, sell_qty=0,
@@ -35,6 +50,23 @@ def test_long_side_correct_full_fill():
     assert got["chase_bucket_id"] == "chase_3"
     assert got["fill_price"] == 100
     assert got["queue_position_model"] == "NONE"
+    assert got["fill_latency_sec"] == 2
+    assert got["price_concession_per_unit"] == 0
+    assert got["slippage_usd"] == 0
+
+
+def test_fill_latency_and_limit_price_concession_are_explicit():
+    rows = [row(100), row(101), row(102, ask=100, ask_qty=2)]
+    got = evaluate(
+        rows, direction="LONG", requested_qty=.4,
+        chase_schedule=schedule(limit=101, end=103), symbol="BTC",
+    )
+    assert got["outcome"] == "FILL"
+    assert got["fill_latency_sec"] == 2
+    assert got["price_concession_per_unit"] == 1
+    assert got["slippage_usd"] == .4
+    assert got["missed_entry_cost_usd"] is None
+    assert got["missed_entry_cost_basis"] == "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON"
 
 
 def test_short_side_correct_full_fill():
@@ -79,6 +111,8 @@ def test_gap_and_stale_fail_closed():
     assert got["outcome"] == "UNSUPPORTED"
     assert "EVIDENCE_GAP" in got["negative_reasons"]
     assert "STALE_EVIDENCE_BUCKET" in got["negative_reasons"]
+    assert got["fill_latency_sec"] is None
+    assert got["slippage_usd"] is None
 
 
 def test_chase_interval_is_authoritative_and_reported():
@@ -151,3 +185,28 @@ def test_marketable_bbo_thin_depth_is_partial_without_print():
     assert got["filled_qty"] == .125
     assert got["remaining_qty"] == .875
     assert got["aggressor_corroborated"] is False
+
+
+def test_distinct_reprice_intervals_do_not_double_count_displayed_liquidity():
+    sched = (
+        schedule(limit=100, start=100, end=103, bucket="chase_3")
+        + schedule(limit=101, start=103, end=106, bucket="chase_4")
+    )
+    rows = [
+        row(100), row(101), row(102, ask=100, ask_qty=.4),
+        row(103, ask=102), row(104, ask=102), row(105, ask=101, ask_qty=.6),
+    ]
+    got = evaluate(
+        rows, direction="LONG", requested_qty=1, chase_schedule=sched,
+        aggressor_window_sec=1,
+    )
+    assert got["outcome"] == "PARTIAL_FILL"
+    assert got["final_classification"] == "PARTIAL_FILL"
+    assert got["filled_qty"] == .6
+    assert got["accumulated_qty"] == .6
+    assert got["raw_partial_qty"] == .6
+    assert got["rounded_executable_qty"] == .6
+    assert [a["accumulated_quantity_after"] for a in got["quantity_attempts"]] == [.6]
+    assert got["quantity_attempts"][0]["accumulation_basis"] == (
+        "MAX_SINGLE_OBSERVATION_NO_CROSS_SNAPSHOT_SUM"
+    )

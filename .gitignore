@@ -151,14 +151,17 @@ scripts/_test.py
 scripts/_*.mjs
 scripts/_*.ps1
 services/btc-conservative-agent/local-collection-data/
+# Legacy migration/cleanup source; never an operational analyzer path.
 services/btc-conservative-agent/fly-data-mirror/
 services/btc-conservative-agent/analyzer_mirror/
+services/btc-conservative-agent/canonical-research-data/
 /.audit-data-*/
 /outputs/
 .fly-dashboard-proxy.pid
 .fly-data-sync-loop.lock
 .fly-data-sync-loop.heartbeat.json
 .fly-data-sync-loop.guard
+.fly-mirror-generation.lease
 services/btc-conservative-agent/research.db
 services/btc-conservative-agent/research.db-journal
 services/btc-conservative-agent/research/genome/*.jsonl
@@ -257,7 +260,7 @@ tmp/
 # Local walkthrough videos (not committed)
 docs/*.mp4
 
-# V2 research prompt drafts (source constants live in a160_v2_research.py)
+# Local BTC research drafts and generated reports
 services/btc-conservative-agent/tmp_*.md
 services/btc-conservative-agent/tmp_research_*.json
 services/btc-conservative-agent/research/*.json
@@ -308,8 +311,6 @@ services/btc-conservative-agent/past_analysis/
 /decisions_3factor.csv
 /execution_funnel.jsonl*
 /lane_opportunity_capture.jsonl*
-/type_b_adx_v3_shadow_decisions.jsonl*
-/type_b_research_v2.jsonl*
 *.log.*
 *.jsonl.tmp
 *.jsonl.*.tmp
@@ -338,7 +339,6 @@ services/btc-conservative-agent/past_analysis/
 /runtime_pathway_integrity.json
 /shadow_vs_live_entry_report.json
 /tile_independence_report.json
-/type_b_execution_audit.json
 /*_report.json
 /*_validation.json
 /trend_health.csv
@@ -368,3 +368,6 @@ packages/founder-ide/upstream/*
 !packages/founder-ide/upstream/overlay/**
 packages/skycode-fork/
 vault/
+# Ephemeral verified bundle transport staging; never analyzer input or source.
+/.batch-transfer/
+/scripts/.batch-transfer/

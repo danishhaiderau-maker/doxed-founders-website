@@ -52,10 +52,12 @@ import {
   type BotApiState,
 } from './bot-state.mapper';
 import { normalizeAnalyzerGenomeStatus } from './analyzer-genome-status';
+import { missingBitfinexVenueEvidenceReadiness } from './bitfinex-live-copy-readiness';
 import {
   probePublicBotHealth,
   summarizeAnalyzerMirrorHealth,
   summarizeCanonicalBotHealth,
+  ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
   type CanonicalBotHealth,
 } from './public-bot-health-probe';
 import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
@@ -637,6 +639,8 @@ export class TradingAgentsService implements OnModuleInit {
       positionMismatchAlert:
         typeof dash.positionMismatchAlert === 'string' ? dash.positionMismatchAlert : null,
       exchangeProvider: instance.exchangeProvider,
+      bitfinexLiveCopySizingReadiness:
+        dash.bitfinexLiveCopySizingReadiness ?? missingBitfinexVenueEvidenceReadiness(),
       reconciliation: reconcile
         ? {
             signedExchangePositionQty: reconcile.signedExchangePositionQty ?? null,
@@ -695,7 +699,11 @@ export class TradingAgentsService implements OnModuleInit {
     return {
       schema: 'relay_lifecycle_evidence_v1',
       generatedAt: new Date().toISOString(),
-      generatingRevision: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
+      generatingRevision:
+        process.env.RAILWAY_GIT_COMMIT_SHA ||
+        process.env.SOURCE_GIT_REV ||
+        process.env.GIT_SHA ||
+        null,
       runIdentity: process.env.RAILWAY_DEPLOYMENT_ID || process.env.FLY_ALLOC_ID || null,
       agentSlug: slug,
       userId: scopedUserId,
@@ -902,7 +910,10 @@ export class TradingAgentsService implements OnModuleInit {
       mirrorReceipt && mirrorReceipt.available === true ? mirrorReceipt : analyzerSummary;
     return {
       ...summarizeCanonicalBotHealth(flyProbe, canonical),
-      analyzerMirror: summarizeAnalyzerMirrorHealth(mirrorInput),
+      analyzerMirror: summarizeAnalyzerMirrorHealth(
+        mirrorInput, Date.now(), ANALYZER_MIRROR_FRESH_MAX_AGE_SEC,
+        canonical?.source_git_rev ?? null,
+      ),
     };
   }
 
@@ -1397,6 +1408,8 @@ export class TradingAgentsService implements OnModuleInit {
       relayArmed: Boolean(row?.relayArmedAt),
       copyRelaySimActive: row?.copyRelaySimActive ?? false,
       userInstanceLastError: row?.lastError ?? null,
+      // This endpoint intentionally performs no full dashboard-state,
+      // participant/event, exchange-account, or research payload read.
       projection: 'coordination_v1' as const,
     };
   }

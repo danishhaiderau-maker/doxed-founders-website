@@ -1,0 +1,125 @@
+"""Regression for V3.1 Best Policy Overview compatibility fields."""
+from pathlib import Path
+
+from research import research_dashboard as dashboard
+
+
+def test_empty_overview_shows_deployed_epoch_and_five_collecting_identities(monkeypatch):
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
+    monkeypatch.setattr(dashboard, "_read_report", lambda _name, default=None: default or {})
+
+    payload = dashboard._best_policy_research_v31_payload()
+
+    deployed = payload["deployed_policy_collection"]
+    assert payload["status"] == "STALE GENERATION — QUALIFICATION BLOCKED"
+    assert payload["generation_freshness"]["current"] is False
+    assert "CURRENT_POLICY_REPORT_MISSING" in payload["generation_freshness"]["reasons"]
+    assert payload["policy_epoch_id"] == "v31-analyzer-hypothesis-paper-v1"
+    assert deployed["policy_count"] == 5
+    assert deployed["qualification_allowed"] is False
+    assert all(row["collection_status"] == "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE" for row in deployed["policies"])
+    assert all(row["policy_id"] and row["policy_signature"] for row in deployed["policies"])
+
+
+def test_executive_summary_pre_wraps_inside_narrow_viewport():
+    source = Path(dashboard.__file__).read_text(encoding="utf-8")
+    assert "pre { min-width: 0; max-width: 100%;" in source
+    assert "overflow-wrap: anywhere; word-break: break-word;" in source
+
+
+def test_best_policy_overview_projects_canonical_v31_counts_and_search(monkeypatch):
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True,
+            "stale": False,
+            "revision_parity": "MATCH",
+            "epoch_parity": "MATCH",
+            "reasons": [],
+        },
+    )
+    report = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "epoch_id": "epoch-clean-808",
+        "qualification": "NO_SAFE_QUALIFIED_POLICY",
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+        "collection": {
+            "independent_opportunities": 3,
+            "decision_branches": 6,
+            "terminal_lifecycles": 3,
+            "execution_rows": 1,
+            "decision_outcomes": {"CENSORED": 3, "NO_TRADE": 3},
+            "effective_paper_execution_identities": [{
+                "policy_epoch_id": "paper-epoch-clean",
+                "policy_signature": "paper-policy-clean",
+            }],
+        },
+        "candidate_screen": {
+            "descriptive_top_100": [],
+            "split": {"train": 0, "oos": 0},
+        },
+        "safe_policy_ranking": {"qualification": "NO_SAFE_QUALIFIED_POLICY"},
+        "search": {
+            "schema": "hierarchical_policy_search_plan_v3",
+            "counts": {
+                "entry_cartesian": 2700,
+                "nominal_full_cartesian": 8_597_534_400,
+            },
+        },
+    }
+    compatibility = {
+        "schema": "best_policy_research_v3_1_adapter_v1",
+        "epoch_id": "epoch-clean-808",
+        "evidence": {"completed_paths": 1},
+    }
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: report)
+    monkeypatch.setattr(dashboard, "_read_report", lambda name, default=None: (
+        compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE else (default or {})
+    ))
+
+    # Exercise the adapter directly so this focused test cannot seed the
+    # dashboard's short-lived HTTP response cache for a following test cohort.
+    payload = dashboard._best_policy_research_v31_payload()
+
+    assert payload["epoch_id"] == "epoch-clean-808"
+    assert payload["evidence"]["current_epoch_events"] == 3
+    assert payload["evidence"]["completed_paths"] == 1
+    assert payload["evidence"]["independent_episode_count"] == 3
+    assert payload["evidence"]["decision_branches"] == 6
+    assert payload["policy_epoch_id"] == "paper-epoch-clean"
+    assert payload["evidence_policy_signature"] == "paper-policy-clean"
+    assert payload["research_design"]["counts"]["entry_policy_cartesian"] == 2700
+    assert payload["research_design"]["counts"]["naive_full_cartesian"] == 8_597_534_400
+    assert payload["research_design"]["static_vs_dynamic"]["required"] is True
+    assert payload["status"] == "NO QUALIFIED POLICY"
+    assert payload["current_candidate"] is None
+
+
+def test_best_policy_overview_does_not_count_no_order_terminals_as_paths(monkeypatch):
+    report = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "epoch_id": "epoch-clean-no-orders",
+        "collection": {
+            "independent_opportunities": 2,
+            "terminal_lifecycles": 2,
+            "execution_rows": 0,
+        },
+        "candidate_screen": {"descriptive_top_100": [], "split": {}},
+        "safe_policy_ranking": {"qualification": "NO_SAFE_QUALIFIED_POLICY"},
+    }
+    compatibility = {
+        "schema": "best_policy_research_v3_1_adapter_v1",
+        "epoch_id": "epoch-clean-no-orders",
+        "evidence": {"completed_paths": 0},
+    }
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: report)
+    monkeypatch.setattr(dashboard, "_read_report", lambda name, default=None: (
+        compatibility if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE else (default or {})
+    ))
+
+    payload = dashboard._best_policy_research_v31_payload()
+
+    assert payload["evidence"]["current_epoch_events"] == 2
+    assert payload["evidence"]["terminal_lifecycles"] == 2
+    assert payload["evidence"]["completed_paths"] == 0

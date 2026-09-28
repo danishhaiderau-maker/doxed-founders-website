@@ -64,6 +64,8 @@ def test_grid_fails_closed_without_real_copy_cohort():
     assert report["eligible_ids"] == 0
     assert written["cohort_exclusion_reason_counts"]["BITFINEX_LINKAGE_MISSING"] == 1
     assert written["physical_hard_stop_invariant_pct"] == 30.0
+    assert "fixed 30% invariant" in written["qualified_live_recommendation"]["note"]
+    assert "13%" not in written["qualified_live_recommendation"]["note"]
     assert written["actual_bitfinex"]["n"] == 0
 
 

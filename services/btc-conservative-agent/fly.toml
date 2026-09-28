@@ -5,6 +5,11 @@
 app = "doxed-btc-bot"
 primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested syd host (mem_overcommit)
 
+[env]
+  # Outside durable checkpoint fingerprint (slice/file budget are outside stable identity).
+  DATA_SYNC_INVENTORY_SLICE_SECONDS = "60"
+  DATA_SYNC_INVENTORY_FILE_BUDGET = "1000"
+
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]
   internal_port = 7002

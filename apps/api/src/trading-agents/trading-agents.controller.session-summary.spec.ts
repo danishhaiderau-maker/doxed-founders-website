@@ -160,7 +160,7 @@ test('ops pause authenticates before all mutation and uses canonical pause settl
   ]);
 });
 
-test('ops flat-audit refresh authenticates paused disarmed state and only requests a pause wake', async () => {
+test('ops flat-audit refresh authenticates paused disarmed state and runs the read-only audit', async () => {
   const calls: unknown[][] = [];
   const controller = new TradingAgentsController(
     { getOpsRelayStatus: async (...args: unknown[]) => {
@@ -170,8 +170,14 @@ test('ops flat-audit refresh authenticates paused disarmed state and only reques
         realTradingConfirmedAt: null,
       };
     } } as never,
-    {} as never, {} as never, {} as never,
-    { requestExecutorWake: async (...args: unknown[]) => { calls.push(args); } } as never,
+    {
+      refreshPausedFlatAudit: async (...args: unknown[]) => {
+        calls.push(args);
+        return { accepted: true, status: 'PAUSED', resumed: false, armed: false, flat: true };
+      },
+    } as never,
+    {} as never, {} as never,
+    { requestExecutorWake: async () => { throw new Error('flat audit must not wake executor'); } } as never,
   );
   const result = await controller.opsRefreshFlatAudit(
     'conservative-btc',
@@ -179,11 +185,11 @@ test('ops flat-audit refresh authenticates paused disarmed state and only reques
     'admin-token',
   );
   assert.deepEqual(result, {
-    accepted: true, status: 'PAUSED', resumed: false, armed: false,
+    accepted: true, status: 'PAUSED', resumed: false, armed: false, flat: true,
   });
   assert.deepEqual(calls, [
     ['conservative-btc', 'private-user', 'admin-token', undefined],
-    ['USER_PAUSE'],
+    ['private-user', 'conservative-btc'],
   ]);
 });
 
