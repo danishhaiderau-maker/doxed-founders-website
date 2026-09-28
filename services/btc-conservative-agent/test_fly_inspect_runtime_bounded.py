@@ -126,8 +126,8 @@ def test_postdeploy_receipt_bootstrap_completes_before_paper_resume():
     assert "_BOOTSTRAP_BYTES_PER_STEP = 8 * 1024 * 1024" in store
     minimum_cycles = (observed_rows + records_per_cycle - 1) // records_per_cycle
     assert 45 * 60 >= minimum_cycles
-    assert 'call("/api/pause", {})' in section
-    assert section.count('call("/api/pause", {})') == 1
+    assert 'call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})' in section
+    assert section.count('call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})') == 1
     assert 'call("/api/status")' in section
     assert 'str(status.get("source_git_rev") or "").lower() == expected' in section
     assert 'status.get("execution_paused") is True' in section

@@ -14,7 +14,7 @@ NAMES = {
     "manual_admin_pause_active", "_finish_execution_admission",
     "evaluate_execution_admission", "execution_allowed",
     "execution_admission_snapshot", "_execution_control_fields_locked",
-    "_clear_execution_pause_if_reason",
+    "_clear_execution_pause_if_reason", "_pause_owner_locked",
 }
 
 
@@ -34,6 +34,10 @@ def ns():
         "get_execution_status": lambda: "RESEARCH_ALLOW",
         "_WS_RECOVERABLE_PAUSE_REASONS": frozenset({
             "WS_STALE", "STALE_DATA_HARD_STOP", "PRICE_STALE_OR_MISSING"}),
+        "_PAUSE_INTENTS": frozenset({"OPERATOR", "DEPLOY_MAINTENANCE", "SAFETY"}),
+        "PAUSE_OWNER_UNATTRIBUTED": "UNATTRIBUTED_MANUAL",
+        "PAUSE_OWNER_SAFETY": "SAFETY",
+        "tile_max_active_signals": lambda lane: None,
     }
     module = ast.Module(body=[n for n in TREE.body
                              if isinstance(n, ast.FunctionDef) and n.name in NAMES],

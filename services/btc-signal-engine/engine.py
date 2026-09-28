@@ -98,6 +98,7 @@ from combo_pathway_config import (
     RESEARCH_CANDIDATE_ROLE,
     RESEARCH_LANE_AI_SCAN,
     RETIRED_TILE_LANES,
+    tile_max_active_signals,
     any_combo_execution_enabled,
     active_tile_lifecycle_manifest,
     active_tile_registry_signature,
@@ -803,12 +804,12 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         "collector_version": COLLECTOR_V31_VERSION,
         "legacy_collector_version": COLLECTOR_V22_VERSION,
     }
-    # A normal process restart must keep the collector identity bound by the
-    # last explicit Fresh Collection reset.  Rebuilding research_session.json
-    # without these fields caused V2/V3 to silently mint an epoch-v22-* alias
-    # while the dashboard continued to advertise the official epoch-* id.
-    # Only a new, explicitly confirmed reset is allowed to replace them.
-    if fcm and not fresh_collection_reset:
+    # A normal process restart must keep the bound collector identity whether
+    # or not Fresh Collection mode is on.  Rebuilding research_session.json
+    # without these fields made V2/V3 mint a per-process epoch-v22-* alias
+    # that never matched the identity cache, so inventory could not become
+    # CURRENT.  Only a new, explicitly confirmed reset may replace them.
+    if not fresh_collection_reset:
         for key in (
             "collector_v22_epoch_ts",
             "collector_v22_epoch_id",
@@ -824,8 +825,67 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         payload["collector_v22_epoch_id"] = fresh_epoch_id
         payload["collector_version"] = COLLECTOR_V31_VERSION
         payload["legacy_collector_version"] = COLLECTOR_V22_VERSION
-    with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+    with _collection_epoch_bind_lock:
+        _write_research_session_payload(payload)
+    _refresh_collection_epoch_identity_cache()
+
+
+# Serializes every research_session.json writer so an epoch bind can never be
+# lost to (or race) a concurrent session rewrite.
+_collection_epoch_bind_lock = threading.RLock()
+
+
+class CollectionEpochUnbound(RuntimeError):
+    """research_session.json carries no bound collection epoch."""
+
+    code = "INVENTORY_EPOCH_UNBOUND"
+
+    def __init__(self, detail: str = ""):
+        super().__init__(f"{self.code}{': ' + detail if detail else ''}")
+
+
+def _write_research_session_payload(payload: dict) -> None:
+    """Atomically replace research_session.json.
+
+    Readers must never observe a truncated file: an empty read looks unbound
+    and would let a collector bind a second epoch mid-run.
+    """
+    target = os.path.abspath(RESEARCH_SESSION_FILE)
+    tmp = f"{target}.tmp-{os.getpid()}-{threading.get_ident()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass
+    os.replace(tmp, target)
+
+
+def _bound_collection_epoch_id() -> str:
+    """The single persisted collection epoch, or "" when unbound.
+
+    Manifest, identity cache, WAL/bundle identity, ACK/promotion and cleanup
+    identities all read this.  It never derives a replacement id.
+    """
+    session = _load_research_session_meta() or {}
+    return str(session.get("collector_v22_epoch_id") or "").strip()
+
+
+def _require_bound_collection_epoch_id() -> str:
+    epoch_id = _bound_collection_epoch_id()
+    if not epoch_id:
+        raise CollectionEpochUnbound("research_session.json has no collector_v22_epoch_id")
+    return epoch_id
+
+
+def _refresh_collection_epoch_identity_cache() -> None:
+    refresh = globals().get("_prime_data_sync_identity_epoch_cache")
+    if callable(refresh):
+        try:
+            refresh()
+        except Exception as exc:
+            logger.warning(f"[COLLECTOR_V22] identity cache refresh failed: {exc}")
 
 def _should_wipe_research_on_startup() -> bool:
     """v96: never auto-wipe research data — archive via dashboard Fresh Collection or WIPE_CSV_ON_STARTUP=1."""
@@ -3183,13 +3243,17 @@ def is_continuous_benchmark_lane(lane: str = None) -> bool:
 
 
 def get_lane_max_active_signals(lane: str = None) -> int:
-    """Shared dashboard pool — max concurrent applies globally, not per lane."""
-    return get_effective_max_active_signals()
+    """Registry tiles own their capacity; other lanes use the dashboard pool."""
+    tile_cap = tile_max_active_signals(lane)
+    return tile_cap if tile_cap else get_effective_max_active_signals()
 
 
 def ensure_lane_signal_capacity(lane: str) -> bool:
-    """Global max_active_signals pool (open + pending + awaiting across all lanes)."""
-    return ensure_signal_capacity()
+    """Per-tile slots for registry tiles; global pool for every other lane."""
+    tile_cap = tile_max_active_signals(lane)
+    if not tile_cap:
+        return ensure_signal_capacity()
+    return not _is_at_signal_capacity(tile_cap, lane=str(lane).upper())
 
 
 def _normalize_lane_key(lane_or_obj) -> str:
@@ -4602,6 +4666,9 @@ def risk_trading_allowed() -> bool:
 def ensure_directional_capacity(direction: str, lane: str = None) -> bool:
     direction = direction.upper()
     if is_research_data_collection():
+        tile_cap = tile_max_active_signals(lane)
+        if tile_cap:
+            return count_directional_exposure(direction, lane=lane) < tile_cap
         cap = get_effective_max_active_signals()
         return count_directional_exposure(direction, lane=None) < cap
     prof = get_regime_risk_profile()
@@ -5023,6 +5090,7 @@ def set_live_copy_coordination_state(next_state: str, reason: str = "") -> dict:
         state["live_copy_coordination_updated_at"] = utc_iso()
         if wanted == COORD_STATE_FULLY_PAUSED:
             state["manual_admin_pause"] = True
+            state["pause_intent"] = PAUSE_OWNER_SAFETY
         elif wanted == COORD_STATE_RUNNING_TOGETHER:
             if state.get("execution_reason") == LIVE_RELAY_COORDINATION_REASON:
                 state["execution_paused"] = False
@@ -5319,6 +5387,29 @@ def _finish_execution_admission(allowed: bool, reason: str, lane: str = None) ->
     return verdict
 
 
+PAUSE_OWNER_OPERATOR = "OPERATOR"
+PAUSE_OWNER_DEPLOY_MAINTENANCE = "DEPLOY_MAINTENANCE"
+PAUSE_OWNER_SAFETY = "SAFETY"
+# A manual pause persisted before owners were recorded. Deploy tooling may
+# clear it; it is never mistaken for a deliberate operator pause.
+PAUSE_OWNER_UNATTRIBUTED = "UNATTRIBUTED_MANUAL"
+_PAUSE_INTENTS = frozenset({
+    PAUSE_OWNER_OPERATOR, PAUSE_OWNER_DEPLOY_MAINTENANCE, PAUSE_OWNER_SAFETY,
+})
+# Manual pauses that a deploy-owned resume must never clear.
+_DEPLOY_RETAINED_PAUSE_OWNERS = frozenset({PAUSE_OWNER_OPERATOR, PAUSE_OWNER_SAFETY})
+
+
+def _pause_owner_locked() -> str | None:
+    """Who owns the current pause: OPERATOR, DEPLOY_MAINTENANCE, SAFETY or None."""
+    if not (state.get("execution_paused") or state.get("manual_admin_pause")):
+        return None
+    if state.get("manual_admin_pause"):
+        intent = state.get("pause_intent")
+        return intent if intent in _PAUSE_INTENTS else PAUSE_OWNER_UNATTRIBUTED
+    return PAUSE_OWNER_SAFETY
+
+
 def _execution_control_fields_locked() -> dict:
     """Copy the full control tuple while the caller holds state_lock."""
     return {
@@ -5326,6 +5417,7 @@ def _execution_control_fields_locked() -> dict:
         "execution_reason": state.get("execution_reason", ""),
         "_pause_priority": state.get("_pause_priority", 0),
         "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
+        "pause_owner": _pause_owner_locked(),
         "last_execution_admission": dict(state.get("last_execution_admission") or {}),
     }
 
@@ -5348,11 +5440,18 @@ def evaluate_execution_admission(lane: str = None) -> tuple:
         logger.warning(f"[EXECUTION BLOCK] risk pause reason={state.get('execution_reason')} [PIPELINE ENFORCEMENT]")
         return _finish_execution_admission(False, "RISK_PAUSE", lane)
     lane_key = str(lane).upper() if lane and research_isolation_enabled() else None
-    active = get_active_signal_count()
-    max_pos = get_effective_max_active_signals()
+    tile_cap = tile_max_active_signals(lane)
+    if tile_cap:
+        pool = "tile"
+        active = get_active_signal_count(str(lane).upper())
+        max_pos = tile_cap
+    else:
+        pool = "global"
+        active = get_active_signal_count()
+        max_pos = get_effective_max_active_signals()
     if active >= max_pos:
         logger.warning(
-            f"[LIMIT] Max active signals reached (global pool): {active}/{max_pos} "
+            f"[LIMIT] Max active signals reached ({pool} pool): {active}/{max_pos} "
             f"lane={lane_key or 'ALL'} [PIPELINE ENFORCEMENT]"
         )
         return _finish_execution_admission(False, "MAX_ACTIVE_SIGNALS", lane)
@@ -13288,18 +13387,15 @@ def _restore_collector_v22_provisionals() -> int:
 
 
 def _collector_v22_epoch_id() -> str:
-    """Stable epoch-v22-* id for reproducible research datasets."""
-    session = _load_research_session_meta() or {}
-    bound = session.get("collector_v22_epoch_id")
+    """The bound collection epoch; binds one durably if the session is unbound.
+
+    Never returns a per-process alias: any id handed to a collector is first
+    persisted to research_session.json, so every identity observes it.
+    """
+    bound = _bound_collection_epoch_id()
     if bound:
-        return str(bound)
-    raw = session.get("collector_v22_epoch_ts") or session.get("fresh_collection_start_time") or bot_start_time
-    try:
-        anchor = float(raw or bot_start_time or time.time())
-    except (TypeError, ValueError):
-        anchor = float(bot_start_time or time.time())
-    material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
-    return "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+        return bound
+    return _ensure_collector_v22_epoch()
 
 
 def _collector_source_in_current_epoch(source: dict) -> bool:
@@ -13361,22 +13457,36 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
 
 
 def _ensure_collector_v22_epoch() -> str:
-    """Bind a fresh epoch-v22-* on first v2.2 startup (does not wipe v2.1 data)."""
-    meta = dict(_load_research_session_meta() or {})
-    if meta.get("collector_v22_epoch_ts"):
-        return str(meta.get("collector_v22_epoch_id") or _collector_v22_epoch_id())
-    anchor = time.time()
-    meta["collector_v22_epoch_ts"] = anchor
-    material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
-    meta["collector_v22_epoch_id"] = "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
-    meta["collector_version"] = COLLECTOR_V31_VERSION
-    meta["legacy_collector_version"] = COLLECTOR_V22_VERSION
-    try:
-        with open(RESEARCH_SESSION_FILE, "w", encoding="utf-8") as handle:
-            json.dump(meta, handle, indent=2)
-    except OSError as exc:
-        logger.warning(f"[COLLECTOR_V22] epoch bind failed: {exc} [PIPELINE ENFORCEMENT]")
-    return str(meta["collector_v22_epoch_id"])
+    """Durably bind an epoch-v22-* when research_session.json has none.
+
+    An explicit Fresh Collection reset remains the only way to replace a bound
+    epoch.  A write failure raises instead of returning an unpersisted id.
+    """
+    with _collection_epoch_bind_lock:
+        meta = dict(_load_research_session_meta() or {})
+        bound = str(meta.get("collector_v22_epoch_id") or "").strip()
+        if bound:
+            return bound
+        try:
+            anchor = float(meta.get("collector_v22_epoch_ts") or 0.0)
+        except (TypeError, ValueError):
+            anchor = 0.0
+        if anchor <= 0:
+            anchor = time.time()
+        material = f"collector_v22_epoch|{COLLECTOR_V22_VERSION}|{anchor:.6f}"
+        epoch_id = "epoch-v22-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+        meta["collector_v22_epoch_ts"] = anchor
+        meta["collector_v22_epoch_id"] = epoch_id
+        meta["collector_version"] = COLLECTOR_V31_VERSION
+        meta["legacy_collector_version"] = COLLECTOR_V22_VERSION
+        try:
+            _write_research_session_payload(meta)
+        except OSError as exc:
+            logger.error(f"[COLLECTOR_V22] epoch bind failed: {exc} [PIPELINE ENFORCEMENT]")
+            raise CollectionEpochUnbound(f"bind write failed: {exc}") from exc
+    logger.warning(f"[COLLECTOR_V22] bound collection epoch {epoch_id} [PIPELINE ENFORCEMENT]")
+    _refresh_collection_epoch_identity_cache()
+    return epoch_id
 
 
 def _arm_chase_offset_touch_grid(signal: dict):
@@ -13431,6 +13541,10 @@ def _shadow_stage_direction_revalidation(shadow: dict, now: float) -> tuple[str,
         current_context = copy.deepcopy(
             state.get("last_ai_context") or state.get("last_cycle_3m_universe") or {}
         )
+    # The shadow mirrors the tile chase cohort, so recheck it under the same
+    # admission rule the registry tiles use.
+    if any(_lane_uses_score_led_admission(lane) for lane in ACTIVE_TILE_REGISTRY):
+        latest_ai = _fill_revalidation_ai_views(latest_ai)["score_led"]
     signal_ts = float(shadow.get("signal_ts") or 0)
     if latest_ai_ts <= signal_ts:
         return "NOT_REVALIDATED", "NO_NEWER_AI_DECISION"
@@ -17904,6 +18018,15 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
     if not is_ai_scan_lane(source_lane) or not ai:
         return
     if not is_research_data_collection():
+        return
+    # Same parse as combo_pathway_config: only exact "1" is enabled.
+    # A missing flag must not fall through to hypothesis-era research orders.
+    if os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") != "1":
+        logger.error(
+            "[SCORE_LED] research start refused: "
+            "SCORE_LED_PAPER_RESEARCH_ENABLED is missing or not 1 "
+            "[PIPELINE ENFORCEMENT]"
+        )
         return
     lane_ai, score_led_admission = _effective_score_led_family_ai(ai)
     ai_direction = lane_ai.get("direction")
@@ -22811,6 +22934,31 @@ def _pending_limit_ready_for_fill(
 FILL_DIRECTION_REVALIDATE_AFTER_SEC = float(os.getenv("FILL_DIRECTION_REVALIDATE_AFTER_SEC", "180"))
 
 
+def _lane_uses_score_led_admission(lane) -> bool:
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper()) or {}
+    return spec.get("admission_treatment") == SCORE_LED_ADMISSION_POLICY_ID
+
+
+def _fill_revalidation_ai_views(latest_ai: dict) -> dict:
+    """Raw and score-led views of the latest AI row for fill-time rechecks.
+
+    _effective_score_led_family_ai acquires state_lock, so callers must build
+    these views before taking trade_lock (global order is state -> trade).
+    """
+    raw = latest_ai or {}
+    try:
+        score_led, _admission = _effective_score_led_family_ai(raw)
+    except Exception as exc:
+        logger.warning(f"[FILL REVALIDATION] score-led view unavailable: {exc} [PIPELINE ENFORCEMENT]")
+        score_led = {"direction": "NO_TRADE", "decision": "REJECT"}
+    return {"raw": raw, "score_led": score_led}
+
+
+def _fill_revalidation_ai_for_lane(views: dict, lane) -> dict:
+    """Score-led tiles are rechecked under the rule that opened them."""
+    return views["score_led"] if _lane_uses_score_led_admission(lane) else views["raw"]
+
+
 def stale_fill_direction_conflict(order: dict, signal: dict, *, now: float, latest_ai: dict, latest_ai_ts: float, current_context: dict = None) -> str:
     """Cancel an aged order when a newer shared decision withdrew/reversed it."""
     age_sec = _order_signal_age_sec(order, signal, now)
@@ -22908,6 +23056,7 @@ def process_pending_orders():
             "sr_bias": (state.get("support_resistance") or {}).get("sr_bias"),
             "adx": ((state.get("market_context") or {}).get("trend_strength") or {}).get("adx"),
         }
+    fill_ai_views = _fill_revalidation_ai_views(latest_ai_for_fill)
     ready_orders = []
     for order in pending_snapshot:
         if order.get("status") != "PENDING":
@@ -22943,16 +23092,21 @@ def process_pending_orders():
                     f"trade_id={order.get('trade_id')} [PIPELINE ENFORCEMENT]"
                 )
                 continue
+            fill_ai_view = _fill_revalidation_ai_for_lane(fill_ai_views, order.get("research_lane"))
             revalidation_reason = stale_fill_direction_conflict(
                 order,
                 fill_signal,
                 now=time.time(),
-                latest_ai=latest_ai_for_fill,
+                latest_ai=fill_ai_view,
                 latest_ai_ts=latest_ai_ts_for_fill,
                 current_context=fill_context_for_revalidation,
             )
             order["fill_time_revalidation"] = {
                 "performed": True, "checked_ts": utc_iso(),
+                "admission_view": (
+                    "SCORE_LED" if fill_ai_view is fill_ai_views["score_led"]
+                    and fill_ai_views["score_led"] is not fill_ai_views["raw"] else "RAW"
+                ),
                 "signal_age_sec": round(float(fill_age_sec), 3),
                 "latest_ai_ts": latest_ai_ts_for_fill or None,
                 "result": "BLOCKED" if revalidation_reason else "PASSED",
@@ -31301,6 +31455,7 @@ def _strategy_progress_hard_restart(progress: dict, incident: dict) -> bool:
 
 def watchdog_loop():
     last_progress_dump_ts = 0.0
+    pending_restart_block_alerted = False
     while not shutdown_event.is_set():
         with state_lock:
             hb_ts = state.get("last_heartbeat") or last_heartbeat
@@ -31361,6 +31516,30 @@ def watchdog_loop():
                         "for supervisor recovery"
                     )
                     os._exit(75)
+                pending_blocks_restart = bool(
+                    _force_paper_mode_active()
+                    and not progress["live_armed"]
+                    and progress["open_positions"] == 0
+                    and progress["pending_orders"] != 0
+                    and _strategy_progress_hard_restart(progress, incident)
+                )
+                if pending_blocks_restart and not pending_restart_block_alerted:
+                    # Receipt only. Pending orders stay in place and the process
+                    # does not exit, wipe state, or clear them.
+                    dump_system_state(
+                        trigger="PENDING_ORDERS_BLOCK_RESTART",
+                        progress=progress,
+                        incident=incident,
+                        restart_allowed=False,
+                    )
+                    logger.critical(
+                        "[WATCHDOG] pending orders block restart pending=%s; "
+                        "alert only, orders kept",
+                        progress["pending_orders"],
+                    )
+                    pending_restart_block_alerted = True
+                elif not pending_blocks_restart:
+                    pending_restart_block_alerted = False
                 if flat_paper:
                     logger.error(
                         "[WATCHDOG] paper flat stall fail-soft reasons=%s; "
@@ -32013,7 +32192,8 @@ DASHBOARD_JS = """(function () {
         && d.signal_generation_ready === true;
       const paperEntryReason = paperEntriesAllowed
         ? 'ALLOWED'
-        : (d.execution_reason || d.new_entry_block_reason || 'NOT READY');
+        : ((d.execution_reason || d.new_entry_block_reason || 'NOT READY')
+          + (d.pause_owner ? ' (' + d.pause_owner + ')' : ''));
       const liveCopyAllowed = d.live_armed === true
         && d.bitfinex_live_enabled === true;
       const liveCopyReason = liveCopyAllowed
@@ -33039,7 +33219,8 @@ DASHBOARD_JS = """(function () {
             src.className = 'text-red-500 font-bold animate-pulse';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-orange-600';
           } else if (d.execution_paused) {
-            src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason');
+            src.innerHTML = 'PAUSED - ' + (d.execution_reason || 'Unknown reason')
+              + (d.pause_owner ? ' · owner ' + d.pause_owner : '');
             src.className = 'text-red-500 font-bold animate-pulse';
             banner.className = 'bg-gray-800 p-6 rounded-lg shadow mb-8 border-4 border-green-600';
           } else if (d.ws_transport_ready === true || d.ws_ready === true || d.market_data_mode === 'WS' || d.price_source === 'WS') {
@@ -38200,7 +38381,7 @@ def status():
     )
     tile_registry = active_tile_lifecycle_manifest()
     tile_registry_signature = active_tile_registry_signature()
-    return jsonify({
+    payload = {
         "status": status,
         **_dashboard_owner_metadata(),
         "last_heartbeat": hb,
@@ -38288,7 +38469,9 @@ def status():
             "hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper")),
             "writers_hooked": True,
         },
-    })
+    }
+    payload["collection_epoch_parity"] = _collection_epoch_parity(payload["lifecycle_pipeline"])
+    return jsonify(payload)
 
 
 @app.route('/health')
@@ -38331,6 +38514,7 @@ def health():
         "execution_paused": bool(state.get("execution_paused", False)),
         "execution_reason": state.get("execution_reason", ""),
         "manual_admin_pause": bool(state.get("manual_admin_pause", False)),
+        "pause_owner": _pause_owner_locked(),
         "live_armed": bool(state.get("live_armed", False)),
         "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
         "force_paper_mode": _force_paper_mode_active(),
@@ -38429,8 +38613,21 @@ def get_debug_state():
 
 @app.route('/api/pause', methods=['POST'])
 def api_pause():
+    body = request.get_json(silent=True) or {}
+    requested_owner = (
+        PAUSE_OWNER_DEPLOY_MAINTENANCE
+        if str(body.get("owner") or "").strip().upper() == PAUSE_OWNER_DEPLOY_MAINTENANCE
+        else PAUSE_OWNER_OPERATOR
+    )
     with state_lock:
+        already_operator = (
+            bool(state.get("manual_admin_pause"))
+            and state.get("pause_intent") == PAUSE_OWNER_OPERATOR
+        )
+        # Deploy maintenance never downgrades a deliberate operator pause.
+        pause_owner = PAUSE_OWNER_OPERATOR if already_operator else requested_owner
         state["manual_admin_pause"] = True
+        state["pause_intent"] = pause_owner
     # Persist before any cancel/trade_lock work so true-flat survives a stalled
     # response or process restart without requiring another /api/pause.
     save_persistent_config()
@@ -38448,11 +38645,12 @@ def api_pause():
         orders=paper_orders,
         positions=paper_positions,
     )
-    logger.warning("[ADMIN] Manual pause via /api/pause [PIPELINE ENFORCEMENT]")
+    logger.warning(f"[ADMIN] Manual pause via /api/pause owner={pause_owner} [PIPELINE ENFORCEMENT]")
     response = jsonify({
         "status": "paused",
         "execution_paused": True,
         "execution_reason": "ADMIN_MANUAL",
+        "pause_owner": pause_owner,
         "live_pending_cancel": disarm["cancel"],
         "exit_only_lanes": list(disarm["exit_only"].keys()),
     })
@@ -38559,14 +38757,13 @@ def _api_resume_with_reset_intent_held():
     # genuinely healthy — that proves the market-data feed is alive, which is
     # the only safety property system_ready was indirectly checking here.
     body = request.get_json(silent=True) or {}
-    clear_manual = bool(
-        body.get("clear_admin_manual_pause") is True
-        or str(body.get("clear_admin_manual_pause") or "").strip().lower()
-        in ("1", "true", "yes", "on")
+    deploy_owned_resume = (
+        str(body.get("owner") or "").strip().upper() == PAUSE_OWNER_DEPLOY_MAINTENANCE
     )
     with state_lock:
         active_reason = str(state.get("execution_reason") or "")
         manual_paused = bool(state.get("manual_admin_pause", False))
+        pause_owner = _pause_owner_locked()
     if active_reason == "GENOME_IDENTITY_INVALID":
         response = jsonify({
             "status": "resume_blocked",
@@ -38577,22 +38774,18 @@ def _api_resume_with_reset_intent_held():
         })
         response.status_code = 409
         return response
-    # True-flat / maintenance ADMIN_MANUAL is durable across deploy+restart.
-    # Guarding resume prevents the normal post-accept /api/resume from wiping
-    # an operator maintenance pause unless the caller opts in explicitly.
-    if manual_paused and not clear_manual:
-        response = jsonify({
-            "status": "resume_blocked",
+    # A manual pause is durable across deploy+restart. Deploy tooling resumes
+    # with owner=DEPLOY_MAINTENANCE and may only end its own (or an
+    # unattributed legacy) pause; a deliberate operator pause survives the
+    # deploy until the operator resumes (a resume without owner).
+    if manual_paused and deploy_owned_resume and pause_owner in _DEPLOY_RETAINED_PAUSE_OWNERS:
+        return jsonify({
+            "status": "operator_pause_retained",
             "execution_paused": True,
-            "reason": "STICKY_ADMIN_MANUAL_PAUSE",
+            "reason": f"{pause_owner}_PAUSE_RETAINED",
+            "pause_owner": pause_owner,
             "active_pause_reason": active_reason or "ADMIN_MANUAL",
-            "remediation": (
-                "POST /api/resume with JSON "
-                '{"clear_admin_manual_pause": true} to end true-flat maintenance'
-            ),
         })
-        response.status_code = 409
-        return response
     ws_healthy = bool(runtime.get("ws_transport_ready", False))
     if not runtime.get("system_ready"):
         # Real WS issue (not just a paused pipeline) — keep blocking.
@@ -38623,15 +38816,29 @@ def _api_resume_with_reset_intent_held():
         )
     with state_lock:
         state["manual_admin_pause"] = False
+        state["pause_intent"] = None
     save_persistent_config()
     set_execution_paused("")
+    with state_lock:
+        still_paused = bool(state.get("execution_paused"))
+        remaining_reason = str(state.get("execution_reason") or "")
+        remaining_owner = _pause_owner_locked()
     _patch_api_state_cache_fields(
-        execution_paused=False,
-        execution_reason="",
+        execution_paused=still_paused,
+        execution_reason=remaining_reason,
         manual_admin_pause=False,
+        pause_owner=remaining_owner,
     )
-    logger.info("[ADMIN] Manual resume via /api/resume [PIPELINE ENFORCEMENT]")
-    return jsonify({"status": "resumed", "execution_paused": False})
+    logger.info(
+        f"[ADMIN] Manual resume via /api/resume "
+        f"owner={'DEPLOY_MAINTENANCE' if deploy_owned_resume else 'OPERATOR'} [PIPELINE ENFORCEMENT]"
+    )
+    return jsonify({
+        "status": "resumed" if not still_paused else "resume_blocked_by_safety_gate",
+        "execution_paused": still_paused,
+        "pause_owner": remaining_owner,
+        "active_pause_reason": remaining_reason or None,
+    })
 
 
 @app.route('/api/positions/close', methods=['POST'])
@@ -40165,6 +40372,7 @@ _DATA_SYNC_INVENTORY_WORKER_NAME = "data_sync_inventory_worker.py"
 _DATA_SYNC_INVENTORY_WORKER_REQUEST_SCHEMA = "fly_runtime_inventory_worker_request_v1"
 _DATA_SYNC_INVENTORY_WORKER_RESULT_SCHEMA = "fly_runtime_inventory_worker_result_v2"
 _DATA_SYNC_INVENTORY_WORKER_FAILURE_CODES = frozenset({
+    CollectionEpochUnbound.code,
     "DIRECTORY_ENTRY_LIMIT_EXCEEDED",
     "DIRECTORY_SCAN_FAILED",
     "GENERATION_DIRECTORY_LIMIT_EXCEEDED",
@@ -40400,6 +40608,27 @@ def _stop_lifecycle_pipeline_runtime(timeout: float = 5.0) -> bool:
             type(exc).__name__,
         )
         return False
+
+
+def _collection_epoch_parity(lifecycle_public) -> dict:
+    """Compare every epoch identity against the single bound session epoch."""
+    session_epoch = _bound_collection_epoch_id() or None
+    with _data_sync_identity_cache_lock:
+        cache_epoch = _data_sync_identity_epoch_cache.get("collection_epoch_id") or None
+    wal = (lifecycle_public or {}).get("emergency_wal") if isinstance(lifecycle_public, dict) else None
+    wal_epoch = ((wal or {}).get("identity") or {}).get("epoch_id") if isinstance(wal, dict) else None
+    identities = {
+        "session_epoch": session_epoch,
+        "identity_cache_epoch": cache_epoch,
+        "lifecycle_wal_epoch": wal_epoch or None,
+    }
+    if not session_epoch:
+        verdict = "UNBOUND"
+    elif all(value == session_epoch for value in identities.values() if value is not None) and cache_epoch:
+        verdict = "MATCH"
+    else:
+        verdict = "MISMATCH"
+    return {**identities, "status": verdict, "match": verdict == "MATCH"}
 
 
 def _lifecycle_pipeline_runtime_status() -> dict:
@@ -43069,6 +43298,12 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
     result_path = None
     worker_failure_code = None
     try:
+        # An unbound epoch can never produce an admissible generation; fail
+        # before scanning instead of rescanning until "no progress".
+        bound_epoch_id = _bound_collection_epoch_id()
+        if not bound_epoch_id:
+            worker_failure_code = CollectionEpochUnbound.code
+            raise CollectionEpochUnbound("inventory refresh refused")
         nonce = uuid.uuid4().hex
         launched_unix = time.time()
         work_root = _data_sync_inventory_work_root()
@@ -43081,7 +43316,7 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
             if isinstance(value, str) and value
         ]
         v3_runtime_identity = {
-            "epoch_id": _collector_v22_epoch_id(),
+            "epoch_id": bound_epoch_id,
             "source_revision": _runtime_git_rev(),
             "deployed_revision": _runtime_git_rev(),
             "tile_config_signature": active_tile_registry_signature(),
@@ -43306,7 +43541,7 @@ def _data_sync_inventory_refresh_worker(refresh_nonce: str | None = None) -> Non
         # Freeze the admission identity, not whatever happens to be current at
         # the later HTTP request. Epoch/config changes abort optional batching.
         if (v3_runtime_identity["source_revision"] == _runtime_git_rev()
-                and v3_runtime_identity["epoch_id"] == _collector_v22_epoch_id()
+                and v3_runtime_identity["epoch_id"] == _bound_collection_epoch_id()
                 and v3_runtime_identity["tile_config_signature"] == active_tile_registry_signature()):
             disk_generation["bundle_identity"] = {
                 "source_git_rev": v3_runtime_identity["source_revision"],
@@ -43442,8 +43677,13 @@ def _data_sync_request_async_inventory(
     *,
     force_refresh: bool = False,
     refresh_nonce: str | None = None,
+    allow_start: bool = True,
 ) -> dict:
-    """Return a completed current inventory or start one non-blocking build."""
+    """Return a completed current inventory or start one non-blocking build.
+
+    ``allow_start=False`` is the read-only contract for plain manifest GETs:
+    report the cached state but never admit a physical scan.
+    """
     _start_data_sync_bundle_reservation_hydration()
     start_worker = False
     with _data_sync_inventory_cache_condition:
@@ -43586,6 +43826,38 @@ def _data_sync_request_async_inventory(
                 "worker_spool_bytes_used": _data_sync_async_inventory.get("worker_spool_bytes_used"),
                 "error": None,
             }
+        with _data_sync_identity_cache_lock:
+            epoch_bound = bool(_data_sync_identity_epoch_cache.get("collection_epoch_id"))
+        if not _data_sync_async_inventory.get("refreshing") and (
+            not allow_start or not epoch_bound
+        ):
+            idle_generation = _data_sync_async_inventory.get("generation")
+            idle_rows = _data_sync_async_inventory.get("rows")
+            if not epoch_bound:
+                _data_sync_async_inventory["worker_failure_code"] = CollectionEpochUnbound.code
+                _data_sync_async_inventory["error"] = CollectionEpochUnbound.code
+            return {
+                "status": (
+                    "EPOCH_UNBOUND" if not epoch_bound
+                    else "STALE" if isinstance(idle_rows, list) or isinstance(idle_generation, dict)
+                    else "EMPTY"
+                ),
+                "rows": [dict(row) for row in idle_rows] if isinstance(idle_rows, list) else [],
+                "generation": dict(idle_generation) if isinstance(idle_generation, dict) else None,
+                "generated_at": _data_sync_async_inventory.get("generated_at"),
+                "generation_id": _data_sync_async_inventory.get("generation_id"),
+                "refresh_nonce": _data_sync_async_inventory.get("completed_refresh_nonce"),
+                "refreshing": False,
+                "refresh_started_at": _data_sync_async_inventory.get("refresh_started_at"),
+                "refresh_completed_at": _data_sync_async_inventory.get("refresh_completed_at"),
+                "last_failure_at": _data_sync_async_inventory.get("last_failure_at"),
+                "worker_phase": _data_sync_async_inventory.get("worker_phase"),
+                "worker_failure_code": _data_sync_async_inventory.get("worker_failure_code"),
+                "last_worker_failure_code": _data_sync_async_inventory.get("last_worker_failure_code"),
+                "last_worker_failure_at": _data_sync_async_inventory.get("last_worker_failure_at"),
+                "retry_after_seconds": 60 if not epoch_bound else 0,
+                "error": _data_sync_async_inventory.get("error"),
+            }
         if not _data_sync_async_inventory.get("refreshing"):
             _data_sync_async_inventory["refreshing"] = True
             _data_sync_async_inventory["status"] = "BUILDING"
@@ -43696,7 +43968,7 @@ def _read_data_sync_ack() -> dict:
         session = _load_research_session_meta() or {}
         identity = {
             "source_git_rev": _runtime_git_rev(),
-            "collection_epoch_id": str(session.get("collector_v22_epoch_id") or ""),
+            "collection_epoch_id": _bound_collection_epoch_id(),
             "tile_registry_signature": active_tile_registry_signature(),
         }
         def matches(receipt):
@@ -44392,9 +44664,13 @@ def api_data_sync_manifest():
             "error": None,
         }
     else:
+        # A plain GET is a read: only an explicit fresh/nonce request (the
+        # sync client's refresh contract), the admin POST trigger, or the
+        # background refresher may admit a physical inventory scan.
         inventory_state = _data_sync_request_async_inventory(
             force_refresh=force_refresh,
             refresh_nonce=refresh_nonce or None,
+            allow_start=bool(force_refresh or refresh_nonce),
         )
     all_files = inventory_state.get("rows") or []
     disk_generation = inventory_state.get("generation")
@@ -44481,7 +44757,7 @@ def api_data_sync_manifest():
         ack = {path: row for path, row in ack.items()
                if isinstance(row, dict) and row.get("inventory_sha256") == inventory_generation_id}
     session = _load_research_session_meta() or {}
-    collection_epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
+    collection_epoch_id = _bound_collection_epoch_id()
     # Keep the identity-only manifest independent of trading-state contention.
     fresh_collection_signal_ts = float(state.get("fresh_collection_signal_ts") or 0.0)
     if fresh_collection_signal_ts <= 0:
@@ -44644,14 +44920,22 @@ _data_sync_identity_epoch_cache = {
 }
 
 
+_EPOCH_CACHE_UNCHANGED = object()
+
+
 def _update_data_sync_identity_epoch_cache(
-    *, collection_epoch_id=None, fresh_collection_signal_ts=None,
+    *, collection_epoch_id=_EPOCH_CACHE_UNCHANGED, fresh_collection_signal_ts=None,
 ):
-    """Publish already-observed epoch identity without request-path I/O."""
+    """Publish already-observed epoch identity without request-path I/O.
+
+    An explicit falsy epoch clears the cache so an unbound session can never
+    keep advertising a stale epoch; a new value rebinds it.
+    """
     with _data_sync_identity_cache_lock:
-        if collection_epoch_id:
-            _data_sync_identity_epoch_cache["collection_epoch_id"] = str(
-                collection_epoch_id
+        if collection_epoch_id is not _EPOCH_CACHE_UNCHANGED:
+            _data_sync_identity_epoch_cache["collection_epoch_id"] = (
+                str(collection_epoch_id).strip() or None
+                if collection_epoch_id else None
             )
         if fresh_collection_signal_ts is not None:
             _data_sync_identity_epoch_cache["fresh_collection_signal_ts"] = float(
@@ -44660,9 +44944,9 @@ def _update_data_sync_identity_epoch_cache(
 
 
 def _prime_data_sync_identity_epoch_cache() -> None:
-    """Read durable epoch identity once during startup, never in the handler."""
+    """Read durable epoch identity at startup and after every session write."""
     session = _load_research_session_meta() or {}
-    epoch_id = str(session.get("collector_v22_epoch_id") or "").strip()
+    epoch_id = _bound_collection_epoch_id()
     try:
         signal_ts = float(
             state.get("fresh_collection_signal_ts")
@@ -44703,6 +44987,89 @@ def _data_sync_memory_identity_payload():
 def api_data_sync_identity():
     """Reserved-capacity preflight with no volume, session or lifecycle I/O."""
     return jsonify(_data_sync_memory_identity_payload())
+
+
+@app.route('/api/data-sync/manifest/refresh', methods=['POST'])
+def api_data_sync_manifest_refresh():
+    """Explicit admin trigger for one single-flight inventory build."""
+    if not _admin_authed_strict():
+        return jsonify({"error": "unauthorized"}), 401
+    receipt_bootstrap = _data_sync_receipt_bootstrap_gate()
+    if not receipt_bootstrap["complete"]:
+        return jsonify({
+            "status": "RECEIPT_BOOTSTRAP_PENDING",
+            "receipt_bootstrap": receipt_bootstrap,
+            "retry_after_seconds": 5,
+        }), 409
+    body = request.get_json(silent=True) or {}
+    refresh_nonce = str(body.get("nonce") or "").strip().lower() or uuid.uuid4().hex
+    if not re.fullmatch(r"[0-9a-f]{32}", refresh_nonce):
+        return jsonify({"error": "manifest refresh nonce is invalid"}), 400
+    inventory_state = _data_sync_request_async_inventory(
+        force_refresh=True, refresh_nonce=refresh_nonce, allow_start=True,
+    )
+    status_code = 409 if inventory_state.get("status") == "EPOCH_UNBOUND" else 202
+    return jsonify({
+        "status": inventory_state.get("status"),
+        "refresh_nonce": inventory_state.get("refresh_nonce") or refresh_nonce,
+        "refreshing": bool(inventory_state.get("refreshing")),
+        "worker_failure_code": inventory_state.get("worker_failure_code"),
+        "collection_epoch_id": _data_sync_memory_identity_payload().get("collection_epoch_id"),
+    }), status_code
+
+
+_DATA_SYNC_BACKGROUND_REFRESH_INTERVAL_SECONDS = 120.0
+_DATA_SYNC_BACKGROUND_REFRESH_FAILURE_BACKOFF_SECONDS = 600.0
+
+
+def _data_sync_inventory_needs_background_refresh(now_wall: float) -> bool:
+    """True only when no admissible CURRENT generation exists for this identity."""
+    with _data_sync_inventory_cache_condition:
+        if _data_sync_async_inventory.get("refreshing"):
+            return False
+        last_failure = str(_data_sync_async_inventory.get("last_failure_at") or "")
+        status = _data_sync_async_inventory.get("status")
+        generation = _data_sync_async_inventory.get("generation")
+    if last_failure:
+        try:
+            failed_at = datetime.fromisoformat(last_failure.replace("Z", "+00:00")).timestamp()
+            if now_wall - failed_at < _DATA_SYNC_BACKGROUND_REFRESH_FAILURE_BACKOFF_SECONDS:
+                return False
+        except ValueError:
+            pass
+    if status != "CURRENT" or not isinstance(generation, dict):
+        return True
+    cached = generation.get("bundle_identity") or {}
+    current = _data_sync_memory_identity_payload()
+    return any(
+        not cached.get(key) or cached.get(key) != current.get(key)
+        for key in ("source_git_rev", "collection_epoch_id", "tile_registry_signature")
+    )
+
+
+def _data_sync_background_refresh_loop() -> None:
+    """Rebuild inventory off the request path when authority is missing."""
+    while True:
+        time.sleep(_DATA_SYNC_BACKGROUND_REFRESH_INTERVAL_SECONDS)
+        try:
+            with _data_sync_identity_cache_lock:
+                epoch_bound = bool(_data_sync_identity_epoch_cache.get("collection_epoch_id"))
+            if not epoch_bound or not _data_sync_receipt_bootstrap_gate()["complete"]:
+                continue
+            if _data_sync_inventory_needs_background_refresh(time.time()):
+                _data_sync_request_async_inventory(
+                    force_refresh=True, refresh_nonce=uuid.uuid4().hex, allow_start=True,
+                )
+        except Exception as exc:
+            logger.warning(f"[DATA_SYNC] background inventory refresh skipped: {exc}")
+
+
+def _start_data_sync_background_refresh() -> None:
+    threading.Thread(
+        target=safe_thread(_data_sync_background_refresh_loop),
+        name="data-sync-background-refresh",
+        daemon=True,
+    ).start()
 
 
 @app.route('/api/data-sync/sqlite-snapshot')
@@ -44874,7 +45241,7 @@ def _data_sync_ack_v3_identity_matches(body: dict) -> tuple[bool, str | None]:
     session = _load_research_session_meta() or {}
     expected_identity = {
         "source_git_rev": _runtime_git_rev(),
-        "collection_epoch_id": str(session.get("collector_v22_epoch_id") or ""),
+        "collection_epoch_id": _bound_collection_epoch_id(),
         "tile_registry_signature": active_tile_registry_signature(),
     }
     for key, expected in expected_identity.items():
@@ -45209,7 +45576,7 @@ def api_data_sync_ack():
     session = _load_research_session_meta() or {}
     expected_identity = {
         "source_git_rev": _runtime_git_rev(),
-        "collection_epoch_id": str(session.get("collector_v22_epoch_id") or ""),
+        "collection_epoch_id": _bound_collection_epoch_id(),
         "tile_registry_signature": active_tile_registry_signature(),
     }
     for key, expected in expected_identity.items():
@@ -45444,7 +45811,7 @@ def _data_sync_lifecycle_cleanup_current_identity() -> dict:
     return {
         "source_git_rev": revision,
         "deployed_git_rev": revision,
-        "collection_epoch_id": _collector_v22_epoch_id(),
+        "collection_epoch_id": _bound_collection_epoch_id(),
         "tile_registry_signature": active_tile_registry_signature(),
         "config_signature": hashlib.sha256(json.dumps(
             config_material, separators=(",", ":"), sort_keys=True,
@@ -50881,6 +51248,7 @@ def _persistent_config_keys():
         "duplicate_limit_block_enabled",
         "exit_only_lanes",
         "manual_admin_pause",
+        "pause_intent",
     ]
     if state.get("strategy_mode") != "RESEARCH":
         keys.append("daily_pnl_usd")
@@ -52329,6 +52697,7 @@ def main():
     prune_aux_logs_on_startup()
     _ensure_collector_v22_epoch()
     _prime_data_sync_identity_epoch_cache()
+    _start_data_sync_background_refresh()
     _reconcile_lifecycle_cleanup_transactions()
     _audit_lifecycle_purge_recovery()
     _audit_raw_generation_cleanup_recovery()

@@ -138,9 +138,27 @@ def _async_inventory_function(state, monotonic_value):
         "hmac": hmac,
         "uuid": uuid,
         "utc_iso": lambda: "2026-09-01T00:00:00Z",
+        "_data_sync_identity_cache_lock": threading.Lock(),
+        "_data_sync_identity_epoch_cache": {"collection_epoch_id": "epoch"},
+        "CollectionEpochUnbound": SimpleNamespace(code="INVENTORY_EPOCH_UNBOUND"),
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), namespace)
     return namespace["_data_sync_request_async_inventory"], starts
+
+
+def test_read_only_inventory_request_reports_stale_without_revalidating():
+    state = {
+        "status": "CURRENT", "rows": [{"path": "old.json", "size": 1}],
+        "generated_at": "old", "expires_at": 149.0,
+        "served_since_refresh": True, "refreshing": False,
+        "error": None,
+    }
+    request_inventory, starts = _async_inventory_function(state, 150.0)
+    result = request_inventory(force_refresh=False, allow_start=False)
+    assert result["status"] == "STALE"
+    assert result["refreshing"] is False
+    assert state["refreshing"] is False
+    assert starts == []
 
 
 def test_expired_current_inventory_is_served_stale_while_revalidating_fail_closed():

@@ -170,7 +170,7 @@ def continue_bootstrap(expected: str, request_json, *, monotonic=time.monotonic,
         raise RuntimeError("resume-bootstrap bounded deadline expired: " + json.dumps(last_diagnostic or {}, sort_keys=True, separators=(",", ":")))
 
     # Sole mutation. An ambiguous response propagates and is never retried.
-    resumed = request_json("/api/resume", {"clear_admin_manual_pause": True})
+    resumed = request_json("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})
     if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
         raise RuntimeError("single paper resume was not acknowledged")
     final = None
@@ -219,7 +219,7 @@ def preserve_maintenance(expected: str, request_json, *, monotonic=time.monotoni
         raise RuntimeError("maintenance preservation refused non-exact, unsafe, or invalid-schema state")
     # Never retry this mutation. Its only purpose is to restore the fail-safe
     # pause after the proof-bound continuation step itself has failed.
-    paused = request_json("/api/pause", {})
+    paused = request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
     if paused.get("status") != "paused" or paused.get("execution_paused") is not True:
         raise RuntimeError("maintenance preservation pause was not acknowledged")
     final = observe_status(request_json, until=deadline, monotonic=monotonic, sleep=sleep)

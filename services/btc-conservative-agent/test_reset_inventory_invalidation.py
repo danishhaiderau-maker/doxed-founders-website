@@ -127,6 +127,7 @@ def test_historical_ack_is_retained_but_not_advertised_for_new_epoch(tmp_path):
                 "tile_registry_signature": "b" * 64}
     env = {"json": json, "_data_sync_ack_path": lambda: target,
            "_load_research_session_meta": lambda: {"collector_v22_epoch_id": "epoch-new"},
+           "_bound_collection_epoch_id": lambda: "epoch-new",
            "_runtime_git_rev": lambda: identity["source_git_rev"],
            "active_tile_registry_signature": lambda: identity["tile_registry_signature"]}
     read = compile_function("_read_data_sync_ack", env)
