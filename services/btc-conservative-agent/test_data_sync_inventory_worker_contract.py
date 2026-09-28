@@ -174,6 +174,28 @@ def test_worker_rejects_allowed_root_outside_volume(tmp_path):
     assert not result_path.exists()
 
 
+def test_volume_root_receipt_does_not_collide_with_runtime_basename(tmp_path):
+    worker = _load_worker()
+    volume = tmp_path / "volume"
+    runtime = volume / "runtime"
+    runtime.mkdir(parents=True)
+    name = "ai_scan_independence_report.json"
+    (runtime / name).write_text('{"where":"runtime"}\n', encoding="utf-8")
+    (volume / name).write_text('{"where":"volume-root","poison":true}\n', encoding="utf-8")
+    nonce = "e" * 32
+    request_path, result_path = _paths(volume, nonce)
+    payload = _request(volume, nonce)
+    payload["top_level_receipt_names"] = [name]
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert worker.run(request_path, result_path, nonce) == 0
+    rows = _generation_rows(json.loads(result_path.read_text(encoding="utf-8")))
+    matches = [row for row in rows if row["path"] == name]
+    assert len(matches) == 1
+    assert matches[0]["size"] == (runtime / name).stat().st_size
+    assert matches[0]["size"] != (volume / name).stat().st_size
+
+
 def test_worker_deduplicates_overlapping_roots_and_filters_sensitive_files(tmp_path):
     worker = _load_worker()
     volume = tmp_path / "volume"

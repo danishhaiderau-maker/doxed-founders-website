@@ -160,11 +160,10 @@ def _load_request(request_path: Path, result_path: Path, nonce: str) -> dict:
 
 def _relpath(path: Path, request: dict) -> str:
     resolved = path.resolve()
-    volume = request["_volume"]
     runtime = request["_runtime"]
-    top_names = set(request.get("top_level_receipt_names") or [])
-    if resolved.parent == volume and resolved.name in top_names:
-        return resolved.name
+    # Never alias a volume-root file to its basename. That path is already the
+    # inventory identity of runtime/<name>, and the two files raise
+    # CheckpointError "conflicting inventory row".
     try:
         return resolved.relative_to(runtime).as_posix()
     except ValueError:
