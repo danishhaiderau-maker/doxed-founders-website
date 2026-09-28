@@ -13,11 +13,23 @@ function Test-MirrorCandidate {
     throw "Downloaded candidate has an invalid relative path: $RelativePath."
   }
   $name = $normalizedRelativePath.ToLowerInvariant()
-  $opaqueCorruptEvidence = $name.StartsWith(
-    "corrupt_evidence_quarantine/",
-    [System.StringComparison]::Ordinal
+  $opaqueCorruptEvidence = (
+    $name.StartsWith("corrupt_evidence_quarantine/", [System.StringComparison]::Ordinal) -or
+    $name.StartsWith(
+      "v3/receipts/authority_identity_quarantine_v1/",
+      [System.StringComparison]::Ordinal
+    )
   )
-  if ($opaqueCorruptEvidence) {
+  # Ops recovery/reset receipt trees are not analyzer evidence. Corrupt or
+  # multi-record crash journals under these prefixes must not fail the research
+  # ACK path; admit by authenticated size only (same contract as quarantine).
+  $opaqueOpsReceiptTree = (
+    $name.StartsWith("recovery_receipts/", [System.StringComparison]::Ordinal) -or
+    $name.StartsWith("research_reset_receipts/", [System.StringComparison]::Ordinal) -or
+    $name.StartsWith("v3/receipts/authority_identity_quarantine_v1/", [System.StringComparison]::Ordinal) -or
+    $name.Contains("/authority_identity_quarantine_v1/")
+  )
+  if ($opaqueCorruptEvidence -or $opaqueOpsReceiptTree) {
     if ($relativeParts.Count -lt 2) {
       throw "Downloaded quarantine candidate has an invalid relative path: $RelativePath."
     }
@@ -36,9 +48,10 @@ function Test-MirrorCandidate {
   }
   # This legacy filename is an append-only newline-delimited crash journal,
   # not one JSON document. Validating the whole file as JSON stalls the mirror
-  # as soon as a second crash record is appended.
-  if ($name -eq "crash_dump.json") {
-    $name = "crash_dump.jsonl"
+  # as soon as a second crash record is appended. Match by leaf name so nested
+  # recovery_receipts/**/crash_dump.json paths are treated as JSONL too.
+  if ($name -eq "crash_dump.json" -or $name.EndsWith("/crash_dump.json")) {
+    $name = $name.Substring(0, $name.Length - 5) + ".jsonl"
   }
   if ($name -match '\.json$') {
     try {
@@ -146,7 +159,36 @@ function Publish-MirrorCandidate {
     [int]$ReplaceAttempts = 12
   )
   $backup = "$Candidate.replace-backup"
+  $candidateDir = [System.IO.Path]::GetDirectoryName($Candidate)
+  $destinationDir = [System.IO.Path]::GetDirectoryName($Destination)
+  $crossDirectory = -not [string]::Equals(
+    $candidateDir,
+    $destinationDir,
+    [System.StringComparison]::OrdinalIgnoreCase
+  )
   try {
+    if ($crossDirectory) {
+      # Short MAX_PATH staging lives under .fly-sync-candidates/. File.Replace
+      # across directories is flaky under reader locks; move destination aside
+      # then Move the validated candidate into place on the same volume.
+      [void][System.IO.Directory]::CreateDirectory($destinationDir)
+      if (Test-Path -LiteralPath $Destination) {
+        $aside = "$Destination.$PID.replace-aside"
+        [System.IO.File]::Move($Destination, $aside)
+        try {
+          [System.IO.File]::Move($Candidate, $Destination)
+          Remove-Item -LiteralPath $aside -Force -ErrorAction SilentlyContinue
+        } catch {
+          if (-not (Test-Path -LiteralPath $Destination) -and (Test-Path -LiteralPath $aside)) {
+            [System.IO.File]::Move($aside, $Destination)
+          }
+          throw
+        }
+      } else {
+        [System.IO.File]::Move($Candidate, $Destination)
+      }
+      return
+    }
     if (Test-Path -LiteralPath $Destination) {
       Invoke-MirrorAtomicReplace `
         -Candidate $Candidate `

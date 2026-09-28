@@ -443,7 +443,7 @@ def test_chunk_pressure_circuit_breaker_aborts_early_and_resets_deterministicall
         timeout=15,
     )
     assert json.loads(completed.stdout) == [1, 2, 0, 1, 1, 0]
-    assert '$resourcePressureCircuitThreshold = 2' in SYNC_SCRIPT
+    assert '$resourcePressureCircuitThreshold = 6' in SYNC_SCRIPT
     assert '$consecutiveChunkPressureFailures = 0' in SYNC_SCRIPT
     assert 'stage=file_chunk_resource_pressure_circuit_open' in SYNC_SCRIPT
     circuit = SYNC_SCRIPT.index('stage=file_chunk_resource_pressure_circuit_open')
