@@ -47,6 +47,10 @@ jobs:
       - name: Verify Fly is alive, safe, and running current bot source
         env:
           EXPECTED_REVISION: ${{ steps.expected.outputs.revision }}
+          # The deployed paper cohort is explicitly score-led. Keep the
+          # monitor's registry identity on the same startup policy as Fly;
+          # an unset flag would expect the retired hypothesis identity.
+          SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
         run: |
           python - <<'PY'
           import json

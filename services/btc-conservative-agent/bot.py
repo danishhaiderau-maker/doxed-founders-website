@@ -17901,6 +17901,15 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         return
     if not is_research_data_collection():
         return
+    # Same parse as combo_pathway_config: only exact "1" is enabled.
+    # A missing flag must not fall through to hypothesis-era research orders.
+    if os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") != "1":
+        logger.error(
+            "[SCORE_LED] research start refused: "
+            "SCORE_LED_PAPER_RESEARCH_ENABLED is missing or not 1 "
+            "[PIPELINE ENFORCEMENT]"
+        )
+        return
     lane_ai, score_led_admission = _effective_score_led_family_ai(ai)
     ai_direction = lane_ai.get("direction")
     final_direction = ai_direction

@@ -4,6 +4,7 @@ import copy
 import ast
 import json
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -208,9 +209,15 @@ def test_family_fanout_preserves_raw_ai_and_records_effective_admission():
         "COMBO_LANE_SPECS": {"FAMILY_ONE": {"combo_key": "ONE"}},
         "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
         "logger": type("Logger", (), {"error": lambda *_args: None, "info": lambda *_args: None})(),
+        "os": os,
     }
     fanout = _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
-    fanout({"trade_id": "scan-score-led"}, raw_ai, 2.0, {}, "AI_SCAN")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
+    try:
+        fanout({"trade_id": "scan-score-led"}, raw_ai, 2.0, {}, "AI_SCAN")
+    finally:
+        monkeypatch.undo()
 
     assert raw_ai == original
     written_ai = writes[0][0][1]
@@ -361,11 +368,17 @@ def test_applied_rejection_fanout_records_evidence_without_parsing_spread(fields
         "logger": type(
             "Logger", (), {"error": lambda *_args: None, "info": lambda *_args: None}
         )(),
+        "os": os,
     }
     fanout = _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
-    fanout(
-        {"trade_id": "scan-rejected-score-led"}, raw_ai, 2.0, {}, "AI_SCAN",
-    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
+    try:
+        fanout(
+            {"trade_id": "scan-rejected-score-led"}, raw_ai, 2.0, {}, "AI_SCAN",
+        )
+    finally:
+        monkeypatch.undo()
 
     assert raw_ai == original
     assert len(writes) == 1
@@ -376,6 +389,107 @@ def test_applied_rejection_fanout_records_evidence_without_parsing_spread(fields
     )
     assert writes[0][1]["execution_disposition"] == "AI_REJECTED_NO_ORDER"
     assert enqueued == []
+
+
+@pytest.mark.parametrize("raw", [None, "", "0", "true", "yes", "1"])
+def test_missing_score_led_flag_refuses_research_start_present_flag_does_not(raw):
+    """Missing or non-1 values refuse lane start; exact 1 still starts paper research."""
+    patch = pytest.MonkeyPatch()
+    if raw is None:
+        patch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
+    else:
+        patch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raw)
+    enabled = os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") == "1"
+    raw_ai = {
+        "shared_ai_call_id": "scan-flag-gate",
+        "direction": "LONG",
+        "decision": "APPROVE",
+        "approved": True,
+        "long_score": 42,
+        "short_score": 38,
+    }
+    original = copy.deepcopy(raw_ai)
+    enqueued = []
+    writes = []
+    errors = []
+    state = {
+        "strategy_mode": "RESEARCH",
+        "live_armed": False,
+        "bitfinex_live_enabled": False,
+        "invert_signal": False,
+    }
+    effective = _load_bot_function(
+        "_effective_score_led_family_ai",
+        {
+            "state": state,
+            "state_lock": _Lock(),
+            "resolve_score_led_paper_admission": resolve_score_led_paper_admission,
+            "SCORE_LED_PAPER_RESEARCH_ENABLED": enabled,
+            "SCORE_LED_ADMISSION_POLICY_ID": SCORE_LED_ADMISSION_POLICY_ID,
+            "is_research_data_collection": lambda: True,
+            "_force_paper_mode_active": lambda: True,
+            "copy": copy,
+        },
+    )
+    namespace = {
+        "_effective_score_led_family_ai": effective,
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "state": state,
+        "compute_directional_spread": (
+            lambda direction, _ai: 4 if direction == "LONG" else -4
+        ),
+        "_enrich_combo_lane_features": lambda features, _ctx: dict(features),
+        "COMBO_EXECUTION_LANES": ("FAMILY_ONE",),
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: True,
+        "is_patient_chase_lane": lambda _lane: True,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": (
+            lambda _lane, _ai, direction, spread, **_kwargs:
+            {"passes": direction == "LONG" and spread == 4}
+        ),
+        "is_research_lane_enabled": lambda _lane: True,
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-flag-gate",
+        "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-v2"},
+        "_write_v3_shared_lane_decision": (
+            lambda *args, **kwargs:
+            writes.append((copy.deepcopy(args), copy.deepcopy(kwargs))) or True
+        ),
+        "_enqueue_combo_lane_execution": (
+            lambda *args, **kwargs: enqueued.append(copy.deepcopy(args))
+        ),
+        "COMBO_LANE_SPECS": {"FAMILY_ONE": {"combo_key": "ONE"}},
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": type(
+            "Logger",
+            (),
+            {
+                "error": lambda *_args: errors.append(_args),
+                "info": lambda *_args: None,
+            },
+        )(),
+        "os": os,
+    }
+    fanout = _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
+    try:
+        fanout({"trade_id": "scan-flag-gate"}, raw_ai, 2.0, {}, "AI_SCAN")
+    finally:
+        patch.undo()
+
+    assert raw_ai == original
+    assert state["live_armed"] is False
+    assert state["bitfinex_live_enabled"] is False
+    if enabled:
+        assert enqueued
+        assert enqueued[0][1]["direction"] == "LONG"
+        assert writes[0][1]["exact_reason"] == "SCORE_LED_VALID_NON_TIE"
+        assert not any("research start refused" in str(row) for row in errors)
+    else:
+        assert enqueued == []
+        assert writes == []
+        assert any("research start refused" in str(row) for row in errors)
 
 
 def test_lane_evidence_keeps_raw_and_effective_fields_separate():
