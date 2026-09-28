@@ -361,9 +361,13 @@ export function isCredentialResolutionUnavailableError(value) {
   return match != null && CREDENTIAL_RESOLUTION_FAILURE_CODES.has(match[1]);
 }
 
+// Open by default so AUTHENTICATED_OWNER paper-tip proof accepts this class
+// without DURABLE_RELAYS_ONLY_RECOVERY. Pass false to close the exemption.
+// Armed, live, and previously used relays still fail the row predicates.
+// Owner flatness and strict reconcile/audit for every other relay stay required.
 export function isNeverArmedUncredentialedRelay(
   row,
-  allowDurableExemption = durableOnlyRecovery,
+  allowDurableExemption = true,
 ) {
   const reconcileAbsent = row?.reconcile == null;
   const orderAuditAbsent = row?.exchangeOrderAudit == null;
@@ -410,6 +414,12 @@ export function isNeverArmedUncredentialedRelay(
     && reconcileAbsent
     && orderAuditAbsent
   );
+}
+
+export function isStrictAuditRefreshTarget(row) {
+  return row?.credentialConfigured === true
+    && isRelayPausedAndDisarmed(row)
+    && !isNeverArmedUncredentialedRelay(row);
 }
 
 export function isCompleteStoredExchangeOrderAuditFlat(audit) {
@@ -593,10 +603,12 @@ async function main() {
 
   let rows = await loadRelayBoundaryRows();
   if (!durableOnlyRecovery) {
-    const refreshTargets = rows.filter((row) => (
-      row.credentialConfigured === true && isRelayPausedAndDisarmed(row)
-    ));
-    if (refreshTargets.length === 0) {
+    const refreshTargets = rows.filter(isStrictAuditRefreshTarget);
+    // A fleet made only of never-armed unusable relays has nothing to refresh.
+    // The Fly owner flatness check below still runs.
+    const neverArmedFleet = rows.length > 0
+      && rows.every((row) => isNeverArmedUncredentialedRelay(row));
+    if (refreshTargets.length === 0 && !neverArmedFleet) {
       throw new Error('strict relay proof found no paused, disarmed Cheetah audit target');
     }
     for (const target of refreshTargets) {
@@ -610,9 +622,12 @@ async function main() {
       || (
         rows.length > 0
         && rows.every((row) => (
-          isRelayPausedAndDisarmed(row)
-          && isStrictRawFlatReconcileSnapshot(row.reconcile)
-          && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
+          isNeverArmedUncredentialedRelay(row)
+          || (
+            isRelayPausedAndDisarmed(row)
+            && isStrictRawFlatReconcileSnapshot(row.reconcile)
+            && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
+          )
         ))
       )
     ) break;

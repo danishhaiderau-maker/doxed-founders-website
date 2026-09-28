@@ -9,6 +9,7 @@ import {
   isCompleteStoredRawFlatReconcileSnapshot,
   isCredentialResolutionUnavailableError,
   isNeverArmedUncredentialedRelay,
+  isStrictAuditRefreshTarget,
   isStrictExchangeOrderAuditFlat,
   isStrictRawFlatReconcileSnapshot,
   isRelayPausedAndDisarmed,
@@ -53,9 +54,22 @@ const inertUncredentialedRelay = {
   exchangeOrderAudit: null,
 };
 
-test('durable recovery waives absent audits only for a never-armed uncredentialed relay', () => {
+test('never-armed uncredentialed relays are flat on authenticated owner proof unless the exemption is closed', () => {
+  assert.equal(isNeverArmedUncredentialedRelay(inertUncredentialedRelay), true);
   assert.equal(isNeverArmedUncredentialedRelay(inertUncredentialedRelay, true), true);
   assert.equal(isNeverArmedUncredentialedRelay(inertUncredentialedRelay, false), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    relayArmedAt: '2026-08-01T00:00:00.000Z',
+  }), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    realTradingConfirmedAt: '2026-08-01T00:00:00.000Z',
+  }), false);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...inertUncredentialedRelay,
+    relayExecutionMode: 'LIVE',
+  }), false);
   assert.equal(isNeverArmedUncredentialedRelay({
     ...inertUncredentialedRelay,
     liveDeskSessionStartedAt: '2026-08-01T00:00:00.000Z',
@@ -90,7 +104,12 @@ test('durable recovery accepts a stable provider row only after an exact newer m
       lastObservedAt: '2026-09-03T01:00:01.000Z',
     },
   };
+  assert.equal(isNeverArmedUncredentialedRelay(staleProviderRow), true);
   assert.equal(isNeverArmedUncredentialedRelay(staleProviderRow, true), true);
+  assert.equal(isNeverArmedUncredentialedRelay({
+    ...staleProviderRow,
+    relayArmedAt: '2026-09-03T01:00:02.000Z',
+  }), false);
   assert.equal(isNeverArmedUncredentialedRelay({
     ...staleProviderRow,
     providerCredentialId: 'different-row',
@@ -128,6 +147,36 @@ test('durable recovery accepts a stable provider row only after an exact newer m
     orphanOrderIds: undefined,
     orphanPositionIds: undefined,
   }, true), true);
+});
+
+test('authenticated owner refresh still targets other credentialed relays and skips the never-armed class', () => {
+  assert.equal(isStrictAuditRefreshTarget(inertUncredentialedRelay), false);
+  const provenUnusable = {
+    ...inertUncredentialedRelay,
+    credentialConfigured: true,
+    instanceCredentialId: 'credential-row',
+    providerCredentialPresent: true,
+    providerCredentialId: 'credential-row',
+    providerCredentialUpdatedAt: '2026-09-03T01:00:00.000Z',
+    lastError: 'Exchange credentials missing — re-hire with API keys',
+    liveFidelityGuard: {
+      status: 'IDLE',
+      lastResetReason: 'EXCHANGE_CREDENTIALS_MISSING',
+      lastObservedAt: '2026-09-03T01:00:01.000Z',
+    },
+  };
+  assert.equal(isStrictAuditRefreshTarget(provenUnusable), false);
+  assert.equal(isStrictAuditRefreshTarget({
+    ...inertUncredentialedRelay,
+    credentialConfigured: true,
+    totalParticipants: 2,
+    providerCredentialPresent: true,
+  }), true);
+  assert.equal(isStrictAuditRefreshTarget({
+    ...provenUnusable,
+    relayArmedAt: '2026-09-03T01:00:02.000Z',
+    totalParticipants: 1,
+  }), false);
 });
 
 test('native HTTPS fallback preserves auth and pins the canonical proof to IPv4', () => {

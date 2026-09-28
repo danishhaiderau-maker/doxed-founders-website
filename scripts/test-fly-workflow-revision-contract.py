@@ -247,6 +247,27 @@ def test_all_bitfinex_instances_must_be_paused_disarmed_and_reconciled_flat():
     assert "isNeverArmedUncredentialedRelay(row)" in helper
 
 
+def test_authenticated_owner_flat_proof_exempts_never_armed_without_skipping_owner():
+    helper = (ROOT / "scripts/check-relay-flat.mjs").read_text(encoding="utf-8")
+    flat = DEPLOY[
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat"):
+        DEPLOY.index("- name: Prove exact unready Fly revision and every durable relay account is flat")
+    ]
+    assert 'REQUIRE_CANONICAL_FLY_OWNER: "YES"' in flat
+    assert "DURABLE_RELAYS_ONLY_RECOVERY" not in flat
+    assert "allowDurableExemption = true" in helper
+    assert "allowDurableExemption = durableOnlyRecovery" not in helper
+    assert "DURABLE_RELAYS_ONLY_RECOVERY cannot be combined with REQUIRE_CANONICAL_FLY_OWNER=YES" in helper
+    assert "const neverArmedFleet = rows.length > 0" in helper
+    assert "&& !isNeverArmedUncredentialedRelay(row)" in helper
+    wait = helper[helper.index("for (let attempt"):helper.index("const output")]
+    assert wait.index("isNeverArmedUncredentialedRelay(row)") < wait.index(
+        "isStrictRawFlatReconcileSnapshot(row.reconcile)"
+    )
+    assert 'DURABLE_RELAYS_ONLY_RECOVERY: "YES"' in DEPLOY
+    assert 'REQUIRE_CANONICAL_FLY_OWNER: "NO"' in DEPLOY
+
+
 def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     pause = DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary")
     flat = DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
