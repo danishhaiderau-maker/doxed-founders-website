@@ -1,158 +1,204 @@
-﻿"""Dashboard /api/data_size endpoint reports Fly runtime size + top files."""
-
+"""The storage dashboard route must never traverse the Fly volume."""
 import os
 import sys
+import threading
+import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
-
 import bot
-
-
-class _FakeCompleted:
-    """Minimal CompletedProcess substitute.
-
-    The endpoint reads ``out.stdout`` for both the text-mode ``du`` probes and
-    the bytes-mode ``wc`` probe, so both kinds of output live on ``stdout``.
-    """
-
-    def __init__(self, stdout="", returncode=0, payload=b""):
-        # When payload is provided it represents raw bytes (wc -l output); use
-        # it directly so the endpoint's bytes-mode branch sees real content.
-        self.stdout = payload if payload else stdout
-        self.stderr = ""
-        self.returncode = returncode
 
 
 class DataSizeEndpointTests(unittest.TestCase):
     def setUp(self):
         self.original_bootstrap = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+        self.original_condition = bot._data_sync_inventory_cache_condition
+        self.original_async = bot._data_sync_async_inventory
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+        bot._data_sync_inventory_cache_condition = threading.Condition()
 
     def tearDown(self):
         bot._DASHBOARD_BOOTSTRAP_COMPLETE = self.original_bootstrap
+        bot._data_sync_inventory_cache_condition = self.original_condition
+        bot._data_sync_async_inventory = self.original_async
 
-    def _stub_subprocess(self, du_total_mb=480.0, du_files=None, wc_lines=None):
-        """Build a deterministic subprocess.run fake returning known sizes."""
-        if du_files is None:
-            du_files = [
-                (320.5, "/app/data/runtime/ai_reason_research.jsonl"),
-                (110.0, "/app/data/runtime/signal_replay.jsonl"),
-                (30.2, "/app/data/runtime/trades_3factor.csv"),
-                (10.0, "/app/data/runtime/bot.log"),
-                (5.0, "/app/data/runtime/debug.log"),
-            ]
-        if wc_lines is None:
-            wc_lines = {
-                "trades_3factor.csv": 1234,
-                "ai_reason_research.jsonl": 9876,
-                "signal_replay.jsonl": 4422,
-            }
+    @staticmethod
+    def _usage(used_mb=480, total_mb=1024):
+        unit = 1024 * 1024
+        return SimpleNamespace(total=total_mb * unit, used=used_mb * unit,
+                               free=(total_mb - used_mb) * unit)
 
-        du_total_stdout = "%.1f\t/app/data/runtime\n" % du_total_mb
-        du_files_lines = "\n".join("%.1f\t%s" % (mb, p) for mb, p in du_files)
-        wc_text = "\n".join(
-            "%d\t/app/data/runtime/%s" % (cnt, fname) for fname, cnt in wc_lines.items()
-        )
+    def _state(self, status="CURRENT"):
+        bot._data_sync_async_inventory = {
+            "status": status, "generated_at": "2026-09-03T00:00:00Z",
+            "expires_at": time.monotonic() + 60.0,
+            "generation_id": "a" * 64, "error": None,
+            "refreshing": status == "BUILDING",
+            "generation": {
+                "file_count": 2, "total_bytes": 430 * 1024 * 1024,
+                "top_files": [
+                    {"path": "runtime/a.jsonl", "name": "a.jsonl", "size": 320 * 1024 * 1024},
+                    {"path": "runtime/b.jsonl", "name": "b.jsonl", "size": 110 * 1024 * 1024},
+                ],
+            },
+        }
 
-        def fake_run(cmd, *args, **kwargs):
-            # First positional arg is the argv list. Branch on the leading tool.
-            tool = cmd[0] if isinstance(cmd, (list, tuple)) and cmd else None
-            if tool == "du":
-                # `du -sm <runtime>` (total) vs `du -sm <runtime>/*` (files).
-                # The file-list variant ends with `/*` on the only argument.
-                arg = cmd[-1] if len(cmd) > 1 else ""
-                if arg.endswith("/*"):
-                    return _FakeCompleted(stdout=du_files_lines, returncode=0)
-                return _FakeCompleted(stdout=du_total_stdout, returncode=0)
-            if tool == "wc":
-                return _FakeCompleted(stdout="", returncode=0, payload=wc_text.encode("utf-8"))
-            return _FakeCompleted(stdout="", returncode=1)
-
-        return fake_run
+    def _get(self, used_mb=480):
+        forbidden = AssertionError("request path attempted full-volume work")
+        with mock.patch.object(bot, "_admin_authed_strict", return_value=True), \
+             mock.patch.object(bot.shutil, "disk_usage", return_value=self._usage(used_mb)), \
+             mock.patch.object(bot.subprocess, "run", side_effect=forbidden), \
+             mock.patch.object(bot.os, "walk", side_effect=forbidden), \
+             mock.patch.object(bot, "_data_sync_request_async_inventory", side_effect=forbidden), \
+             mock.patch.object(bot, "storage_state") as storage_state, \
+             mock.patch.object(bot, "project_capacity") as project_capacity:
+            with bot.app.test_client() as client:
+                response = client.get("/api/data_size")
+        storage_state.assert_not_called()
+        project_capacity.assert_not_called()
+        return response
 
     def test_unauthenticated_request_is_rejected(self):
-        # Force strict auth to fail by clearing both local-operator and token.
         with mock.patch.object(bot, "_admin_authed_strict", return_value=False):
             with bot.app.test_client() as client:
-                resp = client.get("/api/data_size")
-        self.assertEqual(resp.status_code, 401)
-        body = resp.get_json()
-        self.assertEqual(body["status"], "error")
+                response = client.get("/api/data_size")
+        self.assertEqual(response.status_code, 401)
 
-    def test_authenticated_response_shape(self):
-        # Strict auth passes so the endpoint runs the (stubbed) du/wc probes.
-        # Top files now come from os.walk (not `du path/*`, which never expands).
-        walk_files = [
-            ("ai_reason_research.jsonl", 320.5 * 1024 * 1024),
-            ("signal_replay.jsonl", 110.0 * 1024 * 1024),
-            ("trades_3factor.csv", 30.2 * 1024 * 1024),
-            ("bot.log", 10.0 * 1024 * 1024),
-            ("debug.log", 5.0 * 1024 * 1024),
-        ]
+    def test_current_inventory_and_filesystem_usage_are_distinct(self):
+        self._state()
+        body = self._get().get_json()
+        self.assertEqual(body["filesystem_used_mb"], 480.0)
+        self.assertEqual(body["inventory_transferable_mb"], 430.0)
+        self.assertEqual(body["runtime_size_status"], "CURRENT")
+        self.assertAlmostEqual(body["volume_pct"], 46.9, delta=.05)
+        self.assertEqual([row["name"] for row in body["top_files"]], ["a.jsonl", "b.jsonl"])
+        self.assertEqual(body["line_count_status"], "UNAVAILABLE")
+        self.assertTrue(all(value is None for value in body["line_counts"].values()))
 
-        def fake_walk(_root):
-            yield ("/app/data/runtime", [], [name for name, _ in walk_files])
+    def test_stale_inventory_is_explicit_and_never_exposes_top_files(self):
+        self._state("STALE")
+        body = self._get().get_json()
+        self.assertEqual(body["runtime_size_status"], "STALE")
+        self.assertEqual(body["inventory_transferable_mb"], 430.0)
+        self.assertEqual(body["top_files"], [])
 
-        def fake_getsize(path):
-            name = os.path.basename(path)
-            for fname, size in walk_files:
-                if fname == name:
-                    return int(size)
-            raise OSError("missing")
+    def test_building_or_empty_inventory_is_unavailable(self):
+        for status in ("BUILDING", "EMPTY"):
+            with self.subTest(status=status):
+                self._state(status)
+                bot._data_sync_async_inventory["generation"] = None
+                body = self._get().get_json()
+                self.assertEqual(body["runtime_size_status"], "UNAVAILABLE")
+                self.assertIsNone(body["runtime_size_mb"])
+                self.assertEqual(body["top_files"], [])
 
-        with mock.patch.object(bot, "_admin_authed_strict", return_value=True):
-            with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess()):
-                with mock.patch.object(bot.os, "walk", side_effect=fake_walk):
-                    with mock.patch.object(bot.os.path, "getsize", side_effect=fake_getsize):
-                        with bot.app.test_client() as client:
-                            resp = client.get("/api/data_size")
-        self.assertEqual(resp.status_code, 200)
-        body = resp.get_json()
-        self.assertEqual(body["status"], "ok")
-        self.assertEqual(body["volume_total_mb"], 1024.0)
-        self.assertEqual(body["runtime_size_mb"], 480.0)
-        # 480/1024*100 = 46.875 -> rounded to one decimal = 46.9
-        self.assertAlmostEqual(body["volume_pct"], 46.9, delta=0.05)
-        self.assertEqual(body["cleanup_status"], "ok")
+    def test_expired_current_inventory_is_stale_and_ranking_is_withheld(self):
+        self._state("CURRENT")
+        bot._data_sync_async_inventory["expires_at"] = time.monotonic() - 1.0
+        body = self._get().get_json()
+        self.assertEqual(body["runtime_size_status"], "STALE")
+        self.assertEqual(body["inventory_transferable_mb"], 430.0)
+        self.assertEqual(body["top_files"], [])
 
-        # Top-5 files are sorted descending by size and capped at 5.
-        top = body["top_files"]
-        self.assertEqual(len(top), 5)
-        self.assertEqual(top[0]["name"], "ai_reason_research.jsonl")
-        self.assertAlmostEqual(top[0]["size_mb"], 320.5, delta=0.05)
-        # Sorted: 320.5, 110.0, 30.2, 10.0, 5.0
-        self.assertGreaterEqual(top[0]["size_mb"], top[1]["size_mb"])
+    def test_building_with_retained_generation_is_stale_revalidating(self):
+        self._state("BUILDING")
+        body = self._get().get_json()
+        self.assertEqual(body["runtime_size_status"], "STALE_REVALIDATING")
+        self.assertEqual(body["inventory_transferable_mb"], 430.0)
+        self.assertEqual(body["top_files"], [])
 
-        # Line counts come from the wc stub.
-        self.assertEqual(body["line_counts"]["trades_3factor.csv"], 1234)
-        self.assertEqual(body["line_counts"]["signal_replay.jsonl"], 4422)
-        self.assertEqual(body["line_counts"]["ai_reason_research.jsonl"], 9876)
+    def test_capacity_threshold_uses_filesystem_usage(self):
+        self._state()
+        self.assertEqual(self._get(700).get_json()["cleanup_status"], "warn")
+        self.assertEqual(self._get(900).get_json()["cleanup_status"], "critical")
 
-    def test_critical_threshold_when_over_80_percent(self):
-        # 900/1024*100 ~= 87.9 -> critical
-        with mock.patch.object(bot, "_admin_authed_strict", return_value=True):
-            with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess(du_total_mb=900.0)):
-                with bot.app.test_client() as client:
-                    resp = client.get("/api/data_size")
-        body = resp.get_json()
-        self.assertGreater(body["volume_pct"], 80.0)
-        self.assertEqual(body["cleanup_status"], "critical")
+    def test_inventory_lock_contention_fails_closed_without_waiting(self):
+        self._state()
+        held = threading.Event()
+        release = threading.Event()
 
-    def test_warn_threshold_between_60_and_80(self):
-        # 700/1024*100 ~= 68.4 -> warn
-        with mock.patch.object(bot, "_admin_authed_strict", return_value=True):
-            with mock.patch.object(bot.subprocess, "run", side_effect=self._stub_subprocess(du_total_mb=700.0)):
-                with bot.app.test_client() as client:
-                    resp = client.get("/api/data_size")
-        body = resp.get_json()
-        self.assertGreater(body["volume_pct"], 60.0)
-        self.assertLessEqual(body["volume_pct"], 80.0)
-        self.assertEqual(body["cleanup_status"], "warn")
+        def hold_inventory_condition():
+            with bot._data_sync_inventory_cache_condition:
+                held.set()
+                release.wait(timeout=2.0)
+
+        owner = threading.Thread(target=hold_inventory_condition, daemon=True)
+        owner.start()
+        self.assertTrue(held.wait(timeout=1.0))
+        started = time.monotonic()
+        try:
+            body = self._get().get_json()
+        finally:
+            release.set()
+            owner.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.25)
+        self.assertEqual(body["runtime_size_status"], "UNAVAILABLE")
+        self.assertIsNone(body["inventory_transferable_mb"])
+        self.assertEqual(body["top_files"], [])
+        self.assertTrue(body["inventory_refreshing"])
+        self.assertEqual(body["inventory_error"], "INVENTORY_SNAPSHOT_LOCK_BUSY")
+
+    def test_concurrent_pollers_do_not_queue_behind_inventory_lock(self):
+        self._state()
+        held = threading.Event()
+        release = threading.Event()
+
+        def hold_inventory_condition():
+            with bot._data_sync_inventory_cache_condition:
+                held.set()
+                release.wait(timeout=2.0)
+
+        owner = threading.Thread(target=hold_inventory_condition, daemon=True)
+        owner.start()
+        self.assertTrue(held.wait(timeout=1.0))
+        started = time.monotonic()
+        try:
+            with mock.patch.object(bot, "_admin_authed_strict", return_value=True), \
+                 mock.patch.object(bot.shutil, "disk_usage", return_value=self._usage()), \
+                 mock.patch.object(bot.subprocess, "run", side_effect=AssertionError("subprocess")), \
+                 mock.patch.object(bot.os, "walk", side_effect=AssertionError("walk")), \
+                 mock.patch.object(bot, "_data_sync_request_async_inventory", side_effect=AssertionError("refresh")), \
+                 mock.patch.object(bot, "storage_state") as storage_state, \
+                 mock.patch.object(bot, "project_capacity") as project_capacity:
+                responses = []
+
+                def poll():
+                    with bot.app.test_client() as client:
+                        responses.append(client.get("/api/data_size"))
+
+                pollers = [threading.Thread(target=poll) for _ in range(8)]
+                for poller in pollers:
+                    poller.start()
+                for poller in pollers:
+                    poller.join(timeout=0.5)
+                self.assertTrue(all(not poller.is_alive() for poller in pollers))
+                storage_state.assert_not_called()
+                project_capacity.assert_not_called()
+        finally:
+            release.set()
+            owner.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(len(responses), 8)
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        self.assertTrue(all(
+            response.get_json()["runtime_size_status"] == "UNAVAILABLE"
+            for response in responses
+        ))
+
+    def test_dashboard_explains_trigger_and_disabled_retention(self):
+        self.assertIn("50 MB value is a synchronization trigger, not a storage cap", bot.HTML)
+        self.assertIn("Retention: disabled", bot.HTML)
+        self.assertIn("dataSizeInventoryStatus", bot.HTML)
+        self.assertIn("ranking withheld", bot.DASHBOARD_JS)
 
 
 if __name__ == "__main__":

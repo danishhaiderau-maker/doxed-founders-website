@@ -9,6 +9,75 @@ function Stop-RelayEvidenceSync([string]$Code) {
   throw "[RELAY_EVIDENCE_$Code]"
 }
 
+function Get-RelayForwardFailureCode([System.Exception]$Exception) {
+  # Preserve only a bounded diagnostic class.  WebException/HTTP exception
+  # messages can contain the request URI, scoped user id, or proxy details and
+  # must never be copied into the sync heartbeat or log.
+  $cursor = $Exception
+  while ($null -ne $cursor) {
+    try {
+      if ($null -ne $cursor.Response -and $null -ne $cursor.Response.StatusCode) {
+        return "FORWARD_HTTP_$([int]$cursor.Response.StatusCode)"
+      }
+    } catch { }
+    if ($cursor -is [System.TimeoutException] -or
+        $cursor -is [System.Threading.Tasks.TaskCanceledException]) {
+      return 'FORWARD_TIMEOUT'
+    }
+    if ($cursor -is [System.Net.WebException]) {
+      if ($cursor.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
+        return 'FORWARD_TIMEOUT'
+      }
+      return 'FORWARD_NETWORK_FAILED'
+    }
+    if ($cursor -is [System.Net.Http.HttpRequestException] -or
+        $cursor -is [System.Net.Sockets.SocketException]) {
+      return 'FORWARD_NETWORK_FAILED'
+    }
+    $cursor = $cursor.InnerException
+  }
+  return 'FORWARD_FAILED'
+}
+
+function Get-RelayEvidenceSemanticDigest($Payload) {
+  # The platform refreshes generatedAt even when the immutable lifecycle/event
+  # evidence is byte-for-byte equivalent.  Hash every top-level field except
+  # that observation timestamp so an unchanged snapshot is not reposted to
+  # Fly and does not invalidate the runtime's evidence cache every poll.
+  function ConvertTo-RelayCanonicalValue($Value) {
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [Collections.IDictionary]) {
+      $mapped = [ordered]@{}
+      foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
+        $mapped[$key] = ConvertTo-RelayCanonicalValue $Value[$key]
+      }
+      return $mapped
+    }
+    if ($Value -is [Collections.IEnumerable] -and -not ($Value -is [Management.Automation.PSCustomObject])) {
+      return @($Value | ForEach-Object { ConvertTo-RelayCanonicalValue $_ })
+    }
+    $mapped = [ordered]@{}
+    foreach ($name in @($Value.PSObject.Properties.Name | Sort-Object)) {
+      $mapped[[string]$name] = ConvertTo-RelayCanonicalValue $Value.PSObject.Properties[[string]$name].Value
+    }
+    return $mapped
+  }
+  $semantic = [ordered]@{}
+  foreach ($name in @($Payload.PSObject.Properties.Name | Sort-Object)) {
+    if ([string]$name -ceq 'generatedAt') { continue }
+    $semantic[[string]$name] = ConvertTo-RelayCanonicalValue $Payload.PSObject.Properties[[string]$name].Value
+  }
+  $bytes = [Text.Encoding]::UTF8.GetBytes(
+    ($semantic | ConvertTo-Json -Depth 100 -Compress)
+  )
+  $hasher = [Security.Cryptography.SHA256]::Create()
+  try {
+    return (([BitConverter]::ToString($hasher.ComputeHash($bytes))) -replace '-', '').ToLowerInvariant()
+  } finally {
+    $hasher.Dispose()
+  }
+}
+
 $apiBaseUrl = [Environment]::GetEnvironmentVariable('PLATFORM_API_BASE_URL', 'Process')
 $agentSlug = [Environment]::GetEnvironmentVariable('PLATFORM_RELAY_AGENT_SLUG', 'Process')
 $userId = [Environment]::GetEnvironmentVariable('PLATFORM_RELAY_USER_ID', 'Process')
@@ -86,6 +155,31 @@ foreach ($record in @($payload.records)) {
   }
 }
 
+# A refreshed envelope timestamp is not new lifecycle evidence.  Compare the
+# fully validated semantic payload with the last locally accepted artifact
+# before forwarding it to the single-vCPU Fly runtime.  This keeps the sync
+# heartbeat current without rewriting the same 7 MB evidence file and waking
+# expensive downstream joins every three minutes.
+$incomingSemanticDigest = Get-RelayEvidenceSemanticDigest $payload
+if (Test-Path -LiteralPath $destination -PathType Leaf) {
+  try {
+    $existingPayload = Get-Content -LiteralPath $destination -Raw | ConvertFrom-Json
+    $existingValid = (
+      $existingPayload.schema -eq 'relay_lifecycle_evidence_v1' -and
+      $existingPayload.generatingRevision -and
+      $existingPayload.runIdentity -and
+      $null -ne $existingPayload.records
+    )
+  } catch {
+    $existingValid = $false
+  }
+  if ($existingValid -and
+      (Get-RelayEvidenceSemanticDigest $existingPayload) -ceq $incomingSemanticDigest) {
+    Write-Output $destination
+    return
+  }
+}
+
 # Forward the exact validated bytes to the volume-backed source bot so its
 # append-derived counterfactual worker can join platform events by canonical
 # trade ID. Forwarding happens before local replacement: any network or ACK
@@ -98,19 +192,31 @@ try {
 } finally {
   $sha256.Dispose()
 }
+# The isolated validator has a 90-second hard ceiling. Keep the client
+# deadline outside that ceiling so a valid but CPU-contended first install is
+# not abandoned and immediately posted a second time.
 try {
   $forward = Invoke-RestMethod -Method Post `
     -Uri ($sourceBotUrl.TrimEnd('/') + '/api/data-sync/platform-relay-evidence') `
-    -Headers @{ 'X-Bot-Admin-Token' = $adminToken; 'Content-Type' = 'application/json' } `
-    -Body ([Text.Encoding]::UTF8.GetBytes($raw)) -TimeoutSec 45
+    -Headers @{
+      'X-Bot-Admin-Token' = $adminToken
+      'Content-Type' = 'application/json'
+      # The source verifies this against the streamed request body.  Once a
+      # checksum has already been fully validated and atomically installed,
+      # retries can skip the expensive schema/event walk without trusting the
+      # caller's declaration.
+      'X-Content-SHA256' = $digest
+      'X-Relay-Semantic-SHA256' = $incomingSemanticDigest
+    } `
+    -Body ([Text.Encoding]::UTF8.GetBytes($raw)) -TimeoutSec 105
 } catch {
-  Stop-RelayEvidenceSync 'FORWARD_FAILED'
+  Stop-RelayEvidenceSync (Get-RelayForwardFailureCode $_.Exception)
 }
 if ($forward.ok -ne $true -or [string]$forward.schema -ne 'relay_lifecycle_evidence_v1' -or
-    [string]$forward.sha256 -cne $digest -or [int]$forward.records -ne @($payload.records).Count) {
+    [string]$forward.sha256 -cne $digest -or
+    [int]$forward.records -ne @($payload.records).Count) {
   Stop-RelayEvidenceSync 'FORWARD_ACK_INVALID'
 }
-
 $parent = Split-Path -Parent $destination
 if (-not $parent) { Stop-RelayEvidenceSync 'DESTINATION_INVALID' }
 New-Item -ItemType Directory -Force -Path $parent | Out-Null

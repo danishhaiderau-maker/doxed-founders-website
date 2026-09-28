@@ -1,6 +1,7 @@
 param(
   [string]$SourceDir = "",
-  [string]$TargetDir = ""
+  [string]$TargetDir = "",
+  [string]$Heartbeat = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,9 +10,15 @@ $repoRoot = Split-Path -Parent $scriptDir
 . (Join-Path $scriptDir "fly-data-paths.ps1")
 
 if (-not $SourceDir) {
-  $SourceDir = Join-Path $repoRoot "services\btc-conservative-agent\fly-data-mirror"
+  # Explicit legacy source only. It is never selected by operational launchers.
+  $legacyBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.IO.Path]::GetTempPath() }
+  $SourceDir = Join-Path $legacyBase "DoxxedCrypto\fly-data-mirror"
 }
 if (-not $TargetDir) { $TargetDir = Get-DoxxedFlyMirrorDir }
+if (-not $Heartbeat) {
+  $legacyHeartbeat = Join-Path $repoRoot ".fly-data-sync-loop.heartbeat.json"
+  $Heartbeat = $legacyHeartbeat
+}
 $source = [System.IO.Path]::GetFullPath($SourceDir)
 $target = [System.IO.Path]::GetFullPath($TargetDir)
 
@@ -38,32 +45,10 @@ if (Test-Path -LiteralPath $syncPidFile) {
     catch { }
 }
 
-New-Item -ItemType Directory -Path $target -Force | Out-Null
-$sourceFiles = @(Get-ChildItem -LiteralPath $source -Recurse -File -Force)
-$copiedBytes = [int64]0
-foreach ($file in $sourceFiles) {
-  $relative = $file.FullName.Substring($source.Length).TrimStart('\')
-  $destination = Join-Path $target $relative
-  New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
-  Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-  $sourceHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
-  $targetHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
-  if ($sourceHash -ne $targetHash) { throw "Verification failed for $relative" }
-  $copiedBytes += $file.Length
+if (-not (Test-Path -LiteralPath $Heartbeat -PathType Leaf)) {
+  throw "Completed Fly sync heartbeat does not exist: $Heartbeat"
 }
-
-$targetFiles = @(Get-ChildItem -LiteralPath $target -Recurse -File -Force)
-if ($targetFiles.Count -ne $sourceFiles.Count) {
-  throw "Verification failed: source has $($sourceFiles.Count) files but target has $($targetFiles.Count)."
-}
-
-[pscustomobject]@{
-  Status = "verified_copy_complete"
-  Source = $source
-  Target = $target
-  Files = $sourceFiles.Count
-  Bytes = $copiedBytes
-  SourceRetained = $true
-  NextStep = "Restart desktop tools; they now default to Target. Keep Source until a fresh sync and analyzer pass are verified."
-}
+$migration = Join-Path $repoRoot "scripts\migrate_canonical_research_store.py"
+& python $migration --source $source --destination $target --heartbeat $Heartbeat
+if ($LASTEXITCODE -ne 0) { throw "Verified canonical migration failed with exit code $LASTEXITCODE." }
 

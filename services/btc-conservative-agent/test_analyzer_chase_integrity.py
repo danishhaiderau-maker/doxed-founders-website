@@ -56,3 +56,33 @@ def test_chase_integrity_still_fails_real_mismatch_inside_shared_cohort(tmp_path
     assert report["report_status"] == "INVALID"
     assert check["passed"] is False
     assert check["comparison_status"] == "COMPARABLE"
+
+
+def test_chase_threshold_report_includes_shadow_without_mixing_execution(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    monkeypatch.setattr(analyzer, "_load_jsonl_by_trade_id", lambda name: {
+        "shadow-1": {
+            "trade_id": "shadow-1", "research_lane": "AI_SCAN",
+            "limit_chase_count": 0, "net_pnl_usd": 0.25,
+        }
+    } if name == analyzer.SHADOW_OUTCOME_FILE else {})
+    monkeypatch.setattr(analyzer, "_load_shadow_lane_outcome_df", lambda session: pd.DataFrame([{
+        "trade_id": "lab-1", "research_lane": "CONTINUOUS",
+        "limit_chase_count": 3, "net_pnl_usd": -0.10,
+    }]))
+    executed = {"trades": [{
+        "trade_id": "paper-1", "lane": "FAMILY_CHANDELIER_3",
+        "chase_count": 2, "net_pnl_usd": 0.11, "win": True,
+    }]}
+
+    report = analyzer.chase_threshold_report(session={}, chase_payload=executed)
+
+    assert report["executed_thresholds"]["2"]["trades"] == 1
+    assert report["shadow_thresholds"]["0"]["trades"] == 1
+    assert report["shadow_thresholds"]["3"]["trades"] == 1
+    assert report["coverage"] == {
+        "executed_terminal_outcomes": 1,
+        "shadow_terminal_outcomes": 2,
+        "generic_shadow_counterfactuals": 1,
+        "tile_lab_shadow_outcomes": 1,
+    }

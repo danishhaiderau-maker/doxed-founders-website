@@ -1,11 +1,14 @@
 """Static parity checks for Fly deploy and revision-monitor path semantics."""
 
 from pathlib import Path
+import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = (ROOT / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
 MONITOR = (ROOT / ".github/workflows/fly-bot-monitor.yml").read_text(encoding="utf-8")
+BOOTSTRAP_HELPER = (ROOT / "scripts/fly_resume_bootstrap.py").read_text(encoding="utf-8")
+PREDEPLOY_ABORT_HELPER = (ROOT / "scripts/fly_resume_predeploy_abort.py").read_text(encoding="utf-8")
 TEST_PATH = "services/btc-conservative-agent/test*.py"
 
 
@@ -22,3 +25,359 @@ def test_runtime_and_deploy_contract_changes_remain_revision_relevant():
     ):
         assert path in DEPLOY
         assert path.replace("/**", "") in MONITOR
+
+
+def test_monitor_splits_fast_liveness_from_full_readiness_fail_closed():
+    assert MONITOR.count('"https://doxed-btc-bot.fly.dev/health"') == 2
+    assert MONITOR.count('"https://doxed-btc-bot.fly.dev/ready"') == 2
+    assert '"https://doxed-btc-bot.fly.dev/api/status"' not in MONITOR
+    assert MONITOR.count("require_health(") == 2
+    assert MONITOR.count("require_ready(") == 2
+    assert "require_strategy_progress(ready)" in MONITOR
+    assert "require_tile_registry(" in MONITOR
+
+
+def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatness():
+    assert "recover-stalled-runtime" in DEPLOY
+    assert "inputs.mode == 'recover-stalled-runtime'" in DEPLOY
+    assert "recovery_continuation_run_id:" in DEPLOY
+    assert "python scripts/fly_stalled_recovery_proof.py" in DEPLOY
+    assert '--continuation-run-id "$RECOVERY_CONTINUATION_RUN_ID"' in DEPLOY
+    assert 'DURABLE_RELAYS_ONLY_RECOVERY: "YES"' in DEPLOY
+    assert 'REQUIRE_CANONICAL_FLY_OWNER: "NO"' in DEPLOY
+
+
+def test_stalled_runtime_predeploy_recheck_remains_exact_healthy_complete_and_flat():
+    block = DEPLOY[
+        DEPLOY.index("- name: Recheck maintenance boundary immediately before deploy"):
+        DEPLOY.index("- name: Deploy the exact source revision")
+    ]
+    assert 'DEPLOY_MODE: ${{ inputs.mode }}' in block
+    assert 'EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}' in block
+    assert 'str(status.get("source_git_rev") or "") == expected' in block
+    assert 'status.get("process_alive") is True' in block
+    assert 'progress.get("ok") is True' in block
+    assert 'progress.get("trade_lock_progressing") is True' in block
+    assert 'progress.get("trade_lock_available") is True' not in block
+    assert 'pipeline.get("owner") is True' in block
+    assert 'pipeline.get("running") is True' in block
+    assert 'pipeline.get("source_revision_match") is True' in block
+    assert 'bootstrap.get("status") == "COMPLETE"' in block
+    assert 'bootstrap.get("complete") is True' in block
+    assert 'bootstrap.get("blocked") is not True' in block
+    assert 'type(open_positions) is int and open_positions == 0' in block
+    assert 'type(pending_orders) is int and pending_orders == 0' in block
+
+
+def test_bootstrap_continuation_is_proof_bound_and_never_deploys_or_restarts():
+    block = DEPLOY[
+        DEPLOY.index("  resume-bootstrap:"):
+        DEPLOY.index("  repair-execution-tail:")
+    ]
+    assert "inputs.mode == 'resume-bootstrap'" in block
+    assert "uses: actions/checkout@v4" in block
+    assert "python scripts/fly_resume_bootstrap.py validate-proof" in block
+    assert "python scripts/fly_resume_bootstrap.py continue" in block
+    assert "python scripts/fly_resume_bootstrap.py preserve-maintenance" in block
+    assert "if: failure() && steps.continue-bootstrap.outcome == 'failure'" in block
+    assert "continue-on-error: true" in block
+    assert 're.fullmatch(r"[0-9a-f]{12}", revision)' in BOOTSTRAP_HELPER
+    assert 're.fullmatch(r"[0-9a-f]{40}", head_sha)' in BOOTSTRAP_HELPER
+    assert 'head_sha[:12] != expected' in BOOTSTRAP_HELPER
+    assert 'run.get("conclusion") != "failure"' in BOOTSTRAP_HELPER
+    assert 'run.get("path") or "").split("@", 1)[0] != WORKFLOW_PATH' in BOOTSTRAP_HELPER
+    for name, conclusion in (
+        ("Deploy the exact source revision", "success"),
+        ("Prove liveness, execution safety, and exact revision", "success"),
+        ("Complete receipt bootstrap inside exact-revision maintenance", "failure"),
+        ("Best-effort preserve safe paper maintenance after failed guarded deploy", "success"),
+    ):
+        assert f'unique_step("{name}", "{conclusion}")' in BOOTSTRAP_HELPER
+    assert 'int(deployed["number"]) < int(live["number"]) < int(failed["number"])' in BOOTSTRAP_HELPER
+    assert 'step.get("name") == "Resume paper execution after exact-revision acceptance"' in BOOTSTRAP_HELPER
+    assert BOOTSTRAP_HELPER.count('request_json("/api/resume", {"clear_admin_manual_pause": True})') == 1
+    assert "flyctl deploy" not in block
+    assert "machines restart" not in block
+    assert BOOTSTRAP_HELPER.count('request_json("/api/pause", {})') == 1
+    assert 'request_json("/api/orders/cancel"' not in block
+    assert 'request_json("/api/positions/close"' not in block
+
+
+def test_bootstrap_continuation_requires_exact_safe_owner_and_complete_receipt():
+    block = BOOTSTRAP_HELPER
+    assert '"revision_exact": observed_revision == expected' in block
+    assert 'status.get("execution_paused") is paused' in block
+    assert 'status.get("manual_admin_pause") is paused' in block
+    assert 'status.get("process_alive") is True' in block
+    assert 'progress.get("ok") is True' in block
+    assert '"trade_lock_progressing": progress.get("trade_lock_progressing") is True' in block
+    assert 'status.get("force_paper_mode") is True' in block
+    assert 'status.get("bitfinex_live_enabled") is False' in block
+    assert 'status.get("live_armed") is False' in block
+    assert '"open_positions_zero": open_positions == 0' in block
+    assert '"pending_orders_zero": pending_orders == 0' in block
+    assert 'pipeline.get("owner") is True' in block
+    assert 'pipeline.get("running") is True' in block
+    assert 'pipeline.get("source_revision_match") is True' in block
+    assert 'bootstrap.get("blocked") is True' in block
+    assert 'bootstrap.get("status") == "COMPLETE"' in block
+    assert 'bootstrap.get("complete") is True' in block
+    assert "timeout=45 * 60" in block
+    assert "bootstrap_deadline = deadline - min(60, timeout / 4)" in block
+    after_resume = block[block.index('resumed = request_json("/api/resume", {"clear_admin_manual_pause": True})'):]
+    assert '_common_safe(final, expected, paused=False)' in after_resume
+    assert '"receipt_bootstrap_complete"' in after_resume
+
+
+def test_bootstrap_status_observation_retries_only_transient_transport_failures():
+    main = DEPLOY[
+        DEPLOY.index("- name: Complete receipt bootstrap inside exact-revision maintenance"):
+        DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
+    ]
+    continuation = BOOTSTRAP_HELPER
+    for block in (main, continuation):
+        assert "while " in block and "monotonic() <" in block
+        assert "attempt += 1" in block
+        assert "urllib.error.URLError" in block and "TimeoutError" in block
+        assert "- " in block and "monotonic()" in block
+        assert "2 ** min(attempt - 1, 4)" in block
+        assert 'raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")' in block
+    assert "if exc.code not in {502, 503, 504}:" in main
+    assert "exc.code in TRANSIENT_HTTP" in continuation
+    assert 'status = observe_status(deadline)' in main
+    assert 'until=bootstrap_deadline' in continuation
+    assert 'until=deadline' in continuation
+
+
+def test_bootstrap_continuation_program_is_valid_python():
+    compile(BOOTSTRAP_HELPER, "fly_resume_bootstrap.py", "exec")
+
+
+def test_predeploy_abort_resume_is_separate_proof_bound_and_non_deploying():
+    block = DEPLOY[DEPLOY.index("  resume-predeploy-abort:"):DEPLOY.index("  repair-execution-tail:")]
+    assert "inputs.mode == 'resume-predeploy-abort'" in block
+    assert "fly_resume_predeploy_abort.py validate-proof" in block
+    assert "fly_resume_predeploy_abort.py resume" in block
+    assert "fly_resume_predeploy_abort.py preserve-maintenance" in block
+    assert "flyctl deploy" not in block and "machines restart" not in block
+    assert PREDEPLOY_ABORT_HELPER.count('request_json("/api/resume", {"clear_admin_manual_pause": True})') == 1
+    assert '"Deploy the exact source revision",' in PREDEPLOY_ABORT_HELPER
+    assert '"skipped"' in PREDEPLOY_ABORT_HELPER
+    compile(PREDEPLOY_ABORT_HELPER, "fly_resume_predeploy_abort.py", "exec")
+
+
+def test_unready_recovery_uses_guest_agent_flatness_when_http_owner_is_unavailable():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert "inputs.mode != 'recover-unready'" in maintenance
+    recovery = DEPLOY[
+        DEPLOY.index("- name: Prove exact unready Fly revision and every durable relay account is flat"):
+        DEPLOY.index("- name: Prove stalled runtime recovery from the last guarded deployment")
+    ]
+    assert 'flyctl machine exec --app doxed-btc-bot' in recovery
+    assert 're.fullmatch(r"[0-9a-f]{12}", expected)' in recovery
+    assert '[[ "$EXPECTED_UNREADY_REVISION" =~ ^[0-9a-f]{12}$ ]]' in recovery
+    assert 'FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"' in recovery
+    assert 'GITHUB_ENV' not in recovery
+    assert 'expected = sys.argv[1]' in recovery
+    assert 'sys.argv[2].replace("Z", "+00:00")' in recovery
+    assert 'runtime_revision = os.getenv("SOURCE_GIT_REV", "").lower()' in recovery
+    assert 'RECOVERY_RUNTIME_REVISION_MISMATCH:' in recovery
+    assert 'lifecycle_path.stat().st_mtime >= threshold' in recovery
+    assert 'lifecycle.get("paper_only") is True and lifecycle.get("live_armed") is False' in recovery
+    assert 'lifecycle.get("positions") == [] and lifecycle.get("pending_orders") == []' in recovery
+    assert '"schema": "recover_unready_guest_pause_v1"' in recovery
+    assert '"status": "SAFE_BOUNDARY_PROVEN"' in recovery
+    assert 'config["manual_admin_pause"] = True' in recovery
+    assert 'config_path.is_file() and not config_path.is_symlink()' in recovery
+    assert 'config.get("live_armed") is not True' in recovery
+    assert 'config.get("bitfinex_live_enabled") is not True' in recovery
+    assert 'os.replace(temp_path, config_path)' in recovery
+    assert 'os.fsync(directory_fd)' in recovery
+    assert 'guest_output="$(flyctl machine exec' in recovery
+    assert "'${EXPECTED_UNREADY_REVISION}' '${FAILED_DEPLOY_COMPLETED_AT}'" in recovery
+    assert 'assert len(rows)==1' in recovery
+    assert 'File "/app/btc_conservative_agent.py", line 195' in recovery
+    wrapper = (ROOT / "services" / "btc-conservative-agent" / "btc_conservative_agent.py").read_text(encoding="utf-8")
+    assert wrapper.index('os.getenv("FORCE_PAPER_MODE")') < wrapper.index("import bot as signal_engine")
+    assert 'b"ModuleNotFoundError" in log' in recovery
+    assert 'b"research.mirror_generation_lease" in log' in recovery
+    assert 'run.get("name") != "Deploy Fly BTC bot"' in recovery
+    assert 'run.get("path") or "").split("@", 1)[0] != ".github/workflows/fly-bot-deploy.yml"' in recovery
+    assert 'deploy_jobs = [job for job in jobs if job.get("name") == "test-and-deploy"]' in recovery
+    assert 'int(deployed[0]["number"]) < int(failed_acceptance[0]["number"]) < int(preserved[0]["number"])' in recovery
+    assert '"Re-enter maintenance and flatten the exact deployed revision"' in recovery
+    assert '"Prove liveness, execution safety, and exact revision"' in recovery
+    assert '"Best-effort preserve safe paper maintenance after failed guarded deploy"' in recovery
+    predeploy = DEPLOY[
+        DEPLOY.index("- name: Recheck maintenance boundary immediately before deploy"):
+        DEPLOY.index("- name: Deploy the exact source revision")
+    ]
+    assert "inputs.mode != 'recover-unready'" in predeploy
+
+
+def test_recover_unready_guest_program_is_valid_python():
+    marker = "cat > \"$RUNNER_TEMP/recover-unready-guest.py\" <<'PY'\n"
+    start = DEPLOY.index(marker) + len(marker)
+    end = DEPLOY.index("\n          PY", start)
+    source = textwrap.dedent(DEPLOY[start:end])
+    compile(source, "recover-unready-guest.py", "exec")
+
+
+def test_all_bitfinex_instances_must_be_paused_disarmed_and_reconciled_flat():
+    helper = (ROOT / "scripts/check-relay-flat.mjs").read_text(encoding="utf-8")
+    assert "const cheetahRows" not in helper
+    assert "const cheetah = rows.filter" not in helper
+    assert "const relayPausedAndDisarmed = rows.length > 0" in helper
+    assert "const reconciledFlat = rows.length > 0" in helper
+    assert "&& rows.every(isRelayPausedAndDisarmed)" in helper
+    assert "provider: 'exchange:bitfinex'" in helper
+    assert "select: { id: true, userId: true, updatedAt: true }" in helper
+    assert "row?.instanceCredentialId === row.providerCredentialId" in helper
+    assert "row?.participantReadStable === true" in helper
+    assert "firstCredentialVersions.has(instance.userId)" in helper
+    assert "providerCredentialReadStable" in helper
+    assert "lastResetReason === 'EXCHANGE_CREDENTIALS_MISSING'" in helper
+    assert "observedAtMs >= credentialUpdatedAtMs" in helper
+    assert "dashboard.liveDeskSessionStartedAt ?? null" in helper
+    assert "orphanOrderIds: dashboard.orphanOrderIds," in helper
+    assert "orphanPositionIds: dashboard.orphanPositionIds," in helper
+    assert "isNeverArmedUncredentialedRelay(row)" in helper
+
+
+def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
+    pause = DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary")
+    flat = DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    predeploy = DEPLOY.index("- name: Recheck maintenance boundary immediately before deploy")
+    deploy = DEPLOY.index("- name: Deploy the exact source revision")
+    postdeploy = DEPLOY.index("- name: Re-enter maintenance and flatten the exact deployed revision")
+    accept = DEPLOY.index("- name: Prove liveness, execution safety, and exact revision")
+    resume = DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
+    assert pause < flat < predeploy < deploy < postdeploy < accept < resume
+    assert 'status.get("manual_admin_pause") is True' in DEPLOY
+    assert 'payload.get("manual_admin_pause") is True' in DEPLOY
+    assert 'str(status.get("source_git_rev") or "").startswith(expected)' in DEPLOY
+    assert 'status.get("manual_admin_pause") is False' in DEPLOY
+    assert 'status.get("live_armed") is False' in DEPLOY
+    assert 'status.get("bitfinex_live_enabled") is False' in DEPLOY
+    assert 'status.get("force_paper_mode") is True' in DEPLOY
+    assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in DEPLOY
+    assert 'request_json("/api/reconcile/phantom-cancel"' in DEPLOY
+    assert "pause mutation attempt={attempt}" in DEPLOY
+    assert "checking durable state" in DEPLOY
+
+
+def test_postdeploy_restart_boundary_is_exact_generation_fenced_and_flat():
+    block = DEPLOY[
+        DEPLOY.index("- name: Re-enter maintenance and flatten the exact deployed revision"):
+        DEPLOY.index("- name: Prove liveness, execution safety, and exact revision")
+    ]
+    exact = block.index('str(status.get("source_git_rev") or "") == expected')
+    pause = block.index('request_json("/api/pause", {}, timeout=30)')
+    assert exact < pause
+    assert 'status.get("execution_paused") is True' in block
+    assert 'status.get("manual_admin_pause") is True' in block
+    assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in block
+    assert 'request_json("/api/positions/close", {"trade_id": trade_id})' in block
+    assert 'generation <= round_generation' in block
+    assert 'fresh_state(required_generation)' in block
+    assert 'require_paused=True, require_flat=True' in block
+    assert 'if not final["orders"] and not final["positions"]:' in block
+
+
+def test_generationless_bootstrap_is_bound_to_one_exact_safe_revision():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert 'legacy_bootstrap_revision = "e5e61229871744a062ae75651d3c442bae910b5d"' in maintenance
+    assert "legacy_status_revision = legacy_bootstrap_revision[:12]" in maintenance
+    assert 'str(legacy_status.get("source_git_rev") or "") == legacy_status_revision' in maintenance
+    assert 'str(legacy_status.get("source_git_rev") or "").startswith' not in maintenance
+    assert 'legacy_status.get("execution_paused") is True' in maintenance
+    assert 'legacy_status.get("manual_admin_pause") is True' in maintenance
+    assert 'legacy_status.get("force_paper_mode") is True' in maintenance
+    assert 'legacy_status.get("live_armed") is False' in maintenance
+    assert 'legacy_status.get("bitfinex_live_enabled") is False' in maintenance
+    assert 'raise SystemExit("generation-less relay authority is not the exact safe legacy bootstrap revision")' in maintenance
+
+
+def test_generationless_bootstrap_requires_repeated_relay_and_status_flatness():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert "def prove_legacy_bootstrap_flat():" in maintenance
+    assert "confirmations >= 3" in maintenance
+    assert "sequence > last_snapshot_seq" in maintenance
+    assert "not orders and not positions and status_flat and sequence_advanced" in maintenance
+    assert "open_positions != 0 or pending_orders != 0" in maintenance
+    assert maintenance.count("prove_legacy_bootstrap_flat()") == 3
+
+
+def test_legacy_missing_order_is_accepted_only_before_mandatory_flat_reproof():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    missing = maintenance.index('if exc.code != 404 or exposure.get("_legacy_exact_revision_bootstrap") is not True:')
+    marker = maintenance.index('cancelled = {"status": "not_found"}', missing)
+    skip = maintenance.index('if cancelled.get("status") == "not_found":', marker)
+    reproof = maintenance.rindex("prove_legacy_bootstrap_flat()")
+    assert missing < marker < skip < reproof
+    assert "if exc.code != 404 or" in maintenance
+    assert "raise" in maintenance[missing:marker]
+
+
+def test_legacy_flat_proof_ignores_transport_failures_but_not_confirmations():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    proof = maintenance[
+        maintenance.index("def prove_legacy_bootstrap_flat():"):
+        maintenance.index("def fresh_exposure", maintenance.index("def prove_legacy_bootstrap_flat():"))
+    ]
+    assert "for attempt in range(1, 21):" in proof
+    assert "except Exception as exc:" in proof
+    assert "confirmations = 0" in proof
+    assert "continue" in proof
+    assert "confirmations >= 3" in proof
+
+
+def test_generation_remains_mandatory_outside_the_exact_bootstrap():
+    maintenance = DEPLOY[
+        DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
+        DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
+    ]
+    assert 'candidate["_legacy_exact_revision_bootstrap"] = True' in maintenance
+    assert 'if minimum_generation is not None:' in maintenance
+    assert 'raise SystemExit("relay execution generation disappeared after a fenced mutation")' in maintenance
+    assert 'raise SystemExit("relay generation appeared during legacy flat proof; restart with the normal fence")' in maintenance
+    assert 'raise SystemExit("maintenance cancel generation is missing")' in maintenance
+    assert 'raise SystemExit("maintenance reconciliation generation is missing")' in maintenance
+
+
+def test_failed_deploy_preserves_pause_and_never_resumes_unaccepted_revision():
+    failure_pause = DEPLOY.index("- name: Best-effort preserve safe paper maintenance after failed guarded deploy")
+    assert failure_pause > DEPLOY.index("- name: Resume paper execution after exact-revision acceptance")
+    block = DEPLOY[failure_pause:]
+    assert "if: failure()" in block
+    assert "continue-on-error: true" in block
+    assert 'base + "/api/pause"' in block
+    assert 'base + "/api/resume"' not in block
+    assert 'status.get("force_paper_mode") is True' in block
+    assert 'status.get("live_armed") is False' in block
+    assert 'status.get("bitfinex_live_enabled") is False' in block
+    assert 'status.get("execution_paused") is True' in block
+    assert 'status.get("manual_admin_pause") is True' in block
+
+
+def test_admin_pause_is_persisted_before_guarded_deploy_can_continue():
+    bot = (ROOT / "services/btc-conservative-agent/bot.py").read_text(encoding="utf-8")
+    pause_body = bot[bot.index("def api_pause():"):bot.index("_RESUMABLE_PAUSE_REASONS")]
+    assert pause_body.index('state["manual_admin_pause"] = True') < pause_body.index('_disarm_live_control("ADMIN_MANUAL")')
+    disarm = bot[bot.index("def _disarm_live_control"):bot.index("@app.route('/api/exchange_exposure_audit'")]
+    assert "save_persistent_config()" in disarm

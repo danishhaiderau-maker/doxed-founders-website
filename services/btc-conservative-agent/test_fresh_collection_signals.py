@@ -122,7 +122,7 @@ class FreshCollectionSignalTests(unittest.TestCase):
                 os.chdir(root)
                 retired = (
                     Path("type_b_adx_v3_shadow_decisions.jsonl"),
-                    Path(bot.TYPE_B_RESEARCH_V2_EVENT_FILE),
+                    Path("type_b_research_v2.jsonl"),
                 )
                 archive = Path("research_archive/session_001/archive_meta.json")
                 archive.parent.mkdir(parents=True)
@@ -135,8 +135,12 @@ class FreshCollectionSignalTests(unittest.TestCase):
                 self.assertTrue(all(str(path) in deleted for path in retired))
                 self.assertTrue(archive.exists())
 
-                bot._record_type_b_research_v2_opportunity({}, "2026-01-01T00:00:00Z")
-                bot._record_type_b_research_v2_child("OUTCOME", "legacy")
+                # Cleanup-only path literals must remain after the retired
+                # writers and constants are physically removed.  The active
+                # runtime must have no callable route that can recreate them.
+                self.assertFalse(hasattr(bot, "TYPE_B_RESEARCH_V2_EVENT_FILE"))
+                self.assertFalse(hasattr(bot, "_record_type_b_research_v2_opportunity"))
+                self.assertFalse(hasattr(bot, "_record_type_b_research_v2_child"))
                 self.assertTrue(all(not path.exists() for path in retired))
                 os.chdir(old_cwd)
         finally:
@@ -263,6 +267,13 @@ class FreshCollectionSignalTests(unittest.TestCase):
             bot,
             "_load_research_session_meta",
             return_value={"fresh_collection_start_time": 12345.25},
+        ), mock.patch.object(
+            bot,
+            "_data_sync_request_async_inventory",
+            return_value={
+                "status": "CURRENT", "rows": [],
+                "generated_at": "2026-08-30T00:00:00Z", "error": None,
+            },
         ):
             with bot.app.test_client() as client:
                 response = client.get("/api/data-sync/manifest")
@@ -378,16 +389,16 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.assertFalse(body["wiped"])
         reset.assert_not_called()
 
-    def test_dashboard_button_posts_official_epoch_reset(self):
+    def test_dashboard_button_is_laptop_only_and_never_posts_fly_reset(self):
         src = Path(__file__).with_name("bot.py").read_text(encoding="utf-8")
         start = src.index("async function toggleFreshCollection()")
         end = src.index("async function wipeFlyOnly()", start)
         fn = src[start:end]
-        self.assertIn("fetch('/api/fresh_epoch_reset'", fn)
+        self.assertNotIn("/api/fresh_epoch_reset", fn)
         self.assertNotIn("/api/toggle_fresh_collection", fn)
-        self.assertIn("cannot turn OFF", fn)
-        self.assertIn("method: 'GET'", fn)
-        self.assertIn("method: 'POST'", fn)
+        self.assertIn("/api/local-research-reset/v1/requests", fn)
+        self.assertIn("DELETE LAPTOP RESEARCH ONLY", fn)
+        self.assertIn("localResetCompletionVerified(body)", fn)
 
 
 if __name__ == "__main__":

@@ -269,6 +269,8 @@ export default function AgentHubDashboardClient({ slug }: { slug: string }) {
       if (disposed || document.hidden || inFlight) return;
       inFlight = true;
       try {
+        // Full Fly/Neon dashboard materialization is reserved for explicit
+        // Live view. Routine refresh reads only the coordination projection.
         if (liveViewEnabled) await loadLive();
         else await loadCoordination();
       } finally {

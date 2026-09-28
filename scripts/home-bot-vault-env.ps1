@@ -53,7 +53,15 @@ function Import-CanonicalBotAdminToken {
 
 function Import-HomeBotVaultConfig {
   param(
-    [string[]]$Names = @("BOT_ADMIN_TOKEN", "PLATFORM_API_BASE_URL", "PLATFORM_RELAY_AGENT_SLUG", "PLATFORM_RELAY_USER_ID"),
+    [string[]]$Names = @(
+      "BOT_ADMIN_TOKEN",
+      "PLATFORM_API_BASE_URL",
+      "PLATFORM_RELAY_AGENT_SLUG",
+      "PLATFORM_RELAY_USER_ID",
+      "LIFECYCLE_LAPTOP_ATTESTATION_KEY",
+      "LIFECYCLE_LAPTOP_ATTESTATION_KEY_ID",
+      "LIFECYCLE_CLEANUP_ENABLED"
+    ),
     [string]$VaultEnvPath = ""
   )
   if (-not $VaultEnvPath) { $VaultEnvPath = Get-HomeBotVaultEnvPath }

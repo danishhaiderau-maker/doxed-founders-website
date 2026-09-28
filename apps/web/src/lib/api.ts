@@ -4682,6 +4682,34 @@ export function hireTradingAgent(
   }, token);
 }
 
+export interface PausedCredentialRefreshResult {
+  ok: true;
+  status: 'PAUSED';
+  armed: false;
+  resumed: false;
+  chargedDdollar: 0;
+  marginTransferRequested: false;
+  authenticatedAudit: { known: boolean; flat: boolean; observedAt: string };
+}
+
+export function refreshPausedTradingAgentCredentials(
+  slug: string,
+  body: {
+    exchangeProvider: string;
+    apiKey: string;
+    apiSecret: string;
+    passphrase?: string;
+    testnet?: boolean;
+  },
+  token: string,
+) {
+  return apiFetch<PausedCredentialRefreshResult>(
+    `/trading-agents/${slug}/credentials/refresh-paused`,
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
 export interface PrivateAgentDashboard {
   kind: 'copy' | 'live';
   agent: { id: string; slug: string; name: string; assetSymbol: string };
@@ -6251,19 +6279,6 @@ export type FounderGraphResponse = {
 
 export function fetchFounderGraph(token: string) {
   return apiFetch<FounderGraphResponse>('/copilot/founder-graph', undefined, token);
-}
-
-/**
- * Nucleus graph. Session JWT (`Bearer <accessToken>`) works here and on
- * `GET /copilot/founder-graph`. The extension uses the same path with
- * `Authorization: FounderNode {nodeId}:{nodeToken}` — see docs/NUCLEUS-FOUNDER-GRAPH.md.
- */
-export function fetchIdeNucleus(token: string) {
-  return apiFetch<FounderGraphResponse & { auth?: 'jwt' | 'founder-node' }>(
-    '/ide/nucleus',
-    undefined,
-    token,
-  );
 }
 
 export type ProjectTimelineResponse = {

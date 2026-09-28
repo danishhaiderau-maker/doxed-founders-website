@@ -29,7 +29,7 @@ def test_pending_fill_slow_evidence_is_outside_trade_lock():
 
 
 def test_chase_research_persistence_is_outside_trade_lock():
-    for name in ("_commit_relay_limit_chase", "_apply_urgent_marketable_chase"):
+    for name in ("_commit_relay_limit_chase",):
         node = _function(name)
         for child in ast.walk(node):
             if not isinstance(child, (ast.With, ast.AsyncWith)):
@@ -64,9 +64,29 @@ def test_pending_registration_is_once_only_by_trade_identity():
     assert "order['registration_suppressed_reason'] = 'RETIRED_LIFECYCLE'" in body
 
 
-def test_health_and_session_expose_v31_with_explicit_legacy_writer():
+def test_status_and_session_expose_v31_with_explicit_legacy_writer():
     session = ast.unparse(_function("_write_research_session"))
-    health = ast.unparse(_function("health"))
-    for body in (session, health):
+    status = ast.unparse(_function("status"))
+    for body in (session, status):
         assert "'collector_version': COLLECTOR_V31_VERSION" in body
         assert "'legacy_collector_version': COLLECTOR_V22_VERSION" in body
+
+
+def test_shared_ai_coordinator_bypasses_child_capacity_gate():
+    body = ast.unparse(_function("process_signal"))
+    assert (
+        "sole and is_research_data_collection() and "
+        "(not is_ai_scan_lane(research_lane))"
+    ) in body
+
+
+def test_generic_jsonl_writer_has_emergency_admission_and_terminal_exemptions():
+    body = ast.unparse(_function("_safe_append_jsonl"))
+    assert "emergency_admission" in body
+    assert "MARKET_MICROSTRUCTURE_1S" in body
+    for mandatory in (
+        "TRADE_LIFECYCLE", "TRADE_OUTCOME", "FILL_QUALITY", "PATH_REPLAY",
+        "SIGNAL_REPLAY", "COUNTERFACTUAL",
+    ):
+        assert mandatory in body
+    assert "NEW_NONESSENTIAL_RESEARCH_BLOCKED_AT_STORAGE_EMERGENCY" not in body

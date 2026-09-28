@@ -86,7 +86,7 @@ async function fetchShowcase() {
     tradeId: p.trade_id,
     status: 'PENDING',
   }));
-  return { price: s.price, positions, pending, v2Shadow: s.v2_shadow_only ?? s.a160_v2?.shadow_only ?? null };
+  return { price: s.price, positions, pending };
 }
 
 async function fetchCopy() {
@@ -224,7 +224,6 @@ async function tick() {
     missExit: missExit.length,
     bfxLive: copy.inst.bitfinexLiveEnabled === true,
     lastTickSec: dash.lastTickAt ? Math.round((now - new Date(dash.lastTickAt).getTime()) / 1000) : null,
-    v2Shadow: showcase.v2Shadow,
   });
 }
 

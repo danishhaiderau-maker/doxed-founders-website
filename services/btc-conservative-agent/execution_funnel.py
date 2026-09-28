@@ -17,6 +17,7 @@ FUNNEL_SUMMARY_FILE = "execution_funnel_summary.json"
 
 _lock = threading.Lock()
 _states: dict[str, dict] = {}
+_closed_ids_by_path: dict[str, set[str]] = {}
 
 
 def _invert_on(src) -> bool:
@@ -45,6 +46,48 @@ def _append_jsonl(path: str, row: dict) -> None:
             f.write(json.dumps(row, default=str) + "\n")
             f.flush()
             os.fsync(f.fileno())
+
+
+def _append_close_once(path: str, row: dict) -> bool:
+    """Durably emit one CLOSED stage per trade, including after a restart.
+
+    Position management can retry a close after a downstream receipt/logging
+    failure.  The funnel is an event ledger, so those retries must not create
+    thousands of logical closes for the same trade.
+    """
+    tid = str(row.get("trade_id") or "")
+    if not tid:
+        return False
+    resolved = os.path.abspath(path)
+    with _lock:
+        closed_ids = _closed_ids_by_path.get(resolved)
+        if closed_ids is None:
+            closed_ids = set()
+            if os.path.isfile(resolved):
+                try:
+                    with open(resolved, encoding="utf-8") as existing:
+                        for line in existing:
+                            try:
+                                prior = json.loads(line)
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                            if str(prior.get("stage") or "").upper() == "CLOSED":
+                                prior_tid = str(prior.get("trade_id") or "")
+                                if prior_tid:
+                                    closed_ids.add(prior_tid)
+                except OSError:
+                    # The append below remains authoritative; a later retry
+                    # will re-read the file if this process is restarted.
+                    pass
+            _closed_ids_by_path[resolved] = closed_ids
+        if tid in closed_ids:
+            return False
+        with open(resolved, "a", encoding="utf-8") as output:
+            output.write(json.dumps(row, default=str) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        closed_ids.add(tid)
+        return True
 
 
 def _distance_pct(market: float, target: float) -> float:
@@ -255,7 +298,7 @@ def funnel_on_close(trade_id: str, exit_reason: str, net_pnl_usd: float = None, 
         st["closed"] = True
         st["exit_reason"] = exit_reason
         row["invert_on"] = bool(st.get("invert_on", False)) or _invert_on(st)
-    _append_jsonl(FUNNEL_FILE, row)
+    _append_close_once(FUNNEL_FILE, row)
 
 
 def state_price(signal: dict) -> float:

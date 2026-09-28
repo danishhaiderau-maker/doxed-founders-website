@@ -13,8 +13,6 @@ import * as vscode from 'vscode';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { evaluateDeliveryToolUse } from '../nucleus-context';
-import { getActiveNucleusPacket } from '../nucleus-session';
 
 export interface RunCommandInput {
   command: string;
@@ -67,16 +65,6 @@ export const runCommandTool: vscode.LanguageModelTool<RunCommandInput> = {
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart('Error: no command provided.'),
       ]);
-    }
-
-    const nucleus = getActiveNucleusPacket();
-    if (nucleus) {
-      const pinned = evaluateDeliveryToolUse(nucleus, null, 'search');
-      if (!pinned.allow) {
-        return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(pinned.message),
-        ]);
-      }
     }
 
     const tmp = makeTempOutputPath();

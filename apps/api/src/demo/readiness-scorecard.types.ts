@@ -23,7 +23,6 @@ export type SwitchStates = {
   demoMode: boolean;
   cassetteMode: 'replay' | 'capture';
   laneSizePatch: boolean;
-  labShadowTiles: boolean;
   executionPaused: boolean;
 };
 

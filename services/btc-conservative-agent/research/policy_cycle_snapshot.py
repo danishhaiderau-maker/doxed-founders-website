@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
+from collector_v22 import research_event_generation_paths
 from microstructure_tape import FILE_NAME as MICROSTRUCTURE_FILE, validate_window
 
 CONSERVATIVE_FILL_REPORT_FILE = "conservative_fill_descriptive_report.json"
@@ -98,69 +99,36 @@ def _microstructure_evidence(events, tape_snapshot) -> dict:
     }
 
 
-def resolve_research_events_path(data_dir=".", *also_roots: str) -> Path:
-    """Prefer a non-empty events ledger on the configured data root.
+def load_policy_cycle_snapshot(data_dir=".") -> dict:
+    from research.v3_policy_report_adapter import has_v3_evidence, load_v3_cycle_snapshot
 
-    Health exposes ``data_root`` (fly mirror) and ``report_root`` (worktree).
-    An empty file beside the analyzer must not hide mirror session events.
-    When every copy is missing or empty, the data-root path is returned so
-    the row count stays zero instead of borrowing another tree.
-    """
-    ordered: list[Path] = []
-    seen: set[Path] = set()
-    for root in (data_dir, *also_roots):
-        if not root:
-            continue
-        path = (Path(root) / RESEARCH_EVENTS_FILE).resolve()
-        if path in seen:
-            continue
-        seen.add(path)
-        ordered.append(path)
-    existing = [path for path in ordered if path.is_file()]
-    data_root = Path(data_dir).resolve() if data_dir else None
-
-    def _under_data_root(path: Path) -> bool:
-        if data_root is None:
-            return False
-        try:
-            path.relative_to(data_root)
-        except ValueError:
-            return False
-        return True
-
-    nonempty = [path for path in existing if path.stat().st_size > 0]
-    data_nonempty = [path for path in nonempty if _under_data_root(path)]
-    if data_nonempty:
-        return data_nonempty[0]
-    if nonempty:
-        return nonempty[0]
-    if existing:
-        return existing[0]
-    return (Path(data_dir) / RESEARCH_EVENTS_FILE) if data_dir else Path(RESEARCH_EVENTS_FILE)
-
-
-def load_policy_cycle_snapshot(data_dir=".", also_roots=()) -> dict:
-    path = resolve_research_events_path(data_dir, *tuple(also_roots or ()))
-    data_root = Path(data_dir).resolve() if data_dir else None
-    try:
-        source_root = "data_root" if data_root is not None and path.resolve().is_relative_to(data_root) else "also_root"
-    except ValueError:
-        source_root = "also_root"
+    if has_v3_evidence(data_dir):
+        receipt = load_v3_cycle_snapshot(data_dir)
+        from research.v3_policy_report_adapter import load_v3_order_intents
+        tape_snapshot = _load_microstructure_snapshot(data_dir)
+        return {
+            "events": tuple(),
+            "v3_order_intents": load_v3_order_intents(data_dir, epoch_id=receipt.get("epoch_id")),
+            "receipt": receipt,
+            "microstructure": _microstructure_evidence([], tape_snapshot),
+            "microstructure_snapshot": tape_snapshot,
+        }
     events = []
     digest = hashlib.sha256()
-    for line in _read_snapshot_lines(path):
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            # A concurrent append may expose an incomplete final line. It
-            # belongs to the next cycle, never this snapshot.
-            continue
-        if not isinstance(row, dict):
-            continue
-        frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
-        events.append(frozen)
-        digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-        digest.update(b"\n")
+    for source_path in research_event_generation_paths(str(data_dir)):
+        for line in _read_snapshot_lines(Path(source_path)):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # A concurrent append may expose an incomplete final line. It
+                # belongs to the next cycle, never this snapshot.
+                continue
+            if not isinstance(row, dict):
+                continue
+            frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
+            events.append(frozen)
+            digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            digest.update(b"\n")
     last = events[-1] if events else {}
     envelope = last.get("envelope") or {}
     receipt = {
@@ -168,7 +136,6 @@ def load_policy_cycle_snapshot(data_dir=".", also_roots=()) -> dict:
         "snapshot_id": "policy-snapshot-" + digest.hexdigest()[:24],
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "source_file": RESEARCH_EVENTS_FILE,
-        "source_root": source_root,
         "source_read_mode": "BYTES_THEN_PARSE_V1",
         "row_count": len(events),
         "last_event_id": last.get("event_id"),
@@ -189,15 +156,25 @@ def load_policy_cycle_snapshot(data_dir=".", also_roots=()) -> dict:
 
 def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_hook=None) -> dict:
     """Generate candidate then best from one pinned event tuple."""
+    from research.runtime_identity_incidents import load_incident_input
+    incident_input = load_incident_input()
     from research.policy_candidate_oos import build_policy_candidate_oos_report
     from research.best_policy_research import build_best_policy_research_report
-    from research.conservative_fill_cohort import build_conservative_fill_cohort
+    from research.conservative_fill_cohort import (
+        build_conservative_fill_cohort,
+        build_v3_conservative_fill_cohort,
+    )
 
-    snapshot = load_policy_cycle_snapshot(data_dir, also_roots=(report_dir,))
+    snapshot = load_policy_cycle_snapshot(data_dir)
+    genome = None
+    from research.v3_policy_report_adapter import has_v3_evidence, load_or_build_genome
+    if has_v3_evidence(data_dir):
+        genome = load_or_build_genome(data_dir, report_dir)
     candidate = build_policy_candidate_oos_report(
         data_dir=data_dir, report_dir=report_dir,
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],
         microstructure_evidence=snapshot["microstructure"],
+        genome=genome,
     )
     if between_builders_hook:
         between_builders_hook()
@@ -205,10 +182,17 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         data_dir=data_dir, report_dir=report_dir,
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],
         microstructure_evidence=snapshot["microstructure"],
+        genome=genome,
     )
-    conservative_fill = build_conservative_fill_cohort(
-        snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
-    )
+    if snapshot["receipt"].get("schema") == "policy_cycle_snapshot_v3_1":
+        conservative_fill = build_v3_conservative_fill_cohort(
+            snapshot.get("v3_order_intents") or (),
+            snapshot["microstructure_snapshot"]["rows"],
+        )
+    else:
+        conservative_fill = build_conservative_fill_cohort(
+            snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
+        )
     conservative_fill.update({
         "cycle_snapshot": snapshot["receipt"],
         "microstructure_snapshot": snapshot["microstructure_snapshot"]["receipt"],
@@ -216,10 +200,14 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         "policy_epoch_id": snapshot["receipt"].get("policy_epoch_id"),
         "policy_signature": snapshot["receipt"].get("policy_signature"),
     })
+    if incident_input.enabled:
+        conservative_fill["runtime_identity_incident_input"] = incident_input.provenance()
+        conservative_fill["runtime_identity_incident_status"] = "DESCRIPTIVE_ONLY_NOT_QUALIFICATION_EVIDENCE"
     report_path = Path(report_dir) / CONSERVATIVE_FILL_REPORT_FILE
     report_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = report_path.with_suffix(report_path.suffix + ".tmp")
     temp_path.write_text(json.dumps(conservative_fill, indent=2), encoding="utf-8")
+    incident_input.assert_unchanged()
     temp_path.replace(report_path)
     return {
         "candidate": candidate, "best": best, "cycle_snapshot": snapshot["receipt"],

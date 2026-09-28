@@ -61,15 +61,14 @@ def test_edge_controls_and_mutation_routes_are_removed() -> None:
         assert token not in source
 
 
-def test_current_two_tile_roster_survives_edge_retirement() -> None:
+def test_current_registry_roster_survives_edge_retirement() -> None:
     payload = bot.build_static_pathway_lane_specs()
     lanes = {row["lane"] for row in payload["lanes"]}
-    assert lanes == {
-        config.COMPARISON_BENCHMARK_LANE,
-        *config.COMBO_EXECUTION_LANES,
-    }
+    assert lanes == {*config.ACTIVE_TILE_ORDER, bot.RESEARCH_LANE_CONTINUOUS}
+    assert len(payload["lanes"]) == 6
+    assert bot.RESEARCH_LANE_CONTINUOUS not in config.RETIRED_TILE_LANES
+    assert bot.is_research_lane_retired(bot.RESEARCH_LANE_CONTINUOUS) is False
     assert payload["benchmark_lane"] == config.COMPARISON_BENCHMARK_LANE
-    assert "v15-typeb-opportunity-v2" not in {config.RESEARCH_STACK_VERSION, config.ANALYZER_SYNC_ID}
 
 
 def test_only_one_ai_evaluator_call_site_remains() -> None:

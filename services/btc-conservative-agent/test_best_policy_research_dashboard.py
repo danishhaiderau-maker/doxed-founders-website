@@ -66,7 +66,24 @@ def _write_fixture(tmp_path: Path, events, report):
     )
 
 
-def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monkeypatch):
+def _publish_atomic_fixture(tmp_path, monkeypatch, reports):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    dashboard._API_RESPONSE_CACHE.clear()
+    published = tmp_path / dashboard.PUBLISHED_REPORTS_DIR
+    published.mkdir(exist_ok=True)
+    manifest = {"generation_id": "fixture-generation", "generation_revision": "fixture-revision",
+                "source_data_revision": "fixture-source", "generated_at": "2026-08-26T00:00:00+00:00",
+                "fresh_epoch": {"epoch_id": "epoch-clean"},
+                "reports": [{"file": name} for name in reports], "text_artifacts": []}
+    (published / dashboard.REPORT_MANIFEST_FILE).write_text(json.dumps(manifest), encoding="utf-8")
+    for name, report in reports.items():
+        path = published / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report), encoding="utf-8")
+
+
+def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(tmp_path, monkeypatch):
     reports = {
         "chase_threshold_report.json": {
             "generated_at": "2026-08-20T00:00:00+00:00",
@@ -75,9 +92,14 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
         "chase_attribution_report.json": {"trades": []},
         "exit_combinations_report.json": {"top": [{"type": "CONTINUOUS"}]},
         "exit_leakage_by_reason_report.json": {"reasons": []},
-        "exit_ladder_simulator_report.json": {"profiles": []},
+        "exit_ladder_simulator_report.json": {
+            "profiles": [],
+            "raw_replays_available": 92,
+            "eligible_replays_available": 0,
+            "replays_available": 0,
+        },
     }
-    monkeypatch.setattr(dashboard, "_read_report", lambda name: reports.get(name, {}))
+    _publish_atomic_fixture(tmp_path, monkeypatch, reports)
 
     payloads = [
         dashboard._chase_threshold_payload(),
@@ -85,11 +107,60 @@ def test_legacy_chase_and_exit_surfaces_are_machine_readably_nonqualifying(monke
         dashboard._exit_reason_leak_payload(),
         dashboard._ladder_sim_payload(),
     ]
-    for payload in payloads:
+    assert payloads[0]["evidence_scope"] == "SEPARATED_EXECUTED_AND_SHADOW"
+    assert payloads[0]["ranking_eligible"] is False
+    for payload in payloads[1:]:
         assert payload["qualified_v3_1"] is False
         assert payload["ranking_eligible"] is False
-        assert payload["evidence_scope"].startswith("LEGACY")
         assert payload["warning"]
+    assert payloads[1]["evidence_scope"] == "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[2]["evidence_scope"] == "SAVED EXECUTED PAPER + SHADOW/LAB — SEPARATED"
+    assert payloads[1]["generation_freshness"]["current"] is False
+    assert payloads[2]["generation_freshness"]["current"] is False
+    assert payloads[3]["evidence_scope"].startswith("LEGACY")
+    assert payloads[3]["raw_replays_available"] == 92
+    assert payloads[3]["eligible_replays_available"] == 0
+
+
+def test_execution_panels_keep_undeclared_artifacts_unavailable(tmp_path, monkeypatch):
+    _publish_atomic_fixture(tmp_path, monkeypatch, {})
+    for name in ("chase_threshold_report.json", "exit_combinations_report.json",
+                 "exit_leakage_by_reason_report.json"):
+        (tmp_path / name).write_text(json.dumps({"top": [{"trades": 9}]}), encoding="utf-8")
+    for payload in (dashboard._chase_threshold_payload(), dashboard._exit_combos_payload(),
+                    dashboard._exit_reason_leak_payload()):
+        assert payload["source_available"] is False
+        assert payload["qualification_eligible"] is False
+        assert "REPORT_NOT_IN_CURRENT_GENERATION" in payload["empty_reason"]
+
+
+def test_chase_surfaces_publish_executed_and_shadow_separately(tmp_path, monkeypatch):
+    reports = {
+        "chase_threshold_report.json": {
+            "generated_at": "2026-08-26T00:00:00+00:00",
+            "executed_thresholds": {"2": {"trades": 1, "sum_pnl_usd": 0.11, "ev_usd": 0.11}},
+            "shadow_thresholds": {"0": {"trades": 12, "sum_pnl_usd": 0.42, "ev_usd": 0.035}},
+            "coverage": {
+                "executed_terminal_outcomes": 1,
+                "shadow_terminal_outcomes": 12,
+                "generic_shadow_counterfactuals": 7,
+                "tile_lab_shadow_outcomes": 5,
+            },
+        },
+        "chase_attribution_report.json": {"trades": [], "totals": {}},
+        "chase_effectiveness_report.json": {"buckets": {}},
+        "chase_delay_report.json": {},
+    }
+    _publish_atomic_fixture(tmp_path, monkeypatch, reports)
+
+    threshold = dashboard._chase_threshold_payload()
+    chase = dashboard._chase_payload()
+
+    assert threshold["executed_thresholds"][0]["trades"] == 1
+    assert threshold["shadow_thresholds"][0]["trades"] == 12
+    assert threshold["coverage"]["shadow_terminal_outcomes"] == 12
+    assert chase["shadow_buckets"][0]["bucket"] == "0"
+    assert chase["executed_buckets"] == []
 
 
 def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
@@ -101,31 +172,26 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
         }],
         "dimensions": ["adx_bucket"],
     })
-    monkeypatch.setattr(dashboard, "_best_policy_research_payload", lambda: {
-        "epoch_id": "epoch-clean", "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "research_design": {"counts": {
-            "entry_policy_cartesian": 2700,
-            "naive_full_cartesian": 8597534400,
-        }},
-        "live_policy_change_allowed": False,
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "epoch_id": "epoch-clean", "qualified": False,
         "blockers": ["QUALIFICATION_GATE_FAILED:conservative_execution"],
-    })
-    monkeypatch.setattr(dashboard, "_read_json", lambda name: {
-        "epoch_id": "epoch-clean", "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "cycle_snapshot": {"snapshot_id": "snap-1"},
-        "evidence": {"independent_episodes": 133, "training_episodes": 93, "oos_episodes": 40},
-        "descriptive_challenger": {"profitable_static_policies": [{
-            "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
-            "qualification": "DESCRIPTIVE_ONLY",
-            "train": {"independent_episodes": 93},
-            "oos": {
-                "independent_episodes": 40, "fills": 40, "wins": 30, "losses": 10,
-                "net_pnl_usd": 101.7442, "expectancy_usd": 2.543605,
-                "max_drawdown_usd": -100.5837,
+        "ranking": {},
+        "report": {
+            "collection": {"oos_episodes": 40},
+            "search_progress": {
+                "entry_policy_cartesian": 2700,
+                "naive_full_cartesian": 8597534400,
             },
-        }]},
+        },
+        "screen": {"descriptive_top_100": [{
+            "policy_id": "OFFSET_0.29_CHASE_w234_s25_i60|atr_tp_k2.5",
+            "episodes_total": 133, "oos_episodes": 40, "oos_fills": 40,
+                "oos_wins": 30, "oos_losses": 10,
+                "sealed_oos_net_usd": 101.7442,
+                "expectancy_lcb_usd": 2.543605,
+                "max_drawdown_usd": -100.5837,
+                "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO_DEPTH_V1"}},
+            }]},
     })
 
     payload = dashboard._combos_payload()
@@ -145,7 +211,7 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
     assert row["reprice_interval_sec"] == 60
     assert row["exit_policy"] == "atr_tp_k2.5"
     assert row["atr_take_profit_multiple"] == 2.5
-    assert row["fill_model"] == "IDEAL_TOUCH_REPLAY"
+    assert row["fill_model"] == "CONSERVATIVE_BBO_DEPTH_V1"
     assert row["protection_model"] == "NO_LADDER_NO_THESIS_NO_HARD_STOP"
     assert row["oos_win_probability_pct"] == 75.0
     assert row["oos_win_probability_ci95_low_pct"] < 75 < row["oos_win_probability_ci95_high_pct"]
@@ -157,16 +223,33 @@ def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     response = client.get("/")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
-    assert "Current-epoch counterfactual policy grid" in html
-    assert "Win probability (95% CI)" in html
-    assert "MIXED — CURRENT V2.2 POLICY GRID + LEGACY EXECUTED" in html
+    assert "Top Profitable Conservative Policy Combos" in html
+    assert "Positive Ideal-Touch Diagnostic Hypotheses" in html
+    assert "Diagnostic touches" in html
+    assert "Diagnostic replay PnL" in html
+    assert "Execution fills" in html
+    assert "Execution OOS PnL" in html
+    assert "CURRENT V3.1 POLICY GRID + LEGACY EXECUTED — SEPARATED" in html
+    assert "MIXED — CURRENT V3.1 POLICY GRID + LEGACY EXECUTED" not in html
     assert "LEGACY EXECUTED" in html
     assert "SOURCE UNAVAILABLE" in html
-    assert "Top 100 Policy Combinations" in html
+    assert "Profitable conservative rows" in html
+    assert "Positive ideal-touch hypotheses" in html
+    assert "Policy-grid families materialized" in html
+    assert "No eligible legacy executed-lane combinations exist in the current cohort." in html
+    assert "No known combo data — run analyzer after fresh collection." not in html
+    assert "not applicable (source empty)" in html
+    assert "Conservative shortlist families" in html
+    assert "Diagnostic families represented" in html
+    assert "Maximum rows per family" in html
+    assert "Configured family-balanced capacity" in html
     assert "Top 100 Policy Combos" in html
     assert "Entry configurations" in html
-    assert "Distinct policies tested" in html
-    assert "Profitable in train + OOS" in html
+    assert "Policy specs enumerated" in html
+    assert "Policies with terminal OOS fills" in html
+    assert "Profitable terminal OOS policies" in html
+    assert "Profitable policies shown" not in html
+    assert "Profitable in train + OOS" not in html
     assert "Theoretical search space" in html
     assert "Hierarchical search space" in html
     assert "pg.policy_rows || pg.rows || []" in html
@@ -189,31 +272,159 @@ def test_current_policy_grid_exposes_at_most_top_100_rows(monkeypatch):
                 "max_drawdown_usd": -5.0,
             },
         })
-    monkeypatch.setattr(dashboard, "_best_policy_research_payload", lambda: {
-        "epoch_id": "epoch-clean",
-        "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "research_design": {"counts": {"entry_policy_cartesian": 2700}},
-    })
-    monkeypatch.setattr(dashboard, "_read_json", lambda _name: {
-        "epoch_id": "epoch-clean",
-        "policy_epoch_id": POLICY_EPOCH,
-        "evidence_policy_signature": EVIDENCE_SIGNATURE,
-        "descriptive_challenger": {
-            "profitable_static_policies": policies,
-            "policy_search_statistics": {
+    v31_policies = [{
+        "policy_id": row["policy_id"], "episodes_total": 100,
+        "oos_episodes": 30, "oos_fills": 30, "oos_wins": 20,
+        "oos_losses": 10, "sealed_oos_net_usd": 10.0,
+        "expectancy_lcb_usd": 0.333333, "max_drawdown_usd": -5.0,
+        "policy_spec": {"fill": {"execution_world": "CONSERVATIVE_BBO_DEPTH_V1"}},
+    } for row in policies]
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "epoch_id": "epoch-clean", "qualified": False, "blockers": [],
+        "ranking": {},
+        "report": {
+            "collection": {},
+            "search_progress": {"entry_policy_cartesian": 2700},
+            "safe_policy_ranking": {
                 "distinct_policies_tested": 12601,
                 "train_and_oos_profitable_policies": 1449,
             },
+        },
+        "screen": {
+            "unique_policies_evaluated": 12601,
+            "descriptive_top_100": v31_policies,
         },
     })
 
     grid = dashboard._current_policy_grid_rows()
 
     assert len(grid["rows"]) == 100
-    assert grid["rows_available"] == 1449
-    assert grid["policy_search_statistics"]["distinct_policies_tested"] == 12601
+    assert grid["rows_available"] == 120
+    assert grid["policy_search_statistics"]["policy_specs_enumerated"] == 12601
+    assert grid["policy_search_statistics"]["terminal_oos_policies_tested"] == 100
+    assert grid["policy_search_statistics"]["profitable_terminal_oos_policies"] == 100
     assert grid["rows_limit"] == 100
+
+
+def test_zero_fill_descriptive_rows_are_never_labeled_profitable_or_tested(monkeypatch):
+    rows = [{
+        "policy_id": f"counterfactual-{index}",
+        "policy_family": "ATR_TARGET",
+        "episodes_total": 11,
+        "oos_episodes": 0,
+        "oos_fills": 0,
+        "oos_wins": 0,
+        "oos_losses": 0,
+        "sealed_oos_net_usd": 12.5,
+        "expectancy_lcb_usd": 0.75,
+        "max_drawdown_usd": 0.0,
+        "policy_spec": {"fill": {"execution_world": "IDEAL_TOUCH_DIAGNOSTIC"}},
+        "validation": {
+            "outcome_states": {"FULL_FILL": 6, "NO_FILL": 18},
+            "risk": {"wins": 1, "losses": 5},
+        },
+        "gates": {},
+    } for index in range(100)]
+    report = {
+        "collection": {"independent_opportunities": 11},
+        "search": {"counts": {"entry_cartesian": 2700}},
+        "candidate_screen": {
+            "unique_policies_evaluated": 100,
+            "descriptive_top_100": rows,
+        },
+        "safe_policy_ranking": {
+            "policies_assessed": 100,
+            "policies_qualified": 0,
+        },
+    }
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": report,
+        "screen": report["candidate_screen"],
+        "ranking": report["safe_policy_ranking"],
+        "epoch_id": "epoch-zero-fill",
+        "qualified": False,
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+    })
+
+    grid = dashboard._current_policy_grid_rows()
+
+    assert len(grid["rows"]) == 0
+    assert len(grid["diagnostic_rows"]) == 100
+    assert grid["evidence"]["independent_opportunities"] == 11
+    assert grid["policy_episode_split"] == {
+        "training_episodes": 11,
+        "oos_episodes": 0,
+        "unit": "INDEPENDENT_MARKET_EPISODES_REUSED_ACROSS_POLICY_SPECS",
+    }
+    stats = grid["policy_search_statistics"]
+    assert stats["profitable_conservative_rows_displayed"] == 0
+    assert stats["positive_ideal_touch_hypotheses_displayed"] == 100
+    assert stats["policy_specs_enumerated"] == 100
+    assert stats["terminal_oos_policies_tested"] == 0
+    assert stats["profitable_terminal_oos_policies"] == 0
+    first = grid["diagnostic_rows"][0]
+    assert first["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert first["diagnostic_replay_net_pnl_usd"] == 12.5
+    assert first["diagnostic_replay_expectancy_lcb_usd"] == 0.75
+    assert first["diagnostic_replay_max_drawdown_usd"] == 0.0
+    assert first["diagnostic_touch_episodes"] == 6
+    assert first["diagnostic_no_touch_episodes"] == 18
+    assert first["diagnostic_replay_wins"] == 1
+    assert first["diagnostic_replay_losses"] == 5
+
+    public = dashboard._public_policy_evidence_row(rows[0])
+    assert public["sealed_oos_net_usd"] is None
+    assert public["expectancy_lcb_usd"] is None
+    assert public["max_drawdown_usd"] is None
+    assert public["cvar95_usd"] is None
+    assert public["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert public["diagnostic_replay_net_pnl_usd"] == 12.5
+
+
+def test_current_policy_grid_projects_nested_v31_parameters(monkeypatch):
+    candidate = {
+        "policy_id": "deterministic_0.1pct_offset_v1|ATR_TP_2.5_SCENARIO_C_ATR_SL_1",
+        "policy_family": "FIXED_TARGET",
+        "episodes_total": 1,
+        "oos_episodes": 1,
+        "sealed_oos_net_usd": 1.0,
+        "validation": {"outcome_states": {"FULL_FILL": 1}, "risk": {"wins": 1, "losses": 0}},
+        "policy_spec": {
+            "entry": {
+                "entry_policy_id": "deterministic_0.1pct_offset_v1",
+                "chase_id": "deterministic_0.1pct_offset_v1",
+                "offset_pct": 0.1,
+            },
+            "fill": {"execution_world": "IDEAL_TOUCH_DIAGNOSTIC"},
+            "loss_protection": {
+                "atr_stop_k": 1.0,
+                "hard_stop_margin_pct": 30,
+                "thesis_cut_margin_pct": -12,
+                "time_stop_min": 120,
+            },
+            "profit_protection": {"mode": "ATR_TARGET", "atr_tp_k": 2.5},
+        },
+    }
+    report = {
+        "collection": {"independent_opportunities": 1},
+        "candidate_screen": {"descriptive_top_100": [candidate]},
+    }
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": report,
+        "screen": report["candidate_screen"],
+        "ranking": {},
+        "epoch_id": "epoch-v31",
+        "qualified": False,
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+    })
+
+    row = dashboard._current_policy_grid_rows()["diagnostic_rows"][0]
+
+    assert row["entry_offset_pct"] == 0.1
+    assert row["chase_policy"] == "deterministic_0.1pct_offset_v1"
+    assert row["fill_model"] == "IDEAL_TOUCH_DIAGNOSTIC"
+    assert row["exit_behavior"] == "ATR_TARGET + TP 2.5x ATR"
+    assert row["protection_model"] == "ATR stop 1x + thesis -12% + hard 30% + time 120m"
 
 
 def test_genome_blocks_preserved_report_when_current_source_is_unavailable(monkeypatch):
@@ -237,6 +448,130 @@ def test_genome_blocks_preserved_report_when_current_source_is_unavailable(monke
     assert payload["status"] == "GENOME_SOURCE_UNAVAILABLE"
     assert payload["preserved_report_available"] is True
     assert "not rendered as current evidence" in payload["warning"]
+
+
+def test_genome_prefers_current_safe_v31_over_retired_missing_source(monkeypatch):
+    def fake_read(name, *args):
+        text = str(name).replace("\\", "/")
+        if text.endswith("safe_policy_genome_v3_report.json"):
+            return {
+                "schema": "safe_policy_genome_v3_1_report_v1",
+                "status": "COLLECTING",
+                "qualification": "NO_SAFE_QUALIFIED_POLICY",
+                "generated_at": "2026-08-23T04:30:00Z",
+                "epoch_id": "epoch-clean",
+                "collection": {"independent_opportunities": 12},
+                "candidate_screen": {"descriptive_top_100": []},
+                "blockers": ["INSUFFICIENT_OOS_EPISODES"],
+                "live_policy_change_allowed": False,
+            }
+        if text.endswith("genome_source_status.json"):
+            return {"status": "GENOME_SOURCE_UNAVAILABLE"}
+        return {}
+    monkeypatch.setattr(dashboard, "_read_json", fake_read)
+
+    payload = dashboard._genome_payload()
+
+    assert payload["available"] is True
+    assert payload["collector_generation"] == "V3.1"
+    assert payload["epoch_id"] == "epoch-clean"
+    assert payload["collection"]["independent_opportunities"] == 12
+    assert payload["live_policy_change_allowed"] is False
+    assert payload["legacy_genome"]["status"].startswith("RETIRED_RESEARCH_DB")
+
+
+def test_genome_compact_row_preserves_diagnostic_truth_not_execution_spoof(monkeypatch):
+    report = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "candidate_screen": {
+            "descriptive_top_100": [],
+            "profitable_ideal_touch_diagnostic_top_100": [{
+                "policy_id": "diagnostic-policy",
+                "policy_family": "HYBRID_RUNNER",
+                "full_fills": 7,
+                "sealed_oos_net_usd": 999.0,
+                "qualification": "QUALIFIED",
+                "ranking_eligible": True,
+                "gates": {"integrity_pass": False},
+                "evidence_blockers": ["UNKNOWN_EXECUTION_EVIDENCE"],
+                "ideal_touch_diagnostic": {
+                    "oos_net_usd": 1.25,
+                    "max_drawdown_usd": -0.2,
+                },
+            }],
+        },
+    }
+    monkeypatch.setattr(
+        dashboard, "_read_json",
+        lambda name, *args: report
+        if str(name).replace("\\", "/").endswith("safe_policy_genome_v3_report.json")
+        else {},
+    )
+
+    row = dashboard._genome_payload()["candidate_screen"]["descriptive_top_100"][0]
+
+    assert row["policy_id"] == "diagnostic-policy"
+    assert row["diagnostic_replay_net_pnl_usd"] == 1.25
+    assert row["diagnostic_replay_max_drawdown_usd"] == -0.2
+    assert row["metric_evidence"] == "IDEAL_TOUCH_DIAGNOSTIC_ONLY"
+    assert row["qualification_eligibility"] == "NOT QUALIFICATION ELIGIBLE"
+    assert row["descriptive_blockers"] == [
+        "NOT_EXECUTION_VERIFIED", "NOT_QUALIFICATION_ELIGIBLE",
+        "UNKNOWN_EXECUTION_EVIDENCE", "integrity_pass",
+    ]
+    assert row["sealed_oos_net_usd"] is None
+    assert row["max_drawdown_usd"] is None
+    assert "qualification" not in row
+    assert "ranking_eligible" not in row
+
+
+def test_api_cache_key_changes_with_analyzer_report_generation(tmp_path, monkeypatch):
+    manifest = tmp_path / dashboard.REPORT_MANIFEST_FILE
+    safe = tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE
+    manifest.write_text('{"generated_at":"one"}', encoding="utf-8")
+    safe.write_text('{"schema":"safe_policy_genome_v3_1_report_v1"}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        dashboard,
+        "_data_file_candidates",
+        lambda name: [manifest if name == dashboard.REPORT_MANIFEST_FILE else safe],
+    )
+    with dashboard.app.test_request_context("/api/genome"):
+        first = dashboard._read_api_cache_key()
+        manifest.write_text('{"generated_at":"generation-two"}', encoding="utf-8")
+        second = dashboard._read_api_cache_key()
+
+    assert first != second
+
+
+def test_integrity_api_is_fail_closed_and_exposes_valid_receipt(monkeypatch):
+    dashboard._API_RESPONSE_CACHE.clear()
+    monkeypatch.setattr(
+        dashboard,
+        "_read_json",
+        lambda name, *args: (
+            {"schema": "analyzer_integrity_v1", "valid": True, "failed_checks": []}
+            if name == dashboard.ANALYZER_INTEGRITY_FILE else {}
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True, "stale": False, "revision_parity": "MATCH",
+            "epoch_parity": "MATCH", "reasons": [],
+        },
+    )
+    with dashboard.app.test_client() as client:
+        response = client.get("/api/integrity")
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+
+    monkeypatch.setattr(dashboard, "_read_json", lambda name, *args: {})
+    with dashboard.app.test_client() as client:
+        missing = client.get("/api/integrity")
+    assert missing.status_code == 503
+    assert missing.get_json()["valid"] is False
 
 
 def test_best_policy_is_hidden_until_current_epoch_oos_is_qualified(tmp_path, monkeypatch):
@@ -334,6 +669,82 @@ def test_dashboard_retires_five_question_cards():
     assert "Thesis fast-cut" not in source
     assert "Chase timing and limits" not in source
     assert "fetch('/api/best-policy-research')" in source
+
+
+def test_static_and_dynamic_routes_use_v31_genome_not_retired_v22(monkeypatch, tmp_path):
+    # This explicitly exercises the no-published-generation compatibility
+    # path. Never let a developer's actual report_manifest select another path.
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    dashboard._API_RESPONSE_CACHE.clear()
+    report = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "status": "V3_COLLECTING",
+        "epoch_id": "epoch-v31-clean",
+        "live_policy_change_allowed": False,
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+        "collection": {"independent_opportunities": 42},
+        "search": {"nominal_full_cartesian": 8597534400},
+        "candidate_screen": {
+            "unique_policies_evaluated": 2700,
+            "training_episodes": 28,
+            "oos_episodes": 14,
+            "descriptive_top_100": [
+                {"policy_id": "profitable", "sealed_oos_net_usd": 12.5},
+                {"policy_id": "losing", "sealed_oos_net_usd": -1.0},
+            ],
+            "dynamic_regime_leaders": {
+                "BULL": [{"policy_id": "bull-policy", "sealed_oos_net_usd": 3.0}],
+            },
+        },
+        "safe_policy_ranking": {"qualification": "NO_SAFE_QUALIFIED_POLICY"},
+        "number_one_strategy": None,
+    }
+
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": report,
+        "screen": report["candidate_screen"],
+        "ranking": report["safe_policy_ranking"],
+        "epoch_id": report["epoch_id"],
+        "qualified": False,
+        "blockers": report["blockers"],
+    })
+    client = dashboard.app.test_client()
+
+    static = client.get("/api/static-policy-research").get_json()
+    dynamic = client.get("/api/dynamic-policy-research").get_json()
+
+    assert static["schema"] == "static_policy_dashboard_v3_1"
+    assert static["collector_generation"] == "V3.1"
+    assert static["epoch_id"] == "epoch-v31-clean"
+    assert static["independent_episodes"] == 42
+    assert [row["policy_id"] for row in static["profitable_policies"]] == ["profitable"]
+    assert "NO_CURRENT_V22_EPOCH" not in static["blockers"]
+    assert dynamic["schema"] == "dynamic_policy_dashboard_v3_1"
+    assert dynamic["collector_generation"] == "V3.1"
+    assert dynamic["regimes"][0]["regime"] == "BULL"
+    assert dynamic["live_policy_change_allowed"] is False
+    assert "NO_CURRENT_V22_EPOCH" not in dynamic["blockers"]
+
+
+def test_dynamic_absent_from_published_generation_does_not_revive_legacy(monkeypatch, tmp_path):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    dashboard._API_RESPONSE_CACHE.clear()
+    published = tmp_path / dashboard.PUBLISHED_REPORTS_DIR
+    published.mkdir()
+    (published / dashboard.REPORT_MANIFEST_FILE).write_text(json.dumps({
+        "fresh_epoch": {"epoch_id": "epoch-current"}, "reports": [],
+    }), encoding="utf-8")
+    def no_legacy_fallback():
+        raise AssertionError("A published generation must not revive legacy leaders")
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", no_legacy_fallback)
+    response = dashboard.app.test_client().get("/api/dynamic-policy-research").get_json()
+    assert response["regimes"] == []
+    assert response["epoch_id"] == "epoch-current"
+    assert response["status"] == "UNKNOWN"
+    assert response["live_policy_change_allowed"] is False
+    assert response["blockers"] == ["REPORT_NOT_IN_CURRENT_GENERATION"]
 
 
 def test_analyzer_adapter_emits_fail_closed_current_epoch_artifact(tmp_path):
@@ -487,35 +898,56 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
         "shadow_research": {"independent_episodes": 1, "profitable_policies": []},
     }
     (tmp_path / "policy_candidate_oos_report.json").write_text(json.dumps(detail), encoding="utf-8")
+    _publish_atomic_fixture(tmp_path, monkeypatch, {
+        "paused_shadow_research_report.json": {"overall": {"closed": 3}},
+        "real_edge_summary.json": {"executed_pnl_usd": -2.5},
+    })
     (tmp_path / "paused_shadow_research_report.json").write_text(json.dumps({"overall": {"closed": 3}}), encoding="utf-8")
-    (tmp_path / "shadow_lane_comprehensive_report.json").write_text(json.dumps({
-        "coverage": {"independent_shared_ai_episodes": 4, "deduped_lane_records": 7},
-        "cohorts": [{"research_lane": "TYPE_B_HUNTER_V1", "classification": "POLICY_ENTERED_ACCEPTED"}],
-        "safety": {"executed_pnl_merged": False},
-    }), encoding="utf-8")
     (tmp_path / "real_edge_summary.json").write_text(json.dumps({"executed_pnl_usd": -2.5}), encoding="utf-8")
+    (tmp_path / dashboard.SAFE_POLICY_GENOME_V3_REPORT_FILE).write_text(
+        json.dumps({
+            "schema": "safe_policy_genome_v3_1_report_v1",
+            "epoch_id": "epoch-clean",
+            "candidate_screen": {},
+            "blockers": ["INSUFFICIENT_V3_1_EVIDENCE"],
+        }),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(dashboard, "_data_file_candidates", lambda name: [tmp_path / name])
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: {
+        "report": {
+            "schema": "safe_policy_genome_v3_1_report_v1",
+            "epoch_id": "epoch-clean",
+            "candidate_screen": {},
+            "collection": {"decision_outcomes": {"REJECTED": 2}},
+            "blockers": ["INSUFFICIENT_V3_1_EVIDENCE"],
+        },
+        "screen": {}, "ranking": {}, "epoch_id": "epoch-clean",
+        "qualified": False, "blockers": ["INSUFFICIENT_V3_1_EVIDENCE"],
+    })
+    dashboard._API_RESPONSE_CACHE.clear()
 
     client = dashboard.app.test_client()
     static = client.get("/api/static-policy-research").get_json()
     dynamic = client.get("/api/dynamic-policy-research").get_json()
     shadow = client.get("/api/shadow-policy-research").get_json()
 
-    assert static["profitable_policies"][0]["policy_id"] == "policy-a"
+    # Retired V2.2 policy detail must never repopulate V3.1 policy pages.
+    assert static["profitable_policies"] == []
+    assert static["evidence_source"] == "safe_policy_genome_v3_report.json"
     assert static["live_policy_change_allowed"] is False
-    assert dynamic["regimes"][0]["regime"] == "BULL"
     assert dynamic["winner_kind"] == "NONE"
-    assert dynamic["winner_status"] == "NO_PROFITABLE_OOS_WINNER"
-    assert dynamic["relative_leader_kind"] == "DYNAMIC"
-    assert dynamic["comparison_delta"]["dynamic_minus_static_expectancy_usd"] == 3.0467
-    assert "No profitable OOS winner" in dynamic["warning"]
-    assert dynamic["regimes"][0]["fallback"] is True
-    assert dynamic["regimes"][0]["selected_policy_id"] == "CONTROL_OR_NO_TRADE"
+    assert dynamic["winner_status"] == "NO_QUALIFIED_OOS_WINNER"
+    assert dynamic["relative_leader_kind"] == "NONE"
+    assert dynamic["regimes"] == []
+    assert "No qualified dynamic OOS winner" in dynamic["warning"]
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
-    assert shadow["v22_shadow"]["independent_episodes"] == 1
+    assert shadow["v22_shadow"] == {}
+    # A root-level legacy artifact that is absent from the current manifest is
+    # not revived even as an excluded detail; its explicit empty envelope keeps
+    # the current signed cohort fail-closed.
+    assert shadow["legacy_v22_excluded"]["shadow_research"] == {}
     assert shadow["paused_shadow"]["overall"]["closed"] == 3
-    assert shadow["comprehensive_shadow_lanes"]["coverage"]["independent_shared_ai_episodes"] == 4
-    assert shadow["comprehensive_shadow_lanes"]["safety"]["executed_pnl_merged"] is False
     assert shadow["live_policy_change_allowed"] is False
     assert client.get("/static-policies").status_code == 200
     assert client.get("/dynamic-policies").status_code == 200
@@ -529,9 +961,11 @@ def test_main_dashboard_links_to_all_policy_research_pages():
     assert 'href="/dynamic-policies"' in source
     assert 'href="/shadow-research"' in source
     assert "Profitable OOS winner" in source
-    assert "NONE — both candidates unprofitable" in source
+    assert "NONE — both candidates unprofitable" not in source
     assert "Relative leader only" in source
     assert "Descriptive winner" not in source
+    assert "t.win_rate_pct ?? t.wr_pct" in source
+    assert "t.sum_pnl_usd ?? t.pnl_usd" in source
 
 
 def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):
@@ -541,13 +975,64 @@ def test_safe_policy_genome_v31_routes_are_canonical_aliases(monkeypatch):
         "qualification": "NO_SAFE_QUALIFIED_POLICY",
         "collection": {"independent_opportunities": 12},
     }
-    monkeypatch.setattr(dashboard, "_read_json", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: payload)
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True, "stale": False, "revision_parity": "MATCH",
+            "epoch_parity": "MATCH", "reasons": [],
+        },
+    )
+    dashboard._API_RESPONSE_CACHE.clear()
     client = dashboard.app.test_client()
 
     assert client.get("/safe-policy-genome-v3.1").status_code == 200
     assert client.get("/api/safe-policy-genome-v3.1").get_json() == payload
     assert client.get("/safe-policy-genome-v3").status_code == 200
+    dashboard._API_RESPONSE_CACHE.clear()
     assert client.get("/api/safe-policy-genome-v3").get_json() == payload
+
+
+def test_safe_policy_dashboard_surfaces_exact_v31_maturity_blockers(monkeypatch):
+    safe = {
+        "schema": "safe_policy_genome_v3_1_report_v1",
+        "epoch_id": "epoch-clean",
+        "blockers": ["NO_SAFE_QUALIFIED_POLICY"],
+    }
+    compatibility = {
+        "schema": "best_policy_research_v3_1_adapter_v1",
+        "epoch_id": "epoch-clean",
+        "blockers": [
+            "V3_MARKET_SEGMENTS_NOT_MATURED",
+            "V3_MINIMUM_INDEPENDENT_EPISODES_NOT_MET",
+        ],
+    }
+
+    def fake_report(name, default=None):
+        if name == dashboard.BEST_POLICY_RESEARCH_REPORT_FILE:
+            return compatibility
+        return default or {}
+
+    monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: safe)
+    monkeypatch.setattr(dashboard, "_read_report", fake_report)
+    monkeypatch.setattr(
+        dashboard,
+        "_generation_freshness_meta",
+        lambda *_args, **_kwargs: {
+            "current": True, "stale": False, "revision_parity": "MATCH",
+            "epoch_parity": "MATCH", "reasons": [],
+        },
+    )
+    source = dashboard._safe_policy_v3_dashboard_source()
+
+    assert source["epoch_id"] == "epoch-clean"
+    assert source["blockers"] == [
+        "NO_SAFE_QUALIFIED_POLICY",
+        "V3_MARKET_SEGMENTS_NOT_MATURED",
+        "V3_MINIMUM_INDEPENDENT_EPISODES_NOT_MET",
+    ]
+    assert safe["blockers"] == ["NO_SAFE_QUALIFIED_POLICY"]
 
 
 def test_analyzer_policy_reports_use_configured_data_and_report_roots():
@@ -556,4 +1041,4 @@ def test_analyzer_policy_reports_use_configured_data_and_report_roots():
     assert 'policy_report_dir = os.getenv("BTC_AGENT_REPORT_DIR") or "."' in analyzer
     assert "data_dir=policy_data_dir" in analyzer
     assert "report_dir=policy_report_dir" in analyzer
-    assert "build_shadow_lane_comprehensive_report" in analyzer
+    assert "build_shadow_lane_comprehensive_report" not in analyzer

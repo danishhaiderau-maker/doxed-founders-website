@@ -1,15 +1,27 @@
+import copy
 import json
+import hashlib
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from research_v3_bridge import dual_write_v22_record
 from research_v3_bridge import dual_write_provisional_source
 from research_v3_bridge import dual_write_lane_decision
 from research_v3_bridge import dual_write_lane_entry_resolution
-from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, paper_policy_identity_for_sources
+from research_v3_bridge import dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources
+from research_v3_bridge import reconcile_overdue_expected_order_decisions
 from research_v3_bridge import reconcile_terminal_v22_into_v3
-from research_v3_store import V3EvidenceStore
+from research_v3_bridge import write_pre_entry_evidence_failure
+from research_v3_bridge import _paper_market_segment
+from research_v3_store import V3EvidenceStore, _id_cache, _segment_hash_cache
+from research_v3_contract import canonical_json
+from research_order_schedule import initialize_order_schedule, close_order_schedule
+from research.policy_evidence_bindings import authoritative_schedule_intents
 
 
 def _event(event_id="cont-1", episode_id="episode-1"):
@@ -34,6 +46,415 @@ def _event(event_id="cont-1", episode_id="episode-1"):
 
 
 class V3BridgeTests(unittest.TestCase):
+    def test_lane_decision_freezes_baselines_from_immutable_pre_signal_bbo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "market_microstructure_1s.jsonl").write_text(
+                json.dumps({
+                    "bucket_ts": 999, "last": 100.0,
+                    "bid": 99.99, "ask": 100.01,
+                    "bid_qty": 3.0, "ask_qty": 4.0,
+                }) + "\n",
+                encoding="utf-8",
+            )
+            dual_write_lane_decision(
+                {
+                    "trade_id": "scan-pre-bbo", "shared_ai_call_id": "scan-pre-bbo",
+                    "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                    "feature_snapshot_at_signal": {"signal_price": 100.0},
+                },
+                lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS"},
+            )
+            opportunity = json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+                .ledger_path("opportunity").read_text().strip()
+            )
+            self.assertEqual(
+                opportunity["signal_time_bbo"]["capture_basis"],
+                "IMMUTABLE_PRE_SIGNAL_MARKET_SEGMENT",
+            )
+            schedules = opportunity["baseline_schedule_snapshot"]["schedules"]
+            self.assertEqual(
+                schedules["MARKET_ENTRY_AT_SIGNAL"]["capture_status"],
+                "CAPTURED_AT_SIGNAL",
+            )
+            self.assertEqual(
+                schedules["NO_CHASE_LIMIT"]["capture_status"],
+                "CAPTURED_AT_SIGNAL",
+            )
+
+    def test_terminal_schedule_snapshot_is_append_only_idempotent_and_evidence_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "terminal-1", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "shared_ai_call_id": "scan-terminal-1", "signal_price": 101,
+                "research_lane": "CONTINUOUS",
+            }
+            schedule = {
+                "schema": "research_chase_schedule_v1", "authoritative": True,
+                "intervals": [{"bucket_id": "b0", "start_ts": 1001,
+                               "end_ts": 1010, "limit_price": 100}],
+                "terminal_ts": 1010, "terminal_ts_exact": 1010.5,
+                "terminal_reason": "FILLED",
+            }
+            order = {
+                **signal, "created_ts": 1001, "status": "FILLED", "qty": .2,
+                "limit_price": 100, "research_chase_schedule": schedule,
+                "chase_schedule_authoritative": True,
+            }
+            first = dual_write_terminal_paper_schedule(
+                order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
+            )
+            second = dual_write_terminal_paper_schedule(
+                order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
+            )
+            self.assertTrue(first["write"]["written"])
+            self.assertTrue(second["write"]["duplicate"])
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test"
+            ).ledger_path("order_intent").read_text().strip())
+            self.assertEqual(row["intent_kind"], "AUTHORITATIVE_PAPER_SCHEDULE_TERMINAL")
+            self.assertTrue(row["evidence_only"])
+            self.assertEqual(row["schedule_sha256"], first["schedule_sha256"])
+            self.assertEqual(row["chase_schedule"]["terminal_reason"], "FILLED")
+            self.assertTrue(row["schedule_lifecycle_final"])
+            self.assertEqual(row["requested_qty"], 0.2)
+            self.assertEqual(row["requested_qty_provenance"], "SOURCE_TICKET_QTY")
+            self.assertEqual(row["execution_basis"]["requested_qty"], 0.2)
+            self.assertEqual(row["final_quantity_state"]["status"], "UNKNOWN")
+            self.assertEqual(row["quantity_events"], [])
+
+    def test_closed_temporary_chase_pull_is_not_selectable_terminal_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "pull-1", "shared_ai_call_id": "scan-pull-1",
+                "raw_direction": "LONG", "final_direction": "LONG", "qty": .2,
+                "research_chase_schedule": {
+                    "authoritative": True,
+                    "intervals": [{"start_ts": 1, "end_ts": 2, "limit_price": 100}],
+                    "terminal_ts": 2, "terminal_reason": "VIRTUAL_CHASE_HIDE",
+                },
+            }
+            self.assertIsNone(dual_write_terminal_paper_schedule(
+                source, source, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=False,
+            ))
+            self.assertFalse((Path(tmp) / "v3/ledgers/order_intent.jsonl").exists())
+
+    def test_pull_virtual_wait_reregister_final_expiry_has_one_selectable_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "resume-1", "created_ts_ts": 1,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "shared_ai_call_id": "scan-resume-1", "signal_price": 100,
+                "research_lane": "CONTINUOUS",
+            }
+            first_order = {
+                **signal, "status": "PENDING", "created_ts": 1, "qty": .2,
+                "limit_price": 99, "limit_chase_count": 0,
+            }
+            initialize_order_schedule(
+                first_order, signal, now=1, registered=True,
+            )
+            close_order_schedule(
+                first_order, signal, now=2, reason="VIRTUAL_CHASE_HIDE",
+            )
+            self.assertIsNone(dual_write_terminal_paper_schedule(
+                first_order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=False,
+            ))
+
+            resumed_order = {
+                **signal, "status": "PENDING", "created_ts": 4, "qty": .2,
+                "limit_price": 100, "limit_chase_count": 3,
+            }
+            resumed_order.pop("research_chase_schedule", None)
+            resumed_order.pop("chase_schedule_authoritative", None)
+            initialize_order_schedule(
+                resumed_order, signal, now=4, registered=True,
+                reason="ORDER_REREGISTERED_AFTER_VIRTUAL_WAIT",
+            )
+            close_order_schedule(
+                resumed_order, signal, now=7, reason="TTL_EXPIRED",
+            )
+            receipt = dual_write_terminal_paper_schedule(
+                resumed_order, signal, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
+            )
+            self.assertTrue(receipt["write"]["written"])
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("order_intent").read_text().splitlines()]
+            selected = authoritative_schedule_intents(rows)
+            self.assertEqual(len(selected), 1)
+            self.assertTrue(selected[0]["schedule_lifecycle_final"])
+            self.assertEqual(len(selected[0]["chase_schedule"]["intervals"]), 2)
+            self.assertEqual(
+                [item["chase_step_index"] for item in selected[0]["chase_schedule"]["intervals"]],
+                [0, 3],
+            )
+            self.assertEqual(selected[0]["chase_schedule"]["terminal_reason"], "TTL_EXPIRED")
+
+    def test_terminal_schedule_snapshot_refuses_open_or_incomplete_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "open-1", "shared_ai_call_id": "scan-open-1",
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "research_chase_schedule": {
+                    "authoritative": True,
+                    "intervals": [{"start_ts": 1, "end_ts": None, "limit_price": 100}],
+                },
+            }
+            self.assertIsNone(dual_write_terminal_paper_schedule(
+                source, source, epoch_id="epoch-v3-test", data_dir=tmp,
+                lifecycle_final=True,
+            ))
+            self.assertFalse((Path(tmp) / "v3/ledgers/order_intent.jsonl").exists())
+
+    def test_market_segment_rejects_malformed_nonfinite_and_nonpositive_book_values_without_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tape = Path(tmp) / "market_microstructure_1s.jsonl"
+            tape.write_text("\n".join([
+                json.dumps({"bucket_ts": 1000, "last": 100, "bid": 99, "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+                json.dumps({"bucket_ts": 1001, "last": 100, "bid": "bad", "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+                json.dumps({"bucket_ts": 1002, "last": 100, "bid": 99, "ask": 101,
+                            "bid_qty": 0, "ask_qty": float("inf")}),
+                json.dumps({"bucket_ts": 1003, "last": "NaN", "bid": 99, "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+                json.dumps({"bucket_ts": "not-a-time", "last": 100, "bid": 99, "ask": 101,
+                            "bid_qty": 1, "ask_qty": 1}),
+            ]) + "\n", encoding="utf-8")
+
+            rows, coverage = _paper_market_segment(tmp, start_ts=1000, end_ts=1003)
+
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(coverage["invalid_timestamp_rows"], 1)
+            self.assertEqual(coverage["invalid_price_rows"], 1)
+            self.assertEqual(coverage["invalid_bbo_rows"], 1)
+            self.assertEqual(coverage["invalid_depth_rows"], 1)
+            self.assertFalse(coverage["all_rows_have_valid_bbo"])
+            self.assertFalse(coverage["all_rows_have_visible_depth"])
+
+    def test_market_segment_requires_both_requested_boundaries_and_reports_gaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "market_microstructure_1s.jsonl").write_text(
+                "\n".join(json.dumps({"bucket_ts": ts, "last": 100, "bid": 99,
+                                       "ask": 101, "bid_qty": 1, "ask_qty": 1})
+                          for ts in (1003, 1006, 1007)) + "\n",
+                encoding="utf-8",
+            )
+            _rows, coverage = _paper_market_segment(tmp, start_ts=1000, end_ts=1010)
+            self.assertFalse(coverage["requested_bounds_complete"])
+            self.assertFalse(coverage["two_second_or_better"])
+            self.assertEqual(coverage["observed_start_ts"], 1003.0)
+            self.assertEqual(coverage["observed_end_ts"], 1007.0)
+            self.assertEqual(coverage["max_gap_sec"], 3.0)
+
+    def test_provisional_hot_path_verifies_only_its_two_ledgers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                V3EvidenceStore,
+                "verify",
+                side_effect=AssertionError("full-store verification entered hot path"),
+            ):
+                receipt = dual_write_provisional_source(
+                    "family-pending",
+                    {
+                        "shared_ai_call_id": "scan-family-pending",
+                        "signal_ts": 1000,
+                        "raw_direction": "SHORT",
+                        "observation_status": "WAITING_ENTRY_WINDOW",
+                    },
+                    epoch_id="epoch-v3-test",
+                    data_dir=tmp,
+                )
+
+            verification = receipt["store_verification"]
+            self.assertEqual(
+                verification["schema"],
+                "v3_store_write_set_verification_v1",
+            )
+            self.assertTrue(verification["passed"])
+            self.assertEqual(
+                set(verification["ledger_counts"]),
+                {"opportunity", "lifecycle"},
+            )
+
+    def _lost_expected_order(self, tmp):
+        dual_write_lane_decision(
+            {
+                "trade_id": "scan-lost", "shared_ai_call_id": "scan-lost",
+                "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                "research_lane": "CONTINUOUS",
+            },
+            lane="CONTINUOUS", policy_decision="ACCEPT",
+            execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+            epoch_id="epoch-v3-test", data_dir=tmp,
+            lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 60},
+        )
+        # Model the historical interruption: decision survived, pre-order
+        # awaiting state and its lifecycle row did not.
+        V3EvidenceStore(tmp, epoch_id="epoch-v3-test").ledger_path("lifecycle").unlink()
+
+    def test_restart_ledger_reconciliation_heals_already_lost_expectation_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            first = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000,
+                runtime_revision="repair-rev",
+            )
+            second = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2001,
+                runtime_revision="repair-rev",
+            )
+            self.assertEqual(first["reconciled"], 1)
+            self.assertEqual(second["reconciled"], 0)
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().strip())
+            self.assertEqual(row["entry_resolution"], "NO_ORDER")
+            self.assertEqual(row["policy_signature"], json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+                .ledger_path("decision").read_text().strip()
+            )["policy_signature"])
+            self.assertEqual(
+                row["restart_recovery_provenance"]["runtime_revision"],
+                "repair-rev",
+            )
+
+    def test_restart_reconciliation_closes_overdue_awaiting_despite_provisional_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = dual_write_lane_decision(
+                {
+                    "trade_id": "scan-interrupted", "shared_ai_call_id": "scan-interrupted",
+                    "shared_ai_call_ts_epoch": 1000, "raw_direction": "SHORT",
+                    "research_lane": "CONTINUOUS",
+                },
+                lane="CONTINUOUS", policy_decision="ACCEPT",
+                execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                epoch_id="epoch-v3-test", data_dir=tmp,
+                lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 60},
+            )
+            # This is the exact interrupted-runtime shape observed in production:
+            # the durable lane receipt is still AWAITING and a generic child signal
+            # was opened, but no paper order intent was ever committed.
+            dual_write_provisional_source(
+                "cont-child", {
+                    "shared_ai_call_id": "scan-interrupted", "signal_ts": 1000,
+                    "raw_direction": "SHORT", "observation_status": "WAITING_ENTRY_WINDOW",
+                },
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            result = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000,
+                runtime_revision="repair-rev",
+            )
+            self.assertEqual(result["reconciled"], 1)
+            rows = [json.loads(line) for line in V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().splitlines()]
+            terminal = next(row for row in rows if row.get("entry_resolution") == "NO_ORDER")
+            self.assertEqual(terminal["episode_id"], receipt["episode_id"])
+            self.assertEqual(terminal["exact_reason"], "RUNTIME_RESTART_LEDGER_RECONCILIATION")
+
+    def test_restart_ledger_reconciliation_refuses_active_or_not_overdue_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            decision = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("decision").read_text().strip())
+            active = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=2000,
+                active_rows=[decision], runtime_revision="repair-rev",
+            )
+            early = reconcile_overdue_expected_order_decisions(
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=1001,
+                runtime_revision="repair-rev",
+            )
+            self.assertEqual(active["resolved_or_active"], 1)
+            self.assertEqual(early["not_overdue"], 1)
+            self.assertFalse(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").exists())
+
+    def test_restart_reconciliation_streams_large_rich_order_intent_ledger(self):
+        """Large evidence payloads must not be retained as decoded objects."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self._lost_expected_order(tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            intent_path = store.ledger_path("order_intent")
+            intent_path.parent.mkdir(parents=True, exist_ok=True)
+            padding = "x" * (64 * 1024)
+            with intent_path.open("w", encoding="utf-8", newline="\n") as handle:
+                for index in range(256):
+                    handle.write(json.dumps({
+                        "epoch_id": "another-epoch",
+                        "episode_id": f"noise-{index}",
+                        "policy_signature": f"policy-{index}",
+                        "research_lane": "CONTINUOUS",
+                        "rich_evidence_payload": padding,
+                    }, separators=(",", ":")))
+                    handle.write("\n")
+            self.assertGreater(intent_path.stat().st_size, 16 * 1024 * 1024)
+
+            probe = textwrap.dedent("""
+                import ctypes, json, os, sys
+                from research_v3_bridge import reconcile_overdue_expected_order_decisions
+
+                def peak_rss_bytes():
+                    if os.name == "nt":
+                        class Counters(ctypes.Structure):
+                            _fields_ = [
+                                ("cb", ctypes.c_ulong),
+                                ("PageFaultCount", ctypes.c_ulong),
+                                ("PeakWorkingSetSize", ctypes.c_size_t),
+                                ("WorkingSetSize", ctypes.c_size_t),
+                                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                                ("PagefileUsage", ctypes.c_size_t),
+                                ("PeakPagefileUsage", ctypes.c_size_t),
+                            ]
+                        counters = Counters()
+                        counters.cb = ctypes.sizeof(counters)
+                        ctypes.windll.psapi.GetProcessMemoryInfo(
+                            ctypes.windll.kernel32.GetCurrentProcess(),
+                            ctypes.byref(counters), counters.cb,
+                        )
+                        return int(counters.PeakWorkingSetSize)
+                    import resource
+                    peak = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+                    return peak if sys.platform == "darwin" else peak * 1024
+
+                baseline = peak_rss_bytes()
+                result = reconcile_overdue_expected_order_decisions(
+                    epoch_id="epoch-v3-test", data_dir=sys.argv[1],
+                    observed_ts=2000, runtime_revision="streaming-repair",
+                )
+                print(json.dumps({
+                    "result": result,
+                    "rss_growth": max(0, peak_rss_bytes() - baseline),
+                }))
+            """)
+            completed = subprocess.run(
+                [sys.executable, "-c", probe, tmp], cwd=Path(__file__).parent,
+                check=True, capture_output=True, text=True,
+            )
+            measurement = json.loads(completed.stdout.strip())
+            result = measurement["result"]
+
+            self.assertEqual(result["expected"], 1)
+            self.assertEqual(result["reconciled"], 1)
+            self.assertLess(measurement["rss_growth"], 32 * 1024 * 1024)
+
     def test_lane_entry_receipts_are_append_only_and_no_order_has_no_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = {
@@ -47,15 +468,19 @@ class V3BridgeTests(unittest.TestCase):
                 epoch_id="epoch-v3-test", data_dir=tmp,
                 lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
             )
-            self.assertEqual(len(receipt["writes"]), 3)
+            self.assertEqual(len(receipt["writes"]), 4)
             rows = [json.loads(line) for line in V3EvidenceStore(
                 tmp, epoch_id="epoch-v3-test",
             ).ledger_path("lifecycle").read_text().splitlines()]
             self.assertEqual(rows[0]["entry_resolution"], "AWAITING")
             self.assertEqual(rows[0]["resolution_deadline_ts"], 1780)
 
+            recovery_source = {**source, "_restart_recovery_provenance": {
+                "schema": "paper_awaiting_restart_provenance_v1",
+                "snapshot_git_rev": "abc123",
+            }}
             dual_write_lane_entry_resolution(
-                source, lane="CONTINUOUS", entry_resolution="NO_ORDER",
+                recovery_source, lane="CONTINUOUS", entry_resolution="NO_ORDER",
                 exact_reason="MAX_ACTIVE_SIGNALS", epoch_id="epoch-v3-test",
                 data_dir=tmp, lane_policy={"policy_id": "CONTINUOUS", "entry_ttl_sec": 600},
                 observed_ts=1001,
@@ -66,6 +491,10 @@ class V3BridgeTests(unittest.TestCase):
             terminal = next(row for row in rows if row["entry_resolution"] == "NO_ORDER")
             self.assertTrue(terminal["terminal"])
             self.assertEqual(terminal["outcome_state"], "NO_TRADE")
+            self.assertEqual(
+                terminal["restart_recovery_provenance"]["snapshot_git_rev"],
+                "abc123",
+            )
             self.assertFalse(any(key in terminal for key in ("pnl", "pnl_usd", "net_usd")))
 
     def test_shared_call_episode_is_stable_across_symbol_enrichment(self):
@@ -105,7 +534,15 @@ class V3BridgeTests(unittest.TestCase):
                 "trade_id": "scan-lanes-1", "shared_ai_call_id": "scan-lanes-1",
                 "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
                 "executed_direction": "LONG", "long_score": 62, "short_score": 38,
-                "score_gap": 24, "feature_snapshot_at_signal": {"adx": 31},
+                "score_gap": 24, "exchange": "BITFINEX", "symbol": "tBTCF0:USTF0",
+                "research_feature_snapshot": {
+                    "market_context": {"regime_label": "BULL"},
+                    "cycle_3m_universe": {
+                        "adx14": 31, "atr14_pct_3m": 0.4,
+                        "realized_volatility_30m_pct": 0.08,
+                        "volatility_of_volatility_30m_pct": 0.01,
+                    },
+                },
             }
             continuous = dual_write_lane_decision(
                 source, lane="CONTINUOUS", policy_decision="ACCEPT",
@@ -131,10 +568,184 @@ class V3BridgeTests(unittest.TestCase):
                 "CONTINUOUS", "OFFSET_029_ATR_TP_25",
             })
             self.assertEqual(len({row["policy_signature"] for row in decisions}), 2)
+            opportunity = json.loads(store.ledger_path("opportunity").read_text())
+            identity = opportunity["causal_identity"]
+            self.assertEqual(identity["market"], "BITFINEX")
+            self.assertEqual(identity["symbol"], "TBTCF0:USTF0")
+            self.assertEqual(identity["direction"], "LONG")
+            self.assertEqual(identity["regime_volatility"]["market_regime"], "BULL")
+            self.assertEqual(identity["regime_volatility"]["realized_volatility"], 0.08)
+            self.assertTrue(identity["collection_identity_complete"])
             patient_row = next(row for row in decisions if row["research_lane"] == "OFFSET_029_ATR_TP_25")
             self.assertEqual(patient_row["outcome_state"], "REJECTED")
             self.assertFalse(patient_row["order_intent_expected"])
             self.assertEqual(store.verify()["ledger_counts"]["order_intent"], 0)
+
+    def test_lane_decision_verifies_only_touched_ledgers_and_referenced_segments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            store.ledger_path("order_intent").write_text(
+                '{"record_id":"untouched-broken"}', encoding="utf-8",
+            )
+            _id_cache.clear()
+            source = {
+                "trade_id": "scan-scoped", "shared_ai_call_id": "scan-scoped",
+                "shared_ai_call_ts_epoch": 0, "raw_direction": "NO_TRADE",
+            }
+            loaded = []
+            original = V3EvidenceStore._load_ids
+
+            def track(path):
+                loaded.append(path.name)
+                return original(path)
+
+            with mock.patch.object(V3EvidenceStore, "_load_ids", side_effect=track):
+                receipt = dual_write_lane_decision(
+                    source, lane="CONTINUOUS", policy_decision="REJECT",
+                    execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="NO_TRADE",
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+                )
+            verification = receipt["store_verification"]
+            self.assertTrue(verification["passed"])
+            self.assertEqual(verification["scope"], "TOUCHED_OBJECTS_ONLY")
+            self.assertFalse(verification["full_store_verified"])
+            self.assertEqual(
+                set(verification["ledger_counts"]),
+                {"opportunity", "pre_entry_features", "decision", "lifecycle"},
+            )
+            self.assertNotIn("order_intent.jsonl", loaded)
+            self.assertFalse(store.verify()["passed"])
+
+    def test_six_lane_cold_cache_parses_each_touched_ledger_at_most_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-six", "shared_ai_call_id": "scan-six",
+                "shared_ai_call_ts_epoch": 0, "raw_direction": "NO_TRADE",
+            }
+            _id_cache.clear()
+            loaded = []
+            original = V3EvidenceStore._load_ids
+
+            def track(path):
+                loaded.append(path.name)
+                return original(path)
+
+            with mock.patch.object(V3EvidenceStore, "_load_ids", side_effect=track):
+                for lane in (
+                    "CONTINUOUS", "FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5",
+                    "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK",
+                ):
+                    receipt = dual_write_lane_decision(
+                        source, lane=lane, policy_decision="REJECT",
+                        execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="NO_TRADE",
+                        epoch_id="epoch-v3-test", data_dir=tmp,
+                        lane_policy={"policy_id": lane, "paper_only": True},
+                    )
+                    self.assertTrue(receipt["store_verification"]["passed"])
+            for ledger in ("opportunity.jsonl", "decision.jsonl", "lifecycle.jsonl"):
+                self.assertLessEqual(loaded.count(ledger), 1)
+
+    def test_lane_decision_does_not_rehash_unreferenced_old_segments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            old_ref = store.put_market_segment(
+                source="OLD", symbol="BTC", timeframe="1s", start_ts=1, end_ts=2,
+                rows=[{"ts": 1, "price": 1}],
+            )
+            old_path = str((store.root / old_ref["relative_path"]).resolve())
+            _segment_hash_cache.clear()
+            hashed = []
+            original = V3EvidenceStore._hash_segment
+
+            def track(path):
+                hashed.append(str(path.resolve()))
+                return original(path)
+
+            with mock.patch.object(V3EvidenceStore, "_hash_segment", side_effect=track):
+                receipt = dual_write_lane_decision(
+                    {"trade_id": "scan-no-segment", "shared_ai_call_id": "scan-no-segment",
+                     "shared_ai_call_ts_epoch": 0, "raw_direction": "NO_TRADE"},
+                    lane="CONTINUOUS", policy_decision="REJECT",
+                    execution_disposition="AI_REJECTED_NO_ORDER", exact_reason="NO_TRADE",
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+                )
+            self.assertTrue(receipt["store_verification"]["passed"])
+            self.assertNotIn(old_path, hashed)
+
+    def test_rejected_shared_lanes_reuse_one_pre_signal_market_context_segment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tape = Path(tmp) / "market_microstructure_1s.jsonl"
+            tape.write_text("\n".join([
+                json.dumps({"bucket_ts": 998, "last": 100.0, "best_bid": 99.9, "best_ask": 100.1}),
+                json.dumps({"bucket_ts": 1000, "last": 100.2, "best_bid": 100.1, "best_ask": 100.3}),
+            ]) + "\n", encoding="utf-8")
+            source = {
+                "trade_id": "scan-context", "shared_ai_call_id": "scan-context",
+                "shared_ai_call_ts_epoch": 1000, "symbol": "tBTCF0:USTF0",
+                "raw_direction": "NO_TRADE", "executed_direction": "NO_TRADE",
+                "feature_snapshot_at_signal": {"adx": 14, "regime": "RANGE"},
+            }
+            receipts = [
+                dual_write_lane_decision(
+                    source, lane=lane, policy_decision="REJECT",
+                    execution_disposition="AI_REJECTED_NO_ORDER",
+                    exact_reason="NO_TRADE", epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": lane, "paper_only": True},
+                )
+                for lane in ("CONTINUOUS", "FAMILY_ATR_TRAIL")
+            ]
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            verification = store.verify()
+            self.assertEqual(verification["ledger_counts"]["opportunity"], 1)
+            self.assertEqual(verification["ledger_counts"]["decision"], 2)
+            self.assertEqual(verification["ledger_counts"]["market_segment"], 1)
+            decisions = [
+                json.loads(line)
+                for line in store.ledger_path("decision").read_text().splitlines()
+            ]
+            refs = [row["market_context_segment_refs"][0] for row in decisions]
+            self.assertEqual(refs[0]["sha256"], refs[1]["sha256"])
+            self.assertEqual(refs[0]["source"], "LIVE_MICROSTRUCTURE_1S_PRE_SIGNAL")
+            self.assertTrue(all(
+                row["market_context_segment_coverage"]["future_exit_path_included"] is False
+                for row in decisions
+            ))
+            self.assertTrue(all(
+                row["market_context_segment_coverage"]["future_path_status"]
+                == "NOT_CAPTURED_AT_DECISION_TIME"
+                for row in decisions
+            ))
+            self.assertTrue(all(
+                row["market_context_segment_coverage"]["horizon_coverage"]
+                ["decision_to_entry_terminal"] is False
+                and row["market_context_segment_coverage"]["horizon_coverage"]
+                ["entry_to_exit_terminal"] is False
+                and row["market_context_segment_coverage"]["horizon_coverage"]
+                ["post_exit"] is False
+                for row in decisions
+            ))
+            lifecycles = [
+                json.loads(line)
+                for line in store.ledger_path("lifecycle").read_text().splitlines()
+            ]
+            self.assertTrue(all(row["market_context_segment_refs"] for row in lifecycles))
+            context_row = json.loads(
+                store.ledger_path("market_segment").read_text().strip()
+            )
+            self.assertEqual(context_row["event_id"], "market-context:episode-" + hashlib.sha256(b"shared:scan-context").hexdigest()[:20])
+            self.assertEqual(context_row["tape_id"], f"tape:{refs[0]['sha256']}")
+            self.assertEqual(len(receipts[0]["writes"]), 5)
+            self.assertTrue(receipts[1]["writes"][1]["duplicate"])
+            for receipt in receipts:
+                verification = receipt["store_verification"]
+                self.assertEqual(verification["scope"], "TOUCHED_OBJECTS_ONLY")
+                self.assertEqual(verification["market_segment_count"], 1)
+                self.assertEqual(
+                    set(verification["ledger_counts"]),
+                    {"opportunity", "pre_entry_features", "market_segment", "decision", "lifecycle"},
+                )
 
     def test_accepted_but_disabled_lane_is_no_trade_not_zero_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +768,139 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(row["execution_disposition"], "LANE_DISABLED_NO_ORDER")
             self.assertEqual(row["outcome_state"], "NO_TRADE")
             self.assertNotEqual(row["outcome_state"], "REALIZED_ZERO_PNL")
+
+    def test_approved_and_rejected_opportunities_emit_bound_pre_entry_receipts(self):
+        from policy_search_manifest import compact_search_receipt
+
+        for suffix, policy_decision, disposition in (
+            ("approved", "ACCEPT", "ORDER_ELIGIBLE"),
+            ("rejected", "REJECT", "AI_REJECTED_NO_ORDER"),
+        ):
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as tmp:
+                features = {
+                    "research_feature_schema_version": "causal-features-v7",
+                    "price": 100.25, "adx": 27.0,
+                    "volatility_percentile": 0.72,
+                }
+                receipt = dual_write_lane_decision(
+                    {
+                        "trade_id": f"scan-{suffix}",
+                        "shared_ai_call_id": f"scan-{suffix}",
+                        "shared_ai_call_ts_epoch": 1000,
+                        "symbol": "tBTCF0:USTF0", "raw_direction": "LONG",
+                        "feature_snapshot_at_signal": features,
+                    },
+                    lane="CONTINUOUS", policy_decision=policy_decision,
+                    execution_disposition=disposition, exact_reason=policy_decision,
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS", "paper_only": True},
+                )
+                store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+                row = json.loads(
+                    store.ledger_path("pre_entry_features").read_text().strip()
+                )
+                search = compact_search_receipt()
+                self.assertEqual(row["receipt_schema"], "pre_entry_features_v1")
+                self.assertEqual(row["captured_at_ts"], 1000.0)
+                self.assertEqual(row["availability_boundary"], "PRE_DECISION_ONLY")
+                self.assertEqual(row["feature_schema_version"], "causal-features-v7")
+                self.assertEqual(row["bucket_definition_signature"], search["signature"])
+                self.assertEqual(row["bucket_definition_version"], search["version"])
+                self.assertEqual(row["features"], features)
+                self.assertEqual(
+                    row["source_evidence_refs"]["feature_snapshot_sha256"],
+                    hashlib.sha256(canonical_json(features).encode("utf-8")).hexdigest(),
+                )
+                self.assertEqual(row["episode_id"], receipt["episode_id"])
+                self.assertEqual(
+                    row["opportunity_id"], f"opportunity:{receipt['episode_id']}"
+                )
+                self.assertNotIn("policy_decision", row)
+                self.assertNotIn("outcome_state", row)
+
+    def test_pre_entry_receipt_is_one_per_episode_and_rejects_content_collision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-one-feature", "shared_ai_call_id": "scan-one-feature",
+                "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                "feature_snapshot_at_signal": {
+                    "research_feature_schema_version": "causal-v1", "price": 100.0,
+                },
+            }
+            common = {
+                "policy_decision": "ACCEPT", "execution_disposition": "ORDER_ELIGIBLE",
+                "exact_reason": "APPROVE", "epoch_id": "epoch-v3-test", "data_dir": tmp,
+            }
+            dual_write_lane_decision(
+                source, lane="CONTINUOUS",
+                lane_policy={"policy_id": "CONTINUOUS"}, **common,
+            )
+            retry = dual_write_lane_decision(
+                source, lane="FAMILY_ATR_TRAIL",
+                lane_policy={"policy_id": "FAMILY_ATR_TRAIL"}, **common,
+            )
+            self.assertTrue(retry["writes"][0]["duplicate"])
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertEqual(
+                len(store.ledger_path("pre_entry_features").read_text().splitlines()), 1,
+            )
+            mutated = copy.deepcopy(source)
+            mutated["feature_snapshot_at_signal"]["price"] = 101.0
+            with self.assertRaisesRegex(ValueError, "PRE_ENTRY_FEATURE_RECEIPT_COLLISION"):
+                dual_write_lane_decision(
+                    mutated, lane="FAMILY_MFE_GIVEBACK",
+                    lane_policy={"policy_id": "FAMILY_MFE_GIVEBACK"}, **common,
+                )
+
+    def test_pre_entry_receipt_fails_closed_on_post_decision_feature_leak(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "POST_DECISION_FEATURE_LEAK"):
+                dual_write_lane_decision(
+                    {
+                        "trade_id": "scan-leak", "shared_ai_call_id": "scan-leak",
+                        "shared_ai_call_ts_epoch": 1000, "raw_direction": "LONG",
+                        "feature_snapshot_at_signal": {
+                            "research_feature_schema_version": "causal-v1",
+                            "price": 100.0, "terminal": {"net_pnl_usd": 9.0},
+                        },
+                    },
+                    lane="CONTINUOUS", policy_decision="ACCEPT",
+                    execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+                    epoch_id="epoch-v3-test", data_dir=tmp,
+                    lane_policy={"policy_id": "CONTINUOUS"},
+                )
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            self.assertFalse(store.ledger_path("pre_entry_features").exists())
+            self.assertFalse(store.ledger_path("decision").exists())
+
+    def test_pre_entry_write_failure_has_durable_sanitized_dead_letter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "scan-dead-letter",
+                "shared_ai_call_id": "scan-dead-letter",
+                "shared_ai_call_ts_epoch": 1000,
+                "raw_direction": "LONG",
+                "policy_id": "CONTINUOUS",
+            }
+            first = write_pre_entry_evidence_failure(
+                source, lane="CONTINUOUS", epoch_id="epoch-v3-test",
+                data_dir=tmp, failure_class="OSError",
+            )
+            second = write_pre_entry_evidence_failure(
+                source, lane="CONTINUOUS", epoch_id="epoch-v3-test",
+                data_dir=tmp, failure_class="OSError",
+            )
+            self.assertTrue(first["written"])
+            self.assertTrue(second["duplicate"])
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("evidence_failure").read_text().strip())
+            self.assertEqual(row["receipt_schema"], "evidence_write_failure_v1")
+            self.assertEqual(row["failed_ledger"], "pre_entry_features")
+            self.assertEqual(row["resolution"], "ORDER_ELIGIBILITY_BLOCKED")
+            self.assertTrue(row["order_eligibility_blocked"])
+            self.assertEqual(row["failure_class"], "OSError")
+            self.assertNotIn("error", row)
 
     def test_lane_decision_retry_is_write_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,6 +962,46 @@ class V3BridgeTests(unittest.TestCase):
             self.assertFalse(submitted["terminal"])
             self.assertEqual(submitted["policy_signature"], decision["policy_signature"])
 
+    def test_frozen_policy_spec_repairs_mismatched_base_signature_on_terminal_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = {
+                "trade_id": "patient-child", "shared_ai_call_id": "scan-terminal",
+                "created_ts_ts": 1000, "raw_direction": "LONG",
+                "research_lane": "OFFSET_029_ATR_PROTECTED",
+                "policy_identity_schema": "paper_policy_identity_v3",
+                "policy_id": "PATIENT_PROTECTED",
+                "policy_signature": "policy-base-control",
+                "policy_epoch_id": "policy-epoch-base-control",
+                "paper_policy_spec": {
+                    "schema": "paper_policy_identity_spec_v3",
+                    "policy_id": "PATIENT_PROTECTED",
+                    "research_lane": "OFFSET_029_ATR_PROTECTED",
+                    "entry_limit_policy": "OFFSET_0.29_PROTECTED",
+                    "entry_offset_fraction": 0.0029,
+                    "declared_entry_ttl_sec": 1800.0,
+                    "entry_reconciliation_allowance_sec": 180,
+                    "exit_config": {"policy": "PROTECTED"},
+                    "paper_only": True,
+                    "relay_eligible": False,
+                    "base_policy_signature": "policy-base-control",
+                },
+            }
+            frozen = paper_policy_identity_for_sources("epoch-v3-test", source)
+            self.assertTrue(frozen["policy_signature"].startswith("paper-policy-"))
+            self.assertNotEqual(frozen["policy_signature"], source["policy_signature"])
+
+            dual_write_lane_entry_resolution(
+                source, lane="OFFSET_029_ATR_PROTECTED",
+                entry_resolution="NO_ORDER", exact_reason="TTL_EXPIRED",
+                epoch_id="epoch-v3-test", data_dir=tmp, observed_ts=1001,
+            )
+            row = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("lifecycle").read_text().strip())
+            self.assertEqual(row["policy_signature"], frozen["policy_signature"])
+            self.assertEqual(row["policy_epoch_id"], frozen["policy_epoch_id"])
+            self.assertEqual(row["policy_id"], "PATIENT_PROTECTED")
+
     def test_continuous_relay_capability_default_keeps_decision_and_order_identity_equal(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = {
@@ -232,7 +1016,7 @@ class V3BridgeTests(unittest.TestCase):
                 source, lane="CONTINUOUS", policy_decision="ACCEPT",
                 execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
                 epoch_id="epoch-v3-test", data_dir=tmp,
-                lane_policy={**source, "relay_eligible": True, "paper_only": False},
+                lane_policy={**source, "relay_eligible": True, "paper_only": True},
             )
             dual_write_paper_order_intent(
                 {"trade_id": "cont-child", "created_ts": 1001, "signal_dir": "LONG",
@@ -249,8 +1033,12 @@ class V3BridgeTests(unittest.TestCase):
             self.assertTrue(decision["paper_policy_spec"]["relay_eligible"])
             self.assertTrue(intent["paper_policy_spec"]["relay_eligible"])
             self.assertTrue(intent["relay_eligible"])
-            self.assertFalse(decision["paper_policy_spec"]["paper_only"])
-            self.assertFalse(intent["paper_policy_spec"]["paper_only"])
+            # Relay capability must never rewrite the signed source evidence
+            # as non-paper.  The order source deliberately carries the old
+            # capability-shaped false value above; identity normalization must
+            # still keep decision and submit on one paper policy signature.
+            self.assertTrue(decision["paper_policy_spec"]["paper_only"])
+            self.assertTrue(intent["paper_policy_spec"]["paper_only"])
             self.assertEqual(
                 decision["paper_policy_spec"], intent["paper_policy_spec"],
             )
@@ -306,6 +1094,13 @@ class V3BridgeTests(unittest.TestCase):
                 "paper_only": True, "relay_eligible": False,
                 "policy_id": "OFFSET_029_ATR_TP_25", "policy_signature": "policy-paper",
                 "policy_epoch_id": "policy-epoch-paper",
+                "entry_limit_policy": "OFFSET_0.29_CHASE_w234_s25_i60",
+                "entry_offset_fraction": 0.0029,
+                "signal_time_bbo": {
+                    "bid": 100.69, "ask": 100.71,
+                    "bid_qty": 4.0, "ask_qty": 4.0,
+                },
+                "context": {"cycle_3m_universe": {"atr14_pct_3m": 0.081}},
             }
             order = {
                 "trade_id": "o29atr-1", "created_ts": 1001, "signal_dir": "LONG",
@@ -313,18 +1108,46 @@ class V3BridgeTests(unittest.TestCase):
                 "research_lane": "OFFSET_029_ATR_TP_25", "paper_only": True,
                 "relay_eligible": False, "chase_schedule_authoritative": True,
                 "research_chase_schedule": {"authoritative": True, "intervals": [{"step": 0}]},
+                "source_order_market_evidence": {"latest_observation": {
+                    "verdict": "EXECUTABLE", "gate_policy": "BBO_DEPTH_V1",
+                    "activation_ts": 1002, "generation": 2, "book_ts": 1009,
+                    "book_age_sec": 1.0, "best_bid": 100.70, "best_ask": 100.71,
+                    "side_correct_executable_quote": 100.71,
+                    "visible_executable_qty": 4.0, "recent_aggressor_qty": 1.0,
+                }},
+                "fill_time_revalidation": {
+                    "performed": True, "checked_ts": "1970-01-01T00:16:49Z",
+                    "signal_age_sec": 9.0, "result": "PASSED", "reason": None,
+                },
             }
             submit = dual_write_paper_order_intent(order, signal, epoch_id="epoch-v3-test", data_dir=tmp)
-            position = {"trade_id": "o29atr-1", "entry_ts": 1010, "entry": 100.7071, "qty": 0.2, "fill_model": "LIMIT_TOUCH"}
+            position = {"trade_id": "o29atr-1", "entry_ts": 1010, "entry": 100.7071, "qty": 0.2,
+                        "fill_model": "LIMIT_TOUCH", "atr14_pct_3m": 0.083}
             fill = dual_write_paper_fill(order, signal, position, epoch_id="epoch-v3-test", data_dir=tmp)
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             self.assertTrue(submit["store_verification"]["passed"])
             self.assertTrue(fill["store_verification"]["passed"])
             intent = json.loads(store.ledger_path("order_intent").read_text().strip())
             execution = json.loads(store.ledger_path("execution").read_text().strip())
+            self.assertEqual(submit["policy_signature"], intent["policy_signature"])
+            self.assertEqual(fill["policy_signature"], execution["policy_signature"])
             self.assertEqual(intent["intent_kind"], "ACTUAL_PAPER_LIMIT_SUBMIT")
             self.assertEqual(intent["requested_qty"], 0.2)
             self.assertTrue(intent["chase_schedule_authoritative"])
+            self.assertEqual(
+                intent["schedule_sha256"],
+                hashlib.sha256(canonical_json(intent["chase_schedule"]).encode("utf-8")).hexdigest(),
+            )
+            self.assertEqual(intent["atr14_pct_at_signal"], 0.081)
+            self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
+            self.assertEqual(intent["entry_children_count"], 1)
+            self.assertEqual(intent["entry_children"][0]["offset_pct"], 0.29)
+            opportunity = json.loads(store.ledger_path("opportunity").read_text().strip())
+            baselines = opportunity["baseline_schedule_snapshot"]["schedules"]
+            self.assertEqual(baselines["MARKET_ENTRY_AT_SIGNAL"]["capture_status"], "CAPTURED_AT_SIGNAL")
+            self.assertEqual(baselines["NO_CHASE_LIMIT"]["capture_status"], "CAPTURED_AT_SIGNAL")
+            self.assertTrue(baselines["CHASE_13_MIN_COMPRESSED"]["schedule"])
+            self.assertTrue(baselines["CHASE_30_MIN_LEGACY"]["schedule"])
             self.assertTrue(intent["policy_signature"].startswith("paper-policy-"))
             self.assertTrue(intent["policy_epoch_id"].startswith("paper-policy-epoch-"))
             self.assertEqual(intent["base_policy_signature"], "policy-paper")
@@ -332,11 +1155,33 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(execution["execution_world"], "SHOWCASE_PAPER_OBSERVED")
             self.assertFalse(execution["authenticated_exchange_actual"])
             self.assertEqual(execution["filled_qty"], 0.2)
+            self.assertEqual(execution["execution_basis"], "CONSERVATIVE_BBO_DEPTH")
+            self.assertTrue(execution["conservative_fill_supported"])
+            self.assertEqual(execution["fill_gate_verdict"], "EXECUTABLE")
+            self.assertEqual(execution["limit_generation"], 2)
+            self.assertEqual(execution["remaining_qty"], 0.0)
+            self.assertFalse(execution["partial_fill"])
+            self.assertEqual(execution["atr14_pct_at_fill"], 0.083)
+            self.assertEqual(execution["atr14_pct_basis"], "UNVERIFIED_TIMING_FALLBACK")
+            self.assertFalse(execution["atr14_fill_observation_verified"])
+            self.assertEqual(execution["fill_time_revalidation"]["result"], "PASSED")
+            self.assertTrue(execution["fill_time_revalidation"]["performed"])
             self.assertEqual(intent["episode_id"], execution["episode_id"])
+            self.assertEqual(intent["opportunity_id"], f"opportunity:{intent['episode_id']}")
+            self.assertEqual(execution["opportunity_id"], intent["opportunity_id"])
+            self.assertEqual(execution["schedule_id"], intent["schedule_id"])
+            self.assertEqual(
+                execution["fill_id"],
+                "fill:epoch-v3-test:o29atr-1:paper-primary",
+            )
             lifecycle_rows = [json.loads(line) for line in store.ledger_path("lifecycle").read_text().splitlines()]
             fill_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_POSITION_OPEN")
             submit_lifecycle = next(row for row in lifecycle_rows if row.get("observation_status") == "PAPER_ORDER_SUBMITTED")
             self.assertEqual(submit_lifecycle["outcome_state"], "CENSORED")
+            self.assertFalse(fill_lifecycle["terminal"])
+            self.assertEqual(fill_lifecycle["ranking_blocker"], "EXIT_PATH_NOT_MATURED")
+            self.assertEqual(store.verify()["market_segment_count"], 0)
+            self.assertFalse(store.ledger_path("market_segment").exists())
             self.assertEqual(submit_lifecycle["effective_execution_mode"], "PAPER_OBSERVED")
             self.assertEqual(intent["effective_execution_mode"], "PAPER_OBSERVED")
             self.assertEqual(intent["policy_execution_scope"], "PAPER_RESEARCH_ONLY")
@@ -347,6 +1192,68 @@ class V3BridgeTests(unittest.TestCase):
                 self.assertEqual(row["policy_id"], intent["policy_id"])
                 self.assertEqual(row["policy_signature"], intent["policy_signature"])
                 self.assertEqual(row["policy_epoch_id"], intent["policy_epoch_id"])
+
+    def test_paper_submit_reads_direct_shared_signal_cycle_atr_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "o29atr-direct-cycle", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "symbol": "tBTCF0:USTF0", "shared_ai_call_id": "scan-direct-cycle",
+                "signal_price": 101.0, "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+                "cycle_3m_universe": {"atr14_pct_3m": 0.079},
+            }
+            order = {
+                "trade_id": "o29atr-direct-cycle", "created_ts": 1001,
+                "signal_dir": "LONG", "signal_price": 101.0,
+                "limit_price": 100.7071, "qty": 0.2,
+                "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+            }
+
+            receipt = dual_write_paper_order_intent(
+                order, signal, epoch_id="epoch-v3-direct-cycle", data_dir=tmp,
+            )
+
+            self.assertTrue(receipt["store_verification"]["passed"])
+            intent = json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-direct-cycle")
+                .ledger_path("order_intent")
+                .read_text()
+                .strip()
+            )
+            self.assertEqual(intent["atr14_pct_at_signal"], 0.079)
+            self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
+
+    def test_paper_submit_reads_frozen_ai_input_cycle_atr_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            signal = {
+                "trade_id": "o29atr-ai-input-cycle", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "final_direction": "LONG",
+                "symbol": "tBTCF0:USTF0", "shared_ai_call_id": "scan-ai-input-cycle",
+                "signal_price": 101.0, "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+                "ai_input": {"cycle_3m_universe": {"atr14_pct_3m": 0.082}},
+            }
+            order = {
+                "trade_id": "o29atr-ai-input-cycle", "created_ts": 1001,
+                "signal_dir": "LONG", "signal_price": 101.0,
+                "limit_price": 100.7071, "qty": 0.2,
+                "research_lane": "OFFSET_029_ATR_TP_25",
+                "paper_only": True, "relay_eligible": False,
+            }
+
+            dual_write_paper_order_intent(
+                order, signal, epoch_id="epoch-v3-ai-input-cycle", data_dir=tmp,
+            )
+            intent = json.loads(
+                V3EvidenceStore(tmp, epoch_id="epoch-v3-ai-input-cycle")
+                .ledger_path("order_intent")
+                .read_text()
+                .strip()
+            )
+            self.assertEqual(intent["atr14_pct_at_signal"], 0.082)
+            self.assertEqual(intent["atr14_pct_basis"], "SIGNAL_TIME_3M_ATR14")
 
     def test_different_paper_lanes_never_share_inherited_control_signature(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -461,6 +1368,12 @@ class V3BridgeTests(unittest.TestCase):
             outcome = {
                 "trade_id": "p-path", "close_ts": 1004, "exit": 104,
                 "net_pnl_usd": 4.0, "exit_reason": "ATR_TP_2_5",
+                "entry_context": {"regime": "BULL", "adx": 28.0, "sr_state": "FREE_RANGE", "ema9": 99.0},
+                "exit_context": {"regime": "BULL", "adx": 31.0, "sr_state": "AT_RESISTANCE", "ema9": 103.0},
+                "exit_market_receipt": {"basis": "SIDE_CORRECT_BBO_DEPTH", "best_bid": 103.9, "best_ask": 104.0},
+                "partial_exit_receipts": [{"ts": 1003, "action": "TP1", "price": 103,
+                                             "closed_qty": 0.025, "remaining_fraction": 0.75,
+                                             "realized_gross_usd": 0.075}],
             }
 
             receipt = dual_write_paper_close(
@@ -469,6 +1382,7 @@ class V3BridgeTests(unittest.TestCase):
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
             market_row = json.loads(store.ledger_path("market_segment").read_text().strip())
+            execution = json.loads(store.ledger_path("execution").read_text().strip())
             ref = lifecycle["market_segment_refs"][0]
             envelope = json.loads((Path(tmp) / ref["relative_path"]).read_text())
 
@@ -477,10 +1391,37 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(ref["row_count"], 5)
             self.assertEqual(market_row["coverage"]["max_gap_sec"], 1.0)
             self.assertTrue(market_row["coverage"]["two_second_or_better"])
+            self.assertTrue(market_row["coverage"]["requested_bounds_complete"])
+            self.assertTrue(market_row["coverage"]["all_rows_have_valid_bbo"])
+            self.assertTrue(market_row["coverage"]["all_rows_have_visible_depth"])
+            self.assertTrue(market_row["coverage"]["conservative_bbo_depth_eligible"])
+            self.assertEqual(market_row["context_role"], "ENTRY_AND_EXIT_PATH")
+            self.assertTrue(market_row["coverage"]["entry_path_included"])
+            self.assertTrue(market_row["coverage"]["future_exit_path_included"])
+            self.assertTrue(market_row["coverage"]["horizon_coverage"]["decision_to_entry_terminal"])
+            self.assertTrue(market_row["coverage"]["horizon_coverage"]["entry_to_exit_terminal"])
+            self.assertFalse(market_row["coverage"]["horizon_coverage"]["post_exit"])
+            self.assertEqual(
+                market_row["coverage"]["future_path_status"],
+                "CAPTURED_THROUGH_TERMINAL_CLOSE",
+            )
             self.assertEqual(envelope["rows"][0]["ts"], 1000.0)
             self.assertEqual(envelope["rows"][0]["price"], 100.0)
             self.assertEqual(envelope["rows"][-1]["ask_qty"], 3.0)
             self.assertEqual(lifecycle["ranking_blocker"], "POLICY_REPLAY_PENDING")
+            self.assertEqual(lifecycle["opportunity_id"], f"opportunity:{receipt['episode_id']}")
+            self.assertEqual(lifecycle["tape_id"], f"tape:{ref['sha256']}")
+            self.assertEqual(market_row["tape_id"], lifecycle["tape_id"])
+            self.assertEqual(execution["entry_context"]["regime"], "BULL")
+            self.assertEqual(execution["exit_context"]["sr_state"], "AT_RESISTANCE")
+            self.assertEqual(execution["exit_market_receipt"]["basis"], "SIDE_CORRECT_BBO_DEPTH")
+            self.assertEqual(execution["partial_exits"][0]["closed_qty"], 0.025)
+            self.assertEqual(execution["protection_trajectory"]["partial_exit_count"], 1)
+            self.assertEqual(execution["path_extrema"]["basis"], "OBSERVED_1S_PRICE_PATH")
+            self.assertEqual(execution["path_extrema"]["mfe_pct"], 4.0)
+            self.assertEqual(execution["path_extrema"]["mae_pct"], 1.0)
+            self.assertEqual(execution["path_extrema"]["time_to_mfe_sec"], 3.0)
+            self.assertEqual(execution["path_extrema"]["time_to_mae_sec"], 0.0)
 
     def test_paper_close_fails_path_qualification_when_tape_has_large_gap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -549,6 +1490,52 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual({row["policy_signature"] for row in attributable}, {intent["policy_signature"]})
             self.assertEqual({row["policy_epoch_id"] for row in attributable}, {intent["policy_epoch_id"]})
 
+    def test_shared_signal_identity_cannot_override_lane_owned_fill_and_close_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            shared_signal = {
+                "trade_id": "shared-control", "created_ts_ts": 1000,
+                "raw_direction": "LONG", "shared_ai_call_id": "scan-two-lanes",
+                "research_lane": "CONTINUOUS", "policy_id": "CONTROL",
+                "policy_signature": "control-signature", "policy_epoch_id": "control-epoch",
+                "policy_identity_schema": "paper_policy_identity_v3",
+                "paper_policy_spec": {"paper_only": True, "policy_id": "CONTROL"},
+            }
+            lane_order = {
+                "trade_id": "lane-3", "created_ts": 1001, "signal_dir": "LONG",
+                "limit_price": 99.9, "qty": 0.1, "research_lane": "OFFSET_029_ATR_PROTECTED",
+                "policy_id": "LANE_3_POLICY", "policy_signature": "lane-3-signature",
+                "policy_epoch_id": "lane-3-epoch", "policy_identity_schema": "paper_policy_identity_v3",
+                "paper_policy_spec": {
+                    "paper_only": True, "policy_id": "LANE_3_POLICY",
+                    "research_lane": "OFFSET_029_ATR_PROTECTED",
+                },
+            }
+            lane_position = {
+                **lane_order, "entry_ts": 1010, "entry": 99.9, "dir": "LONG",
+            }
+            expected_lane_identity = paper_policy_identity_for_sources(
+                "epoch-v3-test", lane_order,
+            )
+            dual_write_paper_fill(
+                lane_order, shared_signal, lane_position,
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            dual_write_paper_close(
+                lane_position, shared_signal,
+                {"trade_id": "lane-3", "close_ts": 1020, "exit": 100.1,
+                 "net_pnl_usd": 0.2, "exit_reason": "TEST"},
+                epoch_id="epoch-v3-test", data_dir=tmp,
+            )
+            rows = [
+                json.loads(line)
+                for line in V3EvidenceStore(tmp, epoch_id="epoch-v3-test").ledger_path("execution").read_text().splitlines()
+            ]
+            self.assertEqual(
+                {row["policy_signature"] for row in rows},
+                {expected_lane_identity["policy_signature"]},
+            )
+            self.assertEqual({row["policy_id"] for row in rows}, {"LANE_3_POLICY"})
+
     def test_provisional_without_stable_identity_is_deferred_without_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             receipt = dual_write_provisional_source("cont-pending", {
@@ -599,11 +1586,75 @@ class V3BridgeTests(unittest.TestCase):
 
     def test_unfilled_is_not_realized_zero_pnl(self):
         with tempfile.TemporaryDirectory() as tmp:
-            dual_write_v22_record(_event(), data_dir=tmp)
+            event = _event()
+            event["exact_reason"] = "SIGNAL_TTL_EXPIRED"
+            event["fill_time_revalidation"] = {
+                "performed": True, "result": "BLOCKED",
+                "reason": "FILL_REVALIDATION_DIRECTION_CHANGED",
+            }
+            dual_write_v22_record(event, data_dir=tmp)
             store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
             lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
             self.assertEqual(lifecycle["outcome_state"], "NO_FILL")
             self.assertNotEqual(lifecycle["outcome_state"], "REALIZED_ZERO_PNL")
+            self.assertTrue(lifecycle["terminal_no_fill"])
+            self.assertTrue(lifecycle["terminal_ttl_expired"])
+            self.assertEqual(lifecycle["terminal_reason"], "SIGNAL_TTL_EXPIRED")
+            self.assertEqual(lifecycle["fill_time_revalidation"]["result"], "BLOCKED")
+
+    def test_source_fill_without_shared_ai_identity_is_not_normalized_as_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _event("scan-legacy-fill", "episode-legacy-fill")
+            event["event_episode"] = {
+                "shared_ai_call_id": None,
+                "grouping_basis": "TIME_DIRECTION_SYMBOL_FALLBACK",
+            }
+            event["base_policy_id"] = "CONTROL_V1"
+            event["envelope"] = {
+                **event["envelope"],
+                "policy_id": "CONTROL_V1",
+            }
+            event["live_fill_ts"] = 1005.0
+            event["live_fill_price"] = 100.25
+
+            receipt = dual_write_v22_record(event, data_dir=tmp)
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            lifecycle = json.loads(store.ledger_path("lifecycle").read_text().strip())
+
+            self.assertFalse(store.ledger_path("execution").exists())
+            self.assertFalse(receipt["execution_normalized"])
+            self.assertEqual(
+                receipt["execution_normalization_blocker"],
+                "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE",
+            )
+            self.assertFalse(lifecycle["ranking_eligible"])
+            self.assertEqual(
+                lifecycle["ranking_blocker"],
+                "SOURCE_FILL_CAUSAL_IDENTITY_INCOMPLETE",
+            )
+
+    def test_source_fill_with_complete_identity_preserves_policy_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            event = _event("scan-attributable-fill", "episode-attributable-fill")
+            event["base_policy_id"] = "CONTROL_V1"
+            event["envelope"] = {
+                **event["envelope"],
+                "policy_id": "CONTROL_V1",
+            }
+            event["live_fill_ts"] = 1005.0
+            event["live_fill_price"] = 100.25
+
+            receipt = dual_write_v22_record(event, data_dir=tmp)
+            execution = json.loads(V3EvidenceStore(
+                tmp, epoch_id="epoch-v3-test",
+            ).ledger_path("execution").read_text().strip())
+
+            self.assertTrue(receipt["execution_normalized"])
+            self.assertEqual(execution["shared_ai_call_id"], "scan-1")
+            self.assertEqual(execution["policy_id"], "CONTROL_V1")
+            self.assertEqual(execution["policy_signature"], "policy-a")
+            self.assertEqual(execution["policy_epoch_id"], "pe-a")
+            self.assertEqual(execution["research_lane"], "CONTROL_V1")
 
     def test_order_intent_preserves_exact_entry_children_for_v3_replay(self):
         with tempfile.TemporaryDirectory() as tmp:

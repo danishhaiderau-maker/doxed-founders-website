@@ -18,15 +18,16 @@ test('relay is dry-run without explicit user consent', () => {
   assert.equal(shouldDryRunIntentMirror('0', {}), true);
 });
 
-test('live relay consent copies only the proven Continuous lane', () => {
+test('live relay consent copies only the explicit two-lane roster', () => {
   assert.deepEqual(CONSERVATIVE_BTC_LIVE_RELAY_LANES, [
     'CONTINUOUS',
+    'OFFSET_029_ATR_TP_25',
   ]);
 });
 
-test('Type B remains research-only and can never enter live-copy allowlist', () => {
+test('unknown research lanes can never enter the live-copy allowlist', () => {
   assert.equal(
-    (CONSERVATIVE_BTC_LIVE_RELAY_LANES as readonly string[]).includes('TYPE_B_HUNTER_V1'),
+    (CONSERVATIVE_BTC_LIVE_RELAY_LANES as readonly string[]).includes('RETIRED_EXPERIMENT'),
     false,
   );
 });

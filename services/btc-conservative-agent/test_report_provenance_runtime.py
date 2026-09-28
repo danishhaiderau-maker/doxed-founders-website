@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 
@@ -47,6 +48,10 @@ def test_report_provenance_executes_against_canonical_evidence_root(tmp_path, mo
     assert provenance["policy_comparability_key"] == "policy-one"
     assert provenance["policy_comparability_status"] == "SINGLE_COMPARABLE_POLICY"
     assert all(row["available"] for row in provenance["evidence_inputs"].values())
+    relay = provenance["evidence_inputs"]["relay_lifecycle_evidence_v1.json"]
+    assert relay["generating_revision"] == "a" * 40
+    assert relay["producer_service"] == "PLATFORM_RELAY_EXPORTER"
+    assert relay["producer_revision_role"] == "EXPORTER_DEPLOYMENT_REVISION"
 
 
 def test_provenance_uses_joined_policy_keys_when_raw_jsonl_is_null(tmp_path, monkeypatch):
@@ -105,6 +110,11 @@ def test_report_stamp_marks_ungated_report_descriptive_and_unqualified(tmp_path)
     provenance = {
         "cohort_schema": "analysis_cohorts_v1",
         "generation_revision": "b" * 40,
+        "analyzer_revision": "a" * 40,
+        "source_revision": "c" * 40,
+        "deployed_revision": "d" * 40,
+        "dataset_epoch": "epoch-current",
+        "config_signature": "config-current",
         "source_data_revision": "c" * 64,
         "policy_comparability_key": None,
         "cohorts": cohorts,
@@ -118,6 +128,136 @@ def test_report_stamp_marks_ungated_report_descriptive_and_unqualified(tmp_path)
     assert report["report_eligibility"]["included_row_count"] == 0
     assert report["report_eligibility"]["excluded_row_count"] == 10
     assert report["live_policy_change_allowed"] is False
+
+
+def test_empty_current_lanes_are_written_and_publish_with_exact_generation_identity(
+    tmp_path, monkeypatch
+):
+    import research.mirror_coherence as mirror_coherence
+    import research.canonical_data_store as canonical_data_store
+
+    monkeypatch.setattr(mirror_coherence, "assert_mirror_coherent", lambda **_kwargs: None)
+    monkeypatch.setattr(canonical_data_store, "record_analyzer_completion", lambda *args, **kwargs: {})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BTC_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(analyzer, "_load_signal_snapshots", lambda: {})
+    monkeypatch.setattr(analyzer, "load_research_session", lambda: {
+        "fresh_collection_mode": True,
+        "fresh_collection_start_time": 1_787_780_026.0,
+    })
+
+    report = analyzer.benchmark_vs_lanes_report(
+        trades=pd.DataFrame(),
+        session={
+            "fresh_collection_mode": True,
+            "fresh_collection_start_time": 1_787_780_026.0,
+        },
+    )
+
+    assert report["status"] == "CURRENT_SESSION_NO_APPROVE_SNAPSHOTS"
+    assert report["session_scope"] == "FRESH-COLLECTION"
+    assert report["evidence_scope"] == "CURRENT_SESSION"
+    assert set(report["lanes"]) == set(analyzer.ACTIVE_TILE_ORDER)
+    assert all(row["real_fills"] == 0 for row in report["lanes"].values())
+    unavailable = (
+        "approve_to_fill_pct",
+        "shadow_fill_pct",
+        "net_pnl_real",
+        "net_pnl_shadow_blocked",
+        "per_approve_ev",
+        "counterfactual_ev_per_approve",
+        "win_rate_pct",
+    )
+    assert all(
+        row[field] is None
+        for row in report["lanes"].values()
+        for field in unavailable
+    )
+    assert analyzer._best_worst_lanes(report) == (None, None)
+    compact_rows = analyzer._lane_table_rows(report)
+    assert len(compact_rows) == len(analyzer.ACTIVE_TILE_ORDER)
+    assert all(row["pnl"] is None and row["ev"] is None for row in compact_rows)
+    assert all("all_time" not in row for row in report["lanes"].values())
+
+    provenance = {
+        "cohort_schema": "analysis_cohorts_v1",
+        "generation_revision": "revision-current",
+        "analyzer_revision": "analyzer-current",
+        "source_revision": "source-current",
+        "deployed_revision": "deployed-current",
+        "dataset_epoch": "epoch-current",
+        "config_signature": "config-current",
+        "source_data_revision": "source-current",
+        "fresh_epoch_id": "epoch-current",
+        "policy_comparability_key": None,
+        "cohorts": {
+            analyzer.SHOWCASE_STRATEGY: {
+                "included_row_count": 0,
+                "evidence_row_count": 0,
+                "exclusion_reason_counts": {},
+            }
+        },
+    }
+    analyzer._stamp_report_analysis_provenance(
+        analyzer.BENCHMARK_VS_LANES_REPORT_FILE,
+        provenance,
+    )
+    stamped = json.loads(
+        Path(analyzer.BENCHMARK_VS_LANES_REPORT_FILE).read_text(encoding="utf-8")
+    )
+    assert stamped["generation_revision"] == "revision-current"
+    assert stamped["source_data_revision"] == "source-current"
+    assert stamped["epoch_id"] == "epoch-current"
+
+    manifest = {
+        "generation_id": "generation-current",
+        "generation_revision": "revision-current",
+        "source_data_revision": "source-current",
+        "fresh_epoch": {"epoch_id": "epoch-current"},
+        "session_scope": "FRESH-COLLECTION",
+        "reports": [{"file": analyzer.BENCHMARK_VS_LANES_REPORT_FILE}],
+        "text_artifacts": [],
+    }
+    analyzer._publish_completed_report_generation(manifest)
+    published_dir = Path(analyzer.PUBLISHED_REPORTS_DIR)
+    published_manifest = json.loads(
+        (published_dir / analyzer.REPORT_MANIFEST_FILE).read_text(encoding="utf-8")
+    )
+    published_report = json.loads(
+        (published_dir / analyzer.BENCHMARK_VS_LANES_REPORT_FILE).read_text(encoding="utf-8")
+    )
+
+    assert analyzer.BENCHMARK_VS_LANES_REPORT_FILE in {
+        row["file"] for row in published_manifest["reports"]
+    }
+    assert published_report["generation_revision"] == published_manifest["generation_revision"]
+    assert published_report["source_data_revision"] == published_manifest["source_data_revision"]
+    assert published_report["epoch_id"] == published_manifest["fresh_epoch"]["epoch_id"]
+    assert published_report["evidence_scope"] == "CURRENT_SESSION"
+
+
+def test_lane_ranking_requires_real_terminal_execution_evidence():
+    no_fill = {
+        "lanes": {
+            analyzer.BENCHMARK_LANES[0]: {
+                "approves": 4,
+                "real_fills": 0,
+                "net_pnl_real": 0.0,
+            }
+        }
+    }
+    assert analyzer._best_worst_lanes(no_fill) == (None, None)
+
+    first, second = analyzer.BENCHMARK_LANES[:2]
+    eligible = {
+        "lanes": {
+            first: {"approves": 4, "real_fills": 2, "net_pnl_real": 0.25},
+            second: {"approves": 5, "real_fills": 3, "net_pnl_real": -0.10},
+        }
+    }
+    best, worst = analyzer._best_worst_lanes(eligible)
+    assert best["lane"] == first
+    assert worst["lane"] == second
 
 
 def test_report_stamp_normalizes_report_specific_showcase_counts(tmp_path):
@@ -138,6 +278,11 @@ def test_report_stamp_normalizes_report_specific_showcase_counts(tmp_path):
     provenance = {
         "cohort_schema": "analysis_cohorts_v1",
         "generation_revision": "b" * 40,
+        "analyzer_revision": "a" * 40,
+        "source_revision": "c" * 40,
+        "deployed_revision": "d" * 40,
+        "dataset_epoch": "epoch-current",
+        "config_signature": "config-current",
         "source_data_revision": "c" * 64,
         "policy_comparability_key": None,
         "cohorts": cohorts,
@@ -185,3 +330,71 @@ def test_chase_attribution_without_trade_rows_keeps_unknown_hold_fail_closed(tmp
 
     assert report["trades"][0]["trade_id"] == "cont-no-trade-row"
     assert report["trades"][0]["avg_hold_min"] is None
+
+
+def test_chase_attribution_keeps_v31_lane_without_legacy_chase_column(tmp_path, monkeypatch):
+    def load_rows(path):
+        if "duplicate_intent_audit" in str(path):
+            return [{
+                "trade_id": "fc3-current",
+                "research_lane": "FAMILY_CHANDELIER_3",
+            }]
+        return [{
+            "trade_id": "fc3-current",
+            "stage": "ORDER_SUBMITTED",
+            "research_lane": "UNKNOWN",
+            "limit_price": 63_000,
+        }]
+
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", load_rows)
+    monkeypatch.setattr(analyzer, "_filter_jsonl_rows_by_session", lambda rows, _session: rows)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda _name: str(tmp_path / "chase.json"))
+    trades = pd.DataFrame([{
+        "trade_id": "fc3-current",
+        "net_pnl_usd": 0.12,
+        "duration_min": 7.5,
+    }])
+
+    report = analyzer.chase_attribution_report(trades=trades, session={})
+
+    assert report["trades"][0]["lane"] == "FAMILY_CHANDELIER_3"
+    assert report["trades"][0]["avg_hold_min"] == 7.5
+
+
+def test_fresh_epoch_chase_attribution_excludes_pre_epoch_relay_only_rows(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [])
+    monkeypatch.setattr(analyzer, "_filter_jsonl_rows_by_session", lambda rows, _session: rows)
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    monkeypatch.setattr(analyzer, "_platform_relay_evidence_index", lambda _path: {
+        "legacy-trade": {
+            "records": [{
+                "canonicalTradeId": "legacy-trade",
+                "createdAt": "2026-06-18T10:18:44.999Z",
+                "closedAt": "2026-06-18T10:28:58.289Z",
+                "events": [],
+            }],
+        },
+    })
+
+    report = analyzer.chase_attribution_report(
+        trades=pd.DataFrame(),
+        session={"fresh_collection_start_time": 1787520261.5305245},
+    )
+
+    assert report["trades"] == []
+
+
+def test_empty_current_epoch_overwrites_scenario_c_reports(tmp_path, monkeypatch):
+    monkeypatch.setattr(analyzer, "analyzer_report_path", lambda name: str(tmp_path / name))
+    stale_leak = tmp_path / analyzer.SCENARIO_C_LEAKAGE_REPORT_FILE
+    stale_capture = tmp_path / analyzer.SCENARIO_C_CAPTURE_RATIO_REPORT_FILE
+    stale_leak.write_text('{"overall":{"left_on_table_usd":24.84}}', encoding="utf-8")
+    stale_capture.write_text('{"overall_mfe_positive":{"aggregate_capture_pct":-4.2}}', encoding="utf-8")
+
+    leak = analyzer.scenario_c_leakage_report(trades=pd.DataFrame(), session={})
+    capture = analyzer.scenario_c_capture_ratio_report(trades=pd.DataFrame(), session={})
+
+    assert leak["overall"]["left_on_table_usd"] is None
+    assert capture["overall_mfe_positive"] == {"trades": 0}
+    assert json.loads(stale_leak.read_text(encoding="utf-8"))["evidence_status"] == "INSUFFICIENT_CURRENT_EPOCH_TERMINALS"
+    assert json.loads(stale_capture.read_text(encoding="utf-8"))["evidence_status"] == "INSUFFICIENT_CURRENT_EPOCH_TERMINALS"

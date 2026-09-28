@@ -1,5 +1,7 @@
 import ast
 import copy
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,23 @@ class QuietLogger:
     def error(self, *_args, **_kwargs):
         pass
 
+    def warning(self, *_args, **_kwargs):
+        pass
+
+
+class AvailableLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def acquire(self, blocking=False):
+        return True
+
+    def release(self):
+        pass
+
 
 @pytest.mark.parametrize(
     "process_result,expected",
@@ -38,6 +57,8 @@ class QuietLogger:
          ("NO_ORDER", "DUPLICATE_LIMIT_PRICE")),
         ({"entry_resolution": "AWAITING", "exact_reason": "AWAITING_DASHBOARD_CHASE"},
          ("AWAITING", "AWAITING_DASHBOARD_CHASE")),
+        (None, ("NO_ORDER", "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION")),
+        ({}, ("NO_ORDER", "PIPELINE_RETURNED_WITHOUT_ENTRY_RESOLUTION")),
     ],
 )
 def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expected):
@@ -46,6 +67,7 @@ def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expec
         "copy": copy,
         "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
         "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
         "guard_retired_lane_execution": lambda *_args: True,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
         "is_research_lane_enabled": lambda _lane: True,
@@ -89,6 +111,505 @@ def test_preorder_ttl_is_no_order_but_submitted_expiry_is_not():
     assert len(writes) == 1
 
 
+def test_periodic_ledger_reconciliation_protects_only_durable_exposure():
+    calls = []
+    namespace = {
+        "time": type("Clock", (), {"time": staticmethod(lambda: 2000.0)}),
+        "copy": copy,
+        "os": os,
+        "trade_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_last_ts": 0.0,
+        "V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC": 30.0,
+        "open_positions": [{"trade_id": "open-1"}],
+        "pending_orders": [{"trade_id": "pending-1"}],
+        # This pre-order wait must not suppress overdue ledger repair.
+        "trades_map": {"wait-1": {"signal_ref": {"trade_id": "wait-1"}}},
+        "_collector_v22_epoch_id": lambda: "epoch-1",
+        "_runtime_git_rev": lambda: "rev-1",
+        "reconcile_overdue_expected_order_decisions": (
+            lambda **kwargs: calls.append(kwargs) or {"reconciled": 1}
+        ),
+        "logger": QuietLogger(),
+    }
+    reconcile = load_function("_reconcile_overdue_v3_expected_orders", namespace)
+    assert reconcile(force=True)["reconciled"] == 1
+    assert calls[0]["active_rows"] == [
+        {"trade_id": "open-1"}, {"trade_id": "pending-1"},
+    ]
+    assert calls[0]["observed_ts"] == 2000.0
+    assert calls[0]["runtime_revision"] == "rev-1"
+
+
+def test_periodic_ledger_reconciliation_throttles_from_scan_completion():
+    timestamps = iter((2000.0, 2000.0, 2045.0))
+    namespace = {
+        "time": type("Clock", (), {"time": staticmethod(lambda: next(timestamps))}),
+        "copy": copy,
+        "os": os,
+        "trade_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_lock": AvailableLock(),
+        "_v3_expected_order_reconcile_last_ts": 0.0,
+        "V3_EXPECTED_ORDER_RECONCILE_INTERVAL_SEC": 30.0,
+        "open_positions": [],
+        "pending_orders": [],
+        "_collector_v22_epoch_id": lambda: "epoch-1",
+        "_runtime_git_rev": lambda: "rev-1",
+        "reconcile_overdue_expected_order_decisions": lambda **_kwargs: {"reconciled": 0},
+        "logger": QuietLogger(),
+    }
+    reconcile = load_function("_reconcile_overdue_v3_expected_orders", namespace)
+
+    assert reconcile(force=True) == {"reconciled": 0}
+    assert namespace["_v3_expected_order_reconcile_last_ts"] == 2045.0
+
+
+def test_stale_signal_reconciliation_also_runs_durable_v3_reconciliation():
+    reconcile = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "reconcile_stale_signals"),
+    )
+    assert "_reconcile_overdue_v3_expected_orders()" in reconcile
+
+
+def test_startup_forces_same_durable_v3_reconciliation_path():
+    assert "_reconcile_overdue_v3_expected_orders(force=True)" in SOURCE
+    assert "active_v3_rows.extend(" not in SOURCE
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY", "STALE_NO_EXPOSURE"],
+)
+def test_preorder_retirement_reasons_close_expected_order_lifecycle(reason):
+    writes = []
+    namespace = {
+        "_append_v3_lane_entry_resolution": lambda *args: writes.append(args),
+    }
+    resolve = load_function("_v3_record_preorder_terminal_if_needed", namespace)
+    row = {"research_lane": "FAMILY_ATR_TRAIL", "shared_ai_call_id": "scan-1"}
+
+    assert resolve({}, {}, row, reason) is True
+    assert writes == [(row, "FAMILY_ATR_TRAIL", "NO_ORDER", reason)]
+
+    # A submitted-order expiry belongs to the order lifecycle and must never be
+    # rewritten as a pre-order NO_ORDER terminal.
+    assert resolve({"submitted_order_trade_id": "paper-1"}, {}, row, reason) is False
+    assert len(writes) == 1
+
+
+def test_combo_execution_enqueue_freezes_shared_call_snapshot():
+    submitted = []
+
+    class Worker:
+        def submit(self, key, payload, source_ts=None):
+            submitted.append((key, payload, source_ts))
+            return True
+
+    namespace = {
+        "copy": copy,
+        "time": type("Clock", (), {"time": staticmethod(lambda: 123.0)}),
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: (ai_result or ctx)["shared_ai_call_id"],
+        "_get_combo_lane_execution_worker": lambda _lane: Worker(),
+        "logger": QuietLogger(),
+    }
+    enqueue = load_function("_enqueue_combo_lane_execution", namespace)
+    ctx = {"shared_ai_call_id": "scan-old", "nested": {"value": 1}}
+    ai = {"shared_ai_call_id": "scan-old", "direction": "LONG"}
+    assert enqueue(ctx, ai, 2.5, {"adx": 30}, "OFFSET_029_ATR_TP_25", "TEST")
+    ctx["shared_ai_call_id"] = "scan-new"
+    ctx["nested"]["value"] = 2
+    ai["shared_ai_call_id"] = "scan-new"
+
+    key, payload, source_ts = submitted[0]
+    assert key == "OFFSET_029_ATR_TP_25:scan-old"
+    assert payload["ctx"]["shared_ai_call_id"] == "scan-old"
+    assert payload["ctx"]["nested"]["value"] == 1
+    assert payload["ai"]["shared_ai_call_id"] == "scan-old"
+    assert source_ts == 123.0
+
+
+def test_ai_fanout_queues_lane_execution_instead_of_blocking_scheduler():
+    fanout = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "spawn_combo_lanes_from_ai_scan"),
+    )
+    assert "_enqueue_combo_lane_execution(" in fanout
+    assert "_spawn_combo_lane(" not in fanout
+
+
+def test_family_decision_stamps_dashboard_history_before_v3_ledger_write():
+    fanout = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "spawn_combo_lanes_from_ai_scan"),
+    )
+    stamp = fanout.index("_stamp_shared_ai_lane_verdict(")
+    ledger = fanout.index("_write_v3_shared_lane_decision(")
+    assert stamp < ledger
+    assert "policy_accepted" in fanout[stamp:ledger]
+    assert "decision_reason" in fanout[stamp:ledger]
+
+
+@pytest.mark.parametrize(
+    "decision,ai_error,expected_policy,expected_disposition",
+    [
+        ("APPROVE", False, "ACCEPT", "ORDER_ELIGIBLE"),
+        ("REJECT", False, "REJECT", "AI_REJECTED_NO_ORDER"),
+        ("REJECT", True, "ERROR", "AI_REJECTED_NO_ORDER"),
+    ],
+)
+def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
+    decision, ai_error, expected_policy, expected_disposition,
+):
+    writes = []
+    enqueues = []
+    namespace = {
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "state": {"invert_signal": False},
+        "compute_directional_spread": lambda *_args: 5,
+        "_enrich_combo_lane_features": lambda features, _ctx: features,
+        "COMBO_EXECUTION_LANES": ("FAMILY_ONE",),
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: False,
+        "is_patient_chase_lane": lambda _lane: False,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
+        "is_research_lane_enabled": lambda _lane: True,
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-gate",
+        "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-1"},
+        "_write_v3_shared_lane_decision": (
+            lambda *args, **kwargs: writes.append((args, kwargs)) or True
+        ),
+        "_enqueue_combo_lane_execution": (
+            lambda *args, **kwargs: enqueues.append((args, kwargs))
+        ),
+        "COMBO_LANE_SPECS": {"FAMILY_ONE": {"combo_key": "ONE"}},
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    fanout = load_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout(
+        {"trade_id": "scan-gate"},
+        {"decision": decision, "direction": "LONG", "ai_error": ai_error},
+        2.0, {"adx": 25}, "AI_SCAN",
+    )
+    assert len(writes) == 1
+    assert writes[0][1]["policy_decision"] == expected_policy
+    assert writes[0][1]["execution_disposition"] == expected_disposition
+    assert len(enqueues) == (1 if decision == "APPROVE" else 0)
+
+
+def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tmp_path):
+    from research_v3_bridge import dual_write_lane_decision
+
+    decisions = []
+    base_features = {
+        "research_feature_schema_version": "causal-v1",
+        "price": 100.0,
+        "regime": "BULL",
+        "atr14_pct_3m": 0.42,
+        "realized_volatility": 0.08,
+        "volatility_of_volatility": 0.01,
+        "adx": 27.0,
+        "market_context": {
+            "market": "BITFINEX",
+            "symbol": "BTCUSD",
+            "regime_label": "BULL",
+            "trend_strength": {"adx": 27.0},
+        },
+        "cycle_3m_universe": {
+            "atr14_pct_3m": 0.42,
+            "realized_volatility_30m_pct": 0.08,
+            "volatility_of_volatility_30m_pct": 0.01,
+            "adx14": 27.0,
+        },
+    }
+    ai = {
+        "decision": "APPROVE", "direction": "LONG", "raw_direction": "LONG",
+        "shared_ai_call_id": "scan-canonical-feature",
+    }
+    ctx = {
+        "trade_id": "scan-canonical-feature",
+        "shared_ai_call_id": "scan-canonical-feature",
+        "created_ts_ts": 1000.0,
+        "symbol": "BTCUSD",
+    }
+
+    def persist(lane, lane_ai, lane_ctx, receipt_features, **verdict):
+        decisions.append((lane, copy.deepcopy(receipt_features)))
+        source = {
+            "trade_id": lane_ctx["trade_id"],
+            "shared_ai_call_id": lane_ai["shared_ai_call_id"],
+            "shared_ai_call_ts_epoch": lane_ctx["created_ts_ts"],
+            "symbol": lane_ctx["symbol"],
+            "raw_direction": lane_ai["raw_direction"],
+            "executed_direction": lane_ai["direction"],
+            "feature_snapshot_at_signal": copy.deepcopy(receipt_features),
+        }
+        receipt = dual_write_lane_decision(
+            source, lane=lane, epoch_id="epoch-canonical-feature",
+            data_dir=str(tmp_path), lane_policy={"policy_id": lane}, **verdict,
+        )
+        return bool(receipt["store_verification"]["passed"])
+
+    namespace = {
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "state": {"invert_signal": False},
+        "compute_directional_spread": lambda *_args: 5,
+        "_enrich_combo_lane_features": lambda features, _ctx: {
+            **features, "lane_enriched_marker": True,
+        },
+        "COMBO_EXECUTION_LANES": ("FAMILY_ONE", "FAMILY_TWO"),
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: False,
+        "is_patient_chase_lane": lambda _lane: False,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
+        "is_research_lane_enabled": lambda _lane: True,
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-canonical-feature",
+        "_v3_lane_policy_material": lambda lane: {"policy_signature": lane},
+        "_write_v3_shared_lane_decision": persist,
+        "_enqueue_combo_lane_execution": lambda *_args, **_kwargs: None,
+        "COMBO_LANE_SPECS": {
+            "FAMILY_ONE": {"combo_key": "ONE"},
+            "FAMILY_TWO": {"combo_key": "TWO"},
+        },
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    fanout = load_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout(ctx, ai, 2.0, base_features, "AI_SCAN")
+    assert persist(
+        "CONTINUOUS", ai, ctx, base_features,
+        policy_decision="ACCEPT", execution_disposition="ORDER_ELIGIBLE",
+        exact_reason="APPROVE",
+    )
+
+    assert decisions == [
+        ("FAMILY_ONE", base_features),
+        ("FAMILY_TWO", base_features),
+        ("CONTINUOUS", base_features),
+    ]
+    ledger_dir = tmp_path / "v3" / "ledgers"
+    pre_entry_rows = [
+        json.loads(line)
+        for line in (ledger_dir / "pre_entry_features.jsonl").read_text().splitlines()
+    ]
+    decision_rows = [
+        json.loads(line)
+        for line in (ledger_dir / "decision.jsonl").read_text().splitlines()
+    ]
+    opportunity_rows = [
+        json.loads(line)
+        for line in (ledger_dir / "opportunity.jsonl").read_text().splitlines()
+    ]
+    assert len(pre_entry_rows) == 1
+    assert pre_entry_rows[0]["features"] == base_features
+    assert {row["research_lane"] for row in decision_rows} == {
+        "FAMILY_ONE", "FAMILY_TWO", "CONTINUOUS",
+    }
+    assert len(opportunity_rows) == 1
+    identity = opportunity_rows[0]["causal_identity"]
+    assert identity["collection_identity_complete"] is True
+    assert identity["missing_fields"] == []
+    assert identity["regime_volatility"] == {
+        "market_regime": "BULL",
+        "atr14_pct_3m": 0.42,
+        "realized_volatility": 0.08,
+        "volatility_of_volatility": 0.01,
+        "adx": 27.0,
+    }
+
+    mutated = {**base_features, "price": 101.0}
+    with pytest.raises(ValueError, match="PRE_ENTRY_FEATURE_RECEIPT_COLLISION"):
+        persist(
+            "MUTATED", ai, ctx, mutated,
+            policy_decision="ACCEPT", execution_disposition="ORDER_ELIGIBLE",
+            exact_reason="APPROVE",
+        )
+
+
+def test_shared_causal_snapshot_is_pre_ai_complete_and_lane_independent():
+    namespace = {"copy": copy, "time": __import__("time")}
+    for name in (
+        "_volatility_bucket",
+        "_adx_bucket",
+        "_causal_feature_observation",
+        "_atr_pct_bucket",
+        "_realized_vol_pct_bucket",
+        "_freeze_shared_causal_feature_snapshot",
+    ):
+        load_function(name, namespace)
+    freeze = namespace["_freeze_shared_causal_feature_snapshot"]
+    original = {"price": 100.0, "policy_only": "base"}
+    ctx = {
+        "regime": "BEAR",
+        "shared_ai_call_ts_epoch": 1_700_000_000.0,
+        "market_context": {
+            "market": "BITFINEX", "symbol": "BTCUSD",
+            "trend_strength": {"adx": 31.0},
+        },
+        "cycle_3m_universe": {
+            "atr14_pct_3m": 0.55,
+            "realized_volatility_30m_pct": 0.09,
+            "volatility_of_volatility_30m_pct": 0.02,
+            "adx14": 30.0,
+        },
+    }
+
+    frozen = freeze(original, ctx)
+    ctx["regime"] = "BULL"
+    ctx["cycle_3m_universe"]["atr14_pct_3m"] = 9.9
+
+    assert frozen["regime"]["value"] == "BEAR"
+    assert frozen["regime"]["observed_ts"] == 1_700_000_000.0
+    assert frozen["regime_label"] == "BEAR"
+    assert frozen["atr14_pct_3m"] == 0.55
+    assert frozen["realized_volatility"] == 0.09
+    assert frozen["volatility_of_volatility"] == 0.02
+    assert frozen["adx"] == 30.0
+    assert frozen["causal_snapshot_phase"] == "PRE_AI_DECISION"
+    assert frozen["atr_bucket"]["value"] == "LOW"
+    assert frozen["realized_volatility_bucket"]["value"] == "FLAT"
+    assert frozen["trend_strength_bucket"]["value"] == "STRONG"
+    assert frozen["adx_bucket"]["value"] == "STRONG"
+    assert original == {"price": 100.0, "policy_only": "base"}
+
+
+def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter():
+    dead_letters = []
+    namespace = {
+        "copy": copy,
+        "datetime": __import__("datetime").datetime,
+        "time": __import__("time"),
+        "os": os,
+        "SYMBOL": "BTCUSD",
+        "invert_signal_active": lambda: False,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-failure",
+        "_v3_lane_policy_material": lambda _lane: {"policy_id": "FAMILY_ONE"},
+        "_collector_v22_epoch_id": lambda: "epoch-1",
+        "dual_write_lane_decision": (
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable"))
+        ),
+        "write_pre_entry_evidence_failure": (
+            lambda source, **kwargs: dead_letters.append((source, kwargs))
+        ),
+        "logger": QuietLogger(),
+    }
+    writer = load_function("_write_v3_shared_lane_decision", namespace)
+    assert writer(
+        "FAMILY_ONE",
+        {"decision": "APPROVE", "direction": "LONG"},
+        {"created_ts_ts": 1000, "symbol": "BTCUSD"},
+        {"adx": 25}, policy_decision="ACCEPT",
+        execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+    ) is False
+    assert len(dead_letters) == 1
+    assert dead_letters[0][1]["failure_class"] == "OSError"
+
+    dead_letters.clear()
+    namespace["dual_write_lane_decision"] = lambda *_args, **_kwargs: {
+        "writes": [{"ledger": "pre_entry_features", "written": True}],
+        "store_verification": {"passed": False},
+    }
+    assert writer(
+        "FAMILY_ONE",
+        {"decision": "APPROVE", "direction": "LONG"},
+        {"created_ts_ts": 1000, "symbol": "BTCUSD"},
+        {"adx": 25}, policy_decision="ACCEPT",
+        execution_disposition="ORDER_ELIGIBLE", exact_reason="APPROVE",
+    ) is False
+    assert dead_letters[0][1]["failure_class"] == "ScopedVerificationFailed"
+
+    enqueues = []
+    fanout_namespace = {
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "state": {"invert_signal": False},
+        "compute_directional_spread": lambda *_args: 5,
+        "_enrich_combo_lane_features": lambda features, _ctx: features,
+        "COMBO_EXECUTION_LANES": ("FAMILY_ONE",),
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: False,
+        "is_patient_chase_lane": lambda _lane: False,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
+        "is_research_lane_enabled": lambda _lane: True,
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-failure",
+        "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-1"},
+        "_write_v3_shared_lane_decision": lambda *_args, **_kwargs: False,
+        "_enqueue_combo_lane_execution": (
+            lambda *args, **kwargs: enqueues.append((args, kwargs))
+        ),
+        "COMBO_LANE_SPECS": {"FAMILY_ONE": {"combo_key": "ONE"}},
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    fanout = load_function("spawn_combo_lanes_from_ai_scan", fanout_namespace)
+    fanout(
+        {"trade_id": "scan-failure"},
+        {"decision": "APPROVE", "direction": "LONG", "ai_error": False},
+        2.0, {"adx": 25}, "AI_SCAN",
+    )
+    assert enqueues == []
+
+
+def test_continuous_order_spawn_is_after_pre_entry_evidence_gate():
+    continuous = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "spawn_continuous_lane_from_ai_scan"),
+    )
+    write = continuous.index("evidence_ready = _write_v3_shared_lane_decision(")
+    gate = continuous.index(
+        'if v3_disposition == "ORDER_ELIGIBLE" and not evidence_ready:', write,
+    )
+    spawn = continuous.index("_spawn_combo_lane(", gate)
+    assert write < gate < spawn
+    assert "return" in continuous[gate:spawn]
+
+
+def test_continuous_shared_ai_rejection_increments_benchmark_counter():
+    state = {
+        "shared_ai_lane_counters": {
+            "CONTINUOUS": {
+                "evaluated": 0,
+                "accepted": 0,
+                "rejected": 0,
+                "reasons": {},
+            }
+        },
+        "ai_history": [{"shared_ai_call_id": "scan-counter"}],
+    }
+    stamp = load_function(
+        "_stamp_shared_ai_lane_verdict",
+        {
+            "DASHBOARD_PRIMARY_LANES": ("FAMILY_ONE",),
+            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
+            "state": state,
+            "state_lock": AvailableLock(),
+            "time": __import__("time"),
+        },
+    )
+
+    stamp("scan-counter", "CONTINUOUS", False, "AI_REJECT")
+    stamp("scan-counter", "CONTINUOUS", False, "AI_REJECT")
+
+    counter = state["shared_ai_lane_counters"]["CONTINUOUS"]
+    assert counter["evaluated"] == 1
+    assert counter["accepted"] == 0
+    assert counter["rejected"] == 1
+    assert counter["reasons"] == {"AI_REJECT": 1}
+    assert state["ai_history"][0]["continuous_verdict"]["accepted"] is False
+
+
 def test_verdict_and_resolution_share_one_policy_material_builder():
     decision = ast.get_source_segment(
         SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
@@ -102,4 +623,24 @@ def test_verdict_and_resolution_share_one_policy_material_builder():
     assert "lane_policy=_v3_lane_policy_material(lane)" in resolution
     assert '"entry_ttl_sec": float(SIGNAL_TTL_SEC)' in SOURCE
     assert "dual_write_paper_order_intent(" in SOURCE
+
+
+def test_pending_registration_freezes_policy_identity_before_async_evidence_and_fill():
+    register = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "lane_register_pending_order"),
+    )
+    fill = ast.get_source_segment(
+        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
+                     and item.name == "fill_order"),
+    )
+    assert "frozen_identity = paper_policy_identity_for_sources(" in register
+    assert "order.update(copy.deepcopy(frozen_identity))" in register
+    assert "master_signal.update(copy.deepcopy(frozen_identity))" not in register
+    assert register.index("order,", register.index("paper_policy_identity_for_sources(")) < register.index(
+        "signal_snapshot",
+        register.index("paper_policy_identity_for_sources("),
+    )
+    assert '"order": copy.deepcopy(order)' in register
+    assert "paper_policy_identity_for_sources(" in fill
 
