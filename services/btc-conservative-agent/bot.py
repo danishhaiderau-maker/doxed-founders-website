@@ -436,11 +436,8 @@ _RESEARCH_LANE_TOGGLE_DEFAULTS = combo_toggle_defaults()
 #
 # Keep this fail-closed and synchronized with packages/utils/src/trade-id-match.ts.
 PLATFORM_RELAY_ELIGIBLE_LANES = frozenset(
-    {
-        RESEARCH_LANE_CONTINUOUS,
-        *(lane for lane, spec in COMBO_LANE_SPECS.items()
-          if spec.get("platform_relay_eligible")),
-    }
+    lane for lane, spec in COMBO_LANE_SPECS.items()
+    if spec.get("platform_relay_eligible")
 )
 PLATFORM_RELAY_CONFIGURED_LANES = frozenset({
     RESEARCH_LANE_CONTINUOUS,
@@ -456,12 +453,9 @@ PLATFORM_RELAY_BLOCKERS = {
 # Keep this deliberately smaller than the research lane prefix registry: adding a
 # paper lane must never silently make it eligible for real-money mirroring.
 PLATFORM_RELAY_TRADE_PREFIX_LANES = {
-    "cont": RESEARCH_LANE_CONTINUOUS,
-    **{
-        str(spec["id_prefix"]): lane
-        for lane, spec in COMBO_LANE_SPECS.items()
-        if spec.get("platform_relay_eligible")
-    },
+    str(spec["id_prefix"]): lane
+    for lane, spec in COMBO_LANE_SPECS.items()
+    if spec.get("platform_relay_eligible")
 }
 PLATFORM_RELAY_EVIDENCE_PREFIX_LANES = {
     **PLATFORM_RELAY_TRADE_PREFIX_LANES,
@@ -2830,7 +2824,7 @@ def lane_blocks_live_orders(lane: str) -> bool:
     """Hard block retired, benchmark, shadow and relay-ineligible lanes."""
     lane = str(lane or "").upper()
     if lane == RESEARCH_LANE_CONTINUOUS:
-        return False
+        return True
     if is_shadow_only_lane(lane):
         return True
     status = get_pathway_lane_status(lane)
@@ -17561,7 +17555,10 @@ def _spawn_combo_lane(ctx, ai, edge_score, features, target_lane: str, trigger_r
         )
         return
     enriched = _enrich_combo_lane_features(features, ctx)
-    if not is_research_lane_enabled(target_lane):
+    if (
+        str(target_lane or "").upper() == RESEARCH_LANE_CONTINUOUS
+        or not is_research_lane_enabled(target_lane)
+    ):
         if is_patient_chase_lane(target_lane):
             log_lane_opportunity_event(
                 target_lane, "SPAWN_SHADOW", (ctx or {}).get("trade_id"),
@@ -18113,7 +18110,7 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
 
 
 def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
-    """CONTINUOUS benchmark tile — mirrors AI_SCAN AI; toggle ON places limits, OFF logs shadow data only."""
+    """CONTINUOUS benchmark label — analysis and shadow only, never an order or relay."""
     if not is_ai_scan_lane(source_lane) or not ai:
         return
     spawn_ctx = copy.deepcopy(ctx or {})
@@ -18121,7 +18118,9 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
     spawn_ctx["shared_ai_call_id"] = call_id
     spawn_ctx["shared_ai_call_ts"] = (ai or {}).get("shared_ai_call_ts")
     spawn_ctx["trade_id"] = allocate_lane_trade_id(RESEARCH_LANE_CONTINUOUS)
-    orders_on = continuous_ai_research_enabled()
+    # Continuous is an analytical comparison label. The toggle may keep
+    # observation on, but it cannot open an order or relay path.
+    orders_on = False
     continuous_ai = copy.deepcopy(ai)
     continuous_tier = continuous_score_gap_execution_tier(continuous_ai)
     continuous_accept = continuous_tier in AI_EXECUTE_TIERS
@@ -18180,12 +18179,9 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         score=abs(long_score - short_score),
         policy_version="continuous_shared_direction_gap_v1",
     )
-    if continuous_accept and orders_on:
-        v3_disposition = "ORDER_ELIGIBLE"
-        v3_reason = continuous_reason
-    elif continuous_accept:
+    if continuous_accept:
         v3_disposition = "LANE_DISABLED_DATA_ONLY"
-        v3_reason = "CONTINUOUS_TOGGLE_OFF_DATA_ONLY"
+        v3_reason = "CONTINUOUS_ANALYSIS_ONLY"
     else:
         v3_disposition = "POLICY_REJECTED_NO_ORDER"
         v3_reason = continuous_reason
@@ -18213,7 +18209,7 @@ def spawn_continuous_lane_from_ai_scan(ctx, ai, edge_score, features, source_lan
         f"[CONTINUOUS LANE] spawn from {source_lane} trade_id={spawn_ctx['trade_id']} "
         f"decision={continuous_ai.get('decision')} tier={continuous_tier} "
         f"raw_decision={continuous_ai.get('raw_decision') or '-'} "
-        f"orders={'ON' if orders_on else 'OFF(data-only)'} "
+        f"orders={'ON' if orders_on else 'OFF(analysis-only)'} "
         f"[PIPELINE ENFORCEMENT]"
     )
     # Apply the same toggle contract as every other execution tile. ON enters
@@ -29727,7 +29723,7 @@ def _load_lane_metrics_from_disk() -> dict:
         )
         wins = int(lb.get("wins") or bm.get("wins") or 0)
         losses = int(lb.get("losses") or bm.get("losses") or 0)
-        win_rate = round(100.0 * wins / fills, 1) if fills else float(bm.get("win_rate_pct") or 0)
+        win_rate = round(100.0 * wins / fills, 1) if fills else None
         # The analyzer also emits policy-filtered LAB metrics from immutable
         # shadow_lane_outcome rows. Prefer the live convenience ledger when
         # present, but do not lose valid LAB results when that cache is absent.
@@ -29853,7 +29849,8 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     lab_win_rate = float(m.get("lab_win_rate") or 0.0)
     lab_ev = float(m.get("lab_per_close_ev") or 0.0)
     lab_open = int(m.get("lab_open_shadows") or 0)
-    win_rate = float(m.get("win_rate_pct") or 0.0)
+    raw_win_rate = m.get("win_rate_pct")
+    win_rate = None if raw_win_rate is None else float(raw_win_rate)
     shadow_sim = bool(m.get("shadow_sim_mode"))
     checker_pass_sims = int(m.get("checker_pass_sims") or 0)
     checker_pass_pnl = float(m.get("checker_pass_pnl") or 0)
@@ -29877,11 +29874,14 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     elif shadow_sim and fills:
         summary_line = (
             f"shadow sim · n={approves} approves · {fills} sim trades · "
-            f"{win_rate:.0f}% win · ${pnl:.2f} sim · EV ${ev:.2f}/approve"
+            f"{(0.0 if win_rate is None else win_rate):.0f}% win · ${pnl:.2f} sim · EV ${ev:.2f}/approve"
         )
     else:
+        win_label = (
+            f" · {win_rate:.0f}% win" if fills and win_rate is not None else ""
+        )
         summary_line = (
-            f"n={approves} approves · {fills} trades · "
+            f"n={approves} approves · {fills} trades{win_label} · "
             f"{float(fill_pct or 0):.0f}% fill · ${pnl:.2f} real · EV ${ev:.2f}/approve"
         )
     return {
@@ -30583,7 +30583,10 @@ def paused_shadow_dashboard_stats() -> dict:
     for bucket in (lane_stats, adx_stats):
         for stat in bucket.values():
             decided = stat["wins"] + stat["losses"]
-            stat["win_rate_pct"] = round((stat["wins"] / decided) * 100, 1) if decided else None
+            stat["win_rate_pct"] = (
+                round((stat["wins"] / decided) * 100, 1) if decided
+                else (0.0 if stat["filled"] else None)
+            )
             stat["ev_usd"] = round(stat["pnl_usd"] / stat["filled"], 4) if stat["filled"] else None
     decided = wins + losses
     return {
@@ -30601,7 +30604,10 @@ def paused_shadow_dashboard_stats() -> dict:
         "wins": wins,
         "losses": losses,
         "flat": flats,
-        "win_rate_pct": round((wins / decided) * 100, 1) if decided else None,
+        "win_rate_pct": (
+            round((wins / decided) * 100, 1) if decided
+            else (0.0 if filled else None)
+        ),
         "pnl_usd": round(total_pnl, 4),
         "ev_usd": round(total_pnl / filled, 4) if filled else None,
         "by_lane": lane_stats,
@@ -31273,6 +31279,22 @@ def _update_strategy_progress_incident(progress: dict, now: float = None) -> dic
     return snapshot
 
 
+def _strategy_progress_hard_restart(progress: dict, incident: dict) -> bool:
+    """Lock and websocket stalls may exit 75.
+
+    Paper-flat, support-resistance skip, and AI-age stalls stay latched.
+    Restarting those forever is a crash loop, not recovery.
+    """
+    hard_exit_reasons = {
+        "TRADE_LOCK_UNAVAILABLE",
+        "WS_TRANSPORT_STALLED",
+        "WS_TRADE_STREAM_STALLED",
+    }
+    reasons = set((incident or {}).get("reasons") or [])
+    reasons.update((progress or {}).get("reasons") or [])
+    return bool(reasons.intersection(hard_exit_reasons))
+
+
 def watchdog_loop():
     last_progress_dump_ts = 0.0
     while not shutdown_event.is_set():
@@ -31317,12 +31339,13 @@ def watchdog_loop():
                 # A paper-only, disarmed, position-flat process may be restarted
                 # by Fly to clear a wedged lock. Never self-restart a live or
                 # position-bearing risk manager.
-                if (
+                flat_paper = bool(
                     _force_paper_mode_active()
                     and not progress["live_armed"]
                     and progress["open_positions"] == 0
                     and progress["pending_orders"] == 0
-                ):
+                )
+                if flat_paper and _strategy_progress_hard_restart(progress, incident):
                     dump_system_state(
                         trigger="STRATEGY_PROGRESS_EXIT_75",
                         progress=progress,
@@ -31334,6 +31357,12 @@ def watchdog_loop():
                         "for supervisor recovery"
                     )
                     os._exit(75)
+                if flat_paper:
+                    logger.error(
+                        "[WATCHDOG] paper flat stall fail-soft reasons=%s; "
+                        "not exiting 75",
+                        list(incident.get("reasons") or progress.get("reasons") or []),
+                    )
         time.sleep(5)
 
 
@@ -33038,8 +33067,8 @@ DASHBOARD_JS = """(function () {
           if (d.fee_profile) syncTxt += ' | fees=' + d.fee_profile;
           if (d.bot_version) syncTxt += ' | ' + d.bot_version;
           if (d.analyzer_sync_id) syncTxt += ' | ' + d.analyzer_sync_id;
-          if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous paper orders OFF · shadow observation ON';
-          else syncTxt += ' | Continuous AI ON';
+          if (d.continuous_ai_research_enabled === false) syncTxt += ' | Continuous observation OFF';
+          else syncTxt += ' | Continuous analysis-only · no orders';
           inst.innerText = syncTxt;
           const history = d.runtime_incident_history || {};
           const incidents = Array.isArray(history.application_incidents)
@@ -33103,9 +33132,9 @@ DASHBOARD_JS = """(function () {
         safeText('spreadUsd', d.spread_usd != null ? d.spread_usd.toFixed(2) : '-');
         safeText('bidSizeBtc', d.bid_size_btc != null ? d.bid_size_btc.toFixed(4) : '-');
         safeText('askSizeBtc', d.ask_size_btc != null ? d.ask_size_btc.toFixed(4) : '-');
-        safeText('accountBalance', '$' + (d.account_balance != null ? d.account_balance.toFixed(2) : '500.00'));
+        safeText('accountBalance', (d.account_balance != null && Number.isFinite(Number(d.account_balance))) ? ('$' + Number(d.account_balance).toFixed(2)) : 'UNAVAILABLE');
         safeText('dailyPnl', '$' + (d.daily_pnl_usd != null ? d.daily_pnl_usd.toFixed(2) : '0.00') + ' net (UTC calendar day)');
-        safeText('equity', '$' + (d.equity != null ? d.equity.toFixed(2) : '500.00'));
+        safeText('equity', (d.equity != null && Number.isFinite(Number(d.equity))) ? ('$' + Number(d.equity).toFixed(2)) : 'UNAVAILABLE');
         safeText('exchangeLabel', d.exchange_label || 'Bitfinex');
         const fp = d.fee_profile || 'BITFINEX_ZERO';
         safeText('feeProfile', fp);

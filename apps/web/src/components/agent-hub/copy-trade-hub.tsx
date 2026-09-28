@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import {
+  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   formatUsd,
   type CopyRelayReconcileSnapshot,
   type CopyRelaySimState,
@@ -216,8 +217,8 @@ function deskHeader(
       eyebrow: `${exchange} relay simulation`,
       title: `Your ${exchange} relay sim session`,
       hint: simActive
-        ? 'Real Bitfinex API, 1 order at a time · $20 · 100x — test the full order lifecycle, then resume live copy.'
-        : 'Connect API once, then start simulation to place a single capped $20 / 100x order and test the API lifecycle.',
+        ? `Real Bitfinex API, 1 order at a time · $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} · 100x — test the full order lifecycle, then resume live copy.`
+        : `Connect API once, then start simulation to place a single capped $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} / 100x order and test the API lifecycle.`,
     };
   }
   if (isLive) {

@@ -1,5 +1,6 @@
 import type { ExchangeProvider } from './trading-agent-adapters';
 import { EXCHANGE_PROVIDER_LABELS } from './trading-agent-adapters';
+import { DEFAULT_SUBSCRIBER_MAX_MARGIN_USD } from './signal-cycle';
 
 export type ExchangeApiGuide = {
   provider: ExchangeProvider;
@@ -26,7 +27,7 @@ export const BITFINEX_DERIVATIVES_FUNDING_COPY = {
   depositSteps: [
     'Deposit USDT to Bitfinex (Funding or Exchange wallet is fine for arrival).',
     'Move USDT to Derivatives: Wallet → Transfer → From Exchange or Funding → To Derivatives → USDT.',
-    'Keep at least ~$25 USDT in Derivatives for the next copy trade (platform uses up to $20 margin per trade).',
+    `Keep USDT in Derivatives for the next copy trade (platform uses up to $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin per trade).`,
     'With API keys connected, the platform can auto-move USDT from Exchange/Funding into Derivatives before each signal when wallet transfer is enabled on the key.',
   ],
   apiNote:
@@ -39,12 +40,12 @@ export const BITFINEX_SIGNUP_REFERRAL_URL = 'https://www.bitfinex.com/sign-up?re
 export const AGENT_BETA_RISK_COPY = {
   title: 'Live copy trading — real money',
   bullets: [
-    'Platform enforces $20 max margin per trade on your exchange — you cannot size larger via API keys.',
+    `Platform enforces $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} max margin per trade on your exchange — you cannot size larger via API keys.`,
     'Past performance does not guarantee future results.',
     'The agent may lose capital. Use only funds you can afford to lose.',
     'High risk. Not financial advice.',
   ],
-  checkboxLabel: 'I understand the risks — platform places up to $20 margin per trade on my exchange.',
+  checkboxLabel: `I understand the risks — platform places up to $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin per trade on my exchange.`,
 };
 
 export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
@@ -53,7 +54,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
     recommended: true,
     recommendReason: BITFINEX_RECOMMEND_BANNER,
     docsUrl: 'https://support.bitfinex.com/hc/en-us/articles/115003363429-How-to-create-and-revoke-a-Bitfinex-API-Key',
-    maxCapitalWarningUsd: 20,
+    maxCapitalWarningUsd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     credentialHint: 'API Key + API Secret (no passphrase).',
     requiredPermissions: [
       'Read balance',
@@ -76,7 +77,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   bybit: {
     provider: 'bybit',
     docsUrl: 'https://www.bybit.com/en/help-center/article/How-to-create-your-API-key',
-    maxCapitalWarningUsd: 20,
+    maxCapitalWarningUsd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     credentialHint: 'API Key + API Secret. Use Unified Trading account keys for BTC perps.',
     requiredPermissions: ['Read', 'Trade (derivatives)'],
     forbiddenPermissions: ['Withdraw', 'Transfer'],
@@ -92,7 +93,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   binance: {
     provider: 'binance',
     docsUrl: 'https://www.binance.com/en/support/faq/how-to-create-api-keys-on-binance-360002502072',
-    maxCapitalWarningUsd: 20,
+    maxCapitalWarningUsd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     credentialHint: 'API Key + Secret. Futures keys if copying BTC perpetuals.',
     requiredPermissions: ['Enable Reading', 'Enable Futures (or Spot & Margin if spot only)'],
     forbiddenPermissions: ['Enable Withdrawals'],
@@ -108,7 +109,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   okx: {
     provider: 'okx',
     docsUrl: 'https://www.okx.com/help-center/how-to-create-an-api-key',
-    maxCapitalWarningUsd: 20,
+    maxCapitalWarningUsd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     credentialHint: 'API Key + Secret + Passphrase (OKX requires all three).',
     requiredPermissions: ['Read', 'Trade'],
     forbiddenPermissions: ['Withdraw'],
@@ -124,7 +125,7 @@ export const EXCHANGE_API_GUIDES: Record<ExchangeProvider, ExchangeApiGuide> = {
   hyperliquid: {
     provider: 'hyperliquid',
     docsUrl: 'https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets',
-    maxCapitalWarningUsd: 20,
+    maxCapitalWarningUsd: DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
     credentialHint: 'Agent wallet address + agent wallet private key (not your main wallet).',
     requiredPermissions: ['Agent wallet trading'],
     forbiddenPermissions: ['Main wallet private key export'],

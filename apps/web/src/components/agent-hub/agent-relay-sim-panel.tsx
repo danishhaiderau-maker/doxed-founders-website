@@ -2,6 +2,7 @@
 
 import {
   COPY_RELAY_SIM_RECONCILE_ALERT_BTC,
+  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
   formatUsd,
   type CopyRelayLimitChainSnapshot,
   type CopyRelayReconcileSnapshot,
@@ -148,7 +149,7 @@ export function AgentRelaySimPanel({
           </p>
           <h2 className="mt-1 text-lg font-bold text-white">Bitfinex API relay test</h2>
           <p className="mt-1 max-w-2xl text-xs text-zinc-500">
-            Real Bitfinex API orders, tightly capped — 1 position at a time · $20 margin · 100x
+            Real Bitfinex API orders, tightly capped — 1 position at a time · ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} margin · 100x
             leverage. Showcase signals come from the canonical Fly strategy owner.
           </p>
         </div>
@@ -219,7 +220,7 @@ export function AgentRelaySimPanel({
         >
           <p>
             Relay sim is the live-API dress rehearsal before real trading. It places a{' '}
-            <strong className="text-white">single $20 order at 100x leverage</strong> on your real
+            <strong className="text-white">single ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} order at 100x leverage</strong> on your real
             Bitfinex account - one order at a time, no stacking - so you can watch a complete trade
             lifecycle (entry to fill to manage to exit) and confirm the exchange API can place,
             cancel, and fill orders correctly.
@@ -241,12 +242,12 @@ export function AgentRelaySimPanel({
         {active ? (
           <p className="rounded-lg border border-sky-500/30 bg-sky-950/15 px-3 py-2 text-xs text-sky-100/90">
             Relay sim active — real Bitfinex API testing mode (instance{' '}
-            {instanceStatus ?? 'PAUSED'}). Capped at 1 order · $20 · 100x. The next showcase signal
+            {instanceStatus ?? 'PAUSED'}). Capped at 1 order · ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} · 100x. The next showcase signal
             opens one real position; no new entries until it closes.
           </p>
         ) : signedIn ? (
           <p className="rounded-lg border border-zinc-800 bg-black/20 px-3 py-2 text-xs text-zinc-500">
-            Start sim to place a single capped $20 / 100x order on the real Bitfinex API and watch
+            Start sim to place a single capped ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} / 100x order on the real Bitfinex API and watch
             the full lifecycle. Live relay stays paused while sim runs; stop sim to resume real
             trading.
           </p>
@@ -285,7 +286,7 @@ export function AgentRelaySimPanel({
                   Real Bitfinex balance · derivative wallet
                 </p>
                 <p className="mt-1 text-[10px] text-zinc-500">
-                  Live read from your connected Bitfinex API — the real wallet funding each $20 / 100x
+                  Live read from your connected Bitfinex API — the real wallet funding each ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} / 100x
                   sim order. This is real money; the paper $500 ledger above is the sim book.
                 </p>
               </div>
@@ -393,13 +394,13 @@ export function AgentRelaySimPanel({
           </p>
           {!active ? (
             <p className="mb-3 text-xs text-zinc-500">
-              Start relay sim to place a single capped $20 / 100x order on the real Bitfinex API.
+              Start relay sim to place a single capped ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} / 100x order on the real Bitfinex API.
               Tables show structure even when flat.
             </p>
           ) : !simHasRows ? (
             <p className="mb-3 rounded-lg border border-amber-500/30 bg-amber-950/15 px-3 py-2 text-xs text-amber-100/90">
               Sim is running but no order yet — waiting for the next signed signal from the canonical Fly bot. One
-              real $20 / 100x order will be placed; no new entries until it closes.
+              real ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} / 100x order will be placed; no new entries until it closes.
             </p>
           ) : null}
           <AgentTransparencyTables liveBook={simBook} maxRows={5} />

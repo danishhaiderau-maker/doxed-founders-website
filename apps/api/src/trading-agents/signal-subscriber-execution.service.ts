@@ -5872,14 +5872,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               where: { id: instance.id },
               data: {
                 status: TradingAgentInstanceStatus.PAUSED,
-                lastError: 'Relay sim active — real Bitfinex API testing mode (1 order · $20 · 100x cap).',
+                lastError: 'Relay sim active — real Bitfinex API testing mode (1 order · $0.25 · 100x cap).',
               },
             });
           }
           try {
             // Sim mode = REAL Bitfinex API, not a paper book. Purpose: prove the live order
             // pipeline (place / cancel / fill / merge) end-to-end with real money but tightly
-            // capped — max 1 concurrent position, $20 margin, 100x leverage (the subscriber
+            // capped — max 1 concurrent position, $0.25 margin class, 100x leverage (the subscriber
             // defaults). Once the trader has seen a full lifecycle, they stop sim and resume
             // live copy for real trading. The real exchange position is the source of truth;
             // reconcileLotLedger reads it directly via this.activeTrading.

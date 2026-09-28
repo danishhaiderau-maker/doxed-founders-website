@@ -86,6 +86,32 @@ def _run_spawn(long_score: int, short_score: int, monkeypatch, textual_decision=
     return calls[0]
 
 
+def test_continuous_approval_stays_analysis_only(monkeypatch) -> None:
+    recorded = {}
+
+    def fake_write(*_args, **kwargs):
+        recorded.update(kwargs)
+        return True
+
+    monkeypatch.setattr(bot, "_write_v3_shared_lane_decision", fake_write)
+    monkeypatch.setattr(bot, "_spawn_combo_lane", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bot, "continuous_ai_research_enabled", lambda: True)
+    bot.spawn_continuous_lane_from_ai_scan(
+        ctx={"trade_id": "scan-analysis-only"},
+        ai=_approved_ai(35, 65),
+        edge_score=5.0,
+        features={},
+        source_lane=bot.RESEARCH_LANE_AI_SCAN,
+    )
+    assert recorded["execution_disposition"] == "LANE_DISABLED_DATA_ONLY"
+    assert recorded["exact_reason"] == "CONTINUOUS_ANALYSIS_ONLY"
+    assert bot.lane_orders_allowed(bot.RESEARCH_LANE_CONTINUOUS) is False
+    assert bot.RESEARCH_LANE_CONTINUOUS not in bot.PLATFORM_RELAY_ELIGIBLE_LANES
+    source = open(bot.__file__, encoding="utf-8").read()
+    gate = source.index("str(target_lane or \"\").upper() == RESEARCH_LANE_CONTINUOUS")
+    assert source.index("result = process_signal(", gate) > gate
+
+
 def test_floor_constant_is_four() -> None:
     assert bot.CONTINUOUS_MIN_SPREAD_FLOOR == 4, (
         f"CONTINUOUS_MIN_SPREAD_FLOOR must stay 4 (R2 floor); "

@@ -1445,7 +1445,7 @@ def test_direction_only_current_ui_has_no_pullback_or_ai_confidence_control():
     assert "DETERMINISTIC_LIMIT_BLOCKED" in BOT_SOURCE
 
 
-def test_only_continuous_benchmark_is_platform_relay_capable():
+def test_continuous_benchmark_is_not_platform_relay_capable():
     tree = ast.parse(BOT_SOURCE)
     assignment = next(
         node for node in tree.body
@@ -1457,7 +1457,7 @@ def test_only_continuous_benchmark_is_platform_relay_capable():
         )
     )
     assigned_source = ast.get_source_segment(BOT_SOURCE, assignment)
-    assert "RESEARCH_LANE_CONTINUOUS" in assigned_source
+    assert "RESEARCH_LANE_CONTINUOUS" not in assigned_source
     assert 'spec.get("platform_relay_eligible")' in assigned_source
     assert "COMBO_LANE_SPECS.items()" in assigned_source
     assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in assigned_source

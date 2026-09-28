@@ -1948,7 +1948,7 @@ export class TradingAgentsService implements OnModuleInit {
     return {
       message:
         row?.agentShowcaseDefaultSettings?.trim() ??
-        'Copy-trades admin DeepSeek AI on the showcase bot. DDollar paper track needs no API keys. Live Bitfinex hire: platform enforces $20 max margin per trade.',
+        'Copy-trades admin DeepSeek AI on the showcase bot. DDollar paper track needs no API keys. Live Bitfinex hire: platform enforces $0.25 max margin per trade.',
     };
   }
 

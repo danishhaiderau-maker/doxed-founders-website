@@ -6,6 +6,7 @@ import {
   type CopyRelaySimState,
   type TradeLifecycleIntegritySnapshot,
   type RelaySimParticipantStats,
+  DEFAULT_SUBSCRIBER_MAX_MARGIN_USD,
 } from '@dcf/utils';
 import type { RelayFidelitySnapshot } from '@/components/agent-hub/agent-relay-fidelity-panel';
 
@@ -166,7 +167,7 @@ export function buildRelaySyncAlerts(input: {
       level: 'info',
       title: 'Sim book synced',
       detail:
-        'Paper relay tracks virtual $20 lots on merged BTC-PERP. Tables below show sim orders/positions; showcase reference appears when the admin bot fires the next signal.',
+        `Paper relay tracks virtual $${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} lots on merged BTC-PERP. Tables below show sim orders/positions; showcase reference appears when the admin bot fires the next signal.`,
     });
   }
 

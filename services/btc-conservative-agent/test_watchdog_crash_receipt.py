@@ -33,6 +33,12 @@ WATCHDOG_FUNCTION = next(
     for node in TREE.body
     if isinstance(node, ast.FunctionDef) and node.name == "watchdog_loop"
 )
+HARD_RESTART_FUNCTION = next(
+    node
+    for node in TREE.body
+    if isinstance(node, ast.FunctionDef)
+    and node.name == "_strategy_progress_hard_restart"
+)
 
 
 def compile_context():
@@ -224,7 +230,7 @@ class ExitCalled(Exception):
         self.code = code
 
 
-def compile_watchdog(*, pending, iterations=1, advances=()):
+def compile_watchdog(*, pending, iterations=1, advances=(), reasons=None):
     class Shutdown:
         calls = 0
 
@@ -254,10 +260,11 @@ def compile_watchdog(*, pending, iterations=1, advances=()):
         exits.append(code)
         raise ExitCalled(code)
 
+    stall_reasons = list(reasons or ["TRADE_LOCK_UNAVAILABLE"])
     progress = {
         "ok": False,
-        "reasons": ["TRADE_LOCK_UNAVAILABLE"],
-        "trade_lock_available": False,
+        "reasons": stall_reasons,
+        "trade_lock_available": "TRADE_LOCK_UNAVAILABLE" not in stall_reasons,
         "ws_age_sec": 1.0,
         "ai_age_sec": 10.0,
         "ai_expected": True,
@@ -278,7 +285,7 @@ def compile_watchdog(*, pending, iterations=1, advances=()):
         "_update_strategy_progress_incident": lambda _progress: {
             "active": True,
             "consecutive_failures": 3,
-            "reasons": ["TRADE_LOCK_UNAVAILABLE"],
+            "reasons": list(stall_reasons),
         },
         "dump_system_state": lambda **kwargs: dumps.append(kwargs),
         "dump_threads": lambda: None,
@@ -286,7 +293,9 @@ def compile_watchdog(*, pending, iterations=1, advances=()):
         "logger": type("Logger", (), {"critical": staticmethod(lambda *a, **k: None), "error": staticmethod(lambda *a, **k: None)}),
         "os": type("OS", (), {"_exit": staticmethod(exit_)}),
     }
-    module = ast.Module(body=[WATCHDOG_FUNCTION], type_ignores=[])
+    module = ast.Module(
+        body=[HARD_RESTART_FUNCTION, WATCHDOG_FUNCTION], type_ignores=[],
+    )
     ast.fix_missing_locations(module)
     exec(compile(module, str(BOT_PATH), "exec"), namespace)
     return namespace["watchdog_loop"], dumps, exits
@@ -313,3 +322,12 @@ def test_flat_paper_process_emits_receipt_then_exits_exactly_75():
     assert exits == [75]
     assert dumps[-1]["trigger"] == "STRATEGY_PROGRESS_EXIT_75"
     assert dumps[-1]["restart_allowed"] is True
+
+
+def test_flat_ai_or_sr_stall_fail_soft_does_not_exit_75():
+    watchdog, dumps, exits = compile_watchdog(
+        pending=0, reasons=["AI_CADENCE_STALLED"],
+    )
+    watchdog()
+    assert exits == []
+    assert [item["trigger"] for item in dumps] == ["STRATEGY_PROGRESS_INCIDENT"]
