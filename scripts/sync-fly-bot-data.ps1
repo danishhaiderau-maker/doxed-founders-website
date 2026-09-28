@@ -2087,7 +2087,9 @@ foreach ($row in $selectedFiles) {
             -FileCount $selectedFileCount `
             -FileBytes $offset `
             -RemoteBytes $remoteSize
-          $slowSuccessfulChunk = $chunkRequestElapsedMs -ge 2000
+          $slowSuccessfulChunk = Test-FlySyncSlowSuccessEscalates `
+            -PayloadBytes $payload.Length `
+            -RequestElapsedMs $chunkRequestElapsedMs
           if ($slowSuccessfulChunk) {
             # A checksum-valid 200 can still prove resource pressure. During
             # the first production transfer, repeated 2-8 second successful

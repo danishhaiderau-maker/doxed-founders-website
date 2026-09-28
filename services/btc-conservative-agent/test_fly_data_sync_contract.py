@@ -286,7 +286,7 @@ def test_sqlite_request_deadline_stops_building_retry():
 
 def test_successful_slow_chunks_increase_throttle_instead_of_masking_pressure():
     assert "$chunkRequestWatch = [System.Diagnostics.Stopwatch]::StartNew()" in SYNC_SCRIPT
-    assert "$slowSuccessfulChunk = $chunkRequestElapsedMs -ge 2000" in SYNC_SCRIPT
+    assert "$slowSuccessfulChunk = Test-FlySyncSlowSuccessEscalates" in SYNC_SCRIPT
     assert "stage=file_chunk status=slow_success" in SYNC_SCRIPT
     assert "-not $slowSuccessfulChunk -and $adaptiveThrottleMs" in SYNC_SCRIPT
 
