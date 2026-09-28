@@ -58,6 +58,7 @@ $sizeReportFile = Join-Path $mirrorDir "_size_report.json"
 $growthStateFile = Join-Path $mirrorDir ".fly-sync-growth-state.json"
 $generationLeaseFile = Join-Path $mirrorDir ".fly-mirror-generation.lease"
 Assert-LocalGenerationUnfenced -DataRoot $mirrorDir -Stage 'sync_loop_start'
+$pinnedResumeGuardFile = Join-Path $mirrorDir ".fly-pinned-generation-resume.guard"
 New-Item -ItemType Directory -Path (Split-Path -Parent $logFile) -Force | Out-Null
 $relayEvidenceLastSuccessAt = if (Test-Path -LiteralPath $relayEvidenceDestination -PathType Leaf) {
   (Get-Item -LiteralPath $relayEvidenceDestination).LastWriteTimeUtc.ToString("o")
@@ -85,6 +86,71 @@ function Write-Utf8NoBomJsonAtomic {
       Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
   }
+}
+
+function Get-FlySyncSafeErrorCode {
+  param([Parameter(Mandatory = $true)][object]$ErrorRecord)
+  try {
+    $response = $ErrorRecord.Exception.Response
+    if ($response -and $response.StatusCode) {
+      $status = [int]$response.StatusCode
+      if ($status -ge 100 -and $status -le 599) { return "HTTP_$status" }
+    }
+  } catch {}
+  $typeName = 'ERROR'
+  try { $typeName = [string]$ErrorRecord.Exception.GetType().Name } catch {}
+  $safeType = ($typeName.ToUpperInvariant() -replace '[^A-Z0-9_]', '_')
+  if ([string]::IsNullOrWhiteSpace($safeType) -or $safeType.Length -gt 64) { $safeType = 'ERROR' }
+  return "EXCEPTION_$safeType"
+}
+
+function Enter-PinnedGenerationResumeGuard {
+  param([Parameter(Mandatory = $true)][string]$GuardPath)
+  # A live boundary resume holds this file FileShare.None for its complete
+  # session. The ordinary loop holds it for one complete cycle, releasing
+  # before its configured sleep so a boundary resume has a clean handoff gap.
+  return [System.IO.File]::Open(
+    $GuardPath,
+    [System.IO.FileMode]::OpenOrCreate,
+    [System.IO.FileAccess]::ReadWrite,
+    [System.IO.FileShare]::None
+  )
+}
+
+function Write-PinnedGenerationResumeDeferredHeartbeat {
+  param(
+    [Parameter(Mandatory = $true)][string]$HeartbeatPath,
+    [Parameter(Mandatory = $true)][string]$Source,
+    [Parameter(Mandatory = $true)][int]$PollSeconds,
+    [Parameter(Mandatory = $true)][int]$Failures
+  )
+  $deferredAt = [DateTimeOffset]::UtcNow
+  $heartbeat = [ordered]@{
+    schema = 'fly_data_sync_loop_heartbeat_v1'
+    ok = $null
+    inProgress = $true
+    phase = 'PINNED_GENERATION_RESUME_DEFERRED'
+    syncedAt = $deferredAt.ToString('o')
+    source = $Source
+    skipped = $true
+    syncDeferred = $true
+    deferredBy = 'pinned_generation_resume'
+    pollOk = $null
+    sourceRevision = $null
+    observedSourceRevision = $null
+    mirroredSourceRevision = $null
+    deployedRevision = $null
+    revisionParity = 'UNKNOWN'
+    ackAccepted = $null
+    completionAuthority = 'NONE'
+    consecutiveFailures = $Failures
+    backoffSec = 0
+    nextRetryAt = $deferredAt.AddSeconds($PollSeconds).ToString('o')
+  }
+  Write-Utf8NoBomJsonAtomic -Value $heartbeat -LiteralPath $HeartbeatPath -Depth 8
+  Add-Content -LiteralPath $logFile -Value (
+    "$($heartbeat.syncedAt)`tDEFER`tpinned-generation-resume owns guard before remote preflight"
+  )
 }
 
 function Publish-AnalyzerLeaseDeferredReceipt {
@@ -154,7 +220,7 @@ function Publish-AnalyzerLeaseDeferredReceipt {
     Write-Utf8NoBomJsonAtomic -Value $receipt -LiteralPath $HeartbeatPath -Depth 8
     return $true
   } catch {
-    Write-Warning "Deferred immutable-mirror receipt rejected: $($_.Exception.Message)"
+    Write-Warning ("Deferred immutable-mirror receipt rejected: " + (Get-FlySyncSafeErrorCode $_))
     return $false
   }
 }
@@ -269,21 +335,25 @@ function Write-SizeReport {
           -ErrorAction Stop
         $report.fly_size_mb = $flyRes.runtime_size_mb
         $report.fly_volume_pct = $flyRes.volume_pct
-        $report.fly_top_files = $flyRes.top_files
+        $report.fly_top_files = @($flyRes.top_files | ForEach-Object {
+          [ordered]@{
+            name = [IO.Path]::GetFileName([string]$_.name)
+            size_mb = $_.size_mb
+          }
+        })
         $report.fly_source = $flyRes.source
-        $report.fly_runtime_path = $flyRes.runtime_path
         $report.fly_volume_total_mb = $flyRes.volume_total_mb
         $report.fly_cleanup_status = $flyRes.cleanup_status
         $report.fly_computed_at = $flyRes.computed_at
       } catch {
-        $report.fly_error = $_.Exception.Message
+        $report.fly_error = Get-FlySyncSafeErrorCode $_
       }
     }
 
     Write-Utf8NoBomJsonAtomic -Value $report -LiteralPath $ReportFile -Depth 6
   } catch {
     Add-Content -LiteralPath $logFile -Value (
-      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report failed: $($_.Exception.Message)"
+      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report failed code=$(Get-FlySyncSafeErrorCode $_)"
     )
   }
 }
@@ -576,7 +646,7 @@ function Get-FlySyncPreflightManifest {
       if ($attempt -ge $preflightManifestAttempts -or $remainingWaitSec -le 0) {
         throw (
           "Fly data-sync stage=loop_manifest_preflight failed after " +
-          "$attempt/$preflightManifestAttempts attempt(s): $($_.Exception.Message)"
+          "$attempt/$preflightManifestAttempts attempt(s): $(Get-FlySyncSafeErrorCode $_)"
         )
       }
       # BUILDING/STALE_REVALIDATING is a single-flight resumable scan, not a
@@ -635,7 +705,7 @@ function Invoke-OptionalRelayEvidenceSync {
   }
   throw (
     "Fly data-sync stage=optional_relay_evidence failed after " +
-    "$relaySyncAttempts/$relaySyncAttempts attempt(s): $($lastRelayError.Exception.Message)"
+    "$relaySyncAttempts/$relaySyncAttempts attempt(s): $(Get-FlySyncSafeErrorCode $lastRelayError)"
   )
 }
 
@@ -667,7 +737,7 @@ function Wait-FlyRuntimeQuietForFullSync {
       Add-Content -LiteralPath $logFile -Value (
         "$((Get-Date).ToUniversalTime().ToString('o'))`tQUIET_PROBE_FAILED`t" +
         "attempt=$attempt elapsed_ms=$([Math]::Round($probeWatch.Elapsed.TotalMilliseconds)) " +
-        "error=$($_.Exception.Message)"
+        "error_code=$(Get-FlySyncSafeErrorCode $_)"
       )
     }
     Start-Sleep -Seconds 5
@@ -703,7 +773,7 @@ if (Test-Path -LiteralPath $growthStateFile) {
     }
   } catch {
     Add-Content -LiteralPath $logFile -Value (
-      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tunreadable growth state: $($_.Exception.Message)"
+      "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tunreadable growth state code=$(Get-FlySyncSafeErrorCode $_)"
     )
   }
 }
@@ -711,6 +781,21 @@ if (Test-Path -LiteralPath $growthStateFile) {
 try {
   while ($true) {
     Assert-LocalGenerationUnfenced -DataRoot $mirrorDir -Stage 'sync_loop_iteration'
+    $pinnedResumeGuard = $null
+    # This check must remain ahead of orphan cleanup and all Fly operations.
+    # A pinned boundary resume owns the reviewed generation contract; ordinary
+    # polling must publish only a typed local defer heartbeat until it exits.
+    try {
+      $pinnedResumeGuard = Enter-PinnedGenerationResumeGuard -GuardPath $pinnedResumeGuardFile
+    } catch {
+      Write-PinnedGenerationResumeDeferredHeartbeat `
+        -HeartbeatPath $heartbeatFile `
+        -Source $SourceUrl `
+        -PollSeconds $pollSec `
+        -Failures $consecutiveFailures
+      Start-Sleep -Seconds $pollSec
+      continue
+    }
     Remove-OrphanedMirrorCandidates -MirrorPath $mirrorDir
     $started = Get-Date
     $didSync = $false
@@ -757,7 +842,7 @@ try {
           }
         } catch {
           Add-Content -LiteralPath $logFile -Value (
-            "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tunreadable fresh-signal state: $($_.Exception.Message)"
+            "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tunreadable fresh-signal state code=$(Get-FlySyncSafeErrorCode $_)"
           )
         }
       }
@@ -771,7 +856,7 @@ try {
           -QuarantineRoot (Join-Path (Split-Path -Parent $mirrorDir) 'fly-data-quarantine') `
           -FreshCollectionSignalTs $currentSignal
         Add-Content -LiteralPath $logFile -Value (
-          "$((Get-Date).ToUniversalTime().ToString('o'))`tFRESH`tquarantine complete files=$($quarantineResult.FileCount) path=$($quarantineResult.Destination)"
+          "$((Get-Date).ToUniversalTime().ToString('o'))`tFRESH`tquarantine complete files=$($quarantineResult.FileCount) destination=REDACTED"
         )
         # A signal is acknowledged only after recursive preservation, hash
         # verification and active-mirror emptying all succeed. Any lock or
@@ -939,6 +1024,7 @@ try {
         Add-Content -LiteralPath $logFile -Value (
           "$($heartbeat.syncedAt)`tSKIP`tidentity match; full inventory not due"
         )
+        if ($pinnedResumeGuard) { $pinnedResumeGuard.Dispose(); $pinnedResumeGuard = $null }
         Start-Sleep -Seconds $pollSec
         continue
       }
@@ -1003,6 +1089,7 @@ try {
         # Fly preflight succeeded; local analyzer ownership is a normal defer,
         # not another outage failure.
         $consecutiveFailures = 0
+        if ($pinnedResumeGuard) { $pinnedResumeGuard.Dispose(); $pinnedResumeGuard = $null }
         Start-Sleep -Seconds $pollSec
         continue
       }
@@ -1095,7 +1182,7 @@ try {
         -MaximumBackoffSeconds $maximumFailureBackoffSec
       $failureAt = (Get-Date).ToUniversalTime().ToString("o")
       $nextRetryAt = [datetime]::UtcNow.AddSeconds($sleepSec).ToString("o")
-      $failureMessage = $_.Exception.Message
+      $failureMessage = Get-FlySyncSafeErrorCode $_
       $retainedHeartbeat = $null
       if (Test-Path -LiteralPath $heartbeatFile -PathType Leaf) {
         try {
@@ -1173,8 +1260,11 @@ try {
     try {
       Write-SizeReport -MirrorPath $mirrorDir -ReportFile $sizeReportFile -FlyApiUrl $SourceUrl -IntervalSec ([Math]::Max(15, $IntervalSec))
     } catch {
-      Add-Content -LiteralPath $logFile -Value "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report wrapper failed: $($_.Exception.Message)"
+      Add-Content -LiteralPath $logFile -Value "$((Get-Date).ToUniversalTime().ToString('o'))`tWARN`tsize report wrapper failed code=$(Get-FlySyncSafeErrorCode $_)"
     }
+    # The full normal cycle is now complete. Release the shared pinned-resume
+    # guard before cadence sleep so a reviewed boundary resume can acquire it.
+    if ($pinnedResumeGuard) { $pinnedResumeGuard.Dispose(); $pinnedResumeGuard = $null }
     if ($didSync) {
       # A full copy can run for several minutes. Give the control plane one
       # complete configured interval before requesting another recursive
@@ -1192,6 +1282,7 @@ try {
     [void](Clear-StaleInProgressHeartbeat -Path $heartbeatFile -Reason "MIRROR_SYNC_LOOP_EXITED" -OwnedByThisProcess)
   } catch { }
   if ($generationLease) { $generationLease.Dispose() }
+  if ($pinnedResumeGuard) { $pinnedResumeGuard.Dispose() }
   Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
   if ($guardStream) { $guardStream.Dispose() }
   Remove-Item -LiteralPath $guardFile -Force -ErrorAction SilentlyContinue

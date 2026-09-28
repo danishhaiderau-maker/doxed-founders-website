@@ -224,7 +224,7 @@ def test_full_sync_reuses_authenticated_loop_preflight_without_duplicate_fetch()
     # the checksum acknowledgement remains after all file reconciliation.
     assert '-Stage "acknowledgement_finalize"' in child_source
     assert "$ack = Invoke-DataSyncJsonRequest" in child_source
-    assert "AckAccepted = $ack.accepted" in child_source
+    assert "AckAccepted = [bool]$terminalAcknowledgement.AckAccepted" in child_source
     assert "Canonical manifest commit failed" in child_source
 
 
@@ -276,7 +276,10 @@ def test_reused_manifest_is_fenced_against_a_fresh_authenticated_identity():
     acknowledgement = child_source.index('-Stage "acknowledgement_finalize"')
     canonical_completion = child_source.index("Canonical manifest commit failed")
 
-    assert '"$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery$generationQuery$pageQuery&nonce="' in child_source
+    assert '"$base/api/data-sync/manifest?fresh=1$pathQuery$generationQuery$pageQuery&nonce="' in child_source
+    # The final identity fence is a read-only poll: fresh=1 would restart the
+    # inventory and race CURRENT back to STALE before the fence completes.
+    assert 'return "$base/api/data-sync/manifest?identity_only=1$generationQuery$pathQuery"' in child_source
     assert final_fence < identity_assertion < acknowledgement < canonical_completion
     for identity_field in (
         "source_git_rev",
