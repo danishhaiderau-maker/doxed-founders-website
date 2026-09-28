@@ -1162,7 +1162,8 @@ jobs:
           if not token:
               raise SystemExit("BOT_ADMIN_TOKEN is missing")
           headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
-          legacy_bootstrap_revision = "e5e61229871744a062ae75651d3c442bae910b5d"
+          # This pin is the generation-less bridge for tipping off the crash-loop tip image onto the restore tree.
+          legacy_bootstrap_revision = "4ed032bb9be4b45995b9a74b4bc855d28dd4fb08"
           legacy_status_revision = legacy_bootstrap_revision[:12]
           status = None
           for attempt in range(1, 6):
