@@ -106,6 +106,36 @@ def _completed_mirror_identity(data_root: Path, revision: object) -> tuple[str, 
     return hashlib.sha256(canonical).hexdigest(), epoch
 
 
+def _sync_receipt_is_stale(
+    payload: dict,
+    *,
+    mirror: Path,
+    now: datetime | None,
+    max_age_seconds: int | None,
+    previous: MirrorCoherenceToken | None,
+    held_lease: object | None,
+) -> bool:
+    """True when the receipt is outside the sync-age SLA."""
+
+    age_limit = int(
+        max_age_seconds
+        if max_age_seconds is not None
+        else os.getenv("ANALYZER_MIRROR_SYNC_MAX_AGE_SEC", "600")
+    )
+    observed_now = now or datetime.now(timezone.utc)
+    age = (
+        observed_now.astimezone(timezone.utc) - _parse_utc(payload.get("syncedAt"))
+    ).total_seconds()
+    same_held_generation = bool(
+        previous is not None
+        and held_lease is not None
+        and getattr(held_lease, "held", False)
+        and Path(getattr(held_lease, "path", "")).resolve()
+        == (mirror / ".fly-mirror-generation.lease").resolve()
+    )
+    return age < -60 or (age > age_limit and not same_held_generation)
+
+
 def assert_mirror_coherent(
     *,
     repo_root: str | os.PathLike[str],
@@ -136,7 +166,18 @@ def assert_mirror_coherent(
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_INVALID") from exc
     if not isinstance(payload, dict):
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_INVALID")
-    if payload.get("inProgress") is True:
+    # Age before the in-progress gate. A crashed sync can leave inProgress
+    # true; once the receipt is expired that flag must not hide a failed or
+    # stale mirror forever.
+    receipt_stale = _sync_receipt_is_stale(
+        payload,
+        mirror=mirror,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        previous=previous,
+        held_lease=held_lease,
+    )
+    if payload.get("inProgress") is True and not receipt_stale:
         raise MirrorCoherenceError("MIRROR_SYNC_IN_PROGRESS")
     if payload.get("ok") is not True:
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_FAILED")
@@ -163,24 +204,10 @@ def assert_mirror_coherent(
     if not str(deployed_revision or "").strip():
         deployed_revision = values[2]
 
-    age_limit = int(
-        max_age_seconds
-        if max_age_seconds is not None
-        else os.getenv("ANALYZER_MIRROR_SYNC_MAX_AGE_SEC", "600")
-    )
-    observed_now = now or datetime.now(timezone.utc)
-    age = (observed_now.astimezone(timezone.utc) - _parse_utc(payload.get("syncedAt"))).total_seconds()
-    same_held_generation = bool(
-        previous is not None
-        and held_lease is not None
-        and getattr(held_lease, "held", False)
-        and Path(getattr(held_lease, "path", "")).resolve()
-        == (mirror / ".fly-mirror-generation.lease").resolve()
-    )
     # Freshness is mandatory when an iteration starts.  At publication a long
     # calculation may legitimately outlive the receipt-age SLA, but only the
     # still-held cross-process lease plus the same token can waive age alone.
-    if age < -60 or (age > age_limit and not same_held_generation):
+    if receipt_stale:
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_STALE")
 
     # Heartbeat timestamps and relay-health observations can refresh while the

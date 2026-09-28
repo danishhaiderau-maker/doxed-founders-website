@@ -1104,6 +1104,8 @@ try {
       } else {
         $heartbeat = [ordered]@{
           ok = $false
+          inProgress = $false
+          phase = "failed"
           syncedAt = $failureAt
           source = $SourceUrl
           error = $failureMessage

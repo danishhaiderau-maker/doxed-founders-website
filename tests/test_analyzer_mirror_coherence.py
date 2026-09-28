@@ -101,6 +101,20 @@ def test_preflight_rejects_stale_receipt(tmp_path):
         _check(repo, mirror, max_age_seconds=600)
 
 
+def test_stale_in_progress_receipt_expires_before_in_progress_gate(tmp_path):
+    repo, mirror = tmp_path / "repo", tmp_path / "mirror"
+    repo.mkdir(); mirror.mkdir()
+    _write_mirror_identity(mirror)
+    old = datetime.now(timezone.utc) - timedelta(minutes=11)
+    _write_heartbeat(mirror, syncedAt=old.isoformat(), inProgress=True, ok=True)
+    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_RECEIPT_STALE"):
+        _check(repo, mirror, max_age_seconds=600)
+
+    _write_heartbeat(mirror, syncedAt=old.isoformat(), inProgress=True, ok=False)
+    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_RECEIPT_FAILED"):
+        _check(repo, mirror, max_age_seconds=600)
+
+
 def test_prepublication_accepts_timestamp_refresh_but_rejects_generation_change(tmp_path):
     repo, mirror = tmp_path / "repo", tmp_path / "mirror"
     repo.mkdir(); mirror.mkdir()
