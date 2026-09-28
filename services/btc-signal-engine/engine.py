@@ -10982,36 +10982,46 @@ def process_virtual_chase_chase6_market_conversions(price: float):
         if until <= 0 or now < until:
             continue
         tid = order.get("trade_id")
-        meta = trades_map.get(tid, {})
-        signal = meta.get("signal_ref") or {}
-        limit_price = float(order.get("limit_price") or 0)
-        # This path is the explicit final market conversion.  Freeze the order
-        # type before price resolution so it cannot accidentally reuse the
-        # passive limit walker and its hard-limit boundary.
-        order["entry_type"] = "SIM_MARKET"
-        order["fee_type"] = "TAKER"
-        fill_px = resolve_sim_fill_price(order)
-        slippage = None
-        if limit_price > 0 and fill_px:
-            direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
-            if direction == "LONG":
-                slippage = round(float(fill_px) - limit_price, 4)
-            elif direction == "SHORT":
-                slippage = round(limit_price - float(fill_px), 4)
-        order["fill_price"] = fill_px
-        order["limit_price"] = fill_px
-        order["market_conversion"] = True
-        if signal:
-            signal["market_conversion"] = True
-            signal["conversion_slippage"] = slippage
-            signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
-            signal["fill_phase"] = _virtual_chase_fill_phase(6, market=True)
-            _record_virtual_chase_execution_metrics(signal, order)
-        logger.info(
-            f"[VIRTUAL_CHASE] chase=6 market conversion trade_id={tid} "
-            f"limit={fmt(limit_price)} fill={fmt(fill_px)} slip={slippage} [PIPELINE ENFORCEMENT]"
-        )
-        fill_order(order)
+        with trade_lock:
+            if (not tid or tid in fill_handoff_trade_ids
+                    or order.get("status") != "PENDING"
+                    or not any(row is order for row in pending_orders)):
+                continue
+            fill_handoff_trade_ids.add(tid)
+            order["fill_handoff_in_progress"] = True
+        try:
+            meta = trades_map.get(tid, {})
+            signal = meta.get("signal_ref") or {}
+            limit_price = float(order.get("limit_price") or 0)
+            # This path is the explicit final market conversion.  Freeze the order
+            # type before price resolution so it cannot accidentally reuse the
+            # passive limit walker and its hard-limit boundary.
+            order["entry_type"] = "SIM_MARKET"
+            order["fee_type"] = "TAKER"
+            fill_px = resolve_sim_fill_price(order)
+            slippage = None
+            if limit_price > 0 and fill_px:
+                direction = _normalize_order_side_to_dir(order.get("signal_dir") or order.get("side"))
+                if direction == "LONG":
+                    slippage = round(float(fill_px) - limit_price, 4)
+                elif direction == "SHORT":
+                    slippage = round(limit_price - float(fill_px), 4)
+            order["fill_price"] = fill_px
+            order["limit_price"] = fill_px
+            order["market_conversion"] = True
+            if signal:
+                signal["market_conversion"] = True
+                signal["conversion_slippage"] = slippage
+                signal["market_conversion_delay"] = VIRTUAL_CHASE_LANE_CHASE6_WAIT_SEC
+                signal["fill_phase"] = _virtual_chase_fill_phase(6, market=True)
+                _record_virtual_chase_execution_metrics(signal, order)
+            logger.info(
+                f"[VIRTUAL_CHASE] chase=6 market conversion trade_id={tid} "
+                f"limit={fmt(limit_price)} fill={fmt(fill_px)} slip={slippage} [PIPELINE ENFORCEMENT]"
+            )
+            fill_order(order)
+        finally:
+            _release_unfilled_fill_handoff(order)
 
 
 def get_effective_ai_cooldown_sec(lane: str = None) -> int:
@@ -23089,7 +23099,7 @@ def process_pending_orders():
             if order not in pending_orders or order.get("status") != "PENDING":
                 continue
             tid = str(order.get("trade_id") or "")
-            if not tid or any(
+            if not tid or tid in fill_handoff_trade_ids or any(
                 isinstance(pos, dict) and str(pos.get("trade_id") or "") == tid
                 for pos in open_positions
             ):
@@ -23171,7 +23181,20 @@ def process_pending_orders():
         expire_signal_for_order(order, reason)
         logger.warning(f"[FILL REVALIDATION] cancelled trade_id={order.get('trade_id')} reason={reason} [PIPELINE ENFORCEMENT]")
     for order, fill_signal in fills:
-        fill_order(order)
+        try:
+            fill_order(order)
+        finally:
+            _release_unfilled_fill_handoff(order)
+
+
+def _release_unfilled_fill_handoff(order):
+    """Reopen a claim whose fill attempt left the order PENDING so it can retry."""
+    with trade_lock:
+        if order.get("status") == "PENDING" and any(row is order for row in pending_orders):
+            tid = order.get("trade_id")
+            if tid:
+                fill_handoff_trade_ids.discard(tid)
+            order.pop("fill_handoff_in_progress", None)
 
 def fill_order(order):
     def clear_fill_handoff():
