@@ -45487,6 +45487,7 @@ def _data_sync_ack_v3(body: dict):
         "inventory_file_count": int(generation["file_count"]),
         "manifest_page_count": int(generation["page_count"]),
         "manifest_pages_complete": True,
+        "ack_session_id": session_id,
         "cleanup_status": "ELIGIBILITY_MODEL_ONLY_SOURCE_RETAINED",
     })
 

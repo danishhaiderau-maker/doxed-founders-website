@@ -3959,7 +3959,17 @@ def test_unattended_research_supervisor_is_local_repair_only():
         assert forbidden not in RESEARCH_SUPERVISOR_TASK.lower()
 
 
+def test_v3_finalize_response_echoes_the_bound_ack_session():
+    start = BOT.index("def _data_sync_ack_v3(body: dict)")
+    end = BOT.index("@app.route('/api/data-sync/ack'", start)
+    ack_v3 = BOT[start:end]
+    final_commit = ack_v3[ack_v3.rindex("_write_data_sync_ack(compact_ack)"):]
+    assert '"operation": "FINALIZE"' in final_commit
+    assert '"ack_session_id": session_id' in final_commit
+
+
 if __name__ == "__main__":
+    test_v3_finalize_response_echoes_the_bound_ack_session()
     test_fly_runtime_cwd_is_volume_backed()
     test_incremental_sync_is_authenticated_and_chunk_verified()
     test_local_sync_has_fail_closed_30_gib_admission_guard()
