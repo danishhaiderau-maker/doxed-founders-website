@@ -762,6 +762,102 @@ def _shared_call_independence_clusters(
     return clusters
 
 
+
+def _unknown_execution_codes(row: dict[str, Any]) -> list[str]:
+    return [
+        str(code) for code in (row.get("unknown_reason_codes") or [])
+        if str(code).startswith("UNKNOWN_EXECUTION")
+    ]
+
+
+def _resolved_entry_row(row: dict[str, Any]) -> bool:
+    resolution = str(row.get("entry_resolution") or row.get("resolution") or "").upper()
+    return bool(
+        row.get("entry_resolution_terminal") is True
+        or resolution in {"ORDER_SUBMITTED", "NO_ORDER", "ORDER_SUBMITTED_THEN_EXPIRED"}
+    )
+
+
+def execution_scoring_classification(row: dict[str, Any]) -> str:
+    """Score one row without turning a resolution or UNKNOWN_EXECUTION into NO_FILL."""
+    unknown_codes = _unknown_execution_codes(row)
+    execution = str(row.get("execution_classification") or "").upper()
+    resolution = str(row.get("resolution") or "").upper()
+    unknown_execution = bool(unknown_codes) or (
+        execution == "UNKNOWN" and resolution == "ORDER_SUBMITTED_THEN_EXPIRED"
+    )
+    outcome = normalize_lifecycle_outcome(
+        row.get("outcome_state") or row.get("execution_classification"),
+        net_pnl_usd=row.get("net_pnl_usd"),
+    )
+    if unknown_execution or (_resolved_entry_row(row) and outcome == "NO_FILL"):
+        return "UNKNOWN"
+    return outcome
+
+
+def quarantine_unknown_execution_episodes(
+    terminal_rows: list[dict[str, Any]],
+    recovered_receipts: dict[tuple[str, str, str], dict[str, Any]],
+) -> dict[str, Any]:
+    """Separate unresolved execution from general scoring without deleting evidence.
+
+    This is an episode receipt. Epoch quarantine is a different tool and is not used.
+    """
+    episodes: dict[str, dict[str, Any]] = {}
+
+    def note(episode_id: str, *, reason: str, source: str) -> None:
+        episode_id = str(episode_id or "")
+        if not episode_id:
+            return
+        slot = episodes.setdefault(episode_id, {
+            "episode_id": episode_id,
+            "classification": "UNKNOWN",
+            "separate_from_general_scoring": True,
+            "reasons": [],
+            "sources": [],
+        })
+        if reason not in slot["reasons"]:
+            slot["reasons"].append(reason)
+        if source not in slot["sources"]:
+            slot["sources"].append(source)
+
+    for key, receipt in recovered_receipts.items():
+        if execution_scoring_classification(receipt) != "UNKNOWN":
+            raise RuntimeError("UNKNOWN_EXECUTION_RELABELED")
+        note(key[0], reason="UNKNOWN_EXECUTION", source="recovered_expired_order")
+    for row in terminal_rows:
+        raw = normalize_lifecycle_outcome(
+            row.get("outcome_state"), net_pnl_usd=row.get("net_pnl_usd"),
+        )
+        classification = execution_scoring_classification(row)
+        if classification == "NO_FILL" and (
+            _unknown_execution_codes(row) or _resolved_entry_row(row)
+        ):
+            raise RuntimeError("RESOLVED_OR_UNKNOWN_EXECUTION_CLASSIFIED_NO_FILL")
+        if classification == "UNKNOWN" and (
+            raw == "NO_FILL" or _unknown_execution_codes(row)
+        ):
+            note(
+                str(row.get("episode_id") or ""),
+                reason="RESOLVED_OR_UNKNOWN_EXECUTION_NOT_NO_FILL",
+                source="terminal_lifecycle",
+            )
+    rows = []
+    for episode_id in sorted(episodes):
+        row = episodes[episode_id]
+        row["reasons"] = sorted(row["reasons"])
+        row["sources"] = sorted(row["sources"])
+        rows.append(row)
+    return {
+        "schema": "episode_execution_quarantine_v1",
+        "destructive": False,
+        "separate_from_general_scoring": True,
+        "epoch_quarantine_used": False,
+        "episode_count": len(rows),
+        "episodes": rows,
+    }
+
+
 def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidates=None) -> dict[str, Any]:
     from research.runtime_identity_incidents import load_incident_input, IncidentEpisodeIndex, REASON
     incident_input = load_incident_input()
@@ -918,9 +1014,6 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         excluded_opportunities or identity_aliases or len(observed_epochs) > 1
         or policy_identity_contamination
     )
-    outcome_counts = Counter(normalize_lifecycle_outcome(
-        row.get("outcome_state"), net_pnl_usd=row.get("net_pnl_usd")
-    ) for row in terminal_lifecycles)
     decision_outcomes = Counter(str(
         row.get("primary_outcome")
         or row.get("outcome_state")
@@ -1004,6 +1097,19 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         ),
         "passed": entry_resolution_counts["overdue_orphan"] == 0,
     }
+    episode_quarantine = quarantine_unknown_execution_episodes(
+        terminal_lifecycles, applied_expired_order_recoveries,
+    )
+    quarantined_episode_ids = {
+        str(row.get("episode_id") or "") for row in episode_quarantine["episodes"]
+    }
+    outcome_counts = Counter(
+        normalize_lifecycle_outcome(
+            row.get("outcome_state"), net_pnl_usd=row.get("net_pnl_usd"),
+        )
+        for row in terminal_lifecycles
+        if str(row.get("episode_id") or "") not in quarantined_episode_ids
+    )
     effective_paper_execution_identities = []
     seen_effective_identities = set()
     for row in [*order_intents, *executions, *policy_attributable_lifecycles]:
@@ -1041,9 +1147,12 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
                 flush=True,
             )
 
-        candidate_inputs = load_candidate_inputs(
-            data_dir, epoch_id=selected_epoch, minimum_signal_ts=cutoff,
-        )
+        candidate_inputs = [
+            row for row in load_candidate_inputs(
+                data_dir, epoch_id=selected_epoch, minimum_signal_ts=cutoff,
+            )
+            if str(row.get("episode_id") or "") not in quarantined_episode_ids
+        ]
         incident_index.add(candidate_inputs)
         candidate_screen = evaluate_protection_screen(
             candidate_inputs,
@@ -1207,6 +1316,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "market_segment_ledger_rows": len(market_segment_rows),
             "market_segment_objects_verified": verification["market_segment_count"],
             "entry_resolution_integrity": entry_resolution_integrity,
+            "episode_quarantine": episode_quarantine,
             "effective_paper_execution_identities": effective_paper_execution_identities,
         },
         "search": search,
@@ -1228,5 +1338,7 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
             "descriptive_statistics_preserved": True,
         }
     incident_input.assert_unchanged()
+    if episode_quarantine["episode_count"]:
+        _atomic_json(Path(report_dir) / "episode_execution_quarantine.json", episode_quarantine)
     _atomic_json(Path(report_dir) / REPORT_FILE, report)
     return report

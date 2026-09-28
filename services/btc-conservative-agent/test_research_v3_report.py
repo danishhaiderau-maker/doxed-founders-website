@@ -8,6 +8,7 @@ from pathlib import Path
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 from research.research_v3_report import (
     build_safe_policy_genome_v3_report,
+    execution_scoring_classification,
     join_pre_entry_feature_receipts,
 )
 from research import research_dashboard as dashboard
@@ -64,6 +65,26 @@ def test_causal_join_missing_identities_cannot_match_empty_strings():
     assert joined[0]["pre_entry_features"] == {}
     assert joined[0]["pre_entry_feature_blockers"] == ["PRE_ENTRY_OPPORTUNITY_IDENTITY_MISSING"]
     assert coverage["dynamic_schema_complete_opportunities"] == 0
+
+
+def test_scoring_classification_never_relabels_unknown_or_resolved_as_no_fill():
+    unknown = {
+        "outcome_state": "NO_FILL",
+        "execution_classification": "UNKNOWN",
+        "resolution": "ORDER_SUBMITTED_THEN_EXPIRED",
+        "unknown_reason_codes": [
+            "UNKNOWN_EXECUTION_LEDGER_MISSING",
+            "UNKNOWN_EXECUTION_GRADE_MARKET_EVIDENCE_MISSING",
+        ],
+    }
+    resolved = {
+        "outcome_state": "NO_FILL",
+        "entry_resolution": "NO_ORDER",
+        "entry_resolution_terminal": True,
+    }
+    assert execution_scoring_classification(unknown) == "UNKNOWN"
+    assert execution_scoring_classification(resolved) == "UNKNOWN"
+    assert execution_scoring_classification({"outcome_state": "NO_FILL"}) == "NO_FILL"
 
 
 class V3ReportTests(unittest.TestCase):
@@ -333,6 +354,74 @@ class V3ReportTests(unittest.TestCase):
                 recovered[0]["unknown_reason_codes"],
             )
             self.assertNotIn("ORPHAN_EXPECTED_ORDER", report["blockers"])
+
+    def test_resolved_or_unknown_execution_is_quarantined_not_scored_no_fill(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
+            store = V3EvidenceStore(data, epoch_id="epoch-v3")
+            store.append("opportunity", {
+                "record_id": "o-unknown", "episode_id": "episode-unknown", "signal_ts": 10,
+                "symbol": "BTCUSD", "raw_direction": "LONG",
+                "shared_ai_call_id": "scan-unknown",
+            })
+            store.append("decision", {
+                "record_id": "d-unknown", "episode_id": "episode-unknown",
+                "shared_ai_call_id": "scan-unknown", "decision_stage": "LANE_POLICY_VERDICT",
+                "research_lane": "FAMILY_ATR_TRAIL", "policy_id": "trail",
+                "policy_signature": "sig-trail", "policy_epoch_id": "pe-1",
+                "order_intent_expected": True, "resolution_deadline_ts": 2,
+            })
+            store.append("lifecycle", {
+                "record_id": "l-unknown", "episode_id": "episode-unknown", "terminal": True,
+                "outcome_state": "NO_FILL",
+                "unknown_reason_codes": ["UNKNOWN_EXECUTION_LEDGER_MISSING"],
+                "execution_classification": "UNKNOWN",
+                "resolution": "ORDER_SUBMITTED_THEN_EXPIRED",
+            })
+            store.append("opportunity", {
+                "record_id": "o-resolved", "episode_id": "episode-resolved", "signal_ts": 20,
+                "symbol": "BTCUSD", "raw_direction": "SHORT",
+            })
+            store.append("lifecycle", {
+                "record_id": "l-resolved", "episode_id": "episode-resolved", "terminal": True,
+                "outcome_state": "NO_FILL", "entry_resolution": "ORDER_SUBMITTED",
+                "entry_resolution_terminal": True,
+            })
+            store.append("opportunity", {
+                "record_id": "o-clean", "episode_id": "episode-clean", "signal_ts": 30,
+                "symbol": "BTCUSD", "raw_direction": "LONG",
+            })
+            store.append("lifecycle", {
+                "record_id": "l-clean", "episode_id": "episode-clean", "terminal": True,
+                "outcome_state": "NO_FILL",
+            })
+            Path(data, "expired_orders_3factor.csv").write_text(
+                "time,trade_id,shared_ai_call_id,research_lane,reason,expired_ts,touched_limit\n"
+                "2026-01-01T00:30:00Z,ftr-unknown,scan-unknown,FAMILY_ATR_TRAIL,"
+                "SIGNAL_TTL_EXPIRED,1801,True\n",
+                encoding="utf-8",
+            )
+            ledger = Path(data, "v3", "ledgers", "lifecycle.jsonl")
+            before = ledger.read_bytes()
+
+            report = build_safe_policy_genome_v3_report(data, reports)
+
+            self.assertEqual(report["collection"]["outcome_states"].get("NO_FILL"), 1)
+            quarantine = report["collection"]["episode_quarantine"]
+            self.assertFalse(quarantine["destructive"])
+            self.assertFalse(quarantine["epoch_quarantine_used"])
+            self.assertTrue(quarantine["separate_from_general_scoring"])
+            quarantined = {row["episode_id"]: row for row in quarantine["episodes"]}
+            self.assertEqual(set(quarantined), {"episode-unknown", "episode-resolved"})
+            for row in quarantined.values():
+                self.assertEqual(row["classification"], "UNKNOWN")
+                self.assertTrue(row["separate_from_general_scoring"])
+                self.assertNotEqual(row["classification"], "NO_FILL")
+            self.assertIn("UNKNOWN_EXECUTION", quarantined["episode-unknown"]["reasons"])
+            receipt_path = Path(reports, "episode_execution_quarantine.json")
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["episode_count"], 2)
+            self.assertEqual(ledger.read_bytes(), before)
+            self.assertTrue(Path(data, "expired_orders_3factor.csv").is_file())
 
     def test_expired_order_recovery_rejects_ambiguous_lane_receipts(self):
         with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as reports:
