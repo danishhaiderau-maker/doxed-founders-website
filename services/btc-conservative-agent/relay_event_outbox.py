@@ -10,10 +10,25 @@ import copy
 import hashlib
 import json
 import os
+import pickle
 import tempfile
 import threading
 import time
 from pathlib import Path
+
+
+def _deep_copy(value):
+    """Independent copy of plain JSON-like state in one C-level pass.
+
+    Transitions run under the bot's ``trade_lock``; Python-level ``deepcopy``
+    of the full lifecycle generation dominated that hold on Fly.
+    """
+    try:
+        return pickle.loads(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+    except RecursionError:
+        return copy.deepcopy(value)
+    except (pickle.PicklingError, TypeError, AttributeError):
+        return copy.deepcopy(value)
 
 
 class RelayEventOutbox:
@@ -110,11 +125,14 @@ class RelayEventOutbox:
                 self._wake.set()
 
     def _atomic_write(self, value: dict) -> None:
+        # json.dump() to a file uses the pure-Python streaming encoder;
+        # dumps() takes the C encoder and yields byte-identical output.
+        body = json.dumps(value, separators=(",", ":"), sort_keys=True)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(value, handle, separators=(",", ":"), sort_keys=True)
+                handle.write(body)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(name, self.path)
@@ -133,9 +151,9 @@ class RelayEventOutbox:
         return {
             "schema": self.SCHEMA,
             "saved_at_unix": time.time(),
-            "pending": copy.deepcopy(list(self._pending.values()) if pending is None else pending),
-            "acks": copy.deepcopy(self._acks[-self.ack_limit:] if acks is None else acks),
-            "sequence_highwater": copy.deepcopy(self._highwater if highwater is None else highwater),
+            "pending": _deep_copy(list(self._pending.values()) if pending is None else pending),
+            "acks": _deep_copy(self._acks[-self.ack_limit:] if acks is None else acks),
+            "sequence_highwater": _deep_copy(self._highwater if highwater is None else highwater),
         }
 
     def _persist(self, state_payload: dict | None = None) -> None:
@@ -164,7 +182,7 @@ class RelayEventOutbox:
             except (OSError, ValueError, json.JSONDecodeError):
                 value = None
         if isinstance(value, dict) and value.get("schema") == "paper_lifecycle_v1":
-            value = copy.deepcopy(value)
+            value = _deep_copy(value)
             value["relay_events"] = relay_value
             value.setdefault("generation", 0)
             value.setdefault("transition_wal", None)
@@ -176,7 +194,7 @@ class RelayEventOutbox:
         wal = prepared.get("transition_wal")
         if not isinstance(wal, dict) or wal.get("schema") != self.WAL_SCHEMA:
             raise ValueError("unsupported paper lifecycle transition WAL")
-        preimage = copy.deepcopy(prepared)
+        preimage = _deep_copy(prepared)
         preimage["transition_wal"] = None
         if self._state_sha256(preimage) != wal.get("preimage_sha256"):
             raise ValueError("paper lifecycle transition preimage hash mismatch")
@@ -188,15 +206,15 @@ class RelayEventOutbox:
             raise ValueError("paper lifecycle transition target hash mismatch")
         if not isinstance(record, dict) or self.payload_sha256(record.get("payload") or {}) != record.get("payload_sha256"):
             raise ValueError("paper lifecycle transition event hash mismatch")
-        relay = copy.deepcopy(target.get("relay_events") or prepared.get("relay_events") or self._relay_value())
+        relay = _deep_copy(target.get("relay_events") or prepared.get("relay_events") or self._relay_value())
         pending = [row for row in relay.get("pending") or [] if row.get("event_id") != record.get("event_id")]
-        pending.append(copy.deepcopy(record))
+        pending.append(_deep_copy(record))
         relay["pending"] = pending
         highwater = relay.setdefault("sequence_highwater", {})
         highwater[str(record["trade_id"])] = max(
             int(highwater.get(str(record["trade_id"]), -1)), int(record["event_seq"])
         )
-        target = copy.deepcopy(target)
+        target = _deep_copy(target)
         target["generation"] = max(
             int(prepared.get("generation") or 0) + 1,
             int(target.get("generation") or 0),
@@ -226,7 +244,7 @@ class RelayEventOutbox:
                 raise RuntimeError("paper lifecycle transition WAL is unresolved")
             floor = self._highwater.get(trade_id, -1) + 1
             sequence = max(floor, int(suggested)) if suggested is not None else floor
-            stamped = copy.deepcopy(payload)
+            stamped = _deep_copy(payload)
             stamped["event_seq"] = sequence
             stamped["event_id"] = str(stamped.get("event_id") or f"{trade_id}:{event_type}:{sequence}:{stamped.get('ts') or time.time_ns()}")
             if event_type == "POSITION_REDUCED":
@@ -238,14 +256,14 @@ class RelayEventOutbox:
                 "created_at_unix": time.time(), "attempts": 0,
                 "next_attempt_at_unix": 0.0, "last_error": None,
             }
-            clean_preimage = copy.deepcopy(preimage)
+            clean_preimage = _deep_copy(preimage)
             clean_preimage["transition_wal"] = None
-            target = copy.deepcopy(target_payload)
+            target = _deep_copy(target_payload)
             target["schema"] = "paper_lifecycle_v1"
             target["generation"] = int(preimage.get("generation") or 0) + 1
             target["transition_wal"] = None
-            target.setdefault("relay_events", copy.deepcopy(preimage.get("relay_events") or self._relay_value()))
-            prepared = copy.deepcopy(clean_preimage)
+            target.setdefault("relay_events", _deep_copy(preimage.get("relay_events") or self._relay_value()))
+            prepared = _deep_copy(clean_preimage)
             prepared["transition_wal"] = {
                 "schema": self.WAL_SCHEMA,
                 "transition_id": stamped["event_id"],
@@ -255,7 +273,7 @@ class RelayEventOutbox:
                 "event_record": record,
             }
             self._atomic_write(prepared)
-            return copy.deepcopy(record)
+            return _deep_copy(record)
 
     def commit_prepared(self, event_id: str) -> dict:
         """Publish PREPARED target plus PENDING event in one durable generation."""
@@ -267,7 +285,7 @@ class RelayEventOutbox:
                 raise ValueError("paper lifecycle prepared transition mismatch")
             committed = self._recover_prepared_value(prepared)
             self._atomic_write(committed)
-            record = copy.deepcopy(wal["event_record"])
+            record = _deep_copy(wal["event_record"])
             self._pending[event_id] = record
             self._highwater[str(record["trade_id"])] = int(record["event_seq"])
             self._wake.set()
@@ -302,7 +320,7 @@ class RelayEventOutbox:
         with self._lock:
             floor = self._highwater.get(trade_id, -1) + 1
             sequence = max(floor, int(suggested)) if suggested is not None else floor
-            stamped = copy.deepcopy(payload)
+            stamped = _deep_copy(payload)
             stamped["event_seq"] = sequence
             stamped["event_id"] = str(stamped.get("event_id") or (
                 f"{trade_id}:{event_type}:{sequence}:"
@@ -326,12 +344,12 @@ class RelayEventOutbox:
             if existing:
                 if existing.get("payload_sha256") != digest:
                     raise ValueError("conflicting relay event id")
-                return copy.deepcopy(existing)
+                return _deep_copy(existing)
             if any(row.get("event_id") == event_id and row.get("payload_sha256") != digest for row in self._acks):
                 raise ValueError("conflicting acknowledged relay event id")
             row = {
                 "event_id": event_id, "trade_id": trade_id, "event_type": event_type,
-                "event_seq": event_seq, "payload_sha256": digest, "payload": copy.deepcopy(payload),
+                "event_seq": event_seq, "payload_sha256": digest, "payload": _deep_copy(payload),
                 "created_at_unix": time.time(), "attempts": 0, "next_attempt_at_unix": 0.0,
                 "last_error": None,
             }
@@ -350,7 +368,7 @@ class RelayEventOutbox:
                     self._highwater[trade_id] = prior_highwater
                 raise
             self._wake.set()
-            return copy.deepcopy(row)
+            return _deep_copy(row)
 
     def due(self, now: float | None = None, limit: int = 100) -> list[dict]:
         return self.delivery_plan(now=now, limit=limit)["records"]
@@ -435,7 +453,7 @@ class RelayEventOutbox:
             if event_id:
                 ready = [row for row in ready if row.get("event_id") == event_id]
             ready.sort(key=lambda row: float(row.get("created_at_unix") or 0))
-            result["records"] = copy.deepcopy(ready[:max(1, int(limit))])
+            result["records"] = _deep_copy(ready[:max(1, int(limit))])
             return result
 
     def fail(self, event_id: str, error: object, now: float | None = None) -> None:
@@ -444,7 +462,7 @@ class RelayEventOutbox:
             row = self._pending.get(event_id)
             if not row:
                 return
-            before = copy.deepcopy(row)
+            before = _deep_copy(row)
             row["attempts"] = int(row.get("attempts") or 0) + 1
             row["last_error"] = str(error)[:160]
             row["next_attempt_at_unix"] = now + min(60.0, 0.5 * (2 ** min(row["attempts"], 7)))
@@ -470,9 +488,9 @@ class RelayEventOutbox:
                 ack.get("payload_sha256") != row["payload_sha256"],
             )):
                 return False
-            before_acks = copy.deepcopy(self._acks)
+            before_acks = _deep_copy(self._acks)
             del self._pending[event_id]
-            self._acks.append({**copy.deepcopy(ack), "acknowledged_at_unix": time.time()})
+            self._acks.append({**_deep_copy(ack), "acknowledged_at_unix": time.time()})
             self._acks = self._acks[-self.ack_limit:]
             try:
                 self._persist(state_payload=state_payload)
@@ -508,15 +526,15 @@ class RelayEventOutbox:
                     raise RuntimeError("paper lifecycle transition WAL is unresolved")
                 if isinstance(current, dict):
                     prior_generation = int(current.get("generation") or 0)
-            value = copy.deepcopy(payload)
+            value = _deep_copy(payload)
             value["generation"] = prior_generation + 1
             value["transition_wal"] = None
             value["relay_events"] = {
                 "schema": self.SCHEMA,
                 "saved_at_unix": time.time(),
-                "pending": copy.deepcopy(list(self._pending.values())),
-                "acks": copy.deepcopy(self._acks[-self.ack_limit:]),
-                "sequence_highwater": copy.deepcopy(self._highwater),
+                "pending": _deep_copy(list(self._pending.values())),
+                "acks": _deep_copy(self._acks[-self.ack_limit:]),
+                "sequence_highwater": _deep_copy(self._highwater),
             }
             return value
 
