@@ -494,6 +494,8 @@ function Write-SyncProgressHeartbeat {
     ok = $true
     inProgress = -not [bool]$Completed
     phase = $Phase
+    ownerPid = $PID
+    ownerStartedAt = (Get-Process -Id $PID).StartTime.ToUniversalTime().ToString("o")
     updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
     # Keep the canonical heartbeat timestamp populated while a long atomic
     # sync is in progress.  Supervisors written against the completed

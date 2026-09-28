@@ -136,6 +136,71 @@ def _sync_receipt_is_stale(
     return age < -60 or (age > age_limit and not same_held_generation)
 
 
+def _process_creation_utc(pid: int) -> datetime | None:
+    """Creation time of a running process, or None when it is not running."""
+
+    if pid <= 0:
+        return None
+    unknown = datetime.min.replace(tzinfo=timezone.utc)
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            # ERROR_ACCESS_DENIED means the pid exists under another account.
+            return unknown if ctypes.get_last_error() == 5 else None
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:
+                return None  # 259 == STILL_ACTIVE
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            if not kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user),
+            ):
+                return unknown
+            ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            return datetime.fromtimestamp(ticks / 1e7 - 11644473600, tz=timezone.utc)
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    return unknown
+
+
+def _in_progress_owner_is_dead(payload: dict) -> bool:
+    """True when an in-progress receipt names an owner that no longer runs.
+
+    A reused pid is detected by comparing the recorded owner start time. A
+    receipt without owner identity cannot prove a dead owner; its staleness
+    is then decided by receipt age alone.
+    """
+
+    try:
+        pid = int(payload.get("ownerPid") or 0)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    created = _process_creation_utc(pid)
+    if created is None:
+        return True
+    recorded = payload.get("ownerStartedAt")
+    if not recorded or created == datetime.min.replace(tzinfo=timezone.utc):
+        return False
+    try:
+        return abs((created - _parse_utc(recorded)).total_seconds()) > 5
+    except MirrorCoherenceError:
+        return False
+
+
 def assert_mirror_coherent(
     *,
     repo_root: str | os.PathLike[str],
@@ -177,7 +242,11 @@ def assert_mirror_coherent(
         previous=previous,
         held_lease=held_lease,
     )
-    if payload.get("inProgress") is True and not receipt_stale:
+    if payload.get("inProgress") is True:
+        # A dead owner or an expired receipt can never complete this sync; the
+        # distinct code lets the next sync owner take the receipt over.
+        if receipt_stale or _in_progress_owner_is_dead(payload):
+            raise MirrorCoherenceError("MIRROR_SYNC_STALE_IN_PROGRESS")
         raise MirrorCoherenceError("MIRROR_SYNC_IN_PROGRESS")
     if payload.get("ok") is not True:
         raise MirrorCoherenceError("MIRROR_SYNC_RECEIPT_FAILED")

@@ -107,11 +107,60 @@ def test_stale_in_progress_receipt_expires_before_in_progress_gate(tmp_path):
     _write_mirror_identity(mirror)
     old = datetime.now(timezone.utc) - timedelta(minutes=11)
     _write_heartbeat(mirror, syncedAt=old.isoformat(), inProgress=True, ok=True)
-    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_RECEIPT_STALE"):
+    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_STALE_IN_PROGRESS"):
         _check(repo, mirror, max_age_seconds=600)
 
     _write_heartbeat(mirror, syncedAt=old.isoformat(), inProgress=True, ok=False)
+    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_STALE_IN_PROGRESS"):
+        _check(repo, mirror, max_age_seconds=600)
+
+    _write_heartbeat(mirror, syncedAt=old.isoformat(), inProgress=False, ok=False)
     with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_RECEIPT_FAILED"):
+        _check(repo, mirror, max_age_seconds=600)
+
+
+def _dead_pid() -> int:
+    import subprocess
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def test_fresh_in_progress_receipt_with_dead_owner_is_stale(tmp_path):
+    repo, mirror = tmp_path / "repo", tmp_path / "mirror"
+    repo.mkdir(); mirror.mkdir()
+    _write_mirror_identity(mirror)
+    _write_heartbeat(mirror, inProgress=True, ownerPid=_dead_pid())
+    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_STALE_IN_PROGRESS"):
+        _check(repo, mirror, max_age_seconds=600)
+
+
+def test_fresh_in_progress_receipt_with_live_owner_still_waits(tmp_path):
+    import os
+
+    repo, mirror = tmp_path / "repo", tmp_path / "mirror"
+    repo.mkdir(); mirror.mkdir()
+    _write_mirror_identity(mirror)
+    started = mirror_coherence._process_creation_utc(os.getpid())
+    assert started is not None
+    _write_heartbeat(mirror, inProgress=True, ownerPid=os.getpid(), ownerStartedAt=started.isoformat())
+    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_IN_PROGRESS"):
+        _check(repo, mirror, max_age_seconds=600)
+
+
+def test_in_progress_receipt_with_reused_owner_pid_is_stale(tmp_path):
+    import os
+
+    repo, mirror = tmp_path / "repo", tmp_path / "mirror"
+    repo.mkdir(); mirror.mkdir()
+    _write_mirror_identity(mirror)
+    _write_heartbeat(
+        mirror, inProgress=True, ownerPid=os.getpid(), ownerStartedAt="2020-01-01T00:00:00+00:00"
+    )
+    if mirror_coherence._process_creation_utc(os.getpid()) == datetime.min.replace(tzinfo=timezone.utc):
+        pytest.skip("process start time unavailable on this platform")
+    with pytest.raises(mirror_coherence.MirrorCoherenceError, match="MIRROR_SYNC_STALE_IN_PROGRESS"):
         _check(repo, mirror, max_age_seconds=600)
 
 

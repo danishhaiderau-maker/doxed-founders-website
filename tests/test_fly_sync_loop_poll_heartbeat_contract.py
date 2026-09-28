@@ -160,6 +160,27 @@ def test_sync_failure_receipt_is_terminal_not_in_progress():
     assert "syncedAt = $failureAt" in block
 
 
+def test_loop_takes_over_dead_owner_receipt_and_closes_its_own_in_finally():
+    source = _source()
+    guard = source.index("$guardStream = [System.IO.File]::Open(")
+    takeover = source.index('Clear-StaleInProgressHeartbeat -Path $heartbeatFile -Reason "MIRROR_SYNC_STALE_IN_PROGRESS_TAKEOVER"')
+    assert guard < takeover
+    helper = source[source.index("function Clear-StaleInProgressHeartbeat"):takeover]
+    assert '$terminal["ok"] = $false' in helper
+    assert '$terminal["inProgress"] = $false' in helper
+    assert ".stale-in-progress-" in helper
+    final = source[source.rindex("} finally {"):]
+    assert '-Reason "MIRROR_SYNC_LOOP_EXITED" -OwnedByThisProcess' in final
+
+
+def test_progress_receipt_names_its_owner():
+    child = CHILD_SCRIPT.read_text(encoding="utf-8-sig")
+    block = child[child.index("inProgress = -not [bool]$Completed"):]
+    block = block[:block.index("source = $SourceUrl")]
+    assert "ownerPid = $PID" in block
+    assert "ownerStartedAt = " in block
+
+
 def test_transient_poll_failure_retains_only_a_qualified_completed_match():
     source = _source()
 

@@ -349,6 +349,32 @@ try {
 }
 Set-Content -LiteralPath $lockFile -Value "$PID" -NoNewline -Encoding UTF8
 
+# Holding the guard proves no other loop is alive. An in-progress receipt left
+# by a dead writer can never complete; preserve it and publish a terminal
+# failure so the analyzer reports failure instead of waiting forever.
+function Clear-StaleInProgressHeartbeat {
+  param([string]$Path, [string]$Reason, [switch]$OwnedByThisProcess)
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+  try { $current = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { return $false }
+  if ($current.inProgress -ne $true) { return $false }
+  if ($OwnedByThisProcess -and [string]$current.ownerPid -ne [string]$PID) { return $false }
+  $stamp = [datetime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
+  Copy-Item -LiteralPath $Path -Destination "$Path.stale-in-progress-$stamp" -Force -ErrorAction SilentlyContinue
+  $terminal = [ordered]@{}
+  foreach ($property in $current.PSObject.Properties) { $terminal[$property.Name] = $property.Value }
+  $terminal["ok"] = $false
+  $terminal["inProgress"] = $false
+  $terminal["phase"] = "failed"
+  $terminal["failureCode"] = $Reason
+  $terminal["abandonedPhase"] = [string]$current.phase
+  $terminal["syncedAt"] = [datetime]::UtcNow.ToString("o")
+  Write-Utf8NoBomJsonAtomic -LiteralPath $Path -Value $terminal -Depth 8
+  return $true
+}
+if (Clear-StaleInProgressHeartbeat -Path $heartbeatFile -Reason "MIRROR_SYNC_STALE_IN_PROGRESS_TAKEOVER") {
+  Add-Content -LiteralPath $logFile -Value "$([datetime]::UtcNow.ToString('o'))`tTAKEOVER`tstale in-progress receipt preserved and closed"
+}
+
 . (Join-Path $scriptDir "home-bot-vault-env.ps1")
 Import-HomeBotVaultConfig -VaultEnvPath $vaultEnv
 if (-not $env:BOT_ADMIN_TOKEN) {
@@ -1162,6 +1188,9 @@ try {
     }
   }
 } finally {
+  try {
+    [void](Clear-StaleInProgressHeartbeat -Path $heartbeatFile -Reason "MIRROR_SYNC_LOOP_EXITED" -OwnedByThisProcess)
+  } catch { }
   if ($generationLease) { $generationLease.Dispose() }
   Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
   if ($guardStream) { $guardStream.Dispose() }
