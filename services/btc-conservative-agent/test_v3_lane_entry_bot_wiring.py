@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from combo_pathway_config import COMBO_EXECUTION_LANES
+
 
 BOT = Path(__file__).with_name("bot.py")
 SOURCE = BOT.read_text(encoding="utf-8")
@@ -71,6 +73,7 @@ def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expec
         "guard_retired_lane_execution": lambda *_args: True,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
         "is_research_lane_enabled": lambda _lane: True,
+        "PATIENT_CHASE_LANES": frozenset(COMBO_EXECUTION_LANES),
         "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "PATIENT",
         "_shared_ai_call_id": lambda ai_result=None, ctx=None: (ai_result or ctx)["shared_ai_call_id"],
         "allocate_lane_trade_id": lambda _lane: "child-1",
@@ -87,11 +90,17 @@ def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expec
         "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
         "_spawn_lab_combo_shadow": lambda *_args, **_kwargs: None,
     }
+    # Production order resolution is the enabled registry lane. Continuous is
+    # analysis-only and returns through the lab shadow before process_signal.
+    is_patient_chase_lane = load_function("is_patient_chase_lane", namespace)
+    enabled_lane = COMBO_EXECUTION_LANES[0]
+    assert is_patient_chase_lane(enabled_lane) is True
+    assert is_patient_chase_lane("CONTINUOUS") is False
     spawn = load_function("_spawn_combo_lane", namespace)
     spawn(
         {"shared_ai_call_id": "scan-1"},
         {"decision": "APPROVE", "direction": "LONG", "shared_ai_call_id": "scan-1"},
-        1.0, {}, "CONTINUOUS", "TEST",
+        1.0, {}, enabled_lane, "TEST",
     )
     assert len(writes) == 1
     assert writes[0][2:] == expected
