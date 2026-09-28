@@ -277,7 +277,7 @@ jobs:
           status=call("/api/status")
           if str(status.get("source_git_rev") or "").lower()!=expected: raise SystemExit("unexpected deployed revision")
           if not(status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False): raise SystemExit("paper safety not proven")
-          call("/api/pause",{})
+          call("/api/pause",{"owner":"DEPLOY_MAINTENANCE"})
           for _ in range(8):
             status=call("/api/status"); progress=status.get("strategy_progress") or {}
             if status.get("execution_paused") is True and status.get("manual_admin_pause") is True and int(progress.get("pending_orders") or 0)==0 and int(progress.get("open_positions") or 0)==0: break
@@ -304,7 +304,7 @@ jobs:
             with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
           seen=[]; last=None; proof_started=time.time(); deadline=proof_started+1000
           while time.time()<deadline:
-            call("/api/pause",{}); last=call("/api/status"); pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
+            call("/api/pause",{"owner":"DEPLOY_MAINTENANCE"}); last=call("/api/status"); pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
             safe=str(last.get("source_git_rev") or "").lower()==expected and last.get("execution_paused") is True and last.get("manual_admin_pause") is True and last.get("force_paper_mode") is True and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
             age=pipeline.get("last_success_age_sec")
             productive=(int(progress.get("rows_scanned") or 0)>0 and int(progress.get("bytes_indexed") or 0)>0) or int(progress.get("promoted_qualification_retries") or 0)>0
@@ -328,7 +328,7 @@ jobs:
           def call(path,payload=None):
             data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
             with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
-          resumed=call("/api/resume",{"clear_admin_manual_pause": True}); final=call("/api/status")
+          resumed=call("/api/resume",{"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status")
           if not(resumed.get("status")=="resumed" and final.get("execution_paused") is False and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False): raise SystemExit("safe paper resume not proven")
           PY
 
@@ -366,7 +366,7 @@ jobs:
               raise SystemExit("refusing cursor repair on an unexpected deployed revision")
           if not (status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False):
               raise SystemExit("paper-only, live-disabled, disarmed safety is not proven")
-          call("/api/pause", {})
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           for _ in range(8):
               status = call("/api/status"); progress = status.get("strategy_progress") or {}
               if (status.get("execution_paused") is True and status.get("manual_admin_pause") is True
@@ -401,7 +401,7 @@ jobs:
               with urllib.request.urlopen(req,timeout=timeout) as response:return json.load(response)
           successes=[]; last=None; deadline=time.time()+1000
           while time.time()<deadline:
-              call("/api/pause", {}); last=call("/api/status")
+              call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"}); last=call("/api/status")
               pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
               safe=(str(last.get("source_git_rev") or "").lower()==expected and last.get("force_paper_mode") is True
                     and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
@@ -417,7 +417,7 @@ jobs:
                   raise SystemExit("worker reached a new classified blocker: "+json.dumps(pipeline,sort_keys=True))
               time.sleep(10)
           if len(successes)<2: raise SystemExit("two advancing worker successes not proven: "+json.dumps(last or {},sort_keys=True))
-          resumed=call("/api/resume", {"clear_admin_manual_pause": True}); final=call("/api/status")
+          resumed=call("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status")
           if not (resumed.get("status")=="resumed" and final.get("execution_paused") is False
                   and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True
                   and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False
@@ -480,7 +480,7 @@ jobs:
               and status.get("live_armed") is False
           ):
               raise SystemExit("paper-only, live-disabled, disarmed safety is not proven")
-          request_json("/api/pause", {})
+          request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           for _ in range(6):
               status = request_json("/api/status")
               progress = status.get("strategy_progress") or {}
@@ -526,7 +526,7 @@ jobs:
           deadline = time.time() + 1000
           while time.time() < deadline:
               try:
-                  call("/api/pause", {})
+                  call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
                   last = call("/api/status")
                   pipeline = last.get("lifecycle_pipeline") or {}
                   progress = pipeline.get("progress") or {}
@@ -558,7 +558,7 @@ jobs:
           if len(success_receipts) < 2:
               raise SystemExit("two distinct lifecycle worker successes were not proven")
 
-          resumed = call("/api/resume", {"clear_admin_manual_pause": True})
+          resumed = call("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})
           if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
               raise SystemExit("paper resume was not acknowledged")
           final = call("/api/status")
@@ -1061,6 +1061,11 @@ jobs:
           python -m pytest test_chase_exact_bucket_controls.py -q
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q
           python test_manual_pause_entry_gate.py
+          python test_pause_owner_resume_default.py
+          python test_api_resume_deadlock.py
+          python -m pytest test_collection_epoch_binding.py -q
+          python -m pytest test_score_led_fill_revalidation.py -q
+          python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py -q
           python -m pytest test_manual_pause_fill_handoff.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
@@ -1165,6 +1170,27 @@ jobs:
           # This pin is the generation-less bridge for tipping off the crash-loop tip image onto the restore tree.
           legacy_bootstrap_revision = "4ed032bb9be4b45995b9a74b4bc855d28dd4fb08"
           legacy_status_revision = legacy_bootstrap_revision[:12]
+          # Record the operator's pre-deploy paper state so the post-deploy
+          # gate can prove the exact state was restored.
+          prior = {"captured": False}
+          try:
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  prior_status = json.load(response)
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/state", headers=headers), timeout=30) as response:
+                  prior_state = json.load(response)
+              prior_paused = prior_status.get("manual_admin_pause") is True
+              prior = {
+                  "captured": True,
+                  "operator_paused": bool(prior_paused and prior_status.get("pause_owner") in {"OPERATOR", "SAFETY"}),
+                  "research_lane_enabled": {
+                      str(k): bool(v) for k, v in dict(prior_state.get("research_lane_enabled") or {}).items()
+                  },
+              }
+          except Exception as exc:
+              print(f"prior operator state not captured: {type(exc).__name__}", flush=True)
+          print("prior operator state: " + json.dumps(prior, sort_keys=True), flush=True)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("prior_operator_state=" + json.dumps(prior, sort_keys=True, separators=(",", ":")) + "\n")
           status = None
           for attempt in range(1, 6):
               # The previous guarded run may already have established the
@@ -1186,7 +1212,7 @@ jobs:
               except Exception as exc:
                   print(f"pause precheck attempt={attempt} response={type(exc).__name__}", flush=True)
               try:
-                  request = urllib.request.Request(base + "/api/pause", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
+                  request = urllib.request.Request(base + "/api/pause", data=b'{"owner": "DEPLOY_MAINTENANCE"}', headers={**headers, "Content-Type": "application/json"}, method="POST")
                   with urllib.request.urlopen(request, timeout=20) as response:
                       json.load(response)
               except Exception as exc:
@@ -1672,7 +1698,7 @@ jobs:
 
           for attempt in range(1, 11):
               try:
-                  paused = request_json("/api/pause", {}, timeout=30)
+                  paused = request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"}, timeout=30)
                   exact_safe_status(require_paused=True)
                   if paused.get("status") == "paused" and paused.get("execution_paused") is True:
                       break
@@ -1923,7 +1949,7 @@ jobs:
           # The preceding postdeploy boundary is already paused.  Reassert it
           # once, then observe read-only status so this gate cannot create a
           # repeated persistent-config write/fsync loop.
-          call("/api/pause", {})
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
           while time.monotonic() < deadline:
               # The lifecycle owner is independent of paper execution and
               # continues bounded subprocess cycles while the pause remains.
@@ -1978,6 +2004,7 @@ jobs:
           PY
 
       - name: Resume paper execution after exact-revision acceptance
+        id: paper_resume
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
         env:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
@@ -1988,9 +2015,15 @@ jobs:
           base = "https://doxed-btc-bot.fly.dev"
           expected = os.environ["EXPECTED_REVISION"][:12]
           headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
-          request = urllib.request.Request(base + "/api/resume", data=json.dumps({"clear_admin_manual_pause": True}).encode(), headers={**headers, "Content-Type": "application/json"}, method="POST")
+          request = urllib.request.Request(base + "/api/resume", data=json.dumps({"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}).encode(), headers={**headers, "Content-Type": "application/json"}, method="POST")
           with urllib.request.urlopen(request, timeout=30) as response:
               resumed = json.load(response)
+          if resumed.get("status") == "operator_pause_retained":
+              # A deliberate operator or safety pause outlives the deploy.
+              print("Deploy maintenance ended; retained pause owner=" + str(resumed.get("pause_owner")))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  handle.write("operator_pause_retained=true\n")
+              raise SystemExit(0)
           if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
               raise SystemExit("paper resume was not acknowledged")
           last = None
@@ -2011,6 +2044,15 @@ jobs:
               time.sleep(3)
           raise SystemExit("exact-revision paper resume confirmation failed: " + json.dumps(last, sort_keys=True))
           PY
+
+      - name: Assert paper active with advancing AI cadence and restored operator state
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && steps.paper_resume.outputs.operator_pause_retained != 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          PRIOR_OPERATOR_STATE: ${{ steps.paper_maintenance.outputs.prior_operator_state }}
+        run: python scripts/fly_postdeploy_active_gate.py
 
 
       - name: Keep true-flat ADMIN_MANUAL after exact-revision acceptance
@@ -2038,29 +2080,26 @@ jobs:
                   and status.get("bitfinex_live_enabled") is False
                   and status.get("force_paper_mode") is True
               ):
-                  request = urllib.request.Request(
-                      base + "/api/resume",
-                      data=b"{}",
-                      headers={**headers, "Content-Type": "application/json"},
-                      method="POST",
-                  )
-                  try:
-                      with urllib.request.urlopen(request, timeout=30) as response:
-                          body = json.load(response)
-                      raise SystemExit(
-                          "bare resume unexpectedly cleared sticky ADMIN_MANUAL: "
-                          + json.dumps(body, sort_keys=True)
+                  def post(path, payload):
+                      request = urllib.request.Request(
+                          base + path,
+                          data=json.dumps(payload).encode(),
+                          headers={**headers, "Content-Type": "application/json"},
+                          method="POST",
                       )
-                  except urllib.error.HTTPError as exc:
-                      body = json.loads(exc.read().decode() or "{}")
-                      if exc.code != 409 or body.get("reason") != "STICKY_ADMIN_MANUAL_PAUSE":
-                          raise SystemExit(
-                              "sticky ADMIN_MANUAL gate not proven: "
-                              + json.dumps(body, sort_keys=True)
-                          )
+                      with urllib.request.urlopen(request, timeout=30) as response:
+                          return json.load(response)
+                  # An explicitly requested hold becomes an operator pause so
+                  # later deploys cannot auto-clear it.
+                  held = post("/api/pause", {})
+                  if held.get("pause_owner") != "OPERATOR":
+                      raise SystemExit("maintenance hold not owned by OPERATOR: " + json.dumps(held, sort_keys=True))
+                  retained = post("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})
+                  if retained.get("status") != "operator_pause_retained" or retained.get("execution_paused") is not True:
+                      raise SystemExit("deploy resume did not retain the operator hold: " + json.dumps(retained, sort_keys=True))
                   print(
                       f"True-flat ADMIN_MANUAL retained on accepted revision {expected}; "
-                      "bare resume blocked"
+                      "operator-owned hold survives deploy resume"
                   )
                   raise SystemExit(0)
               time.sleep(3)
@@ -2085,7 +2124,7 @@ jobs:
           last = None
           for attempt in range(1, 6):
               try:
-                  request = urllib.request.Request(base + "/api/pause", data=b"{}", headers={**headers, "Content-Type": "application/json"}, method="POST")
+                  request = urllib.request.Request(base + "/api/pause", data=b'{"owner": "DEPLOY_MAINTENANCE"}', headers={**headers, "Content-Type": "application/json"}, method="POST")
                   with urllib.request.urlopen(request, timeout=30) as response:
                       json.load(response)
                   with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:

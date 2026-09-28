@@ -161,6 +161,12 @@ def _policy_signature(*, raw_policy_id: str, entry: dict, exit_policy: dict,
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+# Each tile owns its own concurrent pending+open+awaiting capacity. One shared
+# three-minute AI call places at most one order per tile, and an order can rest
+# for entry_ttl_sec (1800s), so a tile needs ~10 slots to never refuse a cycle.
+TILE_MAX_ACTIVE_SIGNALS = 10
+
+
 def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           module: str, test_module: str, entry: dict, exit_policy: dict,
           relay_capability: str = "BLOCKED_UNQUALIFIED",
@@ -188,6 +194,7 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "relay_capability": relay_capability,
         "requested_margin_usd": 0.25,
         "risk_limits": {"account_risk_pct": 0.5, "hard_stop_margin_pct": 30.0},
+        "max_active_signals": TILE_MAX_ACTIVE_SIGNALS,
         "analyzer_cohort": raw_policy_id,
         "presentation": {
             "family": exit_policy["family"],
@@ -339,7 +346,7 @@ def validate_tile_registry() -> tuple[str, ...]:
         "presentation", "retirement_status", "entry_policy", "exit_policy",
         "id_prefix", "toggle_key", "lifecycle_state", "implementation_modules",
         "dedicated_test_modules",
-        "component_surfaces",
+        "component_surfaces", "max_active_signals",
     }
     prefixes = {}
     for lane, spec in ACTIVE_TILE_REGISTRY.items():
@@ -350,6 +357,9 @@ def validate_tile_registry() -> tuple[str, ...]:
         if prefix in prefixes:
             defects.append(f"DUPLICATE_ID_PREFIX:{prefix}:{prefixes[prefix]}:{lane}")
         prefixes[prefix] = lane
+        cap = spec.get("max_active_signals")
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            defects.append(f"{lane}:INVALID_MAX_ACTIVE_SIGNALS")
         if spec.get("paper_only") and spec.get("platform_relay_eligible"):
             defects.append(f"{lane}:PAPER_ONLY_RELAY_CONTRADICTION")
         if not spec.get("paper_only") or spec.get("execution_scope") != "PAPER_ONLY":
@@ -382,6 +392,14 @@ def validate_tile_registry() -> tuple[str, ...]:
     if policy_overlap:
         defects.append("ACTIVE_RETIRED_POLICY_OVERLAP:" + ",".join(sorted(policy_overlap)))
     return tuple(defects)
+
+
+def tile_max_active_signals(lane) -> int | None:
+    """Registry-owned per-tile capacity; None for lanes outside the registry."""
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").upper())
+    if not spec:
+        return None
+    return int(spec["max_active_signals"])
 
 
 def active_tile_lifecycle_manifest() -> tuple[dict, ...]:

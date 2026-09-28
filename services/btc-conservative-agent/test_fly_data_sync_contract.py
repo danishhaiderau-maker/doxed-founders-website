@@ -443,7 +443,7 @@ def test_chunk_pressure_circuit_breaker_aborts_early_and_resets_deterministicall
         timeout=15,
     )
     assert json.loads(completed.stdout) == [1, 2, 0, 1, 1, 0]
-    assert '$resourcePressureCircuitThreshold = 2' in SYNC_SCRIPT
+    assert '$resourcePressureCircuitThreshold = 6' in SYNC_SCRIPT
     assert '$consecutiveChunkPressureFailures = 0' in SYNC_SCRIPT
     assert 'stage=file_chunk_resource_pressure_circuit_open' in SYNC_SCRIPT
     circuit = SYNC_SCRIPT.index('stage=file_chunk_resource_pressure_circuit_open')
@@ -1201,7 +1201,7 @@ def test_final_identity_fence_skips_full_inventory_without_weakening_file_fences
     assert '"file generation changed during download"' in BOT
 
 
-def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monkeypatch, tmp_path):
+def test_data_sync_includes_runtime_receipts_without_volume_root_basename_collision(monkeypatch, tmp_path):
     receipt_names = {
         "tile_independence_report.json",
         "ai_scan_independence_report.json",
@@ -1214,11 +1214,10 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     for name in receipt_names:
-        (tmp_path / name).write_text('{"canonical":true}\n', encoding="utf-8")
-    # A same-named runtime artifact must not create a duplicate manifest path
-    # or override the canonical top-level download target.
-    (runtime / "tile_independence_report.json").write_text(
-        '{"canonical":false}\n', encoding="utf-8"
+        (runtime / name).write_text('{"canonical":true}\n', encoding="utf-8")
+    # A leftover volume-root copy must not share the runtime basename.
+    (tmp_path / "tile_independence_report.json").write_text(
+        '{"canonical":false,"poison":true}\n', encoding="utf-8"
     )
     (runtime / "ordinary.json").write_text("{}\n", encoding="utf-8")
     db = sqlite3.connect(runtime / "research.db")
@@ -1282,7 +1281,10 @@ def test_data_sync_includes_canonical_volume_receipts_when_runtime_is_child(monk
         runtime / "research.db"
     ).resolve()
     resolved = namespace["_data_sync_resolve_relpath"]("tile_independence_report.json")
-    assert resolved == (tmp_path / "tile_independence_report.json").resolve()
+    assert resolved == (runtime / "tile_independence_report.json").resolve()
+    assert resolved != (tmp_path / "tile_independence_report.json").resolve()
+    runtime_row = next(row for row in rows if row["path"] == "tile_independence_report.json")
+    assert runtime_row["size"] == (runtime / "tile_independence_report.json").stat().st_size
     try:
         namespace["_data_sync_resolve_relpath"]("../lane_memory_validation.json")
     except ValueError:
@@ -3957,7 +3959,17 @@ def test_unattended_research_supervisor_is_local_repair_only():
         assert forbidden not in RESEARCH_SUPERVISOR_TASK.lower()
 
 
+def test_v3_finalize_response_echoes_the_bound_ack_session():
+    start = BOT.index("def _data_sync_ack_v3(body: dict)")
+    end = BOT.index("@app.route('/api/data-sync/ack'", start)
+    ack_v3 = BOT[start:end]
+    final_commit = ack_v3[ack_v3.rindex("_write_data_sync_ack(compact_ack)"):]
+    assert '"operation": "FINALIZE"' in final_commit
+    assert '"ack_session_id": session_id' in final_commit
+
+
 if __name__ == "__main__":
+    test_v3_finalize_response_echoes_the_bound_ack_session()
     test_fly_runtime_cwd_is_volume_backed()
     test_incremental_sync_is_authenticated_and_chunk_verified()
     test_local_sync_has_fail_closed_30_gib_admission_guard()

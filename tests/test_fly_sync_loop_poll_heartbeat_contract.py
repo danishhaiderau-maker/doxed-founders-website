@@ -150,6 +150,37 @@ def test_receipt_bootstrap_pending_is_retryable_but_remains_bounded():
     assert "$preflightInventoryWaitMaxSec = 1800" in source
 
 
+def test_sync_failure_receipt_is_terminal_not_in_progress():
+    source = _source()
+    start = source.index("ok = $false\n          inProgress = $false\n          phase = \"failed\"")
+    block = source[start:source.index("inventoryDiagnostic = $lastInventoryDiagnostic", start)]
+    assert "ok = $false" in block
+    assert "inProgress = $false" in block
+    assert 'phase = "failed"' in block
+    assert "syncedAt = $failureAt" in block
+
+
+def test_loop_takes_over_dead_owner_receipt_and_closes_its_own_in_finally():
+    source = _source()
+    guard = source.index("$guardStream = [System.IO.File]::Open(")
+    takeover = source.index('Clear-StaleInProgressHeartbeat -Path $heartbeatFile -Reason "MIRROR_SYNC_STALE_IN_PROGRESS_TAKEOVER"')
+    assert guard < takeover
+    helper = source[source.index("function Clear-StaleInProgressHeartbeat"):takeover]
+    assert '$terminal["ok"] = $false' in helper
+    assert '$terminal["inProgress"] = $false' in helper
+    assert ".stale-in-progress-" in helper
+    final = source[source.rindex("} finally {"):]
+    assert '-Reason "MIRROR_SYNC_LOOP_EXITED" -OwnedByThisProcess' in final
+
+
+def test_progress_receipt_names_its_owner():
+    child = CHILD_SCRIPT.read_text(encoding="utf-8-sig")
+    block = child[child.index("inProgress = -not [bool]$Completed"):]
+    block = block[:block.index("source = $SourceUrl")]
+    assert "ownerPid = $PID" in block
+    assert "ownerStartedAt = " in block
+
+
 def test_transient_poll_failure_retains_only_a_qualified_completed_match():
     source = _source()
 
@@ -193,7 +224,7 @@ def test_full_sync_reuses_authenticated_loop_preflight_without_duplicate_fetch()
     # the checksum acknowledgement remains after all file reconciliation.
     assert '-Stage "acknowledgement_finalize"' in child_source
     assert "$ack = Invoke-DataSyncJsonRequest" in child_source
-    assert "AckAccepted = $ack.accepted" in child_source
+    assert "AckAccepted = [bool]$terminalAcknowledgement.AckAccepted" in child_source
     assert "Canonical manifest commit failed" in child_source
 
 
@@ -245,7 +276,10 @@ def test_reused_manifest_is_fenced_against_a_fresh_authenticated_identity():
     acknowledgement = child_source.index('-Stage "acknowledgement_finalize"')
     canonical_completion = child_source.index("Canonical manifest commit failed")
 
-    assert '"$base/api/data-sync/manifest?fresh=1$identityQuery$pathQuery$generationQuery$pageQuery&nonce="' in child_source
+    assert '"$base/api/data-sync/manifest?fresh=1$pathQuery$generationQuery$pageQuery&nonce="' in child_source
+    # The final identity fence is a read-only poll: fresh=1 would restart the
+    # inventory and race CURRENT back to STALE before the fence completes.
+    assert 'return "$base/api/data-sync/manifest?identity_only=1$generationQuery$pathQuery"' in child_source
     assert final_fence < identity_assertion < acknowledgement < canonical_completion
     for identity_field in (
         "source_git_rev",

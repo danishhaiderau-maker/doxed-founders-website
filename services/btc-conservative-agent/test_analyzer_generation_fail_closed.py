@@ -56,6 +56,13 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
         return default or {}
 
     monkeypatch.setattr(dashboard, "_read_json", fake_read_json)
+    monkeypatch.setattr(dashboard, "_upstream_sync_identity", lambda: {
+        "sync_id": dashboard.EXPECTED_ANALYZER_SYNC_ID,
+        "sync_id_source": "sync_heartbeat",
+        "tile_registry_signature": dashboard.active_tile_registry_signature(),
+        "tile_registry_signature_source": "sync_heartbeat",
+        "fly_health_observed_at": None,
+    })
     monkeypatch.setattr(dashboard, "_read_report", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         dashboard, "_current_generation_report", lambda _name: dict(qualified_report)

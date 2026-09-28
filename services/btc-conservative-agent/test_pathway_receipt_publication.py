@@ -1,4 +1,8 @@
+import ast
 import json
+import os
+import threading
+import time
 from pathlib import Path
 
 import pathway_lab_validation as validation
@@ -73,12 +77,13 @@ def test_periodic_runtime_receipt_preserves_identity_and_real_verdict():
     assert payload["analyzer_sync_id"] == "sync-test"
 
 
-def test_bot_publication_uses_canonical_volume_and_atomic_replace():
+def test_bot_publication_uses_runtime_directory_and_atomic_replace():
     source = (Path(__file__).with_name("bot.py")).read_text(encoding="utf-8")
     body = source.split("def _publish_pathway_receipt", 1)[1].split(
         "def publish_startup_pathway_receipts", 1
     )[0]
-    assert "_data_sync_volume_root()" in body
+    assert "_data_sync_runtime_root()" in body
+    assert "_data_sync_volume_root()" not in body
     assert "_atomic_file_replace(" in body
     assert "Path(name).name" in body
     assert "_AGENT_ROOT" not in body
@@ -96,3 +101,43 @@ def test_bot_publication_uses_canonical_volume_and_atomic_replace():
     assert '"lane_memory_validation.json"' in lane_validation
     assert '"lane_memory_violation.json"' in lane_validation
     assert '"active": False' in lane_validation
+
+
+def test_newly_written_independence_report_is_under_runtime_not_volume_root(tmp_path, monkeypatch):
+    source = (Path(__file__).with_name("bot.py")).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    wanted = {
+        "_data_sync_runtime_root",
+        "_data_sync_volume_root",
+        "_publish_pathway_receipt",
+        "_atomic_file_replace",
+    }
+    selected = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    namespace = {
+        "Path": Path,
+        "os": os,
+        "json": json,
+        "threading": threading,
+        "time": time,
+        "logger": type("Logger", (), {"warning": staticmethod(lambda *args, **kwargs: None)})(),
+        "_pathway_receipt_lock": threading.RLock(),
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
+    monkeypatch.setenv("BOT_DATA_DIR", str(tmp_path))
+
+    written = namespace["_publish_pathway_receipt"](
+        "ai_scan_independence_report.json",
+        {"schema": "ai_scan_independence_v2", "verdict": "PASS"},
+    )
+
+    runtime_path = tmp_path / "runtime" / "ai_scan_independence_report.json"
+    volume_path = tmp_path / "ai_scan_independence_report.json"
+    assert written is True
+    assert runtime_path.is_file()
+    assert runtime_path.parent == (tmp_path / "runtime").resolve()
+    assert not volume_path.exists()
+    assert runtime_path.resolve() != volume_path.resolve()
+    assert json.loads(runtime_path.read_text(encoding="utf-8"))["verdict"] == "PASS"

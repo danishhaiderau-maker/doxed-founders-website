@@ -21,8 +21,18 @@ def load_function(name, namespace):
     )
     module = ast.Module(body=[node], type_ignores=[])
     ast.fix_missing_locations(module)
+    namespace.setdefault("os", _ScoreLedEnabledOs())
     exec(compile(module, str(BOT), "exec"), namespace)
     return namespace[name]
+
+
+class _ScoreLedEnabledOs:
+    """Fan-out refuses to start unless SCORE_LED_PAPER_RESEARCH_ENABLED is exactly 1."""
+
+    def getenv(self, key, default=None):
+        if key == "SCORE_LED_PAPER_RESEARCH_ENABLED":
+            return "1"
+        return os.getenv(key, default)
 
 
 class QuietLogger:
