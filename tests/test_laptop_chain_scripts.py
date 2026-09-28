@@ -72,6 +72,68 @@ def test_watcher_single_owner_endless_loop_and_heartbeat_cleanup():
     assert "Invoke-ChainLogRotation" in watcher
 
 
+def test_watcher_resumes_custody_generation_and_requests_stale_refresh():
+    watcher = _source("laptop-ack-watcher.ps1")
+    loop = watcher[watcher.index("$iteration = 0"):]
+    assert "generation_id=$GenerationId" in watcher
+    assert "StatusCode -eq 410) { return $null }" in watcher
+    custody = loop.index("Get-CustodyGeneration $acked.Set")
+    # Custody is only consulted when the live inventory cannot authorize a sync,
+    # and it is resolved before the eligibility gate that launches the child.
+    assert loop.index("if ($inventoryStatus -eq 'CURRENT' -and $ackEligible -and $authoritative) { $null }") < custody
+    assert custody < loop.index("$status.state = 'WAIT_INVENTORY_NOT_ACK_ELIGIBLE'")
+    assert custody < loop.index("Invoke-GenerationSync -Manifest $manifest")
+    assert "/api/data-sync/manifest/refresh" in watcher
+    wait = loop[loop.index("$status.state = 'WAIT_INVENTORY_NOT_ACK_ELIGIBLE'"):loop.index("WAIT_REVISION_DRIFT")]
+    assert "Test-InventoryRefreshNeeded -Manifest $liveManifest -InventoryStatus $liveStatus" in wait
+    assert "$script:lastInventoryRefreshRequest = [datetime]::UtcNow" in wait
+    assert "$RevalidatingPollSec" in wait
+
+
+def _watcher_function(name: str) -> str:
+    source = _source("laptop-ack-watcher.ps1")
+    match = re.search(r"^function " + re.escape(name) + r"\b.*?^}\r?\n", source, re.S | re.M)
+    assert match, name
+    return match.group(0)
+
+
+@windows_only
+@pytest.mark.parametrize(
+    "heartbeat, acked, expected",
+    [
+        ({"inProgress": False, "ackFinalized": False, "inventoryGenerationId": "a" * 64}, [], "a" * 64),
+        ({"inProgress": True, "ackFinalized": False, "inventoryGenerationId": "a" * 64}, [], ""),
+        ({"inProgress": False, "ackFinalized": True, "inventoryGenerationId": "a" * 64}, [], ""),
+        ({"inProgress": False, "ackFinalized": False, "inventoryGenerationId": "a" * 64}, ["a" * 64], ""),
+        ({"inProgress": False, "ackFinalized": False, "inventoryGenerationId": "not-a-generation"}, [], ""),
+        (None, [], ""),
+    ],
+)
+def test_custody_generation_selection(tmp_path, heartbeat, acked, expected):
+    heartbeat_file = tmp_path / "hb.json"
+    if heartbeat is not None:
+        heartbeat_file.write_text(json.dumps(heartbeat), encoding="utf-8")
+    script = tmp_path / "custody.ps1"
+    acked_literal = ",".join(f"'{item}'" for item in acked) or ""
+    script.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Read-JsonFile([string]$Path) { if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } else { $null } }\n"
+        f"$cfg = [pscustomobject]@{{ HeartbeatFile = '{heartbeat_file}' }}\n"
+        + _watcher_function("Get-CustodyGeneration")
+        + "$set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)\n"
+        + (f"foreach ($g in @({acked_literal})) {{ [void]$set.Add($g) }}\n" if acked else "")
+        + "$result = Get-CustodyGeneration $set\n"
+        "[Console]::Out.Write([string]$result)\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == expected
+
+
 def test_analyzer_runner_uses_real_exit_codes():
     runner = _source("run-analyzer-once.ps1")
     assert "WaitForExit" in runner
