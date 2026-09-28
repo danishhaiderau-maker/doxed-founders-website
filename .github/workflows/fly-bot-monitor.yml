@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Scheduled workflow definition lives on master, but Fly production
+          # source_git_rev is the canonical tip below. Check out that SHA so
+          # revision-drift stays on the deployed history instead of later
+          # master commits that have not shipped.
+          ref: 321937426346ad1f9150eac39ed67ee5edd5bf70
           # Resolve the newest commit that could have triggered a Fly deploy.
           # The deploy workflow also runs when its own safety contract or the
           # canonical flat-boundary checker changes, so service-only history
@@ -77,7 +82,7 @@ jobs:
           # descendant of the newest bot-source commit. Exact equality creates
           # false drift alarms. Prove both ancestry directions instead: the
           # deployed revision contains the latest required bot source, and it
-          # belongs to the current checked-out master history.
+          # belongs to the current production-pin history.
           if subprocess.run(
               ["git", "merge-base", "--is-ancestor", required, actual],
               check=False,
@@ -90,7 +95,7 @@ jobs:
               check=False,
           ).returncode != 0:
               raise SystemExit(
-                  f"Fly revision is not on current master: {actual[:12]}"
+                  f"Fly revision is not on production pin history: {actual[:12]}"
               )
           with urllib.request.urlopen(
               "https://doxed-btc-bot.fly.dev/ready", timeout=12
