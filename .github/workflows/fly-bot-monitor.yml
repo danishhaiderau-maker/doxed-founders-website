@@ -21,7 +21,7 @@ jobs:
           # source_git_rev is the canonical tip below. Check out that SHA so
           # revision-drift stays on the deployed history instead of later
           # master commits that have not shipped.
-          ref: 321937426346ad1f9150eac39ed67ee5edd5bf70
+          ref: aac5940abcbdacaf71a79d9534cd69adedd924ea
           # Resolve the newest commit that could have triggered a Fly deploy.
           # The deploy workflow also runs when its own safety contract or the
           # canonical flat-boundary checker changes, so service-only history
