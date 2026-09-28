@@ -85,6 +85,7 @@ function Test-AnalyzerEngineAlive {
 }
 
 function Wait-ForKey {
+  if ($env:DOXXED_NONINTERACTIVE -eq '1') { return }
   Write-Host ""
   Write-Host "--- Console stays open so you can copy logs. Press Enter to close ---" -ForegroundColor Cyan
   try { Read-Host } catch { while ($true) { Start-Sleep -Seconds 3600 } }
@@ -246,8 +247,18 @@ function Restart-OwnedAnalyzerDashboard {
   Set-Content -LiteralPath $receiptPath -Value ([string]$dashboard.Id) -NoNewline -Encoding UTF8
 }
 
+function Start-AnalyzerDashboard {
+  Assert-AnalyzerScenarioLaunchConfig -Receipt $scenarioLaunch
+  $dashboard = Start-Process -FilePath 'python' -ArgumentList @('research_dashboard.py','--standalone') `
+    -WorkingDirectory $agentDir -WindowStyle Hidden -PassThru
+  if ($null -eq $dashboard -or $dashboard.Id -le 0) { throw 'DASHBOARD_START_FAILED' }
+  Set-Content -LiteralPath (Join-Path $repoRoot '.home-analyzer-dashboard.pid') -Value ([string]$dashboard.Id) -NoNewline -Encoding UTF8
+}
+
 if ($DashboardOnly) {
-  try { Restart-OwnedAnalyzerDashboard } finally {
+  try {
+    if (Test-PortOpen $AnalyzerPort) { Restart-OwnedAnalyzerDashboard } else { Start-AnalyzerDashboard }
+  } finally {
     if ($lockHandle) { $lockHandle.Dispose() }
     Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
   }
@@ -445,3 +456,4 @@ try {
   }
   Wait-ForKey
 }
+exit $exitCode
