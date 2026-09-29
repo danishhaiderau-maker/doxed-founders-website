@@ -9,6 +9,11 @@ on:
     # fly-monitor-incident tracks it until recovery.
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      test_alert:
+        description: Inject one synthetic test_alert finding to prove the incident issue opens (two normal runs close it)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,6 +50,13 @@ jobs:
           # monitor's registry identity on the same startup policy as Fly;
           # an unset flag would expect the retired hypothesis identity.
           SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
+          # Transfer lag stays an annotation until the Tigris segment pipeline
+          # replaces the legacy ACK path; set to "1" to make it page.
+          FLY_MONITOR_SEGMENTS_LIVE: "0"
+          FLY_MONITOR_TEST_ALERT: ${{ inputs.test_alert && '1' || '0' }}
+          # Epoch seconds refreshed every 15 min by scripts/laptop_chain_incident.py
+          # from the laptop supervisor; stale > 2h raises laptop_silent.
+          LAPTOP_CHAIN_HEARTBEAT: ${{ vars.LAPTOP_CHAIN_HEARTBEAT }}
         run: python scripts/fly_monitor_run.py
       - name: Save incident state
         if: always()

@@ -44,7 +44,16 @@ try {
   }
 
   & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-chain-monitor.ps1') @roots | Out-Null
-  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$LASTEXITCODE"
+  $monitorExit = $LASTEXITCODE
+  # One GitHub issue per incident (label laptop-chain-incident) plus the
+  # supervisor heartbeat the Fly monitor watches. Never fails the tick.
+  $incident = 'not-run'
+  try {
+    $incident = (& python (Join-Path $PSScriptRoot 'laptop_chain_incident.py') --state-dir $cfg.StateDir 2>&1 | Select-Object -Last 1) -as [string]
+  } catch {
+    $incident = "INCIDENT_ERROR $($_.Exception.Message)"
+  }
+  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $incident"
 } catch {
   Write-ChainLog -Config $cfg -Name $logName -Message ("TICK_ERROR {0}" -f $_.Exception.Message)
   exit 1

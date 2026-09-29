@@ -37,6 +37,20 @@ POLICIES: Mapping[str, Policy] = {
     "paper_paused": Policy(1, 0.0, 6 * HOUR, False),
     # The monitor itself cannot read GitHub deploy state.
     "monitor_error": Policy(3, 60 * 60.0, 12 * HOUR, False),
+    # Volume pressure is monotonic and unaffected by deploys.
+    "disk_warn": Policy(1, 0.0, 12 * HOUR, False),
+    "disk_critical": Policy(1, 0.0, 2 * HOUR, False),
+    # Emitted only once DEPLOY_MAINTENANCE has owned the pause for an hour;
+    # maintenance must not suppress the alert for a stuck deploy itself.
+    "deploy_stuck": Policy(1, 0.0, 3 * HOUR, False),
+    "eval_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "ai_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    # Informational (annotation only) until the segment pipeline is live.
+    "transfer_lag": Policy(2, 60 * 60.0, 12 * HOUR, False),
+    # Laptop supervisor dead-man heartbeat (it cannot report its own death).
+    "laptop_silent": Policy(1, 0.0, 12 * HOUR, False),
+    # Operator-requested end-to-end proof of the notification channel.
+    "test_alert": Policy(1, 0.0, 0.0, False),
 }
 MAINTENANCE_GRACE_SEC = 90 * 60.0
 PAUSED_ALERT_SEC = 2 * HOUR
@@ -44,19 +58,25 @@ CLEAR_RUNS_TO_RESOLVE = 2
 
 
 def empty_state() -> dict[str, Any]:
-    return {"version": STATE_VERSION, "conditions": {}, "maintenance_since": None, "paused_since": None}
+    return {
+        "version": STATE_VERSION,
+        "conditions": {},
+        "maintenance_since": None,
+        "paused_since": None,
+        "deploy_pause_since": None,
+    }
 
 
-def normalize_state(raw: Any) -> dict[str, Any]:
+def normalize_state(raw: Any, policies: Mapping[str, Policy] = POLICIES) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("version") != STATE_VERSION:
         return empty_state()
     state = empty_state()
     conditions = raw.get("conditions")
     if isinstance(conditions, dict):
         state["conditions"] = {
-            str(k): dict(v) for k, v in conditions.items() if isinstance(v, dict) and k in POLICIES
+            str(k): dict(v) for k, v in conditions.items() if isinstance(v, dict) and k in policies
         }
-    for key in ("maintenance_since", "paused_since"):
+    for key in ("maintenance_since", "paused_since", "deploy_pause_since"):
         value = raw.get(key)
         state[key] = float(value) if isinstance(value, (int, float)) else None
     return state
@@ -81,13 +101,22 @@ def evaluate(
     *,
     now: float,
     maintenance: bool,
+    informational: frozenset[str] = frozenset(),
+    policies: Mapping[str, Policy] = POLICIES,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Update ``state`` in place; return (decisions, resolved).
 
     Each decision has ``key``, ``message`` and ``action`` in
-    {"alert", "known", "pending", "suppressed"}. Only "alert" should fail the
-    run; resolved entries are previously alerted conditions that cleared.
+    {"alert", "known", "pending", "suppressed", "info"}. Only "alert" should
+    fail the run; resolved entries are previously alerted conditions that
+    cleared. Keys in ``informational`` are reported as "info" and never enter
+    incident state, so they cannot open, re-alert, or hold open the issue.
     """
+    findings = dict(findings)
+    info = [
+        {"key": key, "message": findings.pop(key), "action": "info"}
+        for key in sorted(informational & findings.keys())
+    ]
     if maintenance:
         if state.get("maintenance_since") is None:
             state["maintenance_since"] = now
@@ -98,7 +127,7 @@ def evaluate(
     conditions: dict[str, dict[str, Any]] = state["conditions"]
     decisions: list[dict[str, Any]] = []
     for key, message in findings.items():
-        policy = POLICIES[key]
+        policy = policies[key]
         entry = conditions.setdefault(key, {"first_seen": now, "runs": 0, "last_alert": None})
         entry["runs"] = int(entry.get("runs") or 0) + 1
         entry["clear_runs"] = 0
@@ -126,7 +155,7 @@ def evaluate(
         if entry["clear_runs"] >= CLEAR_RUNS_TO_RESOLVE:
             resolved.append({"key": key, "message": entry.get("last_message", "")})
             del conditions[key]
-    return decisions, resolved
+    return decisions + info, resolved
 
 
 def active_alerted(state: Mapping[str, Any]) -> dict[str, dict[str, Any]]:

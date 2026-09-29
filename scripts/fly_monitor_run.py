@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "services" / "btc-conservative-agent"))
 
 import fly_monitor_alerts as alerts  # noqa: E402
+import fly_monitor_rules as rules  # noqa: E402
 from fly_monitor_contract import (  # noqa: E402
     MonitorContractError,
     require_deployed_revision,
@@ -211,6 +212,19 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
             f"(pause_owner={health.get('pause_owner') if health else None}, "
             f"reason={health.get('execution_reason') if health else None!r})"
         )
+    findings.update(rules.deploy_stuck_findings(rules.track_deploy_pause(state, health, now), health))
+    findings.update(rules.disk_findings(health))
+    findings.update(rules.transfer_findings(health))
+    findings.update(rules.laptop_heartbeat_findings(os.environ.get("LAPTOP_CHAIN_HEARTBEAT"), now))
+    if health is not None:
+        volume = health.get("volume")
+        if isinstance(volume, dict):
+            notes.append(
+                f"volume used_pct={volume.get('used_pct')} free_bytes={volume.get('free_bytes')} "
+                f"growth_bytes_per_hour={volume.get('growth_bytes_per_hour')}"
+            )
+        else:
+            notes.append("Fly /health has no volume block (revision predates disk metrics)")
 
     if health is not None and health.get("process_alive") is True and deploy is not None:
         reported = str(health.get("source_git_rev") or health.get("git_rev") or "")
@@ -259,6 +273,7 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
                     require_strategy_progress(payload)
                 except MonitorContractError as exc:
                     findings["not_ready"] = str(exc)
+    findings.update(rules.cadence_findings(ready, paused=paused, now=now))
 
     if ready is not None and isinstance(ready.get("active_tiles"), list):
         import combo_pathway_config as registry
@@ -276,10 +291,17 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
     return findings, maintenance, notes
 
 
-def issue_body(state: dict[str, Any], now: float) -> str:
+def issue_body(
+    state: dict[str, Any],
+    now: float,
+    *,
+    label: str = INCIDENT_LABEL,
+    source: str = "the scheduled **Monitor Fly BTC bot** workflow",
+    link: str | None = None,
+) -> str:
     lines = [
-        f"<!-- {INCIDENT_LABEL} -->",
-        "Opened by the scheduled **Monitor Fly BTC bot** workflow. This issue is edited in place;",
+        f"<!-- {label} -->",
+        f"Opened by {source}. This issue is edited in place;",
         "comments are only added when a condition first alerts, re-alerts, or recovers.",
         "",
         "| Condition | Since (UTC) | Last alert (UTC) | Latest detail |",
@@ -290,38 +312,49 @@ def issue_body(state: dict[str, Any], now: float) -> str:
             f"| `{key}` | {_ts(entry.get('first_seen'))} | {_ts(entry.get('last_alert'))} | "
             f"{str(entry.get('last_message', '')).replace('|', '/')[:400]} |"
         )
-    lines += ["", f"Last checked {_ts(now)} by run {_run_url()}"]
+    lines += ["", f"Last checked {_ts(now)} by {link or 'run ' + _run_url()}"]
     return "\n".join(lines)
 
 
-def sync_issue(state: dict[str, Any], decisions: list[dict[str, Any]], resolved: list[dict[str, Any]], now: float) -> None:
-    github = GitHub()
-    open_issues = github.call(f"/issues?state=open&labels={INCIDENT_LABEL}&per_page=5")
+def sync_issue(
+    state: dict[str, Any],
+    decisions: list[dict[str, Any]],
+    resolved: list[dict[str, Any]],
+    now: float,
+    *,
+    client: Any = None,
+    label: str = INCIDENT_LABEL,
+    title: str = INCIDENT_TITLE,
+    source: str = "the scheduled **Monitor Fly BTC bot** workflow",
+    link: str | None = None,
+) -> None:
+    """Keep exactly one open issue per ``label`` in step with the dedup state."""
+    github = client if client is not None else GitHub()
+    where = link or _run_url()
+    body = lambda: issue_body(state, now, label=label, source=source, link=link)  # noqa: E731
+    open_issues = github.call(f"/issues?state=open&labels={label}&per_page=5")
     issue = open_issues[0] if open_issues else None
     fired = [d for d in decisions if d["action"] == "alert"]
     active = alerts.active_alerted(state)
 
     if fired and issue is None:
         try:
-            github.call("/labels", "POST", {"name": INCIDENT_LABEL, "color": "b60205"})
+            github.call("/labels", "POST", {"name": label, "color": "b60205"})
         except urllib.error.HTTPError as exc:
             if exc.code != 422:
                 raise
-        github.call(
-            "/issues", "POST",
-            {"title": INCIDENT_TITLE, "body": issue_body(state, now), "labels": [INCIDENT_LABEL]},
-        )
+        github.call("/issues", "POST", {"title": title, "body": body(), "labels": [label]})
         return
     if issue is None:
         return
     if fired:
         text = "\n".join(f"- **{d['key']}**: {d['message']}" for d in fired)
-        github.call(f"/issues/{issue['number']}/comments", "POST", {"body": f"Alert ({_run_url()}):\n{text}"})
+        github.call(f"/issues/{issue['number']}/comments", "POST", {"body": f"Alert ({where}):\n{text}"})
     if active:
-        github.call(f"/issues/{issue['number']}", "PATCH", {"body": issue_body(state, now)})
+        github.call(f"/issues/{issue['number']}", "PATCH", {"body": body()})
         return
     recovered = ", ".join(f"`{r['key']}`" for r in resolved) or "all conditions"
-    github.call(f"/issues/{issue['number']}/comments", "POST", {"body": f"Recovered: {recovered} ({_run_url()})."})
+    github.call(f"/issues/{issue['number']}/comments", "POST", {"body": f"Recovered: {recovered} ({where})."})
     github.call(f"/issues/{issue['number']}", "PATCH", {"state": "closed", "state_reason": "completed"})
 
 
@@ -340,6 +373,13 @@ def _escape(message: str) -> str:
     return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
 
 
+def informational_keys() -> frozenset[str]:
+    """Transfer lag only annotates runs until the segment pipeline is declared live."""
+    if os.environ.get("FLY_MONITOR_SEGMENTS_LIVE", "").strip() == "1":
+        return frozenset()
+    return frozenset({"transfer_lag"})
+
+
 def main() -> int:
     state_path = Path(os.environ.get("FLY_MONITOR_STATE", ".fly-monitor-state/state.json"))
     try:
@@ -353,7 +393,11 @@ def main() -> int:
         except Exception as exc:  # a broken monitor alerts through the same dedup policy
             traceback.print_exc()
             findings, maintenance, notes = {"monitor_error": f"monitor crashed: {type(exc).__name__}: {exc}"}, False, []
-        decisions, resolved = alerts.evaluate(state, findings, now=now, maintenance=maintenance)
+        if os.environ.get("FLY_MONITOR_TEST_ALERT", "").strip() == "1":
+            findings["test_alert"] = "synthetic test alert requested via workflow_dispatch (not a real incident)"
+        decisions, resolved = alerts.evaluate(
+            state, findings, now=now, maintenance=maintenance, informational=informational_keys()
+        )
     finally:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
@@ -364,11 +408,11 @@ def main() -> int:
         print("Guarded deploy / DEPLOY_MAINTENANCE active: transitional conditions are suppressed "
               f"for up to {alerts.MAINTENANCE_GRACE_SEC / 60:.0f} minutes.")
     for decision in decisions:
-        level = "error" if decision["action"] == "alert" else "warning"
+        level = {"alert": "error", "info": "notice"}.get(decision["action"], "warning")
         print(f"::{level} title=fly-monitor {decision['key']} ({decision['action']})::{_escape(decision['message'])}")
     for item in resolved:
         print(f"Recovered: {item['key']}")
-    if not decisions:
+    if not [d for d in decisions if d["action"] != "info"]:
         print("Fly bot healthy, paper-only, disarmed, on the latest deployed revision, and strategy progressing.")
 
     try:

@@ -1,0 +1,47 @@
+name: Relay laptop incident
+
+# scripts/laptop_chain_incident.py dispatches this for the notifying writes
+# (open issue, alert/recovery comment). GitHub never notifies a user about
+# their own actions, so posting as github-actions is what makes the owner get
+# the email / push for laptop-chain incidents. Silent edits and closes are
+# made directly by the laptop.
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: Issues API path, "/issues" or "/issues/<number>/comments"
+        required: true
+      body:
+        description: JSON request body
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: laptop-incident-relay
+  cancel-in-progress: false
+
+jobs:
+  relay:
+    runs-on: ubuntu-slim
+    timeout-minutes: 3
+    steps:
+      - name: Post as github-actions so the owner is notified
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          API_PATH: ${{ inputs.path }}
+          BODY: ${{ inputs.body }}
+        run: |
+          if [[ ! "$API_PATH" =~ ^/issues(/[0-9]+/comments)?$ ]]; then
+            echo "::error::refusing path $API_PATH"
+            exit 1
+          fi
+          if [[ "$API_PATH" == "/issues" ]] && ! printf '%s' "$BODY" | jq -e '.labels | index("laptop-chain-incident")' >/dev/null; then
+            echo "::error::relay only opens laptop-chain-incident issues"
+            exit 1
+          fi
+          printf '%s' "$BODY" | gh api -X POST "repos/$REPO$API_PATH" --input - --jq '.html_url'
