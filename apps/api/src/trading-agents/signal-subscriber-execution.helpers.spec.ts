@@ -9186,3 +9186,30 @@ test('desired live-copy coordination maps pause, open lots, and re-arm', () => {
     'FULLY_PAUSED',
   );
 });
+
+test('phantom-cancel never reaches Fly for a paper-only / non-allowlisted showcase trade', async () => {
+  const posts: string[] = [];
+  const audits: unknown[] = [];
+  const warnings: string[] = [];
+  const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.botBridge = { proxyBotPost: async (path: string) => { posts.push(path); return { ok: true, status: 200, data: {} }; } };
+  service.cycles = { recordHireExecutionEvent: async (...args: unknown[]) => { audits.push(args); } };
+  service.logger = { warn: (msg: string) => warnings.push(msg), log: () => undefined };
+  for (const tradeId of ['fc3-6c2023fb11b4', 'fat-1', 'cont-legacy', 'unknown-uuid']) {
+    await service.cancelPhantomShowcasePosition('user', 'agent', 'cycle', tradeId, 'MISSED_SHOWCASE_FILL');
+    await service.cancelPhantomShowcasePosition('user', 'agent', 'cycle', tradeId, 'MISSED_SHOWCASE_FILL');
+  }
+  assert.deepEqual(posts, []);
+  assert.deepEqual(audits, []);
+  assert.equal(warnings.length, 4);
+  assert.ok(warnings.every((msg) => msg.includes('not relay-allowlisted')));
+});
+
+test('phantom-cancel allowlist gate precedes the Fly call', () => {
+  const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
+  const start = source.indexOf('private async cancelPhantomShowcasePosition(');
+  const body = source.slice(start, source.indexOf('Cure 1', start));
+  const gate = body.indexOf('if (!isMirrorableLaneTradeId(showcaseTradeId))');
+  assert.ok(gate > 0);
+  assert.ok(gate < body.indexOf("proxyBotPost('/api/reconcile/phantom-cancel'"));
+});
