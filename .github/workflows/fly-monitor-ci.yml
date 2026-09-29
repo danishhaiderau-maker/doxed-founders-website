@@ -7,6 +7,11 @@ on:
       - ".github/workflows/fly-monitor-ci.yml"
       - "scripts/fly_monitor_*.py"
       - "scripts/test_fly_monitor_*.py"
+      - "scripts/laptop_chain_incident.py"
+      - "scripts/test_laptop_chain_incident.py"
+      - "scripts/laptop-chain-supervisor.ps1"
+      - ".github/workflows/laptop-incident-relay.yml"
+      - "services/btc-conservative-agent/test_volume_health_snapshot.py"
       - "scripts/test-fly-workflow-revision-contract.py"
       - "scripts/fly-bot-runtime-contract.spec.mjs"
       - "tests/test_fly_bot_monitor_contract.py"
@@ -29,6 +34,6 @@ jobs:
       - run: python -m pip install pytest
       - name: Monitor dedup policy, probe retries, and contract fixtures
         working-directory: scripts
-        run: python -m pytest test_fly_monitor_alerts.py test_fly_monitor_run.py test_fly_monitor_contract.py test-fly-workflow-revision-contract.py ../tests/test_fly_bot_monitor_contract.py -q
+        run: python -m pytest test_fly_monitor_alerts.py test_fly_monitor_rules.py test_fly_monitor_run.py test_fly_monitor_contract.py test_laptop_chain_incident.py test-fly-workflow-revision-contract.py ../tests/test_fly_bot_monitor_contract.py ../services/btc-conservative-agent/test_volume_health_snapshot.py -q
       - name: Runtime contract spec
         run: node --test scripts/fly-bot-runtime-contract.spec.mjs

@@ -39022,6 +39022,106 @@ def status():
     return jsonify(payload)
 
 
+VOLUME_HEALTH_CACHE_SEC = 30.0
+VOLUME_GROWTH_SAMPLE_SEC = 300.0
+VOLUME_GROWTH_WINDOW_SEC = 6 * 3600.0
+VOLUME_GROWTH_MIN_SPAN_SEC = 1800.0
+_SEGMENT_STATUS_MAX_BYTES = 64 * 1024
+_SEGMENT_STATUS_FIELDS = (
+    "shipped_seq", "laptop_acked_seq", "unshipped_bytes", "last_segment_at",
+    "updated_at", "last_error", "pruning_enabled",
+)
+_volume_growth_samples = deque(
+    maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1
+)
+_volume_health_cached = (0.0, None)
+
+
+def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
+    """Segment-shipper progress and legacy ACK age from small volume files."""
+    segments_enabled = (os.getenv("RESEARCH_SEGMENTS_ENABLED") or "0").strip() == "1"
+    transfer = {
+        "segments_enabled": segments_enabled,
+        "segment_status_present": False,
+        "legacy_ack_age_sec": None,
+    }
+    status_dir = (os.getenv("RESEARCH_SEGMENTS_STATE_DIR") or "").strip()
+    status_path = (Path(status_dir) if status_dir else volume_root / "segment-shipper") / "status.json"
+    try:
+        if status_path.stat().st_size <= _SEGMENT_STATUS_MAX_BYTES:
+            raw = json.loads(status_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                transfer["segment_status_present"] = True
+                for key in _SEGMENT_STATUS_FIELDS:
+                    transfer[key] = raw.get(key)
+                if transfer.get("last_error") is not None:
+                    transfer["last_error"] = str(transfer["last_error"])[:200]
+                if isinstance(raw.get("updated_at"), (int, float)):
+                    transfer["segment_status_age_sec"] = round(max(0.0, now - raw["updated_at"]), 1)
+    except (OSError, ValueError):
+        pass
+    try:
+        transfer["legacy_ack_age_sec"] = round(
+            max(0.0, now - (volume_root / "sync_ack.json").stat().st_mtime), 1
+        )
+    except OSError:
+        pass
+    return transfer
+
+
+def _volume_health_snapshot(now: float) -> dict:
+    """Cheap, lock-free volume pressure for /health and the scheduled monitor.
+
+    ``shutil.disk_usage`` is one statvfs call; the result is cached briefly so
+    Fly's frequent liveness probe never adds I/O. Growth is estimated from an
+    in-process sample ring, so it is ``None`` until enough history exists
+    after a restart. Concurrent refreshes are harmless: each builds a complete
+    payload and the cache tuple is replaced atomically.
+    """
+    global _volume_health_cached
+    cached_at, cached = _volume_health_cached
+    if cached is not None and 0.0 <= now - cached_at < VOLUME_HEALTH_CACHE_SEC:
+        return cached
+    volume_root = _data_sync_volume_root()
+    payload = {
+        "schema": "volume_health_v1",
+        "sampled_at": round(now, 3),
+        "total_bytes": None,
+        "used_bytes": None,
+        "free_bytes": None,
+        "used_pct": None,
+        "growth_bytes_per_hour": None,
+        "growth_window_sec": None,
+        "hours_to_full": None,
+    }
+    try:
+        usage = shutil.disk_usage(volume_root)
+    except OSError:
+        payload["error"] = "DISK_USAGE_UNAVAILABLE"
+    else:
+        total, used, free = int(usage.total), int(usage.used), int(usage.free)
+        payload.update({
+            "total_bytes": total,
+            "used_bytes": used,
+            "free_bytes": free,
+            "used_pct": round(100.0 * used / total, 2) if total > 0 else None,
+        })
+        samples = _volume_growth_samples
+        if not samples or now - samples[-1][0] >= VOLUME_GROWTH_SAMPLE_SEC:
+            samples.append((now, used))
+        oldest_ts, oldest_used = samples[0]
+        span = now - oldest_ts
+        if span >= VOLUME_GROWTH_MIN_SPAN_SEC:
+            rate = (used - oldest_used) * 3600.0 / span
+            payload["growth_bytes_per_hour"] = int(rate)
+            payload["growth_window_sec"] = int(span)
+            if rate > 0:
+                payload["hours_to_full"] = round(free / rate, 1)
+    payload["transfer"] = _volume_transfer_snapshot(volume_root, now)
+    _volume_health_cached = (now, payload)
+    return payload
+
+
 @app.route('/health')
 def health():
     """Fast process-liveness probe used by Fly.
@@ -39066,6 +39166,7 @@ def health():
         "live_armed": bool(state.get("live_armed", False)),
         "bitfinex_live_enabled": bool(state.get("bitfinex_live_enabled", False)),
         "force_paper_mode": _force_paper_mode_active(),
+        "volume": _volume_health_snapshot(now),
     }
     return jsonify(payload), (200 if process_alive else 503)
 

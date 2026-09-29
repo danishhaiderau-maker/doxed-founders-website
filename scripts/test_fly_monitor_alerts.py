@@ -103,3 +103,17 @@ def test_corrupt_or_foreign_state_starts_clean():
     )
     assert list(state["conditions"]) == ["safety"]
     assert state["paused_since"] is None
+
+
+def test_pre_existing_cached_state_gains_deploy_pause_clock():
+    state = alerts.normalize_state(
+        {"version": 1, "conditions": {}, "maintenance_since": None, "paused_since": 5.0}
+    )
+    assert state["deploy_pause_since"] is None and state["paused_since"] == 5.0
+
+
+def test_test_alert_fires_once_and_resolves_after_two_clean_runs():
+    state = alerts.empty_state()
+    assert _run(state, {"test_alert": "synthetic"}, 0)[0] == {"test_alert": "alert"}
+    assert _run(state, {}, 900) == ({}, [])
+    assert _run(state, {}, 1800) == ({}, ["test_alert"])

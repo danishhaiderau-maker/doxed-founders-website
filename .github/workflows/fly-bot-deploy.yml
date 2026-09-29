@@ -1052,6 +1052,7 @@ jobs:
           python -m pytest test_data_sync_inventory_worker_contract.py -q
           python -m pytest test_data_sync_cadence_throttle_contract.py -q
           python -m pytest test_research_segments.py -q
+          python -m pytest test_volume_health_snapshot.py test_compact_health_payload.py -q
           python test_fly_startup_contract.py
           python test_paper_skips_risk_pauses.py
           python test_daily_pnl_utc_rollover.py
