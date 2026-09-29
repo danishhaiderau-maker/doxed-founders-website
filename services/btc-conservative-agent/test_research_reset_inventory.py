@@ -74,7 +74,8 @@ def test_exact_allowlist_and_no_mutation(tmp_path):
     "v3/.locks/opportunity.lock", "v3/emergency_evidence_wal_v2/mandatory-reserve.bin",
     "v3/receipts/emergency_record_idempotency_v1/append_heads/lifecycle.json",
     "v3/receipts/ledger_generations_v1/lifecycle/ACTIVE.json", "research_events_v22.index.sqlite3-wal",
-    "relay_lifecycle_evidence_v1.json", "csv_write_fallback.jsonl", "lane_pnl_ledger.json"])
+    "relay_lifecycle_evidence_v1.json", "csv_write_fallback.jsonl", "lane_pnl_ledger.json",
+    "csv_write_fallback_replay.json", "trades_3factor.csv.malformed_rows.jsonl"])
 def test_recovery_and_configuration_always_retained(tmp_path, name):
     put(tmp_path, name)
     result = plan_research_reset(tmp_path, proof=proof(tmp_path))

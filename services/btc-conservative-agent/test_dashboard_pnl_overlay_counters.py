@@ -89,13 +89,15 @@ def test_relay_snapshot_emits_pnl_and_counter_keys() -> None:
         f"assignments: {missing}. These keys feed the dashboard overlay -- "
         "without them the tile freezes at the first heavy build."
     )
-    # The lane ledger must be derived from the same trades slice that ships
-    # as snapshot["trades"], not from a stale incremental counter.
-    assert "_derive_lane_pnl_ledger_from_trades(recent_trades)" in body, (
-        "lane_pnl_ledger in the relay snapshot must be derived via "
-        "_derive_lane_pnl_ledger_from_trades(recent_trades) so the tile "
-        "matches the trades table exactly."
+    # The lane ledger must be derived fresh from the same full-session rows
+    # as the headline, never from the bounded display slice or a stale
+    # incremental counter.
+    assert "_session_trade_accounting_locked(session_start)" in body
+    assert 'snapshot["lane_pnl_ledger"] = session_lane_ledger' in body, (
+        "lane_pnl_ledger in the relay snapshot must come from "
+        "_session_trade_accounting_locked so tile sums equal session_pnl_usd."
     )
+    assert "_derive_lane_pnl_ledger_from_trades(recent_trades)" not in body
 
 
 def test_overlay_key_list_includes_pnl_and_counter_keys() -> None:

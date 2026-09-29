@@ -1086,6 +1086,7 @@ jobs:
           python -m pytest test_collector_v22_integrity.py test_compressed_shadow_chase.py test_paper_lifecycle_restart.py test_cleanup_characterization_contract.py test_v3_lane_entry_bot_wiring.py -q
           python -m pytest test_v31_overview_best_policy_counts.py -q
           python -m pytest test_collector_signal_snapshot.py test_research_v3_signal_snapshot.py test_lifecycle_signal_snapshot_dependency.py test_analyzer_signal_snapshot_projection.py test_data_sync_signal_snapshot.py -q
+          python -m pytest test_paper_accounting_runtime_integrity.py test_dashboard_pnl_overlay_counters.py test_analyzer_tile_cohort_accounting.py -q
 
       - name: Verify bounded transport package and original acknowledgment contracts
         # The laptop PowerShell promotion harness is Windows-only and is

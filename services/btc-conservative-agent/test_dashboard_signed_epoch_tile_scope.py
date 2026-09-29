@@ -92,7 +92,8 @@ def test_clean_epoch_uses_only_cutoff_filtered_trade_slice() -> None:
 
 def test_api_snapshot_scopes_ledger_and_tile_specs_from_same_trade_slice() -> None:
     body = _function_source("_build_api_state_snapshot")
-    assert 'snapshot["lane_pnl_ledger"] = _derive_lane_pnl_ledger_from_trades(trades_copy)' in body
+    assert 'snapshot["lane_pnl_ledger"] = session_lane_ledger' in body
+    assert "_session_trade_accounting_locked(session_start)" in body
     assert "_scope_pathway_specs_to_signed_epoch(" in body
     assert "trades_copy," in body
     assert "_epoch_cutoff," in body
