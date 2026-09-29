@@ -13,6 +13,7 @@ import {
   DEFAULT_SUBSCRIBER_LEVERAGE,
   isExecutableEntryPolicy,
   isMirrorableLaneTradeId,
+  RELAY_ELIGIBLE_TILE_LANES,
   SHOWCASE_STRUCTURAL_ENTRY_POLICY_VERSION,
   SUBSCRIBER_DEFAULT_HARD_STOP_MARGIN_PCT,
   SUBSCRIBER_TRAIL_LADDER,
@@ -698,6 +699,15 @@ export class ShowcaseRelayEventsService {
     }
   }
 
+  /**
+   * Registry-derived relay allowlist: the trade-id prefix and declared lane
+   * must both belong to a tile marked platform_relay_eligible.
+   */
+  protected isRelayMirrorable(tradeId: string, researchLane: string): boolean {
+    if (!isMirrorableLaneTradeId(tradeId)) return false;
+    return !researchLane || RELAY_ELIGIBLE_TILE_LANES.includes(researchLane);
+  }
+
   async ingest(
     slug: string,
     body: ShowcaseRelayEventBody,
@@ -726,10 +736,7 @@ export class ShowcaseRelayEventsService {
     const researchLane = (body.research_lane ?? '').trim().toUpperCase();
     const reductionEvidenceIdentity = body.event === 'POSITION_REDUCED'
       && isReductionEvidenceIdentity(tradeId, researchLane);
-    if (!reductionEvidenceIdentity && (
-      !isMirrorableLaneTradeId(tradeId)
-      || (researchLane && researchLane !== 'CONTINUOUS')
-    )) {
+    if (!reductionEvidenceIdentity && !this.isRelayMirrorable(tradeId, researchLane)) {
       this.logger.warn(
         `Rejected non-mirrorable showcase relay event=${body.event} ` +
         `trade=${tradeId || '?'} lane=${researchLane || 'UNKNOWN'}`,

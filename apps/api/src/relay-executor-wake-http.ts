@@ -20,7 +20,10 @@ export function executorWakeAuthorized(supplied: string | undefined, expected: s
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeRequest | null {
+export function parseExecutorWakeRequest(
+  value: unknown,
+  isMirrorableTradeId: (tradeId: string | null) => boolean = isMirrorableLaneTradeId,
+): RelayExecutorWakeRequest | null {
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
   if (typeof raw.trigger !== 'string' || !WAKE_TRIGGERS.has(raw.trigger as RelayExecutorWakeRequest['trigger'])) {
@@ -34,7 +37,7 @@ export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeReque
   }
   let signedClose: RelayExecutorWakeRequest['signedClose'];
   if (raw.trigger === 'POSITION_CLOSED') {
-    if (!isMirrorableLaneTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
+    if (!isMirrorableTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
     if (!raw.signedClose || typeof raw.signedClose !== 'object' || Array.isArray(raw.signedClose)) return null;
     const close = raw.signedClose as Record<string, unknown>;
     if (typeof close.tradeId !== 'string' || close.tradeId !== raw.tradeId) return null;
@@ -58,7 +61,7 @@ export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeReque
   } else if (raw.signedClose != null) return null;
   let signedOpen: RelayExecutorWakeRequest['signedOpen'];
   if (raw.trigger === 'POSITION_OPENED') {
-    if (!isMirrorableLaneTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
+    if (!isMirrorableTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
     if (!raw.signedOpen || typeof raw.signedOpen !== 'object' || Array.isArray(raw.signedOpen)) return null;
     const open = raw.signedOpen as Record<string, unknown>;
     if (
@@ -76,7 +79,7 @@ export function parseExecutorWakeRequest(value: unknown): RelayExecutorWakeReque
   } else if (raw.signedOpen != null) return null;
   let signedExpiry: RelayExecutorWakeRequest['signedExpiry'];
   if (raw.trigger === 'ORDER_EXPIRED') {
-    if (!isMirrorableLaneTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
+    if (!isMirrorableTradeId(typeof raw.tradeId === 'string' ? raw.tradeId : null)) return null;
     if (!raw.signedExpiry || typeof raw.signedExpiry !== 'object' || Array.isArray(raw.signedExpiry)) return null;
     const expiry = raw.signedExpiry as Record<string, unknown>;
     if (

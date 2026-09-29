@@ -24,7 +24,8 @@ from research.genome.clustering import build_cluster_library
 from research.genome.discoveries import generate_discoveries
 from research.genome.drift import detect_drift
 from research.genome.fingerprints import index_by_id, outcome_fingerprint
-from research.genome.hypothesis_engine import generate_hypotheses
+from combo_pathway_config import COMPARISON_BENCHMARK_LANE
+from research.genome.hypothesis_engine import generate_hypotheses, trades_by_active_tile
 from research.genome.library_store import GenomeLibraryStore
 from research.genome.loader import load_all_layers
 from research.genome.memory import merge_cluster_into_library
@@ -351,8 +352,9 @@ def run_genome_analyzer(
     trades = layers.get("trade") or []
     markets = layers.get("market") or []
 
-    combo_trades = [t for t in trades if "604" in str(t.get("research_lane", "")).upper()]
-    cont_trades = [t for t in trades if str(t.get("research_lane", "")).upper() == "CONTINUOUS"]
+    tile_trades = trades_by_active_tile(trades)
+    combo_trades = [t for lane_trades in tile_trades.values() for t in lane_trades]
+    cont_trades = [t for t in trades if str(t.get("research_lane", "")).upper() == COMPARISON_BENCHMARK_LANE]
 
     outcome_fps = _build_outcome_fingerprints(layers)
     candidates = build_cluster_library(markets, trades=trades)
@@ -402,10 +404,10 @@ def run_genome_analyzer(
         "drift": drift,
         "discoveries": discoveries,
         "recommendation": recommendation,
-        "hypotheses": generate_hypotheses(combo_trades, cont_trades),
+        "hypotheses": generate_hypotheses(tile_trades, cont_trades),
         "outcome_fingerprints_sample": outcome_fps[:25],
         "benchmark_reference": {
-            "patient_chase": summarize_trades(combo_trades),
+            "active_tiles": summarize_trades(combo_trades),
             "continuous": summarize_trades(cont_trades),
         },
         "migration_note": "v62 CSV reports still run in parallel until Genome reproduces all required metrics (Priority 13).",
