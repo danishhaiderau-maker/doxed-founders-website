@@ -292,7 +292,8 @@ def test_deploy_uses_durable_pause_flat_deploy_accept_resume_boundary():
     assert 'status.get("bitfinex_live_enabled") is False' in DEPLOY
     assert 'status.get("force_paper_mode") is True' in DEPLOY
     assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in DEPLOY
-    assert 'mutate_json("/api/reconcile/phantom-cancel"' in DEPLOY
+    assert 'mutate_json("/api/positions/close", {"trade_id": trade_id})' in DEPLOY
+    assert "/api/reconcile/phantom-cancel" not in DEPLOY
     assert "pause mutation attempt={attempt}" in DEPLOY
     assert "checking durable state" in DEPLOY
 
