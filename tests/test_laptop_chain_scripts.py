@@ -107,6 +107,36 @@ def test_watcher_opts_into_bundles_only_when_fly_publishes_an_index():
     assert sync.index("FLY_SYNC_TRANSPORT_BUNDLES") < sync.index("& '$SyncScript'")
 
 
+def test_watcher_stops_superseded_child_without_failure_backoff():
+    probe = _watcher_function("Get-SyncSupersession")
+    assert "Test-RevisionPrefixMatch $ManifestRevision $flyRevision" in probe
+    assert "return 'REVISION_CHANGED'" in probe
+    # Only a serial child yields to bundles, and only for a CURRENT, ACK-eligible generation.
+    bundles = probe[probe.index("if (-not $TransportBundles)"):]
+    assert "inventory_ack_eligible -eq $true" in bundles
+    assert "Test-BundleTransportOffered -Token $token -GenerationId $liveGeneration" in bundles
+    assert "} catch {\n    return $null\n  }" in probe
+    # The child wrapper here-string has column-0 braces, so slice the full source.
+    source = _source("laptop-ack-watcher.ps1")
+    sync = source[source.index("function Invoke-GenerationSync"):source.index("function Invoke-AnalyzerRefresh")]
+    wait = sync[sync.index("$deadline = [datetime]::UtcNow.AddMinutes($SyncTimeoutMin)"):sync.index("$script:child.WaitForExit()\n")]
+    assert "WaitForExit($SupersessionCheckSec * 1000)" in wait
+    assert "Get-SyncSupersession -GenerationId $generation" in wait
+    assert "SYNC_SUPERSEDED" in wait and "taskkill.exe /PID $script:child.Id /T /F" in wait
+    assert "Superseded = $true" in sync
+    loop = _source("laptop-ack-watcher.ps1")
+    handled = loop[loop.index("} elseif ($result.Superseded) {"):loop.index("} elseif ($result.Ok) {")]
+    assert "'MIRROR_SYNC_SUPERSEDED'" in handled
+    assert "consecutiveSyncFailures" not in handled
+
+
+def test_watcher_never_resumes_custody_from_another_revision():
+    loop = _source("laptop-ack-watcher.ps1")
+    custody = loop[loop.index("CUSTODY_EXPIRED"):loop.index("CUSTODY_RESUME")]
+    assert "Test-RevisionPrefixMatch ([string]$retained.source_git_rev) ([string]$expected.source_git_rev)" in custody
+    assert "CUSTODY_SUPERSEDED" in custody
+
+
 def _watcher_function(name: str) -> str:
     source = _source("laptop-ack-watcher.ps1")
     match = re.search(r"^function " + re.escape(name) + r"\b.*?^}\r?\n", source, re.S | re.M)
