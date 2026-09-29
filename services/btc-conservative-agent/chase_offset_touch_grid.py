@@ -9,6 +9,8 @@ rule as bot._pending_limit_touched:
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 
@@ -21,9 +23,341 @@ CHASE_WINDOW_SEC = 300
 NEAR_FILL_PCT = 0.001
 NEAR_FILL_USD = 10.0
 LIVE_LEVERAGE = 100.0
-DEFAULT_MARGIN_USDT = 20.0
+DEFAULT_MARGIN_USDT = 0.25
 LIVE_THESIS_CUT = -12.0
 LADDER_4_2 = (4.0, 2.0)
+
+# Signed, shadow-only schedule.  These constants must never be consumed by the
+# executable paper-order or relay chase paths.
+COMPRESSED_SHADOW_SCHEMA = "compressed_chase_shadow_v1"
+COMPRESSED_SHADOW_POLICY_ID = "SHADOW_COMPRESSED_CHASE_0_1_2_4_7_10_EXP13_V1"
+COMPRESSED_SHADOW_STAGE_SECONDS = (0, 60, 120, 240, 420, 600)
+COMPRESSED_SHADOW_EXPIRY_SEC = 780
+COMPRESSED_SHADOW_STEP_PCT = 0.25
+COMPRESSED_SHADOW_INITIAL_OFFSET_PCT = LIVE_ORIG_OFFSET_PCT
+COMPRESSED_SHADOW_COST_MODEL = "SIGNED_BBO_DEPTH_EXPLICIT_FEES_V1"
+
+
+def _compressed_policy_signature() -> str:
+    material = json.dumps({
+        "policy_id": COMPRESSED_SHADOW_POLICY_ID,
+        "stage_seconds": COMPRESSED_SHADOW_STAGE_SECONDS,
+        "expiry_sec": COMPRESSED_SHADOW_EXPIRY_SEC,
+        "step_pct": COMPRESSED_SHADOW_STEP_PCT,
+        "initial_offset_pct": COMPRESSED_SHADOW_INITIAL_OFFSET_PCT,
+        "cost_model": COMPRESSED_SHADOW_COST_MODEL,
+        "execution_class": "SHADOW_ONLY",
+    }, sort_keys=True, separators=(",", ":"))
+    return "policy-sha256-" + hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+COMPRESSED_SHADOW_POLICY_SIGNATURE = _compressed_policy_signature()
+
+
+def arm_compressed_shadow_chase(
+    *, trade_id: str, direction: str, signal_price: float, signal_ts: float,
+    initial_limit_price: float, shared_ai_call_id: str, opportunity_id: str,
+    episode_id: str, epoch_id: str, bid: Optional[float] = None,
+    ask: Optional[float] = None, last: Optional[float] = None,
+    bbo_fresh: bool = False, event_id: str = "",
+    requested_qty: Optional[float] = None,
+    requested_margin_usd: Optional[float] = None,
+    leverage: Optional[float] = None, fee_profile: str = "",
+    entry_fee_rate: Optional[float] = None,
+    exit_fee_rate: Optional[float] = None,
+    slippage_model: str = COMPRESSED_SHADOW_COST_MODEL,
+    signed_quantity_constraints: Optional[Mapping[str, Any]] = None,
+    quantity_constraints_status: Optional[Mapping[str, Any]] = None,
+    event_source_revision: str = "",
+    event_config_signature: str = "",
+) -> tuple[dict, dict]:
+    """Create an auditable shadow schedule and its stage-0 receipt.
+
+    Sizing and cost inputs describe a hypothetical conservative fill only.
+    They never authorize an order or relay.
+    """
+    derived_event_id = str(event_id or "") or (
+        "event:compressed-chase:" + hashlib.sha256(
+            f"{shared_ai_call_id}|{trade_id}|{float(signal_ts):.6f}".encode("utf-8")
+        ).hexdigest()[:20]
+    )
+    identities = {
+        "shared_ai_call_id": str(shared_ai_call_id or ""),
+        "opportunity_id": str(opportunity_id or ""),
+        "episode_id": str(episode_id or ""),
+        "policy_id": COMPRESSED_SHADOW_POLICY_ID,
+        "policy_signature": COMPRESSED_SHADOW_POLICY_SIGNATURE,
+        "epoch_id": str(epoch_id or ""),
+        "event_id": derived_event_id,
+    }
+    missing = [key for key in (
+        "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id", "event_id",
+    ) if not identities[key]]
+    if not str(event_source_revision or "").strip():
+        missing.append("event_source_revision")
+    if not str(event_config_signature or "").strip():
+        missing.append("event_config_signature")
+    constraint_revision = str(
+        (signed_quantity_constraints or {}).get("source_revision")
+        if isinstance(signed_quantity_constraints, Mapping) else ""
+    ).strip()
+    constraint_revision_match = (
+        None if not constraint_revision or not str(event_source_revision or "").strip()
+        else constraint_revision == str(event_source_revision).strip()
+    )
+    if constraint_revision_match is False:
+        missing.append("quantity_constraint_source_revision_mismatch")
+    generation_material = (
+        f"{COMPRESSED_SHADOW_POLICY_SIGNATURE}|{trade_id}|{float(signal_ts):.6f}|"
+        f"{str(direction or '').upper()}"
+    )
+    schedule_generation_id = "shadow-generation-" + hashlib.sha256(
+        generation_material.encode("utf-8")
+    ).hexdigest()
+    state = {
+        "schema": COMPRESSED_SHADOW_SCHEMA,
+        "execution_class": "SHADOW_ONLY",
+        "places_order": False,
+        "relay_eligible": False,
+        "trade_id": str(trade_id),
+        "direction": str(direction or "").upper(),
+        "signal_price": float(signal_price),
+        "signal_ts": float(signal_ts),
+        "expires_ts": float(signal_ts) + COMPRESSED_SHADOW_EXPIRY_SEC,
+        "virtual_limit_price": float(initial_limit_price),
+        "next_stage_index": 1,
+        "terminal_emitted": False,
+        "seen_stage_indexes": {0},
+        "identity_complete": not missing,
+        "missing_identity_fields": missing,
+        "schedule_generation_id": schedule_generation_id,
+        "tape_evidence_path": "market_microstructure_1s.jsonl",
+        "requested_qty": requested_qty,
+        "requested_margin_usd": requested_margin_usd,
+        "leverage": leverage,
+        "fee_profile": str(fee_profile or ""),
+        "entry_fee_rate": entry_fee_rate,
+        "exit_fee_rate": exit_fee_rate,
+        "slippage_model": str(slippage_model or ""),
+        "event_source_revision": str(event_source_revision or ""),
+        "event_config_signature": str(event_config_signature or ""),
+        "quantity_constraint_source_revision_match": constraint_revision_match,
+        "signed_quantity_constraints": (
+            dict(signed_quantity_constraints)
+            if isinstance(signed_quantity_constraints, Mapping) else None
+        ),
+        "quantity_constraints_status": (
+            dict(quantity_constraints_status)
+            if isinstance(quantity_constraints_status, Mapping) else {
+                "supported": False, "receipt": None,
+                "reasons": ["VENUE_QUANTITY_CONSTRAINTS_UNAVAILABLE"],
+            }
+        ),
+        **identities,
+    }
+    return state, _compressed_shadow_receipt(
+        state, event="STAGE", stage_index=0, observed_ts=float(signal_ts),
+        reference_price=float(signal_price), bid=bid, ask=ask,
+        last=float(last if last not in (None, 0) else signal_price),
+        bbo_fresh=bbo_fresh, direction_revalidation_result="VALID_AT_SIGNAL",
+        direction_revalidation_reason="SIGNED_AI_DIRECTION_AT_SIGNAL",
+    )
+
+
+def _compressed_shadow_receipt(
+    state: Mapping[str, Any], *, event: str, stage_index: Optional[int],
+    observed_ts: float, reference_price: Optional[float], bid: Optional[float],
+    ask: Optional[float], last: Optional[float], bbo_fresh: bool,
+    direction_revalidation_result: str, direction_revalidation_reason: str,
+    coverage_status: str = "OBSERVED",
+) -> dict:
+    scheduled_due_ts = (
+        None if stage_index is None else
+        float(state["signal_ts"]) + COMPRESSED_SHADOW_STAGE_SECONDS[stage_index]
+    )
+    bbo_valid = bool(
+        bid not in (None, 0) and ask not in (None, 0)
+        and float(ask) >= float(bid)
+    )
+    direction_valid = direction_revalidation_result in ("VALID", "VALID_AT_SIGNAL")
+    eligible = bool(
+        event == "STAGE" and state.get("identity_complete") and coverage_status == "OBSERVED"
+        and bbo_fresh and bbo_valid and direction_valid
+    )
+    return {
+        "schema": COMPRESSED_SHADOW_SCHEMA,
+        "event": event,
+        "execution_class": "SHADOW_ONLY",
+        "places_order": False,
+        "relay_eligible": False,
+        "trade_id": state["trade_id"],
+        "direction": state["direction"],
+        "shared_ai_call_id": state["shared_ai_call_id"],
+        "opportunity_id": state["opportunity_id"],
+        "episode_id": state["episode_id"],
+        "epoch_id": state["epoch_id"],
+        "event_id": state.get("event_id"),
+        "policy_id": state["policy_id"],
+        "policy_signature": state["policy_signature"],
+        "schedule_generation_id": state["schedule_generation_id"],
+        "identity_complete": bool(state.get("identity_complete")),
+        "missing_identity_fields": list(state.get("missing_identity_fields") or []),
+        "signal_price": float(state["signal_price"]),
+        "signal_ts": float(state["signal_ts"]),
+        "expires_ts": float(state["expires_ts"]),
+        "tape_evidence_path": state.get("tape_evidence_path"),
+        "tape_window_start_ts": float(state["signal_ts"]),
+        "tape_window_end_ts": float(state["expires_ts"]),
+        "stage_index": stage_index,
+        "stage_due_sec": None if stage_index is None else COMPRESSED_SHADOW_STAGE_SECONDS[stage_index],
+        "observed_ts": float(observed_ts),
+        "scheduled_due_ts": scheduled_due_ts,
+        "observed_delay_sec": None if scheduled_due_ts is None else max(0.0, float(observed_ts) - scheduled_due_ts),
+        "virtual_limit_price": float(state["virtual_limit_price"]),
+        "reference_price": reference_price,
+        "bbo": {"bid": bid, "ask": ask, "last": last},
+        "bbo_fresh": bool(bbo_fresh),
+        "bbo_valid": bbo_valid,
+        "coverage_status": coverage_status,
+        "direction_revalidation_result": direction_revalidation_result,
+        "direction_revalidation_reason": direction_revalidation_reason,
+        "eligible_at_stage": eligible,
+        "schedule_seconds": list(COMPRESSED_SHADOW_STAGE_SECONDS),
+        "terminal_expiry_sec": COMPRESSED_SHADOW_EXPIRY_SEC,
+        "requested_qty": state.get("requested_qty"),
+        "requested_margin_usd": state.get("requested_margin_usd"),
+        "leverage": state.get("leverage"),
+        "fee_profile": state.get("fee_profile"),
+        "entry_fee_rate": state.get("entry_fee_rate"),
+        "exit_fee_rate": state.get("exit_fee_rate"),
+        "slippage_model": state.get("slippage_model"),
+        "event_source_revision": state.get("event_source_revision"),
+        "event_config_signature": state.get("event_config_signature"),
+        "quantity_constraint_source_revision_match": state.get(
+            "quantity_constraint_source_revision_match"
+        ),
+        "signed_quantity_constraints": state.get("signed_quantity_constraints"),
+        "quantity_constraints_status": state.get("quantity_constraints_status"),
+    }
+
+
+def poll_compressed_shadow_chase(
+    state: dict, *, now_ts: float, last: Optional[float],
+    bid: Optional[float] = None, ask: Optional[float] = None,
+    bbo_fresh: bool = False,
+    direction_revalidation_result: str = "NOT_REVALIDATED",
+    direction_revalidation_reason: str = "NO_FILL_TIME_DIRECTION_RECEIPT",
+    max_observation_delay_sec: float = 15.0,
+) -> list[dict]:
+    """Advance due virtual stages using observed BBO; never submit an order."""
+    if not state or state.get("terminal_emitted"):
+        return []
+    now = float(now_ts)
+    market = last
+    if market in (None, 0):
+        market = ask if state.get("direction") == "LONG" else bid
+    out: list[dict] = []
+    seen = set(state.get("seen_stage_indexes") or {0})
+    next_idx = 1
+    while next_idx < len(COMPRESSED_SHADOW_STAGE_SECONDS):
+        if next_idx in seen:
+            next_idx += 1
+            continue
+        due_ts = float(state["signal_ts"]) + COMPRESSED_SHADOW_STAGE_SECONDS[next_idx]
+        if now < due_ts:
+            break
+        delay = now - due_ts
+        observed = delay <= float(max_observation_delay_sec)
+        if observed and market not in (None, 0):
+            state["virtual_limit_price"] = _chase_target(
+                state["direction"], float(state["virtual_limit_price"]),
+                float(market), COMPRESSED_SHADOW_STEP_PCT,
+            )
+        out.append(_compressed_shadow_receipt(
+            state, event="STAGE", stage_index=next_idx, observed_ts=now,
+            reference_price=None if not observed or market in (None, 0) else float(market),
+            bid=bid if observed else None, ask=ask if observed else None,
+            last=last if observed else None, bbo_fresh=bbo_fresh if observed else False,
+            direction_revalidation_result=direction_revalidation_result,
+            direction_revalidation_reason=direction_revalidation_reason,
+            coverage_status="OBSERVED" if observed else "COVERAGE_GAP_OVERDUE",
+        ))
+        seen.add(next_idx)
+        next_idx += 1
+    state["seen_stage_indexes"] = seen
+    state["next_stage_index"] = next_idx
+    if now >= float(state["expires_ts"]):
+        state["terminal_emitted"] = True
+        out.append(_compressed_shadow_receipt(
+            state, event="EXPIRED", stage_index=None, observed_ts=now,
+            reference_price=None if market in (None, 0) else float(market),
+            bid=bid, ask=ask, last=last, bbo_fresh=bbo_fresh,
+            direction_revalidation_result=direction_revalidation_result,
+            direction_revalidation_reason=direction_revalidation_reason,
+        ))
+    return out
+
+
+def recover_compressed_shadow_states(
+    receipts: Iterable[Mapping[str, Any]], *, now_ts: float,
+) -> dict[str, dict]:
+    """Recover non-terminal signed shadow states without replaying receipts."""
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    for row in receipts or []:
+        if row.get("schema") != COMPRESSED_SHADOW_SCHEMA:
+            continue
+        if row.get("policy_signature") != COMPRESSED_SHADOW_POLICY_SIGNATURE:
+            continue
+        grouped.setdefault(str(row.get("trade_id") or ""), []).append(row)
+    recovered: dict[str, dict] = {}
+    for trade_id, rows in grouped.items():
+        if not trade_id or any(row.get("event") == "EXPIRED" for row in rows):
+            continue
+        rows = sorted(rows, key=lambda row: float(row.get("observed_ts") or 0))
+        latest = rows[-1]
+        if float(latest.get("expires_ts") or 0) <= float(now_ts):
+            # The runtime will emit exactly one terminal receipt on its next poll.
+            pass
+        seen = {int(row["stage_index"]) for row in rows if row.get("stage_index") is not None}
+        missing = list(latest.get("missing_identity_fields") or [])
+        recovered[trade_id] = {
+            "schema": COMPRESSED_SHADOW_SCHEMA,
+            "execution_class": "SHADOW_ONLY", "places_order": False,
+            "relay_eligible": False, "trade_id": trade_id,
+            "direction": latest.get("direction"),
+            "signal_price": float(latest.get("signal_price") or 0),
+            "signal_ts": float(latest.get("signal_ts") or 0),
+            "expires_ts": float(latest.get("expires_ts") or 0),
+            "virtual_limit_price": float(latest.get("virtual_limit_price") or 0),
+            "seen_stage_indexes": seen, "next_stage_index": 1,
+            "terminal_emitted": False,
+            "identity_complete": not missing,
+            "missing_identity_fields": missing,
+            "schedule_generation_id": latest.get("schedule_generation_id") or "",
+            "tape_evidence_path": latest.get("tape_evidence_path") or "",
+            "requested_qty": latest.get("requested_qty"),
+            "requested_margin_usd": latest.get("requested_margin_usd"),
+            "leverage": latest.get("leverage"),
+            "fee_profile": latest.get("fee_profile") or "",
+            "entry_fee_rate": latest.get("entry_fee_rate"),
+            "exit_fee_rate": latest.get("exit_fee_rate"),
+            "slippage_model": latest.get("slippage_model") or "",
+            "event_source_revision": latest.get("event_source_revision") or "",
+            "event_config_signature": latest.get("event_config_signature") or "",
+            "quantity_constraint_source_revision_match": latest.get(
+                "quantity_constraint_source_revision_match"
+            ),
+            "signed_quantity_constraints": latest.get("signed_quantity_constraints"),
+            "quantity_constraints_status": latest.get("quantity_constraints_status") or {
+                "supported": False, "receipt": None,
+                "reasons": ["VENUE_QUANTITY_CONSTRAINTS_UNAVAILABLE"],
+            },
+            **{key: latest.get(key) or "" for key in (
+                "shared_ai_call_id", "opportunity_id", "episode_id", "epoch_id",
+                "event_id", "policy_id", "policy_signature",
+            )},
+        }
+    return recovered
 
 
 def offset_pct_to_frac(offset_pct: float) -> float:

@@ -10,8 +10,6 @@
  * See `docs/FOUNDER-IDE-FORK-PLAN.md` §4.3 / §8.4.
  */
 import * as vscode from 'vscode';
-import { deliveryEditFitsRange, evaluateDeliveryToolUse } from '../nucleus-context';
-import { getActiveNucleusPacket } from '../nucleus-session';
 
 export interface EditFileInput {
   filePath: string;
@@ -79,13 +77,7 @@ export const editFileTool: vscode.LanguageModelTool<EditFileInput> = {
     _token: vscode.CancellationToken,
   ): Promise<vscode.LanguageModelToolResult> {
     const input = options.input;
-    const delivery = evaluateDeliveryToolUse(getActiveNucleusPacket(), input.filePath, 'edit');
-    if (!delivery.allow) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(delivery.message),
-      ]);
-    }
-    const uri = resolveUri(delivery.path || input.filePath);
+    const uri = resolveUri(input.filePath);
     if (!uri) {
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(`Error: invalid filePath "${input.filePath}".`),
@@ -97,14 +89,6 @@ export const editFileTool: vscode.LanguageModelTool<EditFileInput> = {
       return new vscode.LanguageModelToolResult([
         new vscode.LanguageModelTextPart(
           `Error: file not found (${input.filePath}). Set createIfMissing=true to create it.`,
-        ),
-      ]);
-    }
-
-    if (delivery.range && input.oldText.length === 0) {
-      return new vscode.LanguageModelToolResult([
-        new vscode.LanguageModelTextPart(
-          `Error: Nucleus delivery range L${delivery.range.startLine}-L${delivery.range.endLine} requires oldText inside that range. Do not append elsewhere.`,
         ),
       ]);
     }
@@ -122,13 +106,6 @@ export const editFileTool: vscode.LanguageModelTool<EditFileInput> = {
       range = new vscode.Range(endLine, Number.MAX_SAFE_INTEGER, endLine, Number.MAX_SAFE_INTEGER);
     } else {
       const existing = await readFullFile(uri);
-      if (delivery.range && !deliveryEditFitsRange(existing, input.oldText, delivery.range)) {
-        return new vscode.LanguageModelToolResult([
-          new vscode.LanguageModelTextPart(
-            `Error: edit is outside Nucleus delivery range L${delivery.range.startLine}-L${delivery.range.endLine} in ${delivery.path}.`,
-          ),
-        ]);
-      }
       const idx = existing.indexOf(input.oldText);
       if (idx === -1) {
         return new vscode.LanguageModelToolResult([

@@ -12,15 +12,14 @@ showed the PROFIT_LOCK_LADDER winners (avg MFE 17.16%) left ~$255 on the table
 at 57% peak capture; raising the first lock from 6% to 10% recovered more of
 that MFE while still triggering inside most winners' MFE.
 
-NOTE — the v2a backtest specifically found that tightening the first rung made
-TYPE_B_HUNTER_V1 *worse* (-$22.20 vs v2a baseline). That conclusion is now
-considered stale (see 2026-08-06 note above); TYPE_B_HUNTER_V1 adopts the new
+NOTE — a historical backtest of a retired research lane performed worse than
+its baseline after tightening the first rung. That conclusion is stale; current
+execution uses the operator-approved
 (8, 5) first rung via `TRAIL_LADDER_SCENARIO_C_LEGACY_10_6` and
 `get_lane_ladder_override` in combo_pathway_config.py.
 
-All Scenario C tiles (combo, CONTINUOUS, experimental except Recovery Monster) use this file
-as the GLOBAL default. Per-lane ladder overrides (e.g. TYPE_B_HUNTER_V1's
-profile) are applied via `get_lane_ladder()` in bot.py — lanes without an
+The current execution lanes use this file as the GLOBAL default. Per-lane
+ladder overrides are applied via `get_lane_ladder()` in bot.py — lanes without an
 override fall back to `TRAIL_LADDER_SCENARIO_C` below.
 """
 from __future__ import annotations
@@ -37,7 +36,7 @@ TRAIL_LADDER_SCENARIO_C = [
 ]
 
 # Compatibility aliases must not silently create a different live treatment.
-# TYPE_B uses the same operator-approved eight-rung policy unless a future
+# Current lanes use the same operator-approved eight-rung policy unless a future
 # treatment has its own explicit signature and qualification record.
 TRAIL_LADDER_SCENARIO_C_LEGACY_10_6 = list(TRAIL_LADDER_SCENARIO_C)
 

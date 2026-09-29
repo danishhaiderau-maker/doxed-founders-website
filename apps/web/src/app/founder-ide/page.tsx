@@ -7,6 +7,7 @@ import { SiteBrand, SiteNav } from '@/components/site-nav';
 import { FounderIdePair } from '@/components/founder-ide-pair';
 import { FounderIdeChat } from '@/components/founder-ide-chat';
 import { fetchFounderNodeStatus, revokeFounderNode } from '@/lib/api';
+import { FOUNDER_IDE_WINDOWS_DOWNLOAD_URL } from '@/lib/founder-ide-download';
 
 export default function FounderIdePage() {
   const { data: session } = useSession();
@@ -109,7 +110,7 @@ export default function FounderIdePage() {
 
               <div className='mt-6 flex flex-wrap gap-3'>
                 <a
-                  href='https://github.com/danishhaiderau-maker/founder-next/releases/latest'
+                  href={FOUNDER_IDE_WINDOWS_DOWNLOAD_URL}
                   className='inline-flex items-center gap-1.5 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-violet-500'
                   target='_blank'
                   rel='noreferrer'
@@ -126,7 +127,8 @@ export default function FounderIdePage() {
               </div>
 
               <p className='mt-4 text-xs text-zinc-500'>
-                Windows 10/11 · ~850 MB installer · Mac and Linux coming soon.
+                Windows 10/11 · ~1.2 GB installer (unsigned preview — verify the SHA-256 on the release page) · Mac
+                and Linux coming soon.
               </p>
             </div>
           </section>
@@ -250,11 +252,8 @@ export default function FounderIdePage() {
           </div>
         </section>
 
-        {/* DECISION LOG + NUCLEUS */}
-        <section className='flex flex-wrap gap-6 border-t border-zinc-800 pt-8'>
-          <Link href='/founder-ide/nucleus' className='text-sm text-violet-400 underline-offset-4 hover:underline'>
-            Open Nucleus (Founder Graph) →
-          </Link>
+        {/* DECISION LOG LINK */}
+        <section className='border-t border-zinc-800 pt-8'>
           <Link href='/founder-ide/decisions' className='text-sm text-violet-400 underline-offset-4 hover:underline'>
             View routing decision log →
           </Link>

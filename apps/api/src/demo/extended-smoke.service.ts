@@ -40,15 +40,9 @@ export class ExtendedSmokeService {
     checks.push(await this.runCheck('bot_state_parseable', async () => this.probeBotStateParseable(botUrl)));
     checks.push(await this.runCheck('bot_paper_orders_placed', async () => this.probePaperOrders()));
     checks.push(await this.runCheck('lane_size_patch_active', async () => this.probeLaneSizePatch(botUrl)));
-    checks.push(await this.runCheck('lab_shadow_tiles_running', async () => this.probeLabShadowTiles(botUrl)));
     checks.push(
-      await this.runCheck('independent_v1_post_ai_spawn_wired', async () =>
-        this.probeIndependentV1PostAiSpawnWired(),
-      ),
-    );
-    checks.push(
-      await this.runCheck('independent_v1_ai_to_lab_coupling', async () =>
-        this.probeIndependentV1AiToLabCoupling(),
+      await this.runCheck('two_lane_opportunity_coverage', async () =>
+        this.probeTwoLaneOpportunityCoverage(),
       ),
     );
     checks.push(await this.runCheck('tunnel_reachable', async () => this.probeTunnel()));
@@ -164,178 +158,31 @@ export class ExtendedSmokeService {
     }
   }
 
-  private async probeLabShadowTiles(botUrl: string): Promise<CheckResult> {
-    // Assert SL_AVOIDANCE_V1 + SIZED_CONTINUOUS_V1 produced at least one
-    // shadow signal this run. Shadow signals land in soft_reject_shadow.jsonl
-    // tagged with the research lane.
+  private async probeTwoLaneOpportunityCoverage(): Promise<CheckResult> {
+    // The current runtime has exactly two lanes. Opportunity capture is the
+    // shared, execution-neutral evidence source and includes rejected paths.
     try {
-      const softPath = this.botArtifactPath('soft_reject_shadow.jsonl');
-      let slAvoidance = 0;
-      let sizedContinuous = 0;
-      if (existsSync(softPath)) {
-        const lines = readFileSync(softPath, 'utf8').trim().split(/\r?\n/);
-        for (const line of lines) {
-          if (!line) continue;
-          if (line.includes('SL_AVOIDANCE_V1')) slAvoidance += 1;
-          if (line.includes('SIZED_CONTINUOUS_V1')) sizedContinuous += 1;
-        }
-      }
-      // The bot state also exposes research_lane counters.
-      const res = await fetch(`${botUrl}/api/state`, {
-        signal: AbortSignal.timeout(15_000),
-        headers: { Accept: 'application/json' },
-      }).catch(() => null);
-      if (res && res.ok) {
-        const data = (await res.json()) as Record<string, any>;
-        const laneCounters = (data?.lane_opportunity_counters ??
-          data?.['lane_opportunity_counters'] ??
-          {}) as Record<string, unknown>;
-        const a = Number(laneCounters?.['SL_AVOIDANCE_V1'] ?? 0);
-        const b = Number(laneCounters?.['SIZED_CONTINUOUS_V1'] ?? 0);
-        if (Number.isFinite(a)) slAvoidance += a;
-        if (Number.isFinite(b)) sizedContinuous += b;
-      }
-      // Soft pass in demo/cassette runs: tiles may be enabled but idle until a
-      // live AI_SCAN spawn. Presence of the soft_reject file OR either counter
-      // is enough; both required only when DEMO_REQUIRE_BOTH_LAB_TILES=1.
-      const requireBoth = process.env.DEMO_REQUIRE_BOTH_LAB_TILES === '1';
-      const ok = requireBoth
-        ? slAvoidance > 0 && sizedContinuous > 0
-        : slAvoidance > 0 || sizedContinuous > 0 || existsSync(softPath);
-      return ok
-        ? pass(`LAB shadow tiles — SL_AVOIDANCE=${slAvoidance} SIZED_CONTINUOUS=${sizedContinuous}`)
-        : fail(`LAB shadow tiles idle — SL_AVOIDANCE=${slAvoidance} SIZED_CONTINUOUS=${sizedContinuous} (soft_reject_shadow.jsonl may be empty)`);
-    } catch (err) {
-      return fail(err);
-    }
-  }
-
-  /**
-   * Static wiring probe — would have FAILED before the V1 Hunter/SR LAB-spawn fix.
-   * Reads bot.py and asserts each independent AI V1 tick calls
-   * evaluate_signal_with_ai AND _spawn_independent_v1_lane_after_ai.
-   */
-  private async probeIndependentV1PostAiSpawnWired(): Promise<CheckResult> {
-    try {
-      const botPath = this.botArtifactPath('bot.py');
-      if (!existsSync(botPath)) return fail(`bot.py not found at ${botPath}`);
-      const src = readFileSync(botPath, 'utf8');
-      const lanes: Array<{ lane: string; tickFn: string }> = [
-        { lane: 'TYPE_B_HUNTER_V1', tickFn: 'maybe_tick_type_b_hunter_v1_research' },
-        { lane: 'SR_MICRO_TILE_V1', tickFn: 'maybe_tick_sr_micro_tile_v1_research' },
-      ];
-      const helper = '_spawn_independent_v1_lane_after_ai';
-      const failures: string[] = [];
-      for (const { lane, tickFn } of lanes) {
-        const body = extractPythonDefBody(src, tickFn);
-        if (!body) {
-          failures.push(`${tickFn} missing`);
+      const oppPath = this.botArtifactPath('lane_opportunity_capture.jsonl');
+      if (!existsSync(oppPath)) return fail('lane_opportunity_capture.jsonl missing');
+      const counts: Record<string, number> = {
+        CONTINUOUS: 0,
+        OFFSET_029_ATR_TP_25: 0,
+      };
+      for (const line of readFileSync(oppPath, 'utf8').split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const row = JSON.parse(line) as Record<string, unknown>;
+          const lane = String(row.research_lane ?? row.lane_id ?? row.lane ?? '').toUpperCase();
+          if (lane in counts) counts[lane] += 1;
+        } catch {
           continue;
         }
-        const hasAi = body.includes('evaluate_signal_with_ai');
-        const hasSpawn = body.includes(helper);
-        if (!hasAi) failures.push(`${lane}: tick lacks evaluate_signal_with_ai`);
-        if (hasAi && !hasSpawn) {
-          failures.push(
-            `${lane}: AI tick without ${helper} (Lane Lab stays at 0 while AI runs)`,
-          );
-        }
       }
-      const helperBody = extractPythonDefBody(src, helper);
-      if (!helperBody) {
-        failures.push(`${helper} missing`);
-      } else if (!helperBody.includes('_spawn_combo_lane')) {
-        failures.push(`${helper} does not call _spawn_combo_lane`);
-      }
-      return failures.length === 0
-        ? pass(
-            `V1 post-AI spawn wired — Hunter + SR ticks call ${helper} → _spawn_combo_lane`,
-          )
-        : fail(failures.join('; '));
-    } catch (err) {
-      return fail(err);
-    }
-  }
-
-  /**
-   * Runtime coupling: if independent V1 lanes have AI decision logs, they must
-   * also have SPAWN_* / opportunity / shadow capture rows. Idle (0 AI ticks)
-   * is OK — the static wiring probe above is the pre-runtime gate.
-   */
-  private async probeIndependentV1AiToLabCoupling(): Promise<CheckResult> {
-    try {
-      const lanes = ['TYPE_B_HUNTER_V1', 'SR_MICRO_TILE_V1'];
-      const aiPath = this.botArtifactPath('ai_call_atomic.jsonl');
-      const oppPath = this.botArtifactPath('lane_opportunity_capture.jsonl');
-      const softPath = this.botArtifactPath('soft_reject_shadow.jsonl');
-      const validationPath = this.botArtifactPath('independent_v1_post_ai_spawn_validation.json');
-
-      const aiCounts: Record<string, number> = Object.fromEntries(lanes.map((l) => [l, 0]));
-      const spawnCounts: Record<string, number> = Object.fromEntries(lanes.map((l) => [l, 0]));
-
-      if (existsSync(aiPath)) {
-        for (const line of readFileSync(aiPath, 'utf8').split(/\r?\n/)) {
-          if (!line.trim()) continue;
-          let row: Record<string, unknown>;
-          try {
-            row = JSON.parse(line) as Record<string, unknown>;
-          } catch {
-            continue;
-          }
-          const lane = String(row.lane_id ?? row.research_lane ?? row.lane ?? '');
-          if (lane in aiCounts) aiCounts[lane] = (aiCounts[lane] ?? 0) + 1;
-        }
-      }
-
-      const countSpawnMentions = (filePath: string) => {
-        if (!existsSync(filePath)) return;
-        for (const line of readFileSync(filePath, 'utf8').split(/\r?\n/)) {
-          if (!line.trim()) continue;
-          for (const lane of lanes) {
-            if (!line.includes(lane)) continue;
-            if (
-              /SPAWN_|_spawn_lab|LAB_SHADOW|soft_reject|process_signal|opportunity/i.test(line) ||
-              filePath.endsWith('soft_reject_shadow.jsonl') ||
-              filePath.endsWith('lane_opportunity_capture.jsonl')
-            ) {
-              spawnCounts[lane] = (spawnCounts[lane] ?? 0) + 1;
-            }
-          }
-        }
-      };
-      countSpawnMentions(oppPath);
-      countSpawnMentions(softPath);
-
-      const decoupled = lanes.filter((l) => (aiCounts[l] ?? 0) > 0 && (spawnCounts[l] ?? 0) === 0);
-      const detail = lanes
-        .map((l) => `${l}: ai=${aiCounts[l] ?? 0} spawn/opp=${spawnCounts[l] ?? 0}`)
-        .join('; ');
-
-      if (decoupled.length > 0) {
-        return fail(
-          `AI ticks without LAB/opportunity capture — ${decoupled.join(', ')} (${detail})`,
-        );
-      }
-
-      if (existsSync(validationPath)) {
-        try {
-          const art = JSON.parse(readFileSync(validationPath, 'utf8')) as {
-            verdict?: string;
-          };
-          if (art.verdict === 'FAIL') {
-            return fail(`startup artifact verdict=FAIL (${detail})`);
-          }
-        } catch {
-          /* ignore parse errors; fall through */
-        }
-      }
-
-      const anyAi = lanes.some((l) => (aiCounts[l] ?? 0) > 0);
-      return pass(
-        anyAi
-          ? `V1 AI↔LAB coupled — ${detail}`
-          : `no V1 AI ticks yet this session; static wiring gate applies (${detail})`,
-      );
+      const missing = Object.entries(counts).filter(([, count]) => count === 0).map(([lane]) => lane);
+      const detail = `CONTINUOUS=${counts.CONTINUOUS} OFFSET_029_ATR_TP_25=${counts.OFFSET_029_ATR_TP_25}`;
+      return missing.length === 0
+        ? pass(`two-lane opportunity coverage — ${detail}`)
+        : fail(`missing current-lane opportunity evidence: ${missing.join(', ')} (${detail})`);
     } catch (err) {
       return fail(err);
     }
@@ -710,30 +557,6 @@ export class ExtendedSmokeService {
       };
     }
   }
-}
-
-
-/** Extract a top-level `def name(...):` body from bot.py (indent-based). */
-function extractPythonDefBody(src: string, fnName: string): string | null {
-  const re = new RegExp(`^def ${fnName}\\s*\\(`, 'm');
-  const m = re.exec(src);
-  if (!m || m.index == null) return null;
-  const start = m.index;
-  const after = src.slice(start);
-  const lines = after.split(/\r?\n/);
-  if (lines.length === 0) return null;
-  const body: string[] = [lines[0]!];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line.length === 0) {
-      body.push(line);
-      continue;
-    }
-    // Next top-level def/class ends the body.
-    if (/^(def |class |@)/.test(line)) break;
-    body.push(line);
-  }
-  return body.join('\n');
 }
 
 function pass(detail: string): CheckResult {

@@ -16,7 +16,7 @@ from collector_v22_schema import (
 )
 from collector_storage import project_capacity
 from collector_v22_schema import RESEARCH_EVENTS_FILE
-from collector_v22 import BYTES_PER_EVENT_TYPICAL, _load_event_index
+from collector_v22 import BYTES_PER_EVENT_TYPICAL, event_index_identity_count, research_event_generation_paths
 from path_replay_v1 import (
     CONTROL_CELL,
     LIVE_THESIS_CUT,
@@ -33,19 +33,19 @@ ATR_ROLLING = "ROLLING"
 
 
 def _load_events(data_dir: str) -> list:
-    path = os.path.join(data_dir, RESEARCH_EVENTS_FILE)
     rows = []
-    if not os.path.isfile(path):
-        return rows
-    with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    for path in research_event_generation_paths(data_dir):
+        if not os.path.isfile(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     return rows
 
 
@@ -259,9 +259,7 @@ def replay_event_report(event: Mapping[str, Any], *, data_dir: Optional[str] = N
 
 def _events_per_day_estimate(data_dir: Optional[str]) -> float:
     root = data_dir or os.getcwd()
-    index_path = os.path.join(root, "research_events_v22.index.json")
-    index = _load_event_index(index_path)
-    n = len(index.get("events") or {})
+    n = event_index_identity_count(data_dir=root)
     if n < 2:
         return 15.0
     return max(5.0, min(315.0, float(n)))

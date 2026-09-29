@@ -24,11 +24,34 @@ def test_tile_headlines_use_one_identical_six_metric_contract():
 
 def test_tile_headlines_always_use_executed_fresh_collection_metrics():
     chunk = _render_chunk()
-    assert "stats.real_fills" in chunk
-    assert "stats.net_pnl_real" in chunk
-    assert "stats.per_approve_ev" in chunk
+    assert "currentSettingsPeriod" in chunk
+    assert "headlineClosed" in chunk
+    assert "headlinePnl" in chunk
+    assert "headlineEv" in chunk
+    assert "current execution-settings period; earlier rows remain separate" in chunk
     assert "labPrimaryTrades" not in chunk
     assert "v2ChkPass" not in chunk
+
+
+def test_tile_ev_is_unavailable_when_there_are_no_approvals():
+    chunk = _render_chunk()
+    assert "const headlineEv = headlineApprovals > 0" in chunk
+    assert "const headlineEvLabel = headlineEv == null ? '—'" in chunk
+    assert "statRow('EV/appr', headlineEvLabel)" in chunk
+    assert "· EV ' + headlineEvLabel + '/approve" in chunk
+    assert "headlineApprovals ? headlinePnl / headlineApprovals : 0" not in chunk
+
+
+def test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference():
+    assert "function tradeStopEvidence" in SOURCE
+    assert "Observed PnL % of margin" in SOURCE
+    assert "Observed Net USD" in SOURCE
+    assert "STOP OVERSHOOT" in SOURCE
+    assert "trigger-level reference $" in SOURCE
+    assert "not reconstructed execution" in SOURCE
+    assert "inferredMargin" in SOURCE
+    assert "PRE-FIX PNL ACCOUNTING CONTAMINATED" in SOURCE
+    assert "terminal_single_count_v1" in SOURCE
 
 
 def test_settings_periods_are_durable_and_attached_to_both_payload_paths():
@@ -37,7 +60,9 @@ def test_settings_periods_are_durable_and_attached_to_both_payload_paths():
     assert '_record_execution_settings_epoch("GAP_CHANGED")' in SOURCE
     assert '_record_execution_settings_epoch("TRACKING_STARTED")' in SOURCE
     assert '_record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)' in SOURCE
-    assert SOURCE.count('["settings_periods"] = _reconcile_settings_periods_to_headline(') == 2
+    # Current signed-epoch normalization plus the disk and analyzer-backed
+    # payload paths must all reconcile their period rows to the same headline.
+    assert SOURCE.count('["settings_periods"] = _reconcile_settings_periods_to_headline(') == 3
     assert "def _reconcile_settings_periods_to_headline" in SOURCE
     chunk = _render_chunk()
     assert "Settings-period breakdown" in chunk
@@ -53,6 +78,13 @@ def test_server_is_authoritative_for_execution_gate_controls():
     assert "Execution settings are server-owned" in SOURCE
     assert "_patch_api_state_cache_fields(\n        chase_execution_buckets=out" in SOURCE
     assert "_patch_api_state_cache_fields(\n        spread_gate=out" in SOURCE
+
+
+def test_paper_tile_banner_reports_each_relay_blocker_truthfully():
+    assert '"BLOCKED_UNQUALIFIED": "strategy is not qualified"' in SOURCE
+    assert '"BLOCKED_PARTIAL_REDUCTION_UNPROVEN": (' in SOURCE
+    assert '"BLOCKED_INITIAL_STOP_SWEEP_REQUIRED": (' in SOURCE
+    assert "live copy blocked until partial-close relay support is verified" not in SOURCE
 
 
 def test_virtual_chase_candidates_are_separate_from_pending_orders():
@@ -102,6 +134,8 @@ def test_settings_period_approvals_reconcile_to_analyzer_headline():
 if __name__ == "__main__":
     test_tile_headlines_use_one_identical_six_metric_contract()
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
+    test_tile_ev_is_unavailable_when_there_are_no_approvals()
+    test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference()
     test_settings_periods_are_durable_and_attached_to_both_payload_paths()
     test_server_is_authoritative_for_execution_gate_controls()
     test_virtual_chase_candidates_are_separate_from_pending_orders()

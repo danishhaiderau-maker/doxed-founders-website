@@ -1,0 +1,67 @@
+"""Offline fixture for the PowerShell parent protocol. Never contacts Fly."""
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+request = json.load(sys.stdin)
+manifest = request["manifest"]
+root = Path(request["staging_root"])
+members = []
+for number, row in enumerate(manifest["files"]):
+    raw = row["fixture_payload"].encode()
+    path = root / (str(number) + ".json")
+    if manifest.get("fixture_defect") in {"reuse", "reuse-escape", "reuse-flag", "reuse-size"}:
+        path = Path(request["verified_local_root"]) / row["path"]
+        if manifest["fixture_defect"] == "reuse-escape":
+            path = Path(request["verified_local_root"]) / "wrong.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if manifest.get("fixture_defect") not in {"reuse", "reuse-size"}:
+        path.write_bytes(raw)
+    members.append({**{key: row[key] for key in ("path", "size", "mtime_ns", "inode", "consistency_mode")},
+                    "staged_path": str(path), "sha256": hashlib.sha256(raw).hexdigest()})
+if manifest.get("fixture_defect") == "hash":
+    members[0]["sha256"] = "0" * 64
+identity = {key: manifest[key] for key in ("inventory_generation_id", "inventory_sha256",
+            "source_git_rev", "collection_epoch_id", "tile_registry_signature")}
+if manifest.get("fixture_defect") in {"waiting", "foreign-wait", "late-wait"}:
+    waiting_identity = dict(identity)
+    if manifest["fixture_defect"] == "foreign-wait":
+        waiting_identity["inventory_generation_id"] = "f" * 64
+    print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "INDEX_WAITING",
+                      "generation": waiting_identity,
+                      "elapsed_seconds": 601 if manifest["fixture_defect"] == "late-wait" else 5,
+                      "next_retry_seconds": 10}), flush=True)
+print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "PACKAGE_VERIFIED",
+                  "generation": identity, "members": members,
+                  "reused_local": "true" if manifest.get("fixture_defect") == "reuse-flag" else manifest.get("fixture_defect") in {"reuse", "reuse-escape", "reuse-size"}}), flush=True)
+if str(manifest.get('fixture_defect')).startswith('dual'):
+    waiting=dict(schema='fly_bundle_staging_receipt_v1',status='INDEX_WAITING',generation=identity,
+        elapsed_seconds=700,idle_elapsed_seconds=10,verified_packages=1,next_retry_seconds=5)
+    defect=manifest['fixture_defect']
+    if defect=='dual-missing': del waiting['idle_elapsed_seconds']
+    if defect=='dual-overall': waiting['elapsed_seconds']=1800
+    if defect=='dual-idle': waiting['idle_elapsed_seconds']=600
+    if defect=='dual-count': waiting['verified_packages']=2
+    print(json.dumps(waiting),flush=True)
+    if defect in {'dual-reset','dual-regress'}:
+        waiting['elapsed_seconds']=699 if defect=='dual-regress' else 705
+        waiting['idle_elapsed_seconds']=5
+        print(json.dumps(waiting),flush=True)
+if str(manifest.get("fixture_defect")).startswith("failed"):
+    if manifest['fixture_defect'].startswith('failed-index'):
+        diagnostic=dict(generation_id=identity['inventory_generation_id'],phase='INDEX',attempts=2,http_status=503,transport_error=None)
+        if manifest['fixture_defect']=='failed-index-extra': diagnostic['extra']='PRIVATE_SENTINEL'
+        if manifest['fixture_defect']=='failed-index-malformed': diagnostic['attempts']=True
+        print(json.dumps(dict(schema='fly_bundle_staging_receipt_v1',status='FAILED',error='BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN',index_diagnostic=diagnostic)),flush=True)
+        sys.exit(1)
+    diagnostic=dict(generation_id=identity['inventory_generation_id'],package_sha256='b'*64,phase='CHUNK',offset=0,attempts=3,http_status=503,transport_error=None)
+    if manifest['fixture_defect']=='failed-extra': diagnostic['extra']='PRIVATE_SENTINEL'
+    if manifest['fixture_defect']=='failed-malformed': diagnostic['attempts']=True
+    print(json.dumps(dict(schema='fly_bundle_staging_receipt_v1',status='FAILED',error='PACKAGE_RETRY_EXHAUSTED',diagnostic=diagnostic)),flush=True)
+    sys.exit(1)
+if manifest.get("fixture_defect") == "interleaved":
+    print(json.dumps({"schema":"fly_bundle_staging_receipt_v1","status":"INDEX_WAITING",
+        "generation":identity,"elapsed_seconds":5,"next_retry_seconds":10}),flush=True)
+print(json.dumps({"schema": "fly_bundle_staging_receipt_v1", "status": "COMPLETE",
+                  "files": len(members), "ack_sent": False}), flush=True)

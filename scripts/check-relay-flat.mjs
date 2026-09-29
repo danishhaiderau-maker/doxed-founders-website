@@ -4,6 +4,7 @@
  * Uses the executor's fresh raw Bitfinex reconciliation and does not print credentials.
  */
 import fs from 'node:fs';
+import https from 'node:https';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import prismaPackage from '../node_modules/.prisma/client/default.js';
@@ -42,6 +43,14 @@ const adminToken =
 const CANONICAL_FLY_OWNER_URL = 'https://doxed-btc-bot.fly.dev';
 const requireCanonicalFlyOwner =
   process.env.REQUIRE_CANONICAL_FLY_OWNER === 'YES';
+const durableOnlyRecovery =
+  process.env.DURABLE_RELAYS_ONLY_RECOVERY === 'YES';
+const platformApiUrl = process.env.PLATFORM_API_URL?.trim() || '';
+if (durableOnlyRecovery && requireCanonicalFlyOwner) {
+  throw new Error(
+    'DURABLE_RELAYS_ONLY_RECOVERY cannot be combined with REQUIRE_CANONICAL_FLY_OWNER=YES',
+  );
+}
 const ownerFetchTimeoutMs = Math.max(
   1_000,
   Number.parseInt(process.env.OWNER_STATE_TIMEOUT_MS ?? '15000', 10) || 15_000,
@@ -53,9 +62,19 @@ const ownerFetchAttempts = Math.max(
     Number.parseInt(process.env.OWNER_STATE_FETCH_ATTEMPTS ?? '3', 10) || 3,
   ),
 );
+const prismaProofAttempts = Math.max(
+  1,
+  Math.min(
+    5,
+    Number.parseInt(process.env.PRISMA_PROOF_ATTEMPTS ?? '3', 10) || 3,
+  ),
+);
 const botUrls = requireCanonicalFlyOwner
   ? [CANONICAL_FLY_OWNER_URL]
   : [
+      // The deployed Fly owner is authoritative and must be attempted before
+      // any workstation-era URL retained in an old vault.
+      CANONICAL_FLY_OWNER_URL,
       process.env.SHOWCASE_OWNER_URL?.trim(),
       process.env.TRADING_AGENT_BOT_URL?.trim(),
       resolveHomeBotPublicUrl(),
@@ -125,6 +144,49 @@ export function describeOwnerFetchError(error, url, timeoutMs, attempts = 1) {
   );
 }
 
+export function buildOwnerHttpsRequestOptions(url, token, timeoutMs) {
+  const parsed = new URL(url);
+  return {
+    protocol: parsed.protocol,
+    hostname: parsed.hostname,
+    port: parsed.port || 443,
+    path: `${parsed.pathname}${parsed.search}`,
+    method: 'GET',
+    family: 4,
+    timeout: timeoutMs,
+    headers: token ? { 'X-Bot-Admin-Token': token } : undefined,
+  };
+}
+
+export function fetchOwnerJsonViaHttps(url, token = '', timeoutMs = 15_000) {
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      buildOwnerHttpsRequestOptions(url, token, timeoutMs),
+      (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          if ((response.statusCode ?? 500) < 200 || (response.statusCode ?? 500) >= 300) {
+            reject(new Error(`HTTPS HTTP ${response.statusCode ?? 'unknown'}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch (error) {
+            reject(new Error('HTTPS owner state returned invalid JSON', { cause: error }));
+          }
+        });
+      },
+    );
+    request.on('timeout', () => {
+      request.destroy(new Error(`HTTPS owner state timed out after ${timeoutMs}ms`));
+    });
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 async function fetchOwnerJson(url) {
   let lastError = null;
   for (let attempt = 1; attempt <= ownerFetchAttempts; attempt += 1) {
@@ -139,6 +201,18 @@ async function fetchOwnerJson(url) {
       return await response.json();
     } catch (error) {
       lastError = error;
+      // Node's global fetch uses undici. On this Windows monitor host it can
+      // intermittently exhaust its dual-stack connect attempt while the same
+      // canonical Fly route remains healthy. Fall back to a fresh native HTTPS
+      // request pinned to IPv4; preserve the same authentication and fail-closed
+      // response checks instead of weakening the money-path boundary proof.
+      try {
+        return await fetchOwnerJsonViaHttps(url, adminToken, ownerFetchTimeoutMs);
+      } catch (httpsError) {
+        lastError = new Error('fetch and HTTPS fallback both failed', {
+          cause: new AggregateError([error, httpsError]),
+        });
+      }
       if (attempt < ownerFetchAttempts) {
         await new Promise((resolve) => setTimeout(resolve, attempt * 350));
       }
@@ -233,6 +307,18 @@ export function isStrictRawFlatReconcileSnapshot(rec, nowMs = Date.now()) {
   );
 }
 
+export function isCompleteStoredRawFlatReconcileSnapshot(rec) {
+  if (rec == null || typeof rec !== 'object') return false;
+  for (const key of [
+    'rawExchangePositionQty', 'dustPositionQty', 'signedExchangePositionQty',
+    'ledgerOpenQty', 'signedLedgerOpenQty', 'deltaBtc', 'openLots', 'pendingLots',
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(rec, key)) return false;
+    if (typeof rec[key] !== 'number' || !Number.isFinite(rec[key]) || rec[key] !== 0) return false;
+  }
+  return Number.isFinite(Date.parse(String(rec.updatedAt ?? '')));
+}
+
 export function isStrictExchangeOrderAuditFlat(audit, nowMs = Date.now()) {
   if (audit == null || typeof audit !== 'object') return false;
   const checkedAgeMs = nowMs - Date.parse(String(audit.checkedAt ?? ''));
@@ -256,9 +342,258 @@ export function isRelayPausedAndDisarmed(row) {
   );
 }
 
+const CREDENTIAL_RESOLUTION_FAILURE_CODES = new Set([
+  'ROW_MISSING',
+  'TOKEN_MISSING',
+  'DECRYPT_FAILED',
+  'JSON_INVALID',
+  'FIELDS_MISSING',
+  'STORED_FINGERPRINT_MISMATCH',
+  'CONFIGURED_FINGERPRINT_MISMATCH',
+  'FINGERPRINT_REQUIRED_MISSING',
+]);
+
+export function isCredentialResolutionUnavailableError(value) {
+  if (value === 'Exchange credentials missing — re-hire with API keys') return true;
+  const match = /^Exchange credentials unavailable \(([A-Z_]+)\) — re-hire with API keys$/.exec(
+    String(value ?? ''),
+  );
+  return match != null && CREDENTIAL_RESOLUTION_FAILURE_CODES.has(match[1]);
+}
+
+// Open by default so AUTHENTICATED_OWNER paper-tip proof accepts this class
+// without DURABLE_RELAYS_ONLY_RECOVERY. Pass false to close the exemption.
+// Armed, live, and previously used relays still fail the row predicates.
+// Owner flatness and strict reconcile/audit for every other relay stay required.
+export function isNeverArmedUncredentialedRelay(
+  row,
+  allowDurableExemption = true,
+) {
+  const reconcileAbsent = row?.reconcile == null;
+  const orderAuditAbsent = row?.exchangeOrderAudit == null;
+  const guard = row?.liveFidelityGuard;
+  const observedAtMs = Date.parse(String(guard?.lastObservedAt ?? ''));
+  const credentialUpdatedAtMs = Date.parse(String(row?.providerCredentialUpdatedAt ?? ''));
+  const providerCredentialProvenUnusable = (
+    row?.providerCredentialPresent === true
+    && row?.providerCredentialReadStable === true
+    && typeof row?.providerCredentialId === 'string'
+    && row.providerCredentialId.length > 0
+    && row?.instanceCredentialId === row.providerCredentialId
+    && isCredentialResolutionUnavailableError(row?.lastError)
+    && guard?.status === 'IDLE'
+    && guard?.lastResetReason === 'EXCHANGE_CREDENTIALS_MISSING'
+    && Number.isFinite(observedAtMs)
+    && Number.isFinite(credentialUpdatedAtMs)
+    && observedAtMs >= credentialUpdatedAtMs
+  );
+  const providerCredentialAbsent = (
+    row?.providerCredentialPresent === false
+    && row?.providerCredentialReadStable === true
+    && row?.instanceCredentialId == null
+  );
+  const noDurableRelayHistory = row?.totalParticipants === 0;
+  const orphanOrdersClear = (
+    (Array.isArray(row?.orphanOrderIds) && row.orphanOrderIds.length === 0)
+    || (row?.orphanOrderIds == null && noDurableRelayHistory)
+  );
+  const orphanPositionsClear = (
+    (Array.isArray(row?.orphanPositionIds) && row.orphanPositionIds.length === 0)
+    || (row?.orphanPositionIds == null && noDurableRelayHistory)
+  );
+  return (
+    allowDurableExemption
+    && (providerCredentialAbsent || providerCredentialProvenUnusable)
+    && row?.liveDeskSessionStartedAt == null
+    && isRelayPausedAndDisarmed(row)
+    && row?.activeParticipants === 0
+    && row?.participantReadStable === true
+    && noDurableRelayHistory
+    && orphanOrdersClear
+    && orphanPositionsClear
+    && reconcileAbsent
+    && orderAuditAbsent
+  );
+}
+
+export function isStrictAuditRefreshTarget(row) {
+  return row?.credentialConfigured === true
+    && isRelayPausedAndDisarmed(row)
+    && !isNeverArmedUncredentialedRelay(row);
+}
+
+export function isCompleteStoredExchangeOrderAuditFlat(audit) {
+  return (
+    audit != null && typeof audit === 'object' && audit.known === true
+    && audit.activeOrderCount === 0 && audit.managedActiveOrderCount === 0
+    && audit.foreignActiveOrderCount === 0
+    && Number.isFinite(Date.parse(String(audit.checkedAt ?? '')))
+  );
+}
+
+export async function refreshPausedRelayAudit(
+  apiUrl,
+  adminSecret,
+  userId,
+  fetchImpl = fetch,
+) {
+  const base = String(apiUrl ?? '').trim().replace(/\/$/, '');
+  const token = String(adminSecret ?? '').trim();
+  const scopedUserId = String(userId ?? '').trim();
+  if (!base || !token || !scopedUserId) {
+    throw new Error('strict relay proof requires authenticated user-scoped audit refresh configuration');
+  }
+  const parsed = new URL(base);
+  if (parsed.protocol !== 'https:') {
+    throw new Error('strict relay proof requires an HTTPS platform API URL');
+  }
+  const response = await fetchImpl(
+    `${base}/trading-agents/conservative-btc/ops/refresh-flat-audit`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-bot-admin-token': token,
+    },
+    body: JSON.stringify({
+      userId: scopedUserId,
+      confirmation: 'REFRESH_PAUSED_FLAT_AUDIT',
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) {
+    throw new Error(`authenticated platform audit refresh failed HTTP ${response.status}`);
+  }
+}
+
+export function isRetryablePrismaConnectionError(error) {
+  const message = String(error?.message ?? error ?? '');
+  return /P1001|P1002|P1017|Can't reach database server|Server has closed the connection/i.test(message);
+}
+
+async function loadRelayBoundaryRows() {
+  let lastError = null;
+  for (let attempt = 1; attempt <= prismaProofAttempts; attempt += 1) {
+    try {
+      const agent = await prisma.tradingAgent.findUnique({
+        where: { slug: 'conservative-btc' },
+        select: { id: true },
+      });
+      if (!agent) throw new Error('conservative-btc agent missing');
+
+      const instances = await prisma.tradingAgentInstance.findMany({
+        where: { agentId: agent.id, exchangeProvider: 'bitfinex' },
+        include: {
+          user: { select: { platformHandle: true, name: true } },
+        },
+      });
+      const credentialWhere = {
+        provider: 'exchange:bitfinex',
+        userId: { in: instances.map((instance) => instance.userId) },
+      };
+      const providerCredentials = await prisma.integrationCredential.findMany({
+        where: {
+          ...credentialWhere,
+        },
+        select: { id: true, userId: true, updatedAt: true },
+      });
+      const firstCredentialVersions = new Map(
+        providerCredentials.map((credential) => [
+          credential.userId,
+          `${credential.id}:${credential.updatedAt.toISOString()}`,
+        ]),
+      );
+      const firstCredentials = new Map(
+        providerCredentials.map((credential) => [credential.userId, credential]),
+      );
+
+      const rows = [];
+      for (const instance of instances) {
+        const dashboard = instance.dashboardState ?? {};
+        const activeParticipants = await prisma.signalCycleParticipant.count({
+          where: {
+            userId: instance.userId,
+            cycle: { agentId: agent.id },
+            status: { in: ['PENDING_ENTRY', 'OPEN'] },
+          },
+        });
+        const totalParticipants = await prisma.signalCycleParticipant.count({
+          where: { userId: instance.userId },
+        });
+        const providerCredential = firstCredentials.get(instance.userId);
+        const reconcile =
+          dashboard.copyRelayReconcile
+          ?? dashboard.copyRelaySim?.reconcile
+          ?? null;
+        rows.push({
+          instanceId: instance.id,
+          refreshUserId: instance.userId,
+          user:
+            instance.user.platformHandle
+            || instance.user.name
+            || instance.userId,
+          status: instance.status,
+          lastError: instance.lastError,
+          instanceCredentialId: instance.credentialId,
+          credentialConfigured: Boolean(
+            instance.credentialId || firstCredentialVersions.has(instance.userId)
+          ),
+          providerCredentialPresent: firstCredentialVersions.has(instance.userId),
+          providerCredentialId: providerCredential?.id ?? null,
+          providerCredentialUpdatedAt: providerCredential?.updatedAt.toISOString() ?? null,
+          activeParticipants,
+          totalParticipants,
+          reconcile,
+          relayExecutionMode: dashboard.relayExecutionMode ?? null,
+          relayArmedAt: dashboard.relayArmedAt ?? null,
+          realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
+          liveDeskSessionStartedAt: dashboard.liveDeskSessionStartedAt ?? null,
+          liveFidelityGuard: dashboard.liveFidelityGuard ?? null,
+          exchangeOrderAudit: dashboard.exchangeOrderAudit ?? null,
+          orphanOrderIds: dashboard.orphanOrderIds,
+          orphanPositionIds: dashboard.orphanPositionIds,
+        });
+      }
+      // Re-read only non-secret credential metadata after the per-instance
+      // evidence queries. Any insertion, deletion, or update during the proof
+      // makes the recovery-only exemption unavailable.
+      const credentialRecheck = await prisma.integrationCredential.findMany({
+        where: { ...credentialWhere },
+        select: { id: true, userId: true, updatedAt: true },
+      });
+      const finalCredentialVersions = new Map(
+        credentialRecheck.map((credential) => [
+          credential.userId,
+          `${credential.id}:${credential.updatedAt.toISOString()}`,
+        ]),
+      );
+      for (const row of rows) {
+        row.providerCredentialReadStable = (
+          firstCredentialVersions.get(row.refreshUserId)
+          === finalCredentialVersions.get(row.refreshUserId)
+        );
+        const finalParticipantCount = await prisma.signalCycleParticipant.count({
+          where: { userId: row.refreshUserId },
+        });
+        row.participantReadStable = finalParticipantCount === row.totalParticipants;
+      }
+      return rows;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryablePrismaConnectionError(error) || attempt >= prismaProofAttempts) {
+        throw error;
+      }
+      await prisma.$disconnect().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, attempt * 1_000));
+    }
+  }
+  throw lastError ?? new Error('Neon boundary proof unavailable');
+}
+
 async function main() {
-  const { bot, baseUrl: botUrl } = await fetchOwnerState();
-  const pendingOrders = (bot.orders ?? bot.pending_orders ?? []).filter(
+  const ownerState = durableOnlyRecovery ? null : await fetchOwnerState();
+  const bot = ownerState?.bot ?? null;
+  const botUrl = ownerState?.baseUrl ?? null;
+  const pendingOrders = (bot?.orders ?? bot?.pending_orders ?? []).filter(
     (order) =>
       order
       && !['FILLED', 'CANCELLED', 'CANCELED', 'EXPIRED', 'REJECTED'].includes(
@@ -266,81 +601,72 @@ async function main() {
       ),
   );
 
-  const agent = await prisma.tradingAgent.findUnique({
-    where: { slug: 'conservative-btc' },
-    select: { id: true },
-  });
-  if (!agent) throw new Error('conservative-btc agent missing');
-
-  const instances = await prisma.tradingAgentInstance.findMany({
-    where: { agentId: agent.id, exchangeProvider: 'bitfinex' },
-    include: {
-      user: { select: { platformHandle: true, name: true } },
-    },
-  });
-
-  const rows = [];
-  for (const instance of instances) {
-    const dashboard = instance.dashboardState ?? {};
-    const activeParticipants = await prisma.signalCycleParticipant.count({
-      where: {
-        userId: instance.userId,
-        cycle: { agentId: agent.id },
-        status: { in: ['PENDING_ENTRY', 'OPEN'] },
-      },
-    });
-    const reconcile =
-      dashboard.copyRelayReconcile
-      ?? dashboard.copyRelaySim?.reconcile
-      ?? null;
-    rows.push({
-      instanceId: instance.id,
-      user:
-        instance.user.platformHandle
-        || instance.user.name
-        || instance.userId,
-      status: instance.status,
-      lastError: instance.lastError,
-      activeParticipants,
-      reconcile,
-      relayExecutionMode: dashboard.relayExecutionMode ?? null,
-      relayArmedAt: dashboard.relayArmedAt ?? null,
-      realTradingConfirmedAt: dashboard.realTradingConfirmedAt ?? null,
-      exchangeOrderAudit: dashboard.exchangeOrderAudit ?? null,
-      orphanOrderIds: dashboard.orphanOrderIds ?? [],
-      orphanPositionIds: dashboard.orphanPositionIds ?? [],
-    });
+  let rows = await loadRelayBoundaryRows();
+  if (!durableOnlyRecovery) {
+    const refreshTargets = rows.filter(isStrictAuditRefreshTarget);
+    // A fleet made only of never-armed unusable relays has nothing to refresh.
+    // The Fly owner flatness check below still runs.
+    const neverArmedFleet = rows.length > 0
+      && rows.every((row) => isNeverArmedUncredentialedRelay(row));
+    if (refreshTargets.length === 0 && !neverArmedFleet) {
+      throw new Error('strict relay proof found no paused, disarmed Cheetah audit target');
+    }
+    for (const target of refreshTargets) {
+      await refreshPausedRelayAudit(platformApiUrl, dedicatedAdminToken, target.refreshUserId);
+    }
+  }
+  for (let attempt = 1; attempt <= (durableOnlyRecovery ? 1 : 10); attempt += 1) {
+    rows = await loadRelayBoundaryRows();
+    if (
+      durableOnlyRecovery
+      || (
+        rows.length > 0
+        && rows.every((row) => (
+          isNeverArmedUncredentialedRelay(row)
+          || (
+            isRelayPausedAndDisarmed(row)
+            && isStrictRawFlatReconcileSnapshot(row.reconcile)
+            && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
+          )
+        ))
+      )
+    ) break;
+    if (attempt < 10) await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
 
   const output = {
     at: new Date().toISOString(),
     showcase: {
-      botVersion: bot.bot_version ?? null,
-      botInstanceId: bot.bot_instance_id ?? null,
+      proofMode: durableOnlyRecovery ? 'DURABLE_RECOVERY_ONLY' : 'AUTHENTICATED_OWNER',
+      botVersion: bot?.bot_version ?? null,
+      botInstanceId: bot?.bot_instance_id ?? null,
       url: botUrl,
-      dashboardOwner: bot.dashboard_owner === true,
-      positions: Array.isArray(bot.positions) ? bot.positions.length : null,
-      pendingOrders: pendingOrders.length,
+      dashboardOwner: bot == null ? null : bot.dashboard_owner === true,
+      positions: Array.isArray(bot?.positions) ? bot.positions.length : null,
+      pendingOrders: bot == null ? null : pendingOrders.length,
     },
-    instances: rows,
+    instances: rows.map(({ refreshUserId: _refreshUserId, ...row }) => row),
   };
   console.log(JSON.stringify(output, null, 2));
 
-  const showcaseFlat =
-    output.showcase.positions === 0
-    && output.showcase.pendingOrders === 0;
+  const showcaseFlat = durableOnlyRecovery || (
+    output.showcase.positions === 0 && output.showcase.pendingOrders === 0
+  );
   const trackedFlat = rows.every((row) => row.activeParticipants === 0);
-  const cheetahRows = rows
-    .filter((row) => String(row.user).toLowerCase().includes('cheetah'));
-  const relayPausedAndDisarmed = cheetahRows.length > 0
-    && cheetahRows.every(isRelayPausedAndDisarmed);
-  const reconciledFlat = cheetahRows.length > 0
-    && cheetahRows.every((row) => {
+  const relayPausedAndDisarmed = rows.length > 0
+    && rows.every(isRelayPausedAndDisarmed);
+  const reconciledFlat = rows.length > 0
+    && rows.every((row) => {
       return (
-        isStrictRawFlatReconcileSnapshot(row.reconcile)
-        && isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit)
-        && row.orphanOrderIds.length === 0
-        && row.orphanPositionIds.length === 0
+        isNeverArmedUncredentialedRelay(row)
+        || (
+          (durableOnlyRecovery
+            ? isCompleteStoredRawFlatReconcileSnapshot(row.reconcile)
+            : isStrictRawFlatReconcileSnapshot(row.reconcile))
+          && (durableOnlyRecovery
+            ? isCompleteStoredExchangeOrderAuditFlat(row.exchangeOrderAudit)
+            : isStrictExchangeOrderAuditFlat(row.exchangeOrderAudit))
+        )
       );
     });
   process.exitCode =

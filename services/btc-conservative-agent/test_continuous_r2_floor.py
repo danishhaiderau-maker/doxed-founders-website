@@ -1,7 +1,7 @@
 """Regression tests for the R2 spread floor on the CONTINUOUS lane.
 
 The previous R2 fix (commit 0f980ab4) raised MIN_SPREAD_FLOOR in
-type_b_hunter_v1, but live cont-* trades fire from the CONTINUOUS lane spawn
+an unrelated retired experiment, but live cont-* trades fire from the CONTINUOUS lane spawn
 path (bot.spawn_continuous_lane_from_ai_scan) which had NO spread floor of its
 own. The R2 floor gates AI signals before they reach the chase lifecycle.
 
@@ -24,11 +24,19 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 os.environ.setdefault("FORCE_PAPER_MODE", "1")
 os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import bot
+
+
+@pytest.fixture(autouse=True)
+def _isolated_evidence_root(monkeypatch, tmp_path) -> None:
+    """Keep immutable receipt ledgers isolated across tests and reruns."""
+    monkeypatch.chdir(tmp_path)
 
 
 def _approved_ai(long_score: int, short_score: int) -> dict:
@@ -55,7 +63,14 @@ def _run_spawn(long_score: int, short_score: int, monkeypatch, textual_decision=
     monkeypatch.setattr(bot, "_spawn_combo_lane", fake_spawn_combo_lane)
     monkeypatch.setattr(bot, "continuous_ai_research_enabled", lambda: True)
 
-    ctx = {"trade_id": "test-ctx"}
+    # Immutable pre-entry evidence is keyed by causal opportunity identity.
+    # Each score case is a distinct synthetic opportunity, so do not reuse one
+    # trade id across parametrically different receipts in the same test run.
+    ctx = {
+        "trade_id": (
+            f"test-ctx-{long_score}-{short_score}-{textual_decision.lower()}"
+        )
+    }
     ai = _approved_ai(long_score, short_score)
     ai["decision"] = textual_decision
     ai["approved"] = textual_decision == "APPROVE"
@@ -69,6 +84,32 @@ def _run_spawn(long_score: int, short_score: int, monkeypatch, textual_decision=
     )
     assert len(calls) == 1
     return calls[0]
+
+
+def test_continuous_approval_stays_analysis_only(monkeypatch) -> None:
+    recorded = {}
+
+    def fake_write(*_args, **kwargs):
+        recorded.update(kwargs)
+        return True
+
+    monkeypatch.setattr(bot, "_write_v3_shared_lane_decision", fake_write)
+    monkeypatch.setattr(bot, "_spawn_combo_lane", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bot, "continuous_ai_research_enabled", lambda: True)
+    bot.spawn_continuous_lane_from_ai_scan(
+        ctx={"trade_id": "scan-analysis-only"},
+        ai=_approved_ai(35, 65),
+        edge_score=5.0,
+        features={},
+        source_lane=bot.RESEARCH_LANE_AI_SCAN,
+    )
+    assert recorded["execution_disposition"] == "LANE_DISABLED_DATA_ONLY"
+    assert recorded["exact_reason"] == "CONTINUOUS_ANALYSIS_ONLY"
+    assert bot.lane_orders_allowed(bot.RESEARCH_LANE_CONTINUOUS) is False
+    assert bot.RESEARCH_LANE_CONTINUOUS not in bot.PLATFORM_RELAY_ELIGIBLE_LANES
+    source = open(bot.__file__, encoding="utf-8").read()
+    gate = source.index("str(target_lane or \"\").upper() == RESEARCH_LANE_CONTINUOUS")
+    assert source.index("result = process_signal(", gate) > gate
 
 
 def test_floor_constant_is_four() -> None:
@@ -113,8 +154,8 @@ def test_raw_gap_thirty_is_accepted(monkeypatch) -> None:
     assert normalized["direction"] == "SHORT"
 
 
-def test_textual_reject_cannot_override_executable_score_gap(monkeypatch) -> None:
-    """Production regression: 35/65 must execute even if the model says REJECT."""
+def test_textual_reject_cannot_be_overridden_by_executable_score_gap(monkeypatch) -> None:
+    """A score gap refines an approval; it cannot manufacture one from REJECT."""
     normalized = _run_spawn(
         long_score=35,
         short_score=65,
@@ -122,9 +163,40 @@ def test_textual_reject_cannot_override_executable_score_gap(monkeypatch) -> Non
         textual_decision="REJECT",
     )
     assert normalized["raw_decision"] == "REJECT"
-    assert normalized["decision"] == "APPROVE"
-    assert normalized["execution_tier"] == "STRONG_APPROVE"
-    assert normalized["approved"] is True
+    assert normalized["decision"] == "REJECT"
+    assert normalized["execution_tier"] == "REJECT"
+    assert normalized["approved"] is False
+
+
+def test_explicit_no_trade_cannot_create_continuous_order(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_spawn_combo_lane(ctx, ai, edge_score, features, target_lane, trigger_reason):
+        calls.append(dict(ai))
+
+    monkeypatch.setattr(bot, "_spawn_combo_lane", fake_spawn_combo_lane)
+    monkeypatch.setattr(bot, "continuous_ai_research_enabled", lambda: True)
+    bot.spawn_continuous_lane_from_ai_scan(
+        ctx={"trade_id": "test-no-trade"},
+        ai={
+            "decision": "REJECT",
+            "raw_decision": "REJECT",
+            "approved": False,
+            "direction": "NO_TRADE",
+            "candidate_direction": "NO_TRADE",
+            "raw_direction": "NO_TRADE",
+            "explicit_abstain": True,
+            "long_score": 65,
+            "short_score": 35,
+        },
+        edge_score=5.0,
+        features={},
+        source_lane=bot.RESEARCH_LANE_AI_SCAN,
+    )
+    assert len(calls) == 1
+    assert calls[0]["direction"] == "NO_TRADE"
+    assert calls[0]["decision"] == "REJECT"
+    assert calls[0]["approved"] is False
 
 
 def test_zero_gap_remains_rejected(monkeypatch) -> None:

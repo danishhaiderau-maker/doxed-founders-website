@@ -93,6 +93,12 @@ import {
 } from './relay-fidelity.mapper';
 import { NotificationsService } from '../notifications/notifications.service';
 import { BitfinexAuthTradeStream, type BitfinexWsTrade } from '../exchanges/bitfinex-auth-trade-stream';
+import {
+  assessBitfinexLiveCopySizingReadiness,
+  missingBitfinexVenueEvidenceReadiness,
+} from './bitfinex-live-copy-readiness';
+import { processDormantPositionReduction, type SignedReduction } from './position-reduction-fence';
+import { PrismaReductionFenceRepository } from './position-reduction-prisma.repository';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
@@ -101,25 +107,23 @@ const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
 const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
 const SIGNED_SHOWCASE_FAST_PATH_MAX_AGE_MS = 15_000;
+/**
+ * The authenticated direct wake is the latency path. Neon is only the durable
+ * crash/restart backstop, so it must never be polled as a 4 Hz message queue
+ * (especially because the wake currently lives beside the comparatively large
+ * dashboardState document).
+ */
 export const PERSISTED_WAKE_ACTIVE_POLL_MS = 2_000;
+/**
+ * A disarmed, exposure-free relay has no money-path work to reconcile. Direct
+ * authenticated wakes remain immediate. Startup performs one durable recovery
+ * read, then a durably disarmed and flat executor stops recurring Neon reads
+ * completely. Keeping PAUSED at any fixed cadence prevents Neon suspension.
+ */
 export const PERSISTED_WAKE_PAUSED_POLL_MS = null;
 export const PERSISTED_WAKE_IDLE_POLL_MS = null;
 export const RECONCILIATION_PAUSED_POLL_MS = null;
 export const RECONCILIATION_IDLE_POLL_MS = null;
-
-export type RelayExecutorPollActivity = 'ACTIVE' | 'PAUSED' | 'IDLE';
-
-/** Pure cadence resolver for the executor cost/correctness contract. */
-export function relayExecutorPollDelayMs(
-  channel: 'RECONCILIATION' | 'PERSISTED_WAKE',
-  activity: RelayExecutorPollActivity,
-  activeReconciliationMs = POLL_MS,
-): number | null {
-  if (channel === 'PERSISTED_WAKE') {
-    return activity === 'ACTIVE' ? PERSISTED_WAKE_ACTIVE_POLL_MS : null;
-  }
-  return activity === 'ACTIVE' ? activeReconciliationMs : null;
-}
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
@@ -128,21 +132,41 @@ const PENDING_FILL_RECONCILE_GRACE_MS = 60_000;
 const SHOWCASE_ORDER_SNAPSHOT_PROPAGATION_GRACE_MS = 15_000;
 const BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS = 15_000;
 /**
- * The showcase sizes collateral at its signal price, then posts its canonical
- * deterministic limit up to 0.1% away. Preserve that exact quantity while
- * allowing only a tightly bounded extra margin for the signed anchor offset
- * and decimal transport. Materially larger source sizing still fails closed.
+ * Exact signed quantity is deterministically floored to Bitfinex precision.
+ * The signed margin is a strict ceiling: no anchor or transport tolerance may
+ * expand it, and any larger source sizing fails closed.
  */
-export const EXACT_SHOWCASE_MARGIN_CAP_TOLERANCE_PCT = 0.2;
+export const EXACT_SHOWCASE_MARGIN_CAP_TOLERANCE_PCT = 0;
+export const MAX_SIGNED_COPY_MARGIN_PER_LEG_USD = 0.25;
+export const MAX_AGGREGATE_COPY_MARGIN_USD = 5;
+export const MAX_AGGREGATE_COPY_NOTIONAL_USD = 500;
 export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
 export const LIVE_FIDELITY_GUARD_LOW_OBSERVATIONS = 3;
 export const LIVE_FIDELITY_GUARD_MIN_BREACH_MS = 90_000;
 export const LIVE_FIDELITY_GUARD_OBSERVATION_INTERVAL_MS = 30_000;
 const LIVE_FIDELITY_GUARD_EVIDENCE_MAX_AGE_MS = 30_000;
 
+export type RelayExecutorPollActivity = 'ACTIVE' | 'PAUSED' | 'IDLE';
+
+/** Pure cadence resolver kept deterministic for the cost/correctness contract. */
+export function relayExecutorPollDelayMs(
+  channel: 'RECONCILIATION' | 'PERSISTED_WAKE',
+  activity: RelayExecutorPollActivity,
+  activeReconciliationMs = POLL_MS,
+): number | null {
+  if (channel === 'PERSISTED_WAKE') {
+    if (activity === 'ACTIVE') return PERSISTED_WAKE_ACTIVE_POLL_MS;
+    if (activity === 'PAUSED') return PERSISTED_WAKE_PAUSED_POLL_MS;
+    return PERSISTED_WAKE_IDLE_POLL_MS;
+  }
+  if (activity === 'ACTIVE') return activeReconciliationMs;
+  if (activity === 'PAUSED') return RECONCILIATION_PAUSED_POLL_MS;
+  return RECONCILIATION_IDLE_POLL_MS;
+}
+
 export type ExactShowcaseEntryQtyResolution =
   | { ok: true; qty: number; requiredMarginUsd: number; capQty: number }
-  | { ok: false; reason: 'MISSING_EXACT_QTY' | 'INVALID_SIZING_CONTEXT' | 'BELOW_EXCHANGE_MIN_QTY' | 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
+  | { ok: false; reason: 'MISSING_EXACT_QTY' | 'INVALID_SIZING_CONTEXT' | 'MARGIN_CEILING_EXCEEDED' | 'BELOW_EXCHANGE_MIN_QTY' | 'SOURCE_QTY_EXCEEDS_SUBSCRIBER_CAP' };
 
 /**
  * Prisma Decimal values support Number(...), while the deliberately small
@@ -180,6 +204,9 @@ export function resolveExactShowcaseEntryQty(input: {
     || !Number.isFinite(input.leverage) || input.leverage <= 0
     || !Number.isFinite(input.limitPrice) || input.limitPrice <= 0
   ) return { ok: false, reason: 'INVALID_SIZING_CONTEXT' };
+  if (input.maxMarginUsd > MAX_SIGNED_COPY_MARGIN_PER_LEG_USD) {
+    return { ok: false, reason: 'MARGIN_CEILING_EXCEEDED' };
+  }
   const qty = Math.floor((exact + Number.EPSILON) * 1e5) / 1e5;
   const minQty = input.minQtyBtc ?? MIN_QTY_BTC;
   if (qty < minQty) return { ok: false, reason: 'BELOW_EXCHANGE_MIN_QTY' };
@@ -455,26 +482,7 @@ export type RelayExecutorHealthSnapshot = {
   observedAt?: string;
   sourceRevision?: string | null;
   executionEnabled?: boolean;
-  terminalState?: 'QUIESCENT';
-  paused?: boolean;
-  flatExposure?: boolean;
 };
-
-export function buildQuiescentRelayExecutorReceipt(
-  health: RelayExecutorHealthSnapshot,
-): RelayExecutorHealthSnapshot {
-  return {
-    ...health,
-    healthy: true,
-    status: 'IDLE',
-    running: false,
-    currentInstanceId: null,
-    currentStage: null,
-    terminalState: 'QUIESCENT',
-    paused: true,
-    flatExposure: true,
-  };
-}
 
 export type LiveCopyCoordinationState =
   | 'RUNNING_TOGETHER'
@@ -2342,7 +2350,7 @@ export function hireExpiryRequiresExitOnlyProcessing(
 const RELAY_EXECUTOR_WAKE_KEY = 'relayExecutorWake';
 
 export type RelayExecutorWakeRequest = {
-  trigger: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
+  trigger: 'POSITION_CLOSED' | 'POSITION_REDUCED' | 'ORDER_EXPIRED' | 'ORDER_CANCELLED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE';
   at: string;
   tradeId?: string | null;
   /** HMAC-verified close evidence carried by the latency-only private prewake. */
@@ -3066,6 +3074,29 @@ export function assessCorrelatedExposureCluster(input: {
       aggregateQty: null, aggregateMarginUsd: null, nearest: null,
     };
   }
+  const aggregateParticipants = new Map<string, CorrelatedExposureCandidate>();
+  for (const row of [...input.active, input.candidate]) aggregateParticipants.set(row.participantId, row);
+  const allActive = [...aggregateParticipants.values()];
+  if (allActive.some((row) => row.marginUsd == null || !Number.isFinite(row.marginUsd) || row.marginUsd <= 0)) {
+    return {
+      allowed: false, reason: 'RISK_STATE_UNAVAILABLE', sameDirectionCount: null,
+      aggregateQty: null, aggregateMarginUsd: null, aggregateNotionalUsd: null, nearest: null,
+    };
+  }
+  const aggregateMarginUsd = allActive.reduce((sum, row) => sum + Number(row.marginUsd), 0);
+  const aggregateNotionalUsd = aggregateMarginUsd * DEFAULT_SUBSCRIBER_LEVERAGE;
+  if (aggregateMarginUsd > MAX_AGGREGATE_COPY_MARGIN_USD + Number.EPSILON) {
+    return {
+      allowed: false, reason: 'AGGREGATE_MARGIN_CEILING', sameDirectionCount: null,
+      aggregateQty: null, aggregateMarginUsd, aggregateNotionalUsd, nearest: null,
+    };
+  }
+  if (aggregateNotionalUsd > MAX_AGGREGATE_COPY_NOTIONAL_USD + Number.EPSILON) {
+    return {
+      allowed: false, reason: 'AGGREGATE_NOTIONAL_CEILING', sameDirectionCount: null,
+      aggregateQty: null, aggregateMarginUsd, aggregateNotionalUsd, nearest: null,
+    };
+  }
   const sameDirection = input.active.filter(
     (row) => row.direction === input.candidate.direction
       && row.participantId !== input.candidate.participantId,
@@ -3105,9 +3136,8 @@ export function assessCorrelatedExposureCluster(input: {
     aggregateQty: [input.candidate, ...sameDirection].every((row) => row.qty != null)
       ? [input.candidate, ...sameDirection].reduce((sum, row) => sum + Number(row.qty), 0)
       : null,
-    aggregateMarginUsd: [input.candidate, ...sameDirection].every((row) => row.marginUsd != null)
-      ? [input.candidate, ...sameDirection].reduce((sum, row) => sum + Number(row.marginUsd), 0)
-      : null,
+    aggregateMarginUsd,
+    aggregateNotionalUsd,
     nearest,
   };
 }
@@ -3690,6 +3720,137 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     this.activeTrading = this.bitfinex;
   }
 
+  /**
+   * Real subscriber adapters for the reduction fence. Signed relay ingestion
+   * may reach this only after the durable audit exists and the explicit
+   * rollout gate is enabled; the ordinary Tile execution allowlists remain
+   * unchanged.
+   */
+  async processAuditedPositionReductionDormant(
+    participantId: string,
+    source: SignedReduction,
+  ) {
+    if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') !== 'true') {
+      throw new Error('POSITION_REDUCTION_EXECUTION_DISABLED');
+    }
+    const participant = await this.prisma.signalCycleParticipant.findUnique({
+      where: { id: participantId },
+      include: { cycle: true },
+    });
+    if (!participant || participant.status !== SignalCycleStatus.OPEN) {
+      throw new Error('POSITION_REDUCTION_PARTICIPANT_NOT_OPEN');
+    }
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: participant.cycle.agentId, userId: participant.userId } },
+    });
+    if (!instance?.exchangeProvider || instance.exchangeProvider === 'paper') {
+      throw new Error('POSITION_REDUCTION_LIVE_CREDENTIALS_REQUIRED');
+    }
+    const creds = await this.exchanges.getUserCredentials(participant.userId, instance.exchangeProvider);
+    if (!creds) throw new Error('POSITION_REDUCTION_LIVE_CREDENTIALS_REQUIRED');
+    const meta = await this.loadExecutionMeta(participantId);
+    const intent = participant.cycle.intentEnvelope as unknown as SignalIntentEnvelope;
+    if (!meta.direction || !meta.qty || !intent?.risk) throw new Error('POSITION_REDUCTION_META_INCOMPLETE');
+    const repo = new PrismaReductionFenceRepository(this.prisma);
+    const leverage = resolveSubscriberLeverage(intent);
+    const result = await processDormantPositionReduction({
+      participantId, source, venueStep: 0.00001,
+      requestToken: `reduce:${participantId}:${source.reductionId}`,
+      repo,
+      venue: {
+        authenticatedPositionQty: async () => Math.abs((await this.activeTrading.getOpenPositionDetail(creds))?.amount ?? 0),
+        submitReduceOnly: async (qty, _requestToken) => ({
+          orderId: String(await this.activeTrading.submitMarketClose(creds, {
+            positionDirection: meta.direction!, qty, leverage,
+          })),
+        }),
+        replaceReduceOnlyProtection: async (targetQty) => {
+          const entry = meta.fillPrice ?? meta.limitPrice;
+          if (!entry || !meta.direction) return false;
+          const stopLossMarginPct = resolveEffectiveStopLossMarginPct(
+            intent.risk.stop_loss_margin_pct,
+            { mirrorMode: isShowcaseMirrorOnlyMode(), simActive: false },
+          );
+          const stopPrice = computeStopPrice(entry, meta.direction, stopLossMarginPct, leverage);
+          const replacement = await this.ensureDurableProtectiveStop({
+            participantId, purpose: 'PARTIAL_REDUCTION_REPLACEMENT', creds,
+            positionDirection: meta.direction, qty: targetQty, stopPrice, leverage,
+            predecessorOrderId: meta.stopOrderId,
+          });
+          if (!replacement.ok) return false;
+          if (meta.stopOrderId != null && meta.stopOrderId !== replacement.orderId) {
+            const retired = await this.cancelManagedOrderGone(
+              creds, meta.stopOrderId,
+              `POSITION_REDUCTION replace stop ${meta.stopOrderId} with ${replacement.orderId}`,
+            );
+            if (!retired.gone) return false;
+          }
+          await this.cycles.recordHireExecutionEvent(
+            participant.userId, participant.cycle.agentId, participant.cycleId,
+            'UPDATE_STOPS', {
+              venue: 'bitfinex', event: 'POSITION_REDUCTION_STOP_REPLACED',
+              stopOrderId: replacement.orderId, qty: targetQty,
+              direction: meta.direction, source: 'hire',
+            },
+          );
+          const protectedRow = await this.prisma.signalCycleParticipant.findUnique({
+            where: { id: participantId },
+            select: { protectiveStopPhase: true, protectiveStopQty: true },
+          });
+          return protectedRow?.protectiveStopPhase === 'OWNED'
+            && btcToSats(Number(protectedRow.protectiveStopQty)) === btcToSats(targetQty);
+        },
+        updateConfirmedRemainingQty: async (targetQty) => {
+          await this.cycles.recordHireExecutionEvent(
+            participant.userId, participant.cycle.agentId, participant.cycleId,
+            'UPDATE_STOPS', {
+              venue: 'bitfinex', event: 'POSITION_REDUCTION_CONFIRMED',
+              qty: targetQty, direction: meta.direction, reduction_id: source.reductionId,
+              source_event_id: source.eventId, source_event_seq: source.eventSeq, source: 'hire',
+            },
+          );
+        },
+      },
+    });
+    return result;
+  }
+
+  /** Resolve the exact durable source audit to every OPEN subscriber lot. */
+  async processAuditedPositionReductionEvent(
+    tradeId: string,
+    source: SignedReduction,
+  ): Promise<{ processed: number }> {
+    if (this.config.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') !== 'true') {
+      throw new Error('POSITION_REDUCTION_EXECUTION_DISABLED');
+    }
+    const audit = await this.prisma.relayPositionReductionAudit.findFirst({
+      where: {
+        tradeId,
+        eventId: source.eventId,
+        reductionId: source.reductionId,
+        eventSeq: source.eventSeq,
+      },
+      select: { cycleId: true },
+    });
+    if (!audit) throw new Error('POSITION_REDUCTION_DURABLE_AUDIT_NOT_FOUND');
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: { cycleId: audit.cycleId, status: SignalCycleStatus.OPEN },
+      select: { id: true },
+    });
+    if (participants.length === 0) {
+      throw new Error('POSITION_REDUCTION_OPEN_PARTICIPANT_NOT_FOUND');
+    }
+    let processed = 0;
+    for (const participant of participants) {
+      const result = await this.processAuditedPositionReductionDormant(participant.id, source);
+      if (result.phase !== 'CONFIRMED') {
+        throw new Error(`POSITION_REDUCTION_NOT_CONFIRMED:${participant.id}:${result.reason}`);
+      }
+      processed += 1;
+    }
+    return { processed };
+  }
+
   onModuleInit() {
     this.executorDestroyed = false;
     if (!executionEnabled()) {
@@ -3715,7 +3876,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
-        `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, every ${POLL_MS}ms (max $${cap}/trade)`,
+        `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (max $${cap}/trade)`,
       );
     });
     this.scheduleReconciliation(POLL_MS);
@@ -3742,7 +3903,12 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     this.bitfinexTradeStreams.clear();
   }
 
-  /** ACTIVE/exposure remains on the safety cadence; durably disarmed+flat stops. */
+  /**
+   * Full reconciliation stays at the configured money-path cadence while a
+   * relay is ACTIVE. Once a pass proves the relay disarmed and flat, recurring
+   * reconciliation stops. Explicit authenticated wakes re-arm this timer, and
+   * process startup always performs a recovery pass.
+   */
   private scheduleReconciliation(delayMs: number | null): void {
     if (this.executorDestroyed || delayMs == null || this.reconciliationTimer) return;
     this.reconciliationTimer = setTimeout(async () => {
@@ -3750,15 +3916,17 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       try {
         await this.tick();
       } finally {
-        this.scheduleReconciliation(
-          relayExecutorPollDelayMs('RECONCILIATION', this.lastRelayPollActivity),
-        );
+        if (!this.executorDestroyed) {
+          this.scheduleReconciliation(
+            relayExecutorPollDelayMs('RECONCILIATION', this.lastRelayPollActivity),
+          );
+        }
       }
     }, delayMs);
     this.reconciliationTimer.unref();
   }
 
-  /** Durable Neon wake polling is a startup/recovery backstop, not the latency path. */
+  /** Durable Neon wake polling is a backstop, not the latency path. */
   private schedulePersistedWakePoll(delayMs: number | null): void {
     if (this.executorDestroyed || delayMs == null || this.persistedWakeTimer) return;
     this.persistedWakeTimer = setTimeout(async () => {
@@ -3766,9 +3934,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       try {
         await this.pollPersistedFastWake();
       } finally {
-        this.schedulePersistedWakePoll(
-          relayExecutorPollDelayMs('PERSISTED_WAKE', this.lastRelayPollActivity),
-        );
+        if (!this.executorDestroyed) {
+          this.schedulePersistedWakePoll(
+            relayExecutorPollDelayMs('PERSISTED_WAKE', this.lastRelayPollActivity),
+          );
+        }
       }
     }, delayMs);
     this.persistedWakeTimer.unref();
@@ -4224,7 +4394,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * so the isolated relay-executor worker picks it up on the next poll / tick.
    */
   async requestExecutorWake(
-    trigger: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE',
+    trigger: RelayExecutorWakeRequest['trigger'],
     tradeId?: string | null,
     receivedAt?: string,
     signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'] | RelayExecutorWakeRequest['signedOpen'],
@@ -4283,7 +4453,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
    * crash/restart backstop.
    */
   requestExecutorPreWake(
-    trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED' | 'ORDER_EXPIRED',
+    trigger: 'ORDER_PLACED' | 'POSITION_OPENED' | 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'ORDER_CANCELLED',
     tradeId?: string | null,
     receivedAt?: string,
     signedTerminal?: RelayExecutorWakeRequest['signedClose'] | RelayExecutorWakeRequest['signedExpiry'] | RelayExecutorWakeRequest['signedOpen'],
@@ -4585,40 +4755,65 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
 
   private async consumePersistedExecutorWakes(): Promise<RelayExecutorWakeRequest | null> {
     if (!executionEnabled()) return null;
-    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
-    if (!agent) return null;
-    const instances = await this.prisma.tradingAgentInstance.findMany({
-      where: {
-        agentId: agent.id,
-        exchangeProvider: 'bitfinex',
-        status: { in: [TradingAgentInstanceStatus.ACTIVE, TradingAgentInstanceStatus.PAUSED] },
-      },
-      select: { id: true, dashboardState: true },
-      take: 50,
+    const agent = await this.prisma.tradingAgent.findUnique({
+      where: { slug: AGENT_SLUG },
+      select: { id: true },
     });
+    if (!agent) return null;
+    type WakeProjectionRow = {
+      id: string;
+      status: string;
+      wake: unknown;
+      relayArmedAt: string | null;
+      relayExecutionMode: string | null;
+      simActive: boolean;
+      hasExposure: boolean;
+    };
+    // Project only the wake and tiny activity fields in Postgres. Selecting the
+    // Prisma JSON column here would transfer the entire dashboard document on
+    // every backstop poll, recreating the Neon egress incident even after the
+    // cadence reduction. Exposure is authoritative durable participant state;
+    // status=ACTIVE alone is not treated as an armed money path.
+    const instances = await this.prisma.$queryRaw<WakeProjectionRow[]>(Prisma.sql`
+      SELECT
+        i."id",
+        i."status"::text AS "status",
+        i."dashboardState" -> ${RELAY_EXECUTOR_WAKE_KEY} AS "wake",
+        i."dashboardState" ->> 'relayArmedAt' AS "relayArmedAt",
+        i."dashboardState" ->> 'relayExecutionMode' AS "relayExecutionMode",
+        COALESCE(i."dashboardState" #>> '{copyRelaySim,active}', 'false') = 'true' AS "simActive",
+        EXISTS (
+          SELECT 1
+          FROM "SignalCycleParticipant" p
+          JOIN "SignalCycle" c ON c."id" = p."cycleId"
+          WHERE p."userId" = i."userId"
+            AND c."agentId" = i."agentId"
+            AND p."status"::text IN ('OPEN', 'PENDING_ENTRY')
+        ) AS "hasExposure"
+      FROM "TradingAgentInstance" i
+      WHERE i."agentId" = ${agent.id}
+        AND i."exchangeProvider" = 'bitfinex'
+        AND i."status"::text IN ('ACTIVE', 'PAUSED')
+      ORDER BY i."updatedAt" DESC
+      LIMIT 50
+    `);
+    this.lastRelayPollActivity = instances.some((row) =>
+      row.hasExposure
+      || row.simActive
+      || (row.status === TradingAgentInstanceStatus.ACTIVE
+        && (!!row.relayArmedAt || row.relayExecutionMode === 'LIVE'))
+    ) ? 'ACTIVE' : instances.length > 0 ? 'PAUSED' : 'IDLE';
     let best: RelayExecutorWakeRequest | null = null;
     for (const inst of instances) {
-      const wake = readRelayExecutorWakeRequest(inst.dashboardState);
+      const wake = readRelayExecutorWakeRequest({ [RELAY_EXECUTOR_WAKE_KEY]: inst.wake });
       if (!wake) continue;
       const wakeMs = Date.parse(wake.at);
       if (!Number.isFinite(wakeMs) || Date.now() - wakeMs > 120_000) {
-        const cleared = applyDashboardPatch(
-          (inst.dashboardState ?? {}) as Record<string, unknown>,
-          { [RELAY_EXECUTOR_WAKE_KEY]: null },
-        );
-        await this.prisma.tradingAgentInstance
-          .update({ where: { id: inst.id }, data: { dashboardState: cleared as object } })
-          .catch(() => {});
+        await this.clearProjectedExecutorWake(inst.id, wake).catch(() => {});
         continue;
       }
       if (!best || Date.parse(wake.at) >= Date.parse(best.at)) best = wake;
-      const cleared = applyDashboardPatch(
-        (inst.dashboardState ?? {}) as Record<string, unknown>,
-        { [RELAY_EXECUTOR_WAKE_KEY]: null },
-      );
-      await this.prisma.tradingAgentInstance
-        .update({ where: { id: inst.id }, data: { dashboardState: cleared as object } })
-        .catch(() => {});
+      await this.clearProjectedExecutorWake(inst.id, wake).catch(() => {});
     }
     if (best) {
       this.lastShowcaseWakeAt = Date.parse(best.at) || Date.now();
@@ -4626,6 +4821,20 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
         best.trigger === 'POSITION_CLOSED' ? 'POSITION_CLOSED' : null;
     }
     return best;
+  }
+
+  /** Compare-and-remove only the consumed wake; preserve concurrent dashboard writers. */
+  private async clearProjectedExecutorWake(
+    instanceId: string,
+    wake: RelayExecutorWakeRequest,
+  ): Promise<void> {
+    const serialized = JSON.stringify(wake);
+    await this.prisma.$executeRaw(Prisma.sql`
+      UPDATE "TradingAgentInstance"
+      SET "dashboardState" = COALESCE("dashboardState", '{}'::jsonb) - ${RELAY_EXECUTOR_WAKE_KEY}
+      WHERE "id" = ${instanceId}
+        AND "dashboardState" -> ${RELAY_EXECUTOR_WAKE_KEY} = ${serialized}::jsonb
+    `);
   }
 
   /** Cross-process signed-webhook fast lane; safe to overlap the reconciliation tick. */
@@ -5516,10 +5725,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   }
 
   /** Immediate execution wake from showcase bot push (coalesced if tick in flight). */
-  async wakeNow(trigger?: 'POSITION_CLOSED' | 'ORDER_EXPIRED' | 'POSITION_OPENED' | 'ORDER_PLACED' | 'APPROVE_PENDING' | 'LIMIT_UPDATED' | 'USER_RESUME' | 'USER_PAUSE') {
+  async wakeNow(trigger?: RelayExecutorWakeRequest['trigger']) {
     if (!executionEnabled()) return;
-    // PAUSED/IDLE owns no recurring timer. An authenticated wake re-arms both
-    // safety loops before work; module startup supplies crash recovery probes.
+    // PAUSED/IDLE deliberately has no recurring Neon timer. Every explicit
+    // authenticated wake re-establishes both safety loops before doing work;
+    // the first startup probes provide the durable crash/restart recovery read.
     this.scheduleReconciliation(POLL_MS);
     this.schedulePersistedWakePoll(PERSISTED_WAKE_ACTIVE_POLL_MS);
     if (trigger) {
@@ -5566,7 +5776,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     this.tickStartedAtMs = Date.now();
     this.currentStage = 'LOAD_AGENT';
     try {
-      const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: AGENT_SLUG } });
+      const agent = await this.prisma.tradingAgent.findUnique({
+        where: { slug: AGENT_SLUG },
+        select: { id: true },
+      });
       if (!agent) return;
 
       // Hire expiry (expiresAt) gates LIVE COPY only. The relay sim is the free $20
@@ -5659,14 +5872,14 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
               where: { id: instance.id },
               data: {
                 status: TradingAgentInstanceStatus.PAUSED,
-                lastError: 'Relay sim active — real Bitfinex API testing mode (1 order · $20 · 100x cap).',
+                lastError: 'Relay sim active — real Bitfinex API testing mode (1 order · $0.25 · 100x cap).',
               },
             });
           }
           try {
             // Sim mode = REAL Bitfinex API, not a paper book. Purpose: prove the live order
             // pipeline (place / cancel / fill / merge) end-to-end with real money but tightly
-            // capped — max 1 concurrent position, $20 margin, 100x leverage (the subscriber
+            // capped — max 1 concurrent position, $0.25 margin class, 100x leverage (the subscriber
             // defaults). Once the trader has seen a full lifecycle, they stop sim and resume
             // live copy for real trading. The real exchange position is the source of truth;
             // reconcileLotLedger reads it directly via this.activeTrading.
@@ -5724,57 +5937,10 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       this.currentInstanceId = null;
       this.currentStage = null;
       this.running = false;
-      if (this.lastRelayPollActivity === 'PAUSED') {
-        await this.persistQuiescentReceipts().catch((err) => {
-          this.logger.error(
-            `Relay executor QUIESCENT receipt persistence failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        });
-      }
       if (this.wakeQueued) {
         this.wakeQueued = false;
         setImmediate(() => void this.tick());
       }
-    }
-  }
-
-  private async persistQuiescentReceipts(): Promise<void> {
-    const agent = await this.prisma.tradingAgent.findUnique({
-      where: { slug: AGENT_SLUG },
-      select: { id: true },
-    });
-    if (!agent) return;
-    const instances = await this.prisma.tradingAgentInstance.findMany({
-      where: {
-        agentId: agent.id,
-        exchangeProvider: 'bitfinex',
-        status: TradingAgentInstanceStatus.PAUSED,
-      },
-      select: { id: true, userId: true, status: true, dashboardState: true },
-    });
-    for (const instance of instances) {
-      const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
-      if (relayArmTimestampMs(dash) != null || isCopyRelaySimActive(dash)) continue;
-      const exposure = await this.prisma.signalCycleParticipant.findFirst({
-        where: {
-          userId: instance.userId,
-          status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
-          cycle: { agentId: agent.id },
-        },
-        select: { id: true },
-      });
-      if (exposure) continue;
-      const receipt = buildQuiescentRelayExecutorReceipt(this.getHealthSnapshot());
-      await this.prisma.tradingAgentInstance.update({
-        where: { id: instance.id },
-        data: {
-          dashboardState: applyInstanceDashboardPatch(instance.status, dash, {
-            relayExecutor: receipt,
-          }) as unknown as Prisma.InputJsonValue,
-        },
-      });
     }
   }
 
@@ -6040,8 +6206,11 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     const participantSince =
       simState?.startedAt != null ? { createdAt: { gte: new Date(simState.startedAt) } } : {};
     this.currentStage = 'LOAD_CREDENTIALS';
-    const creds = await this.exchanges.getUserCredentials(instance.userId, instance.exchangeProvider);
-    if (!creds) {
+    const credentialResolution = await this.exchanges.resolveUserCredentials(
+      instance.userId,
+      instance.exchangeProvider,
+    );
+    if (!credentialResolution.ok) {
       if (!simActive) {
         await this.resetLiveFidelityGuardWithoutEvidence(
           instance,
@@ -6052,10 +6221,22 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       }
       await this.prisma.tradingAgentInstance.update({
         where: { id: instance.id },
-        data: { lastError: 'Exchange credentials missing — re-hire with API keys' },
+        data: {
+          // Keep the diagnostic on the scalar error column. Replacing the
+          // complete dashboard JSON here could erase a concurrent reconcile,
+          // order audit, arm transition, or safety pause.
+          lastError:
+            `Exchange credentials unavailable (${credentialResolution.code})`
+            + ' — re-hire with API keys',
+        },
       });
+      this.logger.warn(
+        `Exchange credential resolution unavailable user=${instance.userId} `
+          + `provider=${instance.exchangeProvider} code=${credentialResolution.code}`,
+      );
       return;
     }
+    const creds = credentialResolution.credentials;
 
     // Never place new live money until the private trade stream is authenticated.
     // Existing OPEN risk continues through the ordinary reconciliation path;
@@ -8001,6 +8182,8 @@ await this.notifications
       data: {
         dashboardState: applyInstanceDashboardPatch(fresh.status, dash, {
           copyRelayCapacity: capacity,
+          bitfinexLiveCopySizingReadiness:
+            dash.bitfinexLiveCopySizingReadiness ?? missingBitfinexVenueEvidenceReadiness(),
           // Fix F — tick liveness watchdog. persistCapacityState already runs
           // once per processInstance (both exit-only and normal paths), so this
           // piggybacks on an existing per-tick dashboardState write — no extra
@@ -9368,6 +9551,64 @@ await this.notifications
     const exchangeAckAtMs = Date.now();
     if (timing) timing.exchangeAckAtMs = exchangeAckAtMs;
 
+    let bitfinexSizingReadiness = missingBitfinexVenueEvidenceReadiness();
+    if (venue === 'bitfinex') {
+      try {
+        const [constraints, activeOrder, position, executions] = await Promise.all([
+          this.bitfinex.getBtcPerpVenueConstraints(),
+          this.bitfinex.findOrder(creds, orderId),
+          this.bitfinex.getOpenPositionDetail(creds),
+          this.bitfinex.fetchOrderTrades(creds, orderId),
+        ]);
+        const executedQty = executions.reduce((sum, row) => sum + Math.abs(row.execAmount), 0);
+        const acceptedQtyBtc = Math.abs(activeOrder?.amountOrig ?? 0) || executedQty;
+        const acceptedLimitPrice = activeOrder?.price
+          ?? (executedQty > 0
+            ? executions.reduce((sum, row) => sum + Math.abs(row.execAmount) * row.execPrice, 0) / executedQty
+            : 0);
+        const acceptedNotionalUsd = acceptedQtyBtc * acceptedLimitPrice;
+        bitfinexSizingReadiness = assessBitfinexLiveCopySizingReadiness({
+          requestedMarginUsd: marginUsd,
+          requestedQtyBtc: qty,
+          requestedLimitPrice: limitPrice,
+          leverage,
+          constraints,
+          acceptance: acceptedQtyBtc > 0 && acceptedLimitPrice > 0 ? {
+            authenticated: true,
+            orderId,
+            requestedQtyBtc: qty,
+            acceptedQtyBtc,
+            acceptedLimitPrice,
+            leverage,
+            acceptedNotionalUsd,
+            acceptedMarginUsd: acceptedNotionalUsd / leverage,
+            activeOrdersReconciled: true,
+            positionsReconciled: position == null || Number.isFinite(position.amount),
+            executionsReconciled: Array.isArray(executions),
+          } : null,
+        });
+      } catch (err) {
+        this.logger.warn(`Bitfinex sizing readiness remains NOT_PROVEN order=${orderId}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
+
+    const sizingReadinessInstance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { id: instance.id },
+      select: { dashboardState: true, status: true },
+    });
+    if (sizingReadinessInstance) {
+      const sizingReadinessDash = (sizingReadinessInstance.dashboardState ?? {}) as Record<string, unknown>;
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: {
+          dashboardState: applyInstanceDashboardPatch(
+            sizingReadinessInstance.status,
+            sizingReadinessDash,
+            { bitfinexLiveCopySizingReadiness: bitfinexSizingReadiness },
+          ) as unknown as Prisma.InputJsonValue,
+        },
+      });
+    }
     const payload: ExecutionPayload = {
       bitfinexOrderId: orderId,
       limitPrice,
@@ -9426,6 +9667,7 @@ await this.notifications
         margin_usd: marginUsd,
         margin_cap_usd: effectiveCap,
         leverage,
+        bitfinex_sizing_readiness: bitfinexSizingReadiness,
         correlated_cluster_evidence: {
           schema: 'correlated_exposure_cluster_v2',
           allowed: cluster.allowed,
@@ -14292,7 +14534,7 @@ await this.notifications
    */
   private async ensureDurableProtectiveStop(input: {
     participantId: string;
-    purpose: 'PARTIAL_FILL' | 'OPEN_REPAIR' | 'SCENARIO_C_REPLACEMENT' | 'MARKET_CATCHUP';
+    purpose: 'PARTIAL_FILL' | 'OPEN_REPAIR' | 'SCENARIO_C_REPLACEMENT' | 'MARKET_CATCHUP' | 'PARTIAL_REDUCTION_REPLACEMENT';
     creds: ExchangeCredentials;
     positionDirection: 'LONG' | 'SHORT';
     qty: number;
@@ -16744,7 +16986,7 @@ await this.notifications
 
   /**
     * Part B (intent-mirror) — Place a hire's copy order directly from an
-   * approved `cont-` or `tbhv1-` INTENT cycle. Entry is fail-closed until
+   * approved `cont-` or `o29atr-` INTENT cycle. Entry is fail-closed until
    * canonical showcase state contains the exact matching resting limit.
    * The intent wakes the relay; the :7002 order book supplies the authoritative
    * price and lifecycle so a user account cannot get ahead of the showcase.

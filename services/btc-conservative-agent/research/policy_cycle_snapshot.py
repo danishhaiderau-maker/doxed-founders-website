@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
+from collector_v22 import research_event_generation_paths
 from microstructure_tape import FILE_NAME as MICROSTRUCTURE_FILE, validate_window
 
 CONSERVATIVE_FILL_REPORT_FILE = "conservative_fill_descriptive_report.json"
@@ -99,22 +100,35 @@ def _microstructure_evidence(events, tape_snapshot) -> dict:
 
 
 def load_policy_cycle_snapshot(data_dir=".") -> dict:
-    path = Path(data_dir) / RESEARCH_EVENTS_FILE
+    from research.v3_policy_report_adapter import has_v3_evidence, load_v3_cycle_snapshot
+
+    if has_v3_evidence(data_dir):
+        receipt = load_v3_cycle_snapshot(data_dir)
+        from research.v3_policy_report_adapter import load_v3_order_intents
+        tape_snapshot = _load_microstructure_snapshot(data_dir)
+        return {
+            "events": tuple(),
+            "v3_order_intents": load_v3_order_intents(data_dir, epoch_id=receipt.get("epoch_id")),
+            "receipt": receipt,
+            "microstructure": _microstructure_evidence([], tape_snapshot),
+            "microstructure_snapshot": tape_snapshot,
+        }
     events = []
     digest = hashlib.sha256()
-    for line in _read_snapshot_lines(path):
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            # A concurrent append may expose an incomplete final line. It
-            # belongs to the next cycle, never this snapshot.
-            continue
-        if not isinstance(row, dict):
-            continue
-        frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
-        events.append(frozen)
-        digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-        digest.update(b"\n")
+    for source_path in research_event_generation_paths(str(data_dir)):
+        for line in _read_snapshot_lines(Path(source_path)):
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # A concurrent append may expose an incomplete final line. It
+                # belongs to the next cycle, never this snapshot.
+                continue
+            if not isinstance(row, dict):
+                continue
+            frozen = json.loads(json.dumps(row, sort_keys=True, separators=(",", ":")))
+            events.append(frozen)
+            digest.update(json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            digest.update(b"\n")
     last = events[-1] if events else {}
     envelope = last.get("envelope") or {}
     receipt = {
@@ -142,15 +156,25 @@ def load_policy_cycle_snapshot(data_dir=".") -> dict:
 
 def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_hook=None) -> dict:
     """Generate candidate then best from one pinned event tuple."""
+    from research.runtime_identity_incidents import load_incident_input
+    incident_input = load_incident_input()
     from research.policy_candidate_oos import build_policy_candidate_oos_report
     from research.best_policy_research import build_best_policy_research_report
-    from research.conservative_fill_cohort import build_conservative_fill_cohort
+    from research.conservative_fill_cohort import (
+        build_conservative_fill_cohort,
+        build_v3_conservative_fill_cohort,
+    )
 
     snapshot = load_policy_cycle_snapshot(data_dir)
+    genome = None
+    from research.v3_policy_report_adapter import has_v3_evidence, load_or_build_genome
+    if has_v3_evidence(data_dir):
+        genome = load_or_build_genome(data_dir, report_dir)
     candidate = build_policy_candidate_oos_report(
         data_dir=data_dir, report_dir=report_dir,
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],
         microstructure_evidence=snapshot["microstructure"],
+        genome=genome,
     )
     if between_builders_hook:
         between_builders_hook()
@@ -158,10 +182,17 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         data_dir=data_dir, report_dir=report_dir,
         events=snapshot["events"], cycle_snapshot=snapshot["receipt"],
         microstructure_evidence=snapshot["microstructure"],
+        genome=genome,
     )
-    conservative_fill = build_conservative_fill_cohort(
-        snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
-    )
+    if snapshot["receipt"].get("schema") == "policy_cycle_snapshot_v3_1":
+        conservative_fill = build_v3_conservative_fill_cohort(
+            snapshot.get("v3_order_intents") or (),
+            snapshot["microstructure_snapshot"]["rows"],
+        )
+    else:
+        conservative_fill = build_conservative_fill_cohort(
+            snapshot["events"], snapshot["microstructure_snapshot"]["rows"],
+        )
     conservative_fill.update({
         "cycle_snapshot": snapshot["receipt"],
         "microstructure_snapshot": snapshot["microstructure_snapshot"]["receipt"],
@@ -169,10 +200,14 @@ def build_policy_cycle_reports(data_dir=".", report_dir=".", between_builders_ho
         "policy_epoch_id": snapshot["receipt"].get("policy_epoch_id"),
         "policy_signature": snapshot["receipt"].get("policy_signature"),
     })
+    if incident_input.enabled:
+        conservative_fill["runtime_identity_incident_input"] = incident_input.provenance()
+        conservative_fill["runtime_identity_incident_status"] = "DESCRIPTIVE_ONLY_NOT_QUALIFICATION_EVIDENCE"
     report_path = Path(report_dir) / CONSERVATIVE_FILL_REPORT_FILE
     report_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = report_path.with_suffix(report_path.suffix + ".tmp")
     temp_path.write_text(json.dumps(conservative_fill, indent=2), encoding="utf-8")
+    incident_input.assert_unchanged()
     temp_path.replace(report_path)
     return {
         "candidate": candidate, "best": best, "cycle_snapshot": snapshot["receipt"],

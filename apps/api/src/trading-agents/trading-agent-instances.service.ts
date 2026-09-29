@@ -32,6 +32,7 @@ import {
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
   buildFreshInstanceDashboardState,
+  applyInstanceDashboardPatch,
   activeLiveRelayArmForSessionReset,
   readInstanceScope,
   USER_INSTANCE_STARTING_BALANCE,
@@ -184,6 +185,281 @@ export class TradingAgentInstancesService {
       exchangeBalanceUsd,
       walletNote,
     };
+  }
+
+  /**
+   * Replace credentials for an existing live relay without renewing, billing,
+   * funding, arming, or starting it.  This is deliberately separate from
+   * hireAgent(): credential repair must not inherit activation side effects.
+   *
+   * A successful response includes a fresh, authenticated account snapshot.
+   * The snapshot is persisted only while the instance is still PAUSED and
+   * disarmed, and only after a second exchange read plus a durable-ledger read.
+   */
+  async refreshPausedExchangeCredentials(
+    userId: string,
+    agentSlug: string,
+    input: {
+      exchangeProvider: string;
+      apiKey: string;
+      apiSecret: string;
+      passphrase?: string;
+      testnet?: boolean;
+    },
+  ) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+
+    const before = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!before || before.exchangeProvider === 'paper') {
+      throw new NotFoundException('No live relay instance to repair');
+    }
+    const beforeDash = (before.dashboardState ?? {}) as Record<string, unknown>;
+    if (
+      before.status !== TradingAgentInstanceStatus.PAUSED
+      || beforeDash.relayExecutionMode !== 'PAUSED'
+      || beforeDash.relayArmedAt != null
+      || beforeDash.realTradingConfirmedAt != null
+    ) {
+      throw new BadRequestException('Credential refresh requires a paused, disarmed relay');
+    }
+    if (input.exchangeProvider !== before.exchangeProvider || input.exchangeProvider !== 'bitfinex') {
+      throw new BadRequestException('Credential refresh cannot change the relay exchange');
+    }
+
+    const candidate = {
+      apiKey: input.apiKey,
+      apiSecret: input.apiSecret,
+      passphrase: input.passphrase,
+      testnet: input.testnet,
+    };
+    // Candidate validation and exchange proof happen without changing the
+    // globally resolved credential row, so a concurrent executor cannot see a
+    // half-committed rotation.
+    const prepared = await this.exchanges.prepareUserExchangeConnection(
+      input.exchangeProvider, candidate,
+    );
+
+    // Two distinct authenticated observations close the most obvious
+    // read/change race. A failed/partial read is UNKNOWN, never flat.
+    const first = await this.exchanges.readBitfinexCandidateSnapshot(candidate);
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId,
+        cycle: { agentId: agent.id },
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+      },
+      select: { id: true, status: true },
+    });
+    const second = await this.exchanges.readBitfinexCandidateSnapshot(candidate);
+    if (!first || !second) {
+      throw new ServiceUnavailableException(
+        'Bitfinex authenticated account audit was incomplete; relay remains paused',
+      );
+    }
+
+    const exchangeAmount = Number(second.position?.amount ?? 0);
+    const activeOrderCount = second.orders.length;
+    const openLots = participants.filter((row) => row.status === SignalCycleStatus.OPEN).length;
+    const pendingLots = participants.filter(
+      (row) => row.status === SignalCycleStatus.PENDING_ENTRY,
+    ).length;
+    const firstOrderIds = first.orders.map((order) => order.id).sort((a, b) => a - b);
+    const secondOrderIds = second.orders.map((order) => order.id).sort((a, b) => a - b);
+    const exchangeStable =
+      Number(first.position?.amount ?? 0) === exchangeAmount
+      && firstOrderIds.length === secondOrderIds.length
+      && firstOrderIds.every((id, index) => id === secondOrderIds[index]);
+    const flat = exchangeStable
+      && exchangeAmount === 0
+      && activeOrderCount === 0
+      && openLots === 0
+      && pendingLots === 0;
+    const observedAt = new Date().toISOString();
+    const reconcile = flat
+      ? this.relaySim.buildReconcileSnapshot({
+          exchangePositionQty: 0,
+          exchangePositionAmount: 0,
+          ledgerOpenQty: 0,
+          ledgerOpenAmount: 0,
+          openLots: 0,
+          pendingLots: 0,
+          markPrice: null,
+        })
+      : null;
+    await this.prisma.$transaction(async (tx) => {
+      const fresh = await tx.tradingAgentInstance.findUnique({ where: { id: before.id } });
+      const freshDash = (fresh?.dashboardState ?? {}) as Record<string, unknown>;
+      const currentParticipants = await tx.signalCycleParticipant.findMany({
+        where: {
+          userId,
+          cycle: { agentId: agent.id },
+          status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        },
+      });
+      const initialParticipantKeys = participants.map((row) => `${row.id}:${row.status}`).sort();
+      const currentParticipantKeys = currentParticipants.map((row) => `${row.id}:${row.status}`).sort();
+      if (
+        !fresh
+        || fresh.status !== TradingAgentInstanceStatus.PAUSED
+        || freshDash.relayExecutionMode !== 'PAUSED'
+        || freshDash.relayArmedAt != null
+        || freshDash.realTradingConfirmedAt != null
+        || initialParticipantKeys.length !== currentParticipantKeys.length
+        || initialParticipantKeys.some((key, index) => key !== currentParticipantKeys[index])
+      ) {
+        throw new BadRequestException(
+          'Relay or ledger state changed during credential refresh; no credential or audit published',
+        );
+      }
+      const credential = await tx.integrationCredential.upsert({
+        where: { userId_provider: { userId, provider: prepared.providerKey } },
+        create: {
+          userId, provider: prepared.providerKey, token: prepared.encryptedToken,
+          metadata: prepared.metadata as Prisma.InputJsonValue, verifiedAt: new Date(),
+        },
+        update: {
+          token: prepared.encryptedToken,
+          metadata: prepared.metadata as Prisma.InputJsonValue,
+          verifiedAt: new Date(),
+        },
+      });
+      await tx.tradingAgentInstance.update({
+        where: { id: fresh.id },
+        data: {
+          credentialId: credential.id,
+          lastError: flat
+            ? null
+            : 'Authenticated Bitfinex audit is not flat; relay remains paused',
+          dashboardState: applyInstanceDashboardPatch(fresh.status, freshDash, {
+            copyRelayReconcile: reconcile,
+            exchangeOrderAudit: {
+              known: exchangeStable,
+              activeOrderCount,
+              managedActiveOrderCount: activeOrderCount === 0 ? 0 : null,
+              foreignActiveOrderCount: activeOrderCount === 0 ? 0 : null,
+              checkedAt: observedAt,
+            },
+            credentialRefreshAudit: {
+              schema: 'paused_exchange_credential_refresh_v1',
+              provider: input.exchangeProvider,
+              observedAt,
+              exchangeStable,
+              flat,
+              activated: false,
+              billed: false,
+              marginTransferRequested: false,
+            },
+          }) as Prisma.InputJsonValue,
+        },
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+
+    return {
+      ok: true,
+      status: 'PAUSED' as const,
+      armed: false,
+      resumed: false,
+      chargedDdollar: 0,
+      marginTransferRequested: false,
+      authenticatedAudit: { known: exchangeStable, flat, observedAt },
+    };
+  }
+
+  /** Refresh strict flat evidence for stored credentials without waking money paths. */
+  async refreshPausedFlatAudit(userId: string, agentSlug: string) {
+    const agent = await this.prisma.tradingAgent.findUnique({ where: { slug: agentSlug } });
+    if (!agent) throw new NotFoundException('Agent not found');
+    const instance = await this.prisma.tradingAgentInstance.findUnique({
+      where: { agentId_userId: { agentId: agent.id, userId } },
+    });
+    if (!instance || instance.exchangeProvider !== 'bitfinex') {
+      throw new NotFoundException('No Bitfinex relay instance to audit');
+    }
+    const dash = (instance.dashboardState ?? {}) as Record<string, unknown>;
+    if (
+      instance.status !== TradingAgentInstanceStatus.PAUSED
+      || dash.relayExecutionMode !== 'PAUSED'
+      || dash.relayArmedAt != null
+      || dash.realTradingConfirmedAt != null
+    ) {
+      throw new BadRequestException('Flat audit requires a paused, disarmed relay');
+    }
+    const resolution = await this.exchanges.resolveUserCredentials(userId, 'bitfinex');
+    if (!resolution.ok) {
+      throw new BadRequestException(`Bitfinex credentials unavailable (${resolution.code})`);
+    }
+    const first = await this.exchanges.readBitfinexCandidateSnapshot(resolution.credentials);
+    const participants = await this.prisma.signalCycleParticipant.findMany({
+      where: {
+        userId, cycle: { agentId: agent.id },
+        status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+      },
+      select: { id: true, status: true },
+    });
+    const second = await this.exchanges.readBitfinexCandidateSnapshot(resolution.credentials);
+    if (!first || !second) {
+      throw new ServiceUnavailableException(
+        'Bitfinex authenticated account audit was incomplete; relay remains paused',
+      );
+    }
+    const firstIds = first.orders.map((order) => order.id).sort((a, b) => a - b);
+    const secondIds = second.orders.map((order) => order.id).sort((a, b) => a - b);
+    const exchangeAmount = Number(second.position?.amount ?? 0);
+    const exchangeStable = Number(first.position?.amount ?? 0) === exchangeAmount
+      && firstIds.length === secondIds.length
+      && firstIds.every((id, index) => id === secondIds[index]);
+    const openLots = participants.filter((row) => row.status === SignalCycleStatus.OPEN).length;
+    const pendingLots = participants.length - openLots;
+    const flat = exchangeStable && exchangeAmount === 0 && secondIds.length === 0
+      && openLots === 0 && pendingLots === 0;
+    const observedAt = new Date().toISOString();
+    await this.prisma.$transaction(async (tx) => {
+      const fresh = await tx.tradingAgentInstance.findUnique({ where: { id: instance.id } });
+      const currentParticipants = await tx.signalCycleParticipant.findMany({
+        where: {
+          userId, cycle: { agentId: agent.id },
+          status: { in: [SignalCycleStatus.OPEN, SignalCycleStatus.PENDING_ENTRY] },
+        },
+        select: { id: true, status: true },
+      });
+      const initialParticipantKeys = participants
+        .map((row) => `${row.id}:${row.status}`).sort();
+      const currentParticipantKeys = currentParticipants
+        .map((row) => `${row.id}:${row.status}`).sort();
+      const freshDash = (fresh?.dashboardState ?? {}) as Record<string, unknown>;
+      if (
+        !fresh || fresh.status !== TradingAgentInstanceStatus.PAUSED
+        || freshDash.relayExecutionMode !== 'PAUSED'
+        || freshDash.relayArmedAt != null || freshDash.realTradingConfirmedAt != null
+        || initialParticipantKeys.length !== currentParticipantKeys.length
+        || initialParticipantKeys.some((key, index) => key !== currentParticipantKeys[index])
+      ) {
+        throw new BadRequestException('Relay or ledger state changed during flat audit; no audit published');
+      }
+      await tx.tradingAgentInstance.update({
+        where: { id: fresh.id },
+        data: {
+          lastError: flat ? null : 'Authenticated Bitfinex audit is not flat; relay remains paused',
+          dashboardState: applyInstanceDashboardPatch(fresh.status, freshDash, {
+            copyRelayReconcile: flat ? this.relaySim.buildReconcileSnapshot({
+              exchangePositionQty: 0, exchangePositionAmount: 0,
+              ledgerOpenQty: 0, ledgerOpenAmount: 0,
+              openLots: 0, pendingLots: 0, markPrice: null,
+            }) : null,
+            exchangeOrderAudit: {
+              known: exchangeStable, activeOrderCount: secondIds.length,
+              managedActiveOrderCount: secondIds.length === 0 ? 0 : null,
+              foreignActiveOrderCount: secondIds.length === 0 ? 0 : null,
+              checkedAt: observedAt,
+            },
+          }) as Prisma.InputJsonValue,
+        },
+      });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return { accepted: true, status: 'PAUSED' as const, resumed: false, armed: false, flat, observedAt };
   }
 
   async getMyDashboard(userId: string, agentSlug: string) {

@@ -1,8 +1,8 @@
 """Fail-closed contract for the production paper-research execution graph.
 
-Historical lane implementations and their immutable evidence may remain readable,
-but only CONTINUOUS and OFFSET_029_ATR_TP_25 may produce new paper orders.  Both
-must consume the single shared AI_SCAN result; an alternate prompt/call path is a
+Historical evidence may remain readable as opaque archive data, but only the
+registry-owned active stack may produce new paper orders. All active strategies consume the
+single shared AI_SCAN result; an alternate prompt/call path is a
 release-blocking regression.
 """
 
@@ -12,16 +12,11 @@ import ast
 from pathlib import Path
 
 import combo_pathway_config as config
-import experimental_pathway_config as experimental
-import legacy_pathway_config as legacy
 import pathway_lane_roster as roster
 
 
 SERVICE_DIR = Path(__file__).resolve().parent
 BOT_PATH = SERVICE_DIR / "bot.py"
-ACTIVE_PAPER_LANES = {"CONTINUOUS", "OFFSET_029_ATR_TP_25"}
-
-
 def _bot_tree() -> ast.Module:
     return ast.parse(BOT_PATH.read_text(encoding="utf-8"), filename=str(BOT_PATH))
 
@@ -35,13 +30,15 @@ def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str |
     return None
 
 
-def test_exactly_two_active_order_producing_lanes() -> None:
+def test_active_order_producing_lanes_derive_from_registry() -> None:
     configured = set(config.COMBO_EXECUTION_LANES)
-    assert configured == {config.RESEARCH_LANE_OFFSET_029_ATR_TP_25}
-
-    active = {config.COMPARISON_BENCHMARK_LANE, *configured}
-    assert active == ACTIVE_PAPER_LANES
-    assert set(roster.DASHBOARD_PRIMARY_LANES) == ACTIVE_PAPER_LANES
+    active = set(config.ACTIVE_TILE_REGISTRY)
+    assert configured == {
+        lane for lane, spec in config.ACTIVE_TILE_REGISTRY.items()
+        if not spec.get("is_benchmark")
+    }
+    assert set(roster.DASHBOARD_PRIMARY_LANES) == active
+    assert tuple(roster.DASHBOARD_PRIMARY_LANES) == tuple(config.ACTIVE_TILE_ORDER)
 
     for lane in configured:
         spec = config.COMBO_LANE_SPECS[lane]
@@ -52,17 +49,18 @@ def test_exactly_two_active_order_producing_lanes() -> None:
 
 def test_historical_lanes_are_not_executable_or_primary() -> None:
     retired = set(roster.RETIRED_PATHWAY_LANES)
-    assert retired
     assert retired.isdisjoint(config.COMBO_EXECUTION_LANES)
     assert retired.isdisjoint(roster.DASHBOARD_PRIMARY_LANES)
 
     for lane in retired:
         assert config.is_combo_execution_lane(lane) is False
 
-    assert experimental.EXPERIMENTAL_EXECUTION_LANES == ()
-    assert experimental.EXPERIMENTAL_TILE_DISPLAY_ORDER == ()
     assert roster.PATHWAY_SHADOW_COLLECTING_ENABLED is False
-    assert set(legacy.SHADOW_COLLECTING_LANES).isdisjoint(ACTIVE_PAPER_LANES)
+    assert config.combo_toggle_defaults() == {
+        lane: bool(spec.get("default_enabled", False))
+        for lane, spec in config.COMBO_LANE_SPECS.items()
+        if lane in config.COMBO_EXECUTION_LANES
+    }
 
 
 def test_only_process_signal_can_invoke_the_shared_ai_evaluator() -> None:

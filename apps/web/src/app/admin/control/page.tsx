@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useCallback, useEffect, useState } from 'react';
-import { PLATFORM_X_SHARE_FOOTER } from '@dcf/utils';
+import { DEFAULT_SUBSCRIBER_MAX_MARGIN_USD, PLATFORM_X_SHARE_FOOTER } from '@dcf/utils';
 import { SiteNav } from '@/components/site-nav';
 import { useShareFooterActions } from '@/components/share-footer-provider';
 import { AdminAiKeysPanel } from '@/components/admin/admin-ai-keys-panel';
@@ -42,7 +42,7 @@ export default function AdminControlPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [defaultSettings, setDefaultSettings] = useState('');
-  const [subscriberMaxMarginUsd, setSubscriberMaxMarginUsd] = useState(20);
+  const [subscriberMaxMarginUsd, setSubscriberMaxMarginUsd] = useState(DEFAULT_SUBSCRIBER_MAX_MARGIN_USD);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -259,23 +259,23 @@ export default function AdminControlPage() {
                   <span className="text-zinc-400">Max margin per trade (USD)</span>
                   <input
                     type="number"
-                    min={1}
+                    min={0.2}
                     max={500}
-                    step={1}
+                    step={0.01}
                     value={subscriberMaxMarginUsd}
                     onChange={(e) => setSubscriberMaxMarginUsd(Number(e.target.value))}
                     className="mt-1 w-full max-w-[12rem] rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
                   />
                 </label>
                 <p className="mt-1 text-xs text-zinc-500">
-                  Default $20 — matches showcase bot. Change here when you want to raise the platform cap.
+                  Default ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD} class size. Change here only to raise the platform cap.
                 </p>
                 <textarea
                   value={defaultSettings}
                   onChange={(e) => setDefaultSettings(e.target.value)}
                   rows={4}
                   className="mt-3 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200"
-                  placeholder="Live Bitfinex copy — $20 max margin per trade enforced by platform…"
+                  placeholder="Live Bitfinex copy — $0.25 max margin per trade enforced by platform…"
                 />
                 <button
                   type="submit"

@@ -11,13 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from collector_v22_schema import RESEARCH_EVENTS_FILE
+from collector_v22 import research_event_generation_paths
 from replay_eligibility import validate_replay_eligibility
 from policy_search_manifest import POLICY_SEARCH_MANIFEST
 
 BEST_POLICY_RESEARCH_REPORT_FILE = "best_policy_research_report.json"
 POLICY_CANDIDATE_OOS_REPORT_FILE = "policy_candidate_oos_report.json"
 POLICY_SEARCH_MANIFEST_FILE = "policy_search_manifest.json"
-QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v1"
+QUALIFICATION_GATE_SCHEMA = "best_policy_qualification_gates_v2"
 REQUIRED_QUALIFICATION_GATES = (
     "chronological_untouched_oos",
     "cost_adjusted_positive_expectancy",
@@ -28,7 +29,68 @@ REQUIRED_QUALIFICATION_GATES = (
     "regime_diversity",
     "no_data_integrity_defects",
     "control_benchmark_comparison",
+    "purged_walk_forward_validation",
+    "sealed_holdout_receipt",
+    "measured_execution_costs",
+    "liquidation_buffer",
+    "detailed_regime_support",
+    "baseline_replay_coverage",
 )
+
+QUALIFICATION_GATE_LABELS = {
+    "chronological_untouched_oos": "Chronological untouched OOS",
+    "cost_adjusted_positive_expectancy": "Positive cost-adjusted expectancy",
+    "acceptable_drawdown": "Acceptable drawdown and CVaR",
+    "minimum_independent_episodes": "Adequate independent sample",
+    "parameter_neighborhood_stability": "Stable neighbouring parameters",
+    "conservative_execution": "Conservative execution evidence",
+    "regime_diversity": "Multiple regimes represented",
+    "no_data_integrity_defects": "No data-integrity defects",
+    "control_benchmark_comparison": "Control and benchmark comparison",
+    "purged_walk_forward_validation": "Purged walk-forward and embargoed folds",
+    "sealed_holdout_receipt": "Single-use sealed holdout receipt",
+    "measured_execution_costs": "Measured fees, funding, latency and slippage",
+    "liquidation_buffer": "Verified liquidation buffer",
+    "detailed_regime_support": "Detailed regime and liquidity support",
+    "baseline_replay_coverage": "Market, no-chase, 13m and 30m baseline replay",
+}
+
+
+def qualification_gate_details(gates, evidence=None, *, current_generation_available=True) -> list[dict]:
+    """Project mandatory gates without turning absent evidence into a pass.
+
+    Boolean gates remain in the report for existing clients.  This richer view
+    distinguishes an observed failure from an unmeasured gate and from a report
+    that is not bound to the current generation.
+    """
+    values = gates if isinstance(gates, dict) else {}
+    receipts = evidence if isinstance(evidence, dict) else {}
+    rows = []
+    for gate in REQUIRED_QUALIFICATION_GATES:
+        receipt = receipts.get(gate)
+        receipt = receipt if isinstance(receipt, dict) else {}
+        if not current_generation_available:
+            status = "UNAVAILABLE"
+            blocker = "CURRENT_GENERATION_UNAVAILABLE"
+        elif values.get(gate) is True:
+            status = "PASS"
+            blocker = None
+        elif gate in values and values.get(gate) is False:
+            status = "FAIL"
+            blocker = str(receipt.get("blocker") or f"QUALIFICATION_GATE_FAILED:{gate}")
+        else:
+            status = "UNKNOWN"
+            blocker = str(receipt.get("blocker") or f"QUALIFICATION_GATE_EVIDENCE_MISSING:{gate}")
+        rows.append({
+            "gate": gate,
+            "label": QUALIFICATION_GATE_LABELS.get(gate, gate.replace("_", " ").title()),
+            "status": status,
+            "blocker": blocker,
+            "evidence": receipt.get("evidence"),
+            "receipt_id": receipt.get("receipt_id"),
+            "source": receipt.get("source"),
+        })
+    return rows
 
 
 def qualification_gate_blockers(gates) -> list[str]:
@@ -93,23 +155,92 @@ def _json(path: Path) -> dict:
 
 def _events(path: Path) -> list[dict]:
     rows = []
-    try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict):
-                    rows.append(row)
-    except OSError:
-        pass
+    paths = research_event_generation_paths(str(path.parent)) if path.name == RESEARCH_EVENTS_FILE else [str(path)]
+    for candidate in paths:
+        try:
+            with Path(candidate).open(encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except OSError:
+            pass
     return rows
 
 
-def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None) -> dict:
+def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=None, cycle_snapshot=None, microstructure_evidence=None, genome=None) -> dict:
     data_root = Path(data_dir)
     report_root = Path(report_dir)
+    from research.v3_policy_report_adapter import has_v3_evidence, load_or_build_genome, load_v3_cycle_snapshot
+
+    if has_v3_evidence(data_dir):
+        genome = genome if genome is not None else load_or_build_genome(data_dir, report_dir)
+        snapshot = cycle_snapshot or load_v3_cycle_snapshot(data_dir)
+        oos = _json(report_root / POLICY_CANDIDATE_OOS_REPORT_FILE)
+        collection = genome.get("collection") or {}
+        identities = collection.get("effective_paper_execution_identities") or []
+        identity = identities[0] if len(identities) == 1 else {}
+        gates = oos.get("qualification_gates") or {}
+        gate_receipts = oos.get("qualification_gate_evidence") or {}
+        generation_available = bool(
+            genome.get("epoch_id")
+            and str(oos.get("epoch_id") or "") == str(genome.get("epoch_id") or "")
+        )
+        candidate = oos.get("candidate") or oos.get("current_candidate")
+        blockers = sorted(set(list(oos.get("blockers") or []) + qualification_gate_blockers(gates) + candidate_contract_blockers(candidate)))
+        qualified = bool(str(oos.get("status") or "").upper() == "QUALIFIED" and candidate and not blockers)
+        evidence = oos.get("evidence") or {}
+        report = {
+            "schema": "best_policy_research_v3_1_adapter_v1",
+            "cycle_snapshot": snapshot,
+            "conservative_microstructure_evidence": microstructure_evidence,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "epoch_id": genome.get("epoch_id"),
+            "policy_epoch_id": identity.get("policy_epoch_id"),
+            "evidence_policy_signature": identity.get("policy_signature"),
+            "status": "QUALIFIED" if qualified else "NO QUALIFIED POLICY",
+            "independent_oos_qualified": qualified,
+            "current_candidate": candidate if qualified else None,
+            "descriptive_challenger": oos.get("descriptive_challenger"),
+            "qualification_gates": gates,
+            "qualification_gate_details": qualification_gate_details(
+                gates, gate_receipts, current_generation_available=generation_available
+            ),
+            "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
+            "evidence": {
+                "current_epoch_events": int(evidence.get("current_events") or 0),
+                "collection_epoch_events": int(evidence.get("current_events") or 0),
+                "collection_policy_epoch_count": len({row.get("policy_epoch_id") for row in identities if row.get("policy_epoch_id")}),
+                "completed_paths": int(evidence.get("eligible_events") or 0),
+                "replay_eligible_execution_rows": int(
+                    evidence.get("eligible_events") or 0
+                ),
+                "replay_eligible_events": int(evidence.get("eligible_events") or 0),
+                "replay_ineligible_events": int(evidence.get("excluded_events") or 0),
+                "independent_episode_count": int(evidence.get("independent_episodes") or 0),
+                "events_missing_episode_id": 0,
+                "qualified_oos_episodes": int(evidence.get("qualified_oos_episodes") or 0),
+                "terminal_lifecycles": int(evidence.get("terminal_lifecycles") or 0),
+                "provisional_lifecycles": int(evidence.get("provisional_lifecycles") or 0),
+                "market_segments": int(evidence.get("market_segments") or 0),
+                "order_intents": int(evidence.get("order_intents") or 0),
+            },
+            "blockers": blockers,
+            "source_oos_report": POLICY_CANDIDATE_OOS_REPORT_FILE,
+            "source_report": "safe_policy_genome_v3_report.json",
+            "source_schema": genome.get("schema"),
+            "research_design": {"search": genome.get("search"), "ranking": (genome.get("contract") or {}).get("ranking")},
+            "live_policy_change_allowed": False,
+        }
+        report_root.mkdir(parents=True, exist_ok=True)
+        target = report_root / BEST_POLICY_RESEARCH_REPORT_FILE
+        temp = target.with_suffix(target.suffix + ".tmp")
+        temp.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        temp.replace(target)
+        return report
     rows = list(events) if events is not None else _events(data_root / RESEARCH_EVENTS_FILE)
 
     def signal_ts(row):
@@ -148,6 +279,7 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
 
     oos = _json(report_root / POLICY_CANDIDATE_OOS_REPORT_FILE)
     gates = oos.get("qualification_gates") or {}
+    gate_receipts = oos.get("qualification_gate_evidence") or {}
     blockers = list(oos.get("blockers") or [])
     if cycle_snapshot and (
         (oos.get("cycle_snapshot") or {}).get("snapshot_id")
@@ -200,12 +332,23 @@ def build_best_policy_research_report(data_dir=".", report_dir=".", *, events=No
         "current_candidate": candidate if qualified else None,
         "descriptive_challenger": oos.get("descriptive_challenger"),
         "qualification_gates": gates,
+        "qualification_gate_details": qualification_gate_details(
+            gates,
+            gate_receipts,
+            current_generation_available=bool(
+                epoch_id
+                and str(oos.get("epoch_id") or "") == epoch_id
+                and str(oos.get("policy_epoch_id") or "") == current_policy_epoch
+                and str(oos.get("evidence_policy_signature") or "") == current_policy_signature
+            ),
+        ),
         "qualification_gate_schema": QUALIFICATION_GATE_SCHEMA,
         "evidence": {
             "current_epoch_events": len(current),
             "collection_epoch_events": len(collection_epoch_rows),
             "collection_policy_epoch_count": len(collection_policy_epochs - {""}),
             "completed_paths": eligible,
+            "replay_eligible_execution_rows": eligible,
             "replay_eligible_events": eligible,
             "replay_ineligible_events": len(current) - eligible,
             "independent_episode_count": len(episodes),

@@ -48,7 +48,7 @@ def quarantine_epoch(root, paths, archive_root="research_epoch_quarantine", cuto
         raise
 
 
-def purge_quarantine_archives(root, extra_roots=None):
+def purge_quarantine_archives(root, extra_roots=None, preserve_research_archive=False):
     """Permanently delete quarantine / archive trees so infected fills cannot be restored."""
     root = Path(root).resolve()
     names = (
@@ -57,7 +57,10 @@ def purge_quarantine_archives(root, extra_roots=None):
         "research_archive",
         "research_session_archives",
     )
-    targets = [root / name for name in names]
+    targets = [
+        root / name for name in names
+        if not (preserve_research_archive and name == "research_archive")
+    ]
     genome = root / "research" / "genome" / "epoch_quarantine"
     targets.append(genome)
     for extra in extra_roots or ():

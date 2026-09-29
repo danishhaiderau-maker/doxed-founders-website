@@ -53,6 +53,10 @@ const flySyncLoopPath = new URL('./sync-fly-bot-data-loop.ps1', import.meta.url)
 const flySyncPath = new URL('./sync-fly-bot-data.ps1', import.meta.url);
 const flyDataPathsPath = new URL('./fly-data-paths.ps1', import.meta.url);
 const flyMirrorMigrationPath = new URL('./migrate-fly-mirror-to-local.ps1', import.meta.url);
+const rsiTouchAuditPath = new URL(
+  '../services/btc-conservative-agent/run_rsi_touch_offset_audit.py',
+  import.meta.url,
+);
 const analyzerAutoRestartPath = new URL('./analyzer-auto-restart.ps1', import.meta.url);
 const botSourcePath = new URL(
   '../services/btc-conservative-agent/bot.py',
@@ -75,14 +79,15 @@ const overnightGuardPath = new URL(
   import.meta.url,
 );
 
-test('Fly monitor compares against the latest bot-source revision', async () => {
+test('Fly monitor compares against the latest successful deploy revision', async () => {
   const workflow = await readFile(monitorPath, 'utf8');
 
+  assert.match(workflow, /ref:\s*master/);
+  assert.doesNotMatch(workflow, /ref:\s*[0-9a-f]{40}/);
   assert.match(workflow, /fetch-depth:\s*0/);
-  assert.match(
-    workflow,
-    /git log -1 --format=%H --[\s\S]*services\/btc-conservative-agent[\s\S]*scripts\/check-relay-flat\.mjs[\s\S]*\.github\/workflows\/fly-bot-deploy\.yml/,
-  );
+  assert.match(workflow, /actions:\s*read/);
+  assert.match(workflow, /actions\/workflows\/fly-bot-deploy\.yml\/runs\?branch=master/);
+  assert.match(workflow, /resolve_deployed_revision\(/);
   assert.match(
     workflow,
     /EXPECTED_REVISION:\s*\$\{\{\s*steps\.expected\.outputs\.revision\s*\}\}/,
@@ -90,7 +95,7 @@ test('Fly monitor compares against the latest bot-source revision', async () => 
   assert.doesNotMatch(workflow, /EXPECTED_REVISION:\s*\$\{\{\s*github\.sha\s*\}\}/);
   assert.match(workflow, /re\.fullmatch\(r"\[0-9a-f\]\{7,40\}", reported\)/);
   assert.match(workflow, /"git",\s*"rev-parse",\s*"--verify",\s*f"\{reported\}\^\{\{commit\}\}"/);
-  assert.match(workflow, /merge-base",\s*"--is-ancestor",\s*required,\s*actual/);
+  assert.match(workflow, /require_deployed_revision\(/);
   assert.match(workflow, /merge-base",\s*"--is-ancestor",\s*actual,\s*"HEAD"/);
   assert.doesNotMatch(workflow, /actual\.startswith\(expected\)/);
 });
@@ -106,6 +111,14 @@ test('flat-boundary proof targets the canonical Fly owner', async () => {
     workflow,
     /SHOWCASE_OWNER_URL:\s*https:\/\/bot\.doxxedcrypto\.digital/,
   );
+  assert.equal(
+    workflow.match(
+      /PLATFORM_API_URL:\s*https:\/\/doxed-founders-website-production\.up\.railway\.app\/api/g,
+    )?.length,
+    2,
+    'both the read-only flat check and deploy boundary must refresh user-scoped relay audits',
+  );
+  assert.doesNotMatch(workflow, /RELAY_EXECUTOR_WAKE_URL|BOT_CONTROL_SECRET/);
 });
 
 test('manual Fly deployment is pinned to the BTC service context and flat boundary', async () => {
@@ -115,16 +128,34 @@ test('manual Fly deployment is pinned to the BTC service context and flat bounda
   assert.match(helper, /Push-Location \$serviceRoot/);
   assert.match(helper, /check-relay-flat\.mjs/);
   assert.match(helper, /REQUIRE_CANONICAL_FLY_OWNER = "YES"/);
+  assert.match(helper, /REQUIRE_BOT_ADMIN_TOKEN = "YES"/);
   assert.match(helper, /SOURCE_GIT_REV=\$revision/);
   assert.match(helper, /source_git_rev/);
   assert.match(helper, /live_armed -eq \$false/);
   assert.match(helper, /force_paper_mode -eq \$true/);
+  assert.doesNotMatch(helper, /strategy_progress\.open_positions -eq 0/);
+  assert.doesNotMatch(helper, /strategy_progress\.pending_orders -eq 0/);
+  assert.match(helper, /paperOpenPositions/);
+  assert.match(helper, /paperPendingOrders/);
   assert.doesNotMatch(helper, /Push-Location \$repoRoot/);
 });
 
 test('Fly deploy proves a disarmed paper-signal owner, never a direct live executor', async () => {
   const workflow = await readFile(flyDeployPath, 'utf8');
 
+  assert.match(
+    workflow,
+    /liveness\.get\("boot"\) == "starting"[\s\S]*liveness\.get\("status"\) == "starting"/,
+  );
+  assert.match(
+    workflow,
+    /bootstrap is still starting[\s\S]*time\.sleep\(3\)[\s\S]*continue[\s\S]*base \+ "\/api\/status"/,
+  );
+  assert.ok(
+    workflow.indexOf('liveness.get("boot") == "starting"')
+      < workflow.indexOf('progress = payload.get("strategy_progress") or {}'),
+    'startup response must be retried before strategy evidence is asserted',
+  );
   assert.match(workflow, /health\.get\("live_armed"\) is False/);
   assert.match(workflow, /health\.get\("bitfinex_live_enabled"\) is False/);
   assert.match(workflow, /health\.get\("force_paper_mode"\) is True/);
@@ -368,6 +399,8 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   const sync = await readFile(flySyncPath, 'utf8');
 
   assert.match(launcher, /syncHeartbeatMaxAgeSec\s*=\s*600/);
+  assert.match(launcher, /insideDeclaredBackoff/);
+  assert.match(launcher, /nextRetryAt\.AddSeconds\(\$syncBackoffGraceSec\)/);
   assert.match(launcher, /LastWriteTimeUtc/);
   assert.match(launcher, /Stop-Process -Id \$syncPid -Force/);
   assert.match(launcher, /Get-NetTCPConnection[\s\S]*LocalPort 7002/);
@@ -378,12 +411,46 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   assert.match(syncLoop, /\.fly-data-sync-loop\.guard/);
   assert.match(
     syncLoop,
-    /reason = "below_threshold"[\s\S]*sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
+    /lastSyncedSourceRevision = \[string\]\$growthState\.lastSyncedSourceRevision/,
   );
   assert.match(
     syncLoop,
-    /sourceRevision = \$\(if \(\$result\.SourceRevision\)[\s\S]*\$manifest\.source_git_rev/,
+    /\$forceByRevision = \[bool\]\$observedSourceRevision[\s\S]*-not \$observedSourceRevision\.Equals\(\$lastSyncedSourceRevision/,
   );
+  assert.match(
+    syncLoop,
+    /\$needsFullInventory = \$forceByTime -or \$forceFresh -or \$forceByRevision -or \$forceByGrowth[\s\S]*-not \$needsFullInventory[\s\S]*\$relayEvidencePath = Invoke-OptionalRelayEvidenceSync/,
+  );
+  assert.match(
+    syncLoop,
+    /if \(-not \(\$forceByTime -or \$forceByGrowth -or \$forceFresh -or \$forceByRevision\)\)/,
+  );
+  assert.match(
+    syncLoop,
+    /reason = "identity_match_before_full_interval"[\s\S]*sourceRevision = \$lastSyncedSourceRevision[\s\S]*observedSourceRevision = \$observedSourceRevision[\s\S]*mirroredSourceRevision = \$lastSyncedSourceRevision/,
+  );
+  assert.doesNotMatch(
+    syncLoop,
+    /reason = "identity_match_before_full_interval"[\s\S]{0,800}sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
+  );
+  assert.match(
+    syncLoop,
+    /\$childSourceRevision = \[string\]\$result\.SourceRevision[\s\S]*\$childSourceRevision -notmatch '\^\[0-9a-fA-F\]\{7,64\}\$'[\s\S]*\$lastSyncedSourceRevision = \$childSourceRevision[\s\S]*lastSyncedSourceRevision = \$lastSyncedSourceRevision/,
+  );
+  assert.match(
+    syncLoop,
+    /trigger = \$\(if \(\$forceByRevision\) \{ "revision" \}/,
+  );
+  assert.match(syncLoop, /if \(\$forceByRevision\) \{ \$syncArgs\.ForceFullRefresh = \$true \}/);
+  assert.match(syncLoop, /MirroredSourceRevision = \$\(if \(\$lastSyncedSourceRevision\)/);
+  assert.match(sync, /\[switch\]\$ForceFullRefresh/);
+  assert.match(sync, /revision refresh must walk and revalidate the entire manifest/);
+  assert.doesNotMatch(sync, /\$sameGeneration = if \(\$ForceFullRefresh\) \{\s*\$false/);
+  assert.match(
+    sync,
+    /\$observedRevision = \$\(if \(\$manifest[\s\S]*sourceRevision = \$\(if \(\$MirroredSourceRevision\)[\s\S]*observedSourceRevision = \$\(if \(\$observedRevision\)[\s\S]*mirroredSourceRevision = \$\(if \(\$MirroredSourceRevision\)/,
+  );
+  assert.match(sync, /\$chunkTimeoutSec\s*=\s*240/);
   assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
   assert.match(sync, /Invoke-MirrorAtomicReplace[\s\S]*-Candidate \$stateTmp[\s\S]*-Destination \$statePath/);
   assert.match(sync, /\$stateBackup\s*=\s*"\$stateTmp\.bak"/);
@@ -397,16 +464,17 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
   );
 });
 
-test('raw Fly evidence defaults to machine-local storage and migration is copy-only', async () => {
+test('raw Fly evidence uses the repository canonical store and legacy migration is copy-only', async () => {
   const paths = await readFile(flyDataPathsPath, 'utf8');
   const syncLoop = await readFile(flySyncLoopPath, 'utf8');
   const sync = await readFile(flySyncPath, 'utf8');
   const migration = await readFile(flyMirrorMigrationPath, 'utf8');
+  const rsiAudit = await readFile(rsiTouchAuditPath, 'utf8');
   const homeMode = await readFile(homeModePath, 'utf8');
 
   assert.match(paths, /DOXXED_FLY_MIRROR_DIR/);
-  assert.match(paths, /LOCALAPPDATA/);
-  assert.match(paths, /DoxxedCrypto\\fly-data-mirror/);
+  assert.match(paths, /canonical-research-data/);
+  assert.doesNotMatch(paths, /LOCALAPPDATA|DoxxedCrypto\\fly-data-mirror/);
   assert.match(syncLoop, /Get-DoxxedFlyMirrorDir/);
   assert.match(syncLoop, /syncArgs\.TargetDir = \$mirrorDir/);
   assert.match(syncLoop, /Import-HomeBotVaultConfig -VaultEnvPath \$vaultEnv/);
@@ -415,8 +483,14 @@ test('raw Fly evidence defaults to machine-local storage and migration is copy-o
   assert.match(sync, /home-bot-vault-env.ps1/);
   assert.match(sync, /Import-CanonicalBotAdminToken/);
   assert.match(homeMode, /DataDir = Get-DoxxedFlyMirrorDir/);
-  assert.match(migration, /Get-FileHash[\s\S]*SHA256/);
-  assert.match(migration, /SourceRetained = \$true/);
+  assert.match(rsiAudit, /canonical-research-data/);
+  assert.match(rsiAudit, /FLY_MIRROR must select the repo-contained canonical-research-data store/);
+  assert.doesNotMatch(rsiAudit, /LOCALAPPDATA|DoxxedCrypto[\\/]fly-data-mirror/);
+  assert.match(migration, /legacyBase/);
+  assert.match(migration, /DoxxedCrypto\\fly-data-mirror/);
+  assert.match(migration, /migrate_canonical_research_store\.py/);
+  assert.match(migration, /--source/);
+  assert.match(migration, /--destination/);
   assert.doesNotMatch(migration, /Remove-Item|Move-Item/);
 });
 

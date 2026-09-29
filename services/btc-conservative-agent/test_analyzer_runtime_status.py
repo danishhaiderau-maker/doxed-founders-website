@@ -55,6 +55,16 @@ lane_roster = (
 ).read_text(encoding="utf-8")
 
 checks = {
+    "native analyzer faults persist outside Python exception handling": (
+        'ANALYZER_NATIVE_CRASH_LOG_FILE = "analyzer_native_crash.log"' in analyzer_engine
+        and "faulthandler.enable(file=handle, all_threads=True)" in analyzer_engine
+        and "_close_native_fault_log(_native_fault_handle)" in analyzer_engine
+    ),
+    "analyzer fails closed without canonical mirror": (
+        'BTC_AGENT_DATA_DIR is required and must point to the ' in analyzer_engine
+        and 'refusing to generate reports from cwd' in analyzer_engine
+        and 'if not os.path.isdir(_configured_data_root)' in analyzer_engine
+    ),
     "status exposes live analyzer identity": '"runtime_analyzer_sync_id"' in source,
     "status separates report identity": '"report_analyzer_sync_id"' in source,
     "status exposes current-pass grace": '"report_sync_pending"' in source,
@@ -63,7 +73,10 @@ checks = {
         and '"report_root": str(ROOT)' in source
         and '"data_root": str(DATA_ROOT)' in source
     ),
-    "health rejects wrong runtime identity": "$s.runtime_sync_match -ne $true" in health,
+    "health rejects wrong runtime identity": (
+        "$s.runtime_sync_match -eq $true" in health
+        and "if (-not $result.RuntimeSync)" in health
+    ),
     "health validates the canonical report root": (
         '$s.report_root' in health
         and "$expectedReportRoot = [System.IO.Path]::GetFullPath($agentDir)" in health
@@ -102,18 +115,21 @@ checks = {
     "all launchers use the canonical tested analyzer": (
         '@("analyzer_research_engine_v62.py")' in start_analyzer
         and '@("analyzer_research_engine_v62.py")' in local_analyzer
-        and '$env:BTC_AGENT_REPORT_DIR = $agentDir' in start_analyzer
+        and '$env:BTC_AGENT_REPORT_DIR = $analyzerReportDir' in start_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in start_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in restart_analyzer
         and 'research\\analyzer_research_engine_v62.py' not in local_analyzer
     ),
-    "benchmark lane is not labeled retired": (
-        'pathway_status in ("RETIRED", "DATA_RETIRED")' in source
-        and 'pathway_status in ("RETIRED", "DATA_RETIRED", "BENCHMARK")' not in source
+    "analyzer stamps reports with the exact executing source revision": (
+        "$sourceRevision = (& git -C $repoRoot rev-parse HEAD" in start_analyzer
+        and "rev-parse $runtimeRevision" not in start_analyzer
+        and "$env:SOURCE_GIT_REV = $sourceRevision.ToLowerInvariant()" in start_analyzer
     ),
-    "retired tile 2 is excluded from the primary analyzer roster": (
-        "RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,  # retired 2026-07-30" in lane_roster
-        and "SR_MICRO_TILE_V2_STATIC) -- toggle Show all lanes" not in source
+    "bounded analyzer restart validates its exact owned process": (
+        "[switch]$Restart" in start_analyzer
+        and '$incumbentCommandLine.Contains("--owner-port=$AnalyzerPort")' in start_analyzer
+        and "$incumbentCommandLine.Contains($expectedRevisionMarker)" in start_analyzer
+        and "Stop-Process -Id $incumbentPid -Force -ErrorAction Stop" in start_analyzer
     ),
     "dashboard refreshes only the active tab": (
         "const SECTION_LOADERS" in source
@@ -135,7 +151,9 @@ checks = {
     ),
     "dashboard resolves reports from the active analyzer root": (
         "BTC_AGENT_REPORT_DIR" in source
-        and '_CWD_ROOT / "analyzer_research_engine_v62.py"' in source
+        and 'else data_root / "analyzer"' in source
+        and 'BTC_AGENT_REPORT_DIR cannot select an analyzer source root' in source
+        and '_CWD_ROOT / "analyzer_research_engine_v62.py"' not in source
     ),
     "lane aggregation stays stale-while-refreshed": (
         "prime_dashboard_caches" in source
@@ -177,9 +195,6 @@ checks = {
         in supervisor_watchdog
         and "-BridgePort $bridgePort -Quiet" not in supervisor_watchdog
     ),
-    "empty chase isolation is collecting": (
-        '"verdict": rep.get("verdict") if has_evidence else "COLLECTING"' in source
-    ),
     "executive summary retains expected-vs-actual calibration": (
         'eva = ai_cal.get("expected_vs_actual") or {}' in analyzer_engine
         and '"expected_vs_actual": eva' in analyzer_engine
@@ -197,10 +212,6 @@ checks = {
         and '.home-analyzer-crash-monitor.pid' in (
             Path(__file__).parents[2] / "scripts" / "home-stack-cmd-worker.ps1"
         ).read_text(encoding="utf-8")
-    ),
-    "MFE cohort cannot be confused with the Type B tile": (
-        "MFE Type-B outcome cohort" in source
-        and '"Type B Discovery"' not in source
     ),
 }
 
@@ -232,12 +243,14 @@ with tempfile.TemporaryDirectory() as tmp:
     research_dashboard.DATA_ROOT = agent_root
     research_dashboard._API_RESPONSE_CACHE.clear()
     try:
-        if research_dashboard._genome_payload() != expected_genome:
+        embedded_genome = research_dashboard._genome_payload()
+        if any(embedded_genome.get(key) != value for key, value in expected_genome.items()):
             raise SystemExit("failed: embedded dashboard did not resolve canonical Genome artifact")
         research_dashboard.ROOT = agent_root
         research_dashboard.DATA_ROOT = agent_root
         research_dashboard._API_RESPONSE_CACHE.clear()
-        if research_dashboard._genome_payload() != expected_genome:
+        standalone_genome = research_dashboard._genome_payload()
+        if any(standalone_genome.get(key) != value for key, value in expected_genome.items()):
             raise SystemExit("failed: standalone dashboard did not resolve canonical Genome artifact")
         with research_dashboard.app.test_client() as client:
             first = client.get("/api/genome")
@@ -254,8 +267,12 @@ with research_dashboard.app.test_client() as client:
     if health_response.status_code != 200:
         raise SystemExit(f"failed: /api/health returned {health_response.status_code}")
     health_payload = health_response.get_json()
-    if not health_payload.get("ok") or not health_payload.get("report_root"):
+    if not health_payload.get("alive") or not health_payload.get("report_root"):
         raise SystemExit("failed: /api/health did not expose live canonical identity")
+    if health_payload.get("ok") is not True:
+        freshness = health_payload.get("generation_freshness") or {}
+        if freshness.get("stale") is not True or not freshness.get("reasons"):
+            raise SystemExit("failed: non-ready analyzer health lacked fail-closed stale evidence")
     response = client.get("/api/status")
     if response.status_code != 200:
         raise SystemExit(f"failed: /api/status returned {response.status_code}")

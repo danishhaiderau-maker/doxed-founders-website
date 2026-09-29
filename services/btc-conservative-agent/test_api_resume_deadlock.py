@@ -56,6 +56,7 @@ def reset_pause_state():
         bot.state["execution_reason"] = ""
         bot.state["_pause_priority"] = 0
         bot.state["manual_admin_pause"] = False
+        bot.state["pause_intent"] = None
 
 
 def _stub_runtime(system_ready, ws_transport_ready, reasons=None):
@@ -123,21 +124,37 @@ check("DAILY_DRAWDOWN reason preserved", bot.state.get("execution_reason") == "D
 # [3] Resume succeeds when system_ready=False, ws=True, reason=ADMIN_MANUAL
 #     (manual pause is also in the resumable set)
 # ---------------------------------------------------------------------------
-print("\n[3] Resume succeeds for ADMIN_MANUAL pause under same conditions")
+print("\n[3] Operator pause survives deploy resume; operator resume clears it")
 reset_pause_state()
 with bot.state_lock:
     bot.state["manual_admin_pause"] = True
+    bot.state["pause_intent"] = bot.PAUSE_OWNER_OPERATOR
 bot.set_execution_paused("ADMIN_MANUAL")
 check("precondition: paused for ADMIN_MANUAL", bot.state.get("execution_reason") == "ADMIN_MANUAL")
 _stub_runtime(system_ready=False, ws_transport_ready=True, reasons=["READINESS_STABILIZING"])
 with bot.app.test_client() as client:
+    retained = client.post(
+        "/api/resume",
+        json={"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+retained_body = retained.get_json() or {}
+check(
+    "deploy resume retains operator pause",
+    retained.status_code == 200 and retained_body.get("status") == "operator_pause_retained",
+    detail=str(retained_body),
+)
+check("manual_admin_pause remains armed", bot.state.get("manual_admin_pause") is True)
+check("execution stays paused", bot.state.get("execution_paused") is True)
+with bot.app.test_client() as client:
     resp = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
 check(
-    "resume returns 200 for ADMIN_MANUAL with healthy WS",
+    "bare operator resume returns 200 for ADMIN_MANUAL with healthy WS",
     resp.status_code == 200,
     detail=f"status={resp.status_code}",
 )
 check("manual_admin_pause flag cleared", bot.state.get("manual_admin_pause") is False)
+check("pause_intent cleared", bot.state.get("pause_intent") is None)
 check("execution_paused cleared", bot.state.get("execution_paused") is False)
 
 

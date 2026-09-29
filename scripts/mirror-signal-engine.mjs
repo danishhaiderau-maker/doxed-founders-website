@@ -4,7 +4,7 @@
  * Safe direction: services/btc-conservative-agent/* → services/btc-signal-engine/*
  * Does NOT pull from external bybit_bot.py (use sync-btc-research-bot for that).
  */
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, copyFileSync, readdirSync, rmSync, mkdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,29 @@ const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_co
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
 const singletonAgent = join(root, 'services/btc-conservative-agent/process_singleton.py');
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
+const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sync_inventory_worker.py');
+const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
+const bundleAdmissionAgent = join(root, 'services/btc-conservative-agent/data_sync_bundle_admission.py');
+const bundleAdmissionEngine = join(root, 'services/btc-signal-engine/data_sync_bundle_admission.py');
+const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/platform_relay_evidence_worker.py');
+const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
+const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
+const lifecycleCleanupEngine = join(root, 'services/btc-signal-engine/lifecycle_cleanup_transaction.py');
+const rawCleanupAgent = join(root, 'services/btc-conservative-agent/raw_generation_cleanup.py');
+const rawCleanupEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup.py');
+const rawCleanupOwnerAgent = join(root, 'services/btc-conservative-agent/raw_generation_cleanup_owner.py');
+const rawCleanupOwnerEngine = join(root, 'services/btc-signal-engine/raw_generation_cleanup_owner.py');
+const mirrorLeaseAgent = join(root, 'services/btc-conservative-agent/research/mirror_generation_lease.py');
+const mirrorLeaseEngine = join(root, 'services/btc-signal-engine/research/mirror_generation_lease.py');
+const rotationAgent = join(root, 'services/btc-conservative-agent/production_rotation_orchestrator.py');
+const rotationEngine = join(root, 'services/btc-signal-engine/production_rotation_orchestrator.py');
+const relayOutboxAgent = join(root, 'services/btc-conservative-agent/relay_event_outbox.py');
+const relayOutboxEngine = join(root, 'services/btc-signal-engine/relay_event_outbox.py');
+const resetReceiptStateAgent = join(root, 'services/btc-conservative-agent/research_reset_receipt_state.py');
+const resetReceiptStateEngine = join(root, 'services/btc-signal-engine/research_reset_receipt_state.py');
 const manifestPath = join(root, 'services/btc-signal-engine/manifest.json');
+const agentDir = join(root, 'services/btc-conservative-agent');
+const engineDir = join(root, 'services/btc-signal-engine');
 
 function sha256(text) {
   const normalized = text.replace(/\r\n/g, '\n');
@@ -51,17 +73,107 @@ if (existsSync(combosAgent)) {
   writeFileSync(combosEngine, comboSrc, 'utf8');
   console.log(`Mirrored combo_pathway_config.py → combos.py (${sha256(comboSrc)})`);
 
+  let previous = {};
+  if (existsSync(manifestPath)) {
+    try {
+      previous = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    } catch {
+      previous = {};
+    }
+  }
+  const engineVersion = extractEngineVersion(comboSrc);
+  // CI runs this mirror and requires a clean `git diff`; timestamps may only
+  // move when the mirrored content identity actually changes.
+  const unchanged = previous.signal_hash === botHash && previous.engine_version === engineVersion;
   const manifest = {
-    engine_version: extractEngineVersion(comboSrc),
-    combo_version: new Date().toISOString().slice(0, 10),
-    exit_version: 'scenario-c-v4',
-    benchmark_lane: 'CONTINUOUS',
+    engine_version: engineVersion,
+    combo_version: unchanged && previous.combo_version ? previous.combo_version : new Date().toISOString().slice(0, 10),
+    exit_version: 'five-family-exits-v1',
+    benchmark_lane: 'CONTINUOUS_ANALYTICAL_ONLY',
     signal_hash: botHash,
     source: 'services/btc-conservative-agent/bot.py',
-    updated_at: new Date().toISOString(),
+    updated_at: unchanged && previous.updated_at ? previous.updated_at : new Date().toISOString(),
   };
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   console.log(`Updated manifest (engine=${manifest.engine_version} hash=${botHash})`);
 }
+
+if (!existsSync(inventoryWorkerAgent)) {
+  throw new Error('Missing canonical data_sync_inventory_worker.py');
+}
+copyFileSync(inventoryWorkerAgent, inventoryWorkerEngine);
+copyFileSync(join(agentDir, 'data_sync_quarantine_receipt.py'), join(engineDir, 'data_sync_quarantine_receipt.py'));
+console.log(`Mirrored data-sync inventory worker (${sha256(readFileSync(inventoryWorkerAgent, 'utf8'))})`);
+
+if (!existsSync(bundleAdmissionAgent)) {
+  throw new Error('Missing canonical data-sync bundle admission dependency');
+}
+copyFileSync(bundleAdmissionAgent, bundleAdmissionEngine);
+console.log(`Mirrored data-sync bundle admission (${sha256(readFileSync(bundleAdmissionAgent, 'utf8'))})`);
+
+if (!existsSync(relayEvidenceWorkerAgent)) {
+  throw new Error('Missing canonical platform_relay_evidence_worker.py');
+}
+copyFileSync(relayEvidenceWorkerAgent, relayEvidenceWorkerEngine);
+console.log(`Mirrored relay-evidence validation worker (${sha256(readFileSync(relayEvidenceWorkerAgent, 'utf8'))})`);
+
+if (!existsSync(lifecycleCleanupAgent)) {
+  throw new Error('Missing canonical lifecycle cleanup transaction dependency');
+}
+copyFileSync(lifecycleCleanupAgent, lifecycleCleanupEngine);
+console.log(`Mirrored lifecycle cleanup transaction (${sha256(readFileSync(lifecycleCleanupAgent, 'utf8'))})`);
+
+for (const [source, target, label] of [
+  [rawCleanupAgent, rawCleanupEngine, 'raw generation cleanup transaction'],
+  [rawCleanupOwnerAgent, rawCleanupOwnerEngine, 'raw generation cleanup owner'],
+  [mirrorLeaseAgent, mirrorLeaseEngine, 'mirror generation lease'],
+]) {
+  if (!existsSync(source)) throw new Error(`Missing canonical ${label}`);
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(source, target);
+  console.log(`Mirrored ${label} (${sha256(readFileSync(source, 'utf8'))})`);
+}
+
+if (!existsSync(rotationAgent)) {
+  throw new Error('Missing production rotation orchestrator dependency');
+}
+copyFileSync(rotationAgent, rotationEngine);
+console.log(`Mirrored production rotation orchestrator (${sha256(readFileSync(rotationAgent, 'utf8'))})`);
+
+if (!existsSync(relayOutboxAgent)) {
+  throw new Error('Missing durable relay event outbox dependency');
+}
+copyFileSync(relayOutboxAgent, relayOutboxEngine);
+console.log(`Mirrored durable relay event outbox (${sha256(readFileSync(relayOutboxAgent, 'utf8'))})`);
+
+if (!existsSync(resetReceiptStateAgent)) {
+  throw new Error('Missing reset receipt state dependency');
+}
+copyFileSync(resetReceiptStateAgent, resetReceiptStateEngine);
+console.log(`Mirrored reset receipt state (${sha256(readFileSync(resetReceiptStateAgent, 'utf8'))})`);
+
+// Registry-owned policy dependencies are part of the executable mirror. Copy
+// only the active family modules plus their common implementation and remove
+// retired policy files so parity cannot pass with an orphan execution path.
+copyFileSync(join(agentDir, 'crash_exception_receipt.py'), join(engineDir, 'crash_exception_receipt.py'));
+const activePolicyFiles = [
+  'family_policy_common.py',
+  'paper_policy_family_atr_target.py',
+  'paper_policy_family_atr_trail.py',
+  'paper_policy_family_chandelier.py',
+  'paper_policy_family_hybrid_runner.py',
+  'paper_policy_family_mfe_giveback.py',
+];
+for (const name of activePolicyFiles) {
+  const source = join(agentDir, name);
+  if (!existsSync(source)) throw new Error(`Missing registry dependency: ${name}`);
+  copyFileSync(source, join(engineDir, name));
+}
+for (const name of readdirSync(engineDir)) {
+  if (name.startsWith('paper_policy_') && !activePolicyFiles.includes(name)) {
+    rmSync(join(engineDir, name));
+  }
+}
+console.log(`Mirrored ${activePolicyFiles.length} registry policy dependencies`);
 
 console.log('Done — run npm run verify:signal-parity to confirm.');

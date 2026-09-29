@@ -1,8 +1,7 @@
 /** User-controlled live relay policy for the Conservative BTC agent. */
-export const CONSERVATIVE_BTC_LIVE_RELAY_POLICY = 'continuous_only_v5';
-export const CONSERVATIVE_BTC_LIVE_RELAY_LANES = [
-  'CONTINUOUS',
-] as const;
+export const CONSERVATIVE_BTC_LIVE_RELAY_POLICY = 'two_lane_explicit_v6';
+/** Continuous is analysis-only. Family tiles stay relay-ineligible in the registry. */
+export const CONSERVATIVE_BTC_LIVE_RELAY_LANES = [] as const;
 
 export function hasActiveLiveRelayConsent(dashboardState: unknown): boolean {
   if (!dashboardState || typeof dashboardState !== 'object') return false;

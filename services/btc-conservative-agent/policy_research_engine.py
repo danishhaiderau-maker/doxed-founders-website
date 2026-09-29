@@ -1,7 +1,7 @@
 """Constrained policy-research engine.
 
 Replay many predeclared policies against one canonical market path.
-Never changes live 0.09% / thesis -12% / hard stop -13% / Scenario C / chase.
+Never changes live 0.09% / thesis -12% / hard stop -30% / Scenario C / chase.
 Never treats missing evidence as $0. Never labels a backtest optimum as a live rec.
 """
 from __future__ import annotations

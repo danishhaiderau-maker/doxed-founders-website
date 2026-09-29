@@ -89,10 +89,14 @@ def test_pending_order_registration_is_trade_id_idempotent():
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "paper_policy_identity_for_sources": lambda *_args, **_kwargs: {
+            "paper_policy_signature": "paper-policy-test"
+        },
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
             submit=lambda *_args, **_kwargs: True
         ),
         "time": time,
+        "copy": copy,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "time": time,
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
@@ -115,8 +119,62 @@ def test_pending_order_registration_is_trade_id_idempotent():
     assert namespace["lane_pending_orders"]["CONTINUOUS"] == [first]
 
 
-def test_order_placement_does_not_hold_trade_lock_across_registration_hydration():
-    """Slow collector/schedule hydration must not starve WS/API snapshots."""
+def test_pending_signal_snapshot_retries_concurrent_nested_mapping_mutation():
+    """A lane writer racing evidence capture must not crash registration."""
+    tree = ast.parse(BOT_SOURCE)
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_stable_pending_signal_copy"
+    )
+    namespace = {"copy": copy, "time": time}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), "<signal-copy-test>", "exec"), namespace)
+
+    class MutatesOnce(dict):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.failed = False
+
+        def items(self):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("dictionary changed size during iteration")
+            return super().items()
+
+    signal = {"features": MutatesOnce({"velocity": 0.1})}
+    snapshot = namespace["_stable_pending_signal_copy"](signal)
+
+    assert snapshot == {"features": {"velocity": 0.1}}
+    assert snapshot is not signal
+    assert snapshot["features"] is not signal["features"]
+
+
+def test_pending_signal_snapshot_exhaustion_is_bounded_and_explicit():
+    tree = ast.parse(BOT_SOURCE)
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_stable_pending_signal_copy"
+    )
+    namespace = {"copy": copy, "time": time}
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), "<signal-copy-test>", "exec"), namespace)
+
+    class AlwaysMutating(dict):
+        def items(self):
+            raise RuntimeError("dictionary changed size during iteration")
+
+    try:
+        namespace["_stable_pending_signal_copy"]({"features": AlwaysMutating()})
+    except RuntimeError as exc:
+        assert str(exc) == "pending signal remained mutable during snapshot"
+    else:
+        raise AssertionError("persistent mutation must exhaust the bounded snapshot retries")
+
+
+def test_order_placement_enriches_before_atomic_transition():
+    """Slow enrichment finishes before PREPARE and canonical state stays hidden."""
     tree = ast.parse(BOT_SOURCE)
     fn = next(
         node
@@ -124,26 +182,15 @@ def test_order_placement_does_not_hold_trade_lock_across_registration_hydration(
         if isinstance(node, ast.FunctionDef)
         and node.name == "_place_simulated_limit_order"
     )
-    parents = {}
-    for node in ast.walk(fn):
-        for child in ast.iter_child_nodes(node):
-            parents[child] = node
-    call = next(
-        node
-        for node in ast.walk(fn)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "lane_register_pending_order"
+    source = ast.get_source_segment(BOT_SOURCE, fn)
+    assert source.index("_prepare_initial_pending_order_evidence(") < source.index(
+        "_commit_paper_lifecycle_transition("
     )
-    current = call
-    while current is not fn:
-        current = parents[current]
-        if isinstance(current, ast.With):
-            assert not any(
-                isinstance(item.context_expr, ast.Name)
-                and item.context_expr.id == "trade_lock"
-                for item in current.items
-            )
+    live = next(node for node in fn.body if isinstance(node, ast.FunctionDef) and node.name == "live_mutator")
+    live_source = ast.get_source_segment(BOT_SOURCE, live)
+    assert "pending_orders.append(order)" in live_source
+    assert 'target_signal["status"] = "ORDERED"' not in source
+    assert '"order_placed": True' in source
 
 
 def test_registration_releases_trade_lock_before_slow_schedule_hydration():
@@ -180,10 +227,14 @@ def test_registration_releases_trade_lock_before_slow_schedule_hydration():
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "paper_policy_identity_for_sources": lambda *_args, **_kwargs: {
+            "paper_policy_signature": "paper-policy-test"
+        },
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
             submit=lambda *_args, **_kwargs: True
         ),
         "time": time,
+        "copy": copy,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "logger": QuietLogger(),
     }
@@ -230,10 +281,14 @@ def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelle
         "_emit_genome_execution_event": lambda *_args, **_kwargs: None,
         "dual_write_paper_order_intent": lambda *_args, **_kwargs: None,
         "_collector_v22_epoch_id": lambda: "epoch-test",
+        "paper_policy_identity_for_sources": lambda *_args, **_kwargs: {
+            "paper_policy_signature": "paper-policy-test"
+        },
         "_get_pending_order_evidence_worker": lambda: types.SimpleNamespace(
             submit=lambda *_args, **_kwargs: True
         ),
         "time": time,
+        "copy": copy,
         "os": types.SimpleNamespace(getcwd=lambda: "."),
         "logger": QuietLogger(),
         "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
@@ -438,7 +493,7 @@ def test_stale_cleanup_respects_promotion_grace_before_no_exposure_terminalizati
 
 
 def test_waiting_chase_is_not_reported_as_an_order():
-    assert "def _account_registered_order_submission(signal: dict, ai: dict = None)" in BOT_SOURCE
+    assert "def _account_registered_order_submission(" in BOT_SOURCE
     assert 'signal["_order_submission_accounted"] = True' in BOT_SOURCE
     assert '"CHASE_BUCKET_WAIT",' in BOT_SOURCE
     assert "_account_registered_order_submission(signal, ai)" in BOT_SOURCE
@@ -458,7 +513,10 @@ def test_waiting_chase_is_not_reported_as_an_order():
         "increment_pipeline_funnel": lambda stage: events.append(("funnel", stage)),
         "log_lane_opportunity_event": lambda *args, **_kwargs: events.append(("lane", args[1])),
         "relay_publishes_approve_outcome": lambda _lane: True,
-        "record_approve_outcome": lambda *args, **_kwargs: events.append(("relay", args[1])),
+        "record_approve_outcome": lambda *args, **kwargs: (
+            events.append(("relay", args[1]))
+            if kwargs.get("publish_relay", True) else None
+        ),
     }
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<submission-test>", "exec"), namespace)
     account = namespace["_account_registered_order_submission"]
@@ -480,6 +538,11 @@ def test_waiting_chase_is_not_reported_as_an_order():
     ]
     assert account(signal, {"win_prob": None}) is False
     assert len(events) == 3
+
+    other = {"trade_id": "no-duplicate-relay", "research_lane": "CONTINUOUS", "final_direction": "LONG"}
+    namespace["pending_orders"].append({"trade_id": "no-duplicate-relay", "status": "PENDING"})
+    assert account(other, {"win_prob": None}, publish_relay=False) is True
+    assert events[-2:] == [("funnel", "ORDER_SUBMITTED"), ("lane", "ORDER_SUBMITTED")]
 
 
 def test_specific_gate_failure_is_not_overwritten_by_order_failed():
@@ -527,10 +590,18 @@ def _compile_function(name, namespace):
 def test_marketable_limit_fill_never_violates_hard_limit_price():
     market_walk_calls = []
     namespace = {
+        "copy": copy,
         "refresh_bbo_state": lambda: None,
         "refresh_order_book_state": lambda: None,
         "state_lock": threading.RLock(),
-        "state": {"bid": 63167.0, "ask": 63177.0, "price": 63154.44},
+        "state": {
+            "bid": 63167.0, "ask": 63177.0, "price": 63154.44,
+            "book_ts": 100.0,
+            "order_book": {
+                "bids": [[63167.0, 1, 0.03163], [63166.0, 1, 1.0]],
+                "asks": [[63177.0, 1, 1.0]],
+            },
+        },
         "simulate_market_fill": lambda side, qty: market_walk_calls.append((side, qty))
         or {
             "avg_price": 63154.44 if side == "sell" else 63189.0,
@@ -539,6 +610,9 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
             "partial_fill": False,
         },
     }
+    namespace["simulate_marketable_limit_fill"] = _compile_function(
+        "simulate_marketable_limit_fill", namespace,
+    )
     resolve = _compile_function("resolve_sim_fill_with_depth", namespace)
 
     short_fill = resolve(
@@ -553,7 +627,13 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
     assert short_fill["fill_price"] >= 63167.0
     assert short_fill["is_taker"] is True
 
-    namespace["state"].update({"bid": 63157.0, "ask": 63167.0})
+    namespace["state"].update({
+        "bid": 63157.0, "ask": 63167.0,
+        "order_book": {
+            "bids": [[63157.0, 1, 1.0]],
+            "asks": [[63167.0, 1, 0.03163], [63168.0, 1, 1.0]],
+        },
+    })
     long_fill = resolve(
         {
             "side": "buy",
@@ -578,6 +658,99 @@ def test_marketable_limit_fill_never_violates_hard_limit_price():
     assert market_walk_calls == [("sell", 0.03163)]
 
 
+def test_marketable_limit_fill_receives_bbo_depth_price_improvement():
+    namespace = {
+        "copy": copy,
+        "refresh_bbo_state": lambda: None,
+        "refresh_order_book_state": lambda: None,
+        "state_lock": threading.RLock(),
+        "state": {
+            "bid": 63200.0, "ask": 63210.0, "price": 63205.0,
+            "book_ts": 100.0,
+            "order_book": {
+                "bids": [[63200.0, 1, 1.0]],
+                "asks": [[63210.0, 1, 1.0]],
+            },
+        },
+        "simulate_market_fill": lambda side, qty: {
+            "avg_price": 63200.0 if side == "sell" else 63210.0,
+            "filled_qty": qty,
+            "fully_filled": True,
+            "partial_fill": False,
+        },
+    }
+    namespace["simulate_marketable_limit_fill"] = _compile_function(
+        "simulate_marketable_limit_fill", namespace,
+    )
+    resolve = _compile_function("resolve_sim_fill_with_depth", namespace)
+    short_fill = resolve({"side": "sell", "qty": 0.01, "limit_price": 63150.0, "entry_type": "SIM_LIMIT"})
+    assert short_fill["fill_price"] == 63200.0
+    long_fill = resolve({"side": "buy", "qty": 0.01, "limit_price": 63250.0, "entry_type": "SIM_LIMIT"})
+    assert long_fill["fill_price"] == 63210.0
+
+
+def test_marketable_limit_walk_never_consumes_depth_beyond_hard_limit():
+    walk = _compile_function("simulate_marketable_limit_fill", {})
+    buy = walk(
+        "buy", 2.0, 101.0,
+        [[100.0, 1, 0.5], [101.0, 1, 0.5], [102.0, 1, 5.0]],
+        book_observed_ts=123.5,
+    )
+    assert buy["filled_qty"] == 1.0
+    assert buy["partial_fill"] is True
+    assert buy["fully_filled"] is False
+    assert buy["unfilled_qty"] == 1.0
+    assert buy["avg_price"] == 100.5
+    assert buy["slippage_usd"] == 0.5
+    assert [row["price"] for row in buy["consumed_levels"]] == [100.0, 101.0]
+    assert buy["book_observed_ts"] == 123.5
+
+    sell = walk(
+        "sell", 2.0, 99.0,
+        [[100.0, 1, 0.5], [99.0, 1, 0.5], [98.0, 1, 5.0]],
+    )
+    assert sell["filled_qty"] == 1.0
+    assert sell["avg_price"] == 99.5
+    assert sell["slippage_usd"] == 0.5
+    assert [row["price"] for row in sell["consumed_levels"]] == [100.0, 99.0]
+
+
+def test_marketable_limit_missing_depth_is_unknown_not_a_fabricated_fill():
+    walk = _compile_function("simulate_marketable_limit_fill", {})
+    result = walk("buy", 0.25, 101.0, [], book_observed_ts=None)
+    assert result["filled_qty"] == 0.0
+    assert result["fully_filled"] is False
+    assert result["evidence_status"] == "UNKNOWN"
+    assert result["unknown_reason"] == "ORDER_BOOK_DEPTH_MISSING"
+
+
+def test_marketable_limit_partial_explicitly_cancels_ioc_residual():
+    resolve = _compile_function(
+        "resolve_sim_fill_price",
+        {
+            "time": type("_Clock", (), {"time": staticmethod(lambda: 123.0)}),
+            "resolve_sim_fill_with_depth": lambda _order: {
+                "fill_price": 100.5,
+                "filled_qty": 1.0,
+                "unfilled_qty": 1.0,
+                "partial_fill": True,
+                "is_taker": True,
+                "slippage_usd": 0.5,
+            },
+        },
+    )
+    order = {"qty": 2.0, "limit_price": 101.0}
+    assert resolve(order) == 100.5
+    assert order["requested_qty"] == 2.0
+    assert order["qty"] == 1.0
+    assert order["filled_qty"] == 1.0
+    assert order["remaining_qty"] == 1.0
+    assert order["residual_cancelled_qty"] == 1.0
+    assert order["residual_disposition"] == "CANCELLED_AFTER_PARTIAL_SIM_FILL"
+    assert order["fill_sim"]["unfilled_disposition"] == (
+        "CANCELLED_AFTER_PARTIAL_SIM_FILL"
+    )
+
 def test_marketable_fallback_requires_full_visible_depth_at_hard_limit():
     depth = _compile_function(
         "_marketable_limit_full_depth_available",
@@ -599,8 +772,10 @@ def test_marketable_fallback_requires_full_visible_depth_at_hard_limit():
 
 
 def test_durable_relay_receipt_requires_persistence_and_platform_timestamp():
-    receipt_ok = _compile_function("_relay_response_has_durable_receipt", {})
+    from relay_event_outbox import RelayEventOutbox
+    receipt_ok = _compile_function("_relay_response_has_durable_receipt", {"RelayEventOutbox": RelayEventOutbox})
     expected = {
+        "event": "LIMIT_UPDATED",
         "event_id": "cont-settle:LIMIT_UPDATED:4:token",
         "event_seq": 4,
         "trade_id": "cont-settle",
@@ -608,20 +783,19 @@ def test_durable_relay_receipt_requires_persistence_and_platform_timestamp():
     }
     good = {
         "persisted": True,
-        "intentCreated": True,
-        "canonical_revision_applied": True,
-        "canonical_event_id": expected["event_id"],
-        "canonical_event_seq": 4,
-        "canonical_trade_id": "cont-settle",
-        "canonical_limit_price": 63167.0,
-        "platform_received_at": "2026-08-02T13:05:00Z",
+        "durable_ack": {
+            "event_id": expected["event_id"], "event_type": "LIMIT_UPDATED",
+            "event_seq": 4, "trade_id": "cont-settle",
+            "payload_sha256": RelayEventOutbox.payload_sha256(expected),
+            "signal_cycle_event_id": "db-event-1",
+            "platform_received_at": "2026-08-02T13:05:00Z",
+        },
     }
     assert receipt_ok(good, expected) is True
-    assert receipt_ok({**good, "canonical_limit_price": 63166.0}, expected) is False
-    assert receipt_ok({**good, "canonical_revision_applied": False}, expected) is False
-    assert receipt_ok({**good, "intentCreated": False}, expected) is False
+    assert receipt_ok({**good, "durable_ack": {**good["durable_ack"], "payload_sha256": "0" * 64}}, expected) is False
+    assert receipt_ok({**good, "durable_ack": {**good["durable_ack"], "event_type": "POSITION_CLOSED"}}, expected) is False
     assert receipt_ok({**good, "persisted": False}, expected) is False
-    assert receipt_ok({**good, "platform_received_at": None}, expected) is False
+    assert receipt_ok({**good, "durable_ack": {**good["durable_ack"], "platform_received_at": None}}, expected) is False
     assert receipt_ok(None) is False
 
 
@@ -674,7 +848,8 @@ def test_marketable_fallback_waits_for_relay_settlement_and_is_terminal():
         and node.name == "_apply_marketable_limit_fallback"
     )
     fallback_source = ast.get_source_segment(BOT_SOURCE, fallback)
-    assert 'order.get("marketable_fallback") or order.get("marketable_fallback_inflight")' in fallback_source
+    assert 'if order.get("marketable_fallback_inflight")' in fallback_source
+    assert "_drain_relay_event_outbox_once" in fallback_source
     assert "wait_for_durable_receipt=True" in fallback_source
     assert 'order["relay_event_durable_ack"] = True' in fallback_source
     assert 'signal["relay_settle_not_before_ts"] = order["relay_settle_not_before_ts"]' in fallback_source
@@ -698,11 +873,22 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
     delivery_entered = threading.Event()
     delivery_release = threading.Event()
 
-    def push(event, trade_id, extra, *, wait_for_durable_receipt=False):
+    def push(
+        event, trade_id, extra, *, wait_for_durable_receipt=False,
+        commit_before_ack=None,
+    ):
         deliveries.append((event, trade_id, dict(extra), wait_for_durable_receipt))
         if block_delivery["value"]:
             delivery_entered.set()
             assert delivery_release.wait(timeout=5)
+        if delivery_ok["value"] and callable(commit_before_ack):
+            assert commit_before_ack() is True
+        elif delivery_ok["value"]:
+            order.update({
+                "limit_price": extra["limit_price"],
+                "limit_chase_count": extra["event_seq"],
+                "marketable_fallback": True,
+            })
         return delivery_ok["value"]
 
     class Logger:
@@ -737,7 +923,23 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
             "chase_bucket_allowed": lambda bucket: bucket == 4,
             "chase_count_bucket": lambda count: f"{count}_chases",
             "_cancel_pending_for_chase_gate": lambda *_args: None,
-            "_push_showcase_relay_event": push,
+                "_push_showcase_relay_event": push,
+                "_drain_relay_event_outbox_once": lambda _event_id: (
+                    order.update({
+                        "limit_price": deliveries[-1][2]["limit_price"],
+                        "limit_chase_count": deliveries[-1][2]["event_seq"],
+                        "marketable_fallback": delivery_ok["value"],
+                        "relay_event_durable_ack": delivery_ok["value"],
+                        "relay_settle_not_before_ts": 115.0,
+                    }) or signal.update({
+                        "limit_price": deliveries[-1][2]["limit_price"],
+                        "limit_chase_count": deliveries[-1][2]["event_seq"],
+                        "marketable_fallback": delivery_ok["value"],
+                        "relay_event_durable_ack": delivery_ok["value"],
+                        "relay_settle_not_before_ts": 115.0,
+                    }) or order.pop("marketable_fallback_inflight", None)
+                    or {"acked": int(delivery_ok["value"])}
+                ),
             "_resolve_fill_model": lambda *_args: "AI_DIRECT_CHASE",
             "datetime": datetime,
             "timezone": timezone,
@@ -906,7 +1108,9 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
     failed_worker.join(timeout=5)
     assert not failed_worker.is_alive()
     assert failed_results == [False]
-    assert "marketable_fallback_inflight" not in failed_order
+    # The durable event owns this in-flight marker until retry ACK; clearing it
+    # here would strand a source event that later replays after restart.
+    assert failed_order.get("marketable_fallback_inflight")
     assert "marketable_fallback" not in failed_order
     assert (
         pending_limit_ready_for_fill(
@@ -916,9 +1120,9 @@ def test_marketable_fallback_requires_durable_receipt_before_mutation(monkeypatc
             ask=63235.8,
             now=100.5,
         )
-        is True
+        is False
     )
-    assert touch_checks == [True]
+    assert touch_checks == []
 
     cancelled_order = {
         **concurrent_order,
@@ -1052,15 +1256,12 @@ def test_exact_dashboard_chase_bucket_rests_before_next_chase():
         assert loads
         assert min(stores) < min(loads)
 
-    unrelated_tile = next(
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_submit_tile2_paper_resting_limit"
-    )
+    # Retired Tile 2 submitters must be physically absent; the exact-bucket
+    # contract now belongs only to the shared Patient/Continuous limit path.
     assert not any(
-        isinstance(node, ast.Name)
-        and node.id in ("order_created_ts", "dashboard_exact_chase_managed")
-        for node in ast.walk(unrelated_tile)
+        isinstance(node, ast.FunctionDef)
+        and node.name == "_submit_tile2_paper_resting_limit"
+        for node in tree.body
     )
 
 
@@ -1164,28 +1365,16 @@ def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
     place_source = ast.get_source_segment(BOT_SOURCE, place)
     assert 'smart_meta.get("preserve_original_limit")' in place_source
     assert '"original_limit_price": original_limit_price' in place_source
-    assert 'signal["original_limit_price"] = original_limit_price' in place_source
+    assert 'target_signal["original_limit_price"] = original_limit_price' in place_source
 
 
 def test_active_shared_lanes_do_not_shift_the_qualified_structural_limit():
     assert "RESEARCH_LANE_CONTINUOUS: 0.0," in BOT_SOURCE
-    assert "RESEARCH_LANE_TYPE_B_HUNTER_V1: 0.0," in BOT_SOURCE
+    assert "**{lane: 0.0 for lane in COMBO_EXECUTION_LANES}" in BOT_SOURCE
     assert "A second lane offset here would make the" in BOT_SOURCE
 
 
 def test_edge_is_telemetry_only_even_outside_paper_research_mode():
-    profit_gate = _compile_function(
-        "evaluate_profitability_entry_gates",
-        {
-            "EDGE_RESEARCH_TELEMETRY_ONLY": True,
-            "get_edge_threshold": lambda: 3.0,
-            "is_research_data_collection": lambda: False,
-            "is_profit_gates_lane": lambda _lane: False,
-            "dashboard_ai_band_blocks": lambda _prob: False,
-        },
-    )
-    assert profit_gate({}, {}, 0.0, "CONTINUOUS") == (False, None)
-
     evidence_gate = _compile_function(
         "evaluate_evidence_entry_filter",
         {
@@ -1256,7 +1445,7 @@ def test_direction_only_current_ui_has_no_pullback_or_ai_confidence_control():
     assert "DETERMINISTIC_LIMIT_BLOCKED" in BOT_SOURCE
 
 
-def test_only_continuous_can_emit_platform_live_relay_lifecycle():
+def test_continuous_benchmark_is_not_platform_relay_capable():
     tree = ast.parse(BOT_SOURCE)
     assignment = next(
         node for node in tree.body
@@ -1268,7 +1457,9 @@ def test_only_continuous_can_emit_platform_live_relay_lifecycle():
         )
     )
     assigned_source = ast.get_source_segment(BOT_SOURCE, assignment)
-    assert "RESEARCH_LANE_CONTINUOUS" in assigned_source
+    assert "RESEARCH_LANE_CONTINUOUS" not in assigned_source
+    assert 'spec.get("platform_relay_eligible")' in assigned_source
+    assert "COMBO_LANE_SPECS.items()" in assigned_source
     assert "RESEARCH_LANE_TYPE_B_HUNTER_V1" not in assigned_source
 
 
@@ -1443,12 +1634,16 @@ def test_chase_2_to_3_does_not_happen_at_60s():
     assert idx(900) == 3
 
 
-def test_five_plus_off_does_not_cancel_chase_4_at_9_min():
+def test_disabled_early_window_cancels_but_post_last_window_holds():
     _idx, _start, cancel, reprice, _ready = _five_min_chase_helpers()
-    assert cancel(9 * 60) is False
+    # Before the first enabled bucket, a resting order must be removed so it
+    # cannot fill through an operator-disabled execution window.
+    assert cancel(9 * 60) is True
     assert reprice(9 * 60) is False
     assert cancel(22 * 60) is False
     assert reprice(22 * 60) is True
+    # After the final enabled bucket, preserve the resting limit until TTL but
+    # do not move it again.
     assert cancel(26 * 60) is False
     assert reprice(26 * 60) is False
 

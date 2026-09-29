@@ -68,6 +68,11 @@ def test_runtime_capture_is_research_only_and_started_once():
     assert 'state["ask_qty"] = ask_qty' in BOT
     assert 'float(state.get("rest_price_ts") or state.get("rest_last_tick") or 0.0)' in BOT
     assert "MICROSTRUCTURE_TAPE_FILE" in BOT
+    assert 'append_outcome.get("status") == "ADMISSION_SUPPRESSED"' in body
+    assert "_microstructure_admission_suppressions += 1" in body
+    assert "_microstructure_io_write_failures += 1" in body
+    assert '"admission_suppressions_this_process"' in BOT
+    assert '"io_write_failures_this_process"' in BOT
 
 
 def test_v22_event_references_the_shared_required_window_without_claiming_coverage():

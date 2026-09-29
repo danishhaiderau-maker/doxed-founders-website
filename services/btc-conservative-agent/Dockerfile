@@ -34,10 +34,25 @@ COPY . /app
 
 # Fail the image build if the whitelist-style .dockerignore drops a module that
 # bot.py or the canonical analyzer imports at runtime.
-RUN python -c "import research.analysis_eligibility, research.platform_relay_evidence, research.source_market_evidence, research.immutable_archive, research.counterfactual_normalization, research.epoch_quarantine"
+RUN python -c "import platform_relay_streaming, research.analysis_eligibility, research.platform_relay_evidence, research.source_market_evidence, research.immutable_archive, research.counterfactual_normalization, research.epoch_quarantine, research.mirror_generation_lease"
 # V3 dual-write is on the Fly bot's critical evidence path. Fail the image
 # build if the whitelist omits any collector dependency.
 RUN python -c "import collector_v22, collector_v22_provisional, research_v3_contract, research_v3_store, research_v3_bridge"
+# The authenticated package routes are registered at bot import even while
+# acceleration is disabled. Prove their complete source chain is in the image.
+RUN python -c "import data_sync_bundle_api, data_sync_bundle_runtime, data_sync_bundle_resumption, data_sync_bundle_worker, data_sync_bundle_storage, data_sync_bundle_transport, data_sync_bundle_maintenance, data_sync_bundle_reservations"
+# The exact lifecycle-tail recovery command is invoked only by its guarded
+# workflow, but must still be importable in the production image.
+RUN python -m py_compile lifecycle_tail_repair.py lifecycle_tail_repair_verify.py lifecycle_cursor_rebind.py lifecycle_cursor_rebind_verify.py execution_tail_repair.py execution_tail_repair_verify.py \
+    && python -c "import lifecycle_tail_repair, lifecycle_tail_repair_verify, lifecycle_cursor_rebind, lifecycle_cursor_rebind_verify, execution_tail_repair, execution_tail_repair_verify"
+# Quantity-aware conservative paper evidence is part of both the runtime
+# collector and analyzer path. Fail the image build if the whitelist omits it.
+RUN python -c "import research.conservative_fill_cohort, research.conservative_limit_fill, research.quantity_execution, research.venue_quantity_constraints"
+# This import executes before every AI API call, not just analyzer startup.
+RUN python -c "import research.runtime_baseline_declaration"
+RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
+RUN python -c "import data_sync_quarantine_receipt"
+RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data

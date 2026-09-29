@@ -393,7 +393,7 @@ export function LandingHubPreviewWidgets({
         subtitle="The vault + IDE — your data stays yours."
         headerClass="bg-emerald-950/35"
         href="/founder-ide"
-        footerLabel="Download Founder Stack →"
+        footerLabel="Download Founder IDE →"
       >
         <ul className="space-y-1.5">
           {FOUNDER_NODE_ITEMS.map((item) => (

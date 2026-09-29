@@ -163,3 +163,90 @@ test('FIX 2: accepts a snapshot whose dashboard_url matches canonical Fly', asyn
   assert.equal(result.ok, true);
   assert.equal(storedSeq() > 0n, true);
 });
+
+test('snapshot ingest projects only sequence and bounded write acknowledgement', async () => {
+  const snapshot = canonicalSnapshot({ nested: { retained: ['full', 'snapshot'] } });
+  const next = 1_750_000_000_200;
+  const calls: string[] = [];
+  const prisma = {
+    platformSettings: {
+      findUnique: async (args: unknown) => {
+        calls.push('read');
+        assert.deepEqual(args, {
+          where: { id: 'default' }, select: { showcaseRelaySnapshotSeq: true },
+        });
+        return { showcaseRelaySnapshotSeq: BigInt(next - 1) };
+      },
+      upsert: async (args: {
+        where: unknown;
+        select: unknown;
+        create: Record<string, unknown>;
+        update: Record<string, unknown>;
+      }) => {
+        calls.push('write');
+        assert.deepEqual(args.where, { id: 'default' });
+        assert.deepEqual(args.select, { id: true });
+        assert.deepEqual(args.create.showcaseRelaySnapshot, snapshot);
+        assert.deepEqual(args.update.showcaseRelaySnapshot, snapshot);
+        assert.equal(args.create.showcaseRelaySnapshotSeq, BigInt(next));
+        assert.equal(args.update.showcaseRelaySnapshotSeq, BigInt(next));
+        assert.ok(args.create.showcaseRelaySnapshotAt instanceof Date);
+        assert.ok(args.update.showcaseRelaySnapshotAt instanceof Date);
+        return { id: 'default' };
+      },
+    },
+  };
+  const service = new ShowcaseSnapshotService({ get: () => CONTROL_SECRET } as never, prisma as never);
+  assert.deepEqual(await service.ingest(signedBody(snapshot, next)), { ok: true, snapshot_seq: next });
+  assert.deepEqual(calls, ['read', 'write']);
+});
+
+test('projected sequence read still skips stale ingest without a write', async () => {
+  let writes = 0;
+  const seq = 1_750_000_000_200;
+  const prisma = {
+    platformSettings: {
+      findUnique: async (args: { select: unknown }) => {
+        assert.deepEqual(args.select, { showcaseRelaySnapshotSeq: true });
+        return { showcaseRelaySnapshotSeq: BigInt(seq) };
+      },
+      upsert: async () => { writes += 1; return { id: 'default' }; },
+    },
+  };
+  const service = new ShowcaseSnapshotService({ get: () => CONTROL_SECRET } as never, prisma as never);
+  assert.deepEqual(await service.ingest(signedBody(canonicalSnapshot(), seq)), {
+    ok: true, skipped: true, snapshot_seq: seq,
+  });
+  assert.equal(writes, 0);
+});
+
+test('cached snapshot projects exactly payload, sequence and timestamp while preserving fallback values', async () => {
+  const snapshot = canonicalSnapshot({ positions: [{ quantity: '0.00004' }] });
+  const at = new Date('2026-09-05T06:00:00Z');
+  let row: Record<string, unknown> | null = {
+    showcaseRelaySnapshot: snapshot,
+    showcaseRelaySnapshotSeq: 42n,
+    showcaseRelaySnapshotAt: at,
+  };
+  const prisma = {
+    platformSettings: {
+      findUnique: async (args: unknown) => {
+        assert.deepEqual(args, {
+          where: { id: 'default' },
+          select: {
+            showcaseRelaySnapshot: true,
+            showcaseRelaySnapshotSeq: true,
+            showcaseRelaySnapshotAt: true,
+          },
+        });
+        return row;
+      },
+    },
+  };
+  const service = new ShowcaseSnapshotService({ get: () => CONTROL_SECRET } as never, prisma as never);
+  assert.deepEqual(await service.getCachedSnapshot(), { snapshot, snapshot_seq: 42, at });
+  row = null;
+  assert.deepEqual(await service.getCachedSnapshot(), { snapshot: null, snapshot_seq: 0, at: null });
+  row = { showcaseRelaySnapshot: [], showcaseRelaySnapshotSeq: 43n, showcaseRelaySnapshotAt: at };
+  assert.deepEqual(await service.getCachedSnapshot(), { snapshot: null, snapshot_seq: 43, at });
+});

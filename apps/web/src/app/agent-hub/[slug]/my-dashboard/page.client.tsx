@@ -166,9 +166,17 @@ export default function AgentMyDashboardClient({ slug }: { slug: string }) {
             </div>
 
             {data.instance.lastError && (
-              <p className="mt-4 rounded-lg border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-sm text-amber-200">
-                {data.instance.lastError}
-              </p>
+              <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-950/20 px-4 py-3 text-sm text-amber-200">
+                <p>{data.instance.lastError}</p>
+                {data.instance.status === 'PAUSED' && /credentials?/i.test(data.instance.lastError) ? (
+                  <Link
+                    href={`/agent-hub/${slug}/hire?exchange=bitfinex&mode=refresh-paused`}
+                    className="mt-2 inline-block font-semibold text-white underline"
+                  >
+                    Replace API credentials without resuming or renewing
+                  </Link>
+                ) : null}
+              </div>
             )}
 
             <div className="mt-8 rounded-xl border border-zinc-800 bg-zinc-950/40 p-5 text-sm text-zinc-400">

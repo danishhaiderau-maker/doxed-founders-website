@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import type { TradingAgentDashboardState } from '@dcf/utils';
+import { DEFAULT_SUBSCRIBER_MAX_MARGIN_USD, type TradingAgentDashboardState } from '@dcf/utils';
 import { AgentLiveTradeExportButton } from '@/components/agent-hub/agent-live-trade-export-button';
 import {
   AgentTransparencyTables,
@@ -200,7 +200,7 @@ export function AgentDeskView({
       >
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-5 text-center">
           <p className="text-sm text-emerald-100/90">
-            Connect read+trade API keys on Bitfinex Derivatives. Platform enforces virtual $20/lot caps on
+            Connect read+trade API keys on Bitfinex Derivatives. Platform enforces virtual ${DEFAULT_SUBSCRIBER_MAX_MARGIN_USD}/lot caps on
             your real account.
           </p>
           <Link

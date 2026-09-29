@@ -1,6 +1,6 @@
 import unittest
 
-from research_v3_policy_replay import replay_protected_policy
+from research_v3_policy_replay import prepare_replay_price_path, replay_protected_policy
 
 
 def spec(**overrides):
@@ -17,6 +17,59 @@ def spec(**overrides):
 
 
 class ProtectedReplayTests(unittest.TestCase):
+    def test_prepared_trace_free_replay_preserves_exact_summary(self):
+        prices = [
+            {"ts": 60, "price": 100.01},
+            {"ts": 120, "price": 100.03},
+            {"ts": 180, "price": 100.019},
+        ]
+        policy = spec(
+            profit_protection={
+                "mode": "ATR_TRAIL", "atr_tp_k": None, "atr_trail_k": 1.0,
+                "trail_activation_atr_k": 1.0, "partial_take_profits": [],
+            },
+        )
+        kwargs = dict(
+            direction="LONG", entry_price=100, fill_ts=0,
+            atr_pct_at_fill=0.01, leverage=100, margin_usd=20,
+            policy_spec=policy,
+        )
+        full = replay_protected_policy(prices, **kwargs)
+        prepared = prepare_replay_price_path(prices, fill_ts=0)
+        fast = replay_protected_policy(
+            (), **kwargs, prepared_price_path=prepared, collect_trace=False,
+        )
+        self.assertEqual(fast["trace"], [])
+        self.assertEqual(
+            {key: value for key, value in full.items() if key != "trace"},
+            {key: value for key, value in fast.items() if key != "trace"},
+        )
+
+    def test_prepared_path_normalization_is_linear_in_path_not_policy_count(self):
+        class CountingPath:
+            def __init__(self, rows):
+                self.rows = rows
+                self.visits = 0
+
+            def __iter__(self):
+                for row in self.rows:
+                    self.visits += 1
+                    yield row
+
+        source = CountingPath([
+            {"ts": index + 1, "price": 100 + index / 1_000_000}
+            for index in range(1_000)
+        ])
+        prepared = prepare_replay_price_path(source, fill_ts=0)
+        for _ in range(62):
+            replay_protected_policy(
+                (), direction="LONG", entry_price=100, fill_ts=0,
+                atr_pct_at_fill=1, leverage=100, margin_usd=20,
+                policy_spec=spec(), prepared_price_path=prepared,
+                collect_trace=False,
+            )
+        self.assertEqual(source.visits, 1_000)
+
     def test_atr_stop_prevents_tp_only_path_end_drawdown(self):
         policy = spec(loss_protection={"atr_stop_k": 1.5, "hard_stop_margin_pct": 100, "thesis_cut_margin_pct": None, "thesis_window_sec": 0})
         result = replay_protected_policy(
@@ -87,6 +140,50 @@ class ProtectedReplayTests(unittest.TestCase):
         self.assertEqual(result["partial_exit_count"], 2)
         self.assertEqual(result["remaining_fraction_at_terminal"], 0.5)
         self.assertGreater(result["portfolio_margin_return_pct"], result["margin_return_pct"])
+
+    def test_hybrid_atr_break_even_arms_from_frozen_fill_atr(self):
+        policy = spec(
+            profit_protection={
+                "mode": "HYBRID_RUNNER", "atr_tp_k": 2.5, "atr_trail_k": 1.0,
+                "trail_activation_atr_k": 1.25,
+                "break_even_arm_atr_k": 1.25, "break_even_floor_pct": 0.5,
+                "partial_take_profits": [[1.0, 0.25], [1.5, 0.25]],
+            },
+        )
+        result = replay_protected_policy(
+            [
+                {"ts": 60, "price": 100.01},
+                {"ts": 120, "price": 100.013},
+                {"ts": 180, "price": 100.004},
+            ],
+            direction="LONG", entry_price=100, fill_ts=0, atr_pct_at_fill=0.01,
+            leverage=100, margin_usd=20, policy_spec=policy,
+        )
+        self.assertEqual(result["exit_reason"], "PROFIT_PROTECTION_FLOOR")
+        self.assertGreaterEqual(result["active_floor_pct"], 0.5)
+        self.assertEqual(result["partial_exit_count"], 1)
+
+    def test_hybrid_runner_honors_final_atr_target(self):
+        policy = spec(
+            profit_protection={
+                "mode": "HYBRID_RUNNER", "atr_tp_k": 2.5, "atr_trail_k": 1.0,
+                "trail_activation_atr_k": 1.25,
+                "break_even_arm_atr_k": 1.25, "break_even_floor_pct": 0.5,
+                "partial_take_profits": [[1.0, 0.25], [1.5, 0.25]],
+            },
+        )
+        result = replay_protected_policy(
+            [
+                {"ts": 60, "price": 100.01},
+                {"ts": 120, "price": 100.015},
+                {"ts": 180, "price": 100.025},
+            ],
+            direction="LONG", entry_price=100, fill_ts=0, atr_pct_at_fill=0.01,
+            leverage=100, margin_usd=20, policy_spec=policy,
+        )
+        self.assertEqual(result["exit_reason"], "ATR_TAKE_PROFIT")
+        self.assertEqual(result["partial_exit_count"], 2)
+        self.assertEqual(result["remaining_fraction_at_terminal"], 0.5)
 
 
 if __name__ == "__main__":

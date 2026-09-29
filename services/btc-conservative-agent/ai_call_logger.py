@@ -30,7 +30,7 @@ _LOCK = threading.Lock()
 def generate_call_id(lane_id: str = "") -> str:
     """Generate unique ai_call_id: {lane_prefix}_{uuid_short_12}_{unix_ms}.
 
-    Example: tbhv1_a3f72b1c9d2e_1720658400000
+    Example: lane_a3f72b1c9d2e_1720658400000
     """
     prefix = (lane_id or "ai").lower().replace("_", "").replace(" ", "-")[:8]
     short = uuid.uuid4().hex[:12]

@@ -4682,6 +4682,34 @@ export function hireTradingAgent(
   }, token);
 }
 
+export interface PausedCredentialRefreshResult {
+  ok: true;
+  status: 'PAUSED';
+  armed: false;
+  resumed: false;
+  chargedDdollar: 0;
+  marginTransferRequested: false;
+  authenticatedAudit: { known: boolean; flat: boolean; observedAt: string };
+}
+
+export function refreshPausedTradingAgentCredentials(
+  slug: string,
+  body: {
+    exchangeProvider: string;
+    apiKey: string;
+    apiSecret: string;
+    passphrase?: string;
+    testnet?: boolean;
+  },
+  token: string,
+) {
+  return apiFetch<PausedCredentialRefreshResult>(
+    `/trading-agents/${slug}/credentials/refresh-paused`,
+    { method: 'POST', body: JSON.stringify(body) },
+    token,
+  );
+}
+
 export interface PrivateAgentDashboard {
   kind: 'copy' | 'live';
   agent: { id: string; slug: string; name: string; assetSymbol: string };
@@ -6253,19 +6281,6 @@ export function fetchFounderGraph(token: string) {
   return apiFetch<FounderGraphResponse>('/copilot/founder-graph', undefined, token);
 }
 
-/**
- * Nucleus graph. Session JWT (`Bearer <accessToken>`) works here and on
- * `GET /copilot/founder-graph`. The extension uses the same path with
- * `Authorization: FounderNode {nodeId}:{nodeToken}` — see docs/NUCLEUS-FOUNDER-GRAPH.md.
- */
-export function fetchIdeNucleus(token: string) {
-  return apiFetch<FounderGraphResponse & { auth?: 'jwt' | 'founder-node' }>(
-    '/ide/nucleus',
-    undefined,
-    token,
-  );
-}
-
 export type ProjectTimelineResponse = {
   days: number;
   entries: import('@dcf/utils').ProjectTimelineEntry[];
@@ -6326,6 +6341,7 @@ export function dispatchToIdeSession(
   sessionId: string,
   prompt: string,
   ideProvider = 'cursor',
+  targetNodeId?: string,
 ) {
   return apiFetch<{ id: string; status: string }>(
     `/ide-bridge/sessions/${encodeURIComponent(sessionId)}/dispatch`,
@@ -6334,6 +6350,7 @@ export function dispatchToIdeSession(
       body: JSON.stringify({
         prompt,
         ideProvider,
+        ...(targetNodeId ? { targetNodeId } : {}),
       }),
     },
     token,
@@ -6349,12 +6366,26 @@ export type IdeDispatchStatus = {
   sessionId: string;
   delivered: boolean;
   failed: boolean;
+  /** Present only for Founder IDE remote dispatches. */
+  executionStatus?: 'pending' | 'claimed' | 'cancellation_requested' | 'complete' | 'failed' | 'expired';
+  error?: string | null;
+  cancellationRequested?: boolean;
+  cancellationReason?: string | null;
 };
 
 export function fetchIdeDispatchStatus(token: string, dispatchId: string) {
   return apiFetch<IdeDispatchStatus>(
     `/ide-bridge/dispatch/${encodeURIComponent(dispatchId)}`,
     undefined,
+    token,
+  );
+}
+
+/** Owner cancel for a Founder IDE remote dispatch; the paired desktop kills the run on its next poll. */
+export function cancelIdeDispatch(token: string, dispatchId: string, reason?: string) {
+  return apiFetch<IdeDispatchStatus>(
+    `/ide-bridge/dispatch/${encodeURIComponent(dispatchId)}/cancel`,
+    { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) },
     token,
   );
 }

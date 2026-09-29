@@ -13,11 +13,29 @@ import json
 import math
 from typing import Any, Iterable, Mapping, Sequence
 
+try:
+    from .quantity_execution import (
+        apply_quantity_constraints,
+        validate_signed_quantity_constraints,
+    )
+except ImportError:  # direct script/test execution
+    from quantity_execution import apply_quantity_constraints, validate_signed_quantity_constraints
+
 
 EVIDENCE_SCHEMA = "market_microstructure_1s_v1"
-RECEIPT_SCHEMA = "conservative_limit_fill_receipt_v1"
-EVALUATOR_VERSION = "public-tape-conservative-v2"
+RECEIPT_SCHEMA = "conservative_limit_fill_receipt_v2"
+EVALUATOR_VERSION = "public-tape-conservative-v3-quantity-aware"
 MAX_AGGRESSOR_WINDOW_SEC = 5
+
+
+def _quote_available_at(row, ts):
+    source = _finite_positive(row.get("source_ts"))
+    observed = _finite_positive(row.get("observed_at_ts", row.get("source_ts")))
+    if source is None or observed is None or source > observed or source > ts + 1 or observed >= ts + 1:
+        return None
+    if ts + 1 - source > 3.5:
+        return None
+    return max(float(ts), observed)
 
 
 def _finite_positive(value: Any) -> float | None:
@@ -37,8 +55,16 @@ def _base_receipt(direction: str, qty: Any, window: Any) -> dict[str, Any]:
         "supported": False,
         "direction": str(direction).upper(),
         "requested_qty": qty,
+        "raw_partial_qty": 0.0,
+        "rounded_executable_qty": 0.0,
         "filled_qty": 0.0,
+        "accumulated_qty": 0.0,
         "remaining_qty": qty,
+        "minimum_lot_decision": "UNKNOWN",
+        "minimum_notional_decision": "UNKNOWN",
+        "quantity_constraints": None,
+        "quantity_attempts": [],
+        "final_classification": "UNSUPPORTED",
         "aggressor_window_sec": window,
         "schedule_sha256": None,
         "chase_bucket_id": None,
@@ -51,6 +77,11 @@ def _base_receipt(direction: str, qty: Any, window: Any) -> dict[str, Any]:
         "matching_aggressor_qty": 0.0,
         "aggressor_corroborated": False,
         "fill_price": None,
+        "fill_latency_sec": None,
+        "price_concession_per_unit": None,
+        "slippage_usd": None,
+        "missed_entry_cost_usd": None,
+        "missed_entry_cost_basis": "UNAVAILABLE_REQUIRES_DECLARED_MARK_HORIZON",
         "queue_position_model": "NONE",
         "scope": "PUBLIC_TAPE_COUNTERFACTUAL_NOT_EXCHANGE_CONFIRMATION",
         "negative_reasons": [],
@@ -94,7 +125,26 @@ def _normalise_schedule(schedule: Sequence[Mapping[str, Any]]) -> tuple[list[dic
     return normalised, hashlib.sha256(encoded).hexdigest()
 
 
-def evaluate_limit_fill(
+def evaluate_limit_fill(rows, *, direction, requested_qty, chase_schedule,
+                        aggressor_window_sec=3, symbol=None, quantity_constraints=None):
+    return _evaluate_limit_fill(rows, direction=direction, requested_qty=requested_qty,
+        chase_schedule=chase_schedule, aggressor_window_sec=aggressor_window_sec,
+        symbol=symbol, quantity_constraints=quantity_constraints)
+
+
+def evaluate_conditional_limit_fill(rows, *, direction, requested_qty, chase_schedule,
+                                    aggressor_window_sec=3, symbol=None, venue_quantity_observation=None):
+    from research.conditional_quantity_execution import LABELS
+    result = _evaluate_limit_fill(rows, direction=direction, requested_qty=requested_qty,
+        chase_schedule=chase_schedule, aggressor_window_sec=aggressor_window_sec,
+        symbol=symbol, quantity_constraints=venue_quantity_observation, _conditional=True)
+    result.update(LABELS)
+    result['schema'] = 'conditional_limit_fill_receipt_v1'
+    result['model_kind'] = 'CONDITIONAL_VENUE_QUANTITY'
+    return result
+
+
+def _evaluate_limit_fill(
     rows: Iterable[Mapping[str, Any]],
     *,
     direction: str,
@@ -102,6 +152,8 @@ def evaluate_limit_fill(
     chase_schedule: Sequence[Mapping[str, Any]],
     aggressor_window_sec: int = 3,
     symbol: str | None = None,
+    quantity_constraints: Mapping[str, Any] | None = None,
+    _conditional: bool = False,
 ) -> dict[str, Any]:
     """Return a deterministic fill/no-fill/partial/unsupported receipt.
 
@@ -120,6 +172,18 @@ def evaluate_limit_fill(
         return _unsupported(receipt, "INVALID_DIRECTION")
     if qty is None:
         return _unsupported(receipt, "INVALID_REQUESTED_QTY")
+    validator = validate_signed_quantity_constraints
+    quantity_apply = apply_quantity_constraints
+    if _conditional:
+        from research.conditional_quantity_execution import validate_conditional_constraints, apply_conditional_quantity_constraints
+        validator = validate_conditional_constraints
+        quantity_apply = apply_conditional_quantity_constraints
+    normalized_constraints, constraint_reasons = validator(
+        quantity_constraints, symbol=symbol,
+    )
+    if normalized_constraints is None:
+        return _unsupported(receipt, *constraint_reasons)
+    receipt["quantity_constraints"] = normalized_constraints
     if not isinstance(aggressor_window_sec, int) or not 1 <= aggressor_window_sec <= MAX_AGGRESSOR_WINDOW_SEC:
         return _unsupported(receipt, "INVALID_AGGRESSOR_WINDOW")
     receipt["requested_qty"] = qty
@@ -173,7 +237,7 @@ def evaluate_limit_fill(
 
     incomplete: set[str] = set()
     counters = {"bbo_not_crossed": 0, "insufficient_visible_qty": 0, "no_matching_aggressor": 0}
-    best_partial: dict[str, Any] | None = None
+    best_by_interval: dict[str, dict[str, Any]] = {}
     for ts in expected_ts:
         row = by_ts.get(ts)
         interval = interval_by_ts[ts]
@@ -185,6 +249,10 @@ def evaluate_limit_fill(
             continue
         if row.get("valid_bbo") is not True:
             incomplete.add("INVALID_BBO_BUCKET")
+            continue
+        available_at = _quote_available_at(row, ts)
+        if available_at is None:
+            incomplete.add("QUOTE_OBSERVATION_TIME_UNPROVEN")
             continue
 
         quote = _finite_positive(row.get("ask" if side == "LONG" else "bid"))
@@ -212,6 +280,10 @@ def evaluate_limit_fill(
                 incomplete.add("STALE_OR_INVALID_AGGRESSOR_WINDOW")
                 window_invalid = True
                 break
+            if _quote_available_at(candidate, candidate_ts) is None:
+                incomplete.add("QUOTE_OBSERVATION_TIME_UNPROVEN")
+                window_invalid = True
+                break
             window_rows.append(candidate)
         if window_invalid:
             continue
@@ -225,7 +297,7 @@ def evaluate_limit_fill(
         aggressor_qty = 0.0
         ambiguous = False
         qty_field, vwap_field = (("sell_qty", "sell_vwap") if side == "LONG" else ("buy_qty", "buy_vwap"))
-        amount = _finite_positive(row.get(qty_field)) or 0.0
+        amount = (_finite_positive(row.get(qty_field)) or 0.0) if row.get("trade_bucket_complete") is True else 0.0
         if amount > 0:
             opposite_field = "buy_qty" if qty_field == "sell_qty" else "sell_qty"
             opposite = _finite_positive(row.get(opposite_field)) or 0.0
@@ -258,6 +330,7 @@ def evaluate_limit_fill(
         evidence = {
             "interval": interval,
             "ts": ts,
+            "available_at": available_at,
             "quote": quote,
             "visible": visible,
             "aggressor": aggressor_qty,
@@ -265,26 +338,83 @@ def evaluate_limit_fill(
             "filled": filled,
             "bucket_ids": window_ts,
         }
-        if filled >= qty:
-            best_partial = evidence
-            break
-        if filled > 0 and (best_partial is None or filled > best_partial["filled"]):
-            best_partial = evidence
+        if filled > 0:
+            key = str(interval["bucket_id"])
+            current = best_by_interval.get(key)
+            if current is None or filled > current["filled"]:
+                best_by_interval[key] = evidence
 
     receipt["diagnostics"] = {**counters, "evidence_bucket_count": len(by_ts), "schedule_bucket_count": len(expected_ts)}
-    if best_partial is not None:
+    if best_by_interval:
+        # A later BBO snapshot can repeat the same displayed liquidity.  In
+        # the absence of exchange order IDs or a defensible depletion then
+        # replenishment receipt, summing snapshots across chase intervals
+        # double-counts quantity.  Use the single strongest contemporaneous
+        # observation across the complete schedule.
+        strongest = max(
+            best_by_interval.values(),
+            key=lambda item: (float(item["filled"]), -int(item["ts"])),
+        )
+        accumulated = 0.0
+        attempts: list[dict[str, Any]] = []
+        accepted_evidence: list[dict[str, Any]] = []
+        interval = strongest["interval"]
+        decision = quantity_apply(
+            requested_qty=qty,
+            raw_partial_qty=float(strongest["filled"]),
+            execution_price=interval["limit_price"],
+            accumulated_qty=0,
+            constraints=quantity_constraints,
+            symbol=symbol,
+        )
+        decision["chase_bucket_id"] = interval["bucket_id"]
+        decision["trigger_bucket_ts"] = strongest["ts"]
+        decision["accumulation_basis"] = "MAX_SINGLE_OBSERVATION_NO_CROSS_SNAPSHOT_SUM"
+        attempts.append(decision)
+        if decision["accepted"]:
+            accumulated = float(decision["accumulated_quantity_after"])
+            accepted_evidence.append(strongest)
+        receipt["quantity_attempts"] = attempts
+        receipt["raw_partial_qty"] = sum(float(item["raw_partial_quantity"]) for item in attempts)
+        receipt["rounded_executable_qty"] = sum(
+            float(item["rounded_executable_quantity"]) for item in attempts if item["accepted"]
+        )
+        receipt["accumulated_qty"] = accumulated
+        if not accepted_evidence:
+            unsupported_attempt_reasons = [
+                reason for item in attempts
+                if item.get("final_classification") == "UNSUPPORTED"
+                for reason in item.get("reasons", [])
+            ]
+            if unsupported_attempt_reasons:
+                return _unsupported(receipt, *unsupported_attempt_reasons)
+            if incomplete:
+                return _unsupported(receipt, *sorted(incomplete))
+            receipt.update({
+                "outcome": "NO_FILL",
+                "supported": True,
+                "final_classification": "NO_FILL",
+                "minimum_lot_decision": attempts[-1]["minimum_lot_decision"],
+                "minimum_notional_decision": attempts[-1]["minimum_notional_decision"],
+                "negative_reasons": list(dict.fromkeys(
+                    reason for item in attempts for reason in item["reasons"]
+                )),
+            })
+            return receipt
+        best_partial = accepted_evidence[-1]
         interval = best_partial["interval"]
-        filled_raw = float(best_partial["filled"])
-        is_full = filled_raw >= qty
-        # Preserve exact requested quantity for a full fill. Rounding first can
-        # turn an exact min(qty, visible) result into a fictitious dust partial
-        # when requested_qty has more than twelve decimal places.
-        filled = qty if is_full else round(filled_raw, 12)
+        is_full = accumulated >= qty
+        filled = qty if is_full else accumulated
+        last_decision = attempts[-1]
         receipt.update({
             "outcome": "FILL" if is_full else "PARTIAL_FILL",
             "supported": True,
+            "final_classification": "FULL_FILL" if is_full else "PARTIAL_FILL",
             "filled_qty": filled,
+            "accumulated_qty": filled,
             "remaining_qty": round(max(0.0, qty - filled), 12),
+            "minimum_lot_decision": last_decision["minimum_lot_decision"],
+            "minimum_notional_decision": last_decision["minimum_notional_decision"],
             "chase_bucket_id": interval["bucket_id"],
             "chase_interval": dict(interval),
             "evidence_bucket_ids": best_partial["bucket_ids"],
@@ -294,15 +424,40 @@ def evaluate_limit_fill(
             "visible_executable_qty": best_partial["visible"],
             "matching_aggressor_qty": best_partial["aggressor"],
             "aggressor_corroborated": bool(best_partial["aggressor"] > 0),
+            # Aggregate prints are retrospective corroboration, never proof
+            # available at the earlier BBO observation used for this fill.
+            "aggressor_available_at_ts": (
+                max(float(best_partial["ts"] + 1),
+                    _finite_positive(by_ts[best_partial["ts"]].get("trade_collected_at_ts"))
+                    or float(best_partial["ts"] + 1))
+                if best_partial["aggressor"] > 0 else None
+            ),
+            "aggressor_time_semantics": "POST_BUCKET_CORROBORATION_NOT_FILL_TRIGGER",
             "fill_price": interval["limit_price"],
+            # A conservative replay books at the declared limit, never at the
+            # potentially better displayed quote.  Preserve that deliberate
+            # price concession and the elapsed schedule time explicitly so a
+            # downstream analyst need not reverse engineer either value.
+            "fill_latency_sec": best_partial["available_at"] - schedule[0]["start_ts"],
+            "quote_observed_at_ts": best_partial["available_at"],
+            "price_concession_per_unit": round(max(
+                0.0,
+                interval["limit_price"] - best_partial["quote"]
+                if side == "LONG"
+                else best_partial["quote"] - interval["limit_price"],
+            ), 12),
             "negative_reasons": [] if is_full else ["PARTIAL_ONLY_INSUFFICIENT_PROVABLE_QTY"],
         })
+        receipt["slippage_usd"] = round(
+            float(receipt["price_concession_per_unit"]) * float(filled), 12
+        )
         return receipt
 
     if incomplete:
         return _unsupported(receipt, *sorted(incomplete))
     receipt["outcome"] = "NO_FILL"
     receipt["supported"] = True
+    receipt["final_classification"] = "NO_FILL"
     reasons = []
     if counters["bbo_not_crossed"]:
         reasons.append("BBO_NEVER_CROSSED_LIMIT")

@@ -98,7 +98,7 @@ export function FounderNodeHubPanel({
 
       {showDownloads ? (
         <div className="mt-6 rounded-xl border border-emerald-500/25 bg-emerald-950/10 p-5">
-          <p className="text-sm font-semibold text-emerald-100">Download Founder Stack</p>
+          <p className="text-sm font-semibold text-emerald-100">Download Founder IDE</p>
           <p className="mt-0.5 text-xs text-zinc-500">
             Prefer Founder Stack (IDE + Node). Standalone Node ({FOUNDER_NODE_MIN_VERSION_LABEL}) still works for vault
             pairing. After pair, Founder IDE loads{' '}

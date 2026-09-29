@@ -301,7 +301,7 @@ export class CopyRelaySimService {
     sim: CopyRelaySimState,
     markPrice: number | null,
   ) {
-    // Sim mode now places REAL orders on the Bitfinex API (1 position · $20 · 100x cap),
+    // Sim mode now places REAL orders on the Bitfinex API (1 position · $0.25 · 100x cap),
     // so the live book must read the real exchange, not the paper ledger.
     let orders: Awaited<ReturnType<BitfinexTradingClient['listActiveOrders']>> = [];
     let position: Awaited<ReturnType<BitfinexTradingClient['getOpenPositionDetail']>> = null;

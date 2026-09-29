@@ -60,7 +60,7 @@ def reset_state():
         bot.state["leverage"] = 100
         enabled = dict(bot.state.get("research_lane_enabled") or {})
         enabled[bot.RESEARCH_LANE_CONTINUOUS] = True
-        enabled[bot.RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC] = True
+        enabled[bot.COMBO_EXECUTION_LANES[0]] = True
         bot.state["research_lane_enabled"] = enabled
 
 
@@ -115,30 +115,50 @@ check("manual flag blocks fills after reason replacement", not bot.open_position
 check("reason replacement order cancelled", pending.get("status") == "CANCELLED")
 
 
-print("\n[3] Paused research may collect, while every execution route fails closed")
+print("\n[3] True flat ADMIN_MANUAL stops AI + writes; every execution route fails closed")
 reset_state()
 with bot.state_lock:
     bot.state["manual_admin_pause"] = True
     bot.state["execution_paused"] = True
-    bot.state["execution_reason"] = "BLOCKED"
+    bot.state["execution_reason"] = "ADMIN_MANUAL"
 
 signal_event = {
     "trade_id": "pause-signal-1",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     "event_trigger": True,
 }
 original_is_buffer_ready = bot.is_buffer_ready
 original_log_no_signal = bot.log_no_signal_with_context
+original_call_deepseek = bot.call_deepseek_api
 research_progress = []
+deepseek_calls = []
+
+def _blocked_deepseek(*args, **kwargs):
+    deepseek_calls.append((args, kwargs))
+    raise RuntimeError("AI_SHOULD_NOT_RUN_UNDER_ADMIN_MANUAL")
+
 bot.is_buffer_ready = lambda: False
 bot.log_no_signal_with_context = lambda reason=None, **kwargs: research_progress.append(reason)
+bot.call_deepseek_api = _blocked_deepseek
 bot.process_signal(signal_event)
+# AI_SCAN under research collection must also fail closed (no paused_shadow AI).
+ai_scan_event = {
+    "trade_id": "pause-ai-scan-1",
+    "research_lane": bot.RESEARCH_LANE_AI_SCAN,
+    "event_trigger": True,
+    "paused_shadow_mode": True,  # explicit flag must not reopen the AI path
+}
+bot.process_signal(ai_scan_event)
+invoke_ok, invoke_reason = bot.should_invoke_ai({}, 1.0, True)
 bot.is_buffer_ready = original_is_buffer_ready
 bot.log_no_signal_with_context = original_log_no_signal
+bot.call_deepseek_api = original_call_deepseek
 check(
-    "paused paper runtime reaches isolated research pipeline",
-    research_progress == ["BUFFER_NOT_READY"],
+    "paused paper entry stops before feature work",
+    research_progress == [],
 )
+check("paused AI_SCAN creates no DeepSeek calls", deepseek_calls == [])
+check("should_invoke_ai fail-closed under ADMIN_MANUAL", invoke_ok is False and invoke_reason == "ADMIN_MANUAL_PAUSE")
 check("paused research creates no global order", not bot.pending_orders)
 check("paused research creates no global position", not bot.open_positions)
 
@@ -174,23 +194,6 @@ limit_result = bot.create_limit_order(limit_signal)
 check("limit entry refused", limit_result is None)
 check("limit route creates no pending order", not bot.pending_orders)
 
-tile2_ctx = {
-    "trade_id": "pause-tile2-1",
-    "research_lane": bot.RESEARCH_LANE_SR_MICRO_TILE_V2_STATIC,
-}
-tile2_result = bot._submit_tile2_paper_resting_limit(
-    tile2_ctx,
-    "LONG",
-    63_900.0,
-    3.0,
-    {},
-    {},
-    "pause-episode",
-)
-check("Tile 2 resting limit refused", tile2_result == "REFUSED_ADMIN_PAUSE")
-check("Tile 2 route creates no pending order", not bot.pending_orders)
-
-
 print("\n[4] A fill racing with the pause is cancelled before exposure opens")
 reset_state()
 with bot.state_lock:
@@ -200,7 +203,9 @@ with bot.state_lock:
 raced = {
     "trade_id": "pause-raced-fill-1",
     "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
-    "status": "FILLED",
+    # The real touch detector retains PENDING until durable OPEN commit.
+    "status": "PENDING",
+    "fill_handoff_in_progress": True,
     "side": "sell",
     "signal_dir": "SHORT",
     "limit_price": 64_000.0,
@@ -208,10 +213,13 @@ raced = {
     "qty": 0.01,
 }
 bot.lane_register_pending_order(raced)
+bot.fill_handoff_trade_ids.add(raced["trade_id"])
 bot.fill_order(raced)
 check("raced order removed", raced not in bot.pending_orders)
 check("raced order cancelled", raced.get("status") == "CANCELLED")
 check("raced fill creates no position", not bot.open_positions)
+check("raced cancellation recorded once", expired == [("pause-raced-fill-1", "ADMIN_MANUAL_PAUSE")])
+check("raced handoff released", raced["trade_id"] not in bot.fill_handoff_trade_ids and "fill_handoff_in_progress" not in raced)
 
 
 print("\n[5] Existing positions continue through normal exit management")
@@ -293,6 +301,54 @@ bot.get_config_file = original_get_config_file
 bot._resolve_config_file_for_load = original_resolve_config_file
 
 
+print("\n[6b] Operator ADMIN_MANUAL survives deploy resume; bare resume clears it")
+reset_state()
+_sticky_original_recompute = bot._recompute_system_readiness
+_sticky_original_token = bot._BOT_ADMIN_TOKEN
+_sticky_original_bootstrap = bot._DASHBOARD_BOOTSTRAP_COMPLETE
+_sticky_original_reset_probe = bot._resume_active_reset_receipt_exists
+bot._BOT_ADMIN_TOKEN = "required-test-token"
+bot._DASHBOARD_BOOTSTRAP_COMPLETE = True
+bot._resume_active_reset_receipt_exists = lambda: False
+with bot.state_lock:
+    bot.state["manual_admin_pause"] = True
+    bot.state["pause_intent"] = bot.PAUSE_OWNER_OPERATOR
+    bot.state["execution_paused"] = True
+    bot.state["execution_reason"] = "ADMIN_MANUAL"
+    bot.state["_pause_priority"] = bot.PAUSE_PRIORITIES["ADMIN_MANUAL"]
+bot._recompute_system_readiness = lambda: {
+    "system_ready": True,
+    "ws_transport_ready": True,
+    "readiness_reasons": [],
+}
+with bot.app.test_client() as client:
+    retained = client.post(
+        "/api/resume",
+        json={"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
+    retained_body = retained.get_json() or {}
+    check(
+        "deploy resume retains operator ADMIN_MANUAL",
+        retained_body.get("status") == "operator_pause_retained",
+        detail=f"status={retained.status_code} body={retained_body}",
+    )
+    check("deploy resume leaves manual pause armed", bot.state.get("manual_admin_pause") is True)
+    check("operator pause owner surfaced", retained_body.get("pause_owner") == "OPERATOR")
+    cleared = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    cleared_body = cleared.get_json() or {}
+    check(
+        "bare operator resume clears ADMIN_MANUAL",
+        cleared.status_code == 200 and cleared_body.get("status") == "resumed",
+        detail=f"status={cleared.status_code} body={cleared_body}",
+    )
+    check("operator resume disarms manual pause", bot.state.get("manual_admin_pause") is False)
+bot._recompute_system_readiness = _sticky_original_recompute
+bot._BOT_ADMIN_TOKEN = _sticky_original_token
+bot._DASHBOARD_BOOTSTRAP_COMPLETE = _sticky_original_bootstrap
+bot._resume_active_reset_receipt_exists = _sticky_original_reset_probe
+
+
 print("\n[7] Direct local bridge control is safe during secret rotation")
 reset_state()
 original_admin_token = bot._BOT_ADMIN_TOKEN
@@ -338,7 +394,11 @@ with bot.app.test_client() as client:
         "system_ready": True,
         "readiness_reasons": [],
     }
-    ready_resume = client.post("/api/resume", environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    ready_resume = client.post(
+        "/api/resume",
+        json={"clear_admin_manual_pause": True},
+        environ_base={"REMOTE_ADDR": "127.0.0.1"},
+    )
     check("ready direct loopback resume is accepted without a token", ready_resume.status_code == 200)
     check("ready direct loopback resume changes state", bot.state.get("execution_paused") is False)
     resumed_state = client.get(
@@ -373,7 +433,7 @@ with bot.replay_lock:
     bot.replay_buffers["pause-shadow-visible-1"] = {
         "closed": False,
         "start_ts": paused_shadow_start,
-        "research_lane": bot.RESEARCH_LANE_TYPE_B_HUNTER_V1,
+        "research_lane": bot.COMBO_EXECUTION_LANES[0],
         "direction": "SHORT",
         "paused_shadow": True,
         "collection_mode": "ADMIN_PAUSED_SHADOW",
@@ -444,13 +504,18 @@ bot._recompute_system_readiness = lambda: {
 }
 with bot.app.test_request_context("/api/pause", method="POST"):
     pause_response = bot.api_pause()
-with bot.app.test_request_context("/api/resume", method="POST"):
+with bot.app.test_request_context(
+    "/api/resume",
+    method="POST",
+    json={"clear_admin_manual_pause": True},
+):
     resume_response = bot.api_resume()
 check("pause endpoint succeeds", pause_response.status_code == 200)
 check("resume endpoint succeeds", resume_response.status_code == 200)
 check(
     "state lock released before persistence and cancellation",
     lock_observations == [
+        ("persist", True),
         ("persist", True),
         ("cancel", True),
         ("persist", True),

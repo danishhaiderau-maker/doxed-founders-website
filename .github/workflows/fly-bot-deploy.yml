@@ -9,27 +9,1020 @@ on:
       # running Fly service. A test-only push must not claim a new deployed
       # source revision.
       - "!services/btc-conservative-agent/test*.py"
+      # The isolated inventory worker is part of the deployed runtime, and its
+      # focused containment/nonce suite is an explicit deployment gate.
+      - "services/btc-conservative-agent/data_sync_inventory_worker.py"
+      - "services/btc-conservative-agent/test_data_sync_inventory_worker_contract.py"
+      - "services/btc-conservative-agent/test_data_sync_cadence_throttle_contract.py"
+      - "services/btc-signal-engine/data_sync_inventory_worker.py"
       - "scripts/check-relay-flat.mjs"
       - ".github/workflows/fly-bot-deploy.yml"
   workflow_dispatch:
     inputs:
-      recover_stalled_paper_boundary:
-        description: "Deploy the lock repair when the old runtime is provably paper-only, disarmed, and deadlocked"
+      mode:
+        description: Deploy normally or restart the existing Fly machine without changing its image
+        required: true
+        default: deploy
+        type: choice
+        options:
+          - deploy
+          - recover-startup-crash
+          - recover-unready
+          - recover-stalled-runtime
+          - resume-bootstrap
+          - resume-predeploy-abort
+          - restart-only
+          - inspect-runtime
+          - bundle-canary
+          - repair-execution-funnel
+          - repair-lifecycle-tail
+          - repair-lifecycle-cursor
+          - repair-execution-tail
+          - expand-storage
+          - close-paper-position
+          - flatten-paper-exposure
+      transport_bundles:
+        description: Opt in to bounded transport package generation for this normal deployment only
         required: false
         default: false
         type: boolean
+      keep_maintenance_pause:
+        description: Keep ADMIN_MANUAL true-flat after accept; skip paper resume (maintenance sticky)
+        required: false
+        default: false
+        type: boolean
+      lifecycle_reset_proof:
+        description: Optional bounded JSON proof for one explicit lifecycle reset recovery deploy
+        required: false
+        type: string
+      expected_bundle_revision:
+        description: Exact 12-character incumbent revision for derivative-only bundle inspection/canary
+        required: false
+        type: string
+      bundle_generation_id:
+        description: Exact 64-character inventory generation for inspection/canary
+        required: false
+        type: string
+      bundle_inventory_fingerprint:
+        description: Optional exact 64-character inventory worker fingerprint for bounded receipt inspection
+        required: false
+        type: string
+      bundle_inspect_only:
+        description: Inspect existing bounded receipts only; never run a transport slice
+        required: false
+        default: true
+        type: boolean
+      expected_unready_revision:
+        description: Exact 12-character Fly revision permitted for recover-unready
+        required: false
+        type: string
+      recovery_failed_run_id:
+        description: Failed deploy run that proves the exact unready revision reached Fly
+        required: false
+        type: string
+      recovery_continuation_run_id:
+        description: Successful proof-bound resume-bootstrap run following a bootstrap-observation-only deploy failure
+        required: false
+        type: string
+      expected_bootstrap_revision:
+        description: Exact 12-character currently deployed revision permitted for resume-bootstrap
+        required: false
+        type: string
+      bootstrap_failed_run_id:
+        description: Failed guarded deploy run whose bootstrap gate may be continued without deployment
+        required: false
+        type: string
+      expected_incumbent_revision:
+        description: Exact unchanged 12-character Fly revision permitted for predeploy-abort paper resume
+        required: false
+        type: string
+      expected_candidate_sha:
+        description: Exact 40-character candidate SHA of the failed predeploy run
+        required: false
+        type: string
+      predeploy_failed_run_id:
+        description: Failed guarded run that entered maintenance but skipped deployment and acceptance
+        required: false
+        type: string
+      expected_execution_funnel_sha256:
+        description: Exact pre-repair execution_funnel.jsonl SHA-256
+        required: false
+        type: string
+      expected_execution_funnel_invalid_line:
+        description: Exact one-based corrupt line number
+        required: false
+        type: string
+      expected_execution_funnel_invalid_line_sha256:
+        description: Exact SHA-256 of the raw corrupt line including its line ending
+        required: false
+        type: string
+      expected_execution_funnel_deployed_revision:
+        description: Exact 12-character Fly runtime revision permitted for the repair
+        required: false
+        type: string
+      expected_lifecycle_deployed_revision:
+        description: Exact 12-character Fly runtime revision permitted for lifecycle-tail repair
+        required: false
+        type: string
+      expected_lifecycle_inode:
+        description: Exact lifecycle.jsonl inode observed in the authenticated manifest
+        required: false
+        type: string
+      expected_lifecycle_mtime_ns:
+        description: Exact lifecycle.jsonl mtime_ns observed in the authenticated manifest
+        required: false
+        type: string
+      expected_execution_inode:
+        description: Exact execution.jsonl inode observed in the authenticated probe
+        required: false
+        type: string
+      expected_execution_mtime_ns:
+        description: Exact execution.jsonl mtime_ns observed in the authenticated probe
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: fly-btc-production
   cancel-in-progress: false
 
 jobs:
-  test-and-deploy:
+  bundle-canary:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'bundle-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify bounded derivative-only helper
+        run: |
+          python -m pip install pytest
+          python -m pytest scripts/test_fly_bundle_canary.py scripts/test_fly_bundle_canary_workflow.py -q
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Inspect or run one existing exact-revision transport slice
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_BUNDLE_REVISION: ${{ inputs.expected_bundle_revision }}
+          BUNDLE_GENERATION_ID: ${{ inputs.bundle_generation_id }}
+          BUNDLE_INVENTORY_FINGERPRINT: ${{ inputs.bundle_inventory_fingerprint }}
+          BUNDLE_INSPECT_ONLY: ${{ inputs.bundle_inspect_only && '1' || '0' }}
+        run: python scripts/fly_bundle_canary_dispatch.py
+  resume-bootstrap:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate failed guarded bootstrap proof
+        env:
+          EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
+          BOOTSTRAP_FAILED_RUN_ID: ${{ inputs.bootstrap_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python scripts/fly_resume_bootstrap.py validate-proof
+          --expected "$EXPECTED_BOOTSTRAP_REVISION"
+          --run-id "$BOOTSTRAP_FAILED_RUN_ID"
+
+      - name: Continue exact-revision bootstrap and resume paper once
+        id: continue-bootstrap
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
+        run: >-
+          python scripts/fly_resume_bootstrap.py continue
+          --expected "$EXPECTED_BOOTSTRAP_REVISION"
+
+      - name: Best-effort preserve bootstrap continuation maintenance
+        if: failure() && steps.continue-bootstrap.outcome == 'failure'
+        continue-on-error: true
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_BOOTSTRAP_REVISION: ${{ inputs.expected_bootstrap_revision }}
+        run: >-
+          python scripts/fly_resume_bootstrap.py preserve-maintenance
+          --expected "$EXPECTED_BOOTSTRAP_REVISION"
+  resume-predeploy-abort:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-predeploy-abort'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate exact predeploy-abort topology
+        env:
+          EXPECTED_INCUMBENT_REVISION: ${{ inputs.expected_incumbent_revision }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+          PREDEPLOY_FAILED_RUN_ID: ${{ inputs.predeploy_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: >-
+          python scripts/fly_resume_predeploy_abort.py validate-proof
+          --incumbent "$EXPECTED_INCUMBENT_REVISION"
+          --candidate "$EXPECTED_CANDIDATE_SHA"
+          --run-id "$PREDEPLOY_FAILED_RUN_ID"
+      - name: Resume unchanged incumbent paper execution once
+        id: resume-incumbent
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_INCUMBENT_REVISION: ${{ inputs.expected_incumbent_revision }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        run: >-
+          python scripts/fly_resume_predeploy_abort.py resume
+          --incumbent "$EXPECTED_INCUMBENT_REVISION"
+          --candidate "$EXPECTED_CANDIDATE_SHA"
+      - name: Best-effort preserve incumbent maintenance after failed resume
+        if: failure() && steps.resume-incumbent.outcome == 'failure'
+        continue-on-error: true
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_INCUMBENT_REVISION: ${{ inputs.expected_incumbent_revision }}
+          EXPECTED_CANDIDATE_SHA: ${{ inputs.expected_candidate_sha }}
+        run: >-
+          python scripts/fly_resume_predeploy_abort.py preserve-maintenance
+          --incumbent "$EXPECTED_INCUMBENT_REVISION"
+          --candidate "$EXPECTED_CANDIDATE_SHA"
+  repair-execution-tail:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-tail'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Repair only the exact execution tail and preserve its cursor boundary
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+          EXPECTED_INODE: ${{ inputs.expected_execution_inode }}
+          EXPECTED_MTIME_NS: ${{ inputs.expected_execution_mtime_ns }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json,os,re,time,urllib.request
+          base="https://doxed-btc-bot.fly.dev"; token=str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          expected=str(os.environ.get("EXPECTED_SOURCE_REVISION") or "").strip().lower()
+          inode=str(os.environ.get("EXPECTED_INODE") or "").strip(); mtime=str(os.environ.get("EXPECTED_MTIME_NS") or "").strip()
+          if not token or not re.fullmatch(r"[0-9a-f]{12}",expected): raise SystemExit("exact token and revision required")
+          if expected != str(os.environ.get("GITHUB_SHA") or "")[:12].lower(): raise SystemExit("workflow source must equal deployed repair revision")
+          if inode!="663" or mtime!="1788303277103206804": raise SystemExit("exact execution source identity required")
+          headers={"X-Bot-Admin-Token":token,"Cache-Control":"no-cache"}
+          def call(path,payload=None):
+            data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
+            with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
+          status=call("/api/status")
+          if str(status.get("source_git_rev") or "").lower()!=expected: raise SystemExit("unexpected deployed revision")
+          if not(status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False): raise SystemExit("paper safety not proven")
+          call("/api/pause",{"owner":"DEPLOY_MAINTENANCE"})
+          for _ in range(8):
+            status=call("/api/status"); progress=status.get("strategy_progress") or {}
+            if status.get("execution_paused") is True and status.get("manual_admin_pause") is True and int(progress.get("pending_orders") or 0)==0 and int(progress.get("open_positions") or 0)==0: break
+            time.sleep(2)
+          else: raise SystemExit("flat maintenance boundary not proven")
+          PY
+          machine_json="$(flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          output="$(flyctl machine exec --app doxed-btc-bot --timeout 120 "$machine_id" "python /app/execution_tail_repair.py --root /app/data/runtime --expected-source-size 266240 --expected-source-sha256 a1d83c507265143f0cd4c37ab065c85985234cae6cf10b046d185b842c349250 --expected-prefix-size 265886 --expected-prefix-sha256 2614f49656ae19f8ca3b1c09652ee27cf9d016cd2a58f63092df68894f632b34 --expected-tail-size 354 --expected-tail-sha256 586328be5ab061de70ff01568023d7d3c5eaeca87a86563ceb7805be055b2b61 --expected-inode 663 --expected-mtime-ns 1788303277103206804")"
+          printf '%s\n' "$output"
+          printf '%s' "$output" | python -c 'import json,sys; d=json.loads([x for x in sys.stdin if x.lstrip().startswith("{")][-1]); r=d.get("receipt") or {}; assert d.get("ok") is True and r.get("status")=="REPAIRED" and r.get("byte_offset_preserved") is True and r.get("anchor_preserved") is True and r.get("ranking_eligible") is False and r.get("source_cleanup_authorized") is False'
+          flyctl machine exec --app doxed-btc-bot --timeout 120 "$machine_id" "python /app/execution_tail_repair_verify.py --root /app/data/runtime --expected-revision $EXPECTED_SOURCE_REVISION"
+      - name: Prove two advancing worker cycles before paper resume
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+        run: |
+          python - <<'PY'
+          import json,os,time,urllib.request
+          base="https://doxed-btc-bot.fly.dev"; expected=os.environ["EXPECTED_SOURCE_REVISION"].lower(); headers={"X-Bot-Admin-Token":os.environ["BOT_ADMIN_TOKEN"],"Cache-Control":"no-cache"}
+          def call(path,payload=None):
+            data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
+            with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
+          seen=[]; last=None; proof_started=time.time(); deadline=proof_started+1000
+          while time.time()<deadline:
+            call("/api/pause",{"owner":"DEPLOY_MAINTENANCE"}); last=call("/api/status"); pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
+            safe=str(last.get("source_git_rev") or "").lower()==expected and last.get("execution_paused") is True and last.get("manual_admin_pause") is True and last.get("force_paper_mode") is True and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
+            age=pipeline.get("last_success_age_sec")
+            productive=(int(progress.get("rows_scanned") or 0)>0 and int(progress.get("bytes_indexed") or 0)>0) or int(progress.get("promoted_qualification_retries") or 0)>0
+            if safe and productive and age is not None:
+              key=time.time()-float(age)
+              if key>proof_started and (not seen or key-seen[-1]>2): seen.append(key); print(json.dumps({"worker":"green_cycle","cycle":len(seen),"success_unix":key,"progress":progress},sort_keys=True))
+              if len(seen)>=2: break
+            failure_age=pipeline.get("last_failure_age_sec")
+            failure_unix=(time.time()-float(failure_age)) if failure_age is not None else 0
+            if pipeline.get("last_outcome")=="WORKER_FAILED" and failure_unix>proof_started:
+              raise SystemExit("new classified blocker: "+json.dumps(pipeline,sort_keys=True))
+            time.sleep(10)
+          if len(seen)<2: raise SystemExit("two advancing successes not proven: "+json.dumps(last or {},sort_keys=True))
+          PY
+          machine_json="$(flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          flyctl machine exec --app doxed-btc-bot --timeout 120 "$machine_id" "python /app/execution_tail_repair_verify.py --root /app/data/runtime --expected-revision $EXPECTED_SOURCE_REVISION"
+          python - <<'PY'
+          import json,os,urllib.request
+          base="https://doxed-btc-bot.fly.dev"; expected=os.environ["EXPECTED_SOURCE_REVISION"].lower(); headers={"X-Bot-Admin-Token":os.environ["BOT_ADMIN_TOKEN"],"Cache-Control":"no-cache"}
+          def call(path,payload=None):
+            data=None if payload is None else json.dumps(payload).encode(); req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
+            with urllib.request.urlopen(req,timeout=30) as response:return json.load(response)
+          resumed=call("/api/resume",{"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status")
+          if not(resumed.get("status")=="resumed" and final.get("execution_paused") is False and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False): raise SystemExit("safe paper resume not proven")
+          PY
+
+  repair-lifecycle-cursor:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-cursor'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Rebind only the exact proven lifecycle cursor identity
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, re, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          expected = str(os.environ.get("EXPECTED_SOURCE_REVISION") or "").strip().lower()
+          if not token: raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
+              raise SystemExit("exact 12-character deployed revision is required")
+          if expected != str(os.environ.get("GITHUB_SHA") or "")[:12].lower():
+              raise SystemExit("workflow source must equal the exact deployed cursor-repair revision")
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          def call(path, payload=None, timeout=30):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(base+path, data=data, headers={**headers, **({"Content-Type":"application/json"} if data else {})}, method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          status = call("/api/status")
+          if str(status.get("source_git_rev") or "").lower() != expected:
+              raise SystemExit("refusing cursor repair on an unexpected deployed revision")
+          if not (status.get("force_paper_mode") is True and status.get("bitfinex_live_enabled") is False and status.get("live_armed") is False):
+              raise SystemExit("paper-only, live-disabled, disarmed safety is not proven")
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+          for _ in range(8):
+              status = call("/api/status"); progress = status.get("strategy_progress") or {}
+              if (status.get("execution_paused") is True and status.get("manual_admin_pause") is True
+                  and int(progress.get("pending_orders") or 0) == 0 and int(progress.get("open_positions") or 0) == 0):
+                  break
+              time.sleep(2)
+          else: raise SystemExit("exact flat paper maintenance boundary was not proven")
+          print(json.dumps({"maintenance":"flat","revision":expected},sort_keys=True))
+          PY
+
+          machine_json="$(flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, f"expected one active machine, found {len(active)}"; print(active[0]["id"])')"
+          repair_output="$(flyctl machine exec --app doxed-btc-bot --timeout 90 "$machine_id" \
+            "python /app/lifecycle_cursor_rebind.py --root /app/data/runtime --expected-old-dev 65056 --expected-old-ino 607 --expected-new-dev 65056 --expected-new-ino 1637 --expected-offset 22116009 --expected-anchor-sha256 2ae7b77a086cc542cc91ecffcdec3a071eb8e62897ed0ba39e60d00fbeab331d")"
+          printf '%s\n' "$repair_output"
+          printf '%s' "$repair_output" | python -c 'import json,sys; lines=[x for x in sys.stdin if x.lstrip().startswith("{")]; d=json.loads(lines[-1]); r=d.get("receipt") or {}; assert d.get("ok") is True and r.get("status")=="REBOUND" and r.get("byte_offset_preserved") is True and r.get("anchor_preserved") is True and r.get("indexed_rows_rewritten")==0 and r.get("source_cleanup_authorized") is False'
+          flyctl machine exec --app doxed-btc-bot --timeout 90 "$machine_id" \
+            "python /app/lifecycle_cursor_rebind_verify.py --root /app/data/runtime --expected-revision $EXPECTED_SOURCE_REVISION"
+
+      - name: Prove two advancing lifecycle worker cycles before paper resume
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base="https://doxed-btc-bot.fly.dev"; expected=os.environ["EXPECTED_SOURCE_REVISION"].lower()
+          headers={"X-Bot-Admin-Token":os.environ["BOT_ADMIN_TOKEN"],"Cache-Control":"no-cache"}
+          def call(path,payload=None,timeout=30):
+              data=None if payload is None else json.dumps(payload).encode()
+              req=urllib.request.Request(base+path,data=data,headers={**headers,**({"Content-Type":"application/json"} if data else {})},method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req,timeout=timeout) as response:return json.load(response)
+          successes=[]; last=None; deadline=time.time()+1000
+          while time.time()<deadline:
+              call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"}); last=call("/api/status")
+              pipeline=last.get("lifecycle_pipeline") or {}; progress=pipeline.get("progress") or {}
+              safe=(str(last.get("source_git_rev") or "").lower()==expected and last.get("force_paper_mode") is True
+                    and last.get("bitfinex_live_enabled") is False and last.get("live_armed") is False
+                    and last.get("execution_paused") is True and last.get("manual_admin_pause") is True)
+              age=pipeline.get("last_success_age_sec")
+              advanced=int(progress.get("rows_scanned") or 0)>0 and int(progress.get("bytes_indexed") or 0)>0
+              if safe and pipeline.get("last_outcome")=="WORKER_SUCCESS" and advanced and age is not None:
+                  key=round(time.time()-float(age))
+                  if not successes or abs(key-successes[-1])>2:
+                      successes.append(key); print(json.dumps({"worker":"green_cycle","cycle":len(successes),"progress":progress},sort_keys=True))
+                  if len(successes)>=2: break
+              if pipeline.get("last_outcome")=="WORKER_FAILED" and pipeline.get("last_error_code") not in {None,"SOURCE_LEDGER_ROTATED"}:
+                  raise SystemExit("worker reached a new classified blocker: "+json.dumps(pipeline,sort_keys=True))
+              time.sleep(10)
+          if len(successes)<2: raise SystemExit("two advancing worker successes not proven: "+json.dumps(last or {},sort_keys=True))
+          resumed=call("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}); final=call("/api/status")
+          if not (resumed.get("status")=="resumed" and final.get("execution_paused") is False
+                  and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True
+                  and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False
+                  and str(final.get("source_git_rev") or "").lower()==expected):
+              raise SystemExit("final paper-only resume was not proven")
+          PY
+
+  repair-lifecycle-tail:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-tail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Preserve and remove only the exact proven incomplete lifecycle tail
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+          EXPECTED_INODE: ${{ inputs.expected_lifecycle_inode }}
+          EXPECTED_MTIME_NS: ${{ inputs.expected_lifecycle_mtime_ns }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, re, time, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          expected = str(os.environ.get("EXPECTED_SOURCE_REVISION") or "").strip().lower()
+          inode = str(os.environ.get("EXPECTED_INODE") or "").strip()
+          mtime_ns = str(os.environ.get("EXPECTED_MTIME_NS") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
+              raise SystemExit("exact 12-character deployed revision is required")
+          if expected != str(os.environ.get("GITHUB_SHA") or "")[:12].lower():
+              raise SystemExit("workflow source must equal the exact deployed repair revision")
+          if not re.fullmatch(r"[1-9][0-9]*", inode):
+              raise SystemExit("exact positive lifecycle inode is required")
+          if not re.fullmatch(r"[1-9][0-9]*", mtime_ns):
+              raise SystemExit("exact positive lifecycle mtime_ns is required")
+
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          def request_json(path, payload=None, timeout=30):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  base + path, data=data,
+                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
+                  method="POST" if data is not None else "GET",
+              )
+              with urllib.request.urlopen(req, timeout=timeout) as response:
+                  return json.load(response)
+
+          status = request_json("/api/status")
+          if str(status.get("source_git_rev") or "").lower() != expected:
+              raise SystemExit("refusing lifecycle repair on an unexpected deployed revision")
+          if not (
+              status.get("force_paper_mode") is True
+              and status.get("bitfinex_live_enabled") is False
+              and status.get("live_armed") is False
+          ):
+              raise SystemExit("paper-only, live-disabled, disarmed safety is not proven")
+          request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+          for _ in range(6):
+              status = request_json("/api/status")
+              progress = status.get("strategy_progress") or {}
+              if (
+                  status.get("execution_paused") is True
+                  and status.get("manual_admin_pause") is True
+                  and int(progress.get("pending_orders") or 0) == 0
+                  and int(progress.get("open_positions") or 0) == 0
+              ):
+                  break
+              time.sleep(2)
+          else:
+              raise SystemExit("exact flat paper maintenance boundary was not proven")
+          print(json.dumps({"maintenance": "flat", "revision": expected}, sort_keys=True))
+          PY
+
+          machine_json="$(flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, f"expected one active machine, found {len(active)}"; print(active[0]["id"])')"
+          repair_output="$(flyctl machine exec --app doxed-btc-bot --timeout 90 "$machine_id" \
+            "python /app/lifecycle_tail_repair.py --root /app/data/runtime --expected-source-size 22118400 --expected-source-sha256 d2eaa4fb87c2b9870b5f6791c634e369218fe4b76e2c5a5c64a375f1c72a5c63 --expected-prefix-size 22116009 --expected-prefix-sha256 bdb22b92a32ab082cdcaf30002b95276962c6a6ff6b7c2e69205487be5de92c5 --expected-tail-size 2391 --expected-tail-sha256 7b660b110c16c04c4ed0ed65f3791b8abc3cadbb5e5eaf7b6078430a67fa07eb --expected-inode $EXPECTED_INODE --expected-mtime-ns $EXPECTED_MTIME_NS")"
+          printf '%s\n' "$repair_output"
+          printf '%s' "$repair_output" | python -c 'import json,sys; lines=[line for line in sys.stdin if line.lstrip().startswith("{")]; d=json.loads(lines[-1]); r=d.get("receipt") or {}; assert d.get("ok") is True and r.get("status")=="REPAIRED" and r.get("excluded_classification")=="UNKNOWN" and r.get("ranking_eligible") is False and r.get("source_cleanup_authorized") is False and r.get("source_sha256")=="d2eaa4fb87c2b9870b5f6791c634e369218fe4b76e2c5a5c64a375f1c72a5c63" and r.get("prefix_sha256")=="bdb22b92a32ab082cdcaf30002b95276962c6a6ff6b7c2e69205487be5de92c5"'
+
+          flyctl machine exec --app doxed-btc-bot --timeout 90 "$machine_id" \
+            "python /app/lifecycle_tail_repair_verify.py --root /app/data/runtime --expected-revision $EXPECTED_SOURCE_REVISION --expected-inode $EXPECTED_INODE --expected-mtime-ns $EXPECTED_MTIME_NS"
+
+      - name: Prove the repaired worker advances before resuming paper execution
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_lifecycle_deployed_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = str(os.environ["EXPECTED_SOURCE_REVISION"]).lower()
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          def call(path, payload=None, timeout=30):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(base+path, data=data, headers={**headers, **({"Content-Type":"application/json"} if data else {})}, method="POST" if data is not None else "GET")
+              with urllib.request.urlopen(req, timeout=timeout) as response: return json.load(response)
+          last = None
+          success_receipts = []
+          deadline = time.time() + 1000
+          while time.time() < deadline:
+              try:
+                  call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+                  last = call("/api/status")
+                  pipeline = last.get("lifecycle_pipeline") or {}
+                  progress = pipeline.get("progress") or {}
+                  safe = (
+                      str(last.get("source_git_rev") or "").lower() == expected
+                      and last.get("force_paper_mode") is True
+                      and last.get("bitfinex_live_enabled") is False
+                      and last.get("live_armed") is False
+                      and last.get("execution_paused") is True
+                      and last.get("manual_admin_pause") is True
+                  )
+                  advanced = int(progress.get("rows_scanned") or 0) > 0 and int(progress.get("bytes_indexed") or 0) > 0
+                  success_age = pipeline.get("last_success_age_sec")
+                  if safe and pipeline.get("last_outcome") == "WORKER_SUCCESS" and advanced and success_age is not None:
+                      success_key = round(time.time() - float(success_age))
+                      if not success_receipts or abs(success_key - success_receipts[-1][0]) > 2:
+                          success_receipts.append((success_key, dict(progress)))
+                          print(json.dumps({"worker":"green_cycle","cycle":len(success_receipts),"revision":expected,"progress":progress},sort_keys=True))
+                      if len(success_receipts) >= 2:
+                          break
+                  if pipeline.get("last_outcome") == "WORKER_FAILED" and pipeline.get("last_error_code") not in {None, "TRUNCATED_JSONL_LINE"}:
+                      raise SystemExit("worker reached a new classified blocker: " + json.dumps(pipeline, sort_keys=True))
+              except Exception as exc:
+                  print(f"worker proof waiting: {type(exc).__name__}", flush=True)
+              time.sleep(10)
+          else:
+              raise SystemExit("lifecycle worker did not prove advancing success before deadline: " + json.dumps(last or {}, sort_keys=True))
+
+          if len(success_receipts) < 2:
+              raise SystemExit("two distinct lifecycle worker successes were not proven")
+
+          resumed = call("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})
+          if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
+              raise SystemExit("paper resume was not acknowledged")
+          final = call("/api/status")
+          if not (
+              str(final.get("source_git_rev") or "").lower() == expected
+              and final.get("execution_paused") is False
+              and final.get("manual_admin_pause") is False
+              and final.get("force_paper_mode") is True
+              and final.get("bitfinex_live_enabled") is False
+              and final.get("live_armed") is False
+          ):
+              raise SystemExit("final paper-only unpaused state was not proven")
+          PY
+
+  repair-execution-funnel:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-funnel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Repair one exact corrupt execution-funnel record without fabricating evidence
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_SOURCE_REVISION: ${{ inputs.expected_execution_funnel_deployed_revision }}
+          EXPECTED_FUNNEL_SHA256: ${{ inputs.expected_execution_funnel_sha256 }}
+          EXPECTED_INVALID_LINE: ${{ inputs.expected_execution_funnel_invalid_line }}
+          EXPECTED_INVALID_LINE_SHA256: ${{ inputs.expected_execution_funnel_invalid_line_sha256 }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          expected_revision = str(os.environ.get("EXPECTED_SOURCE_REVISION") or "").strip().lower()
+          expected_sha = str(os.environ.get("EXPECTED_FUNNEL_SHA256") or "").strip().lower()
+          expected_line_text = str(os.environ.get("EXPECTED_INVALID_LINE") or "").strip()
+          expected_line_sha = str(os.environ.get("EXPECTED_INVALID_LINE_SHA256") or "").strip().lower()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          if not re.fullmatch(r"[0-9a-f]{12}", expected_revision):
+              raise SystemExit("exact 12-character deployed revision is required")
+          if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+              raise SystemExit("exact execution-funnel SHA-256 is required")
+          if not re.fullmatch(r"[1-9][0-9]*", expected_line_text):
+              raise SystemExit("exact positive corrupt line number is required")
+          if not re.fullmatch(r"[0-9a-f]{64}", expected_line_sha):
+              raise SystemExit("exact raw corrupt-line SHA-256 is required")
+
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          def get_json(path):
+              req = urllib.request.Request(base + path, headers=headers)
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          status = get_json("/api/status")
+          health = get_json("/health")
+          deployed = str(status.get("source_git_rev") or "").strip().lower()
+          if deployed != expected_revision:
+              raise SystemExit(f"refusing repair on unexpected deployed revision {deployed[:12]}")
+          if not (
+              health.get("force_paper_mode") is True
+              and health.get("live_armed") is False
+              and health.get("bitfinex_live_enabled") is False
+          ):
+              raise SystemExit("refusing repair because exact paper/live safety is not proven")
+
+          payload = {
+              "expected_sha256": expected_sha,
+              "expected_invalid_line": int(expected_line_text),
+              "expected_invalid_line_sha256": expected_line_sha,
+          }
+          request = urllib.request.Request(
+              base + "/api/research/repair-execution-funnel",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={**headers, "Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=60) as response:
+              receipt = json.load(response)
+          if not (
+              receipt.get("complete") is True
+              and receipt.get("status") in {"repaired", "already_repaired"}
+              and receipt.get("source_sha256") == expected_sha
+              and receipt.get("invalid_line_numbers") == [int(expected_line_text)]
+              and receipt.get("expected_invalid_line_sha256") == expected_line_sha
+              and receipt.get("excluded_line_count") == 1
+              and receipt.get("qualification") == "UNKNOWN"
+              and receipt.get("ranking_eligible") is False
+              and re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("rebuilt_sha256") or ""))
+          ):
+              raise SystemExit("repair endpoint did not return the exact complete fail-closed receipt")
+          print(json.dumps({
+              "status": receipt["status"],
+              "source_revision": deployed,
+              "source_sha256": receipt["source_sha256"],
+              "rebuilt_sha256": receipt["rebuilt_sha256"],
+              "valid_line_count": receipt.get("valid_line_count"),
+              "excluded_line_count": receipt["excluded_line_count"],
+              "qualification": receipt["qualification"],
+          }, sort_keys=True))
+          PY
+
+  expand-storage:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'expand-storage'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Extend the sole attached BTC data volume without deleting evidence
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          inventory="$(flyctl volumes list --app doxed-btc-bot --json)"
+          readarray -t fields < <(printf '%s' "$inventory" | python -c 'import json,sys; rows=json.load(sys.stdin); attached=[r for r in rows if str(r.get("attached_machine_id") or "").strip()]; assert len(rows)==1 and len(attached)==1, f"expected exactly one attached volume, found volumes={len(rows)} attached={len(attached)}"; r=attached[0]; assert int(r.get("size_gb") or 0)==2, "refusing unexpected source volume size"; print(r["id"]); print(r["attached_machine_id"])')
+          volume_id="${fields[0]}"
+          machine_id="${fields[1]}"
+          result="$(flyctl volumes extend "$volume_id" --app doxed-btc-bot --size 4 --yes --json)"
+          printf '%s\n' "$result"
+          printf '%s' "$result" | python -c 'import json,sys; d=json.load(sys.stdin); v=d.get("volume") or d; assert int(v.get("size_gb") or 0)==4, f"extension did not reach 4 GB: {v}"'
+          sleep 5
+          flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); assert len(rows)==1 and int(rows[0].get("size_gb") or 0)==4; print(json.dumps({"volume_id":rows[0]["id"],"size_gb":rows[0]["size_gb"],"state":rows[0].get("state")},sort_keys=True))'
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "sh -lc 'df -h /app/data; df -i /app/data'"
+
+  close-paper-position:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'close-paper-position'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close one explicitly authorized paper position through normal accounting
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PAPER_TRADE_ID: ${{ inputs.expected_unready_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          trade_id = str(os.environ.get("PAPER_TRADE_ID") or "").strip()
+          if not re.fullmatch(r"[A-Za-z0-9_-]{6,96}", trade_id):
+              raise SystemExit("close-paper-position requires one exact paper trade id")
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          with urllib.request.urlopen(base + "/health", timeout=10) as response:
+              health = json.load(response)
+          if not (
+              health.get("force_paper_mode") is True
+              and health.get("bitfinex_live_enabled") is False
+              and health.get("live_armed") is False
+          ):
+              raise SystemExit("refusing paper close because live-safety flags are not proven")
+          request = urllib.request.Request(
+              base + "/api/positions/close",
+              data=json.dumps({"trade_id": trade_id}).encode("utf-8"),
+              headers={
+                  "Content-Type": "application/json",
+                  "X-Bot-Admin-Token": token,
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=20) as response:
+              result = json.load(response)
+          if result.get("status") != "closed" or result.get("trade_id") != trade_id:
+              raise SystemExit("paper close did not return its exact accounting receipt")
+          print(json.dumps({"status": "closed", "trade_id": trade_id, "scope": result.get("scope")}, sort_keys=True))
+          PY
+
+  flatten-paper-exposure:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'flatten-paper-exposure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Flatten exact paper-only exposure through authenticated accounting
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+
+          def request_json(path, payload=None, timeout=45):
+              headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+              data = None
+              method = "GET"
+              if payload is not None:
+                  data = json.dumps(payload).encode("utf-8")
+                  headers["Content-Type"] = "application/json"
+                  method = "POST"
+              req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(req, timeout=timeout) as response:
+                  return json.load(response)
+
+          def execution_state():
+              last = None
+              for attempt in range(1, 6):
+                  try:
+                      state = request_json("/api/relay-execution-state?fresh=1", timeout=20)
+                      if not isinstance(state.get("orders"), list) or not isinstance(state.get("positions"), list):
+                          raise RuntimeError("authenticated execution state omitted exposure arrays")
+                      return state
+                  except Exception as exc:
+                      last = exc
+                      time.sleep(min(2 * attempt, 8))
+              raise RuntimeError(f"execution state unavailable: {type(last).__name__}")
+
+          health = request_json("/health", timeout=20)
+          if not (
+              health.get("force_paper_mode") is True
+              and health.get("live_armed") is False
+              and health.get("bitfinex_live_enabled") is False
+          ):
+              raise SystemExit("paper/live safety flags are not proven")
+
+          actions = []
+          for round_no in range(1, 4):
+              state = execution_state()
+              positions = sorted({str(row.get("trade_id") or "").strip() for row in state["positions"]} - {""})
+              orders = sorted({str(row.get("trade_id") or "").strip() for row in state["orders"]} - {""})
+              if not positions and not orders:
+                  print(json.dumps({"status": "flat", "round": round_no, "actions": actions}, sort_keys=True))
+                  raise SystemExit(0)
+              for trade_id in positions:
+                  try:
+                      result = request_json(
+                          "/api/reconcile/phantom-cancel",
+                          {"trade_id": trade_id, "reason": "AUTHORIZED_PAPER_UPGRADE_BOUNDARY_UNKNOWN"},
+                      )
+                      actions.append({"kind": "position", "trade_id": trade_id, "ok": result.get("ok") is True})
+                  except Exception as exc:
+                      actions.append({"kind": "position", "trade_id": trade_id, "error": type(exc).__name__})
+              for trade_id in orders:
+                  try:
+                      result = request_json("/api/orders/cancel", {"trade_id": trade_id})
+                      actions.append({"kind": "order", "trade_id": trade_id, "ok": result.get("status") == "cancelled"})
+                  except Exception as exc:
+                      actions.append({"kind": "order", "trade_id": trade_id, "error": type(exc).__name__})
+              time.sleep(3)
+          final = execution_state()
+          remaining_positions = [row.get("trade_id") for row in final["positions"]]
+          remaining_orders = [row.get("trade_id") for row in final["orders"]]
+          raise SystemExit(
+              "paper exposure did not flatten: "
+              + json.dumps({"positions": remaining_positions, "orders": remaining_orders, "actions": actions}, sort_keys=True)
+          )
+          PY
+
+  inspect-runtime:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'inspect-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Capture current machine status and recent logs without mutation
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          run_probe() {
+            label="$1"
+            shift
+            echo "===${label}==="
+            if timeout --signal=TERM --kill-after=5s 45s "$@"; then
+              return 0
+            else
+              code="$?"
+            fi
+            echo "::warning title=Fly read-only probe incomplete::${label} exited ${code}; continuing with the remaining bounded probes"
+            return 0
+          }
+          run_probe FLY_STATUS flyctl status --app doxed-btc-bot
+          run_probe VOLUME_LIST flyctl volumes list --app doxed-btc-bot --json
+          machine_json="$(timeout --signal=TERM --kill-after=5s 30s flyctl machines list --app doxed-btc-bot --json)"
+          machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
+          run_probe MACHINE_STATUS flyctl machine status --app doxed-btc-bot "$machine_id"
+          bundle_probe_b64="$(base64 -w0 scripts/fly_bundle_maintenance_probe.py)"
+          run_probe BUNDLE_MAINTENANCE_INPUTS flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c \"import base64; exec(base64.b64decode('${bundle_probe_b64}'))\""
+          run_probe RECENT_PLATFORM_LOGS flyctl logs --app doxed-btc-bot --no-tail
+          # Machine Exec uses the Fly Machines guest-agent path rather than
+          # the application's Flask worker or SSH service.  Keep this probe
+          # read-only and emit only bounded lifecycle identity/count fields so
+          # a wedged owner can still prove whether its last atomic paper
+          # snapshot contains exposure without disclosing order payloads.
+          run_probe DURABLE_PAPER_LIFECYCLE flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c 'from pathlib import Path; import json,os; p=Path(\"/app/data/runtime/paper_lifecycle_v1.json\"); d=json.loads(p.read_text(encoding=\"utf-8\")); assert d.get(\"schema\")==\"paper_lifecycle_v1\"; assert d.get(\"paper_only\") is True and d.get(\"live_armed\") is False; positions=d.get(\"positions\"); orders=d.get(\"pending_orders\"); assert isinstance(positions,list) and isinstance(orders,list); assert len(positions)<=100000 and len(orders)<=100000; assert all(isinstance(x,dict) and str(x.get(\"trade_id\") or \"\").strip() and str(x.get(\"status\") or \"\").upper()==\"OPEN\" for x in positions); assert all(isinstance(x,dict) and str(x.get(\"trade_id\") or \"\").strip() and str(x.get(\"status\") or \"\").upper()==\"PENDING\" for x in orders); pids=sorted(str(x[\"trade_id\"]) for x in positions); oids=sorted(str(x[\"trade_id\"]) for x in orders); print(json.dumps({\"schema\":d.get(\"schema\"),\"saved_at\":d.get(\"saved_at\"),\"file_mtime_epoch\":p.stat().st_mtime,\"snapshot_git_rev\":d.get(\"git_rev\"),\"runtime_source_git_rev\":os.getenv(\"SOURCE_GIT_REV\"),\"paper_only\":d.get(\"paper_only\"),\"live_armed\":d.get(\"live_armed\"),\"open_position_count\":len(positions),\"open_position_id_sample\":pids[:20],\"open_position_ids_truncated\":len(pids)>20,\"pending_order_count\":len(orders),\"pending_order_id_sample\":oids[:20],\"pending_order_ids_truncated\":len(oids)>20},sort_keys=True))'"
+          run_probe PROCESS_AND_BOT_LOG flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+            "sh -lc 'echo ===PROCESS_MEMORY===; ps -eo pid,ppid,rss,vsz,etime,comm,args --sort=-rss | head -n 20; echo ===RECENT_BOT_LOG===; tail -n 2500 /app/data/bot.log'"
+          # Read only the final bounded JSONL window and emit the already-sanitized
+          # watchdog receipt.  Persistent logs span deployments, so bind every
+          # scheduler-wedge diagnosis to the receipt's exact source revision.
+          run_probe WATCHDOG_CRASH_RECEIPT flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c 'exec(\"\"\"from pathlib import Path\nimport json\np=Path(\"/app/data/runtime/crash_dump.json\")\nassert p.is_file(), \"crash receipt missing\"\nsize=p.stat().st_size\nwith p.open(\"rb\") as h:\n    h.seek(max(0,size-131072))\n    rows=h.read(131072).splitlines()\nreceipt=None\nfor raw in reversed(rows):\n    try:\n        candidate=json.loads(raw.decode(\"utf-8\"))\n    except Exception:\n        continue\n    watchdog=candidate.get(\"watchdog\") if isinstance(candidate,dict) else None\n    if isinstance(watchdog,dict):\n        receipt={\"time\":candidate.get(\"time\"),\"watchdog\":watchdog}\n        break\nassert receipt is not None, \"bounded crash window contains no watchdog receipt\"\nprint(json.dumps(receipt,sort_keys=True,separators=(\",\",\":\")))\n\"\"\")'"
+          run_probe VOLUME_USAGE flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "sh -lc 'echo ===DF===; df -h /app/data; echo ===INODES===; df -i /app/data; echo ===TOP_LEVEL_BYTES===; du -x -B1 -d1 /app/data 2>/dev/null | sort -n | tail -n 40; echo ===RUNTIME_BYTES===; du -x -B1 -d2 /app/data/runtime 2>/dev/null | sort -n | tail -n 60'"
+          run_probe EXECUTION_FUNNEL_JSONL_INTEGRITY flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json\np=Path(\\\"/app/data/runtime/execution_funnel.jsonl\\\")\ndata=p.read_bytes()\nrows=data.splitlines(keepends=True)\nbad=[]\nfor number,raw in enumerate(rows,1):\n    if not raw.strip():\n        continue\n    try:\n        json.loads(raw.decode(\\\"utf-8\\\"))\n    except Exception as exc:\n        stripped=raw.strip()\n        detail={\\\"line\\\":number,\\\"bytes\\\":len(raw),\\\"is_last\\\":number==len(rows),\\\"error\\\":type(exc).__name__,\\\"raw_sha256\\\":hashlib.sha256(raw).hexdigest(),\\\"starts_object\\\":stripped.startswith(b\\\"{\\\"),\\\"ends_object\\\":stripped.endswith(b\\\"}\\\"),\\\"concat_markers\\\":stripped.count(b\\\"}{\\\")}\n        if isinstance(exc,json.JSONDecodeError):\n            detail.update({\\\"error_message\\\":exc.msg,\\\"error_pos\\\":exc.pos,\\\"error_line\\\":exc.lineno,\\\"error_column\\\":exc.colno})\n        try:\n            text=stripped.decode(\\\"utf-8\\\")\n            _,end=json.JSONDecoder().raw_decode(text)\n            detail.update({\\\"first_value_end\\\":end,\\\"trailing_nonspace_bytes\\\":len(text[end:].strip().encode(\\\"utf-8\\\"))})\n        except Exception:\n            pass\n        bad.append(detail)\nprint(json.dumps({\\\"path\\\":str(p),\\\"bytes\\\":len(data),\\\"lines\\\":len(rows),\\\"ends_with_newline\\\":data.endswith(b\\\"\\\\n\\\"),\\\"sha256\\\":hashlib.sha256(data).hexdigest(),\\\"invalid_count\\\":len(bad),\\\"invalid\\\":bad[:20],\\\"invalid_truncated\\\":len(bad)>20},sort_keys=True))\n\"\"\")'"
+          run_probe LIFECYCLE_JSONL_TAIL_INTEGRITY flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json\np=Path(\\\"/app/data/runtime/v3/ledgers/lifecycle.jsonl\\\")\ndata=p.read_bytes()\nnewline=bytes([10])\nlast_newline=data.rfind(newline)\npublished=last_newline+1 if last_newline>=0 else 0\ntail=data[published:]\ntail_valid=False\ntail_error=None\nif tail:\n    try:\n        value=json.loads(tail.decode(\\\"utf-8\\\"))\n        tail_valid=isinstance(value,dict)\n    except Exception as exc:\n        tail_error=type(exc).__name__\nprint(json.dumps({\\\"path_name\\\":p.name,\\\"physical_size\\\":len(data),\\\"published_size\\\":published,\\\"complete_prefix_sha256\\\":hashlib.sha256(data[:published]).hexdigest(),\\\"source_sha256\\\":hashlib.sha256(data).hexdigest(),\\\"tail_size\\\":len(tail),\\\"tail_sha256\\\":hashlib.sha256(tail).hexdigest(),\\\"ends_with_newline\\\":data.endswith(newline),\\\"tail_starts_object\\\":tail.lstrip().startswith(b\\\"{\\\"),\\\"tail_ends_object\\\":tail.rstrip().endswith(b\\\"}\\\"),\\\"tail_json_object_valid\\\":tail_valid,\\\"tail_error_class\\\":tail_error},sort_keys=True))\n\"\"\")'"
+          run_probe LIFECYCLE_INDEX_CURSOR_IDENTITY flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json,sqlite3\nroot=Path(\\\"/app/data/runtime\\\")\np=root/\\\"v3/ledgers/lifecycle.jsonl\\\"\ndb=root/\\\"v3/lifecycle_bundle_index/lifecycle_index.sqlite3\\\"\nstat=p.stat()\nwith sqlite3.connect(db) as c:\n    c.row_factory=sqlite3.Row\n    row=c.execute(\\\"SELECT ledger,source_dev,source_ino,byte_offset,source_anchor_sha256,source_mtime_ns FROM ledger_cursor WHERE ledger=?\\\", (\\\"lifecycle\\\",)).fetchone()\nassert row is not None\noffset=int(row[\\\"byte_offset\\\"])\nstart=max(0,offset-4096)\nwith p.open(\\\"rb\\\") as h:\n    h.seek(start); material=h.read(offset-start)\nprint(json.dumps({\\\"ledger\\\":\\\"lifecycle\\\",\\\"cursor_source_dev\\\":int(row[\\\"source_dev\\\"]),\\\"cursor_source_ino\\\":int(row[\\\"source_ino\\\"]),\\\"cursor_byte_offset\\\":offset,\\\"cursor_anchor_sha256\\\":row[\\\"source_anchor_sha256\\\"],\\\"active_anchor_sha256\\\":hashlib.sha256(material).hexdigest(),\\\"active_dev\\\":int(stat.st_dev),\\\"active_ino\\\":int(stat.st_ino),\\\"active_size\\\":int(stat.st_size),\\\"active_mtime_ns\\\":int(stat.st_mtime_ns),\\\"anchor_matches\\\":hashlib.sha256(material).hexdigest()==row[\\\"source_anchor_sha256\\\"],\\\"offset_within_active\\\":offset<=int(stat.st_size)},sort_keys=True))\n\"\"\")'"
+          run_probe EXECUTION_JSONL_TAIL_AND_CURSOR flyctl machine exec --app doxed-btc-bot --timeout 60 "$machine_id" \
+            "python -c 'exec(\"\"\"from pathlib import Path\nimport hashlib,json,sqlite3\nroot=Path(\\\"/app/data/runtime\\\")\np=root/\\\"v3/ledgers/execution.jsonl\\\"\ndb=root/\\\"v3/lifecycle_bundle_index/lifecycle_index.sqlite3\\\"\ndata=p.read_bytes(); stat=p.stat(); lf=bytes([10]); published=data.rfind(lf)+1; tail=data[published:]\nwith sqlite3.connect(db) as c:\n c.row_factory=sqlite3.Row; row=c.execute(\\\"SELECT * FROM ledger_cursor WHERE ledger=?\\\",(\\\"execution\\\",)).fetchone()\noffset=int(row[\\\"byte_offset\\\"]) if row else 0; start=max(0,offset-4096)\nwith p.open(\\\"rb\\\") as h: h.seek(start); anchor=h.read(offset-start)\ntry: tail_value=json.loads(tail.decode(\\\"utf-8\\\")) if tail else None; tail_valid=isinstance(tail_value,dict) if tail else True; tail_error=None\nexcept Exception as exc: tail_valid=False; tail_error=type(exc).__name__\nprint(json.dumps({\\\"ledger\\\":\\\"execution\\\",\\\"source_size\\\":len(data),\\\"source_sha256\\\":hashlib.sha256(data).hexdigest(),\\\"published_size\\\":published,\\\"prefix_sha256\\\":hashlib.sha256(data[:published]).hexdigest(),\\\"tail_size\\\":len(tail),\\\"tail_sha256\\\":hashlib.sha256(tail).hexdigest(),\\\"tail_valid\\\":tail_valid,\\\"tail_error\\\":tail_error,\\\"ends_with_newline\\\":data.endswith(lf),\\\"active_dev\\\":int(stat.st_dev),\\\"active_ino\\\":int(stat.st_ino),\\\"active_mtime_ns\\\":int(stat.st_mtime_ns),\\\"cursor_source_dev\\\":int(row[\\\"source_dev\\\"]) if row else None,\\\"cursor_source_ino\\\":int(row[\\\"source_ino\\\"]) if row else None,\\\"cursor_byte_offset\\\":offset,\\\"cursor_anchor_sha256\\\":row[\\\"source_anchor_sha256\\\"] if row else None,\\\"active_anchor_sha256\\\":hashlib.sha256(anchor).hexdigest(),\\\"anchor_matches\\\":bool(row) and hashlib.sha256(anchor).hexdigest()==row[\\\"source_anchor_sha256\\\"]},sort_keys=True))\n\"\"\")'"
+          run_probe RELAY_STREAM_VALIDATION flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+            "python -c 'from pathlib import Path; import json,resource,time; from platform_relay_streaming import validate_streaming; p=Path(\"/app/data/relay_lifecycle_evidence_v1.json\"); t=time.perf_counter(); r=validate_streaming(p); print(json.dumps({\"stage\":\"direct_stream_validation\",\"valid\":r[0],\"code\":r[1],\"records\":r[2].get(\"records\"),\"bytes\":p.stat().st_size,\"seconds\":round(time.perf_counter()-t,3),\"maxrss_kib\":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss}))'"
+          run_probe INCIDENT_LOG_SCAN flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+            "grep -nE 'fly-entrypoint.*bot (starting|exited)|WATCHDOG.*(failed|exiting|stale)|Traceback|MemoryError|Killed|Out of memory' /app/data/bot.log"
+          # The line-number scan proves an incident exists but a bare
+          # `Traceback` marker cannot identify the failing thread.  Emit only
+          # bounded context around the newest traceback so diagnosis remains
+          # useful without downloading or disclosing the complete bot log.
+          run_probe LATEST_TRACEBACK_CONTEXT flyctl ssh console --app doxed-btc-bot --machine "$machine_id" --command \
+            "sh -lc 'grep -n -B 8 -A 48 \"Traceback (most recent call last):\" /app/data/bot.log | tail -n 120'"
+
+  restart-only:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Restart the existing wedged Fly machine
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
+          flyctl machines restart --app doxed-btc-bot "$machine_id"
+
+  recover-startup-crash:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-startup-crash'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Prove exact crashed revision and durable paper boundary
+        working-directory: ${{ github.workspace }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+          RECOVERY_FAILED_RUN_ID: ${{ inputs.recovery_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os, re, urllib.request
+          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip().lower()
+          run_id = str(os.environ.get("RECOVERY_FAILED_RUN_ID") or "").strip()
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
+              raise SystemExit("recover-startup-crash requires an exact 12-character unready revision")
+          if not run_id.isdigit():
+              raise SystemExit("recover-startup-crash requires the failed deploy run id")
+          api = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions"
+          headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
+          def fetch(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
+                  return json.load(response)
+          run = fetch(f"{api}/runs/{run_id}")
+          if (
+              str(run.get("head_sha") or "")[:12] != expected
+              or run.get("conclusion") != "failure"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("name") != "Deploy Fly BTC bot"
+              or str(run.get("path") or "").split("@", 1)[0] != ".github/workflows/fly-bot-deploy.yml"
+          ):
+              raise SystemExit("recovery proof does not bind the expected failed deployment")
+          jobs = fetch(f"{api}/runs/{run_id}/jobs?per_page=100").get("jobs") or []
+          deploy_jobs = [job for job in jobs if job.get("name") == "test-and-deploy"]
+          if len(deploy_jobs) != 1 or deploy_jobs[0].get("conclusion") != "failure":
+              raise SystemExit("recovery proof lacks one failed test-and-deploy job")
+          steps = deploy_jobs[0].get("steps") or []
+          deployed = [s for s in steps if s.get("name") == "Deploy the exact source revision" and s.get("conclusion") == "success"]
+          failed = [s for s in steps if s.get("name") in {"Re-enter maintenance and flatten the exact deployed revision", "Enter durable authenticated paper maintenance boundary"} and s.get("conclusion") == "failure"]
+          if len(deployed) != 1 or len(failed) != 1:
+              raise SystemExit("recovery proof lacks a deployed image and a precise post-deploy/runtime failure")
+          print(f"Bound startup-crash recovery to failed run {run_id} revision {expected}")
+          PY
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
+          cat > "$RUNNER_TEMP/startup-crash-before.py" <<'PY'
+          from pathlib import Path
+          import json, os, sys
+          expected = sys.argv[1]
+          if os.getenv("SOURCE_GIT_REV", "")[:12].lower() != expected:
+              raise SystemExit("startup crash revision mismatch")
+          lifecycle = json.loads(Path("/app/data/runtime/paper_lifecycle_v1.json").read_text(encoding="utf-8"))
+          config = json.loads(Path("/app/data/runtime/config-7002.json").read_text(encoding="utf-8"))
+          assert lifecycle.get("paper_only") is True and lifecycle.get("live_armed") is False
+          assert lifecycle.get("positions") == [] and lifecycle.get("pending_orders") == []
+          assert config.get("live_armed") is not True and config.get("bitfinex_live_enabled") is not True
+          assert config.get("manual_admin_pause") is True
+          log = Path("/app/data/bot.log").read_bytes()[-2097152:]
+          assert b"policy module identity mismatch" in log
+          print(json.dumps({"schema":"startup_crash_before_v1","revision":expected,"paper_only":True,"live_armed":False,"open_positions":0,"pending_orders":0,"manual_admin_pause":True}, sort_keys=True))
+          PY
+          guest_program="$(base64 -w0 "$RUNNER_TEMP/startup-crash-before.py")"
+          guest_output="$(flyctl machine exec --app doxed-btc-bot --timeout 45 "$machine_id" "python -c 'import base64; exec(base64.b64decode(\"${guest_program}\"))' '${EXPECTED_UNREADY_REVISION}'")"
+          printf '%s\n' "$guest_output"
+          printf '%s\n' "$guest_output" | python -c 'import json,sys; rows=[json.loads(x) for x in sys.stdin if x.lstrip().startswith("{")]; assert len(rows)==1 and rows[0]["schema"]=="startup_crash_before_v1" and rows[0]["open_positions"]==0 and rows[0]["pending_orders"]==0'
+
+      - name: Deploy reviewed startup-crash repair without API dependency
+        working-directory: services/btc-conservative-agent
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}" --env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=0"
+
+      - name: Prove repaired revision is live, paused, paper-only, and flat
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          last = None
+          for attempt in range(1, 61):
+              try:
+                  request = urllib.request.Request(base + "/api/status?fresh=1", headers=headers)
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      status = json.load(response)
+                  progress = status.get("strategy_progress") or {}
+                  safe = (
+                      str(status.get("source_git_rev") or "")[:12] == expected
+                      and status.get("force_paper_mode") is True
+                      and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False
+                      and status.get("execution_paused") is True
+                      and status.get("manual_admin_pause") is True
+                      and progress.get("open_positions") == 0
+                      and progress.get("pending_orders") == 0
+                  )
+                  if safe:
+                      print(json.dumps({"schema":"startup_crash_recovery_acceptance_v1","revision":expected,"paper_only":True,"live_armed":False,"execution_paused":True,"open_positions":0,"pending_orders":0,"attempt":attempt}, sort_keys=True))
+                      break
+                  last = "unsafe status"
+              except Exception as exc:
+                  last = type(exc).__name__
+              time.sleep(5)
+          else:
+              raise SystemExit(f"repaired revision did not become paused, paper-only, and flat: {last}")
+          PY
+
+      - name: Prove relay accounts remain flat after startup recovery
+        working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: "https://doxed-founders-website-production.up.railway.app/api"
+          REQUIRE_BOT_ADMIN_TOKEN: "YES"
+          REQUIRE_CANONICAL_FLY_OWNER: "YES"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+        run: node scripts/check-relay-flat.mjs
+
+  test-and-deploy:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: services/btc-conservative-agent
@@ -50,7 +1043,14 @@ jobs:
 
       - name: Verify Fly and dashboard safety contracts
         run: |
-          python -m py_compile bot.py btc_conservative_agent.py fly_relay_state_pusher.py
+          python -m pytest ../../scripts/test_fly_deploy_reset_proof.py -q
+          python -m py_compile bot.py data_sync_inventory_worker.py btc_conservative_agent.py fly_relay_state_pusher.py platform_relay_evidence_worker.py platform_relay_streaming.py
+          python -m pytest test_platform_relay_evidence_worker.py -q
+          python -m pytest test_fly_runtime_baseline_packaging.py test_runtime_baseline_declaration.py -q
+          python -m pytest test_crash_journal_repair.py tests/test_crash_journal_writer.py test_crash_snapshot_nonmutating.py -q
+          python -m pytest test_lifecycle_index_recovery.py test_lifecycle_reset_index_recovery.py test_lifecycle_reset_recovery_startup.py test_lifecycle_pipeline_worker.py test_research_reset_inventory.py -q
+          python -m pytest test_data_sync_inventory_worker_contract.py -q
+          python -m pytest test_data_sync_cadence_throttle_contract.py -q
           python test_fly_startup_contract.py
           python test_paper_skips_risk_pauses.py
           python test_daily_pnl_utc_rollover.py
@@ -65,15 +1065,82 @@ jobs:
           python -m pytest test_chase_exact_bucket_controls.py -q
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q
           python test_manual_pause_entry_gate.py
+          python test_pause_owner_resume_default.py
+          python test_api_resume_deadlock.py
+          python -m pytest test_collection_epoch_binding.py -q
+          python -m pytest test_score_led_fill_revalidation.py -q
+          python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py -q
+          python -m pytest test_manual_pause_fill_handoff.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
+          python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py test_paper_family_chase_durability.py -q
           python test_showcase_manual_close.py
           python test_tile_summary_settings_periods.py
+          python -m pytest test_tile_registry_contract.py test_active_execution_graph_contract.py -q
+          python -m pytest test_lifecycle_tail_repair.py -q
+          python -m pytest test_lifecycle_cursor_rebind.py -q
+          python -m pytest test_execution_tail_repair.py -q
+          python -m pytest test_lifecycle_pipeline_runtime.py test_lifecycle_public_status.py test_fly_inspect_runtime_bounded.py -q
+          python -m pytest test_collector_v22_integrity.py test_compressed_shadow_chase.py test_paper_lifecycle_restart.py test_cleanup_characterization_contract.py test_v3_lane_entry_bot_wiring.py -q
+          python -m pytest test_v31_overview_best_policy_counts.py -q
+          python -m pytest test_collector_signal_snapshot.py test_research_v3_signal_snapshot.py test_lifecycle_signal_snapshot_dependency.py test_analyzer_signal_snapshot_projection.py test_data_sync_signal_snapshot.py -q
+
+      - name: Verify bounded transport package and original acknowledgment contracts
+        # The laptop PowerShell promotion harness is Windows-only and is
+        # verified separately before downloader handoff. These portable tests
+        # cover the deployed worker/API and the actual Python client adapter.
+        run: |
+          python -m pytest test_data_sync_bundle_transport.py test_data_sync_bundle_worker.py test_data_sync_bundle_runtime.py test_data_sync_bundle_storage.py test_data_sync_bundle_api.py test_data_sync_bundle_client.py test_data_sync_bundle_bot_integration.py test_fly_sync_bundle_adapter.py -q
+          python -m pytest ../../scripts/test_fly_transport_bundle_workflow.py -q
+          python -m pytest test_data_sync_bundle_runtime_topology.py -q
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
+
+      - name: Verify transactional and local research safety regressions
+        env:
+          # Keep bot/analyzer imports away from the checkout and any inherited
+          # runner state. Tests still create their own per-case temporary data.
+          BTC_AGENT_DATA_DIR: ${{ runner.temp }}/btc-agent-data-ci
+          # The preceding safety-contract matrix creates many ephemeral
+          # pytest directories. Give the SQLite/receipt regression batch a
+          # fresh bounded temp root so stale CI scratch cannot cause disk-I/O
+          # or shared-library mapping failures.
+          TMPDIR: ${{ runner.temp }}/transactional-pytest
+        run: |
+          rm -rf "$TMPDIR" /tmp/pytest-of-runner
+          mkdir -p "$TMPDIR"
+          mkdir -p "$BTC_AGENT_DATA_DIR"
+          # Keep each bounded group in its own process. Some hosted runners
+          # enforce a per-process CPU quota; splitting preserves all tests
+          # while avoiding a false gate failure from a single long batch.
+          python -m pytest test_transactional_receipt_store.py -q
+          python -m pytest test_execution_admission_pause_truth.py -q
+          python -m pytest test_reset_inventory_invalidation.py -q
+          python -m pytest test_relay_owner_delivery_plan.py -q
+          python -m pytest test_chase_analytics_truth.py -q
+          python -m pytest test_local_fresh_collection.py -q
+          python -m pytest test_local_fresh_collection_integration.py -q
+          python -m pytest test_local_generation_fence.py -q
+          python -m pytest test_local_research_reset.py -q
+          python -m pytest test_local_research_reset_cli.py -q
+          python -m pytest test_local_research_reset_audit.py -q
+          python -m pytest test_local_reset_dashboard.py -q
+          python -m pytest test_fresh_collection_signals.py -q
+          # A Linux runner may skip the real HttpListener acceptance when its
+          # Windows host is unavailable. Release evidence still requires the
+          # separate Windows HttpListener receipt; this check pins the adapter.
+          # PowerShell's Linux HttpListener fixture launches a child Python
+          # process; keep it off the SQLite batch's custom TMPDIR so its
+          # process/fixture paths remain independent.
+          env -u TMPDIR python -m pytest test_local_reset_http_listener.py -q
+          python -m pytest ../../scripts/test_fly_deploy_ci_coverage.py -q
+
+      - name: Verify canonical signal-engine parity
+        working-directory: ${{ github.workspace }}
+        run: node scripts/verify-signal-parity.mjs --full
 
       - name: Install production boundary checker
         working-directory: ${{ github.workspace }}
@@ -81,78 +1148,757 @@ jobs:
           npm ci
           npx prisma generate
 
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Validate optional lifecycle reset startup proof
+        working-directory: ${{ github.workspace }}
+        env:
+          DEPLOY_MODE: ${{ inputs.mode }}
+          LIFECYCLE_RESET_PROOF: ${{ inputs.lifecycle_reset_proof }}
+        run: python scripts/fly_deploy_reset_proof.py validate
+
+      - name: Enter durable authenticated paper maintenance boundary
+        id: paper_maintenance
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          # This pin is the generation-less bridge for tipping off the crash-loop tip image onto the restore tree.
+          legacy_bootstrap_revision = "4ed032bb9be4b45995b9a74b4bc855d28dd4fb08"
+          legacy_status_revision = legacy_bootstrap_revision[:12]
+          # Record the operator's pre-deploy paper state so the post-deploy
+          # gate can prove the exact state was restored.
+          prior = {"captured": False}
+          try:
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  prior_status = json.load(response)
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/state", headers=headers), timeout=30) as response:
+                  prior_state = json.load(response)
+              prior_paused = prior_status.get("manual_admin_pause") is True
+              prior = {
+                  "captured": True,
+                  "operator_paused": bool(prior_paused and prior_status.get("pause_owner") in {"OPERATOR", "SAFETY"}),
+                  "research_lane_enabled": {
+                      str(k): bool(v) for k, v in dict(prior_state.get("research_lane_enabled") or {}).items()
+                  },
+              }
+          except Exception as exc:
+              print(f"prior operator state not captured: {type(exc).__name__}", flush=True)
+          print("prior operator state: " + json.dumps(prior, sort_keys=True), flush=True)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("prior_operator_state=" + json.dumps(prior, sort_keys=True, separators=(",", ":")) + "\n")
+          status = None
+          for attempt in range(1, 6):
+              # The previous guarded run may already have established the
+              # durable pause before its client timed out.  Re-posting
+              # /api/pause in that state can wait behind the lifecycle worker
+              # and turn a safe idempotent boundary into a false failure.
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                      status = json.load(response)
+                  if (
+                      status.get("execution_paused") is True
+                      and status.get("manual_admin_pause") is True
+                      and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False
+                      and status.get("force_paper_mode") is True
+                  ):
+                      print("durable paper maintenance already established; skipping duplicate pause mutation", flush=True)
+                      break
+              except Exception as exc:
+                  print(f"pause precheck attempt={attempt} response={type(exc).__name__}", flush=True)
+              try:
+                  request = urllib.request.Request(base + "/api/pause", data=b'{"owner": "DEPLOY_MAINTENANCE"}', headers={**headers, "Content-Type": "application/json"}, method="POST")
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      json.load(response)
+              except Exception as exc:
+                  print(f"pause mutation attempt={attempt} response={type(exc).__name__}; checking durable state", flush=True)
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                      status = json.load(response)
+                  if (
+                      status.get("execution_paused") is True
+                      and status.get("manual_admin_pause") is True
+                      and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False
+                      and status.get("force_paper_mode") is True
+                  ):
+                      break
+              except Exception as exc:
+                  print(f"pause state attempt={attempt} response={type(exc).__name__}", flush=True)
+              time.sleep(min(2 * attempt, 8))
+          else:
+              raise SystemExit("durable paper maintenance boundary was not confirmed")
+          def request_json(path, payload=None, timeout=45):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + path, data=data,
+                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
+                  method="POST" if data else "GET",
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return json.load(response)
+          def mutate_json(path, payload):
+              # A mutation that outlives the client deadline may still commit.
+              # None means "unconfirmed": the caller must re-observe fresh
+              # authority past the pre-mutation generation before trusting flat.
+              try:
+                  return request_json(path, payload, timeout=90)
+              except (TimeoutError, urllib.error.URLError) as exc:
+                  if isinstance(exc, urllib.error.HTTPError):
+                      raise
+                  print(f"Maintenance mutation unconfirmed path={path} trade_id={payload.get('trade_id')} response={type(exc).__name__}", flush=True)
+                  return None
+          def require_legacy_bootstrap_status(*, require_flat):
+              legacy_status = request_json("/api/status")
+              progress = legacy_status.get("strategy_progress") or {}
+              try:
+                  open_positions = int(progress.get("open_positions") or 0)
+                  pending_orders = int(progress.get("pending_orders") or 0)
+              except (TypeError, ValueError):
+                  raise SystemExit("legacy bootstrap status counts are invalid")
+              safe = (
+                  str(legacy_status.get("source_git_rev") or "") == legacy_status_revision
+                  and legacy_status.get("execution_paused") is True
+                  and legacy_status.get("manual_admin_pause") is True
+                  and legacy_status.get("force_paper_mode") is True
+                  and legacy_status.get("live_armed") is False
+                  and legacy_status.get("bitfinex_live_enabled") is False
+              )
+              if not safe:
+                  raise SystemExit("generation-less relay authority is not the exact safe legacy bootstrap revision")
+              if require_flat and (open_positions != 0 or pending_orders != 0):
+                  return False
+              return True
+          def prove_legacy_bootstrap_flat():
+              confirmations = 0
+              last_snapshot_seq = None
+              for attempt in range(1, 21):
+                  try:
+                      candidate = request_json("/api/relay-execution-state?fresh=1")
+                      status_flat = require_legacy_bootstrap_status(require_flat=True)
+                  except Exception as exc:
+                      # A slow legacy process may miss one transport deadline.
+                      # The failed sample contributes no confirmation and the
+                      # bounded proof still requires three advancing successes.
+                      print(
+                          f"Legacy flat proof attempt={attempt} response={type(exc).__name__}",
+                          flush=True,
+                      )
+                      confirmations = 0
+                      time.sleep(min(attempt, 3))
+                      continue
+                  generation = candidate.get("money_state_generation")
+                  if isinstance(generation, int) and not isinstance(generation, bool):
+                      raise SystemExit("relay generation appeared during legacy flat proof; restart with the normal fence")
+                  if not isinstance(candidate.get("orders"), list) or not isinstance(candidate.get("positions"), list):
+                      raise SystemExit("legacy bootstrap relay exposure arrays are missing")
+                  orders = candidate.get("orders") or []
+                  positions = candidate.get("positions") or []
+                  sequence = candidate.get("snapshot_seq")
+                  sequence_advanced = (
+                      isinstance(sequence, int)
+                      and not isinstance(sequence, bool)
+                      and (last_snapshot_seq is None or sequence > last_snapshot_seq)
+                  )
+                  if not orders and not positions and status_flat and sequence_advanced:
+                      confirmations += 1
+                      last_snapshot_seq = sequence
+                      if confirmations >= 3:
+                          return candidate
+                  else:
+                      confirmations = 0
+                      last_snapshot_seq = sequence if isinstance(sequence, int) else None
+                  time.sleep(min(attempt, 3))
+              raise SystemExit("legacy bootstrap did not produce three advancing flat relay snapshots with flat status")
+          def fresh_exposure(minimum_generation=None):
+              last = None
+              for attempt in range(1, 21):
+                  try:
+                      candidate = request_json("/api/relay-execution-state?fresh=1")
+                      generation = candidate.get("money_state_generation")
+                      if not isinstance(generation, int) or isinstance(generation, bool):
+                          if minimum_generation is not None:
+                              raise SystemExit("relay execution generation disappeared after a fenced mutation")
+                          require_legacy_bootstrap_status(require_flat=False)
+                          candidate["_legacy_exact_revision_bootstrap"] = True
+                          return candidate
+                      if minimum_generation is None or generation >= minimum_generation:
+                          return candidate
+                      last = f"generation {generation} < {minimum_generation}"
+                  except urllib.error.HTTPError as exc:
+                      if exc.code != 503:
+                          raise
+                      last = "503 rebuilding generation-matching authority"
+                  time.sleep(min(attempt, 5))
+              raise SystemExit(f"generation-matching relay authority unavailable: {last}")
+          required_generation = None
+          unconfirmed_floor = None
+          unconfirmed_trade_ids = set()
+          for round_no in range(1, 9):
+              exposure = fresh_exposure(required_generation)
+              if not isinstance(exposure.get("orders"), list) or not isinstance(exposure.get("positions"), list):
+                  raise SystemExit("authenticated maintenance exposure arrays are missing")
+              orders = sorted({str(row.get("trade_id") or "").strip() for row in exposure.get("orders") or []} - {""})
+              positions = sorted({str(row.get("trade_id") or "").strip() for row in exposure.get("positions") or []} - {""})
+              round_generation = exposure.get("money_state_generation")
+              if not orders and not positions:
+                  if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                      prove_legacy_bootstrap_flat()
+                      print(f"Exact-revision legacy bootstrap boundary is flat after round {round_no}")
+                      break
+                  if required_generation is not None and exposure.get("money_state_generation") < required_generation:
+                      raise SystemExit("flat relay authority predates maintenance mutations")
+                  if unconfirmed_floor is not None and exposure.get("money_state_generation") <= unconfirmed_floor:
+                      print(f"Flat authority predates an unconfirmed mutation round={round_no}; re-observing", flush=True)
+                      time.sleep(3)
+                      continue
+                  print(f"Durable maintenance boundary is flat after round {round_no}")
+                  break
+              for trade_id in orders:
+                  try:
+                      cancelled = mutate_json("/api/orders/cancel", {"trade_id": trade_id})
+                  except urllib.error.HTTPError as exc:
+                      if exc.code == 404 and trade_id in unconfirmed_trade_ids:
+                          print(f"Unconfirmed maintenance cancel already applied trade_id={trade_id}", flush=True)
+                          continue
+                      if exc.code != 404 or exposure.get("_legacy_exact_revision_bootstrap") is not True:
+                          raise
+                      # The legacy relay cache may name an order already removed
+                      # from authoritative state.  Accept that idempotent race only
+                      # inside the exact revision bridge; the advancing three-sample
+                      # flat proof below remains mandatory before deployment.
+                      cancelled = {"status": "not_found"}
+                      print(f"Legacy maintenance order already absent trade_id={trade_id}", flush=True)
+                  if cancelled is None:
+                      unconfirmed_trade_ids.add(trade_id)
+                      unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
+                      continue
+                  if cancelled.get("status") == "not_found":
+                      continue
+                  if cancelled.get("status") != "cancelled":
+                      raise SystemExit(f"maintenance cancel was not confirmed for {trade_id}")
+                  generation = cancelled.get("money_state_generation")
+                  if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                      if isinstance(generation, int) and not isinstance(generation, bool):
+                          raise SystemExit("relay generation appeared without a legacy mutation baseline")
+                      continue
+                  if not isinstance(generation, int) or isinstance(generation, bool):
+                      raise SystemExit("maintenance cancel generation is missing")
+                  if generation <= round_generation:
+                      raise SystemExit("maintenance cancel did not advance relay authority generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
+              for trade_id in positions:
+                  reconciled = mutate_json("/api/reconcile/phantom-cancel", {"trade_id": trade_id, "reason": "GUARDED_DEPLOY_MAINTENANCE_BOUNDARY"})
+                  if reconciled is None:
+                      unconfirmed_trade_ids.add(trade_id)
+                      unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
+                      continue
+                  if reconciled.get("ok") is not True:
+                      raise SystemExit(f"maintenance paper reconciliation was not confirmed for {trade_id}")
+                  generation = reconciled.get("money_state_generation")
+                  if reconciled.get("already_cancelled") is True and generation is None:
+                      # Stale exposure named a position that already closed.  No
+                      # mutation happened, so nothing advances; the next round must
+                      # still observe fresh flat authority at the required generation.
+                      print(f"Maintenance position already absent trade_id={trade_id}", flush=True)
+                      continue
+                  if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                      if isinstance(generation, int) and not isinstance(generation, bool):
+                          raise SystemExit("relay generation appeared without a legacy mutation baseline")
+                      continue
+                  if not isinstance(generation, int) or isinstance(generation, bool):
+                      raise SystemExit("maintenance reconciliation generation is missing")
+                  if generation <= round_generation:
+                      raise SystemExit("maintenance reconciliation did not advance relay authority generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
+              if exposure.get("_legacy_exact_revision_bootstrap") is True:
+                  prove_legacy_bootstrap_flat()
+                  print(f"Exact-revision legacy bootstrap mutations are flat after round {round_no}")
+                  break
+              time.sleep(2)
+          else:
+              raise SystemExit("maintenance boundary did not become flat")
+          PY
+
       - name: Prove the current Fly owner and every relay account are flat
-        if: ${{ !inputs.recover_stalled_paper_boundary }}
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy'
         working-directory: ${{ github.workspace }}
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PLATFORM_API_URL: "https://doxed-founders-website-production.up.railway.app/api"
           REQUIRE_BOT_ADMIN_TOKEN: "YES"
           REQUIRE_CANONICAL_FLY_OWNER: "YES"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
         run: node scripts/check-relay-flat.mjs
 
-      - name: Prove emergency recovery is restricted to a stalled paper-only boundary
-        if: ${{ inputs.recover_stalled_paper_boundary }}
+      - name: Prove exact unready Fly revision and every durable relay account is flat
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-unready'
+        working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+          EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+          RECOVERY_FAILED_RUN_ID: ${{ inputs.recovery_failed_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
         run: |
           python - <<'PY'
+          import json, os, re, urllib.request
+          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
+          run_id = str(os.environ.get("RECOVERY_FAILED_RUN_ID") or "").strip()
+          if not re.fullmatch(r"[0-9a-f]{12}", expected):
+              raise SystemExit("recover-unready requires an exact 12-character revision")
+          if not run_id.isdigit():
+              raise SystemExit("recover-unready requires the failed deployment run id")
+          base = f"https://api.github.com/repos/{os.environ['GH_REPOSITORY']}/actions"
+          headers = {"Authorization": f"Bearer {os.environ['GH_TOKEN']}", "Accept": "application/vnd.github+json"}
+          def fetch(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=15) as response:
+                  return json.load(response)
+          run = fetch(f"{base}/runs/{run_id}")
+          if (
+              str(run.get("head_sha") or "")[:12] != expected
+              or run.get("conclusion") != "failure"
+              or run.get("event") != "workflow_dispatch"
+              or run.get("name") != "Deploy Fly BTC bot"
+              or str(run.get("path") or "").split("@", 1)[0] != ".github/workflows/fly-bot-deploy.yml"
+          ):
+              raise SystemExit("recovery run does not bind the expected failed revision")
+          jobs = fetch(f"{base}/runs/{run_id}/jobs?per_page=100").get("jobs") or []
+          deploy_jobs = [job for job in jobs if job.get("name") == "test-and-deploy"]
+          if len(deploy_jobs) != 1 or deploy_jobs[0].get("conclusion") != "failure":
+              raise SystemExit("recovery run lacks one failed test-and-deploy job")
+          steps = deploy_jobs[0].get("steps") or []
+          deployed = [step for step in steps if step.get("name") == "Deploy the exact source revision" and step.get("conclusion") == "success"]
+          failed_acceptance = [step for step in steps if (
+              step.get("name") in {
+                  "Re-enter maintenance and flatten the exact deployed revision",
+                  "Prove liveness, execution safety, and exact revision",
+              }
+              and step.get("conclusion") == "failure"
+          )]
+          preserved = [step for step in steps if (
+              step.get("name") == "Best-effort preserve safe paper maintenance after failed guarded deploy"
+              and step.get("conclusion") == "success"
+          )]
+          if len(deployed) != 1 or len(failed_acceptance) != 1 or len(preserved) != 1:
+              raise SystemExit("recovery run lacks deploy, failed post-deploy acceptance, and maintenance preservation receipts")
+          if not (int(deployed[0]["number"]) < int(failed_acceptance[0]["number"]) < int(preserved[0]["number"])):
+              raise SystemExit("recovery receipt steps are out of order")
+          completed_at = str(deployed[0].get("completed_at") or "")
+          if not completed_at:
+              raise SystemExit("deployed step completion time is missing")
+          receipt_path = os.path.join(os.environ["RUNNER_TEMP"], "failed-deploy-completed-at.txt")
+          with open(receipt_path, "x", encoding="utf-8") as handle:
+              handle.write(completed_at)
+          print(f"Exact unready recovery target proven by Actions run {run_id}: {expected}")
+          PY
+          [[ "$EXPECTED_UNREADY_REVISION" =~ ^[0-9a-f]{12}$ ]]
+          FAILED_DEPLOY_COMPLETED_AT="$(cat "$RUNNER_TEMP/failed-deploy-completed-at.txt")"
+          [[ "$FAILED_DEPLOY_COMPLETED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z$ ]]
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          cat > "$RUNNER_TEMP/recover-unready-guest.py" <<'PY'
+          from datetime import datetime
+          from pathlib import Path
+          import hashlib
           import json
-          import urllib.request
+          import os
+          import stat
+          import sys
 
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
-              health = json.load(response)
-          progress = health.get("strategy_progress") or {}
-          reasons = set(progress.get("reasons") or [])
-          incident = health.get("strategy_progress_incident") or {}
-          assert response.status == 200 and health.get("process_alive") is True, health
-          assert health.get("force_paper_mode") is True, health
-          assert health.get("live_armed") is False, health
-          assert health.get("bitfinex_live_enabled") is False, health
-          assert incident.get("new_entries_suppressed") is True, incident
-          assert progress.get("trade_lock_available") is False, progress
-          assert "TRADE_LOCK_UNAVAILABLE" in reasons, progress
-          assert int(progress.get("open_positions") or 0) > 0 or int(progress.get("pending_orders") or 0) > 0, progress
+          expected = sys.argv[1]
+          threshold = datetime.fromisoformat(
+              sys.argv[2].replace("Z", "+00:00")
+          ).timestamp()
+          runtime_revision = os.getenv("SOURCE_GIT_REV", "").lower()
+          if runtime_revision[:12] != expected:
+              raise SystemExit("RECOVERY_RUNTIME_REVISION_MISMATCH:" + (runtime_revision[:12] or "MISSING"))
+          lifecycle_path = Path("/app/data/runtime/paper_lifecycle_v1.json")
+          config_path = Path("/app/data/runtime/config-7002.json")
+          assert lifecycle_path.is_file() and not lifecycle_path.is_symlink()
+          assert config_path.is_file() and not config_path.is_symlink()
+          lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+          config_bytes = config_path.read_bytes()
+          config = json.loads(config_bytes.decode("utf-8"))
+          assert isinstance(config, dict)
+          assert lifecycle_path.stat().st_mtime >= threshold
+          assert lifecycle.get("schema") == "paper_lifecycle_v1"
+          assert lifecycle.get("paper_only") is True and lifecycle.get("live_armed") is False
+          assert lifecycle.get("positions") == [] and lifecycle.get("pending_orders") == []
+          assert config.get("live_armed") is not True
+          assert config.get("bitfinex_live_enabled") is not True
+          log = Path("/app/data/bot.log").read_bytes()[-2097152:]
+          # This exact wrapper refuses before line 195 unless forced paper
+          # mode is active. The recorded import frame proves that startup
+          # guard passed without exposing its configured value to this guest.
+          assert b'File "/app/btc_conservative_agent.py", line 195' in log
+          assert b"ModuleNotFoundError" in log and b"research.mirror_generation_lease" in log
+
+          before = dict(config)
+          old_sha256 = hashlib.sha256(config_bytes).hexdigest()
+          changed = config.get("manual_admin_pause") is not True
+          if changed:
+              config["manual_admin_pause"] = True
+              mode = stat.S_IMODE(config_path.stat().st_mode)
+              temp_path = config_path.with_name(f".{config_path.name}.recover-{os.getpid()}.tmp")
+              with temp_path.open("x", encoding="utf-8") as handle:
+                  json.dump(config, handle, sort_keys=True, separators=(",", ":"))
+                  handle.flush()
+                  os.fsync(handle.fileno())
+              os.chmod(temp_path, mode)
+              os.replace(temp_path, config_path)
+              directory_fd = os.open(str(config_path.parent), os.O_RDONLY)
+              try:
+                  os.fsync(directory_fd)
+              finally:
+                  os.close(directory_fd)
+
+          final_bytes = config_path.read_bytes()
+          final = json.loads(final_bytes.decode("utf-8"))
+          expected_final = dict(before)
+          expected_final["manual_admin_pause"] = True
+          assert final == expected_final
           print(json.dumps({
-              "recovery": "stalled_paper_boundary",
-              "revision": health.get("source_git_rev"),
-              "paper_only": health.get("force_paper_mode"),
-              "live_armed": health.get("live_armed"),
-              "bitfinex_live_enabled": health.get("bitfinex_live_enabled"),
-              "positions": progress.get("open_positions"),
-              "pending": progress.get("pending_orders"),
-              "reasons": sorted(reasons),
+              "schema": "recover_unready_guest_pause_v1",
+              "status": "SAFE_BOUNDARY_PROVEN",
+              "revision": expected,
+              "paper_only": True,
+              "live_armed": False,
+              "open_positions": 0,
+              "pending_orders": 0,
+              "manual_admin_pause": True,
+              "changed": changed,
+              "old_sha256": old_sha256,
+              "new_sha256": hashlib.sha256(final_bytes).hexdigest(),
+              "mode": stat.S_IMODE(config_path.stat().st_mode),
           }, sort_keys=True))
           PY
+          guest_program="$(base64 -w0 "$RUNNER_TEMP/recover-unready-guest.py")"
+          guest_output="$(flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c 'import base64; exec(base64.b64decode(\"${guest_program}\"))' '${EXPECTED_UNREADY_REVISION}' '${FAILED_DEPLOY_COMPLETED_AT}'")"
+          printf '%s\n' "$guest_output"
+          printf '%s\n' "$guest_output" | python -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin if line.lstrip().startswith("{")]; assert len(rows)==1; row=rows[0]; assert row.get("schema")=="recover_unready_guest_pause_v1" and row.get("status")=="SAFE_BOUNDARY_PROVEN" and row.get("revision")==sys.argv[1] and row.get("paper_only") is True and row.get("live_armed") is False and row.get("open_positions")==0 and row.get("pending_orders")==0 and row.get("manual_admin_pause") is True' "$EXPECTED_UNREADY_REVISION"
+          node scripts/check-relay-flat.mjs
 
-      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Prove stalled runtime recovery from the last guarded deployment
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-stalled-runtime'
+        working-directory: ${{ github.workspace }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          REQUIRE_BOT_ADMIN_TOKEN: "NO"
+          REQUIRE_CANONICAL_FLY_OWNER: "NO"
+          DURABLE_RELAYS_ONLY_RECOVERY: "YES"
+          SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
+          EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+          RECOVERY_PROOF_RUN_ID: ${{ inputs.recovery_failed_run_id }}
+          RECOVERY_CONTINUATION_RUN_ID: ${{ inputs.recovery_continuation_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          python scripts/fly_stalled_recovery_proof.py \
+            --expected "$EXPECTED_UNREADY_REVISION" \
+            --run-id "$RECOVERY_PROOF_RUN_ID" \
+            --continuation-run-id "$RECOVERY_CONTINUATION_RUN_ID"
+          node scripts/check-relay-flat.mjs
+
+      - name: Recheck maintenance boundary immediately before deploy
+        if: github.event_name != 'workflow_dispatch' || inputs.mode != 'recover-unready'
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          DEPLOY_MODE: ${{ inputs.mode }}
+          EXPECTED_UNREADY_REVISION: ${{ inputs.expected_unready_revision }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.request
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          request = urllib.request.Request("https://doxed-btc-bot.fly.dev/api/status", headers=headers)
+          with urllib.request.urlopen(request, timeout=20) as response:
+              status = json.load(response)
+          progress = status.get("strategy_progress") or {}
+          pipeline = status.get("lifecycle_pipeline") or {}
+          bootstrap = pipeline.get("receipt_bootstrap") or {}
+          stalled_recovery = os.environ.get("DEPLOY_MODE") == "recover-stalled-runtime"
+          expected = str(os.environ.get("EXPECTED_UNREADY_REVISION") or "").strip()
+          open_positions = progress.get("open_positions")
+          pending_orders = progress.get("pending_orders")
+          if not (
+              status.get("execution_paused") is True
+              and status.get("manual_admin_pause") is True
+              and status.get("live_armed") is False
+              and status.get("bitfinex_live_enabled") is False
+              and status.get("force_paper_mode") is True
+              and type(open_positions) is int and open_positions == 0
+              and type(pending_orders) is int and pending_orders == 0
+          ):
+              raise SystemExit("maintenance boundary or flatness changed before deploy")
+          if stalled_recovery and not (
+              str(status.get("source_git_rev") or "") == expected
+              and status.get("process_alive") is True
+              and progress.get("ok") is True
+              and progress.get("trade_lock_progressing") is True
+              and pipeline.get("owner") is True
+              and pipeline.get("running") is True
+              and pipeline.get("source_revision_match") is True
+              and bootstrap.get("status") == "COMPLETE"
+              and bootstrap.get("complete") is True
+              and bootstrap.get("blocked") is not True
+          ):
+              raise SystemExit("stalled-runtime exact-revision health or receipt bootstrap changed before deploy")
+          print("Maintenance boundary remains paused, disarmed, and flat immediately before deploy")
+          PY
 
       - name: Deploy the exact source revision
-        run: flyctl deploy --remote-only --strategy immediate --build-arg SOURCE_GIT_REV="${GITHUB_SHA}"
+        id: deploy_source
+        # The helper preserves the normal Fly argv, including
+        # --build-arg SOURCE_GIT_REV="${GITHUB_SHA}" and
+        # --env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=${TRANSPORT_BUNDLES_ENABLED}",
+        # and appends only the three validated reset-recovery overrides.
+        run: python ../../scripts/fly_deploy_reset_proof.py deploy
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DEPLOY_MODE: ${{ inputs.mode }}
+          LIFECYCLE_RESET_PROOF: ${{ inputs.lifecycle_reset_proof }}
+          # Only an explicit normal-deploy opt-in enables acceleration. Pushes,
+          # omitted inputs, and recovery modes deploy it disabled.
+          TRANSPORT_BUNDLES_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' && inputs.transport_bundles && '1' || '0' }}
+
+      - name: Re-enter maintenance and flatten the exact deployed revision
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+          if not token:
+              raise SystemExit("BOT_ADMIN_TOKEN is missing")
+          headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+
+          def request_json(path, payload=None, timeout=30):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + path,
+                  data=data,
+                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
+                  method="POST" if data else "GET",
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return json.load(response)
+
+          def exact_safe_status(*, require_paused=False, require_flat=False):
+              status = request_json("/api/status", timeout=20)
+              progress = status.get("strategy_progress") or {}
+              safe = (
+                  str(status.get("source_git_rev") or "") == expected
+                  and status.get("force_paper_mode") is True
+                  and status.get("live_armed") is False
+                  and status.get("bitfinex_live_enabled") is False
+              )
+              if require_paused:
+                  safe = safe and status.get("execution_paused") is True and status.get("manual_admin_pause") is True
+              if require_flat:
+                  safe = safe and int(progress.get("open_positions") or 0) == 0 and int(progress.get("pending_orders") or 0) == 0
+              if not safe:
+                  raise RuntimeError("exact postdeploy paper maintenance status is not proven")
+              return status
+
+          # Never mutate a different or partially booted revision.
+          last = None
+          for attempt in range(1, 41):
+              try:
+                  exact_safe_status()
+                  break
+              except Exception as exc:
+                  last = exc
+                  time.sleep(min(attempt, 5))
+          else:
+              raise SystemExit(f"exact deployed revision never became safely addressable: {type(last).__name__}")
+
+          for attempt in range(1, 11):
+              try:
+                  paused = request_json("/api/pause", {"owner": "DEPLOY_MAINTENANCE"}, timeout=30)
+                  exact_safe_status(require_paused=True)
+                  if paused.get("status") == "paused" and paused.get("execution_paused") is True:
+                      break
+              except Exception as exc:
+                  last = exc
+              time.sleep(min(attempt, 5))
+          else:
+              raise SystemExit(f"postdeploy maintenance pause was not proven: {type(last).__name__}")
+
+          def fresh_state(minimum_generation=None):
+              last_state = None
+              for attempt in range(1, 31):
+                  try:
+                      exact_safe_status(require_paused=True)
+                      candidate = request_json("/api/relay-execution-state?fresh=1", timeout=30)
+                      generation = candidate.get("money_state_generation")
+                      if not isinstance(generation, int) or isinstance(generation, bool):
+                          raise RuntimeError("postdeploy relay generation is missing")
+                      if minimum_generation is not None and generation < minimum_generation:
+                          raise RuntimeError("postdeploy relay generation is stale")
+                      if not isinstance(candidate.get("orders"), list) or not isinstance(candidate.get("positions"), list):
+                          raise RuntimeError("postdeploy relay exposure arrays are missing")
+                      return candidate
+                  except urllib.error.HTTPError as exc:
+                      if exc.code != 503:
+                          raise
+                      last_state = exc
+                  except Exception as exc:
+                      last_state = exc
+                  time.sleep(min(attempt, 5))
+              raise RuntimeError(f"postdeploy generation-current relay state unavailable: {type(last_state).__name__}")
+
+          required_generation = None
+          for round_no in range(1, 6):
+              exposure = fresh_state(required_generation)
+              round_generation = exposure["money_state_generation"]
+              orders = sorted({str(row.get("trade_id") or "").strip() for row in exposure["orders"]} - {""})
+              positions = sorted({str(row.get("trade_id") or "").strip() for row in exposure["positions"]} - {""})
+              if not orders and not positions:
+                  final_status = exact_safe_status(require_paused=True, require_flat=True)
+                  print(
+                      f"Postdeploy maintenance boundary flat revision={expected} "
+                      f"generation={round_generation} round={round_no}"
+                  )
+                  break
+              for trade_id in orders:
+                  cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
+                  generation = cancelled.get("money_state_generation")
+                  if cancelled.get("status") != "cancelled":
+                      raise SystemExit(f"postdeploy order cancel was not confirmed for {trade_id}")
+                  if not isinstance(generation, int) or isinstance(generation, bool) or generation <= round_generation:
+                      raise SystemExit("postdeploy order cancel did not advance relay generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
+              for trade_id in positions:
+                  closed = request_json("/api/positions/close", {"trade_id": trade_id})
+                  generation = closed.get("money_state_generation")
+                  if closed.get("status") != "closed":
+                      raise SystemExit(f"postdeploy normal paper close was not confirmed for {trade_id}")
+                  if not isinstance(generation, int) or isinstance(generation, bool) or generation <= round_generation:
+                      raise SystemExit("postdeploy normal paper close did not advance relay generation")
+                  round_generation = generation
+                  required_generation = max(required_generation or 0, generation)
+              final = fresh_state(required_generation)
+              if not final["orders"] and not final["positions"]:
+                  exact_safe_status(require_paused=True, require_flat=True)
+                  print(
+                      f"Postdeploy maintenance flattened revision={expected} "
+                      f"generation={final['money_state_generation']} round={round_no}"
+                  )
+                  break
+              time.sleep(2)
+          else:
+              raise SystemExit("postdeploy maintenance boundary did not become generation-current and flat")
+          PY
 
       - name: Prove liveness, execution safety, and exact revision
         env:
           EXPECTED_REVISION: ${{ github.sha }}
+          # The deployed paper cohort is explicitly score-led. Keep the
+          # verifier's registry identity on the same startup policy as Fly;
+          # an unset local flag would expect the retired hypothesis identity.
+          SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
         run: |
           python - <<'PY'
           import json
           import os
           import time
           import urllib.request
+          import combo_pathway_config as registry
 
           expected = os.environ["EXPECTED_REVISION"][:12]
-          url = "https://doxed-btc-bot.fly.dev/health"
+          base = "https://doxed-btc-bot.fly.dev"
+          expected_signature = registry.active_tile_registry_signature()
+          expected_lanes = list(registry.ACTIVE_TILE_ORDER)
           last = ""
-          for _ in range(60):
+          deadline = time.monotonic() + 12 * 60
+          attempt = 0
+          while time.monotonic() < deadline:
+              attempt += 1
               try:
-                  with urllib.request.urlopen(url, timeout=8) as response:
-                      payload = json.load(response)
+                  stage_started = time.monotonic()
+                  with urllib.request.urlopen(base + "/health", timeout=8) as response:
+                      liveness = json.load(response)
+                  print(
+                      f"postdeploy attempt={attempt} stage=health status={response.status} "
+                      f"latency_ms={round((time.monotonic() - stage_started) * 1000)}",
+                      flush=True,
+                  )
+                  # The dashboard socket binds before private state restoration
+                  # completes. During that bounded startup window /health
+                  # deliberately returns a minimal 200 payload without strategy
+                  # progress or tile fields. Treat only that explicit startup
+                  # contract as retryable; all post-bootstrap evidence remains
+                  # mandatory below.
+                  if (
+                      liveness.get("boot") == "starting"
+                      and liveness.get("status") == "starting"
+                  ):
+                      last = (
+                          "Fly dashboard bootstrap is still starting: "
+                          + json.dumps(liveness, sort_keys=True)
+                      )
+                      time.sleep(3)
+                      continue
+                  stage_started = time.monotonic()
+                  with urllib.request.urlopen(base + "/api/status", timeout=8) as status_response:
+                      payload = json.load(status_response)
+                  print(
+                      f"postdeploy attempt={attempt} stage=status status={status_response.status} "
+                      f"latency_ms={round((time.monotonic() - stage_started) * 1000)}",
+                      flush=True,
+                  )
+                  stage_started = time.monotonic()
+                  with urllib.request.urlopen(base + "/ready", timeout=8) as ready_response:
+                      ready = json.load(ready_response)
+                  print(
+                      f"postdeploy attempt={attempt} stage=ready status={ready_response.status} "
+                      f"latency_ms={round((time.monotonic() - stage_started) * 1000)}",
+                      flush=True,
+                  )
                   last = json.dumps(payload, sort_keys=True)
+                  progress = payload.get("strategy_progress") or {}
+                  runtime_lanes = [row.get("lane") for row in payload.get("active_tiles") or []]
                   if (
                       response.status == 200
+                      and status_response.status == 200
+                      and liveness.get("process_alive") is True
+                      and ready_response.status == 200
+                      and ready.get("ok") is True
                       and payload.get("process_alive") is True
                       and str(payload.get("source_git_rev") or "").startswith(expected)
+                      and payload.get("bot_version") == registry.EXECUTION_FIX_VERSION
+                      and payload.get("tile_registry_signature") == expected_signature
+                      and ready.get("tile_registry_signature") == expected_signature
+                      and runtime_lanes == expected_lanes
+                      and progress.get("ok") is True
+                      and progress.get("trade_lock_available") is True
+                      and int(progress.get("open_positions") or 0) == 0
+                      and int(progress.get("pending_orders") or 0) == 0
+                      and payload.get("execution_paused") is True
+                      and payload.get("manual_admin_pause") is True
                   ):
                       health = payload
                       if (
@@ -168,6 +1914,270 @@ jobs:
                       last = f"unsafe Fly execution flags: {health}"
               except Exception as exc:
                   last = str(exc)
+                  print(
+                      f"postdeploy attempt={attempt} stage=request status=failed "
+                      f"error={type(exc).__name__}:{exc}",
+                      flush=True,
+                  )
               time.sleep(3)
           raise SystemExit(f"Fly failed exact-revision liveness proof: {last}")
+          PY
+
+      - name: Complete receipt bootstrap inside exact-revision maintenance
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12].lower()
+          headers = {
+              "X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"],
+              "Cache-Control": "no-cache",
+          }
+
+          def call(path, payload=None, timeout=20):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + path, data=data,
+                  headers={**headers, **({"Content-Type": "application/json"} if data else {})},
+                  method="POST" if data is not None else "GET",
+              )
+              with urllib.request.urlopen(request, timeout=timeout) as response:
+                  return json.load(response)
+
+          def observe_status(deadline):
+              last = None
+              attempt = 0
+              while time.monotonic() < deadline:
+                  attempt += 1
+                  try:
+                      return call("/api/status")
+                  except urllib.error.HTTPError as exc:
+                      if exc.code not in {502, 503, 504}:
+                          raise
+                      last = exc
+                  except (urllib.error.URLError, TimeoutError) as exc:
+                      last = exc
+                  delay = min(2 ** min(attempt - 1, 4), max(0.0, deadline - time.monotonic()))
+                  print(f"transient status observation attempt={attempt} error={type(last).__name__}", flush=True)
+                  if delay:
+                      time.sleep(delay)
+              raise RuntimeError(f"bounded status observation unavailable: {type(last).__name__}")
+
+          # The audited current cohort has at least 21,353 legacy rows.  At the
+          # bounded 64-receipt worker batch and one-second backlog cadence,
+          # scheduling alone needs 334 cycles (>5.5 minutes).  Forty-five
+          # minutes gives that known cohort material headroom; it is not a
+          # latency guarantee because every child remains independently bounded
+          # by its wall timeout.  Expiry still fails safe in maintenance.
+          observed_bootstrap_rows = 21_353
+          conservative_records_per_cycle = 64
+          backlog_interval_seconds = 1
+          bootstrap_timeout_seconds = 45 * 60
+          minimum_cycles = (
+              observed_bootstrap_rows + conservative_records_per_cycle - 1
+          ) // conservative_records_per_cycle
+          if bootstrap_timeout_seconds < minimum_cycles * backlog_interval_seconds:
+              raise SystemExit("configured bootstrap timeout cannot cover audited scheduling floor")
+          deadline = time.monotonic() + bootstrap_timeout_seconds
+          last = None
+          # The preceding postdeploy boundary is already paused.  Reassert it
+          # once, then observe read-only status so this gate cannot create a
+          # repeated persistent-config write/fsync loop.
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+          while time.monotonic() < deadline:
+              # The lifecycle owner is independent of paper execution and
+              # continues bounded subprocess cycles while the pause remains.
+              status = observe_status(deadline)
+              last = status
+              pipeline = status.get("lifecycle_pipeline") or {}
+              bootstrap = pipeline.get("receipt_bootstrap") or {}
+              progress = status.get("strategy_progress") or {}
+              safe = (
+                  str(status.get("source_git_rev") or "").lower() == expected
+                  and status.get("force_paper_mode") is True
+                  and status.get("bitfinex_live_enabled") is False
+                  and status.get("live_armed") is False
+                  and status.get("execution_paused") is True
+                  and status.get("manual_admin_pause") is True
+                  and int(progress.get("open_positions") or 0) == 0
+                  and int(progress.get("pending_orders") or 0) == 0
+              )
+              if not safe:
+                  raise SystemExit("receipt bootstrap lost exact-revision flat maintenance")
+              if not (
+                  pipeline.get("owner") is True
+                  and pipeline.get("running") is True
+                  and pipeline.get("source_revision_match") is True
+              ):
+                  raise SystemExit(
+                      "receipt bootstrap worker is not running on the exact revision: "
+                      + json.dumps(pipeline, sort_keys=True)
+                  )
+              print(json.dumps({
+                  "receipt_bootstrap": bootstrap,
+                  "last_outcome": pipeline.get("last_outcome"),
+                  "revision": expected,
+              }, sort_keys=True), flush=True)
+              if bootstrap.get("blocked") is True or bootstrap.get("status") == "BLOCKED":
+                  raise SystemExit(
+                      "receipt bootstrap reported a fail-closed blocker: "
+                      + json.dumps(bootstrap, sort_keys=True)
+                  )
+              if (
+                  bootstrap.get("required") is True
+                  and bootstrap.get("status") == "COMPLETE"
+                  and bootstrap.get("complete") is True
+              ):
+                  print(f"Receipt bootstrap complete in maintenance on {expected}")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit(
+              "receipt bootstrap did not complete before bounded maintenance timeout: "
+              + json.dumps((last or {}).get("lifecycle_pipeline") or {}, sort_keys=True)
+          )
+          PY
+
+      - name: Resume paper execution after exact-revision acceptance
+        id: paper_resume
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          request = urllib.request.Request(base + "/api/resume", data=json.dumps({"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"}).encode(), headers={**headers, "Content-Type": "application/json"}, method="POST")
+          with urllib.request.urlopen(request, timeout=30) as response:
+              resumed = json.load(response)
+          if resumed.get("status") == "operator_pause_retained":
+              # A deliberate operator or safety pause outlives the deploy.
+              print("Deploy maintenance ended; retained pause owner=" + str(resumed.get("pause_owner")))
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  handle.write("operator_pause_retained=true\n")
+              raise SystemExit(0)
+          if resumed.get("status") != "resumed" or resumed.get("execution_paused") is not False:
+              raise SystemExit("paper resume was not acknowledged")
+          last = None
+          for _ in range(20):
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  status = json.load(response)
+              last = status
+              if (
+                  str(status.get("source_git_rev") or "").startswith(expected)
+                  and status.get("execution_paused") is False
+                  and status.get("manual_admin_pause") is False
+                  and status.get("live_armed") is False
+                  and status.get("bitfinex_live_enabled") is False
+                  and status.get("force_paper_mode") is True
+              ):
+                  print(f"Paper execution resumed on exact accepted revision {expected}; live remains disarmed")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit("exact-revision paper resume confirmation failed: " + json.dumps(last, sort_keys=True))
+          PY
+
+      - name: Assert paper active with advancing AI cadence and restored operator state
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && steps.paper_resume.outputs.operator_pause_retained != 'true' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+          PRIOR_OPERATOR_STATE: ${{ steps.paper_maintenance.outputs.prior_operator_state }}
+        run: python scripts/fly_postdeploy_active_gate.py
+
+
+      - name: Keep true-flat ADMIN_MANUAL after exact-revision acceptance
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ github.sha }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          expected = os.environ["EXPECTED_REVISION"][:12]
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          last = None
+          for _ in range(20):
+              with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  status = json.load(response)
+              last = status
+              if (
+                  str(status.get("source_git_rev") or "").startswith(expected)
+                  and status.get("execution_paused") is True
+                  and status.get("manual_admin_pause") is True
+                  and status.get("execution_reason") == "ADMIN_MANUAL"
+                  and status.get("live_armed") is False
+                  and status.get("bitfinex_live_enabled") is False
+                  and status.get("force_paper_mode") is True
+              ):
+                  def post(path, payload):
+                      request = urllib.request.Request(
+                          base + path,
+                          data=json.dumps(payload).encode(),
+                          headers={**headers, "Content-Type": "application/json"},
+                          method="POST",
+                      )
+                      with urllib.request.urlopen(request, timeout=30) as response:
+                          return json.load(response)
+                  # An explicitly requested hold becomes an operator pause so
+                  # later deploys cannot auto-clear it.
+                  held = post("/api/pause", {})
+                  if held.get("pause_owner") != "OPERATOR":
+                      raise SystemExit("maintenance hold not owned by OPERATOR: " + json.dumps(held, sort_keys=True))
+                  retained = post("/api/resume", {"clear_admin_manual_pause": True, "owner": "DEPLOY_MAINTENANCE"})
+                  if retained.get("status") != "operator_pause_retained" or retained.get("execution_paused") is not True:
+                      raise SystemExit("deploy resume did not retain the operator hold: " + json.dumps(retained, sort_keys=True))
+                  print(
+                      f"True-flat ADMIN_MANUAL retained on accepted revision {expected}; "
+                      "operator-owned hold survives deploy resume"
+                  )
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit(
+              "true-flat maintenance retention not proven: "
+              + json.dumps(last, sort_keys=True)
+          )
+          PY
+
+      - name: Best-effort preserve safe paper maintenance after failed guarded deploy
+        # Source/test failure must not pause an unchanged healthy incumbent.
+        # Preserve maintenance once either mutation step actually starts.
+        if: failure() && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure')
+        continue-on-error: true
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          last = None
+          for attempt in range(1, 6):
+              try:
+                  request = urllib.request.Request(base + "/api/pause", data=b'{"owner": "DEPLOY_MAINTENANCE"}', headers={**headers, "Content-Type": "application/json"}, method="POST")
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      json.load(response)
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                      status = json.load(response)
+                  if (
+                      status.get("force_paper_mode") is True
+                      and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False
+                      and status.get("execution_paused") is True
+                      and status.get("manual_admin_pause") is True
+                  ):
+                      print("Failure path preserved paper-only maintenance; no unaccepted revision was resumed")
+                      raise SystemExit(0)
+              except Exception as exc:
+                  last = exc
+              time.sleep(min(attempt, 5))
+          raise SystemExit(f"failed deploy paper maintenance could not be preserved: {type(last).__name__}")
           PY

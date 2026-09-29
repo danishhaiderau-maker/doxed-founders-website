@@ -1,0 +1,107 @@
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[2]
+HELPER = ROOT / "scripts" / "fly-sync-file-pacing.ps1"
+PWSH = shutil.which("pwsh") or shutil.which("powershell")
+
+
+def _run(body, input_payload=None):
+    if not PWSH:
+        pytest.skip("PowerShell runtime unavailable; executable pacing QA not passed")
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-NonInteractive", "-Command",
+         f"$ErrorActionPreference='Stop'; . '{str(HELPER).replace(chr(39), chr(39)*2)}'; {body}"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=20, input=input_payload,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_small_receipts_have_bounded_faster_pacing_and_no_burst():
+    results = _run("@(0,50,200,450,600,999) | ForEach-Object { "
+                   "$delay=Get-FlySyncInterFileDelayMs -FileBytes 732 -RequestElapsedMs $_ -AdaptiveThrottleMs 1000; "
+                   "[pscustomobject]@{elapsed=$_;delay=$delay} } | ConvertTo-Json -Compress")
+    for result in results:
+        assert 50 <= result["delay"] < 1500
+        assert result["elapsed"] + result["delay"] >= 500
+
+
+def test_slow_small_reads_yield_briefly_and_stay_below_one_request_per_second():
+    results = _run("@(1000,2500,5999) | ForEach-Object { "
+                   "$delay=Get-FlySyncInterFileDelayMs -FileBytes 4096 -RequestElapsedMs $_ -AdaptiveThrottleMs 1000; "
+                   "[pscustomobject]@{elapsed=$_;delay=$delay} } | ConvertTo-Json -Compress")
+    for result in results:
+        assert result["delay"] == 250
+        assert result["elapsed"] + result["delay"] >= 1000
+
+
+def test_large_distressed_or_pressure_requests_keep_protective_delay():
+    results = _run("@("
+                   "(Get-FlySyncInterFileDelayMs -FileBytes 16385 -RequestElapsedMs 100 -AdaptiveThrottleMs 1000),"
+                   "(Get-FlySyncInterFileDelayMs -FileBytes 732 -RequestElapsedMs 6000 -AdaptiveThrottleMs 1000),"
+                   "(Get-FlySyncInterFileDelayMs -FileBytes 732 -RequestElapsedMs 100 -AdaptiveThrottleMs 1100),"
+                   "(Get-FlySyncInterFileDelayMs -FileBytes 732 -RequestElapsedMs 2500 -AdaptiveThrottleMs 5000)"
+                   ") | ConvertTo-Json -Compress")
+    assert results == [1500, 1500, 1500, 5000]
+
+
+def test_slow_success_escalation_distinguishes_latency_from_transfer_pressure():
+    results = _run("@("
+                   "(Test-FlySyncSlowSuccessEscalates -PayloadBytes 4096 -RequestElapsedMs 2500),"
+                   "(Test-FlySyncSlowSuccessEscalates -PayloadBytes 4096 -RequestElapsedMs 6000),"
+                   "(Test-FlySyncSlowSuccessEscalates -PayloadBytes 1048576 -RequestElapsedMs 1999),"
+                   "(Test-FlySyncSlowSuccessEscalates -PayloadBytes 1048576 -RequestElapsedMs 2000)"
+                   ") | ConvertTo-Json -Compress")
+    assert results == [False, True, False, True]
+
+
+def test_invalid_observations_fail_closed():
+    results = _run("$cases=@(@{FileBytes=-1;RequestElapsedMs=0;AdaptiveThrottleMs=1000},"
+                   "@{FileBytes=1;RequestElapsedMs=[double]::NaN;AdaptiveThrottleMs=1000},"
+                   "@{FileBytes=1;RequestElapsedMs=[double]::PositiveInfinity;AdaptiveThrottleMs=1000},"
+                   "@{FileBytes=1;RequestElapsedMs=-1;AdaptiveThrottleMs=1000},"
+                   "@{FileBytes=1;RequestElapsedMs=1;AdaptiveThrottleMs=0}); "
+                   "@($cases | ForEach-Object { try { Get-FlySyncInterFileDelayMs @_ ; 'UNEXPECTED_PASS' } "
+                   "catch { $_.Exception.Message } }) | ConvertTo-Json -Compress")
+    assert results == ["INVALID_SYNC_PACING_OBSERVATION"] * 5
+
+
+def test_helper_cannot_mutate_or_start_a_transfer():
+    source = HELPER.read_text(encoding="utf-8")
+    for forbidden in ("Start-Sleep", "Invoke-WebRequest", "HttpClient", "Remove-Item",
+                      "Set-Content", "Start-ScheduledTask", "Stop-Process"):
+        assert forbidden not in source
+
+
+def test_active_client_uses_pacing_policy_and_parses_without_execution():
+    source = (ROOT / "scripts" / "sync-fly-bot-data.ps1").read_text(encoding="utf-8-sig")
+    assert "$slowSuccessfulChunk = $chunkRequestElapsedMs -ge 2000" not in source
+    assert source.count(
+        "$slowSuccessfulChunk = Test-FlySyncSlowSuccessEscalates `\n"
+        "            -PayloadBytes $payload.Length `\n"
+        "            -RequestElapsedMs $chunkRequestElapsedMs") == 1
+    old_import = '. (Join-Path $scriptDir "fly-sync-backoff.ps1")'
+    old_delay = '$fileThrottleMs = [Math]::Max($baseInterFileThrottleMs, $adaptiveThrottleMs)'
+    assert source.count(old_import) == 1
+    assert old_delay not in source
+    assert source.count('. (Join-Path $scriptDir "fly-sync-file-pacing.ps1")') == 1
+    expected_call = (
+        '$fileThrottleMs = Get-FlySyncInterFileDelayMs `\n'
+        '      -FileBytes $remoteSize `\n'
+        '      -RequestElapsedMs $chunkRequestElapsedMs `\n'
+        '      -AdaptiveThrottleMs $adaptiveThrottleMs `\n'
+        '      -BaseInterFileThrottleMs $baseInterFileThrottleMs `\n'
+        '      -BaseInterChunkThrottleMs $baseInterChunkThrottleMs')
+    assert source.count(expected_call) == 1
+    result = _run("$source=[Console]::In.ReadToEnd(); "
+                  "$parseTokens=$null; $parseErrors=$null; "
+                  "[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$parseTokens,[ref]$parseErrors) | Out-Null; "
+                  "ConvertTo-Json -InputObject @($parseErrors | ForEach-Object Message) -Compress", source)
+    assert result == []
