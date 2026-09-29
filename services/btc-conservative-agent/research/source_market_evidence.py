@@ -160,11 +160,28 @@ def append_market_observation(
     gate_evidence: dict,
     observed_ts: float,
     max_in_memory: int = 64,
+    min_interval_sec: float = 0.0,
+    force: bool = False,
 ) -> tuple[dict, dict]:
-    """Append a timestamped, side-correct BBO/depth/aggressor observation."""
+    """Append a timestamped, side-correct BBO/depth/aggressor observation.
+
+    With ``min_interval_sec`` an unchanged per-tick re-evaluation of the same
+    order is folded into the extrema only.  A verdict change, a limit
+    reprice, or ``force`` (an executable fill decision) is always recorded.
+    """
     record = update_canonical_extrema(store, order, market_price)
     if not record:
         return {}, {}
+    previous = record.get("latest_observation")
+    if not force and float(min_interval_sec or 0) > 0 and isinstance(previous, dict):
+        current_generation = int(record.get("limit_generation") or 0)
+        same_state = (
+            previous.get("fill_gate_verdict") == (gate_evidence or {}).get("reason")
+            and int(previous.get("limit_generation") or 0) == current_generation
+        )
+        elapsed = float(observed_ts) - float(previous.get("observed_at_ts") or 0)
+        if same_state and 0 <= elapsed < float(min_interval_sec):
+            return {}, {}
     direction = str(record.get("direction") or "").upper()
     executable_quote = float(ask or 0) if direction == "LONG" else float(bid or 0)
     # Observations always stamp the current ACK generation/limit — never a
