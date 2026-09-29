@@ -348,13 +348,17 @@ def test_legacy_missing_order_is_accepted_only_before_mandatory_flat_reproof():
         DEPLOY.index("- name: Enter durable authenticated paper maintenance boundary"):
         DEPLOY.index("- name: Prove the current Fly owner and every relay account are flat")
     ]
-    missing = maintenance.index('if exc.code != 404 or exposure.get("_legacy_exact_revision_bootstrap") is not True:')
+    current = maintenance.index('if exc.code == 404 and exposure.get("_legacy_exact_revision_bootstrap") is not True:')
+    missing = maintenance.index("if exc.code != 404:", current)
     marker = maintenance.index('cancelled = {"status": "not_found"}', missing)
     skip = maintenance.index('if cancelled.get("status") == "not_found":', marker)
     reproof = maintenance.rindex("prove_legacy_bootstrap_flat()")
-    assert missing < marker < skip < reproof
-    assert "if exc.code != 404 or" in maintenance
+    flat = maintenance.index('print(f"Durable maintenance boundary is flat after round {round_no}")')
+    assert current < missing < marker < skip < reproof
+    assert "continue" in maintenance[current:missing]
+    assert "money_state_generation" not in maintenance[current:missing]
     assert "raise" in maintenance[missing:marker]
+    assert flat < current
 
 
 def test_legacy_flat_proof_ignores_transport_failures_but_not_confirmations():

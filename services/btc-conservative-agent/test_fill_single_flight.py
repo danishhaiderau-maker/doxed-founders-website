@@ -152,5 +152,14 @@ def test_flat_after_unconfirmed_mutation_requires_newer_generation():
     guard = flat.index('exposure.get("money_state_generation") <= unconfirmed_floor')
     assert guard < flat.index('print(f"Durable maintenance boundary is flat')
     assert "continue" in flat[guard:flat.index('print(f"Durable maintenance boundary is flat')]
-    not_found = step[step.index("if exc.code == 404 and trade_id in unconfirmed_trade_ids:"):]
-    assert not_found.index("continue") < not_found.index("raise")
+    not_found = step[step.index('if exc.code == 404 and exposure.get("_legacy_exact_revision_bootstrap") is not True:'):]
+    assert not_found.index("continue") < not_found.index("if exc.code != 404:") < not_found.index("raise")
+
+
+def test_unconfirmed_cancel_resamples_exposure_before_more_mutations():
+    step = _maintenance_step()
+    unconfirmed = step[step.index("if cancelled is None:"):]
+    assert unconfirmed.index("round_unconfirmed = True") < unconfirmed.index("break") < unconfirmed.index('cancelled.get("status") == "not_found"')
+    resample = step.index("if round_unconfirmed:")
+    assert step.index("round_unconfirmed = False") < resample < step.index("for trade_id in positions:")
+    assert "continue" in step[resample:step.index("for trade_id in positions:")]

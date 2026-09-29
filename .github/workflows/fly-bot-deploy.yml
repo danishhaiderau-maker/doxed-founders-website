@@ -1363,14 +1363,19 @@ jobs:
                       continue
                   print(f"Durable maintenance boundary is flat after round {round_no}")
                   break
+              round_unconfirmed = False
               for trade_id in orders:
                   try:
                       cancelled = mutate_json("/api/orders/cancel", {"trade_id": trade_id})
                   except urllib.error.HTTPError as exc:
-                      if exc.code == 404 and trade_id in unconfirmed_trade_ids:
-                          print(f"Unconfirmed maintenance cancel already applied trade_id={trade_id}", flush=True)
+                      if exc.code == 404 and exposure.get("_legacy_exact_revision_bootstrap") is not True:
+                          # The order left the pending book (fill, TTL expiry, or an
+                          # earlier unconfirmed cancel) after exposure was sampled. No
+                          # mutation happened here; the next round still has to observe
+                          # fresh flat authority at the required generation.
+                          print(f"Maintenance order already absent trade_id={trade_id}", flush=True)
                           continue
-                      if exc.code != 404 or exposure.get("_legacy_exact_revision_bootstrap") is not True:
+                      if exc.code != 404:
                           raise
                       # The legacy relay cache may name an order already removed
                       # from authoritative state.  Accept that idempotent race only
@@ -1381,7 +1386,8 @@ jobs:
                   if cancelled is None:
                       unconfirmed_trade_ids.add(trade_id)
                       unconfirmed_floor = max(unconfirmed_floor or 0, round_generation if isinstance(round_generation, int) else 0)
-                      continue
+                      round_unconfirmed = True
+                      break
                   if cancelled.get("status") == "not_found":
                       continue
                   if cancelled.get("status") != "cancelled":
@@ -1397,6 +1403,11 @@ jobs:
                       raise SystemExit("maintenance cancel did not advance relay authority generation")
                   round_generation = generation
                   required_generation = max(required_generation or 0, generation)
+              if round_unconfirmed:
+                  # The sampled exposure is stale once a mutation's outcome is
+                  # unknown; resample fresh authority before any further mutation.
+                  time.sleep(2)
+                  continue
               for trade_id in positions:
                   reconciled = mutate_json("/api/reconcile/phantom-cancel", {"trade_id": trade_id, "reason": "GUARDED_DEPLOY_MAINTENANCE_BOUNDARY"})
                   if reconciled is None:
