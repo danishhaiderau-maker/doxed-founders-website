@@ -198,6 +198,28 @@ def test_public_status_keeps_recovered_incident_auditable_but_current(tmp_path):
     assert wal["incident_alarms"] == ["EMERGENCY_WAL_CONTROL_COPY_CORRUPT"]
 
 
+def test_public_status_explains_latched_alarm_from_catalog_only(tmp_path):
+    from emergency_evidence_wal import ALARM_CATALOG
+    runtime = {"last_result": {"emergency_wal": {
+        "observed_unix": 999, "capacity_extents": 4, "free_extents": 4,
+        "retained_count": 0, "retained_bytes": 0, "state_counts": {},
+        "alarms": ["EMERGENCY_WAL_HEADER_CORRUPT"],
+        "alarm_details": [{
+            "code": "EMERGENCY_WAL_HEADER_CORRUPT", "first_seen": 900.0,
+            "last_seen": 990.0, "reason": "/secret/path injected",
+        }, {"code": "NOT_ACTIVE", "first_seen": 1.0}],
+    }}}
+    wal = _namespace(tmp_path, runtime)["_lifecycle_pipeline_public_status"](1000)["emergency_wal"]
+    assert wal["alarm_details"] == [{
+        "code": "EMERGENCY_WAL_HEADER_CORRUPT",
+        "reason": ALARM_CATALOG["EMERGENCY_WAL_HEADER_CORRUPT"]["reason"],
+        "clears_when": ALARM_CATALOG["EMERGENCY_WAL_HEADER_CORRUPT"]["clears_when"],
+        "clear_path": "AUTOMATIC_WHEN_RESOLVED", "auto_clear": True,
+        "first_seen_unix": 900.0, "last_seen_unix": 990.0,
+    }]
+    assert "secret" not in repr(wal)
+
+
 def test_artifact_counts_are_content_free_and_report_age(tmp_path):
     completion = tmp_path / "runtime" / "v3" / "lifecycle_bundles" / "aa" / ("lifecycle-" + "1" * 64)
     transfer = tmp_path / "runtime" / "v3" / "lifecycle_transfer_bundles" / "bb" / ("transfer-" + "2" * 64)

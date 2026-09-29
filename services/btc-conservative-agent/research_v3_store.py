@@ -435,6 +435,11 @@ class V3EvidenceStore:
     def emergency_wal_runtime_status(self) -> dict[str, Any]:
         """Return a bounded, content-free status for the fixed-size reserve."""
         wal = self._emergency_wal()
+        try:
+            auto_clear = wal.auto_clear_resolved_alarms()
+        except (RuntimeError, OSError, TimeoutError, ValueError) as exc:
+            # An unproven reserve keeps every alarm; status() below reports it.
+            auto_clear = {"cleared": [], "blocked": str(exc)[:128]}
         raw = wal.status()
         records = raw.get("records") if isinstance(raw.get("records"), list) else []
         state_counts = {"PREPARED": 0, "DEFERRED": 0, "REPLAYED": 0}
@@ -459,6 +464,14 @@ class V3EvidenceStore:
             "oldest_state": str((oldest or {}).get("state") or "") or None,
             "alarms": [str(value)[:128] for value in list(raw.get("alarms") or [])[:32]],
             "incident_alarms": [str(value)[:128] for value in list(raw.get("incident_alarms") or [])[:32]],
+            "alarm_details": [
+                dict(detail) for detail in list(raw.get("alarm_details") or [])[:32]
+                if isinstance(detail, dict)
+            ],
+            "alarm_auto_clear": {
+                "cleared": [str(code)[:128] for code in list(auto_clear.get("cleared") or [])[:32]],
+                "blocked": auto_clear.get("blocked"),
+            },
         }
 
     def _assert_contained(self, path: Path) -> Path:

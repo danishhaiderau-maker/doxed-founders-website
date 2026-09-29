@@ -24,6 +24,61 @@ _local_guard = threading.Lock()
 _local_locks: dict[str, threading.RLock] = {}
 MAX_LOCK_TIMEOUT_SEC = 60.0
 MAX_LOCK_POLL_SEC = 1.0
+ALARM_JOURNAL_NAME = "mandatory-reserve.alarm-journal.json"
+ALARM_AUDIT_NAME = "mandatory-reserve.alarm-audit.jsonl"
+ALARM_JOURNAL_MIN_REWRITE_SEC = 60.0
+ALARM_AUTO_CLEAR_MIN_DWELL_SEC = 300.0
+_CONTROL_HEALTH = "both control copies decode, bind to this identity/capacity and match the headers"
+# ``auto_clear`` alarms describe a condition the reserve can re-prove from its
+# own bytes.  The others are one-time integrity events: they need an
+# authenticated operator clear, and still only after the same health proof.
+ALARM_CATALOG: dict[str, dict[str, Any]] = {
+    "EMERGENCY_WAL_CONTROL_COPY_CORRUPT": {
+        "reason": "A control copy failed checksum/structure validation and was repaired.",
+        "clears_when": _CONTROL_HEALTH, "auto_clear": True},
+    "EMERGENCY_WAL_CONTROL_RECONSTRUCTED": {
+        "reason": "No trusted control copy existed; both were rebuilt from headers.",
+        "clears_when": _CONTROL_HEALTH, "auto_clear": True},
+    "EMERGENCY_WAL_CONTROL_TELEMETRY_RECOVERED": {
+        "reason": "Control counters disagreed with the header region and were recomputed.",
+        "clears_when": _CONTROL_HEALTH, "auto_clear": True},
+    "EMERGENCY_WAL_HEADER_CORRUPT": {
+        "reason": "A header slot failed checksum validation.",
+        "clears_when": "every header slot decodes and validates", "auto_clear": True},
+    "EMERGENCY_WAL_HEADER_INVALID": {
+        "reason": "A header slot decoded but violated the record schema or binding.",
+        "clears_when": "every header slot decodes and validates", "auto_clear": True},
+    "EMERGENCY_WAL_HEADER_DUPLICATE_IDENTITY": {
+        "reason": "Two header slots claimed the same generation, record or sequence.",
+        "clears_when": "every header slot decodes and validates", "auto_clear": True},
+    "EMERGENCY_WAL_PREPARED_PAYLOAD_UNPROVABLE": {
+        "reason": "A PREPARED extent's payload did not match its header digest.",
+        "clears_when": "every retained extent re-verifies against its header", "auto_clear": True},
+    "EMERGENCY_WAL_DEFERRED_PAYLOAD_UNPROVABLE": {
+        "reason": "A DEFERRED extent's payload did not match its header digest.",
+        "clears_when": "every retained extent re-verifies against its header", "auto_clear": True},
+    "EMERGENCY_WAL_CAPACITY_EXHAUSTED": {
+        "reason": "A mandatory row arrived while every reserve extent was occupied.",
+        "clears_when": "at least one extent is free and the reserve is otherwise healthy",
+        "auto_clear": True},
+    "EMERGENCY_WAL_RECORD_ID_CONFLICT": {
+        "reason": "A row reused a retained record_id with different bytes.",
+        "clears_when": ("an authenticated operator confirms the conflicting writer was "
+                        "investigated, and the reserve is otherwise healthy"),
+        "auto_clear": False},
+}
+_UNKNOWN_ALARM = {
+    "reason": "Unrecognised alarm code.",
+    "clears_when": "an authenticated operator clear after the reserve is proven healthy",
+    "auto_clear": False,
+}
+
+
+def explain_alarm(code: str) -> dict[str, Any]:
+    spec = ALARM_CATALOG.get(code, _UNKNOWN_ALARM)
+    return {"code": code, "reason": spec["reason"], "clears_when": spec["clears_when"],
+            "auto_clear": bool(spec["auto_clear"]),
+            "clear_path": "AUTOMATIC_WHEN_RESOLVED" if spec["auto_clear"] else "AUTHENTICATED_OPERATOR_CLEAR"}
 
 def _fsync_parent(path: Path) -> None:
     if os.name == "nt": return
@@ -515,7 +570,138 @@ class EmergencyEvidenceWal:
 
     def status(self):
         with _cross_process_lock(self.lock_path, timeout=self.lock_timeout), self.header_path.open("rb") as handle, self.data_path.open("rb") as data:
-            return self._status_locked(self._read_validate_headers_or_alarm(handle), data)
+            result = self._status_locked(self._read_validate_headers_or_alarm(handle), data)
+            result["alarm_details"] = self._observe_alarms_locked(result.get("alarms") or [])
+            return result
+
+    # -- latched alarm explanation and clearing ---------------------------------
+    def _journal_path(self) -> Path:
+        return self.root / ALARM_JOURNAL_NAME
+
+    def _read_journal(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self._journal_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"schema": "emergency_wal_alarm_journal_v1", "alarms": {}}
+        if not isinstance(value, dict) or not isinstance(value.get("alarms"), dict):
+            return {"schema": "emergency_wal_alarm_journal_v1", "alarms": {}}
+        return value
+
+    def _write_journal(self, journal: dict[str, Any]) -> None:
+        """Best effort: journal I/O must never mask or block the reserve itself."""
+        path = self._journal_path()
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps(journal, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError:
+            try: temporary.unlink()
+            except OSError: pass
+
+    def _observe_alarms_locked(self, alarms, *, now: float | None = None) -> list[dict[str, Any]]:
+        now = time.time() if now is None else float(now)
+        journal = self._read_journal()
+        entries = journal["alarms"]
+        active = sorted({str(code) for code in alarms})
+        changed = set(active) != set(entries)
+        for code in list(entries):
+            if code not in active:
+                entries.pop(code)
+        for code in active:
+            entry = entries.setdefault(code, {"first_seen": now, "last_seen": now})
+            if now - float(entry.get("last_seen") or 0) >= ALARM_JOURNAL_MIN_REWRITE_SEC:
+                entry["last_seen"] = now
+                changed = True
+        if changed:
+            self._write_journal(journal)
+        return [{**explain_alarm(code), "first_seen": entries[code].get("first_seen"),
+                 "last_seen": max(float(entries[code].get("last_seen") or 0), now)}
+                for code in active]
+
+    def _append_alarm_audit(self, row: dict[str, Any]) -> bool:
+        try:
+            with (self.root / ALARM_AUDIT_NAME).open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+                handle.flush(); os.fsync(handle.fileno())
+            return True
+        except OSError:
+            return False
+
+    def clear_resolved_alarms(self, *, actor: str = "AUTO", reason: str = "CONDITION_RESOLVED",
+                              codes=None, operator_confirmed: bool = False,
+                              auth_method: str = "INTERNAL") -> dict[str, Any]:
+        """Move alarms whose condition is re-proven resolved to ``incident_alarms``.
+
+        The whole reserve is re-validated first (headers, every extent, both
+        control copies and their binding); any failure raises and nothing is
+        cleared.  Auto-clearable alarms clear on that proof alone; the rest
+        also need ``operator_confirmed`` from an authenticated caller.  Cleared
+        codes stay visible as historical incidents and in the audit log.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", str(actor or "")):
+            raise ValueError("EMERGENCY_WAL_CLEAR_ACTOR_INVALID")
+        reason = str(reason or "")[:240]
+        if not reason.strip():
+            raise ValueError("EMERGENCY_WAL_CLEAR_REASON_REQUIRED")
+        with _cross_process_lock(self.lock_path, timeout=self.lock_timeout), self.header_path.open("rb") as hf, self.data_path.open("rb") as data:
+            headers = self._read_validate_headers_or_alarm(hf)
+            self._validate_all_extents(data, headers)
+            controls, invalid = self._controls()
+            if invalid or len(controls) != CONTROL_COPIES:
+                return {"cleared": [], "blocked": "CONTROL_REDUNDANCY_NOT_RESTORED"}
+            latest = max(controls, key=lambda v: int(v["version"]))
+            expected = {"identity_sha256": self.identity_sha256, "capacity_extents": self.extents,
+                        **self._derived(headers)}
+            if any(latest.get(k) != v for k, v in expected.items()):
+                return {"cleared": [], "blocked": "CONTROL_HEADER_MISMATCH"}
+            active = sorted({a for c in controls for a in c.get("alarms", []) if isinstance(a, str)})
+            incidents = [a for c in controls for a in c.get("incident_alarms", []) if isinstance(a, str)]
+            requested = set(active) if codes is None else {str(code) for code in codes}
+            free = self._derived(headers)["free_extents"] > 0
+            cleared, retained = [], []
+            for code in active:
+                if code not in requested:
+                    retained.append({"code": code, "why": "NOT_REQUESTED"})
+                    continue
+                if code == "EMERGENCY_WAL_CAPACITY_EXHAUSTED" and not free:
+                    retained.append({"code": code, "why": "CONDITION_STILL_PRESENT"})
+                    continue
+                auto = ALARM_CATALOG.get(code, _UNKNOWN_ALARM)["auto_clear"]
+                if auto or operator_confirmed:
+                    cleared.append(code)
+                else:
+                    retained.append({"code": code, "why": "OPERATOR_CONFIRMATION_REQUIRED"})
+            if cleared:
+                remaining = [code for code in active if code not in cleared]
+                self._reconstruct_both_controls(headers, remaining, incidents + cleared)
+                journal = self._read_journal()
+                for code in cleared:
+                    journal["alarms"].pop(code, None)
+                self._write_journal(journal)
+            receipt = {"schema": "emergency_wal_alarm_clear_v1", "ts": time.time(),
+                       "actor": str(actor), "reason": reason,
+                       "operator_confirmed": bool(operator_confirmed),
+                       "auth_method": str(auth_method or "")[:32],
+                       "cleared": cleared, "retained": retained,
+                       "identity_sha256": self.identity_sha256,
+                       "prior_control_version": int(latest["version"])}
+            if cleared or (codes is not None and actor != "AUTO"):
+                receipt["audit_persisted"] = self._append_alarm_audit(receipt)
+            return receipt
+
+    def auto_clear_resolved_alarms(self, *, now: float | None = None) -> dict[str, Any]:
+        """Clear auto-clearable alarms that have been visible for the dwell time."""
+        now = time.time() if now is None else float(now)
+        entries = self._read_journal()["alarms"]
+        due = [
+            code for code, entry in entries.items()
+            if ALARM_CATALOG.get(code, _UNKNOWN_ALARM)["auto_clear"]
+            and isinstance(entry, dict)
+            and now - float(entry.get("first_seen") or now) >= ALARM_AUTO_CLEAR_MIN_DWELL_SEC
+        ]
+        if not due:
+            return {"cleared": [], "reason": "NO_ALARM_PAST_DWELL"}
+        return self.clear_resolved_alarms(actor="AUTO", reason="CONDITION_REPROVEN_RESOLVED", codes=due)
 
     def defer(self, *, ledger: str, record_id: str, payload: bytes):
         if (not isinstance(payload, bytes) or not 1 <= len(payload) <= MAX_ROW_BYTES

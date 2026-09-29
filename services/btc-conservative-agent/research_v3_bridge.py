@@ -15,6 +15,13 @@ import time
 from research_v3_contract import COLLECTOR_VERSION
 from research_v3_store import V3EvidenceStore
 from research_v3_contract import canonical_json, normalize_lifecycle_outcome
+from research_completeness import (
+    closed_lifecycle_completeness,
+    completeness_projection,
+    hard_vs_atr_stop_counterfactual,
+    session_label_for_ts,
+    unfilled_lifecycle_completeness,
+)
 from lifecycle_qualification_horizon import (
     canonical_path_extrema_usd,
     canonical_terminal_economics,
@@ -478,6 +485,31 @@ def _observed_context(source: Mapping[str, Any], *, phase: str) -> dict[str, Any
         "ema21": _first(nested.get("ema21"), source.get(f"ema21_at_{prefix}")),
         "ema200": _first(nested.get("ema200"), source.get(f"ema200_at_{prefix}")),
     }
+
+
+def _registry_exit_policy(lane: Any) -> dict[str, Any] | None:
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY
+    spec = ACTIVE_TILE_REGISTRY.get(str(lane or "").strip().upper())
+    policy = spec.get("exit_policy") if isinstance(spec, Mapping) else None
+    return dict(policy) if isinstance(policy, Mapping) else None
+
+
+def _closed_completeness_fields(outcome: Mapping[str, Any], position: Mapping[str, Any]) -> dict[str, Any]:
+    projected = completeness_projection(outcome)
+    if projected:
+        return projected
+    return closed_lifecycle_completeness(position, exit_sim=position.get("exit_fill_sim"))
+
+
+def _unfilled_completeness_fields(
+    source: Mapping[str, Any], *, reason: Any, touched: Any = None, created_ts: Any = None,
+) -> dict[str, Any]:
+    projected = completeness_projection(source)
+    if projected and projected.get("no_fill_ttl_outcome_reason") != "ORDER_FILLED":
+        return projected
+    return unfilled_lifecycle_completeness(
+        source, reason=reason, touched=touched, created_ts=created_ts,
+    )
 
 
 def _paper_path_receipt(rows: list[Mapping[str, Any]], *, direction: str, entry_price: Any, fill_ts: Any) -> dict[str, Any]:
@@ -1463,6 +1495,13 @@ def dual_write_terminal_paper_schedule(
         "effective_execution_mode": "PAPER_OBSERVED",
         "evidence_only": True,
     }
+    terminal_reason = str(schedule.get("terminal_reason") or "").upper()
+    if terminal_reason not in {"FILLED", "PARTIAL_FILL_SIM_RESIDUAL_CANCELLED"}:
+        row.update(_unfilled_completeness_fields(
+            order, reason=terminal_reason,
+            touched=order.get("touched_limit") if isinstance(order.get("touched_limit"), bool) else None,
+            created_ts=_first(order.get("created_ts"), order.get("order_created_ts")),
+        ))
     write = V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append("order_intent", row)
     return {
         "schema": "v3_terminal_paper_schedule_receipt_v1",
@@ -1510,6 +1549,12 @@ def dual_write_paper_fill(order: Mapping[str, Any], signal: Mapping[str, Any], p
         "observation_status": "PAPER_POSITION_OPEN", "outcome_state": "PARTIAL_FILL" if order.get("partial_fill") else "FULL_FILL",
         "effective_execution_mode": "PAPER_OBSERVED",
         "terminal": False, "ranking_eligible": False, "ranking_blocker": "EXIT_PATH_NOT_MATURED",
+        "session_label": session_label_for_ts(fill_ts),
+        "fill_revalidation_count": (
+            order.get("fill_revalidation_count")
+            if isinstance(order.get("fill_revalidation_count"), int)
+            and not isinstance(order.get("fill_revalidation_count"), bool) else None
+        ),
         **lifecycle_identity,
     })
     return {"schema": "v3_paper_fill_receipt_v1", "epoch_id": str(epoch_id), **identity,
@@ -1641,6 +1686,15 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         filled_quantity=_first(outcome.get("execution_qty"), position.get("qty")),
     ))
     economics = canonical_terminal_economics(outcome)
+    stop_axis = hard_vs_atr_stop_counterfactual(
+        segment_rows, direction=identity["executed_direction"],
+        entry_price=entry_price, fill_ts=fill_ts,
+        leverage=_first(outcome.get("leverage"), position.get("leverage")),
+        atr_abs=_first(position.get("atr14_3m"), position.get("atr14_abs_at_fill")),
+        atr_pct=_first(position.get("atr14_pct_3m"), position.get("atr14_pct_at_fill")),
+        exit_policy=_registry_exit_policy(policy["paper_policy_spec"].get("research_lane")),
+        actual_exit_price=outcome.get("exit"), actual_close_ts=close_ts,
+    )
     execution = store.append("execution", {
         "record_id": f"execution:{event_id}:paper-close", "episode_id": identity["episode_id"], "event_id": event_id,
         "execution_world": "SHOWCASE_PAPER_OBSERVED", "close_ts": _first(outcome.get("close_ts"), outcome.get("ts")),
@@ -1692,6 +1746,9 @@ def dual_write_paper_close(position: Mapping[str, Any], signal: Mapping[str, Any
         "market_segment_refs": segment_refs,
         "market_segment_coverage": segment_coverage,
         "net_pnl_usd": outcome.get("net_pnl_usd"), "exit_reason": outcome.get("exit_reason"),
+        **_closed_completeness_fields(outcome, position),
+        "stop_axis_counterfactual": stop_axis,
+        "frozen_trial": copy.deepcopy(outcome.get("frozen_trial")) if isinstance(outcome.get("frozen_trial"), Mapping) else None,
         **lifecycle_identity,
     })
     return {"schema": "v3_paper_close_receipt_v1", "epoch_id": str(epoch_id), **identity,
@@ -2078,6 +2135,16 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
         ),
         "replay_eligibility": record.get("replay_eligibility") or {},
         "market_segment_refs": segment_refs,
+        **(
+            _unfilled_completeness_fields(
+                record,
+                reason=_first(record.get("exact_reason"), record.get("terminal_provenance"), "ACCEPTED_UNFILLED"),
+                touched=record.get("touched_limit") if isinstance(record.get("touched_limit"), bool) else None,
+                created_ts=_first(record.get("created_ts"), envelope.get("signal_ts"), record.get("signal_ts")),
+            )
+            if record.get("primary_outcome") == "ACCEPTED_UNFILLED"
+            else completeness_projection(record)
+        ),
         **policy_provenance,
     }))
     return {
