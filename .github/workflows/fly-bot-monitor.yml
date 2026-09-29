@@ -3,18 +3,26 @@ name: Monitor Fly BTC bot
 on:
   schedule:
     # Fly probes /health every 15s and Railway owns the sustained-drop guard.
-    # This job is revision-drift observability, not the money-path watchdog.
+    # This job is revision-drift and safety observability, not the money-path
+    # watchdog. Failures are deduplicated by scripts/fly_monitor_run.py: a run
+    # fails only when an incident alerts or re-alerts, and one issue labelled
+    # fly-monitor-incident tracks it until recovery.
     - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
+  issues: write
+
+concurrency:
+  group: fly-bot-monitor
+  cancel-in-progress: false
 
 jobs:
-  revision-drift:
+  monitor:
     runs-on: ubuntu-slim
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
         with:
@@ -23,148 +31,24 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Resolve latest successfully deployed Fly revision
-        id: expected
+      - name: Restore incident state
+        uses: actions/cache/restore@v4
+        with:
+          path: .fly-monitor-state
+          key: fly-monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fly-monitor-state-
+      - name: Verify Fly liveness, safety, revision, readiness, and strategy progress
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import sys
-          import urllib.request
-
-          sys.path.insert(0, "scripts")
-          from fly_monitor_contract import resolve_deployed_revision
-
-          api = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}"
-          headers = {
-              "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-              "Accept": "application/vnd.github+json",
-          }
-
-          def get(path):
-              request = urllib.request.Request(api + path, headers=headers)
-              with urllib.request.urlopen(request, timeout=20) as response:
-                  return json.load(response)
-
-          runs = get("/actions/workflows/fly-bot-deploy.yml/runs?branch=master&per_page=30")["workflow_runs"]
-          deployed, in_flight = resolve_deployed_revision(
-              runs, lambda run_id: get(f"/actions/runs/{run_id}/jobs?per_page=100")["jobs"]
-          )
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"revision={deployed}\nin_flight={in_flight}\n")
-          print(f"latest successful deploy: {deployed}; in-flight deploy: {in_flight or 'none'}")
-          PY
-      - name: Verify Fly is alive, safe, and running current bot source
-        env:
-          EXPECTED_REVISION: ${{ steps.expected.outputs.revision }}
-          IN_FLIGHT_REVISION: ${{ steps.expected.outputs.in_flight }}
+          FLY_MONITOR_STATE: .fly-monitor-state/state.json
           # The deployed paper cohort is explicitly score-led. Keep the
           # monitor's registry identity on the same startup policy as Fly;
           # an unset flag would expect the retired hypothesis identity.
           SCORE_LED_PAPER_RESEARCH_ENABLED: "1"
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import re
-          import subprocess
-          import sys
-          import urllib.error
-          import urllib.request
-
-          sys.path.insert(0, "services/btc-conservative-agent")
-          import combo_pathway_config as registry
-          sys.path.insert(0, "scripts")
-          from fly_monitor_contract import (
-              require_deployed_revision,
-              require_health,
-              require_ready,
-              require_tile_registry,
-          )
-
-          required = os.environ["EXPECTED_REVISION"]
-          with urllib.request.urlopen("https://doxed-btc-bot.fly.dev/health", timeout=12) as response:
-              liveness = json.load(response)
-          health = require_health(liveness, status=response.status)
-          reported = str(health.get("source_git_rev") or health.get("git_rev") or "")
-          if not re.fullmatch(r"[0-9a-f]{7,40}", reported):
-              raise SystemExit(f"Fly returned an invalid source revision: {reported}")
-          resolved = subprocess.run(
-              ["git", "rev-parse", "--verify", f"{reported}^{{commit}}"],
-              check=False,
-              capture_output=True,
-              text=True,
-          )
-          actual = resolved.stdout.strip()
-          if resolved.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", actual):
-              raise SystemExit(f"Fly returned an invalid source revision: {actual}")
-          require_deployed_revision(
-              actual, deployed=required, in_flight=os.environ.get("IN_FLIGHT_REVISION", "")
-          )
-          if subprocess.run(
-              ["git", "merge-base", "--is-ancestor", actual, "HEAD"],
-              check=False,
-          ).returncode != 0:
-              raise SystemExit(
-                  f"Fly revision is not on master history: {actual[:12]}"
-              )
-          with urllib.request.urlopen(
-              "https://doxed-btc-bot.fly.dev/ready", timeout=12
-          ) as response:
-              ready_payload = json.load(response)
-          ready = require_ready(ready_payload, status=response.status)
-          require_tile_registry(
-              ready,
-              expected_version=registry.EXECUTION_FIX_VERSION,
-              expected_signature=registry.active_tile_registry_signature(),
-              expected_lanes=registry.ACTIVE_TILE_ORDER,
-          )
-          print(
-              f"Fly process healthy, disarmed, and current: {actual} "
-              f"(latest successful deploy {required[:12]})"
-          )
-          print(f"Strict readiness sample: {json.dumps(ready, sort_keys=True)}")
-          PY
-  strategy-progress:
-    runs-on: ubuntu-slim
-    timeout-minutes: 3
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+        run: python scripts/fly_monitor_run.py
+      - name: Save incident state
+        if: always()
+        uses: actions/cache/save@v4
         with:
-          python-version: "3.12"
-      - name: Verify strategy progress independently of process liveness
-        run: |
-          python - <<'PY'
-          import json
-          import sys
-          import urllib.request
-
-          sys.path.insert(0, "scripts")
-          from fly_monitor_contract import require_health, require_ready, require_strategy_progress
-
-          with urllib.request.urlopen(
-              "https://doxed-btc-bot.fly.dev/health", timeout=12
-          ) as response:
-              health_payload = json.load(response)
-          health = require_health(health_payload, status=response.status)
-          with urllib.request.urlopen(
-              "https://doxed-btc-bot.fly.dev/ready", timeout=12
-          ) as response:
-              ready_payload = json.load(response)
-          ready = require_ready(ready_payload, status=response.status)
-          progress = require_strategy_progress(ready)
-          incident = ready.get("strategy_progress_incident") or {}
-          diagnostics = {
-              "process_alive": health.get("process_alive"),
-              "revision": health.get("source_git_rev") or health.get("git_rev"),
-              "strategy_progress": progress,
-              "strategy_progress_incident": incident,
-              "market_data_mode": health.get("market_data_mode"),
-              "paper_only": health.get("force_paper_mode"),
-              "live_armed": health.get("live_armed"),
-          }
-          print(json.dumps(diagnostics, indent=2, sort_keys=True))
-          PY
+          path: .fly-monitor-state
+          key: fly-monitor-state-${{ github.run_id }}-${{ github.run_attempt }}
