@@ -181,7 +181,7 @@ def test_unsupported_scenario_rows_are_diagnostics_not_execution_leaders():
 
 
 def test_dashboard_labels_completion_units_and_family_cohorts_separately():
-    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    html = dashboard.app.test_client().get("/details").get_data(as_text=True)
     assert "Replay-eligible execution rows" in html
     assert "Completed paths', `${" not in html
     assert "Policy-grid families materialized" in html

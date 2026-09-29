@@ -31975,6 +31975,11 @@ HTML = """<!DOCTYPE html>
 <body>
 
 <h1>3-Factor Research Bot — Bitfinex <span style="color:#3fb950;font-size:0.55em;vertical-align:middle;">__BOT_VERSION__</span></h1>
+<div id="operatingTruth" style="margin:10px 0;padding:10px 14px;border:2px solid #d29922;border-radius:8px;background:#161b22;">
+  <div id="operatingMode" style="font-size:1.1rem;font-weight:700;color:#8b949e;">Mode: checking...</div>
+  <div id="operatingDetails" style="font-size:0.85rem;color:#c9d1d9;margin-top:4px;">Revision, pause owner, disk and transfer: checking...</div>
+  <ul id="operatingAlarms" style="margin:6px 0 0;padding-left:18px;font-size:0.85rem;"></ul>
+</div>
 <div style="margin:10px 0;padding:12px 16px;background:linear-gradient(90deg,#1a2332,#161b22);border:2px solid #58a6ff;border-radius:8px;">
   <div style="font-size:0.72rem;text-transform:uppercase;letter-spacing:.08em;color:#8b949e;">Execution/UI build</div>
   <div style="font-size:1.15rem;font-weight:700;color:#58a6ff;margin:4px 0;">__BOT_VERSION__</div>
@@ -33379,6 +33384,43 @@ DASHBOARD_JS = """(function () {
       if (stage === 'api') return 'SNAPSHOT API FAILURE';
       return 'DASHBOARD RENDER FAILURE';
     }
+    function renderOperatingTruth(truth) {
+      const modeEl = document.getElementById('operatingMode');
+      const detailEl = document.getElementById('operatingDetails');
+      const alarmEl = document.getElementById('operatingAlarms');
+      if (!modeEl || !detailEl || !alarmEl) return;
+      const op = (truth && truth.operating) || null;
+      alarmEl.innerHTML = '';
+      if (!op) {
+        modeEl.textContent = 'Mode: not available (runtime did not publish operating truth)';
+        detailEl.textContent = '';
+        return;
+      }
+      const mode = op.mode || {};
+      modeEl.textContent = mode.label || 'Mode: not available';
+      modeEl.style.color = mode.bitfinex_armed ? '#f85149' : '#3fb950';
+      detailEl.textContent = [
+        'Revision ' + (op.revision || 'not available (not published)'),
+        (op.pause || {}).label || 'Pause state: not available',
+        'Disk ' + ((op.disk || {}).label || 'not available'),
+        'Transfer ' + ((op.transfer || {}).label || 'not available'),
+      ].join(' \u00b7 ');
+      const alarms = Array.isArray(op.alarms) ? op.alarms : [];
+      if (!alarms.length) {
+        const li = document.createElement('li');
+        li.style.color = '#3fb950';
+        li.textContent = 'No WAL, disk or transfer alarms.';
+        alarmEl.appendChild(li);
+        return;
+      }
+      alarms.forEach(function (a) {
+        const li = document.createElement('li');
+        li.style.color = a.severity === 'critical' ? '#f85149' : '#d29922';
+        li.textContent = String(a.severity || '').toUpperCase() + ' ' + a.code + ': ' + (a.detail || '');
+        alarmEl.appendChild(li);
+      });
+    }
+
     async function refresh() {
       if (refreshInFlight) return;
       refreshInFlight = true;
@@ -33419,6 +33461,7 @@ DASHBOARD_JS = """(function () {
           const reason = (f && f.reason) || (d.public_sanitized ? 'owner-only field (public sanitized view)' : 'not published by this runtime');
           return 'not available: ' + reason;
         };
+        renderOperatingTruth(truth);
         safeText('collectorVersionBanner', d.collector_version || truthText('collector_version'));
         safeText('runtimeRevisionBanner', d.git_rev || d.source_git_rev || 'UNKNOWN');
         safeText('legacyCollectorVersionBanner', d.legacy_collector_version || 'none');
@@ -33431,9 +33474,10 @@ DASHBOARD_JS = """(function () {
           const cd = d.ai_cooldown_remaining_sec;
           const deepseekLabel = (truth.deepseek && truth.deepseek.label)
             || (d.public_sanitized ? 'DeepSeek status: owner-only field (public sanitized view)' : 'DeepSeek status: not available: not published by this runtime');
+          const modeLabel = (truth.operating && truth.operating.mode && truth.operating.mode.label) || 'Mode not published';
           let txt = pid
-            ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · ' + deepseekLabel
-            : 'LIVE (PID not published) · ' + deepseekLabel;
+            ? modeLabel + ' · bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · ' + deepseekLabel
+            : modeLabel + ' · PID not published · ' + deepseekLabel;
           if (d.server_ts_melbourne) txt += ' · server ' + d.server_ts_melbourne;
           else if (d.server_ts) txt += ' · server ' + formatMelbourneDateTime(d.server_ts);
           if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
@@ -37571,6 +37615,118 @@ def _dashboard_truth_fields(snap: dict, now: float) -> dict:
     }
 
 
+_DASHBOARD_DISK_ALARM_PCT = 85.0
+_DASHBOARD_TRANSFER_STALE_SEC = 3600.0
+
+
+def _dashboard_segment_shipper_status() -> dict | None:
+    raw = (os.getenv("RESEARCH_SEGMENTS_STATE_DIR") or "").strip()
+    root = Path(raw) if raw else _data_sync_volume_root() / "segment-shipper"
+    try:
+        status = json.loads((root / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return status if isinstance(status, dict) else None
+
+
+def _dashboard_seq(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def _dashboard_operating_truth(snap: dict, now: float, wal_summary: dict | None) -> dict:
+    """Mode, revision, pause owner, disk, transfer and alarms: one block for owner and public views."""
+    live_armed = (snap.get("live_armed") if "live_armed" in snap else state.get("live_armed")) is True
+    paper = _force_paper_mode_active() or not live_armed
+    mode = {
+        "paper": paper,
+        "bitfinex_armed": live_armed,
+        "label": ("PAPER" if paper else "LIVE COPY") + " — Bitfinex " + ("ARMED" if live_armed else "DISARMED"),
+    }
+    revision = snap.get("source_git_rev") or snap.get("git_rev") or None
+    if "execution_paused" in snap or "manual_admin_pause" in snap:
+        paused = bool(snap.get("execution_paused") or snap.get("manual_admin_pause"))
+        owner = snap.get("pause_owner") if paused else None
+        pause = {"available": True, "paused": paused, "owner": owner,
+                 "label": f"PAUSED (owner {owner or 'unattributed'})" if paused else "Execution running (no pause)"}
+    else:
+        pause = {"available": False, "paused": None, "owner": None,
+                 "label": "Pause state: not available (not in this snapshot)"}
+    alarms = []
+    try:
+        usage = shutil.disk_usage(_data_sync_volume_root())
+        used_pct = round(100.0 * usage.used / usage.total, 1) if usage.total else None
+    except OSError as exc:
+        used_pct, usage = None, None
+        disk = {"available": False, "used_pct": None, "free_gb": None,
+                "label": f"not available ({type(exc).__name__})"}
+    if usage is not None and used_pct is not None:
+        disk = {"available": True, "used_pct": used_pct, "free_gb": round(usage.free / 1e9, 2),
+                "label": f"{used_pct:.1f}% used, {usage.free / 1e9:.2f} GB free"}
+        if used_pct >= _DASHBOARD_DISK_ALARM_PCT:
+            alarms.append({"code": "DISK_PRESSURE", "severity": "critical",
+                           "detail": f"data volume {used_pct:.1f}% used"})
+    elif usage is not None:
+        disk = {"available": False, "used_pct": None, "free_gb": None, "label": "not available (zero-size volume)"}
+
+    shipper = _dashboard_segment_shipper_status()
+    segments_enabled = (os.getenv("RESEARCH_SEGMENTS_ENABLED") or "0").strip() == "1"
+    try:
+        coordinator = (_data_sync_bundle_public_status() or {}).get("coordinator") or {}
+    except Exception:
+        coordinator = {}
+    bundle_status = coordinator.get("status")
+    if shipper is None:
+        transfer = {
+            "available": False, "segments_enabled": segments_enabled, "bundle_status": bundle_status,
+            "label": ("no data yet (segment shipper has not written a status)" if segments_enabled
+                      else "segment shipping disabled on this runtime")
+                     + (f"; bundle producer {bundle_status}" if bundle_status else ""),
+        }
+        if segments_enabled:
+            alarms.append({"code": "TRANSFER_STATUS_UNAVAILABLE", "severity": "warning",
+                           "detail": "segment shipper status not found on the data volume"})
+    else:
+        shipped = _dashboard_seq(shipper.get("shipped_seq"))
+        acked = _dashboard_seq(shipper.get("laptop_acked_seq"))
+        try:
+            updated = float(shipper.get("updated_at"))
+        except (TypeError, ValueError):
+            updated = None
+        unacked = shipped - acked if shipped is not None and acked is not None and shipped >= acked else None
+        stale = updated is None or now - updated > _DASHBOARD_TRANSFER_STALE_SEC
+        shown = _format_melbourne_hm(updated) if updated else "never"
+        label = (f"segment {shipped if shipped is not None else 'none'} shipped, laptop ACKed "
+                 f"{acked if acked is not None else 'none yet'}")
+        if unacked is not None:
+            label += f" ({unacked} unacknowledged)"
+        label += f" · {'stale since' if stale else 'updated'} {shown}"
+        if bundle_status:
+            label += f"; bundle producer {bundle_status}"
+        transfer = {"available": True, "segments_enabled": segments_enabled, "shipped_seq": shipped,
+                    "laptop_acked_seq": acked, "unacked_segments": unacked, "updated_at": updated,
+                    "stale": stale, "bundle_status": bundle_status, "label": label}
+        if stale:
+            alarms.append({"code": "TRANSFER_STALLED", "severity": "critical",
+                           "detail": f"segment shipper has not advanced since {shown}"})
+
+    wal = wal_summary if isinstance(wal_summary, dict) else {}
+    if not wal.get("available"):
+        alarms.append({"code": "EMERGENCY_WAL_TELEMETRY_UNAVAILABLE", "severity": "warning",
+                       "detail": str(wal.get("reason") or "emergency WAL telemetry not published")})
+    for alarm in wal.get("alarms") or []:
+        if isinstance(alarm, dict) and alarm.get("code"):
+            alarms.append({"code": str(alarm["code"]), "severity": "critical",
+                           "detail": str(alarm.get("explanation") or "")})
+    return {"mode": mode, "revision": revision, "pause": pause, "disk": disk,
+            "transfer": transfer, "alarms": alarms}
+
+
 def _build_dashboard_truth(snap: dict, now: float | None = None) -> dict:
     """Server-side truth block rendered by the dashboard instead of JS fallbacks."""
     current = float(now or time.time())
@@ -37587,6 +37743,7 @@ def _build_dashboard_truth(snap: dict, now: float | None = None) -> dict:
     else:
         revalidation = {"available": False, "reason": "trade lock busy; counts retry next refresh",
                         "tiles": [], "total": None}
+    wal_summary = _dashboard_wal_summary_cached(current)
     return {
         "schema": "dashboard_truth_v1",
         "fields": _dashboard_truth_fields(snap, current),
@@ -37594,7 +37751,8 @@ def _build_dashboard_truth(snap: dict, now: float | None = None) -> dict:
             bool(snap.get("deepseek_key_present")), snap.get("last_ai_call_ts"), current, cadence,
         ),
         "fill_revalidation_cancels": revalidation,
-        "emergency_wal": _dashboard_wal_summary_cached(current),
+        "emergency_wal": wal_summary,
+        "operating": _dashboard_operating_truth(snap, current, wal_summary),
         "process_boot_time": float(process_boot_time),
         "session_start_time": float(snap.get("bot_start_time") or 0.0) or None,
         "trade_scope": snap.get("trade_scope"),
@@ -38636,6 +38794,7 @@ def _public_dashboard_truth(truth: dict) -> dict:
         "fill_revalidation_cancels": {"available": False, "reason": _PUBLIC_OWNER_ONLY_REASON,
                                       "tiles": [], "total": None},
         "emergency_wal": truth.get("emergency_wal"),
+        "operating": truth.get("operating"),
         "process_boot_time": truth.get("process_boot_time"),
         "session_start_time": truth.get("session_start_time"),
         "trade_scope": truth.get("trade_scope"),

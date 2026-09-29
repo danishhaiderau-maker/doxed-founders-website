@@ -220,7 +220,7 @@ def test_top_combos_includes_decoded_current_epoch_oos_policy_grid(monkeypatch):
 
 def test_main_dashboard_labels_current_policy_grid_and_legacy_scopes():
     client = dashboard.app.test_client()
-    response = client.get("/")
+    response = client.get("/details")
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "Top Profitable Conservative Policy Combos" in html

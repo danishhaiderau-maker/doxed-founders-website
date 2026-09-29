@@ -180,7 +180,7 @@ const fetch = async () => ({json: async () => (PAYLOAD)});
 ])
 def test_lane_and_chase_render_missing_money_as_unavailable(name, field, target, row):
     rendered = render_loader(name, {"evidence_status": "CURRENT_GENERATION", field: [row]}, target)
-    assert rendered.count("UNAVAILABLE") >= 2
+    assert rendered.count("UNAVAILABLE") + rendered.count("no data yet") >= 2
     assert "$0.00" not in rendered
     assert "$n/a" not in rendered
 

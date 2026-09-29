@@ -128,7 +128,7 @@ def test_evidence_coverage_declared_report_checksum_failure_is_unavailable(monke
 
 
 def test_evidence_coverage_navigation_and_truthful_labels_are_rendered():
-    response = dashboard.app.test_client().get("/")
+    response = dashboard.app.test_client().get("/details")
     html = response.get_data(as_text=True)
     assert response.status_code == 200
     assert '"evidence-coverage", "Evidence Coverage"' in html

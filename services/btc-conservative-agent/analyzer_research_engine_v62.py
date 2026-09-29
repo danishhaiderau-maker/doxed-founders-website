@@ -11720,6 +11720,38 @@ def lane_opportunity_capture_report(trades=None, shadow_report=None):
     return payload
 
 
+def _lane_closed_trade_stats(lane_trades):
+    """Per-tile closed-trade spread and MAE/MFE consumed by the dashboard Decision page."""
+    if lane_trades is None or lane_trades.empty:
+        return {"n": 0, "mean_net_pnl_usd": None, "stdev_net_pnl_usd": None,
+                "mae_mfe_rows": 0, "median_mae_margin_pct": None, "median_mfe_margin_pct": None}
+    pnl_col = next((c for c in ("outcome_net_pnl_usd", "net_pnl_usd") if c in lane_trades.columns), None)
+    if pnl_col is None:
+        return None
+    pnl = pd.to_numeric(lane_trades[pnl_col], errors="coerce").dropna()
+    n = int(len(pnl))
+
+    def first_col(*names):
+        for name in names:
+            if name in lane_trades.columns:
+                return pd.to_numeric(lane_trades[name], errors="coerce")
+        return pd.Series(np.nan, index=lane_trades.index)
+
+    extremes = pd.DataFrame({
+        "mae": first_col("mae_margin_pct", "max_drawdown", "max_drawdown_margin_pct"),
+        "mfe": first_col("mfe_margin_pct", "max_profit", "max_profit_margin_pct"),
+    }).dropna()
+    return {
+        "n": n,
+        "mean_net_pnl_usd": round(float(pnl.mean()), 6) if n else None,
+        "stdev_net_pnl_usd": round(float(pnl.std(ddof=1)), 6) if n >= 2 else None,
+        "mae_mfe_rows": int(len(extremes)),
+        "median_mae_margin_pct": round(float(extremes["mae"].median()), 3) if len(extremes) else None,
+        "median_mfe_margin_pct": round(float(extremes["mfe"].median()), 3) if len(extremes) else None,
+        "basis": "executed closed trades in this generation; net PnL as recorded",
+    }
+
+
 def ai_funnel_report(trades=None, session=None):
     """
     Per-lane AI approval funnel: ai_calls → approve → order_submitted → filled → closed.
@@ -11751,10 +11783,12 @@ def ai_funnel_report(trades=None, session=None):
         closed = sum(1 for r in lane_opp if r.get("event") == "CLOSED")
         would_block = sum(1 for r in lane_opp if r.get("event") in ("WOULD_BLOCK", "EXECUTION_BLOCK", "APPROVE_NOT_TRADED"))
         net_pnl = 0.0
+        closed_trade_stats = None
         if trades is not None and not trades.empty and "research_lane" in trades.columns:
             lt = trades[trades["research_lane"].astype(str).str.upper() == lane_key]
             if not lt.empty and "outcome_net_pnl_usd" in lt.columns:
                 net_pnl = float(lt["outcome_net_pnl_usd"].sum())
+            closed_trade_stats = _lane_closed_trade_stats(lt)
         funnel = {
             "lane": lane_key,
             "label": RESEARCH_LANE_LABELS.get(lane_key, lane_key),
@@ -11769,6 +11803,7 @@ def ai_funnel_report(trades=None, session=None):
             "order_to_fill_gap": max(0, order_submitted - filled),
             "approve_to_fill_pct": round(100.0 * filled / approve, 1) if approve else 0.0,
             "net_pnl_usd": round(net_pnl, 2),
+            "closed_trade_stats": closed_trade_stats,
         }
         lanes_out[lane_key] = funnel
         print(

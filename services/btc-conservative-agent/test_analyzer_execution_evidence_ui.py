@@ -241,7 +241,7 @@ def test_bounded_payload_uses_modern_diagnostic_fallback_without_promotion():
 
 
 def test_dashboard_visibly_labels_diagnostic_and_execution_evidence():
-    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    html = dashboard.app.test_client().get("/details").get_data(as_text=True)
     safe_html = dashboard.app.test_client().get("/safe-policy-genome-v3.1").get_data(as_text=True)
 
     for warning in (
