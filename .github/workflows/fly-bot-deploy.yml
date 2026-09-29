@@ -39,6 +39,7 @@ on:
           - repair-lifecycle-cursor
           - repair-execution-tail
           - expand-storage
+          - recover-memory
           - close-paper-position
           - flatten-paper-exposure
       transport_bundles:
@@ -681,6 +682,34 @@ jobs:
           sleep 5
           flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); assert len(rows)==1 and int(rows[0].get("size_gb") or 0)==20; print(json.dumps({"volume_id":rows[0]["id"],"size_gb":rows[0]["size_gb"],"state":rows[0].get("state")},sort_keys=True))'
           flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "sh -lc 'df -h /app/data; df -i /app/data'"
+
+  recover-memory:
+    # A boot-time OOM loop cannot answer the authenticated pause pre-step, so
+    # this dispatch-only job proves the durable paper boundary directly on the
+    # guest (paper-only, disarmed, zero positions/orders) and changes only VM
+    # memory. It never deploys source, flattens, or touches exchange exposure.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-memory'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Prove durable paper boundary and raise VM memory to 4096 MB
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          machines="$(flyctl machines list --app doxed-btc-bot --json)"
+          readarray -t fields < <(printf '%s' "$machines" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1, f"expected exactly one active machine, found {len(active)}"; m=active[0]; guest=(m.get("config") or {}).get("guest") or {}; mem=int(guest.get("memory_mb") or 0); assert mem in (2048, 4096), f"refusing unexpected memory {mem}"; print(m["id"]); print(mem)')
+          machine_id="${fields[0]}"
+          current_mb="${fields[1]}"
+          echo "machine=${machine_id} memory_mb=${current_mb}"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "python -c 'from pathlib import Path; import json,os; d=json.loads(Path(\"/app/data/runtime/paper_lifecycle_v1.json\").read_text(encoding=\"utf-8\")); c=json.loads(Path(\"/app/data/runtime/config-7002.json\").read_text(encoding=\"utf-8\")); assert d.get(\"paper_only\") is True and d.get(\"live_armed\") is False; assert d.get(\"positions\")==[] and d.get(\"pending_orders\")==[]; assert c.get(\"live_armed\") is not True and c.get(\"bitfinex_live_enabled\") is not True; print(json.dumps({\"schema\":\"recover_memory_boundary_v1\",\"runtime_source_git_rev\":os.getenv(\"SOURCE_GIT_REV\"),\"paper_only\":True,\"live_armed\":False,\"open_positions\":0,\"pending_orders\":0},sort_keys=True))'"
+          if [ "$current_mb" != "4096" ]; then
+            flyctl machine update "$machine_id" --app doxed-btc-bot --vm-memory 4096 --yes
+          fi
+          sleep 10
+          flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; m=active[0]; g=(m.get("config") or {}).get("guest") or {}; assert int(g.get("memory_mb") or 0)==4096, f"memory not raised: {g}"; print(json.dumps({"machine_id":m["id"],"state":m.get("state"),"memory_mb":g.get("memory_mb"),"cpu_kind":g.get("cpu_kind"),"cpus":g.get("cpus"),"image":(m.get("config") or {}).get("image")},sort_keys=True))'
 
   close-paper-position:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'close-paper-position'
