@@ -52,6 +52,19 @@ else
   echo "[fly-entrypoint] BOT_CONTROL_SECRET missing -> relay-state publisher disabled."
 fi
 
+# Sealed research-segment shipper (shadow mode, pruning not implemented).
+# Separate niced process: no trade lock, no HTTP, no bot import. Default OFF.
+if [ "${RESEARCH_SEGMENTS_ENABLED:-0}" = "1" ]; then
+  SEGMENT_LOG="$DATA_DIR/segment-shipper.log"
+  if [ -f "$SEGMENT_LOG" ] && [ "$(wc -c < "$SEGMENT_LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    : > "$SEGMENT_LOG"
+  fi
+  echo "[fly-entrypoint] starting research segment shipper (shadow, niced)..."
+  nice -n 10 python /app/research_segment_shipper.py >> "$SEGMENT_LOG" 2>&1 &
+else
+  echo "[fly-entrypoint] RESEARCH_SEGMENTS_ENABLED!=1 -> segment shipper disabled."
+fi
+
 echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground, auto-restart loop)..."
 export PYTHONUNBUFFERED=1
 BOT_LOG="$DATA_DIR/bot.log"

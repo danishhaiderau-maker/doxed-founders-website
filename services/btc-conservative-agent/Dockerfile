@@ -53,6 +53,8 @@ RUN python -c "import research.runtime_baseline_declaration"
 RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
 RUN python -c "import data_sync_quarantine_receipt"
 RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker"
+# Optional shadow segment shipper (RESEARCH_SEGMENTS_ENABLED=1) must be importable.
+RUN python -c "import research_segment_format, research_segment_store, research_segment_shipper"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data
