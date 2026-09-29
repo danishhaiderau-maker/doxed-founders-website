@@ -41391,6 +41391,67 @@ def _data_sync_generation_matches(stat, *, size: int, mtime_ns: int, inode: int)
     )
 
 
+_DATA_SYNC_STRICT_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024
+_DATA_SYNC_STRICT_SNAPSHOT_TTL_SEC = 6 * 3600
+
+
+def _data_sync_strict_snapshot(
+    source: Path, root: Path, inventory_sha256: str, relpath: str,
+    size: int, mtime_ns: int, inode: int,
+) -> Path | None:
+    """Freeze one exact strict generation so every chunk reads identical bytes.
+
+    The copy is created only from a fenced whole-file read whose before/after
+    identity equals the manifest row; otherwise None (the caller keeps 409).
+    Snapshots are keyed by generation and identity, never by path alone.
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", str(inventory_sha256 or "")):
+        return None
+    if not 0 < int(size) <= _DATA_SYNC_STRICT_SNAPSHOT_MAX_BYTES:
+        return None
+    key = hashlib.sha256(
+        f"{relpath}\0{int(size)}\0{int(mtime_ns)}\0{int(inode)}".encode("utf-8")
+    ).hexdigest()
+    generation_dir = root / inventory_sha256
+    target = generation_dir / f"{key[:40]}.bin"
+    try:
+        if target.is_file() and not target.is_symlink() and target.stat().st_size == int(size):
+            return target
+    except OSError:
+        pass
+    before = source.stat()
+    if not _data_sync_generation_matches(before, size=size, mtime_ns=mtime_ns, inode=inode):
+        return None
+    with source.open("rb") as handle:
+        payload = handle.read(int(size) + 1)
+    after = source.stat()
+    if len(payload) != int(size) or not _data_sync_generation_matches(
+        after, size=size, mtime_ns=mtime_ns, inode=inode,
+    ):
+        return None
+    generation_dir.mkdir(parents=True, exist_ok=True)
+    temporary = generation_dir / f".{uuid.uuid4().hex}.tmp"
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    cutoff = time.time() - _DATA_SYNC_STRICT_SNAPSHOT_TTL_SEC
+    for stale in root.iterdir():
+        try:
+            if (stale.name != inventory_sha256 and stale.is_dir() and not stale.is_symlink()
+                    and stale.stat().st_mtime < cutoff):
+                for item in stale.iterdir():
+                    item.unlink(missing_ok=True)
+                stale.rmdir()
+        except OSError:
+            continue
+    return target
+
+
 def _data_sync_consistency_mode(path: Path) -> str:
     """Declare only proven append-only files eligible for fixed-prefix reads.
 
@@ -45491,10 +45552,37 @@ def api_data_sync_file():
             if offset > published_boundary:
                 return jsonify({"error": "offset beyond published prefix", "size": published_boundary}), 416
             limit = min(limit, max(0, published_boundary - offset))
-        elif None not in (expected_size, expected_mtime, expected_inode) and not _data_sync_generation_matches(
-            before, size=int(expected_size), mtime_ns=int(expected_mtime), inode=int(expected_inode),
-        ):
-            return jsonify({"error": "file generation changed after manifest"}), 409
+        elif None not in (expected_size, expected_mtime, expected_inode):
+            size, mtime_ns, inode = int(expected_size), int(expected_mtime), int(expected_inode)
+            relpath = _data_sync_relpath(path)
+            # Multi-chunk strict downloads read a frozen copy of the manifest
+            # generation so a live writer cannot change bytes between chunks.
+            snapshot = None
+            if offset > 0 or size > limit:
+                snapshot = _data_sync_strict_snapshot(
+                    path, _data_sync_inventory_work_root() / "strict-snapshots",
+                    ack_inventory_sha256, relpath, size, mtime_ns, inode,
+                )
+            if snapshot is not None:
+                if offset > size:
+                    return jsonify({"error": "offset beyond current file size", "size": size}), 416
+                with snapshot.open("rb") as handle:
+                    handle.seek(offset)
+                    payload = handle.read(min(limit, size - offset))
+                response = make_response(payload)
+                response.headers["Content-Type"] = "application/octet-stream"
+                response.headers["X-Data-Path"] = relpath
+                response.headers["X-Data-Offset"] = str(offset)
+                response.headers["X-Data-Size"] = str(size)
+                response.headers["X-Data-Mtime-Ns"] = str(mtime_ns)
+                response.headers["X-Data-Inode"] = str(inode)
+                response.headers["X-Chunk-Sha256"] = hashlib.sha256(payload).hexdigest()
+                response.headers["X-Data-Published-Size"] = str(size)
+                response.headers["X-Data-Eof"] = "1" if offset + len(payload) >= size else "0"
+                _data_sync_register_served_ack_generation(ack_inventory_sha256, relpath, size, mtime_ns)
+                return response
+            if not _data_sync_generation_matches(before, size=size, mtime_ns=mtime_ns, inode=inode):
+                return jsonify({"error": "file generation changed after manifest"}), 409
         if offset > before.st_size:
             return jsonify({"error": "offset beyond current file size", "size": before.st_size}), 416
         with path.open("rb") as handle:
