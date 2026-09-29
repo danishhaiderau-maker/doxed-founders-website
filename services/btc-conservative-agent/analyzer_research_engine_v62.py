@@ -6345,6 +6345,8 @@ def _load_trade_outcomes_v2():
     except Exception as e:
         print(f"⚠️ trade_outcome read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
         return pd.DataFrame()
+    contaminated = relay_interference_trade_ids(rows)
+    rows = [r for r in rows if str(r.get("trade_id") or "").strip() not in contaminated]
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
 
@@ -9127,8 +9129,15 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(
                 session, trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
             )
-        trades, cohort_quarantine = split_current_tile_cohort(trades, session)
+        trades, cohort_quarantine = split_current_tile_cohort(
+            trades, session, relay_interference=relay_interference_trade_ids(),
+        )
         write_trade_cohort_quarantine(cohort_quarantine)
+        if cohort_quarantine["relay_interference"]["rows"]:
+            print(
+                f"   Relay interference: {cohort_quarantine['relay_interference']['rows']} phantom-cancelled "
+                f"paper fills flagged {cohort_quarantine['relay_interference']['by_lane']} {PIPELINE_ENFORCEMENT_TAG}"
+            )
         if cohort_quarantine["rows"]:
             print(
                 f"   Current tile cohort: quarantined {cohort_quarantine['rows']} trade rows "
@@ -11761,23 +11770,88 @@ def _lane_closed_trade_stats(lane_trades):
 
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 _CURRENT_TRADE_COHORT_QUARANTINE: dict = {}
+RELAY_INTERFERENCE_REASON = "RELAY_INTERFERENCE_PHANTOM_CANCEL"
+PHANTOM_CANCEL_EXIT_REASON = "PHANTOM_CANCEL_BY_RELAY"
 
 
-def split_current_tile_cohort(trades, session=None, tile_lanes=None):
+def _registry_lane_for_trade_id(trade_id) -> str:
+    prefix = str(trade_id or "").split("-", 1)[0]
+    for lane, spec in (globals().get("ACTIVE_TILE_REGISTRY") or {}).items():
+        if prefix and str(spec.get("id_prefix") or "") == prefix:
+            return str(lane).upper()
+    return ""
+
+
+def relay_interference_trade_ids(outcome_rows=None) -> dict:
+    """Paper fills a relay zeroed via phantom-cancel on lanes it never owned.
+
+    A phantom-cancel is only legitimate on a registered relay-eligible,
+    non-paper-only tile. On any other lane it is relay interference: the
+    fill's real outcome was overwritten, so the trade is contamination.
+    Source ledgers are never modified; callers exclude or flag these IDs.
+    """
+    rows = _load_jsonl_rows(TRADE_OUTCOME_FILE) if outcome_rows is None else outcome_rows
+    registry = globals().get("ACTIVE_TILE_REGISTRY") or {}
+    found = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if PHANTOM_CANCEL_EXIT_REASON not in (row.get("exit_reason"), row.get("outcome_exit_reason")):
+            continue
+        trade_id = str(row.get("trade_id") or "").strip()
+        if not trade_id:
+            continue
+        lane = str(row.get("research_lane") or "").strip().upper() or _registry_lane_for_trade_id(trade_id)
+        spec = registry.get(lane) or {}
+        if spec and spec.get("platform_relay_eligible") and not spec.get("paper_only"):
+            continue
+        found[trade_id] = {
+            "trade_id": trade_id,
+            "research_lane": lane or "UNLABELLED",
+            "ts": str(row.get("ts") or ""),
+            "reason": RELAY_INTERFERENCE_REASON,
+        }
+    return found
+
+
+def _relay_interference_summary(relay_interference, marked_in_trades: int) -> dict:
+    by_lane = {}
+    for item in (relay_interference or {}).values():
+        by_lane[item["research_lane"]] = by_lane.get(item["research_lane"], 0) + 1
+    return {
+        "reason": RELAY_INTERFERENCE_REASON,
+        "rows": len(relay_interference or {}),
+        "in_trade_cohort": int(marked_in_trades),
+        "by_lane": dict(sorted(by_lane.items())),
+        "source": TRADE_OUTCOME_FILE,
+        "basis": "PHANTOM_CANCEL_BY_RELAY on paper-only / relay-ineligible lanes; "
+                 "excluded from outcome analysis and flagged in the funnel; ledgers unmodified",
+        "rows_detail": sorted((relay_interference or {}).values(), key=lambda r: (r["ts"], r["trade_id"])),
+    }
+
+
+def split_current_tile_cohort(trades, session=None, tile_lanes=None, relay_interference=None):
     """Return (current cohort, quarantine summary) for executed trade rows.
 
     The current cohort is registry tile lanes from the runtime's current
     collection epoch. Everything else (Continuous benchmark rows, retired or
-    unknown lanes, prior epochs) is excluded from every current-cohort report.
-    Rows without an epoch stamp are kept because they cannot be proven prior.
+    unknown lanes, prior epochs, relay-interference contamination) is excluded
+    from every current-cohort report. Rows without an epoch stamp are kept
+    because they cannot be proven prior.
     """
     tiles = {str(lane).upper() for lane in (CURRENT_RESEARCH_LANES if tile_lanes is None else tile_lanes)}
-    empty = {"rows": 0, "by_reason": {}, "by_lane": {}, "net_pnl_usd": 0.0, "rows_detail": []}
+    empty = {"rows": 0, "by_reason": {}, "by_lane": {}, "net_pnl_usd": 0.0, "rows_detail": [],
+             "relay_interference": _relay_interference_summary(relay_interference, 0)}
     if trades is None or getattr(trades, "empty", True) or "research_lane" not in trades.columns:
         return trades, empty
     lane = trades["research_lane"].fillna("").astype(str).str.strip().str.upper()
     reason = pd.Series("", index=trades.index, dtype=object)
     reason[~lane.isin(tiles)] = "NON_REGISTRY_LANE"
+    marked_interference = 0
+    if relay_interference and "trade_id" in trades.columns:
+        contaminated = trades["trade_id"].fillna("").astype(str).isin(set(relay_interference))
+        reason[contaminated] = RELAY_INTERFERENCE_REASON
+        marked_interference = int(contaminated.sum())
     current_epoch = str((session or {}).get("collector_v22_epoch_id") or "").strip()
     if current_epoch and "epoch_id" in trades.columns:
         row_epoch = trades["epoch_id"].fillna("").astype(str).str.strip()
@@ -11802,6 +11876,7 @@ def split_current_tile_cohort(trades, session=None, tile_lanes=None):
         if len(excluded) else 0.0,
         "current_epoch_id": current_epoch or None,
         "rows_detail": detail,
+        "relay_interference": _relay_interference_summary(relay_interference, marked_interference),
     }
     return trades[reason == ""].copy(), summary
 
@@ -11862,6 +11937,10 @@ def _session_trade_scope(trades, tile_lanes):
     by_lane = unique["research_lane"].fillna("UNLABELLED").astype(str).str.upper().value_counts().to_dict()
     tiles = {str(lane).upper() for lane in tile_lanes}
     quarantine = {k: v for k, v in _CURRENT_TRADE_COHORT_QUARANTINE.items() if k != "rows_detail"}
+    if isinstance(quarantine.get("relay_interference"), dict):
+        quarantine["relay_interference"] = {
+            k: v for k, v in quarantine["relay_interference"].items() if k != "rows_detail"
+        }
     return {
         "session_trade_rows": int(len(unique)),
         "tile_trade_rows": int(sum(int(n) for lane, n in by_lane.items() if lane in tiles)),
@@ -11889,6 +11968,9 @@ def ai_funnel_report(trades=None, session=None):
 
     lanes_out = {}
     cohort_pnl = tile_cohort_pnl(trades, BENCHMARK_LANES)
+    interference_by_lane = (
+        (_CURRENT_TRADE_COHORT_QUARANTINE.get("relay_interference") or {}).get("by_lane") or {}
+    )
     for lane_key in BENCHMARK_LANES:
         lane_ai = [r for r in ai_rows if str(r.get("research_lane") or "").upper() == lane_key]
         lane_opp = [r for r in opp_rows if str(r.get("lane") or "").upper() == lane_key]
@@ -11915,6 +11997,8 @@ def ai_funnel_report(trades=None, session=None):
             "approve": approve,
             "order_submitted": order_submitted,
             "filled": filled,
+            "relay_interference_fills": int(interference_by_lane.get(lane_key, 0)),
+            "filled_uncontaminated": max(0, filled - int(interference_by_lane.get(lane_key, 0))),
             "closed": closed,
             "would_block_or_not_traded": would_block,
             "approve_to_order_gap": max(0, approve - order_submitted),

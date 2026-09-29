@@ -31,11 +31,18 @@ def main() -> None:
     assert 'body.get("trade_id")' in body
     assert '"trade_id is required"' in body
 
-    # Idempotency — both the "already CLOSED" and "not in open_positions"
-    # branches return ok without re-writing.
+    # Idempotency — only a trade that was actually phantom-cancelled returns
+    # ok; closed/unknown trades are refused instead of reported cancelled.
     assert "already_cancelled" in body
     assert "Phantom-cancel idempotent skip" in body
-    assert "Phantom-cancel no-op" in body
+    assert "Phantom-cancel no-op" not in body
+    assert '"PHANTOM_CANCEL_TRADE_ALREADY_CLOSED"' in body
+    assert '"PHANTOM_CANCEL_TRADE_NOT_FOUND"' in body
+
+    # Registry / signed-intent gate runs before any mutation.
+    gate_at = body.index("refusal = phantom_cancel_refusal(pos, trade_id)")
+    assert gate_at < body.index("def live_mutator():")
+    assert gate_at < body.index("_commit_paper_lifecycle_transition(")
 
     # Real-fill guard — refuses to cancel a position that has any real
     # Bitfinex marker.

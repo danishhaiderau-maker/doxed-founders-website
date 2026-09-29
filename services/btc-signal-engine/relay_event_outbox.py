@@ -490,7 +490,11 @@ class RelayEventOutbox:
                 return False
             before_acks = _deep_copy(self._acks)
             del self._pending[event_id]
-            self._acks.append({**_deep_copy(ack), "acknowledged_at_unix": time.time()})
+            self._acks.append({
+                **_deep_copy(ack),
+                "acknowledged_at_unix": time.time(),
+                "intent_created": receipt.get("intentCreated") is True,
+            })
             self._acks = self._acks[-self.ack_limit:]
             try:
                 self._persist(state_payload=state_payload)
@@ -510,6 +514,14 @@ class RelayEventOutbox:
         if woke:
             self._wake.clear()
         return woke
+
+    def acknowledged_events(self, trade_id: str) -> list[dict]:
+        """Durable platform acknowledgements for one trade (bounded ack window)."""
+        with self._lock:
+            return [
+                _deep_copy(row) for row in self._acks
+                if str(row.get("trade_id") or "") == str(trade_id or "")
+            ]
 
     def pending_count(self) -> int:
         with self._lock:

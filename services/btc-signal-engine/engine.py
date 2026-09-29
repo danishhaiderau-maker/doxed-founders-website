@@ -40176,6 +40176,56 @@ def api_emergency_wal_clear_alarms():
 
 PHANTOM_CANCEL_REASON = "PHANTOM_CANCEL_BY_RELAY"
 PHANTOM_CANCEL_MAX_BODY_LEN = 4096
+PHANTOM_CANCEL_ENTRY_EVENTS = frozenset({"ORDER_PLACED", "LIMIT_UPDATED"})
+
+
+def phantom_cancel_refusal(pos, trade_id: str):
+    """Return (code, detail) when a relay may not zero this paper trade, else None.
+
+    Only a registered, relay-eligible, non-paper-only tile whose entry was
+    durably acknowledged by the platform with a created copy intent (relay
+    armed at entry) can be phantom-cancelled. Anything unproven is refused.
+    """
+    lane = _normalize_lane_key(pos) if isinstance(pos, dict) else ""
+    spec = ACTIVE_TILE_REGISTRY.get(lane) or {}
+    if not spec or spec.get("is_benchmark"):
+        return "PHANTOM_CANCEL_NON_REGISTRY_LANE", f"lane {lane or 'MISSING'} is not a registered tile"
+    if (
+        spec.get("paper_only")
+        or not spec.get("platform_relay_eligible")
+        or lane not in PLATFORM_RELAY_ELIGIBLE_LANES
+    ):
+        return "PHANTOM_CANCEL_RELAY_INELIGIBLE_LANE", f"lane {lane} is paper-only / relay-ineligible"
+    if not str(trade_id).startswith(str(spec.get("id_prefix") or "INVALID") + "-"):
+        return "PHANTOM_CANCEL_TRADE_NAMESPACE_MISMATCH", f"trade_id outside {lane} namespace"
+    if pos.get("relay_eligible") is False:
+        return "PHANTOM_CANCEL_POSITION_NOT_RELAY_ELIGIBLE", "position was created relay-ineligible"
+    outbox = globals().get("_relay_event_outbox")
+    acks = outbox.acknowledged_events(trade_id) if outbox is not None else []
+    if not any(
+        str(ack.get("event_type") or "") in PHANTOM_CANCEL_ENTRY_EVENTS
+        and ack.get("intent_created") is True
+        for ack in acks
+    ):
+        return "PHANTOM_CANCEL_NO_SIGNED_RELAY_INTENT", "no acknowledged signed relay entry intent created after arming"
+    return None
+
+
+def _refuse_phantom_cancel(trade_id, code, detail, caller_reason, lane=None, status=403):
+    logger.error(
+        "[ADMIN] Phantom-cancel REFUSED trade_id=%s code=%s lane=%s detail=%s caller_reason=%s "
+        "[PAPER EVIDENCE PRESERVED]",
+        trade_id, code, lane, detail, caller_reason or "<none>",
+    )
+    return jsonify({
+        "ok": False,
+        "refused": True,
+        "error": code,
+        "detail": detail,
+        "trade_id": trade_id,
+        "research_lane": lane,
+        "timestamp": utc_iso(),
+    }), status
 
 
 @app.route('/api/reconcile/phantom-cancel', methods=['POST'])
@@ -40184,13 +40234,15 @@ def api_reconcile_phantom_cancel():
 
     Body:
       {
-        "trade_id": "<cont-...>",          # required
+        "trade_id": "<tile-prefix>-...",   # required
         "reason":   "<human-readable>"      # optional, audited
       }
 
-    Idempotent: a second call for a trade_id that is already CLOSED returns
-    200 with ``already_cancelled=true`` and does NOT double-write the trade
-    outcome or re-emit the relay event.
+    Idempotent: a second call for a trade_id that was already phantom-cancelled
+    returns 200 with ``already_cancelled=true`` and does NOT double-write the
+    trade outcome or re-emit the relay event. Fail closed: paper-only /
+    relay-ineligible lanes and trades without a signed relay intent created
+    after arming get 403; normally closed trades 409; unknown trades 404.
     """
     raw_body = request.get_data(as_text=True) or ""
     if len(raw_body) > PHANTOM_CANCEL_MAX_BODY_LEN:
@@ -40212,8 +40264,7 @@ def api_reconcile_phantom_cancel():
         ]
         already_closed = [
             pos for pos in matches
-            if pos.get("status") == "CLOSED"
-            or pos.get("exit_reason") == PHANTOM_CANCEL_REASON
+            if pos.get("exit_reason") == PHANTOM_CANCEL_REASON
         ]
         live_matches = [
             pos for pos in matches
@@ -40235,23 +40286,31 @@ def api_reconcile_phantom_cancel():
             })
 
     if not live_matches:
-        # Idempotency case 2 — trade_id is not in open_positions at all.
-        # Could be: (a) already rotated out of the in-memory list, or
-        # (b) never existed. Either way, return ok so Railway's caller is
-        # not blocked by a stale state on Fly. Audit the not-found.
-        logger.warning(
-            "[ADMIN] Phantom-cancel no-op trade_id=%s not in open_positions "
-            "(caller_reason=%s) — returning ok for idempotency",
-            trade_id,
-            caller_reason or "<none>",
+        # Idempotency case 2 — not open. Only a trade that was actually
+        # phantom-cancelled earlier is acknowledged; a normally closed or
+        # unknown trade is refused rather than reported as cancelled.
+        with trade_lock:
+            closed_rows = [
+                row for row in trades
+                if isinstance(row, dict) and str(row.get("trade_id") or "") == trade_id
+            ]
+        if any(row.get("exit_reason") == PHANTOM_CANCEL_REASON for row in closed_rows):
+            return jsonify({
+                "ok": True,
+                "already_cancelled": True,
+                "cancelled_trade_id": trade_id,
+                "timestamp": utc_iso(),
+            })
+        if closed_rows:
+            return _refuse_phantom_cancel(
+                trade_id, "PHANTOM_CANCEL_TRADE_ALREADY_CLOSED",
+                "trade closed by its own exit; nothing to cancel", caller_reason,
+                lane=_normalize_lane_key(closed_rows[-1]), status=409,
+            )
+        return _refuse_phantom_cancel(
+            trade_id, "PHANTOM_CANCEL_TRADE_NOT_FOUND",
+            "trade_id is not an open or closed paper trade", caller_reason, status=404,
         )
-        return jsonify({
-            "ok": True,
-            "already_cancelled": True,
-            "cancelled_trade_id": trade_id,
-            "note": "trade_id not currently open; treated as already cancelled",
-            "timestamp": utc_iso(),
-        })
 
     if len(live_matches) > 1:
         # Defensive — should never happen (trade_id is unique), but refuse
@@ -40271,6 +40330,12 @@ def api_reconcile_phantom_cancel():
         )
 
     pos = live_matches[0]
+
+    refusal = phantom_cancel_refusal(pos, trade_id)
+    if refusal is not None:
+        return _refuse_phantom_cancel(
+            trade_id, refusal[0], refusal[1], caller_reason, lane=_normalize_lane_key(pos),
+        )
 
     # Validation guard: refuse to cancel a position that has any marker of a
     # real Bitfinex fill against it. The paper bot does not currently track
