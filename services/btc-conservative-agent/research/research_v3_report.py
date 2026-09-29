@@ -1330,6 +1330,16 @@ def build_safe_policy_genome_v3_report(data_dir=".", report_dir=".", *, candidat
         "blockers": report_blockers,
         "note": "Number one is selected only among policies passing every integrity, conservative-execution, sealed-OOS, drawdown, CVaR, liquidation, stability, multiple-testing and regime gate.",
     }
+    try:
+        from research_completeness_report import build_research_completeness_report
+        report["research_completeness"] = build_research_completeness_report(
+            data_dir, lifecycles=lifecycles, decisions=decisions,
+        )
+    except Exception as exc:  # the completeness view must never hide the main report
+        report["research_completeness"] = {
+            "schema": "research_completeness_report_v1",
+            "status": "ERROR", "error": type(exc).__name__,
+        }
     if incident_input.enabled:
         report["runtime_identity_incident_input"] = incident_input.provenance()
         report["runtime_identity_incident_coverage"] = {

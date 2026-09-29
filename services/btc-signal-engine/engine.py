@@ -220,6 +220,16 @@ from collector_v22_provisional import (
 )
 from research_v3_bridge import dual_write_lane_decision, dual_write_lane_entry_resolution, dual_write_paper_close, dual_write_paper_fill, dual_write_paper_order_intent, dual_write_terminal_paper_schedule, paper_policy_identity_for_sources, reconcile_overdue_expected_order_decisions, write_pre_entry_evidence_failure
 from opportunity_capture_v22 import analyze_v22_events
+from research_completeness import (
+    closed_lifecycle_completeness,
+    completeness_projection,
+    replay_tick_depth,
+    shadow_row_completeness,
+    track_path_extreme_timestamps,
+    unfilled_lifecycle_completeness,
+)
+from frozen_policy_trial import FrozenPolicyTrial
+_FROZEN_POLICY_TRIAL = FrozenPolicyTrial.from_env()
 from process_singleton import ProcessSingletonError, acquire_process_singleton
 from research.platform_relay_evidence import (
     _load_offline_sim_jsonl_revisions as _pure_load_offline_sim_jsonl_revisions,
@@ -4867,6 +4877,7 @@ def _apply_position_exits(pos: dict, price: float, now: float = None):
     pos["max_pnl_pct"] = max(pos.get("max_pnl_pct", 0.0), unreal_pct)
     if pos.get("max_drawdown", 0) is None or unreal_pct < pos.get("max_drawdown", 0):
         pos["max_drawdown"] = min(pos.get("max_drawdown", 0.0), unreal_pct)
+    track_path_extreme_timestamps(pos, unreal_pct, now)
     entry_ts = float(pos.get("entry_ts") or 0)
     if entry_ts > 0:
         cur_candle = int((now - entry_ts) // CANDLE_INTERVAL_SEC) + 1
@@ -16043,6 +16054,7 @@ def log_trade_lifecycle(trade_row: dict, pos: dict, master: dict = None):
         "research_lane": master.get("research_lane") or trade_row.get("research_lane"),
         "ai_prob": trade_row.get("ai_win_prob"),
         "bot_version": EXECUTION_FIX_VERSION,
+        **completeness_projection(trade_row),
     }
     _safe_append_jsonl(TRADE_LIFECYCLE_FILE, row, label="TRADE_LIFECYCLE")
 
@@ -18227,6 +18239,8 @@ def finalize_shadow_lane_collecting(study_id: str, buf: dict):
         "start_price": buf.get("start_price") or outcome.get("start_price"),
         "max_chases": buf.get("max_chases"),
         "fill_at_limit": bool(buf.get("fill_at_limit")),
+        **shadow_row_completeness(buf),
+        "frozen_trial": _FROZEN_POLICY_TRIAL.assignment(lane, observed_ts=buf.get("start_ts")),
         **outcome,
     }
     _safe_append_jsonl(SHADOW_LANE_OUTCOME_FILE, row, label=f"SHADOW_COLLECT_{lane}")
@@ -23098,6 +23112,8 @@ def process_pending_orders():
         with trade_lock:
             if order not in pending_orders or order.get("status") != "PENDING":
                 continue
+            order["limit_touch_count"] = int(order.get("limit_touch_count") or 0) + 1
+            order.setdefault("limit_touch_first_ts", time.time())
             tid = str(order.get("trade_id") or "")
             if not tid or tid in fill_handoff_trade_ids or any(
                 isinstance(pos, dict) and str(pos.get("trade_id") or "") == tid
@@ -23121,6 +23137,7 @@ def process_pending_orders():
                 latest_ai_ts=latest_ai_ts_for_fill,
                 current_context=fill_context_for_revalidation,
             )
+            order["fill_revalidation_count"] = int(order.get("fill_revalidation_count") or 0) + 1
             order["fill_time_revalidation"] = {
                 "performed": True, "checked_ts": utc_iso(),
                 "admission_view": (
@@ -23261,6 +23278,7 @@ def fill_order(order):
     if direction not in ["LONG", "SHORT"]:
         raise Exception("Invalid signal direction")
     candidate_pos = _build_open_position(order, signal, ai)
+    candidate_pos["fill_revalidation_count"] = int(order.get("fill_revalidation_count") or 0)
     frozen_paper_identity = paper_policy_identity_for_sources(
         _collector_v22_epoch_id(),
         order,
@@ -26246,6 +26264,18 @@ def _record_expired_order(source: dict, reason: str):
                 _canonical_source_order_market_evidence.get(str(tid)) or {}
             )
         ),
+        **unfilled_lifecycle_completeness(
+            source, reason=reason,
+            touched=(
+                fill_metrics.get("touched_limit")
+                if isinstance(fill_metrics.get("touched_limit"), bool) else None
+            ),
+            created_ts=created,
+        ),
+        "frozen_trial": _FROZEN_POLICY_TRIAL.assignment(
+            source.get("research_lane") or master.get("research_lane"),
+            observed_ts=created,
+        ),
     }
     relay_terminal_event = (
         "ORDER_EXPIRED"
@@ -27478,6 +27508,11 @@ def close_position(pos: dict, exit_reason: str):
             **{f"cfg_{k}": v for k, v in get_exit_config_snapshot(pos.get("research_lane")).items() if not isinstance(v, (list, tuple))},
             "cfg_trail_ladder_json": json.dumps(_position_trail_ladder(pos)),
             "exit_config_json": json.dumps(get_exit_config_snapshot(pos.get("research_lane"))),
+            **closed_lifecycle_completeness(pos, exit_sim=exit_sim),
+            "frozen_trial": _FROZEN_POLICY_TRIAL.assignment(
+                pos.get("research_lane") or master.get("research_lane"),
+                observed_ts=pos.get("entry_ts"),
+            ),
         }
     def target_mutator(target):
         matches = [row for row in target.get("positions") or [] if str(row.get("trade_id") or "") == str(trade_id)]
@@ -39545,6 +39580,66 @@ def api_repair_execution_funnel_jsonl():
     return jsonify(receipt)
 
 
+def _admin_auth_method() -> str:
+    if _BOT_ADMIN_TOKEN and request.headers.get("X-Bot-Admin-Token") == _BOT_ADMIN_TOKEN:
+        return "ADMIN_TOKEN_HEADER"
+    if _BOT_ADMIN_TOKEN and request.cookies.get("bot_admin_token") == _BOT_ADMIN_TOKEN:
+        return "ADMIN_TOKEN_COOKIE"
+    return "DIRECT_LOCAL_CONTROL"
+
+
+@app.route('/api/admin/emergency-wal/clear-alarms', methods=['POST'])
+def api_emergency_wal_clear_alarms():
+    """Clear latched emergency-WAL alarms whose condition is re-proven resolved.
+
+    The WAL re-validates the whole reserve before clearing anything; alarms
+    that are not auto-clearable additionally need ``operator_confirmed``.
+    Every request is persisted with actor, auth method, time and reason.
+    """
+    if not _admin_authed():
+        return jsonify({"error": "admin authentication required"}), 401
+    body = request.get_json(silent=True) or {}
+    actor = str(body.get("actor") or "").strip()
+    reason = str(body.get("reason") or "").strip()
+    codes = body.get("codes")
+    if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,64}", actor) or actor.upper() == "AUTO":
+        return jsonify({"error": "actor must be a named operator (1-64 safe chars)"}), 400
+    if not reason:
+        return jsonify({"error": "reason is required"}), 400
+    if codes is not None and (
+        not isinstance(codes, list)
+        or not all(isinstance(code, str) and re.fullmatch(r"[A-Z0-9_]{1,128}", code) for code in codes)
+    ):
+        return jsonify({"error": "codes must be a list of alarm codes"}), 400
+    volume = _data_sync_volume_root().resolve()
+    wal_root = volume / "v3" / "emergency_evidence_wal_v2"
+    if not wal_root.exists():
+        return jsonify({"error": "emergency WAL not initialized"}), 404
+    current = _data_sync_lifecycle_cleanup_current_identity()
+    identity = {
+        "epoch_id": current["collection_epoch_id"],
+        "source_revision": current["source_git_rev"],
+        "deployed_revision": current["deployed_git_rev"],
+        "tile_config_signature": current["tile_registry_signature"],
+    }
+    try:
+        wal = EmergencyEvidenceWal(wal_root, identity=identity)
+        receipt = wal.clear_resolved_alarms(
+            actor=actor, reason=reason, codes=codes,
+            operator_confirmed=body.get("operator_confirmed") is True,
+            auth_method=_admin_auth_method(),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)[:160]}), 400
+    except (RuntimeError, OSError, TimeoutError) as exc:
+        return jsonify({"error": str(exc)[:160], "cleared": []}), 409
+    logger.warning(
+        "[ADMIN] emergency WAL alarm clear actor=%s cleared=%s retained=%s blocked=%s",
+        actor, receipt.get("cleared"), receipt.get("retained"), receipt.get("blocked"),
+    )
+    return jsonify(receipt)
+
+
 # ---------------------------------------------------------------------------
 # Cure 2 — Phantom paper position cancellation (Railway-initiated).
 #
@@ -41268,6 +41363,38 @@ def _lifecycle_artifact_counts(now: float, maximum_entries: int = 4096) -> dict:
 
 def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
     """Return bounded lifecycle telemetry without identifiers or proof material."""
+    def _public_wal_alarm_details(raw_details, public_alarms) -> list:
+        """Project WAL alarm explanations using only catalogued text and timestamps."""
+        try:
+            from emergency_evidence_wal import explain_alarm
+        except Exception:
+            return []
+        by_code = {
+            str(detail.get("code")): detail
+            for detail in list(raw_details or [])[:32]
+            if isinstance(detail, dict)
+        }
+        def ts(value):
+            return (
+                float(value)
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else None
+            )
+        out = []
+        for code in public_alarms:
+            detail = by_code.get(code) or {}
+            explained = explain_alarm(code)
+            out.append({
+                "code": code,
+                "reason": explained["reason"],
+                "clears_when": explained["clears_when"],
+                "clear_path": explained["clear_path"],
+                "auto_clear": explained["auto_clear"],
+                "first_seen_unix": ts(detail.get("first_seen")),
+                "last_seen_unix": ts(detail.get("last_seen")),
+            })
+        return out
+
     current = float(now or time.time())
     internal = _lifecycle_pipeline_runtime_status()
     last = internal.get("last_result") if isinstance(internal.get("last_result"), dict) else {}
@@ -41450,6 +41577,7 @@ def _lifecycle_pipeline_public_status(now: float | None = None) -> dict:
             "oldest_state": wal.get("oldest_state") if wal.get("oldest_state") in ("PREPARED", "DEFERRED", "REPLAYED") else None,
             "alarms": alarms,
             "incident_alarms": incident_alarms,
+            "alarm_details": _public_wal_alarm_details(wal.get("alarm_details"), alarms),
             "last_action": {
                 "replayed": wal_action.get("replayed") is True,
                 "released": wal_action.get("released") is True,
@@ -49479,6 +49607,10 @@ def tick_all_replay_buffers(price: float):
     if price is None or price <= 0:
         return
     now = time.time()
+    with state_lock:
+        depth = replay_tick_depth({
+            key: state.get(key) for key in ("bid", "ask", "bid_qty", "ask_qty", "bbo_ts")
+        }, now=now)
     with replay_lock:
         items = list(replay_buffers.items())
     for trade_id, buf in items:
@@ -49488,7 +49620,7 @@ def tick_all_replay_buffers(price: float):
             t_rel = now - _buf_float(buf.get("start_ts"), now)
             _try_shadow_limit_fill(buf, price, t_rel)
             unreal = _shadow_unreal_pct(buf, price) if buf.get("virtual_entry") else None
-            append_replay_tick(trade_id, price, unreal)
+            append_replay_tick(trade_id, price, unreal, depth=depth)
         except Exception as e:
             logger.error(
                 f"[REPLAY_TICK] trade_id={trade_id} lane={buf.get('lane')} failed: {e} "
@@ -49744,6 +49876,7 @@ def log_shadow_outcome_jsonl(
             "post_block_tick_count": (post_block_research or {}).get("post_block_tick_count"),
             "exit_config": buf.get("exit_config") or get_exit_config_snapshot(),
             "post_block_research": post_block_research or {},
+            **shadow_row_completeness(buf),
             **outcome,
         }
         _safe_append_jsonl(SHADOW_OUTCOME_FILE, row, label="SHADOW_OUTCOME")
@@ -49954,6 +50087,7 @@ def append_replay_tick(
     best_ask: float = None,
     observed_ts: float = None,
     mark_source: str = None,
+    depth: dict = None,
 ):
     if not trade_id or price is None or price <= 0:
         return
@@ -49991,6 +50125,8 @@ def append_replay_tick(
             "observed_ts": now,
             "mark_source": source,
         }
+        if isinstance(depth, dict):
+            tick_row.update(depth)
         ticks.append(tick_row)
         if unreal_pct is not None:
             prev_mfe = _buf_float(buf.get("peak_mfe_pct"), None)
@@ -50114,6 +50250,7 @@ def log_trade_outcome_jsonl(trade_row: dict, pos: dict):
             "dist_to_ema_hybrid_pct": pos.get("dist_to_ema_hybrid_pct", trade_row.get("dist_to_ema_hybrid_pct")),
             "bot_version": EXECUTION_FIX_VERSION,
             "analyzer_sync_id": ANALYZER_SYNC_ID,
+            **completeness_projection(trade_row),
         }
         _safe_append_jsonl(TRADE_OUTCOME_FILE, outcome, label="TRADE_OUTCOME")
     except Exception as e:

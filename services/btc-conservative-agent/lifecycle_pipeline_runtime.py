@@ -438,6 +438,11 @@ class LifecyclePipelineRuntime:
                 "oldest_state": wal_status.get("oldest_state"),
                 "alarms": list(wal_status.get("alarms") or [])[:32],
                 "incident_alarms": list(wal_status.get("incident_alarms") or [])[:32],
+                "alarm_details": [
+                    dict(detail) for detail in list(wal_status.get("alarm_details") or [])[:32]
+                    if isinstance(detail, Mapping)
+                ],
+                "alarm_auto_clear": dict(wal_status.get("alarm_auto_clear") or {}),
                 "last_action": {
                     key: wal_action.get(key) for key in (
                         "replayed", "released", "blocked", "empty", "reason",
