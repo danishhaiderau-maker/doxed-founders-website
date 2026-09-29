@@ -49,6 +49,52 @@ def _lease_root(root, *, sessions):
     return report
 
 
+def _artifact(path):
+    info = path.lstat()
+    return {"name": path.name[:80], "bytes": info.st_size, "mtime": int(info.st_mtime),
+            "dir": path.is_dir() and not path.is_symlink()}
+
+
+def _derivative_detail(root):
+    if not root.is_dir():
+        return None
+    report = {}
+    for generation in sorted(root.iterdir())[:8]:
+        if not generation.name.startswith("g-") or not generation.is_dir():
+            continue
+        children = sorted(generation.iterdir())[:16]
+        entry = {"children": [_artifact(child) for child in children]}
+        state_path = generation / "bundle-worker-state.json"
+        indexed = set()
+        if state_path.is_file() and state_path.stat().st_size <= 4 * 1024 * 1024:
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                index = state.get("package_index") if isinstance(state, dict) else None
+                entry["state_status"] = state.get("status") if isinstance(state, dict) else None
+                entry["indexed_packages"] = len(index) if isinstance(index, list) else None
+                for row in index if isinstance(index, list) else []:
+                    if isinstance(row, dict) and isinstance(row.get("package_sha256"), str):
+                        indexed.add(row["package_sha256"] + ".tar")
+                        indexed.add("d-" + row["package_sha256"][:20] + ".json")
+            except (OSError, ValueError) as exc:
+                entry["state_error"] = type(exc).__name__
+        for name in ("packages", "descriptors"):
+            folder = generation / name
+            if not folder.is_dir():
+                continue
+            names = []
+            with os.scandir(folder) as it:
+                for count, item in enumerate(it):
+                    if count >= LIMIT:
+                        break
+                    names.append(item.name)
+            unindexed = sorted(n for n in names if n not in indexed)
+            entry[name] = {"count": len(names), "unindexed_count": len(unindexed),
+                           "unindexed_sample": [_artifact(folder / n) for n in unindexed[:10]]}
+        report[generation.name] = entry
+    return report
+
+
 def main():
     volume = Path(os.getenv("BOT_DATA_DIR") or "/app/data").resolve()
     work = volume / ".data-sync-snapshots"
@@ -61,6 +107,7 @@ def main():
                  "transport-maintenance-receipts", "inventory-generations"):
         path = work / name
         out[name] = sorted(os.listdir(path))[:12] if path.is_dir() else None
+    out["derivatives"] = _derivative_detail(work / "transport-bundles")
     active = work / "transport-maintenance-receipts" / "active-maintenance.json"
     out["active_maintenance_present"] = active.exists()
     if active.is_file() and active.stat().st_size <= 65536:
