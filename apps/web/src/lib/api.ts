@@ -6341,6 +6341,7 @@ export function dispatchToIdeSession(
   sessionId: string,
   prompt: string,
   ideProvider = 'cursor',
+  targetNodeId?: string,
 ) {
   return apiFetch<{ id: string; status: string }>(
     `/ide-bridge/sessions/${encodeURIComponent(sessionId)}/dispatch`,
@@ -6349,6 +6350,7 @@ export function dispatchToIdeSession(
       body: JSON.stringify({
         prompt,
         ideProvider,
+        ...(targetNodeId ? { targetNodeId } : {}),
       }),
     },
     token,
@@ -6364,12 +6366,26 @@ export type IdeDispatchStatus = {
   sessionId: string;
   delivered: boolean;
   failed: boolean;
+  /** Present only for Founder IDE remote dispatches. */
+  executionStatus?: 'pending' | 'claimed' | 'cancellation_requested' | 'complete' | 'failed' | 'expired';
+  error?: string | null;
+  cancellationRequested?: boolean;
+  cancellationReason?: string | null;
 };
 
 export function fetchIdeDispatchStatus(token: string, dispatchId: string) {
   return apiFetch<IdeDispatchStatus>(
     `/ide-bridge/dispatch/${encodeURIComponent(dispatchId)}`,
     undefined,
+    token,
+  );
+}
+
+/** Owner cancel for a Founder IDE remote dispatch; the paired desktop kills the run on its next poll. */
+export function cancelIdeDispatch(token: string, dispatchId: string, reason?: string) {
+  return apiFetch<IdeDispatchStatus>(
+    `/ide-bridge/dispatch/${encodeURIComponent(dispatchId)}/cancel`,
+    { method: 'POST', body: JSON.stringify(reason ? { reason } : {}) },
     token,
   );
 }

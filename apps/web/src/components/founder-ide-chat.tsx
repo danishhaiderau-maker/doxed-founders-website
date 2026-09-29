@@ -9,11 +9,13 @@ import {
   fetchIdeBridgeWorkspaces,
   dispatchToIdeSession,
   fetchIdeDispatchStatus,
+  cancelIdeDispatch,
   critiqueWithSecondBrain,
   type BridgeSession,
   type BridgeWorkspace,
   type FounderNodeStatusRow,
 } from '@/lib/api';
+import { FOUNDER_IDE_DISPATCH_PROVIDER, remoteDispatchView } from '@/lib/founder-remote-dispatch-view';
 import { useVoiceInput } from '@/hooks/use-voice-input';
 import { VoiceWaveform } from '@/components/voice-waveform';
 
@@ -24,6 +26,8 @@ type ChatMsg = {
   at: string;
   pending?: boolean;
   status?: string;
+  dispatchId?: string;
+  cancellable?: boolean;
 };
 
 /**
@@ -55,6 +59,8 @@ type Props = {
 
 const DISPATCH_POLL_INTERVAL_MS = 4000;
 const DISPATCH_POLL_TIMEOUT_MS = 120_000;
+/** Remote builds may legitimately run up to the server's 2h claim TTL. */
+const REMOTE_DISPATCH_POLL_TIMEOUT_MS = 2 * 60 * 60_000 + 15 * 60_000;
 const REFRESH_INTERVAL_MS = 15_000;
 /** Debounce: minimum ms between two mic toggle clicks. Prevents flicker from
  *  rapid toggling that re-initializes SpeechRecognition. */
@@ -165,10 +171,8 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
   useEffect(() => () => stopDispatchPoll(), [stopDispatchPoll]);
 
   // ── Derived state ────────────────────────────────────────────────────────
-  const onlineNode = useMemo(
-    () => nodes.find((n) => n.status === 'online') ?? nodes[0] ?? null,
-    [nodes],
-  );
+  // Remote dispatch must name the exact paired desktop; never fall back to another node.
+  const onlineNode = useMemo(() => nodes.find((n) => n.nodeId === nodeId) ?? null, [nodes, nodeId]);
   const isOnline = Boolean(onlineNode?.status === 'online');
 
   // Group sessions by workspace so the user sees "projects" with chats inside.
@@ -204,46 +208,35 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
   const selectedTargetTitle = selectedSession?.title ?? selectedWorkspace?.title ?? null;
 
   // ── Dispatch poll ────────────────────────────────────────────────────────
+  const applyDispatchStatus = useCallback((dispatchId: string, s: Parameters<typeof remoteDispatchView>[0]) => {
+    const view = remoteDispatchView(s);
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.dispatchId === dispatchId
+          ? { ...m, status: view.label, pending: view.pending, cancellable: view.cancellable }
+          : m,
+      ),
+    );
+    return view;
+  }, []);
+
   const pollDispatch = useCallback(
     (dispatchId: string) => {
       stopDispatchPoll();
       dispatchStartedAtRef.current = Date.now();
+      let timeoutMs = DISPATCH_POLL_TIMEOUT_MS;
       const tick = async () => {
-        if (Date.now() - dispatchStartedAtRef.current > DISPATCH_POLL_TIMEOUT_MS) {
+        if (Date.now() - dispatchStartedAtRef.current > timeoutMs) {
           setNotice('Delivery timed out — is Founder IDE online?');
           stopDispatchPoll();
           return;
         }
         try {
           const s = await fetchIdeDispatchStatus(accessToken, dispatchId);
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === `dispatch:${dispatchId}`
-                ? { ...m, status: s.status, pending: s.status === 'PENDING' || s.status === 'DISPATCHING' }
-                : m,
-            ),
-          );
-          if (s.delivered) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === `dispatch:${dispatchId}`
-                  ? { ...m, pending: false, status: 'Delivered to Founder IDE' }
-                  : m,
-              ),
-            );
-            setNotice('Delivered to Founder IDE.');
-            stopDispatchPoll();
-            return;
-          }
-          if (s.failed) {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === `dispatch:${dispatchId}`
-                  ? { ...m, pending: false, status: `Failed: ${s.result ?? 'unknown'}` }
-                  : m,
-              ),
-            );
-            setNotice(`Delivery failed: ${s.result ?? 'unknown error'}`);
+          if (s.executionStatus) timeoutMs = REMOTE_DISPATCH_POLL_TIMEOUT_MS;
+          const view = applyDispatchStatus(dispatchId, s);
+          if (view.terminal) {
+            setNotice(view.failed ? view.label : view.label + '.');
             stopDispatchPoll();
             return;
           }
@@ -254,7 +247,24 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
       };
       void tick();
     },
-    [accessToken, stopDispatchPoll],
+    [accessToken, applyDispatchStatus, stopDispatchPoll],
+  );
+
+  const handleCancelDispatch = useCallback(
+    async (dispatchId: string) => {
+      setMessages((prev) => prev.map((m) => (m.dispatchId === dispatchId ? { ...m, cancellable: false } : m)));
+      setError(null);
+      try {
+        const s = await cancelIdeDispatch(accessToken, dispatchId, 'Cancelled by the Founder owner from the website.');
+        const view = applyDispatchStatus(dispatchId, s);
+        setNotice(view.terminal ? view.label : 'Cancel requested — your paired desktop will stop the run.');
+        if (!view.terminal && !dispatchPollRef.current) pollDispatch(dispatchId);
+      } catch (e) {
+        setMessages((prev) => prev.map((m) => (m.dispatchId === dispatchId ? { ...m, cancellable: true } : m)));
+        setError(`Cancel failed: ${e instanceof Error ? e.message : 'unknown error'}`);
+      }
+    },
+    [accessToken, applyDispatchStatus, pollDispatch],
   );
 
   // ── Send ─────────────────────────────────────────────────────────────────
@@ -299,12 +309,17 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     setInput('');
 
     try {
-      // Retarget dispatch from Cursor → Founder IDE by forcing ideProvider.
       const created = await dispatchToIdeSession(
         accessToken,
         selectedSession.id,
         text,
-        'founder-ide',
+        FOUNDER_IDE_DISPATCH_PROVIDER,
+        nodeId,
+      );
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === dispatchId ? { ...m, dispatchId: created.id, cancellable: true } : m,
+        ),
       );
       pollDispatch(created.id);
     } catch (e) {
@@ -319,7 +334,7 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [accessToken, input, isOnline, pollDispatch, projects.length, selectedSession, selectedWorkspace, voice]);
+  }, [accessToken, input, isOnline, nodeId, pollDispatch, projects.length, selectedSession, selectedTargetTitle, voice]);
 
   /** Second Brain: cheap expert critique of the latest assistant reply (never DeepSeek). */
   const handleSecondBrainReview = useCallback(async () => {
@@ -643,6 +658,16 @@ export function FounderIdeChat({ accessToken, nodeId }: Props) {
                       )}
                       {m.status}
                     </p>
+                  )}
+                  {m.dispatchId && m.cancellable && (
+                    <button
+                      type='button'
+                      onClick={() => void handleCancelDispatch(m.dispatchId!)}
+                      data-testid='remote-dispatch-cancel'
+                      className='mt-1.5 rounded-lg border border-rose-500/40 bg-rose-950/30 px-2.5 py-1 text-[11px] font-semibold text-rose-100 transition hover:bg-rose-900/40'
+                    >
+                      Cancel
+                    </button>
                   )}
                 </div>
               </div>
