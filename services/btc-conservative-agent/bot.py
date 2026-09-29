@@ -43,6 +43,7 @@ import socket
 import hashlib
 import hmac
 import sqlite3
+from html import escape as html_escape
 from contextlib import contextmanager
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
@@ -32028,9 +32029,9 @@ __ADMIN_ACCESS_CONTROLS__
   <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. The legacy direct path uses the deterministic 0.1% anchor; the five family tiles use their signed per-policy offsets shown on each tile (Fixed 0.27%; the other four 0.30%).</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. The legacy direct path uses the deterministic 0.1% anchor; the registered tiles use their signed per-policy offsets (__TILE_ENTRY_OFFSETS__).</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
-<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Benchmark / legacy direct anchor (deterministic 0.1%):</strong> LONG = price × 0.999 · SHORT = price × 1.001. This does not override the five family policies: Fixed uses 0.27%; Chandelier, ATR Trail, Hybrid Runner and MFE Giveback use 0.30%. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain research/advisory fields only.</p>
+<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Benchmark / legacy direct anchor (deterministic 0.1%):</strong> LONG = price × 0.999 · SHORT = price × 1.001. This does not override the registered tile policies: __TILE_ENTRY_OFFSETS__. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain research/advisory fields only.</p>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>
@@ -32197,7 +32198,7 @@ __ADMIN_ACCESS_CONTROLS__
   not the same as the live queue below.
 </p>
 <p style="color:#58a6ff;font-size:0.82em;margin:4px 0 8px;">
-  Initial limit comes from the owning policy (legacy direct = 0.1%; Fixed = 0.27%; other family tiles = 0.30%). Virtual limit is the
+  Initial limit comes from the owning policy (legacy direct = 0.1%; __TILE_ENTRY_OFFSETS__). Virtual limit is the
   chased price; exchange order ID appears only after a real order exists. A crossed virtual limit
   before the first selected stage is recorded as <code>VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY</code>
   (no invented fill, no marketable order at the old price).
@@ -32257,7 +32258,7 @@ __ADMIN_ACCESS_CONTROLS__
 <h2>AI History (Session)</h2>
 <p id="aiHistoryTableHint" style="color:#8b949e;font-size:0.85em;margin:4px 0 8px;">Every shared DeepSeek scan this process. Verdicts are research evaluations, not orders; executable orders appear only in Pending Orders above.</p>
 <div class="activity-table-scroll" role="region" aria-label="AI history table" tabindex="0"><table>
-    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Five family tile evaluations / lifecycles</th><th>AI explanation / block reason</th></tr></thead>
+    <thead><tr><th>AI Call Time (Melbourne)</th><th>Shared Call ID</th><th>AI direction</th><th>Candidate</th><th>Raw AI verdict</th><th>LONG score</th><th>SHORT score</th><th>Raw gap (0–100)</th><th>Execution gap bucket</th><th>Registered tile evaluations / lifecycles</th><th>AI explanation / block reason</th></tr></thead>
     <tbody id="aiHistoryTable"></tbody>
 </table></div>
 
@@ -32382,28 +32383,15 @@ DASHBOARD_JS = """(function () {
     }
     let laneToggleInFlight = false;
     let freshCollectionInFlight = false;
+    const TILE_REGISTRY_VIEW = __TILE_REGISTRY_JSON__;
+    const TILE_BADGE_PALETTE = ['#3fb950', '#d29922', '#a371f7', '#f0883e', '#db61a2', '#39c5cf', '#e3b341', '#ff7b72'];
+    const NON_TILE_BADGES = {'CONTINUOUS': ['#58a6ff', 'Continuous (analysis only)'], 'AI_SCAN': ['#6e7681', 'AI Scan']};
     function laneBadge(lane, model) {
       const m = model || lane || '-';
-      const colors = {
-        'CONTINUOUS': '#58a6ff',
-        'FAMILY_CHANDELIER_3': '#3fb950',
-        'FAMILY_ATR_TARGET_2_5': '#d29922',
-        'FAMILY_ATR_TRAIL': '#a371f7',
-        'FAMILY_HYBRID_RUNNER': '#f0883e',
-        'FAMILY_MFE_GIVEBACK': '#db61a2',
-        'AI_SCAN': '#6e7681',
-      };
-      const labels = {
-        'CONTINUOUS': 'Continuous',
-        'FAMILY_CHANDELIER_3': 'Chandelier 1.5 ATR Hypothesis',
-        'FAMILY_ATR_TARGET_2_5': 'Fixed TP 2.5 + Scenario C',
-        'FAMILY_ATR_TRAIL': 'ATR Trail 1.5 / 0.75 / 1',
-        'FAMILY_HYBRID_RUNNER': 'Hybrid 25% + 25% Runner',
-        'FAMILY_MFE_GIVEBACK': 'MFE Giveback 20% Hypothesis',
-        'AI_SCAN': 'AI Scan',
-      };
-      const c = colors[lane] || '#8b949e';
-      const short = labels[lane] || m;
+      const idx = TILE_REGISTRY_VIEW.findIndex(function (tile) { return tile.lane === lane; });
+      const other = NON_TILE_BADGES[lane] || [];
+      const c = idx >= 0 ? TILE_BADGE_PALETTE[idx % TILE_BADGE_PALETTE.length] : (other[0] || '#8b949e');
+      const short = idx >= 0 ? TILE_REGISTRY_VIEW[idx].label : (other[1] || m);
       return `<span style="color:${c};font-weight:600;" title="${m}">${short}</span>`;
     }
     let executionControlsBusyUntil = 0;
@@ -32993,13 +32981,13 @@ DASHBOARD_JS = """(function () {
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
-                return '<div style="margin-top:6px;font-size:0.78em;color:#8b949e;">Exit: ' + (exit.profile || 'Scenario C') + ' · ladder ' + (exit.ladder || '—') + '</div>';
+                return '<div style="margin-top:6px;font-size:0.78em;color:#8b949e;">Exit: ' + (exit.profile || 'exit profile not published') + ' · ladder ' + (exit.ladder || '—') + '</div>';
               }
               const body = lines.map(function (line) {
                 return '<div style="font-size:0.74em;color:#8b949e;line-height:1.4;">' + line + '</div>';
               }).join('');
               return '<div style="margin-top:10px;padding:8px 10px;background:#161b22;border:1px solid #30363d;border-radius:8px;">'
-                + '<div style="font-size:0.72em;color:#58a6ff;font-weight:600;margin-bottom:4px;">STRATEGY · ' + (exit.profile || 'Scenario C') + ' · ' + (exit.ladder || '—') + '</div>'
+                + '<div style="font-size:0.72em;color:#58a6ff;font-weight:600;margin-bottom:4px;">STRATEGY · ' + (exit.profile || 'exit profile not published') + ' · ' + (exit.ladder || '—') + '</div>'
                 + body + '</div>';
             })()
             + '</div>';
@@ -34427,6 +34415,7 @@ def build_dashboard_js(ai_payload=None) -> str:
         DASHBOARD_JS.replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__DASHBOARD_URL__", dashboard_public_url())
         .replace("__LAST_AI_PAYLOAD_JSON__", json_for_js(payload))
+        .replace("__TILE_REGISTRY_JSON__", json_for_js(_dashboard_tile_view()))
     )
 
 
@@ -34525,6 +34514,7 @@ def dashboard():
   </form>
   <a href="/admin/login" style="color:#8b98a7;font-size:.82rem;">Open the dedicated login page</a>
 </div>"""
+    tiles = _dashboard_tile_view()
     page = (
         HTML.replace("__DASHBOARD_URL__", dashboard_public_url())
         .replace("__ANALYZER_URL__", research_dashboard_public_url())
@@ -34532,6 +34522,7 @@ def dashboard():
         .replace("__DASHBOARD_PORT__", str(DASHBOARD_PORT))
         .replace("__BOT_VERSION__", EXECUTION_FIX_VERSION)
         .replace("__ADMIN_ACCESS_CONTROLS__", admin_controls)
+        .replace("__TILE_ENTRY_OFFSETS__", html_escape(_dashboard_tile_offsets_text(tiles)))
     )
     resp = make_response(render_template_string(page))
     resp.headers['Cache-Control'] = 'no-store'
@@ -37616,17 +37607,10 @@ def _dashboard_truth_fields(snap: dict, now: float) -> dict:
 
 
 _DASHBOARD_DISK_ALARM_PCT = 85.0
-_DASHBOARD_TRANSFER_STALE_SEC = 3600.0
-
-
-def _dashboard_segment_shipper_status() -> dict | None:
-    raw = (os.getenv("RESEARCH_SEGMENTS_STATE_DIR") or "").strip()
-    root = Path(raw) if raw else _data_sync_volume_root() / "segment-shipper"
-    try:
-        status = json.loads((root / "status.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    return status if isinstance(status, dict) else None
+# Same thresholds as scripts/fly_monitor_rules.py so the strip and the monitor agree.
+_DASHBOARD_LEGACY_ACK_STALE_SEC = 3 * 3600.0
+_DASHBOARD_SEGMENT_STATUS_STALE_SEC = 30 * 60.0
+_DASHBOARD_SEGMENT_SEQ_LAG = 36
 
 
 def _dashboard_seq(value) -> int | None:
@@ -37637,6 +37621,103 @@ def _dashboard_seq(value) -> int | None:
     except (TypeError, ValueError):
         return None
     return number if number >= 0 else None
+
+
+def _dashboard_age_text(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{seconds / 60:.0f} min"
+    if seconds < 48 * 3600:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds / 86400:.1f} days"
+
+
+def _dashboard_transfer_truth(snapshot: dict, now: float, bundle_status=None) -> tuple[dict, list]:
+    """Laptop pull state as far as Fly can observe it; laptop-side failures live on the analyzer."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    alarms = []
+    parts = []
+    segments_enabled = snapshot.get("segments_enabled") is True
+    raw_age = snapshot.get("legacy_ack_age_sec")
+    ack_age = float(raw_age) if isinstance(raw_age, (int, float)) and not isinstance(raw_age, bool) else None
+    if ack_age is None:
+        ack_state = "NO_ACK"
+        parts.append("no laptop ACK on record")
+        if not segments_enabled:
+            alarms.append({"code": "TRANSFER_NO_ACK", "severity": "critical",
+                           "detail": "Fly has no laptop sync ACK on its volume"})
+    else:
+        shown = _format_melbourne_hm(now - ack_age)
+        age_text = _dashboard_age_text(ack_age)
+        if ack_age > _DASHBOARD_LEGACY_ACK_STALE_SEC:
+            ack_state = "CRITICAL_LAG"
+            parts.append(f"last ACK {shown} ({age_text} ago) \u2014 CRITICAL lag")
+            if not segments_enabled:
+                alarms.append({"code": "TRANSFER_ACK_LAG", "severity": "critical",
+                               "detail": f"laptop sync ACK is {age_text} old (last {shown})"})
+        else:
+            ack_state = "OK"
+            parts.append(f"last ACK {shown} ({age_text} ago)")
+    segment = {"enabled": segments_enabled, "status_present": snapshot.get("segment_status_present") is True}
+    if not segments_enabled:
+        parts.append("segment shipping not enabled")
+    elif not segment["status_present"]:
+        parts.append("segments enabled, shipper status missing")
+        alarms.append({"code": "TRANSFER_SEGMENTS_UNAVAILABLE", "severity": "critical",
+                       "detail": "segments enabled but the shipper has not written a status file"})
+    else:
+        shipped = _dashboard_seq(snapshot.get("shipped_seq"))
+        acked = _dashboard_seq(snapshot.get("laptop_acked_seq"))
+        status_age = snapshot.get("segment_status_age_sec")
+        status_age = float(status_age) if isinstance(status_age, (int, float)) and not isinstance(status_age, bool) else None
+        lag = shipped - (acked or 0) if shipped is not None else None
+        segment.update({"shipped_seq": shipped, "laptop_acked_seq": acked, "unacked_segments": lag,
+                        "status_age_sec": status_age})
+        text = (f"segment {shipped if shipped is not None else 'none'} shipped, laptop ACKed "
+                f"{acked if acked is not None else 'none yet'}")
+        if lag is not None:
+            text += f" ({lag} behind)"
+        parts.append(text)
+        problems = []
+        if status_age is None or status_age > _DASHBOARD_SEGMENT_STATUS_STALE_SEC:
+            problems.append("shipper status " + (f"{status_age / 60:.0f} min old" if status_age is not None else "age unknown"))
+        if snapshot.get("last_error"):
+            problems.append(f"last_error={str(snapshot['last_error'])[:120]}")
+        if lag is not None and lag > _DASHBOARD_SEGMENT_SEQ_LAG:
+            problems.append(f"laptop ACK is {lag} segments behind")
+        if problems:
+            alarms.append({"code": "TRANSFER_SEGMENTS_LAGGING", "severity": "critical",
+                           "detail": "; ".join(problems)})
+    if bundle_status:
+        parts.append(f"bundle producer {bundle_status}")
+    parts.append("laptop-side failures: see analyzer")
+    transfer = {"available": ack_age is not None or segment["status_present"],
+                "legacy_ack_age_sec": ack_age, "legacy_ack_state": ack_state,
+                "segments": segment, "bundle_status": bundle_status,
+                "laptop_side": "see analyzer", "label": " \u00b7 ".join(parts)}
+    return transfer, alarms
+
+
+def _dashboard_tile_view() -> list[dict]:
+    """Flat registry projection used by the page (lane, label, order, entry offset)."""
+    rows = []
+    for spec in active_tile_lifecycle_manifest():
+        entry = spec.get("entry_policy") if isinstance(spec.get("entry_policy"), dict) else {}
+        offset = entry.get("offset_pct")
+        rows.append({
+            "lane": str(spec.get("lane") or ""),
+            "label": str(spec.get("label") or spec.get("lane") or ""),
+            "display_order": int(spec.get("display_order") or 0),
+            "offset_pct": float(offset) if isinstance(offset, (int, float)) and not isinstance(offset, bool) else None,
+        })
+    return sorted(rows, key=lambda row: row["display_order"])
+
+
+def _dashboard_tile_offsets_text(tiles) -> str:
+    return "; ".join(
+        f"{tile['label']} {tile['offset_pct']:.2f}%" if tile.get("offset_pct") is not None
+        else f"{tile['label']} offset not published"
+        for tile in tiles
+    ) or "no registered tiles"
 
 
 def _dashboard_operating_truth(snap: dict, now: float, wal_summary: dict | None) -> dict:
@@ -37674,46 +37755,16 @@ def _dashboard_operating_truth(snap: dict, now: float, wal_summary: dict | None)
     elif usage is not None:
         disk = {"available": False, "used_pct": None, "free_gb": None, "label": "not available (zero-size volume)"}
 
-    shipper = _dashboard_segment_shipper_status()
-    segments_enabled = (os.getenv("RESEARCH_SEGMENTS_ENABLED") or "0").strip() == "1"
     try:
         coordinator = (_data_sync_bundle_public_status() or {}).get("coordinator") or {}
     except Exception:
         coordinator = {}
-    bundle_status = coordinator.get("status")
-    if shipper is None:
-        transfer = {
-            "available": False, "segments_enabled": segments_enabled, "bundle_status": bundle_status,
-            "label": ("no data yet (segment shipper has not written a status)" if segments_enabled
-                      else "segment shipping disabled on this runtime")
-                     + (f"; bundle producer {bundle_status}" if bundle_status else ""),
-        }
-        if segments_enabled:
-            alarms.append({"code": "TRANSFER_STATUS_UNAVAILABLE", "severity": "warning",
-                           "detail": "segment shipper status not found on the data volume"})
-    else:
-        shipped = _dashboard_seq(shipper.get("shipped_seq"))
-        acked = _dashboard_seq(shipper.get("laptop_acked_seq"))
-        try:
-            updated = float(shipper.get("updated_at"))
-        except (TypeError, ValueError):
-            updated = None
-        unacked = shipped - acked if shipped is not None and acked is not None and shipped >= acked else None
-        stale = updated is None or now - updated > _DASHBOARD_TRANSFER_STALE_SEC
-        shown = _format_melbourne_hm(updated) if updated else "never"
-        label = (f"segment {shipped if shipped is not None else 'none'} shipped, laptop ACKed "
-                 f"{acked if acked is not None else 'none yet'}")
-        if unacked is not None:
-            label += f" ({unacked} unacknowledged)"
-        label += f" · {'stale since' if stale else 'updated'} {shown}"
-        if bundle_status:
-            label += f"; bundle producer {bundle_status}"
-        transfer = {"available": True, "segments_enabled": segments_enabled, "shipped_seq": shipped,
-                    "laptop_acked_seq": acked, "unacked_segments": unacked, "updated_at": updated,
-                    "stale": stale, "bundle_status": bundle_status, "label": label}
-        if stale:
-            alarms.append({"code": "TRANSFER_STALLED", "severity": "critical",
-                           "detail": f"segment shipper has not advanced since {shown}"})
+    try:
+        transfer_snapshot = _volume_transfer_snapshot(_data_sync_volume_root(), now)
+    except Exception as exc:
+        transfer_snapshot = {"error": type(exc).__name__}
+    transfer, transfer_alarms = _dashboard_transfer_truth(transfer_snapshot, now, coordinator.get("status"))
+    alarms.extend(transfer_alarms)
 
     wal = wal_summary if isinstance(wal_summary, dict) else {}
     if not wal.get("available"):

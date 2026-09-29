@@ -120,14 +120,16 @@ def after_cost_ev(funnel_lane: dict | None, *, stale_since: str | None = None) -
     lane = funnel_lane if isinstance(funnel_lane, dict) else {}
     stats = lane.get("closed_trade_stats") if isinstance(lane.get("closed_trade_stats"), dict) else {}
     n = _count(stats.get("n")) if stats else None
+    n_source = "trade log rows"
     if n is None:
         n = _count(lane.get("closed"))
+        n_source = "CLOSED lifecycle events"
     mean = _finite(stats.get("mean_net_pnl_usd")) if stats else None
     stdev = _finite(stats.get("stdev_net_pnl_usd")) if stats else None
     if mean is None and n:
         total = _finite(lane.get("net_pnl_usd"))
         mean = None if total is None else total / n
-    result = {"n": n, "mean_usd": mean, "ci95_usd": None}
+    result = {"n": n, "n_source": n_source if n is not None else None, "mean_usd": mean, "ci95_usd": None}
     if n is None or n == 0:
         result.update(cell=metric(None, reason="no closed trades yet"),
                       note="no closed trades in this generation")
@@ -314,9 +316,37 @@ def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, ack_wat
     return sorted(alarms.values(), key=lambda a: (order.get(a["severity"], 3), a["code"]))
 
 
+def trade_count_reconciliation(funnel_report: dict | None, summary_trades, tile_total) -> dict:
+    """Explain the Details 'session trades' count against this page's per-tile total."""
+    scope = funnel_report.get("trade_scope") if isinstance(funnel_report, dict) else None
+    summary = _count(summary_trades)
+    if isinstance(scope, dict) and _count(scope.get("session_trade_rows")) is not None:
+        session = _count(scope.get("session_trade_rows"))
+        tile = _count(scope.get("tile_trade_rows")) or 0
+        others = scope.get("non_tile_trade_rows") if isinstance(scope.get("non_tile_trade_rows"), dict) else {}
+        other_text = ", ".join(f"{lane} {n}" for lane, n in others.items()) or "none"
+        text = (f"The Details summary trade count ({session}) = {tile} tile trades + {session - tile} "
+                f"non-tile trades ({other_text}).")
+        consistent = summary is None or summary == session
+        if not consistent:
+            text += f" MISMATCH: the executive summary reports {summary} for the same generation."
+        return {"available": True, "consistent": consistent, "session": session, "tile": tile,
+                "non_tile": others, "text": text}
+    if summary is None and tile_total is None:
+        return {"available": False, "consistent": None, "text": NO_DATA_TEXT}
+    shown_summary = summary if summary is not None else NO_DATA_TEXT
+    shown_tiles = tile_total if tile_total is not None else NO_DATA_TEXT
+    return {
+        "available": False, "consistent": None,
+        "text": (f"The Details summary trade count ({shown_summary}) counts every session trade row, including "
+                 f"non-tile lanes; the per-tile total here is {shown_tiles} (CLOSED lifecycle events). "
+                 "The lane-by-lane reconciliation is published from the next analyzer generation."),
+    }
+
+
 def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | None,
                            ai_coverage: dict | None, generation: dict, alarms: list,
-                           freshness_rows: list) -> dict:
+                           freshness_rows: list, summary_trades=None) -> dict:
     has_generation = bool(generation.get("generated_at")) and isinstance(funnel_report, dict)
     stale_since = None if generation.get("current") else generation.get("generated_at_display") or generation.get("generated_at")
     funnel_lanes = (funnel_report or {}).get("lanes") if isinstance(funnel_report, dict) else None
@@ -340,6 +370,7 @@ def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | 
             "ai_vs_rules": ai,
             "verdict": tile_verdict(has_generation=has_generation, ev=ev, stale_since=stale_since),
         })
+    tile_counts = [t["ev"]["n"] for t in tiles if t["ev"]["n"] is not None]
     return {
         "schema": "analyzer_decision_view_v1",
         "min_sample": MIN_DECISION_SAMPLE,
@@ -347,6 +378,8 @@ def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | 
         "alarms": alarms,
         "freshness": freshness_rows,
         "tiles": tiles,
+        "trade_counts": trade_count_reconciliation(
+            funnel_report, summary_trades, sum(tile_counts) if tile_counts else None),
     }
 
 
@@ -389,7 +422,7 @@ def render_decision_html(payload: dict, *, nav_links, details_href: str = "/deta
         rows.append(
             "<tr>"
             f"<td><strong>{_esc(tile['label'])}</strong><div class='sub'>{_esc(tile['lane'])}</div></td>"
-            f"<td>{cell(tile['sample'])}</td>"
+            f"<td>{cell(tile['sample'])}<div class='sub'>{_esc(ev.get('n_source') or '')}</div></td>"
             f"<td>{cell(ev['cell'], _usd)}<div class='sub'>{_esc(ev.get('note') or '')}</div></td>"
             f"<td>{cell(funnel['fill_rate_pct'], _pct)}"
             f"<div class='sub'>fills {_esc(render_metric(funnel['filled'], stale_marker=''))} of "
@@ -439,6 +472,7 @@ ul{{padding-left:18px;}} li{{margin:6px 0;}} .wrap{{overflow-x:auto;}}
 <tbody>{''.join(rows)}</tbody></table></div>
 <p class="sub">A tile needs at least {payload.get('min_sample', MIN_DECISION_SAMPLE)} closed trades before any EV
 verdict or ranking. "no data yet" means the value was not collected or not published; it is never a zero.</p>
+<h2>Trade counts</h2><p id="decisionTradeScope">{_esc((payload.get('trade_counts') or {}).get('text') or NO_DATA_TEXT)}</p>
 <h2>Data freshness</h2><div class="wrap"><table id="decisionFreshnessTable">{fresh_html}</table></div>
 <h2>More</h2><p>{nav}</p>
 </body></html>"""
