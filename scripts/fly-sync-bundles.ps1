@@ -196,7 +196,15 @@ function Receive-FlyTransportBundles {
         if (-not $reusedLocal) {
         $parent = Split-Path -Parent $destination
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        # Deep receipt paths plus ".<guid>.download" and File.Replace's
+        # ".replace-backup" exceed Windows MAX_PATH; stage those under the
+        # short same-volume mirror subdirectory, as the per-file path does.
         $candidate = $destination + '.' + [guid]::NewGuid().ToString('N') + '.download'
+        if (($candidate.Length + '.replace-backup'.Length) -gt 240) {
+          $candidateDir = Join-Path $mirror '.fly-sync-candidates'
+          New-Item -ItemType Directory -Path $candidateDir -Force | Out-Null
+          $candidate = Join-Path $candidateDir ([guid]::NewGuid().ToString('N') + '.download')
+        }
         try {
           [IO.File]::Copy($staged, $candidate, $false)
           Test-MirrorCandidate -Path $candidate -RelativePath $rel -ExpectedSize ([int64]$row.size)
