@@ -3201,6 +3201,7 @@ def test_long_sync_ack_can_select_the_exact_retained_initial_generation():
         "_data_sync_inventory_generations": {},
         "_DATA_SYNC_INVENTORY_GENERATION_TTL_SECONDS": 7200,
         "_DATA_SYNC_INVENTORY_GENERATION_MAX": 8,
+        "_DATA_SYNC_SERVED_IDENTITY_HISTORY": 4,
     })
     initial = [{"path": "v3/ledgers/order.jsonl", "size": 10, "mtime_ns": 100}]
     evolved = [{"path": "v3/ledgers/order.jsonl", "size": 20, "mtime_ns": 200}]
@@ -3245,6 +3246,93 @@ def test_long_sync_ack_can_select_the_exact_retained_initial_generation():
     )
     assert accepted == {}
     assert rejected["GENERATION_MISMATCH"] == 1
+
+
+def _disk_served_namespace(tmp_path, digest):
+    namespace = _load_bot_functions(
+        "_data_sync_register_served_ack_generation",
+        "_data_sync_disk_served_identities",
+        "_data_sync_validate_ack_rows",
+    )
+    namespace.update({
+        "hashlib": hashlib,
+        "json": json,
+        "re": re,
+        "hmac": hmac,
+        "uuid": uuid,
+        "_data_sync_inventory_work_root": lambda: tmp_path,
+        "_data_sync_bundle_retention_allowed_locked": lambda generation_id: True,
+        "_data_sync_inventory_cache_condition": threading.Condition(),
+        "_data_sync_served_identity_lock": threading.Lock(),
+        "_DATA_SYNC_SERVED_IDENTITY_HISTORY": 4,
+        "_data_sync_inventory_generations": {
+            digest: {"storage": "disk_pages_v2", "ack_eligible": True},
+        },
+    })
+    return namespace
+
+
+def test_disk_served_identities_keep_bounded_history_across_later_reads(tmp_path):
+    # ACK1 409 (gen d57944a8): a later SQLite snapshot lease of the same path
+    # overwrote the single served identity the first pass had mirrored, so its
+    # page acknowledgement was rejected as GENERATION_MISMATCH.
+    digest = "a" * 64
+    ns = _disk_served_namespace(tmp_path, digest)
+    register = ns["_data_sync_register_served_ack_generation"]
+    identities = ns["_data_sync_disk_served_identities"]
+    path = "v3/qualification_horizon_index.sqlite3"
+    register(digest, path, 13053952, 1790678698666640407)
+    register(digest, path, 13100000, 1790678698666640407)
+    register(digest, path, 13053952, 1790678698666640407)
+    assert identities(digest, path) == [
+        (13053952, 1790678698666640407), (13100000, 1790678698666640407),
+    ]
+    frozen = {path: {"size": 12484608, "mtime_ns": 1790678698666640407,
+                     "_served_ack_generations": identities(digest, path)}}
+    accepted, rejected = ns["_data_sync_validate_ack_rows"](
+        [{"path": path, "size": 13053952, "mtime_ns": 1790678698666640407}], frozen,
+    )
+    assert list(accepted) == [path] and sum(rejected.values()) == 0
+    for extra in range(5):
+        register(digest, path, 20000000 + extra, 1)
+    history = identities(digest, path)
+    assert len(history) == 4 and history[-1] == (20000004, 1)
+    assert (13053952, 1790678698666640407) not in history
+    assert identities("b" * 64, path) == []
+
+
+def test_disk_served_identities_read_legacy_single_identity_records(tmp_path):
+    digest = "c" * 64
+    ns = _disk_served_namespace(tmp_path, digest)
+    path = "runtime_pathway_integrity.json"
+    key = hashlib.sha256(path.encode("utf-8")).hexdigest()
+    root = tmp_path / "inventory-served" / digest
+    root.mkdir(parents=True)
+    (root / f"{key}.json").write_text(json.dumps({
+        "schema": "fly_runtime_inventory_served_generation_v1",
+        "generation_id": digest, "path": path, "size": 480, "mtime_ns": 7,
+    }), encoding="utf-8")
+    assert ns["_data_sync_disk_served_identities"](digest, path) == [(480, 7)]
+    ns["_data_sync_register_served_ack_generation"](digest, path, 481, 8)
+    assert ns["_data_sync_disk_served_identities"](digest, path) == [(480, 7), (481, 8)]
+
+
+def test_rotated_append_prefix_read_binds_its_published_generation_for_ack():
+    # ACK1 409 (gen d57944a8): source_order_market_evidence.jsonl rotated
+    # mid-download; the laptop re-fetched the targeted manifest row, but append
+    # reads never registered it, so the acknowledgement could not match.
+    endpoint = BOT[BOT.index("def api_data_sync_file():"):BOT.index(
+        "def _data_sync_ack_v3_identity_matches"
+    )]
+    tail = endpoint[endpoint.rindex("if not append_prefix:"):]
+    assert "elif expected_mtime is not None:" in tail
+    append_register = tail[tail.index("elif expected_mtime is not None:"):]
+    assert "published_boundary," in append_register
+    assert "int(expected_mtime)," in append_register
+    ack = BOT[BOT.index("def _data_sync_ack_v3"):BOT.index("def api_data_sync_ack")]
+    assert "_data_sync_disk_served_identities(generation_id, path)" in ack
+    assert 'row["_served_ack_generations"] = served' in ack
+    assert "_data_sync_disk_served_identity(" not in BOT
 
 
 def test_manifest_publishes_and_retains_its_exact_inventory_generation():

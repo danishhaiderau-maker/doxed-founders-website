@@ -43774,6 +43774,10 @@ def _data_sync_manifest_page(
     }
 
 
+_DATA_SYNC_SERVED_IDENTITY_HISTORY = 4
+_data_sync_served_identity_lock = threading.Lock()
+
+
 def _data_sync_register_served_ack_generation(
     inventory_sha256: str, relpath: str, size: int, mtime_ns: int
 ) -> None:
@@ -43797,33 +43801,45 @@ def _data_sync_register_served_ack_generation(
             identity = (int(size), int(mtime_ns))
             if identity not in history:
                 history.append(identity)
-                del history[:-4]
+                del history[:-_DATA_SYNC_SERVED_IDENTITY_HISTORY]
     if disk_generation is not None:
         root = _data_sync_inventory_work_root() / "inventory-served" / digest
         root.mkdir(parents=True, exist_ok=True)
         key = hashlib.sha256(str(relpath).encode("utf-8")).hexdigest()
         target = root / f"{key}.json"
-        payload = {
-            "schema": "fly_runtime_inventory_served_generation_v1",
-            "generation_id": digest,
-            "path": str(relpath),
-            "size": int(size),
-            "mtime_ns": int(mtime_ns),
-        }
-        temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            temporary.write_text(
-                json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                encoding="utf-8",
-            )
-            os.replace(temporary, target)
-        finally:
-            temporary.unlink(missing_ok=True)
+        identity = [int(size), int(mtime_ns)]
+        # A later lease/read of the same path must not erase the generation an
+        # earlier pass already mirrored and is about to acknowledge.
+        with _data_sync_served_identity_lock:
+            history = [
+                list(item)
+                for item in _data_sync_disk_served_identities(digest, str(relpath))
+            ]
+            if identity in history:
+                return
+            history = (history + [identity])[-_DATA_SYNC_SERVED_IDENTITY_HISTORY:]
+            payload = {
+                "schema": "fly_runtime_inventory_served_generation_v1",
+                "generation_id": digest,
+                "path": str(relpath),
+                "size": identity[0],
+                "mtime_ns": identity[1],
+                "history": history,
+            }
+            temporary = target.with_name(f"{target.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(
+                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
 
 
-def _data_sync_disk_served_identity(
+def _data_sync_disk_served_identities(
     generation_id: str, relpath: str
-) -> tuple[int, int] | None:
+) -> list[tuple[int, int]]:
     key = hashlib.sha256(str(relpath).encode("utf-8")).hexdigest()
     target = (
         _data_sync_inventory_work_root()
@@ -43838,10 +43854,19 @@ def _data_sync_disk_served_identity(
             )
             or str(payload.get("path") or "") != str(relpath)
         ):
-            return None
-        return int(payload["size"]), int(payload["mtime_ns"])
+            return []
+        history = payload.get("history")
+        if not isinstance(history, list):
+            history = [[payload["size"], payload["mtime_ns"]]]
+        identities = []
+        for item in history:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                identity = (int(item[0]), int(item[1]))
+                if identity not in identities:
+                    identities.append(identity)
+        return identities[-_DATA_SYNC_SERVED_IDENTITY_HISTORY:]
     except (OSError, KeyError, TypeError, ValueError):
-        return None
+        return []
 
 
 def _data_sync_persist_inventory_snapshot(rows: list, generated_at: str) -> dict:
@@ -46065,6 +46090,15 @@ def api_data_sync_file():
                 int(after.st_size),
                 int(after.st_mtime_ns),
             )
+        elif expected_mtime is not None:
+            # A rotated append file is re-fetched from a targeted manifest row;
+            # bind that exact published prefix so its acknowledgement matches.
+            _data_sync_register_served_ack_generation(
+                ack_inventory_sha256,
+                _data_sync_relpath(path),
+                published_boundary,
+                int(expected_mtime),
+            )
         return response
     except (OSError, TypeError, ValueError) as exc:
         return jsonify({"error": str(exc)}), 400
@@ -46184,9 +46218,9 @@ def _data_sync_ack_v3(body: dict):
             return jsonify({"error": "acknowledgement page rows are invalid"}), 400
         expected = {str(row["path"]): dict(row) for row in expected_page["rows"]}
         for path, row in expected.items():
-            served = _data_sync_disk_served_identity(generation_id, path)
-            if served is not None:
-                row["_served_ack_generations"] = [served]
+            served = _data_sync_disk_served_identities(generation_id, path)
+            if served:
+                row["_served_ack_generations"] = served
         if (
             len(received) != len(expected)
             or {str(row.get("path") or "") for row in received if isinstance(row, dict)}
