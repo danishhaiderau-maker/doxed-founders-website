@@ -7,6 +7,7 @@ import textwrap
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = (ROOT / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
 MONITOR = (ROOT / ".github/workflows/fly-bot-monitor.yml").read_text(encoding="utf-8")
+MONITOR_RUNNER = (ROOT / "scripts/fly_monitor_run.py").read_text(encoding="utf-8")
 BOOTSTRAP_HELPER = (ROOT / "scripts/fly_resume_bootstrap.py").read_text(encoding="utf-8")
 PREDEPLOY_ABORT_HELPER = (ROOT / "scripts/fly_resume_predeploy_abort.py").read_text(encoding="utf-8")
 TEST_PATH = "services/btc-conservative-agent/test*.py"
@@ -27,19 +28,20 @@ def test_runtime_and_deploy_contract_changes_remain_deploy_triggers():
 
 def test_monitor_expects_latest_successful_deploy_on_master():
     assert "ref: master" in MONITOR
-    assert "resolve_deployed_revision(" in MONITOR
-    assert "require_deployed_revision(" in MONITOR
+    assert "python scripts/fly_monitor_run.py" in MONITOR
+    assert "resolve_deployed_revision(" in MONITOR_RUNNER
+    assert "require_deployed_revision(" in MONITOR_RUNNER
+    assert 'run.get("head_branch") == "master"' in MONITOR_RUNNER
     assert "ref: aac5940" not in MONITOR
 
 
 def test_monitor_splits_fast_liveness_from_full_readiness_fail_closed():
-    assert MONITOR.count('"https://doxed-btc-bot.fly.dev/health"') == 2
-    assert MONITOR.count('"https://doxed-btc-bot.fly.dev/ready"') == 2
-    assert '"https://doxed-btc-bot.fly.dev/api/status"' not in MONITOR
-    assert MONITOR.count("require_health(") == 2
-    assert MONITOR.count("require_ready(") == 2
-    assert "require_strategy_progress(ready)" in MONITOR
-    assert "require_tile_registry(" in MONITOR
+    assert MONITOR_RUNNER.count('"https://doxed-btc-bot.fly.dev/health"') == 1
+    assert MONITOR_RUNNER.count('"https://doxed-btc-bot.fly.dev/ready"') == 1
+    assert "/api/status" not in MONITOR_RUNNER
+    assert '"PROCESS_LIVENESS_ONLY"' in MONITOR_RUNNER
+    assert "require_strategy_progress(payload)" in MONITOR_RUNNER
+    assert "require_tile_registry(" in MONITOR_RUNNER
 
 
 def test_stalled_runtime_recovery_is_bound_to_guarded_receipts_and_durable_flatness():

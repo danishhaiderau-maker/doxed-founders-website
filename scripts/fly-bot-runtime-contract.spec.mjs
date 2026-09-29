@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const monitorPath = new URL('../.github/workflows/fly-bot-monitor.yml', import.meta.url);
+const monitorRunnerPath = new URL('./fly_monitor_run.py', import.meta.url);
 const deployPath = new URL('../.github/workflows/auto-deploy.yml', import.meta.url);
 const flyDeployPath = new URL(
   '../.github/workflows/fly-bot-deploy.yml',
@@ -81,23 +82,24 @@ const overnightGuardPath = new URL(
 
 test('Fly monitor compares against the latest successful deploy revision', async () => {
   const workflow = await readFile(monitorPath, 'utf8');
+  const runner = await readFile(monitorRunnerPath, 'utf8');
 
   assert.match(workflow, /ref:\s*master/);
   assert.doesNotMatch(workflow, /ref:\s*[0-9a-f]{40}/);
   assert.match(workflow, /fetch-depth:\s*0/);
   assert.match(workflow, /actions:\s*read/);
-  assert.match(workflow, /actions\/workflows\/fly-bot-deploy\.yml\/runs\?branch=master/);
-  assert.match(workflow, /resolve_deployed_revision\(/);
-  assert.match(
-    workflow,
-    /EXPECTED_REVISION:\s*\$\{\{\s*steps\.expected\.outputs\.revision\s*\}\}/,
-  );
+  assert.match(workflow, /python scripts\/fly_monitor_run\.py/);
+  // The branch-filtered runs listing is search-backed and returned stale runs.
+  assert.match(runner, /actions\/workflows\/fly-bot-deploy\.yml\/runs\?per_page=/);
+  assert.doesNotMatch(runner, /runs\?branch=/);
+  assert.match(runner, /run\.get\("head_branch"\) == "master"/);
+  assert.match(runner, /resolve_deployed_revision\(/);
   assert.doesNotMatch(workflow, /EXPECTED_REVISION:\s*\$\{\{\s*github\.sha\s*\}\}/);
-  assert.match(workflow, /re\.fullmatch\(r"\[0-9a-f\]\{7,40\}", reported\)/);
-  assert.match(workflow, /"git",\s*"rev-parse",\s*"--verify",\s*f"\{reported\}\^\{\{commit\}\}"/);
-  assert.match(workflow, /require_deployed_revision\(/);
-  assert.match(workflow, /merge-base",\s*"--is-ancestor",\s*actual,\s*"HEAD"/);
-  assert.doesNotMatch(workflow, /actual\.startswith\(expected\)/);
+  assert.match(runner, /re\.fullmatch\(r"\[0-9a-f\]\{7,40\}", reported\)/);
+  assert.match(runner, /"git",\s*"rev-parse",\s*"--verify",\s*f"\{reported\}\^\{\{commit\}\}"/);
+  assert.match(runner, /require_deployed_revision\(/);
+  assert.match(runner, /"merge-base",\s*"--is-ancestor",\s*actual,\s*"HEAD"/);
+  assert.doesNotMatch(runner, /actual\.startswith\(expected\)/);
 });
 
 test('flat-boundary proof targets the canonical Fly owner', async () => {
