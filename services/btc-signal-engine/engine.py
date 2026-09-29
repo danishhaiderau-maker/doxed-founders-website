@@ -39406,7 +39406,7 @@ VOLUME_GROWTH_MIN_SPAN_SEC = 1800.0
 _SEGMENT_STATUS_MAX_BYTES = 64 * 1024
 _SEGMENT_STATUS_FIELDS = (
     "shipped_seq", "laptop_acked_seq", "unshipped_bytes", "last_segment_at",
-    "updated_at", "last_error", "pruning_enabled",
+    "updated_at", "last_error", "pruning_enabled", "sink", "store_bytes", "max_store_bytes",
 )
 _volume_growth_samples = deque(
     maxlen=int(VOLUME_GROWTH_WINDOW_SEC / VOLUME_GROWTH_SAMPLE_SEC) + 1
@@ -53465,6 +53465,17 @@ def _dashboard_request_path_from_head(head: bytes) -> bytes:
         return b""
 
 
+def _mount_research_segment_server(flask_app):
+    """Serve /api/research-segments/* outside Flask: no hooks, no bot state, no trade lock."""
+    try:
+        import research_segment_server
+
+        return research_segment_server.mount(flask_app)
+    except Exception as exc:
+        logger.error(f"[SEGMENTS] segment server not mounted: {type(exc).__name__}: {exc}")
+        return flask_app
+
+
 def _create_dashboard_server():
     """Bind the dashboard socket synchronously so startup fails as one process."""
     _ensure_flask_port_available(DASHBOARD_PORT)
@@ -53491,6 +53502,10 @@ def _create_dashboard_server():
         _data_sync_thread_cap = threading.BoundedSemaphore(4)
         _data_sync_identity_thread_cap = threading.BoundedSemaphore(2)
         _control_thread_cap = threading.BoundedSemaphore(2)
+        # Immutable research-segment files are streamed by a WSGI dispatcher
+        # mounted in front of Flask; they never borrow presentation workers.
+        _research_segment_thread_cap = threading.BoundedSemaphore(2)
+        _research_segment_path_prefix = b"/api/research-segments/"
         _canonical_paths = (
             b"/api/relay-execution-state",
         )
@@ -53579,6 +53594,8 @@ def _create_dashboard_server():
                     return self._data_sync_identity_thread_cap, "data_sync_identity", request_path.decode("ascii")
                 if request_path in self._data_sync_paths:
                     return self._data_sync_thread_cap, "data_sync", request_path.decode("ascii")
+                if request_path.startswith(self._research_segment_path_prefix):
+                    return self._research_segment_thread_cap, "research_segments", "RESEARCH_SEGMENTS"
             except (OSError, TimeoutError):
                 pass
             # Never log an unrecognized request target: it may contain a token
@@ -53654,7 +53671,11 @@ def _create_dashboard_server():
                 request_cap_acquired = True
                 # Bound socket reads/writes. App computation can take longer,
                 # but a dead tunnel client cannot retain a worker indefinitely.
-                is_priority = request_cap is not self._general_thread_cap
+                # Segment downloads are multi-megabyte streams to a remote
+                # laptop and keep the general per-operation socket timeout.
+                is_priority = request_cap not in (
+                    self._general_thread_cap, self._research_segment_thread_cap
+                )
                 request.settimeout(
                     self._priority_client_io_timeout_sec
                     if is_priority
@@ -53688,7 +53709,8 @@ def _create_dashboard_server():
 
     try:
         httpd = _BoundedThreadedWSGIServer(
-            host=DASHBOARD_BIND_HOST, port=DASHBOARD_PORT, app=app
+            host=DASHBOARD_BIND_HOST, port=DASHBOARD_PORT,
+            app=_mount_research_segment_server(app),
         )
     except Exception as e:
         logger.error(f"[FLASK] failed to bind {DASHBOARD_BIND_HOST}:{DASHBOARD_PORT}: {e}")

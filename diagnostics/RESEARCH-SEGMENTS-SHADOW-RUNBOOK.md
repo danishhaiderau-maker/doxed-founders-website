@@ -23,6 +23,49 @@ Fly state lives on the volume root, outside the inventory roots:
 `/app/data/segment-shipper/{state.json,status.json,intent/}` and
 `/app/data/segment-shipper.log`.
 
+## Volume sink (active; no Fly login or Tigris bucket needed)
+
+`RESEARCH_SEGMENTS_SINK=volume` (set with `RESEARCH_SEGMENTS_ENABLED=1` in
+`fly.toml [env]`) makes the shipper write the same keys write-once and fsynced
+to `/app/data/segment-store/v1/{seg,man}/`. The Tigris sink is unchanged and is
+selected again by unsetting `RESEARCH_SEGMENTS_SINK` (default `tigris`).
+
+| Where | File | Role |
+|---|---|---|
+| Fly | `research_segment_store.VolumeStore` | Durable create-if-absent files; no delete/overwrite. |
+| Fly | `research_segment_server.py` | WSGI dispatcher mounted *in front of* Flask by `bot.py` (`_mount_research_segment_server`). No Flask hooks, bot state or trade lock; its own reserved worker class (2). |
+| Fly | `research_segment_prune.py` | Plan-only prune hook, OFF (see below). |
+| laptop | `HttpSegmentSource` + `research-segment-pull.ps1 -Source Http` | Pulls over HTTPS with `BOT_ADMIN_TOKEN` from `vault\home-bot.env`. |
+| laptop | `research-segment-pull-loop.ps1` | One instance, kept alive by `DoxxedLaptopChainSupervisor`: pull every 2 min (40-segment batches, back-to-back while a backlog remains), parity every 30 min. Opt out with `C:\DoxxedCrypto\laptop-chain\segment-pull.disabled`. |
+
+Endpoints (`X-Bot-Admin-Token` required; 503 when the token is unset):
+`GET /api/research-segments/v1/head`, `GET .../man/<seq>`, `GET .../seg/<seq>`
+(streamed in 64 KiB chunks, `ETag` = manifest `segment_sha256`, 304 on
+`If-None-Match`), `GET .../ack/<seq>`, `POST .../ack` (canonical laptop ACK
+JSON, at most 4 KiB). A segment is published only once its manifest exists.
+
+ACK rules: `through_seq` must be published and `manifest_sha256` must equal the
+sha256 of manifest `through_seq` (the chain head the laptop verified). Stored
+write-once at `v1/acks/laptop/<seq>.json` with a receipt at
+`v1/acks/laptop-receipts/<seq>.json` (`received_at`). Lower seq -> 409
+`ACK_REGRESSION`; same seq and hash -> 200 `ALREADY_RECORDED`; hash mismatch ->
+409 `ACK_HEAD_MISMATCH`. The laptop logs receipts to
+`C:\DoxxedCrypto\fly-mirror-segments\.puller\ack-receipts.jsonl`.
+
+Disk guard: the store duplicates source data until pruning exists, so the
+volume sink defaults to a 3 GiB store cap (`RESEARCH_SEGMENTS_VOLUME_MAX_BYTES`,
+status `STORE_CAP_REACHED`) and a 4 GiB free-space floor
+(`RESEARCH_SEGMENTS_MIN_FREE_BYTES`, status `LOW_DISK_SKIPPED`). Both fail closed
+by pausing the shipper only. `/health` `volume.transfer` shows `sink`,
+`store_bytes` and `max_store_bytes`.
+
+Prune hook (OFF): `plan_prune` lists only rotated `x.jsonl.N` files that were
+shipped whole at `shipped_seq <= laptop-ACKed seq` and are unchanged on disk.
+Execution requires `PRUNE_ENABLED` in code **and**
+`RESEARCH_SEGMENTS_PRUNE_ENABLED=1` **and** two advancing ACK receipts **and** a
+`fly_volume_snapshot_receipt_v1` newer than the covering ACK. The module has no
+delete capability; enabling execution is a separate reviewed change.
+
 ## Scoped credentials
 
 Create two access keys in the Tigris dashboard (`fly storage dashboard <bucket>`).

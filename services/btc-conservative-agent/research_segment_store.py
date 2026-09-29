@@ -3,7 +3,9 @@
 ``S3Store`` speaks the S3 REST API with AWS Signature V4 so it works against
 Tigris (and any S3-compatible store) without boto3 on the Fly image or the
 laptop. ``LocalDirectoryStore`` offers the same write-once semantics on a
-local directory for tests and offline dry runs.
+local directory for tests and offline dry runs; ``VolumeStore`` is its
+fsync-durable variant used as the Fly-volume sink, served to the laptop by
+``research_segment_server``.
 
 Neither store exposes delete or unconditional overwrite: every write is a
 create-if-absent (``If-None-Match: *``). A conflicting write raises
@@ -16,7 +18,9 @@ from __future__ import annotations
 import datetime as _dt
 import hashlib
 import hmac
+import json
 import os
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -93,6 +97,68 @@ class LocalDirectoryStore(ObjectStore):
                 key = path.relative_to(self.root).as_posix()
                 if key.startswith(prefix) and key > start_after:
                     keys.append(key)
+        return sorted(keys)
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+class VolumeStore(LocalDirectoryStore):
+    """Durable write-once store on the Fly volume (``RESEARCH_SEGMENTS_SINK=volume``).
+
+    Same key layout as the bucket (``<prefix>/seg/...``, ``<prefix>/man/...``,
+    ``<prefix>/acks/laptop/...``). A write is confirmed only after the payload
+    and its directory entry are fsynced, so the shipper's checkpoint never
+    runs ahead of durable bytes. There is no delete or overwrite.
+    """
+
+    def put_if_absent(self, key: str, body: bytes, *, sha256: str, content_type: str) -> None:
+        if hashlib.sha256(body).hexdigest() != sha256:
+            raise StoreError("declared sha256 does not match body")
+        target = self._path(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.part")
+        with temporary.open("wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, target)
+        except FileExistsError as exc:
+            raise PreconditionFailed(key) from exc
+        finally:
+            temporary.unlink(missing_ok=True)
+        _fsync_directory(target.parent)
+
+    def head_sha256(self, key: str) -> str | None:
+        target = self._path(key)
+        if not target.is_file():
+            return None
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def list_keys(self, prefix: str, start_after: str = "") -> list[str]:
+        # Only flat directories (acks) are listed; never walk the whole store.
+        base = self._path(prefix.rstrip("/")) if prefix else self.root
+        if not base.is_dir():
+            return []
+        keys = []
+        with os.scandir(base) as entries:
+            for entry in entries:
+                if entry.is_file() and not entry.name.startswith("."):
+                    key = f"{prefix.rstrip('/')}/{entry.name}" if prefix else entry.name
+                    if key > start_after:
+                        keys.append(key)
         return sorted(keys)
 
 
@@ -233,13 +299,132 @@ class S3Store(ObjectStore):
                 return sorted(keys)
 
 
+class HttpSegmentSource(ObjectStore):
+    """Laptop client for the Fly volume sink served by ``research_segment_server``.
+
+    Maps the puller's store keys onto the authenticated endpoint. It can read
+    manifests, segments and recorded ACKs, and can only *write* a laptop ACK;
+    the server enforces write-once, monotonic, head-hash-matched ACKs.
+    """
+
+    _KEY_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]{0,63})/(man|seg|acks/laptop)/(\d{12})\.(json|tar\.gz)$")
+
+    def __init__(self, *, base_url: str, admin_token: str, prefix: str = "v1",
+                 timeout: float = 120.0, attempts: int = 5):
+        parsed = urllib.parse.urlsplit(base_url)
+        loopback = parsed.hostname in ("127.0.0.1", "localhost")
+        if not parsed.netloc or not (parsed.scheme == "https" or (loopback and parsed.scheme == "http")):
+            raise StoreError("segment source URL must be https")
+        if not (admin_token or "").strip():
+            raise StoreError("admin token is required for the segment source")
+        self._base = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+        self._token = admin_token.strip()
+        self._prefix = prefix
+        self._timeout = float(timeout)
+        self._attempts = max(1, int(attempts))
+        self.last_ack_response: dict | None = None
+
+    def __repr__(self) -> str:
+        return f"HttpSegmentSource(base_url={self._base!r}, prefix={self._prefix!r})"
+
+    def _url(self, route: str) -> str:
+        return f"{self._base}/api/research-segments/{self._prefix}/{route}"
+
+    def _route_for_key(self, key: str) -> str:
+        match = self._KEY_RE.match(key)
+        if not match or match.group(1) != self._prefix:
+            raise StoreError(f"unsupported segment key {key!r}")
+        kind = {"man": "man", "seg": "seg", "acks/laptop": "ack"}[match.group(2)]
+        return f"{kind}/{int(match.group(3))}"
+
+    def _request(self, method: str, route: str, body: bytes | None = None):
+        last_error = None
+        for attempt in range(self._attempts):
+            headers = {"X-Bot-Admin-Token": self._token, "Accept-Encoding": "identity"}
+            if body is not None:
+                headers["Content-Type"] = "application/json"
+            request = urllib.request.Request(self._url(route), data=body, method=method, headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=self._timeout) as response:
+                    chunks, expected = [], response.headers.get("Content-Length")
+                    for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                        chunks.append(chunk)
+                    raw = b"".join(chunks)
+                    if expected is not None and len(raw) != int(expected):
+                        raise StoreError(f"{method} {route}: truncated body")
+                    return response.status, raw
+            except urllib.error.HTTPError as exc:
+                status = int(exc.code)
+                payload = exc.read() if status < 500 else b""
+                if status in (404, 409):
+                    return status, payload
+                if status in (401, 403):
+                    raise StoreError(f"{method} {route} unauthorized (HTTP {status})") from None
+                if status != 429 and status < 500:
+                    raise StoreError(f"{method} {route} failed with HTTP {status}") from None
+                last_error = f"HTTP {status}"
+            except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+                last_error = type(exc).__name__
+            time.sleep(min(16.0, 1.0 * (2 ** attempt)))
+        raise StoreError(f"{method} {route} failed after retries: {last_error}")
+
+    def head(self) -> dict:
+        status, raw = self._request("GET", "head")
+        if status != 200:
+            raise StoreError(f"GET head returned HTTP {status}")
+        return json.loads(raw.decode("utf-8"))
+
+    def get(self, key: str) -> bytes | None:
+        status, raw = self._request("GET", self._route_for_key(key))
+        return None if status == 404 else raw
+
+    def put_if_absent(self, key: str, body: bytes, *, sha256: str, content_type: str) -> None:
+        if hashlib.sha256(body).hexdigest() != sha256:
+            raise StoreError("declared sha256 does not match body")
+        if not self._route_for_key(key).startswith("ack/"):
+            raise StoreError("the segment source only accepts laptop ACK writes")
+        status, raw = self._request("POST", "ack", body)
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError:
+            payload = {}
+        if status == 409:
+            self.last_ack_response = payload
+            raise PreconditionFailed(key)
+        if status not in (200, 201):
+            raise StoreError(f"POST ack returned HTTP {status}")
+        self.last_ack_response = payload
+
+    def head_sha256(self, key: str) -> str | None:
+        raw = self.get(key)
+        return None if raw is None else hashlib.sha256(raw).hexdigest()
+
+    def list_keys(self, prefix: str, start_after: str = "") -> list[str]:
+        raise StoreError("the segment source does not list keys")
+
+
+def volume_store_root(environ=None, *, prefix: str = "RESEARCH_SEGMENTS_") -> Path:
+    env = os.environ if environ is None else environ
+    explicit = (env.get(f"{prefix}VOLUME_STORE_DIR") or "").strip()
+    if explicit:
+        return Path(explicit)
+    return Path(env.get("BOT_DATA_DIR") or "/app/data") / "segment-store"
+
+
 def store_from_env(environ=None, *, prefix: str = "RESEARCH_SEGMENTS_") -> ObjectStore:
     """Build a store from environment without ever echoing credentials.
 
+    ``<prefix>SINK=volume`` selects the durable Fly-volume store rooted at
+    ``<prefix>VOLUME_STORE_DIR`` (default ``$BOT_DATA_DIR/segment-store``).
     ``<prefix>LOCAL_STORE_DIR`` selects a local directory store (tests, dry
-    runs). Otherwise S3 credentials are required.
+    runs). Otherwise (``SINK`` unset or ``tigris``) S3 credentials are required.
     """
     env = os.environ if environ is None else environ
+    sink = (env.get(f"{prefix}SINK") or "tigris").strip().lower()
+    if sink == "volume":
+        return VolumeStore(volume_store_root(env, prefix=prefix))
+    if sink not in ("tigris", "s3"):
+        raise StoreError(f"unknown {prefix}SINK {sink!r}")
     local = (env.get(f"{prefix}LOCAL_STORE_DIR") or "").strip()
     if local:
         return LocalDirectoryStore(local)

@@ -9,6 +9,12 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   # Outside durable checkpoint fingerprint (slice/file budget are outside stable identity).
   DATA_SYNC_INVENTORY_SLICE_SECONDS = "60"
   DATA_SYNC_INVENTORY_FILE_BUDGET = "1000"
+  # Sealed research segments, shadow mode: write-once store on this volume
+  # (/app/data/segment-store), served read-only at /api/research-segments/*.
+  # Hard-capped (3 GiB store, 4 GiB free floor); pruning is not enabled.
+  RESEARCH_SEGMENTS_ENABLED = "1"
+  RESEARCH_SEGMENTS_SINK = "volume"
+  RESEARCH_SEGMENTS_ACK_POLL_SECONDS = "300"
 
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]
