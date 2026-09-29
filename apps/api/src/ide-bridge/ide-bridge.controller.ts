@@ -39,13 +39,14 @@ export class IdeBridgeController {
   dispatchToIde(
     @CurrentUser() user: AuthUser,
     @Param('sessionId') sessionId: string,
-    @Body() body: { prompt: string; ideProvider?: string },
+    @Body() body: { prompt: string; ideProvider?: string; targetNodeId?: string },
   ) {
     return this.ideBridge.createDispatch(
       user.id,
       sessionId,
       body.prompt,
       body.ideProvider ?? 'cursor',
+      body.targetNodeId,
     );
   }
 
@@ -55,6 +56,15 @@ export class IdeBridgeController {
     @Param('dispatchId') dispatchId: string,
   ) {
     return this.ideBridge.getDispatchStatus(user.id, dispatchId);
+  }
+
+  @Post('dispatch/:dispatchId/cancel')
+  cancelDispatch(
+    @CurrentUser() user: AuthUser,
+    @Param('dispatchId') dispatchId: string,
+    @Body() body: { reason?: string },
+  ) {
+    return this.ideBridge.cancelDispatch(user.id, dispatchId, body?.reason);
   }
 }
 
