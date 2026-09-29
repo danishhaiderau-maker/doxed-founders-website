@@ -1,5 +1,5 @@
 # One scheduled supervisor tick (at logon and every 5 minutes). It returns
-# quickly: it ensures exactly one ACK watcher, starts an analyzer pass when
+# quickly: it ensures exactly one ACK watcher and one segment pull loop, starts an analyzer pass when
 # the 30-minute cadence is due (or the dashboard is down), and runs the
 # monitor. Long-running work is detached and guarded by its own mutex.
 param(
@@ -26,6 +26,15 @@ try {
     $watcher = Start-Process -FilePath $powershell -WorkingDirectory $cfg.RepoRoot -WindowStyle Hidden -PassThru `
       -ArgumentList ($common + @((Join-Path $PSScriptRoot 'laptop-ack-watcher.ps1')) + $roots)
     Write-ChainLog -Config $cfg -Name $logName -Message "WATCHER_STARTED pid=$($watcher.Id)"
+  }
+
+  # Segment shadow pull loop (Fly volume sink): pull every 2 min, parity every
+  # 30 min. Opt out with <StateDir>\segment-pull.disabled.
+  $segmentPullDisabled = Test-Path -LiteralPath (Join-Path $cfg.StateDir 'segment-pull.disabled')
+  if (-not $segmentPullDisabled -and -not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull'))) {
+    $segmentLoop = Start-Process -FilePath $powershell -WorkingDirectory $cfg.RepoRoot -WindowStyle Hidden -PassThru `
+      -ArgumentList ($common + @((Join-Path $PSScriptRoot 'research-segment-pull-loop.ps1')) + $roots)
+    Write-ChainLog -Config $cfg -Name $logName -Message "SEGMENT_PULL_STARTED pid=$($segmentLoop.Id)"
   }
 
   if (-not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAnalyzerRun'))) {

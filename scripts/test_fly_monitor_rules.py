@@ -169,6 +169,12 @@ def test_segment_shipper_lag_error_and_stale_status():
     assert "has not written a status file" in rules.transfer_findings(missing)["transfer_lag"]
 
 
+def test_legacy_ack_age_still_watched_while_segments_run_in_shadow():
+    shadow = _transfer(segments_enabled=True, segment_status_present=True, segment_status_age_sec=60.0,
+                       shipped_seq=5, laptop_acked_seq=5, last_error=None, legacy_ack_age_sec=4 * 3600.0)
+    assert "legacy sync ACK 4.0h old" in rules.transfer_findings(shadow)["transfer_lag"]
+
+
 def test_transfer_lag_is_informational_and_never_opens_incident():
     state = alerts.empty_state()
     for t in (0, 3600, 7200):

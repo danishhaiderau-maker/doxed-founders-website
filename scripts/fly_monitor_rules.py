@@ -154,10 +154,15 @@ def transfer_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
     transfer = volume.get("transfer") if isinstance(volume, dict) else None
     if not isinstance(transfer, dict):
         return {}
+    ack_age = _num(transfer.get("legacy_ack_age_sec"))
+    legacy_stale = ack_age is not None and ack_age > LEGACY_ACK_STALE_SEC
     if transfer.get("segments_enabled") is True:
         if transfer.get("segment_status_present") is not True:
             return {"transfer_lag": "segments enabled but the shipper has not written a status file"}
         problems = []
+        # Segments run in shadow; the legacy ACK chain stays authoritative.
+        if legacy_stale:
+            problems.append(f"legacy sync ACK {ack_age / 3600:.1f}h old")
         status_age = _num(transfer.get("segment_status_age_sec"))
         if status_age is not None and status_age > SEGMENT_STATUS_STALE_SEC:
             problems.append(f"shipper status {status_age / 60:.0f} min old")
@@ -167,7 +172,6 @@ def transfer_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
         if shipped is not None and shipped - (acked or 0) > SEGMENT_SEQ_LAG:
             problems.append(f"laptop ACK {int(acked or 0)} is {int(shipped - (acked or 0))} segments behind {int(shipped)}")
         return {"transfer_lag": "segment transfer lagging: " + "; ".join(problems)} if problems else {}
-    ack_age = _num(transfer.get("legacy_ack_age_sec"))
-    if ack_age is not None and ack_age > LEGACY_ACK_STALE_SEC:
+    if legacy_stale:
         return {"transfer_lag": f"laptop legacy sync ACK is {ack_age / 3600:.1f}h old (> {LEGACY_ACK_STALE_SEC / 3600:.0f}h)"}
     return {}

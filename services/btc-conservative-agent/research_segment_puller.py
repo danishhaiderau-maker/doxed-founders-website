@@ -31,7 +31,8 @@ import sys
 from pathlib import Path
 
 import research_segment_format as fmt
-from research_segment_store import ObjectStore, PreconditionFailed, StoreError, store_from_env
+from research_segment_store import (HttpSegmentSource, ObjectStore, PreconditionFailed, StoreError,
+                                    store_from_env)
 
 PULLER_VERSION = "research_segment_puller_v1"
 STATE_SCHEMA = "research_segment_puller_state_v1"
@@ -278,8 +279,13 @@ class SegmentPuller:
                           "last_collection_epoch_id": manifest["collection_epoch_id"]})
             self.save_state(state)
             applied += 1
+        if hasattr(self.store, "last_ack_response"):
+            self.store.last_ack_response = None
         acked = self.ack(state)
         result = {"applied_now": applied, "applied_seq": state["applied_seq"], "acked_seq": acked}
+        receipt = getattr(self.store, "last_ack_response", None)
+        if receipt:
+            result["ack_receipt"] = receipt
         self.write_status(last_error=None, **result)
         return result
 
@@ -296,11 +302,20 @@ class SegmentPuller:
                                      content_type="application/json")
         except PreconditionFailed:
             existing = self.store.get(key)
-            ack = fmt.parse_ack(existing or b"")
+            if existing is None:
+                raise PullerError(f"ACK {key} was refused and no matching ACK exists; "
+                                  "existing ACK disagrees with applied chain") from None
+            ack = fmt.parse_ack(existing)
             if ack["through_seq"] != through or ack["manifest_sha256"] != state["last_manifest_sha256"]:
                 raise PullerError(f"existing ACK {key} disagrees with applied chain") from None
         state["acked_seq"] = through
         self.save_state(state)
+        receipt = getattr(self.store, "last_ack_response", None)
+        if receipt:
+            with (self.meta / "ack-receipts.jsonl").open("ab") as handle:
+                handle.write(json.dumps({"logged_at": _utc_now(), **receipt}, sort_keys=True).encode() + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         return through
 
 
@@ -318,6 +333,16 @@ def _sha256_file_range(path: Path, start: int, end: int) -> str:
     return digest.hexdigest()
 
 
+def _remote_head_summary(store) -> dict:
+    try:
+        head = store.head()
+    except (StoreError, ValueError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    return {key: head.get(key) for key in (
+        "published_seq", "laptop_acked", "store_bytes", "max_store_bytes",
+        "unshipped_bytes", "shipper_last_error", "pruning_enabled")}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--shadow-root", default=r"C:\DoxxedCrypto\fly-mirror-segments")
@@ -325,15 +350,28 @@ def main(argv=None) -> int:
     parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v1")
     parser.add_argument("--max-segments", type=int, default=None)
     parser.add_argument("--no-ack", action="store_true")
+    parser.add_argument("--source", choices=("store", "http"),
+                        default=os.getenv("RESEARCH_SEGMENTS_SOURCE") or "store",
+                        help="store: bucket/local store from env; http: Fly volume-sink endpoint")
+    parser.add_argument("--base-url", default=os.getenv("RESEARCH_SEGMENTS_BASE_URL")
+                        or "https://doxed-btc-bot.fly.dev")
     args = parser.parse_args(argv)
     lock = None
     puller = None
     try:
-        puller = SegmentPuller(store=store_from_env(), shadow_root=Path(args.shadow_root),
+        if args.source == "http":
+            # The admin token comes from the environment only and is never echoed.
+            store = HttpSegmentSource(base_url=args.base_url, prefix=args.prefix,
+                                      admin_token=os.getenv("BOT_ADMIN_TOKEN") or "")
+        else:
+            store = store_from_env()
+        puller = SegmentPuller(store=store, shadow_root=Path(args.shadow_root),
                                archive_root=Path(args.archive_root), prefix=args.prefix,
                                write_ack=not args.no_ack)
         lock = _RunLock(puller.meta / "run.lock")
         result = puller.pull_once(max_segments=args.max_segments)
+        if args.source == "http":
+            result["remote_head"] = _remote_head_summary(store)
         print(json.dumps({"ok": True, **result}, sort_keys=True))
         return 0
     except (PullerError, fmt.SegmentFormatError, StoreError) as exc:

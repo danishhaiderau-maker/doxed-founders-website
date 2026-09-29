@@ -16,6 +16,11 @@ Each cycle:
 5. Upload segment then manifest with ``If-None-Match: *``. A 412 whose stored
    sha256 equals ours is an idempotent retry; any other 412 fails closed.
 6. Only then replace the checkpoint and drop the intent.
+
+``RESEARCH_SEGMENTS_SINK`` selects the store: ``tigris`` (default, S3) or
+``volume`` (write-once, fsynced files under ``/app/data/segment-store``,
+served to the laptop by ``research_segment_server``). Both sinks share the
+same keys, determinism, chain and checkpoint-after-confirmed-write rules.
 """
 
 from __future__ import annotations
@@ -36,6 +41,12 @@ STATE_SCHEMA = "research_segment_shipper_state_v1"
 STATUS_SCHEMA = "research_segment_shipper_status_v1"
 INTENT_SCHEMA = "research_segment_shipper_intent_v1"
 PRUNING_ENABLED = False
+
+# The volume sink duplicates source data on the trading volume until pruning
+# exists, so it carries a hard size cap and a much higher free-space floor.
+VOLUME_DEFAULT_MAX_STORE_BYTES = 3 * 1024 ** 3
+VOLUME_DEFAULT_MIN_FREE_BYTES = 4 * 1024 ** 3
+DEFAULT_MIN_FREE_BYTES = 200 * 1024 * 1024
 
 APPEND_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
 RECORD_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
@@ -144,8 +155,10 @@ class SegmentShipper:
         rules: dict, prefix: str = "v1", max_segment_bytes: int = 8 * 1024 * 1024,
         max_member_bytes: int = 64 * 1024 * 1024, source_git_rev: str = "unknown",
         large_snapshot_bytes: int = 1024 * 1024, large_snapshot_interval: float = 3600.0,
-        clock=time.time,
+        clock=time.time, sink: str = "tigris", max_store_bytes: int = 0,
     ):
+        self.sink = sink
+        self.max_store_bytes = max(0, int(max_store_bytes))
         self.large_snapshot_bytes = max(0, int(large_snapshot_bytes))
         self.large_snapshot_interval = max(0.0, float(large_snapshot_interval))
         self.throttled: list[str] = []
@@ -184,7 +197,8 @@ class SegmentShipper:
                 previous = {}
         previous.update(fields)
         previous.update({"schema": STATUS_SCHEMA, "pruning_enabled": PRUNING_ENABLED,
-                         "updated_at": self.clock(), "prefix": self.prefix})
+                         "updated_at": self.clock(), "prefix": self.prefix, "sink": self.sink,
+                         "max_store_bytes": self.max_store_bytes})
         _atomic_write(self.status_path, json.dumps(previous, sort_keys=True, indent=2).encode())
 
     # --------------------------------------------------------------- universe
@@ -418,6 +432,7 @@ class SegmentShipper:
         new_state = json.loads(json.dumps(state))
         files, tombstones = new_state["files"], new_state.setdefault("tombstones", {})
         payloads, members = [], []
+        seq = int(state["seq"]) + 1
         generation_of = lambda rel: int((files.get(rel) or tombstones.get(rel) or {}).get("generation", 0))
         for op in selected:
             raw, extra = self._read(op)
@@ -449,7 +464,7 @@ class SegmentShipper:
                 files[relpath] = {"class": "snapshot", "size": extra["final_size"],
                                   "mtime_ns": int(stat.st_mtime_ns), "inode": int(stat.st_ino),
                                   "dev": int(stat.st_dev), "sha256": extra["final_sha256"],
-                                  "generation": 0}
+                                  "generation": 0, "shipped_seq": seq}
             elif self._is_append_class(relpath):
                 end = op["end_offset"]
                 if kind == fmt.KIND_REWRITE:
@@ -466,9 +481,8 @@ class SegmentShipper:
                                   "mtime_ns": int(stat.st_mtime_ns), "inode": int(stat.st_ino),
                                   "dev": int(stat.st_dev), "sha256": member["sha256"],
                                   "generation": member.get("generation", generation_of(relpath)),
-                                  "shipped_at": self.clock()}
+                                  "shipped_at": self.clock(), "shipped_seq": seq}
                 tombstones.pop(relpath, None)
-        seq = int(state["seq"]) + 1
         segment_raw = fmt.build_segment(payloads)
         # The window is derived from source mtimes, not the wall clock, so a
         # rebuild over the same bytes yields a byte-identical manifest.
@@ -484,7 +498,9 @@ class SegmentShipper:
         manifest_raw = fmt.canonical_json(manifest)
         new_state.update({"seq": seq, "last_manifest_sha256": fmt.sha256_bytes(manifest_raw),
                           "last_window_end": manifest["window_end"],
-                          "last_segment_at": self.clock()})
+                          "last_segment_at": self.clock(),
+                          "store_bytes": int(state.get("store_bytes") or 0)
+                          + len(segment_raw) + len(manifest_raw)})
         return segment_raw, manifest_raw, new_state
 
     def _epoch_id(self) -> str:
@@ -546,6 +562,15 @@ class SegmentShipper:
     def cycle(self) -> dict:
         recovered = self.complete_intent()
         state = self.load_state()
+        store_bytes = int(state.get("store_bytes") or 0)
+        if self.max_store_bytes and store_bytes >= self.max_store_bytes:
+            # Fail closed: the store duplicates source data until pruning
+            # exists, so it must never grow into the trading volume's headroom.
+            self.write_status(shipped_seq=state["seq"], store_bytes=store_bytes,
+                              last_error="STORE_CAP_REACHED",
+                              last_segment_at=state.get("last_segment_at"))
+            return {"shipped": None, "recovered": recovered, "deferred_bytes": 0,
+                    "store_cap_reached": True}
         self.throttled = []
         ops = self.plan(state, self.scan())
         selected, deferred = self.select(ops)
@@ -554,14 +579,18 @@ class SegmentShipper:
         if not selected:
             self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
                               oversized_paths=oversized[:50], throttled_snapshots=throttled,
-                              last_error=None, last_segment_at=state.get("last_segment_at"))
+                              last_error=None, last_segment_at=state.get("last_segment_at"),
+                              last_manifest_sha256=state["last_manifest_sha256"],
+                              store_bytes=store_bytes)
             return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred}
         segment_raw, manifest_raw, new_state = self.build(state, selected)
         self.write_intent(segment_raw, manifest_raw, new_state)
         shipped = self.complete_intent()
         self.write_status(shipped_seq=new_state["seq"], unshipped_bytes=deferred,
                           oversized_paths=oversized[:50], throttled_snapshots=throttled,
-                          last_error=None, last_segment_at=new_state["last_segment_at"])
+                          last_error=None, last_segment_at=new_state["last_segment_at"],
+                          last_manifest_sha256=new_state["last_manifest_sha256"],
+                          store_bytes=new_state["store_bytes"])
         return {"shipped": shipped, "recovered": recovered, "deferred_bytes": deferred,
                 "members": len(selected)}
 
@@ -621,11 +650,20 @@ def _log(message: str) -> None:
     print(f"[{stamp}] [segment-shipper] {message}", flush=True)
 
 
+def sink_from_env(environ=None) -> str:
+    env = os.environ if environ is None else environ
+    return (env.get("RESEARCH_SEGMENTS_SINK") or "tigris").strip().lower()
+
+
 def shipper_from_env(environ=None) -> SegmentShipper:
     env = os.environ if environ is None else environ
     volume = Path(env.get("BOT_DATA_DIR") or "/app/data")
     here = Path(__file__).resolve().parent
+    sink = sink_from_env(env)
+    default_cap = VOLUME_DEFAULT_MAX_STORE_BYTES if sink == "volume" else 0
     return SegmentShipper(
+        sink=sink,
+        max_store_bytes=int(env.get("RESEARCH_SEGMENTS_VOLUME_MAX_BYTES") or default_cap),
         store=store_from_env(env), volume_root=volume, runtime_root=volume / "runtime",
         state_dir=Path(env.get("RESEARCH_SEGMENTS_STATE_DIR") or volume / "segment-shipper"),
         rules=load_selection_rules(Path(env.get("RESEARCH_SEGMENTS_BOT_SOURCE") or here / "bot.py")),
@@ -646,7 +684,9 @@ def main() -> int:
     interval = max(30.0, float(os.getenv("RESEARCH_SEGMENTS_INTERVAL_SECONDS") or 300))
     backlog_pause = max(1.0, float(os.getenv("RESEARCH_SEGMENTS_BACKLOG_PAUSE_SECONDS") or 5))
     ack_poll = max(60.0, float(os.getenv("RESEARCH_SEGMENTS_ACK_POLL_SECONDS") or 1800))
-    min_free = int(os.getenv("RESEARCH_SEGMENTS_MIN_FREE_BYTES") or 200 * 1024 * 1024)
+    default_floor = (VOLUME_DEFAULT_MIN_FREE_BYTES if sink_from_env() == "volume"
+                     else DEFAULT_MIN_FREE_BYTES)
+    min_free = int(os.getenv("RESEARCH_SEGMENTS_MIN_FREE_BYTES") or default_floor)
     try:
         shipper = shipper_from_env()
     except (RuntimeError, StoreError, OSError, ValueError) as exc:
@@ -656,7 +696,8 @@ def main() -> int:
     if lock is None:
         _log("another shipper holds the lock -> exiting")
         return 0
-    _log(f"started prefix={shipper.prefix} interval={interval:.0f}s pruning=OFF")
+    _log(f"started prefix={shipper.prefix} sink={shipper.sink} interval={interval:.0f}s "
+         f"max_store_bytes={shipper.max_store_bytes} min_free={min_free} pruning=OFF")
     last_ack_poll = 0.0
     while True:
         pause = interval

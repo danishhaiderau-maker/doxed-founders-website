@@ -22,6 +22,8 @@ CHAIN_SCRIPTS = [
     "laptop-chain-monitor.ps1",
     "laptop-chain-supervisor.ps1",
     "register-laptop-chain-task.ps1",
+    "research-segment-pull.ps1",
+    "research-segment-pull-loop.ps1",
 ]
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh")
 windows_only = pytest.mark.skipif(os.name != "nt" or not POWERSHELL, reason="Windows PowerShell required")
@@ -188,6 +190,22 @@ def test_analyzer_runner_uses_real_exit_codes():
     assert "exit $exitCode" in runner
     launcher = _source("start-home-analyzer.ps1")
     assert launcher.rstrip().endswith("exit $exitCode")
+
+
+def test_supervisor_keeps_one_segment_pull_loop_not_a_second_watcher():
+    supervisor = _source("laptop-chain-supervisor.ps1")
+    loop = _source("research-segment-pull-loop.ps1")
+    pull = _source("research-segment-pull.ps1")
+    assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')" in supervisor
+    assert "research-segment-pull-loop.ps1" in supervisor
+    assert supervisor.count("laptop-ack-watcher.ps1") == 1
+    assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentPull')" in loop
+    assert "[int]$PullIntervalSec = 120" in loop and "[int]$ParityIntervalMin = 30" in loop
+    assert "'-Source', 'Http'" in loop and "-MaxSegments" in loop
+    assert "laptop-ack-watcher" not in loop
+    # Only the admin token is read from the vault and it is never echoed.
+    assert "BOT_ADMIN_TOKEN" in pull and "Write-Host $env:BOT_ADMIN_TOKEN" not in pull
+    assert "'Process')" in pull
 
 
 def test_supervisor_task_uses_system_powershell():
