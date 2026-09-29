@@ -211,6 +211,73 @@ def test_orphan_artifact_and_tampered_intent_fail_closed(setup):
         mod.maintain_capacity(**args)
 
 
+def _intent(args):
+    return json.loads((args["receipt_root"] / "active-maintenance.json").read_text())
+
+
+def _supersede(args):
+    # Restart onto a new revision: the boundary and caller share this identity.
+    args["current_identity"]["source_git_rev"] = "new-source"
+
+
+def test_superseded_completed_retirement_is_finalized_not_stranded(setup, monkeypatch):
+    args, _, _ = setup
+    original = mod._finalize_retirement
+    def restart(*a, **kw): raise OSError("restart before finalization")
+    monkeypatch.setattr(mod, "_finalize_retirement", restart)
+    with pytest.raises(OSError): mod.maintain_capacity(**args)
+    assert _intent(args)["complete"] is False
+    assert (args["pin_root"] / (IDS[0] + ".json")).exists()
+    monkeypatch.setattr(mod, "_finalize_retirement", original)
+    _supersede(args)
+    result = mod.maintain_capacity(**args)
+    assert result["status"] == "ADMITTED"
+    final = _intent(args)
+    assert final["complete"] is True and final["superseded"] is True
+    assert not list(args["pin_root"].iterdir())
+    assert (args["source_root"] / "raw-evidence.json").read_bytes() == b"never remove"
+
+
+def test_superseded_intent_after_pin_release_is_closed(setup, monkeypatch):
+    args, _, _ = setup
+    original = mod._atomic_json
+    def fail_complete(path, value):
+        if value.get("complete") is True: raise OSError("lost completion")
+        return original(path, value)
+    monkeypatch.setattr(mod, "_atomic_json", fail_complete)
+    with pytest.raises(OSError): mod.maintain_capacity(**args)
+    monkeypatch.setattr(mod, "_atomic_json", original)
+    _supersede(args)
+    assert mod.maintain_capacity(**args)["status"] == "ADMITTED"
+    assert _intent(args)["complete"] is True and _intent(args)["superseded"] is True
+
+
+def test_superseded_unfenced_intent_is_abandoned(setup, monkeypatch):
+    args, _, _ = setup
+    def restart(self, generation, **kwargs): raise OSError("restart before fence")
+    monkeypatch.setattr(DownloadProtection, "fence_if_idle_unprotected", restart)
+    with pytest.raises(OSError): mod.maintain_capacity(**args)
+    monkeypatch.undo()
+    _supersede(args)
+    result = mod.maintain_capacity(**args)
+    assert result["status"] == "ADMITTED" and result["retired_generation"] == IDS[0]
+    assert len(list(args["output_root"].glob("g-*"))) == 3
+
+
+def test_superseded_fenced_intent_without_receipt_stays_fail_closed(setup, monkeypatch):
+    args, _, _ = setup
+    def restart(*a, **kw): raise OSError("restart mid retirement")
+    monkeypatch.setattr(mod, "retire_derivative_generation", restart)
+    with pytest.raises(OSError): mod.maintain_capacity(**args)
+    monkeypatch.undo()
+    _supersede(args)
+    with pytest.raises(ValueError, match="INTENT_IDENTITY_CHANGED"):
+        mod.maintain_capacity(**args)
+    assert (args["output_root"] / ("g-" + IDS[0][:16])).exists()
+    assert json.loads((args["pin_root"] / (IDS[0] + ".json")).read_text())["fence"] is not None
+    assert _intent(args)["complete"] is False
+
+
 def test_deadline_prevents_candidate_fencing(setup):
     args, _, _ = setup
     values = iter([0, 121])

@@ -42,6 +42,65 @@ def _read_operation(path):
     return result
 
 
+def _finalize_retirement(owner, output, pins, active, pending, receipt_path, remaining,
+                         pin_released=False, **marks):
+    token, candidate, state_sha = pending["fence_token"], pending["candidate"], pending["state_sha256"]
+    with owner._locked():
+        remaining()
+        receipt = json.loads(_stable_read(receipt_path, 4 * 1024 * 1024))
+        require(receipt.get("receipt_sha256") == _seal(receipt)["receipt_sha256"]
+                and receipt.get("status") == "COMPLETE" and receipt.get("generation_id") == candidate
+                and receipt.get("state_sha256") == state_sha and receipt.get("raw_source_deleted") is False,
+                "FINALIZATION_RECEIPT_INVALID")
+        derivative = output / ("g-" + candidate[:16])
+        require(not derivative.exists() and not derivative.is_symlink(), "DERIVATIVE_STILL_PRESENT")
+        pin_path = pins / (candidate + ".json")
+        if pin_released:
+            require(not pin_path.exists() and not pin_path.is_symlink(), "FINALIZATION_PIN_INVALID")
+        else:
+            state = owner._load(candidate)
+            now = owner._now(state)
+            require(state["fence"] is not None and state["fence"]["token"] == token
+                    and not any(expiry > now for expiry in state["sessions"].values()), "FINALIZATION_PIN_INVALID")
+            _directory(pins)
+            _safe(pin_path)
+            pin_path.unlink()
+            if os.name != "nt":
+                fd = os.open(pins, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        _atomic_json(active, _seal({**pending, "complete": True, **marks}))
+
+
+def _close_superseded_intent(owner, output, pins, receipts, active, pending, remaining):
+    """Close an intent frozen under an earlier identity; it can never be resumed.
+
+    A restart onto a new revision or generation can interrupt maintenance
+    between steps, and without this every later admission fails forever. The
+    candidate stays fenced, so close only on unambiguous on-disk proof: an
+    unfenced intent without a receipt is abandoned; a completed retirement
+    (valid receipt, derivative gone, matching fence, no live reader) is
+    finalized, including one whose pin release landed before the restart.
+    Anything in between remains fail-closed.
+    """
+    receipt_path = receipts / ("r-" + pending["fence_token"] + ".json")
+    receipt_exists = receipt_path.exists() or receipt_path.is_symlink()
+    pin_path = pins / (pending["candidate"] + ".json")
+    pin_released = receipt_exists and not pin_path.exists() and not pin_path.is_symlink()
+    if not pin_released:
+        with owner._locked():
+            state = owner._load(pending["candidate"])
+            if state["fence"] is None and not receipt_exists:
+                _atomic_json(active, _seal({**pending, "complete": True, "abandoned_unfenced": True,
+                                            "superseded": True}))
+                return
+    require(receipt_exists, "INTENT_IDENTITY_CHANGED")
+    _finalize_retirement(owner, output, pins, active, pending, receipt_path, remaining,
+                         pin_released=pin_released, superseded=True)
+
+
 def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
                       current_identity, target_generation, protection_boundary,
                       timeout_seconds=120, clock=time.monotonic):
@@ -75,9 +134,12 @@ def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
     if pending is not None and pending.get("complete") is True:
         pending = None
     if pending is not None:
-        require(pending["current_identity"] == current_identity and pending["target_generation"] == target_generation
-                and pending["source_root"] == str(source) and pending["output_root"] == str(output)
+        require(pending["source_root"] == str(source) and pending["output_root"] == str(output)
                 and pending["pin_root"] == str(pins), "INTENT_IDENTITY_CHANGED")
+        if pending["current_identity"] != current_identity or pending["target_generation"] != target_generation:
+            _close_superseded_intent(owner, output, pins, receipts, active, pending, remaining)
+            pending = None
+    if pending is not None:
         # A deferred reader admission may have left an intent but no fence or
         # retirement. Such an unfenced intent is safely abandonable, so one
         # busy generation cannot starve later idle candidates on every pass.
@@ -159,30 +221,7 @@ def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
                     "RETIREMENT_INCOMPLETE")
             # Proof-bound finalization, never age-based fence expiry. Retention
             # reservation remains held; no reader can be admitted in this gap.
-            with owner._locked():
-                remaining()
-                receipt = json.loads(_stable_read(receipt_path, 4 * 1024 * 1024))
-                require(receipt.get("receipt_sha256") == _seal(receipt)["receipt_sha256"]
-                        and receipt.get("status") == "COMPLETE" and receipt.get("generation_id") == candidate
-                        and receipt.get("state_sha256") == state_sha and receipt.get("raw_source_deleted") is False,
-                        "FINALIZATION_RECEIPT_INVALID")
-                derivative = output / ("g-" + candidate[:16])
-                require(not derivative.exists() and not derivative.is_symlink(), "DERIVATIVE_STILL_PRESENT")
-                pin_path = pins / (candidate + ".json")
-                state = owner._load(candidate)
-                now = owner._now(state)
-                require(state["fence"] is not None and state["fence"]["token"] == token
-                        and not any(expiry > now for expiry in state["sessions"].values()), "FINALIZATION_PIN_INVALID")
-                _directory(pins)
-                _safe(pin_path)
-                pin_path.unlink()
-                if os.name != "nt":
-                    fd = os.open(pins, os.O_RDONLY | os.O_DIRECTORY)
-                    try:
-                        os.fsync(fd)
-                    finally:
-                        os.close(fd)
-                _atomic_json(active, _seal({**pending, "complete": True}))
+            _finalize_retirement(owner, output, pins, active, pending, receipt_path, remaining)
             admission = check_derivative_admission(output, target_generation, MAX_PACKAGE_BYTES)
             return {**admission, "retired_generation": candidate, "cleanup_performed": True,
                     "raw_source_deleted": False}
