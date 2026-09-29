@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -66,7 +67,12 @@ def _transient(exc: BaseException) -> bool:
     # transport exception or a 401/403 would be retried until the deadline.
     if isinstance(exc, urllib.error.HTTPError):
         return exc.code in TRANSIENT_HTTP
-    return isinstance(exc, (urllib.error.URLError, TimeoutError))
+    # A CPU-starved runtime can drop a response mid-body: the read surfaces as
+    # IncompleteRead, a reset, or truncated JSON rather than a URLError.
+    return isinstance(exc, (
+        urllib.error.URLError, TimeoutError, http.client.IncompleteRead,
+        http.client.RemoteDisconnected, ConnectionError, json.JSONDecodeError,
+    ))
 
 
 def observe_status(request_json, *, until, monotonic, sleep):

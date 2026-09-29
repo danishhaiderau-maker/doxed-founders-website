@@ -1094,6 +1094,11 @@ jobs:
           python -m pytest ../../scripts/test_fly_transport_bundle_workflow.py -q
           python -m pytest test_data_sync_bundle_runtime_topology.py -q
 
+      - name: Verify guarded deploy maintenance boundary failure modes
+        run: |
+          python -m pytest test_data_sync_bundle_maintenance.py test_deploy_maintenance_boundary_hardening.py test_fill_single_flight.py -q
+          python -m pytest ../../scripts/test_fly_failure_paper_resume.py ../../scripts/test_fly_resume_bootstrap.py ../../scripts/test_fly_resume_predeploy_abort.py ../../scripts/test-fly-workflow-revision-contract.py -q
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -1165,12 +1170,19 @@ jobs:
           BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
         run: |
           python - <<'PY'
-          import json, os, time, urllib.error, urllib.request
+          import http.client, json, os, time, urllib.error, urllib.request
           base = "https://doxed-btc-bot.fly.dev"
           token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
           if not token:
               raise SystemExit("BOT_ADMIN_TOKEN is missing")
           headers = {"X-Bot-Admin-Token": token, "Cache-Control": "no-cache"}
+          # A CPU-starved runtime drops responses mid-body (IncompleteRead,
+          # resets, truncated JSON) or behind a gateway error; none of these
+          # prove a request did or did not take effect.
+          def transient(exc):
+              if isinstance(exc, urllib.error.HTTPError):
+                  return exc.code in {502, 503, 504}
+              return isinstance(exc, (urllib.error.URLError, TimeoutError, http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError, json.JSONDecodeError))
           # This pin is the generation-less bridge for tipping off the crash-loop tip image onto the restore tree.
           legacy_bootstrap_revision = "4ed032bb9be4b45995b9a74b4bc855d28dd4fb08"
           legacy_status_revision = legacy_bootstrap_revision[:12]
@@ -1196,13 +1208,13 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write("prior_operator_state=" + json.dumps(prior, sort_keys=True, separators=(",", ":")) + "\n")
           status = None
-          for attempt in range(1, 6):
+          for attempt in range(1, 9):
               # The previous guarded run may already have established the
               # durable pause before its client timed out.  Re-posting
               # /api/pause in that state can wait behind the lifecycle worker
               # and turn a safe idempotent boundary into a false failure.
               try:
-                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=45) as response:
                       status = json.load(response)
                   if (
                       status.get("execution_paused") is True
@@ -1217,12 +1229,12 @@ jobs:
                   print(f"pause precheck attempt={attempt} response={type(exc).__name__}", flush=True)
               try:
                   request = urllib.request.Request(base + "/api/pause", data=b'{"owner": "DEPLOY_MAINTENANCE"}', headers={**headers, "Content-Type": "application/json"}, method="POST")
-                  with urllib.request.urlopen(request, timeout=20) as response:
+                  with urllib.request.urlopen(request, timeout=45) as response:
                       json.load(response)
               except Exception as exc:
                   print(f"pause mutation attempt={attempt} response={type(exc).__name__}; checking durable state", flush=True)
               try:
-                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=20) as response:
+                  with urllib.request.urlopen(urllib.request.Request(base + "/api/status", headers=headers), timeout=45) as response:
                       status = json.load(response)
                   if (
                       status.get("execution_paused") is True
@@ -1252,8 +1264,8 @@ jobs:
               # authority past the pre-mutation generation before trusting flat.
               try:
                   return request_json(path, payload, timeout=90)
-              except (TimeoutError, urllib.error.URLError) as exc:
-                  if isinstance(exc, urllib.error.HTTPError):
+              except Exception as exc:
+                  if not transient(exc):
                       raise
                   print(f"Maintenance mutation unconfirmed path={path} trade_id={payload.get('trade_id')} response={type(exc).__name__}", flush=True)
                   return None
@@ -1323,27 +1335,30 @@ jobs:
               last = None
               for attempt in range(1, 21):
                   try:
-                      candidate = request_json("/api/relay-execution-state?fresh=1")
-                      generation = candidate.get("money_state_generation")
-                      if not isinstance(generation, int) or isinstance(generation, bool):
-                          if minimum_generation is not None:
-                              raise SystemExit("relay execution generation disappeared after a fenced mutation")
-                          require_legacy_bootstrap_status(require_flat=False)
-                          candidate["_legacy_exact_revision_bootstrap"] = True
-                          return candidate
-                      if minimum_generation is None or generation >= minimum_generation:
-                          return candidate
-                      last = f"generation {generation} < {minimum_generation}"
-                  except urllib.error.HTTPError as exc:
-                      if exc.code != 503:
+                      candidate = request_json("/api/relay-execution-state?fresh=1", timeout=90)
+                  except Exception as exc:
+                      if not transient(exc):
                           raise
-                      last = "503 rebuilding generation-matching authority"
+                      last = f"transient {type(exc).__name__}"
+                      print(f"fresh exposure attempt={attempt} response={type(exc).__name__}", flush=True)
+                      time.sleep(min(2 * attempt, 10))
+                      continue
+                  generation = candidate.get("money_state_generation")
+                  if not isinstance(generation, int) or isinstance(generation, bool):
+                      if minimum_generation is not None:
+                          raise SystemExit("relay execution generation disappeared after a fenced mutation")
+                      require_legacy_bootstrap_status(require_flat=False)
+                      candidate["_legacy_exact_revision_bootstrap"] = True
+                      return candidate
+                  if minimum_generation is None or generation >= minimum_generation:
+                      return candidate
+                  last = f"generation {generation} < {minimum_generation}"
                   time.sleep(min(attempt, 5))
               raise SystemExit(f"generation-matching relay authority unavailable: {last}")
           required_generation = None
           unconfirmed_floor = None
           unconfirmed_trade_ids = set()
-          for round_no in range(1, 9):
+          for round_no in range(1, 13):
               exposure = fresh_exposure(required_generation)
               if not isinstance(exposure.get("orders"), list) or not isinstance(exposure.get("positions"), list):
                   raise SystemExit("authenticated maintenance exposure arrays are missing")
@@ -1696,7 +1711,7 @@ jobs:
           EXPECTED_REVISION: ${{ github.sha }}
         run: |
           python - <<'PY'
-          import json, os, time, urllib.error, urllib.request
+          import http.client, json, os, time, urllib.error, urllib.request
 
           base = "https://doxed-btc-bot.fly.dev"
           expected = os.environ["EXPECTED_REVISION"][:12]
@@ -1781,7 +1796,7 @@ jobs:
               raise RuntimeError(f"postdeploy generation-current relay state unavailable: {type(last_state).__name__}")
 
           required_generation = None
-          for round_no in range(1, 6):
+          for round_no in range(1, 9):
               exposure = fresh_state(required_generation)
               round_generation = exposure["money_state_generation"]
               orders = sorted({str(row.get("trade_id") or "").strip() for row in exposure["orders"]} - {""})
@@ -1793,8 +1808,28 @@ jobs:
                       f"generation={round_generation} round={round_no}"
                   )
                   break
+              def postdeploy_mutation(path, trade_id):
+                  # An unconfirmed or already-absent mutation proves nothing;
+                  # the round resamples generation-current authority instead.
+                  try:
+                      return request_json(path, {"trade_id": trade_id}, timeout=90)
+                  except urllib.error.HTTPError as exc:
+                      if exc.code == 404:
+                          print(f"Postdeploy maintenance target already absent trade_id={trade_id}", flush=True)
+                          return None
+                      if exc.code not in {502, 503, 504}:
+                          raise
+                      print(f"Postdeploy maintenance mutation unconfirmed trade_id={trade_id} response={exc.code}", flush=True)
+                      return None
+                  except (urllib.error.URLError, TimeoutError, http.client.IncompleteRead, http.client.RemoteDisconnected, ConnectionError, json.JSONDecodeError) as exc:
+                      print(f"Postdeploy maintenance mutation unconfirmed trade_id={trade_id} response={type(exc).__name__}", flush=True)
+                      return None
+              round_unconfirmed = False
               for trade_id in orders:
-                  cancelled = request_json("/api/orders/cancel", {"trade_id": trade_id})
+                  cancelled = postdeploy_mutation("/api/orders/cancel", trade_id)
+                  if cancelled is None:
+                      round_unconfirmed = True
+                      break
                   generation = cancelled.get("money_state_generation")
                   if cancelled.get("status") != "cancelled":
                       raise SystemExit(f"postdeploy order cancel was not confirmed for {trade_id}")
@@ -1802,8 +1837,14 @@ jobs:
                       raise SystemExit("postdeploy order cancel did not advance relay generation")
                   round_generation = generation
                   required_generation = max(required_generation or 0, generation)
+              if round_unconfirmed:
+                  time.sleep(2)
+                  continue
               for trade_id in positions:
-                  closed = request_json("/api/positions/close", {"trade_id": trade_id})
+                  closed = postdeploy_mutation("/api/positions/close", trade_id)
+                  if closed is None:
+                      round_unconfirmed = True
+                      break
                   generation = closed.get("money_state_generation")
                   if closed.get("status") != "closed":
                       raise SystemExit(f"postdeploy normal paper close was not confirmed for {trade_id}")
@@ -1811,6 +1852,9 @@ jobs:
                       raise SystemExit("postdeploy normal paper close did not advance relay generation")
                   round_generation = generation
                   required_generation = max(required_generation or 0, generation)
+              if round_unconfirmed:
+                  time.sleep(2)
+                  continue
               final = fresh_state(required_generation)
               if not final["orders"] and not final["positions"]:
                   exact_safe_status(require_paused=True, require_flat=True)
@@ -2192,3 +2236,14 @@ jobs:
               time.sleep(min(attempt, 5))
           raise SystemExit(f"failed deploy paper maintenance could not be preserved: {type(last).__name__}")
           PY
+
+      - name: Guaranteed paper resume after failed guarded deploy
+        # Paper must never sit idle after a deploy attempt. Runs last on every
+        # failure or cancellation exit once a maintenance mutation started.
+        if: ${{ (failure() || cancelled()) && !(github.event_name == 'workflow_dispatch' && inputs.keep_maintenance_pause == true) && (steps.paper_maintenance.outcome == 'success' || steps.paper_maintenance.outcome == 'failure' || steps.deploy_source.outcome == 'success' || steps.deploy_source.outcome == 'failure') }}
+        timeout-minutes: 15
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          PRIOR_OPERATOR_STATE: ${{ steps.paper_maintenance.outputs.prior_operator_state }}
+        run: python scripts/fly_failure_paper_resume.py

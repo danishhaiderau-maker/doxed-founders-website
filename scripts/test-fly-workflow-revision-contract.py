@@ -305,8 +305,9 @@ def test_postdeploy_restart_boundary_is_exact_generation_fenced_and_flat():
     assert exact < pause
     assert 'status.get("execution_paused") is True' in block
     assert 'status.get("manual_admin_pause") is True' in block
-    assert 'request_json("/api/orders/cancel", {"trade_id": trade_id})' in block
-    assert 'request_json("/api/positions/close", {"trade_id": trade_id})' in block
+    assert 'return request_json(path, {"trade_id": trade_id}, timeout=90)' in block
+    assert 'postdeploy_mutation("/api/orders/cancel", trade_id)' in block
+    assert 'postdeploy_mutation("/api/positions/close", trade_id)' in block
     assert 'generation <= round_generation' in block
     assert 'fresh_state(required_generation)' in block
     assert 'require_paused=True, require_flat=True' in block

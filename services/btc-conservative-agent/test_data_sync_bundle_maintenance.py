@@ -247,6 +247,71 @@ def test_target_generation_skeleton_is_kept_for_resume(setup):
     assert (skeleton / "packages").is_dir()
 
 
+def _killed_worker_debris(folder):
+    unindexed = hashlib.sha256(b"published before checkpoint").hexdigest()
+    paths = [
+        folder / "packages" / (".%s.tmp" % ("1" * 32)),
+        folder / "packages" / (unindexed + ".tar"),
+        folder / "descriptors" / (".d-%s.json.%s.tmp" % ("2" * 20, "3" * 12)),
+        folder / "descriptors" / ("d-" + unindexed[:20] + ".json"),
+        folder / (".bundle-worker-state.json.%s.tmp" % ("4" * 12)),
+    ]
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"killed mid-write")
+    return paths
+
+
+def test_killed_worker_temporaries_and_unindexed_artifacts_are_removed(setup):
+    args, _, _ = setup
+    _two_generations_and_skeleton(args, IDS[4])
+    current = args["output_root"] / ("g-" + IDS[3][:16])
+    indexed = sorted(p.name for p in (current / "packages").iterdir())
+    debris = _killed_worker_debris(current)
+    result = mod.maintain_capacity(**args)
+    assert result["status"] == "ADMITTED"
+    assert not any(path.exists() for path in debris)
+    assert sorted(p.name for p in (current / "packages").iterdir()) == indexed
+    assert (current / "bundle-worker-state.json").is_file()
+    assert (args["source_root"] / "raw-evidence.json").read_bytes() == b"never remove"
+
+
+def test_worker_killed_after_publish_before_first_checkpoint_is_reclaimed(setup):
+    args, _, _ = setup
+    abandoned = _two_generations_and_skeleton(args, "9" * 64)
+    target = args["output_root"] / ("g-" + IDS[4][:16])
+    _killed_worker_debris(abandoned)
+    _killed_worker_debris(target)
+    result = mod.maintain_capacity(**args)
+    assert result["status"] == "ADMITTED"
+    assert not abandoned.exists()
+    assert sorted(p.name for p in target.iterdir()) == ["descriptors", "packages"]
+    assert not any((target / "packages").iterdir()) and not any((target / "descriptors").iterdir())
+
+
+@pytest.mark.parametrize("name", [".partial.tmp", "notes.txt", "a" * 63 + ".tar", ".%s.tmp" % ("1" * 31)])
+def test_unrecognised_artifact_is_never_deleted_and_fails_closed(setup, name):
+    args, _, _ = setup
+    _two_generations_and_skeleton(args, IDS[4])
+    current = args["output_root"] / ("g-" + IDS[3][:16])
+    (current / "packages" / name).write_bytes(b"unknown bytes")
+    with pytest.raises(ValueError, match="BUNDLE_DERIVATIVE_ORPHAN_ARTIFACT"):
+        mod.maintain_capacity(**args)
+    assert (current / "packages" / name).read_bytes() == b"unknown bytes"
+
+
+def test_debris_pass_refuses_while_a_worker_holds_the_lease(setup):
+    args, _, _ = setup
+    _two_generations_and_skeleton(args, IDS[4])
+    current = args["output_root"] / ("g-" + IDS[3][:16])
+    debris = _killed_worker_debris(current)
+    with _singleton_lease(args["output_root"] / ".bundle-worker.lease"):
+        assert mod.maintain_capacity(**args) == {"status": "DEFERRED", "reason": "BUNDLE_WORKER_LEASE_HELD"}
+    assert all(path.exists() for path in debris)
+    assert mod.maintain_capacity(**args)["status"] == "ADMITTED"
+    assert not any(path.exists() for path in debris)
+
+
 def _intent(args):
     return json.loads((args["receipt_root"] / "active-maintenance.json").read_text())
 
