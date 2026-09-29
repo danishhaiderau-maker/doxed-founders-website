@@ -257,6 +257,63 @@ def test_registration_releases_trade_lock_before_slow_schedule_hydration():
     assert not worker.is_alive()
 
 
+def _coordination_display_namespace():
+    tree = ast.parse(BOT_SOURCE)
+    wanted = {"live_copy_coordination_state", "live_copy_coordination_display_fields"}
+    fns = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in wanted
+    ]
+    assert {fn.name for fn in fns} == wanted
+    namespace = {
+        "state": {},
+        "state_lock": threading.RLock(),
+        "COORD_STATE_RUNNING_TOGETHER": "RUNNING_TOGETHER",
+        "COORD_STATE_RELAY_EXIT_ONLY": "RELAY_EXIT_ONLY",
+        "COORD_STATE_SOURCE_RESEARCH_ONLY": "SOURCE_RESEARCH_ONLY",
+        "COORD_STATE_FULLY_PAUSED": "FULLY_PAUSED",
+        "COORD_STATE_UNCONFIRMED_SINCE_BOOT": "UNCONFIRMED_SINCE_BOOT",
+        "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
+        "LIVE_RELAY_COORDINATION_UNCONFIRMED_REASON": "LIVE_RELAY_COORDINATION_NOT_CONFIRMED_BY_RAILWAY_SINCE_BOOT",
+    }
+    exec(compile(ast.Module(body=fns, type_ignores=[]), "<coord-display-test>", "exec"), namespace)
+    return namespace
+
+
+def test_live_copy_coordination_boot_default_is_reported_unconfirmed():
+    ns = _coordination_display_namespace()
+    fields = ns["live_copy_coordination_display_fields"]()
+    assert fields["live_copy_coordination_state"] == "UNCONFIRMED_SINCE_BOOT"
+    assert fields["live_copy_coordination_confirmed"] is False
+    assert fields["live_copy_coordination_updated_at"] is None
+    # Enforcement is unchanged: only the reported view is qualified.
+    assert fields["live_copy_coordination_enforced_state"] == "RUNNING_TOGETHER"
+    assert ns["live_copy_coordination_state"]() == "RUNNING_TOGETHER"
+
+
+def test_live_copy_coordination_railway_confirmed_state_is_reported_verbatim():
+    ns = _coordination_display_namespace()
+    ns["state"].update({
+        "live_copy_coordination_state": "SOURCE_RESEARCH_ONLY",
+        "live_copy_coordination_updated_at": "2026-09-30T00:00:00+00:00",
+    })
+    fields = ns["live_copy_coordination_display_fields"]()
+    assert fields["live_copy_coordination_state"] == "SOURCE_RESEARCH_ONLY"
+    assert fields["live_copy_coordination_confirmed"] is True
+    assert fields["live_copy_coordination_ui_reason"] == "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED"
+    ns["state"]["live_copy_coordination_state"] = "RUNNING_TOGETHER"
+    fields = ns["live_copy_coordination_display_fields"]()
+    assert fields["live_copy_coordination_state"] == "RUNNING_TOGETHER"
+    assert fields["live_copy_coordination_ui_reason"] == ""
+
+
+def test_live_copy_coordination_display_is_wired_into_snapshot_and_banner():
+    assert 'snapshot.update(live_copy_coordination_display_fields())' in BOT_SOURCE
+    assert '**live_copy_coordination_display_fields(),' in BOT_SOURCE
+    assert "d.live_copy_coordination_state !== 'UNCONFIRMED_SINCE_BOOT'" in BOT_SOURCE
+    assert '"UNCONFIRMED_SINCE_BOOT"' not in BOT_SOURCE.split("def set_live_copy_coordination_state", 1)[1].split("\ndef ", 1)[0]
+
+
 def test_live_copy_coordination_blocks_new_continuous_pending_but_allows_labelled_shadow():
     tree = ast.parse(BOT_SOURCE)
     fn = next(
