@@ -33,6 +33,8 @@ export type FounderCloudMode = {
 };
 
 export type FounderNodeHeartbeat = {
+  /** Advertised capability only; never permission to start a local build. */
+  ide?: { provider: string; capabilityVersion: number; capabilities: string[] };
   nodeId: string;
   label: string;
   platform: string;

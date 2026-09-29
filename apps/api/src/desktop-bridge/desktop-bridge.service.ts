@@ -14,7 +14,7 @@ const BRIDGE_KEY = '_desktopBridgeByNode';
 const WORKSPACES_KEY = '_workspacesByNode';
 const SESSIONS_KEY = '_sessionsByNode';
 const MAX_WORKSPACES = 10;
-const MAX_SESSIONS = 20;
+const MAX_SESSIONS = 25;
 const MAX_STR_LEN = 200;
 const MAX_MESSAGES_PER_SESSION = 50;
 const MESSAGE_TEXT_MAX = 1000;
@@ -36,78 +36,91 @@ export class DesktopBridgeService {
       workspaces?: BridgeWorkspace[];
       sessions?: BridgeSession[];
     },
+    transaction?: Prisma.TransactionClient,
   ): Promise<DesktopBridgeSnapshot | null> {
     const snapshot = input.bridge
       ? sanitizeDesktopBridge(nodeId, label, input.bridge)
       : null;
-    const cleanedWorkspaces = input.workspaces?.length
-      ? this.sanitizeWorkspaces(input.workspaces)
-      : [];
-    const cleanedSessions = input.sessions?.length
-      ? this.sanitizeSessions(input.sessions)
-      : [];
+    const hasWorkspaces = input.workspaces !== undefined;
+    const hasSessions = input.sessions !== undefined;
+    const cleanedWorkspaces = hasWorkspaces ? this.sanitizeWorkspaces(input.workspaces) : [];
+    const cleanedSessions = hasSessions ? this.sanitizeSessions(input.sessions) : [];
 
-    if (!snapshot && cleanedWorkspaces.length === 0 && cleanedSessions.length === 0) {
+    if (!snapshot && !hasWorkspaces && !hasSessions) {
       return null;
     }
 
-    const settings = await this.prisma.founderBuilderSettings.findUnique({
-      where: { userId },
-      select: { memoryGraph: true },
-    });
-    const base =
-      settings?.memoryGraph && typeof settings.memoryGraph === 'object' && !Array.isArray(settings.memoryGraph)
-        ? { ...(settings.memoryGraph as Record<string, unknown>) }
-        : {};
-
-    if (snapshot) {
-      const byNode =
-        base[BRIDGE_KEY] && typeof base[BRIDGE_KEY] === 'object' && !Array.isArray(base[BRIDGE_KEY])
-          ? { ...(base[BRIDGE_KEY] as Record<string, DesktopBridgeSnapshot>) }
-          : {};
-      byNode[nodeId] = snapshot;
-      base[BRIDGE_KEY] = byNode;
-    }
-
-    if (cleanedWorkspaces.length > 0) {
-      const byNode =
-        base[WORKSPACES_KEY] && typeof base[WORKSPACES_KEY] === 'object' && !Array.isArray(base[WORKSPACES_KEY])
-          ? { ...(base[WORKSPACES_KEY] as Record<string, BridgeWorkspace[]>) }
-          : {};
-      byNode[nodeId] = cleanedWorkspaces;
-      base[WORKSPACES_KEY] = byNode;
-    }
-
-    if (cleanedSessions.length > 0) {
-      const byNode =
-        base[SESSIONS_KEY] && typeof base[SESSIONS_KEY] === 'object' && !Array.isArray(base[SESSIONS_KEY])
-          ? { ...(base[SESSIONS_KEY] as Record<string, BridgeSession[]>) }
-          : {};
-      const prior = Array.isArray(byNode[nodeId]) ? byNode[nodeId]! : [];
-      const priorById = new Map(prior.map((s) => [s.id, s]));
-      const mergedSessions = cleanedSessions.map((s) => {
-        if (s.messages?.length) return s;
-        const old = priorById.get(s.id);
-        if (old?.messages?.length) {
-          return {
-            ...s,
-            messages: old.messages,
-            messageCount: s.messageCount ?? old.messageCount ?? old.messages.length,
-          };
-        }
-        return s;
+    const persist = async (transaction: Prisma.TransactionClient) => {
+      const settings = await transaction.founderBuilderSettings.findUnique({
+        where: { userId },
+        select: { memoryGraph: true },
       });
-      byNode[nodeId] = mergedSessions;
-      base[SESSIONS_KEY] = byNode;
+      const base =
+        settings?.memoryGraph && typeof settings.memoryGraph === 'object' && !Array.isArray(settings.memoryGraph)
+          ? { ...(settings.memoryGraph as Record<string, unknown>) }
+          : {};
+
+      if (snapshot) {
+        const byNode =
+          base[BRIDGE_KEY] && typeof base[BRIDGE_KEY] === 'object' && !Array.isArray(base[BRIDGE_KEY])
+            ? { ...(base[BRIDGE_KEY] as Record<string, DesktopBridgeSnapshot>) }
+            : {};
+        byNode[nodeId] = snapshot;
+        base[BRIDGE_KEY] = byNode;
+      }
+
+      if (hasWorkspaces) {
+        const byNode =
+          base[WORKSPACES_KEY] && typeof base[WORKSPACES_KEY] === 'object' && !Array.isArray(base[WORKSPACES_KEY])
+            ? { ...(base[WORKSPACES_KEY] as Record<string, BridgeWorkspace[]>) }
+            : {};
+        byNode[nodeId] = cleanedWorkspaces;
+        base[WORKSPACES_KEY] = byNode;
+      }
+
+      if (hasSessions) {
+        const byNode =
+          base[SESSIONS_KEY] && typeof base[SESSIONS_KEY] === 'object' && !Array.isArray(base[SESSIONS_KEY])
+            ? { ...(base[SESSIONS_KEY] as Record<string, BridgeSession[]>) }
+            : {};
+        const prior = Array.isArray(byNode[nodeId]) ? byNode[nodeId]! : [];
+        const priorById = new Map(prior.map((s) => [s.id, s]));
+        const mergedSessions = cleanedSessions.map((s) => {
+          if (s.messages?.length) return s;
+          const old = priorById.get(s.id);
+          if (old?.messages?.length) {
+            return {
+              ...s,
+              messages: old.messages,
+              messageCount: s.messageCount ?? old.messageCount ?? old.messages.length,
+            };
+          }
+          return s;
+        });
+        byNode[nodeId] = mergedSessions;
+        base[SESSIONS_KEY] = byNode;
+      }
+
+      await transaction.founderBuilderSettings.upsert({
+        where: { userId },
+        create: { userId, memoryGraph: base as Prisma.InputJsonValue },
+        update: { memoryGraph: base as Prisma.InputJsonValue },
+      });
+
+      return snapshot;
+    };
+    // Heartbeats publish node capability and snapshots in this same transaction.
+    if (transaction) return persist(transaction);
+    // Standalone snapshot writes retain the same serializable boundary.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await this.prisma.$transaction(persist, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      } catch (error) {
+        const retryable = error && typeof error === 'object' && 'code' in error && error.code === 'P2034';
+        if (!retryable || attempt === 2) throw error;
+      }
     }
-
-    await this.prisma.founderBuilderSettings.upsert({
-      where: { userId },
-      create: { userId, memoryGraph: base as Prisma.InputJsonValue },
-      update: { memoryGraph: base as Prisma.InputJsonValue },
-    });
-
-    return snapshot;
+    throw new Error('Desktop snapshot transaction did not complete');
   }
 
   async saveFromHeartbeat(
@@ -165,7 +178,6 @@ export class DesktopBridgeService {
     workspaces: BridgeWorkspace[],
   ): Promise<BridgeWorkspace[]> {
     const cleaned = this.sanitizeWorkspaces(workspaces);
-    if (cleaned.length === 0) return [];
     await this.saveBridgePayload(userId, nodeId, '', { workspaces: cleaned });
     return cleaned;
   }
@@ -184,13 +196,15 @@ export class DesktopBridgeService {
     const byNode = (graph as Record<string, unknown>)[WORKSPACES_KEY];
     if (!byNode || typeof byNode !== 'object' || Array.isArray(byNode)) return [];
 
-    const perNode = Object.values(byNode as Record<string, BridgeWorkspace[]>).filter(
-      Array.isArray,
-    ) as BridgeWorkspace[][];
-    if (perNode.length === 0) return [];
+    const all = Object.entries(byNode as Record<string, BridgeWorkspace[]>).flatMap(
+      ([targetNodeId, workspaces]) =>
+        Array.isArray(workspaces)
+          ? workspaces.map((workspace) => ({ ...workspace, targetNodeId }))
+          : [],
+    );
+    if (all.length === 0) return [];
 
     // Flatten all nodes' workspaces, then sort by lastActiveAt desc.
-    const all = perNode.flat();
     all.sort(
       (a, b) =>
         new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
@@ -247,7 +261,6 @@ export class DesktopBridgeService {
     sessions: BridgeSession[],
   ): Promise<BridgeSession[]> {
     const cleaned = this.sanitizeSessions(sessions);
-    if (cleaned.length === 0) return [];
     await this.saveBridgePayload(userId, nodeId, '', { sessions: cleaned });
     return cleaned;
   }
@@ -266,17 +279,73 @@ export class DesktopBridgeService {
     const byNode = (graph as Record<string, unknown>)[SESSIONS_KEY];
     if (!byNode || typeof byNode !== 'object' || Array.isArray(byNode)) return [];
 
-    const perNode = Object.values(byNode as Record<string, BridgeSession[]>).filter(
-      Array.isArray,
-    ) as BridgeSession[][];
-    if (perNode.length === 0) return [];
-
-    const all = perNode.flat();
+    const all = Object.entries(byNode as Record<string, BridgeSession[]>).flatMap(
+      ([targetNodeId, sessions]) =>
+        Array.isArray(sessions)
+          ? sessions.map((session) => ({ ...session, targetNodeId }))
+          : [],
+    );
+    if (all.length === 0) return [];
     all.sort(
       (a, b) =>
         new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
     );
     return all.slice(0, MAX_SESSIONS * 2);
+  }
+
+  /**
+   * Resolve the one node bucket that owns a dispatchable session. A session
+   * alias is never allowed to select an arbitrary node: absent a requested
+   * target node, multiple matching canonical sessions fail closed.
+   */
+  async findDispatchTarget(
+    userId: string,
+    sessionId: string,
+    targetNodeId?: string,
+  ): Promise<{ nodeId: string; session: BridgeSession } | undefined> {
+    const requestedId = this.canonicalSessionId(sessionId);
+    if (!requestedId) return undefined;
+
+    const settings = await this.prisma.founderBuilderSettings.findUnique({
+      where: { userId },
+      select: { memoryGraph: true },
+    });
+    const graph = settings?.memoryGraph;
+    if (!graph || typeof graph !== 'object' || Array.isArray(graph)) return undefined;
+    const byNode = (graph as Record<string, unknown>)[SESSIONS_KEY];
+    if (!byNode || typeof byNode !== 'object' || Array.isArray(byNode)) return undefined;
+
+    const buckets = Object.entries(byNode as Record<string, BridgeSession[]>);
+    const matches = new Map<string, { nodeId: string; session: BridgeSession }>();
+    for (const [nodeId, sessions] of buckets) {
+      if (targetNodeId !== undefined && nodeId !== targetNodeId) continue;
+      if (!Array.isArray(sessions)) continue;
+      for (const session of sessions) {
+        if (!session || typeof session !== 'object') continue;
+        const id = this.canonicalSessionId(session.id);
+        const composerId = this.canonicalSessionId(session.composerId);
+        if (id !== requestedId && composerId !== requestedId) continue;
+
+        // Multiple reports of the same canonical session from the same node
+        // are equivalent. Distinct canonical sessions (or nodes) are not.
+        const canonicalId = id || composerId;
+        if (!canonicalId) continue;
+        matches.set(`${nodeId}\u0000${canonicalId}`, { nodeId, session });
+      }
+    }
+
+    return matches.size === 1 ? [...matches.values()][0] : undefined;
+  }
+
+  private canonicalSessionId(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    try {
+      return decodeURIComponent(trimmed).trim() || undefined;
+    } catch {
+      return trimmed;
+    }
   }
 
   /**

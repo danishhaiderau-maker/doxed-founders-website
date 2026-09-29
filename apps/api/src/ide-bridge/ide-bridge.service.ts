@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, Injectable, NotFoundException } from '@nestjs/common';
 import { FounderEventType } from '@prisma/client';
 import {
   CLAUDE_CODE_CAPABILITIES,
@@ -16,12 +16,14 @@ import { DesktopBridgeService } from '../desktop-bridge/desktop-bridge.service';
 import { FounderAgentRunService } from '../founder-agent-run/founder-agent-run.service';
 import { BuilderService } from '../builder/builder.service';
 import { ConnectedWorkspaceService } from '../connected-workspace/connected-workspace.service';
+import { FounderRemoteDispatchError, FounderRemoteDispatchService, type FounderRemoteDispatchRepository } from './founder-remote-dispatch';
 
 export type PendingIdeDispatchRow = {
   id: string;
   sessionId: string;
   prompt: string;
   ideProvider: string;
+  targetNodeId?: string;
 };
 
 const DISPATCH_DEDUPE_MS = 60_000;
@@ -86,6 +88,41 @@ export class IdeBridgeService {
     private readonly builderService: BuilderService,
     private readonly connectedWorkspaceService: ConnectedWorkspaceService,
   ) {}
+
+  private async assertRemoteNode(userId: string, nodeId: string) {
+    const node = await this.prisma.founderNode.findFirst({
+      where: { userId, nodeId, status: 'online', ideCapabilitiesAt: { gte: new Date(Date.now() - BRIDGE_ONLINE_MS) } },
+      select: { nodeId: true, ideProvider: true, ideCapabilityVersion: true, ideCapabilities: true },
+    });
+    if (!node || node.ideProvider !== 'founder-ide-next' || node.ideCapabilityVersion !== 1 ||
+      !Array.isArray(node.ideCapabilities) || !node.ideCapabilities.includes('remote-build-v1')) {
+      throw new ConflictException('Selected desktop is offline or does not advertise remote-build-v1');
+    }
+    return { nodeId: node.nodeId, ideProvider: node.ideProvider, capabilityVersion: 1,
+      capabilities: ['remote-build-v1'] };
+  }
+
+  private get remoteDispatch() {
+    return new FounderRemoteDispatchService({
+      repository: this.dispatchModel as unknown as FounderRemoteDispatchRepository,
+      resolveTarget: async (userId, sessionId, nodeId) => {
+        const target = await this.desktopBridge.findDispatchTarget(userId, sessionId, nodeId);
+        return target ? { sessionId: target.session.id, targetNodeId: target.nodeId,
+          ideProvider: target.session.ideProvider ?? 'cursor' } : null;
+      },
+      assertNode: (userId, nodeId) => this.assertRemoteNode(userId, nodeId),
+    });
+  }
+
+  private async remoteRequest<T>(operation: () => Promise<T>): Promise<T> {
+    try { return await operation(); }
+    catch (error) {
+      if (error instanceof FounderRemoteDispatchError) {
+        throw new HttpException({ message: error.message, code: error.code }, error.status);
+      }
+      throw error;
+    }
+  }
 
   async getRecentAgents(userId: string): Promise<RecentAgentsResponse> {
     const [bridges, activeRun, cursorEvents, cursorCred, founderNode, persistedWorkspaces, persistedSessions] =
@@ -415,9 +452,22 @@ export class IdeBridgeService {
     sessionId: string,
     prompt: string,
     ideProvider: string,
+    targetNodeId?: string,
   ) {
+    const provider = ideProvider === 'founder-ide' ? 'founder-ide-next' : ideProvider;
+    if (provider === 'founder-ide-next') {
+      if (!targetNodeId) throw new BadRequestException('Select the paired desktop explicitly');
+      return this.remoteRequest(() => this.remoteDispatch.create(userId, sessionId, prompt, targetNodeId!));
+    }
+    if (provider !== 'cursor') throw new BadRequestException('Unsupported desktop provider');
+    const target = await this.desktopBridge.findDispatchTarget(userId, sessionId, targetNodeId);
+    if (!target || (target.session.ideProvider ?? 'cursor') !== provider) {
+      throw new NotFoundException('Session is not available on the selected desktop');
+    }
+    sessionId = target.session.id;
+    targetNodeId = target.nodeId;
     const trimmed = prompt?.trim();
-    if (!trimmed) throw new Error('Prompt required');
+    if (!trimmed || trimmed.length > 12_000) throw new BadRequestException('Prompt must contain 1–12000 characters');
     const attributed = withFounderOsDispatchAttribution(trimmed);
     const dedupeKey = normalizeDispatchPromptForDedupe(attributed);
 
@@ -426,6 +476,8 @@ export class IdeBridgeService {
       where: {
         userId,
         sessionId,
+        targetNodeId,
+        ideProvider: provider,
         OR: [
           {
             createdAt: { gte: new Date(Date.now() - DISPATCH_DEDUPE_MS) },
@@ -454,6 +506,7 @@ export class IdeBridgeService {
         sessionId,
         prompt: attributed,
         ideProvider: ideProvider || 'cursor',
+        targetNodeId,
         status: 'PENDING',
       },
     });
@@ -463,9 +516,12 @@ export class IdeBridgeService {
    * Return up to `take` PENDING dispatches for a user, oldest first.
    * Called by Founder Node on each sync cycle.
    */
-  async getPendingDispatches(userId: string, take = 10): Promise<PendingIdeDispatchRow[]> {
+  async getPendingDispatches(userId: string, nodeId: string, take = 10): Promise<PendingIdeDispatchRow[]> {
+    const node = await this.prisma.founderNode.findFirst({ where: { userId, nodeId },
+      select: { ideProvider: true } });
+    if (node?.ideProvider === 'founder-ide-next') return this.remoteRequest(() => this.remoteDispatch.pending(userId, nodeId));
     return this.dispatchModel.findMany({
-      where: { userId, status: 'PENDING' },
+      where: { userId, targetNodeId: nodeId, ideProvider: 'cursor', status: 'PENDING' },
       orderBy: { createdAt: 'asc' },
       take,
       select: { id: true, sessionId: true, prompt: true, ideProvider: true },
@@ -476,14 +532,19 @@ export class IdeBridgeService {
    * Atomically claim a dispatch for execution. Flips PENDING → DISPATCHING
    * only when the row is still pending for this user (compare-and-swap).
    */
-  async claimDispatch(userId: string, dispatchId: string): Promise<PendingIdeDispatchRow | null> {
+  async claimDispatch(userId: string, nodeId: string, dispatchId: string, body?: unknown): Promise<PendingIdeDispatchRow | null> {
+    if (body && typeof body === 'object' && Object.keys(body).length > 0) {
+      return this.remoteRequest(() => this.remoteDispatch.claim(userId, nodeId, dispatchId, body));
+    }
     const existing = await this.dispatchModel.findFirst({
-      where: { id: dispatchId, userId, status: 'PENDING' },
+      where: { id: dispatchId, userId, targetNodeId: nodeId, ideProvider: 'cursor', status: 'PENDING' },
       select: { id: true, sessionId: true, prompt: true, ideProvider: true },
     });
     if (!existing) return null;
+    const target = await this.desktopBridge.findDispatchTarget(userId, existing.sessionId, nodeId);
+    if (!target || target.session.id !== existing.sessionId || (target.session.ideProvider ?? 'cursor') !== 'cursor') return null;
     const claimed = await this.dispatchModel.updateMany({
-      where: { id: dispatchId, userId, status: 'PENDING' },
+      where: { id: dispatchId, userId, targetNodeId: nodeId, ideProvider: 'cursor', status: 'PENDING' },
       data: { status: 'DISPATCHING' },
     });
     if (claimed.count === 0) return null;
@@ -494,6 +555,8 @@ export class IdeBridgeService {
       where: {
         userId,
         sessionId: existing.sessionId,
+        targetNodeId: nodeId,
+        ideProvider: 'cursor',
         status: 'PENDING',
       },
       select: { id: true, prompt: true },
@@ -507,7 +570,7 @@ export class IdeBridgeService {
       .map((row) => row.id);
     if (supersededIds.length > 0) {
       await this.dispatchModel.updateMany({
-        where: { id: { in: supersededIds }, userId, status: 'PENDING' },
+        where: { id: { in: supersededIds }, userId, targetNodeId: nodeId, ideProvider: 'cursor', status: 'PENDING' },
         data: {
           status: 'DISPATCHED',
           dispatchedAt: new Date(),
@@ -519,15 +582,25 @@ export class IdeBridgeService {
     return existing;
   }
 
-  async markDispatched(id: string, result?: string): Promise<void> {
-    await this.dispatchModel.updateMany({
-      where: { id, status: { in: ['PENDING', 'DISPATCHING'] } },
+  async markDispatched(userId: string, nodeId: string, id: string,
+    body: { claimToken?: unknown; result?: unknown; error?: unknown }): Promise<unknown> {
+    if (body && Object.prototype.hasOwnProperty.call(body, 'claimToken')) {
+      return this.remoteRequest(() => this.remoteDispatch.complete(userId, nodeId, id, body));
+    }
+    const result = typeof body?.error === 'string' ? `error: ${body.error}` : body?.result;
+    if (typeof result !== 'string' || !result.trim() || result.length > 4000) {
+      throw new BadRequestException('A bounded completion result is required');
+    }
+    const updated = await this.dispatchModel.updateMany({
+      where: { id, userId, targetNodeId: nodeId, ideProvider: 'cursor', status: 'DISPATCHING' },
       data: {
         status: 'DISPATCHED',
         dispatchedAt: new Date(),
         ...(result ? { result: result.slice(0, 4000) } : {}),
       },
     });
+    if (updated.count !== 1) throw new ConflictException('Dispatch not claimed by this desktop');
+    return { success: true };
   }
 
   /** Poll delivery outcome for a dispatch the web UI just created. */
@@ -541,6 +614,7 @@ export class IdeBridgeService {
         dispatchedAt: true,
         createdAt: true,
         sessionId: true,
+        ideProvider: true,
       },
     })) as {
       id: string;
@@ -549,8 +623,10 @@ export class IdeBridgeService {
       dispatchedAt: Date | null;
       createdAt: Date;
       sessionId: string;
+      ideProvider: string;
     } | null;
     if (!row) throw new NotFoundException('Dispatch not found');
+    if (row.ideProvider === 'founder-ide-next') return this.remoteRequest(() => this.remoteDispatch.status(userId, dispatchId));
     const resultText = row.result ?? '';
     const delivered = row.status === 'DISPATCHED' && /^dispatched\s*\(/i.test(resultText);
     const failed =
@@ -570,5 +646,22 @@ export class IdeBridgeService {
       delivered,
       failed,
     };
+  }
+
+  /** Request cancellation of an owner-owned Founder IDE dispatch. */
+  async cancelDispatch(userId: string, dispatchId: string, reason?: unknown) {
+    const row = await this.dispatchModel.findFirst({
+      where: { id: dispatchId, userId },
+      select: { id: true, ideProvider: true },
+    });
+    if (!row) throw new NotFoundException('Dispatch not found');
+    if (row.ideProvider !== 'founder-ide-next') {
+      throw new BadRequestException('Cancellation is supported only for Founder IDE remote dispatches');
+    }
+    return this.remoteRequest(() => this.remoteDispatch.cancel(userId, dispatchId, reason));
+  }
+
+  async getRemoteCancellationStatus(userId: string, nodeId: string, dispatchId: string, body: unknown) {
+    return this.remoteRequest(() => this.remoteDispatch.cancelStatus(userId, nodeId, dispatchId, body));
   }
 }

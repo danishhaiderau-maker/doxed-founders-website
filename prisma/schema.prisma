@@ -2077,6 +2077,10 @@ model FounderNode {
   vaultHealthy    Boolean   @default(true)
   platform        String?
   appVersion      String?
+  ideProvider     String?
+  ideCapabilityVersion Int?
+  ideCapabilities Json?
+  ideCapabilitiesAt DateTime?
   ollamaEnabled   Boolean   @default(false)
   ollamaBaseUrl   String?
   ollamaModel     String?
@@ -3193,8 +3197,19 @@ model PendingIdeDispatch {
   dispatchedAt DateTime?
   result       String?   @db.Text
   createdAt    DateTime  @default(now())
+  targetNodeId String?
+  capabilityVersion Int?
+  targetCapability String?
+  envelopeHash String?
+  claimTokenHash String?
+  claimedAt DateTime?
+  expiresAt DateTime?
+  error String? @db.Text
+  cancelRequestedAt DateTime?
+  cancelReason String? @db.Text
 
   @@index([userId, status])
+  @@index([userId, targetNodeId, status])
   @@index([createdAt])
 }
 
