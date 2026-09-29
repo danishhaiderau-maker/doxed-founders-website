@@ -1,0 +1,111 @@
+# Research segments — Phase 2 shadow runbook
+
+Implements Phase 2a/2b of `TRANSFER-ARCHITECTURE-PROPOSAL-20260929.md` in
+**shadow mode only**. The legacy inventory/bundle/ACK pipeline stays
+authoritative. Pruning is not implemented (`PRUNING_ENABLED = False`); when it
+lands, the laptop ACK is the only prune authority (no time-based fallback).
+
+## Components
+
+| Where | File | Role |
+|---|---|---|
+| Fly | `research_segment_shipper.py` | Separate niced process (`SCHED_IDLE` when available). No bot import, no trade lock, no HTTP. Started by `fly-entrypoint.sh` only when `RESEARCH_SEGMENTS_ENABLED=1`. |
+| shared | `research_segment_format.py` | Deterministic tar.gz (mtime 0, fixed metadata), canonical manifest, sha256 chain, ACK schema. |
+| shared | `research_segment_store.py` | Stdlib SigV4 S3 client. Only create-if-absent (`If-None-Match: *`), GET, HEAD, List. No delete. |
+| laptop | `research_segment_puller.py` + `scripts/research-segment-pull.ps1` | In-order pull, chain/hash verification, create-new raw archive, idempotent apply into the shadow tree, cumulative ACK. |
+| laptop | `research_segment_parity.py` | Read-only shadow-vs-legacy comparison. |
+
+Object layout (prefix `v1`): `v1/seg/<seq>.tar.gz`, `v1/man/<seq>.json`,
+`v1/acks/laptop/<seq>.json`. There is no mutable `head.json`: the laptop
+probes `man/<applied+1>` so the Fly key never needs overwrite rights.
+
+Fly state lives on the volume root, outside the inventory roots:
+`/app/data/segment-shipper/{state.json,status.json,intent/}` and
+`/app/data/segment-shipper.log`.
+
+## Scoped credentials
+
+Create two access keys in the Tigris dashboard (`fly storage dashboard <bucket>`).
+Never print them; paste them straight into the destinations below.
+
+Fly key (write, no delete):
+
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["s3:PutObject"],
+   "Resource": ["arn:aws:s3:::doxed-btc-research/v1/seg/*", "arn:aws:s3:::doxed-btc-research/v1/man/*"]},
+  {"Effect": "Allow", "Action": ["s3:GetObject"],
+   "Resource": ["arn:aws:s3:::doxed-btc-research/v1/seg/*", "arn:aws:s3:::doxed-btc-research/v1/man/*",
+                "arn:aws:s3:::doxed-btc-research/v1/acks/*"]},
+  {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::doxed-btc-research"],
+   "Condition": {"StringLike": {"s3:prefix": ["v1/acks/laptop/*"]}}}
+]}
+```
+
+Laptop key (read segments, write ACKs only):
+
+```json
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["s3:GetObject"],
+   "Resource": ["arn:aws:s3:::doxed-btc-research/v1/seg/*", "arn:aws:s3:::doxed-btc-research/v1/man/*",
+                "arn:aws:s3:::doxed-btc-research/v1/acks/laptop/*"]},
+  {"Effect": "Allow", "Action": ["s3:PutObject"],
+   "Resource": ["arn:aws:s3:::doxed-btc-research/v1/acks/laptop/*"]}
+]}
+```
+
+`s3:PutObject` alone can overwrite when a client omits the conditional header.
+Both clients always send `If-None-Match: *`, and the laptop's chain check plus
+its create-new archive detect any substituted object. If Tigris supports the
+`s3:if-none-match` condition key, add
+`"Condition": {"Null": {"s3:if-none-match": "false"}}` to both PutObject
+statements.
+
+## Enable shadow mode (after the deploy freeze lifts)
+
+1. **Bucket.** From a directory with **no** `fly.toml`, and **without** `-a`
+   (attaching to the app sets secrets on it, which restarts the trading machine):
+   `fly storage create --name doxed-btc-research -o <org> -y > <vault>\tigris-admin.txt`.
+   Keep the admin credential in the vault only; it is never deployed.
+2. **Keys.** Create the two scoped keys above.
+3. **Laptop vault.** Create
+   `C:\DoxxedCrypto\doxedcryptofounder-secrets\vault\research-segments-laptop.env`:
+   `RESEARCH_SEGMENTS_BUCKET`, `RESEARCH_SEGMENTS_ACCESS_KEY_ID`,
+   `RESEARCH_SEGMENTS_SECRET_ACCESS_KEY` (optionally `RESEARCH_SEGMENTS_ENDPOINT`,
+   default `https://fly.storage.tigris.dev`).
+4. **Fly secrets, staged (no restart):**
+   `fly secrets set --stage -a doxed-btc-bot RESEARCH_SEGMENTS_BUCKET=... RESEARCH_SEGMENTS_ACCESS_KEY_ID=... RESEARCH_SEGMENTS_SECRET_ACCESS_KEY=... RESEARCH_SEGMENTS_ENABLED=1`
+   Enter the values interactively or from the vault, never on a logged command line.
+5. **Deploy** through the normal guarded `fly-bot-deploy.yml` boundary. The
+   staged secrets take effect with that restart.
+6. **Prove progress** (two advancing cycles, per repair-first monitoring):
+   `fly ssh console -a doxed-btc-bot -C "cat /app/data/segment-shipper/status.json"`.
+   `shipped_seq` must advance, `last_error` must be null and `pruning_enabled`
+   must be false. The genesis backlog ships in 8 MiB segments about every 5 s.
+7. **Laptop pull** (idempotent; schedule every 2 min with Task Scheduler):
+   `powershell -NoProfile -ExecutionPolicy Bypass -File C:\DoxxedCrypto\btc-v31-current\scripts\research-segment-pull.ps1`
+   Run parity separately, e.g. every 30 min and outside legacy publish windows:
+   `... research-segment-pull.ps1 -Parity`. The report is written to
+   `C:\DoxxedCrypto\fly-mirror-segments\parity-latest.json`.
+
+Optional tuning (Fly env): `RESEARCH_SEGMENTS_INTERVAL_SECONDS` (300),
+`RESEARCH_SEGMENTS_MAX_SEGMENT_BYTES` (8 MiB), `RESEARCH_SEGMENTS_MAX_MEMBER_BYTES`
+(64 MiB), `RESEARCH_SEGMENTS_LARGE_SNAPSHOT_BYTES` (1 MiB),
+`RESEARCH_SEGMENTS_LARGE_SNAPSHOT_INTERVAL_SECONDS` (3600),
+`RESEARCH_SEGMENTS_ACK_POLL_SECONDS` (1800), `RESEARCH_SEGMENTS_MIN_FREE_BYTES`
+(200 MiB), `RESEARCH_SEGMENTS_PREFIX` (`v1`).
+
+**Rollback:** `fly secrets unset --stage -a doxed-btc-bot RESEARCH_SEGMENTS_ENABLED`,
+applied at the next guarded boundary. Objects already in Tigris are harmless.
+
+## Rotation finding (do not shrink rotation yet)
+
+`rotate_log` renames `x.jsonl` to `x.jsonl.N` at 20 MB. Only these readers
+include numeric rotations: `_signal_replay_paths`, `_one_second_tape_by_bucket`,
+`research/opportunity_backfill.py`, `research/platform_relay_evidence.py`
+(newest 128) and `research/source_market_evidence.load_market_evidence_index`
+(capped at 128, but `sorted(..., reverse=True)[-128:]` keeps the **oldest** 128).
+The generic analyzer `_load_jsonl_rows` (about 40 call sites, including trade
+lifecycle, counterfactual, AI input log, signal snapshot, fill quality and
+source-order market evidence) reads only the active file. Smaller rotation would silently drop rows from those
+loaders. Make the loaders rotation-aware first.
