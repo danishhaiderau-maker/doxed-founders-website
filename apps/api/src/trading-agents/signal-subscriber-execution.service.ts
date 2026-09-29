@@ -3541,6 +3541,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
   private emergencyPositionReadWait = (ms: number) =>
     new Promise<void>((resolve) => setTimeout(resolve, ms));
   private readonly logger = new Logger(SignalSubscriberExecutionService.name);
+  private phantomCancelAllowlistSkips?: Set<string>;
   private readonly bitfinex = new BitfinexTradingClient();
   private activeTrading: ExecutionTradingClient;
   private readonly positionRuntime = new Map<string, PositionRuntime>();
@@ -14031,6 +14032,10 @@ await this.notifications
    *
    * Idempotency rests on the Fly endpoint (which no-ops an already-cancelled
    * trade_id), so a retry on the next tick for the same trade is safe.
+   *
+   * Only relay-allowlisted lanes may be phantom-cancelled: a paper-only or
+   * relay-ineligible showcase trade was never mirrored, so zeroing it would
+   * only destroy research evidence. Fly refuses these too (defence in depth).
    */
   private async cancelPhantomShowcasePosition(
     userId: string,
@@ -14040,6 +14045,17 @@ await this.notifications
     reason: string,
   ): Promise<void> {
     if (!showcaseTradeId) return;
+    if (!isMirrorableLaneTradeId(showcaseTradeId)) {
+      const skipped = (this.phantomCancelAllowlistSkips ??= new Set<string>());
+      if (!skipped.has(showcaseTradeId)) {
+        if (skipped.size >= 1024) skipped.clear();
+        skipped.add(showcaseTradeId);
+        this.logger.warn(
+          `[CURE-3] Phantom-cancel skipped ${userId} trade=${showcaseTradeId} reason=${reason}: lane not relay-allowlisted (paper evidence preserved)`,
+        );
+      }
+      return;
+    }
     const startedAt = Date.now();
     let outcome: 'OK' | 'NO_CONTENT' | 'ERROR' = 'ERROR';
     let httpStatus: number | null = null;
