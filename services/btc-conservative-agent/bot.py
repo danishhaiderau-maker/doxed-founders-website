@@ -51039,25 +51039,40 @@ def _load_post_exit_replays():
     restored = 0
     headers: Dict[str, dict] = {}
     ticks_by_tid: Dict[str, list] = {}
+    # The rotated sidecar holds hundreds of MB of expired tick rows; parsing
+    # them all into dicts OOM-killed boot on a 2 GB machine. Stream twice:
+    # headers first, then ticks only for buffers still inside their window.
     try:
       for replay_path in replay_paths:
         with open(replay_path, "r", encoding="utf-8-sig") as f:
             for line in f:
-                line = line.strip()
-                if not line:
+                if "post_exit_header" not in line:
                     continue
                 try:
                     row = json.loads(line)
                 except (TypeError, ValueError):
                     continue
-                kind = row.get("kind")
                 tid = row.get("trade_id")
-                if not tid:
-                    continue
-                if kind == "post_exit_header":
+                if tid and row.get("kind") == "post_exit_header":
                     headers[tid] = row
-                elif kind == "tick":
-                    ticks_by_tid.setdefault(tid, []).append(row)
+      active_tids = {
+          tid for tid, header in headers.items()
+          if _buf_float(header.get("post_exit_deadline_ts"), 0) > now
+      }
+      headers = {tid: headers[tid] for tid in active_tids}
+      if active_tids:
+        for replay_path in replay_paths:
+            with open(replay_path, "r", encoding="utf-8-sig") as f:
+                for line in f:
+                    if '"tick"' not in line or not any(tid in line for tid in active_tids):
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    tid = row.get("trade_id")
+                    if row.get("kind") == "tick" and tid in active_tids:
+                        ticks_by_tid.setdefault(tid, []).append(row)
     except Exception as e:
         logger.error(f"[POST_EXIT_REPLAY] load failed: {e}")
         return
