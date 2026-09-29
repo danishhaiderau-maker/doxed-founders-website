@@ -135,8 +135,7 @@ def test_maintenance_timeout_is_unconfirmed_not_fatal():
     step = _maintenance_step()
     helper = step[step.index("def mutate_json("):step.index("def require_legacy_bootstrap_status(")]
     assert "timeout=90" in helper
-    assert "except (TimeoutError, urllib.error.URLError)" in helper
-    assert "isinstance(exc, urllib.error.HTTPError)" in helper and "raise" in helper
+    assert "if not transient(exc):" in helper and "raise" in helper
     assert "return None" in helper
     assert 'mutate_json("/api/orders/cancel"' in step
     assert 'request_json("/api/orders/cancel"' not in step

@@ -5418,6 +5418,28 @@ _PAUSE_INTENTS = frozenset({
 })
 # Manual pauses that a deploy-owned resume must never clear.
 _DEPLOY_RETAINED_PAUSE_OWNERS = frozenset({PAUSE_OWNER_OPERATOR, PAUSE_OWNER_SAFETY})
+# Bulk mirror downloads yield CPU to a guarded deploy's maintenance boundary
+# for a bounded window, so a stuck pause can never starve the mirror.
+_DEPLOY_MAINTENANCE_SHED = {"requested_at": 0.0}
+DEPLOY_MAINTENANCE_SHED_WINDOW_SEC = 30 * 60
+
+
+def _data_sync_deploy_maintenance_shed():
+    """503 + Retry-After while deploy maintenance holds the pause; else None.
+
+    Lock-free reads: this runs on every chunk request and must not contend
+    with the state lock the maintenance boundary itself is waiting on.
+    """
+    requested_at = float(_DEPLOY_MAINTENANCE_SHED.get("requested_at") or 0.0)
+    if not (
+        state.get("manual_admin_pause")
+        and state.get("pause_intent") == PAUSE_OWNER_DEPLOY_MAINTENANCE
+        and 0.0 <= time.time() - requested_at < DEPLOY_MAINTENANCE_SHED_WINDOW_SEC
+    ):
+        return None
+    response = jsonify({"error": "DEPLOY_MAINTENANCE_LOAD_SHED"})
+    response.headers["Retry-After"] = "60"
+    return response, 503
 
 
 def _pause_owner_locked() -> str | None:
@@ -39145,6 +39167,8 @@ def api_pause():
         )
         # Deploy maintenance never downgrades a deliberate operator pause.
         pause_owner = PAUSE_OWNER_OPERATOR if already_operator else requested_owner
+        if pause_owner == PAUSE_OWNER_DEPLOY_MAINTENANCE:
+            _DEPLOY_MAINTENANCE_SHED["requested_at"] = time.time()
         state["manual_admin_pause"] = True
         state["pause_intent"] = pause_owner
         # Entry gates read these flags; they must be true before this request
@@ -45851,6 +45875,9 @@ def _start_data_sync_background_refresh() -> None:
 @app.route('/api/data-sync/sqlite-snapshot')
 def api_data_sync_sqlite_snapshot():
     """Materialize one short-lived, integrity-checked SQLite download lease."""
+    shed = _data_sync_deploy_maintenance_shed()
+    if shed is not None:
+        return shed
     try:
         path = _data_sync_resolve_relpath(request.args.get("path"))
         if _data_sync_consistency_mode(path) != "sqlite_snapshot_v1":
@@ -45889,6 +45916,9 @@ def api_data_sync_sqlite_snapshot():
 
 @app.route('/api/data-sync/file')
 def api_data_sync_file():
+    shed = _data_sync_deploy_maintenance_shed()
+    if shed is not None:
+        return shed
     try:
         path = _data_sync_resolve_relpath(request.args.get("path"))
         ack_inventory_sha256 = str(

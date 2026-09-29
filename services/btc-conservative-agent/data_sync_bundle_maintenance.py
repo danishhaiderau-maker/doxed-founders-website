@@ -10,10 +10,12 @@ worker lease then inventory mutex. Holding that mutex here would invert order.
 It must not acquire inventory locks from callbacks under worker lease either.
 Unrelated read admission need not be blocked. This module never drops raw data.
 """
+import contextlib
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import time
 
 from data_sync_bundle_download_pins import DownloadProtection, _directory, _safe
@@ -21,7 +23,7 @@ from data_sync_bundle_retirement import retire_derivative_generation, _stable_re
 from data_sync_bundle_storage import (check_derivative_admission, _entries, _generation_usage,
                                       _is_empty_skeleton, GEN, HEX)
 from data_sync_bundle_transport import MAX_PACKAGE_BYTES
-from data_sync_bundle_worker import _atomic_json, _validate_output_root
+from data_sync_bundle_worker import BundleWorkerError, _atomic_json, _singleton_lease, _validate_output_root
 
 FIELDS = {"inventory_generation_id", "source_git_rev", "collection_epoch_id", "tile_registry_signature"}
 SCHEMA = "bundle_capacity_maintenance_v1"
@@ -102,6 +104,68 @@ def _close_superseded_intent(owner, output, pins, receipts, active, pending, rem
                          pin_released=pin_released, superseded=True)
 
 
+# Exact names a bundle worker killed mid-write can leave behind: atomic-write
+# temporaries, and content-addressed artifacts published before the state
+# checkpoint that would have indexed them. Readers only ever serve indexed
+# artifacts and the worker recreates the rest, so these hold no authority.
+_TEMPORARY_DEBRIS = {
+    None: re.compile(r"\.bundle-worker-state\.json\.[0-9a-f]{12}\.tmp"),
+    "packages": re.compile(r"\.[0-9a-f]{32}\.tmp"),
+    "descriptors": re.compile(r"\.d-[0-9a-f]{20}\.json\.[0-9a-f]{12}\.tmp"),
+}
+_UNINDEXED_DEBRIS = {
+    "packages": re.compile(r"[0-9a-f]{64}\.tar"),
+    "descriptors": re.compile(r"d-[0-9a-f]{20}\.json"),
+}
+
+
+def _indexed_artifacts(path):
+    state_path = path / "bundle-worker-state.json"
+    if not (state_path.exists() or state_path.is_symlink()):
+        return {"packages": set(), "descriptors": set()}
+    value = json.loads(_stable_read(state_path, 2 * 1024 * 1024))
+    index = value.get("package_index")
+    require(isinstance(index, list), "DEBRIS_STATE_INVALID")
+    packages, descriptors = set(), set()
+    for entry in index:
+        digest = entry.get("package_sha256") if isinstance(entry, dict) else None
+        require(isinstance(digest, str) and HEX.fullmatch(digest), "DEBRIS_STATE_INVALID")
+        packages.add(digest + ".tar")
+        descriptors.add(f"d-{digest[:20]}.json")
+    return {"packages": packages, "descriptors": descriptors}
+
+
+def _remove_killed_worker_debris(output):
+    """Delete only exact-pattern debris; caller holds the worker lease.
+
+    The worker holds that singleton lease for its whole run, so nothing
+    matched here can belong to a live write. Unknown names are left in place
+    and still fail admission closed.
+    """
+    removed = 0
+    for path in sorted(_entries(output, 7)):
+        if not GEN.fullmatch(path.name):
+            continue
+        _safe(path, directory=True)
+        indexed = _indexed_artifacts(path)
+        for child in _entries(path, 16):
+            if child.name in _TEMPORARY_DEBRIS:
+                _safe(child, directory=True)
+                for artifact in _entries(child, 4096):
+                    name = artifact.name
+                    if (_TEMPORARY_DEBRIS[child.name].fullmatch(name)
+                            or (_UNINDEXED_DEBRIS[child.name].fullmatch(name)
+                                and name not in indexed[child.name])):
+                        _safe(artifact)
+                        artifact.unlink()
+                        removed += 1
+            elif _TEMPORARY_DEBRIS[None].fullmatch(child.name):
+                _safe(child)
+                child.unlink()
+                removed += 1
+    return removed
+
+
 def _remove_abandoned_skeletons(output, keep_generations):
     """Remove empty pre-checkpoint folders of other generations.
 
@@ -171,7 +235,18 @@ def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
                 _atomic_json(active, _seal({**pending, "complete": True, "abandoned_unfenced": True}))
                 pending = None
     if pending is None:
-        with owner._locked():
+        # Worker lease then readers lease, the retirement order. A live worker
+        # owns every artifact on disk, so defer (transient) rather than judge
+        # its in-flight writes as orphans (terminal for this generation).
+        worker = contextlib.ExitStack()
+        try:
+            worker.enter_context(_singleton_lease(output / ".bundle-worker.lease"))
+        except BundleWorkerError as exc:
+            if str(exc) != "BUNDLE_WORKER_LEASE_HELD":
+                raise
+            return {"status": "DEFERRED", "reason": "BUNDLE_WORKER_LEASE_HELD"}
+        with worker, owner._locked():
+            _remove_killed_worker_debris(output)
             _remove_abandoned_skeletons(output, {current, target_generation})
         try:
             return check_derivative_admission(output, target_generation, MAX_PACKAGE_BYTES)
