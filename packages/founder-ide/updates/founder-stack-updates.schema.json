@@ -6,7 +6,7 @@
   "properties": {
     "manifestVersion": { "type": "integer", "const": 1 },
     "publishedAt": { "type": "string", "format": "date-time" },
-    "product": { "type": "string", "const": "founder-stack" },
+    "product": { "type": "string", "const": "founder-ide-next" },
     "channel": { "type": "string", "enum": ["stable", "beta", "insider"] },
     "latestVersion": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
     "minimumVersion": {
@@ -25,7 +25,7 @@
           "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
           "status": { "type": "string", "enum": ["current", "pending-build", "legacy", "yanked"] },
           "releasedAt": { "type": ["string", "null"], "format": "date-time" },
-          "foundation": { "type": "string", "enum": ["void", "vscodium"] },
+          "foundation": { "type": "string", "enum": ["electron", "void", "vscodium"] },
           "download": {
             "type": "object",
             "required": ["url", "sha256"],

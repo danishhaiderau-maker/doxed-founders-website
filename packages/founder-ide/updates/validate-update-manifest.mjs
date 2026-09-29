@@ -61,8 +61,8 @@ if (manifest.manifestVersion === 1) ok('manifestVersion == 1');
 else fail(`manifestVersion must be 1 (got ${manifest.manifestVersion})`);
 
 checks++;
-if (manifest.product === 'founder-stack') ok('product == "founder-stack"');
-else fail(`product must be "founder-stack" (got ${manifest.product})`);
+if (manifest.product === 'founder-ide-next') ok('product == "founder-ide-next"');
+else fail(`product must be "founder-ide-next" (got ${manifest.product})`);
 
 checks++;
 if (isSemver(manifest.latestVersion)) ok(`latestVersion is semver (${manifest.latestVersion})`);

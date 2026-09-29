@@ -1,64 +1,29 @@
 {
   "$schema": "./founder-stack-updates.schema.json",
   "manifestVersion": 1,
-  "publishedAt": "2026-07-16T00:00:00Z",
-  "product": "founder-stack",
+  "publishedAt": "2026-09-29T00:12:41Z",
+  "product": "founder-ide-next",
   "channel": "stable",
-  "latestVersion": "0.9.1",
-  "minimumVersion": "0.8.0",
-  "releaseNotesUrl": "https://github.com/danishhaiderau-maker/doxedcryptofounder/releases",
+  "latestVersion": "1.0.129",
+  "minimumVersion": "1.0.129",
+  "releaseNotesUrl": "https://github.com/danishhaiderau-maker/founder-ide-releases/releases/tag/v1.0.129",
   "releases": [
     {
-      "version": "0.9.1",
+      "version": "1.0.129",
       "status": "current",
-      "releasedAt": "2026-07-16T00:00:00Z",
-      "foundation": "void",
+      "releasedAt": "2026-09-29T00:12:41Z",
+      "foundation": "electron",
       "download": {
-        "url": "https://github.com/danishhaiderau-maker/doxed-founders-website/releases/download/founder-stack-v0.9.1/Founder-Stack-Setup-0.9.1.exe",
-        "size": 111025351,
-        "sha256": "b5701ce07b1057ed2eab0db6cc7de24bb4e9ee390da634a6d6d89f58dd61bee5",
+        "url": "https://github.com/danishhaiderau-maker/founder-ide-releases/releases/download/v1.0.129/Founder-IDE-Next-QA-Setup-1.0.129.exe",
+        "size": 1240773585,
+        "sha256": "0da711fb797dc2a0f3a425b576ad92f8ae5dc5fcb8a6be70342c2c06ee0539d3",
         "signature": null
       },
-      "minimumVersion": "0.8.0",
-      "rollback": {
-        "mechanism": "inno-overinstall",
-        "previousVersionKept": false,
-        "note": "0.9.1 is IDE-only: Founder Node is no longer bundled (the IDE talks to the Gateway API directly). Installing 0.9.1 over 0.9.0 replaces the IDE in place (Inno Setup overinstall, same AppId) and the bundle's own uninstaller removes the Start Menu group. The previously-installed Founder Node (if any) is left in place and can be uninstalled separately via Add/Remove Programs. The ~/FounderVault is never touched by the installer."
-      }
-    },
-    {
-      "version": "0.9.0",
-      "status": "legacy",
-      "releasedAt": "2026-07-15T00:00:00Z",
-      "foundation": "void",
-      "download": {
-        "url": "https://github.com/danishhaiderau-maker/doxed-founders-website/releases/download/founder-stack-v0.9.0/Founder-Stack-Setup-0.9.0.exe",
-        "size": 105835389,
-        "sha256": "97a01b76a246c8b02b90a9401a0427226ec5f9a667e660e56095ecda9995efa8",
-        "signature": null
-      },
-      "minimumVersion": "0.8.0",
-      "rollback": {
-        "mechanism": "inno-overinstall",
-        "previousVersionKept": false,
-        "note": "Legacy Void-based 0.9.0 bundle. Known issue: this build shipped a launcher-less Founder IDE (the inner installer's gulp electron() step errored on Python 3.14 + empty .build/electron cache, producing a VSCode-win32-x64 dir without Founder IDE.exe). Superseded by 0.9.1 which rebuilds the launcher correctly. To roll back, re-run the 0.9.0 installer; the ~/FounderVault is never touched."
-      }
-    },
-    {
-      "version": "0.8.0",
-      "status": "legacy",
-      "releasedAt": "2026-07-10T00:00:00Z",
-      "foundation": "vscodium",
-      "download": {
-        "url": "https://github.com/danishhaiderau-maker/doxed-founders-website/releases/download/founder-stack-v0.8.0/Founder-Stack-Lite-0.8.0.zip",
-        "size": 85659314,
-        "sha256": "PLACEHOLDER_FILL_AFTER_PUBLISH_SHA256SUM",
-        "signature": null
-      },
-      "minimumVersion": "0.7.0",
+      "minimumVersion": "1.0.129",
       "rollback": {
         "mechanism": "manual",
-        "note": "Legacy VSCodium-based Lite deliverable. No rollback path beyond manual reinstall. Archived under packages/founder-ide/legacy/."
+        "previousVersionKept": false,
+        "note": "Founder IDE Next QA NSIS installer from the public founder-ide-releases channel; the EXE is not code-signed yet. It replaces the earlier Founder-Stack 0.9.x channel, which is a different product, so 0.9.x clients must install it fresh. Roll back by reinstalling an earlier founder-ide-releases installer; the FounderVault is never touched by the installer."
       }
     }
   ]
