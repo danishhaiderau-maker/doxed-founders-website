@@ -6,11 +6,8 @@ Single source of truth for demo-mode bot configuration. Used by the
 end-to-end demo harness (`scripts/demo-harness.mjs`) to start the bot
 on :7002 in a safe simulation state.
 
-Current registry-owned four-tile research stack:
-  - CONTINUOUS benchmark
-  - OFFSET_029_ATR_TP_25 Patient Chase
-  - OFFSET_029_ATR_PROTECTED static protected Patient Chase
-  - OFFSET_029_ATR_REGIME regime-adaptive protected Patient Chase
+The research tile roster is owned by combo_pathway_config.ACTIVE_TILE_REGISTRY;
+this launcher does not enumerate or enable tiles.
 
 It:
   - Forces LIVE_TRADING_ENABLED=False (refuses to launch if the outer
@@ -67,9 +64,6 @@ def configure_demo_env() -> None:
     os.environ["DEMO_CASSETTE_MODE"] = "capture" if capture else "replay"
 
     os.environ.setdefault("DASHBOARD_PORT", "7002")
-    # The demo observes the same shared AI cadence as the four-tile runtime.
-    # Per-lane order toggles remain controlled by the normal persisted state.
-    os.environ.setdefault("CONTINUOUS_AI_RESEARCH_ENABLED", "1")
 
 
 def cassette_lookup(model: str, temperature: float, prompt_prefix: str):

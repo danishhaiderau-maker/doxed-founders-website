@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { existsSync, readFileSync, statSync } from 'fs';
 import { join } from 'path';
+import { ACTIVE_TILE_LANES } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
 import { BotBridgeService } from '../trading-agents/bot-bridge.service';
 import { CopyRelaySimService } from '../trading-agents/copy-relay-sim.service';
@@ -41,8 +42,8 @@ export class ExtendedSmokeService {
     checks.push(await this.runCheck('bot_paper_orders_placed', async () => this.probePaperOrders()));
     checks.push(await this.runCheck('lane_size_patch_active', async () => this.probeLaneSizePatch(botUrl)));
     checks.push(
-      await this.runCheck('two_lane_opportunity_coverage', async () =>
-        this.probeTwoLaneOpportunityCoverage(),
+      await this.runCheck('tile_opportunity_coverage', async () =>
+        this.probeTileOpportunityCoverage(),
       ),
     );
     checks.push(await this.runCheck('tunnel_reachable', async () => this.probeTunnel()));
@@ -158,16 +159,15 @@ export class ExtendedSmokeService {
     }
   }
 
-  private async probeTwoLaneOpportunityCoverage(): Promise<CheckResult> {
-    // The current runtime has exactly two lanes. Opportunity capture is the
-    // shared, execution-neutral evidence source and includes rejected paths.
+  private async probeTileOpportunityCoverage(): Promise<CheckResult> {
+    // Opportunity capture is the shared, execution-neutral evidence source and
+    // includes rejected paths. The expected roster is the canonical registry.
     try {
       const oppPath = this.botArtifactPath('lane_opportunity_capture.jsonl');
       if (!existsSync(oppPath)) return fail('lane_opportunity_capture.jsonl missing');
-      const counts: Record<string, number> = {
-        CONTINUOUS: 0,
-        OFFSET_029_ATR_TP_25: 0,
-      };
+      const counts: Record<string, number> = Object.fromEntries(
+        ACTIVE_TILE_LANES.map((lane) => [lane, 0]),
+      );
       for (const line of readFileSync(oppPath, 'utf8').split(/\r?\n/)) {
         if (!line.trim()) continue;
         try {
@@ -179,10 +179,10 @@ export class ExtendedSmokeService {
         }
       }
       const missing = Object.entries(counts).filter(([, count]) => count === 0).map(([lane]) => lane);
-      const detail = `CONTINUOUS=${counts.CONTINUOUS} OFFSET_029_ATR_TP_25=${counts.OFFSET_029_ATR_TP_25}`;
+      const detail = Object.entries(counts).map(([lane, count]) => `${lane}=${count}`).join(' ');
       return missing.length === 0
-        ? pass(`two-lane opportunity coverage — ${detail}`)
-        : fail(`missing current-lane opportunity evidence: ${missing.join(', ')} (${detail})`);
+        ? pass(`tile opportunity coverage - ${detail}`)
+        : fail(`missing current-tile opportunity evidence: ${missing.join(', ')} (${detail})`);
     } catch (err) {
       return fail(err);
     }

@@ -291,14 +291,32 @@ function createService(
       ?? (async <T>(operation: (tx: typeof transactionClient) => Promise<T>) =>
         operation(transactionClient)),
   };
-  return new ShowcaseRelayEventsService(
+  const service = new ShowcaseRelayEventsService(
     config as never,
     botBridge as never,
     cycles as never,
     execution as never,
     prisma as never,
   );
+  // The production registry has no relay-eligible tile, so the real allowlist
+  // rejects every lane. These pipeline tests use `cont-` / CONTINUOUS purely
+  // as a hypothetical eligible fixture lane.
+  (service as unknown as {
+    isRelayMirrorable: (tradeId: string, lane: string) => boolean;
+  }).isRelayMirrorable = (tradeId, lane) =>
+    tradeId.startsWith('cont-') && (!lane || lane === 'CONTINUOUS');
+  return service;
 }
+
+test('production relay allowlist rejects Continuous and unknown lanes', () => {
+  const probe = Object.create(ShowcaseRelayEventsService.prototype) as {
+    isRelayMirrorable: (tradeId: string, lane: string) => boolean;
+  };
+  assert.equal(probe.isRelayMirrorable('cont-deadbeef1234', 'CONTINUOUS'), false);
+  assert.equal(probe.isRelayMirrorable('cont-deadbeef1234', ''), false);
+  assert.equal(probe.isRelayMirrorable('fc3-deadbeef1234', 'FAMILY_CHANDELIER_3'), false);
+  assert.equal(probe.isRelayMirrorable('deadbeef1234', ''), false);
+});
 
 test('concurrent relay revisions stay monotonic across API replicas', async () => {
   type StoredEnvelope = {

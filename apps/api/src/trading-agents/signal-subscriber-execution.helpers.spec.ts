@@ -6762,9 +6762,22 @@ test('duplicate pre/post POSITION_CLOSED wake cannot queue a second close', asyn
   }
 });
 
+// Production has no relay-eligible tile, so the default allowlist rejects
+// every lane; `cont-` is a hypothetical eligible fixture lane here.
+const parseWakeWithFixtureLane = (value: unknown) =>
+  parseExecutorWakeRequest(value, (tradeId) => Boolean(tradeId?.startsWith('cont-')));
+
+test('private wake parser rejects Continuous trade ids under the production allowlist', () => {
+  const now = Date.now();
+  assert.equal(parseExecutorWakeRequest({
+    trigger: 'POSITION_OPENED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
+    signedOpen: { fillPrice: 64_200, sourceEventAtMs: now - 500, platformReceivedAtMs: now - 100 },
+  }), null);
+});
+
 test('private wake parser preserves only bounded POSITION_CLOSED evidence', () => {
   const now = Date.now();
-  const wake = parseExecutorWakeRequest({
+  const wake = parseWakeWithFixtureLane({
     trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
     signedClose: {
       tradeId: 'cont-c105efa5', eventId: 'close-c105efa5-4', eventSeq: 4,
@@ -6779,8 +6792,8 @@ test('private wake parser preserves only bounded POSITION_CLOSED evidence', () =
     { trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: '', signedClose: { sourceEventAtMs: now - 1, platformReceivedAtMs: now } },
     { trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5', signedClose: {} },
     { trigger: 'POSITION_CLOSED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5', signedClose: { sourceEventAtMs: now + 1, platformReceivedAtMs: now } },
-  ]) assert.equal(parseExecutorWakeRequest(bad), null);
-  assert.equal(parseExecutorWakeRequest({
+  ]) assert.equal(parseWakeWithFixtureLane(bad), null);
+  assert.equal(parseWakeWithFixtureLane({
     trigger: 'ORDER_PLACED', at: new Date(now).toISOString(), tradeId: 'cont-entry',
     signedClose: { exitPrice: 64_400 },
   }), null);
@@ -6834,11 +6847,11 @@ test('private wake parser preserves only bounded POSITION_OPENED fill evidence',
     trigger: 'POSITION_OPENED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5',
     signedOpen: { fillPrice: 64_200, sourceEventAtMs: now - 500, platformReceivedAtMs: now - 100 },
   };
-  assert.equal(parseExecutorWakeRequest(valid)?.signedOpen?.fillPrice, 64_200);
-  assert.equal(parseExecutorWakeRequest({ ...valid, signedOpen: {} }), null);
-  assert.equal(parseExecutorWakeRequest({ ...valid, signedOpen: { ...valid.signedOpen, fillPrice: '64200' } }), null);
-  assert.equal(parseExecutorWakeRequest({ ...valid, signedOpen: { ...valid.signedOpen, sourceEventAtMs: now } }), null);
-  assert.equal(parseExecutorWakeRequest({ trigger: 'ORDER_PLACED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5', signedOpen: valid.signedOpen }), null);
+  assert.equal(parseWakeWithFixtureLane(valid)?.signedOpen?.fillPrice, 64_200);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, signedOpen: {} }), null);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, signedOpen: { ...valid.signedOpen, fillPrice: '64200' } }), null);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, signedOpen: { ...valid.signedOpen, sourceEventAtMs: now } }), null);
+  assert.equal(parseWakeWithFixtureLane({ trigger: 'ORDER_PLACED', at: new Date(now).toISOString(), tradeId: 'cont-c105efa5', signedOpen: valid.signedOpen }), null);
 });
 
 test('duplicate pre/post ORDER_EXPIRED wake cannot queue a second cancellation', async () => {
@@ -6881,12 +6894,12 @@ test('private expiry wake requires exact identity, generation, price, and cohere
       eventId: 'expiry-3', reason: 'SIGNAL_TTL_EXPIRED',
     },
   };
-  assert.equal(parseExecutorWakeRequest(valid)?.signedExpiry?.eventSeq, 3);
-  assert.equal(parseExecutorWakeRequest({ ...valid, tradeId: '' }), null);
-  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: {} }), null);
-  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: { ...valid.signedExpiry, sourceExpiresAtMs: now + 1 } }), null);
-  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: { ...valid.signedExpiry, eventSeq: '3' } }), null);
-  assert.equal(parseExecutorWakeRequest({ ...valid, signedExpiry: { ...valid.signedExpiry, limitPrice: '64400' } }), null);
+  assert.equal(parseWakeWithFixtureLane(valid)?.signedExpiry?.eventSeq, 3);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, tradeId: '' }), null);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, signedExpiry: {} }), null);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, signedExpiry: { ...valid.signedExpiry, sourceExpiresAtMs: now + 1 } }), null);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, signedExpiry: { ...valid.signedExpiry, eventSeq: '3' } }), null);
+  assert.equal(parseWakeWithFixtureLane({ ...valid, signedExpiry: { ...valid.signedExpiry, limitPrice: '64400' } }), null);
 });
 
 test('signed expiry cancels only current exact pending generation before terminal persistence', async () => {

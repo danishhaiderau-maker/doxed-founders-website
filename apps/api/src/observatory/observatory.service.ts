@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { RegulatoryClass, SimulatedRaiseStatus } from '@prisma/client';
+import { ACTIVE_TILE_LANES } from '@dcf/utils';
 import { isObservatoryEnabled, isPhase15TrustLayerEnabled } from '../phase15/phase15.constants';
 import { PrismaService } from '../prisma/prisma.service';
 import { FounderOsService } from '../founder-os/founder-os.service';
@@ -117,7 +118,7 @@ export class ObservatoryService {
       'founder-os.integrations': 'founder_os_integrations_health',
       'bot.ping': 'bot_ping',
       'bot.ai-verdicts': 'ai_verdicts_emitted',
-      'bot.lab-shadow': 'two_lane_opportunity_coverage',
+      'bot.lab-shadow': 'tile_opportunity_coverage',
       'bot.lane-size-patch': 'lane_size_patch_active',
       'relay.cycle-completes': 'relay_cycle_completes',
       'analyzer.manifest': 'analyzer_manifest_present',
@@ -244,10 +245,11 @@ export class ObservatoryService {
         case 'bot.lab-shadow': {
           const opportunities = botArtifact('lane_opportunity_capture.jsonl');
           const rows = countJsonlLines(opportunities);
-          const hasContinuous = fileContains(opportunities, 'CONTINUOUS');
-          const hasPatient = fileContains(opportunities, 'OFFSET_029_ATR_TP_25');
-          status = rows > 0 && hasContinuous && hasPatient ? 'green' : 'yellow';
-          coverage = `lane_opportunity_capture.jsonl rows=${rows} CONTINUOUS=${hasContinuous} OFFSET_029_ATR_TP_25=${hasPatient}`;
+          const tilePresence = ACTIVE_TILE_LANES.map((lane) => [lane, fileContains(opportunities, lane)] as const);
+          status = rows > 0 && tilePresence.every(([, present]) => present) ? 'green' : 'yellow';
+          coverage = `lane_opportunity_capture.jsonl rows=${rows} ${tilePresence
+            .map(([lane, present]) => `${lane}=${present}`)
+            .join(' ')}`;
           break;
         }
         case 'bot.lane-size-patch': {

@@ -431,7 +431,7 @@ PATHWAY_LANE_STATUS = {
     RESEARCH_LANE_AI_SCAN: "AI_SCAN",
 }
 RESEARCH_LANE_LABELS = {
-    RESEARCH_LANE_CONTINUOUS: "Continuous AI Research",
+    RESEARCH_LANE_CONTINUOUS: "Continuous — analytical comparison (no orders)",
     **COMBO_LANE_LABELS,
 }
 RESEARCH_SPAWN_LANES = ()
@@ -450,10 +450,9 @@ PLATFORM_RELAY_ELIGIBLE_LANES = frozenset(
     lane for lane, spec in COMBO_LANE_SPECS.items()
     if spec.get("platform_relay_eligible")
 )
-PLATFORM_RELAY_CONFIGURED_LANES = frozenset({
-    RESEARCH_LANE_CONTINUOUS,
-    *COMBO_EXECUTION_LANES,
-})
+# Registry tiles only. Continuous is an analytical comparison label and never
+# an order-placing or relay-configured lane.
+PLATFORM_RELAY_CONFIGURED_LANES = frozenset(COMBO_EXECUTION_LANES)
 PAPER_ONLY_RESEARCH_LANES = frozenset(
     lane for lane, spec in COMBO_LANE_SPECS.items() if spec.get("paper_only")
 )
@@ -12366,6 +12365,7 @@ def update_feature_snapshot():
         data_quality = update_data_quality(state["feature_snapshot"])
         with state_lock:
             state["data_quality"] = data_quality
+            state["data_quality_ts"] = time.time()
         if state.get("debug_enabled"):
             logger.debug(f"[FEATURES] {state['feature_snapshot']}")
             logger.debug(f"[DATA QUALITY] {data_quality:.3f}")
@@ -24848,6 +24848,7 @@ def _process_ws_trade_tick(trade: dict, snapshot_seed: bool = False):
         data_quality = 0.0
     with state_lock:
         state["data_quality"] = data_quality
+        state["data_quality_ts"] = time.time()
     trade_ts_raw = trade.get("T")
     trade_ts = trade_ts_raw / 1000 if trade_ts_raw and trade_ts_raw > 1e12 else (trade_ts_raw or time.time())
     latency = max(0, (time.time() - trade_ts) * 1000)
@@ -26336,6 +26337,9 @@ def _record_expired_order(source: dict, reason: str):
         expired_orders.append(row)
         if len(expired_orders) > MAX_EXPIRED_ORDERS:
             expired_orders.pop(0)
+        _count_fill_revalidation_cancel(
+            fill_revalidation_cancel_counts, row.get("research_lane"), reason
+        )
     _relay_mirror(
         "EXPIRED",
         {"trade_id": tid, "reason": reason, "limit_price": limit_price, "direction": row.get("dir")},
@@ -27709,6 +27713,10 @@ candle_index = 0
 trades: List[Dict] = []
 pending_orders: List[Dict] = []
 expired_orders: List[Dict] = []
+# Process-lifetime FILL_REVALIDATION_* cancels per lane and reason. The
+# expired_orders tail above is capped at MAX_EXPIRED_ORDERS, so it cannot
+# back a truthful count. Guarded by trade_lock.
+fill_revalidation_cancel_counts: Dict[str, Dict[str, int]] = {}
 open_positions: List[Dict] = []
 trades_map: Dict[str, Dict] = {}
 app = Flask("3factor_bot")
@@ -29834,7 +29842,7 @@ def _continuous_benchmark_dashboard_spec(shared: dict, tile_number: int = 6) -> 
         "post_ai_gates": "Continuous raw-score-gap tiers only",
         "margin_usd": shared["margin_usd"],
         "execution": "Immediate deterministic 0.1% limit + bounded 25% chase",
-        "orders": "Toggle ON creates paper orders; OFF records evaluation only",
+        "orders": "Never places paper or live orders; records evaluation only",
         "filters": {
             "entry_mode": "SHARED_DIRECTION_IMMEDIATE_LIMIT",
             "policy_version": policy_id,
@@ -29845,8 +29853,9 @@ def _continuous_benchmark_dashboard_spec(shared: dict, tile_number: int = 6) -> 
     }
     return {
         "lane": RESEARCH_LANE_CONTINUOUS,
-        "label": "Continuous Benchmark - Paper Orders",
-        "subtitle": "BENCHMARK - shared direction call, independent verdict and orders",
+        "label": "Continuous - Analytical Comparison (no orders)",
+        "subtitle": "ANALYSIS ONLY - comparison label on the shared direction call; never places orders",
+        "places_orders": False,
         "role": "continuous_direct_benchmark",
         "status": "BENCHMARK",
         "is_benchmark": True,
@@ -31932,7 +31941,7 @@ __ADMIN_ACCESS_CONTROLS__
     <strong style="color:#58a6ff;">Quick toggles</strong>
     <button onclick="toggleEarlyFail()">Early Fail: <span id="earlyFailBtn">OFF</span></button>
     <button id="invertToggleBtn" onclick="toggleInvert()" title="Flip LONG↔SHORT on new signals only. Existing tickets stay unchanged. Admin login required to toggle.">Invert Signal: <span id="invertBtn">OFF</span></button>
-    <button onclick="toggleContinuousAi()" title="CONTINUOUS benchmark paper orders — OFF still runs the shared three-minute AI observation and records shadow outcomes">Continuous Paper Orders: <span id="continuousAiBtn">OFF</span></button>
+    <button onclick="toggleContinuousAi()" title="Continuous is an analytical comparison label only and never places paper or live orders. This switch only controls whether its comparison evaluations are recorded.">Continuous Comparison (analysis only, no orders): <span id="continuousAiBtn">OFF</span></button>
     <button onclick="toggleDebug()">Debug Mode: <span id="debugToggle">OFF</span></button>
     <button id="freshCollectionBtn" onclick="toggleFreshCollection()" title="Laptop reset is unavailable until local controller readiness is verified. Fly is unchanged. Requires this page open on the laptop.">Fresh Collection — Laptop Only: <span id="freshCollectionLabel">READINESS REQUIRED</span></button>
     <button id="wipeFlyOnlyBtn" onclick="wipeFlyOnly()" title="Wipes Fly volume but keeps the local sync mirror for offline analysis. Use when Fly is filling up but you want to retain local history." style="background:#374151;">Wipe Fly Data Only</button>
@@ -31942,7 +31951,7 @@ __ADMIN_ACCESS_CONTROLS__
 
 <div id="pathwayLab" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Pathway Lab — Active Paper Research</strong>
-  <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · benchmark = CONTINUOUS (Continuous AI Research)</p>
+  <p id="pathwayLabFrozenNote" style="color:#8b949e;font-size:0.85em;margin:6px 0 4px 0;">Architecture frozen — only tile labels/filters/pathways change unless explicitly approved · CONTINUOUS = analytical comparison label only (never places orders)</p>
   <div id="pathwayLaneTiles" style="display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;margin-bottom:12px;"></div>
 </div>
 
@@ -31950,7 +31959,7 @@ __ADMIN_ACCESS_CONTROLS__
   <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. The Continuous benchmark and legacy direct path use the deterministic 0.1% anchor; the five family tiles use their signed per-policy offsets shown on each tile (Fixed 0.27%; the other four 0.30%).</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. The legacy direct path uses the deterministic 0.1% anchor; the five family tiles use their signed per-policy offsets shown on each tile (Fixed 0.27%; the other four 0.30%).</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
 <p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Benchmark / legacy direct anchor (deterministic 0.1%):</strong> LONG = price × 0.999 · SHORT = price × 1.001. This does not override the five family policies: Fixed uses 0.27%; Chandelier, ATR Trail, Hybrid Runner and MFE Giveback use 0.30%. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain research/advisory fields only.</p>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
@@ -32119,7 +32128,7 @@ __ADMIN_ACCESS_CONTROLS__
   not the same as the live queue below.
 </p>
 <p style="color:#58a6ff;font-size:0.82em;margin:4px 0 8px;">
-  Initial limit comes from the owning policy (Continuous/legacy direct = 0.1%; Fixed = 0.27%; other family tiles = 0.30%). Virtual limit is the
+  Initial limit comes from the owning policy (legacy direct = 0.1%; Fixed = 0.27%; other family tiles = 0.30%). Virtual limit is the
   chased price; exchange order ID appears only after a real order exists. A crossed virtual limit
   before the first selected stage is recorded as <code>VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY</code>
   (no invented fill, no marketable order at the old price).
@@ -32845,11 +32854,7 @@ DASHBOARD_JS = """(function () {
               orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2d4a;border:1px solid #1f6feb;border-radius:6px;color:#58a6ff;font-size:0.82em;font-weight:700;">SHADOW ONLY — NO ORDERS · still collecting decisions &amp; simulated PnL</div>';
             }
           } else if (spec.lane === 'CONTINUOUS') {
-            if (on) {
-              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#0f2a1a;border:1px solid #238636;border-radius:6px;color:#3fb950;font-size:0.82em;font-weight:700;">✓ ORDERS ENABLED — benchmark lane places limits</div>';
-            } else {
-              orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#3d2e00;border:1px solid #d4a72c;border-radius:6px;color:#f0c14b;font-size:0.82em;font-weight:700;">DATA ONLY — no limits · AI + shadow replay still logged</div>';
-            }
+            orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#3d2e00;border:1px solid #d4a72c;border-radius:6px;color:#f0c14b;font-size:0.82em;font-weight:700;">ANALYSIS ONLY — comparison label, never places orders · evaluation recording ' + (on ? 'ON' : 'OFF') + '</div>';
           } else if (spec.status === 'BENCHMARK') {
             orderBanner = '<div style="margin-top:10px;padding:8px 10px;background:#3d2e00;border:1px solid #d4a72c;border-radius:6px;color:#f0c14b;font-size:0.82em;font-weight:700;">BENCHMARK yardstick — data only · no orders</div>';
           } else if (spec.status === 'RETIRED') {
@@ -32904,7 +32909,7 @@ DASHBOARD_JS = """(function () {
               return '<div style="margin-top:6px;font-size:0.76em;color:#c9d1d9;"><strong style="color:#58a6ff;">Entry criteria:</strong> ' + parts.join(' · ') + '</div>';
             })()
             + (spec.is_independent_ai
-              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">All enabled family tiles and Continuous share one direction call while keeping separate policies, orders, chase, and P&amp;L; their child outcomes remain one correlated AI cluster.</div>'
+              ? '<div style="margin-top:4px;font-size:0.74em;color:#3fb950;">All enabled family tiles share one direction call while keeping separate policies, orders, chase, and P&amp;L; their child outcomes remain one correlated AI cluster.</div>'
               : '')
             + (function () {
               const prom = spec.promotion_criteria;
@@ -33342,7 +33347,15 @@ DASHBOARD_JS = """(function () {
           throw new Error('Snapshot API reported an error');
         }
         refreshStage = 'render';
-        safeText('collectorVersionBanner', d.collector_version || 'UNKNOWN');
+        const truth = d.dashboard_truth || {};
+        const truthFields = truth.fields || {};
+        const truthText = (key, fmt) => {
+          const f = truthFields[key];
+          if (f && f.available) return fmt ? fmt(f.value, f) : String(f.value);
+          const reason = (f && f.reason) || (d.public_sanitized ? 'owner-only field (public sanitized view)' : 'not published by this runtime');
+          return 'not available: ' + reason;
+        };
+        safeText('collectorVersionBanner', d.collector_version || truthText('collector_version'));
         safeText('runtimeRevisionBanner', d.git_rev || d.source_git_rev || 'UNKNOWN');
         safeText('legacyCollectorVersionBanner', d.legacy_collector_version || 'none');
         const skipBlk = d.display_skip_block || {};
@@ -33352,14 +33365,15 @@ DASHBOARD_JS = """(function () {
         if (sb) {
           const pid = d.bot_pid;
           const cd = d.ai_cooldown_remaining_sec;
+          const deepseekLabel = (truth.deepseek && truth.deepseek.label)
+            || (d.public_sanitized ? 'DeepSeek status: owner-only field (public sanitized view)' : 'DeepSeek status: not available: not published by this runtime');
           let txt = pid
-            ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · DeepSeek ' + (d.deepseek_key_present ? 'OK' : 'MISSING')
-            : 'LIVE (PID unknown — restart bot)';
+            ? 'LIVE Python bot PID ' + pid + ' · cwd ' + (d.bot_cwd || '-') + ' · ' + deepseekLabel
+            : 'LIVE (PID not published) · ' + deepseekLabel;
           if (d.server_ts_melbourne) txt += ' · server ' + d.server_ts_melbourne;
           else if (d.server_ts) txt += ' · server ' + formatMelbourneDateTime(d.server_ts);
           if (cd != null && cd > 0) txt += ' · AI cooldown ' + cd + 's';
           if (d.dashboard_url) txt += ' · URL ' + d.dashboard_url;
-          txt += ' · Stop: run stop_bot.ps1 in Final Bots (closing CMD alone may not stop a background bot)';
           sb.style.borderColor = '#238636';
           sb.style.color = '#c9d1d9';
           sb.innerText = txt;
@@ -33394,11 +33408,11 @@ DASHBOARD_JS = """(function () {
         const inst = document.getElementById('botInstance');
         if (inst) {
           const pid = d.bot_pid;
-          const keyOk = d.deepseek_key_present;
           const weakMin = d.weak_setup_min_edge;
-          let syncTxt = keyOk ? 'DeepSeek key OK' : 'DeepSeek key MISSING (.env)';
+          let syncTxt = (truth.deepseek && truth.deepseek.label)
+            || (d.public_sanitized ? 'DeepSeek status: owner-only field (public sanitized view)' : 'DeepSeek status: not available: not published by this runtime');
           if (pid) syncTxt = 'PID ' + pid + ' | ' + syncTxt;
-          else syncTxt = 'PID unknown — restart bot to sync dashboard | ' + syncTxt;
+          else syncTxt = 'PID not published | ' + syncTxt;
           if (weakMin != null) syncTxt += ' | WEAK_SETUP min edge ' + weakMin;
           const cd = d.ai_cooldown_remaining_sec;
           if (cd != null && cd > 0) syncTxt += ' | AI cooldown ' + cd + 's / ' + (d.ai_cooldown_sec || 300) + 's';
@@ -33429,7 +33443,7 @@ DASHBOARD_JS = """(function () {
             (history.platform_history_status || 'PLATFORM HISTORY STATUS UNKNOWN') +
             ' — ' + (history.platform_history_note || 'No platform history note.');
         }
-        safeText('lastFetch', d.last_fetch_success || 'never');
+        safeText('lastFetch', truthText('last_fetch_success', v => formatMelbourneDateTime(v)));
         let wsAgeSec = null;
         if (d.ws_age != null) {
           wsAgeSec = Math.round(d.ws_age);
@@ -33516,7 +33530,7 @@ DASHBOARD_JS = """(function () {
         safeText('aiDecision', aiStatusTxt);
         safeText('aiStatusNote', dai.note || '');
         const laneLabels = (d.research_config && d.research_config.lane_labels) || {
-          'CONTINUOUS': 'Continuous Benchmark — Paper Orders',
+          'CONTINUOUS': 'Continuous — analytical comparison (no orders)',
           'HIGH_EDGE_RUNNER': 'High Edge Runner',
           'EXTREME_EDGE': 'Extreme Edge',
           'EDGE_ACCELERATION': 'Edge Acceleration',
@@ -33610,8 +33624,8 @@ DASHBOARD_JS = """(function () {
         const contAiOn = d.continuous_ai_research_enabled !== false;
         const contAiBtn = document.getElementById('continuousAiBtn');
         if (contAiBtn) {
-          contAiBtn.innerText = contAiOn ? 'ON' : 'OFF';
-          if (contAiBtn.parentElement) contAiBtn.parentElement.style.backgroundColor = contAiOn ? '#10b981' : '#ef4444';
+          contAiBtn.innerText = contAiOn ? 'RECORDING' : 'OFF';
+          if (contAiBtn.parentElement) contAiBtn.parentElement.style.backgroundColor = '#374151';
         }
         const contAiCtrlLabel = document.getElementById('continuousAiControlLabel');
         const contAiCtrlBtn = document.getElementById('continuousAiControlBtn');
@@ -33631,7 +33645,7 @@ DASHBOARD_JS = """(function () {
             'Cooldown ~' + (d.ai_cooldown_sec || 300) + 's between continuous calls',
             'Triggers on edge &gt; 0 (PERIODIC_RESEARCH_AI)',
             'Lane tag: CONTINUOUS in ai_tranche + ai_input_log.jsonl',
-            'Fans one shared candidate into the enabled five-family registry plus Continuous benchmark; child outcomes are correlated',
+            'Fans one shared candidate into the enabled registry tiles; Continuous only records an analytical comparison; child outcomes are correlated',
           ];
           contAiList.innerHTML = items.map(function (t) { return '<li>' + t + '</li>'; }).join('');
         }
@@ -33831,18 +33845,22 @@ DASHBOARD_JS = """(function () {
         const pendingOrderRows = (d.orders||[]).map(o => {
           let st = o.status || '-';
           const gate = o.venue_fill_gate || null;
-          const gateReason = gate && gate.reason ? String(gate.reason) : 'NOT CHECKED';
+          const gateView = o.venue_fill_gate_display || {};
+          const gateReason = gate && gate.reason
+            ? String(gate.reason)
+            : (gateView.label || 'NOT EVALUATED — venue gate runs only when price reaches the limit');
           const gateQty = gate && gate.visible_executable_qty != null && gate.requested_qty != null
             ? (' ' + Number(gate.visible_executable_qty).toFixed(5) + '/' + Number(gate.requested_qty).toFixed(5))
             : '';
           const gateAge = gate && gate.book_age_sec != null ? (' · book ' + Number(gate.book_age_sec).toFixed(1) + 's') : '';
-          const gateColor = gateReason === 'EXECUTABLE' ? '#3fb950' : (gateReason === 'NOT CHECKED' ? '#8b949e' : '#f0c14b');
-          if (o.limit_touched && st === 'PENDING') st += ' (TOUCHED)';
+          const gateScope = gateView.scope ? (' · ' + gateView.scope) : '';
+          const gateColor = gateReason === 'EXECUTABLE' ? '#3fb950' : (gate ? '#f0c14b' : '#8b949e');
+          if (o.limit_touched && st === 'PENDING') st += ' (price reached limit — paper, not a fill)';
           const chaseN = o.limit_chase_count || 0;
           if (chaseN > 0 && st === 'PENDING') st += ' (CHASING)';
           const chaseCell = chaseN > 0 ? (chaseN + '×') : (st.indexOf('PENDING') >= 0 ? '0' : '-');
           return `
-          <tr${o.limit_touched ? ' style="color:#3fb950;"' : ''}>
+          <tr${o.limit_touched ? ' style="color:#f0c14b;"' : ''}>
             <td>${o.created_ts_melbourne || formatMelbourneDateTime(o.created_ts)}</td>
             <td>${o.age_min?.toFixed(1)||'-'}</td>
             <td>${laneBadge(o.research_lane, o.research_model)}</td>
@@ -33853,7 +33871,7 @@ DASHBOARD_JS = """(function () {
             <td>${o.original_limit_price?.toFixed(2)||'-'}</td>
             <td>${chaseCell}</td>
             <td>${o.signal_price?.toFixed(2)||'-'}</td>
-            <td style="color:${gateColor};font-size:0.82em;">${gateReason}${gateQty}${gateAge}</td>
+            <td style="color:${gateColor};font-size:0.82em;">${gateReason}${gateQty}${gateAge}${gateScope}</td>
           </tr>`;
         }).join('');
         safeHTML(
@@ -34114,7 +34132,7 @@ DASHBOARD_JS = """(function () {
         const dbg = d.debug_state || {};
         safeText('lastCheckTime', dbg.last_check_time || '-');
         safeText('lastEventTime', dbg.last_event_time || '-');
-        safeText('edgeScore', dbg.last_edge_score || '0');
+        safeText('edgeScore', truthText('edge_score'));
         safeText('edgeProgress', dbg.edge_progress || '-');
         safeText('flags', JSON.stringify(dbg.last_flags || {}));
         const pipeTrig = dbg.pipeline_event_trigger;
@@ -34175,7 +34193,8 @@ DASHBOARD_JS = """(function () {
             sb.innerHTML = 'Wrong port :' + window.location.port + ' — use <strong>__DASHBOARD_URL__</strong> (bot listens on ' + dashPort + ')';
           }
         }
-        safeText('dataQuality', ((d.data_quality != null ? d.data_quality : 0) * 100).toFixed(1) + '%');
+        safeText('dataQuality', truthText('data_quality', (v, f) => (Number(v) * 100).toFixed(1) + '%'
+          + (f.age_sec != null ? ' (' + Math.round(f.age_sec) + 's ago)' : '')));
       } catch(e) {
         console.error("Refresh failed:", e);
         const rs = document.getElementById('refreshStatus');
@@ -36598,6 +36617,7 @@ def _build_relay_execution_state_snapshot() -> dict:
             "price_source": state.get("price_source"),
             "data_source": state.get("data_source"),
             "data_quality": state.get("data_quality"),
+            "data_quality_ts": state.get("data_quality_ts"),
             # Presentation market fields must travel with the same bounded
             # live receipt as price.  Omitting them caused /api/state to keep
             # the boot-time nulls while execution was active even though the
@@ -36617,7 +36637,7 @@ def _build_relay_execution_state_snapshot() -> dict:
             ),
             "funding": copy.deepcopy(state.get("funding") or {}),
             "daily_pnl_usd": state.get("daily_pnl_usd"),
-            "last_fetch_success": utc_iso(),
+            "last_fetch_success": state.get("last_fetch_success"),
             "ws_ready": bool(state.get("ws_ready", False)),
             "ws_transport_connected": bool(state.get("ws_transport_connected", False)),
             "ws_age": (
@@ -37299,6 +37319,240 @@ def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
             if len(selected) > bounded_limit:
                 del selected[0]
     return copy.deepcopy(selected), total
+
+
+def _count_fill_revalidation_cancel(counts: dict, lane, reason) -> None:
+    """Increment the per-lane FILL_REVALIDATION_* cancel counter in place."""
+    reason_text = str(reason or "")
+    if not reason_text.startswith("FILL_REVALIDATION"):
+        return
+    lane_key = str(lane or "UNKNOWN").strip().upper() or "UNKNOWN"
+    bucket = counts.setdefault(lane_key, {})
+    bucket[reason_text] = int(bucket.get(reason_text, 0)) + 1
+
+
+def _fill_revalidation_cancel_summary(counts: dict, lanes) -> dict:
+    """Project per-tile FILL_REVALIDATION cancel counts in registry order."""
+    counts = counts if isinstance(counts, dict) else {}
+    ordered = [str(lane).upper() for lane in lanes]
+    tiles = []
+    for lane in ordered:
+        by_reason = {
+            str(k): int(v) for k, v in sorted((counts.get(lane) or {}).items())
+        }
+        tiles.append({
+            "lane": lane,
+            "label": RESEARCH_LANE_LABELS.get(lane, lane),
+            "total": sum(by_reason.values()),
+            "by_reason": by_reason,
+        })
+    other = {
+        str(lane): sum(int(v) for v in (reasons or {}).values())
+        for lane, reasons in sorted(counts.items())
+        if lane not in ordered
+    }
+    return {
+        "scope": "since process boot",
+        "tiles": tiles,
+        "total": sum(t["total"] for t in tiles) + sum(other.values()),
+        "non_tile_lanes": other,
+    }
+
+
+def _venue_fill_gate_display(order: dict, *, gate_enabled: bool, relay_eligible: bool) -> dict:
+    """Describe the venue fill gate truthfully instead of a bare NOT CHECKED."""
+    scope = "relay-eligible tile" if relay_eligible else "paper-only · tile relay-ineligible"
+    gate = order.get("venue_fill_gate") if isinstance(order, dict) else None
+    if isinstance(gate, dict) and gate.get("reason"):
+        return {"state": "EVALUATED", "label": str(gate["reason"]), "scope": scope}
+    if not gate_enabled:
+        return {
+            "state": "DISABLED",
+            "label": "N/A — venue fill gate disabled",
+            "scope": scope,
+        }
+    if isinstance(order, dict) and order.get("limit_touched"):
+        return {
+            "state": "AWAITING_EVALUATION",
+            "label": "Price reached limit — gate evaluates on the next fill check",
+            "scope": scope,
+        }
+    return {
+        "state": "NOT_EVALUATED",
+        "label": "Not evaluated yet — gate runs only when price reaches the limit",
+        "scope": scope,
+    }
+
+
+def _deepseek_dashboard_status(key_present: bool, last_ai_call_ts, now: float,
+                               cadence_sec: float) -> dict:
+    """Summarise DeepSeek readiness from key presence and AI-call recency only."""
+    try:
+        last = float(last_ai_call_ts or 0.0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if not key_present:
+        return {"status": "KEY_MISSING", "label": "DeepSeek key not configured",
+                "last_ai_call_age_sec": None}
+    if last <= 0:
+        return {"status": "NO_AI_CALL_YET", "label": "DeepSeek key configured · no AI call yet this process",
+                "last_ai_call_age_sec": None}
+    age = max(0.0, float(now) - last)
+    stale_after = max(60.0, 3.0 * float(cadence_sec or 0.0))
+    if age > stale_after:
+        return {"status": "STALE", "label": f"DeepSeek key configured · last AI call {int(age)}s ago (stale)",
+                "last_ai_call_age_sec": round(age, 1)}
+    return {"status": "OK", "label": f"DeepSeek OK · last AI call {int(age)}s ago",
+            "last_ai_call_age_sec": round(age, 1)}
+
+
+_WAL_ALARM_EXPLANATIONS = {
+    "EMERGENCY_WAL_CONTROL_COPY_CORRUPT": (
+        "A redundant emergency-WAL control copy failed validation and was "
+        "repaired from a trusted copy; evidence records were not lost."
+    ),
+    "EMERGENCY_WAL_CONTROL_RECONSTRUCTED": (
+        "No valid control copy was found, so control metadata was rebuilt "
+        "from the extent headers."
+    ),
+    "EMERGENCY_WAL_CONTROL_TELEMETRY_RECOVERED": (
+        "Control telemetry disagreed with the extent headers and was "
+        "recomputed from the headers."
+    ),
+}
+
+
+def _wal_alarm_dashboard_summary(wal) -> dict:
+    """Explain emergency-WAL alarms for the dashboard (active vs. historical)."""
+    if not isinstance(wal, dict):
+        return {"available": False, "reason": "emergency WAL telemetry not published",
+                "status": None, "alarms": [], "incident_alarms": []}
+
+    def _explain(codes, *, active):
+        return [{
+            "code": code,
+            "active": active,
+            "explanation": _WAL_ALARM_EXPLANATIONS.get(code, "No explanation registered for this alarm code."),
+        } for code in codes]
+
+    alarms = [str(c) for c in (wal.get("alarms") or [])]
+    incidents = [str(c) for c in (wal.get("incident_alarms") or []) if str(c) not in alarms]
+    return {
+        "available": True,
+        "status": wal.get("status"),
+        "reserve_ready": wal.get("reserve_ready") is True,
+        "alarms": _explain(alarms, active=True),
+        "incident_alarms": _explain(incidents, active=False),
+        "note": (
+            "Active alarms block the emergency reserve. Incident alarms are "
+            "retained history of a repaired condition."
+        ),
+    }
+
+
+_DASHBOARD_WAL_CACHE = {"ts": 0.0, "value": None}
+_DASHBOARD_WAL_CACHE_TTL_SEC = 60.0
+
+
+def _dashboard_wal_summary_cached(now: float) -> dict:
+    cached = _DASHBOARD_WAL_CACHE.get("value")
+    if cached is not None and now - float(_DASHBOARD_WAL_CACHE.get("ts") or 0.0) < _DASHBOARD_WAL_CACHE_TTL_SEC:
+        return cached
+    try:
+        wal = (_lifecycle_pipeline_public_status(now) or {}).get("emergency_wal")
+        value = _wal_alarm_dashboard_summary(wal)
+    except Exception as exc:
+        value = {"available": False, "reason": f"telemetry error: {type(exc).__name__}",
+                 "status": None, "alarms": [], "incident_alarms": []}
+    _DASHBOARD_WAL_CACHE.update({"ts": now, "value": value})
+    return value
+
+
+def _unavailable(reason: str) -> dict:
+    return {"available": False, "value": None, "reason": reason}
+
+
+def _dashboard_truth_fields(snap: dict, now: float) -> dict:
+    """Real values or explicit 'not available: <reason>' for dashboard headline fields."""
+    last_fetch = snap.get("last_fetch_success")
+    if last_fetch and last_fetch != "never":
+        fetch = {"available": True, "value": last_fetch, "reason": None}
+    else:
+        fetch = _unavailable("no successful OHLCV fetch since process boot")
+    collector = snap.get("collector_version")
+    collector_view = (
+        {"available": True, "value": collector, "reason": None}
+        if collector else _unavailable("collector version not published by this runtime")
+    )
+    dbg = snap.get("debug_state") if isinstance(snap.get("debug_state"), dict) else {}
+    edge = dbg.get("last_edge_score")
+    edge_view = (
+        {"available": True, "value": edge, "reason": None}
+        if isinstance(edge, (int, float)) and not isinstance(edge, bool) and edge != 0
+        else _unavailable("no edge score computed yet this process")
+    )
+    dq = snap.get("data_quality")
+    dq_ts = float(snap.get("data_quality_ts") or 0.0)
+    dq_view = (
+        {"available": True, "value": float(dq), "reason": None,
+         "age_sec": round(max(0.0, now - dq_ts), 1)}
+        if dq_ts > 0 and isinstance(dq, (int, float)) and not isinstance(dq, bool)
+        else _unavailable("data quality not measured yet this process")
+    )
+    return {
+        "last_fetch_success": fetch,
+        "collector_version": collector_view,
+        "edge_score": edge_view,
+        "data_quality": dq_view,
+    }
+
+
+def _build_dashboard_truth(snap: dict, now: float | None = None) -> dict:
+    """Server-side truth block rendered by the dashboard instead of JS fallbacks."""
+    current = float(now or time.time())
+    try:
+        cadence = float(get_effective_ai_cooldown_sec())
+    except Exception:
+        cadence = 0.0
+    if trade_lock.acquire(timeout=_API_STATE_LOCK_TIMEOUT_SEC):
+        try:
+            revalidation_counts = copy.deepcopy(fill_revalidation_cancel_counts)
+        finally:
+            trade_lock.release()
+        revalidation = _fill_revalidation_cancel_summary(revalidation_counts, ACTIVE_TILE_ORDER)
+    else:
+        revalidation = {"available": False, "reason": "trade lock busy; counts retry next refresh",
+                        "tiles": [], "total": None}
+    return {
+        "schema": "dashboard_truth_v1",
+        "fields": _dashboard_truth_fields(snap, current),
+        "deepseek": _deepseek_dashboard_status(
+            bool(snap.get("deepseek_key_present")), snap.get("last_ai_call_ts"), current, cadence,
+        ),
+        "fill_revalidation_cancels": revalidation,
+        "emergency_wal": _dashboard_wal_summary_cached(current),
+        "process_boot_time": float(process_boot_time),
+        "session_start_time": float(snap.get("bot_start_time") or 0.0) or None,
+        "trade_scope": snap.get("trade_scope"),
+        "trade_count_session": snap.get("trade_count_session"),
+    }
+
+
+def _attach_dashboard_truth(snap: dict) -> dict:
+    """Annotate a presentation snapshot in place with the dashboard truth block."""
+    snap["dashboard_truth"] = _build_dashboard_truth(snap)
+    snap["process_boot_time"] = float(process_boot_time)
+    for order in snap.get("orders") or []:
+        if not isinstance(order, dict):
+            continue
+        lane = str(order.get("research_lane") or "").upper()
+        spec = ACTIVE_TILE_REGISTRY.get(lane) or {}
+        order["venue_fill_gate_display"] = _venue_fill_gate_display(
+            order,
+            gate_enabled=bool(VENUE_EXECUTABLE_SHOWCASE_FILL_GATE),
+            relay_eligible=bool(spec.get("platform_relay_eligible", False)),
+        )
+    return snap
 
 
 _DASHBOARD_TRADE_ENRICHMENT_CACHE_LOCK = threading.Lock()
@@ -38207,6 +38461,7 @@ def _api_state_cache_refresher_loop():
                     snap["paused_shadow_stats"] = paused_shadow_stats
                 snap["api_state_mode"] = "ACTIVE_EXECUTION_OVERLAY"
                 snap["api_state_overlay_build_ms"] = relay.get("build_ms")
+            _attach_dashboard_truth(snap)
             with _api_state_cache_lock:
                 _api_state_cache["payload"] = snap
                 _api_state_cache["built_at"] = time.time()
@@ -38259,8 +38514,9 @@ _PUBLIC_STATE_SAFE_TOP_KEYS = {
     # bot identity / status
     "bot_status", "bot_pid", "bot_instance_id", "dashboard_owner",
     "dashboard_pid", "dashboard_port", "source_git_rev",
-    "bot_version", "bot_start_time",
-    "analyzer_sync_id",
+    "bot_version", "bot_start_time", "process_boot_time",
+    "analyzer_sync_id", "collector_version", "last_fetch_success",
+    "trade_scope",
     # dashboard meta
     "dashboard_url", "dashboard_port", "display_timezone",
     "server_ts", "server_ts_melbourne",
@@ -38294,6 +38550,33 @@ _PUBLIC_TRADE_SAFE_KEYS = {
     "gross_pnl_usd", "trading_fees_usd", "fees_usd",
     "funding_fees_usd", "close_ts_melbourne",
 }
+
+
+_PUBLIC_OWNER_ONLY_REASON = "owner-only field (public sanitized view)"
+
+
+def _public_dashboard_truth(truth: dict) -> dict:
+    """Public projection of dashboard_truth: strategy internals become owner-only."""
+    fields = truth.get("fields") if isinstance(truth.get("fields"), dict) else {}
+    owner_only = _unavailable(_PUBLIC_OWNER_ONLY_REASON)
+    return {
+        "schema": truth.get("schema"),
+        "fields": {
+            "last_fetch_success": fields.get("last_fetch_success") or owner_only,
+            "collector_version": fields.get("collector_version") or owner_only,
+            "edge_score": dict(owner_only),
+            "data_quality": dict(owner_only),
+        },
+        "deepseek": {"status": "OWNER_ONLY", "label": "DeepSeek status: " + _PUBLIC_OWNER_ONLY_REASON,
+                     "last_ai_call_age_sec": None},
+        "fill_revalidation_cancels": {"available": False, "reason": _PUBLIC_OWNER_ONLY_REASON,
+                                      "tiles": [], "total": None},
+        "emergency_wal": truth.get("emergency_wal"),
+        "process_boot_time": truth.get("process_boot_time"),
+        "session_start_time": truth.get("session_start_time"),
+        "trade_scope": truth.get("trade_scope"),
+        "trade_count_session": truth.get("trade_count_session"),
+    }
 
 
 def _sanitize_public_state(state: dict) -> dict:
@@ -38339,6 +38622,10 @@ def _sanitize_public_state(state: dict) -> dict:
             if k in ("rate", "next_time", "next_time_melbourne", "mark_price",
                      "next_funding_time", "ts", "predicted_rate")
         }
+
+    truth = state.get("dashboard_truth")
+    if isinstance(truth, dict):
+        out["dashboard_truth"] = _public_dashboard_truth(truth)
 
     # Truthfully expose the mode while keeping mutation admin-only.
     invert = bool(state.get("invert_signal", False))

@@ -1,11 +1,13 @@
 /** Fuzzy match bot trade_id ↔ relay cycle tradeId (prefix / normalization). */
 
+import { RELAY_ELIGIBLE_TILE_ID_PREFIXES } from './generated/tile-registry.generated';
+
 export type TradeIdMatchKind = 'exact' | 'prefix' | 'normalized' | 'contains' | 'none';
 
 /**
  * F5 (2026-07-07 incident hardening) — Extract the lane prefix from a trade_id.
  * Trade IDs are `<lane-prefix>-<12-hex>` per services/btc-conservative-agent/bot.py
- * allocate_lane_trade_id. Active mirror prefixes are cont- and o29atr-.
+ * allocate_lane_trade_id; lane prefixes come from the canonical tile registry.
  * Returns the lowercase prefix (including trailing `-`) or '' when no prefix.
  */
 function extractLanePrefix(tradeId: string): string {
@@ -81,9 +83,10 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
 
 /**
  * F7 (2026-07-08 real-money hotfix) — Lane prefixes explicitly approved for
- * live-copy mirroring. Continuous is the only currently approved showcase
- * lane. Unknown and retired identifiers remain fail-closed even when old
- * trade IDs survive in historical data.
+ * live-copy mirroring, generated from the registry's platform_relay_eligible
+ * tiles. Continuous is an analytical comparison label and never mirrorable.
+ * Unknown and retired identifiers remain fail-closed even when old trade IDs
+ * survive in historical data.
  *
  * Fail-closed: any prefix not in this set is treated as research/paper and
  * never mirrored to real money. This inverts the legacy {@link isPaperLaneTradeId}
@@ -91,7 +94,7 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
  * remembered to add it to the deny list (the exact bug that caused the
  * 2026-07-08 vc603-/szdc1-/slav1- live-mirror incident).
  */
-const MIRRORABLE_LANE_PREFIXES = new Set(['cont', 'o29atr']);
+const MIRRORABLE_LANE_PREFIXES: ReadonlySet<string> = new Set(RELAY_ELIGIBLE_TILE_ID_PREFIXES);
 
 /**
  * F7 — Returns true ONLY when the trade_id belongs to an explicitly
