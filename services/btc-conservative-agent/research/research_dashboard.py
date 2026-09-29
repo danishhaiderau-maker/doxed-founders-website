@@ -6863,7 +6863,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <header>
   <div>
     <h1>Research Dashboard · Details</h1>
-    <div class="meta"><a href="/" id="decision-link">← Decision (one-page summary)</a></div>
+    <a href="/" id="decision-link" style="display:inline-block;margin:6px 0 4px;padding:5px 12px;border:1px solid #58a6ff;border-radius:6px;background:#0d2240;color:#79c0ff;font-weight:600;text-decoration:none;">← Decision (one-page summary)</a>
     <div class="meta">Read-only · analyzer outputs · <span id="scope">loading…</span></div>
   </div>
   <div>
@@ -9040,6 +9040,7 @@ def _decision_payload() -> dict:
     freshness = _generation_freshness_meta(manifest)
     funnel, funnel_evidence = _current_lane_artifact("ai_funnel_report.json")
     scorecard, _scorecard_evidence = _current_lane_artifact("discovery_cohort_scorecard_report.json")
+    summary, _summary_evidence = _current_lane_artifact("research_compact_summary.json")
     generated_at = manifest.get("generated_at")
     fmt = format_melbourne_dt
     generation = {
@@ -9098,6 +9099,7 @@ def _decision_payload() -> dict:
         tile_order=tuple(DASHBOARD_PRIMARY_LANES), registry=ACTIVE_TILE_REGISTRY,
         funnel_report=funnel or None, ai_coverage=(scorecard or {}).get("ai_verdict_coverage"),
         generation=generation, alarms=alarms, freshness_rows=freshness_rows,
+        summary_trades=((summary or {}).get("performance") or {}).get("trades"),
     )
 
 

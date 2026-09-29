@@ -11752,6 +11752,21 @@ def _lane_closed_trade_stats(lane_trades):
     }
 
 
+def _session_trade_scope(trades, tile_lanes):
+    """Reconcile the executive 'session trades' count with per-tile trade rows."""
+    if trades is None or "research_lane" not in getattr(trades, "columns", ()):
+        return None
+    unique = trades.drop_duplicates(subset=["trade_id"]) if "trade_id" in trades.columns else trades
+    by_lane = unique["research_lane"].fillna("UNLABELLED").astype(str).str.upper().value_counts().to_dict()
+    tiles = {str(lane).upper() for lane in tile_lanes}
+    return {
+        "session_trade_rows": int(len(unique)),
+        "tile_trade_rows": int(sum(int(n) for lane, n in by_lane.items() if lane in tiles)),
+        "non_tile_trade_rows": {str(lane): int(n) for lane, n in sorted(by_lane.items()) if lane not in tiles},
+        "basis": "same session trade frame as the executive summary session-trades count",
+    }
+
+
 def ai_funnel_report(trades=None, session=None):
     """
     Per-lane AI approval funnel: ai_calls → approve → order_submitted → filled → closed.
@@ -11820,6 +11835,7 @@ def ai_funnel_report(trades=None, session=None):
         "session_scope": scope,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "lanes": lanes_out,
+        "trade_scope": _session_trade_scope(trades, BENCHMARK_LANES),
         "totals": {
             "ai_calls": sum(v.get("ai_calls", 0) for v in lanes_out.values()),
             "approve": sum(v.get("approve", 0) for v in lanes_out.values()),
@@ -21401,7 +21417,8 @@ def format_executive_summary_short(payload):
         f"=== EXECUTIVE SUMMARY — {scope} ({time_label}) | {payload.get('analyzer_sync_id', ANALYZER_SYNC_ID)} ===",
         "=" * 72,
         f"Data scope: {payload.get('data_scope', 'all').upper()} | CSV trades: {csv_n} | Analyzed fills: {analyzed}",
-        f"Trades {analyzed} | WR {p.get('win_rate_pct', 'n/a')}% | PnL {_fmt_usd(p.get('net_pnl_usd'))} | "
+        f"Session trades (all lanes, incl. non-tile) {analyzed} | WR {p.get('win_rate_pct', 'n/a')}% | "
+        f"PnL {_fmt_usd(p.get('net_pnl_usd'))} | "
         f"EV {p.get('expectancy_usd', 'n/a')}/trade | MFE capture {p.get('mfe_capture_pct', 'n/a')}%",
         f"APPROVE {re.get('approve_attempts', 'n/a')} → executed {re.get('executed', 'n/a')} | "
         f"Gate damage ${_fmt_usd(re.get('gate_damage_usd'))} | Edge: {payload.get('edge_verdict', 'n/a')}",

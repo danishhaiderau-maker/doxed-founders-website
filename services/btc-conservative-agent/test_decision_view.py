@@ -159,3 +159,38 @@ def test_analyzer_publishes_closed_trade_stats_per_tile():
     assert stats["mae_mfe_rows"] == 2 and stats["median_mae_margin_pct"] == -20.0
     empty = engine._lane_closed_trade_stats(trades.iloc[0:0])
     assert empty["n"] == 0 and empty["mean_net_pnl_usd"] is None
+
+def test_trade_counts_reconcile_details_summary_with_tile_rows():
+    funnel = {"trade_scope": {"session_trade_rows": 57, "tile_trade_rows": 53,
+                              "non_tile_trade_rows": {"CONTINUOUS": 4}}}
+    ok = dv.trade_count_reconciliation(funnel, 57, 53)
+    assert ok["consistent"] is True
+    assert ok["text"] == "The Details summary trade count (57) = 53 tile trades + 4 non-tile trades (CONTINUOUS 4)."
+    bad = dv.trade_count_reconciliation(funnel, 60, 53)
+    assert bad["consistent"] is False and "MISMATCH: the executive summary reports 60" in bad["text"]
+
+
+def test_trade_counts_without_scope_explain_both_scopes():
+    pending = dv.trade_count_reconciliation({}, 57, 53)
+    assert pending["available"] is False
+    assert "(57) counts every session trade row, including non-tile lanes" in pending["text"]
+    assert "per-tile total here is 53 (CLOSED lifecycle events)" in pending["text"]
+    assert dv.trade_count_reconciliation(None, None, None)["text"] == dv.NO_DATA_TEXT
+
+
+def test_sample_names_its_source():
+    assert dv.after_cost_ev({"closed_trade_stats": {"n": 5, "mean_net_pnl_usd": 0.1}})["n_source"] == "trade log rows"
+    assert dv.after_cost_ev({"closed": 3, "net_pnl_usd": 0.3})["n_source"] == "CLOSED lifecycle events"
+    assert dv.after_cost_ev(None)["n_source"] is None
+
+
+def test_analyzer_trade_scope_uses_the_session_trade_frame():
+    spec = importlib.util.spec_from_file_location("decision_engine_scope", AGENT / "analyzer_research_engine_v62.py")
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    trades = pd.DataFrame({"trade_id": ["a", "b", "b", "c", "d"],
+                           "research_lane": ["FAMILY_X", "FAMILY_X", "FAMILY_X", "CONTINUOUS", None]})
+    scope = engine._session_trade_scope(trades, ["FAMILY_X"])
+    assert scope["session_trade_rows"] == 4 and scope["tile_trade_rows"] == 2
+    assert scope["non_tile_trade_rows"] == {"CONTINUOUS": 1, "UNLABELLED": 1}
+    assert engine._session_trade_scope(pd.DataFrame({"x": [1]}), ["FAMILY_X"]) is None
