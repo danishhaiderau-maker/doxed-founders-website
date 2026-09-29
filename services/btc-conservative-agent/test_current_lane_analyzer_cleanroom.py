@@ -173,10 +173,10 @@ def test_current_lanes_fail_closed_on_stale_revision_epoch_and_scope(monkeypatch
         "EPOCH_ID_MISMATCH",
         "SCOPE_MISMATCH",
     }.issubset(set(payload["evidence"]["benchmark"]["blockers"]))
-    assert lane["executed_closes"] == 0
-    assert lane["pnl"] == 0.0
-    assert lane["all_time_fills"] == 0
-    assert lane["all_time_pnl"] == 0.0
+    assert lane["executed_closes"] is None
+    assert lane["pnl"] is None
+    assert lane["all_time_fills"] is None
+    assert lane["all_time_pnl"] is None
 
 
 def test_current_lanes_treat_identity_matched_empty_receipt_as_insufficient(monkeypatch):
@@ -248,8 +248,8 @@ def test_current_lanes_never_reads_all_data_fallback(monkeypatch, tmp_path):
 
     assert payload["evidence_status"] == "UNAVAILABLE_CURRENT_GENERATION"
     assert payload["evidence"]["historical_fallback_used"] is False
-    assert lane["executed_closes"] == 0
-    assert lane["pnl"] == 0.0
+    assert lane["executed_closes"] is None
+    assert lane["pnl"] is None
 
 
 def test_generic_exit_grid_no_longer_depends_on_retired_type_b_taxonomy():

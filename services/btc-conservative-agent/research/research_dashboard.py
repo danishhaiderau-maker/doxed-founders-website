@@ -24,6 +24,8 @@ from zoneinfo import ZoneInfo
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
 from runtime_incident_history import build_runtime_incident_history
+import shutil
+from research import decision_view as _decision_view
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -1847,6 +1849,9 @@ def _lane_rows(*, include_evidence: bool = False):
     benchmark_lane = str(bench.get("benchmark_lane") or COMPARISON_BENCHMARK_LANE or BENCHMARK_LANE)
     bench_metrics = lanes.get(benchmark_lane) or {}
     benchmark_pnl = float(bench_metrics.get("net_pnl_real") or bench_metrics.get("net_pnl_usd") or 0)
+    benchmark_pnl_published = benchmark_pnl if any(
+        bench_metrics.get(key) is not None for key in ("net_pnl_real", "net_pnl_usd")
+    ) else None
     benchmark_ev = float(bench_metrics.get("per_approve_ev") or 0)
 
     all_keys = set(CURRENT_RESEARCH_LANES)
@@ -1894,6 +1899,13 @@ def _lane_rows(*, include_evidence: bool = False):
             else lab.get("net_pnl_usd") or 0
         )
         ev = float(m.get("per_approve_ev") or 0)
+        report_approves = int(m.get("approves") or 0)
+        # The report rounds per-approval EV to cents, which turns a real but
+        # small EV into 0.0; derive it from the unrounded inputs instead.
+        ev_published = (
+            round(pnl / report_approves, 4) if report_approves
+            else (round(ev, 4) if m.get("per_approve_ev") is not None else None)
+        )
         at_fills = int(all_time.get("real_fills") or 0)
         at_pnl = float(all_time.get("net_pnl_real") or 0)
         at_ev = float(all_time.get("ev_usd") or (at_pnl / at_fills if at_fills else 0))
@@ -1921,6 +1933,8 @@ def _lane_rows(*, include_evidence: bool = False):
             status = "SHADOW_COLLECTING"
         elif is_retired:
             status = "HISTORICAL"
+        elif _decision_view.lane_evidence_status(fills):
+            status = _decision_view.lane_evidence_status(fills)
         elif compare_ev >= benchmark_ev and compare_pnl > benchmark_pnl and lane != benchmark_lane:
             status = "BEATS BENCHMARK"
         elif compare_pnl < benchmark_pnl or (benchmark_ev and compare_ev < benchmark_ev * 0.85):
@@ -1957,7 +1971,7 @@ def _lane_rows(*, include_evidence: bool = False):
             "counterfactual_pnl": round(counterfactual_pnl, 2),
             "counterfactual_ev_per_close": round(
                 counterfactual_pnl / counterfactual_closes, 2
-            ) if counterfactual_closes else 0.0,
+            ) if counterfactual_closes else None,
             "v2_checker_pass_sims": int(m.get("v2_checker_pass_sims") or 0),
             "v2_reject_counterfactual_sims": int(m.get("v2_reject_counterfactual_sims") or 0),
             "v2_metrics_note": m.get("v2_metrics_note") or "",
@@ -1975,10 +1989,10 @@ def _lane_rows(*, include_evidence: bool = False):
             "good_blocks_saved_usd": round(good_blocks_saved, 2),
             "wr": None,
             "pnl": round(pnl, 2),
-            "ev": round(ev, 2),
-            "all_time_fills": at_fills,
-            "all_time_pnl": round(at_pnl, 2),
-            "all_time_ev": round(at_ev, 2),
+            "ev": ev_published,
+            "all_time_fills": at_fills if all_time else None,
+            "all_time_pnl": round(at_pnl, 2) if all_time else None,
+            "all_time_ev": round(at_ev, 2) if all_time else None,
             "status": status,
             "pathway_status": pathway_status or status,
             "verdict": m.get("verdict") or "",
@@ -2009,8 +2023,8 @@ def _lane_rows(*, include_evidence: bool = False):
         "historical_fallback_used": False,
     }
     if include_evidence:
-        return rows, benchmark_pnl, evidence
-    return rows, benchmark_pnl
+        return rows, benchmark_pnl_published, evidence
+    return rows, benchmark_pnl_published
 
 
 def _normalize_chase_lane(lane: str) -> str:
@@ -4682,6 +4696,13 @@ def _filter_lane_rows(rows, *, all_lanes: bool = False):
     return out
 
 
+_UNAVAILABLE_LANE_EVIDENCE_FIELDS = (
+    "approves", "trades", "executed_closes", "pnl", "ev",
+    "counterfactual_closes", "counterfactual_pnl", "counterfactual_ev_per_close",
+    "all_time_fills", "all_time_pnl", "all_time_ev",
+)
+
+
 @app.route("/api/lanes")
 def api_lanes():
     rows, bench_pnl, evidence = _lane_rows(include_evidence=True)
@@ -4699,10 +4720,18 @@ def api_lanes():
         })
     all_lanes = _wants_all_lanes()
     filtered = _filter_lane_rows(rows, all_lanes=all_lanes)
-    if evidence.get("status") != "CURRENT_GENERATION":
-        filtered = [{**row, "approves": None} for row in filtered]
+    stale_since = None
+    if evidence.get("status") == "STALE_GENERATION":
+        generated_at = (_read_json(REPORT_MANIFEST_FILE, {}) or {}).get("generated_at")
+        stale_since = format_melbourne_dt(generated_at) if generated_at else "unknown"
+    elif evidence.get("status") != "CURRENT_GENERATION":
+        # Without current-generation evidence these are defaults, not measurements.
+        unavailable = dict.fromkeys(_UNAVAILABLE_LANE_EVIDENCE_FIELDS)
+        filtered = [{**row, **unavailable} for row in filtered]
+        bench_pnl = None
     return jsonify({
         "lanes": filtered,
+        "stale_since": stale_since,
         "benchmark_pnl": bench_pnl,
         "lane_filter": "all" if all_lanes else "active_tile_registry",
         "lane_filter_note": (
@@ -6833,7 +6862,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="stale-banner" class="stale-banner" style="display:none;"></div>
 <header>
   <div>
-    <h1>Research Dashboard</h1>
+    <h1>Research Dashboard · Details</h1>
+    <div class="meta"><a href="/" id="decision-link">← Decision (one-page summary)</a></div>
     <div class="meta">Read-only · analyzer outputs · <span id="scope">loading…</span></div>
   </div>
   <div>
@@ -7741,11 +7771,15 @@ async function loadFindings() {
 }
 
 function laneApprovalCount(current, row) {
-  return current.evidence_status === 'CURRENT_GENERATION' ? (row.approves ?? 'UNAVAILABLE') : 'UNAVAILABLE';
+  const stale = current.evidence_status === 'STALE_GENERATION';
+  if ((current.evidence_status !== 'CURRENT_GENERATION' && !stale) || row.approves == null) return 'no data yet';
+  return stale ? row.approves + ' · stale since ' + (current.stale_since || 'unknown') : row.approves;
 }
 function laneEvidenceMetric(current, row, field, money=false) {
-  if (current.evidence_status !== 'CURRENT_GENERATION' || (row.metric_available || {})[field] !== true || row[field] == null) return 'UNAVAILABLE';
-  return money ? fmtExecutionUsd(row[field]) : row[field];
+  const stale = current.evidence_status === 'STALE_GENERATION';
+  if ((current.evidence_status !== 'CURRENT_GENERATION' && !stale) || (row.metric_available || {})[field] !== true || row[field] == null) return 'no data yet';
+  const value = money ? fmtExecutionUsd(row[field]) : row[field];
+  return stale ? value + ' · stale since ' + (current.stale_since || 'unknown') : value;
 }
 async function loadLanes() {
   const rCurrent = await fetch('/api/lanes');
@@ -7767,7 +7801,7 @@ async function loadLanes() {
         : `Evidence status: INSUFFICIENT CURRENT-GENERATION EXECUTION EVIDENCE${blockers ? ` — ${blockers}` : ''}. Historical results are not substituted.`;
   }
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
-    `<tr><td>${row.lane || row.research_lane || ''}</td><td>${currentAvailable ? (row.status || row.pathway_status || 'COLLECTING') : 'STALE / UNAVAILABLE'}</td>`
+    `<tr><td>${row.lane || row.research_lane || ''}</td><td>${currentAvailable ? (row.status || row.pathway_status || 'COLLECTING') : (current.evidence_status === 'STALE_GENERATION' ? 'STALE / UNAVAILABLE · stale since ' + (current.stale_since || 'unknown') : 'no data yet')}</td>`
     + `<td>${laneApprovalCount(current, row)}</td><td>${laneEvidenceMetric(current, row, 'executed_closes')}</td>`
     + `<td>${laneEvidenceMetric(current, row, 'pnl', true)}</td><td>${laneEvidenceMetric(current, row, 'ev', true)}</td>`
     + `<td>${laneEvidenceMetric(current, row, 'counterfactual_closes')}</td><td>${laneEvidenceMetric(current, row, 'counterfactual_pnl', true)}</td></tr>`
@@ -8927,7 +8961,7 @@ setInterval(refreshActiveSection, 180000);
 </script></body></html>"""
 
 
-@app.route("/")
+@app.route("/details")
 def index():
     nav_groups_json = json.dumps([
         {"id": gid, "label": glabel, "items": [[a, b] for a, b, _ in items]}
@@ -8943,6 +8977,139 @@ def index():
         registry_error=REGISTRY_IMPORT_ERROR,
     )
     resp = make_response(html)
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
+LAPTOP_CHAIN_STATE_DIR = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain")
+SEGMENT_PULLER_STATUS_FILE = (
+    Path(os.getenv("RESEARCH_SEGMENT_SHADOW_ROOT") or r"C:\DoxxedCrypto\fly-mirror-segments")
+    / ".puller" / "status.json"
+)
+DECISION_NAV_LINKS = (
+    ("Details (full report)", "/details"),
+    ("Safe Policy Genome V3.1", "/safe-policy-genome-v3.1"),
+    ("Static policies", "/static-policies"),
+    ("Dynamic policies", "/dynamic-policies"),
+    ("Shadow research", "/shadow-research"),
+    ("Risk and drawdown", "/risk-drawdown"),
+    ("Chronological OOS", "/chronological-oos"),
+    ("Evidence maturity", "/evidence-maturity"),
+    ("Partial reduction", "/partial-reduction"),
+    ("Decision JSON", "/api/decision"),
+)
+
+
+def _read_state_json(path) -> dict | None:
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _local_disk_usage() -> dict | None:
+    try:
+        usage = shutil.disk_usage(DATA_ROOT)
+    except OSError:
+        return None
+    if not usage.total:
+        return None
+    return {"used_pct": round(usage.used / usage.total * 100.0, 1),
+            "free_gb": round(usage.free / 1024 ** 3, 1)}
+
+
+def _local_sqlite_wal_files() -> list:
+    rows = []
+    try:
+        for path in DATA_ROOT.glob("*-wal"):
+            try:
+                rows.append({"name": path.name[:-4], "bytes": path.stat().st_size})
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return rows
+
+
+def _decision_payload() -> dict:
+    now = datetime.now(timezone.utc)
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    freshness = _generation_freshness_meta(manifest)
+    funnel, funnel_evidence = _current_lane_artifact("ai_funnel_report.json")
+    scorecard, _scorecard_evidence = _current_lane_artifact("discovery_cohort_scorecard_report.json")
+    generated_at = manifest.get("generated_at")
+    fmt = format_melbourne_dt
+    generation = {
+        "generated_at": generated_at,
+        "generated_at_display": fmt(generated_at) if generated_at else None,
+        "epoch_id": _lane_report_identity(manifest).get("epoch_id") or None,
+        "current": bool(freshness.get("current")),
+        "reasons": list(freshness.get("reasons") or []),
+        "funnel_report_status": funnel_evidence.get("status"),
+        "funnel_report_blockers": list(funnel_evidence.get("blockers") or []),
+        "registry_error": REGISTRY_IMPORT_ERROR,
+    }
+    analyzer_run = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "analyzer-run.status.json")
+    ack = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "laptop-ack-watcher.status.json")
+    monitor = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "laptop-chain-monitor.state.json")
+    segments = _read_state_json(SEGMENT_PULLER_STATUS_FILE)
+    disk = _local_disk_usage()
+    alarms = _decision_view.collect_alarms(
+        freshness=freshness, analyzer_run=analyzer_run, ack_watcher=ack,
+        monitor_state=monitor, segment_status=segments, local_disk=disk,
+        local_wal=_local_sqlite_wal_files(), now=now,
+    )
+    for alarm in alarms:
+        if alarm.get("since"):
+            alarm["since"] = fmt(alarm["since"])
+    ack_max_age = _decision_view.TRANSFER_ACK_LAG_ALARM_SEC
+
+    def fresh(ts, max_age, missing=_decision_view.NO_DATA_TEXT):
+        return _decision_view.freshness_text(ts, max_age_sec=max_age, now=now, display=fmt, missing=missing)
+
+    last_sync = (ack or {}).get("lastSyncResult") if isinstance((ack or {}).get("lastSyncResult"), dict) else {}
+    if generated_at:
+        generation_text = f"{fmt(generated_at)} · current" if generation["current"] else f"stale since {fmt(generated_at)}"
+    else:
+        generation_text = "no data yet (no completed generation)"
+    run_ts = (analyzer_run or {}).get("finishedAt") or (analyzer_run or {}).get("startedAt")
+    freshness_rows = [
+        {"label": "Analyzer generation", "text": generation_text},
+        {"label": "Last analyzer run",
+         "text": f"{analyzer_run.get('state')} at {fmt(run_ts)}" if analyzer_run and run_ts
+         else "no data yet (runner status not found)"},
+        {"label": "Last laptop ACK", "text": fresh((ack or {}).get("lastAckAt"), ack_max_age)},
+        {"label": "Last Fly to laptop sync attempt",
+         "text": (("OK · " if last_sync.get("ok") else "FAILED · ") + fresh(last_sync.get("at"), ack_max_age))
+         if last_sync.get("at") else _decision_view.NO_DATA_TEXT},
+        {"label": "Mirror sync receipt",
+         "text": fresh(freshness.get("mirror_sync_receipt_timestamp"),
+                       float(freshness.get("mirror_sync_receipt_max_age_seconds") or 600))},
+        {"label": "Last research segment applied",
+         "text": fresh((segments or {}).get("last_applied_at") or (segments or {}).get("updated_at"), ack_max_age,
+                       missing="no data yet (segment puller has not run on this laptop)")},
+        {"label": "Local data drive",
+         "text": f"{disk['used_pct']:.1f}% used, {disk['free_gb']:.1f} GB free" if disk else _decision_view.NO_DATA_TEXT},
+    ]
+    return _decision_view.build_decision_payload(
+        tile_order=tuple(DASHBOARD_PRIMARY_LANES), registry=ACTIVE_TILE_REGISTRY,
+        funnel_report=funnel or None, ai_coverage=(scorecard or {}).get("ai_verdict_coverage"),
+        generation=generation, alarms=alarms, freshness_rows=freshness_rows,
+    )
+
+
+@app.route("/api/decision")
+def api_decision():
+    return jsonify(_decision_payload())
+
+
+@app.route("/")
+@app.route("/decision")
+def decision_page():
+    resp = make_response(_decision_view.render_decision_html(_decision_payload(), nav_links=DECISION_NAV_LINKS))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"

@@ -48,11 +48,11 @@ def test_lane_approvals_actual_endpoint_and_renderer_preserve_unknown_and_zero(m
     cases = []
     lane = next(iter(dashboard.CURRENT_RESEARCH_LANES))
     for status, current, count, expected in (
-        ('UNAVAILABLE', False, 0, 'UNAVAILABLE'),
-        ('CURRENT_GENERATION', False, 12, 'UNAVAILABLE'),
+        ('UNAVAILABLE', False, 0, 'no data yet'),
+        ('CURRENT_GENERATION', False, 12, '12 · stale since '),
         ('CURRENT_GENERATION', True, 0, 0),
         ('CURRENT_GENERATION', True, 12, 12),
-        ('CURRENT_GENERATION', True, None, 'UNAVAILABLE'),
+        ('CURRENT_GENERATION', True, None, 'no data yet'),
     ):
         monkeypatch.setattr(dashboard, '_lane_rows', lambda **kwargs: ([{'lane': lane, 'approves': count}], None, {'status': status}))
         monkeypatch.setattr(dashboard, '_generation_freshness_meta', lambda: {'current': current, 'reasons': []})
@@ -60,11 +60,18 @@ def test_lane_approvals_actual_endpoint_and_renderer_preserve_unknown_and_zero(m
         response = dashboard.app.test_client().get('/api/lanes')
         assert response.status_code == 200
         payload = response.get_json()
-        if not current: assert payload['lanes'][0]['approves'] is None
+        if status != 'CURRENT_GENERATION': assert payload['lanes'][0]['approves'] is None
+        if status == 'CURRENT_GENERATION' and not current:
+            assert payload['lanes'][0]['approves'] == 12 and payload['stale_since']
         cases.append((payload, expected))
     script = helper.group(0) + '\nconsole.log(JSON.stringify(' + json.dumps([p for p, _ in cases]) + '.map(p=>laneApprovalCount(p,p.lanes[0]))));'
-    result = subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True, timeout=15)
-    assert json.loads(result.stdout) == [e for _, e in cases]
+    result = subprocess.run([shutil.which('node'), '-'], input=script, check=True, capture_output=True, text=True, encoding='utf-8', timeout=15)
+    rendered = json.loads(result.stdout)
+    for got, (_, expected) in zip(rendered, cases):
+        if isinstance(expected, str) and expected.endswith('stale since '):
+            assert got.startswith(expected)
+        else:
+            assert got == expected
     assert 'Both paper and counterfactual evidence may support research qualification' in dashboard.DASHBOARD_HTML
     assert 'Counterfactual results never count as fills, executed PnL, or strategy qualification' not in dashboard.DASHBOARD_HTML
 
@@ -76,10 +83,10 @@ def test_current_lane_missing_fields_and_lab_source_are_independent(monkeypatch)
     zero = {'approves': 0, 'real_fills': 0, 'net_pnl_real': 0, 'per_approve_ev': 0}
     rendered_cases = []
     for metrics, lab, lab_bound, expected in (
-        ({}, {}, False, ['UNAVAILABLE'] * 4),
-        (zero, {}, False, [0, 0, 'UNAVAILABLE', 'UNAVAILABLE']),
+        ({}, {}, False, ['no data yet'] * 4),
+        (zero, {}, False, [0, 0, 'no data yet', 'no data yet']),
         (zero, {'closes': 0, 'net_pnl_usd': 0}, True, [0, 0, 0, 0]),
-        (zero, {'closes': 8, 'net_pnl_usd': 12}, False, [0, 0, 'UNAVAILABLE', 'UNAVAILABLE']),
+        (zero, {'closes': 8, 'net_pnl_usd': 12}, False, [0, 0, 'no data yet', 'no data yet']),
         ({**zero, 'lab_closes': 0, 'lab_net_pnl': 0}, {'closes': 8, 'net_pnl_usd': 12}, True, [0, 0, 0, 0]),
     ):
         def artifact(name):
@@ -99,7 +106,7 @@ def test_current_lane_missing_fields_and_lab_source_are_independent(monkeypatch)
     assert helper
     inputs = [[p, r] for p, r, _ in rendered_cases]
     script = helper.group(0) + '\nconsole.log(JSON.stringify(' + json.dumps(inputs) + '.map(([p,r])=>["executed_closes","pnl","counterfactual_closes","counterfactual_pnl"].map(f=>laneEvidenceMetric(p,r,f)))));'
-    result = subprocess.run([shutil.which('node'), '-e', script], check=True, capture_output=True, text=True, timeout=15)
+    result = subprocess.run([shutil.which('node'), '-'], input=script, check=True, capture_output=True, text=True, encoding='utf-8', timeout=15)
     assert json.loads(result.stdout) == [e for _, _, e in rendered_cases]
 
 

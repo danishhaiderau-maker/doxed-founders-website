@@ -111,7 +111,7 @@ def test_revision_mismatch_is_visible_and_blocks_every_decision_surface(monkeypa
         decision = client.get("/api/decision-readiness").get_json()
         best = client.get("/api/best-policy-research").get_json()
         safe = client.get("/api/safe-policy-genome-v3.1").get_json()
-        page = client.get("/").get_data(as_text=True)
+        page = client.get("/details").get_data(as_text=True)
 
     assert health["alive"] is True
     assert health["ok"] is health["ready"] is False
@@ -261,8 +261,8 @@ def test_lane_ui_surfaces_stale_reason_and_neutralizes_performance_status(monkey
     _install_generation(monkeypatch)
 
     with dashboard.app.test_client() as client:
-        page = client.get("/").get_data(as_text=True)
+        page = client.get("/details").get_data(as_text=True)
 
     assert "Evidence status: STALE ANALYZER GENERATION" in page
     assert "...(evidence.blockers || [])" in page
-    assert "'STALE / UNAVAILABLE'" in page
+    assert "'STALE / UNAVAILABLE · stale since '" in page

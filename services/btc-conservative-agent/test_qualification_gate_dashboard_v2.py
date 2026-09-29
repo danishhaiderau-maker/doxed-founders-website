@@ -93,7 +93,7 @@ def test_v31_dashboard_api_never_reuses_old_generation_gate_passes(monkeypatch):
 
 
 def test_main_dashboard_renders_mandatory_gate_status_table():
-    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    html = dashboard.app.test_client().get("/details").get_data(as_text=True)
 
     assert "Mandatory Bitfinex qualification gates" in html
     assert "qualification-gate-body" in html

@@ -67,7 +67,7 @@ def test_research_design_api_keeps_definitions_but_marks_missing_generation_unav
 
 def test_research_design_navigation_and_non_fabrication_labels_render():
     dashboard._API_RESPONSE_CACHE.clear()
-    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    html = dashboard.app.test_client().get("/details").get_data(as_text=True)
     assert '"research-design", "Entry & Regime Evidence"' in html
     assert 'id="sec-research-design"' in html
     assert "Definitions and coverage never create fills, PnL, profitability, qualification" in html
@@ -86,7 +86,7 @@ def test_research_design_client_failure_is_visible_and_fail_closed():
 
 def test_stale_header_and_forensic_export_provenance_are_unambiguous():
     dashboard._API_RESPONSE_CACHE.clear()
-    html = dashboard.app.test_client().get("/").get_data(as_text=True)
+    html = dashboard.app.test_client().get("/details").get_data(as_text=True)
     assert "STALE SAVED ANALYZER GENERATION · READ-ONLY" in html
     assert 'id="bundle-provenance"' in html
     assert "ZIP checksums prove captured bytes; they do not prove" in html
