@@ -87,3 +87,39 @@ try {{
             assert result["phases"][1] == {"files": 1, "phase": "bundle_verified"}
         if defect == "interleaved":
             assert result["phases"][:2] == [{"files":1,"phase":"bundle_verified"},{"files":1,"phase":"bundle_index_wait"}]
+
+
+@pytest.mark.skipif(not PWSH.exists(), reason="PowerShell runtime unavailable")
+def test_deep_existing_destination_replaces_within_max_path(tmp_path):
+    payload = '{"sample":2}'
+    target = tmp_path / "mirror"
+    leaf = "decision/" + "1" * 64 + ".json"
+    pad = 218 - len(str(target)) - len("/v3/receipts/") - len("/" + leaf)
+    assert pad > 8, "temporary directory too deep for this fixture"
+    relative = "v3/receipts/" + "r" * pad + "/" + leaf
+    destination = target / relative
+    destination.parent.mkdir(parents=True)
+    destination.write_text('{"sample":1}')
+    manifest = {"inventory_generation_id": "a" * 64, "inventory_sha256": "a" * 64,
+                "source_git_rev": "source", "collection_epoch_id": "epoch",
+                "tile_registry_signature": "tile", "schema": "fly_runtime_incremental_sync_v1",
+                "inventory_status": "CURRENT", "inventory_authoritative": True,
+                "inventory_ack_eligible": True, "fixture_defect": None,
+                "files": [{"path": relative, "size": len(payload), "inode": 123,
+                           "mtime_ns": 456, "consistency_mode": "strict_generation_v1",
+                           "fixture_payload": payload}]}
+    encoded = base64.b64encode(json.dumps(manifest).encode()).decode()
+    script = f"""
+$ErrorActionPreference='Stop'
+. '{ROOT.as_posix()}/scripts/fly-mirror-atomic.ps1'
+. '{ROOT.as_posix()}/scripts/fly-sync-bundles.ps1'
+$manifest=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'))|ConvertFrom-Json
+$result=Receive-FlyTransportBundles -Manifest $manifest -SourceUrl 'https://doxed-btc-bot.fly.dev' -AdminToken 'offline-fixture' -TargetRoot '{target.as_posix()}' -ClientScript '{ROOT.as_posix()}/scripts/test-support/bundle-staging-fixture.py' -SyncState @{{}} -SaveCheckpoint {{}} -Progress {{}}
+$result.Files
+"""
+    completed = subprocess.run([str(PWSH), "-NoProfile", "-Command", script],
+                               capture_output=True, text=True, timeout=30)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == "1"
+    assert destination.read_text() == payload
+    assert list((target / ".fly-sync-candidates").iterdir()) == []
