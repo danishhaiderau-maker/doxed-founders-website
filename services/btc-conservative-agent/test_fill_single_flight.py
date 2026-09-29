@@ -118,9 +118,39 @@ def test_touch_pass_skips_orders_already_in_fill_handoff():
 
 
 def test_maintenance_treats_already_cancelled_reconcile_as_no_mutation():
-    start = WORKFLOW.index('reconciled = request_json("/api/reconcile/phantom-cancel"')
+    start = WORKFLOW.index('reconciled = mutate_json("/api/reconcile/phantom-cancel"')
     loop = WORKFLOW[start:WORKFLOW.index("maintenance boundary did not become flat", start)]
     skip = loop.index('if reconciled.get("already_cancelled") is True and generation is None:')
     assert loop.index('if reconciled.get("ok") is not True:') < skip
     assert skip < loop.index('raise SystemExit("maintenance reconciliation generation is missing")')
     assert "continue" in loop[skip:loop.index("_legacy_exact_revision_bootstrap", skip)]
+
+
+def _maintenance_step():
+    start = WORKFLOW.index("- name: Enter durable authenticated paper maintenance boundary")
+    return WORKFLOW[start:WORKFLOW.index("maintenance boundary did not become flat", start)]
+
+
+def test_maintenance_timeout_is_unconfirmed_not_fatal():
+    step = _maintenance_step()
+    helper = step[step.index("def mutate_json("):step.index("def require_legacy_bootstrap_status(")]
+    assert "timeout=90" in helper
+    assert "except (TimeoutError, urllib.error.URLError)" in helper
+    assert "isinstance(exc, urllib.error.HTTPError)" in helper and "raise" in helper
+    assert "return None" in helper
+    assert 'mutate_json("/api/orders/cancel"' in step
+    assert 'request_json("/api/orders/cancel"' not in step
+    for marker in ("if cancelled is None:", "if reconciled is None:"):
+        block = step[step.index(marker):step.index("continue", step.index(marker))]
+        assert "unconfirmed_trade_ids.add(trade_id)" in block
+        assert "unconfirmed_floor = max(" in block
+
+
+def test_flat_after_unconfirmed_mutation_requires_newer_generation():
+    step = _maintenance_step()
+    flat = step[step.index("if not orders and not positions:"):step.index("for trade_id in orders:")]
+    guard = flat.index('exposure.get("money_state_generation") <= unconfirmed_floor')
+    assert guard < flat.index('print(f"Durable maintenance boundary is flat')
+    assert "continue" in flat[guard:flat.index('print(f"Durable maintenance boundary is flat')]
+    not_found = step[step.index("if exc.code == 404 and trade_id in unconfirmed_trade_ids:"):]
+    assert not_found.index("continue") < not_found.index("raise")
