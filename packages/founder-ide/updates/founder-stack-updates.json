@@ -1,25 +1,25 @@
 {
   "$schema": "./founder-stack-updates.schema.json",
   "manifestVersion": 1,
-  "publishedAt": "2026-09-29T02:27:49Z",
+  "publishedAt": "2026-09-29T05:37:00Z",
   "product": "founder-ide-next",
   "channel": "stable",
-  "latestVersion": "1.0.130",
-  "minimumVersion": "1.0.130",
-  "releaseNotesUrl": "https://github.com/danishhaiderau-maker/founder-ide-releases/releases/tag/v1.0.130",
+  "latestVersion": "1.0.131",
+  "minimumVersion": "1.0.131",
+  "releaseNotesUrl": "https://github.com/danishhaiderau-maker/founder-ide-releases/releases/tag/v1.0.131",
   "releases": [
     {
-      "version": "1.0.130",
+      "version": "1.0.131",
       "status": "current",
-      "releasedAt": "2026-09-29T02:27:49Z",
+      "releasedAt": "2026-09-29T05:37:00Z",
       "foundation": "electron",
       "download": {
-        "url": "https://github.com/danishhaiderau-maker/founder-ide-releases/releases/download/v1.0.130/Founder-IDE-Next-QA-Setup-1.0.130.exe",
-        "size": 1240786166,
-        "sha256": "5c105d8bfb1d2f91d9507ea26ed0e14ff65a439c6f764b68a0425aeb4506d3e3",
+        "url": "https://github.com/danishhaiderau-maker/founder-ide-releases/releases/download/v1.0.131/Founder-IDE-Next-QA-Setup-1.0.131.exe",
+        "size": 1240789132,
+        "sha256": "c931eaf125a0e1c991a0acd314f236c97fdda7f6fe67a0d6bfa535ad444884f3",
         "signature": null
       },
-      "minimumVersion": "1.0.130",
+      "minimumVersion": "1.0.131",
       "rollback": {
         "mechanism": "manual",
         "previousVersionKept": false,
