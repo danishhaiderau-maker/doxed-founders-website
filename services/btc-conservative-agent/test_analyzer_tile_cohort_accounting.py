@@ -79,3 +79,70 @@ def test_executive_summary_and_funnel_share_the_cohort_total(engine, tmp_path, m
     )
     assert payload["performance"]["trades"] == 4
     assert payload["performance"]["net_pnl_usd"] == round(engine.tile_cohort_pnl(kept)["net_pnl_usd"], 2)
+
+
+def _outcomes(engine):
+    fc3_prefix = engine.ACTIVE_TILE_REGISTRY[engine.CURRENT_RESEARCH_LANES[0]]["id_prefix"]
+    fat_prefix = engine.ACTIVE_TILE_REGISTRY[engine.CURRENT_RESEARCH_LANES[1]]["id_prefix"]
+    return [
+        {"trade_id": f"{fc3_prefix}-p1", "exit_reason": "PHANTOM_CANCEL_BY_RELAY", "ts": "2026-09-29T10:00:00Z"},
+        {"trade_id": f"{fc3_prefix}-p2", "exit_reason": "PHANTOM_CANCEL_BY_RELAY", "ts": "2026-09-29T11:00:00Z"},
+        {"trade_id": f"{fat_prefix}-p3", "outcome_exit_reason": "PHANTOM_CANCEL_BY_RELAY", "ts": "2026-09-29T12:00:00Z"},
+        {"trade_id": f"{fc3_prefix}-ok", "exit_reason": "TRAIL_STOP", "ts": "2026-09-29T12:30:00Z"},
+        {"trade_id": "", "exit_reason": "PHANTOM_CANCEL_BY_RELAY"},
+    ]
+
+
+def test_phantom_cancel_on_paper_only_tiles_is_relay_interference(engine):
+    found = engine.relay_interference_trade_ids(_outcomes(engine))
+    fc3, fat = engine.CURRENT_RESEARCH_LANES[0], engine.CURRENT_RESEARCH_LANES[1]
+    assert {v["research_lane"] for v in found.values()} == {fc3, fat}
+    assert len(found) == 3
+    assert all(v["reason"] == "RELAY_INTERFERENCE_PHANTOM_CANCEL" for v in found.values())
+
+
+def test_phantom_cancel_on_relay_eligible_tile_is_not_contamination(engine, monkeypatch):
+    lane = engine.CURRENT_RESEARCH_LANES[0]
+    registry = {k: dict(v) for k, v in engine.ACTIVE_TILE_REGISTRY.items()}
+    registry[lane].update({"paper_only": False, "platform_relay_eligible": True})
+    monkeypatch.setattr(engine, "ACTIVE_TILE_REGISTRY", registry)
+    found = engine.relay_interference_trade_ids(_outcomes(engine))
+    assert {v["research_lane"] for v in found.values()} == {engine.CURRENT_RESEARCH_LANES[1]}
+
+
+def test_relay_interference_is_quarantined_receipted_and_flagged(engine, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    found = engine.relay_interference_trade_ids(_outcomes(engine))
+    trades = _trades(engine)
+    fc3 = engine.CURRENT_RESEARCH_LANES[0]
+    contaminated_id = next(t for t, v in found.items() if v["research_lane"] == fc3)
+    trades = pd.concat([trades, pd.DataFrame([
+        {"trade_id": contaminated_id, "research_lane": fc3, "epoch_id": CURRENT, "net_pnl_usd": 0.0},
+    ])], ignore_index=True)
+    kept, quarantine = engine.split_current_tile_cohort(
+        trades, {"collector_v22_epoch_id": CURRENT}, relay_interference=found,
+    )
+    assert contaminated_id not in set(kept["trade_id"])
+    assert quarantine["by_reason"]["RELAY_INTERFERENCE_PHANTOM_CANCEL"] == 1
+    relay = quarantine["relay_interference"]
+    assert relay["rows"] == 3 and relay["in_trade_cohort"] == 1
+    assert relay["by_lane"][fc3] == 2
+    engine.write_trade_cohort_quarantine(quarantine)
+    receipt = json.loads((tmp_path / engine.TRADE_COHORT_QUARANTINE_FILE).read_text(encoding="utf-8"))
+    assert receipt["relay_interference"]["rows"] == 3
+    assert len(receipt["relay_interference"]["rows_detail"]) == 3
+    scope = engine._session_trade_scope(kept, engine.CURRENT_RESEARCH_LANES)
+    assert "rows_detail" not in scope["quarantined_trade_rows"]["relay_interference"]
+
+
+def test_outcome_loader_excludes_relay_interference_without_editing_ledger(engine, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / engine.TRADE_OUTCOME_FILE
+    body = "".join(json.dumps(row) + "\n" for row in _outcomes(engine))
+    path.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(engine, "_agent_data_path", lambda p: str(tmp_path / p))
+    loaded = engine._load_trade_outcomes_v2()
+    contaminated = set(engine.relay_interference_trade_ids(_outcomes(engine)))
+    assert contaminated and not contaminated & set(loaded["trade_id"])
+    assert any(tid.endswith("-ok") for tid in loaded["trade_id"])
+    assert path.read_text(encoding="utf-8") == body
