@@ -20,6 +20,7 @@ param(
   [int]$MaxIterations = 0,
   [int]$InventoryRefreshMinIntervalSec = 600,
   [int]$RevalidatingPollSec = 15,
+  [int]$SupersessionCheckSec = 180,
   [switch]$SkipAnalyzerRefresh,
   [switch]$DisableTransportBundles
 )
@@ -182,6 +183,30 @@ function Test-BundleTransportOffered($Token, [string]$GenerationId) {
   )
 }
 
+# A deploy changes the runtime revision, and Fly refuses to ACK a generation
+# frozen under another revision, so a child still copying it can never finish.
+# A serial child is also superseded once Fly publishes bundles for the live
+# CURRENT generation: restarting on that path resumes from the sync state.
+function Get-SyncSupersession([string]$GenerationId, [string]$ManifestRevision, [bool]$TransportBundles) {
+  try {
+    $flyRevision = [string](Get-FlyHealth $cfg.SourceUrl).source_git_rev
+    if ($flyRevision -and -not (Test-RevisionPrefixMatch $ManifestRevision $flyRevision)) { return 'REVISION_CHANGED' }
+    if (-not $TransportBundles) {
+      $token = Get-AdminToken $cfg.VaultEnv
+      $live = Get-ManifestPage -Token $token
+      $liveGeneration = [string]$live.inventory_generation_id
+      if ([string]$live.inventory_status -eq 'CURRENT' -and $live.inventory_ack_eligible -eq $true -and
+          $live.inventory_authoritative -eq $true -and $liveGeneration -match '^[0-9a-f]{64}$' -and
+          (Test-BundleTransportOffered -Token $token -GenerationId $liveGeneration)) {
+        return 'BUNDLES_OFFERED'
+      }
+    }
+  } catch {
+    return $null
+  }
+  return $null
+}
+
 function Invoke-GenerationSync($Manifest, [string]$FullRevision, [bool]$TransportBundles = $false) {
   $generation = [string]$Manifest.inventory_generation_id
   $stamp = [datetime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
@@ -225,9 +250,19 @@ try {
     $null = $script:child.Handle  # keeps ExitCode readable after exit
     $status.syncChildPid = $script:child.Id
     Save-WatcherStatus
-    $finished = $script:child.WaitForExit($SyncTimeoutMin * 60 * 1000)
+    $deadline = [datetime]::UtcNow.AddMinutes($SyncTimeoutMin)
+    $superseded = $null
+    while (-not ($finished = $script:child.WaitForExit($SupersessionCheckSec * 1000))) {
+      if ([datetime]::UtcNow -ge $deadline) { break }
+      $superseded = Get-SyncSupersession -GenerationId $generation -ManifestRevision ([string]$Manifest.source_git_rev) -TransportBundles $TransportBundles
+      if ($superseded) { break }
+    }
     if (-not $finished) {
-      Write-ChainLog -Config $cfg -Name $logName -Message ("SYNC_TIMEOUT child={0} after {1} min; stopping own child" -f $script:child.Id, $SyncTimeoutMin)
+      if ($superseded) {
+        Write-ChainLog -Config $cfg -Name $logName -Message ("SYNC_SUPERSEDED child={0} gen={1} reason={2}; stopping own child" -f $script:child.Id, $generation.Substring(0, 16), $superseded)
+      } else {
+        Write-ChainLog -Config $cfg -Name $logName -Message ("SYNC_TIMEOUT child={0} after {1} min; stopping own child" -f $script:child.Id, $SyncTimeoutMin)
+      }
       Invoke-NativeQuiet { & taskkill.exe /PID $script:child.Id /T /F } | Out-Null
       $script:child.WaitForExit(30000) | Out-Null
     }
@@ -235,8 +270,11 @@ try {
     $code = $script:child.ExitCode
     $errorText = (Get-Content -LiteralPath $stderr -Raw -ErrorAction SilentlyContinue)
     $proven = Test-GenerationAckProven $generation
+    if ($superseded -and -not $proven) {
+      return [pscustomobject]@{ Ok = $false; Deferred = $false; Superseded = $true; Code = $code; Detail = "SUPERSEDED_$superseded" }
+    }
     $detail = if ($proven) { 'REMOTE_ACK_FINALIZED' } elseif (-not $finished) { 'SYNC_TIMEOUT' } elseif ($errorText) { ($errorText.Trim() -split "`n")[-1] } else { "EXIT_$code" }
-    return [pscustomobject]@{ Ok = ($proven -and $code -eq 0); Deferred = $false; Code = $code; Detail = $detail }
+    return [pscustomobject]@{ Ok = ($proven -and $code -eq 0); Deferred = $false; Superseded = $false; Code = $code; Detail = $detail }
   } finally {
     $script:child = $null
     $status.syncChildPid = $null
@@ -296,6 +334,8 @@ try {
           $retained = Get-GenerationManifest -Token $token -GenerationId $custodyGeneration
           if ($null -eq $retained) {
             Write-ChainLog -Config $cfg -Name $logName -Message ("CUSTODY_EXPIRED gen={0}" -f $custodyGeneration.Substring(0, 16))
+          } elseif (-not (Test-RevisionPrefixMatch ([string]$retained.source_git_rev) ([string]$expected.source_git_rev))) {
+            Write-ChainLog -Config $cfg -Name $logName -Message ("CUSTODY_SUPERSEDED gen={0} rev={1} fly={2}" -f $custodyGeneration.Substring(0, 16), $retained.source_git_rev, $expected.source_git_rev)
           } elseif ([string]$retained.inventory_generation_id -eq $custodyGeneration) {
             Write-ChainLog -Config $cfg -Name $logName -Message ("CUSTODY_RESUME gen={0} live={1}" -f $custodyGeneration.Substring(0, 16), $liveStatus)
             $manifest = $retained
@@ -353,6 +393,13 @@ try {
               if ($result.Deferred) {
                 $status.state = 'DEFER_ANALYZER_LEASE'
                 $status.detail = $result.Detail
+              } elseif ($result.Superseded) {
+                # Not a sync failure: close the child's receipt without backoff and
+                # re-poll promptly so the successor generation starts at once.
+                [void](Set-SyncHeartbeatTerminalFailure -Config $cfg -Reason 'MIRROR_SYNC_SUPERSEDED' -BackoffSec 60)
+                $status.state = 'SUPERSEDED'
+                $status.detail = $result.Detail
+                $sleepSec = [Math]::Min($PollSec, $RevalidatingPollSec)
               } elseif ($result.Ok) {
                 $status.consecutiveSyncFailures = 0
                 $status.state = 'ACKED'
