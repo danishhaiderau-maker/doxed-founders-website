@@ -211,6 +211,42 @@ def test_orphan_artifact_and_tampered_intent_fail_closed(setup):
         mod.maintain_capacity(**args)
 
 
+def _two_generations_and_skeleton(args, skeleton_id):
+    import shutil
+    for generation in IDS[:2]:
+        shutil.rmtree(args["output_root"] / ("g-" + generation[:16]))
+    skeleton = args["output_root"] / ("g-" + skeleton_id[:16])
+    (skeleton / "packages").mkdir(parents=True)
+    return skeleton
+
+
+def test_abandoned_pre_checkpoint_skeleton_is_removed_and_admission_proceeds(setup):
+    args, _, _ = setup
+    skeleton = _two_generations_and_skeleton(args, "9" * 64)
+    result = mod.maintain_capacity(**args)
+    assert result["status"] == "ADMITTED" and result["cleanup_performed"] is False
+    assert not skeleton.exists()
+    assert sorted(p.name for p in args["output_root"].glob("g-*")) == ["g-" + IDS[2][:16], "g-" + IDS[3][:16]]
+    assert (args["source_root"] / "raw-evidence.json").read_bytes() == b"never remove"
+
+
+def test_skeleton_holding_any_artifact_is_kept_and_fails_closed(setup):
+    args, _, _ = setup
+    skeleton = _two_generations_and_skeleton(args, "9" * 64)
+    (skeleton / "packages" / ".partial.tmp").write_bytes(b"unindexed bytes")
+    with pytest.raises(ValueError, match="BUNDLE_DERIVATIVE_ORPHAN_ARTIFACT"):
+        mod.maintain_capacity(**args)
+    assert (skeleton / "packages" / ".partial.tmp").read_bytes() == b"unindexed bytes"
+
+
+def test_target_generation_skeleton_is_kept_for_resume(setup):
+    args, _, _ = setup
+    skeleton = _two_generations_and_skeleton(args, IDS[4])
+    result = mod.maintain_capacity(**args)
+    assert result["status"] == "ADMITTED" and result["current_generation_present"] is True
+    assert (skeleton / "packages").is_dir()
+
+
 def _intent(args):
     return json.loads((args["receipt_root"] / "active-maintenance.json").read_text())
 

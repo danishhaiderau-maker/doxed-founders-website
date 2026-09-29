@@ -90,8 +90,26 @@ def _integer(value, low, high):
     return type(value) is int and low <= value <= high
 
 
+SKELETON_CHILDREN = frozenset({"packages", "descriptors"})
+
+
+def _is_empty_skeleton(children):
+    """A worker stopped after creating its output folders but before its first
+    state checkpoint leaves only empty folders, which hold no artifact bytes."""
+    if not children or set(children) - SKELETON_CHILDREN:
+        return False
+    for path in children.values():
+        _stat(path, directory=True)
+        with os.scandir(path) as entries:
+            if next(entries, None) is not None:
+                return False
+    return True
+
+
 def _generation_usage(directory, current):
     children = {path.name: path for path in _entries(directory, 4)}
+    if "bundle-worker-state.json" not in children and _is_empty_skeleton(children):
+        return (1 + len(children)) * 4096, (current if directory.name == "g-" + current[:16] else None)
     if "bundle-worker-state.json" not in children or set(children) - {
             "bundle-worker-state.json", "packages", "descriptors", DIAGNOSTIC_FILE}:
         _fail("BUNDLE_DERIVATIVE_ORPHAN_ARTIFACT")

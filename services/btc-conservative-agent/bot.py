@@ -43399,8 +43399,10 @@ def _admit_data_sync_bundle_generation(generation_id: str) -> dict:
                         "collection_epoch_id", "tile_registry_signature"))
                 try:
                     maintenance = _data_sync_bundle_maintain_capacity(generation)
-                except Exception:
-                    publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED"})
+                except Exception as exc:
+                    code = str(exc) if re.fullmatch(r"[A-Z0-9_]{1,96}", str(exc)) else type(exc).__name__
+                    logger.warning("bundle capacity maintenance failed: %s", code)
+                    publish({"status": "FAILED", "error": "BUNDLE_COORDINATOR_FAILED", "reason": code})
                     _data_sync_bundle_admission_publish(store, identity, "MAINTENANCE_FAILED")
                     return
                 if maintenance.get("status") != "ADMITTED":

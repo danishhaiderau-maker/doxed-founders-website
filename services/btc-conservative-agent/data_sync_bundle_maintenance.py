@@ -18,7 +18,8 @@ import time
 
 from data_sync_bundle_download_pins import DownloadProtection, _directory, _safe
 from data_sync_bundle_retirement import retire_derivative_generation, _stable_read, _seal
-from data_sync_bundle_storage import check_derivative_admission, _entries, _generation_usage, GEN, HEX
+from data_sync_bundle_storage import (check_derivative_admission, _entries, _generation_usage,
+                                      _is_empty_skeleton, GEN, HEX)
 from data_sync_bundle_transport import MAX_PACKAGE_BYTES
 from data_sync_bundle_worker import _atomic_json, _validate_output_root
 
@@ -101,6 +102,25 @@ def _close_superseded_intent(owner, output, pins, receipts, active, pending, rem
                          pin_released=pin_released, superseded=True)
 
 
+def _remove_abandoned_skeletons(output, keep_generations):
+    """Remove empty pre-checkpoint folders of other generations.
+
+    ``os.rmdir`` refuses non-empty directories, so a concurrent artifact write
+    fails this pass closed instead of losing bytes.
+    """
+    keep = {"g-" + generation[:16] for generation in keep_generations}
+    for path in sorted(_entries(output, 7)):
+        if not GEN.fullmatch(path.name) or path.name in keep:
+            continue
+        _safe(path, directory=True)
+        children = {child.name: child for child in _entries(path, 4)}
+        if "bundle-worker-state.json" in children or not _is_empty_skeleton(children):
+            continue
+        for child in children.values():
+            os.rmdir(child)
+        os.rmdir(path)
+
+
 def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
                       current_identity, target_generation, protection_boundary,
                       timeout_seconds=120, clock=time.monotonic):
@@ -151,6 +171,8 @@ def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
                 _atomic_json(active, _seal({**pending, "complete": True, "abandoned_unfenced": True}))
                 pending = None
     if pending is None:
+        with owner._locked():
+            _remove_abandoned_skeletons(output, {current, target_generation})
         try:
             return check_derivative_admission(output, target_generation, MAX_PACKAGE_BYTES)
         except ValueError as exc:
@@ -165,7 +187,7 @@ def maintain_capacity(*, source_root, output_root, pin_root, receipt_root,
             remaining()
             if GEN.fullmatch(path.name):
                 _, generation = _generation_usage(path, target_generation)
-                if generation not in {current, target_generation}:
+                if generation is not None and generation not in {current, target_generation}:
                     raw = _stable_read(path / "bundle-worker-state.json", 2 * 1024 * 1024)
                     candidates.append((generation, hashlib.sha256(raw).hexdigest()))
     else:
