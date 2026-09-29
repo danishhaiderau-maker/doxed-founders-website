@@ -99,7 +99,8 @@ ESSENTIAL_NAMES = frozenset({
     "pending_orders.json", "paper_state.json", "state.json", "research_session.json",
     "policy.json", "spread-gate.json", "pathway_lane_specs.json", "lane_pnl_ledger.json",
     "lane_lab_pnl_ledger.json", "execution_settings_history.jsonl",
-    "csv_write_fallback.jsonl", "relay_lifecycle_evidence_v1.json",
+    "csv_write_fallback.jsonl", "csv_write_fallback_replay.json", "relay_lifecycle_evidence_v1.json",
+    "trades_3factor.csv.malformed_rows.jsonl", "expired_orders_3factor.csv.malformed_rows.jsonl",
 })
 
 

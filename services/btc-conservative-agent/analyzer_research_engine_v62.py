@@ -9127,6 +9127,13 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = apply_session_filters(
                 session, trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors
             )
+        trades, cohort_quarantine = split_current_tile_cohort(trades, session)
+        write_trade_cohort_quarantine(cohort_quarantine)
+        if cohort_quarantine["rows"]:
+            print(
+                f"   Current tile cohort: quarantined {cohort_quarantine['rows']} trade rows "
+                f"{cohort_quarantine['by_reason']} lanes={cohort_quarantine['by_lane']} {PIPELINE_ENFORCEMENT_TAG}"
+            )
         raw_trade_count = len(trades.drop_duplicates(subset=["trade_id"])) if not trades.empty and "trade_id" in trades.columns else len(trades)
 
         master = build_master_dataset(trades, blocked, decisions, ai_log, signal_persist, near_edge)
@@ -11752,6 +11759,101 @@ def _lane_closed_trade_stats(lane_trades):
     }
 
 
+TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
+_CURRENT_TRADE_COHORT_QUARANTINE: dict = {}
+
+
+def split_current_tile_cohort(trades, session=None, tile_lanes=None):
+    """Return (current cohort, quarantine summary) for executed trade rows.
+
+    The current cohort is registry tile lanes from the runtime's current
+    collection epoch. Everything else (Continuous benchmark rows, retired or
+    unknown lanes, prior epochs) is excluded from every current-cohort report.
+    Rows without an epoch stamp are kept because they cannot be proven prior.
+    """
+    tiles = {str(lane).upper() for lane in (CURRENT_RESEARCH_LANES if tile_lanes is None else tile_lanes)}
+    empty = {"rows": 0, "by_reason": {}, "by_lane": {}, "net_pnl_usd": 0.0, "rows_detail": []}
+    if trades is None or getattr(trades, "empty", True) or "research_lane" not in trades.columns:
+        return trades, empty
+    lane = trades["research_lane"].fillna("").astype(str).str.strip().str.upper()
+    reason = pd.Series("", index=trades.index, dtype=object)
+    reason[~lane.isin(tiles)] = "NON_REGISTRY_LANE"
+    current_epoch = str((session or {}).get("collector_v22_epoch_id") or "").strip()
+    if current_epoch and "epoch_id" in trades.columns:
+        row_epoch = trades["epoch_id"].fillna("").astype(str).str.strip()
+        prior = (reason == "") & (row_epoch != "") & (row_epoch.str.lower() != "nan") & (row_epoch != current_epoch)
+        reason[prior] = "PRIOR_EPOCH"
+    excluded = trades[reason != ""]
+    detail = []
+    for idx, row in excluded.iterrows():
+        detail.append({
+            "trade_id": str(row.get("trade_id") or ""),
+            "research_lane": str(lane.loc[idx] or "UNLABELLED"),
+            "epoch_id": str(row.get("epoch_id") or "") if "epoch_id" in excluded.columns else "",
+            "ts": str(row.get("ts") or ""),
+            "net_pnl_usd": safe_float(row.get("net_pnl_usd")),
+            "reason": reason.loc[idx],
+        })
+    summary = {
+        "rows": int(len(excluded)),
+        "by_reason": {str(k): int(v) for k, v in reason[reason != ""].value_counts().sort_index().items()},
+        "by_lane": {str(k): int(v) for k, v in lane[reason != ""].replace("", "UNLABELLED").value_counts().sort_index().items()},
+        "net_pnl_usd": round(float(pd.to_numeric(excluded.get("net_pnl_usd"), errors="coerce").fillna(0).sum()), 6)
+        if len(excluded) else 0.0,
+        "current_epoch_id": current_epoch or None,
+        "rows_detail": detail,
+    }
+    return trades[reason == ""].copy(), summary
+
+
+def write_trade_cohort_quarantine(summary: dict) -> None:
+    """Publish the excluded rows as a read-only quarantine receipt; the ledger is untouched."""
+    global _CURRENT_TRADE_COHORT_QUARANTINE
+    _CURRENT_TRADE_COHORT_QUARANTINE = dict(summary or {})
+    payload = {
+        "schema": "analyzer_trade_cohort_quarantine_v1",
+        "analyzer_sync_id": ANALYZER_SYNC_ID,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "basis": "rows excluded from the current tile cohort; source trades CSV is never modified",
+        **_CURRENT_TRADE_COHORT_QUARANTINE,
+    }
+    try:
+        with open(TRADE_COHORT_QUARANTINE_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, default=str)
+    except OSError as exc:
+        print(f"  ⚠️ Could not write {TRADE_COHORT_QUARANTINE_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+
+
+def tile_cohort_pnl(trades, tile_lanes=None) -> dict:
+    """Per-lane and total realized PnL from one pass over one trade-deduped frame.
+
+    Every PnL total the analyzer publishes (executive summary, per-lane funnel,
+    Decision view) must come from here so the lane sum always equals the total.
+    """
+    lanes = [str(lane).upper() for lane in (CURRENT_RESEARCH_LANES if tile_lanes is None else tile_lanes)]
+    out = {"n": 0, "net_pnl_usd": 0.0, "wins": 0,
+           "by_lane": {lane: {"n": 0, "net_pnl_usd": 0.0} for lane in lanes}}
+    if trades is None or getattr(trades, "empty", True):
+        return out
+    frame = trades.drop_duplicates(subset=["trade_id"], keep="last") if "trade_id" in trades.columns else trades
+    pnl_col = "net_pnl_usd" if "net_pnl_usd" in frame.columns else "outcome_net_pnl_usd"
+    if pnl_col not in frame.columns:
+        return out
+    pnl = pd.to_numeric(frame[pnl_col], errors="coerce")
+    frame = frame[pnl.notna()]
+    pnl = pnl[pnl.notna()]
+    lane = (frame["research_lane"].fillna("").astype(str).str.upper()
+            if "research_lane" in frame.columns else pd.Series("", index=frame.index))
+    for key, group in pnl.groupby(lane):
+        if key in out["by_lane"]:
+            out["by_lane"][key] = {"n": int(len(group)), "net_pnl_usd": float(group.sum())}
+    counted = pnl[lane.isin(out["by_lane"].keys())]
+    out["n"] = int(len(counted))
+    out["net_pnl_usd"] = float(sum(v["net_pnl_usd"] for v in out["by_lane"].values()))
+    out["wins"] = int((counted > 0).sum())
+    return out
+
+
 def _session_trade_scope(trades, tile_lanes):
     """Reconcile the executive 'session trades' count with per-tile trade rows."""
     if trades is None or "research_lane" not in getattr(trades, "columns", ()):
@@ -11759,10 +11861,12 @@ def _session_trade_scope(trades, tile_lanes):
     unique = trades.drop_duplicates(subset=["trade_id"]) if "trade_id" in trades.columns else trades
     by_lane = unique["research_lane"].fillna("UNLABELLED").astype(str).str.upper().value_counts().to_dict()
     tiles = {str(lane).upper() for lane in tile_lanes}
+    quarantine = {k: v for k, v in _CURRENT_TRADE_COHORT_QUARANTINE.items() if k != "rows_detail"}
     return {
         "session_trade_rows": int(len(unique)),
         "tile_trade_rows": int(sum(int(n) for lane, n in by_lane.items() if lane in tiles)),
         "non_tile_trade_rows": {str(lane): int(n) for lane, n in sorted(by_lane.items()) if lane not in tiles},
+        "quarantined_trade_rows": quarantine,
         "basis": "same session trade frame as the executive summary session-trades count",
     }
 
@@ -11784,6 +11888,7 @@ def ai_funnel_report(trades=None, session=None):
     ]
 
     lanes_out = {}
+    cohort_pnl = tile_cohort_pnl(trades, BENCHMARK_LANES)
     for lane_key in BENCHMARK_LANES:
         lane_ai = [r for r in ai_rows if str(r.get("research_lane") or "").upper() == lane_key]
         lane_opp = [r for r in opp_rows if str(r.get("lane") or "").upper() == lane_key]
@@ -11797,12 +11902,10 @@ def ai_funnel_report(trades=None, session=None):
         filled = sum(1 for r in lane_opp if r.get("event") == "FILLED")
         closed = sum(1 for r in lane_opp if r.get("event") == "CLOSED")
         would_block = sum(1 for r in lane_opp if r.get("event") in ("WOULD_BLOCK", "EXECUTION_BLOCK", "APPROVE_NOT_TRADED"))
-        net_pnl = 0.0
+        net_pnl = cohort_pnl["by_lane"].get(lane_key, {}).get("net_pnl_usd", 0.0)
         closed_trade_stats = None
         if trades is not None and not trades.empty and "research_lane" in trades.columns:
             lt = trades[trades["research_lane"].astype(str).str.upper() == lane_key]
-            if not lt.empty and "outcome_net_pnl_usd" in lt.columns:
-                net_pnl = float(lt["outcome_net_pnl_usd"].sum())
             closed_trade_stats = _lane_closed_trade_stats(lt)
         funnel = {
             "lane": lane_key,
@@ -11836,6 +11939,11 @@ def ai_funnel_report(trades=None, session=None):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "lanes": lanes_out,
         "trade_scope": _session_trade_scope(trades, BENCHMARK_LANES),
+        "pnl": {
+            "net_pnl_usd": round(cohort_pnl["net_pnl_usd"], 6),
+            "trades": cohort_pnl["n"],
+            "basis": "tile_cohort_pnl: the same function feeds the executive summary total",
+        },
         "totals": {
             "ai_calls": sum(v.get("ai_calls", 0) for v in lanes_out.values()),
             "approve": sum(v.get("approve", 0) for v in lanes_out.values()),
@@ -21159,10 +21267,10 @@ def build_executive_summary_payload(
     wr = net = ev = None
     exit_mix = []
     if analysis_df is not None and not analysis_df.empty:
-        n_trades = len(analysis_df)
-        pnl_s = pd.to_numeric(analysis_df.get("net_pnl_usd", 0), errors="coerce")
-        wr = float((pnl_s > 0).mean() * 100)
-        net = float(pnl_s.sum())
+        cohort_pnl = tile_cohort_pnl(analysis_df)
+        n_trades = cohort_pnl["n"]
+        wr = float(cohort_pnl["wins"] / n_trades * 100) if n_trades else None
+        net = cohort_pnl["net_pnl_usd"]
         ev = float(net / n_trades) if n_trades else 0.0
         exit_mix = _exit_mix_from_df(analysis_df)
 

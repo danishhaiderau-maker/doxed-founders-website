@@ -4034,6 +4034,19 @@ def update_lane_pnl_ledger(lane: str, event: str, net_pnl_usd: float = 0.0, dire
 
 
 
+def _trade_row_net_pnl_usd(row) -> float:
+    """Canonical realized PnL of one closed trade row (0.0 is a real value)."""
+    for key in ("net_pnl_usd", "net", "pnl"):
+        value = row.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
     """Rebuild per-lane PnL ledger from a session trades list.
 
@@ -4054,10 +4067,7 @@ def _derive_lane_pnl_ledger_from_trades(session_trades) -> dict:
         lane = _normalize_lane_key(row.get("research_lane") or "")
         if not lane:
             continue
-        try:
-            pnl = float(row.get("net_pnl_usd") or row.get("pnl") or 0.0)
-        except (TypeError, ValueError):
-            pnl = 0.0
+        pnl = _trade_row_net_pnl_usd(row)
         bucket = ledger.setdefault(lane, {
             "lane": lane,
             "net_pnl_usd": 0.0,
@@ -11702,6 +11712,46 @@ def _transient_csv_lock_error(exc: BaseException) -> bool:
     return False
 
 
+CSV_OVERFLOW_RESTKEY = "__csv_overflow_fields__"
+CSV_MALFORMED_QUARANTINE_SUFFIX = ".malformed_rows.jsonl"
+
+
+def _quarantine_overflow_csv_rows(filename, header, rows):
+    """Move rows wider than the header into a JSONL sidecar before a schema rewrite.
+
+    A row with more cells than the header cannot be mapped to columns, and
+    DictWriter rejects it, which previously failed every later schema expansion
+    and diverted all new rows to the CSV fallback. The row is preserved
+    verbatim in the sidecar; it is never silently dropped.
+    """
+    kept, malformed = [], []
+    for line_no, parsed in enumerate(rows, start=2):
+        if CSV_OVERFLOW_RESTKEY in parsed:
+            malformed.append({
+                "ts": utc_iso(),
+                "target": filename,
+                "csv_line": line_no,
+                "header_width": len(header),
+                "cells": [parsed.get(col) for col in header] + list(parsed[CSV_OVERFLOW_RESTKEY] or []),
+                "reason": "ROW_WIDER_THAN_HEADER",
+                "bot_version": EXECUTION_FIX_VERSION,
+            })
+        else:
+            kept.append(parsed)
+    if malformed:
+        sidecar = f"{filename}{CSV_MALFORMED_QUARANTINE_SUFFIX}"
+        for record in malformed:
+            if _safe_append_jsonl(
+                sidecar, record, label="CSV_MALFORMED_QUARANTINE", fallback_on_error=False,
+            ) is False:
+                raise RuntimeError(f"CSV quarantine append failed for {sidecar}; rewrite aborted")
+        logger.error(
+            f"[CSV QUARANTINE] {filename}: moved {len(malformed)} row(s) wider than the "
+            f"{len(header)}-column header to {sidecar} [PIPELINE ENFORCEMENT]"
+        )
+    return kept
+
+
 def _dynamic_csv_writer_once(filename, row):
     file_exists = os.path.exists(filename)
     if not file_exists:
@@ -11713,7 +11763,8 @@ def _dynamic_csv_writer_once(filename, row):
     new_fields = list(set(existing) | set(row.keys()))
     if set(new_fields) != set(existing):
         with open(filename, "r", encoding="utf-8", errors="replace") as f:
-            old_rows = list(csv.DictReader(f))
+            old_rows = list(csv.DictReader(f, restkey=CSV_OVERFLOW_RESTKEY))
+        old_rows = _quarantine_overflow_csv_rows(filename, existing, old_rows)
         _atomic_write_csv_rows(
             filename, new_fields, [*old_rows, safe_csv_row(row)],
         )
@@ -11755,8 +11806,96 @@ def _csv_write_fallback(filename, row, err: BaseException) -> None:
         _safe_append_jsonl(
             CSV_FALLBACK_JSONL, payload, label="CSV_FALLBACK", fallback_on_error=False,
         )
+        _csv_fallback_pending_targets.add(filename)
     except Exception as fe:
         logger.error(f"[CSV FALLBACK FAILED] {fe} [PIPELINE ENFORCEMENT]")
+
+
+CSV_FALLBACK_REPLAY_RECEIPT = "csv_write_fallback_replay.json"
+CSV_FALLBACK_REPLAY_TARGETS = frozenset({"trades_3factor.csv", "expired_orders_3factor.csv"})
+_csv_fallback_pending_targets: set = set()
+
+
+def _replay_csv_write_fallback_locked(targets) -> dict:
+    """Re-append diverted rows to CSVs that accept writes again; caller holds csv_lock.
+
+    csv_write_fallback.jsonl is never modified. A receipt of replayed line
+    digests keeps the replay idempotent across restarts, and a row whose
+    (trade_id, ts) is already in the CSV is not written twice.
+    """
+    targets = {t for t in targets if t in CSV_FALLBACK_REPLAY_TARGETS}
+    if not targets or not os.path.exists(CSV_FALLBACK_JSONL):
+        return {}
+    try:
+        with open(CSV_FALLBACK_REPLAY_RECEIPT, encoding="utf-8") as handle:
+            prior = json.load(handle)
+    except (OSError, ValueError):
+        prior = {}
+    done = {k: set(v) for k, v in (prior.get("replayed") or {}).items() if isinstance(v, list)}
+    pending = {}
+    with open(CSV_FALLBACK_JSONL, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            target, row = record.get("target"), record.get("row")
+            if target not in targets or not isinstance(row, dict):
+                continue
+            digest = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            if digest not in done.get(target, set()):
+                pending.setdefault(target, []).append((digest, row))
+    results = {}
+    for target, items in pending.items():
+        present = set()
+        if os.path.exists(target):
+            with open(target, encoding="utf-8", errors="replace") as handle:
+                for existing in csv.DictReader(handle, restkey=CSV_OVERFLOW_RESTKEY):
+                    present.add((str(existing.get("trade_id") or ""), str(existing.get("ts") or "")))
+        replayed = already = 0
+        error = None
+        for digest, row in items:
+            key = (str(row.get("trade_id") or ""), str(row.get("ts") or ""))
+            try:
+                if key == ("", "") or key not in present:
+                    _dynamic_csv_writer_once(target, row)
+                    present.add(key)
+                    replayed += 1
+                else:
+                    already += 1
+            except Exception as exc:
+                error = str(exc)
+                break
+            done.setdefault(target, set()).add(digest)
+        results[target] = {"replayed": replayed, "already_present": already,
+                           "remaining": len(items) - replayed - already, "error": error}
+        if error is None:
+            _csv_fallback_pending_targets.discard(target)
+    receipt = {
+        "schema": "csv_write_fallback_replay_v1",
+        "updated_at": utc_iso(),
+        "replayed": {k: sorted(v) for k, v in done.items()},
+        "last_run": results,
+    }
+    candidate = f"{CSV_FALLBACK_REPLAY_RECEIPT}.{os.getpid()}.tmp"
+    with open(candidate, "w", encoding="utf-8") as handle:
+        json.dump(receipt, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(candidate, CSV_FALLBACK_REPLAY_RECEIPT)
+    for target, result in results.items():
+        log = logger.error if result["error"] else logger.info
+        log(f"[CSV REPLAY] {target} {result} [PIPELINE ENFORCEMENT]")
+    return results
+
+
+def replay_csv_write_fallback(targets=CSV_FALLBACK_REPLAY_TARGETS) -> dict:
+    research_gate = globals().get("_research_write_gate") or threading.RLock()
+    with research_gate, csv_lock:
+        return _replay_csv_write_fallback_locked(targets)
 
 
 def dynamic_csv_writer(filename, row):
@@ -11766,6 +11905,11 @@ def dynamic_csv_writer(filename, row):
         for attempt in range(CSV_WRITE_RETRIES):
             try:
                 _dynamic_csv_writer_once(filename, row)
+                if filename in _csv_fallback_pending_targets:
+                    try:
+                        _replay_csv_write_fallback_locked({filename})
+                    except Exception as replay_error:
+                        logger.error(f"[CSV REPLAY] {filename} failed: {replay_error} [PIPELINE ENFORCEMENT]")
                 if state.get("execution_reason") == "CSV_FAILURE":
                     set_execution_paused("")
                 logger.info(
@@ -17389,6 +17533,36 @@ def allocate_lane_trade_id(research_lane: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
+def paper_order_identity_violation(signal) -> str | None:
+    """Every new order must carry a registered tile lane and that tile's trade-id namespace."""
+    signal = signal if isinstance(signal, dict) else {}
+    lane = str(signal.get("research_lane") or "").strip().upper()
+    spec = ACTIVE_TILE_REGISTRY.get(lane)
+    if not spec or spec.get("is_benchmark"):
+        return f"NON_REGISTRY_ORDER_LANE:{lane or 'MISSING'}"
+    if not str(signal.get("trade_id") or "").startswith(str(spec.get("id_prefix") or "INVALID") + "-"):
+        return f"ORDER_ID_NAMESPACE_MISMATCH:{lane}"
+    return None
+
+
+def refuse_non_registry_order(signal, context: str) -> bool:
+    """Fail closed before any order record exists; True means the caller must stop."""
+    violation = paper_order_identity_violation(signal)
+    if violation is None:
+        return False
+    if isinstance(signal, dict):
+        signal["status"] = "BLOCKED"
+        signal["outcome"] = "NON_REGISTRY_ORDER_IDENTITY"
+        signal["exit_reason"] = "NON_REGISTRY_ORDER_IDENTITY"
+        signal["block_reason"] = violation
+        signal["order_placed"] = False
+    logger.error(
+        f"[ORDER IDENTITY] {context} refused trade_id={(signal or {}).get('trade_id')} "
+        f"violation={violation} [PIPELINE ENFORCEMENT]"
+    )
+    return True
+
+
 def relay_publishes_approve_outcome(research_lane: str) -> bool:
     """Publish entry intent only for explicitly platform-relay-eligible lanes."""
     return str(research_lane or "").upper() in PLATFORM_RELAY_ELIGIBLE_LANES
@@ -21214,7 +21388,9 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         )
         return False
     smart_meta = smart_meta or {}
-    lane = signal.get("research_lane", RESEARCH_LANE_CONTINUOUS)
+    if refuse_non_registry_order(signal, "SIM_LIMIT_CREATE"):
+        return False
+    lane = str(signal["research_lane"]).upper()
     meta = trades_map.get(signal.get("trade_id"), {})
     ai = meta.get("ai") or signal.get("ai") or {}
     allowed, reason, defer = evaluate_dashboard_execution_gate(signal, ai, stage="submit")
@@ -25897,6 +26073,8 @@ def execute_market_order(signal):
         return False
     if not guard_retired_lane_execution(signal.get("research_lane"), "execute_market_order", signal.get("trade_id")):
         return
+    if refuse_non_registry_order(signal, "MARKET_EXECUTE"):
+        return False
     logger.info(f"[ORDER] MARKET EXEC trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     full_pipeline_trace("[ORDER]", "MARKET_EXEC_START", signal.get("trade_id"))
     price = state.get("price")
@@ -25985,6 +26163,8 @@ def create_limit_order(signal):
         return None
     if not guard_retired_lane_execution(signal.get("research_lane"), "create_limit_order", signal.get("trade_id")):
         return None
+    if refuse_non_registry_order(signal, "LIMIT_CREATE"):
+        return None
     logger.info(f"[ORDER] LIMIT EXEC trade_id={signal.get('trade_id')} final_direction={signal.get('final_direction')} [PIPELINE ENFORCEMENT]")
     full_pipeline_trace("[ORDER]", "LIMIT_EXEC_START", signal.get("trade_id"))
     price = state.get("price")
@@ -26020,9 +26200,7 @@ def create_limit_order(signal):
         "shared_ai_call_id": signal.get("shared_ai_call_id") or signal.get("source_trade_id"),
         "shared_ai_call_ts": signal.get("shared_ai_call_ts"),
         "source_trade_id": signal.get("source_trade_id") or signal.get("shared_ai_call_id"),
-        "research_lane": str(
-            signal.get("research_lane") or RESEARCH_LANE_CONTINUOUS
-        ).upper(),
+        "research_lane": str(signal["research_lane"]).upper(),
         "side": map_signal_to_exchange_side(signal["final_direction"]),
         "signal_dir": signal["final_direction"],
         "limit_price": limit_price,
@@ -36827,8 +37005,8 @@ def _build_relay_execution_state_snapshot() -> dict:
         ) = _snapshot_relay_trade_projections_locked(
             session_start
         )
-        session_trade_count, session_realized_pnl = (
-            _session_trade_aggregates_locked(session_start)
+        session_trade_count, session_realized_pnl, session_lane_ledger = (
+            _session_trade_accounting_locked(session_start)
         )
         recent_expired, expired_orders_total = _snapshot_expired_rows_locked(
             MAX_EXPIRED_ORDERS
@@ -36912,9 +37090,9 @@ def _build_relay_execution_state_snapshot() -> dict:
     snapshot["trades_map"] = trades_map_lite
     # Money-path PnL / counters / lane ledger: these feed the dashboard
     # tiles via the ACTIVE_EXECUTION_OVERLAY path (see
-    # _api_state_cache_refresher_loop). Computing them here from the same
-    # `recent_trades` slice already shipped as snapshot["trades"] keeps the
-    # tile numbers identical to the trades table. Previously these keys
+    # _api_state_cache_refresher_loop). Count, PnL, and lane ledger come from
+    # one full-session pass so tile sums always equal the headline; the
+    # bounded `recent_trades` display slice must never feed them. Previously these keys
     # were only emitted by the heavy _build_api_state_snapshot and the
     # overlay did not include them, so under live trading the tile froze
     # at the first heavy build and under-counted every trade that closed
@@ -36923,7 +37101,7 @@ def _build_relay_execution_state_snapshot() -> dict:
     snapshot["trade_count"] = session_trade_count
     snapshot["session_pnl_usd"] = session_realized_pnl
     snapshot["trades_display_limit"] = _DASHBOARD_TRADES_MAX
-    snapshot["lane_pnl_ledger"] = _derive_lane_pnl_ledger_from_trades(recent_trades)
+    snapshot["lane_pnl_ledger"] = session_lane_ledger
     _display_balance = get_display_balance()
     snapshot["account_balance"] = _display_balance
     # Best-effort equity: account_balance + unrealized PnL of open positions.
@@ -37353,20 +37531,7 @@ def _session_realized_pnl_usd() -> float:
     """
     session_start = _showcase_trade_session_start()
     with trade_lock:
-        if session_start:
-            src = [t for t in trades if _trade_row_in_session(t, session_start)]
-        else:
-            src = list(trades)
-        total = 0.0
-        for t in src:
-            val = t.get("net_pnl_usd")
-            if val is None or val == "":
-                val = t.get("net")
-            try:
-                total += float(val or 0.0)
-            except (TypeError, ValueError):
-                continue
-        return round(total, 2)
+        return _session_trade_accounting_locked(session_start)[1]
 
 
 def _snapshot_trade_rows_locked(session_start: float):
@@ -37383,22 +37548,24 @@ def _snapshot_trade_rows_locked(session_start: float):
     return copy.deepcopy(src)
 
 
-def _session_trade_aggregates_locked(session_start: float) -> tuple[int, float]:
-    """Calculate exact session totals without copying the unbounded ledger."""
-    count = 0
-    realized = 0.0
-    for row in trades:
-        if session_start and not _trade_row_in_session(row, session_start):
-            continue
-        count += 1
-        try:
-            value = row.get("net_pnl_usd")
-            if value in (None, ""):
-                value = row.get("net")
-            realized += float(value or 0.0)
-        except (AttributeError, TypeError, ValueError):
-            continue
-    return count, round(realized, 2)
+def _session_trade_accounting_locked(session_start: float) -> tuple[int, float, dict]:
+    """Session trade count, realized PnL, and per-lane ledger from one row set.
+
+    The headline equals the lane-ledger sum plus lane-less rows, so the
+    dashboard tiles and the session total cannot disagree.  Caller owns
+    ``trade_lock``; rows are referenced, never copied.
+    """
+    rows = [
+        row for row in trades
+        if isinstance(row, dict)
+        and (not session_start or _trade_row_in_session(row, session_start))
+    ]
+    ledger = _derive_lane_pnl_ledger_from_trades(rows)
+    realized = sum(float(bucket.get("net_pnl_usd") or 0.0) for bucket in ledger.values())
+    for row in rows:
+        if not _normalize_lane_key(row.get("research_lane") or ""):
+            realized += _trade_row_net_pnl_usd(row)
+    return len(rows), round(realized, 2), ledger
 
 
 def _snapshot_expired_rows_locked(limit: int) -> tuple[list, int]:
@@ -38108,8 +38275,8 @@ def _build_api_state_snapshot():
         phase_started = time.perf_counter()
         try:
             raw_trades_copy = _snapshot_trade_rows_locked(session_start)
-            session_trade_count, session_realized_pnl = (
-                _session_trade_aggregates_locked(session_start)
+            session_trade_count, session_realized_pnl, session_lane_ledger = (
+                _session_trade_accounting_locked(session_start)
             )
             expired_orders_copy, expired_orders_total = (
                 _snapshot_expired_rows_locked(_DASHBOARD_HISTORY_MAX)
@@ -38236,7 +38403,7 @@ def _build_api_state_snapshot():
         snapshot["pipeline_funnel_counters"] = copy.deepcopy(snapshot.get("pipeline_funnel_counters") or {})
         snapshot["research_isolation_mode"] = research_isolation_enabled()
         snapshot["lane_opportunity_counters"] = copy.deepcopy(snapshot.get("lane_opportunity_counters") or {})
-        snapshot["lane_pnl_ledger"] = _derive_lane_pnl_ledger_from_trades(trades_copy)
+        snapshot["lane_pnl_ledger"] = session_lane_ledger
         snapshot["lane_lab_pnl_ledger"] = get_lane_lab_pnl_ledger()
         snapshot["lab_open_shadows"] = count_open_lab_shadows()
         snapshot["lane_position_counts"] = lane_position_counts
@@ -53980,6 +54147,10 @@ def main():
     _record_execution_settings_epoch("TRACKING_STARTED")
     _prepare_research_timing_at_startup()
     _start_data_sync_bundle_reservation_hydration()
+    try:
+        replay_csv_write_fallback()
+    except Exception as exc:
+        logger.error(f"[STARTUP] CSV fallback replay failed: {exc} [PIPELINE ENFORCEMENT]")
     load_session_trades_from_csv()
     _recompute_research_balance_from_trades()
     try:

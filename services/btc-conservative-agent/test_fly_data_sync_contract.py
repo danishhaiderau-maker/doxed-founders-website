@@ -2368,12 +2368,14 @@ def test_dynamic_csv_schema_expansion_is_an_atomic_inode_change():
     selected = [
         node for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name in {
-            "_atomic_write_csv_rows", "_dynamic_csv_writer_once"
+            "_atomic_write_csv_rows", "_dynamic_csv_writer_once",
+            "_quarantine_overflow_csv_rows",
         }
     ]
     namespace = {
         "os": os, "csv": __import__("csv"), "threading": threading,
         "safe_csv_row": lambda row: dict(row),
+        "CSV_OVERFLOW_RESTKEY": "__csv_overflow_fields__",
     }
     exec(compile(ast.Module(body=selected, type_ignores=[]), "bot.py", "exec"), namespace)
     with tempfile.TemporaryDirectory() as tmp:
