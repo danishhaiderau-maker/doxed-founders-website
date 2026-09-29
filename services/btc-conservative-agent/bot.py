@@ -5752,6 +5752,11 @@ BOOK_FORCE_MIN_SEC = 1.5
 # create a paper fill after Bitfinex had already moved away.
 VENUE_EXECUTABLE_SHOWCASE_FILL_GATE = True
 SOURCE_ORDER_MARKET_EVIDENCE_FILE = "source_order_market_evidence.jsonl"
+# Unchanged per-tick fill-gate re-evaluations of one pending order are persisted
+# at most this often; verdict changes, reprices and fills are always written.
+SOURCE_ORDER_EVIDENCE_MIN_INTERVAL_SEC = max(
+    0.0, float(os.getenv("SOURCE_ORDER_EVIDENCE_MIN_INTERVAL_SEC", "5"))
+)
 _canonical_source_order_market_evidence = {}
 # Coordinated live-copy operating states (Railway Cheetah <-> Fly Showcase).
 COORD_STATE_RUNNING_TOGETHER = "RUNNING_TOGETHER"
@@ -22909,7 +22914,7 @@ def _pending_limit_ready_for_fill(
     """Honor relay settlement before a terminal marketable source fill."""
     now = time.time() if now is None else float(now)
 
-    def persist_market_evidence(evidence: dict):
+    def persist_market_evidence(evidence: dict, executable: bool = False):
         append_observation = globals().get("_append_source_market_observation")
         summary_builder = globals().get("_source_market_evidence_summary")
         store = globals().get("_canonical_source_order_market_evidence")
@@ -22926,6 +22931,8 @@ def _pending_limit_ready_for_fill(
             venue_snapshot=venue_snapshot or {},
             gate_evidence=evidence or {},
             observed_ts=now,
+            min_interval_sec=globals().get("SOURCE_ORDER_EVIDENCE_MIN_INTERVAL_SEC", 0.0),
+            force=bool(executable),
         )
         if not observation:
             return
@@ -22966,7 +22973,7 @@ def _pending_limit_ready_for_fill(
             )
             evidence["entry_path"] = "MARKETABLE_FALLBACK"
             order["venue_fill_gate"] = evidence
-            persist_market_evidence(evidence)
+            persist_market_evidence(evidence, executable)
             return executable
         return False
     # Isolated contract tests compile this helper without the module-level
@@ -22982,7 +22989,7 @@ def _pending_limit_ready_for_fill(
             now=now,
         )
         order["venue_fill_gate"] = evidence
-        persist_market_evidence(evidence)
+        persist_market_evidence(evidence, executable)
         return executable
     return _pending_limit_touched(order, price, bid=bid, ask=ask)
 
