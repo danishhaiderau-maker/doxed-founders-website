@@ -34,6 +34,26 @@ def test_tile_registry_is_fail_closed_for_relay_and_retirement():
     }.intersection(RETIRED_POLICY_IDENTITIES)
 
 
+def test_partial_exit_tiles_can_never_be_relay_capable_while_reductions_are_unwired():
+    import combo_pathway_config as registry
+
+    partial = [lane for lane, spec in ACTIVE_TILE_REGISTRY.items() if registry.tile_has_partial_exits(spec)]
+    assert partial == ["FAMILY_HYBRID_RUNNER"]
+    hybrid = ACTIVE_TILE_REGISTRY["FAMILY_HYBRID_RUNNER"]
+    assert hybrid["relay_capability"] == registry.PARTIAL_EXIT_RELAY_CAPABILITY
+
+    original = dict(hybrid)
+    try:
+        hybrid.update({"platform_relay_eligible": True, "relay_capability": "QUALIFIED"})
+        defects = validate_tile_registry()
+        assert "FAMILY_HYBRID_RUNNER:PARTIAL_EXIT_RELAY_REQUIRES_EXCHANGE_REDUCTIONS" in defects
+        assert "FAMILY_HYBRID_RUNNER:PARTIAL_EXIT_RELAY_CAPABILITY_NOT_BLOCKED" in defects
+    finally:
+        hybrid.clear()
+        hybrid.update(original)
+    assert validate_tile_registry() == ()
+
+
 def test_active_registry_is_the_exact_analyzer_hypothesis_experiment():
     expected = {
         "FAMILY_ATR_TARGET_2_5": "OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C",

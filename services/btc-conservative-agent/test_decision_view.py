@@ -194,3 +194,47 @@ def test_analyzer_trade_scope_uses_the_session_trade_frame():
     assert scope["session_trade_rows"] == 4 and scope["tile_trade_rows"] == 2
     assert scope["non_tile_trade_rows"] == {"CONTINUOUS": 1, "UNLABELLED": 1}
     assert engine._session_trade_scope(pd.DataFrame({"x": [1]}), ["FAMILY_X"]) is None
+
+
+def test_relay_state_is_no_data_without_a_snapshot_never_flat_or_disarmed():
+    registry = {"FAMILY_HYBRID_RUNNER": {"platform_relay_eligible": False}}
+    view = dv.relay_state_view(None, registry=registry, now=NOW)
+    assert view["allowlist"] == []
+    assert view["allowlist_text"].startswith("empty")
+    for key in ("armed", "executor_heartbeat", "exchange_position_btc", "ledger_open_btc", "active_orders"):
+        assert view[key]["state"] == dv.NO_DATA, key
+    failed = dv.relay_state_view(
+        {"schema": "relay_status_snapshot_v1", "observedAt": NOW.isoformat(), "ok": False,
+         "error": "RELAY_STATUS_HTTP_FAILED"},
+        registry=registry, now=NOW,
+    )
+    assert "RELAY_STATUS_HTTP_FAILED" in dv.render_metric(failed["armed"])
+    assert failed["exchange_position_btc"]["state"] == dv.NO_DATA
+
+
+def test_relay_state_renders_disarmed_flat_heartbeat_and_goes_stale():
+    snapshot = {
+        "schema": "relay_status_snapshot_v1", "observedAt": (NOW - timedelta(minutes=2)).isoformat(), "ok": True,
+        "status": "PAUSED", "relayExecutionMode": "PAUSED", "relayArmedAt": None,
+        "reconciliation": {"signedExchangePositionQty": 0, "signedLedgerOpenQty": 0,
+                           "updatedAt": "2026-09-30T11:57:00Z"},
+        "exchangeOrderAudit": {"known": True, "activeOrderCount": 0},
+        "relayExecutor": {"status": "PAUSED_HEALTHY", "healthy": True, "observedAt": "2026-09-30T11:59:00Z"},
+    }
+    view = dv.relay_state_view(snapshot, registry={}, now=NOW)
+    assert dv.render_metric(view["armed"]) == "DISARMED (PAUSED)"
+    assert view["exchange_position_btc"] == {"state": dv.VALUE, "value": 0}
+    assert view["active_orders"] == {"state": dv.VALUE, "value": 0}
+    assert dv.render_metric(view["executor_heartbeat"]).startswith("PAUSED_HEALTHY (healthy)")
+    stale = dv.relay_state_view(snapshot, registry={}, now=NOW + timedelta(hours=1))
+    assert stale["exchange_position_btc"]["state"] == dv.STALE
+    unknown_orders = dv.relay_state_view(
+        {**snapshot, "exchangeOrderAudit": {"known": False, "activeOrderCount": 0}}, registry={}, now=NOW)
+    assert unknown_orders["active_orders"]["state"] == dv.NO_DATA
+    html = dv.render_decision_html(
+        dv.build_decision_payload(tile_order=(), registry={}, funnel_report=None, ai_coverage=None,
+                                  generation={}, alarms=[], freshness_rows=[], relay_state=view),
+        nav_links=(),
+    )
+    assert 'id="decisionRelayState"' in html
+    assert "DISARMED (PAUSED)" in html and "empty (no tile may copy to Bitfinex)" in html

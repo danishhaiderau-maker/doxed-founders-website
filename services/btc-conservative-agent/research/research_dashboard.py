@@ -9100,6 +9100,10 @@ def _decision_payload() -> dict:
         funnel_report=funnel or None, ai_coverage=(scorecard or {}).get("ai_verdict_coverage"),
         generation=generation, alarms=alarms, freshness_rows=freshness_rows,
         summary_trades=((summary or {}).get("performance") or {}).get("trades"),
+        relay_state=_decision_view.relay_state_view(
+            _read_state_json(DATA_ROOT / "relay_status_snapshot_v1.json"),
+            registry=ACTIVE_TILE_REGISTRY, now=now,
+        ),
     )
 
 
