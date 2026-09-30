@@ -66,6 +66,22 @@ Execution requires `PRUNE_ENABLED` in code **and**
 `fly_volume_snapshot_receipt_v1` newer than the covering ACK. The module has no
 delete capability; enabling execution is a separate reviewed change.
 
+Hot snapshots: a snapshot copy needs to be stable only while it is read (up to
+3 attempts). A file that still changes on every attempt is backed off (60 s,
+doubling, capped at 1 h) so it cannot stall other streams; `/head` lists it in
+`racing_paths` and `last_error` reads `PLAN_RACE: ...`.
+
+Analyzer on the segment shadow: the analyzer reads only a promoted canonical
+store (`canonical_dataset_current.json`). `research_segment_promotion.py --view
+<empty dir>` copies the shadow tree (holding the puller lock) and writes the
+`.fly-sync-state.json` and `.segment-promotion.heartbeat.json` that the
+unchanged `scripts/migrate_canonical_research_store.py --source <view>
+--heartbeat <view>\.segment-promotion.heartbeat.json --destination
+<checkout>\services\btc-conservative-agent\canonical-research-data` accepts.
+It refuses unless the laptop has applied every published seq, Fly reports
+`unshipped_bytes == 0` with no oversized/racing paths or shipper error, the
+shipped revision matches `/health`, and `research_session.json` is present.
+
 ## Scoped credentials
 
 Create two access keys in the Tigris dashboard (`fly storage dashboard <bucket>`).
