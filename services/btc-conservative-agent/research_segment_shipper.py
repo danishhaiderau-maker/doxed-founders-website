@@ -951,7 +951,12 @@ class SegmentShipper:
                     "members": new_state["baseline"]["append_streams"], "genesis": True}
         self.boosted = self.boost_due(state)
         mode = {"backlog_mode": self.boosted, "segment_budget_bytes": self.segment_budget}
-        ops = self.plan(state, self.scan())
+        universe = self.scan()
+        # A stream that no longer exists can never ship to clear its backoff;
+        # left in racing_paths it would block laptop promotion forever.
+        for stream in [s for s in self.race_backoff if s not in universe]:
+            del self.race_backoff[stream]
+        ops = self.plan(state, universe)
         selected, deferred = self.select(ops, cursor=str(state.get("select_cursor") or ""))
         oversized = sorted(op["path"] for op in ops if op.get("oversized"))
         throttled = sorted(self.throttled)[:50]
