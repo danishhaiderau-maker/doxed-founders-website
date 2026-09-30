@@ -10,6 +10,8 @@ param(
   [int]$PullIntervalSec = 120,
   [int]$ParityIntervalMin = 30,
   [int]$MaxSegmentsPerPull = 40,
+  [int]$CatchUpIntervalSec = 15,
+  [long]$CatchUpUnshippedBytes = 8388608,
   [int]$MaxIterations = 0
 )
 
@@ -69,7 +71,7 @@ try {
     if ($MaxIterations -gt 0 -and $iteration -ge $MaxIterations) { break }
     # Drain a large first backlog in consecutive bounded batches.
     $backlog = $pull -and $pull.ok -and $pull.applied_now -ge $MaxSegmentsPerPull
-    if (-not $backlog) { Start-Sleep -Seconds $PullIntervalSec }
+    if (-not $backlog) { Start-Sleep -Seconds (Get-SegmentPullSleepSeconds -Pull $pull -IntervalSec $PullIntervalSec -CatchUpIntervalSec $CatchUpIntervalSec -CatchUpUnshippedBytes $CatchUpUnshippedBytes) }
   }
 } finally {
   Exit-SingleInstance $instance

@@ -215,3 +215,28 @@ shadow tree; the puller maps Fly offsets through each stream's baseline.
 - Every deploy/restart/maintenance boundary ends with paper resumed and every
   registry tile ON (`fly_postdeploy_active_gate.py`, `--tiles-only` for
   restart/repair jobs); relay/Bitfinex are never armed.
+
+## Backlog mode (2026-10-01)
+
+The shipper runs SCHED_IDLE/nice 19 on a single dedicated core that the bot keeps
+~100% busy (load ~3). Measured before the fix: shipper ran 0.009 s per 5 s wall,
+every cycle rescanned ~38k files, so one <=8 MiB segment took 100-980 s and the
+backlog grew past the laptop promotion gate (32 MiB).
+
+- Above `RESEARCH_SEGMENTS_BACKLOG_BOOST_BYTES` (8 MiB) unshipped, the next cycle
+  ships up to `RESEARCH_SEGMENTS_BOOST_SEGMENT_BYTES` (64 MiB raw), back-to-back,
+  at `RESEARCH_SEGMENTS_BOOST_NICE` (10, SCHED_OTHER). At or below it the worker
+  returns to 8 MiB segments and SCHED_IDLE. A boosted segment is never started if
+  it could cross the 3 GiB store cap; the 4 GiB free floor still skips cycles.
+- A snapshot that changes mid-copy drops only its own stream from the build; the
+  other streams ship in the same cycle (the racing stream backs off as before).
+- The scan uses `os.scandir` (one stat per file).
+- `/api/research-segments/v2/head` exposes `backlog_mode`,
+  `segment_budget_bytes`, `shipper_priority` and `shipper_priority_error`.
+- The laptop pull loop polls every 15 s while the head is ahead of the applied
+  seq or reports >8 MiB unshipped, otherwise every 120 s.
+- Diagnose with `gh workflow run "Deploy Fly BTC bot" -f mode=inspect-runtime`:
+  `SEGMENT_SHIPPER_THROUGHPUT` reports machine busy %, shipper run vs run-queue
+  wait, log tail, and a timed dry-run scan/plan with per-stream pending bytes.
+- The 32 MiB promotion gate is unchanged: it is ~10 min of peak growth and a
+  caught-up shipper holds a few MiB between cycles.

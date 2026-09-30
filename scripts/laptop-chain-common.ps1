@@ -161,6 +161,19 @@ function Test-SingleInstanceHeld([string]$Name) {
   return $true
 }
 
+function Get-SegmentPullSleepSeconds {
+  # Poll quickly while Fly is draining a backlog (it publishes large segments
+  # back-to-back) or when the head is ahead of what was just applied.
+  param($Pull, [int]$IntervalSec, [int]$CatchUpIntervalSec, [long]$CatchUpUnshippedBytes)
+  if (-not $Pull -or -not $Pull.ok -or -not $Pull.remote_head) { return $IntervalSec }
+  $head = $Pull.remote_head
+  $unshipped = 0L
+  if ($null -ne $head.unshipped_bytes) { $unshipped = [long]$head.unshipped_bytes }
+  $behind = ($null -ne $head.published_seq) -and ($null -ne $Pull.applied_seq) -and ([long]$head.published_seq -gt [long]$Pull.applied_seq)
+  if ($behind -or $unshipped -gt $CatchUpUnshippedBytes) { return [Math]::Min($IntervalSec, $CatchUpIntervalSec) }
+  return $IntervalSec
+}
+
 function Get-FlyHealth([string]$SourceUrl) {
   return Invoke-RestMethod -Uri "$SourceUrl/health" -TimeoutSec 30 -UseBasicParsing
 }

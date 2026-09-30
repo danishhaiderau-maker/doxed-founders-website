@@ -15,6 +15,11 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   RESEARCH_SEGMENTS_ENABLED = "1"
   RESEARCH_SEGMENTS_SINK = "volume"
   RESEARCH_SEGMENTS_ACK_POLL_SECONDS = "300"
+  # Backlog mode: above 8 MiB unshipped, ship 64 MiB segments back-to-back at
+  # nice 10 instead of SCHED_IDLE (idle class starves on the saturated core).
+  RESEARCH_SEGMENTS_BACKLOG_BOOST_BYTES = "8388608"
+  RESEARCH_SEGMENTS_BOOST_SEGMENT_BYTES = "67108864"
+  RESEARCH_SEGMENTS_BOOST_NICE = "10"
   # Fresh-start epoch (2026-09-30): v2 begins at a genesis BASELINE segment,
   # so only data written after the cutover ships. v1 is superseded.
   RESEARCH_SEGMENTS_PREFIX = "v2"

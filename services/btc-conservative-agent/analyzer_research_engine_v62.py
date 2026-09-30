@@ -582,6 +582,8 @@ BENCHMARK_RELATIVE_SCORECARD_FILE = "benchmark_relative_scorecard.json"
 MISSED_OPPORTUNITY_HEATMAP_FILE = "missed_opportunity_heatmap.json"
 MISSED_OPPORTUNITY_PROOF_REPORT_FILE = "missed_opportunity_proof_report.json"
 TILE_EVIDENCE_POINTS_REPORT_FILE = "tile_evidence_points_report.json"
+FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE = "fixed_vs_dynamic_selector_report.json"
+FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
 COMPRESSED_SHADOW_SCHEDULE_FILES = (
@@ -678,6 +680,8 @@ ANALYZER_JSON_REPORT_FILES = (
     MISSED_OPPORTUNITY_HEATMAP_FILE,
     MISSED_OPPORTUNITY_PROOF_REPORT_FILE,
     TILE_EVIDENCE_POINTS_REPORT_FILE,
+    FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE,
+    FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
     PATHWAY_SURVIVAL_REPORT_FILE,
@@ -751,6 +755,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("collector_v2.1 Opportunity Capture", COLLECTOR_V21_REPORT_FILE, "Four cohorts: actual / unfilled / rejected / hypothetical; CONTROL vs Stage-1"),
     ("Missed Opportunities", MISSED_OPPORTUNITY_HEATMAP_FILE, "Blocked signals by reason and $ left"),
     ("Tile Evidence Points", TILE_EVIDENCE_POINTS_REPORT_FILE, "Per-tile fill worlds, did vs missed, AI usefulness, collection rate, quarantine receipt and n>=30 after-cost EV ranking"),
+    ("Fixed vs Dynamic Selector", FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, "Best single fixed tile vs regime-conditional tile selector, walk-forward OOS after costs, n>=30 gates per arm and regime"),
+    ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
     ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
@@ -9199,7 +9205,9 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
             collector_v21_opportunity_capture_report()
             ai_funnel_report(trades=trades, session=session)
-            tile_evidence_points_report(session=session)
+            evidence_points = tile_evidence_points_report(session=session)
+            selector_report = fixed_vs_dynamic_selector_report(session=session)
+            forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
                 decisions=decisions,
@@ -9311,7 +9319,9 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
         collector_v21_opportunity_capture_report()
         ai_funnel_report(trades=trades, session=session)
-        tile_evidence_points_report(session=session)
+        evidence_points = tile_evidence_points_report(session=session)
+        selector_report = fixed_vs_dynamic_selector_report(session=session)
+        forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
             decisions=decisions,
@@ -12152,6 +12162,65 @@ def tile_evidence_points_report(session=None):
     except OSError as exc:
         print(f"  ?? Could not write {TILE_EVIDENCE_POINTS_REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
+
+
+def _write_aux_report(path, payload, session):
+    payload["analyzer_sync_id"] = ANALYZER_SYNC_ID
+    payload["session_scope"] = _shadow_scope_label(session)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, default=str)
+        print(f"  ? Wrote {path} {PIPELINE_ENFORCEMENT_TAG}")
+    except OSError as exc:
+        print(f"  ?? Could not write {path}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
+
+
+def fixed_vs_dynamic_selector_report(session=None):
+    """Publish best fixed tile vs regime-conditional selector, walk-forward OOS after costs."""
+    from research.fixed_vs_dynamic_selector import build_fixed_vs_dynamic_selector
+    from research.tile_evidence_points import TRADES_FILE, _read_csv
+
+    session = session or load_research_session()
+    v2_start = _v2_data_start_ts()
+    try:
+        payload = build_fixed_vs_dynamic_selector(
+            registry=ACTIVE_TILE_REGISTRY,
+            tile_order=CURRENT_RESEARCH_LANES,
+            trades=_read_csv(_agent_data_path(TRADES_FILE)),
+            epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
+            v2_start_ts=v2_start.timestamp() if v2_start is not None else None,
+            relay_interference_ids=set(relay_interference_trade_ids()),
+        )
+    except Exception as exc:  # the selector view must never stop the analyzer
+        payload = {"schema": "fixed_vs_dynamic_selector_v1", "status": "ERROR", "verdict": "ERROR",
+                   "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, payload, session)
+
+
+def forward_trial_report(session=None, evidence=None, selector=None):
+    """Freeze gates, write-once freeze manifest once a tile qualifies, and the 15-day tracker."""
+    from research import forward_trial_freeze as ft
+    from research.tile_evidence_points import TRADES_FILE, _read_csv
+
+    session = session or load_research_session()
+    state_dir = os.environ.get("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain"
+    try:
+        payload = ft.build_forward_trial_report(
+            evidence=evidence if isinstance(evidence, dict) and evidence.get("status") != "ERROR" else None,
+            selector=selector if isinstance(selector, dict) and selector.get("status") != "ERROR" else None,
+            registry=ACTIVE_TILE_REGISTRY,
+            tile_order=CURRENT_RESEARCH_LANES,
+            trades=_read_csv(_agent_data_path(TRADES_FILE)),
+            directory=ft.trial_dir(),
+            registry_signature=active_tile_registry_signature(),
+            runtime_registry_signature=ft.runtime_registry_signature(os.path.join(state_dir, "fly_runtime_snapshot_v1.json")),
+            analyzer_revision=_auxiliary_report_generation_context(session).get("analyzer_revision"),
+            signing_key=ft.signing_key_from_env(),
+        )
+    except Exception as exc:  # the trial view must never stop the analyzer
+        payload = {"schema": "forward_trial_v1", "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(FORWARD_TRIAL_REPORT_FILE, payload, session)
 
 
 def ai_funnel_report(trades=None, session=None):
