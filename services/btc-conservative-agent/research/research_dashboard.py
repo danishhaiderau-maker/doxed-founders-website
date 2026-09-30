@@ -542,9 +542,22 @@ def _load_bot_session():
     return _read_json("research_session.json")
 
 
+def _generation_bound_integrity_receipt() -> dict:
+    """The analyzer integrity receipt, only when it belongs to the published generation.
+
+    The analyzer writes this receipt beside the generation rather than listing
+    it in the published report manifest, so it is bound by generated_at.
+    """
+    receipt = _read_json(ANALYZER_INTEGRITY_FILE) or {}
+    generated_at = (_read_json(REPORT_MANIFEST_FILE, {}) or {}).get("generated_at")
+    if not isinstance(receipt, dict) or not generated_at or receipt.get("generated_at") != generated_at:
+        return {}
+    return receipt
+
+
 def _integrity_payload() -> dict:
     return _integrity_with_generation_freshness(
-        _read_report(ANALYZER_INTEGRITY_FILE) or {}
+        _read_report(ANALYZER_INTEGRITY_FILE) or _generation_bound_integrity_receipt()
     )
 
 
@@ -8984,10 +8997,11 @@ def index():
 
 
 LAPTOP_CHAIN_STATE_DIR = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain")
-SEGMENT_PULLER_STATUS_FILE = (
-    Path(os.getenv("RESEARCH_SEGMENT_SHADOW_ROOT") or r"C:\DoxxedCrypto\fly-mirror-segments")
-    / ".puller" / "status.json"
-)
+SEGMENT_SHADOW_ROOT = Path(os.getenv("RESEARCH_SEGMENT_SHADOW_ROOT") or r"C:\DoxxedCrypto\fly-mirror-segments")
+SEGMENT_PULLER_STATUS_FILE = SEGMENT_SHADOW_ROOT / ".puller" / "status.json"
+SEGMENT_PARITY_FILES = (SEGMENT_SHADOW_ROOT / "parity-latest.json", SEGMENT_SHADOW_ROOT / "parity-v2.json")
+FLY_SEGMENT_HEAD_FILE = LAPTOP_CHAIN_STATE_DIR / "fly_segment_head_snapshot_v1.json"
+RELAY_STATUS_SNAPSHOT_FILE = LAPTOP_CHAIN_STATE_DIR / "relay_status_snapshot_v1.json"
 DECISION_NAV_LINKS = (
     ("Details (full report)", "/details"),
     ("Safe Policy Genome V3.1", "/safe-policy-genome-v3.1"),
@@ -9008,6 +9022,11 @@ def _read_state_json(path) -> dict | None:
     except (OSError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _latest_segment_parity() -> dict | None:
+    receipts = [r for r in (_read_state_json(p) for p in SEGMENT_PARITY_FILES) if r]
+    return max(receipts, key=lambda r: str(r.get("generated_at") or ""), default=None)
 
 
 def _local_disk_usage() -> dict | None:
@@ -9054,24 +9073,19 @@ def _decision_payload() -> dict:
         "registry_error": REGISTRY_IMPORT_ERROR,
     }
     analyzer_run = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "analyzer-run.status.json")
-    ack = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "laptop-ack-watcher.status.json")
     monitor = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "laptop-chain-monitor.state.json")
     segments = _read_state_json(SEGMENT_PULLER_STATUS_FILE)
+    fly_head = _read_state_json(FLY_SEGMENT_HEAD_FILE)
+    parity = _latest_segment_parity()
     disk = _local_disk_usage()
     alarms = _decision_view.collect_alarms(
-        freshness=freshness, analyzer_run=analyzer_run, ack_watcher=ack,
-        monitor_state=monitor, segment_status=segments, local_disk=disk,
-        local_wal=_local_sqlite_wal_files(), now=now,
+        freshness=freshness, analyzer_run=analyzer_run, monitor_state=monitor,
+        segment_status=segments, fly_segment_head=fly_head, segment_parity=parity,
+        local_disk=disk, local_wal=_local_sqlite_wal_files(), now=now,
     )
     for alarm in alarms:
         if alarm.get("since"):
             alarm["since"] = fmt(alarm["since"])
-    ack_max_age = _decision_view.TRANSFER_ACK_LAG_ALARM_SEC
-
-    def fresh(ts, max_age, missing=_decision_view.NO_DATA_TEXT):
-        return _decision_view.freshness_text(ts, max_age_sec=max_age, now=now, display=fmt, missing=missing)
-
-    last_sync = (ack or {}).get("lastSyncResult") if isinstance((ack or {}).get("lastSyncResult"), dict) else {}
     if generated_at:
         generation_text = f"{fmt(generated_at)} · current" if generation["current"] else f"stale since {fmt(generated_at)}"
     else:
@@ -9082,16 +9096,9 @@ def _decision_payload() -> dict:
         {"label": "Last analyzer run",
          "text": f"{analyzer_run.get('state')} at {fmt(run_ts)}" if analyzer_run and run_ts
          else "no data yet (runner status not found)"},
-        {"label": "Last laptop ACK", "text": fresh((ack or {}).get("lastAckAt"), ack_max_age)},
-        {"label": "Last Fly to laptop sync attempt",
-         "text": (("OK · " if last_sync.get("ok") else "FAILED · ") + fresh(last_sync.get("at"), ack_max_age))
-         if last_sync.get("at") else _decision_view.NO_DATA_TEXT},
-        {"label": "Mirror sync receipt",
-         "text": fresh(freshness.get("mirror_sync_receipt_timestamp"),
-                       float(freshness.get("mirror_sync_receipt_max_age_seconds") or 600))},
-        {"label": "Last research segment applied",
-         "text": fresh((segments or {}).get("last_applied_at") or (segments or {}).get("updated_at"), ack_max_age,
-                       missing="no data yet (segment puller has not run on this laptop)")},
+        *_decision_view.segment_freshness_rows(
+            segment_status=segments, fly_segment_head=fly_head, segment_parity=parity,
+            promotion=_mirror_sync_receipt(), now=now, display=fmt),
         {"label": "Local data drive",
          "text": f"{disk['used_pct']:.1f}% used, {disk['free_gb']:.1f} GB free" if disk else _decision_view.NO_DATA_TEXT},
     ]
@@ -9101,7 +9108,7 @@ def _decision_payload() -> dict:
         generation=generation, alarms=alarms, freshness_rows=freshness_rows,
         summary_trades=((summary or {}).get("performance") or {}).get("trades"),
         relay_state=_decision_view.relay_state_view(
-            _read_state_json(DATA_ROOT / "relay_status_snapshot_v1.json"),
+            _read_state_json(RELAY_STATUS_SNAPSHOT_FILE),
             registry=ACTIVE_TILE_REGISTRY, now=now,
         ),
     )

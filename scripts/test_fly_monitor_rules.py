@@ -151,10 +151,10 @@ def _transfer(**transfer):
     return {"volume": {"used_pct": 10.0, "transfer": transfer}}
 
 
-def test_legacy_ack_age_flags_after_three_hours_when_segments_off():
-    assert rules.transfer_findings(_transfer(segments_enabled=False, legacy_ack_age_sec=3600.0)) == {}
-    found = rules.transfer_findings(_transfer(segments_enabled=False, legacy_ack_age_sec=4 * 3600.0))
-    assert "legacy sync ACK is 4.0h old" in found["transfer_lag"]
+def test_disabled_segment_shipping_is_a_finding_because_nothing_else_transfers():
+    found = rules.transfer_findings(_transfer(segments_enabled=False))
+    assert "segment shipping is disabled" in found["transfer_lag"]
+    assert not hasattr(rules, "LEGACY_ACK_STALE_SEC")
 
 
 def test_segment_shipper_lag_error_and_stale_status():
@@ -169,10 +169,10 @@ def test_segment_shipper_lag_error_and_stale_status():
     assert "has not written a status file" in rules.transfer_findings(missing)["transfer_lag"]
 
 
-def test_legacy_ack_age_still_watched_while_segments_run_in_shadow():
-    shadow = _transfer(segments_enabled=True, segment_status_present=True, segment_status_age_sec=60.0,
-                       shipped_seq=5, laptop_acked_seq=5, last_error=None, legacy_ack_age_sec=4 * 3600.0)
-    assert "legacy sync ACK 4.0h old" in rules.transfer_findings(shadow)["transfer_lag"]
+def test_retired_legacy_ack_age_never_raises_a_finding():
+    healthy = _transfer(segments_enabled=True, segment_status_present=True, segment_status_age_sec=60.0,
+                        shipped_seq=5, laptop_acked_seq=5, last_error=None, legacy_ack_age_sec=4 * 86400.0)
+    assert rules.transfer_findings(healthy) == {}
 
 
 def test_transfer_lag_is_informational_and_never_opens_incident():

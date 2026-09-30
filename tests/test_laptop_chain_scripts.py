@@ -21,6 +21,7 @@ CHAIN_SCRIPTS = [
     "run-analyzer-once.ps1",
     "laptop-chain-monitor.ps1",
     "laptop-chain-supervisor.ps1",
+    "laptop-status-snapshots.ps1",
     "register-laptop-chain-task.ps1",
     "research-segment-pull.ps1",
     "research-segment-pull-loop.ps1",
@@ -132,8 +133,11 @@ def chain(tmp_path):
     data = canonical / "services" / "btc-conservative-agent" / "canonical-research-data"
     data.mkdir(parents=True)
     state = tmp_path / "state"
+    segments = tmp_path / "segments"
+    (segments / ".puller").mkdir(parents=True)
     prefix = f"DoxxedTest{uuid.uuid4().hex[:10]}"
-    return {"canonical": canonical, "data": data, "state": state, "env": {"DOXXED_LAPTOP_CHAIN_MUTEX_PREFIX": prefix}}
+    return {"canonical": canonical, "data": data, "state": state, "segments": segments,
+            "env": {"DOXXED_LAPTOP_CHAIN_MUTEX_PREFIX": prefix, "RESEARCH_SEGMENT_SHADOW_ROOT": str(segments)}}
 
 
 def _common_prelude(chain) -> str:
@@ -241,6 +245,19 @@ def _pull_status(chain, **payload):
     (chain["state"] / "segment-pull.status.json").write_text(json.dumps(payload))
 
 
+def _puller_status(chain, **overrides):
+    status = {"schema": "research_segment_puller_status_v1", "prefix": "v2", "applied_seq": 40, "acked_seq": 40,
+              "last_error": None, "updated_at": _iso(),
+              "ack_receipt": {"ok": True, "result": "RECORDED", "through_seq": 40, "received_at": _iso()}}
+    status.update(overrides)
+    (chain["segments"] / ".puller" / "status.json").write_text(json.dumps(status), encoding="utf-8")
+
+
+def _active_alert_codes(chain):
+    active = json.loads((chain["state"] / "alerts" / "active-alerts.json").read_text(encoding="utf-8-sig"))
+    return {a["code"] for a in active["alerts"]}
+
+
 @windows_only
 def test_monitor_raises_every_alert(chain):
     chain["state"].mkdir(parents=True, exist_ok=True)
@@ -297,8 +314,65 @@ def test_monitor_is_quiet_when_chain_is_healthy(chain):
     (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
     _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=0, error=None)
     _heartbeat(chain, ok=True, inProgress=False, phase="complete")
+    _puller_status(chain)
+    (chain["segments"] / "parity-latest.json").write_text(json.dumps(
+        {"verdict": "GREEN", "seq": 40, "generated_at": _iso(-5)}), encoding="utf-8")
     result = _monitor_with_pull_loop_held(chain)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@windows_only
+def test_monitor_raises_v2_ack_parity_and_shipper_alerts_not_retired_mirror_alerts(chain):
+    chain["state"].mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=0, error=None)
+    (chain["state"] / "laptop-ack-watcher.status.json").write_text(json.dumps({"consecutiveSyncFailures": 9, "detail": "x"}))
+    _puller_status(chain, ack_receipt={"ok": True, "result": "RECORDED", "through_seq": 12, "received_at": _iso(-60)})
+    (chain["segments"] / "parity-latest.json").write_text(json.dumps(
+        {"verdict": "RED", "seq": 12, "generated_at": _iso(-5)}), encoding="utf-8")
+    (chain["state"] / "fly_segment_head_snapshot_v1.json").write_text(json.dumps(
+        {"schema": "fly_segment_head_snapshot_v1", "ok": True, "observedAt": _iso(), "last_error": "PLAN_RACE"}))
+    result = _monitor_with_pull_loop_held(chain)
+    assert result.returncode == 10, result.stdout + result.stderr
+    assert _active_alert_codes(chain) == {"SEGMENT_ACK_STALE", "SEGMENT_PARITY_NOT_GREEN", "FLY_SEGMENT_SHIPPER_ERROR"}
+
+
+@windows_only
+def test_monitor_flags_a_rejected_v2_ack(chain):
+    chain["state"].mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=0, error=None)
+    _puller_status(chain, ack_receipt={"ok": False, "result": "SEQ_REGRESSION", "through_seq": 3, "received_at": _iso()})
+    _monitor_with_pull_loop_held(chain)
+    assert _active_alert_codes(chain) == {"SEGMENT_ACK_REJECTED"}
+
+
+@windows_only
+def test_status_snapshots_offline_are_explicit_failures_never_flat(chain):
+    result = _ps(
+        f"& '{SCRIPTS / 'laptop-status-snapshots.ps1'}' -RepoRoot '{ROOT}' -CanonicalRoot '{chain['canonical']}' "
+        f"-StateDir '{chain['state']}'; exit $LASTEXITCODE",
+        {**chain["env"], "DOXXED_LAPTOP_CHAIN_OFFLINE": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    head = json.loads((chain["state"] / "fly_segment_head_snapshot_v1.json").read_text(encoding="utf-8-sig"))
+    relay = json.loads((chain["state"] / "relay_status_snapshot_v1.json").read_text(encoding="utf-8-sig"))
+    assert head["schema"] == "fly_segment_head_snapshot_v1" and head["ok"] is False and head["error"] == "OFFLINE"
+    assert relay["schema"] == "relay_status_snapshot_v1" and relay["ok"] is False
+    assert "relayArmedAt" not in relay and "reconciliation" not in relay
+
+
+def test_status_snapshots_are_read_only_and_never_persist_secrets():
+    source = _source("laptop-status-snapshots.ps1")
+    assert source.count("Invoke-RestMethod -Method Get") == 2
+    assert "-Method Post" not in source and "-Method Put" not in source
+    persisted = source[source.index("$relay.ok = $true"):source.index("} catch {\n    $relay.error")]
+    assert "userId" not in persisted and "adminToken" not in persisted and "lastError" not in persisted
+
+
+def test_supervisor_collects_snapshots_before_the_monitor():
+    supervisor = _source("laptop-chain-supervisor.ps1")
+    assert supervisor.index("laptop-status-snapshots.ps1") < supervisor.index("laptop-chain-monitor.ps1")
 
 
 def _fake_repo(tmp_path, launcher_body: str) -> Path:

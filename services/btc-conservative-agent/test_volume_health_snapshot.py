@@ -81,7 +81,7 @@ def test_disk_error_is_reported_not_raised(tmp_path):
     assert snap["error"] == "DISK_USAGE_UNAVAILABLE" and snap["used_pct"] is None
 
 
-def test_transfer_reads_segment_status_and_legacy_ack(tmp_path, monkeypatch):
+def test_transfer_reads_segment_status_and_ignores_retired_legacy_ack(tmp_path, monkeypatch):
     monkeypatch.setenv("RESEARCH_SEGMENTS_ENABLED", "1")
     monkeypatch.delenv("RESEARCH_SEGMENTS_STATE_DIR", raising=False)
     (tmp_path / "segment-shipper").mkdir()
@@ -96,7 +96,7 @@ def test_transfer_reads_segment_status_and_legacy_ack(tmp_path, monkeypatch):
     assert transfer["segments_enabled"] is True and transfer["segment_status_present"] is True
     assert (transfer["shipped_seq"], transfer["laptop_acked_seq"]) == (12, 9)
     assert transfer["segment_status_age_sec"] == 100.0
-    assert transfer["legacy_ack_age_sec"] == 600.0
+    assert "legacy_ack_age_sec" not in transfer
     assert len(transfer["last_error"]) == 200
     assert "secret_ish" not in transfer
 
@@ -104,4 +104,4 @@ def test_transfer_reads_segment_status_and_legacy_ack(tmp_path, monkeypatch):
 def test_transfer_without_files_is_absent_not_error(tmp_path, monkeypatch):
     monkeypatch.delenv("RESEARCH_SEGMENTS_ENABLED", raising=False)
     transfer = _load(tmp_path, lambda _p: Usage(1, 0, 1))["_volume_transfer_snapshot"](tmp_path, 0.0)
-    assert transfer == {"segments_enabled": False, "segment_status_present": False, "legacy_ack_age_sec": None}
+    assert transfer == {"segments_enabled": False, "segment_status_present": False}

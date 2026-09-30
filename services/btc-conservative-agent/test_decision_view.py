@@ -1,6 +1,7 @@
 """Decision page: missing data is never zero, and every metric has one source."""
 from datetime import datetime, timedelta, timezone
 import importlib.util
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -83,27 +84,134 @@ def test_ai_vs_rules_reports_reason_instead_of_zero():
     assert "no AI calls" in result["note"]
 
 
-def test_alarms_surface_transfer_disk_wal_and_staleness():
-    alarms = dv.collect_alarms(
+def _puller(age_min=1, ack_age_min=1, **overrides):
+    status = {"schema": "research_segment_puller_status_v1", "prefix": "v2", "applied_seq": 136, "acked_seq": 136,
+              "last_error": None, "updated_at": (NOW - timedelta(minutes=age_min)).isoformat(),
+              "ack_receipt": {"ok": True, "result": "RECORDED", "through_seq": 136,
+                              "received_at": (NOW - timedelta(minutes=ack_age_min)).isoformat()}}
+    status.update(overrides)
+    return status
+
+
+def _fly_head(age_min=1, **overrides):
+    head = {"schema": "fly_segment_head_snapshot_v1", "ok": True,
+            "observedAt": (NOW - timedelta(minutes=age_min)).isoformat(), "segments_enabled": True,
+            "shipped_seq": 139, "laptop_acked_seq": 136, "unshipped_bytes": 299477, "last_error": None}
+    head.update(overrides)
+    return head
+
+
+def _parity(verdict="GREEN", age_min=5):
+    return {"verdict": verdict, "seq": 136, "counts": {"missing": 0},
+            "generated_at": (NOW - timedelta(minutes=age_min)).isoformat()}
+
+
+def _alarms(**overrides):
+    kwargs = dict(freshness={"current": True}, analyzer_run=None, monitor_state=None,
+                  segment_status=_puller(), fly_segment_head=_fly_head(), segment_parity=_parity(),
+                  local_disk=None, local_wal=None, now=NOW)
+    kwargs.update(overrides)
+    return dv.collect_alarms(**kwargs)
+
+
+def test_healthy_v2_transfer_raises_no_alarms():
+    assert _alarms() == []
+
+
+def test_alarms_surface_v2_transfer_disk_wal_and_staleness():
+    alarms = _alarms(
         freshness={"current": False, "reasons": ["mirror receipt failed"]},
         analyzer_run={"state": "FAILED", "detail": "boom", "finishedAt": NOW.isoformat()},
-        ack_watcher={"lastAckAt": (NOW - timedelta(hours=5)).isoformat(), "consecutiveSyncFailures": 3,
-                     "lastSyncResult": {"detail": "timeout", "at": NOW.isoformat()}},
-        monitor_state={"alerts": [{"code": "SYNC_FAIL_REPEATED", "severity": "critical", "detail": "x"}]},
-        segment_status=None,
+        segment_status=_puller(age_min=40, ack_age_min=40, last_error="HTTP 503"),
+        fly_segment_head=_fly_head(last_error="PLAN_RACE", unshipped_bytes=dv.SEGMENT_UNSHIPPED_ALARM_BYTES + 1,
+                                   shipped_seq=200, laptop_acked_seq=100),
+        segment_parity=_parity("RED", age_min=200),
         local_disk={"used_pct": 91.0},
         local_wal=[{"name": "journal.sqlite", "bytes": dv.LOCAL_WAL_ALARM_BYTES}],
-        now=NOW,
     )
     codes = {a["code"] for a in alarms}
-    assert {"ANALYZER_RUN_FAILED", "ANALYZER_GENERATION_STALE", "TRANSFER_ACK_LAG", "TRANSFER_SYNC_FAILING",
-            "SYNC_FAIL_REPEATED", "SEGMENT_PULLER_NO_DATA", "LOCAL_DISK_PRESSURE",
-            "LOCAL_SQLITE_WAL_LARGE"} <= codes
-    assert alarms[-1]["severity"] == "info"
-    missing = dv.collect_alarms(freshness=None, analyzer_run=None, ack_watcher=None, monitor_state=None,
-                                segment_status={"updated_at": NOW.isoformat()}, local_disk=None,
-                                local_wal=None, now=NOW)
-    assert [a["code"] for a in missing] == ["TRANSFER_STATUS_UNAVAILABLE"]
+    assert codes == {"ANALYZER_RUN_FAILED", "ANALYZER_GENERATION_STALE", "SEGMENT_PULLER_STALE",
+                     "SEGMENT_PULLER_ERROR", "SEGMENT_ACK_STALE", "FLY_SEGMENT_SHIPPER_ERROR",
+                     "SEGMENT_UNSHIPPED_BACKLOG", "SEGMENT_ACK_BEHIND", "SEGMENT_PARITY_NOT_GREEN",
+                     "SEGMENT_PARITY_STALE", "LOCAL_DISK_PRESSURE", "LOCAL_SQLITE_WAL_LARGE"}
+    assert [a["severity"] for a in alarms] == sorted(
+        (a["severity"] for a in alarms), key={"critical": 0, "warning": 1, "info": 2}.get)
+
+
+def test_missing_v2_inputs_are_explicit_alarms_not_silence():
+    codes = {a["code"] for a in _alarms(segment_status=None, fly_segment_head=None, segment_parity=None)}
+    assert codes == {"SEGMENT_PULLER_NO_DATA", "FLY_SEGMENT_HEAD_NO_DATA", "SEGMENT_PARITY_NO_DATA"}
+    stale_head = {a["code"] for a in _alarms(fly_segment_head=_fly_head(age_min=60))}
+    assert stale_head == {"FLY_SEGMENT_HEAD_NO_DATA"}
+    failed_head = {a["code"] for a in _alarms(fly_segment_head={**_fly_head(), "ok": False})}
+    assert failed_head == {"FLY_SEGMENT_HEAD_NO_DATA"}
+    rejected = _alarms(segment_status=_puller(ack_receipt={"ok": False, "result": "SEQ_REGRESSION", "through_seq": 3,
+                                                            "received_at": NOW.isoformat()}))
+    assert [a["code"] for a in rejected] == ["SEGMENT_ACK_REJECTED"]
+
+
+def test_retired_mirror_alarms_never_resurface_from_monitor_state():
+    monitor = {"alerts": [{"code": code, "severity": "critical", "detail": "legacy"}
+                          for code in sorted(dv.RETIRED_TRANSFER_ALARM_CODES)]
+                         + [{"code": "ANALYZER_NO_COMPLETION", "severity": "critical", "detail": "x"}]}
+    assert [a["code"] for a in _alarms(monitor_state=monitor)] == ["ANALYZER_NO_COMPLETION"]
+
+
+def test_segment_freshness_rows_replace_legacy_mirror_rows():
+    rows = dv.segment_freshness_rows(
+        segment_status=_puller(), fly_segment_head=_fly_head(), segment_parity=_parity(),
+        promotion={"segmentPrefix": "v2", "segmentAppliedSeq": 124, "syncedAt": "2026-09-30T03:50:42Z"}, now=NOW)
+    text = {row["label"]: row["text"] for row in rows}
+    assert list(text) == ["Last v2 segment applied on laptop", "Last v2 ACK accepted by Fly", "Fly v2 shipper",
+                          "v2 checkpoint parity", "Analyzer store promoted from"]
+    assert text["Last v2 segment applied on laptop"].startswith("seq 136 \u00b7 ")
+    assert "published seq 139" in text["Fly v2 shipper"] and "unshipped 0.3 MB" in text["Fly v2 shipper"]
+    assert text["v2 checkpoint parity"].startswith("GREEN at seq 136")
+    assert text["Analyzer store promoted from"].startswith("v2 seq 124 promoted")
+    empty = {row["label"]: row["text"] for row in dv.segment_freshness_rows(
+        segment_status=None, fly_segment_head=None, segment_parity=None, promotion={"ok": True}, now=NOW)}
+    assert all(value.startswith(dv.NO_DATA_TEXT) for value in empty.values())
+    old = {row["label"]: row["text"] for row in dv.segment_freshness_rows(
+        segment_status=_puller(age_min=60, ack_age_min=60), fly_segment_head=None, segment_parity=None,
+        promotion=None, now=NOW)}
+    assert "stale since" in old["Last v2 segment applied on laptop"]
+    assert "stale since" in old["Last v2 ACK accepted by Fly"]
+
+
+def test_decision_payload_has_no_legacy_transfer_rows(monkeypatch, tmp_path):
+    monkeypatch.setattr(dashboard, "LAPTOP_CHAIN_STATE_DIR", tmp_path)
+    monkeypatch.setattr(dashboard, "SEGMENT_PULLER_STATUS_FILE", tmp_path / "missing.json")
+    monkeypatch.setattr(dashboard, "SEGMENT_PARITY_FILES", (tmp_path / "missing-parity.json",))
+    monkeypatch.setattr(dashboard, "FLY_SEGMENT_HEAD_FILE", tmp_path / "missing-head.json")
+    payload = dashboard._decision_payload()
+    labels = [row["label"] for row in payload["freshness"]]
+    for legacy in ("Last laptop ACK", "Last Fly to laptop sync attempt", "Mirror sync receipt"):
+        assert legacy not in labels
+    codes = {a["code"] for a in payload["alarms"]}
+    assert not codes & dv.RETIRED_TRANSFER_ALARM_CODES
+    assert "SEGMENT_PULLER_NO_DATA" in codes
+
+
+def test_relay_snapshot_is_read_from_the_laptop_chain_state(monkeypatch, tmp_path):
+    snapshot = tmp_path / "relay_status_snapshot_v1.json"
+    snapshot.write_text(json.dumps({
+        "schema": "relay_status_snapshot_v1", "observedAt": datetime.now(timezone.utc).isoformat(), "ok": True,
+        "status": "PAUSED", "relayExecutionMode": "PAUSED", "relayArmedAt": None,
+        "reconciliation": {"signedExchangePositionQty": 0, "signedLedgerOpenQty": 0, "updatedAt": "x"},
+        "exchangeOrderAudit": {"known": True, "activeOrderCount": 0}}), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "RELAY_STATUS_SNAPSHOT_FILE", snapshot)
+    relay = dashboard._decision_payload()["relay_state"]
+    assert relay["armed"] == {"state": dv.VALUE, "value": "DISARMED (PAUSED)"}
+    assert relay["exchange_position_btc"] == {"state": dv.VALUE, "value": 0}
+
+
+def test_integrity_receipt_is_bound_to_the_published_generation(monkeypatch):
+    receipts = {dashboard.ANALYZER_INTEGRITY_FILE: {"valid": True, "report_status": "VALID", "generated_at": "G1"},
+                dashboard.REPORT_MANIFEST_FILE: {"generated_at": "G1"}}
+    monkeypatch.setattr(dashboard, "_read_json", lambda name, default=None: receipts.get(name, default))
+    assert dashboard._generation_bound_integrity_receipt()["report_status"] == "VALID"
+    receipts[dashboard.REPORT_MANIFEST_FILE] = {"generated_at": "G2"}
+    assert dashboard._generation_bound_integrity_receipt() == {}
 
 
 def test_freshness_text_distinguishes_missing_fresh_and_stale():

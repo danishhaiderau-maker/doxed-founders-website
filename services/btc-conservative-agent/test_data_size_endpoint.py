@@ -194,8 +194,10 @@ class DataSizeEndpointTests(unittest.TestCase):
             for response in responses
         ))
 
-    def test_dashboard_explains_trigger_and_disabled_retention(self):
-        self.assertIn("50 MB value is a synchronization trigger, not a storage cap", bot.HTML)
+    def test_dashboard_explains_segment_transfer_and_disabled_retention(self):
+        self.assertIn("Research data leaves Fly only as numbered segments", bot.HTML)
+        self.assertNotIn("FLY_VOLUME_SYNC_THRESHOLD_MB", bot.HTML)
+        self.assertNotIn("btc-v31-current/services", bot.HTML)
         self.assertIn("Retention: disabled", bot.HTML)
         self.assertIn("dataSizeInventoryStatus", bot.HTML)
         self.assertIn("ranking withheld", bot.DASHBOARD_JS)

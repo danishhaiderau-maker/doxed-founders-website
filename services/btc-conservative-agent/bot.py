@@ -32363,9 +32363,8 @@ __ADMIN_ACCESS_CONTROLS__
 <div id="dataStoragePanel" style="margin:12px 0;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px;">
   <strong style="color:#58a6ff;font-size:1.05em;">Data Storage &middot; Fly volume + retention status</strong>
   <p style="color:#8b949e;font-size:0.82em;margin:6px 0 10px 0;">
-    Fly volume size and largest files. The 50 MB value is a synchronization trigger, not a storage cap and not deletion authorization.
-  Canonical analyzer store at <code>C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data</code> checks Fly identity and O(1) volume usage every 3 min. It performs a full mirror when used space grows by
-    ≥ <code>FLY_VOLUME_SYNC_THRESHOLD_MB</code> (default 50 MB), on revision/epoch change, or at least every 30 min. Safe source pruning is disabled until lifecycle-complete, immutable local acknowledgement and active-reader gates are proven. Moving evidence to quarantine on the same volume reclaims zero bytes.
+    Fly volume size and largest files. Research data leaves Fly only as numbered segments: the laptop pulls them about every 2 min, ACKs each applied sequence, and the analyzer runs on a store promoted from those segments. Segment progress is in the operating strip above.
+    Safe source pruning is disabled until lifecycle-complete, immutable local acknowledgement and active-reader gates are proven. Moving evidence to quarantine on the same volume reclaims zero bytes.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;">
     <div style="padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;">
@@ -32397,7 +32396,7 @@ __ADMIN_ACCESS_CONTROLS__
     </div>
   </div>
   <p id="dataSizeSyncNote" style="color:#6e7681;font-size:0.78em;margin:10px 0 0 0;">
-    Canonical analyzer store: <code>C:/DoxxedCrypto/btc-v31-current/services/btc-conservative-agent/canonical-research-data</code> &middot; Fly-to-local sync on ≥50&nbsp;MB growth or 3&nbsp;min &middot; last checked <span id="dataSizeLastCheck">-</span>
+    Laptop segment pull about every 2&nbsp;min; analyzer runs on the promoted segment store &middot; last checked <span id="dataSizeLastCheck">-</span>
   </p>
 </div>
 
@@ -32409,7 +32408,7 @@ __ADMIN_ACCESS_CONTROLS__
   not the same as the live queue below.
 </p>
 <p style="color:#58a6ff;font-size:0.82em;margin:4px 0 8px;">
-  Initial limit comes from the owning policy (legacy direct = 0.1%; __TILE_ENTRY_OFFSETS__). Virtual limit is the
+  Initial limit comes from the owning tile policy (__TILE_ENTRY_OFFSETS__). Virtual limit is the
   chased price; exchange order ID appears only after a real order exists. A crossed virtual limit
   before the first selected stage is recorded as <code>VIRTUAL_TOUCH_BEFORE_SELECTED_ENTRY</code>
   (no invented fill, no marketable order at the old price).
@@ -32619,20 +32618,30 @@ DASHBOARD_JS = """(function () {
       const d = runtimeState || {};
       const bands = (gates.ai_bands_enabled || []).join(', ') || 'none';
       const chase = (gates.chase_buckets_enabled || []).join(', ') || 'none';
-      const paperEntriesAllowed = d.execution_paused !== true
+      const notInView = 'not available in this view';
+      const paperKnown = typeof d.signal_generation_ready === 'boolean';
+      const paperEntriesAllowed = paperKnown && d.execution_paused !== true
         && d.signal_generation_ready === true;
-      const paperEntryReason = paperEntriesAllowed
+      const paperEntryReason = !paperKnown
+        ? notInView
+        : paperEntriesAllowed
         ? 'ALLOWED'
         : ((d.execution_reason || d.new_entry_block_reason || 'NOT READY')
           + (d.pause_owner ? ' (' + d.pause_owner + ')' : ''));
+      const liveKnown = typeof d.live_armed === 'boolean';
       const liveCopyAllowed = d.live_armed === true
         && d.bitfinex_live_enabled === true;
-      const liveCopyReason = liveCopyAllowed
+      const liveCopyReason = !liveKnown
+        ? notInView
+        : liveCopyAllowed
         ? 'ARMED'
         : 'BLOCKED — DISARMED';
+      const entryOffsets = TILE_REGISTRY_VIEW.map(function (tile) {
+        return tile.label + ' ' + (tile.offset_pct != null ? tile.offset_pct.toFixed(2) + '%' : 'offset not published');
+      }).join('; ') || 'no registered tiles';
       el.innerHTML =
         '<div><strong>PAPER ENTRIES:</strong> <span style="color:'
-          + (paperEntriesAllowed ? '#3fb950' : '#f85149') + ';font-weight:700;">'
+          + (!paperKnown ? '#8b949e' : paperEntriesAllowed ? '#3fb950' : '#f85149') + ';font-weight:700;">'
           + paperEntryReason + '</span></div>' +
         '<div><strong>BITFINEX LIVE:</strong> <span style="color:'
           + (liveCopyAllowed ? '#f59e0b' : '#8b949e') + ';font-weight:700;">'
@@ -32641,7 +32650,7 @@ DASHBOARD_JS = """(function () {
         '<div><strong>Chase buckets:</strong> ' + chase + ' · min submit count: ' + (gates.min_chase_count_to_submit != null ? gates.min_chase_count_to_submit : '—') + '</div>' +
         '<div><strong>Virtual defer:</strong> ' + (gates.virtual_defer_active ? 'ON (waiting for bucket)' : 'OFF (immediate if 0_chases on)') + '</div>' +
         '<div><strong>Max concurrent:</strong> ' + (gates.max_concurrent_signals != null ? gates.max_concurrent_signals : '—') + ' · <strong>Leverage:</strong> ' + (gates.leverage != null ? gates.leverage + 'x' : '—') + '</div>' +
-        '<div><strong>Entry anchor:</strong> deterministic 0.1% offset (LONG=price×0.999 / SHORT=price×1.001) · <strong>Policy:</strong> ' + (gates.entry_limit_policy || 'deterministic_0.1pct_offset_v1') + '</div>';
+        '<div><strong>Entry offsets (tile registry):</strong> ' + entryOffsets + '</div>';
     }
     function renderAiBandGateStatus(bands) {
       const el = document.getElementById('aiBandGateStatus');
@@ -37809,7 +37818,6 @@ def _dashboard_truth_fields(snap: dict, now: float) -> dict:
 
 _DASHBOARD_DISK_ALARM_PCT = 85.0
 # Same thresholds as scripts/fly_monitor_rules.py so the strip and the monitor agree.
-_DASHBOARD_LEGACY_ACK_STALE_SEC = 3 * 3600.0
 _DASHBOARD_SEGMENT_STATUS_STALE_SEC = 30 * 60.0
 _DASHBOARD_SEGMENT_SEQ_LAG = 36
 
@@ -37832,35 +37840,17 @@ def _dashboard_age_text(seconds: float) -> str:
     return f"{seconds / 86400:.1f} days"
 
 
-def _dashboard_transfer_truth(snapshot: dict, now: float, bundle_status=None) -> tuple[dict, list]:
-    """Laptop pull state as far as Fly can observe it; laptop-side failures live on the analyzer."""
+def _dashboard_transfer_truth(snapshot: dict, now: float) -> tuple[dict, list]:
+    """Segment shipping as far as Fly can observe it; laptop-side failures live on the analyzer."""
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     alarms = []
     parts = []
     segments_enabled = snapshot.get("segments_enabled") is True
-    raw_age = snapshot.get("legacy_ack_age_sec")
-    ack_age = float(raw_age) if isinstance(raw_age, (int, float)) and not isinstance(raw_age, bool) else None
-    if ack_age is None:
-        ack_state = "NO_ACK"
-        parts.append("no laptop ACK on record")
-        if not segments_enabled:
-            alarms.append({"code": "TRANSFER_NO_ACK", "severity": "critical",
-                           "detail": "Fly has no laptop sync ACK on its volume"})
-    else:
-        shown = _format_melbourne_hm(now - ack_age)
-        age_text = _dashboard_age_text(ack_age)
-        if ack_age > _DASHBOARD_LEGACY_ACK_STALE_SEC:
-            ack_state = "CRITICAL_LAG"
-            parts.append(f"last ACK {shown} ({age_text} ago) \u2014 CRITICAL lag")
-            if not segments_enabled:
-                alarms.append({"code": "TRANSFER_ACK_LAG", "severity": "critical",
-                               "detail": f"laptop sync ACK is {age_text} old (last {shown})"})
-        else:
-            ack_state = "OK"
-            parts.append(f"last ACK {shown} ({age_text} ago)")
     segment = {"enabled": segments_enabled, "status_present": snapshot.get("segment_status_present") is True}
     if not segments_enabled:
-        parts.append("segment shipping not enabled")
+        parts.append("segment shipping disabled \u2014 no research data leaves Fly")
+        alarms.append({"code": "TRANSFER_SEGMENTS_DISABLED", "severity": "critical",
+                       "detail": "segment shipping is disabled and the whole-generation transfer is retired"})
     elif not segment["status_present"]:
         parts.append("segments enabled, shipper status missing")
         alarms.append({"code": "TRANSFER_SEGMENTS_UNAVAILABLE", "severity": "critical",
@@ -37871,13 +37861,19 @@ def _dashboard_transfer_truth(snapshot: dict, now: float, bundle_status=None) ->
         status_age = snapshot.get("segment_status_age_sec")
         status_age = float(status_age) if isinstance(status_age, (int, float)) and not isinstance(status_age, bool) else None
         lag = shipped - (acked or 0) if shipped is not None else None
+        unshipped = snapshot.get("unshipped_bytes")
+        unshipped = int(unshipped) if isinstance(unshipped, (int, float)) and not isinstance(unshipped, bool) else None
         segment.update({"shipped_seq": shipped, "laptop_acked_seq": acked, "unacked_segments": lag,
-                        "status_age_sec": status_age})
-        text = (f"segment {shipped if shipped is not None else 'none'} shipped, laptop ACKed "
+                        "unshipped_bytes": unshipped, "status_age_sec": status_age})
+        text = (f"segment {shipped if shipped is not None else 'none'} published, laptop ACKed "
                 f"{acked if acked is not None else 'none yet'}")
         if lag is not None:
             text += f" ({lag} behind)"
         parts.append(text)
+        if unshipped is not None:
+            parts.append(f"{unshipped / 1e6:.1f} MB unshipped")
+        if status_age is not None:
+            parts.append(f"shipper updated {_dashboard_age_text(status_age)} ago")
         problems = []
         if status_age is None or status_age > _DASHBOARD_SEGMENT_STATUS_STALE_SEC:
             problems.append("shipper status " + (f"{status_age / 60:.0f} min old" if status_age is not None else "age unknown"))
@@ -37888,12 +37884,8 @@ def _dashboard_transfer_truth(snapshot: dict, now: float, bundle_status=None) ->
         if problems:
             alarms.append({"code": "TRANSFER_SEGMENTS_LAGGING", "severity": "critical",
                            "detail": "; ".join(problems)})
-    if bundle_status:
-        parts.append(f"bundle producer {bundle_status}")
     parts.append("laptop-side failures: see analyzer")
-    transfer = {"available": ack_age is not None or segment["status_present"],
-                "legacy_ack_age_sec": ack_age, "legacy_ack_state": ack_state,
-                "segments": segment, "bundle_status": bundle_status,
+    transfer = {"available": segment["status_present"], "segments": segment,
                 "laptop_side": "see analyzer", "label": " \u00b7 ".join(parts)}
     return transfer, alarms
 
@@ -37957,14 +37949,10 @@ def _dashboard_operating_truth(snap: dict, now: float, wal_summary: dict | None)
         disk = {"available": False, "used_pct": None, "free_gb": None, "label": "not available (zero-size volume)"}
 
     try:
-        coordinator = (_data_sync_bundle_public_status() or {}).get("coordinator") or {}
-    except Exception:
-        coordinator = {}
-    try:
         transfer_snapshot = _volume_transfer_snapshot(_data_sync_volume_root(), now)
     except Exception as exc:
         transfer_snapshot = {"error": type(exc).__name__}
-    transfer, transfer_alarms = _dashboard_transfer_truth(transfer_snapshot, now, coordinator.get("status"))
+    transfer, transfer_alarms = _dashboard_transfer_truth(transfer_snapshot, now)
     alarms.extend(transfer_alarms)
 
     wal = wal_summary if isinstance(wal_summary, dict) else {}
@@ -39443,12 +39431,11 @@ _volume_health_cached = (0.0, None)
 
 
 def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
-    """Segment-shipper progress and legacy ACK age from small volume files."""
+    """Segment-shipper progress from its small status file."""
     segments_enabled = (os.getenv("RESEARCH_SEGMENTS_ENABLED") or "0").strip() == "1"
     transfer = {
         "segments_enabled": segments_enabled,
         "segment_status_present": False,
-        "legacy_ack_age_sec": None,
     }
     status_dir = (os.getenv("RESEARCH_SEGMENTS_STATE_DIR") or "").strip()
     status_path = (Path(status_dir) if status_dir else volume_root / "segment-shipper") / "status.json"
@@ -39464,12 +39451,6 @@ def _volume_transfer_snapshot(volume_root: Path, now: float) -> dict:
                 if isinstance(raw.get("updated_at"), (int, float)):
                     transfer["segment_status_age_sec"] = round(max(0.0, now - raw["updated_at"]), 1)
     except (OSError, ValueError):
-        pass
-    try:
-        transfer["legacy_ack_age_sec"] = round(
-            max(0.0, now - (volume_root / "sync_ack.json").stat().st_mtime), 1
-        )
-    except OSError:
         pass
     return transfer
 

@@ -49,6 +49,9 @@ try {
     }
   }
 
+  # Read-only Fly v2 shipper head and relay-status snapshots; never fails the tick.
+  $snapshots = (& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots 2>&1 |
+    Select-Object -Last 1) -as [string]
   & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-chain-monitor.ps1') @roots | Out-Null
   $monitorExit = $LASTEXITCODE
   # One GitHub issue per incident (label laptop-chain-incident) plus the
@@ -59,7 +62,7 @@ try {
   } catch {
     $incident = "INCIDENT_ERROR $($_.Exception.Message)"
   }
-  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $incident"
+  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $snapshots $incident"
 } catch {
   Write-ChainLog -Config $cfg -Name $logName -Message ("TICK_ERROR {0}" -f $_.Exception.Message)
   exit 1
