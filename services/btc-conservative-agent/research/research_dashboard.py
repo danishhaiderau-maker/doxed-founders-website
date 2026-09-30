@@ -9024,6 +9024,8 @@ def _decision_payload() -> dict:
     funnel, funnel_evidence = _current_lane_artifact("ai_funnel_report.json")
     scorecard, _scorecard_evidence = _current_lane_artifact("discovery_cohort_scorecard_report.json")
     summary, _summary_evidence = _current_lane_artifact("research_compact_summary.json")
+    selector, selector_evidence = _current_lane_artifact("fixed_vs_dynamic_selector_report.json")
+    trial, trial_evidence = _current_lane_artifact("forward_trial_report.json")
     generated_at = manifest.get("generated_at")
     fmt = format_melbourne_dt
     generation = {
@@ -9075,6 +9077,8 @@ def _decision_payload() -> dict:
             _read_state_json(RELAY_STATUS_SNAPSHOT_FILE),
             registry=ACTIVE_TILE_REGISTRY, now=now,
         ),
+        selector=_decision_view.selector_view(selector or None, selector_evidence),
+        forward_trial=_decision_view.forward_trial_view(trial or None, trial_evidence),
     )
 
 

@@ -556,10 +556,52 @@ def relay_state_view(snapshot: dict | None, *, registry: dict, now: datetime) ->
     }
 
 
+def _not_current(evidence: dict | None) -> str:
+    reason = ", ".join((evidence or {}).get("blockers") or []) or "not published in the current generation"
+    return f"{NO_DATA_TEXT} ({reason})"
+
+
+def selector_view(report: dict | None, evidence: dict | None) -> dict:
+    """Fixed vs dynamic selector; a report outside the current generation is never shown as a verdict."""
+    if not isinstance(report, dict) or not report or (evidence or {}).get("status") != "CURRENT_GENERATION":
+        return {"state": NO_DATA, "text": _not_current(evidence), "rows": [], "regimes": []}
+    if report.get("verdict") == "ERROR":
+        return {"state": NO_DATA, "text": f"selector report failed: {report.get('error')}", "rows": [], "regimes": []}
+    oos = report.get("oos") or {}
+    arms = (("Best single fixed tile", "fixed"), ("Regime-conditional selector", "dynamic"),
+            ("Selector minus fixed (paired)", "dynamic_minus_fixed_paired"))
+    rows = [{"arm": label, "n": (oos.get(key) or {}).get("n"), "mean": (oos.get(key) or {}).get("mean_usd"),
+             "ci": (oos.get(key) or {}).get("ci95_usd")} for label, key in arms]
+    regimes = [{"regime": r.get("regime"), "n": (r.get("oos_dynamic") or {}).get("n"),
+                "specific": r.get("oos_dynamic_regime_specific_n"), "gate": r.get("gate"),
+                "closes": sum((r.get("closes_by_tile") or {}).values())}
+               for r in report.get("per_regime") or []]
+    return {"state": INSUFFICIENT if report.get("verdict") == "NOT_ENOUGH_DATA" else VALUE,
+            "verdict": report.get("verdict"), "text": report.get("verdict_text") or "",
+            "rows": rows, "regimes": regimes, "picks": report.get("pick_counts") or {}}
+
+
+def forward_trial_view(report: dict | None, evidence: dict | None) -> dict:
+    if not isinstance(report, dict) or not report or (evidence or {}).get("status") != "CURRENT_GENERATION":
+        return {"state": NO_DATA, "status": None, "text": _not_current(evidence), "candidates": [], "daily": []}
+    tracker = report.get("tracker") or {}
+    return {
+        "state": NO_DATA if report.get("status") == "ERROR" else VALUE,
+        "status": report.get("status"),
+        "text": report.get("status_text") or report.get("error") or "",
+        "candidates": [{"lane": c.get("lane"), "n": c.get("n"), "ci": c.get("ci95_usd"),
+                        "failed": c.get("failed_gates") or []} for c in report.get("candidates") or []],
+        "manifest_id": (report.get("manifest") or {}).get("manifest_id"),
+        "drift": tracker.get("drift") or [],
+        "daily": tracker.get("daily") or [],
+    }
+
+
 def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | None,
                            ai_coverage: dict | None, generation: dict, alarms: list,
                            freshness_rows: list, summary_trades=None,
-                           relay_state: dict | None = None) -> dict:
+                           relay_state: dict | None = None, selector: dict | None = None,
+                           forward_trial: dict | None = None) -> dict:
     has_generation = bool(generation.get("generated_at")) and isinstance(funnel_report, dict)
     stale_since = None if generation.get("current") else generation.get("generated_at_display") or generation.get("generated_at")
     funnel_lanes = (funnel_report or {}).get("lanes") if isinstance(funnel_report, dict) else None
@@ -594,6 +636,8 @@ def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | 
         "trade_counts": trade_count_reconciliation(
             funnel_report, summary_trades, sum(tile_counts) if tile_counts else None),
         "relay_state": relay_state,
+        "selector": selector or selector_view(None, None),
+        "forward_trial": forward_trial or forward_trial_view(None, None),
     }
 
 
@@ -604,6 +648,57 @@ def _esc(value) -> str:
 _VERDICT_COLOURS = {"POSITIVE": "#3fb950", "NEGATIVE": "#f85149", "INCONCLUSIVE": "#d29922",
                     "NOT_ENOUGH_DATA": "#8b949e", "NO_DATA": "#8b949e"}
 _SEVERITY_COLOURS = {"critical": "#f85149", "warning": "#d29922", "info": "#8b949e"}
+
+
+def _ci_text(ci) -> str:
+    return f"[{_usd(ci[0])}, {_usd(ci[1])}]" if ci else "no CI (n<2)"
+
+
+def _selector_html(view: dict) -> str:
+    colour = "#8b949e" if view.get("state") != VALUE else "#58a6ff"
+    head = f"<p id='decisionSelectorVerdict' style='color:{colour};font-weight:700'>{_esc(view.get('text') or NO_DATA_TEXT)}</p>"
+    if not view.get("rows"):
+        return head
+    arms = "".join(
+        f"<tr><td>{_esc(r['arm'])}</td><td>{_esc(r['n'] if r['n'] is not None else NO_DATA_TEXT)}</td>"
+        f"<td>{_esc(_usd(r['mean']) if r['mean'] is not None else NO_DATA_TEXT)}</td><td>{_esc(_ci_text(r['ci']))}</td></tr>"
+        for r in view["rows"])
+    regimes = "".join(
+        f"<tr><td>{_esc(r['regime'])}</td><td>{_esc(r['closes'])}</td><td>{_esc(r['n'])}</td>"
+        f"<td>{_esc(r['specific'])}</td><td>{_esc(r['gate'])}</td></tr>" for r in view.get("regimes") or [])
+    picks = ", ".join(f"{k} {v}" for k, v in (view.get("picks") or {}).items()) or "none"
+    return (head + "<div class='wrap'><table id='decisionSelector'><thead><tr><th>Arm</th><th>OOS closes (n)</th>"
+            f"<th>After-cost EV / close</th><th>95% CI</th></tr></thead><tbody>{arms}</tbody></table></div>"
+            "<div class='wrap'><table id='decisionSelectorRegimes'><thead><tr><th>Entry regime</th><th>Tile closes</th>"
+            "<th>Selector OOS n</th><th>Regime-specific picks</th><th>Gate</th></tr></thead>"
+            f"<tbody>{regimes}</tbody></table></div><p class='sub'>Walk-forward picks: {_esc(picks)}. A selector learns only "
+            "from closes that finished before each signal; the regime is the state recorded at entry. The verdict "
+            f"stays NOT ENOUGH DATA until each arm and the regime-specific picks reach n&ge;{MIN_DECISION_SAMPLE}.</p>")
+
+
+def _trial_html(view: dict) -> str:
+    status = view.get("status")
+    colour = "#3fb950" if status and status.startswith("COMPLETE_CANDIDATE_HELD") else \
+        "#f85149" if status and ("INVALIDATED" in status or "DID_NOT_HOLD" in status) else "#8b949e"
+    out = (f"<p id='decisionForwardTrial' style='color:{colour};font-weight:700'>"
+           f"{_esc(status or NO_DATA_TEXT)}</p><p class='sub'>{_esc(view.get('text') or '')}</p>")
+    if view.get("candidates"):
+        out += ("<div class='wrap'><table id='decisionFreezeGates'><thead><tr><th>Tile</th><th>n</th><th>95% CI</th>"
+                "<th>Failed freeze gates</th></tr></thead><tbody>" + "".join(
+                    f"<tr><td>{_esc(c['lane'])}</td><td>{_esc(c['n'])}</td><td>{_esc(_ci_text(c['ci']))}</td>"
+                    f"<td>{_esc(', '.join(c['failed']) or 'none')}</td></tr>" for c in view["candidates"])
+                + "</tbody></table></div>")
+    if view.get("daily"):
+        out += ("<div class='wrap'><table id='decisionTrialDaily'><thead><tr><th>Day</th><th>Candidate n / EV</th>"
+                "<th>Control n / EV</th><th>EV difference</th></tr></thead><tbody>" + "".join(
+                    f"<tr><td>{d['day']}</td><td>{_esc(d['candidate']['n'])} / {_esc(_usd(d['candidate']['mean_usd']) if d['candidate']['mean_usd'] is not None else NO_DATA_TEXT)}</td>"
+                    f"<td>{_esc(d['control']['n'])} / {_esc(_usd(d['control']['mean_usd']) if d['control']['mean_usd'] is not None else NO_DATA_TEXT)}</td>"
+                    f"<td>{_esc(_usd(d['ev_diff_usd']) if d['ev_diff_usd'] is not None else NO_DATA_TEXT)}</td></tr>"
+                    for d in view["daily"]) + "</tbody></table></div>")
+    if view.get("drift"):
+        out += f"<p style='color:#f85149'>Identity drift: {_esc(', '.join(view['drift']))}</p>"
+    return out + ("<p class='sub'>Freezing records candidate and control identities only; it cannot change runtime "
+                  "behaviour, tile toggles or relay eligibility.</p>")
 
 
 def render_decision_html(payload: dict, *, nav_links, details_href: str = "/details") -> str:
@@ -675,6 +770,7 @@ def render_decision_html(payload: dict, *, nav_links, details_href: str = "/deta
         f"<tr><td>{_esc(row['label'])}</td><td>{_esc(row['text'])}</td></tr>"
         for row in payload.get("freshness") or []
     )
+    selector_html, trial_html = _selector_html(payload.get("selector") or {}), _trial_html(payload.get("forward_trial") or {})
     nav = " · ".join(f"<a href=\"{_esc(href)}\">{_esc(label)}</a>" for label, href in nav_links)
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -703,6 +799,8 @@ ul{{padding-left:18px;}} li{{margin:6px 0;}} .wrap{{overflow-x:auto;}}
 <p class="sub">A tile needs at least {payload.get('min_sample', MIN_DECISION_SAMPLE)} closed trades before any EV
 verdict or ranking. "no data yet" means the value was not collected or not published; it is never a zero.</p>
 <h2>Trade counts</h2><p id="decisionTradeScope">{_esc((payload.get('trade_counts') or {}).get('text') or NO_DATA_TEXT)}</p>
+<h2>Fixed tile vs dynamic selector (walk-forward OOS, after costs)</h2>{selector_html}
+<h2>Forward trial (freeze protocol, 15 days)</h2>{trial_html}
 <h2>Bitfinex relay state (read-only)</h2><div class="wrap"><table id="decisionRelayState">{relay_html}</table></div>
 <p class="sub">From the laptop's authenticated ops relay-status snapshot. Missing or failed snapshots are shown as
 no data, never as flat or disarmed. This page cannot arm or change the relay.</p>

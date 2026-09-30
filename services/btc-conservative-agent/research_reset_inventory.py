@@ -78,6 +78,7 @@ best_policy_research_report.json safe_policy_genome_v3_report.json
 conservative_fill_descriptive_report.json cross_world_evidence_report.json
 fill_time_guard_counterfactual_report.json policy_search_manifest.json roster_policy.json
 tile_evidence_points_report.json trade_cohort_quarantine.json
+fixed_vs_dynamic_selector_report.json forward_trial_report.json
 """.split())
 ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
 GENOME_MIRROR_FILES = frozenset({"environment_genome.jsonl", "market_genome.jsonl",
