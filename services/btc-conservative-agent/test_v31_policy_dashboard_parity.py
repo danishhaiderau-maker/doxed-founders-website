@@ -98,6 +98,6 @@ def test_best_top_and_shadow_share_canonical_v31_epoch_and_counts(monkeypatch):
     assert shadow["collector_generation"] == "V3.1"
     assert shadow["epoch_id"] == "epoch-v31-clean"
     assert shadow["current_v3_1_collection"]["independent_opportunities"] == 5
-    assert shadow["v22_shadow"] == {}
+    assert "v22_shadow" not in shadow
     assert shadow["legacy_v22_excluded"]["status"].startswith("RETIRED_V2_2")
     assert shadow["live_policy_change_allowed"] is False

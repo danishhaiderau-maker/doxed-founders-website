@@ -942,7 +942,7 @@ def test_static_dynamic_and_shadow_apis_fail_closed_but_expose_current_detail(tm
     assert dynamic["regimes"] == []
     assert "No qualified dynamic OOS winner" in dynamic["warning"]
     assert dynamic["fallback"] == "CONTROL_OR_NO_TRADE"
-    assert shadow["v22_shadow"] == {}
+    assert "v22_shadow" not in shadow
     # A root-level legacy artifact that is absent from the current manifest is
     # not revived even as an excluded detail; its explicit empty envelope keeps
     # the current signed cohort fail-closed.

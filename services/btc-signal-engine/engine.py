@@ -32206,9 +32206,9 @@ __ADMIN_ACCESS_CONTROLS__
   <summary>Execution controls — chase selector is here</summary>
   <div class="advanced-content">
   <strong style="color:#58a6ff;">Trading Params</strong>
-  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. The legacy direct path uses the deterministic 0.1% anchor; the registered tiles use their signed per-policy offsets (__TILE_ENTRY_OFFSETS__).</p>
+  <p style="color:#8b949e;font-size:0.85em;margin:6px 0 10px 0;">Leverage, capacity, directional-gap gates, and exact chase counts — saved per port to config-PORT.json + browser backup. Registered tiles use their signed per-policy entry offsets (__TILE_ENTRY_OFFSETS__).</p>
 <label>Leverage (1–100x):</label><input id="leverage" type="number" min="1" max="100" value="100"><br>
-<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Benchmark / legacy direct anchor (deterministic 0.1%):</strong> LONG = price × 0.999 · SHORT = price × 1.001. This does not override the registered tile policies: __TILE_ENTRY_OFFSETS__. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain research/advisory fields only.</p>
+<p style="color:#58a6ff;font-size:0.84em;margin:4px 0 8px 0;"><strong>Entry offsets:</strong> registered tile policies __TILE_ENTRY_OFFSETS__. Micro support/resistance, EMA hybrid, AI-planner and 5-min trigger prices remain research/advisory fields only.</p>
 <label>Max concurrent signals:</label><input id="maxConcurrentPositions" type="number" min="1" max="20" value="20">
 <p style="color:#8b949e;font-size:0.82em;margin:4px 0 8px 0;">Total active slots (pending + open + awaiting). In research mode, same-direction exposure uses this cap (no separate MAX_LONGS=3).</p>
 <div id="capacityWarningBanner" style="display:none;margin:8px 0;padding:10px 12px;background:#7f1d1d;border:1px solid #ef4444;border-radius:6px;color:#fecaca;font-weight:600;"></div><br>

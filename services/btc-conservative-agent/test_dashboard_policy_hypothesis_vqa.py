@@ -10,8 +10,10 @@ ENGINE_SOURCE = (
 
 def test_dashboard_distinguishes_benchmark_anchor_from_family_offsets():
     for source in (BOT_SOURCE, ENGINE_SOURCE):
-        assert "Benchmark / legacy direct anchor (deterministic 0.1%)" in source
-        assert "registered tiles use their signed per-policy offsets (__TILE_ENTRY_OFFSETS__)" in source
+        assert "Benchmark / legacy direct anchor" not in source
+        assert "The legacy direct path uses the deterministic 0.1% anchor" not in source
+        assert "Registered tiles use their signed per-policy entry offsets (__TILE_ENTRY_OFFSETS__)" in source
+        assert "<strong>Entry offsets:</strong> registered tile policies __TILE_ENTRY_OFFSETS__." in source
         assert "the other four 0.30%" not in source
         assert "Initial policy limit" in source
         assert "Direction-only entries use the deterministic 0.1% offset anchor" not in source

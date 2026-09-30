@@ -3,7 +3,7 @@
   "combo_version": "2026-09-30",
   "exit_version": "five-family-exits-v1",
   "benchmark_lane": "CONTINUOUS_ANALYTICAL_ONLY",
-  "signal_hash": "9255f5423c1c",
+  "signal_hash": "09dde5bb2b30",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-09-30T05:48:04.261Z"
+  "updated_at": "2026-09-30T07:00:33.381Z"
 }

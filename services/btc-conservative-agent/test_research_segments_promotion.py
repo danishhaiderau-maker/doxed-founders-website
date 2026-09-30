@@ -117,3 +117,10 @@ def test_view_must_be_empty_and_outside_the_shadow_tree(tmp_path):
     with pytest.raises(promotion.PromotionRefused, match="VIEW_NOT_EMPTY"):
         promotion.stage_view(shadow_root=env.shadow, view_root=occupied, head=head, health=health)
     assert (occupied / "keep.txt").read_text() == "evidence"
+
+def test_promotion_heartbeat_carries_v2_genesis(tmp_path):
+    env, head, health = _synced(tmp_path)
+    view = tmp_path / "view"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, genesis_at=1790735978.5)
+    heartbeat = json.loads((view / promotion.HEARTBEAT_NAME).read_text(encoding="utf-8"))
+    assert heartbeat["segmentGenesisAt"] == 1790735978.5

@@ -1074,6 +1074,24 @@ def _session_hours(session: dict = None) -> float:
     return (pd.Timestamp.now(tz="UTC") - start).total_seconds() / 3600.0
 
 
+def _v2_data_start_ts():
+    """v2 segment genesis: Fly shipper baseline, else the promoted laptop heartbeat."""
+    sources = (
+        (os.path.join("segment-shipper-v2", "state.json"),
+         lambda doc: (doc.get("baseline") or {}).get("created_at")),
+        (".fly-data-sync-loop.heartbeat.json", lambda doc: doc.get("segmentGenesisAt")),
+    )
+    for name, pick in sources:
+        try:
+            with open(_agent_data_path(name), encoding="utf-8") as f:
+                value = float(pick(json.load(f)) or 0)
+        except Exception:
+            continue
+        if value > 0:
+            return pd.Timestamp(value, unit="s", tz="UTC")
+    return None
+
+
 def filter_df_since_session(df, session: dict, ts_cols=("ts", "timestamp")):
     """Keep only rows collected after the current bot session started."""
     if df is None or df.empty or not session:
@@ -21397,6 +21415,9 @@ def build_executive_summary_payload(
     session = session or load_research_session()
     scope = "ALL-DATA" if data_scope == "all" else _shadow_scope_label(session)
     hours = _session_hours(session) if data_scope == "session" else None
+    data_start = _v2_data_start_ts() if data_scope == "session" else None
+    data_start_hours = ((pd.Timestamp.now(tz="UTC") - data_start).total_seconds() / 3600.0
+                        if data_start is not None else None)
 
     n_trades = 0
     wr = net = ev = None
@@ -21522,6 +21543,8 @@ def build_executive_summary_payload(
         "data_scope": data_scope,
         "session_scope": scope,
         "session_hours": round(float(hours), 2) if hours is not None else None,
+        "data_start_utc": data_start.strftime("%Y-%m-%d %H:%M UTC") if data_start is not None else None,
+        "data_start_hours": round(data_start_hours, 2) if data_start_hours is not None else None,
         "dataset": dataset_counts or {},
         "performance": {
             "trades": n_trades,
@@ -21643,6 +21666,13 @@ def _fmt_pct(val, decimals=1, default="n/a"):
     return f"{rendered}%" if rendered != default else default
 
 
+def _session_age_label(payload):
+    if payload.get("data_start_hours") is not None:
+        return f"~{payload['data_start_hours']:.1f}h since v2 data start {payload.get('data_start_utc')}"
+    hours = payload.get("session_hours")
+    return f"~{hours:.1f}h bot session" if hours else ""
+
+
 def format_executive_summary_short(payload):
     """Layer 1 — ~15 lines: KPIs + funnel + pointers to deeper artifacts."""
     p = payload.get("performance") or {}
@@ -21651,7 +21681,7 @@ def format_executive_summary_short(payload):
     ds = payload.get("dataset") or {}
     scope = payload.get("session_scope", "ALL-DATA")
     hours = payload.get("session_hours")
-    time_label = f"~{hours:.1f}h bot session" if hours else "full CSV history"
+    time_label = _session_age_label(payload) or "full CSV history"
     csv_n = ds.get("csv_trades", p.get("trades", 0))
     analyzed = p.get("trades", 0)
 
@@ -22134,8 +22164,8 @@ def write_analysis_dashboard_html(payload, *, lifecycle_inventory=None):
         if os.path.isfile(href):
             report_links += f'<li><a href="{esc(href)}">{esc(title)}</a></li>\n'
     scope_meta = payload.get("session_scope", "ALL-DATA")
-    if payload.get("session_hours"):
-        scope_meta += f" · ~{payload.get('session_hours')}h"
+    if _session_age_label(payload):
+        scope_meta += f" · {_session_age_label(payload)}"
     else:
         ds = payload.get("dataset") or {}
         scope_meta += f" · {ds.get('csv_trades', '?')} CSV trade rows"
