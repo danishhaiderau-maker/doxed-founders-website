@@ -44,9 +44,12 @@ EXCLUDED_NAMES = frozenset({
 EXCLUDED_SUFFIXES = (".jsonl.validation.json",)
 
 # Runtime-relative patterns (fnmatch, case-sensitive). The lifecycle pipeline
-# worker's request files are transient IPC handoffs deleted within seconds;
-# the evidence they produce is written to the v3 ledgers.
-EXCLUDED_PATH_GLOBS = ("v3/lifecycle_worker/pipeline-request-*.json",)
+# worker's request/result files are transient IPC handoffs deleted within
+# seconds; the evidence they produce is written to the v3 ledgers.
+EXCLUDED_PATH_GLOBS = (
+    "v3/lifecycle_worker/pipeline-request-*.json",
+    "v3/lifecycle_worker/pipeline-result-*.json",
+)
 
 EXCLUDED_DIR_NAMES = frozenset({
     # Per-object writer locks are transient coordination state.

@@ -420,9 +420,13 @@ def test_file_deleted_between_scan_and_read_is_a_race_for_its_stream_only(tmp_pa
     assert raced["race"] == "z_handoff.json" and raced["shipped"]
     members = json.loads(env.store.get(fmt.manifest_key("v1", raced["shipped"]["seq"])))["members"]
     assert [m["path"] for m in members] == ["a_live.jsonl"]
+    assert [item["path"] for item in shipper.racing_paths()] == ["z_handoff.json"]
     shipper.plan = real_plan
-    env.clock[0] += shipper_mod.RACE_BACKOFF_BASE_SECONDS
+    # The vanished stream can never ship, so it must not stay in racing_paths
+    # (the laptop refuses promotion while a never-shipped path is racing).
     assert shipper.cycle()["shipped"] is None
+    assert shipper.race_backoff == {}
+    assert json.loads(shipper.status_path.read_text())["racing_paths"] == []
     env.puller().pull_once()
     env.assert_tree_matches_source()
 
@@ -459,12 +463,14 @@ def test_lifecycle_pipeline_request_files_are_not_shipped(tmp_path):
     env = Env(tmp_path)
     env.store = VolumeStore(env.store_root)
     env.write("v3/lifecycle_worker/pipeline-request-abc123.json", b"{}")
+    env.write("v3/lifecycle_worker/pipeline-result-abc123.json", b"{}")
     env.write("v3/lifecycle_worker/status.json", b"{}")
     env.write("v3/pipeline-request-abc123.json", b"{}")
     shipper = env.shipper()
     shipper.rules = shipper_mod.load_selection_rules()
     scanned = shipper.scan()
     assert "v3/lifecycle_worker/pipeline-request-abc123.json" not in scanned
+    assert "v3/lifecycle_worker/pipeline-result-abc123.json" not in scanned
     assert {"v3/lifecycle_worker/status.json", "v3/pipeline-request-abc123.json"} <= set(scanned)
 
 
