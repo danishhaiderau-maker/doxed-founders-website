@@ -391,6 +391,7 @@ def tile_geometry_specs(manifest: Iterable[Mapping[str, Any]], leverage: float) 
         hard_margin = _finite(exit_.get("hard_stop_margin_pct"))
         specs.append({
             "lane": str(tile.get("lane")),
+            "entry_mode": entry.get("mode"),
             "offset_pct": offset_pct,
             "stop_atr_k": _finite(exit_.get("initial_stop_atr_k")),
             "hard_stop_pct": None if not hard_margin or lev <= 0 else round(hard_margin / lev, 6),

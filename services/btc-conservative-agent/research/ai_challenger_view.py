@@ -166,7 +166,7 @@ def render_ai_challenger_html(report: dict | None, *, evidence: dict | None, nav
     else:
         banner = (f"CURRENT generation {_esc(evidence.get('generated_at_display') or '')} · status "
                   f"{_esc(report.get('status'))} · epoch {_esc(report.get('epoch_id') or NO_DATA_TEXT)} · "
-                  f"SHADOW ONLY, no orders; tiles still trade the score-led LLM side")
+                  f"SHADOW ONLY, no orders; tile admission unchanged")
         colour = "#3fb950" if report.get("status") == "OK" else "#d29922"
     nav = " · ".join(f"<a href='{_esc(href)}'>{_esc(label)}</a>" for label, href in nav_links)
     method = report.get("method") or {}

@@ -449,7 +449,7 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         row = call_rows[0]
         assert row["gates_orders"] is False and row["row_kind"] == "CALL"
         assert row["sides"]["compact_v5"] == "LONG"
-        assert row["tiles_admitted_side"] == row["sides"]["llm_score_led"] == "LONG"
+        assert row["score_led_admission_side"] == row["sides"]["llm_score_led"] == "LONG"
         assert row["win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
         lanes = [s["lane"] for s in row["geometry_specs"]]
         assert lanes[:-1] == [t["lane"] for t in bot.active_tile_lifecycle_manifest()]

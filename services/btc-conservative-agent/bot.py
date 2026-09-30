@@ -28578,8 +28578,11 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
         "win_prob": ai_result.get("win_prob"),
         **challengers,
-        "tiles_admitted_side": challengers["sides"]["llm_score_led"],
-        "tiles_admission_note": "score-led admission trades llm_score_led on non-tied scores",
+        "score_led_admission_side": challengers["sides"]["llm_score_led"],
+        "admission_note": (
+            "llm_score_led is the score-led admission side; each tile may add its own gates "
+            "(the tile ledgers are the truth for orders). This log never changes admission."
+        ),
         "tape_features": tape,
         "compact_prompt_state": compact_row.get("call_state"),
         "geometry_model": _ai_shadow.GEOMETRY_MODEL,
@@ -28704,7 +28707,7 @@ def ai_shadow_dashboard_snapshot() -> dict:
         "note": (
             "Descriptive since process start over at most the last 480 calls. No confidence "
             "intervals or multiple-testing correction here; the analyzer AI challenger report "
-            "carries both. Tiles still trade llm_score_led."
+            "carries both. Tile admission is unchanged by this log."
         ),
         "prompt_id": SHARED_DIRECTION_PROMPT_ID,
         "compact_prompt_id": _ai_shadow.COMPACT_PROMPT_ID,
