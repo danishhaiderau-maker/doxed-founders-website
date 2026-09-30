@@ -281,6 +281,17 @@ def test_monitor_flags_a_failing_pull_loop(chain):
 
 
 @windows_only
+def test_monitor_treats_shadow_lock_contention_as_busy(chain):
+    (chain["state"]).mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=2,
+                 error="PullerError: another puller run holds the shadow-root lock")
+    result = _monitor_with_pull_loop_held(chain)
+    active = json.loads((chain["state"] / "alerts" / "active-alerts.json").read_text(encoding="utf-8-sig"))
+    assert active["alerts"] == [], result.stdout + result.stderr
+
+
+@windows_only
 def test_monitor_is_quiet_when_chain_is_healthy(chain):
     chain["state"].mkdir(parents=True, exist_ok=True)
     (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
