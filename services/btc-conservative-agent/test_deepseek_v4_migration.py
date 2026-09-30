@@ -114,7 +114,11 @@ def run():
             "retired V2 research AI cannot be environment-enabled",
             bot.TRADING_AI_ONLY
             and bot.TRADING_AI_ALLOWED_PURPOSES
-            == frozenset({"trading_direction", "trading_confirmation"}),
+            == frozenset({
+                "trading_direction",
+                "trading_confirmation",
+                "trading_direction_shadow",
+            }),
         )
         analyzer_source = (
             Path(__file__).with_name("analyzer_research_engine_v62.py")

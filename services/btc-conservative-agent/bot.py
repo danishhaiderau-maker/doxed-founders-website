@@ -3590,6 +3590,8 @@ def _run_post_ai_evidence_hook(job: dict) -> None:
             _record_post_ai_evidence_gap(hook, "REPLAY_LOCK_TIMEOUT", job.get("key"))
     elif hook == "ai_reason":
         log_ai_reason_research(ctx, ai_result, research_lane)
+    elif hook == "ai_shadow_challengers":
+        _run_ai_shadow_challengers(ctx, ai_result)
     else:
         raise ValueError(f"unknown post-AI evidence hook: {hook}")
     with state_lock:
@@ -3636,7 +3638,7 @@ def enqueue_post_ai_research_hooks(ctx: dict, ai_result: dict, research_lane: st
             "stage": "POST_AI_ENQUEUE",
             "stage_started_ts": time.time(),
         })
-    for hook in ("reversal_study", "ai_reason"):
+    for hook in ("reversal_study", "ai_reason", "ai_shadow_challengers"):
         key = f"{hook}:{trade_id}"
         queued = _get_post_ai_evidence_worker(hook).submit(
             key,
@@ -8346,10 +8348,13 @@ DEEPSEEK_SUPPORTED_THINKING_MODES = frozenset({"enabled", "disabled"})
 # Hard production boundary: DeepSeek is an execution input, never a dashboard or
 # research-report engine. Deterministic collectors/analyzers may consume the
 # resulting trade receipts, but they must not create additional model traffic.
+# "trading_direction_shadow" is the budget-capped compact forecast that is logged
+# for the challenger study only and can never gate or size an order.
 TRADING_AI_ONLY = True
 TRADING_AI_ALLOWED_PURPOSES = frozenset({
     "trading_direction",
     "trading_confirmation",
+    "trading_direction_shadow",
 })
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
@@ -13295,17 +13300,30 @@ def build_shared_direction_prompt_context(ctx: dict) -> dict:
     mc = source.get("market_context") or {}
     cycle = source.get("cycle_3m_universe") or source.get("exhaustion_3m") or {}
     upgrade = source.get("ai_input_upgrade") or {}
+    tape = source.get("tape_features") or {}
+    funding = source.get("funding") or {}
+    # The 3m universe block keys its oscillator and bucket as stoch_rsi_k/_d and
+    # cycle_bucket (start of the forming bar = close of the last closed bar).
+    closed_3m_ts = (
+        cycle.get("closed_3m_ts") or cycle.get("cycle_bucket")
+        or cycle.get("candle_ts") or cycle.get("bucket_ts")
+    )
     raw = {
         "price": source.get("price"),
-        "closed_3m_ts": cycle.get("closed_3m_ts") or cycle.get("candle_ts") or cycle.get("bucket_ts"),
+        "closed_3m_ts": closed_3m_ts,
+        "closed_3m_age_s": (
+            round(time.time() - float(closed_3m_ts), 1) if closed_3m_ts is not None else None
+        ),
         "rsi_3m": cycle.get("rsi_3m") or cycle.get("rsi14_3m"),
-        "stoch_rsi_k_3m": cycle.get("stoch_rsi_k_3m"),
-        "stoch_rsi_d_3m": cycle.get("stoch_rsi_d_3m"),
+        "stoch_rsi_k_3m": cycle.get("stoch_rsi_k_3m", cycle.get("stoch_rsi_k")),
+        "stoch_rsi_d_3m": cycle.get("stoch_rsi_d_3m", cycle.get("stoch_rsi_d")),
         "atr14_pct_3m": cycle.get("atr14_pct_3m"),
         "donchian_loc_3m": cycle.get("donchian_loc_3m"),
         "bb_width_3m": cycle.get("bb_width_3m"),
-        "ret_1m": source.get("ret_1m"),
-        "ret_5m": source.get("ret_5m"),
+        "ret_1m_bp": tape.get("ret_1m_bp"),
+        "ret_5m_bp": tape.get("ret_5m_bp"),
+        "ret_15m_bp": tape.get("ret_15m_bp"),
+        "tape_age_s": tape.get("tape_age_s"),
         "ema9": source.get("ema9"),
         "ema21": source.get("ema21"),
         "ema200": source.get("ema200"),
@@ -13335,12 +13353,29 @@ def build_shared_direction_prompt_context(ctx: dict) -> dict:
             weak_countertrend_conflict(source, "SHORT"),
         ) if reason and reason != "NO_EXECUTABLE_DIRECTION"
     ]
+    rate = funding.get("rate")
+    mark, index = funding.get("mark_price"), funding.get("index_price")
+    derivatives = {
+        "funding_bp_8h": round(float(rate) * 1e4, 4) if rate is not None else None,
+        "funding_sign_note": "positive = longs pay shorts",
+        "funding_source": funding.get("source"),
+        "minutes_to_funding": (
+            round((float(funding["next_time"]) - time.time()) / 60.0, 1)
+            if funding.get("next_time") else None
+        ),
+        "basis_bp": (
+            round((float(mark) - float(index)) / float(index) * 1e4, 3)
+            if mark and index else None
+        ),
+        "open_interest": funding.get("open_interest"),
+    }
     return sanitize_ai_inputs({
-        "schema": "shared_direction_prompt_v4",
+        "schema": SHARED_DIRECTION_PROMPT_SCHEMA,
         "as_of_utc": utc_iso(),
         "shared_ai_call_id": source.get("trade_id"),
         "data_quality": source.get("data_quality"),
         "raw": raw,
+        "derivatives": derivatives,
         "derived": derived,
         "contraindications": conflicts,
     })
@@ -15564,6 +15599,7 @@ def parse_ai_response_fields(text: str) -> dict:
         "candidate_direction": direction,
         "raw_direction": raw_direction,
         "win_prob": max(0, min(100, int(win_prob or 0))),
+        "win_prob_status": "EMITTED" if int(win_prob or 0) > 0 else "NOT_REQUESTED_BY_PROMPT",
         "confidence_requested": False,
         "decision": decision,
         "override": override,
@@ -17634,7 +17670,15 @@ def _pick_dashboard_last_ai(snapshot: dict, ai_history: list) -> dict:
 
 _last_pipeline_event_log = {"key": None, "ts": 0.0}
 
-def call_deepseek_api(messages, temperature=0.4, *, purpose: str):
+def call_deepseek_api(
+    messages,
+    temperature=0.4,
+    *,
+    purpose: str,
+    max_tokens=None,
+    response_format=None,
+    timeout=None,
+):
     """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
     if manual_admin_pause_active():
         raise RuntimeError("ADMIN_MANUAL_PAUSE")
@@ -17651,13 +17695,17 @@ def call_deepseek_api(messages, temperature=0.4, *, purpose: str):
         "temperature": temperature,
         "thinking": {"type": thinking_mode},
     }
+    if max_tokens:
+        request_payload["max_tokens"] = int(max_tokens)
+    if response_format:
+        request_payload["response_format"] = response_format
     t0 = time.time()
     try:
         res = requests.post(
             DEEPSEEK_URL,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json=request_payload,
-            timeout=AI_TIMEOUT_SEC,
+            timeout=timeout or AI_TIMEOUT_SEC,
         )
     except requests.RequestException as e:
         raise RuntimeError(f"HTTP_ERROR:{e}") from e
@@ -18882,9 +18930,11 @@ def evaluate_signal_with_ai(
         replay_eval = compute_replay_model_eval(ctx, float(state.get("last_edge") or ctx.get("edge_score") or 0))
         with state_lock:
             state["last_replay_model_eval"] = copy.deepcopy(replay_eval)
+        ctx["tape_features"] = _ai_shadow_tape_features()
         # One shared direction prompt is the only runtime AI layer.
         prompt_context = build_shared_direction_prompt_context(ctx)
         if not shadow_only:
+            _ai_shadow_observe_prompt(ctx.get("trade_id"), prompt_context)
             # The dashboard label promises the exact model payload.  Keep the
             # full research context in ai_input_log.jsonl, but expose only the
             # compact context actually serialized into the DeepSeek prompt.
@@ -18935,6 +18985,8 @@ def evaluate_signal_with_ai(
             )
         ai_result = {
             "win_prob": win_prob,
+            "win_prob_status": parsed.get("win_prob_status"),
+            "ai_threshold_effective": parsed.get("win_prob_status") == "EMITTED",
             "direction": direction,
             "candidate_direction": parsed.get("candidate_direction") or direction,
             "raw_direction": parsed.get("raw_direction"),
@@ -25491,6 +25543,10 @@ def microstructure_capture_loop():
             ask_qty=ask_qty, last=last, source_ts=source_ts,
             trades=bucket_trades, symbol=BITFINEX_WS_SYMBOL,
         )
+        try:
+            _AI_SHADOW_TAPE.append_bucket(row)
+        except Exception as exc:
+            logger.debug(f"[AI SHADOW] tape ring append skipped: {exc}")
         append_outcome = {}
         if _safe_append_jsonl(
             MICROSTRUCTURE_TAPE_FILE, row,
@@ -28283,7 +28339,38 @@ def close_position(pos: dict, exit_reason: str):
     clear_pending_trade()
     pipeline_state_sync()
 
-SHARED_DIRECTION_PROMPT_ID = "shared_direction_conflict_abstain_v4_20260826"
+import ai_shadow_challengers as _ai_shadow
+
+AI_SHADOW_CHALLENGER_FILE = _ai_shadow.CHALLENGER_FILE
+AI_SHADOW_COMPACT_PROMPT_FILE = _ai_shadow.COMPACT_PROMPT_FILE
+AI_SHADOW_COMPACT_PROMPT_ENABLED = os.getenv("AI_SHADOW_COMPACT_PROMPT_ENABLED", "1").strip() == "1"
+AI_SHADOW_COMPACT_MAX_TOKENS = max(32, int(os.getenv("AI_SHADOW_COMPACT_MAX_TOKENS", "120")))
+AI_SHADOW_COMPACT_TIMEOUT_SEC = max(5.0, float(os.getenv("AI_SHADOW_COMPACT_TIMEOUT_SEC", "20")))
+AI_INPUT_DEAD_FIELD_CALLS = max(2, int(os.getenv("AI_INPUT_DEAD_FIELD_CALLS", "20")))
+_AI_SHADOW_TAPE = _ai_shadow.TapeRing()
+_AI_SHADOW_BOOK = _ai_shadow.ChallengerBook()
+_AI_SHADOW_OI = _ai_shadow.OpenInterestHistory()
+_AI_SHADOW_BUDGET = _ai_shadow.CompactPromptBudget(
+    min_interval_sec=float(os.getenv("AI_SHADOW_COMPACT_MIN_INTERVAL_SEC", "150")),
+    daily_cap=int(os.getenv("AI_SHADOW_COMPACT_DAILY_CAP", "600")),
+)
+_AI_INPUT_DEAD_DETECTOR = _ai_shadow.DeadInputDetector(AI_INPUT_DEAD_FIELD_CALLS)
+_AI_SHADOW_PROMPT_PAYLOADS = {}
+_AI_SHADOW_LOCK = threading.Lock()
+_ai_shadow_status = {
+    "calls_logged": 0,
+    "compact_ok": 0,
+    "compact_errors": 0,
+    "compact_skipped": 0,
+    "last_call_ts": 0.0,
+    "last_compact_error": None,
+    "recent": deque(maxlen=480),
+    "boot_recovered_calls": 0,
+    "boot_hydrated_seconds": 0,
+}
+
+SHARED_DIRECTION_PROMPT_ID = "shared_direction_conflict_abstain_v4_1_20261001"
+SHARED_DIRECTION_PROMPT_SCHEMA = "shared_direction_prompt_v4_1"
 
 AI_PROMPT_TEMPLATE = """
 You are a direction classifier for short-duration BTC perpetual research.
@@ -28336,10 +28423,299 @@ RESEARCH DATA COLLECTION MODE (active):
   shared candidate afterward.
 - Do not decide any tile's verdict and do not return any field beyond direction,
   long_score, short_score, and one short reason.
-- exhaustion_3m / exhaustion_3m_line is the cycle-aligned oscillator block
-  (3-minute bars resampled from Bitfinex 1m). Use it for this-cycle exhaustion.
-  Do not substitute 5m/15m/1h RSI — those are not the decision timeframe.
+- raw.rsi_3m, raw.stoch_rsi_k_3m/_d_3m, raw.atr14_pct_3m, raw.donchian_loc_3m and
+  raw.bb_width_3m are the cycle-aligned 3-minute block (Bitfinex 1m resampled to 3m);
+  raw.closed_3m_ts / raw.closed_3m_age_s give its freshness.
+- raw.ret_*_bp are mid returns in basis points from the 1-second tape; null means
+  unobserved, not flat. derivatives.funding_bp_8h is positive when longs pay shorts.
 """
+
+
+def _ai_shadow_tape_features(now: float = None) -> dict:
+    try:
+        return _ai_shadow.tape_features(_AI_SHADOW_TAPE, float(now or time.time()))
+    except Exception as exc:
+        logger.warning(f"[AI SHADOW] tape features unavailable: {exc} [PIPELINE ENFORCEMENT]")
+        return {"source": "UNAVAILABLE", "error": type(exc).__name__}
+
+
+def _ai_shadow_observe_prompt(call_id, prompt_context: dict) -> dict:
+    try:
+        report = _AI_INPUT_DEAD_DETECTOR.observe(prompt_context or {})
+        with _AI_SHADOW_LOCK:
+            _AI_SHADOW_PROMPT_PAYLOADS[str(call_id or "")] = copy.deepcopy(prompt_context or {})
+            while len(_AI_SHADOW_PROMPT_PAYLOADS) > 16:
+                _AI_SHADOW_PROMPT_PAYLOADS.pop(next(iter(_AI_SHADOW_PROMPT_PAYLOADS)))
+    except Exception as exc:
+        logger.warning(f"[AI SHADOW] input health observe failed: {exc} [PIPELINE ENFORCEMENT]")
+        return {"status": "UNAVAILABLE", "dead_fields": []}
+    if report.get("status") == "DEAD_INPUT":
+        logger.warning(
+            "[AI INPUT DEAD FIELD] %s [PIPELINE ENFORCEMENT]",
+            ", ".join(f"{d['path']}={d['kind']}x{d['calls']}" for d in report["dead_fields"][:8]),
+        )
+    return report
+
+
+def ai_input_health_snapshot() -> dict:
+    report = _AI_INPUT_DEAD_DETECTOR.report()
+    report["prompt_id"] = SHARED_DIRECTION_PROMPT_ID
+    report["prompt_schema"] = SHARED_DIRECTION_PROMPT_SCHEMA
+    report["dead_fields"] = report["dead_fields"][:20]
+    return report
+
+
+def _ai_shadow_decision_ts(ai_result: dict) -> float:
+    raw = (ai_result or {}).get("shared_ai_call_ts")
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return time.time()
+
+
+def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -> dict:
+    funding = (ctx or {}).get("funding") or {}
+    facts = _ai_shadow.build_compact_facts(
+        ctx or {}, tape or {}, now_ts=now_ts, as_of_utc=utc_iso(),
+        oi_change_1h_pct=_AI_SHADOW_OI.observe(now_ts, funding.get("open_interest")),
+    )
+    row = {
+        "schema": _ai_shadow.COMPACT_PROMPT_SCHEMA,
+        "row_kind": "COMPACT_PROMPT",
+        "shared_ai_call_id": call_id,
+        "prompt_id": _ai_shadow.COMPACT_PROMPT_ID,
+        "observed_at_utc": utc_iso(),
+        "epoch_id": _collector_v22_epoch_id(),
+        "git_rev": _runtime_git_rev(),
+        "temperature": 0.0,
+        "max_tokens": AI_SHADOW_COMPACT_MAX_TOKENS,
+        "geometry": dict(_ai_shadow.COMPACT_GEOMETRY),
+        "facts": facts,
+        "facts_sha256": hashlib.sha256(
+            json.dumps(facts, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest(),
+        "gates_orders": False,
+        "call_state": None,
+        "parsed": None,
+        "side": _ai_shadow.NONE,
+    }
+    if not AI_SHADOW_COMPACT_PROMPT_ENABLED:
+        row["call_state"] = "DISABLED"
+        return row
+    if os.environ.get("DEMO_MODE_ENABLED", "").lower() == "true":
+        row["call_state"] = "SKIPPED_DEMO_MODE"
+        return row
+    allowed, reason = _AI_SHADOW_BUDGET.acquire(now_ts)
+    if not allowed:
+        row["call_state"] = f"SKIPPED_{reason}"
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["compact_skipped"] += 1
+        return row
+    try:
+        text, latency_ms = call_deepseek_api(
+            _ai_shadow.render_compact_messages(facts),
+            temperature=0.0,
+            purpose="trading_direction_shadow",
+            max_tokens=AI_SHADOW_COMPACT_MAX_TOKENS,
+            response_format={"type": "json_object"},
+            timeout=AI_SHADOW_COMPACT_TIMEOUT_SEC,
+        )
+        parsed = _ai_shadow.parse_compact_response(text)
+        row.update({
+            "call_state": "CALLED",
+            "model": _deepseek_model(),
+            "latency_ms": latency_ms,
+            "raw_response": str(text)[:600],
+            "parsed": parsed,
+            "side": _ai_shadow.compact_side(parsed),
+        })
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["compact_ok"] += int(parsed.get("parse_status") == "OK")
+            _ai_shadow_status["compact_errors"] += int(parsed.get("parse_status") != "OK")
+    except Exception as exc:
+        row.update({"call_state": "ERROR", "error": str(exc)[:300]})
+        with _AI_SHADOW_LOCK:
+            _ai_shadow_status["compact_errors"] += 1
+            _ai_shadow_status["last_compact_error"] = str(exc)[:160]
+    return row
+
+
+def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
+    """Log every challenger's side for one shared call; never touches orders."""
+    ctx = ctx or {}
+    ai_result = ai_result or {}
+    if ai_result.get("shadow_only"):
+        return
+    call_id = str(ai_result.get("shared_ai_call_id") or ai_result.get("trade_id") or ctx.get("trade_id") or "")
+    if not call_id:
+        return
+    decision_ts = _ai_shadow_decision_ts(ai_result)
+    tape = ctx.get("tape_features")
+    if not isinstance(tape, dict) or tape.get("source") == "UNAVAILABLE":
+        tape = _ai_shadow_tape_features(decision_ts)
+    compact_row = _ai_shadow_run_compact(ctx, tape, call_id, time.time())
+    challengers = _ai_shadow.compute_challenger_sides(
+        ctx, ai_result, tape, call_id, compact=compact_row.get("parsed"),
+    )
+    cycle = ctx.get("cycle_3m_universe") or ctx.get("exhaustion_3m") or {}
+    with state_lock:
+        leverage = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
+    with _AI_SHADOW_LOCK:
+        payload = _AI_SHADOW_PROMPT_PAYLOADS.pop(call_id, None)
+    call_row = {
+        "schema": _ai_shadow.CALL_SCHEMA,
+        "row_kind": "CALL",
+        "shared_ai_call_id": call_id,
+        "decision_ts": decision_ts,
+        "decision_utc": ai_result.get("shared_ai_call_ts"),
+        "decision_price": ctx.get("price"),
+        "atr14_pct_3m": cycle.get("atr14_pct_3m") if isinstance(cycle, dict) else None,
+        "epoch_id": _collector_v22_epoch_id(),
+        "git_rev": _runtime_git_rev(),
+        "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
+        "prompt_schema": SHARED_DIRECTION_PROMPT_SCHEMA,
+        "deepseek_model": ai_result.get("deepseek_model"),
+        "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
+        "win_prob": ai_result.get("win_prob"),
+        **challengers,
+        "tiles_admitted_side": challengers["sides"]["llm_score_led"],
+        "tiles_admission_note": "score-led admission trades llm_score_led on non-tied scores",
+        "tape_features": tape,
+        "compact_prompt_state": compact_row.get("call_state"),
+        "geometry_model": _ai_shadow.GEOMETRY_MODEL,
+        "geometry_specs": _ai_shadow.tile_geometry_specs(active_tile_lifecycle_manifest(), leverage),
+        "prompt_payload": payload,
+        "gates_orders": False,
+    }
+    _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, call_row, label="AI_SHADOW_CHALLENGER")
+    _safe_append_jsonl(AI_SHADOW_COMPACT_PROMPT_FILE, compact_row, label="AI_SHADOW_COMPACT_PROMPT")
+    _AI_SHADOW_BOOK.register(call_row)
+    with _AI_SHADOW_LOCK:
+        _ai_shadow_status["calls_logged"] += 1
+        _ai_shadow_status["last_call_ts"] = time.time()
+        _ai_shadow_status["recent"].append({
+            "call_id": call_id,
+            "sides": dict(challengers["sides"]),
+            "markouts": {},
+        })
+
+
+def _ai_shadow_note_matured(row: dict) -> None:
+    if row.get("row_kind") != "MARKOUT" or not row.get("tape_ok"):
+        return
+    with _AI_SHADOW_LOCK:
+        for entry in _ai_shadow_status["recent"]:
+            if entry["call_id"] == row.get("shared_ai_call_id"):
+                entry["markouts"][int(row["horizon_sec"])] = (
+                    float(row["mid_ret_bp"]),
+                    float(row.get("spread_in_bp") or 0.0) / 2.0 + float(row.get("spread_out_bp") or 0.0) / 2.0,
+                )
+                break
+
+
+def _read_jsonl_tail(path: str, max_bytes: int) -> list:
+    rows = []
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            chunk = handle.read()
+    except OSError:
+        return rows
+    lines = chunk.split(b"\n")
+    if len(chunk) >= max_bytes and lines:
+        lines = lines[1:]
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _ai_shadow_boot_recover() -> None:
+    history = _read_jsonl_tail(MICROSTRUCTURE_TAPE_FILE, 12 * 1024 * 1024)
+    hydrated = _AI_SHADOW_TAPE.merge_history(history)
+    pending = _ai_shadow.pending_calls_from_rows(
+        _read_jsonl_tail(AI_SHADOW_CHALLENGER_FILE, 8 * 1024 * 1024), time.time(),
+    )
+    recovered = sum(1 for row in pending if _AI_SHADOW_BOOK.register(row))
+    with _AI_SHADOW_LOCK:
+        _ai_shadow_status["boot_hydrated_seconds"] = hydrated
+        _ai_shadow_status["boot_recovered_calls"] = recovered
+    logger.info(
+        f"[AI SHADOW] boot tape_seconds={hydrated} recovered_pending_calls={recovered} "
+        f"[PIPELINE ENFORCEMENT]"
+    )
+
+
+def ai_shadow_maturation_loop():
+    """Mature challenger markouts from the tape ring; research evidence only."""
+    try:
+        _ai_shadow_boot_recover()
+    except Exception as exc:
+        logger.warning(f"[AI SHADOW] boot recovery failed: {exc} [PIPELINE ENFORCEMENT]")
+    while not shutdown_event.is_set():
+        if shutdown_event.wait(5.0):
+            break
+        try:
+            for row in _AI_SHADOW_BOOK.mature(_AI_SHADOW_TAPE, time.time()):
+                _safe_append_jsonl(AI_SHADOW_CHALLENGER_FILE, row, label="AI_SHADOW_CHALLENGER")
+                _ai_shadow_note_matured(row)
+        except Exception as exc:
+            logger.warning(f"[AI SHADOW] maturation failed: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def ai_shadow_dashboard_snapshot() -> dict:
+    """Descriptive since-boot challenger markouts for the main dashboard."""
+    horizons = (60, 300, 900, 3600)
+    with _AI_SHADOW_LOCK:
+        recent = [
+            {"sides": dict(e["sides"]), "markouts": dict(e["markouts"])}
+            for e in _ai_shadow_status["recent"]
+        ]
+        status = {k: v for k, v in _ai_shadow_status.items() if k != "recent"}
+    rows = []
+    for name in _ai_shadow.CHALLENGERS:
+        cells = {}
+        for h in horizons:
+            gross, net = [], []
+            for entry in recent:
+                sign = _ai_shadow.side_sign(entry["sides"].get(name))
+                mark = entry["markouts"].get(h)
+                if sign and mark:
+                    gross.append(sign * mark[0])
+                    net.append(sign * mark[0] - mark[1])
+            cells[str(h)] = {
+                "n": len(gross),
+                "mean_bp": round(sum(gross) / len(gross), 3) if gross else None,
+                "mean_net_bp": round(sum(net) / len(net), 3) if net else None,
+            }
+        rows.append({"challenger": name, "horizons": cells})
+    return {
+        "schema": "ai_shadow_dashboard_v1",
+        "mode": "SHADOW_ONLY_NO_ORDERS",
+        "note": (
+            "Descriptive since process start over at most the last 480 calls. No confidence "
+            "intervals or multiple-testing correction here; the analyzer AI challenger report "
+            "carries both. Tiles still trade llm_score_led."
+        ),
+        "prompt_id": SHARED_DIRECTION_PROMPT_ID,
+        "compact_prompt_id": _ai_shadow.COMPACT_PROMPT_ID,
+        "compact_enabled": AI_SHADOW_COMPACT_PROMPT_ENABLED,
+        "compact_budget": _AI_SHADOW_BUDGET.snapshot(),
+        "pending_calls": _AI_SHADOW_BOOK.pending_count(),
+        "book": dict(_AI_SHADOW_BOOK.stats),
+        "tape_ring_seconds": len(_AI_SHADOW_TAPE),
+        "win_prob_status": "NOT_REQUESTED_BY_PROMPT (ai_threshold has no effect)",
+        "input_health": ai_input_health_snapshot(),
+        "status": status,
+        "horizons_sec": list(horizons),
+        "rows": rows,
+    }
 
 signal_queue = Queue(maxsize=MAX_EVENT_QUEUE)
 event_queue = Queue(maxsize=MAX_EVENT_QUEUE)
@@ -29278,6 +29654,7 @@ def research_wipe_file_paths():
         GOLDEN_STACK_REJECTIONS_FILE, TREND_HEALTH_CSV_FILE, REVERSAL_STUDY_FILE,
         AI_REASON_RESEARCH_FILE, AI_CONFIDENCE_CALIBRATION_FILE, TRADE_LIFECYCLE_FILE,
         AI_INPUT_LOG_FILE,
+        AI_SHADOW_CHALLENGER_FILE, AI_SHADOW_COMPACT_PROMPT_FILE,
         EDGE_CENSUS_FILE,
         "pathway_scorecard.json", FILL_QUALITY_FILE, "fill_quality_report.json",
         "shadow_fill_outcome_report.json", "benchmark_vs_lanes_report.json", "pathway_lane_specs.json",
@@ -32733,6 +33110,9 @@ __ADMIN_ACCESS_CONTROLS__
     <p><strong>Heartbeat:</strong> <span id="heartbeat">-</span></p>
     <p><strong>AI Input (last payload sent to DeepSeek):</strong></p>
     <pre id="aiInput" style="max-height:280px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#0d1117;border:1px solid #30363d;padding:8px;font-size:0.8em;color:#c9d1d9;">-</pre>
+    <p><strong>AI vs Challengers (shadow only, no orders):</strong> <span id="aiShadowStatus">-</span></p>
+    <div id="aiShadowTable" style="overflow:auto;font-size:0.78em;color:#c9d1d9;">-</div>
+    <p id="aiShadowNote" style="color:#6e7681;font-size:0.74em;margin:4px 0 0 0;">-</p>
     <p><strong>Features:</strong> <span id="features">-</span></p>
     <p><strong>Data Quality:</strong> <span id="dataQuality">-</span></p>
 </div>
@@ -32951,6 +33331,39 @@ DASHBOARD_JS = """(function () {
     function safeHTML(id, html) {
       const el = document.getElementById(id);
       if (el) el.innerHTML = html ?? "";
+    }
+    function renderAiShadowPanel(s) {
+      if (!s || s.mode !== 'SHADOW_ONLY_NO_ORDERS') {
+        safeText('aiShadowStatus', s && s.mode ? s.mode : 'UNAVAILABLE');
+        safeHTML('aiShadowTable', '');
+        safeText('aiShadowNote', '');
+        return;
+      }
+      const st = s.status || {};
+      const health = s.input_health || {};
+      const dead = (health.dead_fields || []).map(f => f.path + '=' + f.kind).slice(0, 6);
+      safeText('aiShadowStatus',
+        'calls ' + (st.calls_logged || 0) + ' | pending ' + (s.pending_calls || 0)
+        + ' | tape ' + (s.tape_ring_seconds || 0) + 's | compact ok ' + (st.compact_ok || 0)
+        + ' err ' + (st.compact_errors || 0) + ' skip ' + (st.compact_skipped || 0)
+        + ' | inputs ' + (health.status || '-') + (dead.length ? ' [' + dead.join(', ') + ']' : '')
+        + ' | win_prob ' + (s.win_prob_status || '-'));
+      const hs = (s.horizons_sec || []).map(String);
+      const fmt = (c) => {
+        if (!c || !c.n) return '<td style="padding:2px 6px;color:#6e7681;">n=0</td>';
+        const net = c.mean_net_bp;
+        const color = net == null ? '#c9d1d9' : (net >= 0 ? '#3fb950' : '#f85149');
+        return '<td style="padding:2px 6px;color:' + color + ';">'
+          + Number(c.mean_bp).toFixed(1) + ' / ' + (net == null ? '-' : Number(net).toFixed(1))
+          + ' <span style="color:#6e7681;">n=' + c.n + '</span></td>';
+      };
+      const head = '<tr><th style="text-align:left;padding:2px 6px;">side source</th>'
+        + hs.map(h => '<th style="padding:2px 6px;">+' + (Number(h) >= 3600 ? (Number(h) / 3600) + 'h' : (Number(h) / 60) + 'm') + ' gross/net bp</th>').join('') + '</tr>';
+      const body = (s.rows || []).map(r => '<tr><td style="padding:2px 6px;">'
+        + String(r.challenger).replace(/[<>&]/g, '') + '</td>'
+        + hs.map(h => fmt((r.horizons || {})[h])).join('') + '</tr>').join('');
+      safeHTML('aiShadowTable', '<table style="border-collapse:collapse;">' + head + body + '</table>');
+      safeText('aiShadowNote', (s.note || '') + ' Prompt ' + (s.prompt_id || '-') + '; compact ' + (s.compact_prompt_id || '-') + '.');
     }
     const DASH_PREFS_KEY = 'bitfinex_research_dashboard_prefs_v2_' + __DASHBOARD_PORT__;
     function loadDashPrefs() {
@@ -34844,6 +35257,7 @@ DASHBOARD_JS = """(function () {
           ? d.ai_input
           : (window.__LAST_AI_PAYLOAD__ || {});
         safeText('aiInput', JSON.stringify(aiInputBody, null, 2) + (d.ai_input_time ? '\\n@ ' + d.ai_input_time : ''));
+        renderAiShadowPanel(d.ai_shadow);
         safeText('features', JSON.stringify(d.feature_snapshot || {}) + ' (live — may differ from AI Input until next call)');
         if (onWrongPort) {
           const sb = document.getElementById('serverBanner');
@@ -38921,6 +39335,10 @@ def _build_api_state_snapshot():
                 ),
             }
         snapshot["ai_input_time"] = LAST_AI_TIMESTAMP
+        try:
+            snapshot["ai_shadow"] = ai_shadow_dashboard_snapshot()
+        except Exception as exc:
+            snapshot["ai_shadow"] = {"mode": "UNAVAILABLE", "error": type(exc).__name__}
         snapshot["dashboard_ws_stale_sec"] = DASHBOARD_WS_STALE_SEC
         snapshot["feature_snapshot"] = state.get("feature_snapshot", {})
         snapshot["data_quality"] = state.get("data_quality", 0.0)
@@ -39983,6 +40401,7 @@ def ready():
         "live_entry_arm_block_reason": None if armable else arm_block_reason,
         "trading_ready": trading_ready,
         "trading_block_reason": None if trading_ready else trading_block_reason,
+        "ai_input_health": ai_input_health_snapshot(),
     }), (200 if ready_ok else 503)
 
 
@@ -48026,6 +48445,8 @@ _jsonl_validated_targets = {}
 _JSONL_VALIDATION_TAIL_BYTES = 64 * 1024
 _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "AI_INPUT_LOG_FILE",
+    "AI_SHADOW_CHALLENGER_FILE",
+    "AI_SHADOW_COMPACT_PROMPT_FILE",
     "CSV_FALLBACK_JSONL",
     "CHASE_OFFSET_TOUCH_GRID_FILE",
     "ORDER_MULTIVERSE_FILE",
@@ -49691,6 +50112,7 @@ def main():
     threading.Thread(
         target=collector_maturation_worker_loop, name="collector-maturation", daemon=True,
     ).start()
+    threading.Thread(target=safe_thread(ai_shadow_maturation_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
     threading.Thread(target=safe_thread(ws_watchdog), daemon=True).start()
