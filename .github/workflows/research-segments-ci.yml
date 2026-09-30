@@ -18,6 +18,9 @@ on:
       - "scripts/laptop-chain-*.ps1"
       - "scripts/laptop_chain_incident.py"
       - "scripts/test_laptop_chain_incident.py"
+      - "scripts/laptop-status-snapshots.ps1"
+      - "scripts/unattended_proof.py"
+      - "scripts/test_unattended_proof.py"
       - "tests/test_laptop_chain_scripts.py"
       - "services/btc-conservative-agent/test_legacy_data_sync_retirement.py"
       - ".github/workflows/research-segments-ci.yml"
@@ -43,6 +46,6 @@ jobs:
       - run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_fresh_start_wipe.py -q
       - run: python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py ../../scripts/test_fly_failure_paper_resume.py -q
       - run: python -m pytest test_fly_startup_contract.py test_fly_runtime_baseline_packaging.py test_legacy_data_sync_retirement.py -q
-      - run: python -m pytest ../../scripts/test_laptop_chain_incident.py ../../tests/test_laptop_chain_scripts.py -q
+      - run: python -m pytest ../../scripts/test_laptop_chain_incident.py ../../scripts/test_unattended_proof.py ../../tests/test_laptop_chain_scripts.py -q
       - name: Entrypoint shell syntax
         run: bash -n fly-entrypoint.sh

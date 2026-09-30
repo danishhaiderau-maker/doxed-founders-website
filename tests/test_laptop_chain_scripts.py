@@ -390,10 +390,20 @@ def test_status_snapshots_offline_are_explicit_failures_never_flat(chain):
 
 def test_status_snapshots_are_read_only_and_never_persist_secrets():
     source = _source("laptop-status-snapshots.ps1")
-    assert source.count("Invoke-RestMethod -Method Get") == 2
+    assert source.count("Invoke-RestMethod -Method Get") == 4
     assert "-Method Post" not in source and "-Method Put" not in source
     persisted = source[source.index("$relay.ok = $true"):source.index("} catch {\n    $relay.error")]
     assert "userId" not in persisted and "adminToken" not in persisted and "lastError" not in persisted
+    runtime = source[source.index("New-Snapshot 'fly_runtime_snapshot_v1'"):]
+    assert "$runtime.research_lane_enabled = $toggles" in runtime
+    assert not re.search(r"\$runtime(\.|\[)[^=\n]*=\s*\$adminToken", runtime)
+    assert "$runtime.token" not in runtime and "$runtime.headers" not in runtime.lower()
+
+
+def test_supervisor_runs_the_unattended_proof_after_the_monitor():
+    supervisor = _source("laptop-chain-supervisor.ps1")
+    assert supervisor.index("laptop-chain-monitor.ps1") < supervisor.index("unattended_proof.py")
+    assert "--check" in supervisor and "--start" not in supervisor
 
 
 def test_supervisor_collects_snapshots_before_the_monitor():
