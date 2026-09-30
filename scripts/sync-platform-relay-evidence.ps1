@@ -93,6 +93,38 @@ if ($env:PLATFORM_RELAY_EVIDENCE_MAX_AGE_MINUTES) {
   catch { Stop-RelayEvidenceSync 'CONFIG_INVALID' }
 }
 
+# Best-effort relay-state snapshot for the analyzer Decision page. It never
+# blocks evidence sync and keeps only non-identifying state (no user id, no
+# lastError text, no token).
+function Write-RelayStatusSnapshot {
+  $snapshotPath = Join-Path (Split-Path -Parent $destination) 'relay_status_snapshot_v1.json'
+  $snapshot = [ordered]@{ schema = 'relay_status_snapshot_v1'; observedAt = [DateTimeOffset]::UtcNow.ToString('o'); ok = $false }
+  try {
+    $statusUri = "$($apiBaseUrl.TrimEnd('/'))/trading-agents/$([uri]::EscapeDataString($agentSlug))/ops/relay-status?userId=$([uri]::EscapeDataString($userId))"
+    $status = Invoke-RestMethod -Method Get -Uri $statusUri -Headers @{
+      'X-Bot-Admin-Token' = $adminToken
+      'Accept' = 'application/json'
+    } -TimeoutSec 20
+    $snapshot.ok = $true
+    $snapshot.status = $status.status
+    $snapshot.relayExecutionMode = $status.relayExecutionMode
+    $snapshot.relayArmedAt = $status.relayArmedAt
+    $snapshot.reconciliation = $status.reconciliation
+    $snapshot.exchangeOrderAudit = $status.exchangeOrderAudit
+    $snapshot.relayExecutor = $status.relayExecutor
+    $snapshot.relayAllowlist = $status.relayAllowlist
+  } catch {
+    $snapshot.error = 'RELAY_STATUS_HTTP_FAILED'
+  }
+  try {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $snapshotPath) | Out-Null
+    $tempStatus = "$snapshotPath.$([guid]::NewGuid().ToString('N')).tmp"
+    [IO.File]::WriteAllText($tempStatus, ($snapshot | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tempStatus -Destination $snapshotPath -Force
+  } catch { }
+}
+Write-RelayStatusSnapshot
+
 $uri = "$($apiBaseUrl.TrimEnd('/'))/trading-agents/$([uri]::EscapeDataString($agentSlug))/ops/relay-evidence?userId=$([uri]::EscapeDataString($userId))"
 try {
   $response = Invoke-WebRequest -Method Get -Uri $uri -Headers @{
