@@ -267,19 +267,10 @@ class FreshCollectionSignalTests(unittest.TestCase):
             bot,
             "_load_research_session_meta",
             return_value={"fresh_collection_start_time": 12345.25},
-        ), mock.patch.object(
-            bot,
-            "_data_sync_request_async_inventory",
-            return_value={
-                "status": "CURRENT", "rows": [],
-                "generated_at": "2026-08-30T00:00:00Z", "error": None,
-            },
         ):
-            with bot.app.test_client() as client:
-                response = client.get("/api/data-sync/manifest")
-        self.assertEqual(response.status_code, 200)
+            bot._prime_data_sync_identity_epoch_cache()
         self.assertEqual(
-            response.get_json()["fresh_collection_signal_ts"],
+            bot._data_sync_memory_identity_payload()["fresh_collection_signal_ts"],
             12345.25,
         )
 
