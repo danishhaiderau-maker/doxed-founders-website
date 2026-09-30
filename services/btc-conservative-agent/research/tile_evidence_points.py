@@ -39,6 +39,7 @@ HEADLINE_HOLD_SEC = 3600
 TAPE_MAX_GAP_SEC = 10.0
 DEFAULT_ENTRY_TTL_SEC = 1800.0
 ENTRY_RECONCILIATION_ALLOWANCE_SEC = 180.0
+TAPE_COVERAGE_GRACE_SEC = 300.0
 
 # Exits and cancels issued by the deploy boundary (maintenance flatten) or an
 # operator, not by the tile's own policy.  They stay in counts but never in EV.
@@ -46,7 +47,8 @@ FORCED_EXIT_REASONS = frozenset({
     "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
 })
 RELAY_INTERFERENCE_EXIT_REASONS = frozenset({"PHANTOM_CANCEL_BY_RELAY"})
-EXPIRY_REASONS = frozenset({"SIGNAL_TTL_EXPIRED"})
+EXPIRY_REASONS = frozenset({"SIGNAL_TTL_EXPIRED", "TTL_EXPIRED"})
+LIFECYCLE_NO_FILL_SUFFIX = ":paper-no-fill-terminal"
 AI_APPROVE = frozenset({"APPROVE", "STRONG_APPROVE", "SOFT_APPROVE"})
 AI_REJECT = frozenset({"REJECT", "SOFT_REJECT"})
 
@@ -323,6 +325,7 @@ def build_tile_evidence_points(
             filled_ids[lane].add(trade_id)
 
     lifecycle_nofill_terminals: Counter[str] = Counter()
+    lifecycle_nofill_rows: dict[str, dict[str, Mapping[str, Any]]] = defaultdict(dict)
     lifecycle_quarantine: Counter[str] = Counter()
     skipped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for row in lifecycles or ():
@@ -339,6 +342,8 @@ def build_tile_evidence_points(
             continue
         if row.get("terminal_no_fill") is True or _upper(row.get("outcome_state")) == "NO_FILL":
             lifecycle_nofill_terminals[lane] += 1
+            if str(row.get("record_id") or "").endswith(LIFECYCLE_NO_FILL_SUFFIX) and row.get("event_id"):
+                lifecycle_nofill_rows[lane].setdefault(str(row["event_id"]), row)
         if _upper(row.get("observation_status")) == "NO_ORDER" and row.get("terminal"):
             skipped[lane].append(row)
 
@@ -380,6 +385,10 @@ def build_tile_evidence_points(
                                        leverage=row.get("leverage"), margin_usd=row.get("margin_usdt")),
         })
 
+    def world_for(reason: str) -> str:
+        return ("ADMIN_CANCELLED" if reason in FORCED_EXIT_REASONS
+                else "EXPIRED" if reason in EXPIRY_REASONS else "NO_FILL")
+
     def tile_leverage(lane: str):
         values = Counter(t["leverage"] for t in executed.get(lane, []) if t["leverage"])
         return values.most_common(1)[0][0] if values else None
@@ -402,13 +411,12 @@ def build_tile_evidence_points(
             nofill_quarantine["PRE_CUTOVER"] += 1
             continue
         reason = _upper(row.get("reason"))
-        world = ("ADMIN_CANCELLED" if reason in FORCED_EXIT_REASONS
-                 else "EXPIRED" if reason in EXPIRY_REASONS else "NO_FILL")
+        world = world_for(reason)
         direction = _upper(row.get("dir"))
         signal_ts = _epoch_seconds(row.get("shared_ai_call_ts")) or created
         scan = scan_for(trade_id, row.get("shared_ai_call_id"))
         unfilled[lane].append({
-            "trade_id": trade_id, "world": world,
+            "trade_id": trade_id, "world": world, "source": "EXPIRED_ORDERS_LEDGER",
             "collector_touched": _truthy(row.get("touched_limit")),
             "ttl_outcome": row.get("no_fill_ttl_outcome"),
             "ai": _ai_verdict(scan) if scan is not None else "UNLINKED",
@@ -417,6 +425,43 @@ def build_tile_evidence_points(
             "cf_at_expiry": market_entry_outcome(tape, direction=direction, anchor_ts=row.get("expired_ts"),
                                                  leverage=tile_leverage(lane), margin_usd=specs[lane]["margin_usd"]),
         })
+
+    # Tile no-fill terminals in the v3 lifecycle ledger: cross-check the
+    # expired-orders ledger and add any order only the lifecycle ledger saw.
+    nofill_reconciliation: dict[str, dict[str, Any]] = {}
+    for lane in tile_order:
+        by_event = lifecycle_nofill_rows.get(lane, {})
+        csv_ids = {u["trade_id"] for u in unfilled.get(lane, [])}
+        worlds_seen: Counter[str] = Counter()
+        disagree = 0
+        for event_id, row in by_event.items():
+            world = world_for(_upper(row.get("terminal_reason")))
+            worlds_seen[world] += 1
+            if event_id in csv_ids:
+                disagree += sum(1 for u in unfilled[lane] if u["trade_id"] == event_id and u["world"] != world)
+                continue
+            submitted_ts = _epoch_seconds(row.get("submitted_ts"))
+            if v2_start_ts and submitted_ts is not None and submitted_ts < v2_start_ts:
+                continue
+            scan = scan_for(event_id, row.get("shared_ai_call_id"))
+            direction = _upper(row.get("executed_direction"))
+            signal_ts = _epoch_seconds((scan or {}).get("ts")) or submitted_ts
+            unfilled[lane].append({
+                "trade_id": event_id, "world": world, "source": "V3_LIFECYCLE_LEDGER",
+                "collector_touched": False, "ttl_outcome": row.get("no_fill_ttl_outcome"),
+                "ai": _ai_verdict(scan) if scan is not None else "UNLINKED",
+                "cf": market_entry_outcome(tape, direction=direction, anchor_ts=signal_ts,
+                                           leverage=tile_leverage(lane), margin_usd=specs[lane]["margin_usd"]),
+                "cf_at_expiry": market_entry_outcome(tape, direction=direction, anchor_ts=row.get("terminal_ts"),
+                                                     leverage=tile_leverage(lane), margin_usd=specs[lane]["margin_usd"]),
+            })
+        nofill_reconciliation[lane] = {
+            "lifecycle_terminals_by_world": dict(sorted(worlds_seen.items())),
+            "in_both_ledgers": len(csv_ids & set(by_event)),
+            "expired_orders_ledger_only": len(csv_ids - set(by_event)),
+            "lifecycle_ledger_only": len(set(by_event) - csv_ids),
+            "world_disagreements": disagree,
+        }
 
     skipped_out: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for lane, rows in skipped.items():
@@ -477,6 +522,7 @@ def build_tile_evidence_points(
             "collector_touched_limit": dict(sorted(Counter(
                 "TOUCHED" if u["collector_touched"] else "NOT_TOUCHED" for u in strategy_unfilled).items())),
             "v3_lifecycle_no_fill_terminals": lifecycle_nofill_terminals.get(lane, 0),
+            "no_fill_source_reconciliation": nofill_reconciliation.get(lane, {}),
         }
         strategy = [t for t in trades_l if not t["forced_exit"] and t["pnl"] is not None]
         forced = [t for t in trades_l if t["forced_exit"] and t["pnl"] is not None]
@@ -578,6 +624,13 @@ def build_tile_evidence_points(
     if any(c["identity_drift"] for c in collection.values()):
         evidence_gaps.append({"code": "IDENTITY_DRIFT",
                               "detail": "a tile has more than one policy signature or epoch"})
+    if v2_start_ts and (tape.start is None or tape.start > v2_start_ts + TAPE_COVERAGE_GRACE_SEC):
+        evidence_gaps.append({
+            "code": "TAPE_COVERAGE_STARTS_AFTER_V2",
+            "detail": ("no 1s microstructure tape" if tape.start is None else
+                       f"the 1s tape starts at {_iso(tape.start)}, after the v2 start {_iso(v2_start_ts)}")
+                      + "; counterfactuals before it are TAPE_NOT_COVERED",
+        })
 
     return {
         "schema": REPORT_SCHEMA,
@@ -653,19 +706,38 @@ def _read_csv(path: str | None) -> list[dict[str, Any]]:
         return list(csv.DictReader(handle))
 
 
+def rotation_family(path: str | None) -> list[Path]:
+    """The live file plus its numbered rotations (``x.jsonl.1`` ...), oldest first.
+
+    The runtime rotates append ledgers in place, so after a rotation the live
+    file holds only the newest rows. Sidecars such as ``x.jsonl.validation.json``
+    are not rotations.
+    """
+    if not path:
+        return []
+    head = Path(path)
+    rotations = []
+    if head.parent.is_dir():
+        for sibling in head.parent.glob(head.name + ".*"):
+            suffix = sibling.name[len(head.name) + 1:]
+            if suffix.isdigit() and sibling.is_file():
+                rotations.append((int(suffix), sibling))
+    family = [p for _, p in sorted(rotations, reverse=True)]
+    return family + ([head] if head.is_file() else [])
+
+
 def _read_jsonl(path: str | None, keep: Callable[[dict], bool] | None = None,
                 project: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     rows = []
-    if not path or not Path(path).is_file():
-        return rows
-    with open(path, encoding="utf-8-sig", errors="replace") as handle:
-        for line in handle:
-            try:
-                row = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(row, dict) and (keep is None or keep(row)):
-                rows.append({k: row.get(k) for k in project} if project else row)
+    for member in rotation_family(path):
+        with open(member, encoding="utf-8-sig", errors="replace") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(row, dict) and (keep is None or keep(row)):
+                    rows.append({k: row.get(k) for k in project} if project else row)
     return rows
 
 
@@ -679,7 +751,9 @@ def load_evidence_inputs(resolve: Callable[[str], str | None]) -> dict[str, Any]
                                      ("lane", "trade_id", "event", "ts")),
         "lifecycles": _read_jsonl(resolve(LIFECYCLE_FILE), None, (
             "research_lane", "epoch_id", "terminal", "terminal_no_fill", "outcome_state",
-            "observation_status", "exact_reason", "shared_ai_call_id", "observed_ts", "paper_policy_spec")),
+            "observation_status", "exact_reason", "shared_ai_call_id", "observed_ts", "paper_policy_spec",
+            "record_id", "event_id", "terminal_reason", "terminal_ts", "executed_direction", "submitted_ts",
+            "no_fill_ttl_outcome")),
         "ai_scans": _read_jsonl(resolve(AI_SCAN_FILE), None, ("trade_id", "ai_decision", "direction", "ts")),
         "intent_audit": _read_jsonl(resolve(INTENT_AUDIT_FILE), None, ("trade_id", "shared_ai_call_id")),
         "tape_rows": _read_jsonl(resolve(TAPE_FILE), None, ("bucket_ts", "bid", "ask", "last")),

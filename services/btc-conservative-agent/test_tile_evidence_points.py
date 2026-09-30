@@ -204,3 +204,45 @@ def test_evidence_points_page_fails_closed_and_renders_current_report(monkeypatc
     assert client.get("/api/evidence-points").get_json()["report"]["schema"] == tep.REPORT_SCHEMA
     assert ("Evidence points", "/evidence-points") in dashboard.DECISION_NAV_LINKS
     assert epv.REPORT_FILE == tep.REPORT_FILE
+
+def test_loader_reads_rotated_ledgers_and_flags_missing_tape_history(tmp_path):
+    import json
+    head = tmp_path / tep.TAPE_FILE
+    older = tmp_path / (tep.TAPE_FILE + ".1")
+    rows = _tape(seconds=4000)
+    older.write_text("".join(json.dumps(r) + "\n" for r in rows[:3900]), encoding="utf-8")
+    head.write_text("".join(json.dumps(r) + "\n" for r in rows[3900:]), encoding="utf-8")
+    (tmp_path / (tep.TAPE_FILE + ".validation.json")).write_text('{"bucket_ts": 1}', encoding="utf-8")
+    assert [p.name for p in tep.rotation_family(str(head))] == [older.name, head.name]
+    inputs = tep.load_evidence_inputs(lambda name: str(tmp_path / name))
+    assert len(inputs["tape_rows"]) == 4000 and inputs["tape_rows"][0]["bucket_ts"] == T0
+    covered = _build(trades=[_trade(1)], tape_rows=inputs["tape_rows"])
+    assert "TAPE_COVERAGE_STARTS_AFTER_V2" not in {g["code"] for g in covered["evidence_gaps"]}
+    assert covered["did_vs_missed"]["FAMILY_A"]["executed"]["market_at_signal"]["n"] == 1
+    head_only = _build(trades=[_trade(1)], tape_rows=rows[3900:])
+    assert "TAPE_COVERAGE_STARTS_AFTER_V2" in {g["code"] for g in head_only["evidence_gaps"]}
+
+
+def test_lifecycle_no_fill_terminals_feed_fill_worlds_and_reconcile_with_expired_ledger():
+    opportunities = [{"lane": "FAMILY_A", "event": "ORDER_SUBMITTED", "trade_id": f"o{i}", "ts": T0 + i}
+                     for i in range(3)]
+    expired = [{"research_lane": "FAMILY_A", "trade_id": "o0", "reason": "SIGNAL_TTL_EXPIRED", "dir": "LONG",
+                "created_ts": T0, "expired_ts": T0 + 1800}]
+    def terminal(event_id, reason, ts):
+        return {"research_lane": "FAMILY_A", "epoch_id": EPOCH, "terminal": True, "terminal_no_fill": True,
+                "outcome_state": "NO_FILL", "record_id": f"lifecycle:{event_id}:paper-no-fill-terminal",
+                "event_id": event_id, "terminal_reason": reason, "terminal_ts": ts,
+                "executed_direction": "LONG", "submitted_ts": T0 + 1}
+    lifecycles = [terminal("o0", "SIGNAL_TTL_EXPIRED", T0 + 1800), terminal("o1", "LIMIT_NOT_REACHED", T0 + 900),
+                  terminal("o2", "CIRCUIT_BREAKER_ADMIN_MANUAL", T0 + 5990)]
+    report = _build(trades=[_trade(9)], expired=expired, opportunities=opportunities, lifecycles=lifecycles)
+    tile = report["fill_worlds"]["FAMILY_A"]
+    assert tile["worlds"]["EXPIRED"] == 1 and tile["worlds"]["NO_FILL"] == 1 and tile["worlds"]["ADMIN_CANCELLED"] == 1
+    assert tile["worlds"]["UNRESOLVED_OR_RESTING"] == 0
+    assert tile["unfilled_counterfactual"]["NO_FILL"]["market_at_signal"]["n"] == 1
+    assert tile["unfilled_counterfactual"]["NO_FILL"]["market_at_expiry"]["n"] == 1
+    assert tile["no_fill_source_reconciliation"] == {
+        "lifecycle_terminals_by_world": {"ADMIN_CANCELLED": 1, "EXPIRED": 1, "NO_FILL": 1},
+        "in_both_ledgers": 1, "expired_orders_ledger_only": 0, "lifecycle_ledger_only": 2,
+        "world_disagreements": 0}
+    assert "V3_LIFECYCLE_MISSING_TILE_NO_FILL_TERMINALS" not in {g["code"] for g in report["evidence_gaps"]}

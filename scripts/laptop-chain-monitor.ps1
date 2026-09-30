@@ -12,6 +12,7 @@ param(
   [int]$AnalyzerMaxAgeMin = 90,
   [int]$InProgressMaxMin = 15,
   [int]$PullStaleMin = 15,
+  [int]$PlanRaceStuckMin = 30,
   [int]$RenotifyHours = 6,
   [switch]$NoNotify
 )
@@ -100,8 +101,22 @@ if ($parity -and [string]$parity.verdict -ne 'GREEN') {
 
 # 7. Fly shipper error as last observed from this laptop.
 $flyHead = Read-JsonFile $cfg.FlySegmentHeadFile
+# PLAN_RACE is the shipper backing one hot stream off; benign while segments ship.
 if ($flyHead -and $flyHead.ok -eq $true -and $flyHead.last_error) {
-  Add-Alert 'FLY_SEGMENT_SHIPPER_ERROR' 'critical' ([string]$flyHead.last_error)
+  $shipperError = [string]$flyHead.last_error
+  if ($shipperError.StartsWith('PLAN_RACE')) {
+    $observedAt = ConvertTo-UtcDate $flyHead.observedAt
+    $stallSec = $null
+    if ($null -ne $observedAt -and $null -ne $flyHead.last_segment_at) {
+      $stallSec = [DateTimeOffset]::new($observedAt).ToUnixTimeMilliseconds() / 1000.0 - [double]$flyHead.last_segment_at
+    }
+    if ($null -eq $stallSec -or $stallSec -gt ($PlanRaceStuckMin * 60)) {
+      $stallText = if ($null -eq $stallSec) { 'an unknown time' } else { '{0:N0} min' -f ($stallSec / 60) }
+      Add-Alert 'FLY_SEGMENT_SHIPPER_ERROR' 'critical' ("{0} (no segment shipped for {1})" -f $shipperError, $stallText)
+    }
+  } else {
+    Add-Alert 'FLY_SEGMENT_SHIPPER_ERROR' 'critical' $shipperError
+  }
 }
 
 $notify = New-Object System.Collections.ArrayList

@@ -51,6 +51,15 @@ def _table(table_id: str, headers, rows) -> str:
     return f"<div class='wrap'><table id='{table_id}'><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
 
 
+def _reconciliation(tile: dict) -> str:
+    rec = tile.get("no_fill_source_reconciliation") or {}
+    if not rec:
+        return ""
+    return (f"<div class='sub'>both ledgers {_esc(rec.get('in_both_ledgers', 0))} · expired-orders only "
+            f"{_esc(rec.get('expired_orders_ledger_only', 0))} · lifecycle only {_esc(rec.get('lifecycle_ledger_only', 0))}"
+            f" · disagreements {_esc(rec.get('world_disagreements', 0))}</div>")
+
+
 def _label(section: dict, lane: str) -> str:
     return f"<strong>{_esc(section.get('label') or lane)}</strong><div class='sub'>{_esc(lane)}</div>"
 
@@ -78,7 +87,7 @@ def render_evidence_points_html(report: dict | None, *, evidence: dict | None, n
             worlds = t.get("worlds") or {}
             rows.append([_label(t, lane), _esc(t.get("orders_submitted", NO_DATA_TEXT))]
                         + [_esc(worlds.get(w, 0)) for w in WORLDS]
-                        + [_esc(t.get("v3_lifecycle_no_fill_terminals", NO_DATA_TEXT))])
+                        + [_esc(t.get("v3_lifecycle_no_fill_terminals", NO_DATA_TEXT)) + _reconciliation(t)])
         sections.append("<h2>4 · Fill worlds per tile order</h2>" + _table(
             "evidenceFillWorlds", ["Tile", "Orders", *WORLDS, "v3 NO_FILL terminals"], rows)
             + "<p class='sub'>PARTIAL and NO_FILL are shown even when zero. ADMIN_CANCELLED are orders cancelled by a "
