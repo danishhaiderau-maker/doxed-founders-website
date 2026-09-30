@@ -581,6 +581,8 @@ APPROVE_OUTCOME_CONF_DIRECTION_FILE = "approve_outcome_confidence_direction.json
 BENCHMARK_RELATIVE_SCORECARD_FILE = "benchmark_relative_scorecard.json"
 MISSED_OPPORTUNITY_HEATMAP_FILE = "missed_opportunity_heatmap.json"
 MISSED_OPPORTUNITY_PROOF_REPORT_FILE = "missed_opportunity_proof_report.json"
+TILE_EVIDENCE_POINTS_REPORT_FILE = "tile_evidence_points_report.json"
+TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
 COMPRESSED_SHADOW_SCHEDULE_FILES = (
     "chase_offset_touch_grid.jsonl",
@@ -675,6 +677,8 @@ ANALYZER_JSON_REPORT_FILES = (
     COLLECTOR_V21_REPORT_FILE,
     MISSED_OPPORTUNITY_HEATMAP_FILE,
     MISSED_OPPORTUNITY_PROOF_REPORT_FILE,
+    TILE_EVIDENCE_POINTS_REPORT_FILE,
+    TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
     PATHWAY_SURVIVAL_REPORT_FILE,
     REAL_EDGE_SUMMARY_FILE,
@@ -746,6 +750,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Lane Opportunity", LANE_OPPORTUNITY_REPORT_FILE, "Missed lane capture vs shadow fills"),
     ("collector_v2.1 Opportunity Capture", COLLECTOR_V21_REPORT_FILE, "Four cohorts: actual / unfilled / rejected / hypothetical; CONTROL vs Stage-1"),
     ("Missed Opportunities", MISSED_OPPORTUNITY_HEATMAP_FILE, "Blocked signals by reason and $ left"),
+    ("Tile Evidence Points", TILE_EVIDENCE_POINTS_REPORT_FILE, "Per-tile fill worlds, did vs missed, AI usefulness, collection rate, quarantine receipt and n>=30 after-cost EV ranking"),
+    ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
     ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
     ("Pathway Survival", PATHWAY_SURVIVAL_REPORT_FILE, "Pathway stage survival and drop rates"),
@@ -9134,6 +9140,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         session = load_research_session()
         print_data_provenance_banner(session)
         trades, blocked, decisions, ai_log, setups, candles, signal_persist, near_edge, pipeline_events, ai_errors = load_data()
+        trades = apply_exact_terminal_net_pnl(trades)
         all_trades_unfiltered = trades.copy()
         dataset_counts = {
             "csv_trades": len(trades),
@@ -9192,6 +9199,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
             collector_v21_opportunity_capture_report()
             ai_funnel_report(trades=trades, session=session)
+            tile_evidence_points_report(session=session)
             pre_test_analytics_reports(
                 trades=trades,
                 decisions=decisions,
@@ -9303,6 +9311,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         lane_opportunity_capture_report(trades=trades, shadow_report=shadow_report)
         collector_v21_opportunity_capture_report()
         ai_funnel_report(trades=trades, session=session)
+        tile_evidence_points_report(session=session)
         pre_test_analytics_reports(
             trades=trades,
             decisions=decisions,
@@ -11791,15 +11800,53 @@ def lane_opportunity_capture_report(trades=None, shadow_report=None):
     return payload
 
 
+def apply_exact_terminal_net_pnl(trades):
+    """Replace the cent-rounded CSV net PnL with each row's reconciled terminal cost receipt.
+
+    At the paper test size most closes are worth under one cent, so the CSV
+    column (rounded to 0.01) turns real PnL into zeros. The rounded value is
+    kept in ``net_pnl_usd_csv_cents``; the source CSV is never modified.
+    """
+    if trades is None or getattr(trades, "empty", True) or "execution_cost_accounting" not in trades.columns:
+        return trades
+    from research.tile_evidence_points import exact_net_pnl
+
+    out = trades.copy()
+    recorded = out["net_pnl_usd"] if "net_pnl_usd" in out.columns else pd.Series(np.nan, index=out.index)
+    exact, basis = zip(*(exact_net_pnl(row) for row in out.to_dict("records")))
+    exact = pd.Series(exact, index=out.index, dtype="float64")
+    use = pd.Series([b == "TERMINAL_COST_RECEIPT_EXACT" for b in basis], index=out.index)
+    out["net_pnl_usd_csv_cents"] = recorded
+    out["net_pnl_basis"] = list(basis)
+    out.loc[use, "net_pnl_usd"] = exact[use]
+    if "outcome_net_pnl_usd" in out.columns:
+        out.loc[use, "outcome_net_pnl_usd"] = exact[use]
+    return out
+
+
+FORCED_EXIT_REASONS = frozenset({"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL"})
+
+
 def _lane_closed_trade_stats(lane_trades):
-    """Per-tile closed-trade spread and MAE/MFE consumed by the dashboard Decision page."""
+    """Per-tile closed-trade spread and MAE/MFE consumed by the dashboard Decision page.
+
+    EV statistics use strategy exits only: deploy-boundary and operator closes
+    are forced exits, not tile outcomes. MAE/MFE still describe every close.
+    """
     if lane_trades is None or lane_trades.empty:
-        return {"n": 0, "mean_net_pnl_usd": None, "stdev_net_pnl_usd": None,
-                "mae_mfe_rows": 0, "median_mae_margin_pct": None, "median_mfe_margin_pct": None}
+        return {"n": 0, "n_all_closes": 0, "forced_exits_excluded": 0, "mean_net_pnl_usd": None,
+                "stdev_net_pnl_usd": None, "mae_mfe_rows": 0, "median_mae_margin_pct": None,
+                "median_mfe_margin_pct": None}
     pnl_col = next((c for c in ("outcome_net_pnl_usd", "net_pnl_usd") if c in lane_trades.columns), None)
     if pnl_col is None:
         return None
-    pnl = pd.to_numeric(lane_trades[pnl_col], errors="coerce").dropna()
+    reason_col = next((c for c in ("exit_reason", "outcome_exit_reason") if c in lane_trades.columns), None)
+    forced = (
+        lane_trades[reason_col].fillna("").astype(str).str.strip().str.upper().isin(FORCED_EXIT_REASONS)
+        if reason_col else pd.Series(False, index=lane_trades.index)
+    )
+    all_pnl = pd.to_numeric(lane_trades[pnl_col], errors="coerce").dropna()
+    pnl = pd.to_numeric(lane_trades.loc[~forced, pnl_col], errors="coerce").dropna()
     n = int(len(pnl))
 
     def first_col(*names):
@@ -11814,16 +11861,18 @@ def _lane_closed_trade_stats(lane_trades):
     }).dropna()
     return {
         "n": n,
+        "n_all_closes": int(len(all_pnl)),
+        "forced_exits_excluded": int(len(all_pnl) - n),
         "mean_net_pnl_usd": round(float(pnl.mean()), 6) if n else None,
         "stdev_net_pnl_usd": round(float(pnl.std(ddof=1)), 6) if n >= 2 else None,
         "mae_mfe_rows": int(len(extremes)),
         "median_mae_margin_pct": round(float(extremes["mae"].median()), 3) if len(extremes) else None,
         "median_mfe_margin_pct": round(float(extremes["mfe"].median()), 3) if len(extremes) else None,
-        "basis": "executed closed trades in this generation; net PnL as recorded",
+        "basis": "strategy exits in this generation (deploy/operator forced exits excluded); "
+                 "exact reconciled net PnL after fees and funding",
     }
 
 
-TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 _CURRENT_TRADE_COHORT_QUARANTINE: dict = {}
 RELAY_INTERFERENCE_REASON = "RELAY_INTERFERENCE_PHANTOM_CANCEL"
 PHANTOM_CANCEL_EXIT_REASON = "PHANTOM_CANCEL_BY_RELAY"
@@ -12075,6 +12124,34 @@ def _tile_ai_attribution(lane_orders, lane_trades, scan_by_id, intent_scan):
             "ai_unlinked_orders": max(0, len(lane_orders) - linked),
             "ai_approved_orders": approved, "ai_rejected_orders": rejected,
             "ai_vs_rules": comparison}
+
+
+def tile_evidence_points_report(session=None):
+    """Publish per-tile fill worlds, did vs missed, AI usefulness, collection and EV ranking."""
+    from research.tile_evidence_points import build_tile_evidence_points, load_evidence_inputs
+
+    session = session or load_research_session()
+    v2_start = _v2_data_start_ts()
+    try:
+        payload = build_tile_evidence_points(
+            registry=ACTIVE_TILE_REGISTRY,
+            tile_order=CURRENT_RESEARCH_LANES,
+            epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
+            v2_start_ts=v2_start.timestamp() if v2_start is not None else None,
+            relay_interference_ids=set(relay_interference_trade_ids()),
+            **load_evidence_inputs(_agent_data_path),
+        )
+    except Exception as exc:  # the evidence view must never stop the analyzer
+        payload = {"schema": "tile_evidence_points_v1", "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    payload["analyzer_sync_id"] = ANALYZER_SYNC_ID
+    payload["session_scope"] = _shadow_scope_label(session)
+    try:
+        with open(TILE_EVIDENCE_POINTS_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, default=str)
+        print(f"  ? Wrote {TILE_EVIDENCE_POINTS_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
+    except OSError as exc:
+        print(f"  ?? Could not write {TILE_EVIDENCE_POINTS_REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    return payload
 
 
 def ai_funnel_report(trades=None, session=None):
