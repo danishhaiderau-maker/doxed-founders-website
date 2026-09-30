@@ -73,13 +73,10 @@ def validate_proof(raw: str, *, event_name: str, mode: str) -> dict[str, str] | 
     return proof
 
 
-def deploy_argv(*, source_git_rev: str, transport_bundles_enabled: str,
-                proof: Mapping[str, str] | None) -> list[str]:
+def deploy_argv(*, source_git_rev: str, proof: Mapping[str, str] | None) -> list[str]:
     """Build the exact Fly argv, explicitly clearing absent one-shot authority."""
     if re.fullmatch(r"[0-9a-f]{40}", source_git_rev) is None:
         raise ValueError("SOURCE_GIT_REV_INVALID")
-    if transport_bundles_enabled not in {"0", "1"}:
-        raise ValueError("TRANSPORT_BUNDLES_ENABLED_INVALID")
     values = {
         ENV_KEYS[0]: proof["operation_path"] if proof is not None else "",
         ENV_KEYS[1]: proof["operation_sha256"] if proof is not None else "",
@@ -88,7 +85,6 @@ def deploy_argv(*, source_git_rev: str, transport_bundles_enabled: str,
     argv = [
         "flyctl", "deploy", "--remote-only", "--strategy", "immediate",
         "--build-arg", f"SOURCE_GIT_REV={source_git_rev}",
-        "--env", f"DATA_SYNC_TRANSPORT_BUNDLES_ENABLED={transport_bundles_enabled}",
     ]
     for key in ENV_KEYS:
         argv.extend(("--env", f"{key}={values[key]}"))
@@ -110,7 +106,6 @@ def run(argv: Sequence[str], *, environ: Mapping[str, str] = os.environ,
         return 0
     command = deploy_argv(
         source_git_rev=environ.get("GITHUB_SHA", ""),
-        transport_bundles_enabled=environ.get("TRANSPORT_BUNDLES_ENABLED", ""),
         proof=proof,
     )
     runner(command, check=True)

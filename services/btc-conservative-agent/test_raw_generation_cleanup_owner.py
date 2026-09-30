@@ -208,7 +208,4 @@ def test_bot_and_signal_engine_expose_identical_disabled_first_contract():
     names = {node.name: ast.unparse(node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert "RAW_GENERATION_CLEANUP_ENABLED" in names["_raw_generation_cleanup_owner"]
     assert "RAW_GENERATION_PURGE_ENABLED" in names["_raw_generation_cleanup_owner"]
-    assert "_RAW_GENERATION_PURGE_CONFIRM_PREFIX" in names["api_data_sync_raw_generation_purge"]
-    assert "persist_authority" in names["api_data_sync_raw_generation_authority"]
-    assert "REPLAY_RAW_GENERATION" in names["api_data_sync_raw_generation_replay"]
     assert "audit_recovery" in names["_audit_raw_generation_cleanup_recovery"]

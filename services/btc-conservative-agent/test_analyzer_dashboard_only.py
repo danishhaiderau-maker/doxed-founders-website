@@ -1,7 +1,10 @@
 import subprocess
 import base64
+from pathlib import Path
 import pytest
-from test_fly_sync_bundle_powershell import ROOT, PWSH
+
+ROOT = Path(__file__).resolve().parents[2]
+PWSH = Path("C:/Users/danis/.cache/codex-runtimes/codex-primary-runtime/dependencies/native/powershell/pwsh.exe")
 
 
 @pytest.mark.skipif(not PWSH.exists(), reason='PowerShell unavailable')

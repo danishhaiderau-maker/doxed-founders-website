@@ -5,15 +5,12 @@
 e5a14a31 (run 36533147639)  a CPU-starved runtime truncated the fresh relay
       read (IncompleteRead) and timed out -> reads retry, mutations unconfirmed,
       and every failure exit ends with a guaranteed paper resume.
-The #177 class (killed-worker artifacts) is covered in
-test_data_sync_bundle_maintenance.py.
 """
 import ast
 import http.client
 import io
 import json
 import textwrap
-import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -181,44 +178,3 @@ def test_guaranteed_resume_is_the_final_step_on_every_failure_exit():
         "Guaranteed paper resume after failed guarded deploy")
 
 
-def _shed(state, requested_at):
-    class Response:
-        def __init__(self, body):
-            self.body, self.headers = body, {}
-
-    namespace = {
-        "state": state, "time": time, "jsonify": Response,
-        "PAUSE_OWNER_DEPLOY_MAINTENANCE": "DEPLOY_MAINTENANCE",
-        "_DEPLOY_MAINTENANCE_SHED": {"requested_at": requested_at},
-        "DEPLOY_MAINTENANCE_SHED_WINDOW_SEC": 1800,
-    }
-    tree = ast.parse(BOT_SOURCE)
-    node = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_data_sync_deploy_maintenance_shed"]
-    exec(compile(ast.Module(body=node, type_ignores=[]), "bot.py", "exec"), namespace)
-    return namespace["_data_sync_deploy_maintenance_shed"]()
-
-
-def test_bulk_mirror_downloads_yield_during_deploy_maintenance():
-    result = _shed({"manual_admin_pause": True, "pause_intent": "DEPLOY_MAINTENANCE"}, time.time())
-    response, code = result
-    assert code == 503 and response.headers["Retry-After"] == "60"
-    assert response.body == {"error": "DEPLOY_MAINTENANCE_LOAD_SHED"}
-
-
-@pytest.mark.parametrize("state,age", [
-    ({"manual_admin_pause": True, "pause_intent": "OPERATOR"}, 0),
-    ({"manual_admin_pause": True, "pause_intent": "SAFETY"}, 0),
-    ({"manual_admin_pause": False, "pause_intent": None}, 0),
-    ({"manual_admin_pause": True, "pause_intent": "DEPLOY_MAINTENANCE"}, 1801),
-])
-def test_mirror_is_never_starved_outside_a_fresh_deploy_maintenance_window(state, age):
-    assert _shed(state, time.time() - age) is None
-
-
-def test_shed_guards_bulk_download_routes_only():
-    for route in ("def api_data_sync_file():", "def api_data_sync_sqlite_snapshot():"):
-        body = BOT_SOURCE[BOT_SOURCE.index(route):BOT_SOURCE.index(route) + 400]
-        assert "shed = _data_sync_deploy_maintenance_shed()" in body
-    for route in ("@app.route('/api/data-sync/ack'", "@app.route('/api/data-sync/manifest')"):
-        start = BOT_SOURCE.index(route)
-        assert "_data_sync_deploy_maintenance_shed" not in BOT_SOURCE[start:start + 3000]

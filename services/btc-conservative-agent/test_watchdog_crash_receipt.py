@@ -196,7 +196,7 @@ def test_handler_snapshot_is_bounded_and_uses_only_fixed_labels():
         index: {
             "started": 90.0,
             "cap_name": "data_sync",
-            "pre_label": "/api/data-sync/file" if index == 0 else "secret?token=bad",
+            "pre_label": "/api/status" if index == 0 else "secret?token=bad",
             "routed_label": None,
         }
         for index in range(40)
@@ -205,7 +205,7 @@ def test_handler_snapshot_is_bounded_and_uses_only_fixed_labels():
         "time": type("Clock", (), {"monotonic": staticmethod(lambda: 100.0)}),
         "_dashboard_handler_lock": threading.Lock(),
         "_dashboard_active_handlers": active,
-        "_DASHBOARD_TELEMETRY_STATIC_ROUTES": frozenset({"/api/data-sync/file"}),
+        "_DASHBOARD_TELEMETRY_STATIC_ROUTES": frozenset({"/api/status"}),
     }
     module = ast.Module(body=[HANDLER_SNAPSHOT_FUNCTION], type_ignores=[])
     ast.fix_missing_locations(module)
@@ -214,7 +214,7 @@ def test_handler_snapshot_is_bounded_and_uses_only_fixed_labels():
     assert receipt["active_total"] == 32
     assert receipt["by_cap"]["data_sync"]["active"] == 32
     assert receipt["by_cap"]["data_sync"]["oldest_ms"] == 10_000
-    assert receipt["by_cap"]["data_sync"]["routes"]["/api/data-sync/file"] == 1
+    assert receipt["by_cap"]["data_sync"]["routes"]["/api/status"] == 1
     assert receipt["by_cap"]["data_sync"]["routes"]["UNCLASSIFIED"] == 31
     assert "token=bad" not in repr(receipt)
 

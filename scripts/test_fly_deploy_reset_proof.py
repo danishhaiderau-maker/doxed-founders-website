@@ -21,13 +21,11 @@ def test_valid_proof_and_exact_deploy_command():
     proof = validate_proof(encoded(), event_name="workflow_dispatch", mode="deploy")
     argv = deploy_argv(
         source_git_rev="b" * 40,
-        transport_bundles_enabled="1",
         proof=proof,
     )
     assert argv == [
         "flyctl", "deploy", "--remote-only", "--strategy", "immediate",
         "--build-arg", "SOURCE_GIT_REV=" + "b" * 40,
-        "--env", "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=1",
         "--env", f"{ENV_KEYS[0]}={VALID['operation_path']}",
         "--env", f"{ENV_KEYS[1]}={VALID['operation_sha256']}",
         "--env", f"{ENV_KEYS[2]}={VALID['trigger']}",
@@ -78,7 +76,6 @@ def test_empty_proof_explicitly_clears_all_recovery_environment():
     assert validate_proof("", event_name="push", mode="") is None
     argv = deploy_argv(
         source_git_rev="b" * 40,
-        transport_bundles_enabled="0",
         proof=None,
     )
     for key in ENV_KEYS:
@@ -93,7 +90,6 @@ def test_deploy_uses_subprocess_argv_without_shell():
         "DEPLOY_MODE": "deploy",
         "LIFECYCLE_RESET_PROOF": encoded(),
         "GITHUB_SHA": "b" * 40,
-        "TRANSPORT_BUNDLES_ENABLED": "0",
     }
     assert run(
         ["deploy"],

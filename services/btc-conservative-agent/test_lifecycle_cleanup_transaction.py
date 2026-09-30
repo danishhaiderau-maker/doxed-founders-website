@@ -320,17 +320,6 @@ def test_reference_or_source_drift_between_prepare_and_move_fails_closed(tmp_pat
     assert bundle.is_dir()
 
 
-def test_runtime_route_wires_all_rechecks_and_keeps_default_disabled():
-    for source in (BOT_SOURCE, ENGINE_SOURCE):
-        assert "@app.route('/api/data-sync/lifecycle-cleanup/prepare', methods=['POST'])" in source
-        assert "_data_sync_lifecycle_cleanup_active_references()" in source
-        assert 'os.getenv("LIFECYCLE_CLEANUP_ENABLED", "false").lower() == "true"' in source
-        assert 'os.getenv("LIFECYCLE_LAPTOP_ATTESTATION_KEY", "")' in source
-        assert "_reconcile_lifecycle_cleanup_transactions()" in source
-        for kind in ("runtime", "sync", "analyzer", "lifecycle_worker"):
-            assert f'"{kind}"' in source
-
-
 def _committed_quarantine(tmp_path):
     root, bundle, receipt, current, keys = _fixture(tmp_path)
     proof = verify_bundle(bundle, receipt, current_identity=current, active_references={}, attestation_keys=keys)

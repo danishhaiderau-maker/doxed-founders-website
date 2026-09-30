@@ -245,34 +245,6 @@ class FreshCollectionSignalTests(unittest.TestCase):
         self.assertEqual(wipe_resp.status_code, 401)
         reset.assert_not_called()
 
-    def test_manifest_includes_signal(self):
-        """`/api/data-sync/manifest` must surface `fresh_collection_signal_ts`."""
-        with bot.app.test_client() as client:
-            response = client.get("/api/data-sync/manifest")
-        # The manifest endpoint touches the live filesystem in some envs; we
-        # only assert the contract field is present and numeric when the
-        # endpoint succeeds. If it 500s in CI we still want a clear signal.
-        if response.status_code == 200:
-            body = response.get_json()
-            self.assertIn("fresh_collection_signal_ts", body)
-            self.assertIsInstance(
-                body["fresh_collection_signal_ts"], (int, float)
-            )
-
-    def test_manifest_restores_signal_from_durable_session_after_restart(self):
-        """A restart must not make the current fresh epoch look uninitialized."""
-        with bot.state_lock:
-            bot.state["fresh_collection_signal_ts"] = 0.0
-        with mock.patch.object(
-            bot,
-            "_load_research_session_meta",
-            return_value={"fresh_collection_start_time": 12345.25},
-        ):
-            bot._prime_data_sync_identity_epoch_cache()
-        self.assertEqual(
-            bot._data_sync_memory_identity_payload()["fresh_collection_signal_ts"],
-            12345.25,
-        )
 
     @staticmethod
     def _strict_flat_proof():

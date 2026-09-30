@@ -1,4 +1,4 @@
-"""Source contract for opt-in batching in the existing guarded deploy workflow.
+"""Source contract for the guarded deploy workflow's safety ordering.
 
 These tests verify wiring only, not Actions execution or production recovery.
 """
@@ -11,28 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
 
 
-def test_transport_bundles_are_retired_and_pinned_off():
-    assert "transport_bundles:" not in WORKFLOW
-    assert "bundle-canary" not in WORKFLOW
+def test_deploy_step_has_no_transfer_bundle_configuration():
+    for retired in ("transport_bundles:", "bundle-canary", "TRANSPORT_BUNDLES", "data_sync_bundle", "data_sync_inventory_worker"):
+        assert retired not in WORKFLOW
     deploy = WORKFLOW.split("      - name: Deploy the exact source revision\n", 1)[1].split(
         "      - name:", 1)[0]
-    assert 'TRANSPORT_BUNDLES_ENABLED: "0"' in deploy
-    assert '--env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=${TRANSPORT_BUNDLES_ENABLED}"' in deploy
-    assert '--build-arg SOURCE_GIT_REV="${GITHUB_SHA}"' in deploy
     assert "FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}" in deploy
     # No raw workflow expression or arbitrary supplied environment string enters shell.
     run = next(line for line in deploy.splitlines() if "run:" in line)
     assert "inputs." not in run and "${{" not in run
-
-
-def test_portable_batch_gates_precede_any_maintenance_mutation():
-    marker = "      - name: Verify bounded transport package and original acknowledgment contracts"
-    gate = WORKFLOW.split(marker, 1)[1].split("      - uses:", 1)[0]
-    for name in ("transport", "worker", "runtime", "storage", "api", "client", "bot_integration"):
-        assert f"test_data_sync_bundle_{name}.py" in gate
-    assert "test_fly_sync_bundle_adapter.py" in gate
-    assert "../../scripts/test_fly_transport_bundle_workflow.py" in gate
-    assert WORKFLOW.index(marker) < WORKFLOW.index("      - name: Enter durable authenticated paper maintenance boundary")
 
 
 def test_existing_safety_and_exact_revision_gates_remain_in_order():

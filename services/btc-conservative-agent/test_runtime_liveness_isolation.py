@@ -62,14 +62,6 @@ def test_heartbeat_starts_before_synchronous_bootstrap_and_only_once():
     assert start < validate < ready
 
 
-def test_identity_manifest_does_not_wait_for_state_lock():
-    start = SOURCE.index("def api_data_sync_manifest():")
-    end = SOURCE.index("@app.route('/api/data-sync/sqlite-snapshot')", start)
-    body = SOURCE[start:end]
-    assert 'state.get("fresh_collection_signal_ts")' in body
-    assert "with state_lock:" not in body
-
-
 def test_internal_revision_fences_are_exact_and_no_undefined_global_remains():
     start = SOURCE.index("def _start_lifecycle_pipeline_runtime()")
     end = SOURCE.index("def _stop_lifecycle_pipeline_runtime", start)
