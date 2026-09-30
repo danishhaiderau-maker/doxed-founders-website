@@ -50,7 +50,7 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         return {
             "trade_id": "family-pos-1", "status": "OPEN", "entry": 78000.0,
             "entry_ts": 1000.0, "research_lane": self.bot.COMBO_EXECUTION_LANES[0],
-            "dir": "LONG", "exit_profile_id": "CHANDELIER_3", "atr_entry": 125.0,
+            "dir": "LONG", "exit_profile_id": "ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1", "atr_entry": 125.0,
             "atr14_3m": 125.0, "atr_tp_price": None,
             "tp": 79950.0, "sl": 77500.0, "sl_enforced": True,
             "peak_pct": 9.0, "mae_pct": -2.0,
@@ -58,11 +58,11 @@ class PaperLifecycleRestartTests(unittest.TestCase):
 
     def _order(self):
         return {
-            "trade_id": "cont-order-1", "status": "PENDING", "limit_price": 77900.0,
+            "trade_id": "far-order-1", "status": "PENDING", "limit_price": 77900.0,
             "created_ts": 1000.0, "entry_expires_ts": 9999999999.0,
-            "research_lane": self.bot.COMBO_EXECUTION_LANES[1], "chase_count": 3,
+            "research_lane": self.bot.COMBO_EXECUTION_LANES[0], "chase_count": 3,
             "last_chase_ts": 1200.0, "signal_dir": "LONG",
-            "exit_profile_id": "ATR_TP_2.5_ATR_SL_1.5",
+            "exit_profile_id": "ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1",
         }
 
     def _awaiting(self, *, expires_ts=9999999999.0):
@@ -91,7 +91,7 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.assertEqual((result["positions"], result["pending_orders"]), (1, 1))
         self.assertEqual(self.bot.open_positions[0]["atr_entry"], 125.0)
         self.assertEqual(self.bot.pending_orders[0]["chase_count"], 3)
-        self.assertEqual(self.bot.pending_orders[0]["exit_profile_id"], "ATR_TP_2.5_ATR_SL_1.5")
+        self.assertEqual(self.bot.pending_orders[0]["exit_profile_id"], "ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1")
 
     def test_round_trip_persists_exact_revision_identity(self):
         exact = "a" * 40
@@ -116,10 +116,10 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         saved = payload["positions"][0]
         self.assertIsNone(saved["tp"])
         self.assertIsNone(saved["atr_tp_price"])
-        self.assertEqual(saved["tp_policy"], "CHANDELIER")
-        self.assertEqual(saved["sl"], 77750.0)
+        self.assertEqual(saved["tp_policy"], "ATR_TRAIL")
+        self.assertEqual(saved["sl"], 77812.5)
         self.assertTrue(saved["sl_enforced"])
-        self.assertEqual(saved["stop_policy"], "CHANDELIER")
+        self.assertEqual(saved["stop_policy"], "ATR_TRAIL")
         # Snapshot normalization must not rewrite the live accounting object.
         self.assertEqual(self.bot.open_positions[0]["sl"], 77500.0)
 
@@ -166,9 +166,9 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         restored = self.bot.open_positions[0]
         self.assertIsNone(restored["tp"])
         self.assertIsNone(restored["atr_tp_price"])
-        self.assertEqual(restored["sl"], 77750.0)
+        self.assertEqual(restored["sl"], 77812.5)
         self.assertTrue(restored["sl_enforced"])
-        self.assertEqual(restored["stop_policy"], "CHANDELIER")
+        self.assertEqual(restored["stop_policy"], "ATR_TRAIL")
 
     def test_second_restore_is_idempotent(self):
         payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
@@ -306,7 +306,7 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.bot.open_positions.append(position)
         self.bot.pending_orders.append(order)
         self.bot.lane_open_positions[self.bot.COMBO_EXECUTION_LANES[0]].append(position)
-        self.bot.lane_pending_orders[self.bot.COMBO_EXECUTION_LANES[1]].append(order)
+        self.bot.lane_pending_orders[self.bot.COMBO_EXECUTION_LANES[0]].append(order)
         self.bot.trades.append({
             "trade_id": position["trade_id"],
             "exit_reason": "PATH_END_120M",

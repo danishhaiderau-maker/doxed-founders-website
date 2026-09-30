@@ -484,8 +484,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert score_child.stdout.splitlines() == [
-        "v31-five-family-score-led-non-tie-paper-v2",
-        "524acf4949ae234e39a3902882a20872dadfe33d1235453696256348bf0c9335",
+        "v31-dynamic-adaptive-paper-v1",
+        "d62b434fc74ea5b3aa4275841b05b5b8cc5496433fda54f9906eb1a4e445cefd",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -499,8 +499,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert hypothesis_child.stdout.splitlines() == [
-        "v31-five-family-analyzer-hypothesis-paper",
-        "ab621cf7d2be060bd8fc44d400e26d01cfda552c548bd37dc0fea095cda10260",
+        "v31-dynamic-adaptive-paper-v1",
+        "a43f5489c3b2924d816331b4c4dd071c93f364d5ac13ddbc47832c1a0efbf511",
     ]
 
 

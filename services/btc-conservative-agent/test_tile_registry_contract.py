@@ -38,51 +38,72 @@ def test_partial_exit_tiles_can_never_be_relay_capable_while_reductions_are_unwi
     import combo_pathway_config as registry
 
     partial = [lane for lane, spec in ACTIVE_TILE_REGISTRY.items() if registry.tile_has_partial_exits(spec)]
-    assert partial == ["FAMILY_HYBRID_RUNNER"]
-    hybrid = ACTIVE_TILE_REGISTRY["FAMILY_HYBRID_RUNNER"]
-    assert hybrid["relay_capability"] == registry.PARTIAL_EXIT_RELAY_CAPABILITY
-
-    original = dict(hybrid)
+    assert partial == []
+    lane = ACTIVE_TILE_ORDER[0]
+    spec = ACTIVE_TILE_REGISTRY[lane]
+    original = dict(spec)
     try:
-        hybrid.update({"platform_relay_eligible": True, "relay_capability": "QUALIFIED"})
+        spec.update({
+            "exit_policy": {**spec["exit_policy"], "partial_take_profits": ((1.0, 0.25),)},
+            "platform_relay_eligible": True,
+            "relay_capability": "QUALIFIED",
+        })
+        assert registry.tile_has_partial_exits(spec)
         defects = validate_tile_registry()
-        assert "FAMILY_HYBRID_RUNNER:PARTIAL_EXIT_RELAY_REQUIRES_EXCHANGE_REDUCTIONS" in defects
-        assert "FAMILY_HYBRID_RUNNER:PARTIAL_EXIT_RELAY_CAPABILITY_NOT_BLOCKED" in defects
+        assert f"{lane}:PARTIAL_EXIT_RELAY_REQUIRES_EXCHANGE_REDUCTIONS" in defects
+        assert f"{lane}:PARTIAL_EXIT_RELAY_CAPABILITY_NOT_BLOCKED" in defects
     finally:
-        hybrid.clear()
-        hybrid.update(original)
+        spec.clear()
+        spec.update(original)
     assert validate_tile_registry() == ()
 
 
-def test_active_registry_is_the_exact_analyzer_hypothesis_experiment():
-    expected = {
-        "FAMILY_ATR_TARGET_2_5": "OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C",
-        "FAMILY_HYBRID_RUNNER": "OFFSET_0.30_CHASE_w234_s50_i180|HYBRID_secure_25_25_runner_TRAIL_1",
-        "FAMILY_ATR_TRAIL": "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1",
-        "FAMILY_CHANDELIER_3": "OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5",
-        "FAMILY_MFE_GIVEBACK": "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT",
-    }
-    assert {lane: spec["raw_policy_id"] for lane, spec in ACTIVE_TILE_REGISTRY.items()} == expected
-    for spec in ACTIVE_TILE_REGISTRY.values():
-        assert spec["policy_epoch"] == "v31-analyzer-hypothesis-paper-v1"
-        assert spec["entry_policy"]["chase_windows"] == (2, 3, 4)
-        assert spec["entry_policy"]["remaining_gap_step_pct"] == 50.0
-        assert spec["entry_policy"]["reprice_sec"] == 180
-    fixed = ACTIVE_TILE_REGISTRY["FAMILY_ATR_TARGET_2_5"]
-    assert fixed["ladder"] == ((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120))
-    assert fixed["exit_policy"]["thesis_cut_margin_pct"] == -12.0
-    assert fixed["exit_policy"]["thesis_window_sec"] == 300
-    chandelier = ACTIVE_TILE_REGISTRY["FAMILY_CHANDELIER_3"]
-    assert chandelier["exit_policy"]["initial_stop_atr_k"] == 2.0
-    assert chandelier["exit_policy"]["trail_activation_atr_k"] == 1.0
-    hybrid = ACTIVE_TILE_REGISTRY["FAMILY_HYBRID_RUNNER"]
-    assert hybrid["exit_policy"]["partial_take_profits"] == ((1.0, 0.25), (1.5, 0.25))
-    manifest = {row["lane"]: row for row in active_tile_lifecycle_manifest()}
-    assert manifest["FAMILY_ATR_TARGET_2_5"]["ladder"] == fixed["ladder"]
-    for row in manifest.values():
-        result = row["presentation"]["hypothesis_result"]
-        assert result["status"] == "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL"
-        assert result["oos_net_usd"] > 0
+RETIRED_ANALYZER_HYPOTHESIS_LANES = (
+    "FAMILY_CHANDELIER_3",
+    "FAMILY_ATR_TARGET_2_5",
+    "FAMILY_ATR_TRAIL",
+    "FAMILY_HYBRID_RUNNER",
+    "FAMILY_MFE_GIVEBACK",
+)
+
+
+def test_active_registry_is_exactly_the_dynamic_adaptive_paper_experiment():
+    assert ACTIVE_TILE_ORDER == ("FAMILY_ADAPTIVE_REGIME",)
+    spec = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME"]
+    assert spec["raw_policy_id"].endswith(
+        "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1"
+    )
+    assert spec["policy_epoch"] == "v31-dynamic-adaptive-paper-v1"
+    assert spec["default_enabled"] is False
+    assert spec["paper_only"] is True
+    assert spec["platform_relay_eligible"] is False
+    assert spec["entry_policy"]["chase_windows"] == ()
+    assert spec["entry_policy"]["extreme_action"] == "STAND_ASIDE"
+    assert spec["entry_policy"]["block_raw_ai_no_trade"] is True
+    assert spec["entry_policy"]["min_score_gap"] == 5
+    assert spec["entry_policy"]["liquidation_guard_stop_bps"] == 40.0
+    exit_policy = spec["exit_policy"]
+    assert exit_policy["initial_stop_atr_k"] == 1.5
+    assert exit_policy["trail_activation_atr_k"] == 0.75
+    assert exit_policy["trail_atr_k"] == 1.0
+    result = spec["presentation"]["hypothesis_result"]
+    assert result["status"] == "UNPROVEN_HONEST_PAPER_EXPERIMENT"
+    assert "NO PROVEN EDGE" in spec["subtitle"]
+
+
+def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():
+    for lane in (*RETIRED_ANALYZER_HYPOTHESIS_LANES, "CONTINUOUS"):
+        assert lane in RETIRED_TILE_LANES
+        assert lane not in ACTIVE_TILE_REGISTRY
+        assert lane not in COMBO_EXECUTION_LANES
+    for raw in (
+        "OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C",
+        "OFFSET_0.30_CHASE_w234_s50_i180|HYBRID_secure_25_25_runner_TRAIL_1",
+        "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1",
+        "OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5",
+        "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT",
+    ):
+        assert raw in RETIRED_POLICY_IDENTITIES
 
 
 def test_policy_signature_binds_execution_parameters_not_just_display_id():

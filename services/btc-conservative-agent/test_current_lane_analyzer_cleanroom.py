@@ -290,7 +290,7 @@ def test_shadow_loader_requires_exact_registry_policy_identity(monkeypatch):
         {"research_lane": lane, "policy_version": valid, "ts": 1},
         {"research_lane": lane, "policy_version": "STALE_POLICY", "ts": 2},
         {
-            "research_lane": ACTIVE_TILE_ORDER[1],
+            "research_lane": lane,
             "policy_version": "",
             "ts": 3,
         },

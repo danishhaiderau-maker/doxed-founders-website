@@ -20,11 +20,11 @@ RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 DATA_RETIRED_PATHWAY_LANES = frozenset(RETIRED_TILE_LANES)
 PATHWAY_SHADOW_COLLECTING_ENABLED = False
 
-ROSTER_PHASE = "v31-five-family-analyzer-hypothesis-paper"
+ROSTER_PHASE = "v31-dynamic-adaptive-paper"
 ROSTER_NOTES = (
-    "Active stack is derived exclusively from ACTIVE_TILE_REGISTRY: Chandelier, fixed "
-    "ATR target, ATR trail, Hybrid Runner, and MFE Giveback; one shared direction call "
-    "and five independent paper-only, relay-ineligible lifecycles."
+    "Active stack is derived exclusively from ACTIVE_TILE_REGISTRY: one shared "
+    "direction call feeding independent paper-only, relay-ineligible lifecycles. "
+    "Retired tiles are listed in RETIRED_TILE_LANES and read only as archive evidence."
 )
 
 ANALYZER_COMPARE_LANES = DASHBOARD_PRIMARY_LANES

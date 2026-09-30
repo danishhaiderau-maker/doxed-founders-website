@@ -59,7 +59,6 @@ def reset_state():
         bot.state["ask"] = 64_001.0
         bot.state["leverage"] = 100
         enabled = dict(bot.state.get("research_lane_enabled") or {})
-        enabled[bot.RESEARCH_LANE_CONTINUOUS] = True
         enabled[bot.COMBO_EXECUTION_LANES[0]] = True
         bot.state["research_lane_enabled"] = enabled
 
@@ -83,7 +82,7 @@ print("\n[1] Pause cancels every unfilled global paper order")
 reset_state()
 pending = {
     "trade_id": "pause-pending-1",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     "status": "PENDING",
 }
 bot.lane_register_pending_order(pending)
@@ -99,7 +98,7 @@ print("\n[2] Persisted manual flag stays authoritative if pause reason changes")
 reset_state()
 pending = {
     "trade_id": "pause-pending-2",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     "status": "PENDING",
     "side": "sell",
     "signal_dir": "SHORT",
@@ -176,7 +175,7 @@ with bot.state_lock:
 
 market_signal = {
     "trade_id": "pause-market-1",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     "final_direction": "LONG",
     "signal_price": 64_000.0,
 }
@@ -186,7 +185,7 @@ check("market route creates no position", not bot.open_positions)
 
 limit_signal = {
     "trade_id": "pause-limit-1",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     "final_direction": "LONG",
     "signal_price": 64_000.0,
 }
@@ -202,7 +201,7 @@ with bot.state_lock:
     bot.state["execution_reason"] = "ADMIN_MANUAL"
 raced = {
     "trade_id": "pause-raced-fill-1",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     # The real touch detector retains PENDING until durable OPEN commit.
     "status": "PENDING",
     "fill_handoff_in_progress": True,
@@ -230,7 +229,7 @@ with bot.state_lock:
     bot.state["execution_reason"] = "ADMIN_MANUAL"
 position = {
     "trade_id": "pause-existing-position-1",
-    "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+    "research_lane": bot.COMBO_EXECUTION_LANES[0],
     "status": "OPEN",
     "dir": "SHORT",
 }
@@ -419,7 +418,7 @@ with bot.state_lock:
     bot.state["execution_paused"] = True
     bot.state["execution_reason"] = "ADMIN_MANUAL"
     bot.state["_pause_priority"] = bot.PAUSE_PRIORITIES["ADMIN_MANUAL"]
-check("execution remains blocked", bot.execution_allowed(bot.RESEARCH_LANE_CONTINUOUS) is False)
+check("execution remains blocked", bot.execution_allowed(bot.COMBO_EXECUTION_LANES[0]) is False)
 check("manual pause reason remains authoritative", bot.state.get("execution_reason") == "ADMIN_MANUAL")
 check("manual pause priority remains authoritative", bot.state.get("_pause_priority") == bot.PAUSE_PRIORITIES["ADMIN_MANUAL"])
 

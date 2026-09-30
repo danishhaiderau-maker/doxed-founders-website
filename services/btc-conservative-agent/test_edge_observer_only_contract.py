@@ -63,12 +63,14 @@ def test_edge_controls_and_mutation_routes_are_removed() -> None:
 
 def test_current_registry_roster_survives_edge_retirement() -> None:
     payload = bot.build_static_pathway_lane_specs()
-    lanes = {row["lane"] for row in payload["lanes"]}
-    assert lanes == {*config.ACTIVE_TILE_ORDER, bot.RESEARCH_LANE_CONTINUOUS}
-    assert len(payload["lanes"]) == 6
-    assert bot.RESEARCH_LANE_CONTINUOUS not in config.RETIRED_TILE_LANES
-    assert bot.is_research_lane_retired(bot.RESEARCH_LANE_CONTINUOUS) is False
-    assert payload["benchmark_lane"] == config.COMPARISON_BENCHMARK_LANE
+    lanes = [row["lane"] for row in payload["lanes"]]
+    assert lanes == list(config.ACTIVE_TILE_ORDER)
+    assert "CONTINUOUS" in config.RETIRED_TILE_LANES
+    assert "CONTINUOUS" in payload["retired_tiles_note"]
+    assert payload["benchmark_lane"] is None
+    # The owner label for exchange-reconciled exposure is not a tile.
+    assert bot.LEGACY_ADOPTION_LANE == "CONTINUOUS"
+    assert bot.LEGACY_ADOPTION_LANE not in bot.RESEARCH_LANE_LABELS
 
 
 def test_only_one_ai_evaluator_call_site_remains() -> None:

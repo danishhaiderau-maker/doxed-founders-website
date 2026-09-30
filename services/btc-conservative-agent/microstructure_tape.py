@@ -40,6 +40,7 @@ def build_bucket(*, bucket_ts, bid, ask, bid_qty, ask_qty, last,
     buy_qty = sell_qty = 0.0
     buy_notional = sell_notional = 0.0
     trade_count = 0
+    trade_high = trade_low = None
     for trade in trades or ():
         ts = _finite((trade or {}).get("received_ts"))
         price = _finite((trade or {}).get("p"))
@@ -48,6 +49,8 @@ def build_bucket(*, bucket_ts, bid, ask, bid_qty, ask_qty, last,
             continue
         side = str((trade or {}).get("S") or "").upper()
         trade_count += 1
+        trade_high = price if trade_high is None else max(trade_high, price)
+        trade_low = price if trade_low is None else min(trade_low, price)
         if side == "BUY":
             buy_qty += abs(qty); buy_notional += abs(qty) * price
         elif side == "SELL":
@@ -65,6 +68,8 @@ def build_bucket(*, bucket_ts, bid, ask, bid_qty, ask_qty, last,
         "buy_qty": round(buy_qty, 8), "sell_qty": round(sell_qty, 8),
         "buy_vwap": None if not buy_qty else round(buy_notional / buy_qty, 8),
         "sell_vwap": None if not sell_qty else round(sell_notional / sell_qty, 8),
+        "trade_high": trade_high,
+        "trade_low": trade_low,
     }
     canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
     row["row_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()

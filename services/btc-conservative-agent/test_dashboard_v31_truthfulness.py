@@ -117,7 +117,7 @@ def test_continuous_saved_off_choice_overrides_legacy_direct_entry_flag() -> Non
     fn = _isolated_function(
         "continuous_ai_direct_entry_enabled",
         {
-            "continuous_ai_research_enabled": lambda: False,
+            "legacy_adoption_lane_enabled": lambda: False,
             "state_lock": None,
             "state": {"continuous_ai_direct_entry_enabled": True},
         },

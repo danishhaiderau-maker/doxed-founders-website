@@ -62,6 +62,7 @@ import itertools
 import zipfile
 import hashlib
 from pathlib import Path
+import bitfinex_cost_profile
 from research.analysis_eligibility import (
     BITFINEX_COPY_FIDELITY,
     COPY_ONLY_EXCHANGE_FILLS,
@@ -127,7 +128,6 @@ CHASE_PROFIT_REPORT_FILE = "chase_profit_report.json"
 CONFIDENCE_BAND_CROSS_REPORT_FILE = "confidence_band_cross_report.json"
 EDGE_VALIDATION_REPORT_FILE = "edge_validation_report.json"
 BENCHMARK_CONTRIBUTION_REPORT_FILE = "benchmark_contribution_report.json"
-LANE_OVERLAP_REPORT_FILE = "lane_overlap_report.json"
 FAST_CUT_SWEEP_REPORT_FILE = "fast_cut_sweep_report.json"
 QUALIFIED_EXIT_POLICY_GRID_REPORT_FILE = "qualified_exit_policy_grid_report.json"
 TOP_COMBINATIONS_REPORT_FILE = "top_combinations_report.json"
@@ -532,7 +532,6 @@ try:
         active_tile_registry_signature,
         BENCHMARK_LANE,
         COMPARISON_BENCHMARK_LANE,
-        CONTINUOUS_PROXY_LANES,
         COMBO_CHASE_DELAY_LANES,
         COMBO_CHASE_DIRECT_REFERENCE,
         ACTIVE_CHASE_ISOLATION_LANES,
@@ -562,7 +561,7 @@ except ImportError as exc:
 ANALYZER_COMPARE_LANES = CURRENT_RESEARCH_LANES
 ACTIVE_PATHWAY_LANES = CURRENT_RESEARCH_LANES
 EXPECTED_SYMBOL = "tBTCF0:USTF0"
-EXPECTED_FEE_PROFILE = "BITFINEX_ZERO"
+EXPECTED_FEE_PROFILE = bitfinex_cost_profile.FEE_PROFILE_ID
 BOT_VERSION = EXPECTED_BOT_VERSION
 ANALYZER_VERSION = RESEARCH_STACK_VERSION
 REVERSAL_STUDY_FILE = "reversal_study.jsonl"
@@ -700,7 +699,6 @@ ANALYZER_JSON_REPORT_FILES = (
     CONFIDENCE_BAND_CROSS_REPORT_FILE,
     EDGE_VALIDATION_REPORT_FILE,
     BENCHMARK_CONTRIBUTION_REPORT_FILE,
-    LANE_OVERLAP_REPORT_FILE,
     FAST_CUT_SWEEP_REPORT_FILE,
     TOP_COMBINATIONS_REPORT_FILE,
     CHASE_EFFICIENCY_MATRIX_REPORT_FILE,
@@ -775,7 +773,6 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Confidence × Lane", CONFIDENCE_BAND_CROSS_REPORT_FILE, "Performance by AI band per lane"),
     ("Edge Validation", EDGE_VALIDATION_REPORT_FILE, "ACTIVE / WATCHLIST / DEPRECATED status for edge filter"),
     ("Benchmark Contribution", BENCHMARK_CONTRIBUTION_REPORT_FILE, "% of session PnL from each lane"),
-    ("Lane Overlap", LANE_OVERLAP_REPORT_FILE, "Overlap vs CONTINUOUS — unique alpha signals"),
     ("Fast Cut Sweep", FAST_CUT_SWEEP_REPORT_FILE, "Replay sweep at -6/-8/-10/-12 vs booked PnL"),
     ("Top Combinations", TOP_COMBINATIONS_REPORT_FILE, "AI × spread × type × lane ranked cohorts"),
     ("Exit Combinations", EXIT_COMBINATIONS_REPORT_FILE, "Exit reason × entry combo — leakage and best exit paths"),
@@ -6535,22 +6532,6 @@ def _aggregate_lane_metric_blocks(blocks: list) -> dict:
     }
 
 
-def _inject_continuous_benchmark_lane(lane_metrics: dict, lanes_ordered: list) -> None:
-    """CONTINUOUS yardstick = aggregate of immediate-entry (Direct) COMBO lanes."""
-    proxy_lanes = tuple(CONTINUOUS_PROXY_LANES)
-    bench_lane = COMPARISON_BENCHMARK_LANE or BENCHMARK_LANE
-    existing = lane_metrics.get(bench_lane) or {}
-    if int(existing.get("real_fills") or 0) > 0 or int(existing.get("approves") or 0) > 0:
-        return
-    parts = [lane_metrics.get(ln) for ln in proxy_lanes if lane_metrics.get(ln)]
-    agg = _aggregate_lane_metric_blocks(parts)
-    if not agg.get("approves") and not agg.get("real_fills"):
-        return
-    lane_metrics[bench_lane] = agg
-    if bench_lane not in lanes_ordered:
-        lanes_ordered.insert(0, bench_lane)
-
-
 def _normalize_entry_delay_min(df: pd.DataFrame) -> pd.Series:
     """Prefer entry_delay_sec / signal_age_sec; detect legacy entry_delay seconds vs minutes."""
     if df is None or df.empty:
@@ -10175,7 +10156,6 @@ def benchmark_vs_lanes_report(trades=None, session=None, blocked=None, shadow_re
             **lane_research_metrics,
             **lane_extra,
         }
-    _inject_continuous_benchmark_lane(lane_metrics, lanes_ordered)
 
     bench = lane_metrics.get(BENCHMARK_LANE) or _empty_lane_benchmark_metrics()
     for lane, metrics in lane_metrics.items():
@@ -19031,30 +19011,6 @@ def edge_validation_report(trades=None, session=None):
     return payload
 
 
-def _overlap_signal_key(snap: dict):
-    """Match spawn lanes to CONTINUOUS approves by time bucket + direction + AI prob."""
-    if not isinstance(snap, dict):
-        return None
-    ts_raw = snap.get("approve_ts")
-    if ts_raw is None:
-        try:
-            ts_raw = pd.Timestamp(snap.get("ts")).timestamp()
-        except Exception:
-            ts_raw = 0
-    try:
-        ts_val = float(ts_raw)
-    except (TypeError, ValueError):
-        ts_val = 0
-    ai = snap.get("ai") or {}
-    try:
-        prob = int(round(float(ai.get("win_prob") or snap.get("ai_win_prob") or 0)))
-    except (TypeError, ValueError):
-        prob = 0
-    direction = str(snap.get("direction") or ai.get("direction") or "").upper()
-    if not direction:
-        return None
-    return (int(ts_val // 30), direction, prob)
-
 
 def benchmark_contribution_report(trades=None, session=None, benchmark_report=None):
     """Share of total session PnL contributed by each lane."""
@@ -19104,92 +19060,6 @@ def benchmark_contribution_report(trades=None, session=None, benchmark_report=No
         print(f"  ✅ Wrote {BENCHMARK_CONTRIBUTION_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
     except Exception as e:
         print(f"  ⚠️ Could not write {BENCHMARK_CONTRIBUTION_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
-    return payload
-
-
-def lane_overlap_report(trades=None, session=None, benchmark_report=None):
-    """How much each experiment lane overlaps CONTINUOUS approves vs unique alpha."""
-    if session is None:
-        session = load_research_session()
-    scope = _shadow_scope_label(session)
-    print(f"\n=== LANE OVERLAP REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    snapshots_all = _load_signal_snapshots()
-    snapshots = _filter_snapshots_by_session(snapshots_all, session)
-    trade_pnl = {}
-    if trades is not None and not trades.empty and "trade_id" in trades.columns:
-        work = trades.drop_duplicates(subset=["trade_id"], keep="last")
-        pnl_col = "net_pnl_usd" if "net_pnl_usd" in work.columns else "outcome_net_pnl_usd"
-        for _, row in work.iterrows():
-            tid = str(row.get("trade_id") or "")
-            if tid:
-                trade_pnl[tid] = float(pd.to_numeric(row.get(pnl_col), errors="coerce") or 0)
-
-    continuous_keys = set()
-    for tid, snap in snapshots.items():
-        if str(snap.get("research_lane") or "") == BENCHMARK_LANE:
-            k = _overlap_signal_key(snap)
-            if k:
-                continuous_keys.add(k)
-
-    lanes_out = []
-    for lane_key in ACTIVE_ANALYSIS_LANES:
-        if lane_key in LEGACY_LANES:
-            continue
-        lane_snaps = [(tid, s) for tid, s in snapshots.items() if str(s.get("research_lane") or "") == lane_key]
-        if not lane_snaps:
-            continue
-        keys = []
-        for tid, snap in lane_snaps:
-            k = _overlap_signal_key(snap)
-            if k:
-                keys.append((tid, k))
-        if not keys:
-            continue
-        overlap_n = sum(1 for _tid, k in keys if k in continuous_keys)
-        unique_n = len(keys) - overlap_n
-        overlap_pct = round(100.0 * overlap_n / len(keys), 1) if keys else 0.0
-        unique_pct = round(100.0 * unique_n / len(keys), 1) if keys else 0.0
-        overlap_pnl = round(sum(trade_pnl.get(tid, 0) for tid, k in keys if k in continuous_keys), 2)
-        unique_pnl = round(sum(trade_pnl.get(tid, 0) for tid, k in keys if k not in continuous_keys), 2)
-        rec = {
-            "lane": lane_key,
-            "label": RESEARCH_LANE_LABELS.get(lane_key, lane_key),
-            "approves": len(keys),
-            "overlap_with_continuous": overlap_n,
-            "unique_signals": unique_n,
-            "overlap_pct": overlap_pct,
-            "unique_pct": unique_pct,
-            "overlap_pnl_usd": overlap_pnl,
-            "unique_pnl_usd": unique_pnl,
-            "recommendation": (
-                "LIKELY_DUPLICATE" if overlap_pct >= 75 and unique_pnl <= 0
-                else "UNIQUE_ALPHA" if unique_pct >= 40 and unique_pnl > 0
-                else "MIXED"
-            ),
-        }
-        lanes_out.append(rec)
-        print(
-            f"  {lane_key}: overlap={overlap_pct:.0f}% unique={unique_pct:.0f}% "
-            f"unique_pnl=${unique_pnl:+.2f} {PIPELINE_ENFORCEMENT_TAG}"
-        )
-
-    payload = {
-        "schema": "lane_overlap_v1",
-        "analyzer_sync_id": ANALYZER_SYNC_ID,
-        "expected_bot_version": EXPECTED_BOT_VERSION,
-        "session_scope": scope,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "benchmark_lane": BENCHMARK_LANE,
-        "match_method": "30s approve bucket + direction + AI win_prob",
-        "continuous_approve_keys": len(continuous_keys),
-        "lanes": lanes_out,
-    }
-    try:
-        with open(LANE_OVERLAP_REPORT_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"  ✅ Wrote {LANE_OVERLAP_REPORT_FILE} {PIPELINE_ENFORCEMENT_TAG}")
-    except Exception as e:
-        print(f"  ⚠️ Could not write {LANE_OVERLAP_REPORT_FILE}: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return payload
 
 
@@ -19386,7 +19256,6 @@ def pre_test_analytics_reports(
     confidence_band_cross_report(trades=trades, session=session, benchmark_report=benchmark_report)
     edge_validation_report(trades=trades, session=session)
     benchmark_contribution_report(trades=trades, session=session, benchmark_report=benchmark_report)
-    lane_overlap_report(trades=trades, session=session, benchmark_report=benchmark_report)
     fast_cut_sweep_report(trades=trades, session=session)
     research_cohort_split_reports()
     showcase_losing_cluster_descriptive_report(trades=trades, session=session)
@@ -21493,6 +21362,7 @@ def write_report_manifest(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()[:24]
+    manifest["fee_profile_receipt"] = _generation_fee_profile_receipt()
     _stamp_integrity_generation_identity(manifest, reports)
     try:
         exit_validation = _write_current_exit_reports_validation(manifest)
@@ -21544,6 +21414,28 @@ def write_report_manifest(
             # retained manifest with working files from an incoherent mirror.
             raise
     return manifest
+
+
+def _generation_fee_profile_receipt(trades_path=TRADES_FILE):
+    """Which fee profile this generation's cost model and input trades used."""
+    observed = {}
+    try:
+        with open(trades_path, newline="", encoding="utf-8-sig") as handle:
+            for row in csv.DictReader(handle):
+                key = str(row.get("fee_profile") or "MISSING")
+                observed[key] = observed.get(key, 0) + 1
+    except OSError:
+        observed = None
+    return {
+        "schema": "analyzer_fee_profile_receipt_v1",
+        "cost_model": bitfinex_cost_profile.cost_profile(),
+        "cost_model_signature": bitfinex_cost_profile.cost_profile_signature(),
+        "input_trade_fee_profiles": observed,
+        "non_bitfinex_input_rows": (
+            None if observed is None
+            else sum(n for k, n in observed.items() if k != EXPECTED_FEE_PROFILE)
+        ),
+    }
 
 
 def _publish_completed_report_generation(manifest):

@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
+import bitfinex_cost_profile
+
 REPORT_FILE = "tile_evidence_points_report.json"
 REPORT_SCHEMA = "tile_evidence_points_v1"
 MIN_RANK_SAMPLE = 30
@@ -651,7 +653,10 @@ def build_tile_evidence_points(
                          "and only the final limit is recorded; the collector's touched_limit is reported instead",
             "hold_horizons_sec": list(HOLD_HORIZONS_SEC), "headline_hold_sec": HEADLINE_HOLD_SEC,
             "mark": "mid of the 1s bucket at entry+hold; gaps > 10s or horizons past the tape end are not computed",
-            "costs": "fee profile BITFINEX_ZERO (0 maker/taker); funding not modelled in counterfactuals",
+            "costs": (f"fee profile {bitfinex_cost_profile.FEE_PROFILE_ID} "
+                      f"({bitfinex_cost_profile.MAKER_FEE_RATE * 100:g}% maker / "
+                      f"{bitfinex_cost_profile.TAKER_FEE_RATE * 100:g}% taker); "
+                      "funding not modelled in counterfactuals"),
             "not_a_tile_exit_simulation": True,
         },
         "quarantine_receipt": {

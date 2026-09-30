@@ -156,8 +156,8 @@ def test_runtime_owns_one_shadow_schedule_per_shared_ai_call():
     process = source.split("def process_signal", 1)[1]
     arm_at = process.index("_arm_shared_compressed_shadow_chase(ctx, ai)")
     family_at = process.index("spawn_combo_lanes_from_ai_scan(")
-    continuous_at = process.index("spawn_continuous_lane_from_ai_scan(")
-    assert arm_at < family_at < continuous_at
+    assert arm_at < family_at
+    assert "spawn_continuous_lane_from_ai_scan" not in source
 
 
 def test_arm_result_receipt_is_durable_non_execution_evidence():

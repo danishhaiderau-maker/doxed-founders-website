@@ -202,7 +202,8 @@ console.log(JSON.stringify({
     out = json.loads(result.stdout)
     for badge, tile in zip(out["badges"], tiles):
         assert f">{tile['label']}</span>" in badge
-    assert "Continuous (analysis only)" in out["other"][0] and ">UNKNOWN_LANE</span>" in out["other"][1]
+    assert "Continuous" not in out["other"][0] and ">CONTINUOUS</span>" in out["other"][0]
+    assert ">UNKNOWN_LANE</span>" in out["other"][1]
     assert out["mode"] == "PAPER \u2014 Bitfinex DISARMED"
     assert "Transfer segment 50 published, laptop ACKed 10 (40 behind)" in out["details"]
     assert out["alarms"] == ["CRITICAL TRANSFER_SEGMENTS_LAGGING: laptop ACK is 40 segments behind"]

@@ -37,14 +37,17 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Current registered tiles are the analyzer-hypothesis paper experiment:
-  Chandelier 1.5 ATR; Fixed ATR Target 2.5 with Scenario-C ladder; ATR Trail
-  SL 1.5 / arm 0.75 / trail 1; Hybrid Runner with 25% at 1 ATR plus 25% at
-  1.5 ATR; and MFE Giveback 20%. Their entry offsets are 0.27% for Fixed and
-  0.30% for the other four, with chase windows 2/3/4, 50% remaining-gap moves,
-  and 180-second repricing. All five default OFF, are
-  paper-only, and are relay-ineligible; Continuous remains an analytical
-  comparison label only and cannot create an order.
+- The only registered tile is Dynamic Adaptive (`FAMILY_ADAPTIVE_REGIME`), an
+  honest paper experiment with no proven edge: trailing 15-minute realized-vol
+  regime from Bitfinex 1m candles (CALM below the frozen p40, EXTREME above the
+  frozen p90), a fast-move z-score, taker with a bounded protection cap in
+  NORMAL or on a fast move, a short-lived maker limit within one tick in CALM,
+  stand-aside in EXTREME or when the initial stop is at least 40 bps, and an
+  ATR Trail exit (SL 1.5 / arm 0.75 / trail 1). Direction comes from score-led
+  admission; a raw AI NO_TRADE or a score gap below 5 never trades. It defaults
+  OFF, is paper-only, and is relay-ineligible. The five former family tiles
+  and the Continuous comparison label are retired (`RETIRED_TILE_LANES`); a
+  future tile is promoted only if it passes the OOS promotion gate.
   The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.
 - Adding a tile requires one registry specification with a unique lane, policy

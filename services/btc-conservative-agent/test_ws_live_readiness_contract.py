@@ -672,7 +672,7 @@ class LateFillAdoptionBehaviorTest(unittest.TestCase):
             "lane_pending_orders": lane_pending,
             "lane_open_positions": lane_positions,
             "trades_map": {},
-            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
+            "LEGACY_ADOPTION_LANE": "CONTINUOUS",
             "TRAIL_LADDER": [(12, 10)],
             "TP_TARGET_PCT": 10.0,
             "EXEC_MODE_LIVE": "LIVE",

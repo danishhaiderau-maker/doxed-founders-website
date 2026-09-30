@@ -23,7 +23,6 @@ os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 import bot  # noqa: E402
 
 TILE = bot.ACTIVE_TILE_ORDER[0]
-OTHER_TILE = bot.ACTIVE_TILE_ORDER[1]
 
 
 @pytest.fixture
@@ -158,13 +157,14 @@ def admission(monkeypatch):
         bot.state.update(saved)
 
 
-def test_full_tile_blocks_only_itself(admission):
+def test_full_tile_blocks_only_at_its_own_cap(admission):
     cap = bot.tile_max_active_signals(TILE)
-    admission.update({TILE: cap, OTHER_TILE: 0, None: cap})
+    admission.update({TILE: cap, None: cap})
     assert bot.evaluate_execution_admission(TILE) == (False, "MAX_ACTIVE_SIGNALS")
-    assert bot.evaluate_execution_admission(OTHER_TILE) == (True, "ALLOWED")
     assert bot.ensure_lane_signal_capacity(TILE) is False
-    assert bot.ensure_lane_signal_capacity(OTHER_TILE) is True
+    admission.update({TILE: cap - 1, None: cap * 10})
+    assert bot.evaluate_execution_admission(TILE) == (True, "ALLOWED")
+    assert bot.ensure_lane_signal_capacity(TILE) is True
 
 
 def test_shared_pool_saturation_no_longer_refuses_tiles(admission):

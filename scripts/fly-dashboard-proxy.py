@@ -32,7 +32,6 @@ MIRROR_MUTATION_ALLOWLIST = {
     "/api/spread-gate",
     "/api/tile2/reset_counters",
     "/api/toggle_continuous_ai_direct",
-    "/api/toggle_continuous_ai_research",
     "/api/toggle_debug",
     "/api/toggle_duplicate_limit_block",
     "/api/toggle_early_fail",

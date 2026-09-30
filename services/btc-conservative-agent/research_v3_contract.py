@@ -12,6 +12,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+import bitfinex_cost_profile
+
 COLLECTOR_VERSION = "collector_v3.1"
 CONTRACT_SCHEMA = "safe_policy_genome_contract_v1_1"
 POLICY_DSL_SCHEMA = "safe_policy_dsl_v1_1"
@@ -213,7 +215,7 @@ def build_contract() -> dict[str, Any]:
         "execution_worlds": list(EXECUTION_WORLDS),
         "ledgers": list(LEDGER_NAMES),
         "fees": {
-            "bitfinex_trading_fee_rate": 0.0,
+            "bitfinex_trading_fee_rate": bitfinex_cost_profile.TAKER_FEE_RATE,
             "separate_non_fee_costs": ["funding", "spread", "slippage", "latency", "partial_fill", "stop_slippage"],
         },
         "protection_axes": {

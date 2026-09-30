@@ -28,7 +28,7 @@ def test_actual_early_rejection_records_both_direction_gap_without_api(case, rea
         if sink_ok == 'raises':
             raise OSError('sink unavailable')
         return sink_ok
-    env = dict(RESEARCH_LANE_CONTINUOUS='continuous', copy=copy,
+    env = dict(LEGACY_ADOPTION_LANE='continuous', copy=copy,
         state={'price':None if case=='price' else 100}, state_lock=nullcontext(),
         time=SimpleNamespace(time=lambda:123),
         logger=SimpleNamespace(info=noop,error=noop,warning=lambda *a: warnings.append(a)),

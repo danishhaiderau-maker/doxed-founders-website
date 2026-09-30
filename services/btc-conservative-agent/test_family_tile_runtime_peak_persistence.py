@@ -18,21 +18,23 @@ def _position(lane: str) -> dict:
     }
 
 
-def test_fixed_scenario_c_uses_persisted_peak(monkeypatch):
-    pos = _position("FAMILY_ATR_TARGET_2_5")
+def test_adaptive_atr_trail_uses_persisted_peak(monkeypatch):
+    pos = _position("FAMILY_ADAPTIVE_REGIME")
     closed = []
     monkeypatch.setattr(bot, "close_position", lambda row, reason: closed.append(reason))
-    assert bot._apply_family_tile_exit(pos, 100.12, time.time()) is False
-    assert pos["policy_peak_price"] == 100.12
-    assert bot._apply_family_tile_exit(pos, 100.09, time.time()) is True
-    assert closed == ["PROFIT_LOCK_LADDER"]
+    assert bot._apply_family_tile_exit(pos, 101.0, time.time()) is False
+    assert pos["policy_peak_price"] == 101.0
+    assert bot._apply_family_tile_exit(pos, 100.5, time.time()) is False
+    assert pos["policy_peak_price"] == 101.0
+    assert bot._apply_family_tile_exit(pos, 99.9, time.time()) is True
+    assert closed == ["PROFIT_PROTECTION_STOP"]
 
 
-def test_chandelier_ratchets_from_a_prior_tick(monkeypatch):
-    pos = _position("FAMILY_CHANDELIER_3")
+def test_adaptive_atr_trail_ratchets_from_a_prior_tick(monkeypatch):
+    pos = _position("FAMILY_ADAPTIVE_REGIME")
     closed = []
     monkeypatch.setattr(bot, "close_position", lambda row, reason: closed.append(reason))
     assert bot._apply_family_tile_exit(pos, 102.0, time.time()) is False
     assert pos["policy_peak_price"] == 102.0
-    assert bot._apply_family_tile_exit(pos, 100.4, time.time()) is True
+    assert bot._apply_family_tile_exit(pos, 100.9, time.time()) is True
     assert closed == ["PROFIT_PROTECTION_STOP"]

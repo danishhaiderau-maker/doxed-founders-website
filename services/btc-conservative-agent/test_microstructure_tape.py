@@ -21,6 +21,22 @@ def test_bucket_aggregates_side_volume_and_binds_hash():
     assert len(row["row_sha256"]) == 64
 
 
+def test_bucket_records_per_second_trade_high_low_only_from_in_bucket_trades():
+    row = build_bucket(
+        bucket_ts=100, bid=99, ask=101, bid_qty=0.5, ask_qty=0.4,
+        last=100, source_ts=100.5,
+        trades=[
+            {"received_ts": 100.1, "p": 100.5, "v": .2, "S": "Buy"},
+            {"received_ts": 100.4, "p": 102.0, "v": .1, "S": "Buy"},
+            {"received_ts": 100.9, "p": 98.5, "v": .1, "S": "Sell"},
+            {"received_ts": 101.0, "p": 150.0, "v": 1, "S": "Buy"},
+        ],
+    )
+    assert row["trade_high"] == 102.0 and row["trade_low"] == 98.5
+    quiet = build_bucket(bucket_ts=100, bid=99, ask=101, bid_qty=1, ask_qty=1, last=100, source_ts=100.5)
+    assert quiet["trade_high"] is None and quiet["trade_low"] is None
+
+
 def test_invalid_or_stale_bbo_is_preserved_as_negative_evidence():
     crossed = build_bucket(bucket_ts=100, bid=102, ask=101, bid_qty=1, ask_qty=1, last=101, source_ts=100)
     stale = build_bucket(bucket_ts=100, bid=99, ask=101, bid_qty=1, ask_qty=1, last=100, source_ts=90)

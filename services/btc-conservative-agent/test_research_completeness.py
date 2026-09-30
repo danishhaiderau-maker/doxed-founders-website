@@ -292,32 +292,52 @@ def test_frozen_trial_default_off_creates_no_orders():
     assert trial.assignment(LANES[0], observed_ts=10**10) is None
 
 
+def _two_lane_registry():
+    candidate = LANES[0]
+    control = dict(ACTIVE_TILE_REGISTRY[candidate], policy_signature="control-fixture-signature")
+    return {candidate: dict(ACTIVE_TILE_REGISTRY[candidate]), "CONTROL_FIXTURE": control}
+
+
+def test_frozen_trial_fails_closed_without_a_registered_control():
+    # One registry tile and no comparison benchmark: promotion stays gated
+    # because no control arm can be frozen.
+    assert COMPARISON_BENCHMARK_LANE is None
+    assert LANES == ["FAMILY_ADAPTIVE_REGIME"]
+    for control in (COMPARISON_BENCHMARK_LANE, "CONTINUOUS", LANES[0]):
+        with pytest.raises(ValueError):
+            freeze_selection(LANES[0], control, selected_by="danish", frozen_at_ts=1000.0)
+
+
 def test_frozen_trial_records_identity_and_detects_drift(tmp_path):
-    selection = freeze_selection(LANES[0], COMPARISON_BENCHMARK_LANE, selected_by="danish", frozen_at_ts=1000.0)
+    registry = _two_lane_registry()
+    selection = freeze_selection(
+        LANES[0], "CONTROL_FIXTURE", selected_by="danish", frozen_at_ts=1000.0, registry=registry,
+    )
     path = tmp_path / "selection.json"
     path.write_text(json.dumps(selection), encoding="utf-8")
     env = {trial_module.ENABLED_ENV: "1", trial_module.SELECTION_ENV: str(path)}
-    trial = FrozenPolicyTrial.from_env(env)
+    trial = FrozenPolicyTrial.from_env(env, registry=registry)
     status = trial.status()
     assert status["state"] == "RECORDING" and status["trial_id"] == selection["trial_id"]
     assert trial.may_create_order() is False
     stamp = trial.assignment(LANES[0], observed_ts=2000)
     assert stamp["arm"] == "CANDIDATE" and stamp["relay_eligible"] is False and stamp["paper_only"] is True
     assert stamp["arm_policy_signature"] == ACTIVE_TILE_REGISTRY[LANES[0]]["policy_signature"]
-    assert trial.assignment(COMPARISON_BENCHMARK_LANE, observed_ts=2000)["arm"] == "CONTROL"
+    assert trial.assignment("CONTROL_FIXTURE", observed_ts=2000)["arm"] == "CONTROL"
     assert trial.assignment(LANES[0], observed_ts=999) is None  # before freeze
-    drifted_registry = {lane: dict(spec) for lane, spec in ACTIVE_TILE_REGISTRY.items()}
+    drifted_registry = {lane: dict(spec) for lane, spec in registry.items()}
     drifted_registry[LANES[0]]["policy_signature"] = "changed"
     drifted = FrozenPolicyTrial.from_env(env, registry=drifted_registry)
     assert drifted.status()["state"] == "DRIFTED" and drifted.assignment(LANES[0], observed_ts=2000) is None
 
 
 def test_frozen_trial_rejects_tampered_or_unregistered_selection(tmp_path):
+    registry = _two_lane_registry()
     with pytest.raises(ValueError):
-        freeze_selection("NOT_A_TILE", COMPARISON_BENCHMARK_LANE, selected_by="x", frozen_at_ts=1)
-    selection = freeze_selection(LANES[0], COMPARISON_BENCHMARK_LANE, selected_by="x", frozen_at_ts=1)
+        freeze_selection("NOT_A_TILE", "CONTROL_FIXTURE", selected_by="x", frozen_at_ts=1, registry=registry)
+    selection = freeze_selection(LANES[0], "CONTROL_FIXTURE", selected_by="x", frozen_at_ts=1, registry=registry)
     selection["relay_eligible"] = True
-    trial = FrozenPolicyTrial(selection, enabled=True)
+    trial = FrozenPolicyTrial(selection, enabled=True, registry=registry)
     assert trial.status()["state"] == "INVALID"
     missing = FrozenPolicyTrial.from_env({trial_module.ENABLED_ENV: "1"})
     assert missing.status()["reason"] == "SELECTION_PATH_MISSING"

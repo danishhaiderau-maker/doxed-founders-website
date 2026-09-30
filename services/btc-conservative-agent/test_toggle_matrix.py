@@ -1,4 +1,4 @@
-"""Pt 6: Complete Cheetah/CONTINUOUS toggle matrix for the relay contract.
+"""Pt 6: Complete registry-tile toggle matrix for the relay contract.
 
 Tests all 11 scenarios from the toggle contract spec. Uses an in-process
 mock of the Bitfinex exchange object so NO real orders are ever placed.
@@ -35,19 +35,19 @@ from bot import (
     EXEC_MODE_PAPER,
     EXEC_MODE_LIVE,
     EXEC_MODE_EXIT_ONLY,
-    RESEARCH_LANE_CONTINUOUS,
+    COMBO_EXECUTION_LANES,
+    LEGACY_ADOPTION_LANE,
+    RETIRED_TILE_LANES,
 )
 import bitfinex_live_executor as bx
 
-LANE = RESEARCH_LANE_CONTINUOUS
+LANE = COMBO_EXECUTION_LANES[0]
 passed = 0
 failed = 0
 
 
 def set_lane(on):
     with bot.state_lock:
-        if LANE == RESEARCH_LANE_CONTINUOUS:
-            bot.state["continuous_ai_research_enabled"] = bool(on)
         m = dict(bot.state.get("research_lane_enabled") or {})
         m[LANE] = bool(on)
         bot.state["research_lane_enabled"] = m
@@ -77,7 +77,7 @@ def check(name, cond, detail=""):
 
 
 print("=" * 72)
-print("Pt 6 toggle test matrix -- CONTINUOUS / Cheetah source")
+print(f"Pt 6 toggle test matrix -- registry tile {LANE}")
 print("=" * 72)
 
 # === 1. Tile OFF + Bitfinex OFF: LAB shadow, zero orders, zero exchange calls
@@ -265,6 +265,19 @@ r2 = suspend_lane_trading(LANE, reason="TEST_DUP_2")
 check("both calls succeed", isinstance(r1, dict) and isinstance(r2, dict))
 check("second call has no orders to cancel (already gone)",
       len(r2.get("cancelled_pending", [])) == 0)
+
+# === 12. Retired tiles and the legacy adoption label never originate entries
+print("\n[12] Retired / legacy adoption lanes refuse new paper entries")
+reset()
+for retired_lane in sorted(set(RETIRED_TILE_LANES) | {LEGACY_ADOPTION_LANE}):
+    signal = {"trade_id": f"retired-{retired_lane}", "research_lane": retired_lane}
+    check(f"{retired_lane} entry refused", bot.execute_simulated_order(signal) is False)
+    check(f"{retired_lane} outcome TILE_RETIRED", signal.get("outcome") == "TILE_RETIRED",
+          signal.get("outcome"))
+laneless = {"trade_id": "retired-laneless"}
+check("lane-less signal refused", bot.execute_simulated_order(laneless) is False)
+check("no retired order reached pending", not any(
+    str(o.get("trade_id") or "").startswith("retired-") for o in bot.pending_orders))
 
 print()
 print("=" * 72)

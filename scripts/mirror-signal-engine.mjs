@@ -84,8 +84,8 @@ if (existsSync(combosAgent)) {
   const manifest = {
     engine_version: engineVersion,
     combo_version: unchanged && previous.combo_version ? previous.combo_version : new Date().toISOString().slice(0, 10),
-    exit_version: 'five-family-exits-v1',
-    benchmark_lane: 'CONTINUOUS_ANALYTICAL_ONLY',
+    exit_version: 'adaptive-regime-atr-trail-v1',
+    benchmark_lane: 'NONE',
     signal_hash: botHash,
     source: 'services/btc-conservative-agent/bot.py',
     updated_at: unchanged && previous.updated_at ? previous.updated_at : new Date().toISOString(),
@@ -139,13 +139,11 @@ console.log(`Mirrored reset receipt state (${sha256(readFileSync(resetReceiptSta
 // only the active family modules plus their common implementation and remove
 // retired policy files so parity cannot pass with an orphan execution path.
 copyFileSync(join(agentDir, 'crash_exception_receipt.py'), join(engineDir, 'crash_exception_receipt.py'));
+// The tile-registry contract guarantees every canonical paper_policy_*.py has
+// exactly one registry owner, so the canonical directory is the roster here.
 const activePolicyFiles = [
   'family_policy_common.py',
-  'paper_policy_family_atr_target.py',
-  'paper_policy_family_atr_trail.py',
-  'paper_policy_family_chandelier.py',
-  'paper_policy_family_hybrid_runner.py',
-  'paper_policy_family_mfe_giveback.py',
+  ...readdirSync(agentDir).filter((name) => /^paper_policy_.+\.py$/.test(name)).sort(),
 ];
 for (const name of activePolicyFiles) {
   const source = join(agentDir, name);

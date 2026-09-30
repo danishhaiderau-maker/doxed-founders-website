@@ -405,7 +405,7 @@ def test_coordination_pause_expires_existing_continuous_but_keeps_labelled_shado
     namespace = {
         "pending_orders": pending,
         "trade_lock": threading.RLock(),
-        "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
+        "LEGACY_ADOPTION_LANE": "CONTINUOUS",
         "LIVE_RELAY_COORDINATION_REASON": "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED",
         "_cancel_pending_order_confirmed": fake_cancel,
         "logger": QuietLogger(),
@@ -1426,7 +1426,7 @@ def test_selected_virtual_chase_submits_chased_price_without_anchor_reset():
 
 
 def test_active_shared_lanes_do_not_shift_the_qualified_structural_limit():
-    assert "RESEARCH_LANE_CONTINUOUS: 0.0," in BOT_SOURCE
+    assert "LEGACY_ADOPTION_LANE: 0.0," in BOT_SOURCE
     assert "**{lane: 0.0 for lane in COMBO_EXECUTION_LANES}" in BOT_SOURCE
     assert "A second lane offset here would make the" in BOT_SOURCE
 
@@ -1498,7 +1498,7 @@ def test_direction_only_current_ui_has_no_pullback_or_ai_confidence_control():
     assert 'id="pullbackThresh"' not in BOT_SOURCE
     assert "<th>AI Band</th>" not in BOT_SOURCE
     assert "AI Win Prob" not in BOT_SOURCE
-    assert "continuous_shared_direction_gap_structural_v2" in BOT_SOURCE
+    assert "continuous_shared_direction_gap_structural_v2" not in BOT_SOURCE
     assert "DETERMINISTIC_LIMIT_BLOCKED" in BOT_SOURCE
 
 

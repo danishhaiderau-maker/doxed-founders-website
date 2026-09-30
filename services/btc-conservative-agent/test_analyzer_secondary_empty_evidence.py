@@ -74,6 +74,8 @@ def test_pathway_empty_lanes_keep_counts_but_null_derived_metrics(tmp_path, monk
     report = analyzer.pathway_survival_report(pd.DataFrame(), session={})
 
     assert report["benchmark_ev_per_fill_usd"] is None
+    assert None not in report["lanes"]
+    registry_lane = next(iter(report["lanes"]))
     for lane in report["lanes"].values():
         assert lane["approves"] == 0
         assert lane["fills"] == 0
@@ -89,12 +91,12 @@ def test_pathway_empty_lanes_keep_counts_but_null_derived_metrics(tmp_path, monk
         "_load_jsonl_rows",
         lambda _path: [{
             "trade_id": "pending-approval",
-            "research_lane": analyzer.BENCHMARK_LANE,
+            "research_lane": registry_lane,
             "stage": "APPROVE",
         }],
     )
     approvals_only = analyzer.pathway_survival_report(pd.DataFrame(), session={})
-    benchmark = approvals_only["lanes"][analyzer.BENCHMARK_LANE]
+    benchmark = approvals_only["lanes"][registry_lane]
     assert benchmark["approves"] == 1
     assert benchmark["fills"] == 0
     assert benchmark["approve_to_fill_pct"] is None

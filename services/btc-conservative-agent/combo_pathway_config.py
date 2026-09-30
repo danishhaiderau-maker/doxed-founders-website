@@ -105,11 +105,7 @@ def resolve_score_led_paper_admission(
     return result
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
-RESEARCH_LANE_FAMILY_CHANDELIER = "FAMILY_CHANDELIER_3"
-RESEARCH_LANE_FAMILY_ATR_TARGET = "FAMILY_ATR_TARGET_2_5"
-RESEARCH_LANE_FAMILY_ATR_TRAIL = "FAMILY_ATR_TRAIL"
-RESEARCH_LANE_FAMILY_HYBRID_RUNNER = "FAMILY_HYBRID_RUNNER"
-RESEARCH_LANE_FAMILY_MFE_GIVEBACK = "FAMILY_MFE_GIVEBACK"
+RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME = "FAMILY_ADAPTIVE_REGIME"
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
 TILE_ARCHITECTURE_VERSION = 3
 # Complete atomic add/retire contract from the V3.1 objective.  Every active
@@ -135,24 +131,21 @@ TILE_COMPONENT_SURFACES = (
 TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
 COMBO_EXECUTION_LANES = (
-    RESEARCH_LANE_FAMILY_CHANDELIER,
-    RESEARCH_LANE_FAMILY_ATR_TARGET,
-    RESEARCH_LANE_FAMILY_ATR_TRAIL,
-    RESEARCH_LANE_FAMILY_HYBRID_RUNNER,
-    RESEARCH_LANE_FAMILY_MFE_GIVEBACK,
+    RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
 
 def _policy_signature(*, raw_policy_id: str, entry: dict, exit_policy: dict,
-                      ladder: tuple[tuple[float, float], ...] = ()) -> str:
+                      ladder: tuple[tuple[float, float], ...] = (),
+                      entry_ttl_sec: int = 1800) -> str:
     """Bind causal identity to every execution-defining policy parameter."""
     material = {
         "raw_policy_id": raw_policy_id,
         "entry_policy": entry,
         "exit_policy": exit_policy,
         "ladder": tuple(tuple(row) for row in ladder),
-        "entry_ttl_sec": 1800,
+        "entry_ttl_sec": entry_ttl_sec,
         "path_end_sec": 7200,
         "requested_margin_usd": 0.25,
         "account_risk_pct": 0.5,
@@ -172,9 +165,12 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           relay_capability: str = "BLOCKED_UNQUALIFIED",
           ladder: tuple[tuple[float, float], ...] = (),
           ladder_label: str = "", ladder_profile_id: str = "",
-          hypothesis_result: dict | None = None) -> dict:
+          hypothesis_result: dict | None = None,
+          entry_ttl_sec: int = 1800,
+          subtitle: str | None = None, policy_epoch: str | None = None) -> dict:
     if SCORE_LED_PAPER_RESEARCH_ENABLED:
         raw_policy_id = SCORE_LED_ADMISSION_POLICY_ID + "::" + raw_policy_id
+    chase = tuple(entry["chase_windows"])
     tile = {
         "tile_id": lane,
         "label": label,
@@ -184,8 +180,9 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "policy_signature": _policy_signature(
             raw_policy_id=raw_policy_id, entry=entry,
             exit_policy=exit_policy, ladder=ladder,
+            entry_ttl_sec=entry_ttl_sec,
         ),
-        "policy_epoch": ("v31-score-led-non-tie-paper-v2" if SCORE_LED_PAPER_RESEARCH_ENABLED else "v31-analyzer-hypothesis-paper-v1"),
+        "policy_epoch": policy_epoch or ("v31-score-led-non-tie-paper-v2" if SCORE_LED_PAPER_RESEARCH_ENABLED else "v31-analyzer-hypothesis-paper-v1"),
         "admission_treatment": (SCORE_LED_ADMISSION_POLICY_ID if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
         "research_lane": lane,
         "execution_scope": "PAPER_ONLY",
@@ -214,12 +211,12 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "toggle_key": "research_lane_enabled", "lifecycle_state": "PAPER_ONLY",
         "implementation_modules": (module,), "dedicated_test_modules": (test_module,),
         "entry_offset_pct": entry["offset_pct"],
-        "initial_rest_sec": min(entry["chase_windows"]) * 300,
-        "chase_windows": tuple(entry["chase_windows"]),
-        "chase_age_sec": (min(entry["chase_windows"]) * 300, (max(entry["chase_windows"]) + 1) * 300),
+        "initial_rest_sec": min(chase) * 300 if chase else 0,
+        "chase_windows": chase,
+        "chase_age_sec": (min(chase) * 300, (max(chase) + 1) * 300) if chase else (),
         "chase_interval_sec": entry["reprice_sec"],
         "chase_remaining_gap_step_pct": entry["remaining_gap_step_pct"],
-        "entry_ttl_sec": 1800, "margin_usd": 0.25,
+        "entry_ttl_sec": entry_ttl_sec, "margin_usd": 0.25,
         "account_risk_pct": 0.5, "path_end_sec": 7200,
         "exit_profile_id": raw_policy_id.split("|", 1)[1],
         "promotion_criteria": "Conservative chronological OOS, bounded drawdown, cross-world parity and every live gate GREEN",
@@ -232,78 +229,66 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
             "ladder_label": ladder_label,
             "ladder_profile_id": ladder_profile_id,
         })
-    if SCORE_LED_PAPER_RESEARCH_ENABLED:
+    if SCORE_LED_PAPER_RESEARCH_ENABLED and subtitle is None:
         tile["label"] = label + " · score-led paper"
         tile["subtitle"] = "HIGHER SCORE ADMISSION EXPERIMENT — PAPER ONLY — NOT AI APPROVAL"
         tile["presentation"]["hypothesis_result"] = {"status": "UNTESTED_NEW_ADMISSION_TREATMENT"}
+    if subtitle is not None:
+        tile["subtitle"] = subtitle
     return tile
 
 
 COMBO_LANE_SPECS = {
-    RESEARCH_LANE_FAMILY_CHANDELIER: _tile(
-        lane=RESEARCH_LANE_FAMILY_CHANDELIER, label="Chandelier Hypothesis · 1.5 ATR",
-        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5", id_prefix="fc3",
-        module="paper_policy_family_chandelier.py", test_module="test_paper_policy_family_chandelier.py",
-        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
-        exit_policy={"family": "CHANDELIER", "initial_stop_atr_k": 2.0, "chandelier_atr_k": 1.5, "trail_activation_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
-        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 14, "wins": 14, "losses": 0, "oos_net_usd": 1.849868},
-    ),
-    RESEARCH_LANE_FAMILY_ATR_TARGET: _tile(
-        lane=RESEARCH_LANE_FAMILY_ATR_TARGET, label="Fixed Target Hypothesis · TP 2.5 + Scenario C",
-        raw_policy_id="OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C", id_prefix="fat",
-        module="paper_policy_family_atr_target.py", test_module="test_paper_policy_family_atr_target.py",
-        entry={"offset_pct": 0.27, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
-        exit_policy={"family": "ATR_TARGET", "atr_tp_k": 2.5, "initial_stop_atr_k": None, "thesis_cut_margin_pct": -12.0, "thesis_window_sec": 300, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
-        ladder=((8, 5), (12, 10), (19, 17), (40, 28), (60, 45), (80, 60), (100, 75), (150, 120)),
-        ladder_label="8→5, 12→10, 19→17, 40→28, 60→45, 80→60, 100→75, 150→120",
-        ladder_profile_id="SCENARIO_C_RUNNER_8_v8_20260820",
-        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 15, "wins": 15, "losses": 0, "oos_net_usd": 2.339938},
-    ),
-    RESEARCH_LANE_FAMILY_ATR_TRAIL: _tile(
-        lane=RESEARCH_LANE_FAMILY_ATR_TRAIL, label="ATR Trail Hypothesis · SL 1.5 / arm 0.75 / trail 1",
-        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1", id_prefix="ftr",
-        module="paper_policy_family_atr_trail.py", test_module="test_paper_policy_family_atr_trail.py",
-        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
+    # Regime cells are frozen from scripts/calibrate-adaptive-regime.py; a new
+    # calibration is a new policy signature, never a runtime recalibration.
+    RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME: _tile(
+        lane=RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME, label="Dynamic Adaptive · regime entry + ATR Trail",
+        raw_policy_id="ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1", id_prefix="far",
+        module="paper_policy_family_adaptive_regime.py", test_module="test_paper_policy_family_adaptive_regime.py",
+        entry={
+            "mode": "ADAPTIVE_REGIME", "offset_pct": 0.0, "chase_windows": (),
+            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+            "regime_feature": "RV15_1M_LOG_RETURN_BPS", "rv_window_min": 15,
+            "calm_below_bps": 14.13, "extreme_above_bps": 29.04,
+            "calibration": {
+                "schema": "adaptive_regime_calibration_v1", "symbol": "tBTCF0:USTF0", "timeframe": "1m",
+                "window_start_utc": "2026-08-31T20:00:00Z", "window_end_utc": "2026-09-30T20:00:00Z",
+                "candles": 38072, "rv_samples": 38057, "percentiles": (40, 90),
+                "p40_bps": 14.1252, "p90_bps": 29.0432,
+            },
+            "fast_move_lookback_min": 5, "fast_move_sigma_window_min": 60, "fast_move_z": 1.5,
+            "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
+            "maker_improve_ticks": 1, "maker_ttl_sec": 60,
+            "extreme_action": "STAND_ASIDE", "liquidation_guard_stop_bps": 40.0,
+            "max_candle_staleness_sec": 150, "max_bbo_age_sec": 5.0,
+            "ai_decision_role": "FEATURE_ONLY",
+            "block_raw_ai_no_trade": True, "min_score_gap": 5,
+        },
         exit_policy={"family": "ATR_TRAIL", "initial_stop_atr_k": 1.5, "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
-        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 15, "wins": 15, "losses": 0, "oos_net_usd": 2.132123},
-    ),
-    RESEARCH_LANE_FAMILY_HYBRID_RUNNER: _tile(
-        lane=RESEARCH_LANE_FAMILY_HYBRID_RUNNER, label="Hybrid Runner Hypothesis · secure 25% + 25%",
-        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|HYBRID_secure_25_25_runner_TRAIL_1", id_prefix="fhy",
-        module="paper_policy_family_hybrid_runner.py", test_module="test_paper_policy_family_hybrid_runner.py",
-        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
-        exit_policy={"family": "HYBRID_RUNNER", "initial_stop_atr_k": 1.5, "partial_take_profits": ((1.0, 0.25), (1.5, 0.25)), "trail_activation_atr_k": 1.0, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
-        relay_capability="BLOCKED_PARTIAL_REDUCTION_UNPROVEN",
-        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 15, "wins": 15, "losses": 0, "oos_net_usd": 2.291095},
-    ),
-    RESEARCH_LANE_FAMILY_MFE_GIVEBACK: _tile(
-        lane=RESEARCH_LANE_FAMILY_MFE_GIVEBACK, label="MFE Giveback · retain 80%",
-        raw_policy_id="OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT", id_prefix="fmg",
-        module="paper_policy_family_mfe_giveback.py", test_module="test_paper_policy_family_mfe_giveback.py",
-        entry={"offset_pct": 0.30, "chase_windows": (2, 3, 4), "remaining_gap_step_pct": 50.0, "reprice_sec": 180},
-        exit_policy={"family": "MFE_GIVEBACK", "initial_stop_atr_k": None, "mfe_giveback_fraction": 0.20, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
-        relay_capability="BLOCKED_INITIAL_STOP_SWEEP_REQUIRED",
-        hypothesis_result={"status": "PROFITABLE_IN_ANALYZER_HYPOTHESIS_MODEL", "model": "CANONICAL_1M_ADVERSE_FIRST_OHLC", "oos_episodes": 15, "touches": 14, "wins": 14, "losses": 0, "oos_net_usd": 1.715658},
+        hypothesis_result={
+            "status": "UNPROVEN_HONEST_PAPER_EXPERIMENT",
+            "research_notes": (
+                "volatility-entry edge unsupported by 2026-10-01 research",
+                "AI direction showed no edge; NO_TRADE and score gap <5 never trade",
+            ),
+        },
+        entry_ttl_sec=60,
+        subtitle="HONEST PAPER EXPERIMENT — NO PROVEN EDGE — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch="v31-dynamic-adaptive-paper-v1",
     ),
 }
-COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
-CONTINUOUS_PROXY_LANES = ()
-PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_FAMILY_CHANDELIER
+COMPARISON_BENCHMARK_LANE = None
+PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME
 BENCHMARK_LANE = COMPARISON_BENCHMARK_LANE
 BENCHMARK_PROFILE_ID = "CONTINUOUS_BENCHMARK_v1"
 BENCHMARK_ROLE = "BENCHMARK"
 PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
-RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_CHANDELIER
+RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-five-family-analyzer-hypothesis-paper"
-if SCORE_LED_PAPER_RESEARCH_ENABLED:
-    RESEARCH_STACK_VERSION = "v31-five-family-score-led-non-tie-paper-v2"
+RESEARCH_STACK_VERSION = "v31-dynamic-adaptive-paper-v1"
 RESEARCH_STACK_FEATURES = (
-    "Five exit-family tiles share one direction-only three-minute AI call while retaining "
-    "independent paper decisions, locks, capacity, orders, positions, ledgers and policy identities; "
-    "all five are default-OFF, paper-only and relay-ineligible; ideal touch is diagnostic only; "
-    "conservative BBO/depth receipts control execution evidence"
+    "One Dynamic Adaptive paper tile consumes the shared three-minute direction call; it stands aside on raw AI NO_TRADE, score gap <5, extreme volatility or a stop within the liquidation guard; default-OFF, paper-only and relay-ineligible. Former exit-family tiles and the Continuous comparison label are retired; exit variants survive only as analyzer research variants"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -321,6 +306,9 @@ ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
 RETIRED_TILE_LANES = frozenset({
     "OFFSET_029_ATR_TP_25", "OFFSET_029_ATR_PROTECTED",
     "OFFSET_029_ATR_REGIME", "PROTECTED_W234_SCENARIO_C",
+    # Retired 2026-10-01: all lost in conservative paper evidence.
+    "FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5", "FAMILY_ATR_TRAIL",
+    "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK", "CONTINUOUS",
 })
 RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.03_CHASE_w234_s25_i180|CHANDELIER_3",
@@ -328,6 +316,11 @@ RETIRED_POLICY_IDENTITIES = frozenset({
     "OFFSET_0.04_CHASE_all_on_s50_i60|ATR_TRAIL_SL_2_ARM_1.25_TRAIL_1",
     "OFFSET_0.03_CHASE_w234_s25_i180|HYBRID_secure_33_runner_TRAIL_1",
     "OFFSET_0.03_CHASE_w234_s25_i180|ATR_TP_2.5_GIVEBACK_20PCT",
+    "OFFSET_0.30_CHASE_w234_s50_i180|CHANDELIER_1.5",
+    "OFFSET_0.27_CHASE_w234_s50_i180|ATR_TP_2.5_SCENARIO_C",
+    "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1",
+    "OFFSET_0.30_CHASE_w234_s50_i180|HYBRID_secure_25_25_runner_TRAIL_1",
+    "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT",
 })
 
 
@@ -470,7 +463,7 @@ def active_tile_registry_signature() -> str:
 COMBO_CHASE_DELAY_LANES = ()
 COMBO_CHASE_ISOLATION_PAIRS = ()
 ACTIVE_CHASE_ISOLATION_PAIRS = ()
-ACTIVE_CHASE_ISOLATION_LANES = (COMPARISON_BENCHMARK_LANE,)
+ACTIVE_CHASE_ISOLATION_LANES = ()
 COMBO_CHASE_DIRECT_REFERENCE = None
 
 COMBO_LANE_LABELS = {lane: spec["label"] for lane, spec in COMBO_LANE_SPECS.items()}
