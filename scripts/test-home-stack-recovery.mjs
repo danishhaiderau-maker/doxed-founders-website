@@ -21,7 +21,6 @@ const startBot = read("start-home-bot.ps1");
 const botAutoRestart = read("bot-auto-restart.ps1");
 const startAnalyzer = read("start-home-analyzer.ps1");
 const analyzerAutoRestart = read("analyzer-auto-restart.ps1");
-const flyDataSyncLoop = read("sync-fly-bot-data-loop.ps1");
 const providerFreeRecovery = read("recover-home-stack-provider-free.ps1");
 const commandWorker = read("home-stack-cmd-worker.ps1");
 const health = read("home-stack-health.ps1");
@@ -152,9 +151,6 @@ assert.match(
 );
 assert.match(analyzerAutoRestart, /disabled fail-closed/);
 assert.doesNotMatch(analyzerAutoRestart, /Start-Process|Set-Content|Remove-Item/);
-assert.match(flyDataSyncLoop, /DoxxedCrypto\\locks/);
-assert.match(flyDataSyncLoop, /fly-data-sync-loop\.guard/);
-assert.match(flyDataSyncLoop, /FileShare\]::None/);
 assert.match(
   startEverything,
   /start-home-analyzer\.ps1"\)\s+@\(\s*"-Port",\s*"\$AnalyzerPort",\s*"-NoWait"/,

@@ -33,27 +33,6 @@ class LocalFreshCollectionIntegrationTests(unittest.TestCase):
         self.assertIn("LEGACY_WIPE_RESEARCH_RETIRED", bridge)
         self.assertNotIn('Invoke-WebRequest -Uri "http://127.0.0.1:$BotPort/api/reset"', worker)
 
-    def test_sync_loop_standalone_analyzer_and_publishers_have_fence_checks(self):
-        standalone = (REPO / "scripts" / "sync-fly-bot-data.ps1").read_text(encoding="utf-8")
-        loop = (REPO / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(encoding="utf-8")
-        launcher = (REPO / "scripts" / "start-home-analyzer.ps1").read_text(encoding="utf-8")
-        analyzer = (HERE / "analyzer_research_engine_v62.py").read_text(encoding="utf-8")
-        for marker in (
-            "standalone_sync_start",
-            "file_atomic_promotion",
-            "bundle_file_atomic_promotion",
-            "remote_",
-            "canonical_manifest_promotion",
-            "analyzer_report_remote_publish",
-        ):
-            self.assertIn(marker, standalone)
-        self.assertIn("sync_loop_iteration", loop)
-        self.assertIn("sync_loop_under_lease", loop)
-        self.assertIn("analyzer_launcher_start", launcher)
-        self.assertIn("analyzer_iteration_start", analyzer)
-        self.assertIn("analyzer_iteration_under_lease", analyzer)
-        self.assertIn("analyzer_generation_atomic_swap", analyzer)
-        self.assertIn("analyzer_session_archive", analyzer)
 
     def test_canonical_manifest_promotion_refuses_fenced_generation(self):
         import tempfile

@@ -14,6 +14,6 @@ REM  supervisor, relay publisher, or Cloudflare tunnel.
 REM ====================================================================
 setlocal
 cd /d "%~dp0.."
-powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-fly-desktop-mirror.ps1" -NoWait
+powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0start-laptop-stack.ps1" -NoWait
 set "DCF_MIRROR_EXIT=%ERRORLEVEL%"
 endlocal & exit /b %DCF_MIRROR_EXIT%

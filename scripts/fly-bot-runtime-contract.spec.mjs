@@ -49,9 +49,7 @@ const architectureLockPath = new URL(
 );
 const migrationGuidePath = new URL('../docs/fly-migration-guide.md', import.meta.url);
 const dashboardProxyPath = new URL('./fly-dashboard-proxy.py', import.meta.url);
-const desktopMirrorPath = new URL('./start-fly-desktop-mirror.ps1', import.meta.url);
-const flySyncLoopPath = new URL('./sync-fly-bot-data-loop.ps1', import.meta.url);
-const flySyncPath = new URL('./sync-fly-bot-data.ps1', import.meta.url);
+const laptopStackPath = new URL('./start-laptop-stack.ps1', import.meta.url);
 const flyDataPathsPath = new URL('./fly-data-paths.ps1', import.meta.url);
 const flyMirrorMigrationPath = new URL('./migrate-fly-mirror-to-local.ps1', import.meta.url);
 const rsiTouchAuditPath = new URL(
@@ -347,11 +345,9 @@ test('legacy lock files describe mirrors only and cannot claim production owners
 });
 
 test('desktop Fly mirror is loopback-only and cannot proxy money-path mutations', async () => {
-  const [proxy, launcher, syncLoop, sync, helper] = await Promise.all([
+  const [proxy, launcher, helper] = await Promise.all([
     readFile(dashboardProxyPath, 'utf8'),
-    readFile(desktopMirrorPath, 'utf8'),
-    readFile(flySyncLoopPath, 'utf8'),
-    readFile(flySyncPath, 'utf8'),
+    readFile(laptopStackPath, 'utf8'),
     readFile(flyLockHelperPath, 'utf8'),
   ]);
 
@@ -366,10 +362,9 @@ test('desktop Fly mirror is loopback-only and cannot proxy money-path mutations'
   assert.doesNotMatch(proxy, /"\/api\/bitfinex_live"[\s\S]*MIRROR_MUTATION_ALLOWLIST/);
   assert.doesNotMatch(proxy, /"\/api\/positions\/close"[\s\S]*MIRROR_MUTATION_ALLOWLIST/);
   assert.match(launcher, /--bind 127\.0\.0\.1/);
-  for (const script of [launcher, syncLoop, sync]) {
-    assert.match(script, /fly-canonical-lock\.ps1/);
-    assert.match(script, /Get-CanonicalFlyBotUrl -RequestedUrl \$SourceUrl/);
-  }
+  assert.match(launcher, /fly-canonical-lock\.ps1/);
+  assert.match(launcher, /Get-CanonicalFlyBotUrl -RequestedUrl \$SourceUrl/);
+  assert.doesNotMatch(launcher, /\/api\/data-sync\//);
   assert.match(helper, /doxed-btc-bot\.fly\.dev/);
   assert.match(helper, /REFUSED_NON_CANONICAL_UPSTREAM/);
 });
@@ -387,77 +382,25 @@ test('desktop Start and Reset routes manage the mirror only', async () => {
   );
   assert.match(launcher, /function Invoke-ResetFlyDesktopMirror/);
   assert.match(launcher, /Stop-RecordedMirrorProcess "\.fly-dashboard-proxy\.pid"/);
-  assert.match(launcher, /Stop-RecordedMirrorProcess "\.fly-data-sync-loop\.lock"/);
+  assert.doesNotMatch(launcher, /sync-fly-bot-data/);
   assert.doesNotMatch(
     launcher.match(/function Invoke-ResetFlyDesktopMirror[\s\S]*?^}/m)?.[0] ?? '',
     /fly-control|api\.machines\.dev|stop-bot|start-bot/,
   );
 });
 
-test('desktop recovery rejects zombie mirror processes and restores watchdog ownership', async () => {
-  const launcher = await readFile(desktopMirrorPath, 'utf8');
+test('desktop recovery adopts one proxy and delegates segment pull to the chain supervisor', async () => {
+  const launcher = await readFile(laptopStackPath, 'utf8');
   const recovery = await readFile(fastRecoverPath, 'utf8');
-  const syncLoop = await readFile(flySyncLoopPath, 'utf8');
-  const sync = await readFile(flySyncPath, 'utf8');
 
-  assert.match(launcher, /syncHeartbeatMaxAgeSec\s*=\s*600/);
-  assert.match(launcher, /insideDeclaredBackoff/);
-  assert.match(launcher, /nextRetryAt\.AddSeconds\(\$syncBackoffGraceSec\)/);
-  assert.match(launcher, /LastWriteTimeUtc/);
-  assert.match(launcher, /Stop-Process -Id \$syncPid -Force/);
   assert.match(launcher, /Get-NetTCPConnection[\s\S]*LocalPort 7002/);
   assert.match(launcher, /X-Desktop-Mirror/);
   assert.match(launcher, /proxyEndpointAlive/);
   assert.match(launcher, /unowned listener\(s\)/);
-  assert.match(syncLoop, /FileShare\]::None/);
-  assert.match(syncLoop, /\.fly-data-sync-loop\.guard/);
-  assert.match(
-    syncLoop,
-    /lastSyncedSourceRevision = \[string\]\$growthState\.lastSyncedSourceRevision/,
-  );
-  assert.match(
-    syncLoop,
-    /\$forceByRevision = \[bool\]\$observedSourceRevision[\s\S]*-not \$observedSourceRevision\.Equals\(\$lastSyncedSourceRevision/,
-  );
-  assert.match(
-    syncLoop,
-    /\$needsFullInventory = \$forceByTime -or \$forceFresh -or \$forceByRevision -or \$forceByGrowth[\s\S]*-not \$needsFullInventory[\s\S]*\$relayEvidencePath = Invoke-OptionalRelayEvidenceSync/,
-  );
-  assert.match(
-    syncLoop,
-    /if \(-not \(\$forceByTime -or \$forceByGrowth -or \$forceFresh -or \$forceByRevision\)\)/,
-  );
-  assert.match(
-    syncLoop,
-    /reason = "identity_match_before_full_interval"[\s\S]*sourceRevision = \$lastSyncedSourceRevision[\s\S]*observedSourceRevision = \$observedSourceRevision[\s\S]*mirroredSourceRevision = \$lastSyncedSourceRevision/,
-  );
-  assert.doesNotMatch(
-    syncLoop,
-    /reason = "identity_match_before_full_interval"[\s\S]{0,800}sourceRevision = \$\(if \(\$manifest\.PSObject\.Properties\.Name -contains "source_git_rev"\)/,
-  );
-  assert.match(
-    syncLoop,
-    /\$childSourceRevision = \[string\]\$result\.SourceRevision[\s\S]*\$childSourceRevision -notmatch '\^\[0-9a-fA-F\]\{7,64\}\$'[\s\S]*\$lastSyncedSourceRevision = \$childSourceRevision[\s\S]*lastSyncedSourceRevision = \$lastSyncedSourceRevision/,
-  );
-  assert.match(
-    syncLoop,
-    /trigger = \$\(if \(\$forceByRevision\) \{ "revision" \}/,
-  );
-  assert.match(syncLoop, /if \(\$forceByRevision\) \{ \$syncArgs\.ForceFullRefresh = \$true \}/);
-  assert.match(syncLoop, /MirroredSourceRevision = \$\(if \(\$lastSyncedSourceRevision\)/);
-  assert.match(sync, /\[switch\]\$ForceFullRefresh/);
-  assert.match(sync, /revision refresh must walk and revalidate the entire manifest/);
-  assert.doesNotMatch(sync, /\$sameGeneration = if \(\$ForceFullRefresh\) \{\s*\$false/);
-  assert.match(
-    sync,
-    /\$observedRevision = \$\(if \(\$manifest[\s\S]*sourceRevision = \$\(if \(\$MirroredSourceRevision\)[\s\S]*observedSourceRevision = \$\(if \(\$observedRevision\)[\s\S]*mirroredSourceRevision = \$\(if \(\$MirroredSourceRevision\)/,
-  );
-  assert.match(sync, /\$chunkTimeoutSec\s*=\s*240/);
-  assert.match(sync, /\$statePath\.\$PID\.\$\(\[guid\]::NewGuid/);
-  assert.match(sync, /Invoke-MirrorAtomicReplace[\s\S]*-Candidate \$stateTmp[\s\S]*-Destination \$statePath/);
-  assert.match(sync, /\$stateBackup\s*=\s*"\$stateTmp\.bak"/);
-  assert.match(sync, /Remove-Item -LiteralPath \$stateBackup/);
-  assert.doesNotMatch(sync, /Move-Item -LiteralPath \$stateTmp -Destination \$statePath -Force/);
+  assert.match(launcher, /Start-ScheduledTask -TaskName \$SupervisorTaskName/);
+  assert.match(launcher, /DoxxedLaptopChainSupervisor/);
+  assert.doesNotMatch(launcher, /sync-fly-bot-data|start-home-analyzer/);
+  assert.match(recovery, /start-laptop-stack\.ps1/);
   assert.match(recovery, /Clear-HomeStackUserStopped/);
   assert.match(recovery, /ensure-home-bridge\.ps1/);
   assert.match(
@@ -468,8 +411,6 @@ test('desktop recovery rejects zombie mirror processes and restores watchdog own
 
 test('raw Fly evidence uses the repository canonical store and legacy migration is copy-only', async () => {
   const paths = await readFile(flyDataPathsPath, 'utf8');
-  const syncLoop = await readFile(flySyncLoopPath, 'utf8');
-  const sync = await readFile(flySyncPath, 'utf8');
   const migration = await readFile(flyMirrorMigrationPath, 'utf8');
   const rsiAudit = await readFile(rsiTouchAuditPath, 'utf8');
   const homeMode = await readFile(homeModePath, 'utf8');
@@ -477,13 +418,6 @@ test('raw Fly evidence uses the repository canonical store and legacy migration 
   assert.match(paths, /DOXXED_FLY_MIRROR_DIR/);
   assert.match(paths, /canonical-research-data/);
   assert.doesNotMatch(paths, /LOCALAPPDATA|DoxxedCrypto\\fly-data-mirror/);
-  assert.match(syncLoop, /Get-DoxxedFlyMirrorDir/);
-  assert.match(syncLoop, /syncArgs\.TargetDir = \$mirrorDir/);
-  assert.match(syncLoop, /Import-HomeBotVaultConfig -VaultEnvPath \$vaultEnv/);
-  assert.doesNotMatch(syncLoop, /if \(-not \$env:BOT_ADMIN_TOKEN -and \(Test-Path -LiteralPath \$vaultEnv\)\)/);
-  assert.match(sync, /Get-DoxxedFlyMirrorDir/);
-  assert.match(sync, /home-bot-vault-env.ps1/);
-  assert.match(sync, /Import-CanonicalBotAdminToken/);
   assert.match(homeMode, /DataDir = Get-DoxxedFlyMirrorDir/);
   assert.match(rsiAudit, /canonical-research-data/);
   assert.match(rsiAudit, /FLY_MIRROR must select the repo-contained canonical-research-data store/);

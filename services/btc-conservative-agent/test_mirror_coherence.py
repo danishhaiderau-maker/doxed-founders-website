@@ -316,15 +316,6 @@ def test_python_lease_blocks_powershell_sync_style_exclusive_open(tmp_path: Path
         holder.wait(timeout=5)
 
 
-def test_sync_defers_before_child_can_publish_in_progress() -> None:
-    repo = Path(__file__).resolve().parents[2]
-    source = (repo / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(encoding="utf-8")
-    acquire_at = source.index("$generationLease = [System.IO.File]::Open")
-    invoke_at = source.index('$result = & (Join-Path $scriptDir "sync-fly-bot-data.ps1")')
-    assert acquire_at < invoke_at
-    assert "analyzer owns mirror-generation lease" in source
-
-
 def test_analyzer_uses_bounded_lease_wait_and_short_coherence_retry() -> None:
     source = Path(__file__).with_name("analyzer_research_engine_v62.py").read_text(encoding="utf-8")
     assert 'ANALYZER_MIRROR_LEASE_WAIT_SEC", "1200"' in source

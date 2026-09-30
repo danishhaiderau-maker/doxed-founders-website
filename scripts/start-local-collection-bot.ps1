@@ -10,7 +10,7 @@ $legacyOwnerOptInPhrase = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
 $legacyOwnerOptIn = (Get-Item -Path "env:$legacyOwnerOptInName" -ErrorAction SilentlyContinue).Value
 if ($legacyOwnerOptIn -cne $legacyOwnerOptInPhrase) {
   Write-Host "REFUSED: this obsolete local launcher would start a second AI/strategy owner." -ForegroundColor Red
-  Write-Host "Use scripts\start-fly-desktop-mirror.ps1 for the Fly proxy, data sync, and analyzer."
+  Write-Host "Use scripts\start-laptop-stack.ps1 for the Fly proxy; the laptop-chain supervisor owns segment pull and analyzer."
   Write-Host "Disaster recovery only: set $legacyOwnerOptInName to the exact audited opt-in phrase for this process."
   exit 78
 }

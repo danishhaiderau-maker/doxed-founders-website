@@ -12,7 +12,7 @@ $Host.UI.RawUI.WindowTitle = "Doxed Start Everything"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 if (Test-Path -LiteralPath (Join-Path $repoRoot "config\fly-canonical.lock.json")) {
-  & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
+  & (Join-Path $scriptDir "start-laptop-stack.ps1") -NoWait
   Write-Host "Fly.io is the sole AI/trading owner. Desktop mirror and analyzer started." -ForegroundColor Green
   exit 0
 }

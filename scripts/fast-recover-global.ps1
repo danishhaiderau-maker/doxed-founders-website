@@ -37,9 +37,9 @@ Write-RecoveryStatus "Owner: Fly.io | dashboard proxy :7002 | analyzer :9001 | b
 # marker so the bridge/analyzer watchdogs are allowed to self-heal again.
 Clear-HomeStackUserStopped
 
-$mirrorScript = Join-Path $scriptDir "start-fly-desktop-mirror.ps1"
+$mirrorScript = Join-Path $scriptDir "start-laptop-stack.ps1"
 if (-not (Test-Path -LiteralPath $mirrorScript)) {
-  throw "Missing canonical mirror launcher: $mirrorScript"
+  throw "Missing laptop stack launcher: $mirrorScript"
 }
 & $mirrorScript -NoWait
 

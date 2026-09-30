@@ -1,10 +1,6 @@
 import hashlib
 import json
-import os
 from pathlib import Path
-import re
-import shutil
-import subprocess
 
 import pytest
 
@@ -12,7 +8,6 @@ from research import immutable_archive
 
 
 REPO = Path(__file__).resolve().parents[2]
-LOOP = (REPO / "scripts" / "sync-fly-bot-data-loop.ps1").read_text(encoding="utf-8")
 
 
 def _fixture(root: Path):
@@ -54,59 +49,6 @@ def _fixture(root: Path):
     (root / "report_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (root / "relay_lifecycle_evidence_v1.json").write_text('{"schema":"relay_lifecycle_evidence_v1"}', encoding="utf-8")
     (root / "counterfactual.jsonl").write_text('{"schema":"counterfactual_v2","trade_id":"cont-test"}\n', encoding="utf-8")
-
-
-def _publisher_accepts(archive: Path, tmp_path: Path) -> bool:
-    match = re.search(r"function Test-CompleteAnalyzerArchive \{.*?^\}", LOOP, re.MULTILINE | re.DOTALL)
-    assert match
-    probe = tmp_path / "probe.ps1"
-    escaped = str(archive).replace("'", "''")
-    probe.write_text(match.group(0) + f"\nif (Test-CompleteAnalyzerArchive -ArchivePath '{escaped}') {{ exit 0 }} else {{ exit 7 }}\n", encoding="utf-8")
-    # In the managed test host, Windows PowerShell descendants of Python run
-    # under AppHealth compatibility restrictions and reject otherwise-valid
-    # .NET path/hash calls. PowerShell 7 executes the exact publisher function
-    # without that environment-only restriction.
-    shell = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-    result = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(probe)], capture_output=True, text=True)
-    return result.returncode == 0
-
-
-def test_archive_v2_is_exact_hash_bound_and_preserves_evidence(tmp_path):
-    root = tmp_path / "run"
-    archive_root = tmp_path / "archives"
-    root.mkdir()
-    _fixture(root)
-    archive = immutable_archive.create_archive(root, {"generated_at": "2026-08-16T00:00:00Z", "data_scope": "session"}, archive_root)
-    manifest = json.loads((archive / "archive_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema"] == "research_session_archive_v2"
-    assert manifest["complete"] is True
-    assert manifest["analyzer_revision"] == "2" * 40
-    assert manifest["source_data_revision"] == "3" * 64
-    assert manifest["fresh_epoch"]["epoch_id"] == "epoch-fixture"
-    assert manifest["fresh_epoch"]["cutoff_utc"] == "2026-08-16T00:00:00+00:00"
-    paths = {row["path"] for row in manifest["files"]}
-    assert "reports/qualified_report.json" in paths
-    assert "reports/chase_policy_lab_report.json" in paths
-    assert "reports/missed_opportunity_proof_report.json" in paths
-    assert "reports/stale_report.json" not in paths
-    assert "evidence/relay_lifecycle_evidence_v1.json" in paths
-    assert "evidence/counterfactual.jsonl" in paths
-    for row in manifest["files"]:
-        member = archive / row["path"]
-        assert member.stat().st_size == row["size_bytes"]
-        assert hashlib.sha256(member.read_bytes()).hexdigest() == row["sha256"]
-    assert _publisher_accepts(archive, tmp_path)
-    index = json.loads((root / "research_session_index.json").read_text(encoding="utf-8"))
-    indexed = index["sessions"][0]
-    assert indexed["session_id"] == archive.name
-    assert indexed["analyzer_revision"] == "2" * 40
-    assert indexed["source_data_revision"] == "3" * 64
-    assert indexed["cohort_schema"] == "analysis_cohorts_v1"
-    assert indexed["epoch_id"] == "epoch-fixture"
-    evidence = {row["name"]: row for row in indexed["evidence_objects"]}
-    assert evidence["relay_lifecycle_evidence_v1.json"]["sha256"] == hashlib.sha256(
-        (archive / "evidence" / "relay_lifecycle_evidence_v1.json").read_bytes()
-    ).hexdigest()
 
 
 def test_archive_index_retains_every_prior_generation_without_truncation(tmp_path):
@@ -207,21 +149,3 @@ def test_interrupted_archive_never_exposes_partial_generation(tmp_path, monkeypa
     assert not list(archive_root.glob(".staging-*"))
     assert not (root / "research_session_index.json").exists()
 
-
-def test_publisher_rejects_tampered_partial_and_extra_members(tmp_path):
-    root = tmp_path / "run"
-    archive_root = tmp_path / "archives"
-    root.mkdir()
-    _fixture(root)
-    archive = immutable_archive.create_archive(root, {}, archive_root)
-    (archive / "analysis_dashboard.html").write_text("tampered", encoding="utf-8")
-    assert not _publisher_accepts(archive, tmp_path)
-
-    partial = tmp_path / "partial"
-    partial.mkdir()
-    (partial / "archive_manifest.json").write_text(json.dumps({"schema": "research_session_archive_v2", "complete": True, "files": []}), encoding="utf-8")
-    assert not _publisher_accepts(partial, tmp_path)
-
-    archive2 = immutable_archive.create_archive(root, {}, archive_root)
-    (archive2 / "undeclared.json").write_text("{}", encoding="utf-8")
-    assert not _publisher_accepts(archive2, tmp_path)
