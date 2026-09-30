@@ -54,6 +54,14 @@ try {
     Select-Object -Last 1) -as [string]
   & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-chain-monitor.ps1') @roots | Out-Null
   $monitorExit = $LASTEXITCODE
+  # Unattended-proof row (at most every 30 min) from the snapshots and alert
+  # set above; a no-op unless a proof window was started. Never fails the tick.
+  $proof = 'not-run'
+  try {
+    $proof = (& python (Join-Path $PSScriptRoot 'unattended_proof.py') --check --state-dir $cfg.StateDir 2>&1 | Select-Object -Last 1) -as [string]
+  } catch {
+    $proof = "PROOF_ERROR $($_.Exception.Message)"
+  }
   # One GitHub issue per incident (label laptop-chain-incident) plus the
   # supervisor heartbeat the Fly monitor watches. Never fails the tick.
   $incident = 'not-run'
@@ -62,7 +70,7 @@ try {
   } catch {
     $incident = "INCIDENT_ERROR $($_.Exception.Message)"
   }
-  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $snapshots $incident"
+  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $snapshots $incident $proof"
 } catch {
   Write-ChainLog -Config $cfg -Name $logName -Message ("TICK_ERROR {0}" -f $_.Exception.Message)
   exit 1

@@ -68,6 +68,30 @@ block (cached 30s): `total_bytes`, `used_bytes`, `free_bytes`, `used_pct`,
 samples), plus `volume.transfer` with the segment-shipper status and the
 legacy `sync_ack.json` age.
 
+## 48h unattended proof
+
+`python scripts/unattended_proof.py --start` records T0 and a baseline
+(Fly revision, registry signature, tile toggles) and opens
+`diagnostics\unattended-proof-<T0>.jsonl` in the canonical workspace. Each
+`DoxxedLaptopChainSupervisor` tick then runs `--check` after the monitor and
+appends a row at most every 30 minutes from the tick's own snapshots
+(`fly_runtime_snapshot_v1.json`, `fly_segment_head_snapshot_v1.json`,
+`relay_status_snapshot_v1.json`, `analyzer-run.status.json`,
+`alerts\active-alerts.json`). A row passes only if paper is running (a
+`DEPLOY_MAINTENANCE` pause counts as a guarded deploy boundary), every
+runtime tile is ON, the AI cycle advanced since the last row, WS ticks are
+under 60s old, published-minus-acked segments are within 30 with pruning
+off, the analyzer generation is under 45 min old, no critical alarm is
+open, live/Bitfinex is disarmed and no manual intervention was seen.
+Missing or stale evidence fails the row. At T0+48h the verdict is appended
+and written to `unattended-proof-<T0>.verdict.json`: PASS needs no FAIL rows,
+no gap over 45 min and every boundary resumed within 60 min.
+
+Any operator action during the window must be journalled as one JSON line
+(`{"at": "<UTC ISO>", "action": "..."}`) in
+`C:\DoxxedCrypto\laptop-chain\manual-interventions.jsonl`; it fails the
+proof honestly.
+
 ## Proving the channel
 
 - Fly: run **Monitor Fly BTC bot** via *Run workflow* with `test_alert`

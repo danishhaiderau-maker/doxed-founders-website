@@ -23,6 +23,7 @@ function New-Snapshot([string]$Schema) {
 }
 
 $head = New-Snapshot 'fly_segment_head_snapshot_v1'
+$health = $null
 if ($offline) {
   $head.error = 'OFFLINE'
 } else {
@@ -71,4 +72,56 @@ if ($offline) {
   }
 }
 Write-JsonAtomic -Path $cfg.RelayStatusSnapshotFile -Value $relay -Depth 8
-Write-Output ("SNAPSHOTS fly_head_ok={0} relay_ok={1}" -f $head.ok, $relay.ok)
+
+# Paper/tile/AI/WS state for the unattended proof: public /health and /ready,
+# plus only the tile toggle map from the admin-authenticated /api/state.
+$runtime = New-Snapshot 'fly_runtime_snapshot_v1'
+if ($offline) {
+  $runtime.error = 'OFFLINE'
+} elseif ($null -eq $health) {
+  $runtime.error = 'FLY_HEALTH_HTTP_FAILED'
+} else {
+  foreach ($name in 'execution_paused', 'pause_owner', 'execution_reason', 'manual_admin_pause', 'live_armed',
+                    'bitfinex_live_enabled', 'force_paper_mode', 'git_rev', 'tile_registry_signature') {
+    $runtime[$name] = $health.$name
+  }
+  try {
+    $ready = Invoke-RestMethod -Method Get -Uri "$($cfg.SourceUrl)/ready" -TimeoutSec $TimeoutSec
+    $progress = $ready.strategy_progress
+    $cycle = $progress.scheduled_ai_cycle
+    $runtime.ready_status = $ready.status
+    $runtime.ws_age = $ready.ws_age
+    $runtime.active_tile_lanes = @($ready.active_tiles | ForEach-Object { [string]$_.lane })
+    $runtime.strategy_progress = [ordered]@{
+      ai_progressing = $progress.ai_progressing; ai_age_sec = $progress.ai_age_sec
+      ai_stale_after_sec = $progress.ai_stale_after_sec; evaluation_age_sec = $progress.evaluation_age_sec
+      process_startup_age_sec = $progress.process_startup_age_sec
+      ws_age_sec = $progress.ws_age_sec; ws_progressing = $progress.ws_progressing
+      scheduled_ai_cycle = [ordered]@{
+        completed_ts = $cycle.completed_ts; last_poll_ts = $cycle.last_poll_ts
+        last_poll_entry_eligible = $cycle.last_poll_entry_eligible; stage = $cycle.stage
+      }
+    }
+    $runtime.ok = $true
+  } catch {
+    $runtime.error = 'FLY_READY_HTTP_FAILED'
+  }
+  if ([string]::IsNullOrWhiteSpace($adminToken)) {
+    $runtime.toggles_error = 'ADMIN_TOKEN_MISSING'
+  } else {
+    try {
+      $state = Invoke-RestMethod -Method Get -Uri "$($cfg.SourceUrl)/api/state" -Headers @{ 'X-Bot-Admin-Token' = $adminToken } -TimeoutSec $TimeoutSec
+      if ($state.research_lane_enabled) {
+        $toggles = [ordered]@{}
+        foreach ($p in $state.research_lane_enabled.PSObject.Properties) { $toggles[[string]$p.Name] = ($p.Value -eq $true) }
+        $runtime.research_lane_enabled = $toggles
+      } else {
+        $runtime.toggles_error = 'TOGGLES_NOT_IN_STATE'
+      }
+    } catch {
+      $runtime.toggles_error = 'FLY_STATE_HTTP_FAILED'
+    }
+  }
+}
+Write-JsonAtomic -Path (Join-Path $cfg.StateDir 'fly_runtime_snapshot_v1.json') -Value $runtime -Depth 6
+Write-Output ("SNAPSHOTS fly_head_ok={0} relay_ok={1} runtime_ok={2}" -f $head.ok, $relay.ok, $runtime.ok)
