@@ -119,8 +119,10 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
             target = view_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            size = target.stat().st_size
-            sync_state[relative] = {"size": size, "sha256": _sha256_file(target)}
+            stat = target.stat()
+            size = stat.st_size
+            sync_state[relative] = {"size": size, "sha256": _sha256_file(target),
+                                    "inode": int(stat.st_ino), "mtime_ns": int(stat.st_mtime_ns)}
             byte_count += size
     finally:
         lock.release()
@@ -128,7 +130,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
     heartbeat = {
         "ok": True, "inProgress": False, "phase": "complete",
         "source": "research_segments_volume_sink", "syncedAt": state.get("last_applied_at"),
-        "sourceRevision": revision, "mirroredSourceRevision": revision,
+        "sourceRevision": revision, "observedSourceRevision": revision,
+        "mirroredSourceRevision": revision,
         "deployedRevision": str(health["source_git_rev"]).lower(), "revisionParity": "MATCH",
         "tileRegistrySignature": health["tile_registry_signature"],
         "collectionEpochId": state.get("last_collection_epoch_id"),

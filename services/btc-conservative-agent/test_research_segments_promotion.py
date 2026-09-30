@@ -10,6 +10,7 @@ import pytest
 
 import research_segment_promotion as promotion
 from research.canonical_data_store import current_analyzer_dataset_identity
+from research.mirror_coherence import assert_mirror_coherent
 from test_research_segments import Env, _rows
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +58,9 @@ def test_complete_shadow_is_promoted_by_the_existing_migration(tmp_path, monkeyp
     assert identity["dataset_epoch"] == "epoch-abc"
     assert identity["source_revision"] == "abc123def456"
     assert identity["tile_config_signature"] == SIGNATURE
+    token = assert_mirror_coherent(repo_root=project, data_root=store, expected_revision="abc123def456",
+                                   max_age_seconds=10 ** 9, require_canonical_manifest=True)
+    assert token.manifest_entry_hash
     assert (store / "v3" / "ledgers" / "opportunity.jsonl").read_bytes() == _rows(0, 4)
     assert not (env.shadow / "tree" / promotion.SYNC_STATE_NAME).exists()
 
