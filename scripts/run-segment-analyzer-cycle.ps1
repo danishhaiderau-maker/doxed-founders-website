@@ -68,8 +68,11 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   $promotionExit = $LASTEXITCODE
   Write-ChainLog -Config $cfg -Name $logName -Message ("PROMOTION attempt={0} exit={1} {2}" -f $attempt, $promotionExit, $promotion)
   if ($promotionExit -eq 0) { break }
-  # Only a moving head is worth retrying; any other refusal is final.
-  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 }
+  # Only a moving head, or the pull loop briefly holding the shadow-root lock
+  # (continuous while it catches up after a deploy), is worth retrying; any
+  # other refusal is final.
+  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH|holds the shadow-root lock') { Stop-Cycle 3 }
+  if ($promotion -match 'holds the shadow-root lock') { Start-Sleep -Seconds 20 }
 }
 if ($promotionExit -ne 0) { Stop-Cycle 3 }
 

@@ -104,6 +104,14 @@ def test_a_stopped_cycle_brings_a_dead_dashboard_back():
     assert body.count("Stop-Cycle 3") == 2 and "Stop-Cycle 4" in body
 
 
+def test_promotion_retries_while_the_pull_loop_holds_the_shadow_lock():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    loop = cycle.split("for ($attempt = 1;", 1)[1].split("\n}\n", 1)[0]
+    final = next(line for line in loop.splitlines() if "-notmatch" in line and "Stop-Cycle 3" in line)
+    assert "holds the shadow-root lock" in final and "SHADOW_BEHIND_PUBLISHED" in final
+    assert "Start-Sleep" in loop
+
+
 def test_supervisor_task_uses_system_powershell():
     register = _source("register-laptop-chain-task.ps1")
     assert "System32\\WindowsPowerShell\\v1.0\\powershell.exe" in register
