@@ -23,11 +23,6 @@ from local_fresh_collection import (  # noqa: E402
     queue_operation,
     read_operation,
 )
-from local_fresh_collection_owner_audit import (  # noqa: E402
-    OWNER_COMMAND_PATTERNS,
-    RELAUNCH_ACTION_PATTERNS,
-    RELAUNCH_TASK_NAMES,
-)
 from research.local_generation_fence import (  # noqa: E402
     BLOCKED_STATE,
     LocalGenerationFenced,
@@ -564,27 +559,6 @@ class LocalFreshCollectionTests(unittest.TestCase):
         self.assertTrue((self.canonical / "raw" / "events.jsonl").exists())
         self.assertTrue((payload / "opaque.bin").exists())
 
-    def test_owner_audit_covers_bundle_batch_resume_and_retirement_entrypoints(self):
-        self.assertTrue(
-            {
-                "fly-sync-bundle-client",
-                "start-fly-batch-sync",
-                "fly-sync-generation-resume",
-                "resume-current-epoch-batch-20260921.ps1",
-                "small-sync-client-20260920",
-                "raw_generation_cleanup_owner",
-                "canonical_generation_retirement",
-                "research-stability-supervisor.py",
-            }.issubset(set(OWNER_COMMAND_PATTERNS))
-        )
-        self.assertIn("DcfShowcaseBotAutostart", RELAUNCH_TASK_NAMES)
-        self.assertIn("DoxxedResearchStabilitySupervisor", RELAUNCH_TASK_NAMES)
-        self.assertIn("DoxedSupervisorWatchdog", RELAUNCH_TASK_NAMES)
-        self.assertIn(
-            "resume-current-epoch-batch-20260921.ps1", RELAUNCH_ACTION_PATTERNS
-        )
-        self.assertIn("small-sync-client-20260920", RELAUNCH_ACTION_PATTERNS)
-        self.assertIn("home-stack-supervisor-watchdog.ps1", RELAUNCH_ACTION_PATTERNS)
 
     def test_capability_refuses_split_runtime_root_and_duplicate_target(self):
         different_runtime = Path(self.temp.name) / "different-agent-root"

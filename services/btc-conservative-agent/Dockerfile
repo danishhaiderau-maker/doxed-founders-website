@@ -38,9 +38,6 @@ RUN python -c "import platform_relay_streaming, research.analysis_eligibility, r
 # V3 dual-write is on the Fly bot's critical evidence path. Fail the image
 # build if the whitelist omits any collector dependency.
 RUN python -c "import collector_v22, collector_v22_provisional, research_v3_contract, research_v3_store, research_v3_bridge"
-# The authenticated package routes are registered at bot import even while
-# acceleration is disabled. Prove their complete source chain is in the image.
-RUN python -c "import data_sync_bundle_api, data_sync_bundle_runtime, data_sync_bundle_resumption, data_sync_bundle_worker, data_sync_bundle_storage, data_sync_bundle_transport, data_sync_bundle_maintenance, data_sync_bundle_reservations"
 # The exact lifecycle-tail recovery command is invoked only by its guarded
 # workflow, but must still be importable in the production image.
 RUN python -m py_compile lifecycle_tail_repair.py lifecycle_tail_repair_verify.py lifecycle_cursor_rebind.py lifecycle_cursor_rebind_verify.py execution_tail_repair.py execution_tail_repair_verify.py \
@@ -51,7 +48,6 @@ RUN python -c "import research.conservative_fill_cohort, research.conservative_l
 # This import executes before every AI API call, not just analyzer startup.
 RUN python -c "import research.runtime_baseline_declaration"
 RUN python -c "import research.scan_counterfactual_unavailable, research.reset_writer_barrier"
-RUN python -c "import data_sync_quarantine_receipt"
 RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker"
 # Optional shadow segment shipper (RESEARCH_SEGMENTS_ENABLED=1) must be importable.
 RUN python -c "import research_segment_format, research_segment_selection, research_segment_store, research_segment_shipper, research_segment_server, research_segment_prune, research_fresh_start_wipe"

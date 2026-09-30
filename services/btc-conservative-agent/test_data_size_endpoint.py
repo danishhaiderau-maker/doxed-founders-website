@@ -54,7 +54,6 @@ class DataSizeEndpointTests(unittest.TestCase):
              mock.patch.object(bot.shutil, "disk_usage", return_value=self._usage(used_mb)), \
              mock.patch.object(bot.subprocess, "run", side_effect=forbidden), \
              mock.patch.object(bot.os, "walk", side_effect=forbidden), \
-             mock.patch.object(bot, "_data_sync_request_async_inventory", side_effect=forbidden), \
              mock.patch.object(bot, "storage_state") as storage_state, \
              mock.patch.object(bot, "project_capacity") as project_capacity:
             with bot.app.test_client() as client:
@@ -145,54 +144,6 @@ class DataSizeEndpointTests(unittest.TestCase):
         self.assertTrue(body["inventory_refreshing"])
         self.assertEqual(body["inventory_error"], "INVENTORY_SNAPSHOT_LOCK_BUSY")
 
-    def test_concurrent_pollers_do_not_queue_behind_inventory_lock(self):
-        self._state()
-        held = threading.Event()
-        release = threading.Event()
-
-        def hold_inventory_condition():
-            with bot._data_sync_inventory_cache_condition:
-                held.set()
-                release.wait(timeout=2.0)
-
-        owner = threading.Thread(target=hold_inventory_condition, daemon=True)
-        owner.start()
-        self.assertTrue(held.wait(timeout=1.0))
-        started = time.monotonic()
-        try:
-            with mock.patch.object(bot, "_admin_authed_strict", return_value=True), \
-                 mock.patch.object(bot.shutil, "disk_usage", return_value=self._usage()), \
-                 mock.patch.object(bot.subprocess, "run", side_effect=AssertionError("subprocess")), \
-                 mock.patch.object(bot.os, "walk", side_effect=AssertionError("walk")), \
-                 mock.patch.object(bot, "_data_sync_request_async_inventory", side_effect=AssertionError("refresh")), \
-                 mock.patch.object(bot, "storage_state") as storage_state, \
-                 mock.patch.object(bot, "project_capacity") as project_capacity:
-                responses = []
-
-                def poll():
-                    with bot.app.test_client() as client:
-                        responses.append(client.get("/api/data_size"))
-
-                pollers = [threading.Thread(target=poll) for _ in range(8)]
-                for poller in pollers:
-                    poller.start()
-                for poller in pollers:
-                    poller.join(timeout=0.5)
-                self.assertTrue(all(not poller.is_alive() for poller in pollers))
-                storage_state.assert_not_called()
-                project_capacity.assert_not_called()
-        finally:
-            release.set()
-            owner.join(timeout=1.0)
-        elapsed = time.monotonic() - started
-
-        self.assertLess(elapsed, 0.5)
-        self.assertEqual(len(responses), 8)
-        self.assertTrue(all(response.status_code == 200 for response in responses))
-        self.assertTrue(all(
-            response.get_json()["runtime_size_status"] == "UNAVAILABLE"
-            for response in responses
-        ))
 
     def test_dashboard_explains_segment_transfer_and_disabled_retention(self):
         self.assertIn("Research data leaves Fly only as numbered segments", bot.HTML)

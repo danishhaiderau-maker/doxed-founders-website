@@ -8,8 +8,6 @@ from contextlib import contextmanager
 import pytest
 
 import research_v3_store as store_module
-from data_sync_inventory_worker import _transactional_receipt_authority_binding
-from data_sync_sqlite_snapshot_worker import build_snapshot
 from research_reset_recovery_audit import audit_research_reset_recovery
 from research_v3_contract import LEDGER_NAMES, canonical_json
 from research_v3_store import V3EvidenceStore, _path_signature
@@ -349,48 +347,6 @@ def test_import_covers_sealed_and_active_generations_with_one_slice_each(store):
     _activate(store)
     assert store.verified_record_receipt("decision", "sealed-row")["state"] == "COMMITTED"
     assert store.verified_record_receipt("decision", "active-row")["state"] == "COMMITTED"
-
-
-def test_snapshot_inventory_binding_and_reset_audit_use_authority(store, tmp_path):
-    store.append("decision", {"record_id": "snapshot-row"})
-    marker = _activate(store)
-    database = store.root / AUTHORITY_RELATIVE / "receipts.sqlite3"
-    request = {"_runtime": store.root, "v3_runtime_identity": store._identity_binding()}
-    binding = _transactional_receipt_authority_binding(database, request)
-    assert binding["authority_id"] == marker["authority_id"]
-    snapshot = tmp_path / "snapshot.sqlite3"
-    result = build_snapshot({
-        "source_path": str(database), "destination_path": str(snapshot),
-        "deadline_seconds": 10, "memory_bytes": 128 * 1024 * 1024,
-        "max_output_bytes": 32 * 1024 * 1024,
-    })
-    assert result["snapshot_sha256"] == hashlib.sha256(snapshot.read_bytes()).hexdigest()
-    with sqlite3.connect(snapshot) as connection:
-        assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-        assert connection.execute("SELECT COUNT(*) FROM record_receipts").fetchone()[0] == 1
-    authority = audit_transactional_receipt_authority(store.root, store._identity_binding())
-    assert authority["active"] is True and authority["receipt_count"] == 1
-    recovery = audit_research_reset_recovery(
-        store.root, expected_identity=store._identity_binding(),
-    )
-    assert recovery["transactional_receipt_authority"]["active"] is True
-    assert any(
-        row["code"] == "TRANSACTIONAL_RECEIPT_AUTHORITY_RETIREMENT_REQUIRED"
-        for row in recovery["blockers"]
-    )
-
-
-def test_inventory_binding_rejects_duplicate_marker_keys(store):
-    store.append("decision", {"record_id": "snapshot-row"})
-    _activate(store)
-    marker_path = store.root / AUTHORITY_RELATIVE / "ACTIVE.json"
-    marker_path.write_bytes(b'{"schema":"duplicate",' + marker_path.read_bytes()[1:])
-    database = store.root / AUTHORITY_RELATIVE / "receipts.sqlite3"
-    with pytest.raises(RuntimeError, match="MARKER_INVALID"):
-        _transactional_receipt_authority_binding(database, {
-            "_runtime": store.root,
-            "v3_runtime_identity": store._identity_binding(),
-        })
 
 
 def test_importing_authority_is_not_silently_treated_as_legacy(store):

@@ -17,8 +17,6 @@ const combosAgent = join(root, 'services/btc-conservative-agent/combo_pathway_co
 const combosEngine = join(root, 'services/btc-signal-engine/combos.py');
 const singletonAgent = join(root, 'services/btc-conservative-agent/process_singleton.py');
 const singletonEngine = join(root, 'services/btc-signal-engine/process_singleton.py');
-const inventoryWorkerAgent = join(root, 'services/btc-conservative-agent/data_sync_inventory_worker.py');
-const inventoryWorkerEngine = join(root, 'services/btc-signal-engine/data_sync_inventory_worker.py');
 const relayEvidenceWorkerAgent = join(root, 'services/btc-conservative-agent/platform_relay_evidence_worker.py');
 const relayEvidenceWorkerEngine = join(root, 'services/btc-signal-engine/platform_relay_evidence_worker.py');
 const lifecycleCleanupAgent = join(root, 'services/btc-conservative-agent/lifecycle_cleanup_transaction.py');
@@ -91,23 +89,6 @@ if (singletonAgentHash !== singletonEngineHash) {
   );
 }
 console.log(`OK  process singleton dependency matches (${singletonAgentHash})`);
-
-if (!existsSync(inventoryWorkerAgent) || !existsSync(inventoryWorkerEngine)) {
-  fail('Missing isolated data-sync inventory worker in canonical bot or signal engine');
-}
-const inventoryWorkerAgentHash = sha256(inventoryWorkerAgent);
-const inventoryWorkerEngineHash = sha256(inventoryWorkerEngine);
-if (inventoryWorkerAgentHash !== inventoryWorkerEngineHash) {
-  fail(
-    `data-sync inventory worker (${inventoryWorkerAgentHash}) !== signal-engine copy (${inventoryWorkerEngineHash})`,
-  );
-}
-console.log(`OK  data-sync inventory worker matches (${inventoryWorkerAgentHash})`);
-const quarantineSource = join(root, 'services/btc-conservative-agent/data_sync_quarantine_receipt.py');
-const quarantineMirror = join(root, 'services/btc-signal-engine/data_sync_quarantine_receipt.py');
-if (!existsSync(quarantineSource) || !existsSync(quarantineMirror) || sha256(quarantineSource) !== sha256(quarantineMirror)) {
-  throw new Error('Quarantine receipt helper missing or differs from canonical source');
-}
 
 if (!existsSync(relayEvidenceWorkerAgent) || !existsSync(relayEvidenceWorkerEngine)) {
   fail('Missing isolated relay-evidence validation worker in canonical bot or signal engine');
