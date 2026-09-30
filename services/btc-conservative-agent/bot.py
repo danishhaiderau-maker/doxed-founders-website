@@ -13674,6 +13674,10 @@ def research_collection_health(now: float = None) -> dict:
                 "multiverse_written_source_never_recorded", 0,
             ),
             "source_unavailable_retries_since_boot": counters.get("source_unavailable_retries", 0),
+            "rejected_written_since_boot": counters.get("rejected_opportunity_written", 0),
+            "superseded_rejected_provisionals_since_boot": counters.get(
+                "superseded_rejected_provisionals", 0,
+            ),
             "written_1h": written_1h,
             "empty_path_1h": empty_1h,
             "insufficient_path_1h": insufficient_1h,
@@ -14122,8 +14126,16 @@ COLLECTOR_MATURATION_WORKER_MAX_BATCH = max(
     COLLECTOR_MATURATION_MAX_BATCH_SIZE,
     int(os.getenv("COLLECTOR_MATURATION_WORKER_MAX_BATCH", "400")),
 )
+COLLECTOR_MATURATION_WORKER_BACKLOG_INTERVAL_SEC = min(
+    COLLECTOR_MATURATION_WORKER_INTERVAL_SEC,
+    max(2.0, float(os.getenv("COLLECTOR_MATURATION_WORKER_BACKLOG_INTERVAL_SEC", "5"))),
+)
+COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC = max(
+    60.0, float(os.getenv("COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC", "900")),
+)
 COLLECTOR_MATURATION_ITEM_YIELD_SEC = 0.01
 _collector_maturation_worker_status = {"alive": False}
+_order_multiverse_maturation_attempts: dict = {}
 
 
 def collector_maturation_worker_loop():
@@ -14156,7 +14168,11 @@ def collector_maturation_worker_loop():
                 logger.warning(f"[COLLECTOR_MATURATION] worker pass failed: {exc} [PIPELINE ENFORCEMENT]")
             _collector_maturation_worker_status["last_pass_ts"] = time.time()
             _collector_maturation_worker_status["last_pass_sec"] = round(time.time() - pass_started, 3)
-            shutdown_event.wait(COLLECTOR_MATURATION_WORKER_INTERVAL_SEC)
+            backlog = bool(_collector_maturation_worker_status.get("last_budget_exhausted"))
+            shutdown_event.wait(
+                COLLECTOR_MATURATION_WORKER_BACKLOG_INTERVAL_SEC if backlog
+                else COLLECTOR_MATURATION_WORKER_INTERVAL_SEC
+            )
     finally:
         # The tick-thread fallback resumes if this owner ever exits.
         _collector_maturation_worker_status["alive"] = False
@@ -14169,8 +14185,8 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
     if not from_worker and _collector_maturation_worker_status.get("alive"):
         return
     now = time.time()
-    interval = COLLECTOR_MATURATION_WORKER_INTERVAL_SEC if from_worker else 60.0
-    if now - _order_multiverse_last_poll < interval - 0.5:
+    # The worker paces itself (backlog cadence); only the tick fallback polls.
+    if not from_worker and now - _order_multiverse_last_poll < 60.0 - 0.5:
         return
     _order_multiverse_last_poll = now
     # Periodic reconciliation remains complete even when only one in-memory
@@ -14220,9 +14236,15 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
     if from_worker:
         # The wall budget, not the item count, bounds a worker pass.
         count = min(COLLECTOR_MATURATION_WORKER_MAX_BATCH, max(count, len(ready_ids) + COLLECTOR_MATURATION_BATCH_SIZE))
+    # Fewest attempts first: a mature row that keeps failing to finalize must
+    # not hold the head of every pass ahead of rows that would.
+    attempts = _order_multiverse_maturation_attempts
+    for stale_id in [key for key in attempts if key not in pending_snapshot]:
+        attempts.pop(stale_id, None)
     ready_ids.sort(
-        key=lambda pending_id: float(
-            (pending_snapshot.get(pending_id) or {}).get("expires_ts") or 0
+        key=lambda pending_id: (
+            attempts.get(pending_id, 0),
+            float((pending_snapshot.get(pending_id) or {}).get("expires_ts") or 0),
         )
     )
     selected_ids = ready_ids[:count]
@@ -14287,6 +14309,7 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
         if not isinstance(src, dict):
             continue
         processed += 1
+        attempts[pending_id] = attempts.get(pending_id, 0) + 1
         if src.get("collector_rejected"):
             persist_rejected_opportunity(
                 src,
@@ -14313,12 +14336,14 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
         _collector_maturation_worker_status.update({
             "last_selected": len(selected_ids),
             "last_processed": processed,
+            "last_terminal_ready": len(ready_ids),
             "last_budget_exhausted": processed < len(selected_ids),
         })
     # V2 is the durable migration source.  A rollout or crash between the V2
     # append and V3 dual-write must not leave an eternal provisional V3 row.
-    # Reconcile once per changed V2 generation; failures retry next poll.
-    if now - _v3_terminal_reconcile_last_ts < 60.0:
+    # Reconcile once per changed V2 generation; failures retry next poll.  The
+    # scan reads every V2 generation, so it cannot run on the drain cadence.
+    if now - _v3_terminal_reconcile_last_ts < COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC:
         return
     _v3_terminal_reconcile_last_ts = now
     try:
@@ -14974,9 +14999,19 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         if not tid:
             return None
         if _execution_trade_is_terminal(tid):
+            # The terminal execution ledger supersedes the rejected recovery
+            # source.  Left pending, it re-enters every sweep oldest-first and
+            # the journal re-merge restores it, starving mature rows behind it.
+            pending = _order_multiverse_pending_src.get(tid)
+            superseded = isinstance(pending, dict) and bool(pending.get("collector_rejected"))
+            if superseded:
+                _order_multiverse_pending_src.pop(tid, None)
+                _order_multiverse_state.pop(tid, None)
+                remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
+                _collector_collection_stat("superseded_rejected_provisionals")
             logger.info(
                 f"[COLLECTOR_V22] terminal execution suppresses stale rejected provisional "
-                f"trade_id={tid} [PIPELINE ENFORCEMENT]"
+                f"trade_id={tid} released={superseded} [PIPELINE ENFORCEMENT]"
             )
             return None
         price = float(
@@ -15117,6 +15152,7 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             _order_multiverse_pending_src.pop(tid, None)
             remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
+            _collector_collection_stat("rejected_opportunity_written")
             _safe_append_jsonl(OPPORTUNITY_CAPTURE_FILE, record, label="OPPORTUNITY_CAPTURE")
         logger.info(
             f"[COLLECTOR_V22] {record.get('primary_outcome')} trade_id={tid} reason={reason} "

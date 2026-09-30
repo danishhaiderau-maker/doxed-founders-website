@@ -297,13 +297,21 @@ def test_analyzer_report_quarantines_empty_path_rows_and_measures_post_fix(tmp_p
         shared_ai_call_id="call-old", evaluation_ts=SIGNAL_TS,
         path_source={"window_state": WINDOW_BEFORE_TAPE},
     )
+    # Tape-sourced row that matured after the fix but whose call predates arming.
+    early_row = json.loads(json.dumps(good_row, default=str))
+    early_row["trade_id"] = "tile-early"
+    early_row["envelope"]["signal_ts"] = SIGNAL_TS - 3600
+    early_row["entry_grid_anchor"]["shared_ai_call_id"] = "call-early"
     with (tmp_path / "order_multiverse.jsonl").open("w", encoding="utf-8") as handle:
-        for row in (legacy, good_row, dangling, pre_tape):
+        for row in (legacy, good_row, dangling, pre_tape, early_row):
             handle.write(json.dumps(row, default=str) + "\n")
     with (tmp_path / GRID_FILE).open("w", encoding="utf-8") as handle:
         handle.write(json.dumps(grid) + "\n")
     with (tmp_path / "chase_offset_touch_grid.jsonl").open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps({"shared_ai_call_id": "call-0", "discovery_shadow_only": True,
+                                 "signal_ts": SIGNAL_TS - 7200}) + "\n")
         handle.write(json.dumps({"shared_ai_call_id": "call-1", "discovery_shadow_only": True,
+                                 "signal_ts": SIGNAL_TS,
                                  "tile_admission_basis": "SCORE_LED_ADMISSION"}) + "\n")
 
     report = build_multiverse_collection_report(str(tmp_path))
@@ -313,14 +321,19 @@ def test_analyzer_report_quarantines_empty_path_rows_and_measures_post_fix(tmp_p
     assert report["source_never_recorded"]["rows"] == 1
     assert report["source_never_recorded"]["status_counts"] == {OBS_DATA_ERROR: 1}
     assert report["legacy_cache_only_rows"]["empty_path_rate"] == 1.0
-    assert report["post_fix_rows"]["rows"] == 2
+    assert report["post_fix_rows"]["rows"] == 3
     assert report["post_fix_rows"]["empty_path_rate"] == 0.0
     assert report["entry_grid"]["missing_grid_references"] == 1
     assert "MULTIVERSE_ENTRY_GRID_REFERENCE_MISSING" in report["alarms"]
-    assert report["touch_grid_coverage"]["post_fix"] == {
-        "tile_calls": 1, "discovery_grid_calls": 1, "coverage": 1.0,
+    coverage = report["touch_grid_coverage"]
+    assert coverage["arm_fix_signal_ts"] == SIGNAL_TS
+    assert coverage["post_fix"] == {"tile_calls": 1, "discovery_grid_calls": 1, "coverage": 1.0}
+    # call-early matured with a tape path yet was never armed: pre-arm cohort, no alarm.
+    assert coverage["legacy"] == {"tile_calls": 2, "discovery_grid_calls": 1, "coverage": 0.5}
+    assert "TOUCH_GRID_COVERAGE_LOW" not in report["alarms"]
+    assert coverage["discovery_calls_by_admission_basis"] == {
+        "SCORE_LED_ADMISSION": 1, "AI_APPROVE_LEGACY": 1,
     }
-    assert report["touch_grid_coverage"]["discovery_calls_by_admission_basis"] == {"SCORE_LED_ADMISSION": 1}
 
 
 def test_analyzer_registers_collection_health_report():
@@ -330,3 +343,36 @@ def test_analyzer_registers_collection_health_report():
     assert name in engine.ANALYZER_JSON_REPORT_FILES
     assert name in {row[1] for row in engine.DEEP_DIVE_REPORT_CATALOG}
     assert name in ANALYZER_REPORT_FILES
+
+
+# ------------------------------------------------------ bot drain contract
+def _bot_function(name: str):
+    import ast
+    tree = ast.parse((Path(__file__).resolve().parent / "bot.py").read_text(encoding="utf-8"))
+    return next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def test_terminal_execution_releases_superseded_rejected_provisional():
+    """A suppressed rejected source must leave pending and the journal, or it
+    heads every oldest-first sweep forever (Fly 2026-09-30: 19 rows, every pass)."""
+    import ast
+    fn = _bot_function("persist_rejected_opportunity")
+    branch = next(
+        node for node in ast.walk(fn)
+        if isinstance(node, ast.If) and "_execution_trade_is_terminal" in ast.unparse(node.test)
+    )
+    body = "\n".join(ast.unparse(stmt) for stmt in branch.body)
+    assert "collector_rejected" in body
+    assert "_order_multiverse_pending_src.pop(tid" in body
+    assert "remove_provisional_event(tid" in body
+    assert isinstance(branch.body[-1], ast.Return)
+
+
+def test_worker_sweep_orders_by_attempts_and_throttles_v3_reconcile():
+    import ast
+    source = ast.unparse(_bot_function("_maybe_complete_pending_order_multiverse"))
+    assert "attempts.get(pending_id, 0)" in source
+    assert "attempts[pending_id] = attempts.get(pending_id, 0) + 1" in source
+    assert "COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC" in source
+    loop = ast.unparse(_bot_function("collector_maturation_worker_loop"))
+    assert "COLLECTOR_MATURATION_WORKER_BACKLOG_INTERVAL_SEC" in loop
