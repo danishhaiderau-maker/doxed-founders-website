@@ -9390,6 +9390,32 @@ def _build_funnel_trade_index():
 _EXPIRED_ORDER_RECORD_START = re.compile(
     r"(?=(?:19|20)\d{2}-\d{2}-\d{2}T[^,\r\n]+,[^,\r\n]+,(?:LONG|SHORT)(?:,|$))"
 )
+_EXPIRED_ORDER_CANONICAL_PREFIX = ["time", "trade_id", "dir"]
+_EXPIRED_ORDER_TIMESTAMP = re.compile(r"(?:19|20)\d{2}-\d{2}-\d{2}T")
+
+
+def _expired_order_header_aligned_rows(physical, header):
+    """Rows of a ledger whose header is not in canonical column order.
+
+    Schema expansion once rewrote the header in set order, so the positional
+    record-start prefix cannot apply. Such rows were all written by
+    DictWriter against that header, so each physical line is one record; its
+    identity cells are checked by name and anything wider fails closed.
+    """
+    time_index = header.index("time") if "time" in header else None
+    dir_index = header.index("dir") if "dir" in header else None
+    for source_line, physical_row in enumerate(physical[1:], start=2):
+        row = next(csv.reader([physical_row]))
+        if len(row) > len(header):
+            raise ValueError(
+                f"EXPIRED_ORDERS_SCHEMA_OVERFLOW:{source_line}:1:{len(row)}:{len(header)}"
+            )
+        if (time_index is None or time_index >= len(row)
+                or not _EXPIRED_ORDER_TIMESTAMP.match(row[time_index])
+                or (dir_index is not None and dir_index < len(row)
+                    and row[dir_index] not in ("LONG", "SHORT"))):
+            raise ValueError(f"EXPIRED_ORDERS_RECORD_BOUNDARY_UNKNOWN:{source_line}")
+        yield source_line, row
 
 
 def _load_expired_orders_csv(path=EXPIRED_ORDERS_FILE, usecols=None):
@@ -9417,6 +9443,16 @@ def _load_expired_orders_csv(path=EXPIRED_ORDERS_FILE, usecols=None):
     if len(set(header)) != len(header):
         raise ValueError("EXPIRED_ORDERS_HEADER_DUPLICATE_COLUMNS")
     normalized = []
+    if header[:3] != _EXPIRED_ORDER_CANONICAL_PREFIX:
+        for source_line, row in _expired_order_header_aligned_rows(physical, header):
+            missing = len(header) - len(row)
+            row.extend(["UNKNOWN"] * missing)
+            material = dict(zip(header, row))
+            material["_csv_source_line"] = source_line
+            material["_csv_parse_status"] = "NORMALIZED_MISSING_FIELDS" if missing else "EXACT"
+            material["_csv_missing_fields"] = missing
+            normalized.append(material)
+        physical = physical[:1]
     for source_line, physical_row in enumerate(physical[1:], start=2):
         starts = [match.start() for match in _EXPIRED_ORDER_RECORD_START.finditer(physical_row)]
         if not starts or starts[0] != 0:
