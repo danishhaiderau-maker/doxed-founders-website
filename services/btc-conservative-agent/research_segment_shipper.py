@@ -34,6 +34,10 @@ import sys
 import time
 from pathlib import Path
 
+import contextlib
+import sqlite3
+import uuid
+
 import research_segment_format as fmt
 from research_segment_store import ObjectStore, PreconditionFailed, StoreError, store_from_env
 
@@ -49,6 +53,12 @@ VOLUME_DEFAULT_MIN_FREE_BYTES = 4 * 1024 ** 3
 DEFAULT_MIN_FREE_BYTES = 200 * 1024 * 1024
 SNAPSHOT_COPY_ATTEMPTS = 3
 RACE_BACKOFF_BASE_SECONDS = 60.0
+# Online-backup steps hold the source's SHARED lock only for one step, so the
+# bot's rollback-journal writers (5 s busy timeout) are never starved.
+SQLITE_BACKUP_PAGES_PER_STEP = 1024
+SQLITE_BACKUP_STEP_SLEEP_SECONDS = 0.005
+SQLITE_BACKUP_DEADLINE_SECONDS = 180.0
+SQLITE_CONSISTENCY = "sqlite_online_backup_v1"
 
 APPEND_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
 RECORD_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
@@ -155,6 +165,83 @@ def _is_sqlite(relpath: str) -> bool:
     return relpath.lower().endswith(SQLITE_SUFFIXES)
 
 
+def _is_sqlite_db(relpath: str) -> bool:
+    return relpath.lower().endswith((".db", ".sqlite", ".sqlite3"))
+
+
+SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _has_sqlite_header(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(len(SQLITE_MAGIC)) == SQLITE_MAGIC
+    except OSError:
+        return False
+
+
+def _wal_signature(path: Path) -> list[int]:
+    """WAL frames can commit without touching the main file's size or mtime."""
+    try:
+        stat = Path(f"{path}-wal").stat()
+    except OSError:
+        return [0, 0, 0]
+    return [int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns)]
+
+
+@contextlib.contextmanager
+def _normal_cpu_class():
+    """Leave SCHED_IDLE while a SQLite step holds the source's SHARED lock.
+
+    An idle-class holder can be starved by the very bot thread waiting on that
+    lock. Niceness stays lowered; failures fall back to the current class.
+    """
+    try:
+        previous = os.sched_getscheduler(0)
+        os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
+    except (AttributeError, OSError):
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            os.sched_setscheduler(0, previous, os.sched_param(0))
+        except OSError:
+            pass
+
+
+def sqlite_online_backup(source: Path, target: Path, *, deadline_seconds: float,
+                         clock=time.monotonic) -> None:
+    """Write a transactionally consistent, integrity-checked copy of ``source``.
+
+    SQLite restarts the backup whenever another connection writes the source
+    between steps, so the result is never torn; a source too hot to finish
+    within the deadline raises ``TimeoutError`` and nothing is shipped.
+    """
+    deadline = clock() + max(1.0, float(deadline_seconds))
+
+    def progress(_status, _remaining, _total):
+        if clock() >= deadline:
+            raise TimeoutError(f"{source.name} online backup exceeded {deadline_seconds:.0f}s")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    reader = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True, timeout=15)
+    writer = sqlite3.connect(str(target))
+    try:
+        with _normal_cpu_class():
+            reader.backup(writer, pages=SQLITE_BACKUP_PAGES_PER_STEP, progress=progress,
+                          sleep=SQLITE_BACKUP_STEP_SLEEP_SECONDS)
+        if clock() >= deadline:
+            raise TimeoutError(f"{source.name} online backup exceeded {deadline_seconds:.0f}s")
+        result = writer.execute("PRAGMA integrity_check").fetchone()
+        if not result or str(result[0]).lower() != "ok":
+            raise sqlite3.DatabaseError(f"{source.name} online backup failed integrity_check")
+    finally:
+        writer.close()
+        reader.close()
+
+
 class SegmentShipper:
     def __init__(
         self, *, store: ObjectStore, volume_root: Path, runtime_root: Path, state_dir: Path,
@@ -162,8 +249,15 @@ class SegmentShipper:
         max_member_bytes: int = 64 * 1024 * 1024, source_git_rev: str = "unknown",
         large_snapshot_bytes: int = 1024 * 1024, large_snapshot_interval: float = 3600.0,
         clock=time.time, sink: str = "tigris", max_store_bytes: int = 0,
+        max_sqlite_bytes: int = 512 * 1024 * 1024, huge_snapshot_interval: float = 6 * 3600.0,
+        sqlite_backup_deadline: float = SQLITE_BACKUP_DEADLINE_SECONDS,
     ):
         self.sink = sink
+        self.max_sqlite_bytes = max(1, int(max_sqlite_bytes))
+        # Snapshots above the regular member cap are re-shipped this rarely so
+        # a large hot DB cannot consume the unpruned store.
+        self.huge_snapshot_interval = max(0.0, float(huge_snapshot_interval))
+        self.sqlite_backup_deadline = float(sqlite_backup_deadline)
         self.max_store_bytes = max(0, int(max_store_bytes))
         self.large_snapshot_bytes = max(0, int(large_snapshot_bytes))
         self.large_snapshot_interval = max(0.0, float(large_snapshot_interval))
@@ -185,7 +279,15 @@ class SegmentShipper:
         self.state_path = self.state_dir / "state.json"
         self.status_path = self.state_dir / "status.json"
         self.intent_dir = self.state_dir / "intent"
+        self.sqlite_scratch = self.state_dir / "sqlite-snapshots"
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self._clear_sqlite_scratch()
+
+    def _clear_sqlite_scratch(self) -> None:
+        # Scratch backups are the shipper's own copies, never source evidence.
+        if self.sqlite_scratch.is_dir():
+            for leftover in self.sqlite_scratch.glob("*.db"):
+                leftover.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ state
     def load_state(self) -> dict:
@@ -339,12 +441,15 @@ class SegmentShipper:
             else:
                 changed = tracked is None or tracked.get("class") != "snapshot" or (
                     size, int(stat.st_mtime_ns), int(stat.st_ino)
-                ) != (tracked["size"], tracked["mtime_ns"], tracked["inode"])
+                ) != (tracked["size"], tracked["mtime_ns"], tracked["inode"]) or (
+                    "wal" in tracked and tracked["wal"] != _wal_signature(path))
                 # Large, continuously mutating snapshots (e.g. research.db) are
                 # re-shipped at most once per interval to bound bucket growth.
+                interval = (self.huge_snapshot_interval if size > self.max_member_bytes
+                            else self.large_snapshot_interval)
                 if (changed and tracked is not None and size > self.large_snapshot_bytes
                         and self.clock() - float(tracked.get("shipped_at") or 0.0)
-                        < self.large_snapshot_interval):
+                        < interval):
                     self.throttled.append(relpath)
                     changed = False
                 if changed:
@@ -356,9 +461,24 @@ class SegmentShipper:
                            "tracked": tracked})
                 if op["kind"] == fmt.KIND_APPEND:
                     self._clamp_append(op)
+                # Only a real SQLite file can be backed up online; anything else
+                # named *.db keeps the plain stable-copy path.
+                op["sqlite"] = (_is_sqlite_db(relpath) and not self._is_append_class(relpath)
+                                and _has_sqlite_header(path))
+                # Flagged here, not in select, so every oversized path stays
+                # visible in status even when a budget break ends selection first.
+                op["oversized"] = op["bytes"] > self._member_cap(op)
                 ops.append(op)
         ops.sort(key=lambda item: (item["stream"], _RANK.get(item["kind"], 2), item["path"]))
         return ops
+
+    def _member_cap(self, op: dict) -> int:
+        if self._sqlite_snapshot_op(op):
+            return self.max_sqlite_bytes
+        return self.max_member_bytes
+
+    def _sqlite_snapshot_op(self, op: dict) -> bool:
+        return op["kind"] in (fmt.KIND_SNAPSHOT, fmt.KIND_REWRITE) and bool(op.get("sqlite"))
 
     def _clamp_append(self, op: dict) -> None:
         """Split large appends at a record boundary so they fit one segment."""
@@ -396,18 +516,27 @@ class SegmentShipper:
             if op["stream"] in blocked:
                 deferred += pending
                 continue
-            if op["bytes"] > self.max_member_bytes:
+            if op.get("oversized") or op["bytes"] > self._member_cap(op):
                 op["oversized"] = True
                 blocked.add(op["stream"])
                 deferred += pending
                 continue
-            if selected and total + op["bytes"] > self.max_segment_bytes:
+            # A SQLite snapshot always travels alone so its backup can be
+            # streamed from disk instead of held in memory.
+            if selected and (total + op["bytes"] > self.max_segment_bytes
+                             or self._sqlite_snapshot_op(op)):
                 deferred += sum(item.get("pending_bytes", item["bytes"]) for item in ops[index:])
                 self.next_cursor = op["stream"]
                 break
             selected.append(op)
             total += op["bytes"]
             deferred += pending - op["bytes"]
+            if self._sqlite_snapshot_op(op):
+                later = ops[index + 1:]
+                deferred += sum(item.get("pending_bytes", item["bytes"]) for item in later)
+                if later:
+                    self.next_cursor = later[0]["stream"]
+                break
         return selected, deferred
 
     # ---------------------------------------------------------------- reading
@@ -465,11 +594,51 @@ class SegmentShipper:
         payloads, members = [], []
         seq = int(state["seq"]) + 1
         generation_of = lambda rel: int((files.get(rel) or tombstones.get(rel) or {}).get("generation", 0))
+        try:
+            return self._build(state, selected, new_state, files, tombstones, payloads, members,
+                               seq, generation_of)
+        finally:
+            self._clear_sqlite_scratch()
+
+    def _snapshot_sqlite(self, op: dict) -> tuple[Path, int, str]:
+        """Consistent online backup of a live SQLite DB into shipper scratch."""
+        path = op["abs"]
+        live = path.stat()
+        if (int(live.st_dev), int(live.st_ino)) != (int(op["stat"].st_dev), int(op["stat"].st_ino)):
+            raise PlanRace(f"{op['path']} changed identity", op["stream"])
+        target = self.sqlite_scratch / f"{uuid.uuid4().hex}.db"
+        try:
+            sqlite_online_backup(path, target, deadline_seconds=self.sqlite_backup_deadline)
+        except (TimeoutError, sqlite3.Error) as exc:
+            target.unlink(missing_ok=True)
+            raise PlanRace(f"{op['path']} online backup not completed: {exc}", op["stream"]) from exc
+        op["stat"] = live
+        op["wal"] = _wal_signature(path)
+        size = target.stat().st_size
+        if size > self.max_sqlite_bytes:
+            target.unlink(missing_ok=True)
+            raise PlanRace(f"{op['path']} backup {size} exceeds the SQLite cap", op["stream"])
+        digest = hashlib.sha256()
+        with target.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(READ_CHUNK), b""):
+                digest.update(chunk)
+        return target, size, digest.hexdigest()
+
+    def _build(self, state, selected, new_state, files, tombstones, payloads, members, seq,
+               generation_of) -> tuple[bytes, bytes, dict]:
+        snapshot_file = None
         for op in selected:
-            raw, extra = self._read(op)
             relpath, kind = op["path"], op["kind"]
+            if self._sqlite_snapshot_op(op):
+                if len(selected) != 1:
+                    raise RuntimeError("a SQLite snapshot must be the only segment member")
+                snapshot_file, size, digest = self._snapshot_sqlite(op)
+                raw, extra = b"", {"consistency": SQLITE_CONSISTENCY}
+            else:
+                raw, extra = self._read(op)
+                size, digest = len(raw), fmt.sha256_bytes(raw)
             member = {"index": len(members), "kind": kind, "path": relpath,
-                      "size": len(raw), "sha256": fmt.sha256_bytes(raw)}
+                      "size": size, "sha256": digest}
             if kind in (fmt.KIND_APPEND, fmt.KIND_SEAL):
                 member["base_offset"] = op["base_offset"]
                 member["end_offset"] = op["base_offset"] + len(raw)
@@ -508,13 +677,20 @@ class SegmentShipper:
                                   "generation": member.get("generation", generation_of(relpath))}
                 tombstones.pop(relpath, None)
             else:
-                files[relpath] = {"class": "snapshot", "size": len(raw),
+                files[relpath] = {"class": "snapshot", "size": size,
                                   "mtime_ns": int(stat.st_mtime_ns), "inode": int(stat.st_ino),
                                   "dev": int(stat.st_dev), "sha256": member["sha256"],
                                   "generation": member.get("generation", generation_of(relpath)),
                                   "shipped_at": self.clock(), "shipped_seq": seq}
+                if snapshot_file is not None:
+                    # Change detection compares the live source, not the backup.
+                    files[relpath].update({"size": int(stat.st_size), "snapshot_size": size,
+                                           "wal": op["wal"]})
                 tombstones.pop(relpath, None)
-        segment_raw = fmt.build_segment(payloads)
+        if snapshot_file is not None:
+            segment_raw = fmt.build_segment_from_file(snapshot_file, members[0]["size"])
+        else:
+            segment_raw = fmt.build_segment(payloads)
         # The window is derived from source mtimes, not the wall clock, so a
         # rebuild over the same bytes yields a byte-identical manifest.
         previous_end = float(state.get("last_window_end") or 0.0)
@@ -727,6 +903,9 @@ def shipper_from_env(environ=None) -> SegmentShipper:
         source_git_rev=(env.get("SOURCE_GIT_REV") or "unknown").strip(),
         large_snapshot_bytes=int(env.get("RESEARCH_SEGMENTS_LARGE_SNAPSHOT_BYTES") or 1024 * 1024),
         large_snapshot_interval=float(env.get("RESEARCH_SEGMENTS_LARGE_SNAPSHOT_INTERVAL_SECONDS") or 3600),
+        max_sqlite_bytes=int(env.get("RESEARCH_SEGMENTS_MAX_SQLITE_BYTES") or 512 * 1024 * 1024),
+        huge_snapshot_interval=float(env.get("RESEARCH_SEGMENTS_HUGE_SNAPSHOT_INTERVAL_SECONDS")
+                                     or 6 * 3600),
     )
 
 

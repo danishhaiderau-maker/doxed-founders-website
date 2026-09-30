@@ -121,6 +121,30 @@ def build_segment(payloads: list[bytes]) -> bytes:
     return compressed.getvalue()
 
 
+def build_segment_from_file(path, size: int, chunk_bytes: int = 1024 * 1024) -> bytes:
+    """Stream one file into a segment byte-identical to ``build_segment([raw])``.
+
+    Only the compressed output is held in memory, so a large SQLite snapshot
+    never needs its raw bytes, the tar buffer and the gzip output at once.
+    """
+    compressed = io.BytesIO()
+    with gzip.GzipFile(
+        filename="", mode="wb", fileobj=compressed, compresslevel=GZIP_LEVEL, mtime=0,
+    ) as handle:
+        with tarfile.open(fileobj=handle, mode="w", format=tarfile.USTAR_FORMAT,
+                          bufsize=chunk_bytes) as archive:
+            info = tarfile.TarInfo(member_name(0))
+            info.size = int(size)
+            info.mtime = 0
+            info.mode = 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.type = tarfile.REGTYPE
+            with open(path, "rb") as source:
+                archive.addfile(info, source)
+    return compressed.getvalue()
+
+
 def read_segment(raw: bytes, expected_members: int) -> list[bytes]:
     """Extract ordered member payloads without touching the filesystem."""
     try:
