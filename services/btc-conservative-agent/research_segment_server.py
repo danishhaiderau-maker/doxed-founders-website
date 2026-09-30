@@ -169,6 +169,7 @@ class SegmentServer:
             "shipper_last_segment_at": status.get("last_segment_at"),
             "oversized_paths": status.get("oversized_paths"),
             "throttled_snapshots": status.get("throttled_snapshots"),
+            "racing_paths": status.get("racing_paths"),
             "laptop_acked": self.acked_head(),
             "pruning_enabled": False,
         }

@@ -335,6 +335,75 @@ def test_large_snapshot_is_not_starved_by_earlier_growing_streams(tmp_path):
     env.assert_tree_matches_source()
 
 
+def test_hot_snapshot_written_between_scan_and_read_still_ships(tmp_path):
+    env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
+    env.store = VolumeStore(env.store_root)
+    db = env.write("research.db", b"a" * 4000)
+    shipper = env.shipper()
+    real_scan = shipper.scan
+
+    def scan_then_write():
+        found = real_scan()
+        db.write_bytes(b"b" * 4100)
+        os.utime(db, ns=(db.stat().st_atime_ns, db.stat().st_mtime_ns + 5_000_000_000))
+        return found
+
+    shipper.scan = scan_then_write
+    result = shipper.cycle()
+    assert result["shipped"] and "race" not in result
+    member = json.loads(env.store.get(fmt.manifest_key("v1", 1)))["members"][0]
+    assert member["path"] == "research.db" and member["size"] == 4100
+    shipper.scan = real_scan
+    assert shipper.cycle()["shipped"] is None
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(tmp_path, monkeypatch):
+    env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
+    env.store = VolumeStore(env.store_root)
+    env.write("a_live.jsonl", _rows(0, 3))
+    db = env.write("z_research.db", b"d" * 1000)
+    hot_inode = db.stat().st_ino
+    real_fstat = os.fstat
+    ticks = [0]
+
+    def churning_fstat(fd):
+        result = real_fstat(fd)
+        if result.st_ino != hot_inode:
+            return result
+        ticks[0] += 1
+        fields = list(result)
+        fields[8] += ticks[0]
+        return os.stat_result(fields, {"st_mtime_ns": result.st_mtime_ns + ticks[0]})
+
+    monkeypatch.setattr(shipper_mod.os, "fstat", churning_fstat)
+    shipper = env.shipper()
+    raced = shipper.cycle()
+    assert raced["shipped"] is None and raced["race"] == "z_research.db"
+    status = json.loads(shipper.status_path.read_text())
+    assert status["last_error"].startswith("PLAN_RACE") and "changed while copying" in status["last_error"]
+    assert [item["path"] for item in status["racing_paths"]] == ["z_research.db"]
+
+    shipped = shipper.cycle()
+    members = json.loads(env.store.get(fmt.manifest_key("v1", shipped["shipped"]["seq"])))["members"]
+    assert [m["path"] for m in members] == ["a_live.jsonl"]
+    assert shipper.cycle()["shipped"] is None
+
+    env.clock[0] += shipper_mod.RACE_BACKOFF_BASE_SECONDS
+    assert shipper.cycle()["race"] == "z_research.db"
+    assert shipper.race_backoff["z_research.db"][0] == 2
+    assert shipper.race_backoff["z_research.db"][1] == env.clock[0] + 2 * shipper_mod.RACE_BACKOFF_BASE_SECONDS
+
+    monkeypatch.setattr(shipper_mod.os, "fstat", real_fstat)
+    env.clock[0] += 2 * shipper_mod.RACE_BACKOFF_BASE_SECONDS
+    final = shipper.cycle()
+    assert final["shipped"] and shipper.race_backoff == {}
+    assert json.loads(shipper.status_path.read_text())["racing_paths"] == []
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
 # --------------------------------------------------------- safety surfaces
 def _imports(path: Path) -> set:
     tree = ast.parse(path.read_text(encoding="utf-8"))

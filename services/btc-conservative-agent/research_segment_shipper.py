@@ -47,6 +47,8 @@ PRUNING_ENABLED = False
 VOLUME_DEFAULT_MAX_STORE_BYTES = 3 * 1024 ** 3
 VOLUME_DEFAULT_MIN_FREE_BYTES = 4 * 1024 ** 3
 DEFAULT_MIN_FREE_BYTES = 200 * 1024 * 1024
+SNAPSHOT_COPY_ATTEMPTS = 3
+RACE_BACKOFF_BASE_SECONDS = 60.0
 
 APPEND_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
 RECORD_SUFFIXES = frozenset({".jsonl", ".csv", ".log"})
@@ -64,6 +66,10 @@ class ShipperConflict(RuntimeError):
 
 class PlanRace(RuntimeError):
     """A file changed identity between planning and reading; retry next cycle."""
+
+    def __init__(self, message: str, stream: str | None = None):
+        super().__init__(message)
+        self.stream = stream
 
 
 def _extract_frozenset(source: str, name: str) -> frozenset:
@@ -163,6 +169,9 @@ class SegmentShipper:
         self.large_snapshot_interval = max(0.0, float(large_snapshot_interval))
         self.throttled: list[str] = []
         self.next_cursor = ""
+        # stream -> (consecutive races, retry-not-before); in memory only, so a
+        # restart retries every stream once.
+        self.race_backoff: dict[str, tuple[int, float]] = {}
         self.store = store
         self.volume_root = Path(volume_root).resolve()
         self.runtime_root = Path(runtime_root).resolve()
@@ -379,7 +388,9 @@ class SegmentShipper:
         if cursor:
             ops = sorted(ops, key=lambda item: item["stream"] < cursor)
         self.next_cursor = ""
-        selected, total, deferred, blocked = [], 0, 0, set()
+        now = self.clock()
+        blocked = {stream for stream, (_count, until) in self.race_backoff.items() if until > now}
+        selected, total, deferred = [], 0, 0
         for index, op in enumerate(ops):
             pending = op.get("pending_bytes", op["bytes"])
             if op["stream"] in blocked:
@@ -409,33 +420,42 @@ class SegmentShipper:
         with path.open("rb") as handle:
             live = os.fstat(handle.fileno())
             if (int(live.st_dev), int(live.st_ino)) != (int(stat.st_dev), int(stat.st_ino)):
-                raise PlanRace(f"{op['path']} changed identity")
+                raise PlanRace(f"{op['path']} changed identity", op["stream"])
             if kind in (fmt.KIND_SNAPSHOT,) or (kind == fmt.KIND_REWRITE and not self._is_append_class(op["path"])):
-                raw = handle.read()
-                after = os.fstat(handle.fileno())
-                if (int(after.st_size), int(after.st_mtime_ns)) != (int(stat.st_size), int(stat.st_mtime_ns)) \
-                        or len(raw) != int(stat.st_size):
-                    raise PlanRace(f"{op['path']} changed while copying")
+                # Stability is required only during the copy itself: a hot
+                # file (research.db) is always written between scan and read.
+                for _attempt in range(SNAPSHOT_COPY_ATTEMPTS):
+                    handle.seek(0)
+                    before = os.fstat(handle.fileno())
+                    raw = handle.read()
+                    after = os.fstat(handle.fileno())
+                    if ((int(after.st_size), int(after.st_mtime_ns))
+                            == (int(before.st_size), int(before.st_mtime_ns))
+                            and len(raw) == int(after.st_size)):
+                        break
+                else:
+                    raise PlanRace(f"{op['path']} changed while copying", op["stream"])
+                op["stat"] = after
                 extra = {"consistency": "raw_stable_copy" if _is_sqlite(op["path"]) else "atomic_file"}
                 return raw, extra
             if kind == fmt.KIND_SEAL:
                 whole = handle.read()
                 if len(whole) != op["end_offset"]:
-                    raise PlanRace(f"{op['path']} changed while sealing")
+                    raise PlanRace(f"{op['path']} changed while sealing", op["stream"])
                 tracked = op["tracked"]
                 head, tail = _anchors_from_bytes(
                     whole[:min(ANCHOR_BYTES, tracked["offset"])],
                     whole[max(0, tracked["offset"] - ANCHOR_BYTES):tracked["offset"]],
                 )
                 if (head, tail) != (tracked["head_sha256"], tracked["tail_sha256"]):
-                    raise PlanRace(f"{op['path']} rotated file prefix does not match shipped bytes")
+                    raise PlanRace(f"{op['path']} rotated file prefix does not match shipped bytes", op["stream"])
                 return whole[op["base_offset"]:], {
                     "final_size": len(whole), "final_sha256": hashlib.sha256(whole).hexdigest(),
                 }
             handle.seek(op["base_offset"])
             raw = handle.read(op["end_offset"] - op["base_offset"])
             if len(raw) != op["end_offset"] - op["base_offset"]:
-                raise PlanRace(f"{op['path']} shrank while reading")
+                raise PlanRace(f"{op['path']} shrank while reading", op["stream"])
             return raw, {}
 
     # --------------------------------------------------------------- building
@@ -591,20 +611,42 @@ class SegmentShipper:
         if not selected:
             self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
                               oversized_paths=oversized[:50], throttled_snapshots=throttled,
-                              last_error=None, last_segment_at=state.get("last_segment_at"),
+                              racing_paths=self.racing_paths(), last_error=None, last_segment_at=state.get("last_segment_at"),
                               last_manifest_sha256=state["last_manifest_sha256"],
                               store_bytes=store_bytes)
             return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred}
-        segment_raw, manifest_raw, new_state = self.build(state, selected)
+        try:
+            segment_raw, manifest_raw, new_state = self.build(state, selected)
+        except PlanRace as exc:
+            if exc.stream is None:
+                raise
+            # Back the racing stream off so one hot file cannot stall every
+            # other stream; nothing was written, so the next cycle replans.
+            count = self.race_backoff.get(exc.stream, (0, 0.0))[0] + 1
+            delay = min(RACE_BACKOFF_BASE_SECONDS * 2 ** (count - 1),
+                        max(RACE_BACKOFF_BASE_SECONDS, self.large_snapshot_interval))
+            self.race_backoff[exc.stream] = (count, self.clock() + delay)
+            self.write_status(shipped_seq=state["seq"], last_error=f"PLAN_RACE: {exc}",
+                              racing_paths=self.racing_paths())
+            return {"shipped": None, "recovered": recovered,
+                    "deferred_bytes": deferred + sum(op["bytes"] for op in selected),
+                    "race": exc.stream}
         self.write_intent(segment_raw, manifest_raw, new_state)
         shipped = self.complete_intent()
+        for op in selected:
+            self.race_backoff.pop(op["stream"], None)
         self.write_status(shipped_seq=new_state["seq"], unshipped_bytes=deferred,
                           oversized_paths=oversized[:50], throttled_snapshots=throttled,
+                          racing_paths=self.racing_paths(),
                           last_error=None, last_segment_at=new_state["last_segment_at"],
                           last_manifest_sha256=new_state["last_manifest_sha256"],
                           store_bytes=new_state["store_bytes"])
         return {"shipped": shipped, "recovered": recovered, "deferred_bytes": deferred,
                 "members": len(selected)}
+
+    def racing_paths(self) -> list[dict]:
+        return [{"path": stream, "races": count, "retry_at": round(until, 3)}
+                for stream, (count, until) in sorted(self.race_backoff.items())][:50]
 
     def poll_laptop_ack(self) -> int | None:
         state = self.load_state()
@@ -722,12 +764,18 @@ def main() -> int:
                 if result.get("shipped"):
                     _log(f"shipped seq={result['shipped']['seq']} members={result['members']} "
                          f"bytes={result['shipped']['segment_bytes']} deferred={result['deferred_bytes']}")
+                if result.get("race"):
+                    _log(f"snapshot kept changing while copying, backing off: {result['race']}")
                 if result.get("deferred_bytes"):
                     pause = backlog_pause
             if time.time() - last_ack_poll >= ack_poll:
                 last_ack_poll = time.time()
                 shipper.poll_laptop_ack()
         except PlanRace as exc:
+            try:
+                shipper.write_status(last_error=f"PLAN_RACE: {exc}")
+            except Exception:
+                pass
             _log(f"file changed during cycle, retrying: {exc}")
             pause = backlog_pause
         except ShipperConflict as exc:
