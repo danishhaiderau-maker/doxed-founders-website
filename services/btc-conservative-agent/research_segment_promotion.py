@@ -35,6 +35,9 @@ HEARTBEAT_NAME = ".segment-promotion.heartbeat.json"
 SYNC_STATE_NAME = ".fly-sync-state.json"
 RECEIPT_SCHEMA = "research_segment_promotion_view_v1"
 DEFAULT_MAX_UNSHIPPED_BYTES = 32 * 1024 * 1024
+# Per-append integrity caches keyed to the Fly inode/mtime of their source;
+# meaningless off-host and never read by the analyzer.
+FLY_LOCAL_ONLY_SUFFIXES = (".jsonl.validation.json",)
 
 
 class PromotionRefused(RuntimeError):
@@ -76,6 +79,8 @@ def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
     # A racing hot snapshot is only acceptable if an earlier version shipped.
     for row in head.get("racing_paths") or []:
         path = str(row.get("path") if isinstance(row, dict) else row)
+        if path.endswith(FLY_LOCAL_ONLY_SUFFIXES):
+            continue
         if not (tree / path).is_file():
             reasons.append(f"FLY_RACING_PATH_NEVER_SHIPPED:{path}")
     error = str(head.get("shipper_last_error") or "")

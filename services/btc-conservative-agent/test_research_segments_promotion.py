@@ -80,13 +80,15 @@ def test_incomplete_or_unhealthy_shadow_is_refused(tmp_path, change, reason):
 
 def test_live_tail_and_racing_shipped_snapshot_are_promoted_and_recorded(tmp_path):
     env, head, health = _synced(tmp_path)
-    live = {**head, "unshipped_bytes": 4096, "racing_paths": [{"path": "research.db", "races": 3}],
+    live = {**head, "unshipped_bytes": 4096,
+            "racing_paths": [{"path": "research.db", "races": 3},
+                             {"path": "never.jsonl.validation.json", "races": 9}],
             "shipper_last_error": "PLAN_RACE: research.db changed identity"}
     view = tmp_path / "view"
     promotion.stage_view(shadow_root=env.shadow, view_root=view, head=live, health=health)
     heartbeat = json.loads((view / promotion.HEARTBEAT_NAME).read_text())
     assert heartbeat["unshippedBytesAtPromotion"] == 4096
-    assert heartbeat["racingPaths"] == ["research.db"]
+    assert heartbeat["racingPaths"] == ["research.db", "never.jsonl.validation.json"]
 
 
 def test_revision_drift_and_missing_session_are_refused(tmp_path):
