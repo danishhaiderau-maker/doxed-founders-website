@@ -215,6 +215,7 @@ def collect(state: dict[str, Any], now: float) -> tuple[dict[str, str], bool, li
     findings.update(rules.deploy_stuck_findings(rules.track_deploy_pause(state, health, now), health))
     findings.update(rules.disk_findings(health))
     findings.update(rules.transfer_findings(health))
+    findings.update(rules.collection_findings(health))
     findings.update(rules.laptop_heartbeat_findings(os.environ.get("LAPTOP_CHAIN_HEARTBEAT"), now))
     if health is not None:
         volume = health.get("volume")

@@ -207,6 +207,8 @@ CONDITIONAL_ANALYZER_RAW_INPUTS = {
     # PnL or silently treated as a populated cohort.
     "trades_3factor.csv": "NO_TERMINAL_TRADES",
     "chase_offset_touch_grid.jsonl": "NO_COMPRESSED_SHADOW_SCHEDULE_EVENTS",
+    # Pre-dedupe order_multiverse rows carry inline entry_children.
+    "order_multiverse_entry_grid.jsonl": "NO_DEDUPED_ENTRY_GRIDS_YET",
 }
 OPTIONAL_ANALYZER_RAW_INPUTS = (
     "blocked_signals_3factor.csv",

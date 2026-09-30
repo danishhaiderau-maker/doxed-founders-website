@@ -104,19 +104,27 @@ def validate_replay_eligibility(event: Mapping[str, Any]) -> dict:
 
     fills, fill_reasons = _fill_timestamps(event)
     reasons.extend(fill_reasons)
+    live_fill = _finite_timestamp(event.get("live_fill_ts")) if event.get("live_fill_ts") is not None else None
+    # Hypothetical children are anchored at the shared call when an entry-grid
+    # anchor is present; the live fill stays relative to this tile's signal.
+    anchor = event.get("entry_grid_anchor")
+    anchor_ts = _finite_timestamp(anchor.get("signal_ts")) if isinstance(anchor, Mapping) else None
     required_end = signal_ts + MAX_ENTRY_WINDOW_SEC if signal_ts is not None else None
     if signal_ts is not None:
-        for fill_ts in fills:
-            if fill_ts < signal_ts - _TIMESTAMP_TOLERANCE_SEC:
+        for index, fill_ts in enumerate(fills):
+            is_live = index == 0 and live_fill is not None
+            origin = signal_ts if is_live or anchor_ts is None else anchor_ts
+            if fill_ts < origin - _TIMESTAMP_TOLERANCE_SEC:
                 reasons.append("FILL_BEFORE_SIGNAL")
-            if fill_ts > signal_ts + MAX_ENTRY_WINDOW_SEC + _TIMESTAMP_TOLERANCE_SEC:
+            if fill_ts > origin + MAX_ENTRY_WINDOW_SEC + _TIMESTAMP_TOLERANCE_SEC:
                 reasons.append("FILL_OUTSIDE_SUPPORTED_ENTRY_WINDOW")
             required_end = max(required_end, fill_ts + MAX_HOLD_PERIOD_SEC)
 
     actual_start = timestamps[0] if timestamps else None
     actual_end = timestamps[-1] + _ONE_MINUTE_SEC if timestamps else None
     if signal_ts is not None and actual_start is not None:
-        if actual_start > signal_ts + _TIMESTAMP_TOLERANCE_SEC:
+        tape_origin = signal_ts if anchor_ts is None else min(signal_ts, anchor_ts)
+        if actual_start > tape_origin + _TIMESTAMP_TOLERANCE_SEC:
             reasons.append("TAPE_STARTS_AFTER_SIGNAL")
         if actual_end + _TIMESTAMP_TOLERANCE_SEC < signal_ts + MAX_ENTRY_WINDOW_SEC:
             reasons.append("ENTRY_WINDOW_INCOMPLETE")
