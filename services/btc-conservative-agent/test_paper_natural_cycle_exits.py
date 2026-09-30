@@ -37,7 +37,7 @@ def _short_pos(**overrides):
         "status": "OPEN",
         "max_pnl_pct": 0.0,
         "max_drawdown": 0.0,
-        "research_lane": bot.RESEARCH_LANE_CONTINUOUS,
+        "research_lane": bot.LEGACY_ADOPTION_LANE,
         "exit_config": {
             "trail_ladder": list(bot.TRAIL_LADDER_SCENARIO_C),
             "peak_never_loser_min_peak": bot.PEAK_NEVER_LOSER_MIN_PEAK,

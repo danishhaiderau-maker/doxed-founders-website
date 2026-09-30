@@ -103,8 +103,8 @@ except ImportError as _registry_exc:
     # Without the canonical registry no roster, sync id or signature is known.
     # Every status surface reports REGISTRY_UNAVAILABLE and ready=false.
     REGISTRY_IMPORT_ERROR = f"{type(_registry_exc).__name__}: {_registry_exc}"
-    BENCHMARK_LANE = "CONTINUOUS"
-    COMPARISON_BENCHMARK_LANE = "CONTINUOUS"
+    BENCHMARK_LANE = None
+    COMPARISON_BENCHMARK_LANE = None
     EXPECTED_BOT_VERSION = "REGISTRY_UNAVAILABLE"
     EXPECTED_ANALYZER_SYNC_ID = "REGISTRY_UNAVAILABLE"
     RESEARCH_DASHBOARD_VERSION = "v9.83-quality-roster-4-tiles-2026-06-21"

@@ -236,7 +236,7 @@ def test_empty_current_lanes_are_written_and_publish_with_exact_generation_ident
     assert published_report["evidence_scope"] == "CURRENT_SESSION"
 
 
-def test_lane_ranking_requires_real_terminal_execution_evidence():
+def test_lane_ranking_requires_real_terminal_execution_evidence(monkeypatch):
     no_fill = {
         "lanes": {
             analyzer.BENCHMARK_LANES[0]: {
@@ -248,7 +248,13 @@ def test_lane_ranking_requires_real_terminal_execution_evidence():
     }
     assert analyzer._best_worst_lanes(no_fill) == (None, None)
 
-    first, second = analyzer.BENCHMARK_LANES[:2]
+    only = analyzer.BENCHMARK_LANES[0]
+    single = {"lanes": {only: {"approves": 4, "real_fills": 2, "net_pnl_real": 0.25}}}
+    best, worst = analyzer._best_worst_lanes(single)
+    assert best["lane"] == worst["lane"] == only
+
+    first, second = "LANE_FIXTURE_A", "LANE_FIXTURE_B"
+    monkeypatch.setattr(analyzer, "BENCHMARK_LANES", (first, second))
     eligible = {
         "lanes": {
             first: {"approves": 4, "real_fills": 2, "net_pnl_real": 0.25},

@@ -77,9 +77,11 @@ def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expec
     writes = []
     namespace = {
         "copy": copy,
-        "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
+        "LEGACY_ADOPTION_LANE": "CONTINUOUS",
         "is_research_data_collection": lambda: True,
         "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda *_args, **_kwargs: None,
         "guard_retired_lane_execution": lambda *_args: True,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
         "is_research_lane_enabled": lambda _lane: True,
@@ -100,8 +102,8 @@ def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expec
         "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
         "_spawn_lab_combo_shadow": lambda *_args, **_kwargs: None,
     }
-    # Production order resolution is the enabled registry lane. Continuous is
-    # analysis-only and returns through the lab shadow before process_signal.
+    # Production order resolution is the enabled registry lane; retired lanes
+    # are never patient-chase lanes.
     is_patient_chase_lane = load_function("is_patient_chase_lane", namespace)
     enabled_lane = COMBO_EXECUTION_LANES[0]
     assert is_patient_chase_lane(enabled_lane) is True
@@ -286,6 +288,8 @@ def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
         "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda *_args, **_kwargs: None,
         "state": {"invert_signal": False},
         "compute_directional_spread": lambda *_args: 5,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
@@ -378,6 +382,8 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
         "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda *_args, **_kwargs: None,
         "state": {"invert_signal": False},
         "compute_directional_spread": lambda *_args: 5,
         "_enrich_combo_lane_features": lambda features, _ctx: {
@@ -551,6 +557,8 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
         "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda *_args, **_kwargs: None,
         "state": {"invert_signal": False},
         "compute_directional_spread": lambda *_args: 5,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
@@ -579,54 +587,6 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
         2.0, {"adx": 25}, "AI_SCAN",
     )
     assert enqueues == []
-
-
-def test_continuous_order_spawn_is_after_pre_entry_evidence_gate():
-    continuous = ast.get_source_segment(
-        SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
-                     and item.name == "spawn_continuous_lane_from_ai_scan"),
-    )
-    write = continuous.index("evidence_ready = _write_v3_shared_lane_decision(")
-    gate = continuous.index(
-        'if v3_disposition == "ORDER_ELIGIBLE" and not evidence_ready:', write,
-    )
-    spawn = continuous.index("_spawn_combo_lane(", gate)
-    assert write < gate < spawn
-    assert "return" in continuous[gate:spawn]
-
-
-def test_continuous_shared_ai_rejection_increments_benchmark_counter():
-    state = {
-        "shared_ai_lane_counters": {
-            "CONTINUOUS": {
-                "evaluated": 0,
-                "accepted": 0,
-                "rejected": 0,
-                "reasons": {},
-            }
-        },
-        "ai_history": [{"shared_ai_call_id": "scan-counter"}],
-    }
-    stamp = load_function(
-        "_stamp_shared_ai_lane_verdict",
-        {
-            "DASHBOARD_PRIMARY_LANES": ("FAMILY_ONE",),
-            "RESEARCH_LANE_CONTINUOUS": "CONTINUOUS",
-            "state": state,
-            "state_lock": AvailableLock(),
-            "time": __import__("time"),
-        },
-    )
-
-    stamp("scan-counter", "CONTINUOUS", False, "AI_REJECT")
-    stamp("scan-counter", "CONTINUOUS", False, "AI_REJECT")
-
-    counter = state["shared_ai_lane_counters"]["CONTINUOUS"]
-    assert counter["evaluated"] == 1
-    assert counter["accepted"] == 0
-    assert counter["rejected"] == 1
-    assert counter["reasons"] == {"AI_REJECT": 1}
-    assert state["ai_history"][0]["continuous_verdict"]["accepted"] is False
 
 
 def test_verdict_and_resolution_share_one_policy_material_builder():

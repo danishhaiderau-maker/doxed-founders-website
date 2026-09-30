@@ -5,21 +5,33 @@ import pathway_lab_validation as validation
 
 
 @pytest.mark.parametrize("pending,opened", [(1, 0), (0, 1), (1, 1)])
-def test_configured_benchmark_exposure_does_not_make_it_an_execution_tile(pending, opened):
-    benchmark = validation.COMPARISON_BENCHMARK_LANE
+def test_retired_continuous_exposure_is_unregistered_without_a_benchmark(pending, opened):
+    assert validation.COMPARISON_BENCHMARK_LANE is None
     before = tuple(validation.ACTIVE_TILE_ORDER)
-    assert benchmark not in before
     receipt = validation.validate_lane_memory_runtime(
-        {benchmark: pending}, {benchmark: opened}, ()
+        {"CONTINUOUS": pending}, {"CONTINUOUS": opened}, ()
+    )
+    assert receipt["verdict"] == "CRITICAL"
+    assert receipt["critical_issues"] == ["UNREGISTERED_LANE_EXPOSURE:CONTINUOUS:1"]
+    assert tuple(validation.ACTIVE_TILE_ORDER) == before
+    assert "CONTINUOUS" not in validation.COMBO_EXECUTION_LANES
+
+
+@pytest.mark.parametrize("pending,opened", [(1, 0), (0, 1), (1, 1)])
+def test_configured_benchmark_exposure_does_not_make_it_an_execution_tile(monkeypatch, pending, opened):
+    monkeypatch.setattr(validation, "COMPARISON_BENCHMARK_LANE", "BENCHMARK_FIXTURE")
+    receipt = validation.validate_lane_memory_runtime(
+        {"BENCHMARK_FIXTURE": pending}, {"BENCHMARK_FIXTURE": opened}, ()
     )
     assert receipt["verdict"] == "PASS"
-    assert tuple(validation.ACTIVE_TILE_ORDER) == before
-    assert benchmark not in validation.COMBO_EXECUTION_LANES
+    assert "BENCHMARK_FIXTURE" not in validation.COMBO_EXECUTION_LANES
 
 
-def test_retired_benchmark_is_rejected():
-    benchmark = validation.COMPARISON_BENCHMARK_LANE
-    receipt = validation.validate_lane_memory_runtime({benchmark: 1}, {benchmark: 0}, (benchmark,))
+def test_retired_benchmark_is_rejected(monkeypatch):
+    monkeypatch.setattr(validation, "COMPARISON_BENCHMARK_LANE", "BENCHMARK_FIXTURE")
+    receipt = validation.validate_lane_memory_runtime(
+        {"BENCHMARK_FIXTURE": 1}, {"BENCHMARK_FIXTURE": 0}, ("BENCHMARK_FIXTURE",)
+    )
     assert receipt["verdict"] == "CRITICAL"
 
 

@@ -1,0 +1,318 @@
+"""Adaptive regime entry over the ATR Trail exit (paper only, relay-ineligible).
+
+The entry style is decided once, at signal time, from closed Bitfinex 1m
+candles and the side-correct BBO observed at that moment:
+
+* CALM (trailing RV below the frozen p40) and no fast move: rest a plain limit
+  at the touch improved by at most ``maker_improve_ticks``, cancelled after
+  ``maker_ttl_sec``.
+* NORMAL (p40..p90) or a fast move in the signal direction: marketable limit at
+  the opposite touch plus ``taker_protection_bps``, cancelled after
+  ``taker_ttl_sec``.
+* EXTREME (above the frozen p90): stand aside.
+* Any initial ATR stop at or beyond ``liquidation_guard_stop_bps`` (100x
+  liquidation is ~50 bps away): stand aside.
+
+Missing or stale inputs stand aside. Raw AI approve/reject is recorded only as
+a feature; the shared score-led direction is the sole admission input.
+"""
+from __future__ import annotations
+
+import math
+from typing import Any, Mapping, Sequence
+
+from family_policy_common import PolicySpec, account_risk_quantity as _size, chase_due as _chase, dashboard_policy as _dashboard, entry_fields as _entry, exit_action as _exit, exit_config as _config
+from combo_pathway_config import COMBO_LANE_SPECS
+
+LANE = "FAMILY_ADAPTIVE_REGIME"
+POLICY_ID = COMBO_LANE_SPECS[LANE]["raw_policy_id"]
+POLICY_SIGNATURE = COMBO_LANE_SPECS[LANE]["policy_signature"]
+ENTRY = COMBO_LANE_SPECS[LANE]["entry_policy"]
+DECISION_SCHEMA = "adaptive_entry_decision_v1"
+ADAPTIVE_ENTRY = True
+RV_WINDOW_MIN = int(ENTRY["rv_window_min"])
+FAST_LOOKBACK_MIN = int(ENTRY["fast_move_lookback_min"])
+FAST_SIGMA_WINDOW_MIN = int(ENTRY["fast_move_sigma_window_min"])
+MIN_CLOSED_CANDLES = max(RV_WINDOW_MIN, FAST_SIGMA_WINDOW_MIN, FAST_LOOKBACK_MIN) + 1
+
+SPEC = PolicySpec(policy_id=POLICY_ID, lane=LANE, label="Adaptive regime entry + ATR trail", family="ATR_TRAIL", entry_offset_pct=0.0, chase_windows=(), chase_interval_sec=0, chase_step=0.0, entry_ttl_sec=int(ENTRY["maker_ttl_sec"]), initial_stop_atr_k=1.5, trail_activation_atr_k=0.75, trail_atr_k=1.0)
+CHASE_STEP = SPEC.chase_step
+
+ACTION_TAKER = "TAKER"
+ACTION_MAKER = "MAKER"
+ACTION_STAND_ASIDE = "STAND_ASIDE"
+
+
+def _log_returns(closes: Sequence[float]) -> list[float] | None:
+    values = [float(c) for c in closes]
+    if len(values) < 2 or any(not math.isfinite(c) or c <= 0 for c in values):
+        return None
+    return [math.log(b / a) for a, b in zip(values, values[1:])]
+
+
+def realized_vol_bps(closes: Sequence[float]) -> float | None:
+    """sqrt(sum r^2) of consecutive 1m log returns, in bps."""
+    returns = _log_returns(closes)
+    if not returns:
+        return None
+    return math.sqrt(sum(r * r for r in returns)) * 1e4
+
+
+def fast_move_z(closes: Sequence[float], direction: str) -> float | None:
+    """Signed z-score of the last ``FAST_LOOKBACK_MIN`` return in the signal direction."""
+    sign = 1 if str(direction).upper() == "LONG" else -1 if str(direction).upper() == "SHORT" else 0
+    if not sign or len(closes) < FAST_SIGMA_WINDOW_MIN + 1:
+        return None
+    returns = _log_returns(closes[-(FAST_SIGMA_WINDOW_MIN + 1):])
+    if not returns:
+        return None
+    mean = sum(returns) / len(returns)
+    var = sum((r - mean) ** 2 for r in returns) / max(len(returns) - 1, 1)
+    sigma = math.sqrt(var)
+    if sigma <= 0:
+        return None
+    move = math.log(float(closes[-1]) / float(closes[-1 - FAST_LOOKBACK_MIN]))
+    return sign * move / (sigma * math.sqrt(FAST_LOOKBACK_MIN))
+
+
+def classify_regime(rv_bps: float | None) -> str:
+    if rv_bps is None:
+        return "UNAVAILABLE"
+    if rv_bps > float(ENTRY["extreme_above_bps"]):
+        return "EXTREME"
+    if rv_bps < float(ENTRY["calm_below_bps"]):
+        return "CALM"
+    return "NORMAL"
+
+
+def price_tick(price: float) -> float:
+    """Bitfinex perpetual prices carry five significant digits."""
+    price = float(price or 0)
+    if price <= 0:
+        return 0.0
+    return 10.0 ** (math.floor(math.log10(price)) - 4)
+
+
+def _closed_closes(candles_1m: Sequence[Sequence[float]], signal_ts: float) -> tuple[list[float], float | None]:
+    """Closes of candles whose minute ended at or before ``signal_ts`` (no lookahead)."""
+    rows = []
+    for row in candles_1m or ():
+        try:
+            open_ts = float(row[0]) / (1000.0 if float(row[0]) > 1e11 else 1.0)
+            close = float(row[4])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if open_ts + 60.0 <= float(signal_ts):
+            rows.append((open_ts, close))
+    rows.sort()
+    deduped: dict[float, float] = {}
+    for open_ts, close in rows:
+        deduped[open_ts] = close
+    ordered = sorted(deduped.items())
+    last_close_ts = ordered[-1][0] + 60.0 if ordered else None
+    return [close for _, close in ordered], last_close_ts
+
+
+def _score_gap(ai_feature: Mapping[str, Any] | None) -> float | None:
+    try:
+        return abs(float(ai_feature["long_score"]) - float(ai_feature["short_score"]))
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def ai_admission_block(ai_feature: Mapping[str, Any] | None) -> str | None:
+    """Raw NO_TRADE or a weak score gap never trades; approve/reject stays a feature."""
+    ai_feature = ai_feature or {}
+    raw_direction = str(ai_feature.get("raw_direction") or "").upper()
+    if ENTRY["block_raw_ai_no_trade"] and raw_direction not in ("LONG", "SHORT"):
+        return "AI_NO_TRADE"
+    gap = _score_gap(ai_feature)
+    if gap is None:
+        return "AI_SCORES_UNAVAILABLE"
+    if gap < float(ENTRY["min_score_gap"]):
+        return "AI_SCORE_GAP_BELOW_MIN"
+    return None
+
+
+def decide_entry(*, direction: str, signal_ts: float, candles_1m: Sequence[Sequence[float]],
+                 bid: float, ask: float, bbo_ts: float | None, atr_abs: float,
+                 reference_price: float, ai_feature: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Pure signal-time decision; every branch returns a complete, loggable record."""
+    direction = str(direction or "").upper()
+    closes, last_close_ts = _closed_closes(candles_1m, signal_ts)
+    rv = realized_vol_bps(closes[-(RV_WINDOW_MIN + 1):]) if len(closes) >= RV_WINDOW_MIN + 1 else None
+    z = fast_move_z(closes, direction)
+    regime = classify_regime(rv)
+    fast = z is not None and z >= float(ENTRY["fast_move_z"])
+    bid = float(bid or 0); ask = float(ask or 0)
+    reference = float(reference_price or 0) or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
+    stop_bps = (
+        float(SPEC.initial_stop_atr_k) * float(atr_abs) / reference * 1e4
+        if atr_abs and float(atr_abs) > 0 and reference > 0 else None
+    )
+    bbo_age = float(signal_ts) - float(bbo_ts) if bbo_ts else None
+    candle_age = float(signal_ts) - last_close_ts if last_close_ts else None
+    tick = price_tick(reference)
+    record: dict[str, Any] = {
+        "schema": DECISION_SCHEMA,
+        "lane": LANE,
+        "policy_id": POLICY_ID,
+        "policy_signature": POLICY_SIGNATURE,
+        "direction": direction,
+        "signal_ts": float(signal_ts),
+        "regime": regime,
+        "rv15_bps": None if rv is None else round(rv, 4),
+        "calm_below_bps": float(ENTRY["calm_below_bps"]),
+        "extreme_above_bps": float(ENTRY["extreme_above_bps"]),
+        "fast_move_z": None if z is None else round(z, 4),
+        "fast_move": bool(fast),
+        "closed_candles": len(closes),
+        "last_candle_close_ts": last_close_ts,
+        "candle_age_sec": None if candle_age is None else round(candle_age, 3),
+        "bid": bid or None,
+        "ask": ask or None,
+        "bbo_age_sec": None if bbo_age is None else round(bbo_age, 3),
+        "tick": tick,
+        "atr_abs": float(atr_abs or 0) or None,
+        "stop_distance_bps": None if stop_bps is None else round(stop_bps, 4),
+        "liquidation_guard_stop_bps": float(ENTRY["liquidation_guard_stop_bps"]),
+        "ai_feature": dict(ai_feature or {}),
+        "ai_decision_role": ENTRY["ai_decision_role"],
+        "action": ACTION_STAND_ASIDE,
+        "reason": None,
+        "liquidity_intent": None,
+        "limit_price": None,
+        "entry_ttl_sec": None,
+    }
+
+    def stand_aside(reason: str) -> dict[str, Any]:
+        record["reason"] = reason
+        return record
+
+    if direction not in ("LONG", "SHORT"):
+        return stand_aside("NO_DIRECTION")
+    ai_block = ai_admission_block(ai_feature)
+    record["score_gap"] = _score_gap(ai_feature)
+    if ai_block:
+        return stand_aside(ai_block)
+    if str((ai_feature or {}).get("raw_direction") or "").upper() != direction:
+        return stand_aside("AI_DIRECTION_CONFLICT")
+    if len(closes) < MIN_CLOSED_CANDLES or candle_age is None:
+        return stand_aside("REGIME_WARMUP")
+    if candle_age > float(ENTRY["max_candle_staleness_sec"]):
+        return stand_aside("CANDLES_STALE")
+    if regime == "UNAVAILABLE":
+        return stand_aside("REGIME_UNAVAILABLE")
+    if bid <= 0 or ask <= 0 or ask <= bid:
+        return stand_aside("BBO_UNAVAILABLE")
+    if bbo_age is None or bbo_age > float(ENTRY["max_bbo_age_sec"]):
+        return stand_aside("BBO_STALE")
+    if stop_bps is None:
+        return stand_aside("ATR_UNAVAILABLE")
+    if stop_bps >= float(ENTRY["liquidation_guard_stop_bps"]):
+        return stand_aside("LIQUIDATION_GUARD")
+    if regime == "EXTREME":
+        return stand_aside("EXTREME_VOLATILITY")
+
+    long_side = direction == "LONG"
+    if regime == "NORMAL" or fast:
+        cap = float(ENTRY["taker_protection_bps"]) / 1e4
+        raw = ask * (1.0 + cap) if long_side else bid * (1.0 - cap)
+        limit = math.ceil(raw / tick) * tick if long_side else math.floor(raw / tick) * tick
+        record.update({
+            "action": ACTION_TAKER,
+            "reason": "FAST_MOVE_TAKER" if regime == "CALM" else "NORMAL_TAKER",
+            "liquidity_intent": "TAKER",
+            "limit_price": round(limit, 8),
+            "entry_ttl_sec": int(ENTRY["taker_ttl_sec"]),
+        })
+        return record
+
+    improve = int(ENTRY["maker_improve_ticks"]) * tick
+    if long_side:
+        limit = bid + improve if bid + improve < ask else bid
+    else:
+        limit = ask - improve if ask - improve > bid else ask
+    record.update({
+        "action": ACTION_MAKER,
+        "reason": "CALM_MAKER",
+        "liquidity_intent": "MAKER",
+        "limit_price": round(limit, 8),
+        "entry_ttl_sec": int(ENTRY["maker_ttl_sec"]),
+    })
+    return record
+
+
+def decision_is_executable(decision: Mapping[str, Any] | None, direction: str) -> bool:
+    return bool(
+        isinstance(decision, Mapping)
+        and decision.get("schema") == DECISION_SCHEMA
+        and decision.get("policy_id") == POLICY_ID
+        and decision.get("action") in (ACTION_TAKER, ACTION_MAKER)
+        and str(decision.get("direction") or "") == str(direction or "").upper()
+        and float(decision.get("limit_price") or 0) > 0
+        and int(decision.get("entry_ttl_sec") or 0) > 0
+    )
+
+
+def adaptive_entry_fields(direction, reference_price, decision):
+    fields = _entry(SPEC, direction, reference_price)
+    ok = decision_is_executable(decision, direction)
+    limit = float(decision["limit_price"]) if ok else None
+    fields.update({
+        "entry_path": "FAMILY_ADAPTIVE_REGIME",
+        "entry_reason": (
+            f"ADAPTIVE_{decision['regime']}_{decision['action']}" if ok
+            else f"ADAPTIVE_NO_ORDER_{(decision or {}).get('reason') or 'DECISION_MISSING'}"
+        ),
+        "deterministic_entry_offset_pct": 0.0,
+        "deterministic_initial_limit": limit,
+        "ai_direct_limit": limit,
+        "planned_limit_price": limit,
+        "structural_entry_valid": ok,
+        "entry_ttl_sec": int(decision["entry_ttl_sec"]) if ok else SPEC.entry_ttl_sec,
+        "adaptive_entry_decision": dict(decision or {}),
+        "adaptive_liquidity_intent": (decision or {}).get("liquidity_intent") if ok else None,
+    })
+    return fields
+
+
+def entry_fields(direction, reference_price):
+    return adaptive_entry_fields(direction, reference_price, None)
+
+
+def chase_due(*, created_ts, last_chase_ts, now):
+    return _chase(SPEC, created_ts=created_ts, last_chase_ts=last_chase_ts, now=now)
+
+
+def account_risk_quantity(*, equity_usd, entry_price, atr_abs, leverage=100.0):
+    return _size(SPEC, equity_usd=equity_usd, entry_price=entry_price, atr_abs=atr_abs, leverage=leverage)
+
+
+def exit_action(**kwargs):
+    return _exit(SPEC, **kwargs)
+
+
+def exit_config(analyzer_sync_id):
+    return _config(SPEC, analyzer_sync_id)
+
+
+def dashboard_policy():
+    payload = _dashboard(SPEC)
+    payload["filter_chips"] = [
+        "PAPER ONLY",
+        f"CALM <{ENTRY['calm_below_bps']:g}bps → maker ≤{ENTRY['maker_improve_ticks']} tick, {ENTRY['maker_ttl_sec']}s",
+        f"NORMAL/fast z≥{ENTRY['fast_move_z']:g} → taker cap {ENTRY['taker_protection_bps']:g}bps, {ENTRY['taker_ttl_sec']}s",
+        f"EXTREME >{ENTRY['extreme_above_bps']:g}bps → stand aside",
+        f"Stop ≥{ENTRY['liquidation_guard_stop_bps']:g}bps → skip",
+        f"Hard stop {SPEC.hard_stop_margin_pct:g}%", "120m cap",
+    ]
+    payload["entry"].update({
+        "trigger": "Shared three-minute score-led direction; raw AI approve/reject is a logged feature only",
+        "entry_path": "FAMILY_ADAPTIVE_REGIME",
+        "fill_path": "CONSERVATIVE_BBO_DEPTH_PAPER_LIMIT",
+        "chase_detail": "No chase; one signal-time taker, maker or stand-aside decision",
+        "regime_feature": ENTRY["regime_feature"],
+        "calibration": dict(ENTRY.get("calibration") or {}),
+    })
+    return payload

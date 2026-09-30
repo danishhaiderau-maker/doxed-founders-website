@@ -84,11 +84,12 @@ test('gate 2: every new-exposure entry path runs the pre-trade liquidation gate'
 });
 
 test('gate 4: partial-exit tiles are refused by the relay allowlist while reductions are off', () => {
-  assert.deepEqual([...PARTIAL_EXIT_TILE_ID_PREFIXES], ['fhy']);
-  assert.equal(isPartialExitLaneTradeId('fhy-deadbeef1234'), true);
-  assert.equal(isPartialExitLaneTradeId('fc3-deadbeef1234'), false);
+  assert.deepEqual([...PARTIAL_EXIT_TILE_ID_PREFIXES], []);
+  assert.equal(isPartialExitLaneTradeId('fhy-deadbeef1234'), false);
+  assert.equal(isPartialExitLaneTradeId('far-deadbeef1234'), false);
   assert.equal(isMirrorableLaneTradeId('fhy-deadbeef1234'), false);
-  assert.equal(isMirrorableLaneTradeId('fhy-deadbeef1234', { partialReductionsEnabled: false }), false);
+  assert.equal(isMirrorableLaneTradeId('far-deadbeef1234'), false);
+  assert.equal(isMirrorableLaneTradeId('far-deadbeef1234', { partialReductionsEnabled: false }), false);
 });
 
 test('gate 4: the executor routes every allowlist check through the partial-exit gate', () => {

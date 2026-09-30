@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-five-family-analyzer-hypothesis-paper",
+  "engine_version": "v31-dynamic-adaptive-paper-v1",
   "combo_version": "2026-09-30",
-  "exit_version": "five-family-exits-v1",
-  "benchmark_lane": "CONTINUOUS_ANALYTICAL_ONLY",
-  "signal_hash": "5e5de3df56e8",
+  "exit_version": "adaptive-regime-atr-trail-v1",
+  "benchmark_lane": "NONE",
+  "signal_hash": "1bede0e050ed",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-09-30T21:54:29.776Z"
+  "updated_at": "2026-09-30T22:11:22.746Z"
 }

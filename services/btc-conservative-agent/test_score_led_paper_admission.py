@@ -178,6 +178,8 @@ def test_family_fanout_preserves_raw_ai_and_records_effective_admission():
     )
     namespace = {
         "_effective_score_led_family_ai": effective,
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda *_args, **_kwargs: None,
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
         "state": state,
@@ -335,6 +337,8 @@ def test_applied_rejection_fanout_records_evidence_without_parsing_spread(fields
     )
     namespace = {
         "_effective_score_led_family_ai": effective,
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda *_args, **_kwargs: None,
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
         "state": state,
@@ -433,6 +437,8 @@ def test_missing_score_led_flag_refuses_research_start_present_flag_does_not(raw
     )
     namespace = {
         "_effective_score_led_family_ai": effective,
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda *_args, **_kwargs: None,
         "is_ai_scan_lane": lambda _lane: True,
         "is_research_data_collection": lambda: True,
         "state": state,

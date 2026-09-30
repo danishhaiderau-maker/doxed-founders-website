@@ -639,10 +639,7 @@ class StrategyProgressIncidentTest(unittest.TestCase):
             recovery_return,
             process_source.index("spawn_combo_lanes_from_ai_scan("),
         )
-        self.assertLess(
-            recovery_return,
-            process_source.index("spawn_continuous_lane_from_ai_scan("),
-        )
+        self.assertNotIn("spawn_continuous_lane_from_ai_scan(", process_source)
 
     def test_stale_reconciliation_never_runs_slow_expiry_io_under_trade_lock(self):
         reconcile_source = ast.get_source_segment(

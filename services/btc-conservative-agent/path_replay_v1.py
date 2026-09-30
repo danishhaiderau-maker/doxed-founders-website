@@ -28,6 +28,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Optional, Sequence, Union
 
+import bitfinex_cost_profile
+
 
 PATH_REPLAY_SCHEMA = "path_replay_v1"
 PATH_REPLAY_POLICY_TAG = "path_replay_v1"
@@ -48,7 +50,7 @@ FILL_MODELS = (
     "REALISTIC_TOUCH",
     "ACTUAL_LIVE",
 )
-FEE_MODEL_BITFINEX_ZERO = "BITFINEX_ZERO"
+FEE_MODEL_BITFINEX = bitfinex_cost_profile.FEE_PROFILE_ID
 FIRST_EXIT_CODES = (
     "THESIS",
     "HARD_STOP",
@@ -111,13 +113,13 @@ def first_exit_code(reason: Optional[str]) -> str:
     return _FIRST_EXIT_MAP.get(raw, "PATH_END")
 
 
-def zero_fill_costs(*, fee_model: str = FEE_MODEL_BITFINEX_ZERO) -> dict:
+def zero_fill_costs(*, fee_model: str = FEE_MODEL_BITFINEX) -> dict:
     return {
         "fee_usd": 0.0,
         "spread_usd": 0.0,
         "slippage_usd": 0.0,
         "chase_cost_usd": 0.0,
-        "fee_model": str(fee_model or FEE_MODEL_BITFINEX_ZERO),
+        "fee_model": str(fee_model or FEE_MODEL_BITFINEX),
     }
 
 

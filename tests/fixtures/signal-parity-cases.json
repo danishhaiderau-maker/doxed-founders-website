@@ -1,30 +1,30 @@
 {
-  "description": "Frozen parity cases for the registry-owned five-family paper stack plus retired analytical Continuous benchmark.",
+  "description": "Frozen parity cases for the registry-owned Dynamic Adaptive paper tile; the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
   "cases": [
     {
-      "id": "five-family-long-shared-direction",
+      "id": "dynamic-adaptive-long-shared-direction",
       "ai": { "win_prob": 0, "bull_score": 8, "bear_score": 4 },
       "direction": "LONG",
       "spread": 4,
-      "expect_lanes": ["FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5", "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK"],
-      "reject_lanes": ["UNKNOWN_RETIRED_LANE"]
+      "expect_lanes": ["FAMILY_ADAPTIVE_REGIME"],
+      "reject_lanes": ["FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5", "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK", "CONTINUOUS", "UNKNOWN_RETIRED_LANE"]
     },
     {
-      "id": "five-family-short-shared-direction",
+      "id": "dynamic-adaptive-short-shared-direction",
       "ai": { "win_prob": 0, "bull_score": 3, "bear_score": 8 },
       "direction": "SHORT",
       "spread": 5,
-      "expect_lanes": ["FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5", "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK"],
-      "reject_lanes": ["UNKNOWN_RETIRED_LANE"]
+      "expect_lanes": ["FAMILY_ADAPTIVE_REGIME"],
+      "reject_lanes": ["FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5", "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK", "CONTINUOUS", "UNKNOWN_RETIRED_LANE"]
     },
     {
-      "id": "benchmark-flag-continuous",
+      "id": "retired-continuous-not-benchmark",
       "lane": "CONTINUOUS",
-      "expect_benchmark": true
+      "expect_benchmark": false
     },
     {
-      "id": "family-not-benchmark",
-      "lane": "FAMILY_CHANDELIER_3",
+      "id": "dynamic-adaptive-not-benchmark",
+      "lane": "FAMILY_ADAPTIVE_REGIME",
       "expect_benchmark": false
     }
   ]

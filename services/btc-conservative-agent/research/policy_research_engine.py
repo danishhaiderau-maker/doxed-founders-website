@@ -12,6 +12,8 @@ import math
 from collections import Counter, defaultdict
 from statistics import median
 
+import bitfinex_cost_profile
+
 SCHEMA = "policy_research_engine_v1"
 HORIZONS_SEC = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "60m": 3600, "120m": 7200}
 LIVE_HARD_STOP_PCT = 30.0
@@ -529,7 +531,7 @@ def tick_price(tick, direction="LONG"):
     return _num(tick.get(key) or tick.get("price"))
 
 
-def replay_path(ticks, *, direction, entry_price, fill_t, qty, leverage, ladder, thesis_cut, thesis_min_age, hard_stop, fee_rate=0.0002, time_stop_sec=None, breakeven_after_mfe=None, giveback_abs=None, giveback_pct=None, size_scale=1.0, skip=False):
+def replay_path(ticks, *, direction, entry_price, fill_t, qty, leverage, ladder, thesis_cut, thesis_min_age, hard_stop, fee_rate=bitfinex_cost_profile.TAKER_FEE_RATE, time_stop_sec=None, breakeven_after_mfe=None, giveback_abs=None, giveback_pct=None, size_scale=1.0, skip=False):
     """Deterministic path replay. Conservative ordering if two exits share a sample."""
     if skip:
         return {

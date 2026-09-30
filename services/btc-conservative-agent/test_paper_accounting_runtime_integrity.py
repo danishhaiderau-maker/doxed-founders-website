@@ -121,7 +121,8 @@ def test_non_registry_lanes_are_refused(signal, expected) -> None:
 def test_tile_lane_with_foreign_trade_id_namespace_is_refused() -> None:
     ns = _load()
     lane, _prefix = _tile(0)
-    _other_lane, other_prefix = _tile(1)
+    other_prefix = "fat"
+    assert other_prefix != _prefix
     signal = {"research_lane": lane, "trade_id": f"{other_prefix}-abc"}
     assert ns["paper_order_identity_violation"](signal) == f"ORDER_ID_NAMESPACE_MISMATCH:{lane}"
     assert ns["refuse_non_registry_order"]({"research_lane": lane, "trade_id": "cont-1"}, "TEST")
