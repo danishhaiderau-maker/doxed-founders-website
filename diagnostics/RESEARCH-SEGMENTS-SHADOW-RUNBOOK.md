@@ -71,6 +71,18 @@ Hot snapshots: a snapshot copy needs to be stable only while it is read (up to
 doubling, capped at 1 h) so it cannot stall other streams; `/head` lists it in
 `racing_paths` and `last_error` reads `PLAN_RACE: ...`.
 
+SQLite files (`research.db` ~182 MB, qualification/lifecycle indexes) are never
+copied raw: the shipper takes an online backup (`sqlite3` backup API, 1024-page
+steps so the bot's rollback-journal writers are not starved, 180 s deadline,
+`PRAGMA integrity_check`) into `segment-shipper/sqlite-snapshots/`, streams that
+backup alone into its own segment (`consistency=sqlite_online_backup_v1`), and
+deletes the scratch copy. A backup that cannot finish is a `PLAN_RACE` with
+backoff; nothing is shipped. SQLite members may be up to 512 MiB
+(`RESEARCH_SEGMENTS_MAX_SQLITE_BYTES`); snapshots above the 64 MiB regular cap
+are re-shipped at most every 6 h (`RESEARCH_SEGMENTS_HUGE_SNAPSHOT_INTERVAL_SECONDS`).
+`oversized_paths` is computed during planning so it no longer disappears when a
+cycle's byte budget is exhausted first.
+
 Analyzer on the segment shadow: the analyzer reads only a promoted canonical
 store (`canonical_dataset_current.json`). `research_segment_promotion.py --view
 <empty dir>` copies the shadow tree (holding the puller lock) and writes the

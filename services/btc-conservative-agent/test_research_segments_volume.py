@@ -404,6 +404,127 @@ def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(t
     env.assert_tree_matches_source()
 
 
+# ------------------------------------------------------- SQLite snapshots
+def _sqlite_db(path: Path, rows: int, start: int = 0) -> None:
+    import sqlite3
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, body TEXT)")
+        connection.executemany("INSERT INTO events (id, body) VALUES (?, ?)",
+                               [(i, "x" * 200) for i in range(start, start + rows)])
+
+
+def _sqlite_rows(path: Path) -> int:
+    import sqlite3
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        return connection.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+
+def test_sqlite_above_member_cap_ships_as_consistent_backup_alone_and_streamed(tmp_path, monkeypatch):
+    env = Env(tmp_path, max_member_bytes=64 * 1024, large_snapshot_bytes=10 ** 9)
+    env.store = VolumeStore(env.store_root)
+    env.write("a_live.jsonl", _rows(0, 3))
+    _sqlite_db(env.runtime / "research.db", rows=2000)
+    source_size = (env.runtime / "research.db").stat().st_size
+    assert source_size > 64 * 1024
+    real_build = fmt.build_segment
+
+    def in_memory_build(payloads):
+        assert all(len(payload) < 64 * 1024 for payload in payloads), "SQLite must be streamed"
+        return real_build(payloads)
+
+    monkeypatch.setattr(shipper_mod.fmt, "build_segment", in_memory_build)
+    env.ship_all()
+    manifests = [json.loads(env.store.get(fmt.manifest_key("v1", seq)))
+                 for seq in range(1, env.shipper().load_state()["seq"] + 1)]
+    db_manifest = next(m for m in manifests if m["members"][0]["path"] == "research.db")
+    assert len(db_manifest["members"]) == 1
+    assert db_manifest["members"][0]["consistency"] == shipper_mod.SQLITE_CONSISTENCY
+    tracked = env.shipper().load_state()["files"]["research.db"]
+    assert tracked["size"] == source_size and tracked["wal"] == [0, 0, 0]
+    assert env.shipper().cycle()["shipped"] is None
+    assert not list((env.state_dir / "sqlite-snapshots").glob("*.db"))
+    env.puller().pull_once()
+    assert _sqlite_rows(env.shadow / "tree" / "research.db") == 2000
+
+
+def test_sqlite_written_concurrently_is_never_shipped_torn(tmp_path):
+    import sqlite3
+    env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
+    env.store = VolumeStore(env.store_root)
+    db = env.runtime / "research.db"
+    _sqlite_db(db, rows=3000)
+    stop = threading.Event()
+
+    def writer():
+        next_id = 10_000
+        with sqlite3.connect(db, timeout=5) as connection:
+            while not stop.is_set():
+                connection.execute("INSERT INTO events (id, body) VALUES (?, ?)", (next_id, "y" * 200))
+                connection.commit()
+                next_id += 1
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    try:
+        result = env.shipper().cycle()
+    finally:
+        stop.set()
+        thread.join()
+    assert result["shipped"] or result.get("race") == "research.db"
+    if result["shipped"]:
+        env.puller().pull_once()
+        assert _sqlite_rows(env.shadow / "tree" / "research.db") >= 3000
+
+
+def test_sqlite_backup_that_cannot_finish_backs_off_and_ships_nothing(tmp_path, monkeypatch):
+    env = Env(tmp_path, large_snapshot_bytes=10 ** 9)
+    env.store = VolumeStore(env.store_root)
+    _sqlite_db(env.runtime / "research.db", rows=10)
+
+    def too_hot(source, target, *, deadline_seconds):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"partial")
+        raise TimeoutError("research.db online backup exceeded 180s")
+
+    monkeypatch.setattr(shipper_mod, "sqlite_online_backup", too_hot)
+    shipper = env.shipper()
+    result = shipper.cycle()
+    assert result["shipped"] is None and result["race"] == "research.db"
+    assert shipper.load_state()["seq"] == 0
+    assert not list((env.state_dir / "sqlite-snapshots").glob("*.db"))
+    assert "online backup not completed" in json.loads(shipper.status_path.read_text())["last_error"]
+
+
+def test_oversized_paths_stay_visible_when_budget_breaks_first(tmp_path):
+    env = Env(tmp_path, max_segment_bytes=300, max_member_bytes=2000, large_snapshot_bytes=10 ** 9)
+    env.store = VolumeStore(env.store_root)
+    env.write("a_live.jsonl", _rows(0, 20))
+    env.write("b_live.jsonl", _rows(0, 20))
+    env.write("z_huge.json", b"h" * 5000)
+    shipper = env.shipper()
+    result = shipper.cycle()
+    assert result["shipped"] and result["deferred_bytes"]
+    assert json.loads(shipper.status_path.read_text())["oversized_paths"] == ["z_huge.json"]
+
+
+def test_huge_sqlite_is_reshipped_at_most_once_per_huge_interval(tmp_path):
+    env = Env(tmp_path, max_member_bytes=64 * 1024, large_snapshot_bytes=1024,
+              large_snapshot_interval=60, huge_snapshot_interval=6 * 3600)
+    env.store = VolumeStore(env.store_root)
+    db = env.runtime / "research.db"
+    _sqlite_db(db, rows=2000)
+    env.ship_all()
+    _sqlite_db(db, rows=10, start=5000)
+    env.clock[0] += 3600
+    shipper = env.shipper()
+    assert shipper.cycle()["shipped"] is None
+    assert "research.db" in json.loads(shipper.status_path.read_text())["throttled_snapshots"]
+    env.clock[0] += 6 * 3600
+    assert env.shipper().cycle()["shipped"]
+
+
 # --------------------------------------------------------- safety surfaces
 def _imports(path: Path) -> set:
     tree = ast.parse(path.read_text(encoding="utf-8"))
