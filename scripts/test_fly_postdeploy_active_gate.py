@@ -122,6 +122,12 @@ def test_workflow_deploy_pauses_and_resumes_are_deploy_owned():
     assert "operator_pause_retained" in held
 
 
+def test_workflow_dispatch_inputs_stay_within_github_limit():
+    block = re.search(r"\n  workflow_dispatch:\n    inputs:\n(.*?)(?=\n {0,4}\S)", WORKFLOW, re.S).group(1)
+    inputs = re.findall(r"^      ([a-z0-9_]+):$", block, re.M)
+    assert "mode" in inputs and len(inputs) <= 25
+
+
 def test_keep_maintenance_pause_defaults_false():
     block = WORKFLOW[WORKFLOW.index("keep_maintenance_pause:"):]
     block = block[: block.index("lifecycle_reset_proof:")]

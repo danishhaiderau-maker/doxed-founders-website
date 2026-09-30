@@ -83,6 +83,7 @@ def test_file_changed_after_planning_aborts_execution(volume):
 
 @pytest.mark.parametrize("kwargs, acked_through, status", [
     ({"acked": False}, 7, "V1_NOT_FULLY_ACKED(published=7)"),
+    ({"acked": False}, "auto", "V1_NOT_FULLY_ACKED(published=7)"),
     ({}, 6, "V1_NOT_FULLY_ACKED(published=7)"),
     ({"v2_seq": 0}, 7, "V2_GENESIS_NOT_PUBLISHED"),
 ])
@@ -98,9 +99,10 @@ def test_v1_epoch_is_kept_while_v1_is_the_active_prefix(volume, monkeypatch):
     assert wipe.build_plan(volume, now=NOW, v1_acked_through=7)["v1_status"] == "V1_STILL_ACTIVE"
 
 
-def test_fully_acked_v1_epoch_is_removed_but_v2_survives(volume):
+@pytest.mark.parametrize("acked_through", [7, "auto"])
+def test_fully_acked_v1_epoch_is_removed_but_v2_survives(volume, acked_through):
     _v1_epoch(volume)
-    plan = wipe.build_plan(volume, now=NOW, v1_acked_through=7)
+    plan = wipe.build_plan(volume, now=NOW, v1_acked_through=acked_through)
     assert plan["v1_status"] == "V1_FULLY_ACKED" and plan["v1_files"] == 5
     wipe.execute(plan, volume)
     assert not (volume / "segment-store" / "v1").exists()

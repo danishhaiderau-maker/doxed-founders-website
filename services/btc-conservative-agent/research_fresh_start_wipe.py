@@ -1,11 +1,12 @@
 """Plan-first deletion of pre-cutover backlog the running bot does not need.
 
-Runs on the Fly guest through the dispatch-only ``fresh-start-wipe`` workflow
-job, after a volume snapshot exists and inside a paper maintenance boundary:
+Runs on the Fly guest through the dispatch-only ``fresh-start-wipe-plan`` /
+``fresh-start-wipe-execute`` workflow modes, after a volume snapshot exists and
+inside a paper maintenance boundary:
 
-    python /app/research_fresh_start_wipe.py --data-root /app/data --plan
+    python /app/research_fresh_start_wipe.py --data-root /app/data --plan --v1-acked-through auto
     python /app/research_fresh_start_wipe.py --data-root /app/data --execute \
-        --expect-plan-sha256 <sha from --plan in the same boundary> --v1-acked-through <seq>
+        --expect-plan-sha256 <sha from --plan in the same boundary> --v1-acked-through auto
 
 Only two classes are ever deleted:
 
@@ -91,7 +92,7 @@ def _tree_files(root: Path) -> list[dict]:
     return rows
 
 
-def v1_epoch_candidates(data_root: Path, v1_acked_through: int | None) -> tuple[list[dict], str]:
+def v1_epoch_candidates(data_root: Path, v1_acked_through: int | str | None) -> tuple[list[dict], str]:
     store, checkpoint = data_root / "segment-store" / "v1", data_root / "segment-shipper"
     if not store.exists() and not checkpoint.exists():
         return [], "V1_ALREADY_ABSENT"
@@ -105,6 +106,8 @@ def v1_epoch_candidates(data_root: Path, v1_acked_through: int | None) -> tuple[
     if int(v2.get("seq") or 0) < 1 or not v2.get("baseline"):
         return [], "V2_GENESIS_NOT_PUBLISHED"
     ack = store / "acks" / "laptop" / f"{published:012d}.json"
+    if v1_acked_through == "auto":
+        v1_acked_through = published
     if v1_acked_through != published or not ack.is_file():
         return [], f"V1_NOT_FULLY_ACKED(published={published})"
     return _tree_files(store) + _tree_files(checkpoint), "V1_FULLY_ACKED"
@@ -123,7 +126,7 @@ def usage(data_root: Path, depth: int = 2) -> dict[str, int]:
     return dict(sorted(totals.items(), key=lambda item: -item[1])[:60])
 
 
-def build_plan(data_root: Path, *, now: float, v1_acked_through: int | None) -> dict:
+def build_plan(data_root: Path, *, now: float, v1_acked_through: int | str | None) -> dict:
     rotations = rotation_candidates(data_root, now)
     v1, v1_status = v1_epoch_candidates(data_root, v1_acked_through)
     candidates = sorted(rotations + v1, key=lambda row: row["path"])
@@ -159,7 +162,8 @@ def execute(plan: dict, data_root: Path) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-root", default="/app/data")
-    parser.add_argument("--v1-acked-through", type=int, default=None)
+    parser.add_argument("--v1-acked-through", type=lambda v: v if v == "auto" else int(v), default=None,
+                        help="final v1 seq the laptop ACKed, or 'auto' to require the on-volume ACK of the published seq")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--execute", action="store_true")
