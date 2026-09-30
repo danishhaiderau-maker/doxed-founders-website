@@ -16,6 +16,7 @@ param(
   [string]$Python = 'python',
   [int]$Port = 9001,
   [int]$PromotionAttempts = 6,
+  [int]$LockWaitMaxSec = 600,
   [int]$SyncMaxAgeSec = 1800,
   [string]$Reason = 'segment-cycle'
 )
@@ -55,6 +56,7 @@ $service = Join-Path $cfg.RepoRoot 'services\btc-conservative-agent'
 $pullArgs = @((Join-Path $service 'research_segment_puller.py'), '--shadow-root', $ShadowRoot, '--archive-root', $ArchiveRoot,
               '--prefix', $Prefix, '--source', 'http', '--base-url', $cfg.SourceUrl)
 $promotion = $null
+$lockWaitStart = $null
 $previous = $ErrorActionPreference
 for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   # The view is this runner's own staging copy; each cycle starts empty.
@@ -68,11 +70,20 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   $promotionExit = $LASTEXITCODE
   Write-ChainLog -Config $cfg -Name $logName -Message ("PROMOTION attempt={0} exit={1} {2}" -f $attempt, $promotionExit, $promotion)
   if ($promotionExit -eq 0) { break }
-  # Only a moving head, or the pull loop briefly holding the shadow-root lock
-  # (continuous while it catches up after a deploy), is worth retrying; any
-  # other refusal is final.
-  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH|holds the shadow-root lock') { Stop-Cycle 3 }
-  if ($promotion -match 'holds the shadow-root lock') { Start-Sleep -Seconds 20 }
+  # The pull loop holds the shadow-root lock for a whole parity pass (~7 min
+  # every 30 min), so lock waits have their own budget and do not consume the
+  # head-movement attempts.
+  if ($promotion -match 'holds the shadow-root lock') {
+    if ($null -eq $lockWaitStart) { $lockWaitStart = [datetime]::UtcNow }
+    if (([datetime]::UtcNow - $lockWaitStart).TotalSeconds -lt $LockWaitMaxSec) {
+      Start-Sleep -Seconds 20
+      $attempt--
+      continue
+    }
+    Stop-Cycle 3
+  }
+  # Only a moving head is worth retrying; any other refusal is final.
+  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 }
 }
 if ($promotionExit -ne 0) { Stop-Cycle 3 }
 

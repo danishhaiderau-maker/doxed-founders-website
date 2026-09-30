@@ -101,15 +101,19 @@ def test_a_stopped_cycle_brings_a_dead_dashboard_back():
     assert "/api/health" in stop and "-EnsureDashboardOnly" in stop and "exit $Code" in stop
     body = cycle.split("$cycleLock = Enter-SingleInstance", 1)[1]
     assert "exit 3" not in body and "exit 4" not in body
-    assert body.count("Stop-Cycle 3") == 2 and "Stop-Cycle 4" in body
+    assert body.count("Stop-Cycle 3") == 3 and "Stop-Cycle 4" in body
 
 
-def test_promotion_retries_while_the_pull_loop_holds_the_shadow_lock():
+def test_promotion_waits_out_a_parity_pass_holding_the_shadow_lock():
     cycle = _source("run-segment-analyzer-cycle.ps1")
+    assert "[int]$LockWaitMaxSec = 600" in cycle
     loop = cycle.split("for ($attempt = 1;", 1)[1].split("\n}\n", 1)[0]
+    lock = loop.split("if ($promotion -match 'holds the shadow-root lock') {", 1)[1].split("\n  }\n", 1)[0]
+    # Lock waits are bounded by their own budget and do not use up head attempts.
+    assert "$LockWaitMaxSec" in lock and "Start-Sleep" in lock and "$attempt--" in lock
+    assert "Stop-Cycle 3" in lock
     final = next(line for line in loop.splitlines() if "-notmatch" in line and "Stop-Cycle 3" in line)
-    assert "holds the shadow-root lock" in final and "SHADOW_BEHIND_PUBLISHED" in final
-    assert "Start-Sleep" in loop
+    assert "SHADOW_BEHIND_PUBLISHED" in final and "shadow-root lock" not in final
 
 
 def test_supervisor_task_uses_system_powershell():
