@@ -497,8 +497,6 @@ def test_reserved_identity_preflight_is_memory_only_and_full_manifest_retains_us
     manifest_end = BOT.index("\n@app.route", manifest_start + 10)
     manifest_body = BOT[manifest_start:manifest_end]
     assert 'shutil.disk_usage(_data_sync_volume_root())' in manifest_body
-    assert "checks Fly identity and O(1) volume usage every 3 min" in BOT
-    assert "or at least every 30 min" in BOT
     assert "Safe source pruning is disabled until lifecycle-complete" in BOT
 
 

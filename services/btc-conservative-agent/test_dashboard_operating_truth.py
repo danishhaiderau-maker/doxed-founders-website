@@ -22,12 +22,13 @@ BOT_TREE = ast.parse(BOT_SOURCE)
 HELPERS = ("_unavailable", "_dashboard_seq", "_dashboard_age_text", "_dashboard_transfer_truth",
            "_dashboard_operating_truth", "_public_dashboard_truth", "_dashboard_tile_view",
            "_dashboard_tile_offsets_text")
-CONSTANTS = ("_DASHBOARD_DISK_ALARM_PCT", "_DASHBOARD_LEGACY_ACK_STALE_SEC",
-             "_DASHBOARD_SEGMENT_STATUS_STALE_SEC", "_DASHBOARD_SEGMENT_SEQ_LAG")
+CONSTANTS = ("_DASHBOARD_DISK_ALARM_PCT", "_DASHBOARD_SEGMENT_STATUS_STALE_SEC", "_DASHBOARD_SEGMENT_SEQ_LAG")
 NOW = 1_790_000_000.0
 DAY = 86400.0
 Usage = namedtuple("Usage", "total used free")
 WAL_OK = {"available": True, "alarms": [], "incident_alarms": []}
+SEGMENTS_OK = {"segments_enabled": True, "segment_status_present": True, "shipped_seq": 50,
+               "laptop_acked_seq": 44, "unshipped_bytes": 300_000, "segment_status_age_sec": 120.0}
 
 
 def _top_level_source(names):
@@ -48,7 +49,6 @@ def _namespace(tmp_path, *, live_armed=False, used=40, transfer=None):
         "state": {"live_armed": live_armed},
         "_force_paper_mode_active": lambda: False,
         "_data_sync_volume_root": lambda: tmp_path,
-        "_data_sync_bundle_public_status": lambda: {"coordinator": {"status": "IDLE"}},
         "_volume_transfer_snapshot": lambda _root, _now: dict(transfer or {}),
         "_format_melbourne_hm": lambda ts: f"T{int(float(ts))}",
         "active_tile_lifecycle_manifest": active_tile_lifecycle_manifest,
@@ -60,7 +60,7 @@ def _namespace(tmp_path, *, live_armed=False, used=40, transfer=None):
 
 
 def test_paper_disarmed_mode_revision_and_pause_owner(tmp_path):
-    ns = _namespace(tmp_path, transfer={"segments_enabled": False, "legacy_ack_age_sec": 600.0})
+    ns = _namespace(tmp_path, transfer=SEGMENTS_OK)
     snap = {"source_git_rev": "abc1234", "execution_paused": True, "manual_admin_pause": True,
             "pause_owner": "OPERATOR"}
     op = ns["_dashboard_operating_truth"](snap, NOW, WAL_OK)
@@ -69,7 +69,7 @@ def test_paper_disarmed_mode_revision_and_pause_owner(tmp_path):
     assert op["pause"]["label"] == "PAUSED (owner OPERATOR)"
     assert op["disk"]["label"] == "40.0% used, 60.00 GB free"
     assert op["alarms"] == []
-    assert op["transfer"]["label"].startswith("last ACK T1789999400 (10 min ago)")
+    assert op["transfer"]["label"].startswith("segment 50 published, laptop ACKed 44 (6 behind)")
 
 
 def test_missing_pause_state_is_not_reported_as_running(tmp_path):
@@ -83,30 +83,33 @@ def test_armed_runtime_is_labelled_live_copy(tmp_path):
     assert op["mode"]["label"] == "LIVE COPY \u2014 Bitfinex ARMED"
 
 
-def test_days_old_legacy_ack_is_critical_and_never_no_alarm(tmp_path):
+def test_disabled_segment_shipping_is_critical_and_never_no_alarm(tmp_path):
     ns = _namespace(tmp_path, transfer={"segments_enabled": False, "legacy_ack_age_sec": 3.4 * DAY})
     op = ns["_dashboard_operating_truth"]({}, NOW, WAL_OK)
     label = op["transfer"]["label"]
-    assert "(3.4 days ago) \u2014 CRITICAL lag" in label
+    assert label.startswith("segment shipping disabled")
     assert label.endswith("laptop-side failures: see analyzer")
-    assert [a["code"] for a in op["alarms"]] == ["TRANSFER_ACK_LAG"]
-    assert op["transfer"]["legacy_ack_state"] == "CRITICAL_LAG"
+    assert [a["code"] for a in op["alarms"]] == ["TRANSFER_SEGMENTS_DISABLED"]
 
 
-def test_missing_ack_is_critical(tmp_path):
-    transfer, alarms = _namespace(tmp_path)["_dashboard_transfer_truth"]({"segments_enabled": False}, NOW)
-    assert transfer["label"].startswith("no laptop ACK on record")
-    assert [a["code"] for a in alarms] == ["TRANSFER_NO_ACK"]
-
-
-def test_live_segments_use_shipper_rules_and_keep_ack_visible(tmp_path):
-    truth = _namespace(tmp_path)["_dashboard_transfer_truth"]
-    healthy, alarms = truth({"segments_enabled": True, "segment_status_present": True, "shipped_seq": 50,
-                             "laptop_acked_seq": 44, "segment_status_age_sec": 120.0,
-                             "legacy_ack_age_sec": 3 * DAY}, NOW, "IDLE")
+def test_retired_legacy_ack_and_bundle_producer_never_reach_the_strip(tmp_path):
+    transfer, alarms = _namespace(tmp_path)["_dashboard_transfer_truth"](
+        {**SEGMENTS_OK, "legacy_ack_age_sec": 3 * DAY}, NOW)
     assert alarms == []
-    assert "segment 50 shipped, laptop ACKed 44 (6 behind)" in healthy["label"]
-    assert "CRITICAL lag" in healthy["label"] and "bundle producer IDLE" in healthy["label"]
+    for retired in ("ACK T", "CRITICAL lag", "bundle producer", "no laptop ACK"):
+        assert retired not in transfer["label"], retired
+    assert not {"legacy_ack_age_sec", "legacy_ack_state", "bundle_status"} & set(transfer)
+    op_source = ast.get_source_segment(BOT_SOURCE, next(
+        n for n in BOT_TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_dashboard_operating_truth"))
+    assert "_data_sync_bundle_public_status" not in op_source
+
+
+def test_live_segments_use_shipper_rules(tmp_path):
+    truth = _namespace(tmp_path)["_dashboard_transfer_truth"]
+    healthy, alarms = truth(SEGMENTS_OK, NOW)
+    assert alarms == []
+    assert healthy["label"] == ("segment 50 published, laptop ACKed 44 (6 behind) \u00b7 0.3 MB unshipped"
+                                " \u00b7 shipper updated 2 min ago \u00b7 laptop-side failures: see analyzer")
     _, lagging = truth({"segments_enabled": True, "segment_status_present": True, "shipped_seq": 100,
                         "laptop_acked_seq": 10, "segment_status_age_sec": 3600.0}, NOW)
     assert [a["code"] for a in lagging] == ["TRANSFER_SEGMENTS_LAGGING"]
@@ -120,13 +123,12 @@ def test_transfer_thresholds_match_the_fly_monitor(tmp_path):
     rules = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rules)
     ns = _namespace(tmp_path)
-    assert ns["_DASHBOARD_LEGACY_ACK_STALE_SEC"] == rules.LEGACY_ACK_STALE_SEC
     assert ns["_DASHBOARD_SEGMENT_STATUS_STALE_SEC"] == rules.SEGMENT_STATUS_STALE_SEC
     assert ns["_DASHBOARD_SEGMENT_SEQ_LAG"] == rules.SEGMENT_SEQ_LAG
 
 
 def test_disk_and_wal_alarms_are_visible(tmp_path):
-    ns = _namespace(tmp_path, used=91, transfer={"segments_enabled": False, "legacy_ack_age_sec": 60.0})
+    ns = _namespace(tmp_path, used=91, transfer=SEGMENTS_OK)
     wal = {"available": True, "alarms": [{"code": "EMERGENCY_WAL_RESERVE_LOW", "explanation": "reserve low"}]}
     op = ns["_dashboard_operating_truth"]({}, NOW, wal)
     assert [a["code"] for a in op["alarms"]] == ["DISK_PRESSURE", "EMERGENCY_WAL_RESERVE_LOW"]
@@ -188,7 +190,7 @@ const document = {getElementById: id => (els[id] = els[id] || mk()), createEleme
 """ + page[badge_start:badge_end].replace("__TILE_REGISTRY_JSON__", json.dumps(tiles)) + page[strip_start:strip_end] + """
 renderOperatingTruth({operating:{mode:{label:'PAPER \\u2014 Bitfinex DISARMED', bitfinex_armed:false},
   revision:'abc1234', pause:{label:'Execution running (no pause)'}, disk:{label:'40.0% used'},
-  transfer:{label:'last ACK 26 Sep \\u2014 CRITICAL lag'}, alarms:[{code:'TRANSFER_ACK_LAG', severity:'critical', detail:'3.4 days'}]}});
+  transfer:{label:'segment 50 published, laptop ACKed 10 (40 behind)'}, alarms:[{code:'TRANSFER_SEGMENTS_LAGGING', severity:'critical', detail:'laptop ACK is 40 segments behind'}]}});
 console.log(JSON.stringify({
   badges: TILE_REGISTRY_VIEW.map(t => laneBadge(t.lane)),
   other: [laneBadge('CONTINUOUS'), laneBadge('UNKNOWN_LANE')],
@@ -202,8 +204,8 @@ console.log(JSON.stringify({
         assert f">{tile['label']}</span>" in badge
     assert "Continuous (analysis only)" in out["other"][0] and ">UNKNOWN_LANE</span>" in out["other"][1]
     assert out["mode"] == "PAPER \u2014 Bitfinex DISARMED"
-    assert "Transfer last ACK 26 Sep \u2014 CRITICAL lag" in out["details"]
-    assert out["alarms"] == ["CRITICAL TRANSFER_ACK_LAG: 3.4 days"]
+    assert "Transfer segment 50 published, laptop ACKed 10 (40 behind)" in out["details"]
+    assert out["alarms"] == ["CRITICAL TRANSFER_SEGMENTS_LAGGING: laptop ACK is 40 segments behind"]
 
 
 def test_missing_operating_block_is_not_available_and_never_live_in_paper():
@@ -223,3 +225,42 @@ console.log(JSON.stringify(els.operatingMode.textContent));
     assert "'LIVE Python bot PID '" not in BOT_SOURCE
     assert "modeLabel + ' \u00b7 bot PID '" in BOT_SOURCE
     assert 'id="operatingTruth"' in BOT_SOURCE
+
+
+def _render_gate_panel(tiles, gates, runtime_state) -> str:
+    page = _template("DASHBOARD_JS")
+    badge = page[page.index("const TILE_REGISTRY_VIEW = "):page.index("let executionControlsBusyUntil")]
+    panel = page[page.index("function renderUltimateGatePanel(gates, runtimeState)"):page.index("function renderAiBandGateStatus")]
+    script = """
+const els = {};
+const document = {getElementById: id => (els[id] = els[id] || {innerHTML: ''})};
+""" + badge.replace("__TILE_REGISTRY_JSON__", json.dumps(tiles)) + panel + f"""
+renderUltimateGatePanel({json.dumps(gates)}, {json.dumps(runtime_state)});
+console.log(JSON.stringify(els.ultimateGatePanel.innerHTML));
+"""
+    result = subprocess.run([shutil.which("node"), "-"], input=script, capture_output=True, text=True,
+                            encoding="utf-8", timeout=15, check=True)
+    return json.loads(result.stdout)
+
+
+def test_gate_panel_never_claims_readiness_or_arming_it_cannot_see(tmp_path):
+    tiles = _namespace(tmp_path)["_dashboard_tile_view"]()
+    public = _render_gate_panel(tiles, {}, {})
+    assert "PAPER ENTRIES:</strong> <span style=\"color:#8b949e;font-weight:700;\">not available in this view" in public
+    assert "BITFINEX LIVE:</strong> <span style=\"color:#8b949e;font-weight:700;\">not available in this view" in public
+    assert "NOT READY" not in public and "DISARMED" not in public
+    owner = _render_gate_panel(tiles, {}, {"signal_generation_ready": True, "execution_paused": False,
+                                            "live_armed": False, "bitfinex_live_enabled": False})
+    assert ">ALLOWED<" in owner and "BLOCKED \u2014 DISARMED" in owner
+    paused = _render_gate_panel(tiles, {}, {"signal_generation_ready": False, "execution_paused": True,
+                                             "execution_reason": "ADMIN_MANUAL", "pause_owner": "DEPLOY_MAINTENANCE",
+                                             "live_armed": False})
+    assert "ADMIN_MANUAL (DEPLOY_MAINTENANCE)" in paused
+
+
+def test_gate_panel_entry_offsets_come_from_the_registry_not_a_fixed_anchor(tmp_path):
+    tiles = _namespace(tmp_path)["_dashboard_tile_view"]()
+    html = _render_gate_panel(tiles, {"entry_limit_policy": "deterministic_0.1pct_offset_v1"}, {})
+    assert "0.1% offset" not in html and "deterministic_0.1pct" not in html
+    for tile in tiles:
+        assert f"{tile['label']} {tile['offset_pct']:.2f}%" in html
