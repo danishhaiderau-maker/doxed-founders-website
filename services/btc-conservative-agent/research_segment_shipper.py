@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 
 import contextlib
+import fnmatch
 import sqlite3
 import uuid
 
@@ -47,7 +48,7 @@ PRUNING_ENABLED = False
 
 # The volume sink duplicates source data on the trading volume until pruning
 # exists, so it carries a hard size cap and a much higher free-space floor.
-VOLUME_DEFAULT_MAX_STORE_BYTES = 3 * 1024 ** 3
+VOLUME_DEFAULT_MAX_STORE_BYTES = 10 * 1024 ** 3
 VOLUME_DEFAULT_MIN_FREE_BYTES = 4 * 1024 ** 3
 DEFAULT_MIN_FREE_BYTES = 200 * 1024 * 1024
 SNAPSHOT_COPY_ATTEMPTS = 3
@@ -97,6 +98,7 @@ def load_selection_rules() -> dict:
         "extensions": selection.EXTENSIONS,
         "excluded_names": selection.EXCLUDED_NAMES,
         "excluded_suffixes": selection.EXCLUDED_SUFFIXES,
+        "excluded_path_globs": selection.EXCLUDED_PATH_GLOBS,
         "excluded_dir_names": frozenset(name.lower() for name in selection.EXCLUDED_DIR_NAMES),
     }
 
@@ -323,6 +325,13 @@ class SegmentShipper:
                 return False
         return True
 
+    def publish_mode(self, worker_state: str, *, priority: str, priority_error: str | None,
+                     next_cycle_at: float | None = None) -> None:
+        """Publish the mode the worker is in now, not the one its last cycle ran in."""
+        self.write_status(worker_state=worker_state, next_cycle_at=next_cycle_at,
+                          backlog_mode=self.boosted, segment_budget_bytes=self.segment_budget,
+                          priority=priority, priority_error=priority_error)
+
     def _clear_sqlite_scratch(self) -> None:
         # Scratch backups are the shipper's own copies, never source evidence.
         if self.sqlite_scratch.is_dir():
@@ -389,6 +398,7 @@ class SegmentShipper:
         found = {}
         excluded_dirs = self.rules["excluded_dir_names"]
         state_dir = str(self.state_dir)
+        path_globs = tuple(self.rules.get("excluded_path_globs", ()))
         # Windows DirEntry.stat() reports no inode/device, which checkpoints need.
         full_stat = os.name == "nt"
         for root, prefix in self._roots():
@@ -420,6 +430,8 @@ class SegmentShipper:
                     except OSError:
                         continue
                     relpath = f"{rel_dir}/{name}" if rel_dir else name
+                    if any(fnmatch.fnmatchcase(relpath, pattern) for pattern in path_globs):
+                        continue
                     try:
                         fmt.validate_relpath(relpath)
                     except fmt.SegmentFormatError:
@@ -470,63 +482,73 @@ class SegmentShipper:
             if relpath in claimed:
                 continue
             tracked = files.get(relpath) if relpath not in sealed_sources else None
-            size = int(stat.st_size)
-            op = None
-            if self._is_append_class(relpath):
-                if tracked is None:
-                    kind = fmt.KIND_REWRITE if relpath in tombstones else fmt.KIND_APPEND
-                    end = _complete_record_size(path, size)
-                    if kind == fmt.KIND_REWRITE or end > 0:
-                        op = {"kind": kind, "base_offset": 0, "end_offset": end}
-                elif (int(stat.st_dev), int(stat.st_ino)) != (tracked["dev"], tracked["inode"]) \
-                        or size < tracked["offset"]:
-                    op = {"kind": fmt.KIND_REWRITE, "base_offset": 0,
-                          "end_offset": _complete_record_size(path, size)}
-                elif (size, int(stat.st_mtime_ns)) != (tracked["size"], tracked["mtime_ns"]) \
-                        or tracked["offset"] < size:
-                    if _anchors(path, tracked["offset"]) != (tracked["head_sha256"], tracked["tail_sha256"]):
-                        op = {"kind": fmt.KIND_REWRITE, "base_offset": 0,
-                              "end_offset": _complete_record_size(path, size)}
-                    else:
-                        end = _complete_record_size(path, size)
-                        if end > tracked["offset"]:
-                            op = {"kind": fmt.KIND_APPEND, "base_offset": tracked["offset"],
-                                  "end_offset": end}
-                if op is not None:
-                    op["bytes"] = op["end_offset"] - op["base_offset"]
-            else:
-                changed = tracked is None or tracked.get("class") != "snapshot" or (
-                    size, int(stat.st_mtime_ns), int(stat.st_ino)
-                ) != (tracked["size"], tracked["mtime_ns"], tracked["inode"]) or (
-                    "wal" in tracked and tracked["wal"] != _wal_signature(path))
-                # Large, continuously mutating snapshots (e.g. research.db) are
-                # re-shipped at most once per interval to bound bucket growth.
-                interval = (self.huge_snapshot_interval if size > self.max_member_bytes
-                            else self.large_snapshot_interval)
-                if (changed and tracked is not None and size > self.large_snapshot_bytes
-                        and self.clock() - float(tracked.get("shipped_at") or 0.0)
-                        < interval):
-                    self.throttled.append(relpath)
-                    changed = False
-                if changed:
-                    kind = (fmt.KIND_REWRITE if tracked is None and relpath in tombstones
-                            else fmt.KIND_SNAPSHOT)
-                    op = {"kind": kind, "bytes": size}
+            try:
+                op = self._plan_entry(relpath, path, stat, tracked, tombstones)
+            except FileNotFoundError:
+                # Deleted after the scan: the next scan tombstones or ignores it.
+                continue
             if op is not None:
-                op.update({"stream": relpath, "path": relpath, "abs": path, "stat": stat,
-                           "tracked": tracked})
-                if op["kind"] == fmt.KIND_APPEND:
-                    self._clamp_append(op)
-                # Only a real SQLite file can be backed up online; anything else
-                # named *.db keeps the plain stable-copy path.
-                op["sqlite"] = (_is_sqlite_db(relpath) and not self._is_append_class(relpath)
-                                and _has_sqlite_header(path))
-                # Flagged here, not in select, so every oversized path stays
-                # visible in status even when a budget break ends selection first.
-                op["oversized"] = op["bytes"] > self._member_cap(op)
                 ops.append(op)
         ops.sort(key=lambda item: (item["stream"], _RANK.get(item["kind"], 2), item["path"]))
         return ops
+
+    def _plan_entry(self, relpath: str, path: Path, stat: os.stat_result, tracked: dict | None,
+                    tombstones: dict) -> dict | None:
+        size = int(stat.st_size)
+        op = None
+        if self._is_append_class(relpath):
+            if tracked is None:
+                kind = fmt.KIND_REWRITE if relpath in tombstones else fmt.KIND_APPEND
+                end = _complete_record_size(path, size)
+                if kind == fmt.KIND_REWRITE or end > 0:
+                    op = {"kind": kind, "base_offset": 0, "end_offset": end}
+            elif (int(stat.st_dev), int(stat.st_ino)) != (tracked["dev"], tracked["inode"]) \
+                    or size < tracked["offset"]:
+                op = {"kind": fmt.KIND_REWRITE, "base_offset": 0,
+                      "end_offset": _complete_record_size(path, size)}
+            elif (size, int(stat.st_mtime_ns)) != (tracked["size"], tracked["mtime_ns"]) \
+                    or tracked["offset"] < size:
+                if _anchors(path, tracked["offset"]) != (tracked["head_sha256"], tracked["tail_sha256"]):
+                    op = {"kind": fmt.KIND_REWRITE, "base_offset": 0,
+                          "end_offset": _complete_record_size(path, size)}
+                else:
+                    end = _complete_record_size(path, size)
+                    if end > tracked["offset"]:
+                        op = {"kind": fmt.KIND_APPEND, "base_offset": tracked["offset"],
+                              "end_offset": end}
+            if op is not None:
+                op["bytes"] = op["end_offset"] - op["base_offset"]
+        else:
+            changed = tracked is None or tracked.get("class") != "snapshot" or (
+                size, int(stat.st_mtime_ns), int(stat.st_ino)
+            ) != (tracked["size"], tracked["mtime_ns"], tracked["inode"]) or (
+                "wal" in tracked and tracked["wal"] != _wal_signature(path))
+            # Large, continuously mutating snapshots (e.g. research.db) are
+            # re-shipped at most once per interval to bound bucket growth.
+            interval = (self.huge_snapshot_interval if size > self.max_member_bytes
+                        else self.large_snapshot_interval)
+            if (changed and tracked is not None and size > self.large_snapshot_bytes
+                    and self.clock() - float(tracked.get("shipped_at") or 0.0)
+                    < interval):
+                self.throttled.append(relpath)
+                changed = False
+            if changed:
+                kind = (fmt.KIND_REWRITE if tracked is None and relpath in tombstones
+                        else fmt.KIND_SNAPSHOT)
+                op = {"kind": kind, "bytes": size}
+        if op is not None:
+            op.update({"stream": relpath, "path": relpath, "abs": path, "stat": stat,
+                       "tracked": tracked})
+            if op["kind"] == fmt.KIND_APPEND:
+                self._clamp_append(op)
+            # Only a real SQLite file can be backed up online; anything else
+            # named *.db keeps the plain stable-copy path.
+            op["sqlite"] = (_is_sqlite_db(relpath) and not self._is_append_class(relpath)
+                            and _has_sqlite_header(path))
+            # Flagged here, not in select, so every oversized path stays
+            # visible in status even when a budget break ends selection first.
+            op["oversized"] = op["bytes"] > self._member_cap(op)
+        return op
 
     def _member_cap(self, op: dict) -> int:
         if self._sqlite_snapshot_op(op):
@@ -685,14 +707,17 @@ class SegmentShipper:
         snapshot_file = None
         for op in selected:
             relpath, kind = op["path"], op["kind"]
-            if self._sqlite_snapshot_op(op):
-                if len(selected) != 1:
-                    raise RuntimeError("a SQLite snapshot must be the only segment member")
-                snapshot_file, size, digest = self._snapshot_sqlite(op)
-                raw, extra = b"", {"consistency": SQLITE_CONSISTENCY}
-            else:
-                raw, extra = self._read(op)
-                size, digest = len(raw), fmt.sha256_bytes(raw)
+            try:
+                if self._sqlite_snapshot_op(op):
+                    if len(selected) != 1:
+                        raise RuntimeError("a SQLite snapshot must be the only segment member")
+                    snapshot_file, size, digest = self._snapshot_sqlite(op)
+                    raw, extra = b"", {"consistency": SQLITE_CONSISTENCY}
+                else:
+                    raw, extra = self._read(op)
+                    size, digest = len(raw), fmt.sha256_bytes(raw)
+            except FileNotFoundError as exc:
+                raise PlanRace(f"{op['path']} vanished before it was read", op["stream"]) from exc
             member = {"index": len(members), "kind": kind, "path": relpath,
                       "size": size, "sha256": digest}
             if kind in (fmt.KIND_APPEND, fmt.KIND_SEAL):
@@ -1111,6 +1136,19 @@ def main() -> int:
     _log(f"started prefix={shipper.prefix} sink={shipper.sink} interval={interval:.0f}s "
          f"max_store_bytes={shipper.max_store_bytes} min_free={min_free} pruning=OFF")
     last_ack_poll = 0.0
+
+    def settle_mode() -> str:
+        nonlocal priority_boosted, priority_error
+        boost = shipper.boost_due()
+        shipper.boosted = boost
+        if boost != priority_boosted:
+            priority_error = _set_priority(boost, boost_nice)
+            priority_boosted = boost
+            _log(f"backlog mode {'ON' if boost else 'OFF'} budget={shipper.segment_budget} "
+                 f"priority={'nice ' + str(boost_nice) if boost else 'idle'}"
+                 + (f" priority_error={priority_error}" if priority_error else ""))
+        return "boost" if priority_boosted else "idle"
+
     while True:
         pause = interval
         try:
@@ -1118,15 +1156,8 @@ def main() -> int:
                 shipper.write_status(last_error="LOW_DISK_SKIPPED")
                 _log("free space below floor -> cycle skipped")
             else:
-                boost = shipper.boost_due()
-                if boost != priority_boosted:
-                    priority_error = _set_priority(boost, boost_nice)
-                    priority_boosted = boost
-                    _log(f"backlog mode {'ON' if boost else 'OFF'} budget={shipper.segment_budget if boost else shipper.max_segment_bytes} "
-                         f"priority={'nice ' + str(boost_nice) if boost else 'idle'}"
-                         + (f" priority_error={priority_error}" if priority_error else ""))
-                    shipper.write_status(priority="boost" if boost else "idle",
-                                         priority_error=priority_error)
+                shipper.publish_mode("CYCLING", priority=settle_mode(),
+                                     priority_error=priority_error)
                 started = time.monotonic()
                 result = shipper.cycle()
                 if result.get("shipped"):
@@ -1156,6 +1187,12 @@ def main() -> int:
             except Exception:
                 pass
             _log(f"cycle error: {type(exc).__name__}: {exc}")
+        try:
+            # Switch now so the sleep runs at, and the head reports, the next cycle's mode.
+            shipper.publish_mode("SLEEPING", priority=settle_mode(), priority_error=priority_error,
+                                 next_cycle_at=shipper.clock() + pause)
+        except Exception as exc:
+            _log(f"mode publish error: {type(exc).__name__}: {exc}")
         time.sleep(pause)
 
 

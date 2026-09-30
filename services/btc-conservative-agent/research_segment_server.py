@@ -174,6 +174,8 @@ class SegmentServer:
             "segment_budget_bytes": status.get("segment_budget_bytes"),
             "shipper_priority": status.get("priority"),
             "shipper_priority_error": status.get("priority_error"),
+            "shipper_worker_state": status.get("worker_state"),
+            "shipper_next_cycle_at": status.get("next_cycle_at"),
             "laptop_acked": self.acked_head(),
             "pruning_enabled": False,
         }
