@@ -5101,6 +5101,34 @@ def live_copy_coordination_state() -> str:
     return COORD_STATE_RUNNING_TOGETHER
 
 
+def live_copy_coordination_display_fields() -> dict:
+    """Dashboard/API view of coordination. Coordination state is in-memory
+    only, so after a Fly restart the RUNNING_TOGETHER boot default is not a
+    Railway-confirmed fact until Railway posts /api/live-copy-coordination."""
+    enforced = live_copy_coordination_state()
+    with state_lock:
+        confirmed_at = state.get("live_copy_coordination_updated_at") or None
+    if not confirmed_at:
+        return {
+            "live_copy_coordination_state": COORD_STATE_UNCONFIRMED_SINCE_BOOT,
+            "live_copy_coordination_enforced_state": enforced,
+            "live_copy_coordination_confirmed": False,
+            "live_copy_coordination_updated_at": None,
+            "live_copy_coordination_ui_reason": LIVE_RELAY_COORDINATION_UNCONFIRMED_REASON,
+        }
+    return {
+        "live_copy_coordination_state": enforced,
+        "live_copy_coordination_enforced_state": enforced,
+        "live_copy_coordination_confirmed": True,
+        "live_copy_coordination_updated_at": confirmed_at,
+        "live_copy_coordination_ui_reason": (
+            LIVE_RELAY_COORDINATION_REASON
+            if enforced != COORD_STATE_RUNNING_TOGETHER
+            else ""
+        ),
+    }
+
+
 def set_live_copy_coordination_state(next_state: str, reason: str = "") -> dict:
     """Apply coordinated state. RELAY_EXIT_ONLY blocks NEW executable CONTINUOUS entries."""
     wanted = str(next_state or "").strip().upper()
@@ -5775,6 +5803,9 @@ COORD_STATE_RELAY_EXIT_ONLY = "RELAY_EXIT_ONLY"
 COORD_STATE_SOURCE_RESEARCH_ONLY = "SOURCE_RESEARCH_ONLY"
 COORD_STATE_FULLY_PAUSED = "FULLY_PAUSED"
 LIVE_RELAY_COORDINATION_REASON = "SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED"
+# Display-only; never accepted by set_live_copy_coordination_state.
+COORD_STATE_UNCONFIRMED_SINCE_BOOT = "UNCONFIRMED_SINCE_BOOT"
+LIVE_RELAY_COORDINATION_UNCONFIRMED_REASON = "LIVE_RELAY_COORDINATION_NOT_CONFIRMED_BY_RAILWAY_SINCE_BOOT"
 VENUE_EXECUTABLE_MAX_BOOK_AGE_SEC = 3.5
 VENUE_EXECUTABLE_TRADE_WINDOW_SEC = 3.0
 FUNDING_RATE_CAP_PER_8H = 0.001
@@ -33655,7 +33686,8 @@ DASHBOARD_JS = """(function () {
         const src = document.getElementById('dataSource');
         const banner = document.getElementById('dataBanner');
         if (src && banner) {
-          if (d.live_copy_coordination_state && d.live_copy_coordination_state !== 'RUNNING_TOGETHER') {
+          if (d.live_copy_coordination_state && d.live_copy_coordination_state !== 'RUNNING_TOGETHER'
+              && d.live_copy_coordination_state !== 'UNCONFIRMED_SINCE_BOOT') {
             src.innerHTML = (d.live_copy_coordination_ui_reason || 'SHOWCASE_EXECUTION_PAUSED_BECAUSE_LIVE_RELAY_IS_PAUSED')
               + ' [' + d.live_copy_coordination_state + ']';
             src.className = 'text-red-500 font-bold animate-pulse';
@@ -38377,13 +38409,7 @@ def _build_api_state_snapshot():
             current_instance_id=str(BOT_INSTANCE_ID or "") or None,
             current_revision=str(_runtime_git_rev_exact() or "") or None,
         )
-        coord = live_copy_coordination_state()
-        snapshot["live_copy_coordination_state"] = coord
-        snapshot["live_copy_coordination_ui_reason"] = (
-            LIVE_RELAY_COORDINATION_REASON
-            if coord != COORD_STATE_RUNNING_TOGETHER
-            else ""
-        )
+        snapshot.update(live_copy_coordination_display_fields())
         if _API_STATE_INLINE_RESEARCH_AGGREGATES:
             snapshot["paused_shadow_stats"] = paused_shadow_dashboard_stats()
         else:
@@ -39797,7 +39823,7 @@ def api_live_copy_coordination():
             else ""
         )
     _patch_api_state_cache_fields(
-        live_copy_coordination_state=result["state"],
+        **live_copy_coordination_display_fields(),
         live_copy_coordination_reason=result.get("reason") or "",
         execution_paused=result.get("execution_paused"),
         execution_reason=result.get("execution_reason") or "",
