@@ -189,5 +189,11 @@ def test_start_refuses_without_a_fresh_runtime_baseline_or_under_onedrive(tmp_pa
         up.start(tmp_path / "OneDrive" / "state", tmp_path / "diag", T0)
 
 
+def test_manual_journal_written_with_a_bom_is_still_read(tmp_path):
+    line = json.dumps({"at": up.iso(T0 + 60), "action": "moved checkout"})
+    (tmp_path / up.MANUAL_JOURNAL).write_bytes(b"\xef\xbb\xbf" + line.encode("utf-8") + b"\n")
+    assert [e["action"] for e in up._manual_entries(tmp_path, T0)] == ["moved checkout"]
+
+
 def test_check_without_window_is_a_noop(tmp_path):
     assert up.check(tmp_path, T0)["result"] == "NO_ACTIVE_WINDOW"
