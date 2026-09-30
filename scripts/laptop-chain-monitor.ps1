@@ -69,6 +69,8 @@ if (-not $pullDisabled) {
   if ($null -eq $finished -or ($now - $finished).TotalMinutes -gt $PullStaleMin) {
     $age = if ($finished) { '{0:N0} min' -f ($now - $finished).TotalMinutes } else { 'never' }
     Add-Alert 'SEGMENT_PULL_STALE' 'critical' "No finished segment pull for $age (limit $PullStaleMin min)"
+  } elseif ([string]$pull.error -like '*holds the shadow-root lock*') {
+    # The analyzer cycle's own pull holds the shadow lock; staleness above still bounds it.
   } elseif (@(0, 1) -notcontains [int]$pull.exitCode -or $pull.error) {
     Add-Alert 'SEGMENT_PULL_FAILING' 'critical' ("Segment pull exit={0} applied={1} remote={2} error={3}" -f $pull.exitCode, $pull.appliedSeq, $pull.remotePublishedSeq, $pull.error)
   }
