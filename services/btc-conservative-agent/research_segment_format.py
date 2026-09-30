@@ -30,7 +30,11 @@ KIND_SEAL = "SEAL"
 KIND_SNAPSHOT = "SNAPSHOT"
 KIND_REWRITE = "REWRITE"
 KIND_TOMBSTONE = "TOMBSTONE"
-PAYLOAD_KINDS = frozenset({KIND_APPEND, KIND_SEAL, KIND_SNAPSHOT, KIND_REWRITE})
+# Epoch genesis only: an append stream starts at ``base_offset``; the bytes
+# before it are recorded by size and sha256 but never shipped. The payload is
+# the stream's header line (CSV) or empty.
+KIND_BASELINE = "BASELINE"
+PAYLOAD_KINDS = frozenset({KIND_APPEND, KIND_SEAL, KIND_SNAPSHOT, KIND_REWRITE, KIND_BASELINE})
 ALL_KINDS = PAYLOAD_KINDS | {KIND_TOMBSTONE}
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -226,6 +230,11 @@ def validate_member(member: dict, index: int) -> None:
             raise SegmentFormatError("SEAL final_size must equal end_offset")
     if kind == KIND_REWRITE:
         _require_int(member.get("generation"), "member.generation", 1)
+    if kind == KIND_BASELINE:
+        _require_int(member.get("base_offset"), "member.base_offset")
+        _require_sha(member.get("source_sha256"), "member.source_sha256")
+        if member["size"] > member["base_offset"]:
+            raise SegmentFormatError("BASELINE preamble cannot exceed its base_offset")
 
 
 def validate_manifest(manifest: dict, *, prefix: str, expected_seq: int) -> None:

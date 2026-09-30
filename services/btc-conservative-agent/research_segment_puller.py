@@ -126,6 +126,8 @@ class SegmentPuller:
         self.state_path = self.meta / "state.json"
         self.status_path = self.meta / "status.json"
         self.write_ack = write_ack
+        # relpath -> epoch baseline; persisted in state with each applied seq.
+        self.baselines: dict[str, dict] = {}
         for directory in (self.tree, self.meta, self.archive_root / "seg", self.archive_root / "man"):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -218,30 +220,68 @@ class SegmentPuller:
         destination.parent.mkdir(parents=True, exist_ok=True)
         _fsync_write(destination, target.read_bytes())
 
+    def _to_local(self, relpath: str, remote_offset: int, label: str) -> int:
+        """Map a Fly byte offset onto a stream that started at an epoch baseline."""
+        baseline = self.baselines.get(relpath)
+        if baseline is None:
+            return remote_offset
+        if remote_offset < baseline["base_offset"]:
+            raise PullerError(f"{label}: offset {remote_offset} precedes the epoch baseline")
+        return remote_offset - baseline["base_offset"] + baseline["preamble_size"]
+
     def apply_member(self, seq: int, member: dict, payload: bytes) -> None:
         kind, relpath = member["kind"], member["path"]
         target = self._local(relpath)
         label = f"seq {seq} member {member['index']} {kind} {relpath}"
-        if kind == fmt.KIND_APPEND:
-            self._append(target, member["base_offset"], member["end_offset"], payload, label)
-        elif kind == fmt.KIND_SEAL:
-            source = self._local(member["source_path"])
+        if kind == fmt.KIND_BASELINE:
+            recorded = {"base_offset": member["base_offset"], "preamble_size": member["size"],
+                        "source_sha256": member["source_sha256"], "seq": seq}
+            if self.baselines.get(relpath) == recorded:
+                return
             if target.exists():
-                if _sha256_file(target) != member["final_sha256"]:
+                if target.stat().st_size != len(payload) or _sha256_file(target) != member["sha256"]:
+                    raise PullerError(f"{label}: a new epoch needs a fresh tree; local file exists")
+            else:
+                _fsync_write(target, payload)
+            self.baselines[relpath] = recorded
+        elif kind == fmt.KIND_APPEND:
+            self._append(target, self._to_local(relpath, member["base_offset"], label),
+                         self._to_local(relpath, member["end_offset"], label), payload, label)
+        elif kind == fmt.KIND_SEAL:
+            source_rel = member["source_path"]
+            source = self._local(source_rel)
+            baseline = self.baselines.get(source_rel) or self.baselines.get(relpath)
+            final_local = self._to_local(source_rel if source_rel in self.baselines else relpath,
+                                         member["final_size"], label)
+            if target.exists():
+                if baseline is None and _sha256_file(target) != member["final_sha256"]:
                     raise PullerError(f"{label}: sealed file exists with different content")
+                if baseline is not None and target.stat().st_size != final_local:
+                    raise PullerError(f"{label}: sealed file exists with different size")
+                if source_rel in self.baselines:
+                    self.baselines[relpath] = self.baselines.pop(source_rel)
                 return
             if not source.exists() and member["base_offset"] != 0:
                 raise PullerError(f"{label}: active source missing for seal")
-            self._append(source, member["base_offset"], member["end_offset"], payload, label)
-            if source.stat().st_size != member["final_size"] or _sha256_file(source) != member["final_sha256"]:
+            self._append(source, self._to_local(source_rel, member["base_offset"], label),
+                         self._to_local(source_rel, member["end_offset"], label), payload, label)
+            if source.stat().st_size != final_local:
+                raise PullerError(f"{label}: sealed content size mismatch")
+            # The pre-baseline prefix never left Fly, so only a stream shipped
+            # from byte 0 can be checked against the whole-file digest.
+            if baseline is None and _sha256_file(source) != member["final_sha256"]:
                 raise PullerError(f"{label}: sealed content sha256 mismatch")
             target.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, target)
+            if source_rel in self.baselines:
+                self.baselines[relpath] = self.baselines.pop(source_rel)
         elif kind == fmt.KIND_SNAPSHOT:
+            self.baselines.pop(relpath, None)
             if target.exists() and _sha256_file(target) == member["sha256"]:
                 return
             _fsync_write(target, payload)
         elif kind == fmt.KIND_REWRITE:
+            self.baselines.pop(relpath, None)
             if target.exists() and _sha256_file(target) == member["sha256"]:
                 return
             self._quarantine_copy(seq, relpath, target)
@@ -256,6 +296,7 @@ class SegmentPuller:
     # ------------------------------------------------------------------- run
     def pull_once(self, max_segments: int | None = None) -> dict:
         state = self.load_state()
+        self.baselines = {path: dict(entry) for path, entry in (state.get("baselines") or {}).items()}
         applied = 0
         while max_segments is None or applied < max_segments:
             seq = int(state["applied_seq"]) + 1
@@ -277,6 +318,8 @@ class SegmentPuller:
                           "last_applied_at": _utc_now(),
                           "last_source_git_rev": manifest["source_git_rev"],
                           "last_collection_epoch_id": manifest["collection_epoch_id"]})
+            if self.baselines or "baselines" in state:
+                state["baselines"] = {path: dict(entry) for path, entry in sorted(self.baselines.items())}
             self.save_state(state)
             applied += 1
         if hasattr(self.store, "last_ack_response"):

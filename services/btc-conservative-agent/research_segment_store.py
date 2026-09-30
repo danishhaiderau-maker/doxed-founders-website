@@ -374,6 +374,12 @@ class HttpSegmentSource(ObjectStore):
             raise StoreError(f"GET head returned HTTP {status}")
         return json.loads(raw.decode("utf-8"))
 
+    def checkpoint_files(self) -> dict:
+        status, raw = self._request("GET", "files")
+        if status != 200:
+            raise StoreError(f"GET files returned HTTP {status}")
+        return json.loads(raw.decode("utf-8"))
+
     def get(self, key: str) -> bytes | None:
         status, raw = self._request("GET", self._route_for_key(key))
         return None if status == 404 else raw

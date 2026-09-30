@@ -39,6 +39,9 @@ on:
           - repair-lifecycle-cursor
           - repair-execution-tail
           - expand-storage
+          - snapshot-volume
+          - fresh-start-wipe-plan
+          - fresh-start-wipe-execute
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
@@ -333,10 +336,19 @@ jobs:
           if not(resumed.get("status")=="resumed" and final.get("execution_paused") is False and final.get("manual_admin_pause") is False and final.get("force_paper_mode") is True and final.get("bitfinex_live_enabled") is False and final.get("live_armed") is False): raise SystemExit("safe paper resume not proven")
           PY
 
+      - uses: actions/checkout@v4
+
+      - name: Force every registry paper tile ON (never arms relay/Bitfinex)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_postdeploy_active_gate.py --tiles-only
+
   repair-lifecycle-cursor:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-cursor'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -426,10 +438,19 @@ jobs:
               raise SystemExit("final paper-only resume was not proven")
           PY
 
+      - uses: actions/checkout@v4
+
+      - name: Force every registry paper tile ON (never arms relay/Bitfinex)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_postdeploy_active_gate.py --tiles-only
+
   repair-lifecycle-tail:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-lifecycle-tail'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -574,6 +595,15 @@ jobs:
               raise SystemExit("final paper-only unpaused state was not proven")
           PY
 
+      - uses: actions/checkout@v4
+
+      - name: Force every registry paper tile ON (never arms relay/Bitfinex)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_postdeploy_active_gate.py --tiles-only
+
   repair-execution-funnel:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'repair-execution-funnel'
     runs-on: ubuntu-latest
@@ -683,6 +713,129 @@ jobs:
           flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); assert len(rows)==1 and int(rows[0].get("size_gb") or 0)==20; print(json.dumps({"volume_id":rows[0]["id"],"size_gb":rows[0]["size_gb"],"state":rows[0].get("state")},sort_keys=True))'
           flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "sh -lc 'df -h /app/data; df -i /app/data'"
 
+  snapshot-volume:
+    # Recoverability gate before any data deletion: an on-demand snapshot of
+    # the exact BTC data volume. Read-only for the guest; never deploys,
+    # restarts, deletes or touches exchange exposure.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-volume'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_VOLUME_ID: vol_45899d3760nj26j4
+      SNAPSHOT_RETENTION_DAYS: "60"
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Snapshot the sole attached BTC data volume
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,os,sys; rows=json.load(sys.stdin); attached=[r for r in rows if str(r.get("attached_machine_id") or "").strip()]; assert len(rows)==1 and len(attached)==1, f"expected exactly one attached volume, found volumes={len(rows)} attached={len(attached)}"; assert attached[0]["id"]==os.environ["EXPECTED_VOLUME_ID"], "refusing unexpected volume id"'
+          flyctl volumes update "$EXPECTED_VOLUME_ID" --app doxed-btc-bot --snapshot-retention "$SNAPSHOT_RETENTION_DAYS"
+          flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,sys; v=json.load(sys.stdin)[0]; print(json.dumps({"volume_id":v.get("id"),"snapshot_retention":v.get("snapshot_retention"),"size_gb":v.get("size_gb"),"auto_backup_enabled":v.get("auto_backup_enabled")},sort_keys=True))'
+          before="$(flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json | python -c 'import json,sys; print(" ".join(sorted(str(s.get("id")) for s in (json.load(sys.stdin) or []))))')"
+          flyctl volumes snapshots create "$EXPECTED_VOLUME_ID" --app doxed-btc-bot
+          for attempt in $(seq 1 90); do
+            listing="$(flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json)"
+            if printf '%s' "$listing" | BEFORE="$before" python -c 'import json,os,sys
+          before=set(os.environ["BEFORE"].split())
+          rows=[s for s in (json.load(sys.stdin) or []) if str(s.get("id")) not in before]
+          if not rows: sys.exit(1)
+          s=max(rows,key=lambda r:str(r.get("created_at") or ""))
+          print(json.dumps({"snapshot_id":s.get("id"),"status":s.get("status"),"size":s.get("size"),"created_at":s.get("created_at"),"retention_days":s.get("retention_days")},sort_keys=True))
+          sys.exit(0 if str(s.get("status") or "").lower()=="created" else 1)'; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "snapshot did not reach status=created in time" >&2
+          flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json
+          exit 1
+
+  fresh-start-wipe:
+    # Deletes only closed old rotations and a fully-ACKed superseded v1
+    # segment epoch (research_fresh_start_wipe.py). Requires the volume
+    # snapshot receipt first. Paper is resumed with every registry tile ON;
+    # relay/Bitfinex are never armed. The v1 epoch is only a candidate when
+    # the laptop's ACK of its final published seq exists on the volume.
+    if: github.event_name == 'workflow_dispatch' && (inputs.mode == 'fresh-start-wipe-plan' || inputs.mode == 'fresh-start-wipe-execute')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Plan (read-only)
+        id: plan
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; print(active[0]["id"])')"
+          ack_arg="--v1-acked-through auto"
+          plan="$(flyctl machine exec --app doxed-btc-bot --timeout 300 "$machine_id" "python /app/research_fresh_start_wipe.py --data-root /app/data --plan $ack_arg")"
+          printf '%s\n' "$plan"
+          sha="$(printf '%s' "$plan" | python -c 'import json,sys; text=sys.stdin.read(); start=text.index("{"); print(json.loads(text[start:])["plan_sha256"])')"
+          {
+            echo "machine_id=$machine_id"
+            echo "plan_sha=$sha"
+            echo "ack_arg=$ack_arg"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Enter paper maintenance boundary
+        id: boundary
+        if: ${{ inputs.mode == 'fresh-start-wipe-execute' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json, os, time, urllib.request
+          base = "https://doxed-btc-bot.fly.dev"
+          headers = {"X-Bot-Admin-Token": os.environ["BOT_ADMIN_TOKEN"], "Cache-Control": "no-cache"}
+          def call(path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              request = urllib.request.Request(base + path, data=data, method="POST" if data else "GET",
+                                               headers={**headers, **({"Content-Type": "application/json"} if data else {})})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return json.load(response)
+          call("/api/pause", {"owner": "DEPLOY_MAINTENANCE"})
+          for _ in range(40):
+              status = call("/api/status")
+              if (status.get("execution_paused") is True and status.get("live_armed") is False
+                      and status.get("bitfinex_live_enabled") is False and status.get("force_paper_mode") is True):
+                  print("paper maintenance boundary established rev=" + str(status.get("source_git_rev")))
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                      handle.write("revision=" + str(status.get("source_git_rev") or "")[:12] + "\n")
+                  raise SystemExit(0)
+              time.sleep(3)
+          raise SystemExit("paper maintenance boundary not established")
+          PY
+
+      - name: Execute the pinned plan
+        if: ${{ inputs.mode == 'fresh-start-wipe-execute' }}
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl machine exec --app doxed-btc-bot --timeout 600 "${{ steps.plan.outputs.machine_id }}" \
+            "python /app/research_fresh_start_wipe.py --data-root /app/data --execute --expect-plan-sha256 ${{ steps.plan.outputs.plan_sha }} ${{ steps.plan.outputs.ack_arg }}"
+          flyctl machine exec --app doxed-btc-bot --timeout 30 "${{ steps.plan.outputs.machine_id }}" "sh -lc 'df -h /app/data'"
+
+      - name: Resume paper
+        if: ${{ always() && steps.boundary.outcome != 'skipped' && steps.boundary.outcome != '' }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_failure_paper_resume.py
+
+      - name: Prove paper active with every registry tile ON
+        if: ${{ success() && inputs.mode == 'fresh-start-wipe-execute' }}
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+          EXPECTED_REVISION: ${{ steps.boundary.outputs.revision }}
+        run: python scripts/fly_postdeploy_active_gate.py
+
   recover-memory:
     # A boot-time OOM loop cannot answer the authenticated pause pre-step, so
     # this dispatch-only job proves the durable paper boundary directly on the
@@ -690,7 +843,7 @@ jobs:
     # memory. It never deploys source, flattens, or touches exchange exposure.
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-memory'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -710,6 +863,15 @@ jobs:
           fi
           sleep 10
           flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[r for r in rows if str(r.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active)==1; m=active[0]; g=(m.get("config") or {}).get("guest") or {}; assert int(g.get("memory_mb") or 0)==4096, f"memory not raised: {g}"; print(json.dumps({"machine_id":m["id"],"state":m.get("state"),"memory_mb":g.get("memory_mb"),"cpu_kind":g.get("cpu_kind"),"cpus":g.get("cpus"),"image":(m.get("config") or {}).get("image")},sort_keys=True))'
+
+      - uses: actions/checkout@v4
+
+      - name: Force every registry paper tile ON (never arms relay/Bitfinex)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   close-paper-position:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'close-paper-position'
@@ -905,7 +1067,7 @@ jobs:
   restart-only:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'restart-only'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
@@ -915,6 +1077,15 @@ jobs:
         run: |
           machine_id="$(flyctl machines list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
           flyctl machines restart --app doxed-btc-bot "$machine_id"
+
+      - uses: actions/checkout@v4
+
+      - name: Force every registry paper tile ON (never arms relay/Bitfinex)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   recover-startup-crash:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'recover-startup-crash'
@@ -1044,6 +1215,15 @@ jobs:
           REQUIRE_CANONICAL_FLY_OWNER: "YES"
           SHOWCASE_OWNER_URL: "https://doxed-btc-bot.fly.dev"
         run: node scripts/check-relay-flat.mjs
+
+      - uses: actions/checkout@v4
+
+      - name: Force every registry paper tile ON (never arms relay/Bitfinex)
+        timeout-minutes: 20
+        working-directory: ${{ github.workspace }}
+        env:
+          BOT_ADMIN_TOKEN: ${{ secrets.BOT_ADMIN_TOKEN }}
+        run: python scripts/fly_postdeploy_active_gate.py --tiles-only
 
   test-and-deploy:
     if: github.event_name != 'workflow_dispatch' || inputs.mode == 'deploy' || inputs.mode == 'recover-unready' || inputs.mode == 'recover-stalled-runtime'
