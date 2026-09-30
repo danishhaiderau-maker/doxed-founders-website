@@ -52,25 +52,25 @@ def test_analyzer_that_never_completed_is_stale():
     assert "analyzer_stale" in lci.findings(None, _alerts(), NOW)
 
 
-def test_watcher_dead_from_fresh_monitor_output():
-    found = lci.findings(_analyzer(60), _alerts(codes=["WATCHER_DEAD", "SYNC_FAIL_REPEATED"]), NOW)
-    assert set(found) == {"watcher_dead"}
+def test_segment_pull_dead_from_fresh_monitor_output():
+    found = lci.findings(_analyzer(60), _alerts(codes=["SEGMENT_PULL_DEAD", "SEGMENT_PULL_STALE"]), NOW)
+    assert set(found) == {"segment_pull_dead"}
 
 
-def test_stale_or_missing_monitor_output_is_monitor_stale_not_watcher_state():
-    found = lci.findings(_analyzer(60), _alerts(age_sec=3600, codes=["WATCHER_DEAD"]), NOW)
+def test_stale_or_missing_monitor_output_is_monitor_stale_not_pull_state():
+    found = lci.findings(_analyzer(60), _alerts(age_sec=3600, codes=["SEGMENT_PULL_DEAD"]), NOW)
     assert set(found) == {"monitor_stale"}
     assert set(lci.findings(_analyzer(60), None, NOW)) == {"monitor_stale"}
 
 
-def test_watcher_dead_needs_two_ticks_and_ten_minutes():
+def test_segment_pull_dead_needs_two_ticks_and_ten_minutes():
     state = lci.alerts.empty_state()
     run = lambda t: {d["key"]: d["action"] for d in lci.alerts.evaluate(
-        state, {"watcher_dead": "x"}, now=t, maintenance=False, policies=lci.POLICIES)[0]}
-    assert run(0) == {"watcher_dead": "pending"}
-    assert run(300) == {"watcher_dead": "pending"}
-    assert run(600) == {"watcher_dead": "alert"}
-    assert run(900) == {"watcher_dead": "known"}
+        state, {"segment_pull_dead": "x"}, now=t, maintenance=False, policies=lci.POLICIES)[0]}
+    assert run(0) == {"segment_pull_dead": "pending"}
+    assert run(300) == {"segment_pull_dead": "pending"}
+    assert run(600) == {"segment_pull_dead": "alert"}
+    assert run(900) == {"segment_pull_dead": "known"}
 
 
 # --- end-to-end with a fake GitHub ----------------------------------------

@@ -11,19 +11,12 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / ".github/workflows/fly-bot-deploy.yml").read_text(encoding="utf-8")
 
 
-def test_boolean_opt_in_defaults_off():
-    block = WORKFLOW.split("      transport_bundles:\n", 1)[1].split("      expected_", 1)[0]
-    assert "        required: false\n" in block
-    assert "        default: false\n" in block
-    assert "        type: boolean\n" in block
-
-
-def test_only_normal_dispatch_can_enable_fixed_binary_flag():
+def test_transport_bundles_are_retired_and_pinned_off():
+    assert "transport_bundles:" not in WORKFLOW
+    assert "bundle-canary" not in WORKFLOW
     deploy = WORKFLOW.split("      - name: Deploy the exact source revision\n", 1)[1].split(
         "      - name:", 1)[0]
-    expression = ("${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' "
-                  "&& inputs.transport_bundles && '1' || '0' }}")
-    assert "TRANSPORT_BUNDLES_ENABLED: " + expression in deploy
+    assert 'TRANSPORT_BUNDLES_ENABLED: "0"' in deploy
     assert '--env "DATA_SYNC_TRANSPORT_BUNDLES_ENABLED=${TRANSPORT_BUNDLES_ENABLED}"' in deploy
     assert '--build-arg SOURCE_GIT_REV="${GITHUB_SHA}"' in deploy
     assert "FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}" in deploy

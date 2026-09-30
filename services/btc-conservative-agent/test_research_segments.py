@@ -510,11 +510,23 @@ def test_entrypoint_launches_shipper_only_behind_flag():
     assert launch < text.index("starting btc_conservative_agent.py")
 
 
-def test_selection_rules_are_read_from_bot_source_not_duplicated():
-    rules = shipper_mod.load_selection_rules(ROOT / "bot.py")
+def test_selection_rules_are_owned_by_segment_code_not_bot_source():
+    rules = shipper_mod.load_selection_rules()
     assert ".jsonl" in rules["extensions"] and ".sqlite3" in rules["extensions"]
     assert {"bot.log", "sync_inventory_current.json"} <= rules["excluded_names"]
     assert {".locks", "research_archive"} <= rules["excluded_dir_names"]
+    shipper_source = (ROOT / "research_segment_shipper.py").read_text(encoding="utf-8")
+    assert "bot.py" not in shipper_source.split('"""', 2)[2]
+    assert "RESEARCH_SEGMENTS_BOT_SOURCE" not in shipper_source
+
+
+def test_jsonl_validation_caches_are_never_shipped():
+    rules = shipper_mod.load_selection_rules()
+    shipper = shipper_mod.SegmentShipper.__new__(shipper_mod.SegmentShipper)
+    shipper.rules = rules
+    assert not shipper._allowed_name("market_microstructure_1s.jsonl.validation.json")
+    assert shipper._allowed_name("market_microstructure_1s.jsonl")
+    assert shipper._allowed_name("validation_summary.json")
 
 
 def test_puller_refuses_onedrive_and_legacy_mirror(tmp_path):

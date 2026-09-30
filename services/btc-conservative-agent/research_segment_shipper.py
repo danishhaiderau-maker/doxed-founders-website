@@ -6,7 +6,7 @@ takes the trade lock, never serves HTTP and never deletes or rewrites source
 data: pruning is not implemented in this phase.
 
 Each cycle:
-1. Stat the same file universe the legacy inventory advertises.
+1. Stat the file universe selected by ``research_segment_selection``.
 2. Plan an ordered list of operations (SEAL, TOMBSTONE, REWRITE, APPEND,
    SNAPSHOT) and keep the longest prefix that fits the byte budget, so an
    operation is never shipped ahead of one it depends on.
@@ -25,11 +25,9 @@ same keys, determinism, chain and checkpoint-after-confirmed-write rules.
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -39,6 +37,7 @@ import sqlite3
 import uuid
 
 import research_segment_format as fmt
+import research_segment_selection as selection
 from research_segment_store import ObjectStore, PreconditionFailed, StoreError, store_from_env
 
 STATE_SCHEMA = "research_segment_shipper_state_v1"
@@ -82,25 +81,12 @@ class PlanRace(RuntimeError):
         self.stream = stream
 
 
-def _extract_frozenset(source: str, name: str) -> frozenset:
-    match = re.search(rf"^{re.escape(name)}\s*=\s*frozenset\((\{{.*?\}})\)", source, re.M | re.S)
-    if not match:
-        raise RuntimeError(f"cannot locate {name} in bot.py")
-    value = ast.literal_eval(match.group(1))
-    if not isinstance(value, set) or not all(isinstance(item, str) for item in value):
-        raise RuntimeError(f"{name} is not a set of strings")
-    return frozenset(value)
-
-
-def load_selection_rules(bot_source_path: Path) -> dict:
-    """Read the inventory's selection sets from bot.py without importing it."""
-    source = bot_source_path.read_text(encoding="utf-8", errors="replace")
+def load_selection_rules() -> dict:
     return {
-        "extensions": _extract_frozenset(source, "_DATA_SYNC_EXTENSIONS"),
-        "excluded_names": _extract_frozenset(source, "_DATA_SYNC_EXCLUDED_NAMES"),
-        "excluded_dir_names": frozenset(
-            name.lower() for name in _extract_frozenset(source, "_DATA_SYNC_EXCLUDED_DIR_NAMES")
-        ),
+        "extensions": selection.EXTENSIONS,
+        "excluded_names": selection.EXCLUDED_NAMES,
+        "excluded_suffixes": selection.EXCLUDED_SUFFIXES,
+        "excluded_dir_names": frozenset(name.lower() for name in selection.EXCLUDED_DIR_NAMES),
     }
 
 
@@ -338,7 +324,7 @@ class SegmentShipper:
 
     def _allowed_name(self, name: str) -> bool:
         lower = name.lower()
-        if name in self.rules["excluded_names"]:
+        if name in self.rules["excluded_names"] or lower.endswith(self.rules.get("excluded_suffixes", ())):
             return False
         if lower.startswith(".env") or "secret" in lower or "credential" in lower:
             return False
@@ -980,7 +966,6 @@ def sink_from_env(environ=None) -> str:
 def shipper_from_env(environ=None) -> SegmentShipper:
     env = os.environ if environ is None else environ
     volume = Path(env.get("BOT_DATA_DIR") or "/app/data")
-    here = Path(__file__).resolve().parent
     sink = sink_from_env(env)
     default_cap = VOLUME_DEFAULT_MAX_STORE_BYTES if sink == "volume" else 0
     return SegmentShipper(
@@ -988,7 +973,7 @@ def shipper_from_env(environ=None) -> SegmentShipper:
         max_store_bytes=int(env.get("RESEARCH_SEGMENTS_VOLUME_MAX_BYTES") or default_cap),
         store=store_from_env(env), volume_root=volume, runtime_root=volume / "runtime",
         state_dir=Path(env.get("RESEARCH_SEGMENTS_STATE_DIR") or volume / "segment-shipper"),
-        rules=load_selection_rules(Path(env.get("RESEARCH_SEGMENTS_BOT_SOURCE") or here / "bot.py")),
+        rules=load_selection_rules(),
         prefix=(env.get("RESEARCH_SEGMENTS_PREFIX") or "v1").strip(),
         max_segment_bytes=int(env.get("RESEARCH_SEGMENTS_MAX_SEGMENT_BYTES") or 8 * 1024 * 1024),
         max_member_bytes=int(env.get("RESEARCH_SEGMENTS_MAX_MEMBER_BYTES") or 64 * 1024 * 1024),

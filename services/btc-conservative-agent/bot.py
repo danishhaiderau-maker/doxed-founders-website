@@ -11791,8 +11791,10 @@ def _dynamic_csv_writer_once(filename, row):
     with open(filename, "r", encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
         existing = reader.fieldnames or []
-    new_fields = list(set(existing) | set(row.keys()))
-    if set(new_fields) != set(existing):
+    # Readers locate columns positionally (time, trade_id, dir first); new
+    # columns may only be appended.
+    new_fields = list(existing) + [key for key in row.keys() if key not in existing]
+    if len(new_fields) != len(existing):
         with open(filename, "r", encoding="utf-8", errors="replace") as f:
             old_rows = list(csv.DictReader(f, restkey=CSV_OVERFLOW_RESTKEY))
         old_rows = _quarantine_overflow_csv_rows(filename, existing, old_rows)
@@ -45956,6 +45958,22 @@ def _schedule_data_sync_retention_cleanup() -> bool:
     return True
 
 
+# Inbound uploads, not generation transfer; every other /api/data-sync/ route
+# belongs to the retired whole-generation path (research ships as segments).
+_DATA_SYNC_INBOUND_ROUTES = frozenset({
+    "/api/data-sync/platform-relay-evidence", "/api/data-sync/analyzer-report",
+})
+
+
+@app.before_request
+def _legacy_data_sync_retired_guard():
+    path = request.path or ""
+    if path.startswith("/api/data-sync/") and path not in _DATA_SYNC_INBOUND_ROUTES:
+        return jsonify({"ok": False, "errorCode": "LEGACY_DATA_SYNC_RETIRED",
+                        "replacement": "/api/research-segments/"}), 410
+    return None
+
+
 @app.route('/api/data-sync/manifest')
 def api_data_sync_manifest():
     # Inventory polling must stay metadata-only. SQLite leases are acquired
@@ -54187,7 +54205,6 @@ def main():
     prune_aux_logs_on_startup()
     _ensure_collector_v22_epoch()
     _prime_data_sync_identity_epoch_cache()
-    _start_data_sync_background_refresh()
     _reconcile_lifecycle_cleanup_transactions()
     _audit_lifecycle_purge_recovery()
     _audit_raw_generation_cleanup_recovery()
@@ -54274,7 +54291,6 @@ def main():
     )
     _record_execution_settings_epoch("TRACKING_STARTED")
     _prepare_research_timing_at_startup()
-    _start_data_sync_bundle_reservation_hydration()
     try:
         replay_csv_write_fallback()
     except Exception as exc:
@@ -54640,14 +54656,6 @@ def _require_fly_runtime_for_direct_start() -> None:
         "[PIPELINE ENFORCEMENT]"
     )
     raise SystemExit(78)
-
-
-from data_sync_bundle_api import register_bundle_routes as _register_data_sync_bundle_routes
-_register_data_sync_bundle_routes(
-    app, authenticated=_data_sync_bundle_authenticated,
-    generation_lookup=_data_sync_bundle_generation,
-    output_root=lambda: _data_sync_volume_root() / ".data-sync-snapshots" / "transport-bundles",
-)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "services" / "btc-conservative-agent"))
+from research_segment_puller import PullerError, _RunLock  # noqa: E402
+
 SCHEMA = "research_segment_checkpoint_parity_v1"
 ANCHOR_BYTES = 4096
 RED_CLASSES = ("missing", "sealed_mismatch", "sqlite_corrupt")
@@ -109,15 +112,24 @@ def main(argv=None) -> int:
         print(json.dumps({"error": "BOT_ADMIN_TOKEN is not set"}))
         return 2
     shadow_root = Path(args.shadow_root)
-    state = json.loads((shadow_root / ".puller" / "state.json").read_text(encoding="utf-8"))
-    checkpoint = _get(args.base_url, args.prefix, "files", token)
-    if int(checkpoint["seq"]) != int(state["applied_seq"]) \
-            or checkpoint["last_manifest_sha256"] != state["last_manifest_sha256"]:
-        print(json.dumps({"verdict": "RETRY", "reason": "laptop is not at the checkpoint seq",
-                          "fly_seq": checkpoint["seq"], "laptop_seq": state["applied_seq"]}))
+    # The tree must not advance between the seq check and the scan.
+    try:
+        lock = _RunLock(shadow_root / ".puller" / "run.lock")
+    except PullerError:
+        print(json.dumps({"verdict": "RETRY", "reason": "a puller run holds the shadow-root lock"}))
         return 3
-    report = classify(checkpoint["files"], checkpoint.get("tombstones") or [],
-                      shadow_root / "tree", state.get("baselines") or {})
+    try:
+        state = json.loads((shadow_root / ".puller" / "state.json").read_text(encoding="utf-8"))
+        checkpoint = _get(args.base_url, args.prefix, "files", token)
+        if int(checkpoint["seq"]) != int(state["applied_seq"]) \
+                or checkpoint["last_manifest_sha256"] != state["last_manifest_sha256"]:
+            print(json.dumps({"verdict": "RETRY", "reason": "laptop is not at the checkpoint seq",
+                              "fly_seq": checkpoint["seq"], "laptop_seq": state["applied_seq"]}))
+            return 3
+        report = classify(checkpoint["files"], checkpoint.get("tombstones") or [],
+                          shadow_root / "tree", state.get("baselines") or {})
+    finally:
+        lock.release()
     report.update({
         "schema": SCHEMA, "generated_at": datetime.now(timezone.utc).isoformat(),
         "prefix": args.prefix, "seq": state["applied_seq"],

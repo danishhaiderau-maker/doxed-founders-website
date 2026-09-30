@@ -8,17 +8,22 @@ inside a paper maintenance boundary:
     python /app/research_fresh_start_wipe.py --data-root /app/data --execute \
         --expect-plan-sha256 <sha from --plan in the same boundary> --v1-acked-through auto
 
-Only two classes are ever deleted:
+Only three classes are ever deleted:
 
 * closed numbered rotations of append streams (``x.jsonl.7``) that are
-  neither among the newest ``KEEP_NEWEST_ROTATIONS`` of their stream nor
-  modified within ``KEEP_RECENT_SECONDS`` (boot replay and future-path
-  windows read the newest rotations);
+  either neither among the newest ``KEEP_NEWEST_ROTATIONS`` of their stream
+  nor modified within ``KEEP_RECENT_SECONDS``, or whose last byte predates the
+  v2 genesis by at least ``CUTOVER_MIN_AGE_SECONDS`` (pre-cutover bytes are in
+  the volume snapshot and the laptop v1 archive; boot post-exit replay and
+  future-path windows read at most 7200 s + 60 s back). Sealed v3 ledger
+  generations under ``runtime/v3`` are paper-ledger evidence and never match;
 * the superseded v1 segment store and v1 shipper checkpoint, only once the
-  v2 epoch has published its genesis and the laptop ACK covers every v1 seq.
+  v2 epoch has published its genesis and the laptop ACK covers every v1 seq;
+* legacy whole-generation transfer state under ``.data-sync-snapshots`` that
+  no running code reads since the transfer path was retired.
 
 Live streams, state, ledgers, locks, config, receipts and SQLite databases
-never match either class. Anything else is reported, never deleted.
+never match any class. Anything else is reported, never deleted.
 """
 
 from __future__ import annotations
@@ -34,9 +39,18 @@ from pathlib import Path
 
 SCHEMA = "research_fresh_start_wipe_plan_v1"
 KEEP_NEWEST_ROTATIONS = 2
-KEEP_RECENT_SECONDS = 72 * 3600
+KEEP_RECENT_SECONDS = 6 * 3600
+CUTOVER_MIN_AGE_SECONDS = 9000
 ROTATION_RE = re.compile(r"^(?P<base>.+\.(?:jsonl|csv|log))\.(?P<n>[1-9][0-9]*)$")
 RESEARCH_LINKS = ("research", "research_accumulator", "research_archive")
+PROTECTED_RUNTIME_DIRS = ("v3",)
+LEGACY_TRANSFER_ROOT = ".data-sync-snapshots"
+LEGACY_TRANSFER_DIRS = (
+    "transport-bundles", "transport-download-pins", "transport-maintenance-receipts",
+    "inventory-generations", "inventory-served", "strict-snapshots",
+)
+LEGACY_TRANSFER_TOP_LEVEL_SUFFIXES = (".db",)
+LEGACY_TRANSFER_TOP_LEVEL_MIN_AGE_SECONDS = 3600
 
 
 def _roots(data_root: Path) -> list[Path]:
@@ -56,11 +70,23 @@ def _roots(data_root: Path) -> list[Path]:
     return roots
 
 
-def rotation_candidates(data_root: Path, now: float) -> list[dict]:
+def v2_genesis_ts(data_root: Path) -> float | None:
+    try:
+        state = json.loads((data_root / "segment-shipper-v2" / "state.json").read_text("utf-8"))
+        created = float(state["baseline"]["created_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return created if int(state.get("seq") or 0) >= 1 and created > 0 else None
+
+
+def rotation_candidates(data_root: Path, now: float, genesis_ts: float | None = None) -> list[dict]:
     streams: dict[tuple[str, str], list[tuple[int, Path, os.stat_result]]] = {}
+    runtime = data_root / "runtime"
+    protected = {runtime / name for name in PROTECTED_RUNTIME_DIRS}
     for root in _roots(data_root):
         for directory, dirnames, filenames in os.walk(root, followlinks=False):
-            dirnames[:] = [name for name in dirnames if not (Path(directory) / name).is_symlink()]
+            dirnames[:] = [name for name in dirnames
+                           if not (Path(directory) / name).is_symlink() and Path(directory) / name not in protected]
             for name in filenames:
                 match = ROTATION_RE.match(name)
                 path = Path(directory) / name
@@ -72,14 +98,39 @@ def rotation_candidates(data_root: Path, now: float) -> list[dict]:
     for (_directory, base), rotations in sorted(streams.items()):
         rotations.sort(key=lambda item: item[0], reverse=True)
         for rank, (number, path, stat) in enumerate(rotations):
-            if rank < KEEP_NEWEST_ROTATIONS or now - stat.st_mtime < KEEP_RECENT_SECONDS:
+            pre_cutover = (genesis_ts is not None and stat.st_mtime < genesis_ts
+                           and now - stat.st_mtime >= CUTOVER_MIN_AGE_SECONDS)
+            if pre_cutover:
+                reason = f"pre-cutover rotation {number} of {base}"
+            elif rank >= KEEP_NEWEST_ROTATIONS and now - stat.st_mtime >= KEEP_RECENT_SECONDS:
+                reason = f"closed rotation {number} of {base}"
+            else:
                 continue
             doomed.append({"path": str(path), "bytes": int(stat.st_size),
-                           "mtime_ns": int(stat.st_mtime_ns), "reason": f"closed rotation {number} of {base}"})
+                           "mtime_ns": int(stat.st_mtime_ns), "reason": reason})
     return doomed
 
 
-def _tree_files(root: Path) -> list[dict]:
+def legacy_transfer_candidates(data_root: Path, now: float) -> list[dict]:
+    root = data_root / LEGACY_TRANSFER_ROOT
+    if not root.is_dir() or root.is_symlink():
+        return []
+    rows = []
+    for name in LEGACY_TRANSFER_DIRS:
+        directory = root / name
+        if directory.is_dir() and not directory.is_symlink():
+            rows.extend(_tree_files(directory, "retired legacy transfer state"))
+    for entry in sorted(root.iterdir()):
+        if (entry.is_file() and not entry.is_symlink()
+                and entry.name.endswith(LEGACY_TRANSFER_TOP_LEVEL_SUFFIXES)):
+            stat = entry.stat()
+            if now - stat.st_mtime >= LEGACY_TRANSFER_TOP_LEVEL_MIN_AGE_SECONDS:
+                rows.append({"path": str(entry), "bytes": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns),
+                             "reason": "retired legacy transfer SQLite snapshot"})
+    return rows
+
+
+def _tree_files(root: Path, reason: str = "superseded v1 segment epoch") -> list[dict]:
     rows = []
     for directory, _dirnames, filenames in os.walk(root, followlinks=False):
         for name in sorted(filenames):
@@ -88,7 +139,7 @@ def _tree_files(root: Path) -> list[dict]:
                 continue
             stat = path.stat()
             rows.append({"path": str(path), "bytes": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns),
-                         "reason": "superseded v1 segment epoch"})
+                         "reason": reason})
     return rows
 
 
@@ -127,13 +178,18 @@ def usage(data_root: Path, depth: int = 2) -> dict[str, int]:
 
 
 def build_plan(data_root: Path, *, now: float, v1_acked_through: int | str | None) -> dict:
-    rotations = rotation_candidates(data_root, now)
+    genesis_ts = v2_genesis_ts(data_root)
+    rotations = rotation_candidates(data_root, now, genesis_ts)
     v1, v1_status = v1_epoch_candidates(data_root, v1_acked_through)
-    candidates = sorted(rotations + v1, key=lambda row: row["path"])
+    legacy = legacy_transfer_candidates(data_root, now)
+    candidates = sorted(rotations + v1 + legacy, key=lambda row: row["path"])
     identity = json.dumps([[row["path"], row["bytes"], row["mtime_ns"]] for row in candidates],
                           separators=(",", ":")).encode()
     return {"schema": SCHEMA, "data_root": str(data_root), "candidates": candidates,
+            "v2_genesis_ts": genesis_ts,
             "rotation_files": len(rotations), "rotation_bytes": sum(r["bytes"] for r in rotations),
+            "pre_cutover_rotation_files": sum(r["reason"].startswith("pre-cutover") for r in rotations),
+            "legacy_transfer_files": len(legacy), "legacy_transfer_bytes": sum(r["bytes"] for r in legacy),
             "v1_files": len(v1), "v1_bytes": sum(r["bytes"] for r in v1), "v1_status": v1_status,
             "total_files": len(candidates), "total_bytes": sum(r["bytes"] for r in candidates),
             "plan_sha256": hashlib.sha256(identity).hexdigest(), "usage_bytes": usage(data_root)}
@@ -151,8 +207,11 @@ def execute(plan: dict, data_root: Path) -> dict:
         path.unlink()
         deleted += 1
         freed += row["bytes"]
-    for directory in (data_root / "segment-store" / "v1", data_root / "segment-shipper"):
-        if plan["v1_files"] and directory.is_dir():
+    emptied = [data_root / LEGACY_TRANSFER_ROOT / name for name in LEGACY_TRANSFER_DIRS]
+    if plan["v1_files"]:
+        emptied += [data_root / "segment-store" / "v1", data_root / "segment-shipper"]
+    for directory in emptied:
+        if directory.is_dir() and not directory.is_symlink():
             for current, dirnames, filenames in os.walk(directory, topdown=False):
                 if not filenames and not os.listdir(current):
                     os.rmdir(current)

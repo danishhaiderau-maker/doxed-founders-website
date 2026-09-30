@@ -34,6 +34,10 @@ from research_segment_store import HttpSegmentSource, StoreError
 HEARTBEAT_NAME = ".segment-promotion.heartbeat.json"
 SYNC_STATE_NAME = ".fly-sync-state.json"
 RECEIPT_SCHEMA = "research_segment_promotion_view_v1"
+DEFAULT_MAX_UNSHIPPED_BYTES = 32 * 1024 * 1024
+# Per-append integrity caches keyed to the Fly inode/mtime of their source;
+# meaningless off-host and never read by the analyzer.
+FLY_LOCAL_ONLY_SUFFIXES = (".jsonl.validation.json",)
 
 
 class PromotionRefused(RuntimeError):
@@ -54,7 +58,8 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def deny_reasons(state: dict, head: dict, health: dict, tree: Path) -> list[str]:
+def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
+                 max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES) -> list[str]:
     reasons = []
     if state.get("schema") != STATE_SCHEMA:
         reasons.append("PULLER_STATE_MISSING")
@@ -65,13 +70,22 @@ def deny_reasons(state: dict, head: dict, health: dict, tree: Path) -> list[str]
         reasons.append(f"SHADOW_BEHIND_PUBLISHED:{applied}<{published}")
     if head.get("last_manifest_sha256") != state.get("last_manifest_sha256"):
         reasons.append("HEAD_MANIFEST_MISMATCH")
-    if int(head.get("unshipped_bytes") or 0) != 0:
-        reasons.append(f"FLY_UNSHIPPED_BYTES:{int(head.get('unshipped_bytes') or 0)}")
-    for field in ("oversized_paths", "racing_paths"):
-        if head.get(field):
-            reasons.append(f"FLY_{field.upper()}:{len(head[field])}")
-    if head.get("shipper_last_error"):
-        reasons.append(f"FLY_SHIPPER_ERROR:{head['shipper_last_error']}")
+    # A live epoch always has an in-flight tail; only a real backlog refuses.
+    unshipped = int(head.get("unshipped_bytes") or 0)
+    if unshipped > max_unshipped_bytes:
+        reasons.append(f"FLY_UNSHIPPED_BYTES:{unshipped}>{max_unshipped_bytes}")
+    if head.get("oversized_paths"):
+        reasons.append(f"FLY_OVERSIZED_PATHS:{len(head['oversized_paths'])}")
+    # A racing hot snapshot is only acceptable if an earlier version shipped.
+    for row in head.get("racing_paths") or []:
+        path = str(row.get("path") if isinstance(row, dict) else row)
+        if path.endswith(FLY_LOCAL_ONLY_SUFFIXES):
+            continue
+        if not (tree / path).is_file():
+            reasons.append(f"FLY_RACING_PATH_NEVER_SHIPPED:{path}")
+    error = str(head.get("shipper_last_error") or "")
+    if error and not error.startswith("PLAN_RACE"):
+        reasons.append(f"FLY_SHIPPER_ERROR:{error}")
     shipped_rev = str(state.get("last_source_git_rev") or "").lower()
     deployed_rev = str(health.get("source_git_rev") or "").lower()
     if not shipped_rev or not deployed_rev or not shipped_rev.startswith(deployed_rev):
@@ -83,7 +97,8 @@ def deny_reasons(state: dict, head: dict, health: dict, tree: Path) -> list[str]
     return reasons
 
 
-def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict) -> dict:
+def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
+               max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES) -> dict:
     shadow_root = refuse_unsafe_root(shadow_root, "shadow root")
     view_root = refuse_unsafe_root(view_root, "promotion view")
     tree = shadow_root / "tree"
@@ -95,7 +110,7 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict) 
     try:
         state_path = shadow_root / ".puller" / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
-        reasons = deny_reasons(state, head, health, tree)
+        reasons = deny_reasons(state, head, health, tree, max_unshipped_bytes)
         if reasons:
             raise PromotionRefused(reasons)
         sync_state, byte_count = {}, 0
@@ -104,8 +119,10 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict) 
             target = view_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
-            size = target.stat().st_size
-            sync_state[relative] = {"size": size, "sha256": _sha256_file(target)}
+            stat = target.stat()
+            size = stat.st_size
+            sync_state[relative] = {"size": size, "sha256": _sha256_file(target),
+                                    "inode": int(stat.st_ino), "mtime_ns": int(stat.st_mtime_ns)}
             byte_count += size
     finally:
         lock.release()
@@ -113,13 +130,18 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict) 
     heartbeat = {
         "ok": True, "inProgress": False, "phase": "complete",
         "source": "research_segments_volume_sink", "syncedAt": state.get("last_applied_at"),
-        "sourceRevision": revision, "mirroredSourceRevision": revision,
+        "sourceRevision": revision, "observedSourceRevision": revision,
+        "mirroredSourceRevision": revision,
         "deployedRevision": str(health["source_git_rev"]).lower(), "revisionParity": "MATCH",
         "tileRegistrySignature": health["tile_registry_signature"],
         "collectionEpochId": state.get("last_collection_epoch_id"),
+        "segmentPrefix": head.get("prefix"),
         "segmentAppliedSeq": state["applied_seq"],
         "segmentHeadManifestSha256": state["last_manifest_sha256"],
         "throttledSnapshots": head.get("throttled_snapshots") or [],
+        "unshippedBytesAtPromotion": int(head.get("unshipped_bytes") or 0),
+        "racingPaths": [str(row.get("path") if isinstance(row, dict) else row)
+                        for row in head.get("racing_paths") or []],
         "fileCount": len(sync_state),
     }
     (view_root / SYNC_STATE_NAME).write_text(json.dumps(sync_state, sort_keys=True, indent=1), encoding="utf-8")
@@ -140,12 +162,15 @@ def main(argv=None) -> int:
     parser.add_argument("--view", required=True)
     parser.add_argument("--base-url", default=os.getenv("RESEARCH_SEGMENTS_BASE_URL")
                         or "https://doxed-btc-bot.fly.dev")
+    parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v2")
+    parser.add_argument("--max-unshipped-bytes", type=int, default=DEFAULT_MAX_UNSHIPPED_BYTES)
     args = parser.parse_args(argv)
     try:
-        source = HttpSegmentSource(base_url=args.base_url,
+        source = HttpSegmentSource(base_url=args.base_url, prefix=args.prefix,
                                    admin_token=os.environ.get("BOT_ADMIN_TOKEN") or "")
         receipt = stage_view(shadow_root=Path(args.shadow_root), view_root=Path(args.view),
-                             head=source.head(), health=_health(args.base_url))
+                             head=source.head(), health=_health(args.base_url),
+                             max_unshipped_bytes=args.max_unshipped_bytes)
     except PromotionRefused as exc:
         print(json.dumps({"ok": False, "deny_reasons": exc.reasons}, indent=2))
         return 3

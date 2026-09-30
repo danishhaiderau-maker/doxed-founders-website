@@ -69,6 +69,39 @@ def test_unprovable_overwide_row_fails_closed(tmp_path):
         analyzer._load_expired_orders_csv(path)
 
 
+def test_set_ordered_header_is_read_by_column_name(tmp_path):
+    analyzer = _load_analyzer()
+    path = tmp_path / "expired.csv"
+    path.write_text(
+        "reason,time,dir,trade_id\r\n"
+        "TTL,2026-09-30T03:18:18+00:00,LONG,fc3-1\r\n"
+        "\"a,b\",2026-09-30T03:19:18+00:00,SHORT,fhy-2\r\n",
+        encoding="utf-8",
+        newline="",
+    )
+
+    frame = analyzer._load_expired_orders_csv(path)
+
+    assert list(frame["trade_id"]) == ["fc3-1", "fhy-2"]
+    assert list(frame["dir"]) == ["LONG", "SHORT"]
+    assert frame.iloc[1]["reason"] == "a,b"
+    assert set(frame["_csv_parse_status"]) == {"EXACT"}
+
+
+@pytest.mark.parametrize("row, error", [
+    ("TTL,not-a-time,LONG,fc3-1", "EXPIRED_ORDERS_RECORD_BOUNDARY_UNKNOWN:2"),
+    ("TTL,2026-09-30T03:18:18+00:00,SIDEWAYS,fc3-1", "EXPIRED_ORDERS_RECORD_BOUNDARY_UNKNOWN:2"),
+    ("TTL,2026-09-30T03:18:18+00:00,LONG,fc3-1,extra", "EXPIRED_ORDERS_SCHEMA_OVERFLOW:2"),
+])
+def test_set_ordered_header_rows_fail_closed_on_bad_identity(tmp_path, row, error):
+    analyzer = _load_analyzer()
+    path = tmp_path / "expired.csv"
+    path.write_text("reason,time,dir,trade_id\r\n" + row + "\r\n", encoding="utf-8", newline="")
+
+    with pytest.raises(ValueError, match=error):
+        analyzer._load_expired_orders_csv(path)
+
+
 def test_current_canonical_damage_yields_both_joined_trade_ids():
     analyzer = _load_analyzer()
     path = AGENT / "canonical-research-data" / "expired_orders_3factor.csv"
