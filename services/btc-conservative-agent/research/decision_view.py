@@ -208,6 +208,18 @@ def ai_vs_rules(tile: dict | None, funnel_lane: dict | None, ai_coverage: dict |
                         "note": f"{NOT_ENOUGH_DATA_TEXT}: {matched} matched AI-vs-rules outcomes"}
             return {"cell": metric(delta), "note": f"AI minus rules, {matched} matched outcomes"}
     ai_calls = _count(funnel_lane.get("ai_calls")) if isinstance(funnel_lane, dict) else None
+    tile_split = funnel_lane.get("ai_vs_rules") if isinstance(funnel_lane, dict) else None
+    if isinstance(tile_split, dict) and tile_split.get("status") == "DESCRIPTIVE_ONLY":
+        delta = _finite(tile_split.get("incremental_net_pnl_usd"))
+        matched = _count(tile_split.get("matched_trades"))
+        if delta is not None and matched:
+            detail = (f"{ai_calls or 0} AI calls; {matched} closed trades: "
+                      f"{_count(tile_split.get('approved_same_direction_trades')) or 0} AI-approved, "
+                      f"{_count(tile_split.get('rejected_trades')) or 0} AI-rejected")
+            if matched < MIN_DECISION_SAMPLE:
+                return {"cell": {"state": INSUFFICIENT, "value": delta},
+                        "note": f"{NOT_ENOUGH_DATA_TEXT}: AI-filtered minus rules-only, {detail}"}
+            return {"cell": metric(delta), "note": f"AI-filtered minus rules-only, {detail}"}
     blockers = (
         ", ".join(str(b) for b in (comparison.get("blockers") or [])[:2])
         if isinstance(comparison, dict) else ""
@@ -592,6 +604,8 @@ def render_decision_html(payload: dict, *, nav_links, details_href: str = "/deta
             extremes = cell(mm["mae"])
         else:
             extremes = f"MAE {cell(mm['mae'], _pct)}<br>MFE {cell(mm['mfe'], _pct)}"
+        ai_note = ("" if ai["cell"].get("state") == NO_DATA
+                   else f"<div class='sub'>{_esc(ai.get('note') or '')}</div>")
         verdict = tile["verdict"]
         colour = _VERDICT_COLOURS.get(verdict["code"], "#8b949e")
         rows.append(
@@ -605,7 +619,7 @@ def render_decision_html(payload: dict, *, nav_links, details_href: str = "/deta
             f"<td>{cell(funnel['not_filled'])}"
             "<div class='sub'>submitted, no fill (NO_FILL or still resting)</div></td>"
             f"<td>{extremes}</td>"
-            f"<td>{cell(ai['cell'], _usd)}</td>"
+            f"<td>{cell(ai['cell'], _usd)}{ai_note}</td>"
             "</tr>"
             f"<tr class='verdict'><td colspan='7' style='color:{colour}'>Verdict: {_esc(verdict['text'])}</td></tr>"
         )

@@ -571,6 +571,7 @@ AI_CONFIDENCE_CALIBRATION_FILE = "ai_confidence_calibration.jsonl"
 TRADE_LIFECYCLE_FILE = "trade_lifecycle.jsonl"
 EXECUTION_FUNNEL_FILE = "execution_funnel.jsonl"
 LANE_OPPORTUNITY_CAPTURE_FILE = "lane_opportunity_capture.jsonl"
+DUPLICATE_INTENT_AUDIT_FILE = "duplicate_intent_audit.jsonl"
 LANE_OPPORTUNITY_REPORT_FILE = "lane_opportunity_capture.json"
 COLLECTOR_V21_REPORT_FILE = "collector_v21_opportunity_capture.json"
 AI_FUNNEL_REPORT_FILE = "ai_funnel_report.json"
@@ -12004,6 +12005,78 @@ def _session_trade_scope(trades, tile_lanes):
     }
 
 
+_AI_APPROVE_DECISIONS = ("APPROVE", "STRONG_APPROVE", "SOFT_APPROVE")
+_AI_REJECT_DECISIONS = ("REJECT", "SOFT_REJECT")
+
+
+def _tile_ai_attribution(lane_orders, lane_trades, scan_by_id, intent_scan):
+    """Join tile orders/trades to the shared AI scan through ``shared_ai_call_id``.
+
+    Tiles are score-led: they trade on AI APPROVE and REJECT scans alike, so the
+    same closed trades give a rules-only total and an AI-filtered total (keep a
+    trade only when the AI approved the same direction; skipped trades add 0).
+    """
+    def verdict(scan):
+        decision = str(scan.get("ai_decision") or "").upper()
+        return ("APPROVE" if decision in _AI_APPROVE_DECISIONS
+                else "REJECT" if decision in _AI_REJECT_DECISIONS else "OTHER")
+
+    calls, linked, approved, rejected = set(), 0, 0, 0
+    for trade_id in lane_orders:
+        scan_id = intent_scan.get(trade_id)
+        scan = scan_by_id.get(scan_id)
+        if scan is None:
+            continue
+        calls.add(scan_id)
+        linked += 1
+        approved += verdict(scan) == "APPROVE"
+        rejected += verdict(scan) == "REJECT"
+    comparison = {"status": "NO_LINKED_CLOSED_TRADES", "matched_trades": 0, "unlinked_trades": 0,
+                  "approved_same_direction_trades": 0, "rejected_trades": 0, "other_trades": 0,
+                  "rules_only_net_pnl_usd": None, "ai_filtered_net_pnl_usd": None,
+                  "incremental_net_pnl_usd": None,
+                  "basis": "SAME_CLOSED_TILE_TRADES_AI_APPROVE_SAME_DIRECTION_ELSE_ZERO",
+                  "join_key": "shared_ai_call_id", "profitability_supported": False}
+    if lane_trades is not None and not lane_trades.empty:
+        frame = lane_trades.drop_duplicates(subset=["trade_id"], keep="last") if "trade_id" in lane_trades.columns else lane_trades
+        pnl_col = "net_pnl_usd" if "net_pnl_usd" in frame.columns else "outcome_net_pnl_usd"
+        dir_col = next((c for c in ("dir", "final_direction", "direction") if c in frame.columns), None)
+        rules = filtered = 0.0
+        for _idx, row in frame.iterrows():
+            try:
+                pnl = float(row.get(pnl_col))
+            except (TypeError, ValueError):
+                pnl = float("nan")
+            trade_id = str(row.get("trade_id") or "")
+            scan_id = str(row.get("shared_ai_call_id") or "") or intent_scan.get(trade_id)
+            scan = scan_by_id.get(scan_id)
+            if scan is None or pd.isna(pnl):
+                comparison["unlinked_trades"] += 1
+                continue
+            comparison["matched_trades"] += 1
+            rules += float(pnl)
+            trade_dir = str(row.get(dir_col) or "").upper() if dir_col else ""
+            kind = verdict(scan)
+            if kind == "APPROVE" and str(scan.get("direction") or "").upper() == trade_dir:
+                comparison["approved_same_direction_trades"] += 1
+                filtered += float(pnl)
+            elif kind == "REJECT":
+                comparison["rejected_trades"] += 1
+            else:
+                comparison["other_trades"] += 1
+        if comparison["matched_trades"]:
+            comparison.update({
+                "status": "DESCRIPTIVE_ONLY",
+                "rules_only_net_pnl_usd": round(rules, 6),
+                "ai_filtered_net_pnl_usd": round(filtered, 6),
+                "incremental_net_pnl_usd": round(filtered - rules, 6),
+            })
+    return {"ai_calls": len(calls), "ai_linked_orders": linked,
+            "ai_unlinked_orders": max(0, len(lane_orders) - linked),
+            "ai_approved_orders": approved, "ai_rejected_orders": rejected,
+            "ai_vs_rules": comparison}
+
+
 def ai_funnel_report(trades=None, session=None):
     """
     Per-lane AI approval funnel: ai_calls → approve → order_submitted → filled → closed.
@@ -12019,6 +12092,12 @@ def ai_funnel_report(trades=None, session=None):
         r for r in _load_jsonl_rows(AI_REASON_RESEARCH_FILE)
         if r.get("schema") == "ai_reason_v2"
     ]
+    scan_by_id = {str(r.get("trade_id")): r for r in ai_rows if r.get("trade_id")}
+    intent_scan = {
+        str(r.get("trade_id")): str(r.get("shared_ai_call_id"))
+        for r in _load_jsonl_rows(DUPLICATE_INTENT_AUDIT_FILE)
+        if r.get("trade_id") and r.get("shared_ai_call_id")
+    }
 
     lanes_out = {}
     cohort_pnl = tile_cohort_pnl(trades, BENCHMARK_LANES)
@@ -12026,13 +12105,11 @@ def ai_funnel_report(trades=None, session=None):
         (_CURRENT_TRADE_COHORT_QUARANTINE.get("relay_interference") or {}).get("by_lane") or {}
     )
     for lane_key in BENCHMARK_LANES:
-        lane_ai = [r for r in ai_rows if str(r.get("research_lane") or "").upper() == lane_key]
         lane_opp = [r for r in opp_rows if str(r.get("lane") or "").upper() == lane_key]
-        ai_calls = len(lane_ai)
-        ai_approve_decisions = sum(
-            1 for r in lane_ai
-            if str(r.get("ai_decision") or "").upper() in ("APPROVE", "STRONG_APPROVE", "SOFT_APPROVE")
-        )
+        lane_orders = list(dict.fromkeys(
+            str(r.get("trade_id")) for r in lane_opp
+            if r.get("event") == "ORDER_SUBMITTED" and r.get("trade_id")
+        ))
         approve = sum(1 for r in lane_opp if r.get("event") == "APPROVE")
         order_submitted = sum(1 for r in lane_opp if r.get("event") == "ORDER_SUBMITTED")
         filled = sum(1 for r in lane_opp if r.get("event") == "FILLED")
@@ -12040,14 +12117,23 @@ def ai_funnel_report(trades=None, session=None):
         would_block = sum(1 for r in lane_opp if r.get("event") in ("WOULD_BLOCK", "EXECUTION_BLOCK", "APPROVE_NOT_TRADED"))
         net_pnl = cohort_pnl["by_lane"].get(lane_key, {}).get("net_pnl_usd", 0.0)
         closed_trade_stats = None
+        lt = None
         if trades is not None and not trades.empty and "research_lane" in trades.columns:
             lt = trades[trades["research_lane"].astype(str).str.upper() == lane_key]
             closed_trade_stats = _lane_closed_trade_stats(lt)
+        attribution = _tile_ai_attribution(lane_orders, lt, scan_by_id, intent_scan)
+        ai_calls = attribution["ai_calls"]
+        ai_approve_decisions = attribution["ai_approved_orders"]
         funnel = {
             "lane": lane_key,
             "label": RESEARCH_LANE_LABELS.get(lane_key, lane_key),
             "ai_calls": ai_calls,
             "ai_approve_decisions": ai_approve_decisions,
+            "ai_linked_orders": attribution["ai_linked_orders"],
+            "ai_unlinked_orders": attribution["ai_unlinked_orders"],
+            "ai_rejected_orders": attribution["ai_rejected_orders"],
+            "ai_vs_rules": attribution["ai_vs_rules"],
+            "ai_attribution_basis": "ORDER_SUBMITTED_TRADE_ID_TO_DUPLICATE_INTENT_AUDIT_SHARED_AI_CALL_ID",
             "approve": approve,
             "order_submitted": order_submitted,
             "filled": filled,
@@ -12084,6 +12170,12 @@ def ai_funnel_report(trades=None, session=None):
         },
         "totals": {
             "ai_calls": sum(v.get("ai_calls", 0) for v in lanes_out.values()),
+            "distinct_ai_calls_attributed": len({
+                intent_scan[str(r.get("trade_id"))] for r in opp_rows
+                if r.get("event") == "ORDER_SUBMITTED"
+                and str(r.get("lane") or "").upper() in lanes_out
+                and intent_scan.get(str(r.get("trade_id"))) in scan_by_id
+            }),
             "approve": sum(v.get("approve", 0) for v in lanes_out.values()),
             "order_submitted": sum(v.get("order_submitted", 0) for v in lanes_out.values()),
             "filled": sum(v.get("filled", 0) for v in lanes_out.values()),
