@@ -40,6 +40,7 @@ import {
 import { emptyCopyRelaySimState, readCopyRelaySimState, isCopyRelaySimActive } from '@dcf/utils';
 import { CopyRelaySimService } from './copy-relay-sim.service';
 import {
+  MAX_SIGNED_COPY_MARGIN_PER_LEG_USD,
   SignalSubscriberExecutionService,
   readPersistedRelayExecutorHealth,
   type RelayExecutorHealthSnapshot,
@@ -173,7 +174,7 @@ export class TradingAgentInstancesService {
     await this.notifications.notifyUser(userId, {
       type: NotificationType.TRADING_AGENT_UPDATE,
       title: `${agent.name} live copy trading active`,
-      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${await loadSubscriberMaxMarginUsd(this.prisma)} margin/trade).`,
+      body: `Charged ${cost.toLocaleString()} DDollar for 1 week. Platform auto-executes admin signals on your ${EXCHANGE_PROVIDER_LABELS[input.exchangeProvider as ExchangeProvider]} account (Bitfinex: max $${Math.min(await loadSubscriberMaxMarginUsd(this.prisma), MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x; not a max loss).`,
       link: `/agent-hub/${agent.slug}`,
     });
 
@@ -551,7 +552,7 @@ export class TradingAgentInstancesService {
             : relayPaused
               ? 'Relay stopped — showcase signals will not execute on your exchange until you press Start.'
               : executionLive
-                ? `Live copy execution active — platform places Bitfinex limit orders from admin signals (max $${marginCap} margin/trade).`
+                ? `Live copy execution active — platform places Bitfinex limit orders from admin signals (max $${Math.min(marginCap, MAX_SIGNED_COPY_MARGIN_PER_LEG_USD).toFixed(2)} margin input/trade at 100x).`
                 : 'Live tier mirrors admin AI trades on your exchange when execution is enabled.',
         openPositions: openHirePositions,
         pnlPct: 0,
@@ -663,7 +664,12 @@ export class TradingAgentInstancesService {
         where: { id: instance.id },
         select: { dashboardState: true },
       });
-      const executorHealth = readPersistedRelayExecutorHealth(freshInstance?.dashboardState);
+      const executorHealth = readPersistedRelayExecutorHealth(
+        freshInstance?.dashboardState,
+        Date.now(),
+        undefined,
+        0,
+      );
       if (!executorHealth.healthy) {
         throw new ServiceUnavailableException(
           `Bitfinex relay executor is ${executorHealth.status.toLowerCase()} ` +
