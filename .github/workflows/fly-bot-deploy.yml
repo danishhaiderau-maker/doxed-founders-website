@@ -39,6 +39,7 @@ on:
           - repair-lifecycle-cursor
           - repair-execution-tail
           - expand-storage
+          - snapshot-volume
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
@@ -682,6 +683,46 @@ jobs:
           sleep 5
           flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,sys; rows=json.load(sys.stdin); assert len(rows)==1 and int(rows[0].get("size_gb") or 0)==20; print(json.dumps({"volume_id":rows[0]["id"],"size_gb":rows[0]["size_gb"],"state":rows[0].get("state")},sort_keys=True))'
           flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" "sh -lc 'df -h /app/data; df -i /app/data'"
+
+  snapshot-volume:
+    # Recoverability gate before any data deletion: an on-demand snapshot of
+    # the exact BTC data volume. Read-only for the guest; never deploys,
+    # restarts, deletes or touches exchange exposure.
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'snapshot-volume'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXPECTED_VOLUME_ID: vol_45899d3760nj26j4
+      SNAPSHOT_RETENTION_DAYS: "60"
+    steps:
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Snapshot the sole attached BTC data volume
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,os,sys; rows=json.load(sys.stdin); attached=[r for r in rows if str(r.get("attached_machine_id") or "").strip()]; assert len(rows)==1 and len(attached)==1, f"expected exactly one attached volume, found volumes={len(rows)} attached={len(attached)}"; assert attached[0]["id"]==os.environ["EXPECTED_VOLUME_ID"], "refusing unexpected volume id"'
+          flyctl volumes update "$EXPECTED_VOLUME_ID" --app doxed-btc-bot --snapshot-retention "$SNAPSHOT_RETENTION_DAYS"
+          flyctl volumes list --app doxed-btc-bot --json | python -c 'import json,sys; v=json.load(sys.stdin)[0]; print(json.dumps({"volume_id":v.get("id"),"snapshot_retention":v.get("snapshot_retention"),"size_gb":v.get("size_gb"),"auto_backup_enabled":v.get("auto_backup_enabled")},sort_keys=True))'
+          before="$(flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json | python -c 'import json,sys; print(" ".join(sorted(str(s.get("id")) for s in (json.load(sys.stdin) or []))))')"
+          flyctl volumes snapshots create "$EXPECTED_VOLUME_ID" --app doxed-btc-bot
+          for attempt in $(seq 1 90); do
+            listing="$(flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json)"
+            if printf '%s' "$listing" | BEFORE="$before" python -c 'import json,os,sys
+          before=set(os.environ["BEFORE"].split())
+          rows=[s for s in (json.load(sys.stdin) or []) if str(s.get("id")) not in before]
+          if not rows: sys.exit(1)
+          s=max(rows,key=lambda r:str(r.get("created_at") or ""))
+          print(json.dumps({"snapshot_id":s.get("id"),"status":s.get("status"),"size":s.get("size"),"created_at":s.get("created_at"),"retention_days":s.get("retention_days")},sort_keys=True))
+          sys.exit(0 if str(s.get("status") or "").lower()=="created" else 1)'; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "snapshot did not reach status=created in time" >&2
+          flyctl volumes snapshots list "$EXPECTED_VOLUME_ID" --json
+          exit 1
 
   recover-memory:
     # A boot-time OOM loop cannot answer the authenticated pause pre-step, so
