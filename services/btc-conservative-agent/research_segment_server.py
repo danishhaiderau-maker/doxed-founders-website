@@ -44,7 +44,7 @@ CHUNK_BYTES = 64 * 1024
 MAX_ACK_BODY_BYTES = 4096
 MANIFEST_CACHE_LIMIT = 4096
 _ROUTE_RE = re.compile(r"^/api/research-segments/([A-Za-z0-9][A-Za-z0-9._-]{0,63})/"
-                       r"(head|ack|man/\d{1,12}|seg/\d{1,12}|ack/\d{1,12})$")
+                       r"(head|files|ack|man/\d{1,12}|seg/\d{1,12}|ack/\d{1,12})$")
 
 
 def receipt_key(prefix: str, seq: int) -> str:
@@ -175,6 +175,20 @@ class SegmentServer:
         }
         return self._respond(start_response, "200 OK", payload)
 
+    def _files(self, start_response):
+        """The shipper checkpoint's view of every tracked file, for laptop parity."""
+        state = self._read_json(self.state_dir / "state.json")
+        keep = ("class", "offset", "size", "sha256", "tail_sha256", "baseline_offset", "baseline",
+                "snapshot_size")
+        files = {path: {key: entry[key] for key in keep if key in entry}
+                 for path, entry in sorted((state.get("files") or {}).items())}
+        return self._respond(start_response, "200 OK", {
+            "schema": "research_segment_checkpoint_files_v1", "prefix": self.prefix,
+            "seq": int(state.get("seq") or 0),
+            "last_manifest_sha256": state.get("last_manifest_sha256"),
+            "baseline": state.get("baseline"), "files": files,
+            "tombstones": sorted((state.get("tombstones") or {}).keys())})
+
     def _serve_manifest(self, environ, start_response, seq: int):
         info = self.manifest_info(seq)
         if info is None:
@@ -304,6 +318,8 @@ class SegmentServer:
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "GET only"})
             if route == "head":
                 return self._head(start_response)
+            if route == "files":
+                return self._files(start_response)
             kind, _, token = route.partition("/")
             seq = int(token)
             if seq < 1:
@@ -330,14 +346,39 @@ def server_from_env(environ=None) -> SegmentServer:
     )
 
 
+def archive_servers_from_env(environ=None) -> dict[str, SegmentServer]:
+    """Superseded epochs stay readable (and ACKable) until the laptop has them all.
+
+    ``RESEARCH_SEGMENTS_ARCHIVE_PREFIXES`` is ``prefix=state_dir[,prefix=state_dir]``;
+    no shipper writes to an archived prefix any more.
+    """
+    env = os.environ if environ is None else environ
+    servers = {}
+    for item in (env.get("RESEARCH_SEGMENTS_ARCHIVE_PREFIXES") or "").split(","):
+        prefix, _, state_dir = item.strip().partition("=")
+        if not prefix or not state_dir:
+            continue
+        servers[prefix] = SegmentServer(
+            store_root=volume_store_root(env), state_dir=Path(state_dir),
+            admin_token=env.get("BOT_ADMIN_TOKEN") or "", prefix=prefix,
+            enabled=(env.get("RESEARCH_SEGMENTS_SINK") or "").strip().lower() == "volume")
+    return servers
+
+
 def mount(app, environ=None):
     """Wrap a WSGI app so only ``/api/research-segments/*`` is served here."""
     server = server_from_env(environ)
+    archives = {prefix: archive for prefix, archive in archive_servers_from_env(environ).items()
+                if prefix != server.prefix}
 
     def dispatch(wsgi_environ, start_response):
-        if (wsgi_environ.get("PATH_INFO") or "").startswith(ROUTE_PREFIX):
-            return server(wsgi_environ, start_response)
+        path = wsgi_environ.get("PATH_INFO") or ""
+        if path.startswith(ROUTE_PREFIX):
+            match = _ROUTE_RE.match(path)
+            target = archives.get(match.group(1)) if match else None
+            return (target or server)(wsgi_environ, start_response)
         return app(wsgi_environ, start_response)
 
     dispatch.research_segment_server = server
+    dispatch.research_segment_archives = archives
     return dispatch

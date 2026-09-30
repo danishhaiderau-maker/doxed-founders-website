@@ -22,6 +22,7 @@ param(
   [string]$HomeBotEnv = 'C:\DoxxedCrypto\doxedcryptofounder-secrets\vault\home-bot.env',
   [string]$LegacyTree = 'C:\DoxxedCrypto\btc-v31-current\services\btc-conservative-agent\canonical-research-data',
   [string]$Python = 'python',
+  [string]$Prefix = 'v2',
   [int]$MaxSegments = 0,
   [switch]$NoAck,
   [switch]$Parity
@@ -62,7 +63,7 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $log = Join-Path $logDir ('segment-pull-{0}.log' -f [datetime]::UtcNow.ToString('yyyyMMdd'))
 $service = Join-Path $RepoRoot 'services\btc-conservative-agent'
 
-$pullArgs = @((Join-Path $service 'research_segment_puller.py'), '--shadow-root', $ShadowRoot, '--archive-root', $ArchiveRoot)
+$pullArgs = @((Join-Path $service 'research_segment_puller.py'), '--shadow-root', $ShadowRoot, '--archive-root', $ArchiveRoot, '--prefix', $Prefix)
 if ($Source -eq 'Http') { $pullArgs += @('--source', 'http', '--base-url', $BaseUrl) } else { $pullArgs += @('--source', 'store') }
 if ($MaxSegments -gt 0) { $pullArgs += @('--max-segments', "$MaxSegments") }
 if ($NoAck) { $pullArgs += '--no-ack' }
@@ -77,7 +78,7 @@ $parityExit = 0
 if ($Parity -and $pullExit -eq 0) {
   $ErrorActionPreference = 'Continue'
   try {
-    $parityOutput = & $Python (Join-Path $service 'research_segment_parity.py') --shadow-tree (Join-Path $ShadowRoot 'tree') --legacy-tree $LegacyTree --report (Join-Path $ShadowRoot 'parity-latest.json') 2>&1 | Out-String
+    $parityOutput = & $Python (Join-Path $RepoRoot 'scripts\research_segment_fly_parity.py') --shadow-root $ShadowRoot --base-url $BaseUrl --prefix $Prefix --report (Join-Path $ShadowRoot 'parity-latest.json') 2>&1 | Out-String
   } finally { $ErrorActionPreference = $previous }
   $parityExit = $LASTEXITCODE
   Add-Content -LiteralPath $log -Value ('{0} parity exit={1} {2}' -f [datetime]::UtcNow.ToString('o'), $parityExit, ($parityOutput -replace '[\r\n]+', ' ')) -Encoding UTF8

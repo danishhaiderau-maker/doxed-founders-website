@@ -180,3 +180,28 @@ The generic analyzer `_load_jsonl_rows` (about 40 call sites, including trade
 lifecycle, counterfactual, AI input log, signal snapshot, fill quality and
 source-order market evidence) reads only the active file. Smaller rotation would silently drop rows from those
 loaders. Make the loaders rotation-aware first.
+
+## Fresh-start epoch (v2, 2026-09-30)
+
+Danish approved abandoning the v1 backlog. v2 starts at a genesis `BASELINE`
+segment (`RESEARCH_SEGMENTS_BASELINE_GENESIS=1`, new state dir
+`/app/data/segment-shipper-v2`): each live append stream is recorded by its
+complete-record offset, sha256 of the unshipped prefix and anchors; CSV
+streams carry their header line. Top-level runtime state and SQLite DBs
+(online backup) ship normally; rotations, per-record directories and other
+history are tracked only and ship when they change. The laptop starts a fresh
+shadow tree; the puller maps Fly offsets through each stream's baseline.
+
+- Parity: `scripts/research_segment_fly_parity.py --prefix v2` compares the
+  tree with the shipper checkpoint (`/api/research-segments/v2/files`) at the
+  same seq. GREEN = 0 sealed mismatches, 0 missing shipped files.
+- v1 stays readable/ACKable via `RESEARCH_SEGMENTS_ARCHIVE_PREFIXES` so the
+  laptop can finish it; only then may the wipe remove it.
+- Wipe: dispatch `Deploy Fly BTC bot` mode `fresh-start-wipe` (plan by
+  default; `wipe_execute=true` pauses, deletes the same-boundary plan pinned
+  by sha256, resumes). It deletes only closed rotations beyond the newest two
+  and older than 72 h, and the fully-ACKed v1 epoch. Take `snapshot-volume`
+  first.
+- Every deploy/restart/maintenance boundary ends with paper resumed and every
+  registry tile ON (`fly_postdeploy_active_gate.py`, `--tiles-only` for
+  restart/repair jobs); relay/Bitfinex are never armed.

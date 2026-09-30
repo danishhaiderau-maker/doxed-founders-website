@@ -5,6 +5,11 @@ on:
     paths:
       - "services/btc-conservative-agent/research_segment_*.py"
       - "services/btc-conservative-agent/test_research_segments*.py"
+      - "services/btc-conservative-agent/research_fresh_start_wipe.py"
+      - "services/btc-conservative-agent/test_research_fresh_start_wipe.py"
+      - "scripts/research_segment_fly_parity.py"
+      - "scripts/fly_postdeploy_active_gate.py"
+      - "scripts/test_fly_postdeploy_active_gate.py"
       - "services/btc-conservative-agent/fly-entrypoint.sh"
       - "services/btc-conservative-agent/fly.toml"
       - "services/btc-conservative-agent/Dockerfile"
@@ -27,9 +32,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Shipper/puller/parity have no third-party runtime dependencies
-        run: python -I -c "import sys; sys.path.insert(0, '.'); import research_segment_format, research_segment_store, research_segment_shipper, research_segment_puller, research_segment_parity, research_segment_server, research_segment_prune, research_segment_promotion"
+        run: python -I -c "import sys; sys.path.insert(0, '.'); import research_segment_format, research_segment_store, research_segment_shipper, research_segment_puller, research_segment_parity, research_segment_server, research_segment_prune, research_segment_promotion, research_fresh_start_wipe"
       - run: python -m pip install -r requirements.txt pytest
-      - run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py -q
+      - run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_fresh_start_wipe.py -q
+      - run: python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py ../../scripts/test_fly_failure_paper_resume.py -q
       - run: python -m pytest test_fly_startup_contract.py test_fly_runtime_baseline_packaging.py -q
       - name: Entrypoint shell syntax
         run: bash -n fly-entrypoint.sh

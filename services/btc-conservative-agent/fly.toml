@@ -15,6 +15,14 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   RESEARCH_SEGMENTS_ENABLED = "1"
   RESEARCH_SEGMENTS_SINK = "volume"
   RESEARCH_SEGMENTS_ACK_POLL_SECONDS = "300"
+  # Fresh-start epoch (2026-09-30): v2 begins at a genesis BASELINE segment,
+  # so only data written after the cutover ships. v1 is superseded.
+  RESEARCH_SEGMENTS_PREFIX = "v2"
+  RESEARCH_SEGMENTS_STATE_DIR = "/app/data/segment-shipper-v2"
+  RESEARCH_SEGMENTS_BASELINE_GENESIS = "1"
+  # v1 stays readable/ACKable (no shipper writes it) until the laptop holds
+  # every v1 seq; only then may fresh-start-wipe remove it.
+  RESEARCH_SEGMENTS_ARCHIVE_PREFIXES = "v1=/app/data/segment-shipper"
 
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]

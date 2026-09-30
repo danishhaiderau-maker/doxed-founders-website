@@ -206,6 +206,8 @@ def main() -> int:
         if args.mode == "resume":
             import time
             result = resume_incumbent(args.incumbent, args.candidate, client, monotonic=time.monotonic, sleep=time.sleep)
+            from fly_postdeploy_active_gate import enable_all_registry_tiles
+            result["tiles"] = enable_all_registry_tiles(client)
         else:
             result = preserve_maintenance(args.incumbent, client)
     print(json.dumps(result, sort_keys=True))

@@ -251,8 +251,12 @@ class SegmentShipper:
         clock=time.time, sink: str = "tigris", max_store_bytes: int = 0,
         max_sqlite_bytes: int = 512 * 1024 * 1024, huge_snapshot_interval: float = 6 * 3600.0,
         sqlite_backup_deadline: float = SQLITE_BACKUP_DEADLINE_SECONDS,
+        baseline_genesis: bool = False,
     ):
         self.sink = sink
+        # A fresh epoch starts at "now": seq 1 records existing bytes instead
+        # of shipping them, so only data written after the cutover travels.
+        self.baseline_genesis = bool(baseline_genesis)
         self.max_sqlite_bytes = max(1, int(max_sqlite_bytes))
         # Snapshots above the regular member cap are re-shipped this rarely so
         # a large hot DB cannot consume the unpruned store.
@@ -711,6 +715,77 @@ class SegmentShipper:
                           + len(segment_raw) + len(manifest_raw)})
         return segment_raw, manifest_raw, new_state
 
+    # ---------------------------------------------------------------- genesis
+    def _ships_at_genesis(self, relpath: str, path: Path) -> bool:
+        """Current state travels with the new epoch; historical records do not.
+
+        Top-level runtime files are the bot's live state and reports; SQLite
+        databases ship as consistent online backups. Rotations, append-stream
+        prefixes and per-record directories are baselined instead.
+        """
+        name = relpath.rsplit("/", 1)[-1]
+        if rotation_parts(name, self.rules["extensions"]) is not None:
+            return False
+        if _is_sqlite_db(relpath) and _has_sqlite_header(path):
+            return True
+        return "/" not in relpath
+
+    def build_genesis(self, state: dict, universe: dict) -> tuple[bytes, bytes, dict]:
+        new_state = json.loads(json.dumps(state))
+        files = new_state["files"]
+        members, payloads, append_stats = [], [], []
+        baselined_bytes, tracked_only = 0, 0
+        for relpath, (path, stat) in sorted(universe.items()):
+            if self._is_append_class(relpath):
+                offset = _complete_record_size(path, int(stat.st_size))
+                source_sha = _sha256_file_range(path, 0, offset)
+                head, tail = _anchors(path, offset)
+                preamble = b""
+                if offset and path.suffix.lower() == ".csv":
+                    with path.open("rb") as handle:
+                        first = handle.readline(min(offset, READ_CHUNK))
+                    preamble = first if first.endswith(b"\n") else b""
+                after = path.stat()
+                if ((int(after.st_dev), int(after.st_ino)) != (int(stat.st_dev), int(stat.st_ino))
+                        or int(after.st_size) < offset):
+                    raise PlanRace(f"{relpath} rotated while baselining", relpath)
+                members.append({"index": len(members), "kind": fmt.KIND_BASELINE, "path": relpath,
+                                "size": len(preamble), "sha256": fmt.sha256_bytes(preamble),
+                                "base_offset": offset, "source_sha256": source_sha,
+                                "source_size": int(stat.st_size)})
+                payloads.append(preamble)
+                files[relpath] = {"class": "append", "offset": offset, "size": int(stat.st_size),
+                                  "mtime_ns": int(stat.st_mtime_ns), "inode": int(stat.st_ino),
+                                  "dev": int(stat.st_dev), "head_sha256": head, "tail_sha256": tail,
+                                  "generation": 0, "baseline_offset": offset}
+                append_stats.append(stat)
+                baselined_bytes += offset
+            elif not self._ships_at_genesis(relpath, path):
+                files[relpath] = {"class": "snapshot", "size": int(stat.st_size),
+                                  "mtime_ns": int(stat.st_mtime_ns), "inode": int(stat.st_ino),
+                                  "dev": int(stat.st_dev), "generation": 0, "shipped_at": 0.0,
+                                  "baseline": True}
+                baselined_bytes += int(stat.st_size)
+                tracked_only += 1
+        segment_raw = fmt.build_segment(payloads)
+        window_end = max([0.0, *(item.st_mtime_ns / 1e9 for item in append_stats)])
+        manifest = fmt.build_manifest(
+            prefix=self.prefix, seq=1, prev_manifest_sha256=state["last_manifest_sha256"],
+            segment_raw=segment_raw, members=members, source_git_rev=self.source_git_rev,
+            collection_epoch_id=self._epoch_id(), window_start=0.0, window_end=window_end,
+        )
+        manifest_raw = fmt.canonical_json(manifest)
+        new_state.update({"seq": 1, "last_manifest_sha256": fmt.sha256_bytes(manifest_raw),
+                          "last_window_end": manifest["window_end"],
+                          "last_segment_at": self.clock(), "select_cursor": "",
+                          "store_bytes": int(state.get("store_bytes") or 0)
+                          + len(segment_raw) + len(manifest_raw),
+                          "baseline": {"seq": 1, "created_at": self.clock(),
+                                       "append_streams": len(members),
+                                       "tracked_only_files": tracked_only,
+                                       "baselined_bytes": baselined_bytes}})
+        return segment_raw, manifest_raw, new_state
+
     def _epoch_id(self) -> str:
         try:
             session = json.loads((self.runtime_root / "research_session.json").read_text("utf-8"))
@@ -780,6 +855,23 @@ class SegmentShipper:
             return {"shipped": None, "recovered": recovered, "deferred_bytes": 0,
                     "store_cap_reached": True}
         self.throttled = []
+        if self.baseline_genesis and int(state["seq"]) == 0 and not state["files"]:
+            try:
+                segment_raw, manifest_raw, new_state = self.build_genesis(state, self.scan())
+            except PlanRace as exc:
+                self.write_status(shipped_seq=0, last_error=f"PLAN_RACE: {exc}")
+                return {"shipped": None, "recovered": recovered, "deferred_bytes": 0,
+                        "race": exc.stream or "genesis"}
+            self.write_intent(segment_raw, manifest_raw, new_state)
+            shipped = self.complete_intent()
+            self.write_status(shipped_seq=1, unshipped_bytes=None, oversized_paths=[],
+                              throttled_snapshots=[], racing_paths=[], last_error=None,
+                              last_segment_at=new_state["last_segment_at"],
+                              last_manifest_sha256=new_state["last_manifest_sha256"],
+                              store_bytes=new_state["store_bytes"], baseline=new_state["baseline"])
+            # The first delta cycle follows immediately.
+            return {"shipped": shipped, "recovered": recovered, "deferred_bytes": 1,
+                    "members": new_state["baseline"]["append_streams"], "genesis": True}
         ops = self.plan(state, self.scan())
         selected, deferred = self.select(ops, cursor=str(state.get("select_cursor") or ""))
         oversized = sorted(op["path"] for op in ops if op.get("oversized"))
@@ -906,6 +998,7 @@ def shipper_from_env(environ=None) -> SegmentShipper:
         max_sqlite_bytes=int(env.get("RESEARCH_SEGMENTS_MAX_SQLITE_BYTES") or 512 * 1024 * 1024),
         huge_snapshot_interval=float(env.get("RESEARCH_SEGMENTS_HUGE_SNAPSHOT_INTERVAL_SECONDS")
                                      or 6 * 3600),
+        baseline_genesis=(env.get("RESEARCH_SEGMENTS_BASELINE_GENESIS") or "0").strip() == "1",
     )
 
 

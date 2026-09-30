@@ -133,6 +133,9 @@ def main() -> int:
         print(f"::error::paper was NOT resumed after the failed deploy: {exc}", flush=True)
         raise
     print("failure-resume " + json.dumps(result, sort_keys=True), flush=True)
+    if result["status"] == "ACTIVE":
+        from fly_postdeploy_active_gate import enable_all_registry_tiles
+        enable_all_registry_tiles(_http_clients(token))
     return 0
 
 

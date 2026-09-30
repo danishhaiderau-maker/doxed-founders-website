@@ -1,5 +1,8 @@
+import re
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -22,15 +25,60 @@ def _active_status(**overrides):
     return status
 
 
-def test_restore_plan_only_reverts_registry_lanes_that_drifted():
-    prior = {"captured": True, "research_lane_enabled": {"FAMILY_CHANDELIER_3": True, "FAMILY_ATR_TRAIL": True, "RETIRED": True}}
+def test_every_registry_lane_not_on_is_enabled_whatever_its_prior_state():
     current = {"FAMILY_CHANDELIER_3": False, "FAMILY_ATR_TRAIL": True, "RETIRED": False}
-    assert gate.tile_restore_plan(prior, current, LANES) == {"FAMILY_CHANDELIER_3": True}
+    assert gate.tile_enable_plan(current, LANES) == ["FAMILY_CHANDELIER_3"]
+    assert gate.tile_enable_plan({}, LANES) == LANES
 
 
-def test_restore_plan_is_empty_when_prior_state_missing():
-    assert gate.tile_restore_plan({"captured": False}, {}, LANES) == {}
-    assert gate.parse_prior("not json") == {"captured": False}
+class _Bot:
+    def __init__(self, enabled, relay_eligible=False, live_armed=False):
+        self.enabled = dict(enabled)
+        self.relay_eligible = relay_eligible
+        self.live_armed = live_armed
+        self.toggles = []
+
+    def __call__(self, path, payload=None):
+        if path == "/api/status":
+            return {**_active_status(live_armed=self.live_armed), "pause_owner": "",
+                    "active_tiles": [{"lane": lane, "relay_eligible": self.relay_eligible} for lane in LANES]}
+        if path == "/api/state":
+            return {"research_lane_enabled": dict(self.enabled)}
+        assert path == "/api/toggle_research_lane" and payload["enabled"] is True
+        self.toggles.append(payload["lane"])
+        self.enabled[payload["lane"]] = True
+        return {"lane": payload["lane"], "enabled": True}
+
+
+def test_enable_all_registry_tiles_turns_every_tile_on_and_returns_receipt():
+    bot = _Bot({"FAMILY_CHANDELIER_3": False})
+    receipt = gate.enable_all_registry_tiles(bot)
+    assert bot.toggles == LANES
+    assert receipt["tiles_all_on"] is True and receipt["tiles_off"] == []
+    assert receipt["pause_owner"] == "" and receipt["live_armed"] is False
+    assert receipt["bitfinex_live_enabled"] is False
+
+
+def test_enable_all_registry_tiles_refuses_relay_eligible_or_armed_state():
+    with pytest.raises(SystemExit, match="relay-ineligible"):
+        gate.enable_all_registry_tiles(_Bot({}, relay_eligible=True))
+    with pytest.raises(SystemExit, match="disarmed"):
+        gate.enable_all_registry_tiles(_Bot({}, live_armed=True))
+
+
+def test_pause_owner_is_a_paper_active_violation():
+    assert gate.paper_active_violations(_active_status(pause_owner="OPERATOR"), "abcdef123456") == [
+        "PAUSE_OWNER:OPERATOR"]
+
+
+def test_every_resume_path_forces_all_tiles_on():
+    scripts = Path(__file__).resolve().parent
+    for name in ("fly_failure_paper_resume.py", "fly_resume_bootstrap.py", "fly_resume_predeploy_abort.py"):
+        assert "enable_all_registry_tiles" in (scripts / name).read_text(encoding="utf-8"), name
+    for job in ("repair-execution-tail", "repair-lifecycle-cursor", "repair-lifecycle-tail",
+                "restart-only", "recover-startup-crash", "recover-memory"):
+        block = re.search(rf"\n  {re.escape(job)}:\n(.*?)(?=\n  [a-z0-9-]+:\n|\Z)", WORKFLOW, re.S).group(1)
+        assert "fly_postdeploy_active_gate.py --tiles-only" in block, job
 
 
 def test_active_state_requires_unpaused_paper_and_disarmed_live():
@@ -61,7 +109,6 @@ def test_workflow_runs_gate_after_resume_unless_hold_or_operator_pause():
     step = step[: step.index("run: python scripts/fly_postdeploy_active_gate.py")]
     assert "steps.paper_resume.outputs.operator_pause_retained != 'true'" in step
     assert "inputs.keep_maintenance_pause == true" in step
-    assert "steps.paper_maintenance.outputs.prior_operator_state" in step
 
 
 def test_workflow_deploy_pauses_and_resumes_are_deploy_owned():

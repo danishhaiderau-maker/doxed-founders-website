@@ -1,15 +1,18 @@
-"""Post-deploy gate: paper must come back ACTIVE in the operator's prior state.
+"""Post-deploy gate: paper must come back ACTIVE with every registry tile ON.
 
-Runs after the deploy's own maintenance resume. It restores registry-tile
-paper toggles to the operator state recorded before maintenance, then proves:
-paper execution unpaused, live relay disarmed, and the scheduled AI cycle
-completing at least twice after the gate started. Any failure fails the run.
+Runs after the deploy's own maintenance resume. Every tile in the canonical
+registry (as reported by /api/status active_tiles) is toggled ON for paper,
+whatever its state before maintenance; tiles stay relay-ineligible and the
+relay/Bitfinex are never armed. It then proves: paper execution unpaused with
+no pause owner, live relay disarmed, and the scheduled AI cycle completing at
+least twice after the gate started. Any failure fails the run.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -21,24 +24,50 @@ POLL_SEC = 10
 TRANSIENT_HTTP = {502, 503, 504}
 
 
-def parse_prior(raw: str) -> dict:
-    try:
-        prior = json.loads(raw or "{}")
-    except ValueError:
-        return {"captured": False}
-    return prior if isinstance(prior, dict) else {"captured": False}
+def tile_enable_plan(current_enabled: dict, registry_lanes: list[str]) -> list[str]:
+    """Registry lanes that are not ON yet; every boundary ends with all tiles ON."""
+    return [lane for lane in registry_lanes if current_enabled.get(lane) is not True]
 
 
-def tile_restore_plan(prior: dict, current_enabled: dict, registry_lanes: list[str]) -> dict:
-    """Registry lanes whose current toggle differs from the recorded prior state."""
-    if not prior.get("captured"):
-        return {}
-    prior_enabled = prior.get("research_lane_enabled") or {}
-    plan = {}
-    for lane in registry_lanes:
-        if lane in prior_enabled and bool(current_enabled.get(lane)) != bool(prior_enabled[lane]):
-            plan[lane] = bool(prior_enabled[lane])
-    return plan
+def tiles_all_on_receipt(status: dict, state: dict) -> dict:
+    lanes = [str(t.get("lane")) for t in status.get("active_tiles") or [] if t.get("lane")]
+    enabled = state.get("research_lane_enabled") or {}
+    off = [lane for lane in lanes if enabled.get(lane) is not True]
+    return {"lanes": lanes, "tiles_off": off, "tiles_all_on": bool(lanes) and not off,
+            "execution_paused": status.get("execution_paused"),
+            "pause_owner": status.get("pause_owner") or "",
+            "live_armed": status.get("live_armed"),
+            "bitfinex_live_enabled": status.get("bitfinex_live_enabled"),
+            "force_paper_mode": status.get("force_paper_mode"),
+            "source_git_rev": status.get("source_git_rev")}
+
+
+def enable_all_registry_tiles(request) -> dict:
+    """Toggle every registry tile ON for paper and return the verified receipt.
+
+    ``request(path, payload=None)`` returns decoded JSON. Tiles must remain
+    relay-ineligible; this never touches relay or Bitfinex arming.
+    """
+    status = request("/api/status", None)
+    eligible = relay_eligible_tiles(status.get("active_tiles") or [])
+    if eligible:
+        raise SystemExit("registry tiles must remain relay-ineligible: " + ",".join(eligible))
+    lanes = [str(t.get("lane")) for t in status.get("active_tiles") or [] if t.get("lane")]
+    if not lanes:
+        raise SystemExit("registry roster missing from /api/status active_tiles")
+    state = request("/api/state", None)
+    for lane in tile_enable_plan(state.get("research_lane_enabled") or {}, lanes):
+        result = request("/api/toggle_research_lane", {"lane": lane, "enabled": True})
+        if result.get("enabled") is not True:
+            raise SystemExit(f"tile toggle ON failed for {lane}")
+        print(json.dumps({"enabled_tile": lane}), flush=True)
+    receipt = tiles_all_on_receipt(request("/api/status", None), request("/api/state", None))
+    print("tiles receipt " + json.dumps(receipt, sort_keys=True), flush=True)
+    if not receipt["tiles_all_on"]:
+        raise SystemExit("registry tiles not all ON: " + ",".join(receipt["tiles_off"]))
+    if receipt["live_armed"] is not False or receipt["bitfinex_live_enabled"] is not False:
+        raise SystemExit("live relay/Bitfinex must stay disarmed")
+    return receipt
 
 
 def paper_active_violations(status: dict, expected_revision: str) -> list[str]:
@@ -55,6 +84,8 @@ def paper_active_violations(status: dict, expected_revision: str) -> list[str]:
         problems.append("BITFINEX_LIVE_ENABLED")
     if status.get("force_paper_mode") is not True:
         problems.append("FORCE_PAPER_MODE_OFF")
+    if status.get("pause_owner"):
+        problems.append("PAUSE_OWNER:" + str(status.get("pause_owner")))
     return problems
 
 
@@ -94,30 +125,30 @@ def _retrying(fn, attempts: int = 6):
     raise RuntimeError(f"transient failure persisted: {type(last).__name__}")
 
 
-def main() -> int:
+def main(argv=None) -> int:
     token = str(os.environ.get("BOT_ADMIN_TOKEN") or "").strip()
+    if "--tiles-only" in (sys.argv[1:] if argv is None else argv):
+        if not token:
+            raise SystemExit("BOT_ADMIN_TOKEN is required")
+        # Restart-style jobs return before boot finishes; wait for the roster.
+        deadline = time.time() + int(os.environ.get("TILES_ON_DEADLINE_SEC") or DEFAULT_DEADLINE_SEC)
+        while True:
+            try:
+                enable_all_registry_tiles(
+                    lambda path, payload=None: _retrying(lambda: _request(path, token, payload)))
+                return 0
+            except (RuntimeError, urllib.error.HTTPError, SystemExit) as exc:
+                if time.time() >= deadline:
+                    raise SystemExit(f"registry tiles not forced ON before deadline: {exc}")
+                print(f"tiles-only waiting for boot: {type(exc).__name__}: {exc}", flush=True)
+                time.sleep(15)
     expected = str(os.environ.get("EXPECTED_REVISION") or "")[:12].lower()
     if not token or len(expected) != 12:
         raise SystemExit("BOT_ADMIN_TOKEN and EXPECTED_REVISION are required")
-    prior = parse_prior(os.environ.get("PRIOR_OPERATOR_STATE", ""))
     deadline_sec = int(os.environ.get("POSTDEPLOY_ACTIVE_DEADLINE_SEC") or DEFAULT_DEADLINE_SEC)
 
-    status = _retrying(lambda: _request("/api/status", token))
-    eligible = relay_eligible_tiles(status.get("active_tiles") or [])
-    if eligible:
-        raise SystemExit("registry tiles must remain relay-ineligible: " + ",".join(eligible))
-    registry_lanes = [str(t.get("lane")) for t in status.get("active_tiles") or [] if t.get("lane")]
-    state = _retrying(lambda: _request("/api/state", token))
-    plan = tile_restore_plan(prior, state.get("research_lane_enabled") or {}, registry_lanes)
-    for lane, enabled in plan.items():
-        result = _retrying(
-            lambda: _request("/api/toggle_research_lane", token, {"lane": lane, "enabled": enabled})
-        )
-        if bool(result.get("enabled")) != enabled:
-            raise SystemExit(f"tile toggle restore failed for {lane}")
-        print(json.dumps({"restored_tile": lane, "enabled": enabled}), flush=True)
-    if not prior.get("captured"):
-        print("prior operator state unavailable; tile toggles left as persisted", flush=True)
+    enable_all_registry_tiles(
+        lambda path, payload=None: _retrying(lambda: _request(path, token, payload)))
 
     started = time.time()
     completions: list[float] = []
