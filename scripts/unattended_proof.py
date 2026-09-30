@@ -95,7 +95,7 @@ def write_json_atomic(path: Path, value: Any) -> None:
 def read_rows(path: Path) -> list[dict[str, Any]]:
     rows = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
     except OSError:
         return rows
     for line in lines:
