@@ -129,6 +129,14 @@ if ($flyHead -and $flyHead.ok -eq $true -and $flyHead.last_error) {
   }
 }
 
+# AI prompt inputs: a payload field null or unchanged for N consecutive calls is a dead input.
+$runtimeSnapshot = Read-JsonFile (Join-Path $cfg.StateDir 'fly_runtime_snapshot_v1.json')
+$inputHealth = if ($runtimeSnapshot) { $runtimeSnapshot.ai_input_health } else { $null }
+if ($inputHealth -and [string]$inputHealth.status -eq 'DEAD_INPUT') {
+  $fields = @($inputHealth.dead_fields | Select-Object -First 8 | ForEach-Object { "$($_.path)=$($_.kind)x$($_.calls)" }) -join ', '
+  Add-Alert 'AI_INPUT_DEAD_FIELD' 'warning' ("AI prompt {0}: {1}" -f $inputHealth.prompt_id, $fields)
+}
+
 $notify = New-Object System.Collections.ArrayList
 $recorded = @()
 foreach ($alert in $alerts) {

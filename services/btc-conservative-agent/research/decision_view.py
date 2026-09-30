@@ -328,7 +328,8 @@ def _plan_race_stall_sec(head: dict) -> float | None:
 
 def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, monitor_state: dict | None,
                    segment_status: dict | None, fly_segment_head: dict | None, segment_parity: dict | None,
-                   local_disk: dict | None, local_wal: list | None, now: datetime) -> list:
+                   local_disk: dict | None, local_wal: list | None, now: datetime,
+                   ai_input_health: dict | None = None) -> list:
     """Every v2 segment transfer / freshness / disk / WAL alarm as a visible row."""
     alarms: dict[str, dict] = {}
 
@@ -422,6 +423,9 @@ def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, monitor
     for wal in local_wal or []:
         if isinstance(wal, dict) and (_count(wal.get("bytes")) or 0) >= LOCAL_WAL_ALARM_BYTES:
             add("LOCAL_SQLITE_WAL_LARGE", "warning", f"{wal.get('name')} WAL is {wal['bytes'] / 1048576:.0f} MB")
+    if isinstance(ai_input_health, dict) and ai_input_health.get("status") == "DEAD_INPUT":
+        add("AI_INPUT_DEAD_FIELD", "warning",
+            f"AI prompt {ai_input_health.get('prompt_id')}: {ai_input_health.get('detail')}")
     order = {"critical": 0, "warning": 1, "info": 2}
     return sorted(alarms.values(), key=lambda a: (order.get(a["severity"], 3), a["code"]))
 

@@ -36,6 +36,7 @@ counterfactual.jsonl approved_but_rejected.jsonl near_miss.jsonl soft_reject_sha
 golden_stack_rejections.jsonl trend_health.csv reversal_study.jsonl
 ai_reason_research.jsonl ai_confidence_calibration.jsonl trade_lifecycle.jsonl
 ai_input_log.jsonl edge_census.jsonl fill_quality.jsonl shadow_vs_live_entry.jsonl
+ai_shadow_challengers.jsonl ai_shadow_compact_prompt.jsonl
 execution_funnel.jsonl lane_opportunity_capture.jsonl ai_edge_disagreement.jsonl
 shadow_runner_study.jsonl shadow_lane_outcome.jsonl duplicate_intent_audit.jsonl
 pathway_scorecard.json fill_quality_report.json shadow_fill_outcome_report.json
@@ -79,7 +80,7 @@ conservative_fill_descriptive_report.json cross_world_evidence_report.json
 fill_time_guard_counterfactual_report.json policy_search_manifest.json roster_policy.json
 tile_evidence_points_report.json trade_cohort_quarantine.json
 fixed_vs_dynamic_selector_report.json forward_trial_report.json
-multiverse_collection_health_report.json
+multiverse_collection_health_report.json ai_challenger_report.json
 """.split())
 ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
 GENOME_MIRROR_FILES = frozenset({"environment_genome.jsonl", "market_genome.jsonl",

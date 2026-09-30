@@ -91,7 +91,8 @@
     "order_book_refresh_loop",
     "ohlcv_refresh_loop",
     "microstructure_capture_loop",
-    "collector_maturation_worker_loop"
+    "collector_maturation_worker_loop",
+    "ai_shadow_maturation_loop"
   ],
   "worker_start_contract": [
     {"target": "run_flask", "safe_thread": false, "daemon": true},
@@ -116,7 +117,8 @@
     {"target": "order_book_refresh_loop", "safe_thread": true, "daemon": true},
     {"target": "ohlcv_refresh_loop", "safe_thread": true, "daemon": true},
     {"target": "microstructure_capture_loop", "safe_thread": true, "daemon": true},
-    {"target": "collector_maturation_worker_loop", "safe_thread": false, "daemon": true}
+    {"target": "collector_maturation_worker_loop", "safe_thread": false, "daemon": true},
+    {"target": "ai_shadow_maturation_loop", "safe_thread": true, "daemon": true}
   ],
   "import_side_effect_calls": [
     "requests.Session",

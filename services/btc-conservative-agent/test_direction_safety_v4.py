@@ -79,7 +79,7 @@ def test_low_adx_aligned_side_is_not_blanket_blocked():
 
 def test_compact_prompt_separates_raw_and_derived_and_drops_noise():
     compact = bot.build_shared_direction_prompt_context(_ctx())
-    assert compact["schema"] == "shared_direction_prompt_v4"
+    assert compact["schema"] == "shared_direction_prompt_v4_1"
     assert "raw" in compact and "derived" in compact
     assert "ai_input_upgrade" not in compact
     assert "historically_profitable_patterns" not in compact

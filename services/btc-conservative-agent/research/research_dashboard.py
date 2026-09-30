@@ -27,6 +27,7 @@ from runtime_incident_history import build_runtime_incident_history
 import shutil
 from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
+from research import ai_challenger_view as _ai_challenger_view
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -224,6 +225,8 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "source_order_market_evidence.jsonl",
     "edge_census.jsonl",
     "duplicate_intent_audit.jsonl",
+    "ai_shadow_challengers.jsonl",
+    "ai_shadow_compact_prompt.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )
@@ -8979,6 +8982,7 @@ DECISION_NAV_LINKS = (
     ("Evidence maturity", "/evidence-maturity"),
     ("Partial reduction", "/partial-reduction"),
     ("Evidence points", "/evidence-points"),
+    ("AI vs challengers", "/ai-challengers"),
     ("Decision JSON", "/api/decision"),
 )
 
@@ -9046,6 +9050,7 @@ def _decision_payload() -> dict:
     summary, _summary_evidence = _current_lane_artifact("research_compact_summary.json")
     selector, selector_evidence = _current_lane_artifact("fixed_vs_dynamic_selector_report.json")
     trial, trial_evidence = _current_lane_artifact("forward_trial_report.json")
+    ai_challengers, _ai_challenger_evidence = _current_lane_artifact(_ai_challenger_view.REPORT_FILE)
     generated_at = manifest.get("generated_at")
     fmt = format_melbourne_dt
     generation = {
@@ -9068,6 +9073,7 @@ def _decision_payload() -> dict:
         freshness=freshness, analyzer_run=analyzer_run, monitor_state=monitor,
         segment_status=segments, fly_segment_head=fly_head, segment_parity=parity,
         local_disk=disk, local_wal=_local_sqlite_wal_files(), now=now,
+        ai_input_health=_ai_challenger_view.dead_input_alarm(ai_challengers or None),
     )
     for alarm in alarms:
         if alarm.get("since"):
@@ -9124,6 +9130,28 @@ def api_evidence_points():
 def evidence_points_page():
     report, evidence = _evidence_points_payload()
     resp = make_response(_evidence_points_view.render_evidence_points_html(
+        report, evidence=evidence, nav_links=DECISION_NAV_LINKS))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+def _ai_challenger_payload() -> tuple[dict, dict]:
+    report, evidence = _current_lane_artifact(_ai_challenger_view.REPORT_FILE)
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    generated_at = manifest.get("generated_at")
+    return report, {**evidence, "generated_at_display": format_melbourne_dt(generated_at) if generated_at else None}
+
+
+@app.route("/api/ai-challengers")
+def api_ai_challengers():
+    report, evidence = _ai_challenger_payload()
+    return jsonify({"evidence": evidence, "report": report or None})
+
+
+@app.route("/ai-challengers")
+def ai_challengers_page():
+    report, evidence = _ai_challenger_payload()
+    resp = make_response(_ai_challenger_view.render_ai_challenger_html(
         report, evidence=evidence, nav_links=DECISION_NAV_LINKS))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp

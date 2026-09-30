@@ -582,6 +582,7 @@ MISSED_OPPORTUNITY_HEATMAP_FILE = "missed_opportunity_heatmap.json"
 MISSED_OPPORTUNITY_PROOF_REPORT_FILE = "missed_opportunity_proof_report.json"
 TILE_EVIDENCE_POINTS_REPORT_FILE = "tile_evidence_points_report.json"
 FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE = "fixed_vs_dynamic_selector_report.json"
+AI_CHALLENGER_REPORT_FILE = "ai_challenger_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -681,6 +682,7 @@ ANALYZER_JSON_REPORT_FILES = (
     MISSED_OPPORTUNITY_PROOF_REPORT_FILE,
     TILE_EVIDENCE_POINTS_REPORT_FILE,
     FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE,
+    AI_CHALLENGER_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -756,6 +758,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Missed Opportunities", MISSED_OPPORTUNITY_HEATMAP_FILE, "Blocked signals by reason and $ left"),
     ("Tile Evidence Points", TILE_EVIDENCE_POINTS_REPORT_FILE, "Per-tile fill worlds, did vs missed, AI usefulness, collection rate, quarantine receipt and n>=30 after-cost EV ranking"),
     ("Fixed vs Dynamic Selector", FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, "Best single fixed tile vs regime-conditional tile selector, walk-forward OOS after costs, n>=30 gates per arm and regime"),
+    ("AI vs Challengers", AI_CHALLENGER_REPORT_FILE, "Shadow-only: LLM side vs rule vote, inverted AI, 1m OFI, 5m contrarian, seeded random and compact v5 prompt; tape markouts and tile-geometry proxy, hour-cluster CIs, BH q-values, dead-input audit"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
@@ -9192,6 +9195,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             ai_funnel_report(trades=trades, session=session)
             evidence_points = tile_evidence_points_report(session=session)
             selector_report = fixed_vs_dynamic_selector_report(session=session)
+            ai_challenger_report(session=session)
             forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
@@ -9306,6 +9310,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         ai_funnel_report(trades=trades, session=session)
         evidence_points = tile_evidence_points_report(session=session)
         selector_report = fixed_vs_dynamic_selector_report(session=session)
+        ai_challenger_report(session=session)
         forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
@@ -12218,6 +12223,24 @@ def fixed_vs_dynamic_selector_report(session=None):
         payload = {"schema": "fixed_vs_dynamic_selector_v1", "status": "ERROR", "verdict": "ERROR",
                    "error": f"{type(exc).__name__}: {exc}"}
     return _write_aux_report(FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, payload, session)
+
+
+def ai_challenger_report(session=None):
+    """Publish LLM vs shadow challengers from the per-call challenger journal."""
+    from ai_shadow_challengers import CHALLENGER_FILE, COMPACT_PROMPT_FILE
+    from research.ai_challenger_report import build_ai_challenger_report
+
+    session = session or load_research_session()
+    try:
+        payload = build_ai_challenger_report(
+            _load_jsonl_rows(CHALLENGER_FILE),
+            _load_jsonl_rows(COMPACT_PROMPT_FILE),
+            epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
+        )
+    except Exception as exc:  # the challenger view must never stop the analyzer
+        payload = {"schema": "ai_challenger_report_v1", "status": "ERROR",
+                   "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(AI_CHALLENGER_REPORT_FILE, payload, session)
 
 
 def forward_trial_report(session=None, evidence=None, selector=None):
