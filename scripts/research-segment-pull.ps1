@@ -76,12 +76,18 @@ Write-Host $pullOutput.Trim()
 
 $parityExit = 0
 if ($Parity -and $pullExit -eq 0) {
-  $ErrorActionPreference = 'Continue'
-  try {
-    $parityOutput = & $Python (Join-Path $RepoRoot 'scripts\research_segment_fly_parity.py') --shadow-root $ShadowRoot --base-url $BaseUrl --prefix $Prefix --report (Join-Path $ShadowRoot 'parity-latest.json') 2>&1 | Out-String
-  } finally { $ErrorActionPreference = $previous }
-  $parityExit = $LASTEXITCODE
-  Add-Content -LiteralPath $log -Value ('{0} parity exit={1} {2}' -f [datetime]::UtcNow.ToString('o'), $parityExit, ($parityOutput -replace '[\r\n]+', ' ')) -Encoding UTF8
+  # Fly publishes between pulls; exit 3 (RETRY) means the checkpoint moved
+  # ahead of the tree, so catch up and re-check a bounded number of times.
+  for ($attempt = 1; $attempt -le 5; $attempt++) {
+    $ErrorActionPreference = 'Continue'
+    try {
+      if ($attempt -gt 1) { $null = & $Python @pullArgs 2>&1 | Out-String }
+      $parityOutput = & $Python (Join-Path $RepoRoot 'scripts\research_segment_fly_parity.py') --shadow-root $ShadowRoot --base-url $BaseUrl --prefix $Prefix --report (Join-Path $ShadowRoot 'parity-latest.json') 2>&1 | Out-String
+    } finally { $ErrorActionPreference = $previous }
+    $parityExit = $LASTEXITCODE
+    Add-Content -LiteralPath $log -Value ('{0} parity attempt={1} exit={2} {3}' -f [datetime]::UtcNow.ToString('o'), $attempt, $parityExit, ($parityOutput -replace '[\r\n]+', ' ')) -Encoding UTF8
+    if ($parityExit -ne 3) { break }
+  }
   Write-Host $parityOutput.Trim()
 }
 if ($pullExit -ne 0) { exit $pullExit }
