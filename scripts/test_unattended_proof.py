@@ -166,6 +166,20 @@ def test_start_then_check_writes_rows_on_cadence_and_refuses_double_start(tmp_pa
     assert active["status"]["result"] == "IN_PROGRESS"
 
 
+def test_force_restart_needs_a_reason_and_closes_the_old_window_as_superseded(tmp_path):
+    state = _state(tmp_path, T0)
+    old = Path(up.start(state, tmp_path / "diag", T0)["receipt"])
+    up.check(state, T0 + 10)
+    with pytest.raises(SystemExit, match="--reason"):
+        up.start(state, tmp_path / "diag", T0 + 400, force=True)
+    new = up.start(state, tmp_path / "diag", T0 + 400, force=True, reason="monitor false alarm fixed")
+    assert Path(new["receipt"]) != old
+    closing = json.loads(old.read_text(encoding="utf-8").splitlines()[-1])
+    assert closing["kind"] == "VERDICT" and closing["result"] == "SUPERSEDED"
+    assert closing["reason"] == "monitor false alarm fixed" and closing["rows"] == 1
+    assert json.loads(old.with_suffix(".verdict.json").read_text(encoding="utf-8"))["result"] == "SUPERSEDED"
+
+
 def test_start_refuses_without_a_fresh_runtime_baseline_or_under_onedrive(tmp_path):
     state = tmp_path / "state"
     state.mkdir()
