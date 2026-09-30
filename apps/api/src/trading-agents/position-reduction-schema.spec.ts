@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { resolve } from 'node:path';
 
+const REPO_ROOT = resolve(__dirname, '../../../..');
+
 test('participant reduction fence has independent collision keys and dormant phases', () => {
-  const schema = readFileSync(resolve(process.cwd(), 'prisma/schema.prisma'), 'utf8');
+  const schema = readFileSync(resolve(REPO_ROOT, 'prisma/schema.prisma'), 'utf8');
   assert.match(schema, /enum ParticipantReductionPhase[\s\S]*CLAIMED[\s\S]*SUBMITTING[\s\S]*ACKNOWLEDGED[\s\S]*CONFIRMED/);
   assert.match(schema, /@@unique\(\[participantId, reductionId\]\)/);
   assert.match(schema, /@@unique\(\[participantId, sourceEventId\]\)/);
@@ -14,7 +16,7 @@ test('participant reduction fence has independent collision keys and dormant pha
 });
 
 test('migration enforces participant reduction collision fences in PostgreSQL', () => {
-  const sql = readFileSync(resolve(process.cwd(), 'prisma/migrations/20260824120000_relay_position_reduction_audit/migration.sql'), 'utf8');
+  const sql = readFileSync(resolve(REPO_ROOT, 'prisma/migrations/20260824120000_relay_position_reduction_audit/migration.sql'), 'utf8');
   assert.match(sql, /participantId_reductionId_key/);
   assert.match(sql, /participantId_sourceEventId_key/);
   assert.match(sql, /participantId_sourceEventSeq_key/);
@@ -22,7 +24,7 @@ test('migration enforces participant reduction collision fences in PostgreSQL', 
 });
 
 test('POSITION_REDUCED ingress remains HMAC-gated and returns before any executor wake', () => {
-  const source = readFileSync(resolve(process.cwd(), 'apps/api/src/trading-agents/showcase-relay-events.service.ts'), 'utf8');
+  const source = readFileSync(resolve(REPO_ROOT, 'apps/api/src/trading-agents/showcase-relay-events.service.ts'), 'utf8');
   const verify = source.indexOf('const verifiedSignedPayload = this.verifySignature');
   const reduction = source.indexOf("if (event === 'POSITION_REDUCED')");
   const preWake = source.indexOf('this.execution.requestExecutorPreWake?.', reduction);
@@ -39,7 +41,7 @@ test('POSITION_REDUCED ingress remains HMAC-gated and returns before any executo
 });
 
 test('subscriber adapter is reachable only after the explicit gate and durable audit', () => {
-  const source = readFileSync(resolve(process.cwd(), 'apps/api/src/trading-agents/signal-subscriber-execution.service.ts'), 'utf8');
+  const source = readFileSync(resolve(REPO_ROOT, 'apps/api/src/trading-agents/signal-subscriber-execution.service.ts'), 'utf8');
   assert.match(source, /processAuditedPositionReductionDormant/);
   assert.match(source, /SUBSCRIBER_POSITION_REDUCTION_ENABLED/);
   assert.match(source, /POSITION_REDUCTION_EXECUTION_DISABLED/);
@@ -51,10 +53,10 @@ test('subscriber adapter is reachable only after the explicit gate and durable a
   assert.match(source, /relayPositionReductionAudit\.findFirst/);
   assert.match(source, /status: SignalCycleStatus\.OPEN/);
 
-  const relay = readFileSync(resolve(process.cwd(), 'apps/api/src/trading-agents/showcase-relay-events.service.ts'), 'utf8');
+  const relay = readFileSync(resolve(REPO_ROOT, 'apps/api/src/trading-agents/showcase-relay-events.service.ts'), 'utf8');
   const verify = relay.indexOf('const verifiedSignedPayload = this.verifySignature');
   const identity = relay.indexOf('const reductionEvidenceIdentity');
-  const persist = relay.indexOf('const receipt = await this.persistRelayEvent(slug, persistBody)');
+  const persist = relay.indexOf('const receipt = await this.persistRelayEvent(slug, persistBody');
   const gate = relay.indexOf("SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true'", persist);
   const invoke = relay.indexOf('processAuditedPositionReductionEvent', gate);
   assert.ok(verify >= 0 && verify < identity && identity < persist && persist < gate && gate < invoke);
