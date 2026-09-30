@@ -344,9 +344,69 @@ def trade_count_reconciliation(funnel_report: dict | None, summary_trades, tile_
     }
 
 
+RELAY_STATUS_MAX_AGE_SEC = 15 * 60
+
+
+def relay_state_view(snapshot: dict | None, *, registry: dict, now: datetime) -> dict:
+    """Read-only Bitfinex relay state from the laptop's ops relay-status snapshot.
+
+    The allowlist comes from the canonical registry, so it shows even without a
+    snapshot. Every platform value is NO_DATA or STALE when the snapshot is
+    missing, failed or old; nothing is ever inferred as flat or disarmed.
+    """
+    eligible = [lane for lane, spec in (registry or {}).items() if spec.get("platform_relay_eligible") is True]
+    snap = snapshot if isinstance(snapshot, dict) and snapshot.get("schema") == "relay_status_snapshot_v1" else None
+    observed = _parse_ts((snap or {}).get("observedAt"))
+    age = (now - observed).total_seconds() if observed else None
+    stale_since = (snap or {}).get("observedAt") if age is not None and age > RELAY_STATUS_MAX_AGE_SEC else None
+    if not snap:
+        reason = "relay status snapshot not collected on this laptop"
+    elif not snap.get("ok"):
+        reason = f"last relay status fetch failed ({snap.get('error') or 'unknown'})"
+    else:
+        reason = None
+
+    def cell(value):
+        if reason:
+            return metric(None, reason=reason)
+        return metric(value, reason="not reported by the platform", stale_since=stale_since)
+
+    ok = reason is None
+
+    def section(key):
+        value = (snap or {}).get(key) if ok else None
+        return value if isinstance(value, dict) else {}
+
+    recon, audit, executor = section("reconciliation"), section("exchangeOrderAudit"), section("relayExecutor")
+    armed_at = (snap or {}).get("relayArmedAt") if ok else None
+    if not ok:
+        armed_text = None
+    elif armed_at:
+        armed_text = f"ARMED since {armed_at}"
+    else:
+        armed_text = f"DISARMED ({(snap or {}).get('relayExecutionMode') or (snap or {}).get('status') or 'mode not reported'})"
+    heartbeat = None
+    if executor.get("status"):
+        heartbeat = f"{executor.get('status')} ({'healthy' if executor.get('healthy') else 'unhealthy'})"
+        if executor.get("observedAt"):
+            heartbeat += f" at {executor.get('observedAt')}"
+    return {
+        "observed_at": (snap or {}).get("observedAt"),
+        "allowlist": eligible,
+        "allowlist_text": ", ".join(eligible) if eligible else "empty (no tile may copy to Bitfinex)",
+        "armed": cell(armed_text),
+        "executor_heartbeat": cell(heartbeat),
+        "exchange_position_btc": cell(recon.get("signedExchangePositionQty")),
+        "ledger_open_btc": cell(recon.get("signedLedgerOpenQty")),
+        "active_orders": cell(audit.get("activeOrderCount") if audit.get("known") else None),
+        "reconciled_at": cell(recon.get("updatedAt")),
+    }
+
+
 def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | None,
                            ai_coverage: dict | None, generation: dict, alarms: list,
-                           freshness_rows: list, summary_trades=None) -> dict:
+                           freshness_rows: list, summary_trades=None,
+                           relay_state: dict | None = None) -> dict:
     has_generation = bool(generation.get("generated_at")) and isinstance(funnel_report, dict)
     stale_since = None if generation.get("current") else generation.get("generated_at_display") or generation.get("generated_at")
     funnel_lanes = (funnel_report or {}).get("lanes") if isinstance(funnel_report, dict) else None
@@ -380,6 +440,7 @@ def build_decision_payload(*, tile_order, registry: dict, funnel_report: dict | 
         "tiles": tiles,
         "trade_counts": trade_count_reconciliation(
             funnel_report, summary_trades, sum(tile_counts) if tile_counts else None),
+        "relay_state": relay_state,
     }
 
 
@@ -441,6 +502,20 @@ def render_decision_html(payload: dict, *, nav_links, details_href: str = "/deta
         + f"<div class='sub'>{_esc(a['detail'])}</div></li>"
         for a in payload.get("alarms") or []
     ) or "<li style='color:#3fb950'>No transfer, freshness, disk or WAL alarms.</li>"
+    relay = payload.get("relay_state") or {}
+    relay_rows = [
+        ("Relay", relay.get("armed")),
+        ("Allowlist (registry)", relay.get("allowlist_text") or NO_DATA_TEXT),
+        ("Executor heartbeat", relay.get("executor_heartbeat")),
+        ("Exchange position (BTC)", relay.get("exchange_position_btc")),
+        ("Ledger open (BTC)", relay.get("ledger_open_btc")),
+        ("Active exchange orders", relay.get("active_orders")),
+        ("Last reconciliation", relay.get("reconciled_at")),
+    ]
+    relay_html = "".join(
+        f"<tr><td>{_esc(label)}</td><td>{_esc(value if isinstance(value, str) else render_metric(value))}</td></tr>"
+        for label, value in relay_rows
+    )
     fresh_html = "".join(
         f"<tr><td>{_esc(row['label'])}</td><td>{_esc(row['text'])}</td></tr>"
         for row in payload.get("freshness") or []
@@ -473,6 +548,9 @@ ul{{padding-left:18px;}} li{{margin:6px 0;}} .wrap{{overflow-x:auto;}}
 <p class="sub">A tile needs at least {payload.get('min_sample', MIN_DECISION_SAMPLE)} closed trades before any EV
 verdict or ranking. "no data yet" means the value was not collected or not published; it is never a zero.</p>
 <h2>Trade counts</h2><p id="decisionTradeScope">{_esc((payload.get('trade_counts') or {}).get('text') or NO_DATA_TEXT)}</p>
+<h2>Bitfinex relay state (read-only)</h2><div class="wrap"><table id="decisionRelayState">{relay_html}</table></div>
+<p class="sub">From the laptop's authenticated ops relay-status snapshot. Missing or failed snapshots are shown as
+no data, never as flat or disarmed. This page cannot arm or change the relay.</p>
 <h2>Data freshness</h2><div class="wrap"><table id="decisionFreshnessTable">{fresh_html}</table></div>
 <h2>More</h2><p>{nav}</p>
 </body></html>"""
