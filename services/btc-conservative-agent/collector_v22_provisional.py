@@ -25,6 +25,8 @@ _PRESERVE_NONEMPTY_SOURCE_FIELDS = (
     "signal_ts",
     "research_feature_snapshot",
     "research_signal_snapshot_ref",
+    "entry_grid_anchor",
+    "shared_ai_call_ts",
 )
 
 

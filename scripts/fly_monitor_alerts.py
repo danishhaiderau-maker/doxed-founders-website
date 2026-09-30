@@ -47,6 +47,12 @@ POLICIES: Mapping[str, Policy] = {
     "ai_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
     # Informational (annotation only) until the segment pipeline is live.
     "transfer_lag": Policy(2, 60 * 60.0, 12 * HOUR, False),
+    # Research collection quality; the bot already requires a 1h sample, and
+    # a deploy/restart legitimately empties the window, so suppress in maintenance.
+    "multiverse_empty_path": Policy(2, 30 * 60.0, 6 * HOUR, True),
+    "multiverse_tape_source": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "multiverse_worker_stalled": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "touch_grid_coverage": Policy(2, 30 * 60.0, 6 * HOUR, True),
     # Laptop supervisor dead-man heartbeat (it cannot report its own death).
     "laptop_silent": Policy(1, 0.0, 12 * HOUR, False),
     # Operator-requested end-to-end proof of the notification channel.

@@ -48,6 +48,7 @@ from collector_v22_schema import (
     OBS_FUNNEL_COMPLETE,
     OBS_INSUFFICIENT_PATH,
     OBS_PENDING,
+    OBS_SOURCE_UNAVAILABLE,
     OBS_WAITING_120M,
     OBS_WAITING_ENTRY_WINDOW,
     PATH_ORIGIN_ACTUAL_FILL,
@@ -79,6 +80,14 @@ from path_replay_v1 import (
 from replay_eligibility import LEGACY_PREMATURE, validate_replay_eligibility
 from policy_search_manifest import compact_search_receipt
 from microstructure_tape import window_reference as microstructure_window_reference
+
+# Path-source window states that mean "cannot decide yet", mirrored from
+# tape_minute_bars without importing it into the pure collector.
+PATH_SOURCE_RETRY_STATES = frozenset({"SOURCE_NOT_READY", "SOURCE_BEHIND"})
+PATH_SOURCE_BEFORE_TAPE = "BEFORE_TAPE"
+_ENTRY_CHILDREN_MEMO_MAX = 64
+_entry_children_memo: "dict[str, list]" = {}
+_entry_children_memo_lock = threading.Lock()
 
 BYTES_PER_EVENT_TYPICAL = 210_000
 BYTES_PRE_SIGNAL_CONTEXT_TYPICAL = 117_000
@@ -406,7 +415,58 @@ def build_entry_children(
     live_orig: float = LIVE_ORIG_OFFSET_PCT,
     ticks_1s: Optional[Sequence[Mapping[str, Any]]] = None,
 ) -> list:
-    """Hypothetical entry children with chase_schedule metadata."""
+    """Hypothetical entry children with chase_schedule metadata.
+
+    Sibling tile rows of one shared call share an anchor, so identical inputs
+    are memoised. The simulator reads only candles inside
+    [signal - 60s, signal + ttl + post-TTL lookahead], which bounds the key.
+    """
+    if ticks_1s:
+        return _build_entry_children_uncached(
+            candles_1m=candles_1m, signal_ts=signal_ts, signal_price=signal_price,
+            direction=direction, ttl_sec=ttl_sec, live_orig=live_orig, ticks_1s=ticks_1s,
+        )
+    lo = float(signal_ts) - 120.0
+    hi = float(signal_ts) + float(ttl_sec) + POST_TTL_LOOKAHEAD_SEC + 60.0
+    window = [
+        [float(v) if v is not None else None for v in row[:6]]
+        for row in (candles_1m or [])
+        if (t := candle_ts_sec(row)) is not None and lo <= t <= hi
+    ]
+    key = hashlib.sha256(json.dumps(
+        [float(signal_ts), float(signal_price), str(direction or "SHORT").upper(),
+         float(ttl_sec), float(live_orig), window],
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    with _entry_children_memo_lock:
+        cached = _entry_children_memo.get(key)
+    if cached is None:
+        cached = _build_entry_children_uncached(
+            candles_1m=candles_1m, signal_ts=signal_ts, signal_price=signal_price,
+            direction=direction, ttl_sec=ttl_sec, live_orig=live_orig,
+        )
+        with _entry_children_memo_lock:
+            if len(_entry_children_memo) >= _ENTRY_CHILDREN_MEMO_MAX:
+                _entry_children_memo.pop(next(iter(_entry_children_memo)))
+            _entry_children_memo[key] = cached
+    return [
+        {**child,
+         "chase_schedule": [dict(step) for step in child.get("chase_schedule") or []],
+         "fill_costs": dict(child.get("fill_costs") or {})}
+        for child in cached
+    ]
+
+
+def _build_entry_children_uncached(
+    *,
+    candles_1m: Sequence[Sequence[Any]],
+    signal_ts: float,
+    signal_price: float,
+    direction: str,
+    ttl_sec: float = CONTROL_TTL_SEC,
+    live_orig: float = LIVE_ORIG_OFFSET_PCT,
+    ticks_1s: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> list:
     direction_u = str(direction or "SHORT").upper()
     children = []
     alt_ttl = float(ttl_sec) + POST_TTL_LOOKAHEAD_SEC
@@ -572,8 +632,16 @@ def build_research_event(
     signed_quantity_constraints: Optional[Mapping[str, Any]] = None,
     frozen_signal_snapshot_ref: Optional[Mapping[str, Any]] = None,
     snapshot_data_dir: Optional[str] = None,
+    path_source: Optional[Mapping[str, Any]] = None,
+    entry_grid_anchor: Optional[Mapping[str, Any]] = None,
 ) -> dict:
-    """Single immutable v2.2 event envelope + canonical 1m tape."""
+    """Single immutable v2.2 event envelope + canonical 1m tape.
+
+    ``entry_grid_anchor`` (signal_ts/signal_price/direction/ttl_sec) anchors
+    the hypothetical entry grid at the shared call instead of this tile.
+    ``path_source`` describes where ``candles_1m`` came from; an empty path or
+    a source that cannot decide the window never finalizes the event.
+    """
     direction_u = str(direction or "SHORT").upper()
     raw_direction = (
         "SHORT" if direction_u == "LONG" else "LONG" if direction_u == "SHORT" else direction_u
@@ -601,12 +669,13 @@ def build_research_event(
         symbol=symbol,
         shared_ai_call_id=shared_ai_call_id,
     )
+    grid_anchor = dict(entry_grid_anchor) if isinstance(entry_grid_anchor, Mapping) else None
     entry_children = build_entry_children(
         candles_1m=candles_1m,
-        signal_ts=signal_ts,
-        signal_price=signal_price,
-        direction=direction_u,
-        ttl_sec=ttl_sec,
+        signal_ts=float(grid_anchor["signal_ts"]) if grid_anchor else signal_ts,
+        signal_price=float(grid_anchor["signal_price"]) if grid_anchor else signal_price,
+        direction=str(grid_anchor["direction"]).upper() if grid_anchor else direction_u,
+        ttl_sec=float(grid_anchor["ttl_sec"]) if grid_anchor else ttl_sec,
         live_orig=live_orig,
         ticks_1s=ticks_1s if include_ticks_1s else None,
     )
@@ -663,7 +732,21 @@ def build_research_event(
     )
     deadline_reached = max(horizon_ts, float(evaluation_ts or horizon_ts)) + 1.0 >= required_end_ts
     entry_window_complete = horizon_ts + 1.0 >= float(signal_ts) + MAX_ENTRY_WINDOW_SEC
-    if deadline_reached and not coverage["eligible"]:
+    source_state = str((path_source or {}).get("window_state") or "")
+    coverage["source_window_state"] = source_state or None
+    source_undecided = not path_1m or source_state in PATH_SOURCE_RETRY_STATES
+    if deadline_reached and not coverage["eligible"] and not path_1m \
+            and source_state == PATH_SOURCE_BEFORE_TAPE:
+        # The tape provably began after this whole window and the cache holds
+        # only recent bars: no source can ever supply it.  This is a data
+        # error, never a research outcome and never an eternal pending row.
+        obs = OBS_DATA_ERROR
+        coverage["reason"] = "PATH_SOURCE_NEVER_RECORDED"
+    elif deadline_reached and not coverage["eligible"] and source_undecided:
+        # Only a loaded source that proves a hole may finalize INSUFFICIENT_PATH.
+        obs = OBS_SOURCE_UNAVAILABLE
+        coverage["reason"] = "SOURCE_UNAVAILABLE_RETRY"
+    elif deadline_reached and not coverage["eligible"]:
         obs = OBS_INSUFFICIENT_PATH
     elif live_filled and path_complete_flag is False and ticket_closed:
         obs = OBS_WAITING_120M
@@ -815,12 +898,14 @@ def build_research_event(
             "ticks_1s_optional": ticks_bounded if include_ticks_1s else [],
             "ticks_1s_note": "optional bounded; replay must not require 1s",
             "coverage": coverage,
+            "path_source": dict(path_source) if isinstance(path_source, Mapping) else None,
         },
         "microstructure_window": microstructure_window_reference(
             signal_ts, required_end_ts,
         ),
         "research_execution_basis": execution_basis,
         "research_chase_schedule": serialized_chase_schedule,
+        "entry_grid_anchor": grid_anchor,
         "entry_children": entry_children,
         "primary_outcome": primary,
         "observation_status": obs,

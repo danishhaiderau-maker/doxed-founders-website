@@ -167,3 +167,41 @@ def transfer_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
             problems.append(f"laptop ACK {int(acked or 0)} is {int(shipped - (acked or 0))} segments behind {int(shipped)}")
         return {"transfer_lag": "segment transfer lagging: " + "; ".join(problems)} if problems else {}
     return {"transfer_lag": "segment shipping is disabled and the whole-generation transfer is retired"}
+
+
+def collection_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
+    """Multiverse empty-path rate, tape source, maturation worker and touch-grid coverage."""
+    block = (health or {}).get("research_collection")
+    if not isinstance(block, dict):
+        return {}
+    alarms = block.get("alarms") if isinstance(block.get("alarms"), list) else []
+    multiverse = block.get("multiverse") if isinstance(block.get("multiverse"), dict) else {}
+    grid = block.get("touch_grid") if isinstance(block.get("touch_grid"), dict) else {}
+    findings: dict[str, str] = {}
+    if "MULTIVERSE_EMPTY_PATH_RATE_HIGH" in alarms:
+        rate = _num(multiverse.get("empty_path_rate_1h"))
+        findings["multiverse_empty_path"] = (
+            f"order multiverse: {int(multiverse.get('empty_path_1h') or 0)}/"
+            f"{int(multiverse.get('written_1h') or 0)} rows written in the last hour have an empty path"
+            + (f" ({rate * 100:.0f}%)" if rate is not None else "")
+        )
+    if "MULTIVERSE_TAPE_SOURCE_UNAVAILABLE" in alarms:
+        tape = block.get("tape_source") if isinstance(block.get("tape_source"), dict) else {}
+        findings["multiverse_tape_source"] = (
+            f"1s tape source stale for multiverse maturation "
+            f"(latest bucket age={tape.get('latest_bucket_age_sec')!r}s, pending={multiverse.get('pending')!r})"
+        )
+    if "COLLECTOR_MATURATION_WORKER_STALLED" in alarms:
+        worker = multiverse.get("maturation_worker") if isinstance(multiverse.get("maturation_worker"), dict) else {}
+        findings["multiverse_worker_stalled"] = (
+            f"collector maturation worker stalled (alive={worker.get('alive')!r}, "
+            f"last_error={str(worker.get('last_error') or '')[:120]!r}, pending={multiverse.get('pending')!r})"
+        )
+    if "TOUCH_GRID_COVERAGE_LOW" in alarms:
+        coverage = _num(grid.get("coverage_1h"))
+        findings["touch_grid_coverage"] = (
+            f"discovery touch grid armed for {int(grid.get('armed_calls_1h') or 0)}/"
+            f"{int(grid.get('eligible_calls_1h') or 0)} tile-eligible calls in the last hour"
+            + (f" ({coverage * 100:.0f}%)" if coverage is not None else "")
+        )
+    return findings

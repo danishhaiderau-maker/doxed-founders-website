@@ -31,7 +31,7 @@ signal_snapshot.jsonl signal_replay.jsonl trade_outcome.jsonl shadow_outcome.jso
 type_b_adx_v3_shadow_decisions.jsonl type_b_research_v2.jsonl path_replay.jsonl
 post_exit_replay.jsonl research_events_v22.jsonl research_events_v22.provisional.json
 cycle_3m_universe.jsonl chase_offset_touch_grid.jsonl order_multiverse.jsonl
-opportunity_capture.jsonl source_order_market_evidence.jsonl market_microstructure_1s.jsonl
+order_multiverse_entry_grid.jsonl opportunity_capture.jsonl source_order_market_evidence.jsonl market_microstructure_1s.jsonl
 counterfactual.jsonl approved_but_rejected.jsonl near_miss.jsonl soft_reject_shadow.jsonl
 golden_stack_rejections.jsonl trend_health.csv reversal_study.jsonl
 ai_reason_research.jsonl ai_confidence_calibration.jsonl trade_lifecycle.jsonl
@@ -79,6 +79,7 @@ conservative_fill_descriptive_report.json cross_world_evidence_report.json
 fill_time_guard_counterfactual_report.json policy_search_manifest.json roster_policy.json
 tile_evidence_points_report.json trade_cohort_quarantine.json
 fixed_vs_dynamic_selector_report.json forward_trial_report.json
+multiverse_collection_health_report.json
 """.split())
 ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
 GENOME_MIRROR_FILES = frozenset({"environment_genome.jsonl", "market_genome.jsonl",

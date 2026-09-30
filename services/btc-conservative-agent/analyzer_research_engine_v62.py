@@ -654,6 +654,7 @@ ACTIVE_ANALYSIS_LANES = CURRENT_RESEARCH_LANES
 BENCHMARK_LANES = ANALYZER_COMPARE_LANES
 LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
+MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE = "multiverse_collection_health_report.json"
 ANALYZER_JSON_REPORT_FILES = (
     AI_CALIBRATION_REPORT_FILE,
     AI_FUNNEL_REPORT_FILE,
@@ -722,6 +723,7 @@ ANALYZER_JSON_REPORT_FILES = (
     FILL_TIME_GUARD_COUNTERFACTUAL_REPORT_FILE,
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
+    MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
@@ -758,6 +760,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Fixed vs Dynamic Selector", FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, "Best single fixed tile vs regime-conditional tile selector, walk-forward OOS after costs, n>=30 gates per arm and regime"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
+    ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
     ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
     ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
     ("Pathway Survival", PATHWAY_SURVIVAL_REPORT_FILE, "Pathway stage survival and drop rates"),
@@ -9165,6 +9168,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             trades, session, relay_interference=relay_interference_trade_ids(),
         )
         write_trade_cohort_quarantine(cohort_quarantine)
+        multiverse_collection_health_report(cohort_quarantine)
         if cohort_quarantine["relay_interference"]["rows"]:
             print(
                 f"   Relay interference: {cohort_quarantine['relay_interference']['rows']} phantom-cancelled "
@@ -12011,6 +12015,44 @@ def write_trade_cohort_quarantine(summary: dict) -> None:
             json.dump(payload, f, indent=2, default=str)
     except OSError as exc:
         print(f"  ⚠️ Could not write {TRADE_COHORT_QUARANTINE_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+
+
+def multiverse_collection_health_report(cohort_quarantine: dict = None) -> dict:
+    """Order-multiverse collection health; empty-path rows join the quarantine receipt."""
+    print(f"\n=== MULTIVERSE COLLECTION HEALTH {PIPELINE_ENFORCEMENT_TAG} ===")
+    try:
+        from multiverse_collection_health import build_multiverse_collection_report, write_report
+        report = build_multiverse_collection_report(os.getcwd())
+        write_report(report, MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE)
+    except Exception as exc:
+        report = {"schema": "multiverse_collection_health_v1", "status": "UNAVAILABLE", "error": str(exc)}
+        try:
+            with open(MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2, default=str)
+        except OSError:
+            pass
+        print(f"  ⚠️ multiverse collection health unavailable: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+        return report
+    post = report.get("post_fix_rows") or {}
+    quarantine = report.get("quarantine") or {}
+    coverage = ((report.get("touch_grid_coverage") or {}).get("post_fix") or {})
+    print(
+        f"  status={report.get('status')} alarms={report.get('alarms')} "
+        f"post-fix rows={post.get('rows')} empty_path_rate={post.get('empty_path_rate')} "
+        f"grid coverage={coverage.get('coverage')} quarantined={quarantine.get('rows')} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    if cohort_quarantine is not None:
+        summary = dict(cohort_quarantine)
+        summary["collection_defects"] = {
+            "order_multiverse": {
+                key: value for key, value in quarantine.items() if key != "trade_ids_sample"
+            },
+            "order_multiverse_source_never_recorded": report.get("source_never_recorded"),
+            "report": MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE,
+        }
+        write_trade_cohort_quarantine(summary)
+    return report
 
 
 def tile_cohort_pnl(trades, tile_lanes=None) -> dict:

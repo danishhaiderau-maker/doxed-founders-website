@@ -46,6 +46,7 @@ from html import escape as html_escape
 from urllib.parse import urlsplit
 from queue import Queue, Empty, Full
 from collections import deque
+import collections
 from bounded_evidence_worker import BoundedEvidenceWorker
 from lifecycle_cleanup_transaction import (
     CleanupTransaction,
@@ -141,6 +142,18 @@ from microstructure_tape import (
     SCHEMA as MICROSTRUCTURE_TAPE_SCHEMA,
     build_bucket as build_microstructure_bucket,
 )
+from tape_minute_bars import (
+    RETRYABLE_WINDOW_STATES as TAPE_RETRYABLE_WINDOW_STATES,
+    SOURCE_LABEL as TAPE_MINUTE_BAR_SOURCE,
+    TapeMinuteBarStore,
+    merge_path_candles,
+)
+from multiverse_entry_grid import (
+    GRID_FILE as ORDER_MULTIVERSE_ENTRY_GRID_FILE,
+    anchor_is_valid as entry_grid_anchor_is_valid,
+    make_anchor as make_entry_grid_anchor,
+    split_entry_grid,
+)
 from research_order_schedule import (
     append_action_timing_receipt,
     append_reprice_interval as append_research_reprice_interval,
@@ -185,6 +198,10 @@ from opportunity_capture_v21 import (
 )
 from collector_v22_schema import (
     COLLECTOR_VERSION as COLLECTOR_V22_VERSION,
+    CONTROL_TTL_SEC,
+    MAX_ENTRY_WINDOW_SEC,
+    MAX_HOLD_PERIOD_SEC,
+    OBS_SOURCE_UNAVAILABLE,
     EVENT_INDEX_FILE as COLLECTOR_V22_EVENT_INDEX_FILE,
     RESEARCH_EVENTS_FILE as COLLECTOR_V22_RESEARCH_EVENTS_FILE,
     STORAGE_PRESSURE_THRESHOLD,
@@ -13387,6 +13404,7 @@ _order_multiverse_state = {}
 _order_multiverse_pending_src = {}
 _order_multiverse_last_poll = 0.0
 _v3_terminal_reconcile_last_v22_size = -1
+_v3_terminal_reconcile_last_ts = 0.0
 _order_multiverse_path_complete = {}
 _order_multiverse_post_ttl_done = {}
 _order_multiverse_written = set()
@@ -13441,6 +13459,239 @@ def _collector_cached_candles_1m(limit: int = 2000) -> list:
         return []
     rows = list(cached)
     return rows[-requested:] if requested else rows
+
+
+_collector_tape_store_obj = None
+_collector_tape_store_lock = threading.Lock()
+COLLECTOR_TAPE_REFRESH_MAX_LINES = max(
+    1000, int(os.getenv("COLLECTOR_TAPE_REFRESH_MAX_LINES", "40000")),
+)
+COLLECTOR_TAPE_LIVE_LAG_SEC = 90.0
+COLLECTOR_PATH_PRE_SIGNAL_SEC = float(MAX_ENTRY_WINDOW_SEC) + 60.0
+COLLECTOR_PATH_POST_SIGNAL_SEC = float(MAX_ENTRY_WINDOW_SEC + MAX_HOLD_PERIOD_SEC) + 120.0
+
+
+def _collector_tape_store():
+    global _collector_tape_store_obj
+    with _collector_tape_store_lock:
+        if _collector_tape_store_obj is None:
+            _collector_tape_store_obj = TapeMinuteBarStore(
+                os.path.dirname(os.path.abspath(MICROSTRUCTURE_TAPE_FILE)),
+            )
+        return _collector_tape_store_obj
+
+
+def _collector_path_candles_1m(signal_ts: float, *, now: float = None) -> tuple:
+    """Maturation path: 1s-tape minute bars first, exchange cache fills gaps.
+
+    Returns ``(candles, path_source)``.  ``path_source.window_state`` tells
+    the collector whether the tape could decide the window; a retryable state
+    keeps the event pending instead of finalizing an empty path.
+    """
+    now = time.time() if now is None else float(now)
+    start = float(signal_ts) - COLLECTOR_PATH_PRE_SIGNAL_SEC
+    end = float(signal_ts) + COLLECTOR_PATH_POST_SIGNAL_SEC
+    store = _collector_tape_store()
+    tape = store.candles(start, end)
+    decide_end = min(end, now - COLLECTOR_TAPE_LIVE_LAG_SEC)
+    window_state = store.window_state(start, decide_end)
+    merged, counts = merge_path_candles(tape, _collector_cached_candles_1m(limit=2000))
+    return merged, {
+        "source": TAPE_MINUTE_BAR_SOURCE,
+        "fallback": "EXCHANGE_1M_CACHE",
+        "window_state": window_state,
+        "window_start_ts": start,
+        "window_end_ts": end,
+        "tape_latest_bucket_ts": store.latest_ts,
+        **counts,
+    }
+
+
+_entry_grid_anchor_by_call = collections.OrderedDict()
+_entry_grid_anchor_lock = threading.Lock()
+ENTRY_GRID_ANCHOR_CACHE_MAX = 4096
+ENTRY_GRID_ANCHOR_MAX_SKEW_SEC = 900.0
+
+
+def _resolve_entry_grid_anchor(source: dict, *, signal_ts: float, signal_price: float,
+                               direction: str) -> dict:
+    """One hypothetical-entry anchor per (shared AI call, direction).
+
+    The first tile of a call that reaches the collector fixes the anchor;
+    later tiles reuse it so their 300-child grids are byte-identical and the
+    multiverse stream stores the grid once.  The anchor is persisted in each
+    pending payload, so restarts never re-anchor a call.
+    """
+    direction_u = str(direction or "SHORT").upper()
+    saved = source.get("entry_grid_anchor") if isinstance(source, dict) else None
+    call = str((source or {}).get("shared_ai_call_id") or "").strip()
+    if entry_grid_anchor_is_valid(saved) and str(saved.get("direction")) == direction_u:
+        if call:
+            with _entry_grid_anchor_lock:
+                _entry_grid_anchor_by_call.setdefault((call, direction_u), dict(saved))
+        return dict(saved)
+    if not call:
+        return make_entry_grid_anchor(
+            shared_ai_call_id=None, signal_ts=signal_ts, signal_price=signal_price,
+            direction=direction_u, ttl_sec=float(CONTROL_TTL_SEC),
+        )
+    key = (call, direction_u)
+    with _entry_grid_anchor_lock:
+        known = _entry_grid_anchor_by_call.get(key)
+        if known and abs(float(known["signal_ts"]) - float(signal_ts)) <= ENTRY_GRID_ANCHOR_MAX_SKEW_SEC:
+            _entry_grid_anchor_by_call.move_to_end(key)
+            return dict(known)
+        raw_call_ts = (source or {}).get("shared_ai_call_ts")
+        try:
+            call_ts = float(raw_call_ts)
+        except (TypeError, ValueError):
+            try:
+                call_ts = datetime.fromisoformat(str(raw_call_ts).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                call_ts = None
+        anchor_ts = (
+            call_ts if call_ts and abs(call_ts - float(signal_ts)) <= ENTRY_GRID_ANCHOR_MAX_SKEW_SEC
+            else float(signal_ts)
+        )
+        anchor = make_entry_grid_anchor(
+            shared_ai_call_id=call, signal_ts=anchor_ts, signal_price=signal_price,
+            direction=direction_u, ttl_sec=float(CONTROL_TTL_SEC),
+        )
+        _entry_grid_anchor_by_call[key] = anchor
+        while len(_entry_grid_anchor_by_call) > ENTRY_GRID_ANCHOR_CACHE_MAX:
+            _entry_grid_anchor_by_call.popitem(last=False)
+        return dict(anchor)
+
+
+_entry_grid_written_digests = collections.OrderedDict()
+ENTRY_GRID_WRITTEN_DIGESTS_MAX = 8192
+
+
+def _append_order_multiverse_row(record: dict, obs: str) -> None:
+    """Write the call grid once to the sidecar, then the tile row with a ref."""
+    compact = dict(record)
+    compact["event"] = obs
+    compact["lifecycle"] = obs
+    row, grid = split_entry_grid(compact)
+    if grid is not None:
+        digest = grid["grid_sha256"]
+        if digest not in _entry_grid_written_digests:
+            if not _safe_append_jsonl(ORDER_MULTIVERSE_ENTRY_GRID_FILE, grid, label="ORDER_MULTIVERSE_GRID"):
+                # Never publish a reference without its grid.
+                row = compact
+            else:
+                _entry_grid_written_digests[digest] = True
+                while len(_entry_grid_written_digests) > ENTRY_GRID_WRITTEN_DIGESTS_MAX:
+                    _entry_grid_written_digests.popitem(last=False)
+    _safe_append_jsonl(ORDER_MULTIVERSE_FILE, row, label="ORDER_MULTIVERSE")
+
+
+COLLECTION_HEALTH_WINDOW_SEC = 3600.0
+COLLECTION_EMPTY_PATH_ALARM_RATE = 0.20
+COLLECTION_EMPTY_PATH_ALARM_MIN_ROWS = 5
+COLLECTION_TOUCH_GRID_ALARM_COVERAGE = 0.90
+COLLECTION_TOUCH_GRID_ALARM_MIN_CALLS = 3
+_collection_stats_lock = threading.Lock()
+_collection_counters = collections.Counter()
+_collection_multiverse_recent = deque(maxlen=4096)
+_collection_touch_grid_recent = deque(maxlen=2048)
+
+
+def _collector_collection_stat(name: str, amount: int = 1) -> None:
+    with _collection_stats_lock:
+        _collection_counters[name] += int(amount)
+
+
+def _collector_record_multiverse_write(record: dict, obs: str) -> None:
+    tape = record.get("canonical_tape") if isinstance(record.get("canonical_tape"), dict) else {}
+    coverage = tape.get("coverage") if isinstance(tape.get("coverage"), dict) else {}
+    never_recorded = coverage.get("reason") == "PATH_SOURCE_NEVER_RECORDED"
+    empty = not tape.get("path_1m")
+    with _collection_stats_lock:
+        _collection_counters["multiverse_written"] += 1
+        _collection_counters[f"multiverse_obs_{obs or 'UNKNOWN'}"] += 1
+        if never_recorded:
+            # Pre-tape backlog finalized as DATA_ERROR; not a live-path defect.
+            _collection_counters["multiverse_written_source_never_recorded"] += 1
+            return
+        if empty:
+            _collection_counters["multiverse_written_empty_path"] += 1
+        _collection_multiverse_recent.append((time.time(), bool(empty), str(obs or "")))
+
+
+def _collector_record_touch_grid_call(*, armed: bool, ai_executes: bool) -> None:
+    with _collection_stats_lock:
+        _collection_counters["touch_grid_eligible_calls"] += 1
+        if armed:
+            _collection_counters["touch_grid_armed_calls"] += 1
+            if not ai_executes:
+                _collection_counters["touch_grid_armed_ai_rejected_calls"] += 1
+        _collection_touch_grid_recent.append((time.time(), bool(armed), bool(ai_executes)))
+
+
+def research_collection_health(now: float = None) -> dict:
+    """Lock-light multiverse/touch-grid collection health for /health and status."""
+    now = time.time() if now is None else float(now)
+    floor = now - COLLECTION_HEALTH_WINDOW_SEC
+    with _collection_stats_lock:
+        counters = dict(_collection_counters)
+        recent = [row for row in _collection_multiverse_recent if row[0] >= floor]
+        grid_recent = [row for row in _collection_touch_grid_recent if row[0] >= floor]
+    written_1h = len(recent)
+    empty_1h = sum(1 for row in recent if row[1])
+    insufficient_1h = sum(1 for row in recent if row[2] == "INSUFFICIENT_PATH")
+    empty_rate = (empty_1h / written_1h) if written_1h else None
+    eligible_1h = len(grid_recent)
+    armed_1h = sum(1 for row in grid_recent if row[1])
+    coverage = (armed_1h / eligible_1h) if eligible_1h else None
+    store = _collector_tape_store_obj
+    tape = store.status(now) if store is not None else {"initial_scan_complete": False}
+    pending = len(_order_multiverse_pending_src)
+    alarms = []
+    if written_1h >= COLLECTION_EMPTY_PATH_ALARM_MIN_ROWS and empty_rate is not None \
+            and empty_rate > COLLECTION_EMPTY_PATH_ALARM_RATE:
+        alarms.append("MULTIVERSE_EMPTY_PATH_RATE_HIGH")
+    tape_age = tape.get("latest_bucket_age_sec")
+    if pending and tape.get("initial_scan_complete") and (tape_age is None or tape_age > 300):
+        alarms.append("MULTIVERSE_TAPE_SOURCE_UNAVAILABLE")
+    worker = _collector_maturation_worker_status
+    last_pass = worker.get("last_pass_ts") or worker.get("started_ts")
+    if pending and (not worker.get("alive") or (last_pass and now - float(last_pass) > 300)):
+        alarms.append("COLLECTOR_MATURATION_WORKER_STALLED")
+    if eligible_1h >= COLLECTION_TOUCH_GRID_ALARM_MIN_CALLS and coverage is not None \
+            and coverage < COLLECTION_TOUCH_GRID_ALARM_COVERAGE:
+        alarms.append("TOUCH_GRID_COVERAGE_LOW")
+    return {
+        "schema": "research_collection_health_v1",
+        "window_sec": COLLECTION_HEALTH_WINDOW_SEC,
+        "status": "ALARM" if alarms else "OK",
+        "alarms": alarms,
+        "multiverse": {
+            "pending": pending,
+            "written_since_boot": counters.get("multiverse_written", 0),
+            "written_empty_path_since_boot": counters.get("multiverse_written_empty_path", 0),
+            "written_source_never_recorded_since_boot": counters.get(
+                "multiverse_written_source_never_recorded", 0,
+            ),
+            "source_unavailable_retries_since_boot": counters.get("source_unavailable_retries", 0),
+            "written_1h": written_1h,
+            "empty_path_1h": empty_1h,
+            "insufficient_path_1h": insufficient_1h,
+            "empty_path_rate_1h": None if empty_rate is None else round(empty_rate, 4),
+            "empty_path_alarm_rate": COLLECTION_EMPTY_PATH_ALARM_RATE,
+            "maturation_worker": dict(_collector_maturation_worker_status),
+        },
+        "touch_grid": {
+            "eligible_calls_since_boot": counters.get("touch_grid_eligible_calls", 0),
+            "armed_calls_since_boot": counters.get("touch_grid_armed_calls", 0),
+            "armed_ai_rejected_calls_since_boot": counters.get("touch_grid_armed_ai_rejected_calls", 0),
+            "eligible_calls_1h": eligible_1h,
+            "armed_calls_1h": armed_1h,
+            "coverage_1h": None if coverage is None else round(coverage, 4),
+            "coverage_alarm_floor": COLLECTION_TOUCH_GRID_ALARM_COVERAGE,
+        },
+        "tape_source": tape,
+    }
 
 
 def _collector_epoch_serialized(fn):
@@ -13650,6 +13901,11 @@ def _reset_collector_epoch_state(reset_anchor: float) -> str:
         _order_multiverse_path_complete.clear()
         _order_multiverse_post_ttl_done.clear()
         _order_multiverse_written.clear()
+        # The grid sidecar is wiped with the epoch; a remembered digest would
+        # publish a reference to a grid that no longer exists.
+        _entry_grid_written_digests.clear()
+        with _entry_grid_anchor_lock:
+            _entry_grid_anchor_by_call.clear()
         _order_multiverse_last_poll = 0.0
         _collector_v22_last_merge = 0.0
         _order_multiverse_maturation_cursor = 0
@@ -13856,12 +14112,65 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
     _maybe_complete_pending_order_multiverse()
 
 
-def _maybe_complete_pending_order_multiverse():
-    global _order_multiverse_last_poll, _v3_terminal_reconcile_last_v22_size
+COLLECTOR_MATURATION_WORKER_INTERVAL_SEC = max(
+    5.0, float(os.getenv("COLLECTOR_MATURATION_WORKER_INTERVAL_SEC", "15")),
+)
+COLLECTOR_MATURATION_WORKER_BUDGET_SEC = max(
+    0.5, float(os.getenv("COLLECTOR_MATURATION_WORKER_BUDGET_SEC", "2.5")),
+)
+COLLECTOR_MATURATION_WORKER_MAX_BATCH = max(
+    COLLECTOR_MATURATION_MAX_BATCH_SIZE,
+    int(os.getenv("COLLECTOR_MATURATION_WORKER_MAX_BATCH", "400")),
+)
+COLLECTOR_MATURATION_ITEM_YIELD_SEC = 0.01
+_collector_maturation_worker_status = {"alive": False}
+
+
+def collector_maturation_worker_loop():
+    """Low-priority owner for tape refresh and multiverse maturation.
+
+    Runs off the tick/order thread with a per-pass wall budget and a yield
+    between items, so a backlog drain can never starve order handling, the
+    AI cadence or the segment shipper.  Exceptions are contained here:
+    ``safe_thread`` treats an escaped exception as a trading-thread crash.
+    """
+    _collector_maturation_worker_status.update({"alive": True, "started_ts": time.time()})
+    try:
+        store = _collector_tape_store()
+        while not shutdown_event.is_set():
+            pass_started = time.time()
+            try:
+                warming = not store.initial_scan_complete
+                refresh = store.refresh(
+                    max_lines=COLLECTOR_TAPE_REFRESH_MAX_LINES * (5 if warming else 1),
+                    pause=lambda: time.sleep(COLLECTOR_MATURATION_ITEM_YIELD_SEC),
+                )
+                _collector_maturation_worker_status["last_tape_refresh"] = refresh
+                # Until the tape family is indexed every window reads as
+                # SOURCE_NOT_READY; sweeping then only rewrites the journal.
+                if store.initial_scan_complete:
+                    _maybe_complete_pending_order_multiverse(from_worker=True)
+                _collector_maturation_worker_status["last_error"] = None
+            except Exception as exc:
+                _collector_maturation_worker_status["last_error"] = f"{type(exc).__name__}: {exc}"
+                logger.warning(f"[COLLECTOR_MATURATION] worker pass failed: {exc} [PIPELINE ENFORCEMENT]")
+            _collector_maturation_worker_status["last_pass_ts"] = time.time()
+            _collector_maturation_worker_status["last_pass_sec"] = round(time.time() - pass_started, 3)
+            shutdown_event.wait(COLLECTOR_MATURATION_WORKER_INTERVAL_SEC)
+    finally:
+        # The tick-thread fallback resumes if this owner ever exits.
+        _collector_maturation_worker_status["alive"] = False
+
+
+def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
+    global _order_multiverse_last_poll, _v3_terminal_reconcile_last_v22_size, _v3_terminal_reconcile_last_ts
     global _collector_v22_last_merge, _order_multiverse_maturation_cursor
     global _order_multiverse_ready_sweep_batch, _order_multiverse_ready_sweep_started_ts
+    if not from_worker and _collector_maturation_worker_status.get("alive"):
+        return
     now = time.time()
-    if now - _order_multiverse_last_poll < 60.0:
+    interval = COLLECTOR_MATURATION_WORKER_INTERVAL_SEC if from_worker else 60.0
+    if now - _order_multiverse_last_poll < interval - 0.5:
         return
     _order_multiverse_last_poll = now
     # Periodic reconciliation remains complete even when only one in-memory
@@ -13869,11 +14178,12 @@ def _maybe_complete_pending_order_multiverse():
     # takes the epoch lock only for one short map mutation at a time.
     if now - _collector_v22_last_merge >= COLLECTOR_PROVISIONAL_REMERGE_INTERVAL_SEC:
         _schedule_collector_v22_provisional_merge(reason="MATURATION_POLL", now=now)
-    pending_ids = sorted(_order_multiverse_pending_src)
+    pending_snapshot = dict(_order_multiverse_pending_src)
+    pending_ids = sorted(pending_snapshot)
     ready_ids = []
     waiting_ids = []
     for pending_id in pending_ids:
-        candidate = _order_multiverse_pending_src.get(pending_id) or {}
+        candidate = pending_snapshot.get(pending_id) or {}
         expires = float(candidate.get("expires_ts") or 0)
         closed = str(candidate.get("status") or "").upper() in (
             "CLOSED", "FILLED", "EXPIRED", "CANCELLED", "COMPLETE",
@@ -13907,9 +14217,12 @@ def _maybe_complete_pending_order_multiverse():
         COLLECTOR_MATURATION_MAX_BATCH_SIZE,
         max(COLLECTOR_MATURATION_BATCH_SIZE, _order_multiverse_ready_sweep_batch),
     )
+    if from_worker:
+        # The wall budget, not the item count, bounds a worker pass.
+        count = min(COLLECTOR_MATURATION_WORKER_MAX_BATCH, max(count, len(ready_ids) + COLLECTOR_MATURATION_BATCH_SIZE))
     ready_ids.sort(
         key=lambda pending_id: float(
-            (_order_multiverse_pending_src.get(pending_id) or {}).get("expires_ts") or 0
+            (pending_snapshot.get(pending_id) or {}).get("expires_ts") or 0
         )
     )
     selected_ids = ready_ids[:count]
@@ -13930,7 +14243,7 @@ def _maybe_complete_pending_order_multiverse():
     oldest_created = min(
         (
             float((row or {}).get("created_ts_ts") or 0)
-            for row in _order_multiverse_pending_src.values()
+            for row in pending_snapshot.values()
             if float((row or {}).get("created_ts_ts") or 0) > 0
         ),
         default=0.0,
@@ -13959,11 +14272,21 @@ def _maybe_complete_pending_order_multiverse():
             "oldest_pending_age_sec": max(0.0, now - oldest_created) if oldest_created else None,
             "last_poll_ts": now,
             "last_journal_merge_ts": _collector_v22_last_merge,
+            "owner": "MATURATION_WORKER" if from_worker else "TICK_THREAD",
+            "worker_interval_sec": COLLECTOR_MATURATION_WORKER_INTERVAL_SEC if from_worker else None,
+            "worker_budget_sec": COLLECTOR_MATURATION_WORKER_BUDGET_SEC if from_worker else None,
         }
+    budget_deadline = (
+        time.monotonic() + COLLECTOR_MATURATION_WORKER_BUDGET_SEC if from_worker else None
+    )
+    processed = 0
     for pending_id in selected_ids:
+        if budget_deadline is not None and time.monotonic() >= budget_deadline:
+            break
         src = _order_multiverse_pending_src.get(pending_id)
         if not isinstance(src, dict):
             continue
+        processed += 1
         if src.get("collector_rejected"):
             persist_rejected_opportunity(
                 src,
@@ -13971,7 +14294,7 @@ def _maybe_complete_pending_order_multiverse():
                 reason=str(src.get("collector_reject_reason") or "REJECTED"),
                 would_block_only=bool(src.get("collector_would_block_only")),
             )
-            time.sleep(0)
+            time.sleep(COLLECTOR_MATURATION_ITEM_YIELD_SEC if from_worker else 0)
             continue
         expires = float(src.get("expires_ts") or 0)
         ttl_done = expires > 0 and now >= expires
@@ -13985,10 +14308,19 @@ def _maybe_complete_pending_order_multiverse():
             src,
             path_complete=bool(post_ttl_done or closed or src.get("path_complete")),
         )
-        time.sleep(0)
+        time.sleep(COLLECTOR_MATURATION_ITEM_YIELD_SEC if from_worker else 0)
+    if from_worker:
+        _collector_maturation_worker_status.update({
+            "last_selected": len(selected_ids),
+            "last_processed": processed,
+            "last_budget_exhausted": processed < len(selected_ids),
+        })
     # V2 is the durable migration source.  A rollout or crash between the V2
     # append and V3 dual-write must not leave an eternal provisional V3 row.
     # Reconcile once per changed V2 generation; failures retry next poll.
+    if now - _v3_terminal_reconcile_last_ts < 60.0:
+        return
+    _v3_terminal_reconcile_last_ts = now
     try:
         v3_data_dir = os.getcwd()
         v22_size = research_event_generation_stat_signature(v3_data_dir)
@@ -14107,7 +14439,10 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
                 live_fill_price = None
             if live_fill_price is not None and live_fill_price <= 0:
                 live_fill_price = None
-        candles_1m = _collector_cached_candles_1m(limit=2000)
+        candles_1m, path_source = _collector_path_candles_1m(ts)
+        grid_anchor = _resolve_entry_grid_anchor(
+            source, signal_ts=ts, signal_price=price, direction=direction,
+        )
         ticks_1s = []
         replay_complete = bool(path_complete or ticket_closed)
         with replay_lock:
@@ -14179,6 +14514,8 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             chase_schedule_authoritative=bool(source.get("chase_schedule_authoritative")),
             frozen_signal_snapshot_ref=_collector_frozen_signal_ref(source, tid),
             snapshot_data_dir=str(_data_sync_runtime_root()),
+            path_source=path_source,
+            entry_grid_anchor=grid_anchor,
         )
         from collector_signal_snapshot import freeze_signal_snapshot
         record["research_signal_snapshot_ref"] = freeze_signal_snapshot(
@@ -14213,23 +14550,29 @@ def _sync_order_multiverse(source: dict, *, path_complete: bool = False):
             "chase_schedule_authoritative": bool(source.get("chase_schedule_authoritative")),
             "research_feature_snapshot": copy.deepcopy(record["feature_snapshot_at_signal"]),
             "research_signal_snapshot_ref": record["research_signal_snapshot_ref"],
+            "shared_ai_call_ts": source.get("shared_ai_call_ts"),
+            "entry_grid_anchor": grid_anchor,
         }
         if keep_collecting:
+            previous_payload = _order_multiverse_pending_src.get(tid)
             _order_multiverse_pending_src[tid] = pending_payload
             _order_multiverse_state[tid] = obs or "PENDING"
             pending_payload["observation_status"] = obs or "PENDING"
-            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id(),
-                                     data_dir=str(_data_sync_runtime_root()))
+            if obs == OBS_SOURCE_UNAVAILABLE:
+                _collector_collection_stat("source_unavailable_retries")
+            # The journal is one fsynced JSON document; rewriting it for an
+            # unchanged payload on every maturation pass is pure I/O.
+            if previous_payload != pending_payload:
+                upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id(),
+                                         data_dir=str(_data_sync_runtime_root()))
             return record
         _order_multiverse_pending_src.pop(tid, None)
         written, reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
         if written:
             remove_provisional_event(tid, data_dir=str(_data_sync_runtime_root()))
             _order_multiverse_written.add(tid)
-            compact = dict(record)
-            compact["event"] = obs
-            compact["lifecycle"] = obs
-            _safe_append_jsonl(ORDER_MULTIVERSE_FILE, compact, label="ORDER_MULTIVERSE")
+            _append_order_multiverse_row(record, obs)
+            _collector_record_multiverse_write(record, obs)
             logger.info(
                 f"[COLLECTOR_V22] write-once event_id={tid} obs={obs} bytes~{reason} "
                 f"[PIPELINE ENFORCEMENT]"
@@ -14651,7 +14994,10 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
         if ts <= 0:
             ts = float(signal.get("snapshot_ts") or time.time())
         direction = signal.get("final_direction") or (ai or {}).get("direction") or "SHORT"
-        candles_1m = _collector_cached_candles_1m(limit=500)
+        candles_1m, path_source = _collector_path_candles_1m(ts)
+        grid_anchor = _resolve_entry_grid_anchor(
+            signal, signal_ts=ts, signal_price=price, direction=direction,
+        )
         with state_lock:
             univ = dict(state.get("last_cycle_3m_universe") or {})
         feature_snapshot = _collector_feature_snapshot(signal, signal_ts=ts)
@@ -14704,6 +15050,8 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
             chase_schedule_authoritative=bool(signal.get("chase_schedule_authoritative")),
             frozen_signal_snapshot_ref=_collector_frozen_signal_ref(signal, tid),
             snapshot_data_dir=str(_data_sync_runtime_root()),
+            path_source=path_source,
+            entry_grid_anchor=grid_anchor,
         )
         from collector_signal_snapshot import freeze_signal_snapshot
         record["research_signal_snapshot_ref"] = freeze_signal_snapshot(
@@ -14746,16 +15094,23 @@ def persist_rejected_opportunity(signal: dict, ai: dict = None, reason: str = "R
                 "quantity_constraints_status": copy.deepcopy(signal.get("quantity_constraints_status")),
                 "research_chase_schedule": signal.get("research_chase_schedule") or signal.get("chase_schedule"),
                 "chase_schedule_authoritative": bool(signal.get("chase_schedule_authoritative")),
+                "shared_ai_call_id": signal.get("shared_ai_call_id"),
+                "shared_ai_call_ts": signal.get("shared_ai_call_ts"),
+                "entry_grid_anchor": grid_anchor,
             }
+            previous_payload = _order_multiverse_pending_src.get(tid)
             _order_multiverse_pending_src[tid] = pending_payload
             _order_multiverse_state[tid] = obs
             pending_payload["observation_status"] = obs
-            upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id(),
-                                     data_dir=str(_data_sync_runtime_root()))
-            logger.info(
-                f"[COLLECTOR_V22] REJECTED provisional trade_id={tid} obs={obs}; awaiting complete tape "
-                f"[PIPELINE ENFORCEMENT]"
-            )
+            if obs == OBS_SOURCE_UNAVAILABLE:
+                _collector_collection_stat("source_unavailable_retries")
+            if previous_payload != pending_payload:
+                upsert_provisional_event(tid, pending_payload, epoch_id=_collector_v22_epoch_id(),
+                                         data_dir=str(_data_sync_runtime_root()))
+                logger.info(
+                    f"[COLLECTOR_V22] REJECTED provisional trade_id={tid} obs={obs}; awaiting complete tape "
+                    f"[PIPELINE ENFORCEMENT]"
+                )
             return record
         written, _reason = write_research_event_once(record, data_dir=str(_data_sync_runtime_root()))
         if written:
@@ -16355,29 +16710,47 @@ def _record_compressed_shadow_arm_result(
     )
 
 
+def _discovery_touch_grid_admission(ai: dict) -> tuple:
+    """(basis_ai, basis) for a tile-eligible call, else (None, None).
+
+    A call is tile-eligible when the raw AI verdict executes or the
+    score-led research admission turns it into a tile APPROVE.  The raw
+    verdict is kept as a logged field; it no longer gates discovery.
+    """
+    if ai_decision_should_execute(ai):
+        return ai, "AI_APPROVE"
+    lane_ai, admission = _effective_score_led_family_ai(ai)
+    if admission.get("applied") and ai_decision_should_execute(lane_ai):
+        return lane_ai, "SCORE_LED_ADMISSION"
+    return None, None
+
+
 def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
-    """Arm one shadow-only 0.01–0.30% touch grid per shared AI APPROVE.
+    """Arm one shadow-only 0.01–0.30% touch grid per tile-eligible AI call.
 
     Family tiles skip the per-lane grid so their paper anchors stay pure.
     Discovery still needs the full offset grid joined by ``shared_ai_call_id``.
     Never places paper or live orders.
     """
-    if not ai_decision_should_execute(ai):
+    basis_ai, admission_basis = _discovery_touch_grid_admission(ai)
+    if basis_ai is None:
         return False
     call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx).strip()
+    if call_id and call_id in _discovery_touch_grid_seen_call_ids:
+        return False
+    raw_ai_executes = admission_basis == "AI_APPROVE"
     raw_direction = str(
-        (ai or {}).get("candidate_direction")
-        or (ai or {}).get("direction")
-        or (ai or {}).get("raw_direction")
+        (basis_ai or {}).get("candidate_direction")
+        or (basis_ai or {}).get("direction")
+        or (basis_ai or {}).get("raw_direction")
         or ""
     ).upper()
     if not call_id or raw_direction not in ("LONG", "SHORT"):
+        _collector_record_touch_grid_call(armed=False, ai_executes=raw_ai_executes)
         return False
     direction = raw_direction
     if invert_signal_active():
         direction = "SHORT" if raw_direction == "LONG" else "LONG"
-    if call_id in _discovery_touch_grid_seen_call_ids:
-        return False
     raw_ts = (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts")
     try:
         signal_ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
@@ -16392,6 +16765,7 @@ def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
         or 0
     )
     if signal_price <= 0:
+        _collector_record_touch_grid_call(armed=False, ai_executes=raw_ai_executes)
         return False
     trade_id = "discovery-grid-" + hashlib.sha256(
         f"{call_id}|discovery_touch_grid_v1".encode("utf-8")
@@ -16411,13 +16785,17 @@ def _arm_shared_discovery_touch_grid(ctx: dict, ai: dict) -> bool:
         row["places_live_order"] = False
         row["discovery_shadow_only"] = True
         row["shared_ai_call_id"] = call_id
+        row["ai_decision"] = str((ai or {}).get("decision") or "UNKNOWN").upper()
+        row["ai_verdict_executes"] = raw_ai_executes
+        row["tile_admission_basis"] = admission_basis
         row["note"] = "discovery path-touch only; no paper/live order"
         _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
     _touch_grid_book[trade_id] = new_grid_state(rows)
     _discovery_touch_grid_seen_call_ids.add(call_id)
+    _collector_record_touch_grid_call(armed=True, ai_executes=raw_ai_executes)
     logger.info(
         f"[TOUCH GRID] discovery armed shared_ai_call_id={call_id} "
-        f"trade_id={trade_id} offsets=0.01-0.30 shadow_only "
+        f"trade_id={trade_id} offsets=0.01-0.30 shadow_only basis={admission_basis} "
         f"[PIPELINE ENFORCEMENT]"
     )
     return True
@@ -28877,6 +29255,7 @@ def research_wipe_file_paths():
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
+        ORDER_MULTIVERSE_ENTRY_GRID_FILE,
         OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         MICROSTRUCTURE_TAPE_FILE,
@@ -28931,6 +29310,7 @@ def _research_wipe_rotated_jsonl_paths() -> list:
         CYCLE_3M_UNIVERSE_FILE,
         CHASE_OFFSET_TOUCH_GRID_FILE,
         ORDER_MULTIVERSE_FILE,
+        ORDER_MULTIVERSE_ENTRY_GRID_FILE,
         OPPORTUNITY_CAPTURE_FILE,
         SOURCE_ORDER_MARKET_EVIDENCE_FILE,
         MICROSTRUCTURE_TAPE_FILE,
@@ -39371,6 +39751,9 @@ def status():
                 "cleanup_enabled": False,
                 "evidence_worlds": ["OBSERVED_PAPER", "IDEAL_TOUCH", "CONSERVATIVE_BBO"],
                 "family_tiles_arm_discovery_grid": True,
+                "discovery_grid_admission": "TILE_ELIGIBLE_CALL",
+                "order_multiverse_entry_grid_file": ORDER_MULTIVERSE_ENTRY_GRID_FILE,
+                "collection_health": research_collection_health(),
             },
             "hard_stop_closes_paper": bool(CONTROL_CELL.get("hard_stop_closes_paper")),
             "writers_hooked": True,
@@ -39519,6 +39902,10 @@ def health():
         "force_paper_mode": _force_paper_mode_active(),
         "volume": _volume_health_snapshot(now),
     }
+    try:
+        payload["research_collection"] = research_collection_health(now)
+    except Exception as exc:
+        payload["research_collection"] = {"status": "UNKNOWN", "error": type(exc).__name__}
     return jsonify(payload), (200 if process_alive else 503)
 
 
@@ -47666,6 +48053,7 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "CSV_FALLBACK_JSONL",
     "CHASE_OFFSET_TOUCH_GRID_FILE",
     "ORDER_MULTIVERSE_FILE",
+    "ORDER_MULTIVERSE_ENTRY_GRID_FILE",
     "OPPORTUNITY_CAPTURE_FILE",
     "CYCLE_3M_UNIVERSE_FILE",
     "LANE_OPPORTUNITY_CAPTURE_FILE",
@@ -49330,6 +49718,9 @@ def main():
     threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
+    threading.Thread(
+        target=collector_maturation_worker_loop, name="collector-maturation", daemon=True,
+    ).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
     threading.Thread(target=safe_thread(ws_watchdog), daemon=True).start()

@@ -55,14 +55,22 @@ def test_collector_sync_paths_do_not_call_network_candle_fetch():
         for item in tree.body
         if isinstance(item, ast.FunctionDef)
     }
-    for name in ("_sync_order_multiverse", "persist_rejected_opportunity"):
-        calls = {
+    def calls_of(name):
+        return {
             node.func.id
             for node in ast.walk(functions[name])
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
+
+    for name in ("_sync_order_multiverse", "persist_rejected_opportunity"):
+        calls = calls_of(name)
         assert "fetch_mtf_candles" not in calls
-        assert "_collector_cached_candles_1m" in calls
+        assert "_collector_path_candles_1m" in calls
+    # The maturation path source reads the durable 1s tape plus the in-memory
+    # cache; it never touches the network.
+    source_calls = calls_of("_collector_path_candles_1m")
+    assert "_collector_cached_candles_1m" in source_calls
+    assert not any("fetch" in name for name in source_calls)
 
 
 def _load_cycle_recorder(cached_rows, *, now=1000.0, compute_hook=None):
