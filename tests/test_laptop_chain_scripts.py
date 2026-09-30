@@ -338,6 +338,32 @@ def test_monitor_raises_v2_ack_parity_and_shipper_alerts_not_retired_mirror_aler
 
 
 @windows_only
+def test_monitor_treats_plan_race_as_benign_until_shipping_stalls(chain):
+    import time
+    chain["state"].mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=0, error=None)
+    _puller_status(chain)
+    (chain["segments"] / "parity-latest.json").write_text(json.dumps(
+        {"verdict": "GREEN", "seq": 40, "generated_at": _iso(-5)}), encoding="utf-8")
+    head_path = chain["state"] / "fly_segment_head_snapshot_v1.json"
+
+    def head(stall_sec):
+        head_path.write_text(json.dumps(
+            {"schema": "fly_segment_head_snapshot_v1", "ok": True, "observedAt": _iso(),
+             "last_segment_at": time.time() - stall_sec,
+             "last_error": "PLAN_RACE: v3/receipts/x/complete.json changed identity"}))
+
+    head(120)
+    result = _monitor_with_pull_loop_held(chain)
+    assert result.returncode == 0, result.stdout + result.stderr
+    head(45 * 60)
+    result = _monitor_with_pull_loop_held(chain)
+    assert result.returncode == 10, result.stdout + result.stderr
+    assert _active_alert_codes(chain) == {"FLY_SEGMENT_SHIPPER_ERROR"}
+
+
+@windows_only
 def test_monitor_flags_a_rejected_v2_ack(chain):
     chain["state"].mkdir(parents=True, exist_ok=True)
     (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))

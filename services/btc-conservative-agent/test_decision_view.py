@@ -138,6 +138,23 @@ def test_alarms_surface_v2_transfer_disk_wal_and_staleness():
         (a["severity"] for a in alarms), key={"critical": 0, "warning": 1, "info": 2}.get)
 
 
+def test_plan_race_is_benign_while_segments_ship_and_alarms_once_stuck():
+    observed = NOW - timedelta(minutes=1)
+
+    def head(stall_sec):
+        return _fly_head(last_error="PLAN_RACE: v3/receipts/x/complete.json changed identity",
+                         last_segment_at=observed.timestamp() - stall_sec)
+
+    assert _alarms(fly_segment_head=head(120)) == []
+    stuck = _alarms(fly_segment_head=head(dv.PLAN_RACE_STUCK_SEC + 60))
+    assert [(a["code"], a["severity"]) for a in stuck] == [("FLY_SEGMENT_SHIPPER_ERROR", "critical")]
+    assert "no segment shipped for 31 min" in stuck[0]["detail"]
+    unknown = _alarms(fly_segment_head=_fly_head(last_error="PLAN_RACE: x changed identity"))
+    assert [a["code"] for a in unknown] == ["FLY_SEGMENT_SHIPPER_ERROR"]
+    conflict = _alarms(fly_segment_head=_fly_head(last_error="CONFLICT: x", last_segment_at=observed.timestamp()))
+    assert [a["code"] for a in conflict] == ["FLY_SEGMENT_SHIPPER_ERROR"]
+
+
 def test_missing_v2_inputs_are_explicit_alarms_not_silence():
     codes = {a["code"] for a in _alarms(segment_status=None, fly_segment_head=None, segment_parity=None)}
     assert codes == {"SEGMENT_PULLER_NO_DATA", "FLY_SEGMENT_HEAD_NO_DATA", "SEGMENT_PARITY_NO_DATA"}

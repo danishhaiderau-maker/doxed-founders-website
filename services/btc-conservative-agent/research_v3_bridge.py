@@ -1502,11 +1502,70 @@ def dual_write_terminal_paper_schedule(
             touched=order.get("touched_limit") if isinstance(order.get("touched_limit"), bool) else None,
             created_ts=_first(order.get("created_ts"), order.get("order_created_ts")),
         ))
-    write = V3EvidenceStore(data_dir, epoch_id=str(epoch_id)).append("order_intent", row)
+    store = V3EvidenceStore(data_dir, epoch_id=str(epoch_id))
+    write = store.append("order_intent", row)
+    no_fill_write = None
+    lane = str(row.get("research_lane") or "").strip().upper()
+    if terminal_reason not in {"FILLED", "PARTIAL_FILL_SIM_RESIDUAL_CANCELLED"} and _is_registry_tile(lane):
+        no_fill_write = store.append("lifecycle", _tile_no_fill_terminal_row(
+            row, lane=lane, terminal_reason=terminal_reason,
+            terminal_ts=schedule.get("terminal_ts_exact") or schedule.get("terminal_ts"),
+        ))
     return {
         "schema": "v3_terminal_paper_schedule_receipt_v1",
         "epoch_id": str(epoch_id), **identity, **causal_ids, **policy,
         "schedule_sha256": schedule_sha256, "write": write,
+        "no_fill_lifecycle_write": no_fill_write,
+    }
+
+
+# Deploy-boundary and operator cancels end a tile order without a strategy
+# decision; they stay NO_FILL terminals but are marked as forced.
+FORCED_TERMINAL_REASONS = frozenset({
+    "ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL",
+})
+
+
+def _is_registry_tile(lane: str) -> bool:
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY
+    return bool(lane) and lane in ACTIVE_TILE_REGISTRY
+
+
+def _tile_no_fill_terminal_row(schedule_row: Mapping[str, Any], *, lane: str,
+                               terminal_reason: str, terminal_ts: Any) -> dict[str, Any]:
+    """Tile-identity NO_FILL lifecycle terminal for an unfilled paper order.
+
+    The durable v2.2 source row for the same order is written under the base
+    CONTROL policy, so without this row a tile's no-fills never reach the
+    tile's lifecycle cohort.
+    """
+    event_id = str(schedule_row["event_id"])
+    carried = (
+        "episode_id", "event_id", "shared_ai_call_id", "opportunity_id", "schedule_id",
+        "executed_direction", "submitted_ts", "limit_price", "requested_qty",
+        "paper_only", "relay_eligible", "policy_identity_schema", "policy_id",
+        "policy_signature", "policy_epoch_id", "base_policy_signature", "base_policy_epoch_id",
+        "paper_policy_spec", "policy_execution_scope", "relay_capability",
+        "schedule_sha256", "lifecycle_completeness_schema", "no_fill_ttl_outcome",
+        "no_fill_ttl_outcome_reason", "session_label", "session_label_basis",
+    )
+    return {
+        "record_id": f"lifecycle:{event_id}:paper-no-fill-terminal",
+        **{key: copy.deepcopy(schedule_row.get(key)) for key in carried if key in schedule_row},
+        "research_lane": lane,
+        "observation_status": "PAPER_ORDER_UNFILLED",
+        "outcome_state": "NO_FILL",
+        "entry_outcome": "NO_FILL",
+        "position_state": "NEVER_OPENED",
+        "terminal": True,
+        "terminal_no_fill": True,
+        "terminal_reason": terminal_reason,
+        "terminal_ts": terminal_ts,
+        "terminal_ttl_expired": "TTL_EXPIRED" in terminal_reason,
+        "forced_terminal": terminal_reason in FORCED_TERMINAL_REASONS,
+        "ranking_eligible": False,
+        "ranking_blocker": "NO_POSITION_OPENED",
+        "evidence_only": True,
     }
 
 

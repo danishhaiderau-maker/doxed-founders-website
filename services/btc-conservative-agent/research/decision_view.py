@@ -29,6 +29,9 @@ FLY_SEGMENT_HEAD_MAX_AGE_SEC = 15 * 60
 SEGMENT_PARITY_MAX_AGE_SEC = 90 * 60
 SEGMENT_UNSHIPPED_ALARM_BYTES = 32 * 1024 * 1024
 SEGMENT_ACK_BEHIND_ALARM_SEQ = 30
+# The shipper backs a racing stream off and replans, so PLAN_RACE is expected
+# while segments keep shipping; it only alarms once shipping itself stalls.
+PLAN_RACE_STUCK_SEC = 30 * 60
 
 # Codes produced only by the retired whole-generation mirror (ACK watcher).
 # A stale monitor state file must not resurrect them.
@@ -311,6 +314,18 @@ def _fly_head_observed(fly_head: dict | None, now: datetime) -> dict | None:
     return head if age is not None and age <= FLY_SEGMENT_HEAD_MAX_AGE_SEC else None
 
 
+def _plan_race_stall_sec(head: dict) -> float | None:
+    """Seconds between the last shipped segment and the head observation."""
+    try:
+        shipped_at = float(head.get("last_segment_at"))
+        observed = datetime.fromisoformat(str(head.get("observedAt")).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return max(0.0, observed.timestamp() - shipped_at)
+
+
 def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, monitor_state: dict | None,
                    segment_status: dict | None, fly_segment_head: dict | None, segment_parity: dict | None,
                    local_disk: dict | None, local_wal: list | None, now: datetime) -> list:
@@ -362,8 +377,16 @@ def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, monitor
             "no current Fly v2 shipper observation on this laptop"
             + (f" (last {observed})" if observed else ""), observed)
     else:
-        if head.get("last_error"):
-            add("FLY_SEGMENT_SHIPPER_ERROR", "critical", head.get("last_error"), head.get("observedAt"))
+        error = str(head.get("last_error") or "")
+        if error.startswith("PLAN_RACE"):
+            stall = _plan_race_stall_sec(head)
+            if stall is None or stall > PLAN_RACE_STUCK_SEC:
+                add("FLY_SEGMENT_SHIPPER_ERROR", "critical",
+                    f"{error} (no segment shipped for "
+                    f"{'an unknown time' if stall is None else f'{stall / 60:.0f} min'})",
+                    head.get("observedAt"))
+        elif error:
+            add("FLY_SEGMENT_SHIPPER_ERROR", "critical", error, head.get("observedAt"))
         if head.get("segments_enabled") is False:
             add("FLY_SEGMENT_SHIPPER_DISABLED", "critical", "Fly reports research segment shipping disabled")
         unshipped = _count(head.get("unshipped_bytes"))
