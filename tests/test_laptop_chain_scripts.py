@@ -95,6 +95,15 @@ def test_supervisor_keeps_one_segment_pull_loop_not_a_second_watcher():
     assert "'Process')" in pull
 
 
+def test_a_stopped_cycle_brings_a_dead_dashboard_back():
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    stop = cycle.split("function Stop-Cycle", 1)[1].split("\n}\n", 1)[0]
+    assert "/api/health" in stop and "-EnsureDashboardOnly" in stop and "exit $Code" in stop
+    body = cycle.split("$cycleLock = Enter-SingleInstance", 1)[1]
+    assert "exit 3" not in body and "exit 4" not in body
+    assert body.count("Stop-Cycle 3") == 2 and "Stop-Cycle 4" in body
+
+
 def test_supervisor_task_uses_system_powershell():
     register = _source("register-laptop-chain-task.ps1")
     assert "System32\\WindowsPowerShell\\v1.0\\powershell.exe" in register

@@ -29,6 +29,19 @@ if ([System.IO.Path]::GetFullPath($ViewRoot).ToLowerInvariant().Contains('canoni
   throw 'SEGMENT_VIEW_MUST_NOT_BE_CANONICAL_STORE'
 }
 
+# The supervisor only takes its dashboard-down path when no cycle is due, so a
+# cycle that stops before the analyzer must bring a dead dashboard back itself.
+function Stop-Cycle([int]$Code) {
+  $up = $false
+  try { $up = [bool](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10 -UseBasicParsing) } catch { }
+  if (-not $up) {
+    & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'run-analyzer-once.ps1') `
+      -RepoRoot $cfg.RepoRoot -CanonicalRoot $cfg.CanonicalRoot -StateDir $cfg.StateDir -Port $Port -Reason 'dashboard-down' -EnsureDashboardOnly
+    Write-ChainLog -Config $cfg -Name $logName -Message "DASHBOARD_ENSURED exit=$LASTEXITCODE after cycle stop $Code"
+  }
+  exit $Code
+}
+
 $cycleLock = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')
 if (-not $cycleLock) { Write-ChainLog -Config $cfg -Name $logName -Message 'SKIP cycle already running'; exit 0 }
 
@@ -56,9 +69,9 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   Write-ChainLog -Config $cfg -Name $logName -Message ("PROMOTION attempt={0} exit={1} {2}" -f $attempt, $promotionExit, $promotion)
   if ($promotionExit -eq 0) { break }
   # Only a moving head is worth retrying; any other refusal is final.
-  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { exit 3 }
+  if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 }
 }
-if ($promotionExit -ne 0) { exit 3 }
+if ($promotionExit -ne 0) { Stop-Cycle 3 }
 
 $ErrorActionPreference = 'Continue'
 try {
@@ -67,7 +80,7 @@ try {
 } finally { $ErrorActionPreference = $previous }
 $migrationExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message ("MIGRATION exit={0} {1}" -f $migrationExit, $migration)
-if ($migrationExit -ne 0) { exit 4 }
+if ($migrationExit -ne 0) { Stop-Cycle 4 }
 
 # Promotion plus migration outlive the default 10-minute receipt SLA as the
 # epoch grows; the receipt is still bound to this cycle's applied seq.
