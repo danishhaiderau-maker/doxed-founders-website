@@ -664,6 +664,19 @@ COMPACT_GEOMETRY = {
     "stop_atr": 1.5,
     "horizon_min": 30,
 }
+COMPACT_QUESTION_LANE = "compact_v5_question"
+
+
+def compact_question_spec() -> dict:
+    """Geometry spec that matures the compact prompt's exact question for Brier scoring."""
+    return {
+        "lane": COMPACT_QUESTION_LANE,
+        "offset_pct": COMPACT_GEOMETRY["entry_offset_bp"] / 100.0,
+        "stop_atr_k": COMPACT_GEOMETRY["stop_atr"],
+        "hard_stop_pct": None,
+        "target_atr_k": COMPACT_GEOMETRY["target_atr"],
+        "max_duration_sec": COMPACT_GEOMETRY["horizon_min"] * 60,
+    }
 
 
 class OpenInterestHistory:

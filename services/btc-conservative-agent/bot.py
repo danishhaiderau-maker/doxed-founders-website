@@ -28583,7 +28583,10 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "tape_features": tape,
         "compact_prompt_state": compact_row.get("call_state"),
         "geometry_model": _ai_shadow.GEOMETRY_MODEL,
-        "geometry_specs": _ai_shadow.tile_geometry_specs(active_tile_lifecycle_manifest(), leverage),
+        "geometry_specs": (
+            _ai_shadow.tile_geometry_specs(active_tile_lifecycle_manifest(), leverage)
+            + [_ai_shadow.compact_question_spec()]
+        ),
         "prompt_payload": payload,
         "gates_orders": False,
     }

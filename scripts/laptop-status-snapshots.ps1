@@ -92,6 +92,14 @@ if ($offline) {
     $runtime.ready_status = $ready.status
     $runtime.ws_age = $ready.ws_age
     $runtime.active_tile_lanes = @($ready.active_tiles | ForEach-Object { [string]$_.lane })
+    $inputHealth = $ready.ai_input_health
+    if ($inputHealth) {
+      $runtime.ai_input_health = [ordered]@{
+        status = $inputHealth.status; prompt_id = $inputHealth.prompt_id
+        observed_calls = $inputHealth.observed_calls; threshold_calls = $inputHealth.threshold_calls
+        dead_fields = @($inputHealth.dead_fields | ForEach-Object { [ordered]@{ path = [string]$_.path; kind = [string]$_.kind; calls = $_.calls } })
+      }
+    }
     $runtime.strategy_progress = [ordered]@{
       ai_progressing = $progress.ai_progressing; ai_age_sec = $progress.ai_age_sec
       ai_stale_after_sec = $progress.ai_stale_after_sec; evaluation_age_sec = $progress.evaluation_age_sec

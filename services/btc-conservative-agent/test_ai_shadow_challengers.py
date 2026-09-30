@@ -228,6 +228,119 @@ def test_dead_input_detector_flags_null_and_constant_critical_fields():
 
 
 # ---------------------------------------------------------------------------
+# Analyzer report, view and alarm
+# ---------------------------------------------------------------------------
+from research import ai_challenger_report as report_mod  # noqa: E402
+from research import ai_challenger_view as view_mod  # noqa: E402
+from research import decision_view  # noqa: E402
+
+
+def _journal(n_calls=240, edge_bp=4.0, prompt_id="p1"):
+    """LLM side is right with a small edge; random is independent of the move."""
+    import random as _random
+    rng = _random.Random(7)
+    rows = []
+    for i in range(n_calls):
+        call_id = f"c{i}"
+        ts = 1_700_000_000 + i * 180
+        move = rng.gauss(0.0, 10.0)
+        llm = "LONG" if rng.random() < 0.5 else "SHORT"
+        move += edge_bp if llm == "LONG" else -edge_bp
+        sides = {name: shadow.NONE for name in shadow.CHALLENGERS}
+        sides.update({"llm_score_led": llm, "inverted_ai": "SHORT" if llm == "LONG" else "LONG",
+                      "rule_vote": llm, "random": shadow.seeded_random_side(call_id)})
+        rows.append({"row_kind": "CALL", "shared_ai_call_id": call_id, "decision_ts": ts,
+                     "decision_utc": str(ts), "prompt_id": prompt_id, "sides": sides,
+                     "llm": {"raw_direction": "NO_TRADE" if i % 10 == 0 else llm, "abstained": False},
+                     "win_prob_status": "NOT_REQUESTED_BY_PROMPT",
+                     "prompt_payload": {"raw": {"ret_1m_bp": move, "stoch_rsi_k_3m": None}}})
+        for h in shadow.MARKOUT_HORIZONS_SEC:
+            rows.append({"row_kind": "MARKOUT", "shared_ai_call_id": call_id, "horizon_sec": h,
+                         "tape_ok": True, "mid_ret_bp": move, "spread_in_bp": 0.2, "spread_out_bp": 0.2})
+        rows.append({"row_kind": "GEOMETRY", "shared_ai_call_id": call_id, "results": [
+            {"lane": "tile_a", "side": "LONG", "result": "TARGET" if move > 0 else "STOP", "result_bp": move},
+            {"lane": "tile_a", "side": "SHORT", "result": "TARGET" if move < 0 else "STOP", "result_bp": -move},
+            {"lane": shadow.COMPACT_QUESTION_LANE, "side": "LONG", "result": "TARGET" if move > 0 else "STOP"},
+            {"lane": shadow.COMPACT_QUESTION_LANE, "side": "SHORT", "result": "NO_FILL"},
+        ]})
+    compact = [{"shared_ai_call_id": f"c{i}", "call_state": "CALLED",
+                "parsed": {"parse_status": "OK", "p_long_success": 0.5, "p_short_success": 0.5}}
+               for i in range(n_calls)]
+    return rows, compact
+
+
+def test_stats_helpers_match_reference_values():
+    assert abs(report_mod.t_two_sided_p(2.0, 10) - 0.07339) < 1e-4
+    assert abs(report_mod.t_two_sided_p(1.96, 100000) - 0.05) < 1e-3
+    assert report_mod.benjamini_hochberg([0.01, 0.04, 0.03, 0.2]) == [0.04, 0.16 / 3, 0.16 / 3, 0.2]
+    stat = report_mod.cluster_test([1.0, 1.0, 3.0, 3.0], [1, 1, 2, 2])
+    assert stat["mean"] == 2.0 and stat["clusters"] == 2 and stat["df"] == 1
+
+
+def test_report_detects_llm_edge_and_keeps_random_null():
+    rows, compact = _journal()
+    rep = report_mod.build_ai_challenger_report(rows, compact, dead_input_threshold=5)
+    assert rep["status"] == "OK" and rep["current_prompt_id"] == "p1"
+    verdicts = {c["challenger"]: c for c in rep["primary_comparisons"]}
+    assert verdicts["inverted_ai"]["verdict"] == "LLM_BETTER"
+    assert verdicts["rule_vote"]["verdict"] == "NO_DETECTABLE_DIFFERENCE"
+    assert verdicts["rule_vote"]["mean_diff_net_bp"] == 0.0
+    assert all(c["q_bh"] is None or 0 <= c["q_bh"] <= 1 for c in rep["primary_comparisons"])
+    assert all(p["flag"] == "OK" for p in rep["random_placebo"])
+    cohort = rep["cohorts"]["p1"]
+    assert cohort["agreement_with_llm"]["rule_vote"]["agreement_rate"] == 1.0
+    assert cohort["llm_behaviour"]["raw_no_trade_but_tiles_admitted_side"] == 24
+    assert cohort["compact_v5"]["brier"] == 0.25 and cohort["compact_v5"]["scored_filled_questions"] == 240
+    assert cohort["geometry_proxy"]["lanes"]["tile_a"]["llm_score_led"]["fill_rate"] == 1.0
+    assert shadow.COMPACT_QUESTION_LANE not in cohort["geometry_proxy"]["lanes"]
+    dead = {d["path"] for d in cohort["dead_inputs"]["dead_fields"]}
+    assert dead == {"raw.stoch_rsi_k_3m"}
+
+
+def test_report_gates_small_samples_and_empty_journal():
+    rows, compact = _journal(n_calls=12)
+    rep = report_mod.build_ai_challenger_report(rows, compact)
+    assert rep["status"] == "NOT_ENOUGH_DATA"
+    assert {c["verdict"] for c in rep["primary_comparisons"]} == {"NOT_ENOUGH_DATA"}
+    assert report_mod.build_ai_challenger_report([], [])["status"] == "NO_DATA"
+
+
+def test_report_cohorts_by_prompt_id_and_filters_epoch():
+    a, _ = _journal(n_calls=40, prompt_id="old")
+    b, _ = _journal(n_calls=40, prompt_id="new")
+    for r in b:
+        r["shared_ai_call_id"] = "n" + r["shared_ai_call_id"]
+        r["epoch_id"] = "E2"
+        if r.get("decision_ts"):
+            r["decision_ts"] += 10_000_000
+    rep = report_mod.build_ai_challenger_report(a + b, [])
+    assert set(rep["cohorts"]) == {"old", "new"} and rep["current_prompt_id"] == "new"
+    only = report_mod.build_ai_challenger_report(
+        [dict(r, epoch_id=r.get("epoch_id", "E1")) for r in a + b], [], epoch_id="E2")
+    assert set(only["cohorts"]) == {"new"}
+
+
+def test_view_renders_truthfully_and_alarm_surfaces_dead_inputs():
+    rows, compact = _journal()
+    rep = report_mod.build_ai_challenger_report(rows, compact, dead_input_threshold=5)
+    page = view_mod.render_ai_challenger_html(
+        rep, evidence={"status": "CURRENT_GENERATION", "generated_at_display": "now"},
+        nav_links=(("Decision", "/decision"),))
+    assert "SHADOW ONLY, no orders" in page and "LLM_BETTER" in page and "aiChallengerMarkouts" in page
+    stale = view_mod.render_ai_challenger_html(None, evidence={"status": "STALE", "blockers": ["x"]},
+                                               nav_links=())
+    assert "NO CURRENT DATA" in stale
+    alarm = view_mod.dead_input_alarm(rep)
+    assert alarm["status"] == "DEAD_INPUT" and "raw.stoch_rsi_k_3m" in alarm["detail"]
+    from datetime import datetime, timezone
+    alarms = decision_view.collect_alarms(
+        freshness=None, analyzer_run=None, monitor_state=None, segment_status=None,
+        fly_segment_head=None, segment_parity=None, local_disk=None, local_wal=None,
+        now=datetime.now(timezone.utc), ai_input_health=alarm)
+    assert "AI_INPUT_DEAD_FIELD" in {a["code"] for a in alarms}
+
+
+# ---------------------------------------------------------------------------
 # bot.py integration
 # ---------------------------------------------------------------------------
 import bot  # noqa: E402
@@ -338,7 +451,9 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         assert row["sides"]["compact_v5"] == "LONG"
         assert row["tiles_admitted_side"] == row["sides"]["llm_score_led"] == "LONG"
         assert row["win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
-        assert len(row["geometry_specs"]) == len(bot.active_tile_lifecycle_manifest())
+        lanes = [s["lane"] for s in row["geometry_specs"]]
+        assert lanes[:-1] == [t["lane"] for t in bot.active_tile_lifecycle_manifest()]
+        assert lanes[-1] == shadow.COMPACT_QUESTION_LANE
         assert compact_rows[0]["call_state"] == "CALLED"
         assert compact_rows[0]["parsed"]["parse_status"] == "OK"
         assert calls == [("trading_direction_shadow", 0.0, {
