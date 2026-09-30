@@ -122,7 +122,9 @@ def test_alarms_surface_v2_transfer_disk_wal_and_staleness():
     alarms = _alarms(
         freshness={"current": False, "reasons": ["mirror receipt failed"]},
         analyzer_run={"state": "FAILED", "detail": "boom", "finishedAt": NOW.isoformat()},
-        segment_status=_puller(age_min=40, ack_age_min=40, last_error="HTTP 503"),
+        segment_status=_puller(age_min=40, last_error="HTTP 503",
+                               ack_receipt={"ok": True, "result": "RECORDED", "through_seq": 130,
+                                            "received_at": (NOW - timedelta(minutes=40)).isoformat()}),
         fly_segment_head=_fly_head(last_error="PLAN_RACE", unshipped_bytes=dv.SEGMENT_UNSHIPPED_ALARM_BYTES + 1,
                                    shipped_seq=200, laptop_acked_seq=100),
         segment_parity=_parity("RED", age_min=200),
@@ -165,6 +167,24 @@ def test_missing_v2_inputs_are_explicit_alarms_not_silence():
     rejected = _alarms(segment_status=_puller(ack_receipt={"ok": False, "result": "SEQ_REGRESSION", "through_seq": 3,
                                                             "received_at": NOW.isoformat()}))
     assert [a["code"] for a in rejected] == ["SEGMENT_ACK_REJECTED"]
+
+
+def test_an_old_ack_is_healthy_while_every_applied_segment_is_acked():
+    assert _alarms(segment_status=_puller(ack_age_min=40)) == []
+    behind = _puller(applied_seq=137, ack_age_min=40)
+    assert [a["code"] for a in _alarms(segment_status=behind)] == ["SEGMENT_ACK_STALE"]
+
+
+def test_dashboard_reads_the_receipt_log_when_an_idle_pull_omits_the_ack(tmp_path, monkeypatch):
+    status = _puller()
+    receipt = status.pop("ack_receipt")
+    (tmp_path / "status.json").write_text(json.dumps(status), encoding="utf-8")
+    monkeypatch.setattr(dashboard, "SEGMENT_PULLER_STATUS_FILE", tmp_path / "status.json")
+    monkeypatch.setattr(dashboard, "SEGMENT_ACK_RECEIPTS_FILE", tmp_path / "ack-receipts.jsonl")
+    assert "ack_receipt" not in dashboard._segment_puller_status()
+    (tmp_path / "ack-receipts.jsonl").write_text(json.dumps({"ok": False}) + "\n" + json.dumps(receipt) + "\n",
+                                                 encoding="utf-8")
+    assert dashboard._segment_puller_status()["ack_receipt"] == receipt
 
 
 def test_retired_mirror_alarms_never_resurface_from_monitor_state():

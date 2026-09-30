@@ -8962,6 +8962,7 @@ def index():
 LAPTOP_CHAIN_STATE_DIR = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain")
 SEGMENT_SHADOW_ROOT = Path(os.getenv("RESEARCH_SEGMENT_SHADOW_ROOT") or r"C:\DoxxedCrypto\fly-mirror-segments")
 SEGMENT_PULLER_STATUS_FILE = SEGMENT_SHADOW_ROOT / ".puller" / "status.json"
+SEGMENT_ACK_RECEIPTS_FILE = SEGMENT_SHADOW_ROOT / ".puller" / "ack-receipts.jsonl"
 SEGMENT_PARITY_FILES = (SEGMENT_SHADOW_ROOT / "parity-latest.json", SEGMENT_SHADOW_ROOT / "parity-v2.json")
 FLY_SEGMENT_HEAD_FILE = LAPTOP_CHAIN_STATE_DIR / "fly_segment_head_snapshot_v1.json"
 RELAY_STATUS_SNAPSHOT_FILE = LAPTOP_CHAIN_STATE_DIR / "relay_status_snapshot_v1.json"
@@ -8986,6 +8987,23 @@ def _read_state_json(path) -> dict | None:
     except (OSError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _segment_puller_status() -> dict | None:
+    """Puller status with its last Fly ACK receipt.
+
+    The puller only embeds ``ack_receipt`` on runs that applied a segment, so an
+    idle run falls back to the last line of its append-only receipt log.
+    """
+    status = _read_state_json(SEGMENT_PULLER_STATUS_FILE)
+    if status is None or isinstance(status.get("ack_receipt"), dict):
+        return status
+    try:
+        lines = SEGMENT_ACK_RECEIPTS_FILE.read_text(encoding="utf-8-sig").splitlines()
+        receipt = json.loads(lines[-1]) if lines else None
+    except (OSError, ValueError):
+        receipt = None
+    return {**status, "ack_receipt": receipt} if isinstance(receipt, dict) else status
 
 
 def _latest_segment_parity() -> dict | None:
@@ -9040,7 +9058,7 @@ def _decision_payload() -> dict:
     }
     analyzer_run = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "analyzer-run.status.json")
     monitor = _read_state_json(LAPTOP_CHAIN_STATE_DIR / "laptop-chain-monitor.state.json")
-    segments = _read_state_json(SEGMENT_PULLER_STATUS_FILE)
+    segments = _segment_puller_status()
     fly_head = _read_state_json(FLY_SEGMENT_HEAD_FILE)
     parity = _latest_segment_parity()
     disk = _local_disk_usage()

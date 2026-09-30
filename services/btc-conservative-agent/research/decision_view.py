@@ -359,13 +359,15 @@ def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, monitor
             add("SEGMENT_PULLER_ERROR", "critical", puller.get("last_error"), puller.get("updated_at"))
         receipt = puller.get("ack_receipt") if isinstance(puller.get("ack_receipt"), dict) else {}
         ack_age = _age_sec(receipt.get("received_at"), now)
+        caught_up = _count(receipt.get("through_seq")) is not None and _count(puller.get("applied_seq")) is not None \
+            and _count(receipt.get("through_seq")) >= _count(puller.get("applied_seq"))
         if not receipt:
             add("SEGMENT_ACK_NO_DATA", "critical", "Fly has not recorded a v2 ACK from this laptop")
         elif receipt.get("ok") is not True:
             add("SEGMENT_ACK_REJECTED", "critical",
                 f"Fly answered the v2 ACK through seq {receipt.get('through_seq')} with {receipt.get('result')}",
                 receipt.get("received_at"))
-        elif ack_age is None or ack_age > SEGMENT_ACK_MAX_AGE_SEC:
+        elif ack_age is None or (not caught_up and ack_age > SEGMENT_ACK_MAX_AGE_SEC):
             add("SEGMENT_ACK_STALE", "critical",
                 f"last v2 ACK accepted by Fly through seq {receipt.get('through_seq')} at {receipt.get('received_at')}",
                 receipt.get("received_at"))
