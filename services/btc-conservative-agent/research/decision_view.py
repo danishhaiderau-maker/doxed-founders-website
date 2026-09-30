@@ -133,7 +133,9 @@ def after_cost_ev(funnel_lane: dict | None, *, stale_since: str | None = None) -
     lane = funnel_lane if isinstance(funnel_lane, dict) else {}
     stats = lane.get("closed_trade_stats") if isinstance(lane.get("closed_trade_stats"), dict) else {}
     n = _count(stats.get("n")) if stats else None
-    n_source = "trade log rows"
+    forced = _count(stats.get("forced_exits_excluded")) if stats else None
+    n_source = (f"strategy exits ({forced} deploy/operator forced exits excluded from EV)"
+                if forced else "trade log rows")
     if n is None:
         n = _count(lane.get("closed"))
         n_source = "CLOSED lifecycle events"
@@ -213,10 +215,12 @@ def ai_vs_rules(tile: dict | None, funnel_lane: dict | None, ai_coverage: dict |
         delta = _finite(tile_split.get("incremental_net_pnl_usd"))
         matched = _count(tile_split.get("matched_trades"))
         if delta is not None and matched:
+            approved = _count(tile_split.get("approved_same_direction_trades")) or 0
+            rejected = _count(tile_split.get("rejected_trades")) or 0
             detail = (f"{ai_calls or 0} AI calls; {matched} closed trades: "
-                      f"{_count(tile_split.get('approved_same_direction_trades')) or 0} AI-approved, "
-                      f"{_count(tile_split.get('rejected_trades')) or 0} AI-rejected")
-            if matched < MIN_DECISION_SAMPLE:
+                      f"{approved} AI-approved, {rejected} AI-rejected")
+            # The comparison is only as strong as its smaller arm.
+            if min(approved, rejected) < MIN_DECISION_SAMPLE:
                 return {"cell": {"state": INSUFFICIENT, "value": delta},
                         "note": f"{NOT_ENOUGH_DATA_TEXT}: AI-filtered minus rules-only, {detail}"}
             return {"cell": metric(delta), "note": f"AI-filtered minus rules-only, {detail}"}
@@ -680,5 +684,7 @@ verdict or ranking. "no data yet" means the value was not collected or not publi
 <p class="sub">From the laptop's authenticated ops relay-status snapshot. Missing or failed snapshots are shown as
 no data, never as flat or disarmed. This page cannot arm or change the relay.</p>
 <h2>Data freshness</h2><div class="wrap"><table id="decisionFreshnessTable">{fresh_html}</table></div>
+<p class="sub">Fill worlds, did vs missed, AI usefulness, collection rate, quarantine receipt and the n&ge;30 EV
+ranking: <a href="/evidence-points">Evidence points</a>.</p>
 <h2>More</h2><p>{nav}</p>
 </body></html>"""

@@ -26,6 +26,7 @@ from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
 from runtime_incident_history import build_runtime_incident_history
 import shutil
 from research import decision_view as _decision_view
+from research import evidence_points_view as _evidence_points_view
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -8974,6 +8975,7 @@ DECISION_NAV_LINKS = (
     ("Chronological OOS", "/chronological-oos"),
     ("Evidence maturity", "/evidence-maturity"),
     ("Partial reduction", "/partial-reduction"),
+    ("Evidence points", "/evidence-points"),
     ("Decision JSON", "/api/decision"),
 )
 
@@ -9079,6 +9081,28 @@ def _decision_payload() -> dict:
 @app.route("/api/decision")
 def api_decision():
     return jsonify(_decision_payload())
+
+
+def _evidence_points_payload() -> tuple[dict, dict]:
+    report, evidence = _current_lane_artifact(_evidence_points_view.REPORT_FILE)
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    generated_at = manifest.get("generated_at")
+    return report, {**evidence, "generated_at_display": format_melbourne_dt(generated_at) if generated_at else None}
+
+
+@app.route("/api/evidence-points")
+def api_evidence_points():
+    report, evidence = _evidence_points_payload()
+    return jsonify({"evidence": evidence, "report": report or None})
+
+
+@app.route("/evidence-points")
+def evidence_points_page():
+    report, evidence = _evidence_points_payload()
+    resp = make_response(_evidence_points_view.render_evidence_points_html(
+        report, evidence=evidence, nav_links=DECISION_NAV_LINKS))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
 
 
 @app.route("/")
