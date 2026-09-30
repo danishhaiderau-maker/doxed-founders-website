@@ -50,7 +50,7 @@ function Assert-QuarantinedRuntimeScript(
   Assert-Contract ($text.Contains("fly-canonical.lock.json")) "$RelativePath refuses a second owner while the Fly canonical lock exists"
 
   if ($RoutesToMirror) {
-    Assert-Contract ($text.Contains("start-fly-desktop-mirror.ps1")) "$RelativePath routes default execution to the Fly desktop mirror/analyzer"
+    Assert-Contract ($text.Contains("start-laptop-stack.ps1")) "$RelativePath routes default execution to the laptop stack"
     Assert-Contract ($text.Contains("DCF_LEGACY_WINDOWS_LAUNCH_CONTRACT_TEST")) "$RelativePath exposes a no-side-effect contract-test path"
   }
 
@@ -91,7 +91,7 @@ function Assert-DefaultExecutionFailsClosed(
 }
 
 $autostart = Read-RepoFile "scripts\start-showcase-bot.cmd"
-Assert-Contract ($autostart.Contains("start-fly-desktop-mirror.ps1")) "scheduled-task entry starts the Fly desktop mirror"
+Assert-Contract ($autostart.Contains("start-laptop-stack.ps1")) "scheduled-task entry starts the laptop stack"
 foreach ($forbidden in @(
   "home-stack-start-everything.ps1",
   "start-showcase-bot-guard.ps1",
@@ -102,7 +102,7 @@ foreach ($forbidden in @(
 }
 
 $recovery = Read-RepoFile "scripts\fast-recover-global.ps1"
-Assert-Contract ($recovery.Contains("start-fly-desktop-mirror.ps1")) "global recovery starts the Fly desktop mirror"
+Assert-Contract ($recovery.Contains("start-laptop-stack.ps1")) "global recovery starts the laptop stack"
 Assert-Contract ($recovery.Contains("ensure-home-bridge.ps1")) "global recovery restores one verified local command bridge"
 Assert-Contract ($recovery.Contains("Clear-HomeStackUserStopped")) "global recovery clears an obsolete voluntary-stop marker"
 foreach ($forbidden in @(
@@ -140,7 +140,7 @@ Assert-QuarantinedRuntimeScript `
   @("function Restart-Tunnel", '$logFile =') `
   $false
 $bridgeWatchdog = Read-RepoFile "scripts\bridge-watchdog.ps1"
-Assert-Contract (-not $bridgeWatchdog.Contains("start-fly-desktop-mirror.ps1")) "obsolete bridge watchdog cannot start a redundant desktop mirror"
+Assert-Contract (-not $bridgeWatchdog.Contains("start-laptop-stack.ps1")) "obsolete bridge watchdog cannot start a redundant laptop stack"
 Assert-QuarantinedRuntimeScript `
   "scripts\bot-auto-restart.ps1" `
   @("function Start-BotHidden", '$agentDir  =')

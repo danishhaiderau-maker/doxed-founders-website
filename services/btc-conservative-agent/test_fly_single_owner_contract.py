@@ -48,9 +48,14 @@ for guarded in (
 ):
     assert "fly-canonical.lock.json" in text(guarded), guarded
 
-assert "start-fly-desktop-mirror.ps1" in text("start-showcase-bot.cmd")
-assert "fly-dashboard-proxy.py" in text("start-fly-desktop-mirror.ps1")
-assert "sync-fly-bot-data-loop.ps1" in text("start-fly-desktop-mirror.ps1")
+assert "start-laptop-stack.ps1" in text("start-showcase-bot.cmd")
+laptop_stack = text("start-laptop-stack.ps1")
+assert "fly-dashboard-proxy.py" in laptop_stack
+assert "DoxxedLaptopChainSupervisor" in laptop_stack
+assert "laptop-chain-supervisor.ps1" in laptop_stack
+assert "/api/data-sync/" not in laptop_stack
+for retired in ("sync-fly-bot-data-loop.ps1", "sync-fly-bot-data.ps1", "start-fly-desktop-mirror.ps1"):
+    assert not (ROOT / "scripts" / retired).exists(), retired
 assert "$env:BTC_AGENT_DATA_DIR = $analyzerDataDir" in text(
     "start-home-analyzer.ps1"
 )
@@ -61,16 +66,7 @@ for analyzer_launcher in ("start-home-analyzer.ps1",):
     assert "Remove-Item -LiteralPath" in analyzer_text
     assert "allowedAnalyzerVars" in analyzer_text
     assert 'Set-Item -Path ("env:" + $matches[1].Trim())' not in analyzer_text
-sync_loop = text("sync-fly-bot-data-loop.ps1")
-assert "Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl" in sync_loop
-assert "$env:BOT_ADMIN_TOKEN" in sync_loop
-assert 'Set-Item -Path ("env:" + $matches[1].Trim())' not in sync_loop
-assert "FLY_VOLUME_SYNC_THRESHOLD_MB" in sync_loop
-assert "/api/data-sync/identity" in sync_loop
-assert "$FullSyncIntervalSec = 1800" in sync_loop
-assert "identity match; full inventory not due" in sync_loop
-assert "size -le 50MB" not in sync_loop
-assert "Incremental chunk sync already" in sync_loop
+assert "Get-CanonicalFlyBotUrl -RequestedUrl $SourceUrl" in laptop_stack
 assert "AI" not in text("fly-dashboard-proxy.py").replace(
     "contains no strategy, exchange, or AI code", ""
 )

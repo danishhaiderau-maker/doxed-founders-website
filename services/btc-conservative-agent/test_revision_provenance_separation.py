@@ -92,10 +92,3 @@ def test_each_json_report_is_stamped_with_separate_revision_roles(tmp_path):
     assert report["config_signature"] == "c" * 64
 
 
-def test_sync_heartbeat_records_authenticated_fly_revision_as_deployed_revision():
-    source = (REPO / "scripts" / "sync-fly-bot-data.ps1").read_text(encoding="utf-8")
-
-    assert "deployedRevision = $(if ($observedRevision)" in source
-    assert 'heartbeat.get("deployedRevision")' in (
-        REPO / "scripts" / "migrate_canonical_research_store.py"
-    ).read_text(encoding="utf-8")

@@ -67,9 +67,9 @@ if (-not $obsoleteOwnerEnabled) {
     exit 78
   }
 
-  $mirrorScript = Join-Path $scriptDir "start-fly-desktop-mirror.ps1"
+  $mirrorScript = Join-Path $scriptDir "start-laptop-stack.ps1"
   if (Test-Path -LiteralPath $mirrorScript) {
-    Write-Warning "Obsolete Windows supervisor is quarantined. Starting the safe Fly desktop mirror/analyzer instead."
+    Write-Warning "Obsolete Windows supervisor is quarantined. Starting the safe laptop stack instead."
     & $mirrorScript -NoWait
     exit 0
   }

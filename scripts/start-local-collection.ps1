@@ -11,7 +11,7 @@ $legacyOwnerOptInPhrase = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
 $legacyOwnerOptIn = (Get-Item -Path "env:$legacyOwnerOptInName" -ErrorAction SilentlyContinue).Value
 if ($legacyOwnerOptIn -cne $legacyOwnerOptInPhrase) {
   Write-Host "REFUSED: local collection would start a second AI/strategy owner and replace :7002/:9001." -ForegroundColor Red
-  Write-Host "Use scripts\start-fly-desktop-mirror.ps1; its analyzer reads the synchronized Fly mirror."
+  Write-Host "Use scripts\start-laptop-stack.ps1; the analyzer reads v2 research segments pulled from Fly."
   Write-Host "Disaster recovery only: set $legacyOwnerOptInName to the exact audited opt-in phrase for this process."
   exit 78
 }

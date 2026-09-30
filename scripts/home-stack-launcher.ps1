@@ -50,10 +50,10 @@ function Get-LegacyStartRefusal([string]$RequestedAction) {
 
 function Invoke-FlyDesktopMirror {
   try {
-    & (Join-Path $scriptDir "start-fly-desktop-mirror.ps1") -NoWait
+    & (Join-Path $scriptDir "start-laptop-stack.ps1") -NoWait
     return @{
       ok = $true
-      message = "Fly desktop mirror started: :7002 proxy, data sync, and :9001 analyzer."
+      message = "Laptop stack started: :7002 proxy; laptop-chain supervisor owns the v2 segment pull and :9001 analyzer."
       architecture_owner = "fly.io"
     }
   } catch {
@@ -89,7 +89,6 @@ function Invoke-ResetFlyDesktopMirror {
   # enumerate or stop the canonical Fly machine, a local strategy process, or
   # the :7810 bridge serving this request.
   Stop-RecordedMirrorProcess ".fly-dashboard-proxy.pid" @("fly-dashboard-proxy.py")
-  Stop-RecordedMirrorProcess ".fly-data-sync-loop.lock" @("sync-fly-bot-data-loop.ps1")
   Stop-RecordedMirrorProcess ".home-analyzer-crash-monitor.pid" @("analyzer-auto-restart.ps1")
   Stop-RecordedMirrorProcess ".home-analyzer-starter.pid" @("start-home-analyzer.ps1")
   Stop-RecordedMirrorProcess ".home-analyzer-dashboard.pid" @("research_dashboard.py")
@@ -101,8 +100,6 @@ function Invoke-ResetFlyDesktopMirror {
   )) {
     Remove-Item -LiteralPath (Join-Path $repoRoot $marker) -Force -ErrorAction SilentlyContinue
   }
-  $canonicalHeartbeat = Join-Path $repoRoot "services\btc-conservative-agent\canonical-research-data\.fly-data-sync-loop.heartbeat.json"
-  Remove-Item -LiteralPath $canonicalHeartbeat -Force -ErrorAction SilentlyContinue
   Start-Sleep -Milliseconds 500
   return (Invoke-FlyDesktopMirror)
 }

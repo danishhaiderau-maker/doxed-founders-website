@@ -10,7 +10,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
 
 # QUARANTINED LEGACY OWNER. Normal desktop operation is
-# start-fly-desktop-mirror.ps1; it never runs this Python strategy process.
+# start-laptop-stack.ps1; it never runs this Python strategy process.
 # Keep the old launcher reversible for an operator-led disaster recovery only.
 $legacyOwnerOptInName = "DCF_ENABLE_OBSOLETE_WINDOWS_TRADING_OWNER"
 $legacyOwnerOptInPhrase = "I_UNDERSTAND_THIS_STARTS_A_SECOND_AI_TRADING_OWNER"
@@ -18,7 +18,7 @@ $legacyOwnerOptIn = (Get-Item -Path "env:$legacyOwnerOptInName" -ErrorAction Sil
 if ($legacyOwnerOptIn -cne $legacyOwnerOptInPhrase) {
   Write-Host "REFUSED: this obsolete launcher would start a second AI/strategy owner on Windows." -ForegroundColor Red
   Write-Host "Fly.io remains the sole production owner." -ForegroundColor Yellow
-  Write-Host "Safe desktop mirror: powershell -File scripts\start-fly-desktop-mirror.ps1 -NoWait"
+  Write-Host "Safe laptop stack: powershell -File scripts\start-laptop-stack.ps1 -NoWait"
   Write-Host "Disaster recovery only: set $legacyOwnerOptInName to the exact audited opt-in phrase for this process."
   exit 78
 }

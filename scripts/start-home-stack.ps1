@@ -21,7 +21,7 @@ $legacyOwnerOptIn = (Get-Item -Path "env:$legacyOwnerOptInName" -ErrorAction Sil
 if ($legacyOwnerOptIn -cne $legacyOwnerOptInPhrase) {
   Write-Host "REFUSED: this obsolete stack would start a second AI/strategy bot and a desktop tunnel." -ForegroundColor Red
   Write-Host "Fly.io remains the sole production owner." -ForegroundColor Yellow
-  Write-Host "Use scripts\start-fly-desktop-mirror.ps1 for :7002 proxy, data sync, and :9001 analyzer."
+  Write-Host "Use scripts\start-laptop-stack.ps1 for the :7002 proxy; the laptop-chain supervisor owns the v2 segment pull and :9001 analyzer."
   Write-Host "Disaster recovery only: set $legacyOwnerOptInName to the exact audited opt-in phrase for this process."
   exit 78
 }

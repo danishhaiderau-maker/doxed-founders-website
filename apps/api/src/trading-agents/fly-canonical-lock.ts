@@ -8,7 +8,7 @@ import { CANONICAL_SHOWCASE_BOT_URL } from './canonical-showcase-runtime';
  * `config/fly-canonical.lock.json` is the source-controlled statement that
  * Fly.io is the sole AI/strategy/trading owner and that desktop 7002 is a
  * read-only proxy. The desktop launchers (`scripts/start-home-bot.ps1`,
- * `scripts/start-fly-desktop-mirror.ps1`, `scripts/fly-canonical-lock.ps1`)
+ * `scripts/start-laptop-stack.ps1`, `scripts/fly-canonical-lock.ps1`)
  * already enforce this on the Windows side; this module is the API-side
  * mirror so a stale or rogue desktop publisher can never satisfy the
  * canonical-owner check on Railway even if it shares `BOT_CONTROL_SECRET`.
