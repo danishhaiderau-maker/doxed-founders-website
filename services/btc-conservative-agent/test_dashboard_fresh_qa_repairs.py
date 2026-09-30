@@ -1,4 +1,4 @@
-"""Focused regressions for fresh analyzer-dashboard truthfulness fixes."""
+﻿"""Focused regressions for fresh analyzer-dashboard truthfulness fixes."""
 import json
 
 import pytest
@@ -84,19 +84,12 @@ def test_shadow_api_declares_executed_and_counterfactual_as_separate(monkeypatch
     assert payload["evidence_classes"]["executed_paper"]["merged_with_shadow"] is False
 
 
-def test_shadow_api_marks_stale_signed_report_unavailable_and_keeps_generic_counts(monkeypatch):
-    source = _source()
-    source["report"]["generation_revision"] = "revision-current"
-    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: source)
+def test_shadow_api_never_reads_retired_signed_lane_report_and_keeps_generic_counts(monkeypatch):
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: _source())
+    requested = []
 
     def fake_report(name, default=None):
-        if name == "shadow_lane_comprehensive_report.json":
-            return {
-                "generation_revision": "revision-old",
-                "epoch_scope": {"selected_epoch_id": "epoch-old"},
-                "coverage": {"independent_shared_ai_episodes": 8},
-                "cohorts": [{"research_lane": "CONTINUOUS"}],
-            }
+        requested.append(name)
         if name == "chase_threshold_report.json":
             return {"coverage": {
                 "shadow_terminal_outcomes": 14,
@@ -107,12 +100,10 @@ def test_shadow_api_marks_stale_signed_report_unavailable_and_keeps_generic_coun
 
     monkeypatch.setattr(dashboard, "_read_report", fake_report)
     payload = dashboard.app.test_client().get("/api/shadow-policy-research").get_json()
-    signed = payload["comprehensive_shadow_lanes"]
-    assert signed["available"] is False
-    assert "EPOCH_MISMATCH" in signed["reason"]
-    assert "GENERATION_REVISION_MISMATCH" in signed["reason"]
-    assert signed["coverage"] == {}
-    assert signed["cohorts"] == []
+    assert "shadow_lane_comprehensive_report.json" not in requested
+    assert "comprehensive_shadow_lanes" not in payload
+    assert "v22_shadow" not in payload
+    assert "REPORT_MISSING" not in json.dumps(payload)
     assert payload["generic_shadow_terminals"] == {
         "status": "SEPARATE_GENERIC_COUNTERFACTUAL_COHORT",
         "terminal_outcomes": 14,
@@ -122,28 +113,22 @@ def test_shadow_api_marks_stale_signed_report_unavailable_and_keeps_generic_coun
     }
 
 
-def test_shadow_api_exposes_matching_signed_report_without_merging_generic(monkeypatch):
-    source = _source()
-    source["report"]["generation_revision"] = "revision-current"
-    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: source)
+def test_shadow_and_dynamic_pages_drop_retired_fields():
+    page = dashboard.app.test_client().get("/shadow-research").get_data(as_text=True)
+    for retired in ("comprehensive_shadow_lanes", "Signed per-lane", "legacy_unscoped_cohorts",
+                    "v22_shadow", "required_market_families"):
+        assert retired not in page
+    assert "Generic shadow terminal outcomes" in page
+    assert "['Required market regimes',(d.required_runtime_regimes||[]).join(' / ')||'not defined']" in page
 
-    def fake_report(name, default=None):
-        if name == "shadow_lane_comprehensive_report.json":
-            return {
-                "generation_revision": "revision-current",
-                "epoch_scope": {"selected_epoch_id": "epoch-clean"},
-                "coverage": {"independent_shared_ai_episodes": 8},
-                "cohorts": [{"research_lane": "CONTINUOUS"}],
-            }
-        if name == "chase_threshold_report.json":
-            return {"coverage": {"shadow_terminal_outcomes": 14}}
-        return default or {}
 
-    monkeypatch.setattr(dashboard, "_read_report", fake_report)
-    payload = dashboard.app.test_client().get("/api/shadow-policy-research").get_json()
-    assert payload["comprehensive_shadow_lanes"]["available"] is True
-    assert payload["comprehensive_shadow_lanes"]["coverage"]["independent_shared_ai_episodes"] == 8
-    assert payload["generic_shadow_terminals"]["terminal_outcomes"] == 14
+def test_dynamic_api_publishes_required_market_regimes(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard, "ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(dashboard, "_safe_policy_v3_dashboard_source", lambda: _source())
+    payload = dashboard.app.test_client().get("/api/dynamic-policy-research").get_json()
+    assert payload["required_runtime_regimes"]
+    assert all(isinstance(regime, str) and regime for regime in payload["required_runtime_regimes"])
 
 
 def test_unsupported_scenario_rows_are_diagnostics_not_execution_leaders():

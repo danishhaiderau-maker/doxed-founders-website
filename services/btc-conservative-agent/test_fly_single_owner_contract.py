@@ -73,9 +73,10 @@ assert "AI" not in text("fly-dashboard-proxy.py").replace(
 assert "python bot.py" not in (
     ROOT / "services" / "btc-conservative-agent" / "start.ps1"
 ).read_text(encoding="utf-8")
-assert "REFUSED_NON_FLY_RUNTIME" in (
-    ROOT / "services" / "btc-conservative-agent" / "start.ps1"
-).read_text(encoding="utf-8")
+start_ps1 = (ROOT / "services" / "btc-conservative-agent" / "start.ps1").read_text(encoding="utf-8")
+assert "REFUSED_NON_FLY_RUNTIME" in start_ps1
+assert "scripts\\start-laptop-stack.ps1" in start_ps1
+assert "start-fly-desktop-mirror" not in start_ps1
 assert "desktop strategy environment export is disabled" in text(
     "print-home-bot-env.mjs"
 )

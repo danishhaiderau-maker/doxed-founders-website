@@ -4169,41 +4169,7 @@ def api_shadow_policy_research():
     collection = report.get("collection") or {}
     paused = _read_report("paused_shadow_research_report.json", {})
     real_edge = _read_report("real_edge_summary.json", {})
-    comprehensive = _read_report("shadow_lane_comprehensive_report.json", {}) or {}
     chase_threshold = _read_report("chase_threshold_report.json", {}) or {}
-    expected_epoch = str(source["epoch_id"] or "")
-    comprehensive_epoch = str(
-        (comprehensive.get("epoch_scope") or {}).get("selected_epoch_id")
-        or comprehensive.get("epoch_id")
-        or ""
-    )
-    expected_revision = str(report.get("generation_revision") or "")
-    comprehensive_revision = str(comprehensive.get("generation_revision") or "")
-    shadow_mismatch_reasons = []
-    if not comprehensive:
-        shadow_mismatch_reasons.append("REPORT_MISSING")
-    if comprehensive and comprehensive_epoch != expected_epoch:
-        shadow_mismatch_reasons.append("EPOCH_MISMATCH")
-    if (
-        comprehensive and expected_revision and comprehensive_revision
-        and comprehensive_revision != expected_revision
-    ):
-        shadow_mismatch_reasons.append("GENERATION_REVISION_MISMATCH")
-    comprehensive_envelope = {
-        "available": not shadow_mismatch_reasons,
-        "status": "CURRENT" if not shadow_mismatch_reasons else "UNAVAILABLE_STALE_OR_MISSING",
-        "reason": ",".join(shadow_mismatch_reasons) if shadow_mismatch_reasons else None,
-        "expected_epoch_id": expected_epoch or None,
-        "report_epoch_id": comprehensive_epoch or None,
-        "expected_generation_revision": expected_revision or None,
-        "report_generation_revision": comprehensive_revision or None,
-        "coverage": (comprehensive.get("coverage") or {}) if not shadow_mismatch_reasons else {},
-        "epoch_scope": (comprehensive.get("epoch_scope") or {}) if not shadow_mismatch_reasons else {},
-        "cohorts": list(comprehensive.get("cohorts") or []) if not shadow_mismatch_reasons else [],
-        "legacy_unscoped_cohorts": list(
-            comprehensive.get("legacy_unscoped_cohorts") or []
-        ) if not shadow_mismatch_reasons else [],
-    }
     chase_coverage = chase_threshold.get("coverage") or {}
     generic_shadow = {
         "status": "SEPARATE_GENERIC_COUNTERFACTUAL_COHORT",
@@ -4239,9 +4205,7 @@ def api_shadow_policy_research():
                 "merged_with_shadow": False,
             },
         },
-        "v22_shadow": {},
         "paused_shadow": paused,
-        "comprehensive_shadow_lanes": comprehensive_envelope,
         "generic_shadow_terminals": generic_shadow,
         "real_edge": real_edge,
         "legacy_v22_excluded": {
@@ -4250,7 +4214,7 @@ def api_shadow_policy_research():
         },
         "blockers": source["blockers"],
         "warning": (
-            "Current signed V3.1 shadow and rejected paths are shown separately from retired V2.2. "
+            "Current V3.1 generic shadow counts and rejected paths are shown separately from retired V2.2. "
             "Counterfactual PnL is never merged with executed PnL and cannot authorize a live policy."
         ),
     })
@@ -4278,16 +4242,14 @@ fetch(endpoint).then(r=>r.json()).then(d=>{
   document.getElementById('head').innerHTML='<tr><th>Policy</th><th>Train N</th><th>Train WR</th><th>Train PnL</th><th>OOS N</th><th>OOS WR</th><th>OOS PnL</th><th>OOS EV</th><th>Drawdown</th><th>Status</th></tr>';
   rows=(d.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>—</td><td>${x.oos_episodes??0}</td><td>—</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>${money(x.max_drawdown_usd)}</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`);
  } else if(mode==='dynamic'){
-  cards=[['Epoch',d.epoch_id],['Qualified OOS winner',d.winner_kind==='NONE'?'NONE — qualification incomplete':(d.winner_kind||'NONE')],['Descriptive regime leader',d.relative_leader_kind||'NONE'],['Static comparison EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic comparison EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required markets',(d.required_market_families||[]).join(' / ')]];
+  cards=[['Epoch',d.epoch_id],['Qualified OOS winner',d.winner_kind==='NONE'?'NONE — qualification incomplete':(d.winner_kind||'NONE')],['Descriptive regime leader',d.relative_leader_kind||'NONE'],['Static comparison EV',money((d.static_oos||{}).expectancy_usd)],['Dynamic comparison EV',money((d.dynamic_oos||{}).expectancy_usd)],['Required market regimes',(d.required_runtime_regimes||[]).join(' / ')||'not defined']];
   document.getElementById('head').innerHTML='<tr><th>Market regime</th><th>Selected policy</th><th>Train N</th><th>Train PnL</th><th>OOS N</th><th>OOS PnL</th><th>OOS EV</th><th>Fallback</th><th>Status</th></tr>';
   rows=(d.regimes||[]).flatMap(group=>(group.policies||[]).map(x=>`<tr><td>${group.regime}</td><td>${x.policy_id}</td><td>${x.training_episodes??'—'}</td><td>—</td><td>${x.oos_episodes??0}</td><td>${money(x.sealed_oos_net_usd)}</td><td>${money(x.expectancy_lcb_usd)}</td><td>NO</td><td class="bad">${x.qualification||'DESCRIPTIVE_ONLY'}</td></tr>`));
  } else {
-  const s=d.v22_shadow||{}, c=d.comprehensive_shadow_lanes||{}, cov=c.coverage||{}, scope=c.epoch_scope||{}, g=d.generic_shadow_terminals||{}, p=d.paused_shadow||{}, o=p.overall||{}, re=d.real_edge||{}, signedAvailable=c.available===true;
-  cards=[['Current rejected paths',d.current_epoch_rejected??'UNAVAILABLE'],['Signed per-lane shadow episodes',signedAvailable?(cov.independent_shared_ai_episodes??0):('UNAVAILABLE · '+(c.reason||'report missing'))],['Signed per-lane records',signedAvailable?(cov.deduped_lane_records??0):'UNAVAILABLE'],['Generic shadow terminal outcomes',g.terminal_outcomes??'UNAVAILABLE'],['Generic counterfactual terminals',g.generic_terminal_outcomes??'UNAVAILABLE'],['Tile LAB shadow terminals',g.tile_lab_terminal_outcomes??'UNAVAILABLE'],['Preserved legacy/unscoped',signedAvailable?(scope.legacy_unscoped_rows??0):'UNAVAILABLE'],['Foreign / malformed',signedAvailable?(Number(scope.foreign_epoch_rows||0)+Number(scope.malformed_current_identity_rows||0)):'UNAVAILABLE'],['Paired signed episodes',signedAvailable?(cov.paired_multi_lane_episodes??0):'UNAVAILABLE'],['Provisional exclusions',signedAvailable?(c.cohorts||[]).reduce((n,x)=>n+(x.provisional_excluded||0),0):'UNAVAILABLE'],['Executed PnL (separate)',money(re.executed_pnl_usd)]];
-  document.getElementById('head').innerHTML='<tr><th>Policy / lane</th><th>Episodes</th><th>Fills</th><th>Wins</th><th>Losses</th><th>Net PnL</th><th>EV</th><th>Status</th></tr>';
-  rows=signedAvailable?(c.cohorts||[]).map(x=>`<tr><td>${x.research_lane}<br><small>${x.classification}</small></td><td>${x.independent_shared_ai_episodes}</td><td>${x.completed_terminal_fills}/${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_per_completed_fill_usd)}</td><td class="bad">${x.qualification}; provisional excluded ${x.provisional_excluded}</td></tr>`):[`<tr><td colspan="8">Signed per-lane shadow cohort unavailable: ${c.reason||'report missing'}. Generic terminal counts remain separate above.</td></tr>`];
-  rows=rows.concat((c.legacy_unscoped_cohorts||[]).map(x=>`<tr><td>${x.research_lane}<br><small>${x.classification}</small></td><td>${x.independent_shared_ai_episodes}</td><td>${x.completed_terminal_fills}/${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.ev_per_completed_fill_usd)}</td><td class="bad">LEGACY UNSCOPED — preserved, excluded from current signed cohort</td></tr>`));
-  rows=rows.concat((s.profitable_policies||[]).map(x=>`<tr><td>${x.policy_id}<br><small>REJECTED V2.2 POLICY REPLAY</small></td><td>${x.independent_episodes}</td><td>${x.fills}</td><td>${x.wins}</td><td>${x.losses}</td><td>${money(x.net_pnl_usd)}</td><td>${money(x.expectancy_usd)}</td><td class="bad">${x.qualification}</td></tr>`));
+  const g=d.generic_shadow_terminals||{}, re=d.real_edge||{};
+  cards=[['Current rejected paths',d.current_epoch_rejected??'UNAVAILABLE'],['Generic shadow terminal outcomes',g.terminal_outcomes??'UNAVAILABLE'],['Generic counterfactual terminals',g.generic_terminal_outcomes??'UNAVAILABLE'],['Tile LAB shadow terminals',g.tile_lab_terminal_outcomes??'UNAVAILABLE'],['Executed PnL (separate)',money(re.executed_pnl_usd)]];
+  document.getElementById('head').innerHTML='<tr><th>Cohort</th><th>Terminal outcomes</th><th>PnL kind</th><th>Status</th></tr>';
+  rows=[['Generic shadow',g.terminal_outcomes],['Generic counterfactual',g.generic_terminal_outcomes],['Tile LAB shadow',g.tile_lab_terminal_outcomes]].map(x=>`<tr><td>${x[0]}</td><td>${x[1]??'UNAVAILABLE'}</td><td>SIMULATED_COUNTERFACTUAL</td><td class="bad">DESCRIPTIVE ONLY - never merged with executed PnL</td></tr>`);
  }
  document.getElementById('kpis').innerHTML=cards.map(x=>`<div class="kpi"><small>${x[0]}</small><div>${x[1]??'—'}</div></div>`).join('');
  const emptyMessage=d.status==='UNAVAILABLE_CURRENT_GENERATION'?'Current analyzer publication unavailable. Complete verified mirror publication and analyzer generation before interpreting policy results.':'No policy rows available in this report. Review the evidence status and blockers above.';

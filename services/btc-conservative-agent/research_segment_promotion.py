@@ -28,6 +28,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import research_segment_format as fmt
 from research_segment_puller import STATE_SCHEMA, PullerError, _RunLock, refuse_unsafe_root
 from research_segment_store import HttpSegmentSource, StoreError
 
@@ -97,8 +98,18 @@ def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
     return reasons
 
 
+def genesis_window_end(manifest_raw: bytes | None) -> float | None:
+    try:
+        manifest = json.loads(manifest_raw or b"")
+        value = float(manifest["window_end"])
+    except (ValueError, KeyError, TypeError):
+        return None
+    return value if int(manifest.get("seq") or 0) == 1 and value > 0 else None
+
+
 def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
-               max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES) -> dict:
+               max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES,
+               genesis_at: float | None = None) -> dict:
     shadow_root = refuse_unsafe_root(shadow_root, "shadow root")
     view_root = refuse_unsafe_root(view_root, "promotion view")
     tree = shadow_root / "tree"
@@ -137,6 +148,7 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         "collectionEpochId": state.get("last_collection_epoch_id"),
         "segmentPrefix": head.get("prefix"),
         "segmentAppliedSeq": state["applied_seq"],
+        "segmentGenesisAt": genesis_at,
         "segmentHeadManifestSha256": state["last_manifest_sha256"],
         "throttledSnapshots": head.get("throttled_snapshots") or [],
         "unshippedBytesAtPromotion": int(head.get("unshipped_bytes") or 0),
@@ -170,7 +182,8 @@ def main(argv=None) -> int:
                                    admin_token=os.environ.get("BOT_ADMIN_TOKEN") or "")
         receipt = stage_view(shadow_root=Path(args.shadow_root), view_root=Path(args.view),
                              head=source.head(), health=_health(args.base_url),
-                             max_unshipped_bytes=args.max_unshipped_bytes)
+                             max_unshipped_bytes=args.max_unshipped_bytes,
+                             genesis_at=genesis_window_end(source.get(fmt.manifest_key(args.prefix, 1))))
     except PromotionRefused as exc:
         print(json.dumps({"ok": False, "deny_reasons": exc.reasons}, indent=2))
         return 3
