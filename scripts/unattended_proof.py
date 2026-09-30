@@ -343,17 +343,31 @@ def _manual_entries(state_dir: Path, since: float) -> list[dict[str, Any]]:
     return entries
 
 
-def start(state_dir: Path, receipt_dir: Path, now: float, *, force: bool = False) -> dict[str, Any]:
+def start(state_dir: Path, receipt_dir: Path, now: float, *, force: bool = False, reason: str = "") -> dict[str, Any]:
     assert_not_onedrive(state_dir)
     assert_not_onedrive(receipt_dir)
     active_path = state_dir / "unattended-proof" / ACTIVE_FILE
     active = read_json(active_path)
-    if isinstance(active, Mapping) and not active.get("verdict") and not force:
+    running = isinstance(active, Mapping) and not active.get("verdict")
+    if running and not force:
         raise SystemExit(f"REFUSED: proof window already running since {active.get('t0')}")
+    if running and not reason.strip():
+        raise SystemExit("REFUSED: replacing a running window requires --reason")
     runtime = read_json(state_dir / RUNTIME_SNAPSHOT) or {}
     ok, err = _fresh_snapshot(runtime, now, "Fly runtime")
     if not ok:
         raise SystemExit(f"REFUSED: cannot record a baseline: {err}")
+    if running:
+        old_receipt = Path(str(active.get("receipt")))
+        old_rows = [r for r in read_rows(old_receipt) if r.get("kind") == "ROW"]
+        superseded = {
+            "schema": VERDICT_SCHEMA, "kind": "VERDICT", "result": "SUPERSEDED", "at": iso(now),
+            "t0": active.get("t0"), "ends_at": active.get("ends_at"), "reason": reason.strip(),
+            "rows": len(old_rows), "fail_rows": sum(1 for r in old_rows if r.get("status") == "FAIL"),
+        }
+        with old_receipt.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(superseded, sort_keys=True) + "\n")
+        write_json_atomic(old_receipt.with_suffix(".verdict.json"), superseded)
     receipt = receipt_dir / f"unattended-proof-{stamp(now)}.jsonl"
     record = {
         "schema": START_SCHEMA, "kind": "START", "t0": iso(now), "ends_at": iso(now + WINDOW_HOURS * 3600),
@@ -416,12 +430,13 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--start", action="store_true")
     mode.add_argument("--check", action="store_true")
     parser.add_argument("--force", action="store_true", help="start: replace a running window; check: write a row now")
+    parser.add_argument("--reason", default="", help="start --force: why the running window is superseded")
     args = parser.parse_args(argv)
     now = datetime.now(timezone.utc).timestamp()
     state_dir = Path(args.state_dir)
     try:
         if args.start:
-            record = start(state_dir, Path(args.receipt_dir), now, force=args.force)
+            record = start(state_dir, Path(args.receipt_dir), now, force=args.force, reason=args.reason)
             print(f"PROOF_STARTED t0={record['t0']} receipt={record['receipt']}")
         else:
             result = check(state_dir, now, force=args.force)

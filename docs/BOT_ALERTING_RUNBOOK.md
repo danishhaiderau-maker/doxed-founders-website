@@ -92,6 +92,10 @@ Any operator action during the window must be journalled as one JSON line
 `C:\DoxxedCrypto\laptop-chain\manual-interventions.jsonl`; it fails the
 proof honestly.
 
+`--start --force --reason "<why>"` replaces a running window only after
+appending a `SUPERSEDED` verdict (reason, row and FAIL counts) to the old
+receipt and its `.verdict.json`; the old window is never silently dropped.
+
 ## Proving the channel
 
 - Fly: run **Monitor Fly BTC bot** via *Run workflow* with `test_alert`

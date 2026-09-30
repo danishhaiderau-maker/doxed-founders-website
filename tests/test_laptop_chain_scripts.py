@@ -363,6 +363,36 @@ def test_monitor_treats_plan_race_as_benign_until_shipping_stalls(chain):
     assert _active_alert_codes(chain) == {"FLY_SEGMENT_SHIPPER_ERROR"}
 
 
+def _healthy_chain_without_embedded_receipt(chain):
+    chain["state"].mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=0, error=None)
+    _puller_status(chain, ack_receipt=None, applied_now=0)
+    (chain["segments"] / "parity-latest.json").write_text(json.dumps(
+        {"verdict": "GREEN", "seq": 40, "generated_at": _iso(-5)}), encoding="utf-8")
+
+
+@windows_only
+def test_monitor_reads_the_receipt_log_when_an_idle_pull_omits_the_ack(chain):
+    _healthy_chain_without_embedded_receipt(chain)
+    log = chain["segments"] / ".puller" / "ack-receipts.jsonl"
+    log.write_text(json.dumps({"ok": True, "result": "RECORDED", "through_seq": 40, "received_at": _iso(-40)}) + "\n",
+                   encoding="utf-8")
+    result = _monitor_with_pull_loop_held(chain)
+    assert result.returncode == 0, result.stdout + result.stderr
+    log.write_text(json.dumps({"ok": True, "result": "RECORDED", "through_seq": 38, "received_at": _iso(-40)}) + "\n",
+                   encoding="utf-8")
+    _monitor_with_pull_loop_held(chain)
+    assert _active_alert_codes(chain) == {"SEGMENT_ACK_STALE"}
+
+
+@windows_only
+def test_monitor_flags_no_ack_data_when_no_receipt_exists_anywhere(chain):
+    _healthy_chain_without_embedded_receipt(chain)
+    _monitor_with_pull_loop_held(chain)
+    assert _active_alert_codes(chain) == {"SEGMENT_ACK_NO_DATA"}
+
+
 @windows_only
 def test_monitor_flags_a_rejected_v2_ack(chain):
     chain["state"].mkdir(parents=True, exist_ok=True)

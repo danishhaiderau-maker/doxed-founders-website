@@ -80,13 +80,23 @@ if (-not $pullDisabled) {
 # 5. v2 ACK accepted by Fly. A missing puller status is already SEGMENT_PULL_STALE.
 $puller = Read-JsonFile (Join-Path $cfg.SegmentShadowRoot '.puller\status.json')
 if ($puller) {
+  # The puller only embeds ack_receipt on runs that applied a segment; idle runs
+  # leave it out, so fall back to the last receipt in its append-only log.
   $receipt = $puller.ack_receipt
+  if (-not $receipt) {
+    $receiptLog = Join-Path $cfg.SegmentShadowRoot '.puller\ack-receipts.jsonl'
+    if (Test-Path -LiteralPath $receiptLog) {
+      $lastLine = Get-Content -LiteralPath $receiptLog -Tail 1 -ErrorAction SilentlyContinue
+      if ($lastLine) { try { $receipt = $lastLine | ConvertFrom-Json } catch { $receipt = $null } }
+    }
+  }
   $ackedAt = if ($receipt) { ConvertTo-UtcDate $receipt.received_at } else { $null }
+  $caughtUp = $receipt -and $null -ne $puller.applied_seq -and [long]$receipt.through_seq -ge [long]$puller.applied_seq
   if (-not $receipt) {
     Add-Alert 'SEGMENT_ACK_NO_DATA' 'critical' 'Fly has not recorded a v2 ACK from this laptop'
   } elseif ($receipt.ok -ne $true) {
     Add-Alert 'SEGMENT_ACK_REJECTED' 'critical' ("Fly answered the v2 ACK through seq {0} with {1}" -f $receipt.through_seq, $receipt.result)
-  } elseif ($null -eq $ackedAt -or ($now - $ackedAt).TotalMinutes -gt $PullStaleMin) {
+  } elseif ($null -eq $ackedAt -or (-not $caughtUp -and ($now - $ackedAt).TotalMinutes -gt $PullStaleMin)) {
     Add-Alert 'SEGMENT_ACK_STALE' 'critical' ("last v2 ACK accepted by Fly through seq {0} at {1}" -f $receipt.through_seq, $receipt.received_at)
   }
 }
