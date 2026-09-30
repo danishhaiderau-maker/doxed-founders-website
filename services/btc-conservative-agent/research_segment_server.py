@@ -170,6 +170,10 @@ class SegmentServer:
             "oversized_paths": status.get("oversized_paths"),
             "throttled_snapshots": status.get("throttled_snapshots"),
             "racing_paths": status.get("racing_paths"),
+            "backlog_mode": bool(status.get("backlog_mode")),
+            "segment_budget_bytes": status.get("segment_budget_bytes"),
+            "shipper_priority": status.get("priority"),
+            "shipper_priority_error": status.get("priority_error"),
             "laptop_acked": self.acked_head(),
             "pruning_enabled": False,
         }

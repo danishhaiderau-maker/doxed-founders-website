@@ -52,6 +52,17 @@ VOLUME_DEFAULT_MIN_FREE_BYTES = 4 * 1024 ** 3
 DEFAULT_MIN_FREE_BYTES = 200 * 1024 * 1024
 SNAPSHOT_COPY_ATTEMPTS = 3
 RACE_BACKOFF_BASE_SECONDS = 60.0
+# A stream that races during a build is dropped from that build and the rest
+# is rebuilt, so one hot snapshot cannot discard a whole cycle's work.
+RACE_REBUILDS_PER_CYCLE = 4
+# Backlog mode: above this many unshipped bytes a cycle ships a larger segment
+# and the worker leaves SCHED_IDLE for a bounded nice level, because an idle-class
+# process on a saturated core gets almost no CPU and each cycle's full scan
+# would otherwise be amortised over only one small segment.
+DEFAULT_BACKLOG_BOOST_BYTES = 8 * 1024 * 1024
+DEFAULT_BOOST_SEGMENT_BYTES = 64 * 1024 * 1024
+DEFAULT_BOOST_NICE = 10
+IDLE_NICE = 19
 # Online-backup steps hold the source's SHARED lock only for one step, so the
 # bot's rollback-journal writers (5 s busy timeout) are never starved.
 SQLITE_BACKUP_PAGES_PER_STEP = 1024
@@ -238,8 +249,14 @@ class SegmentShipper:
         max_sqlite_bytes: int = 512 * 1024 * 1024, huge_snapshot_interval: float = 6 * 3600.0,
         sqlite_backup_deadline: float = SQLITE_BACKUP_DEADLINE_SECONDS,
         baseline_genesis: bool = False,
+        backlog_boost_bytes: int = 0, boost_segment_bytes: int = 0,
     ):
         self.sink = sink
+        # 0 disables backlog mode; the regular budget then always applies.
+        self.backlog_boost_bytes = max(0, int(backlog_boost_bytes))
+        self.boost_segment_bytes = max(0, int(boost_segment_bytes))
+        self.last_deferred: int | None = None
+        self.boosted = False
         # A fresh epoch starts at "now": seq 1 records existing bytes instead
         # of shipping them, so only data written after the cutover travels.
         self.baseline_genesis = bool(baseline_genesis)
@@ -272,6 +289,39 @@ class SegmentShipper:
         self.sqlite_scratch = self.state_dir / "sqlite-snapshots"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._clear_sqlite_scratch()
+
+    # ------------------------------------------------------------ backlog mode
+    @property
+    def segment_budget(self) -> int:
+        if self.boosted:
+            return max(self.max_segment_bytes, self.boost_segment_bytes)
+        return self.max_segment_bytes
+
+    def _backlog_hint(self) -> int:
+        if self.last_deferred is not None:
+            return self.last_deferred
+        # A restarted worker resumes in the mode its last published status implies.
+        try:
+            status = json.loads(self.status_path.read_text(encoding="utf-8"))
+            return int(status.get("unshipped_bytes") or 0)
+        except (OSError, ValueError, TypeError):
+            return 0
+
+    def boost_due(self, state: dict | None = None) -> bool:
+        if not self.backlog_boost_bytes or self.boost_segment_bytes <= self.max_segment_bytes:
+            return False
+        if self._backlog_hint() <= self.backlog_boost_bytes:
+            return False
+        if self.max_store_bytes:
+            if state is None:
+                try:
+                    state = self.load_state()
+                except (OSError, ValueError, RuntimeError):
+                    return False
+            # A boosted segment must still fit under the store cap.
+            if int(state.get("store_bytes") or 0) + self.boost_segment_bytes > self.max_store_bytes:
+                return False
+        return True
 
     def _clear_sqlite_scratch(self) -> None:
         # Scratch backups are the shipper's own copies, never source evidence.
@@ -334,32 +384,48 @@ class SegmentShipper:
         return Path(name).suffix.lower() in self.rules["extensions"] or rotation is not None
 
     def scan(self) -> dict[str, tuple[Path, os.stat_result]]:
+        # scandir entries carry the file type, so each file costs one stat();
+        # the universe is tens of thousands of files and is rescanned per cycle.
         found = {}
         excluded_dirs = self.rules["excluded_dir_names"]
+        state_dir = str(self.state_dir)
+        # Windows DirEntry.stat() reports no inode/device, which checkpoints need.
+        full_stat = os.name == "nt"
         for root, prefix in self._roots():
-            for directory, dirnames, filenames in os.walk(root, followlinks=False):
-                current = Path(directory)
-                dirnames[:] = sorted(
-                    name for name in dirnames
-                    if name.lower() not in excluded_dirs
-                    and not (current / name).is_symlink()
-                    and (current / name).resolve() != self.state_dir
-                )
-                for name in sorted(filenames):
-                    path = current / name
-                    if path.is_symlink() or not self._allowed_name(name):
-                        continue
+            pending = [(str(root), prefix)]
+            while pending:
+                directory, rel_dir = pending.pop()
+                try:
+                    with os.scandir(directory) as iterator:
+                        entries = sorted(iterator, key=lambda entry: entry.name)
+                except OSError:
+                    continue
+                subdirs = []
+                for entry in entries:
+                    name = entry.name
                     try:
-                        stat = path.stat()
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if (name.lower() not in excluded_dirs
+                                    and os.path.realpath(entry.path) != state_dir):
+                                subdirs.append((entry.path, f"{rel_dir}/{name}" if rel_dir else name))
+                            continue
                     except OSError:
                         continue
-                    relative = path.relative_to(root).as_posix()
-                    relpath = f"{prefix}/{relative}" if prefix else relative
+                    if not self._allowed_name(name):
+                        continue
+                    try:
+                        stat = os.stat(entry.path) if full_stat else entry.stat()
+                    except OSError:
+                        continue
+                    relpath = f"{rel_dir}/{name}" if rel_dir else name
                     try:
                         fmt.validate_relpath(relpath)
                     except fmt.SegmentFormatError:
                         continue
-                    found[relpath] = (path, stat)
+                    found[relpath] = (Path(entry.path), stat)
+                pending.extend(reversed(subdirs))
         return found
 
     def _is_append_class(self, relpath: str) -> bool:
@@ -473,9 +539,9 @@ class SegmentShipper:
     def _clamp_append(self, op: dict) -> None:
         """Split large appends at a record boundary so they fit one segment."""
         op["pending_bytes"] = op["end_offset"] - op["base_offset"]
-        if op["pending_bytes"] <= self.max_segment_bytes:
+        if op["pending_bytes"] <= self.segment_budget:
             return
-        limit = op["base_offset"] + self.max_segment_bytes
+        limit = op["base_offset"] + self.segment_budget
         boundary = _complete_record_size(op["abs"], limit)
         if boundary > op["base_offset"]:
             op["end_offset"] = boundary
@@ -513,7 +579,7 @@ class SegmentShipper:
                 continue
             # A SQLite snapshot always travels alone so its backup can be
             # streamed from disk instead of held in memory.
-            if selected and (total + op["bytes"] > self.max_segment_bytes
+            if selected and (total + op["bytes"] > self.segment_budget
                              or self._sqlite_snapshot_op(op)):
                 deferred += sum(item.get("pending_bytes", item["bytes"]) for item in ops[index:])
                 self.next_cursor = op["stream"]
@@ -858,33 +924,46 @@ class SegmentShipper:
             # The first delta cycle follows immediately.
             return {"shipped": shipped, "recovered": recovered, "deferred_bytes": 1,
                     "members": new_state["baseline"]["append_streams"], "genesis": True}
+        self.boosted = self.boost_due(state)
+        mode = {"backlog_mode": self.boosted, "segment_budget_bytes": self.segment_budget}
         ops = self.plan(state, self.scan())
         selected, deferred = self.select(ops, cursor=str(state.get("select_cursor") or ""))
         oversized = sorted(op["path"] for op in ops if op.get("oversized"))
         throttled = sorted(self.throttled)[:50]
-        if not selected:
+        raced: list[str] = []
+        new_state = None
+        while selected:
+            try:
+                segment_raw, manifest_raw, new_state = self.build(state, selected)
+                break
+            except PlanRace as exc:
+                if exc.stream is None:
+                    raise
+                # Nothing was written: back the racing stream off and rebuild the
+                # other streams (they never depend on each other) in this cycle.
+                self._back_off(exc.stream)
+                raced.append(exc.stream)
+                dropped = [op for op in selected if op["stream"] == exc.stream]
+                selected = [op for op in selected if op["stream"] != exc.stream]
+                deferred += sum(op["bytes"] for op in dropped)
+                if not dropped or len(raced) > RACE_REBUILDS_PER_CYCLE:
+                    deferred += sum(op["bytes"] for op in selected)
+                    selected = []
+                if not selected:
+                    self.last_deferred = deferred
+                    self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
+                                      last_error=f"PLAN_RACE: {exc}", racing_paths=self.racing_paths(),
+                                      **mode)
+                    return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred,
+                            "race": exc.stream, **mode}
+        self.last_deferred = deferred
+        if new_state is None:
             self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
                               oversized_paths=oversized[:50], throttled_snapshots=throttled,
                               racing_paths=self.racing_paths(), last_error=None, last_segment_at=state.get("last_segment_at"),
                               last_manifest_sha256=state["last_manifest_sha256"],
-                              store_bytes=store_bytes)
-            return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred}
-        try:
-            segment_raw, manifest_raw, new_state = self.build(state, selected)
-        except PlanRace as exc:
-            if exc.stream is None:
-                raise
-            # Back the racing stream off so one hot file cannot stall every
-            # other stream; nothing was written, so the next cycle replans.
-            count = self.race_backoff.get(exc.stream, (0, 0.0))[0] + 1
-            delay = min(RACE_BACKOFF_BASE_SECONDS * 2 ** (count - 1),
-                        max(RACE_BACKOFF_BASE_SECONDS, self.large_snapshot_interval))
-            self.race_backoff[exc.stream] = (count, self.clock() + delay)
-            self.write_status(shipped_seq=state["seq"], last_error=f"PLAN_RACE: {exc}",
-                              racing_paths=self.racing_paths())
-            return {"shipped": None, "recovered": recovered,
-                    "deferred_bytes": deferred + sum(op["bytes"] for op in selected),
-                    "race": exc.stream}
+                              store_bytes=store_bytes, **mode)
+            return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred, **mode}
         self.write_intent(segment_raw, manifest_raw, new_state)
         shipped = self.complete_intent()
         for op in selected:
@@ -894,9 +973,18 @@ class SegmentShipper:
                           racing_paths=self.racing_paths(),
                           last_error=None, last_segment_at=new_state["last_segment_at"],
                           last_manifest_sha256=new_state["last_manifest_sha256"],
-                          store_bytes=new_state["store_bytes"])
-        return {"shipped": shipped, "recovered": recovered, "deferred_bytes": deferred,
-                "members": len(selected)}
+                          store_bytes=new_state["store_bytes"], **mode)
+        result = {"shipped": shipped, "recovered": recovered, "deferred_bytes": deferred,
+                  "members": len(selected), **mode}
+        if raced:
+            result["race"] = raced[0]
+        return result
+
+    def _back_off(self, stream: str) -> None:
+        count = self.race_backoff.get(stream, (0, 0.0))[0] + 1
+        delay = min(RACE_BACKOFF_BASE_SECONDS * 2 ** (count - 1),
+                    max(RACE_BACKOFF_BASE_SECONDS, self.large_snapshot_interval))
+        self.race_backoff[stream] = (count, self.clock() + delay)
 
     def racing_paths(self) -> list[dict]:
         return [{"path": stream, "races": count, "retry_at": round(until, 3)}
@@ -921,15 +1009,22 @@ class SegmentShipper:
         return best
 
 
-def _lower_priority() -> None:
+def _set_priority(boosted: bool, boost_nice: int = DEFAULT_BOOST_NICE) -> str | None:
+    """Idle class when caught up; a bounded nice level while draining a backlog.
+
+    Returns an error string when the platform refuses the change (the worker
+    then keeps whatever priority it has).
+    """
     try:
-        os.nice(10)
-    except (AttributeError, OSError):
-        pass
-    try:
-        os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
-    except (AttributeError, OSError):
-        pass
+        if boosted:
+            os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
+            os.setpriority(os.PRIO_PROCESS, 0, max(boost_nice, 1))
+        else:
+            os.setpriority(os.PRIO_PROCESS, 0, IDLE_NICE)
+            os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+    except (AttributeError, OSError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
 
 
 def _free_bytes(path: Path) -> int:
@@ -984,6 +1079,10 @@ def shipper_from_env(environ=None) -> SegmentShipper:
         huge_snapshot_interval=float(env.get("RESEARCH_SEGMENTS_HUGE_SNAPSHOT_INTERVAL_SECONDS")
                                      or 6 * 3600),
         baseline_genesis=(env.get("RESEARCH_SEGMENTS_BASELINE_GENESIS") or "0").strip() == "1",
+        backlog_boost_bytes=int(env.get("RESEARCH_SEGMENTS_BACKLOG_BOOST_BYTES")
+                                or DEFAULT_BACKLOG_BOOST_BYTES),
+        boost_segment_bytes=int(env.get("RESEARCH_SEGMENTS_BOOST_SEGMENT_BYTES")
+                                or DEFAULT_BOOST_SEGMENT_BYTES),
     )
 
 
@@ -991,7 +1090,9 @@ def main() -> int:
     if (os.getenv("RESEARCH_SEGMENTS_ENABLED") or "0").strip() != "1":
         _log("RESEARCH_SEGMENTS_ENABLED!=1 -> disabled")
         return 0
-    _lower_priority()
+    boost_nice = int(os.getenv("RESEARCH_SEGMENTS_BOOST_NICE") or DEFAULT_BOOST_NICE)
+    priority_boosted = False
+    priority_error = _set_priority(False)
     interval = max(30.0, float(os.getenv("RESEARCH_SEGMENTS_INTERVAL_SECONDS") or 300))
     backlog_pause = max(1.0, float(os.getenv("RESEARCH_SEGMENTS_BACKLOG_PAUSE_SECONDS") or 5))
     ack_poll = max(60.0, float(os.getenv("RESEARCH_SEGMENTS_ACK_POLL_SECONDS") or 1800))
@@ -1017,10 +1118,21 @@ def main() -> int:
                 shipper.write_status(last_error="LOW_DISK_SKIPPED")
                 _log("free space below floor -> cycle skipped")
             else:
+                boost = shipper.boost_due()
+                if boost != priority_boosted:
+                    priority_error = _set_priority(boost, boost_nice)
+                    priority_boosted = boost
+                    _log(f"backlog mode {'ON' if boost else 'OFF'} budget={shipper.segment_budget if boost else shipper.max_segment_bytes} "
+                         f"priority={'nice ' + str(boost_nice) if boost else 'idle'}"
+                         + (f" priority_error={priority_error}" if priority_error else ""))
+                    shipper.write_status(priority="boost" if boost else "idle",
+                                         priority_error=priority_error)
+                started = time.monotonic()
                 result = shipper.cycle()
                 if result.get("shipped"):
                     _log(f"shipped seq={result['shipped']['seq']} members={result['members']} "
-                         f"bytes={result['shipped']['segment_bytes']} deferred={result['deferred_bytes']}")
+                         f"bytes={result['shipped']['segment_bytes']} deferred={result['deferred_bytes']} "
+                         f"budget={result.get('segment_budget_bytes')} cycle_s={time.monotonic() - started:.1f}")
                 if result.get("race"):
                     _log(f"snapshot kept changing while copying, backing off: {result['race']}")
                 if result.get("deferred_bytes"):

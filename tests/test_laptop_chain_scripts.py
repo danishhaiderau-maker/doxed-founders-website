@@ -171,6 +171,27 @@ def _iso(delta_minutes: float = 0) -> str:
 
 
 @windows_only
+@pytest.mark.parametrize("pull, expected", [
+    ({"ok": True, "applied_seq": 10, "remote_head": {"published_seq": 10, "unshipped_bytes": 1024}}, 120),
+    ({"ok": True, "applied_seq": 10, "remote_head": {"published_seq": 10, "unshipped_bytes": 90_000_000}}, 15),
+    ({"ok": True, "applied_seq": 10, "remote_head": {"published_seq": 12, "unshipped_bytes": 0}}, 15),
+    ({"ok": False, "applied_seq": 10, "remote_head": {"published_seq": 12, "unshipped_bytes": 0}}, 120),
+    (None, 120),
+])
+def test_pull_loop_catches_up_while_fly_drains_a_backlog(chain, pull, expected):
+    payload = "$null" if pull is None else f"('{json.dumps(pull)}' | ConvertFrom-Json)"
+    result = _ps(_common_prelude(chain) + f"Get-SegmentPullSleepSeconds -Pull {payload} -IntervalSec 120 "
+                 "-CatchUpIntervalSec 15 -CatchUpUnshippedBytes 8388608", chain["env"])
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(expected)
+
+
+def test_pull_loop_uses_the_catch_up_interval():
+    loop = _source("research-segment-pull-loop.ps1")
+    assert "Get-SegmentPullSleepSeconds" in loop and "CatchUpIntervalSec" in loop
+
+
+@windows_only
 def test_terminal_failure_preserves_and_closes_in_progress_heartbeat(chain):
     _heartbeat(chain, ok=True, inProgress=True, phase="chunk_complete", updatedAt=_iso(-120), syncedAt=_iso(-120))
     result = _ps(_common_prelude(chain) + "Set-SyncHeartbeatTerminalFailure -Config $cfg -Reason 'TEST' -ConsecutiveFailures 2 -BackoffSec 120", chain["env"])

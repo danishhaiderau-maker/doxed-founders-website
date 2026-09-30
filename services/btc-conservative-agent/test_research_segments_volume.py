@@ -1,4 +1,4 @@
-"""Volume sink, authenticated HTTP serving, laptop ACK recording and prune hook."""
+﻿"""Volume sink, authenticated HTTP serving, laptop ACK recording and prune hook."""
 
 from __future__ import annotations
 
@@ -379,15 +379,13 @@ def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(t
 
     monkeypatch.setattr(shipper_mod.os, "fstat", churning_fstat)
     shipper = env.shipper()
+    # The racing stream is dropped and the rest of the same cycle still ships.
     raced = shipper.cycle()
-    assert raced["shipped"] is None and raced["race"] == "z_research.db"
-    status = json.loads(shipper.status_path.read_text())
-    assert status["last_error"].startswith("PLAN_RACE") and "changed while copying" in status["last_error"]
-    assert [item["path"] for item in status["racing_paths"]] == ["z_research.db"]
-
-    shipped = shipper.cycle()
-    members = json.loads(env.store.get(fmt.manifest_key("v1", shipped["shipped"]["seq"])))["members"]
+    assert raced["race"] == "z_research.db" and raced["shipped"]
+    members = json.loads(env.store.get(fmt.manifest_key("v1", raced["shipped"]["seq"])))["members"]
     assert [m["path"] for m in members] == ["a_live.jsonl"]
+    status = json.loads(shipper.status_path.read_text())
+    assert [item["path"] for item in status["racing_paths"]] == ["z_research.db"]
     assert shipper.cycle()["shipped"] is None
 
     env.clock[0] += shipper_mod.RACE_BACKOFF_BASE_SECONDS
@@ -402,6 +400,117 @@ def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(t
     assert json.loads(shipper.status_path.read_text())["racing_paths"] == []
     env.puller().pull_once()
     env.assert_tree_matches_source()
+
+
+# ------------------------------------------------------- backlog mode
+def _raw_member_bytes(env, result) -> int:
+    manifest = json.loads(env.store.get(fmt.manifest_key("v1", result["shipped"]["seq"])))
+    return sum(member["size"] for member in manifest["members"])
+
+
+def test_backlog_mode_ships_larger_segments_then_returns_to_regular_budget(tmp_path):
+    env = Env(tmp_path, max_segment_bytes=1000, backlog_boost_bytes=2000, boost_segment_bytes=8000)
+    env.store = VolumeStore(env.store_root)
+    for index in range(8):
+        env.write(f"stream{index}.jsonl", _rows(0, 150, tag=str(index)))
+    shipper = env.shipper()
+    first = shipper.cycle()
+    assert first["backlog_mode"] is False and first["segment_budget_bytes"] == 1000
+    assert _raw_member_bytes(env, first) <= 1000 and first["deferred_bytes"] > 2000
+
+    boosted = shipper.cycle()
+    assert boosted["backlog_mode"] is True and boosted["segment_budget_bytes"] == 8000
+    assert 1000 < _raw_member_bytes(env, boosted) <= 8000
+    status = json.loads(shipper.status_path.read_text())
+    assert status["backlog_mode"] is True and status["segment_budget_bytes"] == 8000
+    # A restarted worker resumes backlog mode from the published status.
+    assert env.shipper().boost_due() is True
+
+    while True:
+        result = shipper.cycle()
+        if not result["shipped"]:
+            break
+    assert result["deferred_bytes"] == 0 and result["backlog_mode"] is False
+    assert json.loads(shipper.status_path.read_text())["backlog_mode"] is False
+    env.write("stream0.jsonl", _rows(150, 5, tag="0"), append=True)
+    small = shipper.cycle()
+    assert small["shipped"] and small["segment_budget_bytes"] == 1000
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_backlog_mode_never_outgrows_the_store_cap(tmp_path):
+    env = Env(tmp_path, max_segment_bytes=1000, backlog_boost_bytes=2000, boost_segment_bytes=8000,
+              sink="volume", max_store_bytes=6000)
+    env.store = VolumeStore(env.store_root)
+    for index in range(8):
+        env.write(f"stream{index}.jsonl", _rows(0, 60, tag=str(index)))
+    shipper = env.shipper()
+    first = shipper.cycle()
+    assert first["deferred_bytes"] > 2000
+    # store_bytes + one boosted segment would exceed the cap -> regular budget.
+    second = shipper.cycle()
+    assert second["backlog_mode"] is False and _raw_member_bytes(env, second) <= 1000
+
+
+def test_backlog_mode_disabled_by_default(tmp_path):
+    env = Env(tmp_path, max_segment_bytes=500)
+    env.store = VolumeStore(env.store_root)
+    env.write("a.jsonl", _rows(0, 200))
+    shipper = env.shipper()
+    shipper.cycle()
+    assert shipper.boost_due() is False
+    assert shipper.cycle()["segment_budget_bytes"] == 500
+
+
+def test_env_enables_backlog_mode_with_bounded_defaults(tmp_path):
+    shipper = shipper_mod.shipper_from_env({
+        "BOT_DATA_DIR": str(tmp_path), "RESEARCH_SEGMENTS_SINK": "volume",
+        "RESEARCH_SEGMENTS_STATE_DIR": str(tmp_path / "state"),
+    })
+    assert shipper.backlog_boost_bytes == shipper_mod.DEFAULT_BACKLOG_BOOST_BYTES == 8 * 1024 * 1024
+    assert shipper.boost_segment_bytes == shipper_mod.DEFAULT_BOOST_SEGMENT_BYTES == 64 * 1024 * 1024
+    assert shipper.boost_segment_bytes <= shipper.max_member_bytes
+
+
+def test_priority_switches_between_idle_class_and_bounded_nice(monkeypatch):
+    calls = []
+    monkeypatch.setattr(shipper_mod.os, "SCHED_OTHER", 0, raising=False)
+    monkeypatch.setattr(shipper_mod.os, "SCHED_IDLE", 5, raising=False)
+    monkeypatch.setattr(shipper_mod.os, "PRIO_PROCESS", 0, raising=False)
+    monkeypatch.setattr(shipper_mod.os, "sched_param", lambda priority: priority, raising=False)
+    monkeypatch.setattr(shipper_mod.os, "sched_setscheduler",
+                        lambda pid, policy, param: calls.append(("policy", policy)), raising=False)
+    monkeypatch.setattr(shipper_mod.os, "setpriority",
+                        lambda which, who, nice: calls.append(("nice", nice)), raising=False)
+    assert shipper_mod._set_priority(True, 10) is None
+    assert calls == [("policy", 0), ("nice", 10)]
+    calls.clear()
+    assert shipper_mod._set_priority(False) is None
+    assert calls == [("nice", shipper_mod.IDLE_NICE), ("policy", 5)]
+
+    def refuse(*_args):
+        raise PermissionError("not permitted")
+
+    monkeypatch.setattr(shipper_mod.os, "setpriority", refuse, raising=False)
+    assert "PermissionError" in shipper_mod._set_priority(True, 10)
+
+
+def test_scan_skips_excluded_dirs_state_dir_and_symlinks(tmp_path):
+    env = Env(tmp_path)
+    env.write("top.jsonl", b"{}\n")
+    env.write("v3/ledgers/deep.jsonl", b"{}\n")
+    env.write(".locks/held.json", b"{}")
+    env.write("notes.bin", b"x")
+    link = env.runtime / "alias.jsonl"
+    try:
+        link.symlink_to(env.runtime / "top.jsonl")
+    except (OSError, NotImplementedError):
+        link = None
+    found = env.shipper().scan()
+    assert sorted(found) == ["top.jsonl", "v3/ledgers/deep.jsonl"]
+    path, stat = found["v3/ledgers/deep.jsonl"]
+    assert path == env.runtime / "v3" / "ledgers" / "deep.jsonl" and stat.st_ino
 
 
 # ------------------------------------------------------- SQLite snapshots
