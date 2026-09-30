@@ -43,6 +43,9 @@ function Get-LaptopChainConfig {
     HeartbeatFile = Join-Path $dataRoot '.fly-data-sync-loop.heartbeat.json'
     UpstreamIdentityFile = Join-Path $dataRoot '.fly-upstream-identity.json'
     GenerationLeaseFile = Join-Path $dataRoot '.fly-mirror-generation.lease'
+    SegmentShadowRoot = $(if ($env:RESEARCH_SEGMENT_SHADOW_ROOT) { $env:RESEARCH_SEGMENT_SHADOW_ROOT } else { 'C:\DoxxedCrypto\fly-mirror-segments' })
+    FlySegmentHeadFile = Join-Path $StateDir 'fly_segment_head_snapshot_v1.json'
+    RelayStatusSnapshotFile = Join-Path $StateDir 'relay_status_snapshot_v1.json'
   }
   foreach ($dir in @($config.StateDir, $config.LogDir, $config.RunDir, $config.QuarantineDir, $config.AlertDir)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null

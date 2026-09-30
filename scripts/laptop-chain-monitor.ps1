@@ -76,6 +76,34 @@ if (-not $pullDisabled) {
   }
 }
 
+# 5. v2 ACK accepted by Fly. A missing puller status is already SEGMENT_PULL_STALE.
+$puller = Read-JsonFile (Join-Path $cfg.SegmentShadowRoot '.puller\status.json')
+if ($puller) {
+  $receipt = $puller.ack_receipt
+  $ackedAt = if ($receipt) { ConvertTo-UtcDate $receipt.received_at } else { $null }
+  if (-not $receipt) {
+    Add-Alert 'SEGMENT_ACK_NO_DATA' 'critical' 'Fly has not recorded a v2 ACK from this laptop'
+  } elseif ($receipt.ok -ne $true) {
+    Add-Alert 'SEGMENT_ACK_REJECTED' 'critical' ("Fly answered the v2 ACK through seq {0} with {1}" -f $receipt.through_seq, $receipt.result)
+  } elseif ($null -eq $ackedAt -or ($now - $ackedAt).TotalMinutes -gt $PullStaleMin) {
+    Add-Alert 'SEGMENT_ACK_STALE' 'critical' ("last v2 ACK accepted by Fly through seq {0} at {1}" -f $receipt.through_seq, $receipt.received_at)
+  }
+}
+
+# 6. v2 checkpoint parity verdict.
+$parity = @('parity-latest.json', 'parity-v2.json') |
+  ForEach-Object { Read-JsonFile (Join-Path $cfg.SegmentShadowRoot $_) } |
+  Where-Object { $_ } | Sort-Object { [string]$_.generated_at } -Descending | Select-Object -First 1
+if ($parity -and [string]$parity.verdict -ne 'GREEN') {
+  Add-Alert 'SEGMENT_PARITY_NOT_GREEN' 'critical' ("v2 checkpoint parity {0} at seq {1}" -f $parity.verdict, $parity.seq)
+}
+
+# 7. Fly shipper error as last observed from this laptop.
+$flyHead = Read-JsonFile $cfg.FlySegmentHeadFile
+if ($flyHead -and $flyHead.ok -eq $true -and $flyHead.last_error) {
+  Add-Alert 'FLY_SEGMENT_SHIPPER_ERROR' 'critical' ([string]$flyHead.last_error)
+}
+
 $notify = New-Object System.Collections.ArrayList
 $recorded = @()
 foreach ($alert in $alerts) {

@@ -20,9 +20,22 @@ NO_DATA = "NO_DATA"
 STALE = "STALE"
 INSUFFICIENT = "INSUFFICIENT"
 
-TRANSFER_ACK_LAG_ALARM_SEC = 2 * 3600
 LOCAL_DISK_ALARM_PCT = 85.0
 LOCAL_WAL_ALARM_BYTES = 256 * 1024 * 1024
+
+SEGMENT_PULLER_MAX_AGE_SEC = 15 * 60
+SEGMENT_ACK_MAX_AGE_SEC = 15 * 60
+FLY_SEGMENT_HEAD_MAX_AGE_SEC = 15 * 60
+SEGMENT_PARITY_MAX_AGE_SEC = 90 * 60
+SEGMENT_UNSHIPPED_ALARM_BYTES = 32 * 1024 * 1024
+SEGMENT_ACK_BEHIND_ALARM_SEQ = 30
+
+# Codes produced only by the retired whole-generation mirror (ACK watcher).
+# A stale monitor state file must not resurrect them.
+RETIRED_TRANSFER_ALARM_CODES = frozenset({
+    "SYNC_FAIL_REPEATED", "WATCHER_DEAD",
+    "TRANSFER_ACK_LAG", "TRANSFER_SYNC_FAILING", "TRANSFER_NO_ACK", "TRANSFER_STATUS_UNAVAILABLE",
+})
 
 
 def _finite(value):
@@ -268,17 +281,31 @@ def freshness_text(ts, *, max_age_sec: float, now: datetime, display=None, missi
     return shown
 
 
-def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, ack_watcher: dict | None,
-                   monitor_state: dict | None, segment_status: dict | None,
+def _age_sec(ts, now: datetime):
+    parsed = _parse_ts(ts)
+    return None if parsed is None else (now - parsed).total_seconds()
+
+
+def _fly_head_observed(fly_head: dict | None, now: datetime) -> dict | None:
+    """The laptop's last Fly segment-head observation, or None when unusable."""
+    head = fly_head if isinstance(fly_head, dict) and fly_head.get("schema") == "fly_segment_head_snapshot_v1" else None
+    if not head or not head.get("ok"):
+        return None
+    age = _age_sec(head.get("observedAt"), now)
+    return head if age is not None and age <= FLY_SEGMENT_HEAD_MAX_AGE_SEC else None
+
+
+def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, monitor_state: dict | None,
+                   segment_status: dict | None, fly_segment_head: dict | None, segment_parity: dict | None,
                    local_disk: dict | None, local_wal: list | None, now: datetime) -> list:
-    """Every transfer / freshness / disk / WAL alarm as a visible row."""
+    """Every v2 segment transfer / freshness / disk / WAL alarm as a visible row."""
     alarms: dict[str, dict] = {}
 
     def add(code, severity, detail, since=None):
         alarms.setdefault(code, {"code": code, "severity": severity, "detail": str(detail)[:400], "since": since})
 
     for alert in (monitor_state or {}).get("alerts") or []:
-        if isinstance(alert, dict) and alert.get("code"):
+        if isinstance(alert, dict) and alert.get("code") and alert["code"] not in RETIRED_TRANSFER_ALARM_CODES:
             add(str(alert["code"]), str(alert.get("severity") or "warning"), alert.get("detail") or "", alert.get("openedAt"))
     run = analyzer_run or {}
     if str(run.get("state") or "").upper() in {"FAILED", "TIMEOUT"}:
@@ -287,24 +314,66 @@ def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, ack_wat
     if fresh and fresh.get("current") is not True:
         add("ANALYZER_GENERATION_STALE", "critical",
             "; ".join(str(r) for r in fresh.get("reasons") or []) or "generation not current")
-    ack = ack_watcher or {}
-    last_ack = _parse_ts(ack.get("lastAckAt"))
-    if ack and last_ack is None:
-        add("TRANSFER_NO_ACK", "critical", "laptop ACK watcher has never acknowledged a generation")
-    elif last_ack is not None and (now - last_ack).total_seconds() > TRANSFER_ACK_LAG_ALARM_SEC:
-        add("TRANSFER_ACK_LAG", "critical",
-            f"last laptop ACK {ack.get('lastAckAt')}; watcher state {ack.get('state')}", ack.get("lastAckAt"))
-    if _count(ack.get("consecutiveSyncFailures")):
-        last = ack.get("lastSyncResult") if isinstance(ack.get("lastSyncResult"), dict) else {}
-        add("TRANSFER_SYNC_FAILING", "critical",
-            f"{ack.get('consecutiveSyncFailures')} consecutive sync failures; last: {last.get('detail') or 'unknown'}",
-            last.get("at"))
-    if not ack:
-        add("TRANSFER_STATUS_UNAVAILABLE", "warning", "laptop ACK watcher status file not found")
-    if not segment_status:
-        add("SEGMENT_PULLER_NO_DATA", "info", "research segment puller has not written a status on this laptop")
-    elif segment_status.get("last_error"):
-        add("SEGMENT_PULLER_ERROR", "warning", segment_status.get("last_error"), segment_status.get("updated_at"))
+
+    puller = segment_status if isinstance(segment_status, dict) else None
+    if not puller:
+        add("SEGMENT_PULLER_NO_DATA", "critical", "v2 segment puller has not written a status on this laptop")
+    else:
+        age = _age_sec(puller.get("updated_at"), now)
+        if age is None or age > SEGMENT_PULLER_MAX_AGE_SEC:
+            add("SEGMENT_PULLER_STALE", "critical",
+                f"v2 segment puller status last updated {puller.get('updated_at') or 'never'}; "
+                f"applied seq {puller.get('applied_seq')}", puller.get("updated_at"))
+        if puller.get("last_error"):
+            add("SEGMENT_PULLER_ERROR", "critical", puller.get("last_error"), puller.get("updated_at"))
+        receipt = puller.get("ack_receipt") if isinstance(puller.get("ack_receipt"), dict) else {}
+        ack_age = _age_sec(receipt.get("received_at"), now)
+        if not receipt:
+            add("SEGMENT_ACK_NO_DATA", "critical", "Fly has not recorded a v2 ACK from this laptop")
+        elif receipt.get("ok") is not True:
+            add("SEGMENT_ACK_REJECTED", "critical",
+                f"Fly answered the v2 ACK through seq {receipt.get('through_seq')} with {receipt.get('result')}",
+                receipt.get("received_at"))
+        elif ack_age is None or ack_age > SEGMENT_ACK_MAX_AGE_SEC:
+            add("SEGMENT_ACK_STALE", "critical",
+                f"last v2 ACK accepted by Fly through seq {receipt.get('through_seq')} at {receipt.get('received_at')}",
+                receipt.get("received_at"))
+
+    head = _fly_head_observed(fly_segment_head, now)
+    if head is None:
+        observed = (fly_segment_head or {}).get("observedAt") if isinstance(fly_segment_head, dict) else None
+        add("FLY_SEGMENT_HEAD_NO_DATA", "warning",
+            "no current Fly v2 shipper observation on this laptop"
+            + (f" (last {observed})" if observed else ""), observed)
+    else:
+        if head.get("last_error"):
+            add("FLY_SEGMENT_SHIPPER_ERROR", "critical", head.get("last_error"), head.get("observedAt"))
+        if head.get("segments_enabled") is False:
+            add("FLY_SEGMENT_SHIPPER_DISABLED", "critical", "Fly reports research segment shipping disabled")
+        unshipped = _count(head.get("unshipped_bytes"))
+        if unshipped is not None and unshipped > SEGMENT_UNSHIPPED_ALARM_BYTES:
+            add("SEGMENT_UNSHIPPED_BACKLOG", "warning",
+                f"Fly holds {unshipped / 1048576:.1f} MB of unshipped v2 research bytes", head.get("observedAt"))
+        shipped = _count(head.get("shipped_seq"))
+        acked = _count(head.get("laptop_acked_seq"))
+        if shipped is not None and acked is not None and shipped - acked > SEGMENT_ACK_BEHIND_ALARM_SEQ:
+            add("SEGMENT_ACK_BEHIND", "warning",
+                f"Fly published v2 seq {shipped}; laptop ACKed {acked} ({shipped - acked} behind)",
+                head.get("observedAt"))
+
+    parity = segment_parity if isinstance(segment_parity, dict) else None
+    if not parity:
+        add("SEGMENT_PARITY_NO_DATA", "warning", "no v2 checkpoint parity receipt on this laptop")
+    else:
+        if str(parity.get("verdict") or "").upper() != "GREEN":
+            add("SEGMENT_PARITY_NOT_GREEN", "critical",
+                f"v2 checkpoint parity {parity.get('verdict') or 'UNKNOWN'} at seq {parity.get('seq')}; "
+                f"counts {parity.get('counts')}", parity.get("generated_at"))
+        parity_age = _age_sec(parity.get("generated_at"), now)
+        if parity_age is None or parity_age > SEGMENT_PARITY_MAX_AGE_SEC:
+            add("SEGMENT_PARITY_STALE", "warning",
+                f"last v2 checkpoint parity at {parity.get('generated_at') or 'unknown'}", parity.get("generated_at"))
+
     disk = local_disk or {}
     used_pct = _finite(disk.get("used_pct"))
     if used_pct is not None and used_pct >= LOCAL_DISK_ALARM_PCT:
@@ -314,6 +383,51 @@ def collect_alarms(*, freshness: dict | None, analyzer_run: dict | None, ack_wat
             add("LOCAL_SQLITE_WAL_LARGE", "warning", f"{wal.get('name')} WAL is {wal['bytes'] / 1048576:.0f} MB")
     order = {"critical": 0, "warning": 1, "info": 2}
     return sorted(alarms.values(), key=lambda a: (order.get(a["severity"], 3), a["code"]))
+
+
+def segment_freshness_rows(*, segment_status: dict | None, fly_segment_head: dict | None,
+                           segment_parity: dict | None, promotion: dict | None, now: datetime,
+                           display=None) -> list:
+    """Data-freshness rows for the v2 segment transfer, laptop side and Fly side."""
+    def fresh(ts, max_age):
+        return freshness_text(ts, max_age_sec=max_age, now=now, display=display)
+
+    puller = segment_status if isinstance(segment_status, dict) else {}
+    receipt = puller.get("ack_receipt") if isinstance(puller.get("ack_receipt"), dict) else {}
+    if puller:
+        applied = f"seq {puller.get('applied_seq')} · {fresh(puller.get('updated_at'), SEGMENT_PULLER_MAX_AGE_SEC)}"
+    else:
+        applied = f"{NO_DATA_TEXT} (v2 segment puller has not run on this laptop)"
+    if receipt:
+        ack = (f"seq {receipt.get('through_seq')} · {fresh(receipt.get('received_at'), SEGMENT_ACK_MAX_AGE_SEC)}"
+               + ("" if receipt.get("ok") is True else f" · REJECTED ({receipt.get('result')})"))
+    else:
+        ack = f"{NO_DATA_TEXT} (no v2 ACK recorded by Fly)"
+    head = fly_segment_head if isinstance(fly_segment_head, dict) and fly_segment_head.get("schema") == "fly_segment_head_snapshot_v1" else None
+    if not head:
+        shipper = f"{NO_DATA_TEXT} (Fly shipper not observed from this laptop)"
+    elif not head.get("ok"):
+        shipper = f"{NO_DATA_TEXT} (last Fly /health read failed: {head.get('error') or 'unknown'})"
+    else:
+        unshipped = _count(head.get("unshipped_bytes"))
+        shipper = (f"published seq {head.get('shipped_seq')} · laptop ACKed {head.get('laptop_acked_seq')} · "
+                   f"unshipped {(f'{unshipped / 1048576:.1f} MB') if unshipped is not None else NO_DATA_TEXT} · "
+                   f"observed {fresh(head.get('observedAt'), FLY_SEGMENT_HEAD_MAX_AGE_SEC)}")
+    parity = segment_parity if isinstance(segment_parity, dict) else None
+    parity_text = (f"{parity.get('verdict') or 'UNKNOWN'} at seq {parity.get('seq')} · "
+                   f"{fresh(parity.get('generated_at'), SEGMENT_PARITY_MAX_AGE_SEC)}"
+                   if parity else f"{NO_DATA_TEXT} (no v2 parity receipt)")
+    promo = promotion if isinstance(promotion, dict) and promotion.get("segmentPrefix") else None
+    promo_text = (f"{promo.get('segmentPrefix')} seq {promo.get('segmentAppliedSeq')} promoted "
+                  f"{display(promo.get('syncedAt')) if display and promo.get('syncedAt') else promo.get('syncedAt')}"
+                  if promo else f"{NO_DATA_TEXT} (analyzer store not promoted from v2 segments)")
+    return [
+        {"label": "Last v2 segment applied on laptop", "text": applied},
+        {"label": "Last v2 ACK accepted by Fly", "text": ack},
+        {"label": "Fly v2 shipper", "text": shipper},
+        {"label": "v2 checkpoint parity", "text": parity_text},
+        {"label": "Analyzer store promoted from", "text": promo_text},
+    ]
 
 
 def trade_count_reconciliation(funnel_report: dict | None, summary_trades, tile_total) -> dict:
