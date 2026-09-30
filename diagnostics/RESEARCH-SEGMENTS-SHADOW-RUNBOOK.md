@@ -200,9 +200,18 @@ shadow tree; the puller maps Fly offsets through each stream's baseline.
 - Wipe: dispatch `Deploy Fly BTC bot` mode `fresh-start-wipe-plan` (read-only)
   and review it, then `fresh-start-wipe-execute` (pauses, deletes the
   same-boundary plan pinned by sha256, resumes with every tile ON). It deletes
-  only closed rotations beyond the newest two and older than 72 h, and the v1
-  epoch once the laptop ACK of its final published seq is on the volume. Take
+  only closed rotations beyond the newest two and older than 6 h, closed
+  rotations whose last byte predates the v2 genesis by at least 2.5 h, the v1
+  epoch once the laptop ACK of its final published seq is on the volume, and
+  the retired whole-generation transfer state under `.data-sync-snapshots`
+  (bundles, inventory generations, strict/SQLite snapshots, maintenance
+  receipts). Sealed `runtime/v3` ledger generations are never candidates. Take
   `snapshot-volume` first.
+- The legacy `/api/data-sync/*` transfer routes answer 410
+  `LEGACY_DATA_SYNC_RETIRED`; only the inbound `platform-relay-evidence` and
+  `analyzer-report` uploads remain. The laptop runs one long-lived loop (the
+  segment pull loop); the 30-min supervisor step runs
+  `run-segment-analyzer-cycle.ps1` (pull, promote, migrate, analyze).
 - Every deploy/restart/maintenance boundary ends with paper resumed and every
   registry tile ON (`fly_postdeploy_active_gate.py`, `--tiles-only` for
   restart/repair jobs); relay/Bitfinex are never armed.

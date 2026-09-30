@@ -29,6 +29,9 @@ if ([System.IO.Path]::GetFullPath($ViewRoot).ToLowerInvariant().Contains('canoni
   throw 'SEGMENT_VIEW_MUST_NOT_BE_CANONICAL_STORE'
 }
 
+$cycleLock = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')
+if (-not $cycleLock) { Write-ChainLog -Config $cfg -Name $logName -Message 'SKIP cycle already running'; exit 0 }
+
 if (-not $env:BOT_ADMIN_TOKEN) {
   $raw = Get-Content -LiteralPath $cfg.VaultEnv -Raw
   if ($raw -notmatch '(?m)^\s*BOT_ADMIN_TOKEN\s*=\s*(.+)$') { throw 'BOT_ADMIN_TOKEN_UNAVAILABLE' }

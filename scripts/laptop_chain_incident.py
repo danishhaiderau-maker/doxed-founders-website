@@ -43,9 +43,9 @@ MONITOR_STALE_SEC = 30 * 60.0
 POLICIES: Mapping[str, Policy] = {
     # Emitted only after the analyzer has not completed for ANALYZER_MAX_AGE_SEC.
     "analyzer_stale": Policy(1, 0.0, 12 * HOUR, False),
-    # The supervisor restarts the watcher every tick; persisting across two
-    # ticks and ten minutes means it cannot stay up.
-    "watcher_dead": Policy(2, 10 * 60.0, 12 * HOUR, False),
+    # The supervisor restarts the segment pull loop every tick; persisting
+    # across two ticks and ten minutes means it cannot stay up.
+    "segment_pull_dead": Policy(2, 10 * 60.0, 12 * HOUR, False),
     # The supervisor ticks but the local monitor is not refreshing alerts.
     "monitor_stale": Policy(2, 20 * 60.0, 12 * HOUR, False),
     "test_alert": Policy(1, 0.0, 0.0, False),
@@ -96,8 +96,8 @@ def findings(
         found["monitor_stale"] = f"laptop-chain-monitor active-alerts.json is {age}"
         return found
     for alert in active_alerts.get("alerts") or []:
-        if isinstance(alert, dict) and alert.get("code") == "WATCHER_DEAD":
-            found["watcher_dead"] = f"laptop ACK watcher is not running: {str(alert.get('detail') or '')[:200]}"
+        if isinstance(alert, dict) and alert.get("code") == "SEGMENT_PULL_DEAD":
+            found["segment_pull_dead"] = f"segment pull loop is not running: {str(alert.get('detail') or '')[:200]}"
     return found
 
 

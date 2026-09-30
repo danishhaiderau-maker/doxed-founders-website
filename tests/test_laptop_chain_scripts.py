@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 CHAIN_SCRIPTS = [
     "laptop-chain-common.ps1",
-    "laptop-ack-watcher.ps1",
+    "run-segment-analyzer-cycle.ps1",
     "run-analyzer-once.ps1",
     "laptop-chain-monitor.ps1",
     "laptop-chain-supervisor.ps1",
@@ -53,134 +53,16 @@ def test_never_touches_relay_pause_or_deploy(name):
         assert forbidden not in lowered
 
 
-def test_watcher_single_owner_endless_loop_and_heartbeat_cleanup():
+def test_single_instance_helpers_and_utc_timestamps():
     common = _source("laptop-chain-common.ps1")
-    watcher = _source("laptop-ack-watcher.ps1")
     assert "System.Threading.Mutex" in common
     assert "AbandonedMutexException" in common
-    assert "Enter-SingleInstance -Name $mutexName" in watcher
-    assert "$mutexName = (Get-ChainMutexName 'LaptopAckWatcher')" in watcher
-    assert "while ($true)" in watcher
-    assert "AddHours" not in watcher
-    assert "Get-FlyHealth" in watcher and "/api/data-sync/manifest" in watcher
-    assert "Get-AckedGenerations" in watcher
-    catch_block = watcher[watcher.index("} catch {\n      $status.consecutiveFailures++"):]
-    assert "Set-SyncHeartbeatTerminalFailure" in catch_block.split("$status.nextPollAt")[0]
-    final = watcher[watcher.rindex("} finally {"):]
-    assert "Set-SyncHeartbeatTerminalFailure -Config $cfg -Reason 'LAPTOP_ACK_WATCHER_EXITED'" in final
-    assert "Invoke-AnalyzerRefresh" in watcher[watcher.index("ACK_OK"):]
-    assert "Get-Date -Format" not in watcher + common
+    assert "Get-Date -Format" not in common
     assert "ToUniversalTime" in common and "UtcNow" in common
-    assert "Invoke-ChainLogRotation" in watcher
 
 
-def test_watcher_resumes_custody_generation_and_requests_stale_refresh():
-    watcher = _source("laptop-ack-watcher.ps1")
-    loop = watcher[watcher.index("$iteration = 0"):]
-    assert "generation_id=$GenerationId" in watcher
-    assert "StatusCode -eq 410) { return $null }" in watcher
-    custody = loop.index("Get-CustodyGeneration $acked.Set")
-    # Custody is only consulted when the live inventory cannot authorize a sync,
-    # and it is resolved before the eligibility gate that launches the child.
-    assert loop.index("if ($inventoryStatus -eq 'CURRENT' -and $ackEligible -and $authoritative) { $null }") < custody
-    assert custody < loop.index("$status.state = 'WAIT_INVENTORY_NOT_ACK_ELIGIBLE'")
-    assert custody < loop.index("Invoke-GenerationSync -Manifest $manifest")
-    assert "/api/data-sync/manifest/refresh" in watcher
-    wait = loop[loop.index("$status.state = 'WAIT_INVENTORY_NOT_ACK_ELIGIBLE'"):loop.index("WAIT_REVISION_DRIFT")]
-    assert "Test-InventoryRefreshNeeded -Manifest $liveManifest -InventoryStatus $liveStatus" in wait
-    assert "$script:lastInventoryRefreshRequest = [datetime]::UtcNow" in wait
-    assert "$RevalidatingPollSec" in wait
-
-
-def test_watcher_opts_into_bundles_only_when_fly_publishes_an_index():
-    watcher = _source("laptop-ack-watcher.ps1")
-    probe = _watcher_function("Test-BundleTransportOffered")
-    assert "/api/data-sync/bundles?generation_id=$GenerationId" in probe
-    assert "if ($DisableTransportBundles) { return $false }" in probe
-    assert "fly_runtime_transport_bundle_index_v1" in probe
-    assert "[string]$index.generation_id -eq $GenerationId" in probe
-    # Unreachable or unpublished index keeps the serial path.
-    assert "} catch {\n    return $false\n  }" in probe
-    loop = watcher[watcher.index("$iteration = 0"):]
-    probe_call = loop.index("Test-BundleTransportOffered -Token $token -GenerationId $generation")
-    assert probe_call < loop.index("Invoke-GenerationSync -Manifest $manifest -FullRevision $fullRevision -TransportBundles $bundles")
-    sync = _watcher_function("Invoke-GenerationSync")
-    assert "`$env:FLY_SYNC_TRANSPORT_BUNDLES = '$bundleFlag'" in sync
-    assert sync.index("FLY_SYNC_TRANSPORT_BUNDLES") < sync.index("& '$SyncScript'")
-
-
-def test_watcher_stops_superseded_child_without_failure_backoff():
-    probe = _watcher_function("Get-SyncSupersession")
-    assert "Test-RevisionPrefixMatch $ManifestRevision $flyRevision" in probe
-    assert "return 'REVISION_CHANGED'" in probe
-    # Only a serial child yields to bundles, and only for a CURRENT, ACK-eligible generation.
-    bundles = probe[probe.index("if (-not $TransportBundles)"):]
-    assert "inventory_ack_eligible -eq $true" in bundles
-    assert "Test-BundleTransportOffered -Token $token -GenerationId $liveGeneration" in bundles
-    assert "} catch {\n    return $null\n  }" in probe
-    # The child wrapper here-string has column-0 braces, so slice the full source.
-    source = _source("laptop-ack-watcher.ps1")
-    sync = source[source.index("function Invoke-GenerationSync"):source.index("function Invoke-AnalyzerRefresh")]
-    wait = sync[sync.index("$deadline = [datetime]::UtcNow.AddMinutes($SyncTimeoutMin)"):sync.index("$script:child.WaitForExit()\n")]
-    assert "WaitForExit($SupersessionCheckSec * 1000)" in wait
-    assert "Get-SyncSupersession -GenerationId $generation" in wait
-    assert "SYNC_SUPERSEDED" in wait and "taskkill.exe /PID $script:child.Id /T /F" in wait
-    assert "Superseded = $true" in sync
-    loop = _source("laptop-ack-watcher.ps1")
-    handled = loop[loop.index("} elseif ($result.Superseded) {"):loop.index("} elseif ($result.Ok) {")]
-    assert "'MIRROR_SYNC_SUPERSEDED'" in handled
-    assert "consecutiveSyncFailures" not in handled
-
-
-def test_watcher_never_resumes_custody_from_another_revision():
-    loop = _source("laptop-ack-watcher.ps1")
-    custody = loop[loop.index("CUSTODY_EXPIRED"):loop.index("CUSTODY_RESUME")]
-    assert "Test-RevisionPrefixMatch ([string]$retained.source_git_rev) ([string]$expected.source_git_rev)" in custody
-    assert "CUSTODY_SUPERSEDED" in custody
-
-
-def _watcher_function(name: str) -> str:
-    source = _source("laptop-ack-watcher.ps1")
-    match = re.search(r"^function " + re.escape(name) + r"\b.*?^}\r?\n", source, re.S | re.M)
-    assert match, name
-    return match.group(0)
-
-
-@windows_only
-@pytest.mark.parametrize(
-    "heartbeat, acked, expected",
-    [
-        ({"inProgress": False, "ackFinalized": False, "inventoryGenerationId": "a" * 64}, [], "a" * 64),
-        ({"inProgress": True, "ackFinalized": False, "inventoryGenerationId": "a" * 64}, [], ""),
-        ({"inProgress": False, "ackFinalized": True, "inventoryGenerationId": "a" * 64}, [], ""),
-        ({"inProgress": False, "ackFinalized": False, "inventoryGenerationId": "a" * 64}, ["a" * 64], ""),
-        ({"inProgress": False, "ackFinalized": False, "inventoryGenerationId": "not-a-generation"}, [], ""),
-        (None, [], ""),
-    ],
-)
-def test_custody_generation_selection(tmp_path, heartbeat, acked, expected):
-    heartbeat_file = tmp_path / "hb.json"
-    if heartbeat is not None:
-        heartbeat_file.write_text(json.dumps(heartbeat), encoding="utf-8")
-    script = tmp_path / "custody.ps1"
-    acked_literal = ",".join(f"'{item}'" for item in acked) or ""
-    script.write_text(
-        "$ErrorActionPreference = 'Stop'\n"
-        "function Read-JsonFile([string]$Path) { if (Test-Path -LiteralPath $Path) { Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } else { $null } }\n"
-        f"$cfg = [pscustomobject]@{{ HeartbeatFile = '{heartbeat_file}' }}\n"
-        + _watcher_function("Get-CustodyGeneration")
-        + "$set = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)\n"
-        + (f"foreach ($g in @({acked_literal})) {{ [void]$set.Add($g) }}\n" if acked else "")
-        + "$result = Get-CustodyGeneration $set\n"
-        "[Console]::Out.Write([string]$result)\n",
-        encoding="utf-8",
-    )
-    completed = subprocess.run(
-        [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert completed.stdout.strip() == expected
+def test_legacy_ack_watcher_is_retired():
+    assert not (SCRIPTS / "laptop-ack-watcher.ps1").exists()
 
 
 def test_analyzer_runner_uses_real_exit_codes():
@@ -198,7 +80,11 @@ def test_supervisor_keeps_one_segment_pull_loop_not_a_second_watcher():
     pull = _source("research-segment-pull.ps1")
     assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')" in supervisor
     assert "research-segment-pull-loop.ps1" in supervisor
-    assert supervisor.count("laptop-ack-watcher.ps1") == 1
+    assert "laptop-ack-watcher" not in supervisor
+    assert "run-segment-analyzer-cycle.ps1" in supervisor
+    assert "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')" in supervisor
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')" in cycle
     assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentPull')" in loop
     assert "[int]$PullIntervalSec = 120" in loop and "[int]$ParityIntervalMin = 30" in loop
     assert "'-Source', 'Http'" in loop and "-MaxSegments" in loop
@@ -314,17 +200,17 @@ def test_abandoned_in_progress_detection(chain, payload, expected):
 def test_named_mutex_is_exclusive_across_processes_and_released_on_death(chain):
     holder = subprocess.Popen(
         [POWERSHELL, "-NoProfile", "-Command",
-         _common_prelude(chain) + "$h = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAckWatcher'); 'held'; Start-Sleep -Seconds 60"],
+         _common_prelude(chain) + "$h = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentPull'); 'held'; Start-Sleep -Seconds 60"],
         stdout=subprocess.PIPE, text=True, env={**os.environ, **chain["env"]},
     )
     try:
         assert holder.stdout.readline().strip() == "held"
-        probe = _ps(_common_prelude(chain) + "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAckWatcher')", chain["env"])
+        probe = _ps(_common_prelude(chain) + "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')", chain["env"])
         assert probe.stdout.strip() == "True"
     finally:
         holder.kill()
         holder.wait()
-    probe = _ps(_common_prelude(chain) + "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAckWatcher')", chain["env"])
+    probe = _ps(_common_prelude(chain) + "Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull')", chain["env"])
     assert probe.stdout.strip() == "False"
 
 
@@ -350,38 +236,57 @@ def _run_monitor(chain):
     )
 
 
+def _pull_status(chain, **payload):
+    chain["state"].mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "segment-pull.status.json").write_text(json.dumps(payload))
+
+
 @windows_only
-def test_monitor_raises_all_four_alerts(chain):
+def test_monitor_raises_every_alert(chain):
     chain["state"].mkdir(parents=True, exist_ok=True)
     (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-200), "state": "FAILED"}))
-    (chain["state"] / "laptop-ack-watcher.status.json").write_text(json.dumps({"consecutiveSyncFailures": 3, "detail": "SYNC_FAIL x"}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-60), exitCode=0, error=None)
     _heartbeat(chain, ok=True, inProgress=True, phase="chunk_complete", updatedAt=_iso(-30))
     result = _run_monitor(chain)
     assert result.returncode == 10, result.stdout + result.stderr
     active = json.loads((chain["state"] / "alerts" / "active-alerts.json").read_text(encoding="utf-8-sig"))
     assert {a["code"] for a in active["alerts"]} == {
-        "ANALYZER_NO_COMPLETION", "SYNC_HEARTBEAT_IN_PROGRESS_TOO_LONG", "WATCHER_DEAD", "SYNC_FAIL_REPEATED",
+        "ANALYZER_NO_COMPLETION", "SYNC_HEARTBEAT_IN_PROGRESS_TOO_LONG", "SEGMENT_PULL_DEAD", "SEGMENT_PULL_STALE",
     }
     assert list((chain["state"] / "alerts").glob("alerts-*.jsonl"))
+
+
+def _monitor_with_pull_loop_held(chain):
+    holder = subprocess.Popen(
+        [POWERSHELL, "-NoProfile", "-Command",
+         _common_prelude(chain) + "$h = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentPull'); 'held'; Start-Sleep -Seconds 60"],
+        stdout=subprocess.PIPE, text=True, env={**os.environ, **chain["env"]},
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        return _run_monitor(chain)
+    finally:
+        holder.kill()
+        holder.wait()
+
+
+@windows_only
+def test_monitor_flags_a_failing_pull_loop(chain):
+    (chain["state"]).mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=2, error="HEAD_UNREACHABLE")
+    result = _monitor_with_pull_loop_held(chain)
+    active = json.loads((chain["state"] / "alerts" / "active-alerts.json").read_text(encoding="utf-8-sig"))
+    assert {a["code"] for a in active["alerts"]} == {"SEGMENT_PULL_FAILING"}, result.stdout + result.stderr
 
 
 @windows_only
 def test_monitor_is_quiet_when_chain_is_healthy(chain):
     chain["state"].mkdir(parents=True, exist_ok=True)
     (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
-    (chain["state"] / "laptop-ack-watcher.status.json").write_text(json.dumps({"consecutiveSyncFailures": 0}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=0, error=None)
     _heartbeat(chain, ok=True, inProgress=False, phase="complete")
-    holder = subprocess.Popen(
-        [POWERSHELL, "-NoProfile", "-Command",
-         _common_prelude(chain) + "$h = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopAckWatcher'); 'held'; Start-Sleep -Seconds 60"],
-        stdout=subprocess.PIPE, text=True, env={**os.environ, **chain["env"]},
-    )
-    try:
-        assert holder.stdout.readline().strip() == "held"
-        result = _run_monitor(chain)
-    finally:
-        holder.kill()
-        holder.wait()
+    result = _monitor_with_pull_loop_held(chain)
     assert result.returncode == 0, result.stdout + result.stderr
 
 

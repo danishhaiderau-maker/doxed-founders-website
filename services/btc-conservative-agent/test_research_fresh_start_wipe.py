@@ -108,3 +108,65 @@ def test_fully_acked_v1_epoch_is_removed_but_v2_survives(volume, acked_through):
     assert not (volume / "segment-store" / "v1").exists()
     assert not (volume / "segment-shipper").exists()
     assert (volume / "segment-shipper-v2" / "state.json").is_file()
+
+
+def _genesis(root: Path, created_at: float) -> None:
+    _file(root / "segment-shipper-v2" / "state.json",
+          json.dumps({"seq": 4, "baseline": {"seq": 1, "created_at": created_at}}).encode())
+
+
+def test_pre_cutover_rotations_go_regardless_of_keep_rules_but_never_heads(volume):
+    genesis = NOW - 3 * 3600
+    _genesis(volume, genesis)
+    _file(volume / "runtime" / "order_multiverse.jsonl.1", mtime=genesis - 60)
+    _file(volume / "runtime" / "order_multiverse.jsonl.2", mtime=genesis + 60)
+    _file(volume / "runtime" / "order_multiverse.jsonl", mtime=genesis - 60)
+    plan = wipe.build_plan(volume, now=NOW, v1_acked_through=None)
+    paths = _paths(plan, volume)
+    assert {"runtime/signal_replay.jsonl.4", "runtime/signal_replay.jsonl.5",
+            "runtime/post_exit_replay.jsonl.2", "runtime/order_multiverse.jsonl.1"} <= paths
+    assert not paths & {"runtime/order_multiverse.jsonl.2", "runtime/order_multiverse.jsonl",
+                        "runtime/post_exit_replay.jsonl.3", "runtime/signal_replay.jsonl",
+                        "runtime/state.json.1"}
+    assert plan["pre_cutover_rotation_files"] >= 4
+
+
+def test_pre_cutover_rule_waits_out_boot_replay_windows(volume):
+    genesis = NOW - 3600
+    _genesis(volume, genesis)
+    _file(volume / "runtime" / "order_multiverse.jsonl.1", mtime=genesis - 60)
+    _file(volume / "runtime" / "order_multiverse.jsonl.2", mtime=genesis - 30)
+    plan = wipe.build_plan(volume, now=NOW, v1_acked_through=None)
+    assert "runtime/order_multiverse.jsonl.1" not in _paths(plan, volume)
+
+
+def test_sealed_v3_ledger_generations_are_never_candidates(volume):
+    _genesis(volume, NOW - 3 * 3600)
+    for n in range(1, 5):
+        _file(volume / "runtime" / "v3" / "ledgers" / f"lifecycle.jsonl.{n}")
+    plan = wipe.build_plan(volume, now=NOW, v1_acked_through=None)
+    assert not any(path.startswith("runtime/v3/") for path in _paths(plan, volume))
+
+
+def test_legacy_transfer_state_is_planned_but_relay_staging_survives(volume):
+    legacy = volume / ".data-sync-snapshots"
+    for rel in ("transport-bundles/g-abc/pkg.tar", "inventory-generations/d1/manifest.json",
+                "strict-snapshots/s.db", "transport-maintenance-receipts/r-1.json"):
+        _file(legacy / rel)
+    _file(legacy / "3f2a.db")
+    _file(legacy / "fresh.db", mtime=NOW - 60)
+    _file(legacy / "relay-input-abc.json")
+    _file(legacy / "bundle-admission-state.json")
+    plan = wipe.build_plan(volume, now=NOW, v1_acked_through=None)
+    paths = _paths(plan, volume)
+    assert {".data-sync-snapshots/transport-bundles/g-abc/pkg.tar",
+            ".data-sync-snapshots/inventory-generations/d1/manifest.json",
+            ".data-sync-snapshots/strict-snapshots/s.db",
+            ".data-sync-snapshots/transport-maintenance-receipts/r-1.json",
+            ".data-sync-snapshots/3f2a.db"} <= paths
+    assert not paths & {".data-sync-snapshots/fresh.db", ".data-sync-snapshots/relay-input-abc.json",
+                        ".data-sync-snapshots/bundle-admission-state.json"}
+    assert plan["legacy_transfer_files"] == 5
+    wipe.execute(plan, volume)
+    assert not (legacy / "transport-bundles").exists()
+    assert (legacy / "relay-input-abc.json").is_file() and (legacy / "fresh.db").is_file()

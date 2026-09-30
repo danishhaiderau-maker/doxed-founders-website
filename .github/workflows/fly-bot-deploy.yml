@@ -33,7 +33,6 @@ on:
           - resume-predeploy-abort
           - restart-only
           - inspect-runtime
-          - bundle-canary
           - repair-execution-funnel
           - repair-lifecycle-tail
           - repair-lifecycle-cursor
@@ -45,11 +44,6 @@ on:
           - recover-memory
           - close-paper-position
           - flatten-paper-exposure
-      transport_bundles:
-        description: Opt in to bounded transport package generation for this normal deployment only
-        required: false
-        default: false
-        type: boolean
       keep_maintenance_pause:
         description: Keep ADMIN_MANUAL true-flat after accept; skip paper resume (maintenance sticky)
         required: false
@@ -59,23 +53,6 @@ on:
         description: Optional bounded JSON proof for one explicit lifecycle reset recovery deploy
         required: false
         type: string
-      expected_bundle_revision:
-        description: Exact 12-character incumbent revision for derivative-only bundle inspection/canary
-        required: false
-        type: string
-      bundle_generation_id:
-        description: Exact 64-character inventory generation for inspection/canary
-        required: false
-        type: string
-      bundle_inventory_fingerprint:
-        description: Optional exact 64-character inventory worker fingerprint for bounded receipt inspection
-        required: false
-        type: string
-      bundle_inspect_only:
-        description: Inspect existing bounded receipts only; never run a transport slice
-        required: false
-        default: true
-        type: boolean
       expected_unready_revision:
         description: Exact 12-character Fly revision permitted for recover-unready
         required: false
@@ -154,28 +131,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  bundle-canary:
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'bundle-canary'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Verify bounded derivative-only helper
-        run: |
-          python -m pip install pytest
-          python -m pytest scripts/test_fly_bundle_canary.py scripts/test_fly_bundle_canary_workflow.py -q
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Inspect or run one existing exact-revision transport slice
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          EXPECTED_BUNDLE_REVISION: ${{ inputs.expected_bundle_revision }}
-          BUNDLE_GENERATION_ID: ${{ inputs.bundle_generation_id }}
-          BUNDLE_INVENTORY_FINGERPRINT: ${{ inputs.bundle_inventory_fingerprint }}
-          BUNDLE_INSPECT_ONLY: ${{ inputs.bundle_inspect_only && '1' || '0' }}
-        run: python scripts/fly_bundle_canary_dispatch.py
   resume-bootstrap:
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'resume-bootstrap'
     runs-on: ubuntu-latest
@@ -1257,7 +1212,7 @@ jobs:
           python -m pytest test_lifecycle_index_recovery.py test_lifecycle_reset_index_recovery.py test_lifecycle_reset_recovery_startup.py test_lifecycle_pipeline_worker.py test_research_reset_inventory.py -q
           python -m pytest test_data_sync_inventory_worker_contract.py -q
           python -m pytest test_data_sync_cadence_throttle_contract.py -q
-          python -m pytest test_research_segments.py -q
+          python -m pytest test_research_segments.py test_research_fresh_start_wipe.py test_legacy_data_sync_retirement.py -q
           python -m pytest test_volume_health_snapshot.py test_compact_health_payload.py -q
           python test_fly_startup_contract.py
           python test_paper_skips_risk_pauses.py
@@ -1920,7 +1875,7 @@ jobs:
           LIFECYCLE_RESET_PROOF: ${{ inputs.lifecycle_reset_proof }}
           # Only an explicit normal-deploy opt-in enables acceleration. Pushes,
           # omitted inputs, and recovery modes deploy it disabled.
-          TRANSPORT_BUNDLES_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' && inputs.transport_bundles && '1' || '0' }}
+          TRANSPORT_BUNDLES_ENABLED: "0"
 
       - name: Re-enter maintenance and flatten the exact deployed revision
         env:

@@ -11,7 +11,7 @@ param(
   [string]$StateDir = '',
   [int]$AnalyzerMaxAgeMin = 90,
   [int]$InProgressMaxMin = 15,
-  [int]$SyncFailAlertCount = 3,
+  [int]$PullStaleMin = 15,
   [int]$RenotifyHours = 6,
   [switch]$NoNotify
 )
@@ -56,18 +56,22 @@ if ($heartbeat -and $heartbeat.inProgress -eq $true) {
   $inProgressSince = $null
 }
 
-# 3. Watcher liveness: the mutex is released by the OS when the owner dies.
-$watcherHeld = Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAckWatcher')
-$lock = Read-JsonFile $cfg.WatcherLock
-if (-not $watcherHeld) {
-  $detail = if ($lock) { "lock pid=$($lock.pid) released=$($lock.released)" } else { 'no watcher lock recorded' }
-  Add-Alert 'WATCHER_DEAD' 'critical' "Laptop ACK watcher is not running; $detail"
-}
-
-# 4. Consecutive sync failures.
-$watcher = Read-JsonFile $cfg.WatcherStatus
-if ($watcher -and [int]$watcher.consecutiveSyncFailures -ge $SyncFailAlertCount) {
-  Add-Alert 'SYNC_FAIL_REPEATED' 'critical' ("{0} consecutive SYNC_FAIL; last={1}" -f $watcher.consecutiveSyncFailures, $watcher.detail)
+# 3. Segment pull loop liveness: the mutex is released by the OS when the owner dies.
+$pullDisabled = Test-Path -LiteralPath (Join-Path $cfg.StateDir 'segment-pull.disabled')
+$pull = Read-JsonFile (Join-Path $cfg.StateDir 'segment-pull.status.json')
+if (-not $pullDisabled) {
+  if (-not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentPull'))) {
+    $detail = if ($pull) { "last pid=$($pull.pid) finishedAt=$($pull.finishedAt)" } else { 'no pull status recorded' }
+    Add-Alert 'SEGMENT_PULL_DEAD' 'critical' "Segment pull loop is not running; $detail"
+  }
+  # 4. Positive progress: a finished pull within the window that is not failing.
+  $finished = if ($pull) { ConvertTo-UtcDate $pull.finishedAt } else { $null }
+  if ($null -eq $finished -or ($now - $finished).TotalMinutes -gt $PullStaleMin) {
+    $age = if ($finished) { '{0:N0} min' -f ($now - $finished).TotalMinutes } else { 'never' }
+    Add-Alert 'SEGMENT_PULL_STALE' 'critical' "No finished segment pull for $age (limit $PullStaleMin min)"
+  } elseif (@(0, 1) -notcontains [int]$pull.exitCode -or $pull.error) {
+    Add-Alert 'SEGMENT_PULL_FAILING' 'critical' ("Segment pull exit={0} applied={1} remote={2} error={3}" -f $pull.exitCode, $pull.appliedSeq, $pull.remotePublishedSeq, $pull.error)
+  }
 }
 
 $notify = New-Object System.Collections.ArrayList

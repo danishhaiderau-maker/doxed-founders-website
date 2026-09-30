@@ -1,5 +1,5 @@
 # Fly.io image for the doxxedcrypto.digital showcase BTC bot.
-# Canonical in-repo bot — see .cursor/rules/no-blunt-bot-sync.mdc (DO NOT sync from bybit_bot.py).
+# Canonical in-repo bot â€” see .cursor/rules/no-blunt-bot-sync.mdc (DO NOT sync from bybit_bot.py).
 FROM python:3.12-slim
 # 3.12 (not 3.11): the analyzer module has f-strings with backslashes in the
 # expression part (e.g. analyzer_research_engine_v62.py:9101). Python 3.11 rejects
@@ -54,7 +54,7 @@ RUN python -c "import research.scan_counterfactual_unavailable, research.reset_w
 RUN python -c "import data_sync_quarantine_receipt"
 RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_worker"
 # Optional shadow segment shipper (RESEARCH_SEGMENTS_ENABLED=1) must be importable.
-RUN python -c "import research_segment_format, research_segment_store, research_segment_shipper, research_segment_server, research_segment_prune, research_fresh_start_wipe"
+RUN python -c "import research_segment_format, research_segment_selection, research_segment_store, research_segment_shipper, research_segment_server, research_segment_prune, research_fresh_start_wipe"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data
