@@ -402,6 +402,140 @@ def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(t
     env.assert_tree_matches_source()
 
 
+def test_file_deleted_between_scan_and_read_is_a_race_for_its_stream_only(tmp_path):
+    env = Env(tmp_path)
+    env.store = VolumeStore(env.store_root)
+    env.write("a_live.jsonl", _rows(0, 3))
+    doomed = env.write("z_handoff.json", b'{"x": 1}')
+    shipper = env.shipper()
+    real_plan = shipper.plan
+
+    def plan_then_delete(*args, **kwargs):
+        ops = real_plan(*args, **kwargs)
+        doomed.unlink()
+        return ops
+
+    shipper.plan = plan_then_delete
+    raced = shipper.cycle()
+    assert raced["race"] == "z_handoff.json" and raced["shipped"]
+    members = json.loads(env.store.get(fmt.manifest_key("v1", raced["shipped"]["seq"])))["members"]
+    assert [m["path"] for m in members] == ["a_live.jsonl"]
+    shipper.plan = real_plan
+    env.clock[0] += shipper_mod.RACE_BACKOFF_BASE_SECONDS
+    assert shipper.cycle()["shipped"] is None
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_file_deleted_between_scan_and_plan_is_skipped(tmp_path):
+    env = Env(tmp_path)
+    env.store = VolumeStore(env.store_root)
+    env.write("a_live.jsonl", _rows(0, 3))
+    doomed = env.write("z_handoff.json", b'{"x": 1}')
+    shipper = env.shipper()
+    real_scan = shipper.scan
+
+    def scan_then_delete():
+        found = real_scan()
+        doomed.unlink()
+        return found
+
+    shipper.scan = scan_then_delete
+    real_plan_entry = shipper._plan_entry
+
+    def plan_entry_missing(relpath, path, stat, tracked, tombstones):
+        if relpath == "z_handoff.json":
+            raise FileNotFoundError(path)
+        return real_plan_entry(relpath, path, stat, tracked, tombstones)
+
+    shipper._plan_entry = plan_entry_missing
+    result = shipper.cycle()
+    assert result["shipped"] and "race" not in result
+    members = json.loads(env.store.get(fmt.manifest_key("v1", 1)))["members"]
+    assert [m["path"] for m in members] == ["a_live.jsonl"]
+
+
+def test_lifecycle_pipeline_request_files_are_not_shipped(tmp_path):
+    env = Env(tmp_path)
+    env.store = VolumeStore(env.store_root)
+    env.write("v3/lifecycle_worker/pipeline-request-abc123.json", b"{}")
+    env.write("v3/lifecycle_worker/status.json", b"{}")
+    env.write("v3/pipeline-request-abc123.json", b"{}")
+    shipper = env.shipper()
+    shipper.rules = shipper_mod.load_selection_rules()
+    scanned = shipper.scan()
+    assert "v3/lifecycle_worker/pipeline-request-abc123.json" not in scanned
+    assert {"v3/lifecycle_worker/status.json", "v3/pipeline-request-abc123.json"} <= set(scanned)
+
+
+def test_volume_store_cap_default_leaves_the_free_floor_authoritative():
+    assert shipper_mod.VOLUME_DEFAULT_MAX_STORE_BYTES == 10 * 1024 ** 3
+    assert shipper_mod.VOLUME_DEFAULT_MIN_FREE_BYTES == 4 * 1024 ** 3
+
+
+def test_head_reports_the_sleeping_mode_not_the_last_cycles(tmp_path):
+    venv = VolumeEnv(tmp_path, max_segment_bytes=1000, backlog_boost_bytes=2000,
+                     boost_segment_bytes=8000)
+    try:
+        _assert_head_reports_sleeping_mode(venv)
+    finally:
+        venv.close()
+
+
+def test_main_loop_switches_priority_and_publishes_sleeping_after_the_cycle(tmp_path, monkeypatch):
+    env = Env(tmp_path, max_segment_bytes=1000, backlog_boost_bytes=2000, boost_segment_bytes=8000)
+    env.store = VolumeStore(env.store_root)
+    for index in range(8):
+        env.write(f"stream{index}.jsonl", _rows(0, 150, tag=str(index)))
+    shipper = env.shipper()
+    priorities, sleeps = [], []
+
+    class _Stop(BaseException):
+        pass
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        raise _Stop
+
+    monkeypatch.setenv("RESEARCH_SEGMENTS_ENABLED", "1")
+    monkeypatch.setenv("RESEARCH_SEGMENTS_MIN_FREE_BYTES", "1")
+    monkeypatch.setattr(shipper_mod, "shipper_from_env", lambda *a, **k: shipper)
+    monkeypatch.setattr(shipper_mod, "_set_priority",
+                        lambda boosted, nice=10: priorities.append(boosted))
+    monkeypatch.setattr(shipper_mod.time, "sleep", fake_sleep)
+    with pytest.raises(_Stop):
+        shipper_mod.main()
+    # The first cycle ran idle and left a backlog; the switch happens before the sleep.
+    assert priorities == [False, True]
+    status = json.loads(shipper.status_path.read_text())
+    assert status["worker_state"] == "SLEEPING" and status["priority"] == "boost"
+    assert status["backlog_mode"] is True and status["segment_budget_bytes"] == 8000
+    assert status["next_cycle_at"] == env.clock[0] + sleeps[0]
+
+
+def _assert_head_reports_sleeping_mode(venv):
+    for index in range(8):
+        venv.write(f"stream{index}.jsonl", _rows(0, 150, tag=str(index)))
+    shipper = venv.shipper()
+    shipper.cycle()
+    shipper.boosted = shipper.boost_due()
+    assert shipper.boosted is True
+    shipper.publish_mode("CYCLING", priority="boost", priority_error=None)
+    while shipper.cycle()["shipped"]:
+        pass
+    # The drain cycle ran boosted; the sleeping worker has already dropped back.
+    shipper.boosted = shipper.boost_due()
+    shipper.publish_mode("SLEEPING", priority="idle", priority_error=None,
+                         next_cycle_at=venv.clock[0] + 300)
+    code, _, raw = venv.call("head")
+    assert code == 200
+    head = json.loads(raw)
+    assert head["shipper_worker_state"] == "SLEEPING"
+    assert head["shipper_next_cycle_at"] == venv.clock[0] + 300
+    assert head["backlog_mode"] is False and head["shipper_priority"] == "idle"
+    assert head["segment_budget_bytes"] == shipper.max_segment_bytes
+
+
 # ------------------------------------------------------- backlog mode
 def _raw_member_bytes(env, result) -> int:
     manifest = json.loads(env.store.get(fmt.manifest_key("v1", result["shipped"]["seq"])))

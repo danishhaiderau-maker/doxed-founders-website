@@ -53,7 +53,7 @@ write-once at `v1/acks/laptop/<seq>.json` with a receipt at
 `C:\DoxxedCrypto\fly-mirror-segments\.puller\ack-receipts.jsonl`.
 
 Disk guard: the store duplicates source data until pruning exists, so the
-volume sink defaults to a 3 GiB store cap (`RESEARCH_SEGMENTS_VOLUME_MAX_BYTES`,
+volume sink defaults to a 10 GiB store cap (`RESEARCH_SEGMENTS_VOLUME_MAX_BYTES`,
 status `STORE_CAP_REACHED`) and a 4 GiB free-space floor
 (`RESEARCH_SEGMENTS_MIN_FREE_BYTES`, status `LOW_DISK_SKIPPED`). Both fail closed
 by pausing the shipper only. `/health` `volume.transfer` shows `sink`,
@@ -227,12 +227,18 @@ backlog grew past the laptop promotion gate (32 MiB).
   ships up to `RESEARCH_SEGMENTS_BOOST_SEGMENT_BYTES` (64 MiB raw), back-to-back,
   at `RESEARCH_SEGMENTS_BOOST_NICE` (10, SCHED_OTHER). At or below it the worker
   returns to 8 MiB segments and SCHED_IDLE. A boosted segment is never started if
-  it could cross the 3 GiB store cap; the 4 GiB free floor still skips cycles.
+  it could cross the 10 GiB store cap; the 4 GiB free floor still skips cycles.
 - A snapshot that changes mid-copy drops only its own stream from the build; the
   other streams ship in the same cycle (the racing stream backs off as before).
 - The scan uses `os.scandir` (one stat per file).
 - `/api/research-segments/v2/head` exposes `backlog_mode`,
-  `segment_budget_bytes`, `shipper_priority` and `shipper_priority_error`.
+  `segment_budget_bytes`, `shipper_priority`, `shipper_priority_error`,
+  `shipper_worker_state` (`CYCLING`/`SLEEPING`) and `shipper_next_cycle_at`.
+  Mode and priority are re-evaluated right after each cycle, so a sleeping
+  worker reports the mode its next cycle will run in.
+- A file deleted between scan and read is a race for its stream only.
+  `v3/lifecycle_worker/pipeline-request-*.json` (transient IPC handoffs) is
+  excluded from the universe.
 - The laptop pull loop polls every 15 s while the head is ahead of the applied
   seq or reports >8 MiB unshipped, otherwise every 120 s.
 - Diagnose with `gh workflow run "Deploy Fly BTC bot" -f mode=inspect-runtime`:
