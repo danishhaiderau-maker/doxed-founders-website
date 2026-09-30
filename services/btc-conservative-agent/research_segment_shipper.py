@@ -162,6 +162,7 @@ class SegmentShipper:
         self.large_snapshot_bytes = max(0, int(large_snapshot_bytes))
         self.large_snapshot_interval = max(0.0, float(large_snapshot_interval))
         self.throttled: list[str] = []
+        self.next_cursor = ""
         self.store = store
         self.volume_root = Path(volume_root).resolve()
         self.runtime_root = Path(runtime_root).resolve()
@@ -361,14 +362,23 @@ class SegmentShipper:
             op["end_offset"] = boundary
             op["bytes"] = boundary - op["base_offset"]
 
-    def select(self, ops: list[dict]) -> tuple[list[dict], int]:
+    def select(self, ops: list[dict], cursor: str = "") -> tuple[list[dict], int]:
         """Keep a dependency-safe subset of ``ops`` within the byte budget.
 
         Ops are ordered per stream (SEAL, TOMBSTONE, then content). An
         oversized op blocks only the rest of its own stream; hitting the
         segment budget stops selection entirely, so no op ever ships ahead of
         an op it depends on.
+
+        Selection starts at ``cursor``, the stream that last hit the budget,
+        and wraps around. Otherwise a snapshot larger than the remaining
+        budget would be starved forever by alphabetically earlier streams
+        that grow every cycle. Streams never depend on each other, and the
+        per-stream order is preserved by the stable sort.
         """
+        if cursor:
+            ops = sorted(ops, key=lambda item: item["stream"] < cursor)
+        self.next_cursor = ""
         selected, total, deferred, blocked = [], 0, 0, set()
         for index, op in enumerate(ops):
             pending = op.get("pending_bytes", op["bytes"])
@@ -382,6 +392,7 @@ class SegmentShipper:
                 continue
             if selected and total + op["bytes"] > self.max_segment_bytes:
                 deferred += sum(item.get("pending_bytes", item["bytes"]) for item in ops[index:])
+                self.next_cursor = op["stream"]
                 break
             selected.append(op)
             total += op["bytes"]
@@ -499,6 +510,7 @@ class SegmentShipper:
         new_state.update({"seq": seq, "last_manifest_sha256": fmt.sha256_bytes(manifest_raw),
                           "last_window_end": manifest["window_end"],
                           "last_segment_at": self.clock(),
+                          "select_cursor": self.next_cursor,
                           "store_bytes": int(state.get("store_bytes") or 0)
                           + len(segment_raw) + len(manifest_raw)})
         return segment_raw, manifest_raw, new_state
@@ -573,7 +585,7 @@ class SegmentShipper:
                     "store_cap_reached": True}
         self.throttled = []
         ops = self.plan(state, self.scan())
-        selected, deferred = self.select(ops)
+        selected, deferred = self.select(ops, cursor=str(state.get("select_cursor") or ""))
         oversized = sorted(op["path"] for op in ops if op.get("oversized"))
         throttled = sorted(self.throttled)[:50]
         if not selected:
