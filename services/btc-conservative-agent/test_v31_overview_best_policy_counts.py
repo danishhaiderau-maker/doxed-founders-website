@@ -1,10 +1,11 @@
 """Regression for V3.1 Best Policy Overview compatibility fields."""
 from pathlib import Path
 
+from combo_pathway_config import ACTIVE_TILE_REGISTRY, RESEARCH_STACK_VERSION
 from research import research_dashboard as dashboard
 
 
-def test_empty_overview_shows_deployed_epoch_and_five_collecting_identities(monkeypatch):
+def test_empty_overview_shows_deployed_epoch_and_registry_collecting_identities(monkeypatch):
     monkeypatch.setattr(dashboard, "_current_generation_report", lambda _name: {})
     monkeypatch.setattr(dashboard, "_read_report", lambda _name, default=None: default or {})
 
@@ -14,8 +15,9 @@ def test_empty_overview_shows_deployed_epoch_and_five_collecting_identities(monk
     assert payload["status"] == "STALE GENERATION — QUALIFICATION BLOCKED"
     assert payload["generation_freshness"]["current"] is False
     assert "CURRENT_POLICY_REPORT_MISSING" in payload["generation_freshness"]["reasons"]
-    assert payload["policy_epoch_id"] == "v31-analyzer-hypothesis-paper-v1"
-    assert deployed["policy_count"] == 5
+    assert payload["policy_epoch_id"] == RESEARCH_STACK_VERSION == "v31-dynamic-adaptive-paper-v1"
+    assert deployed["policy_count"] == len(ACTIVE_TILE_REGISTRY) == 1
+    assert [row["lane"] for row in deployed["policies"]] == ["FAMILY_ADAPTIVE_REGIME"]
     assert deployed["qualification_allowed"] is False
     assert all(row["collection_status"] == "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE" for row in deployed["policies"])
     assert all(row["policy_id"] and row["policy_signature"] for row in deployed["policies"])
