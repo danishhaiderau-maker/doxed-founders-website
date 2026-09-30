@@ -331,6 +331,15 @@ RETIRED_POLICY_IDENTITIES = frozenset({
 })
 
 
+PARTIAL_EXIT_RELAY_CAPABILITY = "BLOCKED_PARTIAL_REDUCTION_UNPROVEN"
+
+
+def tile_has_partial_exits(spec: dict) -> bool:
+    """True when the tile's exit policy closes a position in more than one part."""
+    exit_policy = spec.get("exit_policy") or {}
+    return bool(exit_policy.get("partial_take_profits")) or exit_policy.get("family") == "HYBRID_RUNNER"
+
+
 def validate_tile_registry() -> tuple[str, ...]:
     """Return registry defects; an empty tuple is the only deployable state."""
     defects = []
@@ -366,6 +375,13 @@ def validate_tile_registry() -> tuple[str, ...]:
             defects.append(f"{lane}:NOT_STRICTLY_PAPER_ONLY")
         if spec.get("live_copy_eligible") or spec.get("platform_relay_eligible"):
             defects.append(f"{lane}:LIVE_COPY_MUST_FAIL_CLOSED")
+        # Exchange-side partial reductions are not wired; a partial-exit tile
+        # can never be relay-capable until they are.
+        if tile_has_partial_exits(spec):
+            if spec.get("platform_relay_eligible") or spec.get("live_copy_eligible"):
+                defects.append(f"{lane}:PARTIAL_EXIT_RELAY_REQUIRES_EXCHANGE_REDUCTIONS")
+            if spec.get("relay_capability") != PARTIAL_EXIT_RELAY_CAPABILITY:
+                defects.append(f"{lane}:PARTIAL_EXIT_RELAY_CAPABILITY_NOT_BLOCKED")
         if spec.get("tile_id") != lane or spec.get("research_lane") != lane:
             defects.append(f"{lane}:TILE_IDENTITY_MISMATCH")
         state = str(spec.get("lifecycle_state") or "")
