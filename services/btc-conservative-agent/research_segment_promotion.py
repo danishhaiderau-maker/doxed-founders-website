@@ -117,6 +117,7 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict) 
         "deployedRevision": str(health["source_git_rev"]).lower(), "revisionParity": "MATCH",
         "tileRegistrySignature": health["tile_registry_signature"],
         "collectionEpochId": state.get("last_collection_epoch_id"),
+        "segmentPrefix": head.get("prefix"),
         "segmentAppliedSeq": state["applied_seq"],
         "segmentHeadManifestSha256": state["last_manifest_sha256"],
         "throttledSnapshots": head.get("throttled_snapshots") or [],
@@ -140,9 +141,10 @@ def main(argv=None) -> int:
     parser.add_argument("--view", required=True)
     parser.add_argument("--base-url", default=os.getenv("RESEARCH_SEGMENTS_BASE_URL")
                         or "https://doxed-btc-bot.fly.dev")
+    parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v2")
     args = parser.parse_args(argv)
     try:
-        source = HttpSegmentSource(base_url=args.base_url,
+        source = HttpSegmentSource(base_url=args.base_url, prefix=args.prefix,
                                    admin_token=os.environ.get("BOT_ADMIN_TOKEN") or "")
         receipt = stage_view(shadow_root=Path(args.shadow_root), view_root=Path(args.view),
                              head=source.head(), health=_health(args.base_url))
