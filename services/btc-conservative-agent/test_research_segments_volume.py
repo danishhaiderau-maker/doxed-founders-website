@@ -315,6 +315,26 @@ def test_large_first_backlog_drains_in_bounded_batches(tmp_path):
         env.close()
 
 
+def test_large_snapshot_is_not_starved_by_earlier_growing_streams(tmp_path):
+    env = Env(tmp_path, max_segment_bytes=300, large_snapshot_bytes=10 ** 9)
+    env.store = VolumeStore(env.store_root)
+    env.write("a_live.jsonl", _rows(0, 1))
+    env.write("z_research.db", b"d" * 1000)
+    shipped_paths = []
+    for cycle in range(6):
+        env.write("a_live.jsonl", _rows(cycle + 1, 1), append=True)
+        result = env.shipper().cycle()
+        seq = result["shipped"]["seq"]
+        shipped_paths += [m["path"] for m in json.loads(env.store.get(fmt.manifest_key("v1", seq)))["members"]]
+        if "z_research.db" in shipped_paths:
+            break
+    assert "z_research.db" in shipped_paths and cycle <= 2
+    env.write("a_live.jsonl", _rows(50, 1), append=True)
+    env.ship_all()
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
 # --------------------------------------------------------- safety surfaces
 def _imports(path: Path) -> set:
     tree = ast.parse(path.read_text(encoding="utf-8"))
