@@ -63,10 +63,10 @@ def test_complete_shadow_is_promoted_by_the_existing_migration(tmp_path, monkeyp
 
 @pytest.mark.parametrize("change, reason", [
     ({"published_seq": 999}, "SHADOW_BEHIND_PUBLISHED"),
-    ({"unshipped_bytes": 10}, "FLY_UNSHIPPED_BYTES"),
-    ({"racing_paths": [{"path": "research.db"}]}, "FLY_RACING_PATHS"),
+    ({"unshipped_bytes": promotion.DEFAULT_MAX_UNSHIPPED_BYTES + 1}, "FLY_UNSHIPPED_BYTES"),
+    ({"racing_paths": [{"path": "never_shipped.json"}]}, "FLY_RACING_PATH_NEVER_SHIPPED"),
     ({"oversized_paths": ["big.db"]}, "FLY_OVERSIZED_PATHS"),
-    ({"shipper_last_error": "PLAN_RACE: x"}, "FLY_SHIPPER_ERROR"),
+    ({"shipper_last_error": "OSError: disk"}, "FLY_SHIPPER_ERROR"),
     ({"last_manifest_sha256": "0" * 64}, "HEAD_MANIFEST_MISMATCH"),
 ])
 def test_incomplete_or_unhealthy_shadow_is_refused(tmp_path, change, reason):
@@ -76,6 +76,17 @@ def test_incomplete_or_unhealthy_shadow_is_refused(tmp_path, change, reason):
         promotion.stage_view(shadow_root=env.shadow, view_root=view, head={**head, **change}, health=health)
     assert any(item.startswith(reason) for item in refused.value.reasons)
     assert not view.exists() or not any(view.iterdir())
+
+
+def test_live_tail_and_racing_shipped_snapshot_are_promoted_and_recorded(tmp_path):
+    env, head, health = _synced(tmp_path)
+    live = {**head, "unshipped_bytes": 4096, "racing_paths": [{"path": "research.db", "races": 3}],
+            "shipper_last_error": "PLAN_RACE: research.db changed identity"}
+    view = tmp_path / "view"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=live, health=health)
+    heartbeat = json.loads((view / promotion.HEARTBEAT_NAME).read_text())
+    assert heartbeat["unshippedBytesAtPromotion"] == 4096
+    assert heartbeat["racingPaths"] == ["research.db"]
 
 
 def test_revision_drift_and_missing_session_are_refused(tmp_path):
