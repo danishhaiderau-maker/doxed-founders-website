@@ -204,3 +204,20 @@ def test_evidence_points_page_fails_closed_and_renders_current_report(monkeypatc
     assert client.get("/api/evidence-points").get_json()["report"]["schema"] == tep.REPORT_SCHEMA
     assert ("Evidence points", "/evidence-points") in dashboard.DECISION_NAV_LINKS
     assert epv.REPORT_FILE == tep.REPORT_FILE
+
+def test_loader_reads_rotated_ledgers_and_flags_missing_tape_history(tmp_path):
+    import json
+    head = tmp_path / tep.TAPE_FILE
+    older = tmp_path / (tep.TAPE_FILE + ".1")
+    rows = _tape(seconds=4000)
+    older.write_text("".join(json.dumps(r) + "\n" for r in rows[:3900]), encoding="utf-8")
+    head.write_text("".join(json.dumps(r) + "\n" for r in rows[3900:]), encoding="utf-8")
+    (tmp_path / (tep.TAPE_FILE + ".validation.json")).write_text('{"bucket_ts": 1}', encoding="utf-8")
+    assert [p.name for p in tep.rotation_family(str(head))] == [older.name, head.name]
+    inputs = tep.load_evidence_inputs(lambda name: str(tmp_path / name))
+    assert len(inputs["tape_rows"]) == 4000 and inputs["tape_rows"][0]["bucket_ts"] == T0
+    covered = _build(trades=[_trade(1)], tape_rows=inputs["tape_rows"])
+    assert "TAPE_COVERAGE_STARTS_AFTER_V2" not in {g["code"] for g in covered["evidence_gaps"]}
+    assert covered["did_vs_missed"]["FAMILY_A"]["executed"]["market_at_signal"]["n"] == 1
+    head_only = _build(trades=[_trade(1)], tape_rows=rows[3900:])
+    assert "TAPE_COVERAGE_STARTS_AFTER_V2" in {g["code"] for g in head_only["evidence_gaps"]}

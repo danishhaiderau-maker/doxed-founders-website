@@ -39,6 +39,7 @@ HEADLINE_HOLD_SEC = 3600
 TAPE_MAX_GAP_SEC = 10.0
 DEFAULT_ENTRY_TTL_SEC = 1800.0
 ENTRY_RECONCILIATION_ALLOWANCE_SEC = 180.0
+TAPE_COVERAGE_GRACE_SEC = 300.0
 
 # Exits and cancels issued by the deploy boundary (maintenance flatten) or an
 # operator, not by the tile's own policy.  They stay in counts but never in EV.
@@ -578,6 +579,13 @@ def build_tile_evidence_points(
     if any(c["identity_drift"] for c in collection.values()):
         evidence_gaps.append({"code": "IDENTITY_DRIFT",
                               "detail": "a tile has more than one policy signature or epoch"})
+    if v2_start_ts and (tape.start is None or tape.start > v2_start_ts + TAPE_COVERAGE_GRACE_SEC):
+        evidence_gaps.append({
+            "code": "TAPE_COVERAGE_STARTS_AFTER_V2",
+            "detail": ("no 1s microstructure tape" if tape.start is None else
+                       f"the 1s tape starts at {_iso(tape.start)}, after the v2 start {_iso(v2_start_ts)}")
+                      + "; counterfactuals before it are TAPE_NOT_COVERED",
+        })
 
     return {
         "schema": REPORT_SCHEMA,
@@ -653,19 +661,38 @@ def _read_csv(path: str | None) -> list[dict[str, Any]]:
         return list(csv.DictReader(handle))
 
 
+def rotation_family(path: str | None) -> list[Path]:
+    """The live file plus its numbered rotations (``x.jsonl.1`` ...), oldest first.
+
+    The runtime rotates append ledgers in place, so after a rotation the live
+    file holds only the newest rows. Sidecars such as ``x.jsonl.validation.json``
+    are not rotations.
+    """
+    if not path:
+        return []
+    head = Path(path)
+    rotations = []
+    if head.parent.is_dir():
+        for sibling in head.parent.glob(head.name + ".*"):
+            suffix = sibling.name[len(head.name) + 1:]
+            if suffix.isdigit() and sibling.is_file():
+                rotations.append((int(suffix), sibling))
+    family = [p for _, p in sorted(rotations, reverse=True)]
+    return family + ([head] if head.is_file() else [])
+
+
 def _read_jsonl(path: str | None, keep: Callable[[dict], bool] | None = None,
                 project: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
     rows = []
-    if not path or not Path(path).is_file():
-        return rows
-    with open(path, encoding="utf-8-sig", errors="replace") as handle:
-        for line in handle:
-            try:
-                row = json.loads(line)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(row, dict) and (keep is None or keep(row)):
-                rows.append({k: row.get(k) for k in project} if project else row)
+    for member in rotation_family(path):
+        with open(member, encoding="utf-8-sig", errors="replace") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if isinstance(row, dict) and (keep is None or keep(row)):
+                    rows.append({k: row.get(k) for k in project} if project else row)
     return rows
 
 
