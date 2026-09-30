@@ -39,6 +39,8 @@ def render() -> str:
     prefixes = [str(specs[lane]["id_prefix"]) for lane in lanes]
     relay_lanes = [lane for lane in lanes if specs[lane].get("platform_relay_eligible") is True]
     relay_prefixes = [str(specs[lane]["id_prefix"]) for lane in relay_lanes]
+    partial_lanes = [lane for lane in lanes if registry.tile_has_partial_exits(specs[lane])]
+    partial_prefixes = [str(specs[lane]["id_prefix"]) for lane in partial_lanes]
     retired = sorted(str(lane) for lane in registry.RETIRED_TILE_LANES)
 
     def arr(values):
@@ -57,6 +59,11 @@ def render() -> str:
         f"export const RELAY_ELIGIBLE_TILE_LANES: readonly string[] = {arr(relay_lanes)};\n"
         "\n"
         f"export const RELAY_ELIGIBLE_TILE_ID_PREFIXES: readonly string[] = {arr(relay_prefixes)};\n"
+        "\n"
+        "/** Tiles whose exit policy reduces a position in parts; relay refuses them until exchange-side reductions are proven. */\n"
+        f"export const PARTIAL_EXIT_TILE_LANES: readonly string[] = {arr(partial_lanes)};\n"
+        "\n"
+        f"export const PARTIAL_EXIT_TILE_ID_PREFIXES: readonly string[] = {arr(partial_prefixes)};\n"
         "\n"
         f"export const RETIRED_TILE_LANES: readonly string[] = {arr(retired)};\n"
         "\n"

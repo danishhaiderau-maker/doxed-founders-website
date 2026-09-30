@@ -47,6 +47,7 @@ import {
   buildCopyRelayCapacity,
   isPaperLaneTradeId,
   isMirrorableLaneTradeId,
+  isPartialExitLaneTradeId,
   shouldDryRunIntentMirror,
   type CopyRelayCapacitySnapshot,
   type VirtualLotExitReason,
@@ -57,8 +58,10 @@ import {
   BITFINEX_BTC_PERP_SYMBOL,
   BITFINEX_REDUCE_ONLY_FLAG,
   BitfinexTradingClient,
+  bitfinexOrderLev,
   normalizeBitfinexOrderPrice,
   type BitfinexActiveOrder,
+  type BitfinexFuturesPairConstraints,
 } from '../exchanges/bitfinex-api.client';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
@@ -97,12 +100,18 @@ import {
   assessBitfinexLiveCopySizingReadiness,
   missingBitfinexVenueEvidenceReadiness,
 } from './bitfinex-live-copy-readiness';
+import {
+  evaluatePreTradeLiquidationSafety,
+  resolveMinLiquidationToStopMultiple,
+  type PreTradeLiquidationSafety,
+} from './bitfinex-pre-trade-safety';
 import { processDormantPositionReduction, type SignedReduction } from './position-reduction-fence';
 import { PrismaReductionFenceRepository } from './position-reduction-prisma.repository';
 
 const AGENT_SLUG = 'conservative-btc';
 const POLL_MS = resolveSubscriberExecutionPollMs();
 const MIN_QTY_BTC = 0.00004;
+const VENUE_MARGIN_EVIDENCE_TTL_MS = 10 * 60_000;
 const CHASE_INTERVAL_MS = SUBSCRIBER_CHASE_INTERVAL_MS ?? 60_000;
 const CHASE_NEAR_FILL_INTERVAL_MS = SUBSCRIBER_CHASE_NEAR_FILL_INTERVAL_MS ?? 250;
 const CHASE_BOT_ANCHOR_MS = SUBSCRIBER_SHOWCASE_ANCHOR_CHASE_MS ?? 250;
@@ -126,6 +135,9 @@ export const RECONCILIATION_PAUSED_POLL_MS = null;
 export const RECONCILIATION_IDLE_POLL_MS = null;
 const DEFAULT_EXECUTOR_TICK_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS = 15_000;
+/** A paused/idle executor persists a heartbeat on this cadence instead of ticking. */
+export const PAUSED_EXECUTOR_HEARTBEAT_MS = 60_000;
+export const PAUSED_EXECUTOR_HEARTBEAT_MAX_AGE_MS = PAUSED_EXECUTOR_HEARTBEAT_MS * 3;
 const EXPIRED_STILL_LIVE_LOOKBACK_MS = 6 * 60 * 60 * 1_000;
 const EXPIRED_STILL_LIVE_CANDIDATE_LIMIT = 50;
 const PENDING_FILL_RECONCILE_GRACE_MS = 60_000;
@@ -138,6 +150,19 @@ const BITFINEX_REPLACEMENT_VISIBILITY_GRACE_MS = 15_000;
  */
 export const EXACT_SHOWCASE_MARGIN_CAP_TOLERANCE_PCT = 0;
 export const MAX_SIGNED_COPY_MARGIN_PER_LEG_USD = 0.25;
+
+/**
+ * Operator-facing sizing semantics. The platform setting is only an outer
+ * ceiling; each order margin is min(setting, signed intent margin, per-leg cap).
+ */
+export function describeSignedCopyMarginCap(platformCapUsd: number): string {
+  const effective = Math.min(platformCapUsd, MAX_SIGNED_COPY_MARGIN_PER_LEG_USD);
+  return (
+    `per-trade margin input <= $${effective.toFixed(2)} at ${DEFAULT_SUBSCRIBER_LEVERAGE}x `
+    + `(= min(platform setting $${platformCapUsd}, signed intent margin, hard per-leg cap $${MAX_SIGNED_COPY_MARGIN_PER_LEG_USD.toFixed(2)})); `
+    + 'exact signed qty is floored, never rounded up; margin is not max loss'
+  );
+}
 export const MAX_AGGREGATE_COPY_MARGIN_USD = 5;
 export const MAX_AGGREGATE_COPY_NOTIONAL_USD = 500;
 export const LIVE_FIDELITY_GUARD_THRESHOLD_PCT = 60;
@@ -466,7 +491,7 @@ export function liveRelayFidelityObservation(
 
 export type RelayExecutorHealthSnapshot = {
   healthy: boolean;
-  status: 'STARTING' | 'IDLE' | 'RUNNING' | 'STUCK';
+  status: 'STARTING' | 'IDLE' | 'RUNNING' | 'STUCK' | 'PAUSED_HEALTHY';
   running: boolean;
   tickStartedAt: string | null;
   lastTickCompletedAt: string | null;
@@ -518,6 +543,8 @@ export function buildRelayExecutorHealth(input: {
   timeoutMs: number;
   healthMaxAgeMs: number;
   timeoutCount: number;
+  /** PAUSED/IDLE schedule no recurring ticks, so tick age is not a liveness signal there. */
+  pollActivity?: RelayExecutorPollActivity;
 }): RelayExecutorHealthSnapshot {
   const runningForMs = input.running && input.tickStartedAtMs > 0
     ? Math.max(0, input.nowMs - input.tickStartedAtMs)
@@ -527,8 +554,12 @@ export function buildRelayExecutorHealth(input: {
     : null;
   const stuck = runningForMs != null && runningForMs > input.timeoutMs;
   const starting = input.lastTickCompletedAtMs <= 0;
+  const pausedHealthy = !stuck && !starting && !input.running
+    && (input.pollActivity === 'PAUSED' || input.pollActivity === 'IDLE');
   const healthy = !stuck && !starting && (
-    input.running || (heartbeatAgeMs != null && heartbeatAgeMs <= input.healthMaxAgeMs)
+    input.running
+    || pausedHealthy
+    || (heartbeatAgeMs != null && heartbeatAgeMs <= input.healthMaxAgeMs)
   );
   const status: RelayExecutorHealthSnapshot['status'] = stuck
     ? 'STUCK'
@@ -536,7 +567,9 @@ export function buildRelayExecutorHealth(input: {
       ? 'STARTING'
       : input.running
         ? 'RUNNING'
-        : 'IDLE';
+        : pausedHealthy
+          ? 'PAUSED_HEALTHY'
+          : 'IDLE';
   return {
     healthy,
     status,
@@ -1834,6 +1867,8 @@ export function readPersistedRelayExecutorHealth(
   dashboardState: unknown,
   nowMs = Date.now(),
   maxAgeMs = DEFAULT_EXECUTOR_HEALTH_MAX_AGE_MS,
+  /** Arming passes 0 so a paused heartbeat must still meet the strict tick freshness. */
+  pausedMaxAgeMs = PAUSED_EXECUTOR_HEARTBEAT_MAX_AGE_MS,
 ): RelayExecutorHealthSnapshot {
   const dash =
     dashboardState && typeof dashboardState === 'object' && !Array.isArray(dashboardState)
@@ -1849,10 +1884,16 @@ export function readPersistedRelayExecutorHealth(
   const heartbeatAgeMs = Number.isFinite(evidenceAt) ? Math.max(0, nowMs - evidenceAt) : null;
   const roleOk = raw.serviceRole === 'executor-worker';
   const enabled = raw.executionEnabled === true;
-  const fresh = heartbeatAgeMs != null && heartbeatAgeMs <= maxAgeMs;
+  const effectiveMaxAgeMs = raw.status === 'PAUSED_HEALTHY'
+    ? Math.max(maxAgeMs, pausedMaxAgeMs)
+    : maxAgeMs;
+  const fresh = heartbeatAgeMs != null && heartbeatAgeMs <= effectiveMaxAgeMs;
   const workerHealthy = raw.healthy === true && raw.status !== 'STUCK';
   const status: RelayExecutorHealthSnapshot['status'] =
-    raw.status === 'RUNNING' || raw.status === 'IDLE' || raw.status === 'STUCK'
+    raw.status === 'RUNNING'
+    || raw.status === 'IDLE'
+    || raw.status === 'STUCK'
+    || raw.status === 'PAUSED_HEALTHY'
       ? raw.status
       : 'STARTING';
   return {
@@ -3877,7 +3918,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     }
     void loadSubscriberMaxMarginUsd(this.prisma).then((cap) => {
       this.logger.log(
-        `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (max $${cap}/trade)`,
+        `Hire subscriber runner active — Bitfinex copy policy v${BITFINEX_COPY_POLICY_VERSION}, active cadence ${POLL_MS}ms with adaptive paused/idle backoff (${describeSignedCopyMarginCap(cap)})`,
       );
     });
     this.scheduleReconciliation(POLL_MS);
@@ -3894,6 +3935,33 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     setInterval(() => void this.syncBitfinexTradeStreams(), 5_000).unref();
     void this.syncBitfinexTradeStreams();
     setInterval(() => void this.watchExecutorLiveness(), 1_000).unref();
+    if (process.env.RELAY_EXECUTOR_WORKER === 'true') {
+      setInterval(() => void this.persistPausedExecutorHeartbeat(), PAUSED_EXECUTOR_HEARTBEAT_MS).unref();
+    }
+  }
+
+  /**
+   * PAUSED/IDLE schedules no reconciliation ticks, so the per-tick heartbeat
+   * would otherwise freeze at whatever the last tick wrote (often STARTING
+   * from the boot probe). Only the relayExecutor key is replaced, atomically,
+   * so this can never overwrite concurrent arm/pause state.
+   */
+  private async persistPausedExecutorHeartbeat(): Promise<void> {
+    if (this.executorDestroyed || process.env.RELAY_EXECUTOR_WORKER !== 'true') return;
+    const snapshot = this.getHealthSnapshot();
+    if (snapshot.status !== 'PAUSED_HEALTHY') return;
+    const payload = JSON.stringify(snapshot);
+    for (const instanceId of this.relayInstanceCache.keys()) {
+      await this.prisma.$executeRaw`
+        UPDATE "TradingAgentInstance"
+        SET "dashboardState" = jsonb_set(COALESCE("dashboardState", '{}'::jsonb), '{relayExecutor}', ${payload}::jsonb)
+        WHERE "id" = ${instanceId}::text AND "exchangeProvider" = 'bitfinex'
+      `.catch((err) => {
+        this.logger.warn(
+          `[EXECUTOR-HEARTBEAT] paused heartbeat write failed ${instanceId}: ${err instanceof Error ? err.message : err}`,
+        );
+      });
+    }
   }
 
   onModuleDestroy() {
@@ -4095,6 +4163,59 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     setInterval(probe, 3_000).unref();
   }
 
+  private venueMarginEvidence: { value: BitfinexFuturesPairConstraints; atMs: number } | null = null;
+
+  private async loadVenueMarginEvidence(): Promise<BitfinexFuturesPairConstraints | null> {
+    const nowMs = Date.now();
+    if (this.venueMarginEvidence && nowMs - this.venueMarginEvidence.atMs < VENUE_MARGIN_EVIDENCE_TTL_MS) {
+      return this.venueMarginEvidence.value;
+    }
+    try {
+      const value = await this.bitfinex.getBtcPerpVenueConstraints();
+      this.venueMarginEvidence = { value, atMs: nowMs };
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Relay allowlist for every executor entry path. Partial-exit tiles are
+   * refused while exchange-side position reductions are switched off.
+   */
+  private relayMayCopyTradeId(tradeId: string | null | undefined): boolean {
+    const partialReductionsEnabled =
+      this.config?.get<string>('SUBSCRIBER_POSITION_REDUCTION_ENABLED') === 'true';
+    if (isPartialExitLaneTradeId(tradeId) && !partialReductionsEnabled) {
+      this.logger.warn(
+        `[RELAY-PARTIAL-EXIT-GATE] refused ${tradeId}: tile exits in parts and SUBSCRIBER_POSITION_REDUCTION_ENABLED is off`,
+      );
+      return false;
+    }
+    return isMirrorableLaneTradeId(tradeId, { partialReductionsEnabled });
+  }
+
+  /** Gate 2 pre-trade check shared by every new-exposure entry path. */
+  private async checkPreTradeLiquidationSafety(
+    intent: SignalIntentEnvelope,
+    leverage: number,
+    context: string,
+  ): Promise<PreTradeLiquidationSafety> {
+    const result = evaluatePreTradeLiquidationSafety({
+      leverage,
+      orderLeverage: bitfinexOrderLev(leverage),
+      stopLossMarginPct: resolveEffectiveStopLossMarginPct(intent.risk?.stop_loss_margin_pct, {
+        mirrorMode: true,
+      }),
+      venue: await this.loadVenueMarginEvidence(),
+      minMultiple: resolveMinLiquidationToStopMultiple(),
+    });
+    if (!result.ok) {
+      this.logger.warn(`[PRE-TRADE-LIQ-GATE] entry refused ${context}: ${result.reason} (${result.detail})`);
+    }
+    return result;
+  }
+
   getHealthSnapshot(nowMs = Date.now()): RelayExecutorHealthSnapshot {
     const timeoutMs = Math.max(
       10_000,
@@ -4115,6 +4236,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       timeoutMs,
       healthMaxAgeMs,
       timeoutCount: this.executorTimeoutCount,
+      pollActivity: this.lastRelayPollActivity,
     });
     return {
       ...health,
@@ -5941,6 +6063,8 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
       if (this.wakeQueued) {
         this.wakeQueued = false;
         setImmediate(() => void this.tick());
+      } else if (this.lastRelayPollActivity !== 'ACTIVE') {
+        void this.persistPausedExecutorHeartbeat();
       }
     }
   }
@@ -6061,7 +6185,7 @@ export class SignalSubscriberExecutionService implements OnModuleInit, OnModuleD
     ]);
     if (timing) timing.databasePreflightCompletedAtMs = Date.now();
     const cycle = cycles.find((candidate) => {
-      if (!isMirrorableLaneTradeId(candidate.tradeId)) return false;
+      if (!this.relayMayCopyTradeId(candidate.tradeId)) return false;
       if (isPaperLaneTradeId(candidate.tradeId)) return false;
       if (candidate.expiresAt && candidate.expiresAt.getTime() <= Date.now()) return false;
       return readFreshSignedShowcaseExactLimit(
@@ -9240,6 +9364,16 @@ await this.notifications
     }
     const qty = exactQty.qty;
     const marginUsd = exactQty.requiredMarginUsd;
+    const liqSafety = await this.checkPreTradeLiquidationSafety(
+      intent, leverage, `user=${instance.userId} cycle=${cycleId}`,
+    );
+    if (!liqSafety.ok) {
+      await this.prisma.tradingAgentInstance.update({
+        where: { id: instance.id },
+        data: { lastError: `Pre-trade liquidation gate refused entry: ${liqSafety.reason}.` },
+      });
+      return false;
+    }
 
     let available = fastPreflight?.availableUsd ?? 0;
     if (!fastPreflight) {
@@ -14045,7 +14179,7 @@ await this.notifications
     reason: string,
   ): Promise<void> {
     if (!showcaseTradeId) return;
-    if (!isMirrorableLaneTradeId(showcaseTradeId)) {
+    if (!this.relayMayCopyTradeId(showcaseTradeId)) {
       const skipped = (this.phantomCancelAllowlistSkips ??= new Set<string>());
       if (!skipped.has(showcaseTradeId)) {
         if (skipped.size >= 1024) skipped.clear();
@@ -16387,7 +16521,7 @@ await this.notifications
       // guard in case a future bot change leaks paper trades into an allowed
       // position (it would be caught by both the lane-prefix check and the
       // paper-book check).
-      if (!isMirrorableLaneTradeId(tradeId)) {
+      if (!this.relayMayCopyTradeId(tradeId)) {
         this.logger.warn(
           `[F7] mirror-catchup skipped non-mirrorable lane trade=${tradeId} user=${instance.userId}`,
         );
@@ -16813,6 +16947,16 @@ await this.notifications
       await releaseClaim();
       return false;
     }
+    const liqSafety = await this.checkPreTradeLiquidationSafety(
+      intent, leverage, `catchup user=${instance.userId} cycle=${cycleId}`,
+    );
+    if (!liqSafety.ok) {
+      await releaseClaim();
+      await this.recordActionMissEntry(agentId, instance.userId, cycleId, tradeId, liqSafety.reason, {
+        detail: liqSafety.detail,
+      });
+      return false;
+    }
 
     const qty = exactQty.qty;
     const clientOrderId = computeClientOrderId(cycleId, claimParticipantId!, tradeId);
@@ -17060,7 +17204,7 @@ await this.notifications
     for (const cycle of intentCycles) {
       const tid = cycle.tradeId;
       // N6 / G4 — re-affirm the explicit showcase lane allowlist.
-      if (!isMirrorableLaneTradeId(tid)) {
+      if (!this.relayMayCopyTradeId(tid)) {
         this.logger.warn(
           `[INTENT-MIRROR] skip non-mirrorable lane trade=${tid} user=${instance.userId}`,
         );
@@ -17171,6 +17315,10 @@ await this.notifications
       }
       const qty = exactQty.qty;
       const exactMarginUsd = exactQty.requiredMarginUsd;
+      const liqSafety = await this.checkPreTradeLiquidationSafety(
+        intent, leverage, `intent-mirror trade=${tid} user=${instance.userId}`,
+      );
+      if (!liqSafety.ok) continue;
 
       // N4 — dry-run mode. Log the would-be order + audit row, no exchange call.
       if (intentMirrorDryRunActive(instance)) {

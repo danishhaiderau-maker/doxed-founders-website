@@ -1,6 +1,9 @@
 /** Fuzzy match bot trade_id ↔ relay cycle tradeId (prefix / normalization). */
 
-import { RELAY_ELIGIBLE_TILE_ID_PREFIXES } from './generated/tile-registry.generated';
+import {
+  PARTIAL_EXIT_TILE_ID_PREFIXES,
+  RELAY_ELIGIBLE_TILE_ID_PREFIXES,
+} from './generated/tile-registry.generated';
 
 export type TradeIdMatchKind = 'exact' | 'prefix' | 'normalized' | 'contains' | 'none';
 
@@ -96,6 +99,15 @@ export function isPaperLaneTradeId(tradeId: string | null | undefined): boolean 
  */
 const MIRRORABLE_LANE_PREFIXES: ReadonlySet<string> = new Set(RELAY_ELIGIBLE_TILE_ID_PREFIXES);
 
+/** Partial-exit tiles stay unmirrorable unless the caller proves exchange-side reductions are enabled. */
+const PARTIAL_EXIT_LANE_PREFIXES: ReadonlySet<string> = new Set(PARTIAL_EXIT_TILE_ID_PREFIXES);
+
+export function isPartialExitLaneTradeId(tradeId: string | null | undefined): boolean {
+  if (!tradeId) return false;
+  const prefix = extractLanePrefix(tradeId);
+  return prefix ? PARTIAL_EXIT_LANE_PREFIXES.has(prefix.replace(/-$/, '')) : false;
+}
+
 /**
  * F7 — Returns true ONLY when the trade_id belongs to an explicitly
  * allow-listed production mirror lane. Everything else, including bare UUIDs
@@ -106,10 +118,12 @@ const MIRRORABLE_LANE_PREFIXES: ReadonlySet<string> = new Set(RELAY_ELIGIBLE_TIL
  */
 export function isMirrorableLaneTradeId(
   tradeId: string | null | undefined,
+  opts?: { partialReductionsEnabled?: boolean },
 ): boolean {
   if (!tradeId) return false;
   const prefix = extractLanePrefix(tradeId);
   if (!prefix) return false; // unknown / bare-uuid → fail closed
+  if (isPartialExitLaneTradeId(tradeId) && opts?.partialReductionsEnabled !== true) return false;
   // prefix includes trailing '-' (e.g. 'cont-'); strip it for set lookup
   return MIRRORABLE_LANE_PREFIXES.has(prefix.replace(/-$/, ''));
 }

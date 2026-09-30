@@ -6,6 +6,11 @@ import { exchangeErrorMessage, exchangeFetch } from './exchange-http.util';
 export const BITFINEX_BTC_PERP_SYMBOL = 'tBTCF0:USTF0';
 /** Bitfinex defaults to 10x when lev is omitted — showcase bot uses 100x. */
 export const BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE = 100;
+
+/** The exact `lev` value every derivative order submits. */
+export function bitfinexOrderLev(leverage?: number): number {
+  return Math.min(100, Math.max(1, Math.round(leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+}
 /** Bitfinex v2 order flags. Partial lot exits must use REDUCE_ONLY only. */
 export const BITFINEX_POSITION_CLOSE_FLAG = 512;
 export const BITFINEX_REDUCE_ONLY_FLAG = 1024;
@@ -773,7 +778,7 @@ export class BitfinexTradingClient {
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
-    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+    const lev = bitfinexOrderLev(input.leverage);
     const amount =
       input.direction === 'LONG'
         ? Math.abs(input.qty)
@@ -813,7 +818,7 @@ export class BitfinexTradingClient {
       leverage?: number;
     },
   ): Promise<number> {
-    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+    const lev = bitfinexOrderLev(input.leverage);
     const amount = input.direction === 'LONG' ? Math.abs(input.qty) : -Math.abs(input.qty);
     const res = await bitfinexAuthPost(creds, 'v2/auth/w/order/update', {
       id: input.orderId,
@@ -842,7 +847,7 @@ export class BitfinexTradingClient {
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
-    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+    const lev = bitfinexOrderLev(input.leverage);
     const amount =
       input.positionDirection === 'LONG'
         ? -Math.abs(input.qty)
@@ -874,7 +879,7 @@ export class BitfinexTradingClient {
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
-    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+    const lev = bitfinexOrderLev(input.leverage);
     const amount =
       input.positionDirection === 'LONG'
         ? -Math.abs(input.qty)
@@ -912,10 +917,7 @@ export class BitfinexTradingClient {
       throw new Error('Bitfinex final flatten requires a non-zero raw position');
     }
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
-    const lev = Math.min(
-      100,
-      Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)),
-    );
+    const lev = bitfinexOrderLev(input.leverage);
     const amount =
       input.positionDirection === 'LONG'
         ? -Math.abs(input.qty)
@@ -945,7 +947,7 @@ export class BitfinexTradingClient {
     },
   ): Promise<number> {
     const symbol = input.symbol ?? BITFINEX_BTC_PERP_SYMBOL;
-    const lev = Math.min(100, Math.max(1, Math.round(input.leverage ?? BITFINEX_DEFAULT_DERIVATIVE_LEVERAGE)));
+    const lev = bitfinexOrderLev(input.leverage);
     const amount =
       input.direction === 'LONG' ? Math.abs(input.qty) : -Math.abs(input.qty);
     const body: Record<string, unknown> = {

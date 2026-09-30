@@ -32,7 +32,10 @@ import {
   type TradeLifecycleIntegritySnapshot,
   type RelaySimParticipantStats,
   formatMelbourneDateTime,
+  PARTIAL_EXIT_TILE_LANES,
+  RELAY_ELIGIBLE_TILE_LANES,
 } from '@dcf/utils';
+import { readPersistedRelayExecutorHealth } from './signal-subscriber-execution.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PointsService } from '../points/points.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -661,6 +664,20 @@ export class TradingAgentsService implements OnModuleInit {
             checkedAt: exchangeOrderAudit.checkedAt ?? null,
           }
         : null,
+      relayExecutor: (() => {
+        const health = readPersistedRelayExecutorHealth(dash);
+        return {
+          status: health.status,
+          healthy: health.healthy,
+          observedAt: health.observedAt ?? null,
+          heartbeatAgeMs: health.heartbeatAgeMs,
+          sourceRevision: health.sourceRevision ?? null,
+        };
+      })(),
+      relayAllowlist: {
+        eligibleLanes: [...RELAY_ELIGIBLE_TILE_LANES],
+        partialExitLanesRefused: [...PARTIAL_EXIT_TILE_LANES],
+      },
       updatedAt: instance.updatedAt.toISOString(),
     };
   }

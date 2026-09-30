@@ -666,8 +666,16 @@ test('concurrent serialized nearby claims reserve the lane before exchange submi
   assert.deepEqual(results.map((result) => result.allowed), [true, false, false, false]);
 });
 
+const LIVE_VENUE_MARGIN_EVIDENCE = {
+  symbol: 'tBTCF0:USTF0', minQtyBtc: 0.00004, maxQtyBtc: 100,
+  initialMarginFraction: 0.01, maintenanceMarginFraction: 0.005,
+  priceSignificantDigits: 5, amountDecimals: 8,
+  observedAt: '2026-09-29T23:21:00.000Z', source: 'BITFINEX_PUBLIC_FUTURES_CONFIG',
+};
+
 test('entry money path submits the venue-rounded showcase quantity, not the margin cap quantity', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.venueMarginEvidence = { value: LIVE_VENUE_MARGIN_EVIDENCE, atMs: Date.now() };
   const now = Date.now();
   const createdAt = new Date(now);
   const dashboardState = {
@@ -771,6 +779,7 @@ test('entry money path submits the venue-rounded showcase quantity, not the marg
 
 test('market catch-up money path also submits the exact showcase position quantity', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.venueMarginEvidence = { value: LIVE_VENUE_MARGIN_EVIDENCE, atMs: Date.now() };
   const submitted: Array<Record<string, unknown>> = [];
   const events: Array<Record<string, unknown>> = [];
   service.logger = { log() {}, warn() {}, error() {} };
@@ -845,6 +854,7 @@ test('market catch-up money path also submits the exact showcase position quanti
 
 test('market catch-up accepted-timeout retains its durable claim and pauses for exact CID recovery', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.venueMarginEvidence = { value: LIVE_VENUE_MARGIN_EVIDENCE, atMs: Date.now() };
   const fences: Array<Record<string, unknown>> = [];
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
   let deleted = 0;
@@ -899,6 +909,7 @@ test('market catch-up accepted-timeout retains its durable claim and pauses for 
 
 test('market catch-up cannot promote FILLED when exact durable stop protection fails', async () => {
   const service = Object.create(SignalSubscriberExecutionService.prototype) as any;
+  service.venueMarginEvidence = { value: LIVE_VENUE_MARGIN_EVIDENCE, atMs: Date.now() };
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
   let emergencyQty = 0;
   service.logger = { log() {}, warn() {}, error() {} };
@@ -9209,7 +9220,7 @@ test('phantom-cancel allowlist gate precedes the Fly call', () => {
   const source = readFileSync(resolve(__dirname, 'signal-subscriber-execution.service.ts'), 'utf8');
   const start = source.indexOf('private async cancelPhantomShowcasePosition(');
   const body = source.slice(start, source.indexOf('Cure 1', start));
-  const gate = body.indexOf('if (!isMirrorableLaneTradeId(showcaseTradeId))');
+  const gate = body.indexOf('if (!this.relayMayCopyTradeId(showcaseTradeId))');
   assert.ok(gate > 0);
   assert.ok(gate < body.indexOf("proxyBotPost('/api/reconcile/phantom-cancel'"));
 });
