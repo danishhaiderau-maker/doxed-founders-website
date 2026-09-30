@@ -19698,6 +19698,21 @@ def _fresh_epoch_provenance():
         if start is not None and not pd.isna(start):
             cutoff = start.isoformat()
             kind = "SHOWCASE_FRESH_COLLECTION"
+    collector_epoch = str(session.get("collector_v22_epoch_id") or "").strip()
+    if cutoff is None and collector_epoch:
+        # The collector's own epoch is the canonical dataset_epoch; reuse its
+        # id verbatim so dashboards compare it with the session unchanged.
+        try:
+            started = pd.to_datetime(float(session.get("collector_v22_epoch_ts")), unit="s", utc=True)
+        except (TypeError, ValueError):
+            started = None
+        return {
+            "fresh_epoch_schema": "fresh_research_epoch_v1",
+            "fresh_epoch_status": "BOUND",
+            "fresh_epoch_id": collector_epoch,
+            "fresh_epoch_cutoff_utc": started.isoformat() if started is not None else None,
+            "fresh_epoch_kind": "COLLECTOR_V22_EPOCH",
+        }
     if cutoff is None:
         status_path = Path("research_accumulator") / "research_accumulator_status.json"
         try:

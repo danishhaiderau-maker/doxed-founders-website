@@ -316,6 +316,22 @@ def test_fresh_epoch_identity_is_stable_and_cutoff_bound(tmp_path, monkeypatch):
     assert first["fresh_epoch_id"].startswith("epoch-")
 
 
+def test_collector_v22_epoch_binds_verbatim_when_no_showcase_start(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(analyzer, "load_research_session", lambda: {
+        "fresh_collection_start_iso": None,
+        "collector_v22_epoch_id": "epoch-v22-da3e5308a31e370d877c",
+        "collector_v22_epoch_ts": 1790624095.126945,
+    })
+
+    epoch = analyzer._fresh_epoch_provenance()
+
+    assert epoch["fresh_epoch_status"] == "BOUND"
+    assert epoch["fresh_epoch_kind"] == "COLLECTOR_V22_EPOCH"
+    assert epoch["fresh_epoch_id"] == "epoch-v22-da3e5308a31e370d877c"
+    assert epoch["fresh_epoch_cutoff_utc"].startswith("2026-09-28T19:34:55")
+
+
 def test_chase_attribution_without_trade_rows_keeps_unknown_hold_fail_closed(tmp_path, monkeypatch):
     monkeypatch.setattr(analyzer, "_load_jsonl_rows", lambda _path: [{
         "trade_id": "cont-no-trade-row",
