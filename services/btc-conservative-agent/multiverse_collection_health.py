@@ -28,6 +28,7 @@ NEVER_RECORDED_REASON = "PATH_SOURCE_NEVER_RECORDED"
 NEVER_RECORDED_QUARANTINE_REASON = "MULTIVERSE_PATH_SOURCE_NEVER_RECORDED"
 EMPTY_PATH_ALARM_RATE = 0.20
 TOUCH_GRID_COVERAGE_FLOOR = 0.90
+LEGACY_ADMISSION_BASIS = "AI_APPROVE_LEGACY"
 _GRID_DIGEST_RE = re.compile(r'"grid_sha256":\s*"([0-9a-f]{64})"')
 _CHILDREN_KEY = ', "entry_children": '
 _AFTER_CHILDREN_KEY = ', "primary_outcome": '
@@ -132,13 +133,13 @@ def _file_grid_digests(path: str) -> set:
 
 
 def _file_discovery_calls(path: str) -> dict:
-    """shared_ai_call_id -> tile_admission_basis for discovery-grid arm rows."""
+    """shared_ai_call_id -> (tile_admission_basis, signal_ts) for discovery-grid arm rows."""
     sig = _signature(path)
     if sig is None:
         return {}
     key = ("touch",) + sig
     if key not in _FILE_MEMO:
-        calls: dict[str, str] = {}
+        calls: dict[str, tuple] = {}
         for line in _lines(path):
             if '"discovery_shadow_only": true' not in line:
                 continue
@@ -148,7 +149,11 @@ def _file_discovery_calls(path: str) -> dict:
                 continue
             call = str(row.get("shared_ai_call_id") or "")
             if call:
-                calls.setdefault(call, str(row.get("tile_admission_basis") or "AI_APPROVE_LEGACY"))
+                signal_ts = row.get("signal_ts")
+                calls.setdefault(call, (
+                    str(row.get("tile_admission_basis") or LEGACY_ADMISSION_BASIS),
+                    float(signal_ts) if isinstance(signal_ts, (int, float)) else None,
+                ))
         _FILE_MEMO[key] = calls
     return _FILE_MEMO[key]
 
@@ -187,9 +192,12 @@ def build_multiverse_collection_report(data_dir: str, *, epoch_id: Optional[str]
     for path in rotation_family(data_dir, GRID_FILE):
         grid_digests |= _file_grid_digests(path)
     discovery: dict[str, str] = {}
+    arm_fix_ts: Optional[float] = None
     for path in rotation_family(data_dir, TOUCH_GRID_FILE):
-        for call, basis in _file_discovery_calls(path).items():
+        for call, (basis, signal_ts) in _file_discovery_calls(path).items():
             discovery.setdefault(call, basis)
+            if basis != LEGACY_ADMISSION_BASIS and signal_ts is not None:
+                arm_fix_ts = signal_ts if arm_fix_ts is None else min(arm_fix_ts, signal_ts)
 
     defects = [row for row in rows if row["empty_path"] and row["obs"] == "INSUFFICIENT_PATH"]
     defect_ts = [float(row["signal_ts"]) for row in defects if isinstance(row["signal_ts"], (int, float))]
@@ -209,8 +217,16 @@ def build_multiverse_collection_report(data_dir: str, *, epoch_id: Optional[str]
             "coverage": _rate(len(armed), len(calls)),
         }
 
+    # Coverage is a property of the call, not of when its row matured: rows
+    # finalized after the fix can belong to calls armed by the old code.
+    def armed_after_fix(row: dict) -> bool:
+        ts = row["signal_ts"]
+        return arm_fix_ts is not None and isinstance(ts, (int, float)) and float(ts) >= arm_fix_ts
+
+    coverage_rows = [row for row in rows if not row["never_recorded"]]
+    pre_arm_coverage = coverage([row for row in coverage_rows if not armed_after_fix(row)])
     post_cohort = _cohort(post_fix)
-    post_coverage = coverage(post_fix)
+    post_coverage = coverage([row for row in coverage_rows if armed_after_fix(row)])
     alarms = []
     if post_cohort["rows"] >= 5 and (post_cohort["empty_path_rate"] or 0) > EMPTY_PATH_ALARM_RATE:
         alarms.append("MULTIVERSE_EMPTY_PATH_RATE_HIGH")
@@ -239,7 +255,9 @@ def build_multiverse_collection_report(data_dir: str, *, epoch_id: Optional[str]
             "mean_row_bytes_referenced": _mean_bytes(ref_rows),
         },
         "touch_grid_coverage": {
-            "legacy": coverage(legacy),
+            "cohort_basis": "CALL_SIGNAL_TS_VS_FIRST_ADMISSION_BASIS_ARM",
+            "arm_fix_signal_ts": arm_fix_ts,
+            "legacy": pre_arm_coverage,
             "post_fix": post_coverage,
             "discovery_calls_by_admission_basis": dict(Counter(discovery.values())),
         },
