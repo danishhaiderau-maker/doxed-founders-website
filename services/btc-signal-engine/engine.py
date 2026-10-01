@@ -7467,19 +7467,21 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
 def compute_family_tile_entry(signal: dict, features: dict = None) -> dict:
     """Thin lifecycle adapter over the registry-selected family policy.
 
-    Registered patient-chase signals never carry a ``features`` key, so the
-    caller must pass the spawn features holding the signal-time adaptive
-    decision; without them every adaptive order fails closed as
+    ``signal["features"]`` is the frozen global snapshot from
+    atomic_freeze_signal and never holds lane enrichment, so the spawn
+    features carrying the signal-time adaptive decision must be passed
+    explicitly; without them every adaptive order fails closed as
     DECISION_MISSING.
     """
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
     lane = str(signal.get("research_lane") or "").upper()
     policy = _patient_chase_policy(lane)
-    features = signal.get("features") or features or {}
+    lane_features = features or {}
+    features = signal.get("features") or lane_features
     if getattr(policy, "ADAPTIVE_ENTRY", False):
         signal.update(policy.adaptive_entry_fields(
-            direction, price, features.get("adaptive_entry_decision"),
+            direction, price, lane_features.get("adaptive_entry_decision"),
         ))
         if signal.get("structural_entry_valid"):
             price = float(signal["planned_limit_price"])
