@@ -95,7 +95,7 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
     )
     assert result.stdout.splitlines() == [
         "v31-dynamic-adaptive-paper-v2",
-        "a26e7e15f4066108e9abcdb7d10f682b76fee910fc3d3c885a12a0c08ae196d3",
+        "b6ca920378391f8d5f5a4fbbc3478dfdbf0243a60eb07e09036485185543d9a6",
     ]
 
 
