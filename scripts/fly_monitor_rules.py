@@ -92,6 +92,16 @@ def cadence_findings(ready: Mapping[str, Any] | None, *, paused: bool | None, no
     cycle = progress.get("scheduled_ai_cycle") if isinstance(progress.get("scheduled_ai_cycle"), dict) else {}
     findings: dict[str, str] = {}
 
+    # Failing provider calls block entries themselves, so this must not hide
+    # behind the entry-ineligible early return below.
+    provider = progress.get("ai_provider") if isinstance(progress.get("ai_provider"), dict) else {}
+    if provider.get("alert"):
+        findings["ai_no_success"] = (
+            f"no successful DeepSeek response since {provider.get('last_ai_success_at') or 'boot'} "
+            f"({int(provider.get('consecutive_failures') or 0)} consecutive failures, "
+            f"last_error_class={provider.get('last_error_class')!r})"
+        )
+
     poll_ts = _num(cycle.get("last_poll_ts"))
     poll_age = max(0.0, now - poll_ts) if poll_ts else None
     if poll_age is not None and poll_age > SCHEDULER_POLL_STALE_SEC:
@@ -120,7 +130,7 @@ def cadence_findings(ready: Mapping[str, Any] | None, *, paused: bool | None, no
     ai_limit = max(AI_STALE_MIN_SEC, 3 * (_num(progress.get("ai_stale_after_sec")) or 0.0))
     if ai_age is not None and ai_age > ai_limit:
         findings["ai_stale"] = (
-            f"no AI call for {ai_age / 60:.0f} min (> {ai_limit / 60:.0f} min) while entries are eligible"
+            f"no successful AI response for {ai_age / 60:.0f} min (> {ai_limit / 60:.0f} min) while entries are eligible"
         )
     return findings
 

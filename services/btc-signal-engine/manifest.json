@@ -3,7 +3,7 @@
   "combo_version": "2026-10-01",
   "exit_version": "adaptive-regime-atr-trail-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "98dc5eb6899b",
+  "signal_hash": "9809b3354237",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-01T09:26:15.601Z"
+  "updated_at": "2026-10-01T21:55:08.539Z"
 }

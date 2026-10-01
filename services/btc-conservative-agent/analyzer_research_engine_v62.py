@@ -9160,6 +9160,20 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         trades, cohort_quarantine = split_current_tile_cohort(
             trades, session, relay_interference=relay_interference_trade_ids(),
         )
+        per_call, ai_outage_receipt = quarantine_ai_provider_outage_frames({
+            "blocked": blocked, "decisions": decisions, "ai_log": ai_log,
+            "signal_persist": signal_persist, "pipeline_events": pipeline_events,
+            "ai_errors": ai_errors,
+        })
+        blocked, decisions, ai_log = per_call["blocked"], per_call["decisions"], per_call["ai_log"]
+        signal_persist, pipeline_events = per_call["signal_persist"], per_call["pipeline_events"]
+        ai_errors = per_call["ai_errors"]
+        cohort_quarantine["ai_provider_outage"] = ai_outage_receipt
+        if ai_outage_receipt["rows"]:
+            print(
+                f"   AI provider outage quarantine: {ai_outage_receipt['rows']} per-call rows "
+                f"{ai_outage_receipt['rows_by_frame']} {PIPELINE_ENFORCEMENT_TAG}"
+            )
         write_trade_cohort_quarantine(cohort_quarantine)
         multiverse_collection_health_report(cohort_quarantine)
         adaptive_entry_funnel_report()
@@ -11886,7 +11900,56 @@ def _lane_closed_trade_stats(lane_trades):
 
 
 _CURRENT_TRADE_COHORT_QUARANTINE: dict = {}
+# Immutable provider-outage intervals (start/end exclusive, UTC).  Rows created
+# while every primary model call failed or returned a stale verdict are
+# excluded from current-cohort stats; source ledgers are never modified.
+AI_PROVIDER_OUTAGE_INTERVALS = (
+    {
+        "start": "2026-10-01T18:56:01Z",
+        "end": "2026-10-01T21:30:48Z",
+        "reason": "AI_PROVIDER_TIMEOUT_OUTAGE",
+        "detail": "DeepSeek trading_direction calls returned 'Read timed out' (60 s idle) after the "
+                  "last success 18:56:00.128Z; first post-outage response 21:30:47.978Z had 354 s "
+                  "latency (stale verdict) and is included; responses from 21:30:55Z are normal",
+    },
+)
 RELAY_INTERFERENCE_REASON = "RELAY_INTERFERENCE_PHANTOM_CANCEL"
+
+
+def ai_provider_outage_reason(df, ts_cols=("ts", "timestamp")) -> "pd.Series":
+    """Per-row outage reason ('' when outside every interval) from the first usable ts column."""
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype=object)
+    reason = pd.Series("", index=df.index, dtype=object)
+    col = next((c for c in ts_cols if c in df.columns), None)
+    if col is None:
+        return reason
+    ser = pd.to_datetime(df[col], utc=True, errors="coerce")
+    for interval in AI_PROVIDER_OUTAGE_INTERVALS:
+        start = pd.Timestamp(interval["start"])
+        end = pd.Timestamp(interval["end"])
+        inside = (reason == "") & (ser > start) & (ser < end)
+        reason[inside] = interval["reason"]
+    return reason
+
+
+def quarantine_ai_provider_outage_frames(named_frames: dict) -> tuple:
+    """Drop outage-interval rows from per-call frames; return (frames, receipt)."""
+    kept, counts = {}, {}
+    for name, df in named_frames.items():
+        reason = ai_provider_outage_reason(df)
+        if len(reason) and (reason != "").any():
+            counts[name] = int((reason != "").sum())
+            kept[name] = df[reason == ""].copy()
+        else:
+            kept[name] = df
+    receipt = {
+        "intervals": [dict(i) for i in AI_PROVIDER_OUTAGE_INTERVALS],
+        "rows_by_frame": counts,
+        "rows": int(sum(counts.values())),
+        "basis": "per-call AI/decision rows inside provider-outage intervals excluded; ledgers unmodified",
+    }
+    return kept, receipt
 PHANTOM_CANCEL_EXIT_REASON = "PHANTOM_CANCEL_BY_RELAY"
 
 
@@ -11968,6 +12031,9 @@ def split_current_tile_cohort(trades, session=None, tile_lanes=None, relay_inter
         contaminated = trades["trade_id"].fillna("").astype(str).isin(set(relay_interference))
         reason[contaminated] = RELAY_INTERFERENCE_REASON
         marked_interference = int(contaminated.sum())
+    outage = ai_provider_outage_reason(trades, ts_cols=("entry_ts", "open_ts", "ts"))
+    if len(outage):
+        reason[(reason == "") & (outage != "")] = outage[(reason == "") & (outage != "")]
     current_epoch = str((session or {}).get("collector_v22_epoch_id") or "").strip()
     if current_epoch and "epoch_id" in trades.columns:
         row_epoch = trades["epoch_id"].fillna("").astype(str).str.strip()

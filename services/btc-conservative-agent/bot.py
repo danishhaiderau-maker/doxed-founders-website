@@ -382,6 +382,26 @@ _strategy_progress_incident = {
     "consecutive_failures": 0,
     "consecutive_successes": 0,
 }
+# A scheduled cycle that reaches DeepSeek and times out is an attempt, not AI
+# progress.  Provider truth is tracked separately for the primary
+# trading_direction call so a provider outage cannot read as healthy cadence.
+AI_NO_SUCCESS_ALERT_SEC = max(
+    60.0, float(os.getenv("AI_NO_SUCCESS_ALERT_SEC", "600"))
+)
+AI_PROVIDER_HEALTH_PURPOSES = frozenset({"trading_direction"})
+_ai_provider_health_lock = threading.Lock()
+_ai_provider_health = {
+    "last_attempt_ts": 0.0,
+    "last_success_ts": 0.0,
+    "last_failure_ts": 0.0,
+    "failing_since_ts": 0.0,
+    "consecutive_failures": 0,
+    "successes_since_boot": 0,
+    "failures_since_boot": 0,
+    "last_error_class": None,
+    "last_latency_ms": None,
+    "last_model_echo": None,
+}
 # A genuine trade-channel tick remains mandatory for new strategy work. The
 # 60s window tolerates the quiet Bitfinex derivative tape, but entry also
 # requires a separately fresh REST bid/ask snapshot (see
@@ -17727,7 +17747,7 @@ def _pick_dashboard_last_ai(snapshot: dict, ai_history: list) -> dict:
 
 _last_pipeline_event_log = {"key": None, "ts": 0.0}
 
-def call_deepseek_api(
+def _call_deepseek_api_unrecorded(
     messages,
     temperature=0.4,
     *,
@@ -17736,7 +17756,6 @@ def call_deepseek_api(
     response_format=None,
     timeout=None,
 ):
-    """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
     if manual_admin_pause_active():
         raise RuntimeError("ADMIN_MANUAL_PAUSE")
     if TRADING_AI_ONLY and purpose not in TRADING_AI_ALLOWED_PURPOSES:
@@ -17797,7 +17816,135 @@ def call_deepseek_api(
         prompt_tokens = _estimate_token_count(prompt_text)
         completion_tokens = _estimate_token_count(text)
     _report_showcase_inference_usage(prompt_tokens, completion_tokens, model=model)
+    return text, latency_ms, str(payload.get("model") or "")[:64] or None
+
+
+def call_deepseek_api(
+    messages,
+    temperature=0.4,
+    *,
+    purpose: str,
+    max_tokens=None,
+    response_format=None,
+    timeout=None,
+):
+    """HTTP + JSON guard for DeepSeek; raises RuntimeError with a short code prefix."""
+    try:
+        text, latency_ms, model_echo = _call_deepseek_api_unrecorded(
+            messages,
+            temperature,
+            purpose=purpose,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        if not str(exc).startswith(AI_PROVIDER_NOT_ATTEMPTED_PREFIXES):
+            record_ai_provider_outcome(purpose, ok=False, error=exc)
+        raise
+    record_ai_provider_outcome(
+        purpose, ok=True, latency_ms=latency_ms, model_echo=model_echo
+    )
     return text, latency_ms
+
+
+# Local gates that refuse before any provider egress are not provider failures.
+AI_PROVIDER_NOT_ATTEMPTED_PREFIXES = ("ADMIN_MANUAL_PAUSE", "AI_PURPOSE_BLOCKED")
+
+
+def classify_ai_provider_error(exc) -> str:
+    """Bounded error class only; provider bodies never reach health payloads."""
+    text = str(exc or "")
+    status = getattr(exc, "http_status", None)
+    if text.startswith("HTTP_ERROR:"):
+        lowered = text.lower()
+        if "timed out" in lowered or "timeout" in lowered:
+            return "TIMEOUT"
+        if "name or service" in lowered or "resolve" in lowered or "getaddrinfo" in lowered:
+            return "DNS"
+        return "CONNECTION"
+    if status in (401, 403):
+        return "AUTH"
+    if status == 402:
+        return "INSUFFICIENT_BALANCE"
+    if status == 429:
+        return "RATE_LIMIT"
+    if isinstance(status, int) and status >= 500:
+        return "PROVIDER_5XX"
+    if isinstance(status, int) and status >= 400:
+        return "HTTP_4XX"
+    if text.startswith("MISSING_API_KEY"):
+        return "MISSING_API_KEY"
+    if text.startswith(("INVALID_DEEPSEEK_MODEL", "INVALID_DEEPSEEK_THINKING_MODE")):
+        return "MODEL_CONFIG"
+    if text.startswith(("JSON_DECODE", "API_ERROR", "NO_CHOICES", "EMPTY_CONTENT")):
+        return "BAD_RESPONSE"
+    return type(exc).__name__ if exc is not None else "UNKNOWN"
+
+
+def record_ai_provider_outcome(
+    purpose, *, ok, now=None, latency_ms=None, model_echo=None, error=None
+):
+    if purpose not in AI_PROVIDER_HEALTH_PURPOSES:
+        return
+    now = float(now or time.time())
+    with _ai_provider_health_lock:
+        health = _ai_provider_health
+        health["last_attempt_ts"] = now
+        if ok:
+            health.update({
+                "last_success_ts": now,
+                "failing_since_ts": 0.0,
+                "consecutive_failures": 0,
+                "last_latency_ms": latency_ms,
+                "last_model_echo": model_echo,
+            })
+            health["successes_since_boot"] += 1
+            return
+        if not health["consecutive_failures"]:
+            health["failing_since_ts"] = now
+        health["consecutive_failures"] += 1
+        health["failures_since_boot"] += 1
+        health["last_failure_ts"] = now
+        health["last_error_class"] = classify_ai_provider_error(error)
+
+
+def _epoch_iso(ts):
+    if not ts:
+        return None
+    return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+
+
+def ai_provider_health_snapshot(now=None) -> dict:
+    """Successful model responses, not attempts, are the AI liveness truth."""
+    now = float(now or time.time())
+    with _ai_provider_health_lock:
+        health = dict(_ai_provider_health)
+    success_ts = float(health["last_success_ts"] or 0)
+    failures = int(health["consecutive_failures"] or 0)
+    reference_ts = success_ts or float(health["failing_since_ts"] or 0)
+    no_success_sec = max(0.0, now - reference_ts) if failures and reference_ts else 0.0
+    alert = bool(failures and no_success_sec > AI_NO_SUCCESS_ALERT_SEC)
+    return {
+        "schema": "ai_provider_health_v1",
+        "purpose": "trading_direction",
+        "last_ai_success_at": _epoch_iso(success_ts),
+        "last_ai_success_ts": success_ts,
+        "ai_success_age_sec": max(0.0, now - success_ts) if success_ts else None,
+        "last_ai_attempt_at": _epoch_iso(health["last_attempt_ts"]),
+        "last_ai_failure_at": _epoch_iso(health["last_failure_ts"]),
+        "failing_since_at": _epoch_iso(health["failing_since_ts"]),
+        "consecutive_failures": failures,
+        "no_success_while_failing_sec": no_success_sec,
+        "last_error_class": health["last_error_class"],
+        "last_latency_ms": health["last_latency_ms"],
+        "last_model_echo": health["last_model_echo"],
+        "successes_since_boot": int(health["successes_since_boot"]),
+        "failures_since_boot": int(health["failures_since_boot"]),
+        "alert_after_sec": AI_NO_SUCCESS_ALERT_SEC,
+        "alert": "AI_NO_SUCCESS_10M" if alert else None,
+    }
+
 
 def build_ai_error_result(exc, trade_id=None, latency_ms=None, http_status=None):
     err_type = type(exc).__name__
@@ -32619,8 +32766,14 @@ def _strategy_progress_health_snapshot(
     # watchdog needs this independent signal to prove that a recovery AI call
     # really completed; otherwise the latch forces ``ai_progressing`` false and
     # can never accumulate the successful probes required to clear itself.
+    # Attempts keep the scheduler cadence honest; only successful provider
+    # responses prove AI progress.  The failure stays under AI_CADENCE_STALLED
+    # so the AI-only recovery observation path can still clear the latch.
+    ai_provider = ai_provider_health_snapshot(now)
+    ai_provider_failing = ai_provider["alert"] is not None
     ai_observed_progressing = bool(
-        not ai_expected or (ai_ts and ai_age <= ai_stale_sec)
+        (not ai_expected or (ai_ts and ai_age <= ai_stale_sec))
+        and not ai_provider_failing
     )
     ai_progressing = ai_observed_progressing
     with _strategy_progress_incident_lock:
@@ -32691,7 +32844,11 @@ def _strategy_progress_health_snapshot(
         "recovery_probe_ok": bool(
             lock_progressing and ws_progressing and ai_observed_progressing
         ),
-        "ai_age_sec": ai_age,
+        "ai_age_sec": ai_provider["ai_success_age_sec"],
+        "ai_attempt_age_sec": ai_age,
+        "last_ai_success_at": ai_provider["last_ai_success_at"],
+        "ai_consecutive_failures": ai_provider["consecutive_failures"],
+        "ai_provider": ai_provider,
         "evaluation_age_sec": evaluation_age,
         "evaluation_progressing": evaluation_progressing,
         "ai_stale_after_sec": ai_stale_sec,
@@ -33263,6 +33420,7 @@ __ADMIN_ACCESS_CONTROLS__
     <p><strong>Research Isolation:</strong> <span id="researchIsolation">-</span></p>
     <p><strong>Lane Opportunity (session):</strong> <span id="laneOpportunity">-</span></p>
     <p><strong>Last AI Call:</strong> <span id="lastAICall">-</span></p>
+    <p><strong>Last AI Success:</strong> <span id="aiSuccessBanner">-</span></p>
     <p><strong>AI Score:</strong> <span id="aiScore">-</span></p>
     <p><strong>Signal Cooldown:</strong> <span id="signalCooldown">-</span></p>
     <p><strong>AI Cooldown:</strong> <span id="aiCooldown">-</span></p>
@@ -35422,6 +35580,22 @@ DASHBOARD_JS = """(function () {
           safeText('laneOpportunity', 'collecting…');
         }
         safeText('lastAICall', dbg.last_ai_call || '-');
+        const aiProvider = (d.strategy_progress && d.strategy_progress.ai_provider) || null;
+        const aiSuccessEl = document.getElementById('aiSuccessBanner');
+        if (aiSuccessEl) {
+          if (!aiProvider) {
+            aiSuccessEl.textContent = 'UNKNOWN';
+            aiSuccessEl.style.color = '#8b949e';
+          } else {
+            const fails = Number(aiProvider.consecutive_failures || 0);
+            aiSuccessEl.textContent =
+              (aiProvider.last_ai_success_at ? formatMelbourneDateTime(aiProvider.last_ai_success_at) : 'none this process') +
+              ' · ' + fails + ' consecutive failure' + (fails === 1 ? '' : 's') +
+              (aiProvider.last_error_class && fails ? ' (' + aiProvider.last_error_class + ')' : '') +
+              (aiProvider.alert ? ' · ALERT: no successful model response for >10 min' : '');
+            aiSuccessEl.style.color = aiProvider.alert ? '#f85149' : (fails ? '#d29922' : '#3fb950');
+          }
+        }
         safeText('aiScore', dbg.last_ai_score || '-');
         safeText('signalCooldown', dbg.signal_cooldown_active ? 'ACTIVE (' + dbg.cooldown_remaining_signal + 's)' : 'READY');
         safeText('aiCooldown', dbg.ai_cooldown_active ? 'ACTIVE (' + dbg.cooldown_remaining_ai + 's)' : 'READY');
@@ -40294,6 +40468,10 @@ def status():
         "process_alive": process_alive,
         "strategy_progress": strategy_progress,
         "strategy_progress_incident": strategy_progress_incident,
+        "last_ai_success_at": strategy_progress["ai_provider"]["last_ai_success_at"],
+        "ai_consecutive_failures": strategy_progress["ai_provider"]["consecutive_failures"],
+        "ai_alert": strategy_progress["ai_provider"]["alert"],
+        "ai_provider_health": strategy_progress["ai_provider"],
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         **execution_control,
         "system_ready": runtime["system_ready"],

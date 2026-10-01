@@ -974,6 +974,11 @@ jobs:
           machine_json="$(timeout --signal=TERM --kill-after=5s 30s flyctl machines list --app doxed-btc-bot --json)"
           machine_id="$(printf '%s' "$machine_json" | python -c 'import json,sys; rows=json.load(sys.stdin); active=[row for row in rows if str(row.get("state") or "").lower() not in {"destroyed","stopped"}]; assert len(active) == 1, f"expected exactly one active machine, found {len(active)}"; print(active[0]["id"])')"
           run_probe MACHINE_STATUS flyctl machine status --app doxed-btc-bot "$machine_id"
+          deepseek_probe_b64="$(base64 -w0 scripts/fly-deepseek-egress-probe.py)"
+          run_probe DEEPSEEK_EGRESS flyctl machine exec --app doxed-btc-bot --timeout 44 "$machine_id" \
+            "python -c \"import base64; exec(base64.b64decode('${deepseek_probe_b64}'))\""
+          run_probe AI_CALL_LOG flyctl machine exec --app doxed-btc-bot --timeout 30 "$machine_id" \
+            "sh -lc 'grep -nE \"DeepSeek|deepseek|AI_CRASH|HTTP_ERROR|Read timed out|\\[AI[ \\]]\" /app/data/bot.log | grep -v DASHBOARD | tail -n 80'"
           run_probe RECENT_PLATFORM_LOGS flyctl logs --app doxed-btc-bot --no-tail
           # Machine Exec uses the Fly Machines guest-agent path rather than
           # the application's Flask worker or SSH service.  Keep this probe
@@ -1227,6 +1232,7 @@ jobs:
           python -m pytest test_collection_epoch_binding.py -q
           python -m pytest test_score_led_fill_revalidation.py -q
           python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py -q
+          python -m pytest test_ai_provider_health.py test_strategy_progress_watchdog.py test_analyzer_ai_provider_outage_quarantine.py -q
           python -m pytest test_manual_pause_fill_handoff.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
