@@ -18736,8 +18736,9 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             if ai_accepted else None
         )
         if adaptive is not None:
+            # The decision is per tile; the pre-entry receipt is one immutable
+            # record per shared call, so it must stay lane-independent.
             lane_features = {**enriched, "adaptive_entry_decision": adaptive}
-            decision_features = {**decision_features, "adaptive_entry_decision": adaptive}
             _record_adaptive_entry_decision(lane, adaptive)
             if adaptive.get("action") == "STAND_ASIDE" and detail.get("passes"):
                 detail = {**detail, "passes": False, "block_reason": f"ADAPTIVE_{adaptive.get('reason')}"}
@@ -34001,7 +34002,9 @@ DASHBOARD_JS = """(function () {
             const n = Number(closed || 0);
             if (!(n > 0)) return '—';
             const w = Number(wins || 0);
-            return Math.round(100 * w / n) + '% (' + w + 'W/' + Number(losses || 0) + 'L)';
+            const l = Number(losses || 0);
+            const flat = n - w - l;
+            return Math.round(100 * w / n) + '% (' + w + 'W/' + l + 'L)' + (flat > 0 ? ' · ' + flat + ' flat' : '');
           };
           const headlineWinLabel = currentSettingsPeriod
             ? winPctLabel(currentSettingsPeriod.wins, currentSettingsPeriod.losses, headlineClosed)

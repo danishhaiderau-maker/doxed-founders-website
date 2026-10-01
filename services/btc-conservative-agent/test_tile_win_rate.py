@@ -1,6 +1,7 @@
 """Win % on every registry tile: same ledger as PnL, wins = net PnL > 0 after costs."""
 import csv
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,7 +69,11 @@ def test_settings_periods_count_wins_from_the_same_rows_as_period_pnl(tmp_path, 
 def test_fly_card_and_settings_table_render_win_pct_generically():
     chunk = _render_chunk()
     assert "statRow('Win %', headlineWinLabel)" in chunk
-    assert "return Math.round(100 * w / n) + '% (' + w + 'W/' + Number(losses || 0) + 'L)';" in chunk
+    start = chunk.index("const winPctLabel = function")
+    source = chunk[start:chunk.index("};", start) + 2]
+    script = source + ";console.log(JSON.stringify([winPctLabel(2, 3, 5), winPctLabel(12, 9, 27), winPctLabel(0, 0, 0)]))"
+    labels = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8", check=True).stdout)
+    assert labels == ["40% (2W/3L)", "44% (12W/9L) · 6 flat", "—"]
     assert "if (!(n > 0)) return '—';" in chunk
     assert "winPctLabel(period.wins, period.losses, period.executed)" in chunk
     assert '<th style="padding:5px;text-align:right;">Win %</th>' in chunk

@@ -7779,7 +7779,9 @@ function winPctLabel(wins, losses, closed) {
   const n = Number(closed || 0);
   if (!(n > 0)) return '—';
   const w = Number(wins || 0);
-  return `${Math.round(100 * w / n)}% (${w}W/${Number(losses || 0)}L)`;
+  const l = Number(losses || 0);
+  const flat = n - w - l;
+  return `${Math.round(100 * w / n)}% (${w}W/${l}L)${flat > 0 ? ` · ${flat} flat` : ''}`;
 }
 function laneWinMetric(current, row) {
   const stale = current.evidence_status === 'STALE_GENERATION';
