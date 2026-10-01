@@ -38348,6 +38348,9 @@ _DASHBOARD_TRADE_API_KEYS = (
     "funding_fees_usd", "ai_band", "exit_reason", "close_ts_melbourne",
     "dual_execution_truth", "copy_fill_observed",
     "exchange_confirmed_shadow_overlay",
+    # tradeStopEvidence flags every FAMILY_* row lacking the schema as
+    # double-counted, and derives margin/notional from these columns.
+    "pnl_accounting_schema", "margin_usdt", "leverage",
 )
 
 
