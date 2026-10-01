@@ -331,6 +331,76 @@ def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
     assert len(enqueues) == (1 if decision == "APPROVE" else 0)
 
 
+def test_per_tile_adaptive_decisions_share_one_pre_entry_receipt_and_every_tile_enqueues(tmp_path):
+    from research_v3_bridge import dual_write_lane_decision
+
+    lanes = ("FAMILY_ONE", "FAMILY_TWO", "FAMILY_THREE")
+    shared_features = {"research_feature_schema_version": "causal-v1", "price": 100.0}
+    ai = {"decision": "APPROVE", "direction": "LONG", "raw_direction": "LONG",
+          "shared_ai_call_id": "scan-multi-tile"}
+    ctx = {"trade_id": "scan-multi-tile", "shared_ai_call_id": "scan-multi-tile",
+           "created_ts_ts": 1000.0, "symbol": "BTCUSD"}
+    receipts, enqueued, recorded = [], [], []
+
+    def persist(lane, lane_ai, lane_ctx, receipt_features, **verdict):
+        receipts.append((lane, copy.deepcopy(receipt_features)))
+        source = {
+            "trade_id": lane_ctx["trade_id"], "shared_ai_call_id": lane_ai["shared_ai_call_id"],
+            "shared_ai_call_ts_epoch": lane_ctx["created_ts_ts"], "symbol": lane_ctx["symbol"],
+            "raw_direction": lane_ai["raw_direction"], "executed_direction": lane_ai["direction"],
+            "feature_snapshot_at_signal": copy.deepcopy(receipt_features),
+        }
+        receipt = dual_write_lane_decision(
+            source, lane=lane, epoch_id="epoch-multi-tile", data_dir=str(tmp_path),
+            lane_policy={"policy_id": lane}, **verdict,
+        )
+        return bool(receipt["store_verification"]["passed"])
+
+    namespace = {
+        "is_ai_scan_lane": lambda _lane: True,
+        "is_research_data_collection": lambda: True,
+        "_effective_score_led_family_ai": lambda ai: (ai, {"applied": False}),
+        "_schedule_taker_signal_counterfactual": lambda *_args, **_kwargs: None,
+        "_adaptive_regime_entry_decision": lambda lane, *_args, **_kwargs: {
+            "lane": lane, "policy_id": f"policy-{lane}", "action": "TAKER",
+        },
+        "_record_adaptive_entry_decision": lambda lane, decision: recorded.append((lane, decision)),
+        "state": {"invert_signal": False},
+        "compute_directional_spread": lambda *_args: 5,
+        "_enrich_combo_lane_features": lambda features, _ctx: dict(features),
+        "COMBO_EXECUTION_LANES": lanes,
+        "is_independent_ai_lane": lambda _lane: False,
+        "is_shared_ai_direction_lane": lambda _lane: False,
+        "is_patient_chase_lane": lambda _lane: False,
+        "is_deterministic_bracket_lane": lambda _lane: False,
+        "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
+        "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
+        "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
+        "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-multi-tile",
+        "_v3_lane_policy_material": lambda lane: {"policy_signature": lane},
+        "_write_v3_shared_lane_decision": persist,
+        "_enqueue_combo_lane_execution": lambda _ctx, _ai, _edge, features, lane, _reason: (
+            enqueued.append((lane, copy.deepcopy(features)))
+        ),
+        "COMBO_LANE_SPECS": {lane: {"combo_key": lane} for lane in lanes},
+        "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
+        "logger": QuietLogger(),
+    }
+    load_function("spawn_combo_lanes_from_ai_scan", namespace)(ctx, ai, 2.0, shared_features, "AI_SCAN")
+
+    assert [lane for lane, _ in receipts] == list(lanes)
+    assert all(features == shared_features for _, features in receipts)
+    rows = (tmp_path / "v3" / "ledgers" / "pre_entry_features.jsonl").read_text().splitlines()
+    assert len(rows) == 1
+    assert [lane for lane, _ in enqueued] == list(lanes)
+    for lane, features in enqueued:
+        assert features["adaptive_entry_decision"]["lane"] == lane
+    assert [lane for lane, _ in recorded] == list(lanes)
+
+
 def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tmp_path):
     from research_v3_bridge import dual_write_lane_decision
 
