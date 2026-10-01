@@ -110,7 +110,8 @@ def test_healthy_system_is_green_with_every_field():
                      "trading.orders", "trading.orphans", "trading.lifecycle", "ws.ticks", "shipper.progress",
                      "laptop.pull_ack", "laptop.supervisor", "analyzer.generation", "analyzer.api", "analyzer.cycle",
                      "exports.freshness", "streams.coverage", "dashboards.parity", "railway.relay", "railway.api",
-                     "neon.usage", "bitfinex.exposure", "proof.latest", "disk.space"):
+                     "neon.usage", "bitfinex.exposure", "proof.latest", "disk.space", "ai.served_model",
+                     "deepseek.balance"):
         assert required in ids
     for c in report["checks"]:
         assert set(c) >= {"status", "observed", "threshold", "last_good_at", "hint", "runbook"}
@@ -390,6 +391,98 @@ def test_provider_health_block_from_ai_repair_is_preferred():
     checks = by_id(sh.evaluate(inputs, {}))
     assert checks["ai.success"]["status"] == sh.RED
     assert checks["ai.failures"]["status"] == sh.RED
+
+
+def test_provider_health_success_ts_key_from_ai_repair_is_read():
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    inputs["fly_state"]["ai_history"] = []
+    inputs["fly_status"]["ai_provider_health"] = {"last_ai_success_ts": now - 60, "consecutive_failures": 0}
+    assert by_id(sh.evaluate(inputs, {}))["ai.success"]["status"] == sh.GREEN
+
+
+def test_served_model_matches_configured_is_green_and_mismatch_amber():
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    inputs["fly_status"]["ai_provider_health"] = {
+        "last_ai_success_ts": now - 60, "consecutive_failures": 0, "configured_model": "deepseek-flash",
+        "last_model_echo": "deepseek-flash", "last_system_fingerprint": "aeb56401"}
+    check = by_id(sh.evaluate(inputs, {}))["ai.served_model"]
+    assert check["status"] == sh.GREEN and "aeb56401" in check["observed"]
+    inputs["fly_status"]["ai_provider_health"]["configured_model"] = "deepseek-v4-flash"
+    assert by_id(sh.evaluate(inputs, {}))["ai.served_model"]["status"] == sh.AMBER
+
+
+def test_served_model_unexpected_change_is_amber_for_six_hours():
+    now = ts("2026-10-02T03:00:00Z")
+    state: dict = {}
+    inputs = healthy(now)
+    prov = {"last_ai_success_ts": now - 60, "consecutive_failures": 0, "last_model_echo": "deepseek-flash"}
+    inputs["fly_status"]["ai_provider_health"] = prov
+    assert by_id(sh.evaluate(inputs, state))["ai.served_model"]["status"] == sh.GREEN
+    prov["last_model_echo"] = "deepseek-flash-2"
+    later = healthy(now + 300)
+    later["fly_status"]["ai_provider_health"] = {**prov, "configured_model": "deepseek-flash-2"}
+    check = by_id(sh.evaluate(later, state))["ai.served_model"]
+    assert check["status"] == sh.AMBER and "deepseek-flash->deepseek-flash-2" in check["observed"]
+    much_later = healthy(now + 7 * 3600)
+    much_later["fly_status"]["ai_provider_health"] = {**prov, "configured_model": "deepseek-flash-2"}
+    assert by_id(sh.evaluate(much_later, state))["ai.served_model"]["status"] == sh.GREEN
+
+
+def test_served_model_change_reported_by_runtime_is_amber():
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    inputs["fly_status"]["ai_provider_health"] = {
+        "last_ai_success_ts": now - 60, "consecutive_failures": 0, "configured_model": "deepseek-flash",
+        "last_model_echo": "deepseek-flash",
+        "served_model_changes": [{"from": "deepseek-v4-flash", "to": "deepseek-flash", "at": sh.iso(now - 3600)}]}
+    assert by_id(sh.evaluate(inputs, {}))["ai.served_model"]["status"] == sh.AMBER
+
+
+@pytest.mark.parametrize("total,available,expected", [
+    (12.0, True, sh.GREEN), (4.99, True, sh.AMBER), (1.23, True, sh.AMBER), (0.99, True, sh.RED), (20.0, False, sh.RED),
+])
+def test_deepseek_balance_thresholds(total, available, expected):
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    inputs["deepseek_balance"] = {"checked_at": now, "source": "laptop", "total_usd": total, "is_available": available}
+    assert by_id(sh.evaluate(inputs, {}))["deepseek.balance"]["status"] == expected
+
+
+def test_deepseek_balance_prefers_fresh_fly_value_and_skips_without_key():
+    now = ts("2026-10-02T03:00:00Z")
+    inputs = healthy(now)
+    inputs["deepseek_balance"] = {"checked_at": now, "source": "laptop", "error": "KEY_MISSING"}
+    assert by_id(sh.evaluate(inputs, {}))["deepseek.balance"]["status"] == sh.SKIP
+    inputs["fly_status"]["ai_provider_health"] = {"deepseek_balance": {
+        "total_usd": 0.5, "is_available": True, "checked_at": sh.iso(now - 120)}}
+    check = by_id(sh.evaluate(inputs, {}))["deepseek.balance"]
+    assert check["status"] == sh.RED and "source=fly" in check["observed"]
+
+
+def test_deepseek_balance_parse_and_never_echo_key(monkeypatch):
+    now = ts("2026-10-02T03:00:00Z")
+    payload = {"is_available": True, "balance_infos": [
+        {"currency": "CNY", "total_balance": "9.00"}, {"currency": "USD", "total_balance": "1.23"}]}
+    assert sh.parse_deepseek_balance(payload, None, now, "laptop")["total_usd"] == pytest.approx(1.23)
+    assert sh.parse_deepseek_balance(None, "HTTP_401", now, "laptop") == {
+        "checked_at": now, "source": "laptop", "error": "HTTP_401"}
+    seen = {}
+
+    def fake_http(url, *, headers=None, timeout=20.0):
+        seen["url"], seen["auth"] = url, headers["Authorization"]
+        return payload, None
+
+    monkeypatch.setattr(sh, "http_json", fake_http)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    cache: dict = {}
+    result = sh.collect_deepseek_balance({"DEEPSEEK_API_KEY": "sk-test-secret"}, cache, now)
+    assert seen == {"url": sh.DEEPSEEK_BALANCE_URL, "auth": "Bearer sk-test-secret"}
+    assert "sk-test-secret" not in json.dumps(result) and "sk-test-secret" not in json.dumps(cache)
+    seen.clear()
+    assert sh.collect_deepseek_balance({"DEEPSEEK_API_KEY": "sk-test-secret"}, cache, now + 60)["total_usd"] == 1.23
+    assert not seen  # cached for 10 minutes
 
 
 def test_all_neutral_decisions_amber():

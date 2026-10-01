@@ -18,6 +18,8 @@ def _runtime(now, **over):
         "research_lane_enabled": {lane: True for lane in LANES},
         "strategy_progress": {
             "ai_progressing": True, "ai_age_sec": 100.0, "ai_stale_after_sec": 300.0, "evaluation_age_sec": 90.0,
+            "last_ai_success_at": up.iso(now - 130), "ai_consecutive_failures": 0,
+            "ai_provider": {"last_model_echo": "deepseek-flash"},
             "process_startup_age_sec": 9000.0, "ws_age_sec": 0.5, "ws_progressing": True,
             "scheduled_ai_cycle": {"completed_ts": now - 120, "last_poll_ts": now - 40,
                                    "last_poll_entry_eligible": True, "stage": "IDLE"},
@@ -170,6 +172,41 @@ def test_ai_cycle_not_advancing_since_previous_row_fails():
     previous = {"observed": {"ai_cycle_completed_ts": runtime["strategy_progress"]["scheduled_ai_cycle"]["completed_ts"]}}
     row = up.evaluate_row(**_inputs(now, runtime=runtime, previous=previous))
     assert row["failed_checks"] == ["ai_advancing"]
+
+
+def test_ai_cycles_advancing_without_a_successful_response_fail():
+    """2026-10-01 outage shape: cycles complete, every DeepSeek call times out."""
+    now = T0 + 1800
+    runtime = _runtime(now)
+    runtime["strategy_progress"]["last_ai_success_at"] = up.iso(T0 - 60)
+    runtime["strategy_progress"]["ai_consecutive_failures"] = 3
+    previous = {"observed": {"ai_cycle_completed_ts": now - 1900, "ai_last_success_at": up.iso(T0 - 60)}}
+    row = up.evaluate_row(**_inputs(now, runtime=runtime, previous=previous))
+    assert row["failed_checks"] == ["ai_advancing"]
+    assert "no SUCCESSFUL model response since the previous proof row" in row["checks"]["ai_advancing"]["detail"]
+    assert row["observed"]["ai_consecutive_failures"] == 3
+
+
+def test_ai_success_truth_missing_or_absent_fails_closed():
+    now = T0 + 60
+    runtime = _runtime(now)
+    del runtime["strategy_progress"]["last_ai_success_at"]
+    row = up.evaluate_row(**_inputs(now, runtime=runtime))
+    assert row["failed_checks"] == ["ai_advancing"] and row["checks"]["ai_advancing"]["ok"] is None
+    runtime["strategy_progress"]["last_ai_success_at"] = None
+    assert up.evaluate_row(**_inputs(now, runtime=runtime))["failed_checks"] == ["ai_advancing"]
+    runtime["strategy_progress"]["last_ai_success_at"] = up.iso(now - 20 * 60)
+    row = up.evaluate_row(**_inputs(now, runtime=runtime))
+    assert row["failed_checks"] == ["ai_advancing"] and "> 900s" in row["checks"]["ai_advancing"]["detail"]
+
+
+def test_new_successful_response_since_previous_row_passes_and_records_served_model():
+    now = T0 + 1800
+    previous = {"observed": {"ai_cycle_completed_ts": now - 1900, "ai_last_success_at": up.iso(now - 1850)}}
+    row = up.evaluate_row(**_inputs(now, previous=previous))
+    assert row["status"] == "PASS", row
+    assert row["observed"]["ai_served_model"] == "deepseek-flash"
+    assert "last SUCCESSFUL response" in row["checks"]["ai_advancing"]["detail"]
 
 
 def test_segment_lag_stuck_ack_and_pruning_fail():

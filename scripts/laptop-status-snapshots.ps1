@@ -108,8 +108,16 @@ if ($offline) {
         stale_venues = @($crossVenue.stale_venues | ForEach-Object { [string]$_ })
       }
     }
+    $provider = $progress.ai_provider
     $runtime.strategy_progress = [ordered]@{
       ai_progressing = $progress.ai_progressing; ai_age_sec = $progress.ai_age_sec
+      last_ai_success_at = $progress.last_ai_success_at; ai_consecutive_failures = $progress.ai_consecutive_failures
+      ai_provider = if ($provider) { [ordered]@{
+        last_ai_success_at = $provider.last_ai_success_at; successes_since_boot = $provider.successes_since_boot
+        consecutive_failures = $provider.consecutive_failures; alert = $provider.alert
+        last_model_echo = $provider.last_model_echo; configured_model = $provider.configured_model
+        last_system_fingerprint = $provider.last_system_fingerprint
+      } } else { $null }
       ai_stale_after_sec = $progress.ai_stale_after_sec; evaluation_age_sec = $progress.evaluation_age_sec
       process_startup_age_sec = $progress.process_startup_age_sec
       ws_age_sec = $progress.ws_age_sec; ws_progressing = $progress.ws_progressing

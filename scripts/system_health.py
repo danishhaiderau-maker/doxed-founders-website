@@ -111,7 +111,18 @@ THRESHOLDS: dict[str, float] = {
     "watcher_stale_sec": 15 * MIN,
     "renotify_sec": 6 * HOUR,
     "tick_min_interval_sec": 240.0,
+    "served_model_change_amber_sec": 6 * HOUR,
+    "deepseek_balance_amber_usd": 5.0,
+    "deepseek_balance_red_usd": 1.0,
+    "deepseek_balance_cache_sec": 10 * MIN,
+    "deepseek_balance_fly_max_age_sec": 30 * MIN,
 }
+
+# DeepSeek retired "deepseek-v4-flash" on 2026-10-01 and serves those requests
+# as "deepseek-flash" (DeepSeek-V4.1-Flash). Used only when Fly does not yet
+# report its configured model.
+EXPECTED_DEEPSEEK_MODEL = "deepseek-flash"
+DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 
 # Checks that need N consecutive bad evaluations before an alarm opens (flap
 # guard for single network blips). Default is 1.
@@ -463,7 +474,38 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
     except OSError:
         inputs["laptop_disk"] = None
     inputs["neon"] = collect_neon(cache)
+    inputs["deepseek_balance"] = collect_deepseek_balance(vault, cache, now)
     return inputs
+
+
+def parse_deepseek_balance(payload: Any, err: str | None, now: float, source: str) -> dict[str, Any]:
+    """Bounded summary of GET /user/balance; upstream text is never echoed."""
+    out: dict[str, Any] = {"checked_at": now, "source": source}
+    if err:
+        return {**out, "error": err}
+    infos = dig(payload, "balance_infos", default=[]) or []
+    usd = next((i for i in infos if isinstance(i, Mapping) and str(i.get("currency")).upper() == "USD"), None)
+    try:
+        total = float(usd["total_balance"]) if usd else None
+    except (KeyError, TypeError, ValueError):
+        total = None
+    if total is None:
+        return {**out, "error": "NO_USD_BALANCE"}
+    return {**out, "total_usd": total, "is_available": bool(dig(payload, "is_available", default=False))}
+
+
+def collect_deepseek_balance(vault: Mapping[str, str], cache: dict[str, Any], now: float) -> dict[str, Any]:
+    """Read-only balance GET, cached. The key goes only into the request header."""
+    cached = cache.get("deepseek_balance")
+    if isinstance(cached, Mapping) and now - float(cached.get("checked_at") or 0) < THRESHOLDS["deepseek_balance_cache_sec"]:
+        return dict(cached)
+    key = os.environ.get("DEEPSEEK_API_KEY") or vault.get("DEEPSEEK_API_KEY")
+    if not key:
+        return {"checked_at": now, "source": "laptop", "error": "KEY_MISSING"}
+    payload, err = http_json(DEEPSEEK_BALANCE_URL, headers={"Authorization": f"Bearer {key}"}, timeout=20)
+    result = parse_deepseek_balance(payload, err, now, "laptop")
+    cache["deepseek_balance"] = result
+    return result
 
 
 def collect_neon(cache: dict[str, Any]) -> dict[str, Any] | None:
@@ -601,7 +643,7 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     events[:] = [e for e in events if now - e["ts"] <= 24 * HOUR]
     success_ts = [e["ts"] for e in events if e["ok"]]
     candidates = [mem.get("ai_last_success_ts"), mirror.get("ai_success_ts"), max(success_ts) if success_ts else None,
-                  parse_ts(dig(prov, "last_success_ts"))]
+                  parse_ts(dig(prov, "last_ai_success_ts") or dig(prov, "last_success_ts"))]
     last_success = max([c for c in candidates if c] or [0.0]) or None
     if last_success:
         mem["ai_last_success_ts"] = last_success
@@ -646,6 +688,56 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
                   f"{len(neutral)}/{len(window)} neutral in {fmt_age(t['ai_neutral_window_sec'])}",
                   "not 100% neutral",
                   "model returns only NO_TRADE: prompt/parse regression or dead inputs" if all_neutral else ""))
+
+    echo = str(dig(prov, "last_model_echo") or "") or None
+    fingerprint = dig(prov, "last_system_fingerprint")
+    configured = str(dig(prov, "configured_model") or "") or EXPECTED_DEEPSEEK_MODEL
+    previous = mem.get("ai_served_model")
+    if echo and previous and echo != previous:
+        mem["ai_served_model_changed_at"] = now
+        mem["ai_served_model_previous"] = previous
+    if echo:
+        mem["ai_served_model"] = echo
+    changed_at = mem.get("ai_served_model_changed_at")
+    change_from = mem.get("ai_served_model_previous")
+    for change in dig(prov, "served_model_changes", default=[]) or []:
+        at = parse_ts(dig(change, "at"))
+        if at and (changed_at is None or at > float(changed_at)):
+            changed_at, change_from = at, dig(change, "from")
+    recent_change = changed_at is not None and now - float(changed_at) <= t["served_model_change_amber_sec"]
+    if not reachable or not echo:
+        add(check("ai.served_model", "ai", SKIP, "Fly unreachable" if not reachable else "no served model echoed yet",
+                  f"served model == configured ({configured})"))
+    else:
+        st = AMBER if echo != configured or recent_change else GREEN
+        obs = f"served={echo} configured={configured} fingerprint={fingerprint or '?'}"
+        if recent_change:
+            obs += f"; changed {change_from}->{echo} at {iso(float(changed_at))}"
+        add(check("ai.served_model", "ai", st, obs,
+                  f"served == configured, no change within {fmt_age(t['served_model_change_amber_sec'])}",
+                  "" if st == GREEN else
+                  "DeepSeek is serving a different model than configured (silent alias/retirement); "
+                  "analyzer splits cohorts by served model"))
+
+    fly_balance = dig(prov, "deepseek_balance")
+    balance = inputs.get("deepseek_balance") if isinstance(inputs.get("deepseek_balance"), Mapping) else None
+    if (isinstance(fly_balance, Mapping) and fly_balance.get("total_usd") is not None
+            and now - (parse_ts(fly_balance.get("checked_at")) or 0) <= t["deepseek_balance_fly_max_age_sec"]):
+        balance = {**fly_balance, "source": "fly"}
+    threshold = f">= ${t['deepseek_balance_amber_usd']:.2f} (AMBER < ${t['deepseek_balance_amber_usd']:.2f}, RED < ${t['deepseek_balance_red_usd']:.2f})"
+    if not balance or balance.get("error") == "KEY_MISSING":
+        add(check("deepseek.balance", "ai", SKIP, "balance not observed (no key on laptop, not exposed by Fly)", threshold))
+    elif balance.get("total_usd") is None:
+        add(check("deepseek.balance", "ai", AMBER, f"balance unknown ({balance.get('error')})", threshold,
+                  "DeepSeek /user/balance unreachable or changed shape"))
+    else:
+        total = float(balance["total_usd"])
+        available = balance.get("is_available") is not False
+        st = (RED if total < t["deepseek_balance_red_usd"] or not available
+              else AMBER if total < t["deepseek_balance_amber_usd"] else GREEN)
+        add(check("deepseek.balance", "ai", st,
+                  f"${total:.2f} USD is_available={available} (source={balance.get('source')})", threshold,
+                  "" if st == GREEN else "top up DeepSeek; at $0 every AI call fails with HTTP 402"))
 
     # ---------------- Trading
     toggles = dig(fstate, "research_lane_enabled", default=None) or dig(inputs.get("runtime_snapshot"),

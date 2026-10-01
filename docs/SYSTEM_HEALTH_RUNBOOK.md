@@ -118,6 +118,25 @@ Over the last 6 hours, with at least 20 successful responses, the decisions must
 signature of a prompt or parse regression or of dead inputs.
 Fix: check the `ai_input_health` dead fields and the raw `comment` in `ai_history`.
 
+<a id="ai-served_model"></a>
+### ai.served_model
+The response's `model` field (`last_model_echo`) must equal the configured model, and must
+not have changed within the last 6 hours. AMBER only. On 2026-10-01 DeepSeek retired
+`deepseek-v4-flash` and silently served those requests as `deepseek-flash`
+(DeepSeek-V4.1-Flash). The observed value includes the response `system_fingerprint`.
+Fix: compare `GET https://api.deepseek.com/models` against `DEEPSEEK_DEFAULT_MODEL` in `bot.py`,
+pin the served id, and confirm the analyzer splits the cohort at the switchover annotation.
+Never start a new epoch or change a tile policy signature for a model change.
+
+<a id="deepseek-balance"></a>
+### deepseek.balance
+Read-only `GET https://api.deepseek.com/user/balance` (USD total). AMBER under $5, RED under
+$1 or when `is_available=false`. Fly exposes the same value as
+`ai_provider_health.deepseek_balance` (preferred when fresh); otherwise the watcher queries
+it with `DEEPSEEK_API_KEY` from the environment or vault. The key is only sent as a request
+header and is never stored, logged or printed. At $0 every AI call fails with HTTP 402.
+Fix: top up the DeepSeek account.
+
 <a id="trading-orders"></a>
 ### trading.orders
 Orders per ON tile from `tile_route_counts` deltas, live positions, orders and trades,
