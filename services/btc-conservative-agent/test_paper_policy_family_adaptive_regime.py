@@ -205,6 +205,45 @@ def test_entry_fields_follow_only_an_executable_decision():
     assert policy.adaptive_entry_fields("SHORT", 64995.0, decision)["structural_entry_valid"] is False
 
 
+@pytest.mark.parametrize("candles,intent,ttl", [(CALM, "MAKER", 60), (NORMAL, "TAKER", 15)])
+def test_bot_entry_builder_places_the_spawn_time_decision(candles, intent, ttl):
+    import bot
+
+    decision = _decide(candles, "LONG")
+    signal = {"final_direction": "LONG", "signal_price": 64995.0,
+              "research_lane": policy.LANE, "atr14_3m": 100.0}
+    bot.compute_family_tile_entry(signal, features={"adaptive_entry_decision": decision})
+    assert signal["structural_entry_valid"] is True
+    assert signal["adaptive_liquidity_intent"] == intent
+    assert signal["entry_ttl_sec"] == ttl
+    assert bot.resolve_entry_limit_price(signal) == (
+        pytest.approx(decision["limit_price"]), bot.ENTRY_MODE_AI_DIRECT,
+    )
+
+    bare = {"final_direction": "LONG", "signal_price": 64995.0, "research_lane": policy.LANE}
+    bot.compute_family_tile_entry(bare)
+    assert bare["structural_entry_valid"] is False
+    assert bare["entry_reason"] == "ADAPTIVE_NO_ORDER_DECISION_MISSING"
+
+
+def test_process_signal_hands_spawn_features_to_the_family_entry_builder():
+    """Registered-tile signals carry no ``features`` key; the call must pass them."""
+    import ast
+    import inspect
+    import textwrap
+
+    import bot
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(bot.process_signal)))
+    calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "compute_family_tile_entry"
+    ]
+    assert calls
+    assert all(any(kw.arg == "features" for kw in call.keywords) for call in calls)
+
+
 def test_exit_is_atr_trail_owned_by_generic_primitives():
     assert policy.SPEC.family == "ATR_TRAIL"
     assert policy.SPEC.initial_stop_atr_k == 1.5

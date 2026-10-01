@@ -73,7 +73,7 @@ def test_active_registry_is_exactly_the_dynamic_adaptive_paper_experiment():
     assert spec["raw_policy_id"].endswith(
         "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1"
     )
-    assert spec["policy_epoch"] == "v31-dynamic-adaptive-paper-v1"
+    assert spec["policy_epoch"] == "v31-dynamic-adaptive-paper-v2"
     assert spec["default_enabled"] is False
     assert spec["paper_only"] is True
     assert spec["platform_relay_eligible"] is False

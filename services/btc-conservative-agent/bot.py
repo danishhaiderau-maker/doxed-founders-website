@@ -7464,13 +7464,19 @@ def compute_continuous_ai_direct_entry(signal: dict) -> dict:
     }
 
 
-def compute_family_tile_entry(signal: dict) -> dict:
-    """Thin lifecycle adapter over the registry-selected family policy."""
+def compute_family_tile_entry(signal: dict, features: dict = None) -> dict:
+    """Thin lifecycle adapter over the registry-selected family policy.
+
+    Registered patient-chase signals never carry a ``features`` key, so the
+    caller must pass the spawn features holding the signal-time adaptive
+    decision; without them every adaptive order fails closed as
+    DECISION_MISSING.
+    """
     direction = str(signal.get("final_direction") or "").upper()
     price = float(signal.get("signal_price") or state.get("price") or 0)
     lane = str(signal.get("research_lane") or "").upper()
     policy = _patient_chase_policy(lane)
-    features = signal.get("features") or {}
+    features = signal.get("features") or features or {}
     if getattr(policy, "ADAPTIVE_ENTRY", False):
         signal.update(policy.adaptive_entry_fields(
             direction, price, features.get("adaptive_entry_decision"),
@@ -24699,7 +24705,7 @@ def process_signal(event: dict):
             signal["trade_planner"] = copy.deepcopy(ai.get("trade_planner") or {})
             signal["ai_output"] = copy.deepcopy(ai)
             if is_patient_chase_lane(research_lane):
-                compute_family_tile_entry(signal)
+                compute_family_tile_entry(signal, features=features)
             elif research_lane in AI_DIRECT_RESEARCH_LANES and continuous_ai_direct_entry_enabled():
                 compute_continuous_ai_direct_entry(signal)
             else:
@@ -25739,7 +25745,7 @@ def _schedule_taker_signal_counterfactual(ctx: dict, ai: dict, direction: str) -
 
 def _record_adaptive_entry_decision(lane: str, decision: dict) -> None:
     """Persist every adaptive decision, including stand-asides, for the analyzer."""
-    row = {"ts": utc_iso(), "research_lane": lane, **decision}
+    row = {"ts": utc_iso(), "research_lane": lane, "bot_version": EXECUTION_FIX_VERSION, **decision}
     _safe_append_jsonl(
         ADAPTIVE_ENTRY_DECISIONS_FILE, row,
         label="ADAPTIVE_ENTRY_DECISION", fallback_on_error=False,
@@ -33488,7 +33494,10 @@ DASHBOARD_JS = """(function () {
         ? 'ARMED'
         : 'BLOCKED — DISARMED';
       const entryOffsets = TILE_REGISTRY_VIEW.map(function (tile) {
-        return tile.label + ' ' + (tile.offset_pct != null ? tile.offset_pct.toFixed(2) + '%' : 'offset not published');
+        const rule = tile.entry_rule
+          ? tile.entry_rule.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          : (tile.offset_pct != null ? tile.offset_pct.toFixed(2) + '%' : 'offset not published');
+        return tile.label + ' ' + rule;
       }).join('; ') || 'no registered tiles';
       el.innerHTML =
         '<div><strong>PAPER ENTRIES:</strong> <span style="color:'
@@ -38683,8 +38692,25 @@ def _dashboard_transfer_truth(snapshot: dict, now: float) -> tuple[dict, list]:
     return transfer, alarms
 
 
+def _dashboard_entry_rule(entry: dict) -> str | None:
+    """Signal-time entry rule for policies whose limit is not a fixed offset."""
+    if entry.get("mode") != "ADAPTIVE_REGIME":
+        return None
+    try:
+        return (
+            f"regime-dependent entry: CALM RV15 <{float(entry['calm_below_bps']):g}bps \u2192 maker "
+            f"\u2264{int(entry['maker_improve_ticks'])} tick, {int(entry['maker_ttl_sec'])}s; "
+            f"NORMAL or fast move z\u2265{float(entry['fast_move_z']):g} \u2192 taker cap "
+            f"{float(entry['taker_protection_bps']):g}bps, {int(entry['taker_ttl_sec'])}s; "
+            f"EXTREME >{float(entry['extreme_above_bps']):g}bps or stop "
+            f"\u2265{float(entry['liquidation_guard_stop_bps']):g}bps \u2192 stand aside"
+        )
+    except (KeyError, TypeError, ValueError):
+        return "regime-dependent entry (rule not published)"
+
+
 def _dashboard_tile_view() -> list[dict]:
-    """Flat registry projection used by the page (lane, label, order, entry offset)."""
+    """Flat registry projection used by the page (lane, label, order, entry offset or rule)."""
     rows = []
     for spec in active_tile_lifecycle_manifest():
         entry = spec.get("entry_policy") if isinstance(spec.get("entry_policy"), dict) else {}
@@ -38694,13 +38720,15 @@ def _dashboard_tile_view() -> list[dict]:
             "label": str(spec.get("label") or spec.get("lane") or ""),
             "display_order": int(spec.get("display_order") or 0),
             "offset_pct": float(offset) if isinstance(offset, (int, float)) and not isinstance(offset, bool) else None,
+            "entry_rule": _dashboard_entry_rule(entry),
         })
     return sorted(rows, key=lambda row: row["display_order"])
 
 
 def _dashboard_tile_offsets_text(tiles) -> str:
     return "; ".join(
-        f"{tile['label']} {tile['offset_pct']:.2f}%" if tile.get("offset_pct") is not None
+        f"{tile['label']} {tile['entry_rule']}" if tile.get("entry_rule")
+        else f"{tile['label']} {tile['offset_pct']:.2f}%" if tile.get("offset_pct") is not None
         else f"{tile['label']} offset not published"
         for tile in tiles
     ) or "no registered tiles"

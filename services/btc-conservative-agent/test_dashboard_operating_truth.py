@@ -21,7 +21,7 @@ BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8")
 BOT_TREE = ast.parse(BOT_SOURCE)
 HELPERS = ("_unavailable", "_dashboard_seq", "_dashboard_age_text", "_dashboard_transfer_truth",
            "_dashboard_operating_truth", "_public_dashboard_truth", "_dashboard_tile_view",
-           "_dashboard_tile_offsets_text")
+           "_dashboard_tile_offsets_text", "_dashboard_entry_rule")
 CONSTANTS = ("_DASHBOARD_DISK_ALARM_PCT", "_DASHBOARD_SEGMENT_STATUS_STALE_SEC", "_DASHBOARD_SEGMENT_SEQ_LAG")
 NOW = 1_790_000_000.0
 DAY = 86400.0
@@ -172,8 +172,36 @@ def test_tile_view_and_offsets_come_from_the_registry(tmp_path):
     assert [t["label"] for t in tiles] == [ACTIVE_TILE_REGISTRY[lane]["label"] for lane in ACTIVE_TILE_ORDER]
     text = ns["_dashboard_tile_offsets_text"](tiles)
     for tile in tiles:
-        assert f"{tile['label']} {tile['offset_pct']:.2f}%" in text
+        assert _tile_entry_text(tile) in text
     assert ns["_dashboard_tile_offsets_text"]([]) == "no registered tiles"
+
+
+def _tile_entry_text(tile, *, html=False):
+    rule = tile.get("entry_rule")
+    if rule:
+        rule = rule.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") if html else rule
+        return f"{tile['label']} {rule}"
+    return f"{tile['label']} {tile['offset_pct']:.2f}%"
+
+
+def test_adaptive_regime_tiles_publish_their_rule_not_a_zero_offset(tmp_path):
+    ns = _namespace(tmp_path)
+    tiles = ns["_dashboard_tile_view"]()
+    for tile in tiles:
+        entry = ACTIVE_TILE_REGISTRY[tile["lane"]]["entry_policy"]
+        if entry.get("mode") != "ADAPTIVE_REGIME":
+            assert tile["entry_rule"] is None
+            continue
+        rule = tile["entry_rule"]
+        assert f"CALM RV15 <{entry['calm_below_bps']:g}bps" in rule
+        assert f"maker \u2264{entry['maker_improve_ticks']} tick, {entry['maker_ttl_sec']}s" in rule
+        assert f"NORMAL or fast move z\u2265{entry['fast_move_z']:g}" in rule
+        assert f"taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s" in rule
+        assert f"EXTREME >{entry['extreme_above_bps']:g}bps" in rule
+        assert f"stop \u2265{entry['liquidation_guard_stop_bps']:g}bps" in rule
+        assert f"{tile['label']} 0.00%" not in ns["_dashboard_tile_offsets_text"]([tile])
+    assert ns["_dashboard_entry_rule"]({"mode": "ADAPTIVE_REGIME"}) == "regime-dependent entry (rule not published)"
+    assert ns["_dashboard_entry_rule"]({"offset_pct": 0.3}) is None
 
 
 def test_lane_badge_and_strip_render_from_registry_payload(tmp_path):
@@ -264,4 +292,4 @@ def test_gate_panel_entry_offsets_come_from_the_registry_not_a_fixed_anchor(tmp_
     html = _render_gate_panel(tiles, {"entry_limit_policy": "deterministic_0.1pct_offset_v1"}, {})
     assert "0.1% offset" not in html and "deterministic_0.1pct" not in html
     for tile in tiles:
-        assert f"{tile['label']} {tile['offset_pct']:.2f}%" in html
+        assert _tile_entry_text(tile, html=True) in html
