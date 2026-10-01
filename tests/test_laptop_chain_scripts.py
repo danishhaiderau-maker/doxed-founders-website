@@ -515,7 +515,7 @@ def test_pull_loop_defers_parity_during_an_active_cycle_with_a_hard_bound():
     loop = _source("research-segment-pull-loop.ps1")
     assert "[int]$ParityMaxDeferMin = 120" in loop
     defer = loop[loop.index("$cycle = Read-JsonFile $cfg.CycleStatus"):loop.index("$pullArgs = @(")]
-    assert "@('PROMOTION', 'MIGRATION', 'ANALYZER') -contains $cycle.phase" in defer
+    assert "@('PROMOTION', 'MIGRATION') -contains $cycle.phase" in defer
     assert "$null -eq $cycle.exitCode" in defer and "TotalMinutes -lt 75" in defer
     assert "-not $parityOverdue" in defer and "-ge $ParityMaxDeferMin" in defer
     assert "$parityDue = $false" in defer
@@ -622,3 +622,93 @@ def test_runner_refuses_overlap(tmp_path, chain):
         holder.kill()
         holder.wait()
     assert result.returncode == 3, result.stdout + result.stderr
+
+
+def _git(cwd, *args):
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _ff_fixture(tmp_path, chain):
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "master")
+    _git(origin, "config", "user.email", "t@example.invalid")
+    _git(origin, "config", "user.name", "t")
+    (origin / "a.txt").write_text("one\n")
+    _git(origin, "add", "a.txt")
+    _git(origin, "commit", "-q", "-m", "one")
+    first = _git(origin, "rev-parse", "HEAD")
+    (origin / "a.txt").write_text("two\n")
+    _git(origin, "commit", "-q", "-am", "two")
+    second = _git(origin, "rev-parse", "HEAD")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    _git(clone, "reset", "-q", "--hard", first)
+    chain["state"].mkdir(parents=True, exist_ok=True)
+    return clone, first, second
+
+
+def _ff_snapshots(chain, fly_rev, run_sha, status="completed", conclusion="success"):
+    now = datetime.now(timezone.utc).isoformat()
+    (chain["state"] / "fly_runtime_snapshot_v1.json").write_text(json.dumps(
+        {"schema": "fly_runtime_snapshot_v1", "observedAt": now, "ok": True, "git_rev": fly_rev}), encoding="utf-8")
+    (chain["state"] / "fly_deploy_runs_snapshot_v1.json").write_text(json.dumps(
+        {"schema": "fly_deploy_runs_snapshot_v1", "observedAt": now, "ok": True,
+         "runs": [{"databaseId": 7, "status": status, "conclusion": conclusion, "headSha": run_sha,
+                   "createdAt": now, "updatedAt": now}]}), encoding="utf-8")
+
+
+def _run_auto_ff(clone, chain):
+    return _ps(f"& '{SCRIPTS / 'v2c-auto-ff.ps1'}' -RepoRoot '{clone}' -CanonicalRoot '{chain['canonical']}' "
+               f"-StateDir '{chain['state']}'; exit $LASTEXITCODE", chain["env"])
+
+
+@windows_only
+def test_auto_ff_follows_only_a_successful_deploy_and_logs_a_receipt(tmp_path, chain):
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second, status="in_progress", conclusion="")
+    assert _run_auto_ff(clone, chain).returncode == 2
+    assert _git(clone, "rev-parse", "HEAD") == first
+    _ff_snapshots(chain, second[:12], second, conclusion="failure")
+    assert _run_auto_ff(clone, chain).returncode == 2
+    _ff_snapshots(chain, first[:12], second)
+    assert _run_auto_ff(clone, chain).returncode == 2, "deploy sha must be the revision Fly reports"
+    _ff_snapshots(chain, second[:12], second)
+    result = _run_auto_ff(clone, chain)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _git(clone, "rev-parse", "HEAD") == second
+    receipt = json.loads((chain["state"] / "v2c-auto-ff.receipts.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert receipt["outcome"] == "FAST_FORWARDED" and receipt["to"] == second and receipt["from"] == first
+    assert _run_auto_ff(clone, chain).returncode == 0
+
+
+@windows_only
+def test_auto_ff_refuses_dirty_checkout_and_waits_for_a_busy_cycle(tmp_path, chain):
+    clone, first, second = _ff_fixture(tmp_path, chain)
+    _ff_snapshots(chain, second[:12], second)
+    (clone / "a.txt").write_text("local edit\n")
+    assert _run_auto_ff(clone, chain).returncode == 3
+    assert _git(clone, "rev-parse", "HEAD") == first
+    _git(clone, "checkout", "-q", "--", "a.txt")
+    holder = subprocess.Popen(
+        [POWERSHELL, "-NoProfile", "-Command",
+         f". '{SCRIPTS / 'laptop-chain-common.ps1'}'; $h = Enter-SingleInstance -Name (Get-ChainMutexName "
+         f"'LaptopSegmentAnalyzerCycle'); 'held'; Start-Sleep 30"],
+        stdout=subprocess.PIPE, text=True, env={**os.environ, **chain["env"]})
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        assert _run_auto_ff(clone, chain).returncode == 2
+        assert _git(clone, "rev-parse", "HEAD") == first
+    finally:
+        holder.kill()
+
+
+def test_supervisor_fast_forwards_before_starting_a_cycle_and_cycle_refuses_old_checkout():
+    supervisor = _source("laptop-chain-supervisor.ps1")
+    assert supervisor.index("v2c-auto-ff.ps1") < supervisor.index("run-segment-analyzer-cycle.ps1")
+    assert "v2c-auto-ff.disabled" in supervisor
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    check = cycle[cycle.index("ANALYZER_REVISION_MISMATCH") - 900:cycle.index("Set-CycleStatus 'ANALYZER'")]
+    assert "merge-base --is-ancestor $deployedFull $checkoutHead" in check and "Stop-Cycle 5" in check
+    assert "'.segment-promotion.index.json'" in cycle
+    assert "PYTHONFAULTHANDLER" in _source("run-analyzer-once.ps1")

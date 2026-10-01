@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -124,3 +125,122 @@ def test_promotion_heartbeat_carries_v2_genesis(tmp_path):
     promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, genesis_at=1790735978.5)
     heartbeat = json.loads((view / promotion.HEARTBEAT_NAME).read_text(encoding="utf-8"))
     assert heartbeat["segmentGenesisAt"] == 1790735978.5
+
+
+def _head(env):
+    status = json.loads((env.state_dir / "status.json").read_text())
+    return {"published_seq": status["shipped_seq"], "unshipped_bytes": status["unshipped_bytes"],
+            "last_manifest_sha256": status["last_manifest_sha256"], "oversized_paths": [],
+            "racing_paths": [], "shipper_last_error": None, "throttled_snapshots": []}
+
+
+def _resync(env):
+    env.ship_all()
+    env.puller().pull_once()
+    return _head(env)
+
+
+def _tree_bytes(root: Path) -> dict:
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*")
+            if p.is_file() and p.name not in promotion.VIEW_CONTROL_NAMES}
+
+
+def test_incremental_view_reuses_appends_recopies_and_removes(tmp_path):
+    env, head, health = _synced(tmp_path)
+    view = tmp_path / "view"
+    first = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    assert first["mode"] == "FULL_REBUILD" and first["files_copied"] == 4
+    env.write("v3/ledgers/opportunity.jsonl", _rows(4, 3), append=True)
+    env.write("research.db", b"rewritten-db" * 50)
+    env.write("v3/ledgers/new.jsonl", _rows(0, 1))
+    second = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=_resync(env), health=health)
+    assert second["mode"] == "INCREMENTAL"
+    assert second["files_appended"] == 1 and second["files_copied"] == 2 and second["files_reused"] >= 2
+    tree = env.shadow / "tree"
+    assert _tree_bytes(view) == _tree_bytes(tree)
+    state = json.loads((view / promotion.SYNC_STATE_NAME).read_text())
+    assert all(state[rel]["sha256"] == promotion._sha256_file(tree / rel) for rel in state)
+    assert (view / promotion.HEARTBEAT_NAME).is_file()
+
+
+def test_incremental_view_recopies_a_tampered_file_and_verify_catches_same_stat_tamper(tmp_path):
+    env, head, health = _synced(tmp_path)
+    view = tmp_path / "view"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, now=1000.0)
+    target = view / "v3" / "ledgers" / "decision.jsonl"
+    original = target.read_bytes()
+    target.write_bytes(b"X" * len(original))
+    receipt = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, now=1001.0)
+    assert receipt["files_copied"] == 1 and target.read_bytes() == original
+    stat = target.stat()
+    target.write_bytes(b"Y" * len(original))
+    os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    receipt = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health,
+                                   now=1002.0, verify_interval_sec=0)
+    assert receipt["mode"] == "INCREMENTAL_VERIFIED" and receipt["files_copied"] == 1
+    assert target.read_bytes() == original
+
+
+def test_view_without_index_is_refused_and_full_flag_rebuilds(tmp_path):
+    env, head, health = _synced(tmp_path)
+    view = tmp_path / "view"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    (view / promotion.INDEX_NAME).unlink()
+    with pytest.raises(promotion.PromotionRefused, match="VIEW_NOT_EMPTY"):
+        promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    view.joinpath(promotion.INDEX_NAME).write_text(json.dumps({"schema": promotion.INDEX_SCHEMA, "files": {}}))
+    (view / "orphan.txt").write_text("stale")
+    receipt = promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health, full=True)
+    assert receipt["mode"] == "FULL_REBUILD" and not (view / "orphan.txt").exists()
+    assert _tree_bytes(view) == _tree_bytes(env.shadow / "tree")
+
+
+def test_refused_promotion_leaves_the_previous_view_unconsumable_only_after_staging_starts(tmp_path):
+    env, head, health = _synced(tmp_path)
+    view = tmp_path / "view"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    with pytest.raises(promotion.PromotionRefused):
+        promotion.stage_view(shadow_root=env.shadow, view_root=view, head={**head, "published_seq": 999}, health=health)
+    assert (view / promotion.HEARTBEAT_NAME).is_file() and (view / promotion.INDEX_NAME).is_file()
+
+
+def test_incremental_migration_reuses_appends_and_recopies(tmp_path, monkeypatch):
+    env, head, health = _synced(tmp_path)
+    view = tmp_path / "view"
+    project = tmp_path / "project"
+    migration = _migration_module()
+    monkeypatch.setattr(migration, "REPO_ROOT", project)
+    store = project / "services" / "btc-conservative-agent" / "canonical-research-data"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    first = migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, now=1000.0)
+    assert first["mode"] == "FULL" and first["files_copied"] == 4
+    env.write("v3/ledgers/opportunity.jsonl", _rows(4, 5), append=True)
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=_resync(env), health=health)
+    second = migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, now=1001.0)
+    assert second["mode"] == "INCREMENTAL" and second["files_appended"] == 1
+    assert second["files_reused"] == 3 and second["files_copied"] == 0 and second["files_verified"] == 4
+    assert (store / "v3" / "ledgers" / "opportunity.jsonl").read_bytes() == _rows(0, 4) + _rows(4, 5)
+    decision = store / "v3" / "ledgers" / "decision.jsonl"
+    stat = decision.stat()
+    decision.write_bytes(b"Z" * stat.st_size)
+    os.utime(decision, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    third = migration.migrate(view, store, view / promotion.HEARTBEAT_NAME, now=1002.0, verify_interval_sec=0)
+    assert third["mode"] == "INCREMENTAL_VERIFIED" and third["files_copied"] == 1
+    assert decision.read_bytes() == _rows(0, 2)
+    identity = current_analyzer_dataset_identity(store)
+    assert identity["source_revision"] == "abc123def456"
+
+
+def test_incremental_migration_refuses_a_source_changed_after_staging(tmp_path, monkeypatch):
+    env, head, health = _synced(tmp_path)
+    view = tmp_path / "view"
+    project = tmp_path / "project"
+    migration = _migration_module()
+    monkeypatch.setattr(migration, "REPO_ROOT", project)
+    store = project / "services" / "btc-conservative-agent" / "canonical-research-data"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    migration.migrate(view, store, view / promotion.HEARTBEAT_NAME)
+    staged = view / "v3" / "ledgers" / "decision.jsonl"
+    staged.write_bytes(b"Q" * staged.stat().st_size)
+    with pytest.raises(RuntimeError, match="Source checksum drift"):
+        migration.migrate(view, store, view / promotion.HEARTBEAT_NAME)

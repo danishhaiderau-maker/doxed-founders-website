@@ -561,6 +561,109 @@ def _identity_text(value: Any) -> str | None:
     return text or None
 
 
+def _candidate_receipt_binder(
+    receipt: Mapping[str, Any],
+    source: Mapping[str, Any],
+) -> tuple[
+    Callable[[str], tuple[dict[str, Any], list[str]]],
+    Callable[[str], dict[str, Any]],
+]:
+    """Bind one replay receipt to many candidate signatures.
+
+    The causal facts read from the receipt and its source are signature
+    independent, so they are derived once per receipt; each signature still
+    receives its own complete identity.
+    """
+    outcome = str(receipt.get("outcome") or "UNSUPPORTED")
+    filled = outcome in {"FILL", "PARTIAL_FILL"}
+    tape_ids = [
+        value for value in (
+            _identity_text(item) for item in (source.get("tape_ids") or [])
+        ) if value is not None
+    ]
+    source_fill_ids = [
+        value for value in (
+            _identity_text(item) for item in (source.get("source_fill_ids") or [])
+        ) if value is not None
+    ]
+    epoch_id = _identity_text(source.get("epoch_id"))
+    event_id = _identity_text(source.get("event_id"))
+    episode_id = _identity_text(source.get("episode_id"))
+    opportunity_id = _identity_text(source.get("opportunity_id"))
+    source_policy_signature = _identity_text(source.get("source_policy_signature"))
+    schedule_sha256 = _identity_text(receipt.get("schedule_sha256"))
+    chase_bucket_id = _identity_text(receipt.get("chase_bucket_id"))
+    evidence_bucket_ids = list(receipt.get("evidence_bucket_ids") or [])
+
+    def identity_for(candidate_policy_signature: str) -> tuple[dict[str, Any], list[str]]:
+        """Bind a replay receipt to its causal evidence without inventing IDs."""
+        fill_receipt_id = None
+        if filled:
+            fill_material = {
+                "epoch_id": epoch_id,
+                "event_id": event_id,
+                "episode_id": episode_id,
+                "policy_signature": candidate_policy_signature,
+                "schedule_sha256": schedule_sha256,
+                "tape_ids": tape_ids,
+                "chase_bucket_id": chase_bucket_id,
+                "evidence_bucket_ids": evidence_bucket_ids,
+                "trigger_bucket_ts": receipt.get("trigger_bucket_ts"),
+                "filled_qty": receipt.get("filled_qty"),
+                "fill_price": receipt.get("fill_price"),
+            }
+            fill_receipt_id = canonical_hash("candidate-fill", fill_material)
+
+        identity = {
+            "schema": "candidate_episode_receipt_identity_v1",
+            "epoch_id": epoch_id,
+            "event_id": event_id,
+            "episode_id": episode_id,
+            "opportunity_id": opportunity_id,
+            "source_policy_signature": source_policy_signature,
+            "candidate_policy_signature": _identity_text(candidate_policy_signature),
+            "schedule_sha256": schedule_sha256,
+            "tape_ids": list(tape_ids),
+            "fill_receipt_id": fill_receipt_id,
+            "source_fill_ids": list(source_fill_ids),
+        }
+        required = {
+            "epoch_id": identity["epoch_id"],
+            "event_id": identity["event_id"],
+            "episode_id": identity["episode_id"],
+            "opportunity_id": identity["opportunity_id"],
+            "candidate_policy_signature": identity["candidate_policy_signature"],
+            "schedule_sha256": identity["schedule_sha256"],
+            "tape_ids": identity["tape_ids"],
+        }
+        if filled:
+            required["fill_receipt_id"] = identity["fill_receipt_id"]
+        missing = [name for name, value in required.items() if not value]
+        # A content-addressed fill identity is meaningful only when the complete
+        # causal chain is present. Do not retain a seemingly valid fill ID when an
+        # upstream epoch/opportunity/schedule/tape identity is absent.
+        if missing and fill_receipt_id is not None:
+            identity["fill_receipt_id"] = None
+        identity["complete"] = not missing
+        identity["missing_required_identities"] = missing
+        return identity, missing
+
+    def bind(candidate_policy_signature: str) -> dict[str, Any]:
+        bound = dict(receipt)
+        identity, missing = identity_for(candidate_policy_signature)
+        bound["identity"] = identity
+        if missing:
+            bound["outcome"] = "UNSUPPORTED"
+            bound["supported"] = False
+            bound["negative_reasons"] = list(dict.fromkeys([
+                *(bound.get("negative_reasons") or []),
+                *(f"MISSING_REQUIRED_IDENTITY:{name}" for name in missing),
+            ]))
+        return bound
+
+    return identity_for, bind
+
+
 def _candidate_receipt_identity(
     receipt: Mapping[str, Any],
     source: Mapping[str, Any],
@@ -568,66 +671,7 @@ def _candidate_receipt_identity(
     candidate_policy_signature: str,
 ) -> tuple[dict[str, Any], list[str]]:
     """Bind a replay receipt to its causal evidence without inventing IDs."""
-    outcome = str(receipt.get("outcome") or "UNSUPPORTED")
-    tape_ids = [
-        value for value in (
-            _identity_text(item) for item in (source.get("tape_ids") or [])
-        ) if value is not None
-    ]
-    fill_receipt_id = None
-    if outcome in {"FILL", "PARTIAL_FILL"}:
-        fill_material = {
-            "epoch_id": _identity_text(source.get("epoch_id")),
-            "event_id": _identity_text(source.get("event_id")),
-            "episode_id": _identity_text(source.get("episode_id")),
-            "policy_signature": candidate_policy_signature,
-            "schedule_sha256": _identity_text(receipt.get("schedule_sha256")),
-            "tape_ids": tape_ids,
-            "chase_bucket_id": _identity_text(receipt.get("chase_bucket_id")),
-            "evidence_bucket_ids": list(receipt.get("evidence_bucket_ids") or []),
-            "trigger_bucket_ts": receipt.get("trigger_bucket_ts"),
-            "filled_qty": receipt.get("filled_qty"),
-            "fill_price": receipt.get("fill_price"),
-        }
-        fill_receipt_id = canonical_hash("candidate-fill", fill_material)
-
-    identity = {
-        "schema": "candidate_episode_receipt_identity_v1",
-        "epoch_id": _identity_text(source.get("epoch_id")),
-        "event_id": _identity_text(source.get("event_id")),
-        "episode_id": _identity_text(source.get("episode_id")),
-        "opportunity_id": _identity_text(source.get("opportunity_id")),
-        "source_policy_signature": _identity_text(source.get("source_policy_signature")),
-        "candidate_policy_signature": _identity_text(candidate_policy_signature),
-        "schedule_sha256": _identity_text(receipt.get("schedule_sha256")),
-        "tape_ids": tape_ids,
-        "fill_receipt_id": fill_receipt_id,
-        "source_fill_ids": [
-            value for value in (
-                _identity_text(item) for item in (source.get("source_fill_ids") or [])
-            ) if value is not None
-        ],
-    }
-    required = {
-        "epoch_id": identity["epoch_id"],
-        "event_id": identity["event_id"],
-        "episode_id": identity["episode_id"],
-        "opportunity_id": identity["opportunity_id"],
-        "candidate_policy_signature": identity["candidate_policy_signature"],
-        "schedule_sha256": identity["schedule_sha256"],
-        "tape_ids": identity["tape_ids"],
-    }
-    if outcome in {"FILL", "PARTIAL_FILL"}:
-        required["fill_receipt_id"] = identity["fill_receipt_id"]
-    missing = [name for name, value in required.items() if not value]
-    # A content-addressed fill identity is meaningful only when the complete
-    # causal chain is present. Do not retain a seemingly valid fill ID when an
-    # upstream epoch/opportunity/schedule/tape identity is absent.
-    if missing and fill_receipt_id is not None:
-        identity["fill_receipt_id"] = None
-    identity["complete"] = not missing
-    identity["missing_required_identities"] = missing
-    return identity, missing
+    return _candidate_receipt_binder(receipt, source)[0](candidate_policy_signature)
 
 
 def _bind_candidate_receipt_identity(
@@ -636,19 +680,7 @@ def _bind_candidate_receipt_identity(
     *,
     candidate_policy_signature: str,
 ) -> dict[str, Any]:
-    bound = dict(receipt)
-    identity, missing = _candidate_receipt_identity(
-        bound, source, candidate_policy_signature=candidate_policy_signature,
-    )
-    bound["identity"] = identity
-    if missing:
-        bound["outcome"] = "UNSUPPORTED"
-        bound["supported"] = False
-        bound["negative_reasons"] = list(dict.fromkeys([
-            *(bound.get("negative_reasons") or []),
-            *(f"MISSING_REQUIRED_IDENTITY:{name}" for name in missing),
-        ]))
-    return bound
+    return _candidate_receipt_binder(receipt, source)[1](candidate_policy_signature)
 
 
 def _validation_receipt_identity(receipt: dict[str, Any]) -> dict[str, Any]:
@@ -1105,6 +1137,18 @@ def evaluate_protection_screen(
             except (TypeError, ValueError):
                 continue
             microstructure_by_ts[bucket_ts] = row
+        # Children of one event share its price path, so a replay is fully
+        # determined by these per-event keys; equal keys replay identically.
+        prepared_paths: dict[float, dict[str, Any]] = {}
+        replays: dict[tuple[Any, ...], dict[str, Any]] = {}
+
+        def prepared_path_at(fill_ts: float) -> dict[str, Any]:
+            prepared = prepared_paths.get(fill_ts)
+            if prepared is None:
+                prepared = prepare_replay_price_path(prices, fill_ts=fill_ts)
+                prepared_paths[fill_ts] = prepared
+            return prepared
+
         for child in source.get("entry_children") or []:
             source_policy_id = str(child.get("entry_policy_id") or "").strip()
             if not source_policy_id:
@@ -1136,15 +1180,12 @@ def evaluate_protection_screen(
             )
             prepared_price_path = None
             if conservative_fill_ts is not None and prices and source.get("atr14_pct") is not None:
-                prepared_price_path = prepare_replay_price_path(
-                    prices, fill_ts=float(conservative_fill_ts),
-                )
+                prepared_price_path = prepared_path_at(float(conservative_fill_ts))
             ideal_prepared_price_path = None
             if child.get("fill_ts") is not None and prices and source.get("atr14_pct") is not None:
-                ideal_prepared_price_path = prepare_replay_price_path(
-                    prices, fill_ts=float(child["fill_ts"]),
-                )
-            for protection in protections:
+                ideal_prepared_price_path = prepared_path_at(float(child["fill_ts"]))
+            bind_receipt = _candidate_receipt_binder(conservative_receipt, source)[1]
+            for protection_index, protection in enumerate(protections):
                 policy_id = f"{entry_id}|{protection['protection_id']}"
                 spec = {
                     "entry": {
@@ -1170,11 +1211,7 @@ def evaluate_protection_screen(
                     policy_specs[policy_id] = spec
                     policy_signatures[policy_id] = canonical_hash("v3-policy", spec)
                 candidate_policy_signature = policy_signatures[policy_id]
-                policy_receipt = _bind_candidate_receipt_identity(
-                    conservative_receipt,
-                    source,
-                    candidate_policy_signature=candidate_policy_signature,
-                )
+                policy_receipt = bind_receipt(candidate_policy_signature)
                 conservative_outcome = str(policy_receipt.get("outcome") or "UNSUPPORTED")
                 conservative_fill_ts = policy_receipt.get("trigger_bucket_ts")
                 conservative_fill_price = policy_receipt.get("fill_price")
@@ -1205,18 +1242,25 @@ def evaluate_protection_screen(
                         "reason": "ORDERED_1S_PATH_OR_ATR_MISSING",
                     }
                 else:
-                    replay = replay_protected_policy(
-                        prices,
-                        direction=str(source.get("direction") or "UNKNOWN"),
-                        entry_price=float(conservative_fill_price or 0),
-                        fill_ts=float(conservative_fill_ts),
-                        atr_pct_at_fill=float(source["atr14_pct"]),
-                        leverage=float(source.get("leverage") or 100),
-                        margin_usd=float(source.get("margin_usd") or 0.25) * fill_fraction,
-                        policy_spec=spec,
-                        prepared_price_path=prepared_price_path,
-                        collect_trace=False,
+                    replay_key = (
+                        "CONSERVATIVE", protection_index, float(conservative_fill_ts),
+                        float(conservative_fill_price or 0), fill_fraction,
                     )
+                    replay = replays.get(replay_key)
+                    if replay is None:
+                        replay = replay_protected_policy(
+                            prices,
+                            direction=str(source.get("direction") or "UNKNOWN"),
+                            entry_price=float(conservative_fill_price or 0),
+                            fill_ts=float(conservative_fill_ts),
+                            atr_pct_at_fill=float(source["atr14_pct"]),
+                            leverage=float(source.get("leverage") or 100),
+                            margin_usd=float(source.get("margin_usd") or 0.25) * fill_fraction,
+                            policy_spec=spec,
+                            prepared_price_path=prepared_price_path,
+                            collect_trace=False,
+                        )
+                        replays[replay_key] = replay
                     outcome = {
                         "outcome_state": (
                             "PARTIAL_FILL" if replay.get("status") == "COMPLETE" and conservative_outcome == "PARTIAL_FILL"
@@ -1252,18 +1296,25 @@ def evaluate_protection_screen(
                             "qualification_eligible": False,
                         },
                     }
-                    diagnostic_replay = replay_protected_policy(
-                        prices,
-                        direction=str(source.get("direction") or "UNKNOWN"),
-                        entry_price=float(child.get("fill_price") or 0),
-                        fill_ts=float(child["fill_ts"]),
-                        atr_pct_at_fill=float(source["atr14_pct"]),
-                        leverage=float(source.get("leverage") or 100),
-                        margin_usd=float(source.get("margin_usd") or 0.25),
-                        policy_spec=diagnostic_spec,
-                        prepared_price_path=ideal_prepared_price_path,
-                        collect_trace=False,
+                    diagnostic_key = (
+                        "IDEAL_TOUCH", protection_index, float(child["fill_ts"]),
+                        float(child.get("fill_price") or 0),
                     )
+                    diagnostic_replay = replays.get(diagnostic_key)
+                    if diagnostic_replay is None:
+                        diagnostic_replay = replay_protected_policy(
+                            prices,
+                            direction=str(source.get("direction") or "UNKNOWN"),
+                            entry_price=float(child.get("fill_price") or 0),
+                            fill_ts=float(child["fill_ts"]),
+                            atr_pct_at_fill=float(source["atr14_pct"]),
+                            leverage=float(source.get("leverage") or 100),
+                            margin_usd=float(source.get("margin_usd") or 0.25),
+                            policy_spec=diagnostic_spec,
+                            prepared_price_path=ideal_prepared_price_path,
+                            collect_trace=False,
+                        )
+                        replays[diagnostic_key] = diagnostic_replay
                     diagnostic_outcome = {
                         "outcome_state": (
                             "FULL_FILL" if diagnostic_replay.get("status") == "COMPLETE"
@@ -1414,8 +1465,11 @@ def evaluate_protection_screen(
             if state not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
         )
         regime_breakdown = {}
-        for regime in sorted({str(row.get("regime") or "UNKNOWN") for row in oos}):
-            regime_rows = [row for row in oos if str(row.get("regime") or "UNKNOWN") == regime]
+        oos_by_regime: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in oos:
+            oos_by_regime[str(row.get("regime") or "UNKNOWN")].append(row)
+        for regime in sorted(oos_by_regime):
+            regime_rows = oos_by_regime[regime]
             regime_pnls = [
                 float(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd"))
                 for row in regime_rows

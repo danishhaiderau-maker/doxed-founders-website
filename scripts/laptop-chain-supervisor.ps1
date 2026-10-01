@@ -32,6 +32,17 @@ try {
     Write-ChainLog -Config $cfg -Name $logName -Message "SEGMENT_PULL_STARTED pid=$($segmentLoop.Id)"
   }
 
+  # Follow Fly to a successfully deployed revision before any cycle starts, so
+  # promotion and the analyzer run the code Fly runs. Opt out with
+  # <StateDir>\v2c-auto-ff.disabled. Never fails the tick.
+  $autoFf = 'autoFf=off'
+  if (-not (Test-Path -LiteralPath (Join-Path $cfg.StateDir 'v2c-auto-ff.disabled'))) {
+    try {
+      & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'v2c-auto-ff.ps1') @roots | Out-Null
+      $autoFf = "autoFf=$LASTEXITCODE"
+    } catch { $autoFf = 'autoFf=error' }
+  }
+
   if (-not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAnalyzerRun')) -and
       -not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle'))) {
     # Cadence runs from the last cycle start: the analyzer itself starts 8-17 min
@@ -75,7 +86,7 @@ try {
   } catch {
     $incident = "INCIDENT_ERROR $($_.Exception.Message)"
   }
-  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $snapshots $incident $proof"
+  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $autoFf $snapshots $incident $proof"
 } catch {
   Write-ChainLog -Config $cfg -Name $logName -Message ("TICK_ERROR {0}" -f $_.Exception.Message)
   exit 1
