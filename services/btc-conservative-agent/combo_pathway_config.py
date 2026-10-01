@@ -15,6 +15,8 @@ import math
 import os
 from typing import Any
 
+from scenario_c_config import SCENARIO_C_LADDER_LABEL, SCENARIO_C_PROFILE_ID, TRAIL_LADDER_SCENARIO_C
+
 # Startup-only, explicit research treatment. A restart changes policy identity;
 # this is not a mutable per-request switch or permission to relay live orders.
 SCORE_LED_PAPER_RESEARCH_ENABLED = os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") == "1"
@@ -106,6 +108,10 @@ def resolve_score_led_paper_admission(
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME = "FAMILY_ADAPTIVE_REGIME"
+RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER = "FAMILY_ADAPTIVE_REGIME_LADDER"
+RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER_BE = "FAMILY_ADAPTIVE_REGIME_LADDER_BE"
+RESEARCH_LANE_FAMILY_TREND_FADE_60 = "FAMILY_TREND_FADE_60"
+INVERTED_SCORE_LED_ADMISSION_POLICY_ID = "INVERTED_SCORE_LED_SIDE_V1"
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
 TILE_ARCHITECTURE_VERSION = 3
 # Complete atomic add/retire contract from the V3.1 objective.  Every active
@@ -132,6 +138,9 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME,
+    RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER,
+    RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER_BE,
+    RESEARCH_LANE_FAMILY_TREND_FADE_60,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -146,7 +155,7 @@ def _policy_signature(*, raw_policy_id: str, entry: dict, exit_policy: dict,
         "exit_policy": exit_policy,
         "ladder": tuple(tuple(row) for row in ladder),
         "entry_ttl_sec": entry_ttl_sec,
-        "path_end_sec": 7200,
+        "path_end_sec": int(exit_policy.get("max_duration_sec", 7200)),
         "requested_margin_usd": 0.25,
         "account_risk_pct": 0.5,
     }
@@ -167,7 +176,10 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           ladder_label: str = "", ladder_profile_id: str = "",
           hypothesis_result: dict | None = None,
           entry_ttl_sec: int = 1800,
-          subtitle: str | None = None, policy_epoch: str | None = None) -> dict:
+          subtitle: str | None = None, policy_epoch: str | None = None,
+          max_active_signals: int = TILE_MAX_ACTIVE_SIGNALS,
+          pre_registration: dict | None = None,
+          admission_treatment: str | None = None) -> dict:
     if SCORE_LED_PAPER_RESEARCH_ENABLED:
         raw_policy_id = SCORE_LED_ADMISSION_POLICY_ID + "::" + raw_policy_id
     chase = tuple(entry["chase_windows"])
@@ -183,15 +195,15 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
             entry_ttl_sec=entry_ttl_sec,
         ),
         "policy_epoch": policy_epoch or ("v31-score-led-non-tie-paper-v2" if SCORE_LED_PAPER_RESEARCH_ENABLED else "v31-analyzer-hypothesis-paper-v1"),
-        "admission_treatment": (SCORE_LED_ADMISSION_POLICY_ID if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
+        "admission_treatment": admission_treatment or (SCORE_LED_ADMISSION_POLICY_ID if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
         "research_lane": lane,
         "execution_scope": "PAPER_ONLY",
         "paper_eligible": True,
         "live_copy_eligible": False,
         "relay_capability": relay_capability,
         "requested_margin_usd": 0.25,
-        "risk_limits": {"account_risk_pct": 0.5, "hard_stop_margin_pct": 30.0},
-        "max_active_signals": TILE_MAX_ACTIVE_SIGNALS,
+        "risk_limits": {"account_risk_pct": 0.5, "hard_stop_margin_pct": float(exit_policy.get("hard_stop_margin_pct", 30.0))},
+        "max_active_signals": int(max_active_signals),
         "analyzer_cohort": raw_policy_id,
         "presentation": {
             "family": exit_policy["family"],
@@ -217,12 +229,16 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "chase_interval_sec": entry["reprice_sec"],
         "chase_remaining_gap_step_pct": entry["remaining_gap_step_pct"],
         "entry_ttl_sec": entry_ttl_sec, "margin_usd": 0.25,
-        "account_risk_pct": 0.5, "path_end_sec": 7200,
+        "account_risk_pct": 0.5, "path_end_sec": int(exit_policy.get("max_duration_sec", 7200)),
         "exit_profile_id": raw_policy_id.split("|", 1)[1],
         "promotion_criteria": "Conservative chronological OOS, bounded drawdown, cross-world parity and every live gate GREEN",
         "kill_criteria": "Stop new entries on identity, fill, lifecycle, protection, mirror, analyzer or dashboard contradiction",
         "research_question": f"Does {raw_policy_id} retain positive conservative OOS EV with bounded drawdown?",
     }
+    if pre_registration:
+        tile["pre_registration"] = pre_registration
+        tile["promotion_criteria"] = pre_registration["promotion_summary"]
+        tile["kill_criteria"] = pre_registration["kill_summary"]
     if ladder:
         tile.update({
             "ladder": tuple(tuple(row) for row in ladder),
@@ -238,43 +254,252 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
     return tile
 
 
+RESEARCH_STACK_VERSION = "v31-dynamic-adaptive-ladder-paper-v4"
+
+# Regime cells are frozen from scripts/calibrate-adaptive-regime.py; a new
+# calibration is a new policy signature, never a runtime recalibration.
+_ADAPTIVE_REGIME_ENTRY = {
+    "mode": "ADAPTIVE_REGIME", "offset_pct": 0.0, "chase_windows": (),
+    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "regime_feature": "RV15_1M_LOG_RETURN_BPS", "rv_window_min": 15,
+    "calm_below_bps": 14.13, "extreme_above_bps": 29.04,
+    "calibration": {
+        "schema": "adaptive_regime_calibration_v1", "symbol": "tBTCF0:USTF0", "timeframe": "1m",
+        "window_start_utc": "2026-08-31T20:00:00Z", "window_end_utc": "2026-09-30T20:00:00Z",
+        "candles": 38072, "rv_samples": 38057, "percentiles": (40, 90),
+        "p40_bps": 14.1252, "p90_bps": 29.0432,
+    },
+    "fast_move_lookback_min": 5, "fast_move_sigma_window_min": 60, "fast_move_z": 1.5,
+    "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
+    "maker_improve_ticks": 1, "maker_ttl_sec": 60,
+    "extreme_action": "STAND_ASIDE", "liquidation_guard_stop_bps": 40.0,
+    "max_candle_staleness_sec": 150, "max_bbo_age_sec": 5.0,
+    "ai_decision_role": "FEATURE_ONLY",
+    "block_raw_ai_no_trade": True, "min_score_gap": 5,
+}
+_ADAPTIVE_ATR_TRAIL_EXIT = {"family": "ATR_TRAIL", "initial_stop_atr_k": 1.5, "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200}
+_ADAPTIVE_HYPOTHESIS = {
+    "status": "UNPROVEN_HONEST_PAPER_EXPERIMENT",
+    "research_notes": (
+        "volatility-entry edge unsupported by 2026-10-01 research",
+        "AI direction showed no edge; NO_TRADE and score gap <5 never trade",
+    ),
+}
+_ADAPTIVE_SUBTITLE = "HONEST PAPER EXPERIMENT — NO PROVEN EDGE — PAPER ONLY — RELAY INELIGIBLE"
+_SCENARIO_C_LADDER = tuple(tuple(row) for row in TRAIL_LADDER_SCENARIO_C)
+_PROFIT_LOCK_EXIT = {
+    **_ADAPTIVE_ATR_TRAIL_EXIT,
+    "family": "ATR_TRAIL_PROFIT_LOCK",
+    "effective_stop": "MOST_PROTECTIVE_OF_ATR_STOP_AND_PROFIT_LOCK",
+    "lock_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+    "max_open_positions": 1,
+}
+
+
+def _ladder_pre_registration(hypothesis_id: str) -> dict:
+    """Pre-registered verdict rules, evaluated only on post-registration data."""
+    pre = {
+        "schema": "tile_pre_registration_v1",
+        "hypothesis_id": hypothesis_id,
+        "registered_utc": "2026-10-01T07:30:00Z",
+        "registered_cohort": RESEARCH_STACK_VERSION,
+        "control_lane": RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME,
+        "evidence_world": "CONSERVATIVE_BBO",
+        "ci_method": "6H_CLUSTER_BOOTSTRAP_95",
+        "promotion": {
+            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
+            "min_fills": 400,
+            "min_days": 14,
+            "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "both_halves_positive": True,
+            "deflated_sharpe_min": 0.95,
+            "deflated_sharpe_trials": "LIVE_PRE_REGISTERED_HYPOTHESES",
+            "paired_vs_control_lower_ci95_gt_bp": 0.0,
+        },
+        "kill": {
+            "k1_min_fills": 150, "k1_per_fill_ev_upper_ci95_lt_bp": 0.0,
+            "k2_min_paired_signals": 300, "k2_paired_vs_control_upper_ci95_lt_bp": 0.0,
+            "k3_hard_stops_per_rolling_50_kill_at": 3, "k3_max_lock_or_stop_overshoot_bp": 10.0,
+            "k4_max_drawdown_usd": 1.5,
+            "k5_max_days_without_promotion": 21,
+        },
+    }
+    promote, kill = pre["promotion"], pre["kill"]
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} fills over "
+        f">={promote['min_days']} days, conservative per-fill EV lower 95% CI >0, both halves positive, "
+        f"Deflated Sharpe >={promote['deflated_sharpe_min']} across live hypotheses, beats "
+        f"{pre['control_lane']} on paired signals; promotion = owner review, never relay"
+    )
+    pre["kill_summary"] = (
+        f"K1 after {kill['k1_min_fills']} fills upper 95% CI of per-fill EV <0; K2 loses to "
+        f"{pre['control_lane']} on {kill['k2_min_paired_signals']} paired signals; K3 stop "
+        f"failure (>={kill['k3_hard_stops_per_rolling_50_kill_at']} hard stops in any 50 fills or a lock/stop "
+        f">{kill['k3_max_lock_or_stop_overshoot_bp']:g} bp past its level); K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K5 {kill['k5_max_days_without_promotion']} days without promotion"
+    )
+    return pre
+
+
+def _trend_fade_pre_registration(hypothesis_id: str) -> dict:
+    """Owner-approved beta test; verdicts use post-registration trades only."""
+    pre = {
+        "schema": "tile_pre_registration_trade_count_v1",
+        "hypothesis_id": hypothesis_id,
+        "registered_utc": "2026-10-01T08:30:00Z",
+        "registered_cohort": RESEARCH_STACK_VERSION,
+        "control_lane": RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME,
+        "control_meaning": "AI's own score-led side on the same shared call",
+        "evidence_world": "CONSERVATIVE_BBO",
+        "ci_method": "6H_CLUSTER_BOOTSTRAP_95",
+        "honest_label": "in-sample +$1.30 / 47 trades; expected heavy decay; beta test",
+        "promotion": {
+            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
+            "min_fills": 150,
+            "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "both_halves_positive": True,
+            "max_2h_window_profit_share": 0.30,
+        },
+        "kill": {
+            "k1_after_fills": 40, "k1_net_usd_at_or_below": -0.40,
+            "k2_after_fills": 80, "k2_net_usd_at_or_below": 0.0,
+            "k3_worst_trade_bp_below": -60.0,
+            "k4_max_drawdown_usd": 1.0,
+            "k5_max_days_without_promotion": 14,
+        },
+    }
+    promote, kill = pre["promotion"], pre["kill"]
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades, per-trade EV lower 95% CI >0, "
+        f"both halves positive, no single 2 h window >{promote['max_2h_window_profit_share']:.0%} of profit; "
+        "promotion = owner review, never relay"
+    )
+    pre["kill_summary"] = (
+        f"K1 net <=${kill['k1_net_usd_at_or_below']:.2f} after {kill['k1_after_fills']} trades; "
+        f"K2 net <=${kill['k2_net_usd_at_or_below']:.2f} after {kill['k2_after_fills']} trades; "
+        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp (stop failure); "
+        f"K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K5 day {kill['k5_max_days_without_promotion']} without promotion"
+    )
+    return pre
+
+
+
 COMBO_LANE_SPECS = {
-    # Regime cells are frozen from scripts/calibrate-adaptive-regime.py; a new
-    # calibration is a new policy signature, never a runtime recalibration.
     RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME: _tile(
         lane=RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME, label="Dynamic Adaptive · regime entry + ATR Trail",
         raw_policy_id="ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1", id_prefix="far",
         module="paper_policy_family_adaptive_regime.py", test_module="test_paper_policy_family_adaptive_regime.py",
-        entry={
-            "mode": "ADAPTIVE_REGIME", "offset_pct": 0.0, "chase_windows": (),
-            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
-            "regime_feature": "RV15_1M_LOG_RETURN_BPS", "rv_window_min": 15,
-            "calm_below_bps": 14.13, "extreme_above_bps": 29.04,
-            "calibration": {
-                "schema": "adaptive_regime_calibration_v1", "symbol": "tBTCF0:USTF0", "timeframe": "1m",
-                "window_start_utc": "2026-08-31T20:00:00Z", "window_end_utc": "2026-09-30T20:00:00Z",
-                "candles": 38072, "rv_samples": 38057, "percentiles": (40, 90),
-                "p40_bps": 14.1252, "p90_bps": 29.0432,
-            },
-            "fast_move_lookback_min": 5, "fast_move_sigma_window_min": 60, "fast_move_z": 1.5,
-            "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
-            "maker_improve_ticks": 1, "maker_ttl_sec": 60,
-            "extreme_action": "STAND_ASIDE", "liquidation_guard_stop_bps": 40.0,
-            "max_candle_staleness_sec": 150, "max_bbo_age_sec": 5.0,
-            "ai_decision_role": "FEATURE_ONLY",
-            "block_raw_ai_no_trade": True, "min_score_gap": 5,
-        },
-        exit_policy={"family": "ATR_TRAIL", "initial_stop_atr_k": 1.5, "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0, "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
-        hypothesis_result={
-            "status": "UNPROVEN_HONEST_PAPER_EXPERIMENT",
-            "research_notes": (
-                "volatility-entry edge unsupported by 2026-10-01 research",
-                "AI direction showed no edge; NO_TRADE and score gap <5 never trade",
-            ),
-        },
+        entry=dict(_ADAPTIVE_REGIME_ENTRY),
+        exit_policy=dict(_ADAPTIVE_ATR_TRAIL_EXIT),
+        hypothesis_result=dict(_ADAPTIVE_HYPOTHESIS),
         entry_ttl_sec=60,
-        subtitle="HONEST PAPER EXPERIMENT — NO PROVEN EDGE — PAPER ONLY — RELAY INELIGIBLE",
-        policy_epoch="v31-dynamic-adaptive-paper-v3",
+        subtitle=_ADAPTIVE_SUBTITLE,
+        policy_epoch=RESEARCH_STACK_VERSION,
+    ),
+    # Tiles 2 and 3 pair with Tile 1 on identical signals: same entry, same AI
+    # admission, same ATR Trail. Tile 2 adds the Scenario-C profit-lock ladder;
+    # Tile 3 adds the ladder plus a break-even rung. Margin % at 100x equals bp.
+    RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER: _tile(
+        lane=RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER,
+        label="Dynamic Adaptive + Profit Lock · ATR Trail + Scenario-C ladder",
+        raw_policy_id="ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1_SCENARIO_C_CAP1",
+        id_prefix="fal",
+        module="paper_policy_family_adaptive_regime_ladder.py",
+        test_module="test_paper_policy_family_adaptive_regime_ladder.py",
+        entry=dict(_ADAPTIVE_REGIME_ENTRY),
+        exit_policy={**_PROFIT_LOCK_EXIT, "profit_lock": "SCENARIO_C_LADDER"},
+        ladder=_SCENARIO_C_LADDER,
+        ladder_label=SCENARIO_C_LADDER_LABEL,
+        ladder_profile_id=SCENARIO_C_PROFILE_ID,
+        hypothesis_result={
+            **_ADAPTIVE_HYPOTHESIS,
+            "hypothesis_id": "H2_SCENC_NO_BE_20261001",
+            "research_question": "Does the Scenario-C ladder (no break-even) make the Dynamic Adaptive entry profitable and beat the plain ATR Trail on the same signals?",
+            "prior_evidence": "TILE2-DESIGN-20261001: Scen-C minus ATR trail +0.67 bp/signal [-0.16, +1.50]; simulated EV -1.06 bp/signal [-2.57, +0.45]",
+        },
+        pre_registration=_ladder_pre_registration("H2_SCENC_NO_BE_20261001"),
+        max_active_signals=1,
+        entry_ttl_sec=60,
+        subtitle=_ADAPTIVE_SUBTITLE,
+        policy_epoch=RESEARCH_STACK_VERSION,
+    ),
+    # Owner-requested head-to-head: winners that reach the rung never close
+    # below entry + cost. +1% lock = the round-trip Bitfinex fee (0 bps under
+    # BITFINEX_ZERO) plus one bp of exit-slip buffer; a fee change re-signs it.
+    RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER_BE: _tile(
+        lane=RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER_BE,
+        label="Dynamic Adaptive + Profit Lock + Break-even · ATR Trail + Scenario-C ladder + BE 4→1",
+        raw_policy_id="ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1_SCENARIO_C_BE4_LOCK1_CAP1",
+        id_prefix="flb",
+        module="paper_policy_family_adaptive_regime_ladder_be.py",
+        test_module="test_paper_policy_family_adaptive_regime_ladder_be.py",
+        entry=dict(_ADAPTIVE_REGIME_ENTRY),
+        exit_policy={
+            **_PROFIT_LOCK_EXIT,
+            "profit_lock": "BREAKEVEN_PLUS_SCENARIO_C_LADDER",
+            "breakeven_trigger_margin_pct": 4.0,
+            "breakeven_lock_margin_pct": 1.0,
+            "breakeven_cost_basis": "BITFINEX_ZERO round-trip fee 0 bps + 1 bp exit-slip buffer (100x margin %)",
+        },
+        ladder=_SCENARIO_C_LADDER,
+        ladder_label=SCENARIO_C_LADDER_LABEL,
+        ladder_profile_id=SCENARIO_C_PROFILE_ID,
+        hypothesis_result={
+            **_ADAPTIVE_HYPOTHESIS,
+            "hypothesis_id": "H3_SCENC_BE4_1_20261001",
+            "research_question": "Does adding a break-even rung (peak +4 bp locks +1 bp) to the Scenario-C ladder beat Tile 1 and Tile 2 on the same signals?",
+            "prior_evidence": "TILE2-DESIGN-20261001: BE 4->1 rung minus Scen-C -0.27 bp/signal [-0.76, +0.21]; CI spans zero, tested head-to-head at owner request",
+        },
+        pre_registration=_ladder_pre_registration("H3_SCENC_BE4_1_20261001"),
+        max_active_signals=1,
+        entry_ttl_sec=60,
+        subtitle=_ADAPTIVE_SUBTITLE,
+        policy_epoch=RESEARCH_STACK_VERSION,
+    ),
+    # Owner-approved beta test of the strongest in-sample research idea
+    # (TILE2-DESIGN-20261001 "Tile 4"): fade the score-led side of the same
+    # shared call. Only ties, invalid scores and AI errors refuse; raw AI
+    # NO_TRADE and small gaps trade, because the research tested every
+    # score-led side. 40 bp at 100x = 40% margin, below liquidation.
+    RESEARCH_LANE_FAMILY_TREND_FADE_60: _tile(
+        lane=RESEARCH_LANE_FAMILY_TREND_FADE_60,
+        label="Trend-label fade · inverted AI side, 60-min hold, 40 bp catastrophic stop",
+        raw_policy_id="INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP",
+        id_prefix="ftf",
+        module="paper_policy_family_trend_fade_60.py",
+        test_module="test_paper_policy_family_trend_fade_60.py",
+        entry={
+            "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
+            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+            "direction_source": "INVERTED_SCORE_LED_SIDE",
+            "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR"),
+            "trades_raw_ai_no_trade": True, "min_score_gap": None,
+            "max_spread_bps": 1.68, "max_bbo_age_sec": 5.0,
+            "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
+            "ai_decision_role": "FEATURE_ONLY",
+        },
+        exit_policy={
+            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
+            "max_duration_sec": 3600,
+            "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+            "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
+            "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+            "max_open_positions": 1,
+        },
+        hypothesis_result={
+            "status": "IN_SAMPLE_ONLY_BETA_TEST",
+            "hypothesis_id": "H4_TREND_FADE_60_20261001",
+            "in_sample": "+$1.30 / 47 trades (27W/20L), +11.0 bp/trade, PF 2.0, max DD $0.17; holdout 9 trades $0.00",
+            "corrected": "family-wise circular-shift p 0.13; DSR ~0.1; per-trade CI includes 0",
+            "expected_live": "0 to +5 bp/trade after 50-100% decay",
+        },
+        pre_registration=_trend_fade_pre_registration("H4_TREND_FADE_60_20261001"),
+        admission_treatment=INVERTED_SCORE_LED_ADMISSION_POLICY_ID,
+        max_active_signals=1,
+        entry_ttl_sec=15,
+        subtitle="BETA TEST — in-sample +$1.30 / 47 trades; expected heavy decay — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=RESEARCH_STACK_VERSION,
     ),
 }
 COMPARISON_BENCHMARK_LANE = None
@@ -286,9 +511,8 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-dynamic-adaptive-paper-v3"
 RESEARCH_STACK_FEATURES = (
-    "One Dynamic Adaptive paper tile consumes the shared three-minute direction call; it stands aside on raw AI NO_TRADE, score gap <5, extreme volatility or a stop within the liquidation guard; default-OFF, paper-only and relay-ineligible. Former exit-family tiles and the Continuous comparison label are retired; exit variants survive only as analyzer research variants. v3 delivers the signal-time decision to the paper order path; every v1 and v2 decision was refused DECISION_MISSING and both are quarantined cohorts"
+    "Four paper tiles consume the same shared three-minute call, each with an independent lock, order, position, ledger and analyzer cohort. Tiles 1-3 share the Dynamic Adaptive entry and AI admission so they pair on identical signals: Tile 1 ATR Trail; Tile 2 ATR Trail + Scenario-C profit-lock ladder; Tile 3 Tile 2 + a break-even rung (peak +4 bp locks +1 bp); they stand aside on raw AI NO_TRADE, score gap <5, extreme volatility or a stop within the liquidation guard. Tile 4 (beta test) trades the opposite of the score-led side with a taker at the signal (5 bp cap, 15 s; stand aside when spread >1.68 bp), a 60-minute time exit and a 40 bp catastrophic stop; only ties and AI errors refuse. Locks and stops fill at the side-correct quote that crossed them. Tiles 2-4 hold one position at a time and carry pre-registered promotion and kill rules. All default-OFF, paper-only and relay-ineligible. v4 starts all four in one clean cohort; v1/v2 remain quarantined plumbing-defect cohorts and v3 is the prior single-tile cohort"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

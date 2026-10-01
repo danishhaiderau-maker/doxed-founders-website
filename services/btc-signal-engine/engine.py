@@ -4838,7 +4838,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     pos.setdefault("partial_exit_receipts", []).append(receipt)
     pos["policy_remaining_fraction"] = remaining_after
     if remaining_after <= 0:
-        if reason == "PATH_END_120M":
+        if _TIME_EXIT_REASON.fullmatch(reason):
             pos["path_end_mark_price"] = float(price)
         with trade_lock:
             source_pos.clear()
@@ -6560,8 +6560,21 @@ _TRIGGER_CONSISTENT_EXIT_REASONS = frozenset({
     "PHYSICAL_HARD_STOP_30PCT",
     "INITIAL_ATR_STOP",
     "PROFIT_PROTECTION_STOP",
+    "BREAKEVEN_LOCK",
     "PATH_END_120M",
 })
+# Registry policies name their hard stop and time exit from their own limits.
+_HARD_STOP_REASON = re.compile(r"PHYSICAL_HARD_STOP_\d+(\.\d+)?PCT")
+_TIME_EXIT_REASON = re.compile(r"PATH_END_\d+M")
+
+
+def _is_trigger_consistent_exit_reason(reason) -> bool:
+    reason = str(reason or "").upper()
+    return (
+        reason in _TRIGGER_CONSISTENT_EXIT_REASONS
+        or bool(_HARD_STOP_REASON.fullmatch(reason))
+        or bool(_TIME_EXIT_REASON.fullmatch(reason))
+    )
 
 
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
@@ -6570,7 +6583,7 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
     direction = str(pos.get("dir") or "").upper()
     fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
     trigger = float(pos.get("_exit_eval_price") or 0)
-    if str(exit_reason or "").upper() in _TRIGGER_CONSISTENT_EXIT_REASONS:
+    if _is_trigger_consistent_exit_reason(exit_reason):
         # Do not walk the book to a far-better VWAP than the side-correct
         # trigger that actually fired the rule (the old STOP_LOSS mismatch).
         px = trigger if trigger > 0 else fallback
@@ -18643,6 +18656,24 @@ def _adaptive_regime_entry_decision(lane: str, direction: str, ctx: dict,
     return decision
 
 
+def _tile_view_of_shared_call(lane: str, raw_ai: dict, lane_ai: dict, admission: dict,
+                              final_direction: str, spread: int) -> tuple:
+    """(ai, direction, spread, admission_reason) for one tile from the shared call.
+
+    A tile whose policy declares ``lane_admission`` derives its own side from the
+    same call (for example the opposite of the score-led side); every other tile
+    uses the shared score-led view. The shared row is never mutated.
+    """
+    admit = getattr(_patient_chase_policy(lane), "lane_admission", None)
+    if admit is None:
+        return lane_ai, final_direction, spread, None
+    view = admit(raw_ai, admission)
+    tile_ai = view["lane_ai"]
+    direction = view["direction"]
+    tile_spread = int(compute_directional_spread(direction, tile_ai)) if view["accepted"] else 0
+    return tile_ai, direction, tile_spread, view["reason"]
+
+
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
@@ -18691,14 +18722,17 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             or is_deterministic_bracket_lane(lane)
         ):
             continue
-        detail = combo_lane_match_detail(
-            lane, lane_ai, final_direction, spread, features=enriched,
+        tile_ai, tile_direction, tile_spread, tile_admission_reason = _tile_view_of_shared_call(
+            lane, ai, lane_ai, score_led_admission, final_direction, spread,
         )
-        ai_accepted = str(lane_ai.get("decision") or "").upper() == "APPROVE"
+        detail = combo_lane_match_detail(
+            lane, tile_ai, tile_direction, tile_spread, features=enriched,
+        )
+        ai_accepted = str(tile_ai.get("decision") or "").upper() == "APPROVE"
         lane_features = enriched
         decision_features = features or {}
         adaptive = (
-            _adaptive_regime_entry_decision(lane, final_direction, ctx, ai, enriched)
+            _adaptive_regime_entry_decision(lane, tile_direction, ctx, ai, enriched)
             if ai_accepted else None
         )
         if adaptive is not None:
@@ -18711,7 +18745,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         policy_accepted = ai_accepted and bool(detail.get("passes"))
         if not ai_accepted:
             disposition = "AI_REJECTED_NO_ORDER"
-            decision_reason = f"AI_{str(lane_ai.get('decision') or 'REJECT').upper()}"
+            decision_reason = tile_admission_reason or f"AI_{str(tile_ai.get('decision') or 'REJECT').upper()}"
         elif not detail.get("passes"):
             disposition = "POLICY_FILTERED_NO_ORDER"
             decision_reason = detail.get("block_reason") or "COMBO_FILTER"
@@ -18720,7 +18754,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
         else:
             disposition = "ORDER_ELIGIBLE"
-            decision_reason = (
+            decision_reason = tile_admission_reason or (
                 score_led_admission["reason"]
                 if score_led_admission.get("applied")
                 else "SHARED_AI_APPROVE_AND_POLICY_PASS"
@@ -18731,27 +18765,27 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         # evaluations rendered as "not evaluated" even while their paper
         # workers and orders were advancing.
         _stamp_shared_ai_lane_verdict(
-            _shared_ai_call_id(ai_result=lane_ai, ctx=ctx),
+            _shared_ai_call_id(ai_result=tile_ai, ctx=ctx),
             lane,
             policy_accepted,
             decision_reason,
-            score=spread,
+            score=tile_spread,
             policy_version=str(
                 (_v3_lane_policy_material(lane) or {}).get("policy_signature")
                 or (_v3_lane_policy_material(lane) or {}).get("raw_policy_id")
                 or lane
             ),
             effective_direction=(
-                lane_ai.get("effective_research_direction") or final_direction
+                tile_ai.get("effective_research_direction") or tile_direction
             ),
             admission_policy_id=(
-                lane_ai.get("effective_research_admission_policy_id")
+                tile_ai.get("effective_research_admission_policy_id")
             ),
         )
         evidence_ready = _write_v3_shared_lane_decision(
-            lane, lane_ai, ctx, decision_features,
+            lane, tile_ai, ctx, decision_features,
             policy_decision=(
-                "ERROR" if bool(lane_ai.get("ai_error"))
+                "ERROR" if bool(tile_ai.get("ai_error"))
                 else "ACCEPT" if policy_accepted else "REJECT"
             ),
             execution_disposition=disposition,
@@ -18769,7 +18803,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             br = detail.get("block_reason") or "COMBO_FILTER"
             log_lane_opportunity_event(
                 lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
-                (lane_ai or {}).get("direction"), (lane_ai or {}).get("win_prob"), edge_score,
+                (tile_ai or {}).get("direction"), (tile_ai or {}).get("win_prob"), edge_score,
                 block_reason=br,
             )
             logger.info(
@@ -18778,7 +18812,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             )
             continue
         _enqueue_combo_lane_execution(
-            ctx, lane_ai, edge_score, lane_features, lane,
+            ctx, tile_ai, edge_score, lane_features, lane,
             f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
 
@@ -19579,6 +19613,11 @@ def _row_epoch(value) -> float:
         return 0.0
 
 
+def _win_rate_pct(wins: int, closed: int):
+    """Wins (net PnL > 0 after costs) over closed filled trades; None when nothing closed."""
+    return round(100.0 * int(wins) / int(closed), 1) if closed else None
+
+
 def _settings_period_breakdown() -> dict:
     """Exact fresh-collection PnL by recorded settings epoch; legacy settings stay unknown."""
     files = (EXECUTION_SETTINGS_HISTORY_FILE, CSV_TRADES)
@@ -19652,6 +19691,8 @@ def _settings_period_breakdown() -> dict:
             ]
             pnl = round(sum(lane_trades), 2)
             approved = len(lane_trades)
+            wins = sum(1 for value in lane_trades if value > 0)
+            losses = sum(1 for value in lane_trades if value < 0)
             output[lane].append({
                 **period,
                 "period_number": index + 1,
@@ -19660,6 +19701,9 @@ def _settings_period_breakdown() -> dict:
                 "executed": len(lane_trades),
                 "pnl_usd": pnl,
                 "ev_per_approval": round(pnl / approved, 2) if approved else None,
+                "wins": wins,
+                "losses": losses,
+                "win_rate_pct": _win_rate_pct(wins, len(lane_trades)),
             })
     _settings_breakdown_cache["key"] = key
     _settings_breakdown_cache["value"] = copy.deepcopy(output)
@@ -28475,6 +28519,48 @@ RESEARCH DATA COLLECTION MODE (active):
 """
 
 
+import cross_venue_tape as _cvt
+
+# The cross-venue collector is its own process (fly-entrypoint.sh); the bot only
+# reads its atomically replaced live file for the shadow leader challenger and
+# the staleness alarm. Nothing here can gate readiness or an order.
+CROSS_VENUE_COLLECTOR_ENABLED = os.getenv("CROSS_VENUE_COLLECTOR_ENABLED", "1").strip() == "1"
+_CROSS_VENUE_LIVE_CACHE = {"read_ts": 0.0, "live": None}
+
+
+def _cross_venue_live(max_age_sec: float = 1.0):
+    now = time.time()
+    with _AI_SHADOW_LOCK:
+        if now - _CROSS_VENUE_LIVE_CACHE["read_ts"] < max_age_sec:
+            return _CROSS_VENUE_LIVE_CACHE["live"]
+    live = _cvt.read_live(_cvt.LIVE_FILE) if CROSS_VENUE_COLLECTOR_ENABLED else None
+    with _AI_SHADOW_LOCK:
+        _CROSS_VENUE_LIVE_CACHE.update(read_ts=now, live=live)
+    return live
+
+
+def cross_venue_health_snapshot() -> dict:
+    try:
+        return _cvt.health_from_live(
+            _cross_venue_live(), time.time(), enabled=CROSS_VENUE_COLLECTOR_ENABLED,
+        )
+    except Exception as exc:
+        return {"schema": _cvt.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
+def _ai_shadow_leader_features(decision_ts: float) -> dict:
+    try:
+        ts_list, rows = _AI_SHADOW_TAPE.snapshot()
+
+        def bfx_mid_at(sec):
+            return _ai_shadow.mid_at(ts_list, rows, sec, max_lag=0)
+
+        return _cvt.leader_features(_cross_venue_live(max_age_sec=0.0), decision_ts, bfx_mid_at)
+    except Exception as exc:
+        logger.warning(f"[AI SHADOW] leader features unavailable: {exc} [PIPELINE ENFORCEMENT]")
+        return {"side": _ai_shadow.NONE, "reason": "ERROR", "error": type(exc).__name__}
+
+
 def _ai_shadow_tape_features(now: float = None) -> dict:
     try:
         return _ai_shadow.tape_features(_AI_SHADOW_TAPE, float(now or time.time()))
@@ -28597,10 +28683,13 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
     tape = ctx.get("tape_features")
     if not isinstance(tape, dict) or tape.get("source") == "UNAVAILABLE":
         tape = _ai_shadow_tape_features(decision_ts)
+    leader = _ai_shadow_leader_features(decision_ts)
     compact_row = _ai_shadow_run_compact(ctx, tape, call_id, time.time())
     challengers = _ai_shadow.compute_challenger_sides(
-        ctx, ai_result, tape, call_id, compact=compact_row.get("parsed"),
+        ctx, ai_result, tape, call_id, compact=compact_row.get("parsed"), leader=leader,
     )
+    funding = ctx.get("funding") if isinstance(ctx.get("funding"), dict) else {}
+    live = _cross_venue_live()
     cycle = ctx.get("cycle_3m_universe") or ctx.get("exhaustion_3m") or {}
     with state_lock:
         leverage = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
@@ -28628,6 +28717,18 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
             "(the tile ledgers are the truth for orders). This log never changes admission."
         ),
         "tape_features": tape,
+        "leader_features": leader,
+        "derivatives": {
+            "bitfinex": {
+                "funding_rate": funding.get("rate"),
+                "mark": funding.get("mark_price"),
+                "index": funding.get("index_price"),
+                "open_interest": funding.get("open_interest"),
+                "next_funding_ts": funding.get("next_time"),
+                "updated_ts": funding.get("updated_ts"),
+            },
+            "leaders": (live or {}).get("derivatives") if isinstance(live, dict) else None,
+        },
         "compact_prompt_state": compact_row.get("call_state"),
         "geometry_model": _ai_shadow.GEOMETRY_MODEL,
         "geometry_specs": (
@@ -28762,6 +28863,7 @@ def ai_shadow_dashboard_snapshot() -> dict:
         "tape_ring_seconds": len(_AI_SHADOW_TAPE),
         "win_prob_status": "NOT_REQUESTED_BY_PROMPT (ai_threshold has no effect)",
         "input_health": ai_input_health_snapshot(),
+        "cross_venue": cross_venue_health_snapshot(),
         "status": status,
         "horizons_sec": list(horizons),
         "rows": rows,
@@ -31128,8 +31230,13 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     lab_win_rate = float(m.get("lab_win_rate") or 0.0)
     lab_ev = float(m.get("lab_per_close_ev") or 0.0)
     lab_open = int(m.get("lab_open_shadows") or 0)
-    raw_win_rate = m.get("win_rate_pct")
-    win_rate = None if raw_win_rate is None else float(raw_win_rate)
+    wins = int(m.get("wins") or 0)
+    losses = int(m.get("losses") or 0)
+    if m.get("wins") is not None or m.get("losses") is not None:
+        win_rate = _win_rate_pct(wins, fills)
+    else:
+        raw_win_rate = m.get("win_rate_pct")
+        win_rate = None if raw_win_rate is None or not fills else float(raw_win_rate)
     shadow_sim = bool(m.get("shadow_sim_mode"))
     checker_pass_sims = int(m.get("checker_pass_sims") or 0)
     checker_pass_pnl = float(m.get("checker_pass_pnl") or 0)
@@ -31173,6 +31280,8 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "verdict": m.get("verdict"),
         "summary_line": summary_line,
         "shadow_sim_mode": shadow_sim,
+        "wins": wins,
+        "losses": losses,
         "win_rate_pct": win_rate,
         "checker_pass_sims": checker_pass_sims,
         "checker_pass_pnl": round(checker_pass_pnl, 2),
@@ -33321,6 +33430,9 @@ DASHBOARD_JS = """(function () {
       if (!raw) return 'Not recorded';
       const labels = {
         PROFIT_LOCK_LADDER: 'Profit lock (trailing)',
+        BREAKEVEN_LOCK: 'Break-even lock',
+        INITIAL_ATR_STOP: 'Initial ATR stop',
+        PROFIT_PROTECTION_STOP: 'ATR trail stop',
         TAKE_PROFIT: 'Take profit',
         THESIS_FAST_CUT: 'Thesis fast cut',
         EARLY_FAIL: 'Early thesis failure',
@@ -33392,11 +33504,14 @@ DASHBOARD_JS = """(function () {
       const st = s.status || {};
       const health = s.input_health || {};
       const dead = (health.dead_fields || []).map(f => f.path + '=' + f.kind).slice(0, 6);
+      const cv = s.cross_venue || {};
+      const cvStale = (cv.stale_venues || []).join(',');
       safeText('aiShadowStatus',
         'calls ' + (st.calls_logged || 0) + ' | pending ' + (s.pending_calls || 0)
         + ' | tape ' + (s.tape_ring_seconds || 0) + 's | compact ok ' + (st.compact_ok || 0)
         + ' err ' + (st.compact_errors || 0) + ' skip ' + (st.compact_skipped || 0)
         + ' | inputs ' + (health.status || '-') + (dead.length ? ' [' + dead.join(', ') + ']' : '')
+        + ' | leader feed ' + (cv.status || '-') + (cvStale ? ' [stale ' + cvStale + ']' : '')
         + ' | win_prob ' + (s.win_prob_status || '-'));
       const hs = (s.horizons_sec || []).map(String);
       const fmt = (c) => {
@@ -33882,6 +33997,15 @@ DASHBOARD_JS = """(function () {
             : null;
           const headlineEvLabel = headlineEv == null ? '—' : ('$' + headlineEv.toFixed(2));
           const headlinePnlCol = headlinePnl >= 0 ? '#3fb950' : '#f85149';
+          const winPctLabel = function (wins, losses, closed) {
+            const n = Number(closed || 0);
+            if (!(n > 0)) return '—';
+            const w = Number(wins || 0);
+            return Math.round(100 * w / n) + '% (' + w + 'W/' + Number(losses || 0) + 'L)';
+          };
+          const headlineWinLabel = currentSettingsPeriod
+            ? winPctLabel(currentSettingsPeriod.wins, currentSettingsPeriod.losses, headlineClosed)
+            : winPctLabel(stats.wins, stats.losses, headlineClosed);
           const formatPeriodTime = function (epoch) {
             if (!epoch) return '—';
             try {
@@ -33910,6 +34034,7 @@ DASHBOARD_JS = """(function () {
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + Number(period.executed || 0) + '</td>'
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;color:' + (periodPnl >= 0 ? '#3fb950' : '#f85149') + ';">$' + periodPnl.toFixed(2) + '</td>'
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + (periodEv == null ? '—' : ('$' + Number(periodEv).toFixed(2))) + '</td>'
+              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + winPctLabel(period.wins, period.losses, period.executed) + '</td>'
               + '</tr>';
           }).join('');
           const statsScope = currentSettingsPeriod
@@ -33923,17 +34048,18 @@ DASHBOARD_JS = """(function () {
             + '<thead><tr style="color:#8b949e;background:#101820;">'
             + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Global submit windows</th>'
             + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Closed</th>'
-            + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th>'
+            + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th><th style="padding:5px;text-align:right;">Win %</th>'
             + '</tr></thead><tbody>'
-            + (settingsRows || '<tr><td colspan="7" style="padding:7px;color:#6e7681;">Settings tracking starts with this bot release.</td></tr>')
+            + (settingsRows || '<tr><td colspan="8" style="padding:7px;color:#6e7681;">Settings tracking starts with this bot release.</td></tr>')
             + '</tbody></table></div>';
-          const statsGrid = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
+          const statsGrid = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + statRow('Pending', laneNow.pending || 0)
             + statRow('Open', laneNow.open || 0)
             + statRow('Closed', headlineClosed)
             + statRow('PnL', '$' + headlinePnl.toFixed(2), headlinePnlCol)
             + statRow('EV/appr', headlineEvLabel)
+            + statRow('Win %', headlineWinLabel)
             + '</div>'
             + settingsBreakdown;
           const chips = (spec.filter_chips || []).map(function (c) {
@@ -40227,6 +40353,12 @@ def status():
                 "qualification_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
                 "per_second_trade_high_low": True,
             },
+            "cross_venue_tape": {
+                "tape_schema": _cvt.SCHEMA,
+                "file": _cvt.FILE_NAME,
+                "mode": "SHADOW_ONLY_NO_ORDERS",
+                **cross_venue_health_snapshot(),
+            },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
                 "taker_counterfactual_file": execution_markouts.TAKER_FILE,
@@ -40482,6 +40614,8 @@ def ready():
         "trading_ready": trading_ready,
         "trading_block_reason": None if trading_ready else trading_block_reason,
         "ai_input_health": ai_input_health_snapshot(),
+        # Shadow research feed health; deliberately not an input to ready_ok.
+        "cross_venue_health": cross_venue_health_snapshot(),
     }), (200 if ready_ok else 503)
 
 

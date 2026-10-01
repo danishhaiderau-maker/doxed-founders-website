@@ -1,0 +1,516 @@
+"""Cross-venue lead-lag: do Binance/Bybit/OKX BTC perps lead Bitfinex tBTCF0?
+
+Inputs are the shadow ``cross_venue_tape_1m.jsonl`` minute rows and the
+Bitfinex ``market_microstructure_1s.jsonl`` BBO tape, aligned on the shared
+epoch-second bucket clock (bucket ``s`` holds the quote as of ``s + 1``).
+
+Sections, per leader venue:
+
+* ``xcorr`` - correlation of 1 s log-mid returns, leader at ``t`` vs Bitfinex
+  at ``t + k`` for k in -10..30 s (iid 95% band shown for scale only).
+* ``response`` - after a leader trigger at ``t`` (a ``leader_move`` of at least
+  the threshold over the window, or a ``lead_gap`` where the leader moved that
+  much more than Bitfinex did), the signed Bitfinex mid move from ``t`` to
+  ``t + k`` for k in 1..30 s, hour-clustered CR1 t statistics.
+* ``follow`` - a capacity-one leader-follow rule on Bitfinex: enter at the
+  executable quote of bucket ``t + 1`` (ask for LONG, bid for SHORT), exit at
+  the opposite side of bucket ``t + 1 + hold``. This is an after-spread markout
+  with no exchange fee applied (fees are owned elsewhere); hour-cluster CR1 t,
+  cluster bootstrap 95% CI and Benjamini-Hochberg q across all follow tests.
+* ``basis`` - leader-minus-Bitfinex basis distribution and whether a basis
+  deviation from its 15-minute mean predicts Bitfinex's next 60 s / 300 s.
+* ``derivatives`` - funding and open-interest change vs the next 15 minutes.
+
+The pre-registered rule is the shadow challenger's: 10 s window, 2 bp. Every
+other window/threshold is exploratory and carries the multiple-testing
+correction. Nothing here can place, change or cancel an order.
+"""
+from __future__ import annotations
+
+import glob
+import json
+import math
+import os
+import re
+from typing import Mapping, Optional
+
+import numpy as np
+
+import cross_venue_tape as cvt
+from research.ai_challenger_report import benjamini_hochberg, t_two_sided_p
+
+SCHEMA = "lead_lag_report_v1"
+REPORT_FILE = "lead_lag_report.json"
+BFX_TAPE_FILE = "market_microstructure_1s.jsonl"
+MAX_DAYS = 7
+XCORR_LAGS = tuple(range(-10, 31))
+RESPONSE_LAGS = (1, 2, 3, 5, 10, 15, 20, 30)
+TRIGGERS = ((1, 1.5), (5, 2.0), (10, 2.0))
+PREREGISTERED = (cvt.LEADER_WINDOW_SEC, cvt.LEADER_MIN_MOVE_BP)
+FOLLOW_HOLDS = (5, 10, 30, 60)
+ENTRY_DELAY_SEC = 1
+BASIS_WINDOW_SEC = 900
+BASIS_Z = 2.0
+BASIS_HORIZONS = (60, 300)
+OI_CHANGE_SEC = 300
+DERIV_HORIZON_SEC = 900
+MIN_HOURS = 6
+MIN_CLUSTERS = 10
+BOOTSTRAP_RESAMPLES = 2000
+BOOTSTRAP_SEED = 20261001
+FDR_Q = 0.05
+_BUCKET_RE = re.compile(rb'"bucket_ts":\s*(\d+)')
+
+
+def _r(value, digits: int = 4):
+    if value is None:
+        return None
+    value = float(value)
+    return round(value, digits) if math.isfinite(value) else None
+
+
+# ---------------------------------------------------------------------------
+# Loaders
+# ---------------------------------------------------------------------------
+def _generations(path: str) -> list:
+    """Active file plus numeric rotations, oldest first."""
+    rotated = []
+    for candidate in glob.glob(path + ".*"):
+        suffix = candidate.rsplit(".", 1)[-1]
+        if suffix.isdigit():
+            rotated.append((int(suffix), candidate))
+    return [p for _, p in sorted(rotated)] + ([path] if os.path.isfile(path) else [])
+
+
+def load_cross_venue_rows(data_dir: str, max_days: int = MAX_DAYS) -> list:
+    rows = []
+    for path in _generations(os.path.join(data_dir, cvt.FILE_NAME)):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and row.get("schema") == cvt.SCHEMA:
+                        rows.append(row)
+        except OSError:
+            continue
+    if not rows:
+        return rows
+    latest = max(int(r.get("minute_ts") or 0) for r in rows)
+    floor = latest - max_days * 86400
+    dedup = {}
+    for row in rows:
+        ts = int(row.get("minute_ts") or 0)
+        if ts >= floor:
+            dedup[ts] = row
+    return [dedup[k] for k in sorted(dedup)]
+
+
+def _bucket_range(path: str) -> tuple:
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(4096)
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 4096))
+            tail = handle.read()
+    except OSError:
+        return None, None
+    first = _BUCKET_RE.search(head)
+    last = _BUCKET_RE.findall(tail)
+    return (int(first.group(1)) if first else None, int(last[-1]) if last else None)
+
+
+def load_bitfinex_quotes(data_dir: str, start: int, end: int) -> dict:
+    """{bucket_ts: (bid, ask)} for fresh, valid buckets in [start, end)."""
+    out = {}
+    for path in _generations(os.path.join(data_dir, BFX_TAPE_FILE)):
+        first, last = _bucket_range(path)
+        if first is not None and last is not None and (last < start or first >= end):
+            continue
+        try:
+            with open(path, "rb") as handle:
+                for line in handle:
+                    match = _BUCKET_RE.search(line)
+                    if not match:
+                        continue
+                    ts = int(match.group(1))
+                    if not start <= ts < end:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if row.get("fresh") is not True or row.get("valid_bbo") is not True:
+                        continue
+                    bid, ask = row.get("bid"), row.get("ask")
+                    if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and 0 < bid <= ask:
+                        out[ts] = (float(bid), float(ask))
+        except OSError:
+            continue
+    return out
+
+
+class Aligned:
+    """Dense per-second arrays (NaN = unobserved) over the cross-venue span."""
+
+    def __init__(self, rows: list, bfx_quotes: Optional[Mapping[int, tuple]] = None) -> None:
+        self.start = int(rows[0]["minute_ts"])
+        self.end = int(rows[-1]["minute_ts"]) + 60
+        n = self.end - self.start
+        self.n = n
+        self.venues = sorted({v for r in rows for v in (r.get("venues") or {})})
+        self.mid = {v: np.full(n, np.nan) for v in self.venues}
+        self.flow = {v: np.zeros(n) for v in self.venues}
+        cv_bfx = np.full(n, np.nan)
+        self.deriv_rows = []
+        for row in rows:
+            decoded = cvt.decode_minute(row)
+            for sec, mid in decoded.get("bfx", {}).items():
+                cv_bfx[sec - self.start] = mid
+            for v in self.venues:
+                for sec, cell in (decoded.get(v) or {}).items():
+                    i = sec - self.start
+                    if cell["mid"] is not None:
+                        self.mid[v][i] = cell["mid"]
+                    self.flow[v][i] = cell["buy"] - cell["sell"]
+            if row.get("derivatives"):
+                self.deriv_rows.append((int(row["minute_ts"]) + 59, row["derivatives"]))
+        self.bid = np.full(n, np.nan)
+        self.ask = np.full(n, np.nan)
+        for sec, (bid, ask) in (bfx_quotes or {}).items():
+            i = sec - self.start
+            if 0 <= i < n:
+                self.bid[i], self.ask[i] = bid, ask
+        tape_mid = (self.bid + self.ask) / 2.0
+        self.bfx_source = ("MICROSTRUCTURE_TAPE" if np.isfinite(tape_mid).any()
+                           else "CROSS_VENUE_EMBEDDED_MID")
+        self.bfx_mid = np.where(np.isfinite(tape_mid), tape_mid, cv_bfx)
+        self.hour = (np.arange(n) + self.start) // 3600
+
+
+def _log_ret(series: np.ndarray, lag: int) -> np.ndarray:
+    out = np.full(series.shape, np.nan)
+    if 0 < lag < len(series):
+        out[lag:] = np.log(series[lag:] / series[:-lag]) * 1e4
+    return out
+
+
+def _shift(series: np.ndarray, k: int) -> np.ndarray:
+    """``out[t] = series[t + k]`` (NaN beyond the edge)."""
+    out = np.full(series.shape, np.nan)
+    if k == 0:
+        return series.copy()
+    if k > 0:
+        out[:-k] = series[k:]
+    else:
+        out[-k:] = series[:k]
+    return out
+
+
+def _at(series: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    inside = (idx >= 0) & (idx < series.size)
+    return np.where(inside, series[np.clip(idx, 0, series.size - 1)], np.nan)
+
+
+# ---------------------------------------------------------------------------
+# Statistics
+# ---------------------------------------------------------------------------
+def cluster_stats(values: np.ndarray, clusters: np.ndarray, *, bootstrap: bool = True,
+                  seed: int = BOOTSTRAP_SEED) -> dict:
+    """Mean with CR1 cluster-robust t (G-1 df) and cluster bootstrap 95% CI."""
+    values = np.asarray(values, dtype=float)
+    clusters = np.asarray(clusters)
+    mask = np.isfinite(values)
+    values, clusters = values[mask], clusters[mask]
+    n = int(values.size)
+    out = {"n": n, "clusters": 0, "mean": None, "se": None, "t": None, "p": None,
+           "ci95": [None, None]}
+    if n == 0:
+        return out
+    labels, inverse = np.unique(clusters, return_inverse=True)
+    g = int(labels.size)
+    out["clusters"] = g
+    mean = float(values.mean())
+    out["mean"] = _r(mean)
+    if g < 2:
+        return out
+    sums = np.bincount(inverse, weights=values, minlength=g)
+    counts = np.bincount(inverse, minlength=g).astype(float)
+    score = float(((sums - mean * counts) ** 2).sum())
+    se = math.sqrt(g / (g - 1) * score / (n * n))
+    out["se"] = _r(se)
+    if se > 0:
+        t = mean / se
+        out["t"] = _r(t, 3)
+        out["p"] = _r(t_two_sided_p(t, g - 1), 6)
+    if bootstrap:
+        rng = np.random.default_rng(seed)
+        draws = rng.integers(0, g, size=(BOOTSTRAP_RESAMPLES, g))
+        boots = np.sort(sums[draws].sum(axis=1) / counts[draws].sum(axis=1))
+        out["ci95"] = [_r(boots[int(0.025 * BOOTSTRAP_RESAMPLES)]),
+                       _r(boots[int(0.975 * BOOTSTRAP_RESAMPLES) - 1])]
+    return out
+
+
+def _corr(x: np.ndarray, y: np.ndarray) -> tuple:
+    mask = np.isfinite(x) & np.isfinite(y)
+    n = int(mask.sum())
+    if n < 30:
+        return None, n
+    a, b = x[mask], y[mask]
+    sa, sb = a.std(), b.std()
+    if sa == 0 or sb == 0:
+        return None, n
+    return float(((a - a.mean()) * (b - b.mean())).mean() / (sa * sb)), n
+
+
+def _debounce(idx: np.ndarray, gap: int) -> np.ndarray:
+    keep, last = [], -10 ** 9
+    for i in idx:
+        if i - last >= gap:
+            keep.append(i)
+            last = i
+    return np.array(keep, dtype=int)
+
+
+# ---------------------------------------------------------------------------
+# Sections
+# ---------------------------------------------------------------------------
+def xcorr_section(al: Aligned, venue: str) -> dict:
+    r_lead = _log_ret(al.mid[venue], 1)
+    r_bfx = _log_ret(al.bfx_mid, 1)
+    rows, best = [], None
+    for k in XCORR_LAGS:
+        c, n = _corr(r_lead, _shift(r_bfx, k))
+        rows.append({"lag_s": k, "corr": _r(c), "n": n})
+        if c is not None and (best is None or c > best["corr"]):
+            best = {"lag_s": k, "corr": _r(c)}
+    n0 = next((r["n"] for r in rows if r["lag_s"] == 0), 0)
+    leader_first = sum(r["corr"] for r in rows if r["lag_s"] > 0 and r["corr"] is not None)
+    bfx_first = sum(r["corr"] for r in rows if r["lag_s"] < 0 and r["corr"] is not None)
+    return {
+        "rows": rows,
+        "peak": best,
+        "iid_band_95": _r(1.96 / math.sqrt(n0)) if n0 else None,
+        "sum_corr_leader_first": _r(leader_first),
+        "sum_corr_bitfinex_first": _r(bfx_first),
+        "note": "lag k>0: leader return at t vs Bitfinex return at t+k (leader first).",
+    }
+
+
+def triggers(al: Aligned, venue: str, window: int, threshold: float, kind: str) -> np.ndarray:
+    move = _log_ret(al.mid[venue], window)
+    if kind == "lead_gap":
+        move = move - _log_ret(al.bfx_mid, window)
+    signal = np.where(np.isfinite(move) & (np.abs(move) >= threshold), np.sign(move), 0.0)
+    keep = _debounce(np.flatnonzero(signal), window)
+    out = np.zeros(al.n)
+    if keep.size:
+        out[keep] = signal[keep]
+    return out
+
+
+def response_section(al: Aligned, venue: str, signal: np.ndarray, window: int) -> dict:
+    idx = np.flatnonzero(signal)
+    sign = signal[idx]
+    hours = al.hour[idx]
+    base = al.bfx_mid[idx]
+    lead_move = sign * np.log(al.mid[venue][idx] / _at(al.mid[venue], idx - window)) * 1e4
+    bfx_pre = sign * np.log(base / _at(al.bfx_mid, idx - window)) * 1e4
+    curve = []
+    for k in RESPONSE_LAGS:
+        stat = cluster_stats(sign * np.log(_at(al.bfx_mid, idx + k) / base) * 1e4, hours,
+                             bootstrap=False)
+        curve.append({"lag_s": k, **stat})
+    return {
+        "events": int(idx.size),
+        "mean_leader_move_bp": _r(np.nanmean(lead_move)) if np.isfinite(lead_move).any() else None,
+        "mean_bitfinex_same_window_bp": _r(np.nanmean(bfx_pre)) if np.isfinite(bfx_pre).any() else None,
+        "bitfinex_response": curve,
+    }
+
+
+def follow_section(al: Aligned, signal: np.ndarray, hold: int) -> dict:
+    """Capacity-one after-spread markout of the leader-follow rule."""
+    nets, grosses, hours, sides = [], [], [], []
+    busy_until = -1
+    for i in np.flatnonzero(signal):
+        if i <= busy_until:
+            continue
+        entry_i, exit_i = i + ENTRY_DELAY_SEC, i + ENTRY_DELAY_SEC + hold
+        if exit_i >= al.n:
+            break
+        s = signal[i]
+        bid0, ask0, bid1, ask1 = al.bid[entry_i], al.ask[entry_i], al.bid[exit_i], al.ask[exit_i]
+        if not (np.isfinite(bid0) and np.isfinite(ask0) and np.isfinite(bid1) and np.isfinite(ask1)):
+            continue
+        entry, exit_ = (ask0, bid1) if s > 0 else (bid0, ask1)
+        m0, m1 = (bid0 + ask0) / 2.0, (bid1 + ask1) / 2.0
+        nets.append(s * (exit_ - entry) / entry * 1e4)
+        grosses.append(s * (m1 - m0) / m0 * 1e4)
+        hours.append(al.hour[i])
+        sides.append(s)
+        busy_until = exit_i
+    return {
+        "hold_s": hold,
+        "trades": len(nets),
+        "longs": int(sum(1 for s in sides if s > 0)),
+        "hit_rate_net": _r(sum(1 for v in nets if v > 0) / len(nets)) if nets else None,
+        "mean_gross_mid_bp": _r(float(np.mean(grosses))) if grosses else None,
+        "net_after_spread": cluster_stats(np.array(nets), np.array(hours)),
+    }
+
+
+def basis_section(al: Aligned, venue: str) -> dict:
+    basis = (al.mid[venue] / al.bfx_mid - 1.0) * 1e4
+    finite = basis[np.isfinite(basis)]
+    out = {"seconds": int(finite.size)}
+    if finite.size < 600:
+        out["status"] = "NOT_ENOUGH_DATA"
+        return out
+    out.update({
+        "mean_bp": _r(finite.mean()), "median_bp": _r(np.median(finite)),
+        "p05_bp": _r(np.percentile(finite, 5)), "p95_bp": _r(np.percentile(finite, 95)),
+        "std_bp": _r(finite.std()),
+    })
+    import pandas as pd
+    series = pd.Series(basis)
+    roll = series.rolling(BASIS_WINDOW_SEC, min_periods=BASIS_WINDOW_SEC // 2)
+    z = ((series - roll.mean()) / roll.std()).to_numpy()
+    signal = np.where(np.isfinite(z) & (np.abs(z) >= BASIS_Z), np.sign(z), 0.0)
+    keep = _debounce(np.flatnonzero(signal), max(BASIS_HORIZONS))
+    tests = {}
+    for h in BASIS_HORIZONS:
+        fwd = signal[keep] * np.log(_at(al.bfx_mid, keep + h) / al.bfx_mid[keep]) * 1e4
+        tests[str(h)] = cluster_stats(fwd, al.hour[keep])
+    out["deviation_events"] = int(keep.size)
+    out["deviation_rule"] = (f"|basis - rolling {BASIS_WINDOW_SEC}s mean| >= {BASIS_Z} rolling std; "
+                             "side = sign(deviation) on Bitfinex (leader rich -> Bitfinex up)")
+    out["bitfinex_forward_signed_bp"] = tests
+    return out
+
+
+def derivatives_section(al: Aligned) -> dict:
+    out = {"minutes": len(al.deriv_rows)}
+    if len(al.deriv_rows) < 60:
+        out["status"] = "NOT_ENOUGH_DATA"
+        return out
+    for v in sorted({v for _, d in al.deriv_rows for v in d}):
+        oi, rates = {}, []
+        for ts, d in al.deriv_rows:
+            cell = d.get(v) or {}
+            if isinstance(cell.get("open_interest"), (int, float)) and cell["open_interest"] > 0:
+                oi[ts] = float(cell["open_interest"])
+            if isinstance(cell.get("funding_rate"), (int, float)):
+                rates.append(float(cell["funding_rate"]))
+        changes, fwd = [], []
+        for ts, x in oi.items():
+            past = oi.get(ts - OI_CHANGE_SEC)
+            i, j = ts - al.start, ts - al.start + DERIV_HORIZON_SEC
+            if past and 0 <= i and j < al.n and np.isfinite(al.bfx_mid[i]) and np.isfinite(al.bfx_mid[j]):
+                changes.append((x / past - 1.0) * 100.0)
+                fwd.append(math.log(al.bfx_mid[j] / al.bfx_mid[i]) * 1e4)
+        c, n = _corr(np.array(changes), np.array(fwd)) if changes else (None, 0)
+        out[v] = {
+            "oi_change_5m_vs_bitfinex_next_15m": {"corr": _r(c), "n": n,
+                                                  "note": "overlapping minutes; descriptive only"},
+            "funding_rate_last": rates[-1] if rates else None,
+            "funding_rate_range": [min(rates), max(rates)] if rates else None,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+def _is_prereg(kind: str, window: int, threshold: float) -> bool:
+    return kind == "leader_move" and (window, threshold) == PREREGISTERED
+
+
+def build_lead_lag_report(rows: list, bfx_quotes: Optional[Mapping[int, tuple]] = None) -> dict:
+    base = {"schema": SCHEMA, "mode": "SHADOW_ONLY_NO_ORDERS",
+            "preregistered_rule": {"window_s": PREREGISTERED[0], "min_move_bp": PREREGISTERED[1],
+                                   "trigger": "leader_move", "challenger": "leader_10s"}}
+    if not rows:
+        return {**base, "status": "NO_DATA"}
+    al = Aligned(rows, bfx_quotes)
+    aligned = np.isfinite(al.bfx_mid)
+    hours_aligned = int(np.unique(al.hour[aligned]).size) if aligned.any() else 0
+    venues, follow_tests = {}, []
+    for venue in al.venues:
+        cell = {"aligned_seconds": int((aligned & np.isfinite(al.mid[venue])).sum()),
+                "xcorr": xcorr_section(al, venue), "basis": basis_section(al, venue),
+                "triggers": {}}
+        for kind in ("leader_move", "lead_gap"):
+            for window, threshold in TRIGGERS:
+                signal = triggers(al, venue, window, threshold, kind)
+                key = f"{kind}_{window}s_{threshold:g}bp"
+                follows = []
+                if al.bfx_source == "MICROSTRUCTURE_TAPE":
+                    for hold in FOLLOW_HOLDS:
+                        f = follow_section(al, signal, hold)
+                        follow_tests.append((venue, key, kind, window, threshold, f))
+                        follows.append(f)
+                cell["triggers"][key] = {
+                    "kind": kind, "window_s": window, "threshold_bp": threshold,
+                    "preregistered": _is_prereg(kind, window, threshold),
+                    "response": response_section(al, venue, signal, window),
+                    "follow": follows or "UNAVAILABLE_NO_BITFINEX_BBO",
+                }
+        venues[venue] = cell
+    qs = benjamini_hochberg([f["net_after_spread"].get("p") for *_, f in follow_tests])
+    summary = []
+    for (venue, key, kind, window, threshold, f), q in zip(follow_tests, qs):
+        stat = f["net_after_spread"]
+        stat["q_bh"] = _r(q, 6)
+        if (stat.get("clusters") or 0) < MIN_CLUSTERS or hours_aligned < MIN_HOURS:
+            verdict = "NOT_ENOUGH_DATA"
+        elif q is not None and q <= FDR_Q:
+            verdict = "POSITIVE_AFTER_SPREAD" if (stat.get("mean") or 0) > 0 else "NEGATIVE_AFTER_SPREAD"
+        else:
+            verdict = "NO_DETECTABLE_EDGE"
+        stat["verdict"] = verdict
+        summary.append({"venue": venue, "trigger": key, "hold_s": f["hold_s"], "trades": f["trades"],
+                        "mean_gross_mid_bp": f["mean_gross_mid_bp"],
+                        "mean_net_bp": stat.get("mean"), "ci95": stat.get("ci95"), "q_bh": stat["q_bh"],
+                        "preregistered": _is_prereg(kind, window, threshold), "verdict": verdict})
+    tail = rows[-60:]
+    meta = [r.get("meta") or {} for r in tail]
+    cpu = [m["cpu_pct"] for m in meta if isinstance(m.get("cpu_pct"), (int, float))]
+    return {
+        **base,
+        "status": "OK" if hours_aligned >= MIN_HOURS else "NOT_ENOUGH_DATA",
+        "span": {"start_ts": al.start, "end_ts": al.end, "minutes": len(rows),
+                 "hours_aligned_with_bitfinex": hours_aligned, "bitfinex_source": al.bfx_source},
+        "collector": {
+            "version": (meta[-1] if meta else {}).get("collector_version"),
+            "cpu_pct_last_hour_mean": _r(sum(cpu) / len(cpu), 3) if cpu else None,
+            "row_bytes_mean_last_hour": _r(
+                sum(len(json.dumps(r, separators=(",", ":"))) + 1 for r in tail) / len(tail), 1),
+        },
+        "method": {
+            "clock": "shared epoch-second buckets; bucket s = quote as of s+1",
+            "xcorr": "Pearson on 1 s log-mid returns; iid band is for scale only (returns are not iid)",
+            "triggers": "debounced: a trigger needs >= window seconds since the previous one",
+            "follow": ("capacity one; enter at bucket t+1 ask/bid, exit at bucket t+1+hold bid/ask; "
+                       "after spread, no exchange fee applied"),
+            "inference": (f"hour-clustered CR1 t with G-1 df; cluster bootstrap {BOOTSTRAP_RESAMPLES} "
+                          f"(seed {BOOTSTRAP_SEED}); BH across {len(follow_tests)} follow tests, q<={FDR_Q}"),
+            "gates": f"verdicts need >= {MIN_HOURS} aligned hours and >= {MIN_CLUSTERS} hour clusters",
+        },
+        "follow_summary": summary,
+        "venues": venues,
+        "derivatives": derivatives_section(al),
+    }
+
+
+def build_from_data_dir(data_dir: str, max_days: int = MAX_DAYS) -> dict:
+    rows = load_cross_venue_rows(data_dir, max_days=max_days)
+    if not rows:
+        return build_lead_lag_report([])
+    start = int(rows[0]["minute_ts"])
+    end = int(rows[-1]["minute_ts"]) + 60
+    return build_lead_lag_report(rows, load_bitfinex_quotes(data_dir, start, end))

@@ -36,6 +36,10 @@ class PolicySpec:
     trail_ladder: tuple[tuple[float, float], ...] = ()
     ladder_label: str | None = None
     ladder_profile_id: str | None = None
+    # Margin-% rung: once peak margin return reaches the trigger, the stop may
+    # never sit below entry plus the lock (round-trip cost buffer).
+    breakeven_trigger_margin_pct: float | None = None
+    breakeven_lock_margin_pct: float = 0.0
     mfe_giveback_fraction: float | None = None
     margin_cap_usd: float = 0.25
     account_risk_pct: float = 0.5
@@ -96,6 +100,22 @@ def _ladder_lock_floor(peak_margin_pct: float,
         if float(peak_margin_pct) >= float(trigger_pct):
             floor = float(lock_pct)
     return floor
+
+
+def profit_lock_floor(spec: PolicySpec, peak_margin_pct: float) -> tuple[float | None, str | None]:
+    """Highest armed margin-% lock floor and the rule that armed it."""
+    floor, reason = None, None
+    trigger = spec.breakeven_trigger_margin_pct
+    if trigger is not None and float(peak_margin_pct) >= float(trigger):
+        floor, reason = float(spec.breakeven_lock_margin_pct), "BREAKEVEN_LOCK"
+    ladder_floor = _ladder_lock_floor(peak_margin_pct, spec.trail_ladder) if spec.trail_ladder else None
+    if ladder_floor is not None and (floor is None or ladder_floor >= floor):
+        floor, reason = ladder_floor, "PROFIT_LOCK_LADDER"
+    return floor, reason
+
+
+def lock_price(entry: float, sign: int, lock_margin_pct: float, leverage: float) -> float:
+    return float(entry) * (1.0 + sign * float(lock_margin_pct) / (float(leverage) * 100.0))
 
 
 def initial_limit(spec: PolicySpec, direction: str, reference_price: float) -> float | None:
@@ -190,6 +210,14 @@ def account_risk_quantity(spec: PolicySpec, *, equity_usd: float, entry_price: f
     }
 
 
+def hard_stop_reason(spec: PolicySpec) -> str:
+    return f"PHYSICAL_HARD_STOP_{abs(spec.hard_stop_margin_pct):g}PCT"
+
+
+def time_exit_reason(spec: PolicySpec) -> str:
+    return f"PATH_END_{int(spec.max_duration_sec) // 60}M"
+
+
 def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
                 atr_abs: float = 0.0, atr_pct: float = 0.0,
                 age_sec: float = 0.0, leverage: float = 100.0,
@@ -206,7 +234,7 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
     peak = max(previous_peak, price) if sign > 0 else min(previous_peak, price)
     hard_hit = _margin_return_pct(entry, sign, price, leverage) <= -abs(spec.hard_stop_margin_pct)
     if hard_hit:
-        return ExitAction("PHYSICAL_HARD_STOP_30PCT", remaining, price, None, 0.0, peak)
+        return ExitAction(hard_stop_reason(spec), remaining, price, None, 0.0, peak)
     stop_price = None
     dynamic_stop_active = False
     if atr > 0 and spec.initial_stop_atr_k is not None:
@@ -226,9 +254,17 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
         stop_price = candidate if stop_price is None else (max(stop_price, candidate) if sign > 0 else min(stop_price, candidate))
         dynamic_stop_active = True
 
+    stop_reason = "PROFIT_PROTECTION_STOP" if dynamic_stop_active else "INITIAL_ATR_STOP"
+    # A profit lock is one more stop candidate; the effective stop is the most
+    # protective of the ATR stop/trail and the armed lock floor.
+    lock_floor, lock_reason = profit_lock_floor(spec, _margin_return_pct(entry, sign, peak, leverage))
+    if lock_floor is not None:
+        floor_price = lock_price(entry, sign, lock_floor, leverage)
+        if stop_price is None or (floor_price >= stop_price if sign > 0 else floor_price <= stop_price):
+            stop_price, stop_reason = floor_price, lock_reason
+
     if stop_price is not None and _adverse_hit(sign, price, stop_price):
-        reason = "PROFIT_PROTECTION_STOP" if dynamic_stop_active else "INITIAL_ATR_STOP"
-        return ExitAction(reason, remaining, stop_price, stop_price, 0.0, peak)
+        return ExitAction(stop_reason, remaining, stop_price, stop_price, 0.0, peak)
     current_margin_pct = _margin_return_pct(entry, sign, price, leverage)
     if (
         spec.thesis_cut_margin_pct is not None
@@ -236,15 +272,6 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
         and current_margin_pct <= float(spec.thesis_cut_margin_pct)
     ):
         return ExitAction("THESIS_FAST_CUT", remaining, price, stop_price, 0.0, peak)
-
-    if spec.trail_ladder:
-        peak_margin_pct = _margin_return_pct(entry, sign, peak, leverage)
-        lock_floor = _ladder_lock_floor(peak_margin_pct, spec.trail_ladder)
-        if lock_floor is not None and current_margin_pct <= lock_floor:
-            lock_price = entry * (1.0 + sign * lock_floor / (float(leverage) * 100.0))
-            return ExitAction(
-                "PROFIT_LOCK_LADDER", remaining, lock_price, stop_price, 0.0, peak,
-            )
 
     completed = set(completed_partials or ())
     for index, (trigger_atr, fraction) in enumerate(spec.partial_targets if atr > 0 else ()):
@@ -262,11 +289,19 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
         if _favorable_hit(sign, price, target):
             return ExitAction("ATR_TP", remaining, target, stop_price, 0.0, peak)
     if float(age_sec or 0) >= spec.max_duration_sec:
-        return ExitAction("PATH_END_120M", remaining, price, stop_price, 0.0, peak)
+        return ExitAction(time_exit_reason(spec), remaining, price, stop_price, 0.0, peak)
     return None
 
 
 def exit_config(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]:
+    config = _exit_config_base(spec, analyzer_sync_id)
+    if spec.breakeven_trigger_margin_pct is None:
+        for key in ("breakeven_trigger_margin_pct", "breakeven_lock_margin_pct", "effective_stop"):
+            config.pop(key)
+    return config
+
+
+def _exit_config_base(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]:
     return {
         "policy_snapshot_schema": "exit_policy_v1",
         "policy_source": "btc-conservative-agent",
@@ -290,6 +325,9 @@ def exit_config(spec: PolicySpec, analyzer_sync_id: str) -> dict[str, Any]:
         "ladder_first_lock_pct": spec.trail_ladder[0][1] if spec.trail_ladder else None,
         "ladder_label": spec.ladder_label,
         "ladder_profile_id": spec.ladder_profile_id,
+        "breakeven_trigger_margin_pct": spec.breakeven_trigger_margin_pct,
+        "breakeven_lock_margin_pct": spec.breakeven_lock_margin_pct if spec.breakeven_trigger_margin_pct is not None else None,
+        "effective_stop": "MOST_PROTECTIVE_OF_ATR_STOP_AND_PROFIT_LOCK",
         "mfe_giveback_fraction": spec.mfe_giveback_fraction,
         "path_end_sec": spec.max_duration_sec,
         "partial_reduction_required": bool(spec.partial_targets),
@@ -329,6 +367,8 @@ def dashboard_policy(spec: PolicySpec) -> dict[str, Any]:
             "trail_ladder": [list(row) for row in spec.trail_ladder],
             "ladder_label": spec.ladder_label,
             "ladder_profile_id": spec.ladder_profile_id,
+            "breakeven_trigger_margin_pct": spec.breakeven_trigger_margin_pct,
+            "breakeven_lock_margin_pct": spec.breakeven_lock_margin_pct if spec.breakeven_trigger_margin_pct is not None else None,
             "mfe_giveback_fraction": spec.mfe_giveback_fraction,
             "fixed_time_exit": "120m",
         },

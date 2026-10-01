@@ -227,6 +227,7 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "duplicate_intent_audit.jsonl",
     "ai_shadow_challengers.jsonl",
     "ai_shadow_compact_prompt.jsonl",
+    "cross_venue_tape_1m.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )
@@ -1912,6 +1913,10 @@ def _lane_rows(*, include_evidence: bool = False):
         costly_blocks = float(m.get("costly_blocks_usd") or 0)
         good_blocks_saved = float(m.get("good_blocks_saved_usd") or 0)
         pnl = float(first_supplied(m.get("net_pnl_real"), m.get("net_pnl_usd"), lb.get("net_pnl_usd")))
+        # Win/loss counts come from the same record that supplied the PnL.
+        outcome_source = m if any(m.get(key) is not None for key in ("net_pnl_real", "net_pnl_usd")) else lb
+        wins = int(outcome_source.get("wins") or 0)
+        losses = int(outcome_source.get("losses") or 0)
         counterfactual_pnl = float(
             m.get("lab_net_pnl")
             if m.get("lab_net_pnl") is not None
@@ -2007,6 +2012,9 @@ def _lane_rows(*, include_evidence: bool = False):
             "costly_blocks_usd": round(costly_blocks, 2),
             "good_blocks_saved_usd": round(good_blocks_saved, 2),
             "wr": None,
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round(100.0 * wins / fills, 1) if fills else None,
             "pnl": round(pnl, 2),
             "ev": ev_published,
             "all_time_fills": at_fills if all_time else None,
@@ -2018,10 +2026,13 @@ def _lane_rows(*, include_evidence: bool = False):
             "retired": is_retired,
             "metric_available": metric_available,
         })
+        metric_available["win_rate_pct"] = bool(metric_available["pnl"] and metric_available["executed_closes"])
         if benchmark_current:
             for field, available in metric_available.items():
                 if not available:
                     rows[-1][field] = None
+            if not metric_available["win_rate_pct"]:
+                rows[-1]["wins"] = rows[-1]["losses"] = None
             rows[-1]["trades"] = rows[-1]["executed_closes"]
             if not m:
                 rows[-1]["status"] = "UNAVAILABLE"
@@ -4679,6 +4690,7 @@ def _filter_lane_rows(rows, *, all_lanes: bool = False):
 
 _UNAVAILABLE_LANE_EVIDENCE_FIELDS = (
     "approves", "trades", "executed_closes", "pnl", "ev",
+    "wins", "losses", "win_rate_pct",
     "counterfactual_closes", "counterfactual_pnl", "counterfactual_ev_per_close",
     "all_time_fills", "all_time_pnl", "all_time_ev",
 )
@@ -6908,7 +6920,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="lanes-filter-note">Current lanes: {{ tile_lane_names }}. Archived lane names remain available only in quarantine artifacts.</p>
     <p class="note" id="lanes-evidence-note"></p>
     <p class="note">Executed paper closes and counterfactual/lab terminals are separate evidence classes. Counterfactual outcomes are not actual fills or executed PnL. Both paper and counterfactual evidence may support research qualification under the same completeness, execution-model and holdout gates; model-supported results do not prove live fills.</p>
-    <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Executed closes</th><th>Executed net PnL</th><th>Executed EV / approval</th><th>Counterfactual terminals</th><th>Counterfactual PnL</th></tr></thead><tbody id="lane-body"></tbody></table>
+    <table><thead><tr><th>Lane</th><th>Status</th><th>Approvals</th><th>Executed closes</th><th>Executed net PnL</th><th>Executed EV / approval</th><th>Win %</th><th>Counterfactual terminals</th><th>Counterfactual PnL</th></tr></thead><tbody id="lane-body"></tbody></table>
   </section>
   <section id="sec-regime">
     <h2>Regime Leaderboard</h2>
@@ -6997,6 +7009,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <h2>Exit Combinations</h2>
     <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane.</p>
     <div class="kpis" id="exit-combos-kpis"></div>
+    <h3>Pre-registered tile comparison - identical signals</h3>
+    <p class="note">Tile 1 vs Tile 2 vs Tile 3 on the same shared AI call. A signal is paired only when both tiles closed a fill from it. EV in bp of notional per fill; 95% CI from a 6 h-cluster bootstrap. Verdicts follow each tile's frozen registry pre-registration and are advisory: kill means the owner toggles OFF and retires, promotion means owner review, never relay.</p>
+    <table><thead><tr><th>Tile</th><th>Fills</th><th>Days</th><th>EV bp/fill [95% CI]</th><th>Halves</th><th>Win %</th><th>Max DD</th><th>Hard stops /50</th><th>Max lock overshoot bp</th><th>Verdict</th></tr></thead><tbody id="tile-paired-tiles-body"></tbody></table>
+    <table><thead><tr><th>Challenger - control</th><th>Paired signals</th><th>Mean diff bp [95% CI]</th><th>Win % on paired signals (control / challenger)</th><th>Challenger better</th><th>Unpaired control / challenger</th></tr></thead><tbody id="tile-paired-pairs-body"></tbody></table>
+    <p class="note" id="tile-paired-note"></p>
     <details id="exit-combos-detail-inventory" open>
     <summary>Detailed exit-analysis tables and evidence labels</summary>
     <h3>Executed-paper exit-family scorecard</h3>
@@ -7004,11 +7021,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Exit family</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>EV / independent</th><th>Max DD</th><th>Missing identity / PnL / costs / slip</th><th>Evidence</th></tr></thead><tbody id="exit-family-scorecard-body"></tbody></table>
     <h3>Shadow/lab exit-family scorecard — separate descriptive evidence</h3>
     <table><thead><tr><th>Exit family</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>EV / independent</th><th>Max DD</th><th>Missing identity / PnL / costs / slip</th><th>Evidence</th></tr></thead><tbody id="exit-family-scorecard-shadow-body"></tbody></table>
+    <p class="note" id="exit-family-shadow-archive-note"></p>
     <h3>Executed-paper stop-effectiveness matrix</h3>
     <p class="note">Exit reason × configured stop × chase bucket. This is descriptive attribution, not evidence that a stop caused or prevented profit.</p>
     <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-body"></tbody></table>
     <h3>Shadow/lab stop-effectiveness matrix — separate descriptive evidence</h3>
     <table><thead><tr><th>Stop</th><th>ATR distance</th><th>Hard %</th><th>Exit reason</th><th>Chase</th><th>Terminals</th><th>Independent N</th><th>Wins / losses</th><th>Net PnL</th><th>Avg MAE%</th><th>Avg stop slip</th><th>Missing identity / PnL / MAE / slip</th><th>Evidence</th></tr></thead><tbody id="stop-effectiveness-shadow-body"></tbody></table>
+    <p class="note" id="stop-effectiveness-shadow-archive-note"></p>
     <h3>Causal exit-policy combinations</h3>
     <p class="note">Family × exit profile × terminal reason. Paper and shadow/lab rows remain separate; missing dimensions are not guessed.</p>
     <table><thead><tr><th>Evidence world</th><th>Combination</th><th>N</th><th>WR%</th><th>PnL</th><th>EV</th><th>Identity status</th></tr></thead><tbody id="exit-causal-policy-body"></tbody></table>
@@ -7756,6 +7775,18 @@ function laneApprovalCount(current, row) {
   if ((current.evidence_status !== 'CURRENT_GENERATION' && !stale) || row.approves == null) return 'no data yet';
   return stale ? row.approves + ' · stale since ' + (current.stale_since || 'unknown') : row.approves;
 }
+function winPctLabel(wins, losses, closed) {
+  const n = Number(closed || 0);
+  if (!(n > 0)) return '—';
+  const w = Number(wins || 0);
+  return `${Math.round(100 * w / n)}% (${w}W/${Number(losses || 0)}L)`;
+}
+function laneWinMetric(current, row) {
+  const stale = current.evidence_status === 'STALE_GENERATION';
+  if ((current.evidence_status !== 'CURRENT_GENERATION' && !stale) || (row.metric_available || {}).win_rate_pct !== true) return 'no data yet';
+  const value = winPctLabel(row.wins, row.losses, row.executed_closes);
+  return stale ? value + ' · stale since ' + (current.stale_since || 'unknown') : value;
+}
 function laneEvidenceMetric(current, row, field, money=false) {
   const stale = current.evidence_status === 'STALE_GENERATION';
   if ((current.evidence_status !== 'CURRENT_GENERATION' && !stale) || (row.metric_available || {})[field] !== true || row[field] == null) return 'no data yet';
@@ -7784,9 +7815,9 @@ async function loadLanes() {
   document.getElementById('lane-body').innerHTML = (current.lanes || []).map(row =>
     `<tr><td>${row.lane || row.research_lane || ''}</td><td>${currentAvailable ? (row.status || row.pathway_status || 'COLLECTING') : (current.evidence_status === 'STALE_GENERATION' ? 'STALE / UNAVAILABLE · stale since ' + (current.stale_since || 'unknown') : 'no data yet')}</td>`
     + `<td>${laneApprovalCount(current, row)}</td><td>${laneEvidenceMetric(current, row, 'executed_closes')}</td>`
-    + `<td>${laneEvidenceMetric(current, row, 'pnl', true)}</td><td>${laneEvidenceMetric(current, row, 'ev', true)}</td>`
+    + `<td>${laneEvidenceMetric(current, row, 'pnl', true)}</td><td>${laneEvidenceMetric(current, row, 'ev', true)}</td><td>${laneWinMetric(current, row)}</td>`
     + `<td>${laneEvidenceMetric(current, row, 'counterfactual_closes')}</td><td>${laneEvidenceMetric(current, row, 'counterfactual_pnl', true)}</td></tr>`
-  ).join('') || '<tr><td colspan="8">No current-lane evidence yet.</td></tr>';
+  ).join('') || '<tr><td colspan="9">No current-lane evidence yet.</td></tr>';
   return;
 }async function loadChase() {
   const r = await fetch('/api/chase' + chaseLaneQuery());
@@ -8089,6 +8120,38 @@ async function loadChaseDelay() {
   }).join('') || '<tr><td colspan="9">No delay report data.</td></tr>';
 }
 
+async function loadTilePairedComparison() {
+  const tilesBody = document.getElementById('tile-paired-tiles-body');
+  const pairsBody = document.getElementById('tile-paired-pairs-body');
+  const note = document.getElementById('tile-paired-note');
+  if (!tilesBody || !pairsBody) return;
+  let d = null;
+  try {
+    const r = await fetch('/api/report/tile_paired_comparison_report.json');
+    d = r.ok ? await r.json() : null;
+  } catch (e) { d = null; }
+  if (!d || d.status === 'UNAVAILABLE') {
+    tilesBody.innerHTML = '<tr><td colspan="10">Paired comparison report not generated yet' + (d && d.error ? ' - ' + d.error : '') + '.</td></tr>';
+    pairsBody.innerHTML = '';
+    return;
+  }
+  const num = (v, dp) => v == null ? 'n/a' : Number(v).toFixed(dp);
+  const ci = c => (c && c[0] != null) ? ` [${num(c[0], 2)}, ${num(c[1], 2)}]` : ' [CI n/a]';
+  const pre = d.pre_registered || {};
+  tilesBody.innerHTML = (d.tile_order || []).map(lane => {
+    const s = (d.tiles || {})[lane] || {};
+    const v = (pre[lane] || {}).verdict;
+    const verdict = v ? `${pre[lane].hypothesis_id}: ${v.status}${(v.kill_reasons || []).length ? ' (' + v.kill_reasons.join(', ') + ')' : ''}` : 'CONTROL (no pre-registration)';
+    const honest = v && pre[lane].honest_label ? `<br><span class="note">${pre[lane].honest_label}</span>` : '';
+    return `<tr><td>${(d.labels || {})[lane] || lane}<br><span class="note">${lane}</span></td><td>${s.fills ?? 'n/a'}</td><td>${num(s.days_observed, 2)}</td><td>${num(s.per_fill_ev_bp, 2)}${ci(s.per_fill_ev_ci95_bp)}</td><td>${num(s.first_half_ev_bp, 2)} / ${num(s.second_half_ev_bp, 2)}</td><td>${winPctLabel(s.wins, s.losses, s.fills)}</td><td>${s.max_drawdown_usd == null ? 'n/a' : '$' + num(s.max_drawdown_usd, 2)}</td><td>${s.max_hard_stops_in_rolling_50 ?? 'n/a'}</td><td>${num(s.max_lock_or_stop_overshoot_bp, 2)}</td><td>${verdict}${honest}</td></tr>`;
+  }).join('') || '<tr><td colspan="10">No registry tiles.</td></tr>';
+  pairsBody.innerHTML = (d.paired || []).map(p =>
+    `<tr><td>${p.challenger} - ${p.control}</td><td>${p.paired_signals}</td><td>${num(p.mean_difference_bp, 2)}${ci(p.difference_ci95_bp)}</td><td>${winPctLabel(p.control_wins, p.control_losses, p.paired_signals)} / ${winPctLabel(p.challenger_wins, p.challenger_losses, p.paired_signals)}</td><td>${p.challenger_better_signals ?? 'n/a'}</td><td>${p.unpaired_control_fills ?? 'n/a'} / ${p.unpaired_challenger_fills ?? 'n/a'}</td></tr>`
+  ).join('') || '<tr><td colspan="6">No paired signals yet.</td></tr>';
+  const all = d.all_tiles_paired || {};
+  if (note) note.textContent = `Signals filled by every tile: ${all.signals_filled_by_every_tile ?? 'n/a'}. Cohort ${d.cohort || 'n/a'}; Deflated Sharpe trials = ${d.deflated_sharpe_trials ?? 'n/a'} live hypotheses; generated ${d.generated_at || 'n/a'}.`;
+}
+
 async function loadExitCombos() {
   setEvidenceScope('exit-combos', ...EVIDENCE_SCOPES['exit-combos']);
   const r = await fetch('/api/exit-combos');
@@ -8114,6 +8177,15 @@ async function loadExitCombos() {
   document.getElementById('exit-family-scorecard-shadow-body').innerHTML = renderFamilies(shadow.exit_family_scorecard);
   document.getElementById('stop-effectiveness-body').innerHTML = renderStops(executed.stop_effectiveness_matrix);
   document.getElementById('stop-effectiveness-shadow-body').innerHTML = renderStops(shadow.stop_effectiveness_matrix);
+  loadTilePairedComparison();
+  const shadowArchive = shadow.archive || {};
+  const archiveNote = shadowArchive.archived_rows_excluded
+    ? `Current stack ${shadowArchive.current_stack_version || 'n/a'} only. ${shadowArchive.archived_rows_excluded} archived shadow rows from prior stacks (${Object.entries(shadowArchive.archived_rows_by_version || {}).map(([v, n]) => v + ': ' + n).join(', ')}) are excluded and not analyzed.`
+    : `Current stack ${shadowArchive.current_stack_version || 'n/a'} only. No archived shadow rows excluded.`;
+  ['exit-family-shadow-archive-note', 'stop-effectiveness-shadow-archive-note'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = archiveNote;
+  });
   const causalWorlds = [
     ['PAPER', executed],
     ['SHADOW/LAB', shadow],

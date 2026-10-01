@@ -85,6 +85,9 @@ def test_spawn_resolves_readiness_duplicate_and_chase_wait(process_result, expec
         "guard_retired_lane_execution": lambda *_args: True,
         "_enrich_combo_lane_features": lambda features, _ctx: features,
         "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
         "PATIENT_CHASE_LANES": frozenset(COMBO_EXECUTION_LANES),
         "RESEARCH_LANE_OFFSET_029_ATR_TP_25": "PATIENT",
         "_shared_ai_call_id": lambda ai_result=None, ctx=None: (ai_result or ctx)["shared_ai_call_id"],
@@ -300,6 +303,9 @@ def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
         "is_deterministic_bracket_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
         "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
         "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-gate",
         "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-1"},
@@ -396,6 +402,9 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
         "is_deterministic_bracket_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
         "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
         "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-canonical-feature",
         "_v3_lane_policy_material": lambda lane: {"policy_signature": lane},
@@ -569,6 +578,9 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
         "is_deterministic_bracket_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
         "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
         "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-failure",
         "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-1"},

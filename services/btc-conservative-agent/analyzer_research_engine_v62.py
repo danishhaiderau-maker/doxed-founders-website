@@ -583,6 +583,7 @@ MISSED_OPPORTUNITY_PROOF_REPORT_FILE = "missed_opportunity_proof_report.json"
 TILE_EVIDENCE_POINTS_REPORT_FILE = "tile_evidence_points_report.json"
 FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE = "fixed_vs_dynamic_selector_report.json"
 AI_CHALLENGER_REPORT_FILE = "ai_challenger_report.json"
+LEAD_LAG_REPORT_FILE = "lead_lag_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -656,6 +657,7 @@ LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
 MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE = "multiverse_collection_health_report.json"
 ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE = "adaptive_entry_funnel_report.json"
+TILE_PAIRED_COMPARISON_REPORT_FILE = "tile_paired_comparison_report.json"
 ANALYZER_JSON_REPORT_FILES = (
     AI_CALIBRATION_REPORT_FILE,
     AI_FUNNEL_REPORT_FILE,
@@ -684,6 +686,7 @@ ANALYZER_JSON_REPORT_FILES = (
     TILE_EVIDENCE_POINTS_REPORT_FILE,
     FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE,
     AI_CHALLENGER_REPORT_FILE,
+    LEAD_LAG_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -726,6 +729,7 @@ ANALYZER_JSON_REPORT_FILES = (
     ROSTER_POLICY_FILE,
     MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE,
     ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE,
+    TILE_PAIRED_COMPARISON_REPORT_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
@@ -761,9 +765,11 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Tile Evidence Points", TILE_EVIDENCE_POINTS_REPORT_FILE, "Per-tile fill worlds, did vs missed, AI usefulness, collection rate, quarantine receipt and n>=30 after-cost EV ranking"),
     ("Fixed vs Dynamic Selector", FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, "Best single fixed tile vs regime-conditional tile selector, walk-forward OOS after costs, n>=30 gates per arm and regime"),
     ("AI vs Challengers", AI_CHALLENGER_REPORT_FILE, "Shadow-only: LLM side vs rule vote, inverted AI, 1m OFI, 5m contrarian, seeded random and compact v5 prompt; tape markouts and tile-geometry proxy, hour-cluster CIs, BH q-values, dead-input audit"),
+    ("Cross-Venue Lead-Lag", LEAD_LAG_REPORT_FILE, "Shadow-only: Binance/Bybit/OKX 1s mids vs Bitfinex tBTCF0 - return cross-correlation, Bitfinex response 1-30s after leader moves, capacity-1 leader-follow after-spread markouts (hour-cluster CIs, BH q), basis and funding/OI"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
+    ("Tile Paired Comparison", TILE_PAIRED_COMPARISON_REPORT_FILE, "Tile 1 vs Tile 2 vs Tile 3 on identical shared-AI signals (both filled), 6 h-cluster CIs, and each pre-registered tile scored against its frozen promotion and kill rules"),
     ("Adaptive Entry Funnel", ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE, "Every signal-time taker/maker/stand-aside decision joined to its fill, expiry or skip and scored against the taker-at-signal counterfactual; superseded stack versions quarantined"),
     ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
     ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
@@ -9157,6 +9163,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         write_trade_cohort_quarantine(cohort_quarantine)
         multiverse_collection_health_report(cohort_quarantine)
         adaptive_entry_funnel_report()
+        tile_paired_comparison_report(trades)
         if cohort_quarantine["relay_interference"]["rows"]:
             print(
                 f"   Relay interference: {cohort_quarantine['relay_interference']['rows']} phantom-cancelled "
@@ -9200,6 +9207,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             evidence_points = tile_evidence_points_report(session=session)
             selector_report = fixed_vs_dynamic_selector_report(session=session)
             ai_challenger_report(session=session)
+            lead_lag_report(session=session)
             forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
@@ -9315,6 +9323,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         evidence_points = tile_evidence_points_report(session=session)
         selector_report = fixed_vs_dynamic_selector_report(session=session)
         ai_challenger_report(session=session)
+        lead_lag_report(session=session)
         forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
@@ -12006,6 +12015,28 @@ def write_trade_cohort_quarantine(summary: dict) -> None:
         print(f"  ⚠️ Could not write {TRADE_COHORT_QUARANTINE_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
 
 
+def tile_paired_comparison_report(trades) -> dict:
+    """Current-cohort tiles compared on identical signals, with pre-registered verdicts."""
+    print(f"\n=== TILE PAIRED COMPARISON {PIPELINE_ENFORCEMENT_TAG} ===")
+    try:
+        import tile_paired_comparison
+        rows = trades.to_dict("records") if trades is not None and not getattr(trades, "empty", True) else []
+        report = tile_paired_comparison.build_report(
+            trades=rows, registry=ACTIVE_TILE_REGISTRY, tile_order=CURRENT_RESEARCH_LANES,
+        )
+        report["cohort"] = EXPECTED_BOT_VERSION
+    except Exception as exc:
+        report = {"schema": "tile_paired_comparison_v1", "status": "UNAVAILABLE", "error": str(exc)}
+    try:
+        with open(TILE_PAIRED_COMPARISON_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, default=str, allow_nan=False)
+    except (OSError, ValueError) as exc:
+        print(f"  Could not write {TILE_PAIRED_COMPARISON_REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    for lane, entry in (report.get("pre_registered") or {}).items():
+        print(f"  {lane} {entry['hypothesis_id']}: {entry['verdict']['status']} {entry['verdict']['kill_reasons']} {PIPELINE_ENFORCEMENT_TAG}")
+    return report
+
+
 def adaptive_entry_funnel_report() -> dict:
     """Score every adaptive stand-aside, expiry and fill against the taker counterfactual."""
     print(f"\n=== ADAPTIVE ENTRY FUNNEL {PIPELINE_ENFORCEMENT_TAG} ===")
@@ -12274,6 +12305,19 @@ def ai_challenger_report(session=None):
         payload = {"schema": "ai_challenger_report_v1", "status": "ERROR",
                    "error": f"{type(exc).__name__}: {exc}"}
     return _write_aux_report(AI_CHALLENGER_REPORT_FILE, payload, session)
+
+
+def lead_lag_report(session=None):
+    """Publish the cross-venue lead-lag study from the shadow cross-venue tape."""
+    from cross_venue_tape import FILE_NAME
+    from research.lead_lag_report import SCHEMA, build_from_data_dir
+
+    session = session or load_research_session()
+    try:
+        payload = build_from_data_dir(os.path.dirname(os.path.abspath(_agent_data_path(FILE_NAME))))
+    except Exception as exc:  # the lead-lag view must never stop the analyzer
+        payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(LEAD_LAG_REPORT_FILE, payload, session)
 
 
 def forward_trial_report(session=None, evidence=None, selector=None):
@@ -17054,18 +17098,64 @@ def _descriptive_terminal_exit_df(df, label):
     return clean, int(contaminated.sum())
 
 
+def _shadow_row_stack_version(row) -> str:
+    """Stack version a shadow terminal was simulated under ("" when unstamped)."""
+    if not isinstance(row, dict):
+        return ""
+    config = row.get("exit_config") if isinstance(row.get("exit_config"), dict) else {}
+    for value in (
+        config.get("analyzer_sync_id"), config.get("policy_version"),
+        row.get("analyzer_sync_id"), row.get("bot_version"), row.get("policy_epoch"),
+    ):
+        text = str(value or "").strip()
+        if text and text.lower() != "nan":
+            return text
+    return ""
+
+
+def _scope_shadow_exit_rows(rows, current_version: str = None):
+    """Split shadow terminals into the current stack and an opaque archive count.
+
+    Shadow simulators stamp the runtime stack version into ``exit_config``.  A
+    row from a prior stack (or an unstamped legacy row) was simulated by exit
+    rules that no longer exist, so it is never mixed into current exit tables;
+    it is reported only as a count by version.
+    """
+    current = str(current_version or EXPECTED_BOT_VERSION or "").strip()
+    kept, by_version = [], {}
+    for row in rows:
+        version = _shadow_row_stack_version(row)
+        if current and version == current:
+            kept.append(row)
+        else:
+            label = version or "UNSTAMPED"
+            by_version[label] = by_version.get(label, 0) + 1
+    archive = {
+        "current_stack_version": current,
+        "archived_rows_excluded": int(sum(by_version.values())),
+        "archived_rows_by_version": dict(sorted(by_version.items())),
+        "archive_semantics": "OPAQUE_COUNT_ONLY_NOT_ANALYZED",
+    }
+    return kept, archive
+
+
 def _load_descriptive_shadow_exit_df(session: dict = None):
-    """Raw shadow/lab rows for exit analysis, without live-copy eligibility."""
+    """Current-stack shadow/lab rows for exit analysis, without live-copy eligibility.
+
+    The archive summary of excluded prior-stack rows rides on ``frame.attrs``.
+    """
     rows = dict(_load_jsonl_by_trade_id(COUNTERFACTUAL_FILE) or {})
     rows.update(_load_jsonl_by_trade_id(SHADOW_OUTCOME_FILE) or {})
     rows.update(_load_jsonl_by_trade_id(SHADOW_LANE_OUTCOME_FILE) or {})
     if not rows:
         return None
-    df = pd.DataFrame(list(rows.values()))
-    if session and not df.empty and _session_start_ts(session) is not None:
+    kept, archive = _scope_shadow_exit_rows(list(rows.values()))
+    df = pd.DataFrame(kept)
+    if not df.empty and session and _session_start_ts(session) is not None:
         df = filter_df_since_session(df, session, ts_cols=(
             "exit_ts", "closed_at", "close_ts", "terminal_ts", "ts", "timestamp",
         ))
+    df.attrs["shadow_archive"] = archive
     return df
 
 
@@ -17078,6 +17168,8 @@ def _report_exit_rows(filename: str, *paths: str) -> pd.DataFrame:
 
 def _load_exit_evidence_worlds(trades=None, session: dict = None) -> dict:
     """Return exit evidence as non-additive worlds with explicit provenance."""
+    shadow_frame = _load_descriptive_shadow_exit_df(session=session)
+    shadow_archive = dict(getattr(shadow_frame, "attrs", {}).get("shadow_archive") or {})
     return {
         "executed_paper": {
             "evidence_class": "EXECUTED_PAPER_DESCRIPTIVE",
@@ -17088,8 +17180,9 @@ def _load_exit_evidence_worlds(trades=None, session: dict = None) -> dict:
         "shadow_lab": {
             "evidence_class": "SHADOW_LAB_DESCRIPTIVE",
             "source_files": [COUNTERFACTUAL_FILE, SHADOW_OUTCOME_FILE, SHADOW_LANE_OUTCOME_FILE],
-            "frame": _load_descriptive_shadow_exit_df(session=session),
+            "frame": shadow_frame,
             "pnl_semantics": "SIMULATED_SHADOW_PNL_USD",
+            "archive": shadow_archive,
         },
         "conservative_bbo_depth": {
             "evidence_class": "CONSERVATIVE_BBO_DEPTH_DESCRIPTIVE",
@@ -17160,6 +17253,14 @@ def _exit_numeric_series(work: pd.DataFrame, names, default=np.nan) -> pd.Series
     return pd.Series(default, index=work.index, dtype="float64")
 
 
+def _exit_config_numeric(work: pd.DataFrame, key: str) -> pd.Series:
+    """Numeric field from each row's frozen ``exit_config`` snapshot (NaN when absent)."""
+    if "exit_config" not in work.columns:
+        return pd.Series(np.nan, index=work.index, dtype="float64")
+    values = work["exit_config"].map(lambda cfg: cfg.get(key) if isinstance(cfg, dict) else None)
+    return pd.to_numeric(values, errors="coerce")
+
+
 def _exit_missing_identity_rows(work: pd.DataFrame) -> int:
     identity_columns = [
         name for name in ("opportunity_id", "shared_ai_call_id", "scan_id")
@@ -17189,7 +17290,7 @@ def _exit_family_and_stop_summaries(work: pd.DataFrame, evidence_class: str) -> 
     fees = _exit_numeric_series(frame, ("trading_fees_usd", "outcome_trading_fees_usd", "fees_usd"))
     funding = _exit_numeric_series(frame, ("funding_fees_usd", "outcome_funding_fees_usd", "funding_fees"))
     slippage = _exit_numeric_series(frame, ("book_slippage_usd_total", "execution_slippage", "slippage"))
-    mae = _exit_numeric_series(frame, ("mae_margin_pct", "max_drawdown"))
+    mae = _exit_numeric_series(frame, ("mae_margin_pct", "max_drawdown", "max_drawdown_margin_pct"))
     frame["_pnl"] = pnl
     frame["_gross"] = gross
     frame["_fees"] = fees
@@ -17233,8 +17334,10 @@ def _exit_family_and_stop_summaries(work: pd.DataFrame, evidence_class: str) -> 
     family_rows.sort(key=lambda row: (row["net_pnl_usd"] is not None, row["net_pnl_usd"] or 0), reverse=True)
 
     policy_text = frame.get("cfg_raw_policy_id", frame.get("policy_signature", pd.Series("", index=frame.index))).fillna("").astype(str).str.upper()
-    configured_atr = _exit_numeric_series(frame, ("cfg_initial_stop_atr_k",))
-    hard_pct = _exit_numeric_series(frame, ("cfg_hard_stop_margin_pct",))
+    configured_atr = _exit_numeric_series(frame, ("cfg_initial_stop_atr_k",)).fillna(
+        _exit_config_numeric(frame, "initial_stop_atr_k"))
+    hard_pct = _exit_numeric_series(frame, ("cfg_hard_stop_margin_pct",)).fillna(
+        _exit_config_numeric(frame, "hard_stop_margin_pct").abs())
     frame["_stop_type"] = np.select(
         [configured_atr.notna(), hard_pct.notna()],
         ["INITIAL_ATR_STOP", "PHYSICAL_HARD_STOP"],
@@ -17685,6 +17788,9 @@ def exit_combinations_report(trades=None, session=None, min_trades=1, top_n=100)
         name: build(spec.get("frame"), spec["evidence_class"], spec.get("source_files"), spec.get("pnl_semantics"))
         for name, spec in sources.items()
     }
+    for name, spec in sources.items():
+        if spec.get("archive"):
+            worlds[name]["archive"] = dict(spec["archive"])
     executed = worlds["executed_paper"]
     shadow = worlds["shadow_lab"]
     top, worst_leak = executed["top"], executed["worst_leakage"]

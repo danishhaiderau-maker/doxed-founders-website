@@ -37,6 +37,9 @@ EXCLUDED_NAMES = frozenset({
     "relay-state-pusher-stdlib.log",
     # Ops handoff journal only; sealed cancellation evidence lives in ledgers.
     "cancellation_evidence_handoffs.jsonl",
+    # Cross-venue collector live state, replaced every second; the evidence is
+    # cross_venue_tape_1m.jsonl.
+    "cross_venue_live.json",
 })
 
 # Fly-local validation caches rewritten on every append to their ledger; they

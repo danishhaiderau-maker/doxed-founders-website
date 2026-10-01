@@ -10,6 +10,7 @@ os.environ.setdefault("RESEARCH_DATA_COLLECTION", "1")
 os.environ.setdefault("SKIP_EXCHANGE_MARKET_LOAD", "1")
 
 import ai_shadow_challengers as shadow
+import cross_venue_tape as cvt
 
 
 def _row(ts, bid, ask, bid_qty=1.0, ask_qty=1.0, buy=0.0, sell=0.0, fresh=True):
@@ -420,7 +421,15 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
     original_call = bot.call_deepseek_api
     original_budget = bot._AI_SHADOW_BUDGET
     original_book = bot._AI_SHADOW_BOOK
+    original_live = bot._cross_venue_live
     calls = []
+    anchor = int(bot._ai_shadow_decision_ts({"shared_ai_call_ts": "2026-10-01T00:00:00+00:00"})) - 1
+    falling = [8e4 * (1 - 0.0003 * max(0, s - (anchor - 10)) / 10) for s in range(anchor - 60, anchor + 1)]
+    live = {
+        "schema": cvt.LIVE_SCHEMA, "history_start_ts": anchor - 60, "mids": {"binance": falling},
+        "venues": {"binance": {"connected": True}},
+        "derivatives": {"binance": {"funding_rate": 0.0001, "mark": 8e4}},
+    }
 
     def fake_call(messages, temperature=0.4, *, purpose, **kw):
         calls.append((purpose, temperature, kw))
@@ -434,6 +443,7 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         bot.call_deepseek_api = fake_call
         bot._AI_SHADOW_BUDGET = shadow.CompactPromptBudget(0, 10)
         bot._AI_SHADOW_BOOK = shadow.ChallengerBook()
+        bot._cross_venue_live = lambda *a, **k: live
         ctx = _ctx(tape_features=shadow.tape_features(_ring(0, 400, lambda t: 1e5 + t), 400.0))
         ai = {"shared_ai_call_id": "hook-1", "long_score": 70, "short_score": 40,
               "raw_direction": "LONG", "decision": "APPROVE",
@@ -451,6 +461,11 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         assert row["sides"]["compact_v5"] == "LONG"
         assert row["score_led_admission_side"] == row["sides"]["llm_score_led"] == "LONG"
         assert row["win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
+        assert row["sides"]["leader_10s"] == "SHORT"
+        assert row["leader_features"]["leader_venue"] == "binance"
+        assert row["leader_features"]["anchor_bucket_ts"] == anchor
+        assert row["derivatives"]["leaders"]["binance"]["funding_rate"] == 0.0001
+        assert set(row["derivatives"]["bitfinex"]) >= {"funding_rate", "mark", "open_interest"}
         lanes = [s["lane"] for s in row["geometry_specs"]]
         assert lanes[:-1] == [t["lane"] for t in bot.active_tile_lifecycle_manifest()]
         assert lanes[-1] == shadow.COMPACT_QUESTION_LANE
@@ -473,6 +488,7 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         bot.call_deepseek_api = original_call
         bot._AI_SHADOW_BUDGET = original_budget
         bot._AI_SHADOW_BOOK = original_book
+        bot._cross_venue_live = original_live
 
 
 def test_hook_registered_and_files_are_wipe_and_serialization_scoped():

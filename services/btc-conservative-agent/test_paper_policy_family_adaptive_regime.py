@@ -66,7 +66,7 @@ FAST_UP = _candles(_alternating(75, 1.0) + [3.0] * 5)
 
 def test_registry_owns_exactly_this_paper_only_relay_ineligible_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
-    assert ACTIVE_TILE_ORDER == (policy.LANE,)
+    assert ACTIVE_TILE_ORDER[0] == policy.LANE
     assert spec["paper_only"] is True
     assert spec["platform_relay_eligible"] is False
     assert spec["default_enabled"] is False

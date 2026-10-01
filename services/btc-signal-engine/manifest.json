@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-dynamic-adaptive-paper-v3",
+  "engine_version": "v31-dynamic-adaptive-ladder-paper-v4",
   "combo_version": "2026-10-01",
   "exit_version": "adaptive-regime-atr-trail-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "34816101d4ac",
+  "signal_hash": "48d3177085e1",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-01T04:18:21.211Z"
+  "updated_at": "2026-10-01T08:25:45.767Z"
 }

@@ -7,7 +7,8 @@ it produced. Stand-asides, expiries and refused orders therefore carry the same
 "what an immediate taker entry would have marked" number as filled trades, so
 standing aside can be scored against trading. Rows are split by the stamped
 ``bot_version``; superseded stack versions are reported as quarantined cohorts
-and never mixed into the current cohort.
+and never mixed into the current cohort. Tiles share one AI call, so the
+current cohort is also broken down per tile lane: each tile is its own cohort.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ UNSTAMPED_COHORT = "UNSTAMPED"
 SUPERSEDED_COHORTS = {
     "v31-dynamic-adaptive-paper-v1": "ADAPTIVE_DECISION_PLUMBING_DEFECT",
     "v31-dynamic-adaptive-paper-v2": "ADAPTIVE_DECISION_PLUMBING_DEFECT",
+    "v31-dynamic-adaptive-paper-v3": "SUPERSEDED_SINGLE_TILE_STACK",
     UNSTAMPED_COHORT: "ADAPTIVE_DECISION_PLUMBING_DEFECT",
 }
 
@@ -177,6 +179,10 @@ def build_report(*, decisions, taker_counterfactuals, trades, expired,
             "reading": "Positive mean means an immediate taker entry would have gained; for stand-asides that is the cost of standing aside",
         },
         "current_cohort": cohort_view(current),
+        "current_cohort_by_lane": {
+            lane: cohort_view([row for row in current if row["lane"] == lane])
+            for lane in sorted({row["lane"] for row in current})
+        },
         "quarantined_cohorts": quarantined,
     }
 

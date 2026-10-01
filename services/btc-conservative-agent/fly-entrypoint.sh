@@ -65,6 +65,24 @@ else
   echo "[fly-entrypoint] RESEARCH_SEGMENTS_ENABLED!=1 -> segment shipper disabled."
 fi
 
+# Shadow-only cross-venue price tape (public WebSockets, no keys, no orders).
+# Separate niced process with its own restart loop; runs in the runtime dir so
+# its minute tape ships with the other JSONL evidence. Default ON.
+if [ "${CROSS_VENUE_COLLECTOR_ENABLED:-1}" = "1" ]; then
+  CV_LOG="$DATA_DIR/cross-venue-collector.log"
+  if [ -f "$CV_LOG" ] && [ "$(wc -c < "$CV_LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    : > "$CV_LOG"
+  fi
+  echo "[fly-entrypoint] starting cross-venue collector (shadow, niced)..."
+  ( while true; do
+      nice -n 10 python /app/cross_venue_collector.py >> "$CV_LOG" 2>&1
+      echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] cross-venue collector exited rc=$? -> restarting in 10s" >> "$CV_LOG"
+      sleep 10
+    done ) &
+else
+  echo "[fly-entrypoint] CROSS_VENUE_COLLECTOR_ENABLED!=1 -> cross-venue collector disabled."
+fi
+
 echo "[fly-entrypoint] starting btc_conservative_agent.py on :7002 (foreground, auto-restart loop)..."
 export PYTHONUNBUFFERED=1
 BOT_LOG="$DATA_DIR/bot.log"

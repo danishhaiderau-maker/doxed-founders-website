@@ -1,4 +1,4 @@
-"""Static regression checks for the two-tile accounting contract."""
+"""Static regression checks for the registry-tile accounting contract."""
 
 from pathlib import Path
 
@@ -12,10 +12,11 @@ def _render_chunk() -> str:
     return SOURCE[start:end]
 
 
-def test_tile_headlines_use_one_identical_six_metric_contract():
+def test_tile_headlines_use_one_identical_seven_metric_contract():
     chunk = _render_chunk()
-    for label in ("Status", "Pending", "Open", "Closed", "PnL", "EV/appr"):
+    for label in ("Status", "Pending", "Open", "Closed", "PnL", "EV/appr", "Win %"):
         assert f"statRow('{label}'" in chunk
+    assert "grid-template-columns:repeat(7,1fr)" in chunk
     assert "statRow('Executed'" not in chunk
     assert "statRow('Win%'" not in chunk
     assert "Counterfactual closes" not in chunk
@@ -132,7 +133,7 @@ def test_settings_period_approvals_reconcile_to_analyzer_headline():
 
 
 if __name__ == "__main__":
-    test_tile_headlines_use_one_identical_six_metric_contract()
+    test_tile_headlines_use_one_identical_seven_metric_contract()
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
     test_tile_ev_is_unavailable_when_there_are_no_approvals()
     test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference()

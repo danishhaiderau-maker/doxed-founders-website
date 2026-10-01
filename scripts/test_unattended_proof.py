@@ -153,6 +153,13 @@ def test_tiles_come_from_the_runtime_roster_not_a_fixed_lane_list():
     off = _runtime(now, active_tile_lanes=["FAMILY_ADAPTIVE_REGIME"],
                    research_lane_enabled={"FAMILY_ADAPTIVE_REGIME": False, "FAMILY_ATR_TRAIL": True})
     assert up.evaluate_row(**_inputs(now, runtime=off))["failed_checks"] == ["tiles_all_on"]
+    pair = ["FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER"]
+    both = _runtime(now, active_tile_lanes=pair, research_lane_enabled=dict.fromkeys(pair, True))
+    row = up.evaluate_row(**_inputs(now, runtime=both))
+    assert row["status"] == "PASS" and row["checks"]["tiles_all_on"]["detail"] == "2/2 tiles ON"
+    half = _runtime(now, active_tile_lanes=pair,
+                    research_lane_enabled={"FAMILY_ADAPTIVE_REGIME": True, "FAMILY_ADAPTIVE_REGIME_LADDER": False})
+    assert up.evaluate_row(**_inputs(now, runtime=half))["failed_checks"] == ["tiles_all_on"]
     source = Path(up.__file__).read_text(encoding="utf-8")
     assert "FAMILY_" not in source
 
