@@ -2222,26 +2222,60 @@ def dual_write_v22_record(record: Mapping[str, Any], *, data_dir: str) -> dict[s
     }
 
 
+V3_TERMINAL_RECONCILE_CURSOR_SCHEMA = "v3_terminal_reconcile_cursor_v1"
+_TERMINAL_V22_STATUSES = frozenset({"COMPLETE", "FUNNEL_COMPLETE", "DATA_ERROR", "INSUFFICIENT_PATH"})
+
+
+def _reconcile_source_key(stat) -> tuple:
+    if getattr(stat, "st_ino", 0):
+        return ("ino", int(stat.st_dev), int(stat.st_ino))
+    return ("path-only",)
+
+
 def reconcile_terminal_v22_into_v3(
     *,
     data_dir: str,
     epoch_id: str,
     events_file: str = "research_events_v22.jsonl",
+    cursor: dict | None = None,
+    row_lock=None,
+    still_current=None,
+    pause=None,
 ) -> dict[str, Any]:
     """Backfill terminal V2 rows missed during a V3 bridge rollout or crash.
 
     The durable V2 ledger remains authoritative during migration.  V3 writes
     are idempotent by record_id, and only exact-current-epoch terminal rows are
     eligible for repair.  Corrupt/truncated source or V3 ledgers fail closed.
+
+    ``cursor`` (caller-owned, mutated in place) makes the scan incremental:
+    V2 generations are append-only, so a file whose identity is unchanged is
+    resumed at the byte offset after its last fully reconciled line.  A file
+    is advanced only when every row read from it reconciled without error; a
+    replaced, truncated or rotated file is rescanned from byte zero.  Without
+    a cursor the full history is scanned (original behaviour).
+
+    ``row_lock`` (context manager) serializes each backfill write with the
+    collector; ``still_current`` aborts before a write once the epoch moved.
     """
     root = Path(data_dir)
     from collector_v22 import research_event_generation_paths
     sources = [Path(path) for path in research_event_generation_paths(str(root), events_file)]
     store = V3EvidenceStore(root, epoch_id=str(epoch_id))
     lifecycle_path = store.ledger_path("lifecycle")
-    durable_lifecycle_ids = V3EvidenceStore._load_ids(lifecycle_path)
-    terminal_statuses = {"COMPLETE", "FUNNEL_COMPLETE", "DATA_ERROR", "INSUFFICIENT_PATH"}
+    with store._exclusive(lifecycle_path):
+        durable_lifecycle_ids = set(V3EvidenceStore._cached_ids(lifecycle_path))
+    if cursor is not None and (
+        cursor.get("schema") != V3_TERMINAL_RECONCILE_CURSOR_SCHEMA
+        or cursor.get("epoch_id") != str(epoch_id)
+    ):
+        cursor.clear()
+        cursor.update({"schema": V3_TERMINAL_RECONCILE_CURSOR_SCHEMA, "epoch_id": str(epoch_id), "files": {}})
+    cursor_files = cursor.setdefault("files", {}) if cursor is not None else {}
+    epoch_marker = json.dumps(str(epoch_id)).encode("utf-8")
     scanned = current_epoch_terminal = backfilled = already_present = foreign_epoch = 0
+    skipped_bytes = 0
+    aborted = None
     errors: list[dict[str, Any]] = []
     if not any(source.exists() for source in sources):
         return {
@@ -2258,47 +2292,96 @@ def reconcile_terminal_v22_into_v3(
             "store_verification": store.verify(),
         }
     for source in sources:
+        if aborted:
+            break
         if not source.exists():
             continue
-        with source.open("r", encoding="utf-8") as handle:
-            for line_no, line in enumerate(handle, 1):
-                if not line.endswith("\n"):
+        stat = source.stat()
+        key = _reconcile_source_key(stat)
+        entry = cursor_files.get(str(source)) if cursor is not None else None
+        start = 0
+        if (
+            entry
+            and tuple(entry.get("key") or ()) == key
+            and key != ("path-only",)
+            and 0 <= int(entry.get("offset") or 0) <= int(stat.st_size)
+        ):
+            start = int(entry.get("offset") or 0)
+        skipped_bytes += start
+        offset = start
+        file_errors = 0
+        with source.open("rb") as handle:
+            handle.seek(start)
+            for line_no, raw in enumerate(handle, 1):
+                if not raw.endswith(b"\n"):
                     raise ValueError(f"TRUNCATED_V22_JSONL_LINE:{line_no}")
                 scanned += 1
-                record = json.loads(line)
+                if pause is not None and scanned % 64 == 0:
+                    pause()
+                if epoch_marker not in raw:
+                    foreign_epoch += 1
+                    offset += len(raw)
+                    continue
+                record = json.loads(raw)
                 envelope = record.get("envelope") if isinstance(record.get("envelope"), Mapping) else {}
                 row_epoch = str(_first(record.get("epoch_id"), envelope.get("epoch_id")) or "")
                 if row_epoch != str(epoch_id):
                     foreign_epoch += 1
+                    offset += len(raw)
                     continue
                 status = str(record.get("observation_status") or "")
-                if status not in terminal_statuses:
+                if status not in _TERMINAL_V22_STATUSES:
+                    offset += len(raw)
                     continue
                 current_epoch_terminal += 1
                 event_id = str(_first(record.get("event_id"), record.get("trade_id")) or "")
                 terminal_id = f"lifecycle:{event_id}:terminal"
                 if not event_id:
                     errors.append({"line": line_no, "reason": "MISSING_EVENT_ID"})
+                    file_errors += 1
+                    offset += len(raw)
                     continue
                 if terminal_id in durable_lifecycle_ids:
                     already_present += 1
+                    offset += len(raw)
                     continue
                 try:
-                    receipt = dual_write_v22_record(record, data_dir=str(root))
+                    if row_lock is not None:
+                        with row_lock:
+                            if still_current is not None and not still_current():
+                                aborted = "EPOCH_CHANGED"
+                                break
+                            receipt = dual_write_v22_record(record, data_dir=str(root))
+                    else:
+                        receipt = dual_write_v22_record(record, data_dir=str(root))
                     verification = receipt.get("store_verification") or {}
                     if not verification.get("passed"):
                         errors.append({"line": line_no, "event_id": event_id, "reason": "V3_STORE_VERIFICATION_FAILED"})
+                        file_errors += 1
+                        offset += len(raw)
                         continue
                     durable_lifecycle_ids.add(terminal_id)
                     backfilled += 1
                 except Exception as exc:
                     errors.append({"line": line_no, "event_id": event_id, "reason": f"{type(exc).__name__}:{exc}"})
+                    file_errors += 1
+                offset += len(raw)
+        if cursor is not None and not file_errors and not aborted:
+            cursor_files[str(source)] = {"key": list(key), "offset": offset}
+    if cursor is not None:
+        live_paths = {str(source) for source in sources}
+        for stale in [path for path in cursor_files if path not in live_paths]:
+            cursor_files.pop(stale, None)
+    if aborted:
+        errors.append({"reason": aborted})
     verification = store.verify()
     return {
         "schema": "v3_terminal_reconciliation_v1",
         "epoch_id": str(epoch_id),
         "source": events_file,
         "scanned": scanned,
+        "skipped_bytes": skipped_bytes,
+        "incremental": cursor is not None,
         "current_epoch_terminal": current_epoch_terminal,
         "backfilled": backfilled,
         "already_present": already_present,

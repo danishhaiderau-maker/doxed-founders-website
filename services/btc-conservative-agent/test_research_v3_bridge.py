@@ -1,6 +1,7 @@
 import copy
 import json
 import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -1700,6 +1701,94 @@ class V3BridgeTests(unittest.TestCase):
             self.assertEqual(second["already_present"], 1)
             self.assertEqual(sum(row["record_id"] == "lifecycle:scan-current:terminal" for row in lifecycle), 1)
             self.assertFalse(any(row.get("event_id") == "scan-foreign" for row in lifecycle))
+
+    def _write_v22(self, tmp, rows, *, mode="w"):
+        source = V3EvidenceStore(tmp, epoch_id="epoch-v3-test").root / "research_events_v22.jsonl"
+        with source.open(mode, encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+        return source
+
+    def test_terminal_reconciliation_cursor_resumes_after_reconciled_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            foreign = {**_event("scan-foreign", "episode-foreign"), "epoch_id": "epoch-old"}
+            foreign["envelope"] = {**foreign["envelope"], "epoch_id": "epoch-old"}
+            source = self._write_v22(tmp, [_event("scan-a", "episode-a"), foreign])
+            cursor: dict = {}
+            first = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor)
+            self.assertTrue(first["passed"])
+            self.assertEqual((first["scanned"], first["backfilled"], first["skipped_bytes"]), (2, 1, 0))
+            self.assertEqual(cursor["files"][str(source)]["offset"], source.stat().st_size)
+
+            idle = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor)
+            self.assertEqual((idle["scanned"], idle["backfilled"]), (0, 0))
+
+            size_before = source.stat().st_size
+            self._write_v22(tmp, [_event("scan-b", "episode-b")], mode="a")
+            second = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor)
+            self.assertTrue(second["passed"])
+            self.assertEqual((second["scanned"], second["backfilled"]), (1, 1))
+            self.assertEqual(second["skipped_bytes"], size_before)
+
+            store = V3EvidenceStore(tmp, epoch_id="epoch-v3-test")
+            terminal = [
+                json.loads(line)["record_id"] for line in store.ledger_path("lifecycle").read_text().splitlines()
+                if json.loads(line)["record_id"].endswith(":terminal")
+            ]
+            self.assertEqual(sorted(terminal), ["lifecycle:scan-a:terminal", "lifecycle:scan-b:terminal"])
+
+    def test_terminal_reconciliation_cursor_rescans_replaced_file_and_resets_on_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._write_v22(tmp, [_event("scan-a", "episode-a"), _event("scan-b", "episode-b")])
+            cursor: dict = {}
+            reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor)
+            replacement = source.with_name("research_events_v22.jsonl.tmp")
+            replacement.write_text(json.dumps(_event("scan-c", "episode-c"), separators=(",", ":")) + "\n",
+                                   encoding="utf-8")
+            os.replace(replacement, source)
+            rescanned = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor)
+            self.assertEqual((rescanned["skipped_bytes"], rescanned["scanned"], rescanned["backfilled"]), (0, 1, 1))
+
+            cursor["epoch_id"] = "epoch-previous"
+            reset = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor)
+            self.assertEqual((reset["skipped_bytes"], reset["scanned"], reset["already_present"]), (0, 1, 1))
+            self.assertEqual(cursor["epoch_id"], "epoch-v3-test")
+
+    def test_terminal_reconciliation_cursor_holds_back_on_error_and_epoch_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._write_v22(tmp, [_event("scan-a", "episode-a")])
+            cursor: dict = {}
+            import research_v3_bridge as bridge
+            original = bridge.dual_write_v22_record
+
+            def failing(*_args, **_kwargs):
+                raise OSError("disk hiccup")
+
+            bridge.dual_write_v22_record = failing
+            try:
+                failed = reconcile_terminal_v22_into_v3(data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor)
+            finally:
+                bridge.dual_write_v22_record = original
+            self.assertFalse(failed["passed"])
+            self.assertNotIn(str(source), cursor.get("files", {}))
+
+            import threading
+            aborted = reconcile_terminal_v22_into_v3(
+                data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor,
+                row_lock=threading.Lock(), still_current=lambda: False,
+            )
+            self.assertFalse(aborted["passed"])
+            self.assertEqual(aborted["backfilled"], 0)
+            self.assertIn({"reason": "EPOCH_CHANGED"}, aborted["errors"])
+            self.assertNotIn(str(source), cursor.get("files", {}))
+
+            retried = reconcile_terminal_v22_into_v3(
+                data_dir=tmp, epoch_id="epoch-v3-test", cursor=cursor,
+                row_lock=threading.Lock(), still_current=lambda: True,
+            )
+            self.assertTrue(retried["passed"])
+            self.assertEqual(retried["backfilled"], 1)
+            self.assertIn(str(source), cursor["files"])
 
 
 if __name__ == "__main__":

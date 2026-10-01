@@ -54,6 +54,7 @@ POLICIES: Mapping[str, Policy] = {
     "multiverse_empty_path": Policy(2, 30 * 60.0, 6 * HOUR, True),
     "multiverse_tape_source": Policy(2, 15 * 60.0, 6 * HOUR, True),
     "multiverse_worker_stalled": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    "multiverse_worker_restarted": Policy(1, 15 * 60.0, 6 * HOUR, True),
     "touch_grid_coverage": Policy(2, 30 * 60.0, 6 * HOUR, True),
     # Laptop supervisor dead-man heartbeat (it cannot report its own death).
     "laptop_silent": Policy(1, 0.0, 12 * HOUR, False),

@@ -26,6 +26,8 @@ TOUCH_GRID_FILE = "chase_offset_touch_grid.jsonl"
 DEFECT_REASON = "MULTIVERSE_EMPTY_PATH_COLLECTION_DEFECT"
 NEVER_RECORDED_REASON = "PATH_SOURCE_NEVER_RECORDED"
 NEVER_RECORDED_QUARANTINE_REASON = "MULTIVERSE_PATH_SOURCE_NEVER_RECORDED"
+LATE_MATURATION_REASON = "MULTIVERSE_LATE_MATURATION_BACKFILL"
+LATE_MATURATION_SEC = 3600.0
 EMPTY_PATH_ALARM_RATE = 0.20
 TOUCH_GRID_COVERAGE_FLOOR = 0.90
 LEGACY_ADMISSION_BASIS = "AI_APPROVE_LEGACY"
@@ -95,11 +97,30 @@ def _compact_row(row: Mapping[str, Any], line_bytes: int) -> dict:
         "post_fix": source is not None,
         "window_state": (source or {}).get("window_state"),
         "tape_bars": (source or {}).get("tape_bars"),
+        "maturation_lag_sec": _maturation_lag(source),
+        "late_backfill_marked": bool((source or {}).get("late_backfill")),
         "call_id": str(anchor.get("shared_ai_call_id") or episode.get("shared_ai_call_id") or ""),
         "inline_children": bool(row.get("_inline_children")),
         "grid_ref": str(ref.get("grid_sha256") or "") or None,
         "bytes": int(line_bytes),
     }
+
+
+def _maturation_lag(source: Optional[Mapping[str, Any]]) -> Optional[float]:
+    """Seconds between the path window closing and the row being matured.
+
+    Rows written since the stall fix carry it; older rows derive it from the
+    tape head observed at write time (an upper-bound proxy).
+    """
+    if not source:
+        return None
+    lag = source.get("maturation_lag_sec")
+    if isinstance(lag, (int, float)):
+        return float(lag)
+    head, end = source.get("tape_latest_bucket_ts"), source.get("window_end_ts")
+    if isinstance(head, (int, float)) and isinstance(end, (int, float)):
+        return max(0.0, float(head) - float(end))
+    return None
 
 
 def _file_rows(path: str) -> list:
@@ -277,7 +298,31 @@ def build_multiverse_collection_report(data_dir: str, *, epoch_id: Optional[str]
             "basis": "signal window ended before the 1s tape began; finalized DATA_ERROR, never a research outcome",
             "action": "EXCLUDED_FROM_COHORTS_SOURCE_ROWS_UNMODIFIED",
         },
+        "late_maturation": _late_maturation(post_fix),
         "quarantined_trade_ids": defect_ids + sorted(row["trade_id"] for row in never_recorded),
+    }
+
+
+def _late_maturation(rows: list) -> dict:
+    late = [
+        row for row in rows
+        if row["late_backfill_marked"]
+        or (row["maturation_lag_sec"] is not None and row["maturation_lag_sec"] > LATE_MATURATION_SEC)
+    ]
+    late_ts = [float(row["signal_ts"]) for row in late if isinstance(row["signal_ts"], (int, float))]
+    ids = sorted(row["trade_id"] for row in late)
+    return {
+        "reason": LATE_MATURATION_REASON,
+        "threshold_sec": LATE_MATURATION_SEC,
+        "rows": len(late),
+        "marked_rows": sum(1 for row in late if row["late_backfill_marked"]),
+        "derived_rows": sum(1 for row in late if not row["late_backfill_marked"]),
+        "max_lag_sec": max((row["maturation_lag_sec"] or 0.0) for row in late) if late else None,
+        "interval_signal_ts": [min(late_ts), max(late_ts)] if late_ts else None,
+        "trade_ids_sample": ids[:20],
+        "basis": "path rebuilt from the retained 1s tape after the collector maturation worker stalled; "
+                 "content identical to on-time maturation, only its latency differs",
+        "action": "LABELLED_NOT_EXCLUDED",
     }
 
 

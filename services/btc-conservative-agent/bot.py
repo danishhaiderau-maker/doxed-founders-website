@@ -13570,6 +13570,24 @@ def _collector_path_candles_1m(signal_ts: float, *, now: float = None) -> tuple:
         "window_end_ts": end,
         "tape_latest_bucket_ts": store.latest_ts,
         **counts,
+        **collector_maturation_lag_fields(end, now=now),
+    }
+
+
+def collector_maturation_lag_fields(window_end_ts: float, *, now: float) -> dict:
+    """Honest provenance for rows matured long after their window closed.
+
+    The path is rebuilt from the same retained 1s tape either way; the label
+    only records that maturation ran late (e.g. a stalled worker backlog).
+    """
+    decidable_ts = float(window_end_ts) + float(COLLECTOR_TAPE_LIVE_LAG_SEC)
+    lag = round(max(0.0, float(now) - decidable_ts), 1)
+    late = lag > COLLECTOR_LATE_MATURATION_SEC
+    return {
+        "matured_ts": round(float(now), 3),
+        "maturation_lag_sec": lag,
+        "late_backfill": late,
+        "late_backfill_reason": "MATURED_LATE_FROM_RETAINED_TAPE" if late else None,
     }
 
 
@@ -13673,16 +13691,20 @@ def _collector_record_multiverse_write(record: dict, obs: str) -> None:
     coverage = tape.get("coverage") if isinstance(tape.get("coverage"), dict) else {}
     never_recorded = coverage.get("reason") == "PATH_SOURCE_NEVER_RECORDED"
     empty = not tape.get("path_1m")
+    path_source = tape.get("path_source") if isinstance(tape.get("path_source"), dict) else {}
+    late = bool(path_source.get("late_backfill"))
     with _collection_stats_lock:
         _collection_counters["multiverse_written"] += 1
         _collection_counters[f"multiverse_obs_{obs or 'UNKNOWN'}"] += 1
+        if late:
+            _collection_counters["multiverse_written_late_backfill"] += 1
         if never_recorded:
             # Pre-tape backlog finalized as DATA_ERROR; not a live-path defect.
             _collection_counters["multiverse_written_source_never_recorded"] += 1
             return
         if empty:
             _collection_counters["multiverse_written_empty_path"] += 1
-        _collection_multiverse_recent.append((time.time(), bool(empty), str(obs or "")))
+        _collection_multiverse_recent.append((time.time(), bool(empty), str(obs or ""), late))
 
 
 def _collector_record_touch_grid_call(*, armed: bool, ai_executes: bool) -> None:
@@ -13706,6 +13728,7 @@ def research_collection_health(now: float = None) -> dict:
     written_1h = len(recent)
     empty_1h = sum(1 for row in recent if row[1])
     insufficient_1h = sum(1 for row in recent if row[2] == "INSUFFICIENT_PATH")
+    late_1h = sum(1 for row in recent if len(row) > 3 and row[3])
     empty_rate = (empty_1h / written_1h) if written_1h else None
     eligible_1h = len(grid_recent)
     armed_1h = sum(1 for row in grid_recent if row[1])
@@ -13718,12 +13741,26 @@ def research_collection_health(now: float = None) -> dict:
             and empty_rate > COLLECTION_EMPTY_PATH_ALARM_RATE:
         alarms.append("MULTIVERSE_EMPTY_PATH_RATE_HIGH")
     tape_age = tape.get("latest_bucket_age_sec")
-    if pending and tape.get("initial_scan_complete") and (tape_age is None or tape_age > 300):
+    refreshed = tape.get("last_refresh_ts")
+    refresh_age = None if not refreshed else round(max(0.0, now - float(refreshed)), 1)
+    tape = dict(tape, last_refresh_age_sec=refresh_age)
+    # Only a freshly re-read index proves the tape itself is stale; an old
+    # index means its owner is not refreshing it (worker stall, below).
+    if (
+        pending and tape.get("initial_scan_complete")
+        and refresh_age is not None and refresh_age <= COLLECTOR_TAPE_REFRESH_FRESH_SEC
+        and (tape_age is None or tape_age > 300)
+    ):
         alarms.append("MULTIVERSE_TAPE_SOURCE_UNAVAILABLE")
     worker = _collector_maturation_worker_status
     last_pass = worker.get("last_pass_ts") or worker.get("started_ts")
     if pending and (not worker.get("alive") or (last_pass and now - float(last_pass) > 300)):
         alarms.append("COLLECTOR_MATURATION_WORKER_STALLED")
+    for status in (worker, _collector_v3_reconcile_status):
+        restarted = float(status.get("last_restart_ts") or 0)
+        if restarted and now - restarted <= COLLECTOR_WORKER_RESTART_ALARM_SEC:
+            alarms.append("COLLECTOR_MATURATION_WORKER_RESTARTED")
+            break
     if eligible_1h >= COLLECTION_TOUCH_GRID_ALARM_MIN_CALLS and coverage is not None \
             and coverage < COLLECTION_TOUCH_GRID_ALARM_COVERAGE:
         alarms.append("TOUCH_GRID_COVERAGE_LOW")
@@ -13750,6 +13787,10 @@ def research_collection_health(now: float = None) -> dict:
             "empty_path_rate_1h": None if empty_rate is None else round(empty_rate, 4),
             "empty_path_alarm_rate": COLLECTION_EMPTY_PATH_ALARM_RATE,
             "maturation_worker": dict(_collector_maturation_worker_status),
+            "v3_reconcile_worker": dict(_collector_v3_reconcile_status),
+            "late_backfill_written_since_boot": counters.get("multiverse_written_late_backfill", 0),
+            "late_backfill_1h": late_1h,
+            "late_maturation_threshold_sec": COLLECTOR_LATE_MATURATION_SEC,
         },
         "touch_grid": {
             "eligible_calls_since_boot": counters.get("touch_grid_eligible_calls", 0),
@@ -14200,8 +14241,25 @@ COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC = max(
     60.0, float(os.getenv("COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC", "900")),
 )
 COLLECTOR_MATURATION_ITEM_YIELD_SEC = 0.01
-_collector_maturation_worker_status = {"alive": False}
+# A maturation row whose path window became decidable more than this long
+# before it was written is labelled a late backfill from the retained tape.
+COLLECTOR_LATE_MATURATION_SEC = max(
+    600.0, float(os.getenv("COLLECTOR_LATE_MATURATION_SEC", "3600")),
+)
+COLLECTOR_WORKER_RESTART_ALARM_SEC = 3600.0
+COLLECTOR_WORKER_RESTART_MIN_INTERVAL_SEC = 30.0
+COLLECTOR_TAPE_REFRESH_FRESH_SEC = 120.0
+_collector_maturation_worker_status = {"alive": False, "restarts": 0}
+_collector_v3_reconcile_status = {"alive": False, "restarts": 0, "runs": 0}
+_collector_v3_reconcile_cursor: dict = {}
+_collector_worker_threads: dict = {}
+_collector_worker_threads_lock = threading.Lock()
 _order_multiverse_maturation_attempts: dict = {}
+
+
+def _collector_worker_phase(status: dict, phase: str) -> None:
+    status["phase"] = phase
+    status["phase_started_ts"] = time.time()
 
 
 def collector_maturation_worker_loop():
@@ -14211,41 +14269,176 @@ def collector_maturation_worker_loop():
     between items, so a backlog drain can never starve order handling, the
     AI cadence or the segment shipper.  Exceptions are contained here:
     ``safe_thread`` treats an escaped exception as a trading-thread crash.
+    Full-history V2->V3 reconciliation runs on its own thread so it can
+    never hold this pass (or the tape index refresh) for minutes.
     """
-    _collector_maturation_worker_status.update({"alive": True, "started_ts": time.time()})
+    status = _collector_maturation_worker_status
+    status.update({"alive": True, "started_ts": time.time(), "exit_error": None})
     try:
         store = _collector_tape_store()
         while not shutdown_event.is_set():
             pass_started = time.time()
             try:
                 warming = not store.initial_scan_complete
+                _collector_worker_phase(status, "TAPE_REFRESH")
                 refresh = store.refresh(
                     max_lines=COLLECTOR_TAPE_REFRESH_MAX_LINES * (5 if warming else 1),
                     pause=lambda: time.sleep(COLLECTOR_MATURATION_ITEM_YIELD_SEC),
                 )
-                _collector_maturation_worker_status["last_tape_refresh"] = refresh
+                status["last_tape_refresh"] = refresh
                 # Until the tape family is indexed every window reads as
                 # SOURCE_NOT_READY; sweeping then only rewrites the journal.
                 if store.initial_scan_complete:
+                    _collector_worker_phase(status, "MATURATION")
                     _maybe_complete_pending_order_multiverse(from_worker=True)
-                _collector_maturation_worker_status["last_error"] = None
+                status["last_error"] = None
             except Exception as exc:
-                _collector_maturation_worker_status["last_error"] = f"{type(exc).__name__}: {exc}"
+                status["last_error"] = f"{type(exc).__name__}: {exc}"
                 logger.warning(f"[COLLECTOR_MATURATION] worker pass failed: {exc} [PIPELINE ENFORCEMENT]")
-            _collector_maturation_worker_status["last_pass_ts"] = time.time()
-            _collector_maturation_worker_status["last_pass_sec"] = round(time.time() - pass_started, 3)
-            backlog = bool(_collector_maturation_worker_status.get("last_budget_exhausted"))
+            status["last_pass_ts"] = time.time()
+            status["last_pass_sec"] = round(time.time() - pass_started, 3)
+            backlog = bool(status.get("last_budget_exhausted"))
+            _collector_worker_phase(status, "IDLE")
             shutdown_event.wait(
                 COLLECTOR_MATURATION_WORKER_BACKLOG_INTERVAL_SEC if backlog
                 else COLLECTOR_MATURATION_WORKER_INTERVAL_SEC
             )
+    except BaseException as exc:
+        status["exit_error"] = f"{type(exc).__name__}: {exc}"[:300]
+        logger.error(
+            f"[COLLECTOR_MATURATION] worker exited: {status['exit_error']} [PIPELINE ENFORCEMENT]"
+        )
+        raise
     finally:
-        # The tick-thread fallback resumes if this owner ever exits.
-        _collector_maturation_worker_status["alive"] = False
+        # The tick-thread fallback resumes if this owner ever exits; the
+        # supervisor restarts it and raises COLLECTOR_MATURATION_WORKER_RESTARTED.
+        status["alive"] = False
+        status["exited_ts"] = time.time()
+
+
+def _run_v3_terminal_reconcile(now: float = None, *, pause=None) -> None:
+    """Incremental V2->V3 terminal reconciliation (one bounded poll)."""
+    global _v3_terminal_reconcile_last_v22_size, _v3_terminal_reconcile_last_ts
+    now = time.time() if now is None else float(now)
+    if now - _v3_terminal_reconcile_last_ts < COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC:
+        return
+    _v3_terminal_reconcile_last_ts = now
+    status = _collector_v3_reconcile_status
+    try:
+        v3_data_dir = os.getcwd()
+        v22_size = research_event_generation_stat_signature(v3_data_dir)
+        if v22_size == _v3_terminal_reconcile_last_v22_size:
+            return
+        from research_v3_bridge import reconcile_terminal_v22_into_v3
+        epoch_id = _collector_v22_epoch_id()
+        started = time.time()
+        status.update({"last_started_ts": started})
+        _collector_worker_phase(status, "RECONCILING")
+        receipt = reconcile_terminal_v22_into_v3(
+            data_dir=v3_data_dir,
+            epoch_id=epoch_id,
+            cursor=_collector_v3_reconcile_cursor,
+            row_lock=_collector_epoch_lock,
+            still_current=lambda: _collector_v22_epoch_id() == epoch_id,
+            pause=pause,
+        )
+        status.update({
+            "runs": int(status.get("runs") or 0) + 1,
+            "last_finished_ts": time.time(),
+            "last_duration_sec": round(time.time() - started, 3),
+            "last_scanned": receipt.get("scanned"),
+            "last_skipped_bytes": receipt.get("skipped_bytes"),
+            "last_backfilled": receipt.get("backfilled"),
+            "last_passed": bool(receipt.get("passed")),
+            "last_error": None if receipt.get("passed") else str(receipt.get("errors"))[:300],
+        })
+        if receipt.get("passed"):
+            _v3_terminal_reconcile_last_v22_size = v22_size
+            if receipt.get("backfilled"):
+                logger.warning(
+                    "[COLLECTOR_V3] reconciled terminal V2 rows "
+                    f"backfilled={receipt.get('backfilled')} "
+                    f"already_present={receipt.get('already_present')}"
+                )
+        else:
+            logger.error(
+                "[COLLECTOR_V3] terminal reconciliation failed "
+                f"errors={receipt.get('errors')} [PIPELINE ENFORCEMENT]"
+            )
+    except Exception as exc:
+        status["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+        logger.error(
+            f"[COLLECTOR_V3] terminal reconciliation error: {exc} "
+            "[PIPELINE ENFORCEMENT]"
+        )
+    finally:
+        _collector_worker_phase(status, "IDLE")
+
+
+def collector_v3_reconcile_loop():
+    """Own the V2->V3 terminal reconciliation off the maturation worker."""
+    status = _collector_v3_reconcile_status
+    status.update({"alive": True, "started_ts": time.time(), "exit_error": None})
+    try:
+        while not shutdown_event.is_set():
+            _run_v3_terminal_reconcile(pause=lambda: time.sleep(COLLECTOR_MATURATION_ITEM_YIELD_SEC))
+            status["last_poll_ts"] = time.time()
+            shutdown_event.wait(COLLECTOR_MATURATION_WORKER_INTERVAL_SEC)
+    except BaseException as exc:
+        status["exit_error"] = f"{type(exc).__name__}: {exc}"[:300]
+        logger.error(f"[COLLECTOR_V3] reconcile worker exited: {status['exit_error']} [PIPELINE ENFORCEMENT]")
+        raise
+    finally:
+        status["alive"] = False
+        status["exited_ts"] = time.time()
+
+
+_COLLECTOR_WORKERS = {
+    "collector-maturation": (collector_maturation_worker_loop, _collector_maturation_worker_status),
+    "collector-v3-reconcile": (collector_v3_reconcile_loop, _collector_v3_reconcile_status),
+}
+
+
+def _start_collector_worker(name: str) -> threading.Thread:
+    target, _status = _COLLECTOR_WORKERS[name]
+    thread = threading.Thread(target=target, name=name, daemon=True)
+    with _collector_worker_threads_lock:
+        _collector_worker_threads[name] = thread
+    thread.start()
+    return thread
+
+
+def supervise_collector_workers(now: float = None) -> list:
+    """Restart a dead collector worker; a live-but-blocked one only alarms.
+
+    Python threads cannot be killed, so a blocked owner is surfaced through
+    COLLECTOR_MATURATION_WORKER_STALLED (with its phase) instead.
+    """
+    if shutdown_event.is_set():
+        return []
+    now = time.time() if now is None else float(now)
+    restarted = []
+    for name, (_target, status) in _COLLECTOR_WORKERS.items():
+        with _collector_worker_threads_lock:
+            thread = _collector_worker_threads.get(name)
+        if thread is None or thread.is_alive():
+            continue
+        if now - float(status.get("last_restart_ts") or 0) < COLLECTOR_WORKER_RESTART_MIN_INTERVAL_SEC:
+            continue
+        status["restarts"] = int(status.get("restarts") or 0) + 1
+        status["last_restart_ts"] = now
+        status["last_restart_reason"] = status.get("exit_error") or "THREAD_EXITED"
+        logger.error(
+            f"[COLLECTOR_SUPERVISOR] {name} was dead ({status['last_restart_reason']}); "
+            f"restarting (restarts={status['restarts']}) [PIPELINE ENFORCEMENT]"
+        )
+        _start_collector_worker(name)
+        restarted.append(name)
+    return restarted
 
 
 def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
-    global _order_multiverse_last_poll, _v3_terminal_reconcile_last_v22_size, _v3_terminal_reconcile_last_ts
+    global _order_multiverse_last_poll
     global _collector_v22_last_merge, _order_multiverse_maturation_cursor
     global _order_multiverse_ready_sweep_batch, _order_multiverse_ready_sweep_started_ts
     if not from_worker and _collector_maturation_worker_status.get("alive"):
@@ -14407,38 +14600,10 @@ def _maybe_complete_pending_order_multiverse(*, from_worker: bool = False):
         })
     # V2 is the durable migration source.  A rollout or crash between the V2
     # append and V3 dual-write must not leave an eternal provisional V3 row.
-    # Reconcile once per changed V2 generation; failures retry next poll.  The
-    # scan reads every V2 generation, so it cannot run on the drain cadence.
-    if now - _v3_terminal_reconcile_last_ts < COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC:
-        return
-    _v3_terminal_reconcile_last_ts = now
-    try:
-        v3_data_dir = os.getcwd()
-        v22_size = research_event_generation_stat_signature(v3_data_dir)
-        if v22_size != _v3_terminal_reconcile_last_v22_size:
-            from research_v3_bridge import reconcile_terminal_v22_into_v3
-            receipt = reconcile_terminal_v22_into_v3(
-                data_dir=v3_data_dir,
-                epoch_id=_collector_v22_epoch_id(),
-            )
-            if receipt.get("passed"):
-                _v3_terminal_reconcile_last_v22_size = v22_size
-                if receipt.get("backfilled"):
-                    logger.warning(
-                        "[COLLECTOR_V3] reconciled terminal V2 rows "
-                        f"backfilled={receipt.get('backfilled')} "
-                        f"already_present={receipt.get('already_present')}"
-                    )
-            else:
-                logger.error(
-                    "[COLLECTOR_V3] terminal reconciliation failed "
-                    f"errors={receipt.get('errors')} [PIPELINE ENFORCEMENT]"
-                )
-    except Exception as exc:
-        logger.error(
-            f"[COLLECTOR_V3] terminal reconciliation error: {exc} "
-            "[PIPELINE ENFORCEMENT]"
-        )
+    # The dedicated reconcile thread owns this; inline is only the fallback
+    # while that owner is down (the supervisor restarts it).
+    if not _collector_v3_reconcile_status.get("alive"):
+        _run_v3_terminal_reconcile(now)
 
 
 def _collector_frozen_signal_ref(source: dict, trade_id: str):
@@ -50504,9 +50669,8 @@ def main():
     threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
-    threading.Thread(
-        target=collector_maturation_worker_loop, name="collector-maturation", daemon=True,
-    ).start()
+    _start_collector_worker("collector-maturation")
+    _start_collector_worker("collector-v3-reconcile")
     threading.Thread(target=safe_thread(ai_shadow_maturation_loop), daemon=True).start()
     threading.Thread(target=safe_thread(engine_loop), daemon=True).start()
     threading.Thread(target=safe_thread(tick_execution_engine), daemon=True).start()
@@ -50534,6 +50698,10 @@ def main():
         try:
             recover_from_crash()
             safe_clear_pending()
+            try:
+                supervise_collector_workers()
+            except Exception as exc:
+                logger.error(f"[COLLECTOR_SUPERVISOR] tick failed: {exc} [PIPELINE ENFORCEMENT]")
             print_console_dashboard()
             if shutdown_event.wait(60):
                 logger.info("Shutting down...")
