@@ -652,3 +652,101 @@ def test_s3_store_conditional_put_get_head_list():
         assert store.list_keys("v1/acks/laptop/") == ["v1/acks/laptop/000000000001.json"]
     finally:
         server.shutdown()
+
+
+# ------------------------------------------------- hot-file race isolation
+def _racing_anchors(monkeypatch, name: str, when) -> None:
+    real = shipper_mod._anchors
+
+    def anchors(path, offset):
+        if Path(path).name == name and when(Path(path), offset):
+            raise shipper_mod.PlanRace(f"{path} shrank while hashing")
+        return real(path, offset)
+
+    monkeypatch.setattr(shipper_mod, "_anchors", anchors)
+
+
+def _append_offsets(shipper) -> dict:
+    return {rel: entry["offset"] for rel, entry in shipper.load_state()["files"].items()
+            if entry.get("class") == "append"}
+
+
+def test_plan_phase_race_backs_off_one_stream_and_ships_the_rest(tmp_path, monkeypatch):
+    env = Env(tmp_path)
+    env.write("a.jsonl", _rows(0, 2))
+    env.write("b.jsonl", _rows(0, 2))
+    env.ship_all()
+    env.write("a.jsonl", _rows(2, 2), append=True)
+    env.write("b.jsonl", _rows(2, 2), append=True)
+    old = len(_rows(0, 2))
+    _racing_anchors(monkeypatch, "a.jsonl", lambda _path, offset: offset == old)
+
+    shipper = env.shipper()
+    result = shipper.cycle()
+
+    assert result["shipped"] is not None
+    assert _append_offsets(shipper) == {"a.jsonl": old, "b.jsonl": len(_rows(0, 4))}
+    assert "a.jsonl" in shipper.race_backoff
+    monkeypatch.undo()
+    env.ship_all()
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_build_phase_anchor_race_skips_only_its_stream(tmp_path, monkeypatch):
+    env = Env(tmp_path)
+    env.write("a.jsonl", _rows(0, 2))
+    env.write("b.jsonl", _rows(0, 2))
+    env.ship_all()
+    env.write("a.jsonl", _rows(2, 2), append=True)
+    env.write("b.jsonl", _rows(2, 2), append=True)
+    new = len(_rows(0, 4))
+    _racing_anchors(monkeypatch, "a.jsonl", lambda _path, offset: offset == new)
+
+    shipper = env.shipper()
+    result = shipper.cycle()
+
+    assert result["shipped"] is not None
+    assert _append_offsets(shipper) == {"a.jsonl": len(_rows(0, 2)), "b.jsonl": new}
+    assert "a.jsonl" in shipper.race_backoff
+    monkeypatch.undo()
+    env.ship_all()
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+class _SlowShipper:
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+
+    def cycle(self) -> dict:
+        threading.Event().wait(self.seconds)
+        return {"shipped": None}
+
+
+def test_guarded_cycle_escalates_only_a_starved_cycle():
+    fired = []
+    result = shipper_mod.run_guarded_cycle(_SlowShipper(0.5), starved_after=0.05,
+                                           on_starved=lambda: fired.append(1))
+    assert result == {"shipped": None} and fired == [1]
+
+    fired.clear()
+    shipper_mod.run_guarded_cycle(_SlowShipper(0.0), starved_after=0.2,
+                                  on_starved=lambda: fired.append(1))
+    threading.Event().wait(0.4)
+    assert fired == []
+
+    shipper_mod.run_guarded_cycle(_SlowShipper(0.1), starved_after=0.0,
+                                  on_starved=lambda: fired.append(1))
+    assert fired == []
+
+
+def test_main_polls_ack_outside_the_cycle_error_path():
+    source = (ROOT / "research_segment_shipper.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    loop = next(node for node in ast.walk(main) if isinstance(node, ast.While))
+    first = loop.body[1]
+    assert isinstance(first, ast.Expr) and ast.unparse(first) == "poll_ack()"
+    for handler in (node for node in ast.walk(loop) if isinstance(node, ast.Try)):
+        assert "poll_laptop_ack" not in ast.unparse(handler)

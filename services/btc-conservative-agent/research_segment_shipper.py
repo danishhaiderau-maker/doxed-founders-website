@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -64,6 +65,9 @@ DEFAULT_BACKLOG_BOOST_BYTES = 8 * 1024 * 1024
 DEFAULT_BOOST_SEGMENT_BYTES = 64 * 1024 * 1024
 DEFAULT_BOOST_NICE = 10
 IDLE_NICE = 19
+# An idle-class cycle still running after this long is starved by the bot's
+# load; it is raised to the backlog priority so seq keeps advancing.
+DEFAULT_STARVED_CYCLE_SECONDS = 180.0
 # Online-backup steps hold the source's SHARED lock only for one step, so the
 # bot's rollback-journal writers (5 s busy timeout) are never starved.
 SQLITE_BACKUP_PAGES_PER_STEP = 1024
@@ -488,6 +492,11 @@ class SegmentShipper:
             except FileNotFoundError:
                 # Deleted after the scan: the next scan tombstones or ignores it.
                 continue
+            except PlanRace:
+                # A file rewritten between the scan and its anchor hash backs
+                # off alone; every other stream still plans and ships.
+                self._back_off(relpath)
+                continue
             if op is not None:
                 ops.append(op)
         ops.sort(key=lambda item: (item["stream"], _RANK.get(item["kind"], 2), item["path"]))
@@ -735,6 +744,11 @@ class SegmentShipper:
                     else:
                         raw, extra = self._read(op)
                         size, digest = len(raw), fmt.sha256_bytes(raw)
+                        if kind == fmt.KIND_APPEND and self._is_append_class(relpath):
+                            try:
+                                op["anchors"] = _anchors(op["abs"], op["end_offset"])
+                            except PlanRace as exc:
+                                raise PlanRace(str(exc), op["stream"]) from exc
                 except FileNotFoundError as exc:
                     raise PlanRace(f"{op['path']} vanished before it was read", op["stream"]) from exc
             except PlanRace as exc:
@@ -777,7 +791,7 @@ class SegmentShipper:
                 if kind == fmt.KIND_REWRITE:
                     head, tail = _anchors_from_bytes(raw[:ANCHOR_BYTES], raw[max(0, end - ANCHOR_BYTES):end])
                 else:
-                    head, tail = _anchors(op["abs"], end)
+                    head, tail = op.get("anchors") or _anchors(op["abs"], end)
                 files[relpath] = {"class": "append", "offset": end, "size": int(stat.st_size),
                                   "mtime_ns": int(stat.st_mtime_ns), "inode": int(stat.st_ino),
                                   "dev": int(stat.st_dev), "head_sha256": head, "tail_sha256": tail,
@@ -1074,19 +1088,20 @@ class SegmentShipper:
         return best
 
 
-def _set_priority(boosted: bool, boost_nice: int = DEFAULT_BOOST_NICE) -> str | None:
+def _set_priority(boosted: bool, boost_nice: int = DEFAULT_BOOST_NICE, tid: int = 0) -> str | None:
     """Idle class when caught up; a bounded nice level while draining a backlog.
 
+    Linux applies both calls per thread; ``tid`` 0 is the calling thread.
     Returns an error string when the platform refuses the change (the worker
     then keeps whatever priority it has).
     """
     try:
         if boosted:
-            os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
-            os.setpriority(os.PRIO_PROCESS, 0, max(boost_nice, 1))
+            os.sched_setscheduler(tid, os.SCHED_OTHER, os.sched_param(0))
+            os.setpriority(os.PRIO_PROCESS, tid, max(boost_nice, 1))
         else:
-            os.setpriority(os.PRIO_PROCESS, 0, IDLE_NICE)
-            os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
+            os.setpriority(os.PRIO_PROCESS, tid, IDLE_NICE)
+            os.sched_setscheduler(tid, os.SCHED_IDLE, os.sched_param(0))
     except (AttributeError, OSError) as exc:
         return f"{type(exc).__name__}: {exc}"
     return None
@@ -1151,6 +1166,20 @@ def shipper_from_env(environ=None) -> SegmentShipper:
     )
 
 
+def run_guarded_cycle(shipper: "SegmentShipper", *, starved_after: float, on_starved) -> dict:
+    """Run one cycle; call ``on_starved`` once if it outlives ``starved_after``."""
+    timer = None
+    if starved_after > 0:
+        timer = threading.Timer(starved_after, on_starved)
+        timer.daemon = True
+        timer.start()
+    try:
+        return shipper.cycle()
+    finally:
+        if timer is not None:
+            timer.cancel()
+
+
 def main() -> int:
     if (os.getenv("RESEARCH_SEGMENTS_ENABLED") or "0").strip() != "1":
         _log("RESEARCH_SEGMENTS_ENABLED!=1 -> disabled")
@@ -1160,7 +1189,10 @@ def main() -> int:
     priority_error = _set_priority(False)
     interval = max(30.0, float(os.getenv("RESEARCH_SEGMENTS_INTERVAL_SECONDS") or 300))
     backlog_pause = max(1.0, float(os.getenv("RESEARCH_SEGMENTS_BACKLOG_PAUSE_SECONDS") or 5))
-    ack_poll = max(60.0, float(os.getenv("RESEARCH_SEGMENTS_ACK_POLL_SECONDS") or 1800))
+    ack_poll = max(60.0, float(os.getenv("RESEARCH_SEGMENTS_ACK_POLL_SECONDS") or 300))
+    starved_after = float(os.getenv("RESEARCH_SEGMENTS_STARVED_CYCLE_SECONDS")
+                          or DEFAULT_STARVED_CYCLE_SECONDS)
+    main_tid = threading.get_native_id()
     default_floor = (VOLUME_DEFAULT_MIN_FREE_BYTES if sink_from_env() == "volume"
                      else DEFAULT_MIN_FREE_BYTES)
     min_free = int(os.getenv("RESEARCH_SEGMENTS_MIN_FREE_BYTES") or default_floor)
@@ -1189,8 +1221,28 @@ def main() -> int:
                  + (f" priority_error={priority_error}" if priority_error else ""))
         return "boost" if priority_boosted else "idle"
 
+    def escalate_starved() -> None:
+        nonlocal priority_boosted, priority_error
+        priority_error = _set_priority(True, boost_nice, tid=main_tid)
+        priority_boosted = True
+        _log(f"idle cycle starved >{starved_after:.0f}s -> priority nice {boost_nice}"
+             + (f" priority_error={priority_error}" if priority_error else ""))
+
+    def poll_ack() -> None:
+        nonlocal last_ack_poll
+        if time.time() - last_ack_poll < ack_poll:
+            return
+        last_ack_poll = time.time()
+        try:
+            shipper.poll_laptop_ack()
+        except Exception as exc:  # an ack read never blocks shipping
+            _log(f"ack poll error: {type(exc).__name__}: {exc}")
+
     while True:
         pause = interval
+        # Outside the cycle's try: a slow or failed cycle must not leave
+        # laptop_acked_seq stale on /health.
+        poll_ack()
         try:
             if _free_bytes(shipper.state_dir) < min_free:
                 shipper.write_status(last_error="LOW_DISK_SKIPPED")
@@ -1199,7 +1251,9 @@ def main() -> int:
                 shipper.publish_mode("CYCLING", priority=settle_mode(),
                                      priority_error=priority_error)
                 started = time.monotonic()
-                result = shipper.cycle()
+                result = run_guarded_cycle(
+                    shipper, starved_after=0.0 if priority_boosted else starved_after,
+                    on_starved=escalate_starved)
                 if result.get("shipped"):
                     _log(f"shipped seq={result['shipped']['seq']} members={result['members']} "
                          f"bytes={result['shipped']['segment_bytes']} deferred={result['deferred_bytes']} "
@@ -1208,9 +1262,6 @@ def main() -> int:
                     _log(f"snapshot kept changing while copying, backing off: {result['race']}")
                 if result.get("deferred_bytes"):
                     pause = backlog_pause
-            if time.time() - last_ack_poll >= ack_poll:
-                last_ack_poll = time.time()
-                shipper.poll_laptop_ack()
         except PlanRace as exc:
             try:
                 shipper.write_status(last_error=f"PLAN_RACE: {exc}")
