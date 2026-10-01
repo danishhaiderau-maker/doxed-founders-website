@@ -3557,6 +3557,31 @@ def _read_research_events_v22() -> list[dict]:
     return rows
 
 
+def _deployed_policy_collection() -> dict:
+    """Registry policies awaiting evidence; tiles may pin different policy epochs."""
+    epochs: list[str] = []
+    policies = []
+    for lane, spec in ACTIVE_TILE_REGISTRY.items():
+        epoch = str(spec.get("policy_epoch") or "") or None
+        if epoch and epoch not in epochs:
+            epochs.append(epoch)
+        policies.append({
+            "lane": lane,
+            "policy_id": spec.get("raw_policy_id"),
+            "policy_signature": spec.get("policy_signature"),
+            "policy_epoch": epoch,
+            "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
+            "qualification_status": "NOT_QUALIFIED",
+        })
+    return {
+        "policy_epoch": epochs[0] if len(epochs) == 1 else None,
+        "policy_epochs": epochs,
+        "policies": policies,
+        "policy_count": len(policies),
+        "qualification_allowed": False,
+    }
+
+
 def _best_policy_research_payload():
     """One fail-closed answer based only on the newest qualified V3.1 epoch."""
     manifest = _read_json(REPORT_MANIFEST_FILE)
@@ -3578,22 +3603,8 @@ def _best_policy_research_payload():
     current_policy_signature = str(
         newest.get("policy_signature") or (newest.get("envelope") or {}).get("policy_signature") or ""
     )
-    deployed_policies = [
-        {
-            "lane": lane,
-            "policy_id": spec.get("raw_policy_id"),
-            "policy_signature": spec.get("policy_signature"),
-            "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
-            "qualification_status": "NOT_QUALIFIED",
-        }
-        for lane, spec in ACTIVE_TILE_REGISTRY.items()
-    ]
-    deployed_epochs = {
-        str(spec.get("policy_epoch") or "")
-        for spec in ACTIVE_TILE_REGISTRY.values()
-        if spec.get("policy_epoch")
-    }
-    deployed_policy_epoch = next(iter(deployed_epochs)) if len(deployed_epochs) == 1 else None
+    deployed_collection = _deployed_policy_collection()
+    deployed_policy_epoch = deployed_collection["policy_epoch"]
     current = [row for row in events if str(
         row.get("epoch_id") or (row.get("envelope") or {}).get("epoch_id") or ""
     ) == current_epoch and str(
@@ -3682,12 +3693,7 @@ def _best_policy_research_payload():
         "epoch_id": current_epoch or None,
         "policy_epoch_id": current_policy_epoch or deployed_policy_epoch,
         "evidence_policy_signature": current_policy_signature or None,
-        "deployed_policy_collection": {
-            "policy_epoch": deployed_policy_epoch,
-            "policies": deployed_policies,
-            "policy_count": len(deployed_policies),
-            "qualification_allowed": False,
-        },
+        "deployed_policy_collection": deployed_collection,
         "last_analysis": last_analysis,
         "last_analysis_melbourne": format_melbourne_dt(last_analysis),
         "evidence": analyzed_evidence,
@@ -3968,24 +3974,7 @@ def _best_policy_research_v31_payload() -> dict:
     }
     execution_identities = collection.get("effective_paper_execution_identities") or []
     execution_identity = execution_identities[0] if len(execution_identities) == 1 else {}
-    deployed_policy_collection = report.get("deployed_policy_collection") or {
-        "policy_epoch": next(iter({
-            str(spec.get("policy_epoch")) for spec in ACTIVE_TILE_REGISTRY.values()
-            if spec.get("policy_epoch")
-        }), None),
-        "policies": [
-            {
-                "lane": lane,
-                "policy_id": spec.get("raw_policy_id"),
-                "policy_signature": spec.get("policy_signature"),
-                "collection_status": "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE",
-                "qualification_status": "NOT_QUALIFIED",
-            }
-            for lane, spec in ACTIVE_TILE_REGISTRY.items()
-        ],
-        "policy_count": len(ACTIVE_TILE_REGISTRY),
-        "qualification_allowed": False,
-    }
+    deployed_policy_collection = report.get("deployed_policy_collection") or _deployed_policy_collection()
     descriptive = screen.get("descriptive_top_100") or []
     generated_at = report.get("generated_at") or (_read_json(REPORT_MANIFEST_FILE) or {}).get("generated_at")
     qualified = source["qualified"]
@@ -7784,7 +7773,7 @@ async function loadDecisionReadiness() {
       }).join('')
     : '<tr><td colspan="4">UNAVAILABLE — qualification gate projection was not published.</td></tr>';
   document.getElementById('decision-readiness-provenance').textContent =
-    `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || 'UNAVAILABLE'} · `
+    `Collection epoch: ${d.epoch_id || 'UNAVAILABLE'} · Policy epoch: ${d.policy_epoch_id || ((d.deployed_policy_collection || {}).policy_epochs || []).join(' + ') || 'UNAVAILABLE'} · `
     + `Evidence policy: ${d.evidence_policy_signature || 'UNAVAILABLE'} · Last analysis: ${d.last_analysis_melbourne || '—'} · `
     + `Registry identities (not collection or qualification proof): ${deployedPolicies.map(x => `${x.policy_id} [${x.policy_signature}]`).join(' · ') || 'UNAVAILABLE'} · `
     + `Generation: ${((tiers.currency || {}).generated_at) || d.last_analysis || 'UNAVAILABLE'} · `

@@ -95,7 +95,7 @@ def test_postdeploy_verifier_pins_the_deployed_score_led_registry_identity():
     )
     assert result.stdout.splitlines() == [
         "v31-trend-fade-single-tile-v5",
-        "2d44035c5756e90fa6a1a2d13620148f2b47fec543b3577cff55f6d378fe0572",
+        "81b9fb129bde2986f571dbcbfbadc6002654e2c1c987df86d930bcacdb30ff74",
     ]
 
 

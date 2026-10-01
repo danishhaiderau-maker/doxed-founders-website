@@ -15,9 +15,14 @@ def test_empty_overview_shows_deployed_epoch_and_registry_collecting_identities(
     assert payload["status"] == "STALE GENERATION — QUALIFICATION BLOCKED"
     assert payload["generation_freshness"]["current"] is False
     assert "CURRENT_POLICY_REPORT_MISSING" in payload["generation_freshness"]["reasons"]
-    tile_epochs = {spec["policy_epoch"] for spec in combo_pathway_config.ACTIVE_TILE_REGISTRY.values()}
-    assert payload["policy_epoch_id"] == combo_pathway_config.TREND_FADE_60_POLICY_EPOCH
-    assert tile_epochs == {combo_pathway_config.TREND_FADE_60_POLICY_EPOCH}
+    registry = combo_pathway_config.ACTIVE_TILE_REGISTRY
+    assert deployed["policy_epochs"] == [
+        combo_pathway_config.TREND_FADE_60_POLICY_EPOCH, combo_pathway_config.RESEARCH_STACK_VERSION,
+    ]
+    assert payload["policy_epoch_id"] is None and deployed["policy_epoch"] is None
+    assert [(row["lane"], row["policy_epoch"]) for row in deployed["policies"]] == [
+        (lane, registry[lane]["policy_epoch"]) for lane in combo_pathway_config.ACTIVE_TILE_ORDER
+    ]
     assert deployed["policy_count"] == len(combo_pathway_config.active_tile_lifecycle_manifest())
     assert deployed["qualification_allowed"] is False
     assert all(row["collection_status"] == "COLLECTING_NO_CURRENT_EPOCH_EVIDENCE" for row in deployed["policies"])

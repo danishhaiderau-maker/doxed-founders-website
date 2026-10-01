@@ -40,7 +40,8 @@ def _decide(direction="SHORT", bid=64999.0, ask=65000.0, bbo_age=1.0):
 
 def test_registry_owns_this_paper_only_relay_ineligible_beta_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
-    assert ACTIVE_TILE_ORDER == (policy.LANE,)
+    assert ACTIVE_TILE_ORDER[0] == policy.LANE
+    assert len({COMBO_LANE_SPECS[lane]["policy_signature"] for lane in ACTIVE_TILE_ORDER}) == len(ACTIVE_TILE_ORDER)
     assert spec["paper_only"] is True
     assert spec["platform_relay_eligible"] is False
     assert spec["default_enabled"] is False

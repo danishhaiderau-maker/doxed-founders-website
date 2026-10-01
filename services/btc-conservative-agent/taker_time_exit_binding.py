@@ -9,9 +9,12 @@ Everything is read from the bound lane's registry spec:
 * Entry is one marketable limit at the signal (ask/bid plus a protection cap,
   short TTL). The tile stands aside when the quoted spread or the BBO age exceeds
   its registry limits.
-* Exit is the time limit or the catastrophic price stop, nothing else. The stop
-  books the side-correct quote that crossed it, so gap-through is reported as
-  realised loss rather than hidden.
+* Exit is the time limit or the catastrophic price stop. A tile whose registry
+  spec declares a ``ladder`` also arms that profit-lock ladder (margin % peak →
+  locked at the tile's leverage); the effective stop is the more protective of
+  the catastrophic stop and the armed lock. Stops and locks book the
+  side-correct quote that crossed them, so gap-through is reported as realised
+  loss rather than hidden.
 """
 from __future__ import annotations
 
@@ -54,6 +57,7 @@ class TakerTimeExitBinding:
         self.exit = spec["exit_policy"]
         if self.entry["direction_source"] not in DIRECTION_SOURCES:
             raise ValueError(f"{lane}: unknown direction_source {self.entry['direction_source']}")
+        self.ladder = tuple(tuple(row) for row in spec.get("ladder") or ())
         self.spec = PolicySpec(
             policy_id=self.policy_id, lane=lane, label=label,
             family=self.exit["family"], entry_offset_pct=0.0, chase_windows=(),
@@ -63,6 +67,9 @@ class TakerTimeExitBinding:
             hard_stop_margin_pct=float(self.exit["hard_stop_margin_pct"]),
             max_duration_sec=int(self.exit["max_duration_sec"]),
             margin_cap_usd=float(spec["requested_margin_usd"]),
+            trail_ladder=self.ladder,
+            ladder_label=spec.get("ladder_label") if self.ladder else None,
+            ladder_profile_id=spec.get("ladder_profile_id") if self.ladder else None,
         )
         # Reuses the adaptive decision contract so the generic lifecycle adapter
         # and analyzer treat this tile's signal-time record identically.
@@ -207,14 +214,23 @@ class TakerTimeExitBinding:
             "Side = opposite of score-led AI side"
             if entry["direction_source"] == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
         )
+        max_open = int(exit_policy.get("max_open_positions") or 1)
+        exit_chips = (
+            [
+                f"Ladder {self.spec.ladder_label}",
+                "Stop = tighter of catastrophic stop and lock",
+                "No break-even / trail / target beyond the ladder",
+            ]
+            if self.ladder else ["No ladder / break-even / trail / target"]
+        )
         payload["filter_chips"] = [
             "PAPER ONLY", side,
             f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
             f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
             f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
             f"{int(exit_policy['max_duration_sec']) // 60}m time exit",
-            "No ladder / break-even / trail / target",
-            f"Max {int(exit_policy.get('max_open_positions') or 1)} open position",
+            *exit_chips,
+            f"Max {max_open} open position" + ("s" if max_open > 1 else ""),
         ]
         payload["entry"].update({
             "trigger": (
@@ -234,6 +250,12 @@ class TakerTimeExitBinding:
             "stop_fill": exit_policy["stop_fill"],
             "max_open_positions": exit_policy.get("max_open_positions"),
         })
+        if self.ladder:
+            payload["exit"].update({
+                "profit_lock": exit_policy["profit_lock"],
+                "lock_fill": exit_policy["lock_fill"],
+                "ladder": self.spec.ladder_label,
+            })
         pre = tile.get("pre_registration")
         if pre:
             payload["pre_registration"] = {

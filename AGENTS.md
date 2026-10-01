@@ -37,24 +37,33 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- One tile is registered: Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`), an
-  owner-approved paper beta with no proven edge. It consumes the shared AI call
-  with its own lock, orders, positions, ledger and analyzer cohort. Its own lane
-  admission trades the opposite of the shared call's score-led side (raw AI
-  NO_TRADE and small gaps still trade; ties, invalid scores and AI errors
-  refuse), enters taker at the signal with a 5 bp price cap and 15 s TTL, stands
-  aside when the spread exceeds 1.68 bp or the BBO is stale, and exits only at 60
-  minutes or a 40 bp catastrophic stop booked at the crossing quote (no ladder,
-  break-even, trail or target; one position). Its label discloses "in-sample
-  +$1.30 / 47 trades; expected heavy decay". It defaults OFF in source (the
-  deploy turns it ON), is paper-only, and is relay-ineligible. Its frozen
-  trade-count pre-registration: promotion (owner review, never relay) needs
-  >=150 trades, a per-trade EV lower 95% CI > 0, both halves positive and no 2 h
-  window above 30% of profit; kill when down $0.40 after 40 trades, not positive
-  after 80, any trade worse than -60 bp, drawdown above $1.00, or day 14 without
-  promotion. Its policy epoch and signature are pinned so its cohort continues
-  across registry-version bumps; it has no paired control since the Dynamic
-  Adaptive tiles were retired on 2026-10-02. The three Dynamic Adaptive tiles
+- Two tiles are registered, both owner-approved paper experiments with no
+  proven edge. Each consumes the shared AI call with its own lock, orders,
+  positions, ledger and analyzer cohort, and they pair on identical signals.
+  Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`): its own lane admission trades
+  the opposite of the shared call's score-led side (raw AI NO_TRADE and small
+  gaps still trade; ties, invalid scores and AI errors refuse), enters taker at
+  the signal with a 5 bp price cap and 15 s TTL, stands aside when the spread
+  exceeds 1.68 bp or the BBO is stale, and exits only at 60 minutes or a 40 bp
+  catastrophic stop booked at the crossing quote (no ladder, break-even, trail
+  or target; one position). Its label discloses "in-sample +$1.30 / 47 trades;
+  expected heavy decay". It defaults OFF in source (the deploy turns it ON).
+  Its policy epoch and signature are pinned so its cohort continues across
+  registry-version bumps; it has no paired control since the Dynamic Adaptive
+  tiles were retired on 2026-10-02. Tile 2, Trend Fade 60 + Profit Lock
+  (`FAMILY_TREND_FADE_60_LADDER`, prefix `ftl`): identical entry and lane
+  admission; exits on the Scenario-C profit-lock ladder (8>5, 12>10, 19>17,
+  40>28, 60>45, 80>60, 100>75, 150>120 margin % at 100x, booked at the crossing
+  quote), the 40 bp catastrophic stop or the 60-minute backstop (no break-even,
+  trail or target beyond the ladder); holds up to five concurrent positions in
+  its own capacity; default ON at the owner's request (the registry refuses
+  default ON for any tile that is not paper-only and relay-blocked); Trend Fade
+  60 is its paired control. Both are paper-only and relay-ineligible and carry
+  the same frozen trade-count pre-registration: promotion (owner review, never
+  relay) needs >=150 trades, a per-trade EV lower 95% CI > 0, both halves
+  positive and no 2 h window above 30% of profit; kill when down $0.40 after 40
+  trades, not positive after 80, any trade worse than -60 bp, drawdown above
+  $1.00, or day 14 without promotion. The three Dynamic Adaptive tiles
   (`FAMILY_ADAPTIVE_REGIME`, `FAMILY_ADAPTIVE_REGIME_LADDER`,
   `FAMILY_ADAPTIVE_REGIME_LADDER_BE`), the five former family tiles and the
   Continuous comparison label are retired (`RETIRED_TILE_LANES`); their history
