@@ -48,8 +48,11 @@ POLICIES: Mapping[str, Policy] = {
     "segment_pull_dead": Policy(2, 10 * 60.0, 12 * HOUR, False),
     # The supervisor ticks but the local monitor is not refreshing alerts.
     "monitor_stale": Policy(2, 20 * 60.0, 12 * HOUR, False),
+    # scripts/system_health.py has an open RED alarm (already sustain-gated).
+    "system_health_red": Policy(1, 0.0, 12 * HOUR, False),
     "test_alert": Policy(1, 0.0, 0.0, False),
 }
+SYSTEM_HEALTH_MAX_AGE_SEC = 20 * 60.0
 
 
 def parse_utc(value: Any) -> float | None:
@@ -99,6 +102,22 @@ def findings(
         if isinstance(alert, dict) and alert.get("code") == "SEGMENT_PULL_DEAD":
             found["segment_pull_dead"] = f"segment pull loop is not running: {str(alert.get('detail') or '')[:200]}"
     return found
+
+
+def system_health_findings(report: Any, now: float) -> dict[str, str]:
+    """One finding while the system-health watcher has open RED alarms."""
+    if not isinstance(report, dict):
+        return {}
+    generated = report.get("generated_ts")
+    if not isinstance(generated, (int, float)) or now - generated > SYSTEM_HEALTH_MAX_AGE_SEC:
+        return {}
+    open_ids = [str(x) for x in report.get("open_alarms") or []]
+    if not open_ids:
+        return {}
+    by_id = {f.get("id"): f for f in report.get("failing") or [] if isinstance(f, dict)}
+    lines = [f"{cid}: {str(by_id.get(cid, {}).get('observed') or '')[:160]} -> {by_id.get(cid, {}).get('runbook', '')}"
+             for cid in open_ids[:8]]
+    return {"system_health_red": "system health RED: " + " | ".join(lines)}
 
 
 RELAY_WORKFLOW = "laptop-incident-relay.yml"
@@ -178,6 +197,7 @@ def run(args: argparse.Namespace, *, client: Any = None, now: float | None = Non
         now,
         analyzer_max_age_sec=args.analyzer_max_age_min * 60.0,
     )
+    found.update(system_health_findings(read_json(state_dir / "health" / "system-health-latest.json"), now))
     if args.test_alert:
         found["test_alert"] = "synthetic laptop test alert (not a real incident)"
     decisions, resolved = alerts.evaluate(state, found, now=now, maintenance=False, policies=POLICIES)

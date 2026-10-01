@@ -81,15 +81,26 @@ try {
   } catch {
     $proof = "PROOF_ERROR $($_.Exception.Message)"
   }
-  # One GitHub issue per incident (label laptop-chain-incident) plus the
-  # supervisor heartbeat the Fly monitor watches. Never fails the tick.
+  # Aggregated positive-progress health verdict and edge-triggered alarms
+  # (toast, alarm log, webhook if configured, dashboard banners). The single
+  # system-health watcher; diagnostics only. Never fails the tick.
+  $health = 'not-run'
+  try {
+    $health = (& python (Join-Path $PSScriptRoot 'system_health.py') --tick --state-dir $cfg.StateDir --analyzer-repo $cfg.RepoRoot 2>&1 |
+      Select-Object -Last 1) -as [string]
+  } catch {
+    $health = "HEALTH_ERROR $($_.Exception.Message)"
+  }
+  # One GitHub issue per incident (label laptop-chain-incident, including open
+  # system-health RED alarms) plus the supervisor heartbeat the Fly monitor
+  # watches. Never fails the tick.
   $incident = 'not-run'
   try {
     $incident = (& python (Join-Path $PSScriptRoot 'laptop_chain_incident.py') --state-dir $cfg.StateDir 2>&1 | Select-Object -Last 1) -as [string]
   } catch {
     $incident = "INCIDENT_ERROR $($_.Exception.Message)"
   }
-  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $autoFf $snapshots $incident $proof"
+  Write-ChainLog -Config $cfg -Name $logName -Message "TICK monitorExit=$monitorExit $autoFf $snapshots $incident $proof $health"
 } catch {
   Write-ChainLog -Config $cfg -Name $logName -Message ("TICK_ERROR {0}" -f $_.Exception.Message)
   exit 1
