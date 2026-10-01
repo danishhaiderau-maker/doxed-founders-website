@@ -22,7 +22,7 @@ REPORT_FILE = "tile_paired_comparison_report.json"
 CLUSTER_SEC = 6 * 3600
 BOOTSTRAP_DRAWS = 2000
 BOOTSTRAP_SEED = 20261001
-HARD_STOP_REASONS = frozenset({"PHYSICAL_HARD_STOP_30PCT", "HARD_STOP"})
+WINDOW_2H_SEC = 2 * 3600
 UNFILLED_REASONS = frozenset({"NO_FILL", "UNFILLED", "CANCELLED", "EXPIRED"})
 STOP_LIKE_REASONS = frozenset({
     "INITIAL_ATR_STOP", "PROFIT_PROTECTION_STOP", "PROFIT_LOCK_LADDER", "BREAKEVEN_LOCK",
@@ -143,6 +143,22 @@ def _win_fields(pnls: list[float]) -> dict[str, Any]:
             "win_rate_pct": round(100.0 * wins / len(pnls), 1) if pnls else None}
 
 
+def _is_hard_stop(reason: str) -> bool:
+    return reason == "HARD_STOP" or reason.startswith("PHYSICAL_HARD_STOP")
+
+
+def _max_window_profit_share(fills: list[dict[str, Any]]) -> float | None:
+    """Largest share of total net profit closed inside any 2-hour window."""
+    total = sum(r["pnl_usd"] for r in fills)
+    if total <= 0:
+        return None
+    best = max(
+        sum(r["pnl_usd"] for r in fills if start["close_ts"] <= r["close_ts"] < start["close_ts"] + WINDOW_2H_SEC)
+        for start in fills
+    )
+    return round(best / total, 4)
+
+
 def _tile_stats(fills: list[dict[str, Any]]) -> dict[str, Any]:
     fills = sorted(fills, key=lambda r: r["close_ts"])
     bps = [r["bp"] for r in fills if r["bp"] is not None]
@@ -155,7 +171,7 @@ def _tile_stats(fills: list[dict[str, Any]]) -> dict[str, Any]:
         cumulative += r["pnl_usd"]
         peak = max(peak, cumulative)
         drawdown = max(drawdown, peak - cumulative)
-    hard = [1 if r["reason"] in HARD_STOP_REASONS else 0 for r in fills]
+    hard = [1 if _is_hard_stop(r["reason"]) else 0 for r in fills]
     window = max((sum(hard[i:i + 50]) for i in range(max(1, len(hard) - 49))), default=0)
     overshoots = [r["overshoot_bp"] for r in fills if r["overshoot_bp"] is not None]
     return {
@@ -170,6 +186,8 @@ def _tile_stats(fills: list[dict[str, Any]]) -> dict[str, Any]:
         "second_half_ev_bp": round(sum(bps[half:]) / (len(bps) - half), 4) if len(bps) - half else None,
         **_win_fields([r["pnl_usd"] for r in fills]),
         "max_drawdown_usd": round(drawdown, 6),
+        "worst_fill_bp": round(min(bps), 4) if bps else None,
+        "max_2h_window_profit_share": _max_window_profit_share(fills),
         "max_hard_stops_in_rolling_50": int(window),
         "max_lock_or_stop_overshoot_bp": round(max(overshoots), 4) if overshoots else None,
         "overshoot_evidence_rows": len(overshoots),
@@ -201,8 +219,8 @@ def _paired(by_lane: Mapping[str, list[dict[str, Any]]], a: str, b: str) -> dict
     }
 
 
-def _verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
-             dsr: float | None, now_ts: float) -> dict[str, Any]:
+def _ladder_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                    dsr: float | None, now_ts: float) -> dict[str, Any]:
     promote, kill = pre["promotion"], pre["kill"]
     lo, hi = stats.get("per_fill_ev_ci95_bp") or [None, None]
     plo, phi = paired.get("difference_ci95_bp") or [None, None]
@@ -230,15 +248,53 @@ def _verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[s
         "deflated_sharpe": dsr is not None and dsr >= promote["deflated_sharpe_min"],
         "beats_control_paired": plo is not None and plo > promote["paired_vs_control_lower_ci95_gt_bp"],
     }
+    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+
+
+def _trade_count_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                         dsr: float | None, now_ts: float) -> dict[str, Any]:
+    promote, kill = pre["promotion"], pre["kill"]
+    lo, _ = stats.get("per_fill_ev_ci95_bp") or [None, None]
+    fills = int(stats.get("fills") or 0)
+    net = float(stats.get("net_pnl_usd") or 0.0)
+    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    kills = []
+    if fills >= kill["k1_after_fills"] and net <= kill["k1_net_usd_at_or_below"]:
+        kills.append("K1_NET_LOSS_AFTER_40")
+    if fills >= kill["k2_after_fills"] and net <= kill["k2_net_usd_at_or_below"]:
+        kills.append("K2_NOT_POSITIVE_AFTER_80")
+    worst = stats.get("worst_fill_bp")
+    if worst is not None and worst < kill["k3_worst_trade_bp_below"]:
+        kills.append("K3_STOP_FAILURE")
+    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
+        kills.append("K4_DRAWDOWN")
+    share = stats.get("max_2h_window_profit_share")
+    checks = {
+        "min_fills": fills >= promote["min_fills"],
+        "per_fill_ev_lower_ci95_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
+        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
+        "no_2h_window_dominates": share is not None and share <= promote["max_2h_window_profit_share"],
+    }
+    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+
+
+def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any], age_days: float,
+            *, deflated_sharpe: float | None) -> dict[str, Any]:
     promoted = all(checks.values())
     if not promoted and age_days > kill["k5_max_days_without_promotion"]:
         kills.append("K5_TIME_BOX_INCONCLUSIVE")
     status = "KILL" if kills else ("PROMOTION_ELIGIBLE_FOR_OWNER_REVIEW" if promoted else "COLLECTING")
     return {
-        "status": status, "kill_reasons": kills, "promotion_checks": checks,
-        "deflated_sharpe": dsr, "days_since_registration": round(age_days, 3),
+        "status": status, "kill_reasons": kills, "promotion_checks": dict(checks),
+        "deflated_sharpe": deflated_sharpe, "days_since_registration": round(age_days, 3),
         "action_on_kill": "Toggle OFF and retire per TILE_LIFECYCLE.md (owner decision; never automatic)",
     }
+
+
+VERDICT_RULES = {
+    "tile_pre_registration_v1": _ladder_verdict,
+    "tile_pre_registration_trade_count_v1": _trade_count_verdict,
+}
 
 
 def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, Mapping[str, Any]],
@@ -287,11 +343,17 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
         values = [r["bp"] for r in sorted(by_lane[lane], key=lambda r: r["close_ts"]) if r["bp"] is not None]
         dsr = deflated_sharpe(values, trials=trials, sr_variance=sr_variance)
         vs_control = next((p for p in pairs if p["control"] == pre["control_lane"] and p["challenger"] == lane), {})
+        rule = VERDICT_RULES.get(pre.get("schema"))
         pre_registered[lane] = {
             "hypothesis_id": pre["hypothesis_id"],
             "control_lane": pre["control_lane"],
+            "control_meaning": pre.get("control_meaning"),
+            "honest_label": pre.get("honest_label"),
             "rules": pre,
-            "verdict": _verdict(stats[lane], vs_control, pre, dsr, now_ts),
+            "verdict": (
+                rule(stats[lane], vs_control, pre, dsr, now_ts) if rule
+                else {"status": "UNKNOWN_PRE_REGISTRATION_SCHEMA", "kill_reasons": [], "promotion_checks": {}}
+            ),
         }
     return {
         "schema": SCHEMA,

@@ -485,7 +485,7 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert score_child.stdout.splitlines() == [
         "v31-dynamic-adaptive-ladder-paper-v4",
-        "c36c9d5bf953eb02e64a2269aca66519bfaf62a0aa54b6560f26b3911b398360",
+        "35860f9d58614d5a80fc84a1630612aaf58609c6b38b398b5d37b45b01a343af",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -500,7 +500,7 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
     )
     assert hypothesis_child.stdout.splitlines() == [
         "v31-dynamic-adaptive-ladder-paper-v4",
-        "b69e57f8c4ffeb107b7912e766cef4e9a2c8a5a5dba87dee0bcd46258bad4d6a",
+        "7a00d768359af7621938835b6004d5f3b48b5e715e7a20a8d004a03f28959f29",
     ]
 
 

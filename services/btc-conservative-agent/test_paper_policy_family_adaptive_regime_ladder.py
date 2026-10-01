@@ -29,7 +29,7 @@ def _px(margin_pct, direction="LONG"):
 
 def test_registry_owns_this_paper_only_relay_ineligible_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
-    assert ACTIVE_TILE_ORDER == (base.LANE, policy.LANE, be.LANE)
+    assert ACTIVE_TILE_ORDER[:3] == (base.LANE, policy.LANE, be.LANE)
     assert spec["paper_only"] is True
     assert spec["platform_relay_eligible"] is False
     assert spec["default_enabled"] is False

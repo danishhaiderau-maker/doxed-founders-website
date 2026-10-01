@@ -197,6 +197,9 @@ def test_family_fanout_preserves_raw_ai_and_records_effective_admission():
             {"passes": direction == "LONG" and spread == 4}
         ),
         "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
         "_stamp_shared_ai_lane_verdict": (
             lambda *args, **kwargs: stamps.append((args, copy.deepcopy(kwargs)))
         ),
@@ -355,6 +358,9 @@ def test_applied_rejection_fanout_records_evidence_without_parsing_spread(fields
         "is_deterministic_bracket_lane": lambda _lane: False,
         "combo_lane_match_detail": lambda *_args, **_kwargs: {"passes": True},
         "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
         "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
         "_shared_ai_call_id": (
             lambda ai_result=None, ctx=None: "scan-rejected-score-led"
@@ -456,6 +462,9 @@ def test_missing_score_led_flag_refuses_research_start_present_flag_does_not(raw
             {"passes": direction == "LONG" and spread == 4}
         ),
         "is_research_lane_enabled": lambda _lane: True,
+        "_tile_view_of_shared_call": (
+            lambda _lane, _raw, lane_ai, _adm, direction, spread: (lane_ai, direction, spread, None)
+        ),
         "_stamp_shared_ai_lane_verdict": lambda *_args, **_kwargs: None,
         "_shared_ai_call_id": lambda ai_result=None, ctx=None: "scan-flag-gate",
         "_v3_lane_policy_material": lambda _lane: {"policy_signature": "policy-v2"},

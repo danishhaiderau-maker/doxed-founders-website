@@ -1,5 +1,5 @@
 {
-  "description": "Frozen parity cases for the three registry-owned Dynamic Adaptive paper tiles (ATR Trail; ATR Trail plus Scenario-C profit lock; and ATR Trail plus break-even and Scenario-C profit lock) sharing one direction call; the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
+  "description": "Frozen parity cases for the four registry-owned paper tiles sharing one direction call: Dynamic Adaptive ATR Trail; plus Scenario-C profit lock; plus break-even and Scenario-C profit lock; and the Trend Fade 60 beta (side derived from the same call by its own lane admission, so the shared fingerprint matches it too). The five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
   "cases": [
     {
       "id": "dynamic-adaptive-long-shared-direction",
@@ -13,7 +13,8 @@
       "expect_lanes": [
         "FAMILY_ADAPTIVE_REGIME",
         "FAMILY_ADAPTIVE_REGIME_LADDER",
-        "FAMILY_ADAPTIVE_REGIME_LADDER_BE"
+        "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
+        "FAMILY_TREND_FADE_60"
       ],
       "reject_lanes": [
         "FAMILY_CHANDELIER_3",
@@ -37,7 +38,8 @@
       "expect_lanes": [
         "FAMILY_ADAPTIVE_REGIME",
         "FAMILY_ADAPTIVE_REGIME_LADDER",
-        "FAMILY_ADAPTIVE_REGIME_LADDER_BE"
+        "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
+        "FAMILY_TREND_FADE_60"
       ],
       "reject_lanes": [
         "FAMILY_CHANDELIER_3",
@@ -67,6 +69,11 @@
     {
       "id": "dynamic-adaptive-ladder-be-not-benchmark",
       "lane": "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
+      "expect_benchmark": false
+    },
+    {
+      "id": "trend-fade-60-not-benchmark",
+      "lane": "FAMILY_TREND_FADE_60",
       "expect_benchmark": false
     }
   ]

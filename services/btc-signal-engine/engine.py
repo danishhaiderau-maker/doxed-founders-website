@@ -4838,7 +4838,7 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     pos.setdefault("partial_exit_receipts", []).append(receipt)
     pos["policy_remaining_fraction"] = remaining_after
     if remaining_after <= 0:
-        if reason == "PATH_END_120M":
+        if _TIME_EXIT_REASON.fullmatch(reason):
             pos["path_end_mark_price"] = float(price)
         with trade_lock:
             source_pos.clear()
@@ -6563,6 +6563,18 @@ _TRIGGER_CONSISTENT_EXIT_REASONS = frozenset({
     "BREAKEVEN_LOCK",
     "PATH_END_120M",
 })
+# Registry policies name their hard stop and time exit from their own limits.
+_HARD_STOP_REASON = re.compile(r"PHYSICAL_HARD_STOP_\d+(\.\d+)?PCT")
+_TIME_EXIT_REASON = re.compile(r"PATH_END_\d+M")
+
+
+def _is_trigger_consistent_exit_reason(reason) -> bool:
+    reason = str(reason or "").upper()
+    return (
+        reason in _TRIGGER_CONSISTENT_EXIT_REASONS
+        or bool(_HARD_STOP_REASON.fullmatch(reason))
+        or bool(_TIME_EXIT_REASON.fullmatch(reason))
+    )
 
 
 def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> tuple:
@@ -6571,7 +6583,7 @@ def resolve_sim_exit_price(pos: dict, exit_is_maker: bool, exit_reason: str) -> 
     direction = str(pos.get("dir") or "").upper()
     fallback = get_mark_price(direction, fallback=state.get("price", pos.get("entry", 0)))
     trigger = float(pos.get("_exit_eval_price") or 0)
-    if str(exit_reason or "").upper() in _TRIGGER_CONSISTENT_EXIT_REASONS:
+    if _is_trigger_consistent_exit_reason(exit_reason):
         # Do not walk the book to a far-better VWAP than the side-correct
         # trigger that actually fired the rule (the old STOP_LOSS mismatch).
         px = trigger if trigger > 0 else fallback
@@ -18644,6 +18656,24 @@ def _adaptive_regime_entry_decision(lane: str, direction: str, ctx: dict,
     return decision
 
 
+def _tile_view_of_shared_call(lane: str, raw_ai: dict, lane_ai: dict, admission: dict,
+                              final_direction: str, spread: int) -> tuple:
+    """(ai, direction, spread, admission_reason) for one tile from the shared call.
+
+    A tile whose policy declares ``lane_admission`` derives its own side from the
+    same call (for example the opposite of the score-led side); every other tile
+    uses the shared score-led view. The shared row is never mutated.
+    """
+    admit = getattr(_patient_chase_policy(lane), "lane_admission", None)
+    if admit is None:
+        return lane_ai, final_direction, spread, None
+    view = admit(raw_ai, admission)
+    tile_ai = view["lane_ai"]
+    direction = view["direction"]
+    tile_spread = int(compute_directional_spread(direction, tile_ai)) if view["accepted"] else 0
+    return tile_ai, direction, tile_spread, view["reason"]
+
+
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
@@ -18692,14 +18722,17 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             or is_deterministic_bracket_lane(lane)
         ):
             continue
-        detail = combo_lane_match_detail(
-            lane, lane_ai, final_direction, spread, features=enriched,
+        tile_ai, tile_direction, tile_spread, tile_admission_reason = _tile_view_of_shared_call(
+            lane, ai, lane_ai, score_led_admission, final_direction, spread,
         )
-        ai_accepted = str(lane_ai.get("decision") or "").upper() == "APPROVE"
+        detail = combo_lane_match_detail(
+            lane, tile_ai, tile_direction, tile_spread, features=enriched,
+        )
+        ai_accepted = str(tile_ai.get("decision") or "").upper() == "APPROVE"
         lane_features = enriched
         decision_features = features or {}
         adaptive = (
-            _adaptive_regime_entry_decision(lane, final_direction, ctx, ai, enriched)
+            _adaptive_regime_entry_decision(lane, tile_direction, ctx, ai, enriched)
             if ai_accepted else None
         )
         if adaptive is not None:
@@ -18712,7 +18745,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         policy_accepted = ai_accepted and bool(detail.get("passes"))
         if not ai_accepted:
             disposition = "AI_REJECTED_NO_ORDER"
-            decision_reason = f"AI_{str(lane_ai.get('decision') or 'REJECT').upper()}"
+            decision_reason = tile_admission_reason or f"AI_{str(tile_ai.get('decision') or 'REJECT').upper()}"
         elif not detail.get("passes"):
             disposition = "POLICY_FILTERED_NO_ORDER"
             decision_reason = detail.get("block_reason") or "COMBO_FILTER"
@@ -18721,7 +18754,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
         else:
             disposition = "ORDER_ELIGIBLE"
-            decision_reason = (
+            decision_reason = tile_admission_reason or (
                 score_led_admission["reason"]
                 if score_led_admission.get("applied")
                 else "SHARED_AI_APPROVE_AND_POLICY_PASS"
@@ -18732,27 +18765,27 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
         # evaluations rendered as "not evaluated" even while their paper
         # workers and orders were advancing.
         _stamp_shared_ai_lane_verdict(
-            _shared_ai_call_id(ai_result=lane_ai, ctx=ctx),
+            _shared_ai_call_id(ai_result=tile_ai, ctx=ctx),
             lane,
             policy_accepted,
             decision_reason,
-            score=spread,
+            score=tile_spread,
             policy_version=str(
                 (_v3_lane_policy_material(lane) or {}).get("policy_signature")
                 or (_v3_lane_policy_material(lane) or {}).get("raw_policy_id")
                 or lane
             ),
             effective_direction=(
-                lane_ai.get("effective_research_direction") or final_direction
+                tile_ai.get("effective_research_direction") or tile_direction
             ),
             admission_policy_id=(
-                lane_ai.get("effective_research_admission_policy_id")
+                tile_ai.get("effective_research_admission_policy_id")
             ),
         )
         evidence_ready = _write_v3_shared_lane_decision(
-            lane, lane_ai, ctx, decision_features,
+            lane, tile_ai, ctx, decision_features,
             policy_decision=(
-                "ERROR" if bool(lane_ai.get("ai_error"))
+                "ERROR" if bool(tile_ai.get("ai_error"))
                 else "ACCEPT" if policy_accepted else "REJECT"
             ),
             execution_disposition=disposition,
@@ -18770,7 +18803,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             br = detail.get("block_reason") or "COMBO_FILTER"
             log_lane_opportunity_event(
                 lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
-                (lane_ai or {}).get("direction"), (lane_ai or {}).get("win_prob"), edge_score,
+                (tile_ai or {}).get("direction"), (tile_ai or {}).get("win_prob"), edge_score,
                 block_reason=br,
             )
             logger.info(
@@ -18779,7 +18812,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             )
             continue
         _enqueue_combo_lane_execution(
-            ctx, lane_ai, edge_score, lane_features, lane,
+            ctx, tile_ai, edge_score, lane_features, lane,
             f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
 

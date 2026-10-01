@@ -29,7 +29,7 @@ def _px(margin_pct, direction="LONG", entry=ENTRY):
 
 def test_registry_owns_this_paper_only_relay_ineligible_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
-    assert ACTIVE_TILE_ORDER == (base.LANE, ladder.LANE, policy.LANE)
+    assert ACTIVE_TILE_ORDER[:3] == (base.LANE, ladder.LANE, policy.LANE)
     assert spec["max_active_signals"] == 1
     assert spec["exit_policy"] == {**COMBO_LANE_SPECS[ladder.LANE]["exit_policy"], **{
         k: spec["exit_policy"][k] for k in ("profit_lock", "breakeven_trigger_margin_pct",

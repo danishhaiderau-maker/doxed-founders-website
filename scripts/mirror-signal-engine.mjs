@@ -145,6 +145,7 @@ const activePolicyFiles = [
   'family_policy_common.py',
   'adaptive_regime_entry.py',
   'adaptive_profit_lock_binding.py',
+  'taker_time_exit_binding.py',
   'scenario_c_config.py',
   ...readdirSync(agentDir).filter((name) => /^paper_policy_.+\.py$/.test(name)).sort(),
 ];

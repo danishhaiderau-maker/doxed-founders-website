@@ -110,6 +110,8 @@ RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME = "FAMILY_ADAPTIVE_REGIME"
 RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER = "FAMILY_ADAPTIVE_REGIME_LADDER"
 RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER_BE = "FAMILY_ADAPTIVE_REGIME_LADDER_BE"
+RESEARCH_LANE_FAMILY_TREND_FADE_60 = "FAMILY_TREND_FADE_60"
+INVERTED_SCORE_LED_ADMISSION_POLICY_ID = "INVERTED_SCORE_LED_SIDE_V1"
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
 TILE_ARCHITECTURE_VERSION = 3
 # Complete atomic add/retire contract from the V3.1 objective.  Every active
@@ -138,6 +140,7 @@ COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME,
     RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER,
     RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME_LADDER_BE,
+    RESEARCH_LANE_FAMILY_TREND_FADE_60,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -152,7 +155,7 @@ def _policy_signature(*, raw_policy_id: str, entry: dict, exit_policy: dict,
         "exit_policy": exit_policy,
         "ladder": tuple(tuple(row) for row in ladder),
         "entry_ttl_sec": entry_ttl_sec,
-        "path_end_sec": 7200,
+        "path_end_sec": int(exit_policy.get("max_duration_sec", 7200)),
         "requested_margin_usd": 0.25,
         "account_risk_pct": 0.5,
     }
@@ -175,7 +178,8 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           entry_ttl_sec: int = 1800,
           subtitle: str | None = None, policy_epoch: str | None = None,
           max_active_signals: int = TILE_MAX_ACTIVE_SIGNALS,
-          pre_registration: dict | None = None) -> dict:
+          pre_registration: dict | None = None,
+          admission_treatment: str | None = None) -> dict:
     if SCORE_LED_PAPER_RESEARCH_ENABLED:
         raw_policy_id = SCORE_LED_ADMISSION_POLICY_ID + "::" + raw_policy_id
     chase = tuple(entry["chase_windows"])
@@ -191,14 +195,14 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
             entry_ttl_sec=entry_ttl_sec,
         ),
         "policy_epoch": policy_epoch or ("v31-score-led-non-tie-paper-v2" if SCORE_LED_PAPER_RESEARCH_ENABLED else "v31-analyzer-hypothesis-paper-v1"),
-        "admission_treatment": (SCORE_LED_ADMISSION_POLICY_ID if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
+        "admission_treatment": admission_treatment or (SCORE_LED_ADMISSION_POLICY_ID if SCORE_LED_PAPER_RESEARCH_ENABLED else "AI_FILTERED_V1"),
         "research_lane": lane,
         "execution_scope": "PAPER_ONLY",
         "paper_eligible": True,
         "live_copy_eligible": False,
         "relay_capability": relay_capability,
         "requested_margin_usd": 0.25,
-        "risk_limits": {"account_risk_pct": 0.5, "hard_stop_margin_pct": 30.0},
+        "risk_limits": {"account_risk_pct": 0.5, "hard_stop_margin_pct": float(exit_policy.get("hard_stop_margin_pct", 30.0))},
         "max_active_signals": int(max_active_signals),
         "analyzer_cohort": raw_policy_id,
         "presentation": {
@@ -225,7 +229,7 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "chase_interval_sec": entry["reprice_sec"],
         "chase_remaining_gap_step_pct": entry["remaining_gap_step_pct"],
         "entry_ttl_sec": entry_ttl_sec, "margin_usd": 0.25,
-        "account_risk_pct": 0.5, "path_end_sec": 7200,
+        "account_risk_pct": 0.5, "path_end_sec": int(exit_policy.get("max_duration_sec", 7200)),
         "exit_profile_id": raw_policy_id.split("|", 1)[1],
         "promotion_criteria": "Conservative chronological OOS, bounded drawdown, cross-world parity and every live gate GREEN",
         "kill_criteria": "Stop new entries on identity, fill, lifecycle, protection, mirror, analyzer or dashboard contradiction",
@@ -233,20 +237,8 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
     }
     if pre_registration:
         tile["pre_registration"] = pre_registration
-        promote, kill = pre_registration["promotion"], pre_registration["kill"]
-        tile["promotion_criteria"] = (
-            f"Pre-registered {pre_registration['hypothesis_id']}: >={promote['min_fills']} fills over "
-            f">={promote['min_days']} days, conservative per-fill EV lower 95% CI >0, both halves positive, "
-            f"Deflated Sharpe >={promote['deflated_sharpe_min']} across live hypotheses, beats "
-            f"{pre_registration['control_lane']} on paired signals; promotion = owner review, never relay"
-        )
-        tile["kill_criteria"] = (
-            f"K1 after {kill['k1_min_fills']} fills upper 95% CI of per-fill EV <0; K2 loses to "
-            f"{pre_registration['control_lane']} on {kill['k2_min_paired_signals']} paired signals; K3 stop "
-            f"failure (>={kill['k3_hard_stops_per_rolling_50_kill_at']} hard stops in any 50 fills or a lock/stop "
-            f">{kill['k3_max_lock_or_stop_overshoot_bp']:g} bp past its level); K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
-            f"K5 {kill['k5_max_days_without_promotion']} days without promotion"
-        )
+        tile["promotion_criteria"] = pre_registration["promotion_summary"]
+        tile["kill_criteria"] = pre_registration["kill_summary"]
     if ladder:
         tile.update({
             "ladder": tuple(tuple(row) for row in ladder),
@@ -306,7 +298,7 @@ _PROFIT_LOCK_EXIT = {
 
 def _ladder_pre_registration(hypothesis_id: str) -> dict:
     """Pre-registered verdict rules, evaluated only on post-registration data."""
-    return {
+    pre = {
         "schema": "tile_pre_registration_v1",
         "hypothesis_id": hypothesis_id,
         "registered_utc": "2026-10-01T07:30:00Z",
@@ -332,6 +324,64 @@ def _ladder_pre_registration(hypothesis_id: str) -> dict:
             "k5_max_days_without_promotion": 21,
         },
     }
+    promote, kill = pre["promotion"], pre["kill"]
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} fills over "
+        f">={promote['min_days']} days, conservative per-fill EV lower 95% CI >0, both halves positive, "
+        f"Deflated Sharpe >={promote['deflated_sharpe_min']} across live hypotheses, beats "
+        f"{pre['control_lane']} on paired signals; promotion = owner review, never relay"
+    )
+    pre["kill_summary"] = (
+        f"K1 after {kill['k1_min_fills']} fills upper 95% CI of per-fill EV <0; K2 loses to "
+        f"{pre['control_lane']} on {kill['k2_min_paired_signals']} paired signals; K3 stop "
+        f"failure (>={kill['k3_hard_stops_per_rolling_50_kill_at']} hard stops in any 50 fills or a lock/stop "
+        f">{kill['k3_max_lock_or_stop_overshoot_bp']:g} bp past its level); K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K5 {kill['k5_max_days_without_promotion']} days without promotion"
+    )
+    return pre
+
+
+def _trend_fade_pre_registration(hypothesis_id: str) -> dict:
+    """Owner-approved beta test; verdicts use post-registration trades only."""
+    pre = {
+        "schema": "tile_pre_registration_trade_count_v1",
+        "hypothesis_id": hypothesis_id,
+        "registered_utc": "2026-10-01T08:30:00Z",
+        "registered_cohort": RESEARCH_STACK_VERSION,
+        "control_lane": RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME,
+        "control_meaning": "AI's own score-led side on the same shared call",
+        "evidence_world": "CONSERVATIVE_BBO",
+        "ci_method": "6H_CLUSTER_BOOTSTRAP_95",
+        "honest_label": "in-sample +$1.30 / 47 trades; expected heavy decay; beta test",
+        "promotion": {
+            "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
+            "min_fills": 150,
+            "per_fill_ev_lower_ci95_gt_bp": 0.0,
+            "both_halves_positive": True,
+            "max_2h_window_profit_share": 0.30,
+        },
+        "kill": {
+            "k1_after_fills": 40, "k1_net_usd_at_or_below": -0.40,
+            "k2_after_fills": 80, "k2_net_usd_at_or_below": 0.0,
+            "k3_worst_trade_bp_below": -60.0,
+            "k4_max_drawdown_usd": 1.0,
+            "k5_max_days_without_promotion": 14,
+        },
+    }
+    promote, kill = pre["promotion"], pre["kill"]
+    pre["promotion_summary"] = (
+        f"Pre-registered {hypothesis_id}: >={promote['min_fills']} trades, per-trade EV lower 95% CI >0, "
+        f"both halves positive, no single 2 h window >{promote['max_2h_window_profit_share']:.0%} of profit; "
+        "promotion = owner review, never relay"
+    )
+    pre["kill_summary"] = (
+        f"K1 net <=${kill['k1_net_usd_at_or_below']:.2f} after {kill['k1_after_fills']} trades; "
+        f"K2 net <=${kill['k2_net_usd_at_or_below']:.2f} after {kill['k2_after_fills']} trades; "
+        f"K3 any trade worse than {kill['k3_worst_trade_bp_below']:g} bp (stop failure); "
+        f"K4 drawdown >${kill['k4_max_drawdown_usd']:.2f}; "
+        f"K5 day {kill['k5_max_days_without_promotion']} without promotion"
+    )
+    return pre
 
 
 
@@ -407,6 +457,50 @@ COMBO_LANE_SPECS = {
         subtitle=_ADAPTIVE_SUBTITLE,
         policy_epoch=RESEARCH_STACK_VERSION,
     ),
+    # Owner-approved beta test of the strongest in-sample research idea
+    # (TILE2-DESIGN-20261001 "Tile 4"): fade the score-led side of the same
+    # shared call. Only ties, invalid scores and AI errors refuse; raw AI
+    # NO_TRADE and small gaps trade, because the research tested every
+    # score-led side. 40 bp at 100x = 40% margin, below liquidation.
+    RESEARCH_LANE_FAMILY_TREND_FADE_60: _tile(
+        lane=RESEARCH_LANE_FAMILY_TREND_FADE_60,
+        label="Trend-label fade · inverted AI side, 60-min hold, 40 bp catastrophic stop",
+        raw_policy_id="INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP",
+        id_prefix="ftf",
+        module="paper_policy_family_trend_fade_60.py",
+        test_module="test_paper_policy_family_trend_fade_60.py",
+        entry={
+            "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
+            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+            "direction_source": "INVERTED_SCORE_LED_SIDE",
+            "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR"),
+            "trades_raw_ai_no_trade": True, "min_score_gap": None,
+            "max_spread_bps": 1.68, "max_bbo_age_sec": 5.0,
+            "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
+            "ai_decision_role": "FEATURE_ONLY",
+        },
+        exit_policy={
+            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
+            "max_duration_sec": 3600,
+            "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+            "ladder": None, "breakeven": None, "trail": None, "take_profit": None,
+            "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+            "max_open_positions": 1,
+        },
+        hypothesis_result={
+            "status": "IN_SAMPLE_ONLY_BETA_TEST",
+            "hypothesis_id": "H4_TREND_FADE_60_20261001",
+            "in_sample": "+$1.30 / 47 trades (27W/20L), +11.0 bp/trade, PF 2.0, max DD $0.17; holdout 9 trades $0.00",
+            "corrected": "family-wise circular-shift p 0.13; DSR ~0.1; per-trade CI includes 0",
+            "expected_live": "0 to +5 bp/trade after 50-100% decay",
+        },
+        pre_registration=_trend_fade_pre_registration("H4_TREND_FADE_60_20261001"),
+        admission_treatment=INVERTED_SCORE_LED_ADMISSION_POLICY_ID,
+        max_active_signals=1,
+        entry_ttl_sec=15,
+        subtitle="BETA TEST — in-sample +$1.30 / 47 trades; expected heavy decay — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=RESEARCH_STACK_VERSION,
+    ),
 }
 COMPARISON_BENCHMARK_LANE = None
 PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME
@@ -418,7 +512,7 @@ RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_FEATURES = (
-    "Three Dynamic Adaptive paper tiles consume the same shared three-minute direction call with identical entry and AI admission, so they pair on identical signals, each with an independent lock, order, position, ledger and analyzer cohort: Tile 1 ATR Trail; Tile 2 ATR Trail + Scenario-C profit-lock ladder; Tile 3 Tile 2 + a break-even rung (peak +4 bp locks +1 bp). Locks fill at the side-correct quote that crossed them; effective stop = most protective. Tiles 2 and 3 hold one position at a time and carry pre-registered promotion and kill rules. All stand aside on raw AI NO_TRADE, score gap <5, extreme volatility or a stop within the liquidation guard; default-OFF, paper-only and relay-ineligible. v4 starts all three in one clean cohort; v1/v2 remain quarantined plumbing-defect cohorts and v3 is the prior single-tile cohort"
+    "Four paper tiles consume the same shared three-minute call, each with an independent lock, order, position, ledger and analyzer cohort. Tiles 1-3 share the Dynamic Adaptive entry and AI admission so they pair on identical signals: Tile 1 ATR Trail; Tile 2 ATR Trail + Scenario-C profit-lock ladder; Tile 3 Tile 2 + a break-even rung (peak +4 bp locks +1 bp); they stand aside on raw AI NO_TRADE, score gap <5, extreme volatility or a stop within the liquidation guard. Tile 4 (beta test) trades the opposite of the score-led side with a taker at the signal (5 bp cap, 15 s; stand aside when spread >1.68 bp), a 60-minute time exit and a 40 bp catastrophic stop; only ties and AI errors refuse. Locks and stops fill at the side-correct quote that crossed them. Tiles 2-4 hold one position at a time and carry pre-registered promotion and kill rules. All default-OFF, paper-only and relay-ineligible. v4 starts all four in one clean cohort; v1/v2 remain quarantined plumbing-defect cohorts and v3 is the prior single-tile cohort"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

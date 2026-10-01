@@ -68,9 +68,10 @@ RETIRED_ANALYZER_HYPOTHESIS_LANES = (
 )
 
 
-def test_active_registry_is_exactly_the_three_dynamic_adaptive_paper_experiments():
+def test_active_registry_is_exactly_the_four_paper_experiments():
     assert ACTIVE_TILE_ORDER == (
         "FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER", "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
+        "FAMILY_TREND_FADE_60",
     )
     base = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME"]
     ladder = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME_LADDER"]
@@ -100,8 +101,17 @@ def test_active_registry_is_exactly_the_three_dynamic_adaptive_paper_experiments
         assert spec["entry_policy"] == base["entry_policy"]
         assert spec["toggle_key"] == "research_lane_enabled"
         assert combo_toggle_defaults()[lane] is False
-    assert len({spec["policy_signature"] for spec in tiles}) == 3
-    assert len({spec["id_prefix"] for spec in tiles}) == 3
+    fade = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"]
+    every = (*tiles, fade)
+    assert len({spec["policy_signature"] for spec in every}) == 4
+    assert len({spec["id_prefix"] for spec in every}) == 4
+    assert fade["default_enabled"] is False and combo_toggle_defaults()["FAMILY_TREND_FADE_60"] is False
+    assert fade["paper_only"] is True and fade["platform_relay_eligible"] is False
+    assert fade["entry_policy"]["direction_source"] == "INVERTED_SCORE_LED_SIDE"
+    assert fade["entry_policy"]["mode"] == "TAKER_AT_SIGNAL"
+    assert fade["exit_policy"]["max_duration_sec"] == 3600 and fade["exit_policy"]["hard_stop_bps"] == 40
+    assert fade["max_active_signals"] == 1
+    assert fade["pre_registration"]["control_lane"] == "FAMILY_ADAPTIVE_REGIME"
     assert not base.get("ladder") and ladder["ladder"] == ladder_be["ladder"]
     assert base.get("max_active_signals", 10) == 10
     assert ladder["max_active_signals"] == ladder_be["max_active_signals"] == 1

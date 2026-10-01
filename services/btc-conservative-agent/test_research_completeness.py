@@ -1,4 +1,4 @@
-"""PR-F research completeness: lifecycle fields, shadow gate, stop axis,
+﻿"""PR-F research completeness: lifecycle fields, shadow gate, stop axis,
 frozen trial, AI usefulness, WAL alarm explanation/clear, analyzer compat."""
 import inspect
 import json
@@ -302,7 +302,7 @@ def test_frozen_trial_fails_closed_without_a_registered_control():
     # No comparison benchmark: promotion stays gated because neither the
     # benchmark, a retired lane nor the candidate itself can be the control.
     assert COMPARISON_BENCHMARK_LANE is None
-    assert LANES == ["FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER", "FAMILY_ADAPTIVE_REGIME_LADDER_BE"]
+    assert LANES == ["FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER", "FAMILY_ADAPTIVE_REGIME_LADDER_BE", "FAMILY_TREND_FADE_60"]
     for control in (COMPARISON_BENCHMARK_LANE, "CONTINUOUS", LANES[0]):
         with pytest.raises(ValueError):
             freeze_selection(LANES[0], control, selected_by="danish", frozen_at_ts=1000.0)

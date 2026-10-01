@@ -37,7 +37,7 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Three tiles are registered, all honest paper experiments with no proven edge
+- Four tiles are registered, all honest paper experiments with no proven edge
   that consume the same shared AI call with independent locks, orders,
   positions, ledgers and analyzer cohorts. Dynamic Adaptive
   (`FAMILY_ADAPTIVE_REGIME`): trailing 15-minute realized-vol
@@ -55,15 +55,27 @@
   both ladder tiles the effective stop is the more protective of the ATR
   stop/trail and the armed lock, locks book at the side-correct quote that
   crossed them, the 30% margin hard stop and 2 h cap apply, and each holds at
-  most one position. All three default OFF, are paper-only, and are
-  relay-ineligible. The two ladder tiles carry a frozen registry
+  most one position. Trend Fade 60 (`FAMILY_TREND_FADE_60`) is an owner-approved
+  beta: its own lane admission trades the opposite of the shared call's
+  score-led side (raw AI NO_TRADE and small gaps still trade; ties, invalid
+  scores and AI errors refuse), enters taker at the signal with a 5 bp price
+  cap and 15 s TTL, stands aside when the spread exceeds 1.68 bp or the BBO is
+  stale, and exits only at 60 minutes or a 40 bp catastrophic stop booked at the
+  crossing quote (no ladder, break-even, trail or target; one position). Its
+  label discloses "in-sample +$1.30 / 47 trades; expected heavy decay". All
+  four default OFF, are paper-only, and are relay-ineligible. The two ladder tiles carry a frozen registry
   `pre_registration` scored by the analyzer's paired comparison against Tile 1
   on identical signals: promotion (owner review, never relay) needs >=400 fills
   over >=14 days, conservative per-fill EV lower 95% CI > 0, both halves
   positive, Deflated Sharpe >= 0.95 across live hypotheses, and a positive
   paired lower CI against Tile 1; kill on per-fill EV upper CI < 0 after 150
   fills, a paired upper CI < 0 against Tile 1 after 300 signals, a stop failure,
-  drawdown above $1.50, or 21 days without promotion. The five former family tiles
+  drawdown above $1.50, or 21 days without promotion. Trend Fade 60 has its own
+  trade-count pre-registration: promotion (owner review) needs >=150 trades, a
+  per-trade EV lower 95% CI > 0, both halves positive and no 2 h window above 30%
+  of profit; kill when down $0.40 after 40 trades, not positive after 80, any
+  trade worse than -60 bp, drawdown above $1.00, or day 14 without promotion.
+  The paired view compares it with Tile 1 (the AI's own side). The five former family tiles
   and the Continuous comparison label are retired (`RETIRED_TILE_LANES`); a
   future tile is promoted only if it passes the OOS promotion gate.
   The number of tiles is not an architecture constant; the frozen

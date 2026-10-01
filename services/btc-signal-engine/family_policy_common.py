@@ -210,6 +210,14 @@ def account_risk_quantity(spec: PolicySpec, *, equity_usd: float, entry_price: f
     }
 
 
+def hard_stop_reason(spec: PolicySpec) -> str:
+    return f"PHYSICAL_HARD_STOP_{abs(spec.hard_stop_margin_pct):g}PCT"
+
+
+def time_exit_reason(spec: PolicySpec) -> str:
+    return f"PATH_END_{int(spec.max_duration_sec) // 60}M"
+
+
 def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
                 atr_abs: float = 0.0, atr_pct: float = 0.0,
                 age_sec: float = 0.0, leverage: float = 100.0,
@@ -226,7 +234,7 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
     peak = max(previous_peak, price) if sign > 0 else min(previous_peak, price)
     hard_hit = _margin_return_pct(entry, sign, price, leverage) <= -abs(spec.hard_stop_margin_pct)
     if hard_hit:
-        return ExitAction("PHYSICAL_HARD_STOP_30PCT", remaining, price, None, 0.0, peak)
+        return ExitAction(hard_stop_reason(spec), remaining, price, None, 0.0, peak)
     stop_price = None
     dynamic_stop_active = False
     if atr > 0 and spec.initial_stop_atr_k is not None:
@@ -281,7 +289,7 @@ def exit_action(spec: PolicySpec, *, entry: float, direction: str, price: float,
         if _favorable_hit(sign, price, target):
             return ExitAction("ATR_TP", remaining, target, stop_price, 0.0, peak)
     if float(age_sec or 0) >= spec.max_duration_sec:
-        return ExitAction("PATH_END_120M", remaining, price, stop_price, 0.0, peak)
+        return ExitAction(time_exit_reason(spec), remaining, price, stop_price, 0.0, peak)
     return None
 
 
