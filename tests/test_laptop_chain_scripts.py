@@ -515,7 +515,7 @@ def test_pull_loop_defers_parity_during_an_active_cycle_with_a_hard_bound():
     loop = _source("research-segment-pull-loop.ps1")
     assert "[int]$ParityMaxDeferMin = 120" in loop
     defer = loop[loop.index("$cycle = Read-JsonFile $cfg.CycleStatus"):loop.index("$pullArgs = @(")]
-    assert "@('PROMOTION', 'MIGRATION', 'ANALYZER') -contains $cycle.phase" in defer
+    assert "@('PROMOTION', 'MIGRATION') -contains $cycle.phase" in defer
     assert "$null -eq $cycle.exitCode" in defer and "TotalMinutes -lt 75" in defer
     assert "-not $parityOverdue" in defer and "-ge $ParityMaxDeferMin" in defer
     assert "$parityDue = $false" in defer
