@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHmac } from 'node:crypto';
 import { BotBridgeService } from './bot-bridge.service';
+import { ShowcaseSnapshotService } from './showcase-snapshot.service';
 
 const canonicalState = {
   dashboard_owner: true,
@@ -539,4 +541,114 @@ test('FIX 2: requires the source-controlled lock to be enforced before applying 
     false,
   );
   assert.equal(lockModule.isFlyDeclaredDashboardUrl(undefined), false);
+});
+
+// ── Relay fail-closed through the real in-memory snapshot holder ──────────
+
+const BRIDGE_SECRET = 'bridge-control-secret';
+
+function bridgeWithHolder(
+  row: Record<string, unknown> | null,
+  extraConfig: Record<string, string> = {},
+) {
+  const reads: unknown[] = [];
+  const prisma = {
+    platformSettings: {
+      findUnique: async (args: unknown) => {
+        reads.push(args);
+        return row;
+      },
+      upsert: async () => ({ id: 'default' }),
+    },
+  };
+  const values: Record<string, string> = { BOT_CONTROL_SECRET: BRIDGE_SECRET, ...extraConfig };
+  const config = { get: (key: string) => values[key] };
+  const holder = new ShowcaseSnapshotService(config as never, prisma as never);
+  const bridge = new BotBridgeService(config as never, holder);
+  (bridge as unknown as {
+    recordDirectFlyOwnerProof(state: typeof canonicalState): boolean;
+  }).recordDirectFlyOwnerProof({ ...canonicalState, server_ts: new Date().toISOString() });
+  return { bridge, holder, reads };
+}
+
+function signedPush(snapshot: Record<string, unknown>, seq: number) {
+  const snapshotJson = JSON.stringify(snapshot);
+  return {
+    snapshot_seq: seq,
+    snapshot_json: snapshotJson,
+    snapshot_hmac: createHmac('sha256', BRIDGE_SECRET).update(`${seq}.${snapshotJson}`, 'utf8').digest('hex'),
+  };
+}
+
+async function withFlyDown<T>(fn: () => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('tunnel down', { status: 502 });
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test('relay fails closed on a snapshot restored from Postgres after restart', async () => {
+  const persistedAt = new Date(Date.now() - 120_000);
+  const { bridge } = bridgeWithHolder({
+    showcaseRelaySnapshot: { ...canonicalState, server_ts: persistedAt.toISOString() },
+    showcaseRelaySnapshotSeq: 77n,
+    showcaseRelaySnapshotAt: persistedAt,
+  });
+  await withFlyDown(async () => {
+    assert.equal(await bridge.fetchStateForExecution(true), null);
+    assert.equal(await bridge.fetchPublicShowcaseState(true), null);
+  });
+});
+
+test('relay fails closed when no snapshot exists', async () => {
+  const { bridge } = bridgeWithHolder(null);
+  await withFlyDown(async () => {
+    assert.equal(await bridge.fetchStateForExecution(true), null);
+  });
+});
+
+test('relay fails closed once the in-memory snapshot ages past the execution bound', async () => {
+  const { bridge, holder } = bridgeWithHolder(null);
+  await holder.ingest(signedPush({ ...canonicalState, server_ts: new Date().toISOString() }, 1));
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 9_000;
+    await withFlyDown(async () => {
+      assert.equal(await bridge.fetchStateForExecution(true), null);
+    });
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('fresh in-memory snapshot drives execution and health without Postgres reads', async () => {
+  const { bridge, holder, reads } = bridgeWithHolder(null);
+  await holder.ingest(signedPush({ ...canonicalState, server_ts: new Date().toISOString() }, 1));
+  const bootReads = reads.length;
+  await withFlyDown(async () => {
+    const state = await bridge.fetchStateForExecution(true);
+    assert.equal(state?.snapshot_source, 'railway_cache');
+    assert.equal(state?.snapshot_seq, 1);
+    assert.equal(await bridge.isReachable(), true);
+    assert.equal(await bridge.isFlyHealthReachable(), true);
+  });
+  assert.equal(reads.length, bootReads, 'health and execution reads are served from memory');
+});
+
+test('worker fails closed when the API peer is unreachable and the persisted copy is stale', async () => {
+  const persistedAt = new Date(Date.now() - 60_000);
+  const { bridge } = bridgeWithHolder(
+    {
+      showcaseRelaySnapshot: { ...canonicalState, server_ts: persistedAt.toISOString() },
+      showcaseRelaySnapshotSeq: 5n,
+      showcaseRelaySnapshotAt: persistedAt,
+    },
+    { SHOWCASE_SNAPSHOT_PEER_URL: 'http://api.railway.internal:8080' },
+  );
+  await withFlyDown(async () => {
+    assert.equal(await bridge.fetchStateForExecution(true), null);
+  });
 });

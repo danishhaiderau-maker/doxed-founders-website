@@ -1,13 +1,17 @@
 import {
   BadRequestException,
+  Inject,
   Injectable,
   Logger,
+  OnModuleDestroy,
+  Optional,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { PLATFORM_SETTINGS_ID } from '../prisma/platform-settings-cache';
 import {
   FLY_CANONICAL_LOCK_ENFORCED,
   isFlyDeclaredDashboardUrl,
@@ -22,14 +26,44 @@ export type ShowcaseSnapshotBody = {
   server_ts?: string;
 };
 
+/** Postgres copy is for restart recovery only; Fly pushes every ~2 s. */
+const MIN_PERSIST_INTERVAL_MS = 60_000;
+const PEER_TIMEOUT_MS = 1_500;
+const PEER_COALESCE_MS = 500;
+export const SHOWCASE_SNAPSHOT_CLOCK = 'SHOWCASE_SNAPSHOT_CLOCK';
+
 @Injectable()
-export class ShowcaseSnapshotService {
+export class ShowcaseSnapshotService implements OnModuleDestroy {
   private readonly logger = new Logger(ShowcaseSnapshotService.name);
+  private latest: CachedShowcaseSnapshot | null = null;
+  private lastIngestAt = 0;
+  private lastPersistAt = 0;
+  private persistedSeq = 0;
+  private persistInFlight: Promise<void> | null = null;
+  private bootLoad: Promise<void> | null = null;
+  private persistedMemo: CachedShowcaseSnapshot | null = null;
+  private peerMemo: CachedShowcaseSnapshot | null = null;
+  private peerFetchedAt = 0;
+  private peerFailures = 0;
+  private peerInFlight: Promise<CachedShowcaseSnapshot | null> | null = null;
+  private readonly persistIntervalMs: number;
+  private readonly peerUrl: string;
+  private readonly now: () => number;
 
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
-  ) {}
+    @Optional() @Inject(SHOWCASE_SNAPSHOT_CLOCK) clock?: () => number,
+  ) {
+    this.now = clock ?? (() => Date.now());
+    const configured = Number(this.config.get<string>('SHOWCASE_SNAPSHOT_PERSIST_MS'));
+    this.persistIntervalMs = Number.isFinite(configured)
+      ? Math.max(MIN_PERSIST_INTERVAL_MS, configured)
+      : MIN_PERSIST_INTERVAL_MS;
+    this.peerUrl = (this.config.get<string>('SHOWCASE_SNAPSHOT_PEER_URL') ?? '')
+      .trim()
+      .replace(/\/$/, '');
+  }
 
   private controlSecret(): string {
     const expected = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
@@ -124,57 +158,242 @@ export class ShowcaseSnapshotService {
         'snapshot dashboard_url is not canonical Fly; desktop publishers cannot be canonical',
       );
     }
-    const snapshot = rawSnapshot as Prisma.InputJsonValue;
-    const row = await this.prisma.platformSettings.findUnique({
-      where: { id: 'default' },
-      select: { showcaseRelaySnapshotSeq: true },
-    });
-    const prev = row?.showcaseRelaySnapshotSeq ?? BigInt(0);
+    await this.ensureBootLoaded();
+    const prev = BigInt(this.latest?.snapshot_seq ?? 0);
     if (seq <= prev) {
       return { ok: true, skipped: true, snapshot_seq: Number(prev) };
     }
-    await this.prisma.platformSettings.upsert({
-      where: { id: 'default' },
-      // The result is unused; avoid returning the snapshot and unrelated settings.
-      select: { id: true },
-      create: {
-        id: 'default',
-        showcaseRelaySnapshot: snapshot,
-        showcaseRelaySnapshotSeq: seq,
-        showcaseRelaySnapshotAt: new Date(),
-      },
-      update: {
-        showcaseRelaySnapshot: snapshot,
-        showcaseRelaySnapshotSeq: seq,
-        showcaseRelaySnapshotAt: new Date(),
-      },
-    });
+    const at = new Date(this.now());
+    this.latest = { snapshot: identity, snapshot_seq: rawSeq, at };
+    this.lastIngestAt = this.now();
+    await this.persistIfDue();
     this.logger.debug(`Showcase snapshot cached seq=${seq}`);
     return { ok: true, snapshot_seq: Number(seq) };
   }
 
-  async getCachedSnapshot(): Promise<{
-    snapshot: Record<string, unknown> | null;
-    snapshot_seq: number;
-    at: Date | null;
-  }> {
+  /**
+   * Latest pushed snapshot. `at` is when this platform received it, so the
+   * bridge's freshness gates fail closed on anything restored from Postgres.
+   *
+   * - The process that receives Fly pushes (public API) serves memory.
+   * - The relay-executor worker pulls from the API over private networking.
+   * - Otherwise, read seq/at only and fetch the blob when the seq changed.
+   */
+  async getCachedSnapshot(): Promise<CachedShowcaseSnapshot> {
+    if (this.lastIngestAt > 0 && this.latest) {
+      return cloneRecord(this.latest);
+    }
+    if (this.peerUrl) {
+      const fromPeer = await this.fetchFromPeer();
+      if (fromPeer) return cloneRecord(fromPeer);
+    }
+    return cloneRecord(await this.readPersistedSeqGated());
+  }
+
+  /** Served to the relay worker over private networking. */
+  async getLatestForPeer(sinceSeq: number | null): Promise<
+    | (Omit<CachedShowcaseSnapshot, 'at'> & { at: string | null; unchanged?: false })
+    | { unchanged: true; snapshot_seq: number; at: string | null }
+  > {
+    const record = this.lastIngestAt > 0 && this.latest
+      ? this.latest
+      : await this.readPersistedSeqGated();
+    const at = record.at?.toISOString() ?? null;
+    if (sinceSeq != null && record.snapshot && sinceSeq === record.snapshot_seq) {
+      return { unchanged: true, snapshot_seq: record.snapshot_seq, at };
+    }
+    return { snapshot: record.snapshot, snapshot_seq: record.snapshot_seq, at };
+  }
+
+  async onModuleDestroy() {
+    await this.persistLatest('shutdown');
+  }
+
+  private ensureBootLoaded(): Promise<void> {
+    if (!this.bootLoad) {
+      this.bootLoad = (async () => {
+        const row = await this.prisma.platformSettings.findUnique({
+          where: { id: PLATFORM_SETTINGS_ID },
+          select: {
+            showcaseRelaySnapshot: true,
+            showcaseRelaySnapshotSeq: true,
+            showcaseRelaySnapshotAt: true,
+          },
+        });
+        const restored = recordFromRow(row);
+        if (!this.latest || restored.snapshot_seq > this.latest.snapshot_seq) {
+          this.latest = restored;
+        }
+        this.persistedSeq = restored.snapshot_seq;
+      })().catch((err: unknown) => {
+        this.bootLoad = null;
+        throw err;
+      });
+    }
+    return this.bootLoad;
+  }
+
+  private async persistIfDue() {
+    if (this.now() - this.lastPersistAt < this.persistIntervalMs) return;
+    await this.persistLatest('interval');
+  }
+
+  /** Durability for restart recovery only; never on the read path. */
+  private async persistLatest(reason: 'interval' | 'shutdown') {
+    const record = this.latest;
+    if (!record?.snapshot || !record.at || record.snapshot_seq <= this.persistedSeq) return;
+    if (this.persistInFlight) return;
+    this.lastPersistAt = this.now();
+    const snapshot = record.snapshot as Prisma.InputJsonValue;
+    const seq = BigInt(record.snapshot_seq);
+    this.persistInFlight = this.prisma.platformSettings
+      .upsert({
+        where: { id: PLATFORM_SETTINGS_ID },
+        // The result is unused; avoid returning the snapshot and unrelated settings.
+        select: { id: true },
+        create: {
+          id: PLATFORM_SETTINGS_ID,
+          showcaseRelaySnapshot: snapshot,
+          showcaseRelaySnapshotSeq: seq,
+          showcaseRelaySnapshotAt: record.at,
+        },
+        update: {
+          showcaseRelaySnapshot: snapshot,
+          showcaseRelaySnapshotSeq: seq,
+          showcaseRelaySnapshotAt: record.at,
+        },
+      })
+      .then(() => {
+        this.persistedSeq = Math.max(this.persistedSeq, record.snapshot_seq);
+      })
+      .catch((err: unknown) => {
+        // Memory stays authoritative; retry on the next push.
+        this.lastPersistAt = 0;
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`Showcase snapshot persist (${reason}) failed: ${msg}`);
+      })
+      .finally(() => {
+        this.persistInFlight = null;
+      });
+    await this.persistInFlight;
+  }
+
+  private async readPersistedSeqGated(): Promise<CachedShowcaseSnapshot> {
+    const head = await this.prisma.platformSettings.findUnique({
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: { showcaseRelaySnapshotSeq: true, showcaseRelaySnapshotAt: true },
+    });
+    const seq = Number(head?.showcaseRelaySnapshotSeq ?? 0);
+    const memo = this.persistedMemo;
+    if (memo && memo.snapshot && memo.snapshot_seq === seq) {
+      memo.at = head?.showcaseRelaySnapshotAt ?? memo.at;
+      return memo;
+    }
     const row = await this.prisma.platformSettings.findUnique({
-      where: { id: 'default' },
+      where: { id: PLATFORM_SETTINGS_ID },
       select: {
         showcaseRelaySnapshot: true,
         showcaseRelaySnapshotSeq: true,
         showcaseRelaySnapshotAt: true,
       },
     });
-    const raw = row?.showcaseRelaySnapshot;
-    const snapshot =
-      raw && typeof raw === 'object' && !Array.isArray(raw)
-        ? (raw as Record<string, unknown>)
-        : null;
-    return {
-      snapshot,
-      snapshot_seq: Number(row?.showcaseRelaySnapshotSeq ?? 0),
-      at: row?.showcaseRelaySnapshotAt ?? null,
-    };
+    this.persistedMemo = recordFromRow(row);
+    return this.persistedMemo;
   }
+
+  private fetchFromPeer(): Promise<CachedShowcaseSnapshot | null> {
+    const memo = this.peerMemo;
+    if (memo && this.now() - this.peerFetchedAt < PEER_COALESCE_MS) {
+      return Promise.resolve(memo);
+    }
+    if (!this.peerInFlight) {
+      this.peerInFlight = this.fetchFromPeerOnce().finally(() => {
+        this.peerInFlight = null;
+      });
+    }
+    return this.peerInFlight;
+  }
+
+  private async fetchFromPeerOnce(): Promise<CachedShowcaseSnapshot | null> {
+    const secret = this.config.get<string>('BOT_CONTROL_SECRET')?.trim();
+    if (!secret || !this.peerUrl) return null;
+    const memo = this.peerMemo;
+    const since = memo?.snapshot ? `?since_seq=${memo.snapshot_seq}` : '';
+    try {
+      const res = await fetch(`${this.peerUrl}/api/internal/showcase-snapshot/latest${since}`, {
+        signal: AbortSignal.timeout(PEER_TIMEOUT_MS),
+        headers: { Accept: 'application/json', 'X-Bot-Control-Secret': secret },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = (await res.json()) as {
+        unchanged?: boolean;
+        snapshot?: unknown;
+        snapshot_seq?: unknown;
+        at?: unknown;
+      };
+      const at = typeof body.at === 'string' ? new Date(body.at) : null;
+      const seq = typeof body.snapshot_seq === 'number' ? body.snapshot_seq : 0;
+      let next: CachedShowcaseSnapshot;
+      if (body.unchanged === true && memo?.snapshot && memo.snapshot_seq === seq) {
+        next = { ...memo, at: at && Number.isFinite(at.getTime()) ? at : memo.at };
+      } else {
+        next = {
+          snapshot: asSnapshotObject(body.snapshot),
+          snapshot_seq: seq,
+          at: at && Number.isFinite(at.getTime()) ? at : null,
+        };
+      }
+      this.peerMemo = next;
+      this.peerFetchedAt = this.now();
+      if (this.peerFailures > 0) {
+        this.logger.log(`Showcase snapshot peer recovered after ${this.peerFailures} failure(s)`);
+        this.peerFailures = 0;
+      }
+      return next;
+    } catch (err) {
+      this.peerFailures += 1;
+      if (this.peerFailures === 1 || this.peerFailures % 30 === 0) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `Showcase snapshot peer fetch failed (${this.peerFailures}): ${msg}; using persisted copy`,
+        );
+      }
+      return null;
+    }
+  }
+}
+
+export type CachedShowcaseSnapshot = {
+  snapshot: Record<string, unknown> | null;
+  snapshot_seq: number;
+  at: Date | null;
+};
+
+function asSnapshotObject(raw: unknown): Record<string, unknown> | null {
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : null;
+}
+
+function recordFromRow(
+  row: {
+    showcaseRelaySnapshot?: unknown;
+    showcaseRelaySnapshotSeq?: bigint | null;
+    showcaseRelaySnapshotAt?: Date | null;
+  } | null,
+): CachedShowcaseSnapshot {
+  return {
+    snapshot: asSnapshotObject(row?.showcaseRelaySnapshot),
+    snapshot_seq: Number(row?.showcaseRelaySnapshotSeq ?? 0),
+    at: row?.showcaseRelaySnapshotAt ?? null,
+  };
+}
+
+/** Callers mutate the returned state; never hand out the shared copy. */
+function cloneRecord(record: CachedShowcaseSnapshot): CachedShowcaseSnapshot {
+  return {
+    snapshot: record.snapshot ? structuredClone(record.snapshot) : null,
+    snapshot_seq: record.snapshot_seq,
+    at: record.at ? new Date(record.at.getTime()) : null,
+  };
 }

@@ -208,7 +208,9 @@ export class BuilderScoreService {
 
     // Pool stats (re-uses the promo aggregation logic without needing the
     // promo service — sum of all platform_promo tokens vs the configured cap).
-    const settings = await this.prisma.platformSettings.findFirst();
+    const settings = await this.prisma.platformSettings.findFirst({
+      select: { founderPromoTokenCap: true },
+    });
     const poolCap = settings?.founderPromoTokenCap ?? 30_000_000;
     const poolAgg = await this.prisma.aiTokenUsageLog.aggregate({
       where: { billingSource: 'platform_promo' },

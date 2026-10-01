@@ -132,6 +132,19 @@ is **not** run in a shell — Docker tries to execute `NODE_ENV=production` as t
 | `GITHUB_OAUTH_CALLBACK_URL` | `{API_URL}/api/auth/github/callback` |
 | `GITHUB_WEBHOOK_SECRET` | Optional — GitHub repo push webhook for instant sync |
 
+### Relay snapshot transport (Neon egress)
+
+Fly pushes the signed relay snapshot to `doxed-founders-website` every ~2 s. The API
+keeps the latest copy in memory and persists it to `PlatformSettings` at most once per
+60 s, only for restart recovery. A copy restored after a restart keeps its original
+receive timestamp, so the freshness gates fail closed until a new push arrives.
+
+| Service | Variable | Notes |
+| --- | --- | --- |
+| `relay-executor` | `SHOWCASE_SNAPSHOT_PEER_URL` | `http://doxed-founders-website.railway.internal:8080` — the worker pulls `/api/internal/showcase-snapshot/latest` over private networking. If unset or unreachable it falls back to the persisted copy, which is too old for execution, so the worker uses the direct owner-proven Fly execution endpoint or holds. |
+| both | `SHOWCASE_SNAPSHOT_PERSIST_MS` | Optional; clamped to ≥ 60000. |
+| both | `PLATFORM_SETTINGS_CACHE_TTL_MS` | Optional; margin cap / rate limit / admin status cache, default 30000, max 60000. |
+
 ### Phala CVM (optional — P1 vault backup + P2 unwrap)
 
 Set after deploying `workers/phala-cvm-workload` on Phala Cloud. See [OPS_PHALA_CVM_RAILWAY.md](./OPS_PHALA_CVM_RAILWAY.md).

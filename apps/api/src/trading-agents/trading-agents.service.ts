@@ -1961,7 +1961,10 @@ export class TradingAgentsService implements OnModuleInit {
   }
 
   async getShowcaseDefaultSettings() {
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: { agentShowcaseDefaultSettings: true },
+    });
     return {
       message:
         row?.agentShowcaseDefaultSettings?.trim() ??
