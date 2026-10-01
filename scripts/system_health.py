@@ -1006,6 +1006,10 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         issues.append(f"collection {coll.get('status')}: {', '.join(coll.get('alarms') or [])}")
     if isinstance(cross, Mapping) and cross.get("status") not in (None, "OK", "DISABLED"):
         issues.append(f"cross-venue {cross.get('status')} stale={cross.get('stale_venues')}")
+    xvl = dig(status, "collection", "xvl_evaluator", default=None) or dig(inputs.get("runtime_snapshot"),
+                                                                           "xvl_evaluator_health")
+    if isinstance(xvl, Mapping) and xvl.get("status") not in (None, "OK", "DISABLED", "STARTING"):
+        issues.append(f"XVL evaluator {xvl.get('status')} ({xvl.get('reason')})")
     dead = dig(inputs.get("runtime_snapshot"), "ai_input_health", default={})
     if isinstance(dead, Mapping) and dead.get("status") == "DEAD_INPUT":
         issues.append(f"AI dead inputs {[d.get('path') for d in dead.get('dead_fields') or []][:5]}")
