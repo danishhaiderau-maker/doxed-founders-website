@@ -205,7 +205,20 @@ def collection_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
         worker = multiverse.get("maturation_worker") if isinstance(multiverse.get("maturation_worker"), dict) else {}
         findings["multiverse_worker_stalled"] = (
             f"collector maturation worker stalled (alive={worker.get('alive')!r}, "
+            f"phase={worker.get('phase')!r}, "
             f"last_error={str(worker.get('last_error') or '')[:120]!r}, pending={multiverse.get('pending')!r})"
+        )
+    if "COLLECTOR_MATURATION_WORKER_RESTARTED" in alarms:
+        restarted = [
+            f"{name}: restarts={status.get('restarts')!r} reason={str(status.get('last_restart_reason') or '')[:120]!r}"
+            for name, status in (
+                ("maturation", multiverse.get("maturation_worker")),
+                ("v3_reconcile", multiverse.get("v3_reconcile_worker")),
+            )
+            if isinstance(status, dict) and status.get("last_restart_ts")
+        ]
+        findings["multiverse_worker_restarted"] = (
+            "collector worker died and was auto-restarted: " + ("; ".join(restarted) or "details unavailable")
         )
     if "TOUCH_GRID_COVERAGE_LOW" in alarms:
         coverage = _num(grid.get("coverage_1h"))

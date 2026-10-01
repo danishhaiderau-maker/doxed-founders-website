@@ -373,6 +373,37 @@ def test_worker_sweep_orders_by_attempts_and_throttles_v3_reconcile():
     source = ast.unparse(_bot_function("_maybe_complete_pending_order_multiverse"))
     assert "attempts.get(pending_id, 0)" in source
     assert "attempts[pending_id] = attempts.get(pending_id, 0) + 1" in source
-    assert "COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC" in source
+    assert "_run_v3_terminal_reconcile(now)" in source
+    run = ast.unparse(_bot_function("_run_v3_terminal_reconcile"))
+    assert "COLLECTOR_V3_TERMINAL_RECONCILE_INTERVAL_SEC" in run
     loop = ast.unparse(_bot_function("collector_maturation_worker_loop"))
     assert "COLLECTOR_MATURATION_WORKER_BACKLOG_INTERVAL_SEC" in loop
+
+
+def test_analyzer_labels_late_matured_rows_without_excluding_them(tmp_path):
+    anchor = make_anchor(shared_ai_call_id="call-1", signal_ts=SIGNAL_TS, signal_price=100000.0,
+                         direction="SHORT", ttl_sec=1800.0)
+    rows = []
+    for trade_id, lag in (("on-time", 120.0), ("late-derived", 5 * 3600.0), ("late-marked", None)):
+        event = _tile_event(trade_id, SIGNAL_TS + 3, anchor)
+        row, _grid = split_entry_grid(dict(event, event=event["observation_status"]))
+        row = json.loads(json.dumps(row, default=str))
+        source = row["canonical_tape"].setdefault("path_source", {})
+        source["window_end_ts"] = SIGNAL_TS + 10_800
+        if lag is None:
+            source.update(maturation_lag_sec=7200.0, late_backfill=True,
+                          late_backfill_reason="MATURED_LATE_FROM_RETAINED_TAPE")
+        else:
+            source["tape_latest_bucket_ts"] = SIGNAL_TS + 10_800 + lag
+        rows.append(row)
+    with (tmp_path / "order_multiverse.jsonl").open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, default=str) + "\n")
+    report = build_multiverse_collection_report(str(tmp_path))
+    late = report["late_maturation"]
+    assert late["rows"] == 2 and late["marked_rows"] == 1 and late["derived_rows"] == 1
+    assert late["action"] == "LABELLED_NOT_EXCLUDED"
+    assert sorted(late["trade_ids_sample"]) == ["late-derived", "late-marked"]
+    assert late["max_lag_sec"] == 5 * 3600.0
+    assert not set(late["trade_ids_sample"]) & set(report["quarantined_trade_ids"])
+    assert report["post_fix_rows"]["rows"] == 3
