@@ -8,7 +8,8 @@ param(
   [string]$CanonicalRoot = '',
   [string]$StateDir = '',
   [int]$PullIntervalSec = 120,
-  [int]$ParityIntervalMin = 30,
+  [int]$ParityIntervalMin = 60,
+  [int]$ParityMaxDeferMin = 120,
   [int]$MaxSegmentsPerPull = 40,
   [int]$CatchUpIntervalSec = 15,
   [long]$CatchUpUnshippedBytes = 8388608,
@@ -33,12 +34,16 @@ try {
   while ($true) {
     $iteration++
     $parityDue = ($null -eq $lastParity) -or (([datetime]::UtcNow - $lastParity).TotalMinutes -ge $ParityIntervalMin)
-    # A parity pass holds the shadow-root lock ~7 min; do not start one while an
-    # analyzer cycle is waiting to promote (bounded: a stale marker is ignored).
+    # A parity pass holds the shadow-root lock ~7 min and slows promotion, migration
+    # and the analyzer when they overlap; run it between analyzer cycles instead.
+    # Bounded: a stale cycle marker is ignored and parity is never deferred past
+    # -ParityMaxDeferMin since the last pass.
     $cycle = Read-JsonFile $cfg.CycleStatus
-    if ($parityDue -and $cycle -and $cycle.phase -eq 'PROMOTION' -and $null -eq $cycle.exitCode) {
-      $cycleUpdated = ConvertTo-UtcDate $cycle.updatedAt
-      if ($cycleUpdated -and ([datetime]::UtcNow - $cycleUpdated).TotalMinutes -lt 15) { $parityDue = $false }
+    $parityOverdue = ($null -eq $lastParity) -or (([datetime]::UtcNow - $lastParity).TotalMinutes -ge $ParityMaxDeferMin)
+    if ($parityDue -and -not $parityOverdue -and $cycle -and $null -eq $cycle.exitCode -and
+        @('PROMOTION', 'MIGRATION', 'ANALYZER') -contains $cycle.phase) {
+      $cycleStarted = ConvertTo-UtcDate $cycle.startedAt
+      if ($cycleStarted -and ([datetime]::UtcNow - $cycleStarted).TotalMinutes -lt 75) { $parityDue = $false }
     }
     $pullArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $pullScript, '-RepoRoot', $cfg.RepoRoot,
                   '-Source', 'Http', '-BaseUrl', $cfg.SourceUrl, '-HomeBotEnv', $cfg.VaultEnv,

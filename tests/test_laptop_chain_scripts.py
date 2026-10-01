@@ -87,7 +87,7 @@ def test_supervisor_keeps_one_segment_pull_loop_not_a_second_watcher():
     cycle = _source("run-segment-analyzer-cycle.ps1")
     assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')" in cycle
     assert "Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentPull')" in loop
-    assert "[int]$PullIntervalSec = 120" in loop and "[int]$ParityIntervalMin = 30" in loop
+    assert "[int]$PullIntervalSec = 120" in loop and "[int]$ParityIntervalMin = 60" in loop
     assert "'-Source', 'Http'" in loop and "-MaxSegments" in loop
     assert "laptop-ack-watcher" not in loop
     # Only the admin token is read from the vault and it is never echoed.
@@ -494,10 +494,13 @@ def test_analyzer_cadence_runs_from_cycle_start_and_retries_failed_cycles():
     assert "CycleStatus = Join-Path $StateDir 'segment-analyzer-cycle.status.json'" in _source("laptop-chain-common.ps1")
 
 
-def test_pull_loop_defers_parity_while_a_cycle_waits_to_promote():
+def test_pull_loop_defers_parity_during_an_active_cycle_with_a_hard_bound():
     loop = _source("research-segment-pull-loop.ps1")
+    assert "[int]$ParityMaxDeferMin = 120" in loop
     defer = loop[loop.index("$cycle = Read-JsonFile $cfg.CycleStatus"):loop.index("$pullArgs = @(")]
-    assert "$cycle.phase -eq 'PROMOTION'" in defer and "TotalMinutes -lt 15" in defer
+    assert "@('PROMOTION', 'MIGRATION', 'ANALYZER') -contains $cycle.phase" in defer
+    assert "$null -eq $cycle.exitCode" in defer and "TotalMinutes -lt 75" in defer
+    assert "-not $parityOverdue" in defer and "-ge $ParityMaxDeferMin" in defer
     assert "$parityDue = $false" in defer
 
 
