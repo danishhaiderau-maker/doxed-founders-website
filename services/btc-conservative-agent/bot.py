@@ -8194,7 +8194,6 @@ _load_spread_gate_config()
 SPREAD_GATE_BUCKET_ORDER = ("0", "1", "2", "3", "4", "5+")
 EXECUTION_SETTINGS_HISTORY_FILE = "execution_settings_history.jsonl"
 _execution_settings_history_lock = threading.Lock()
-_settings_breakdown_cache = {"key": None, "value": {}}
 
 
 def _resolve_analytics_report_path(filename: str) -> str:
@@ -19587,161 +19586,12 @@ def _record_execution_settings_epoch(reason: str, force: bool = False) -> None:
         if not force and last and last.get("signature") == signature:
             return
         _safe_append_jsonl(EXECUTION_SETTINGS_HISTORY_FILE, row, label="EXECUTION_SETTINGS")
-    _settings_breakdown_cache["key"] = None
     _cached_pathway_lane_specs = {}
-
-
-def _fresh_collection_start_epoch() -> float:
-    try:
-        with open(RESEARCH_SESSION_FILE, encoding="utf-8") as handle:
-            session = json.load(handle) or {}
-        return float(
-            session.get("fresh_collection_start_time")
-            or session.get("bot_start_time")
-            or bot_start_time
-            or 0
-        )
-    except Exception:
-        return float(bot_start_time or 0)
-
-
-def _row_epoch(value) -> float:
-    if isinstance(value, (int, float)):
-        return float(value)
-    try:
-        return datetime.fromisoformat(str(value or "").replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
 
 
 def _win_rate_pct(wins: int, closed: int):
     """Wins (net PnL > 0 after costs) over closed filled trades; None when nothing closed."""
     return round(100.0 * int(wins) / int(closed), 1) if closed else None
-
-
-def _settings_period_breakdown() -> dict:
-    """Exact fresh-collection PnL by recorded settings epoch; legacy settings stay unknown."""
-    files = (EXECUTION_SETTINGS_HISTORY_FILE, CSV_TRADES)
-    key = tuple(
-        (path, os.path.getmtime(path), os.path.getsize(path))
-        for path in files
-        if os.path.isfile(path)
-    )
-    if _settings_breakdown_cache.get("key") == key:
-        return copy.deepcopy(_settings_breakdown_cache.get("value") or {})
-
-    start = _fresh_collection_start_epoch()
-    now = time.time()
-    epochs = []
-    try:
-        with open(EXECUTION_SETTINGS_HISTORY_FILE, encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except (TypeError, ValueError):
-                    continue
-                ts = float(row.get("epoch") or _row_epoch(row.get("ts")))
-                if ts >= start:
-                    epochs.append({**row, "epoch": ts})
-    except FileNotFoundError:
-        pass
-    epochs.sort(key=lambda row: row["epoch"])
-    compact = []
-    for row in epochs:
-        if compact and compact[-1].get("signature") == row.get("signature"):
-            continue
-        compact.append(row)
-    periods = []
-    if not compact or compact[0]["epoch"] > start + 1:
-        periods.append({
-            "start": start,
-            "end": compact[0]["epoch"] if compact else now,
-            "signature": "legacy-unrecorded",
-            "gap_buckets": [],
-            "chase_buckets": [],
-            "settings_recorded": False,
-        })
-    for index, row in enumerate(compact):
-        periods.append({
-            "start": row["epoch"],
-            "end": compact[index + 1]["epoch"] if index + 1 < len(compact) else now,
-            "signature": row.get("signature"),
-            "gap_buckets": row.get("gap_buckets") or [],
-            "chase_buckets": row.get("chase_buckets") or [],
-            "settings_recorded": True,
-        })
-
-    lanes = tuple(COMBO_EXECUTION_LANES)
-    output = {lane: [] for lane in lanes}
-    trades = []
-    try:
-        with open(CSV_TRADES, encoding="utf-8-sig", newline="") as handle:
-            for row in csv.DictReader(handle):
-                lane = str(row.get("research_lane") or "").upper()
-                ts = _row_epoch(row.get("ts") or row.get("close_ts"))
-                if lane in output and ts >= start:
-                    trades.append((lane, ts, float(row.get("net_pnl_usd") or 0)))
-    except (FileNotFoundError, OSError, ValueError):
-        pass
-
-    for lane in lanes:
-        for index, period in enumerate(periods):
-            lane_trades = [
-                pnl for trade_lane, ts, pnl in trades
-                if trade_lane == lane and period["start"] <= ts < period["end"]
-            ]
-            pnl = round(sum(lane_trades), 2)
-            approved = len(lane_trades)
-            wins = sum(1 for value in lane_trades if value > 0)
-            losses = sum(1 for value in lane_trades if value < 0)
-            output[lane].append({
-                **period,
-                "period_number": index + 1,
-                "current": index == len(periods) - 1,
-                "approvals": approved,
-                "executed": len(lane_trades),
-                "pnl_usd": pnl,
-                "ev_per_approval": round(pnl / approved, 2) if approved else None,
-                "wins": wins,
-                "losses": losses,
-                "win_rate_pct": _win_rate_pct(wins, len(lane_trades)),
-            })
-    _settings_breakdown_cache["key"] = key
-    _settings_breakdown_cache["value"] = copy.deepcopy(output)
-    return output
-
-
-def _reconcile_settings_periods_to_headline(stats: dict, periods: list) -> list:
-    """Keep the settings table on the same approval cohort as the analyzer headline."""
-    rows = copy.deepcopy(periods or [])
-    if not rows:
-        return rows
-    try:
-        target = max(0, int((stats or {}).get("approves") or 0))
-    except (TypeError, ValueError):
-        return rows
-    legacy = [row for row in rows if not row.get("settings_recorded")]
-    if not legacy:
-        return rows
-    recorded = sum(
-        max(0, int(row.get("approvals") or 0))
-        for row in rows
-        if row.get("settings_recorded")
-    )
-    # Analyzer stats exclude synthetic/duplicate research events. Assign the
-    # remaining authoritative approvals to the single pre-tracking baseline
-    # instead of exposing a contradictory raw-event count.
-    legacy_target = max(0, target - recorded)
-    for row in legacy[:-1]:
-        row["approvals"] = 0
-        row["ev_per_approval"] = None
-    row = legacy[-1]
-    row["approvals"] = legacy_target
-    pnl = float(row.get("pnl_usd") or 0)
-    row["ev_per_approval"] = (
-        round(pnl / legacy_target, 2) if legacy_target else None
-    )
-    return rows
 
 
 def spread_gate_allows(spread) -> bool:
@@ -31317,7 +31167,6 @@ def _scope_pathway_specs_to_signed_epoch(
     scoped = copy.deepcopy(payload or {})
     ledger = _derive_lane_pnl_ledger_from_trades(session_trades or [])
     counters = lane_opportunity_counters or {}
-    settings = _settings_period_breakdown()
     for row in scoped.get("lanes") or []:
         lane = str(row.get("lane") or "").upper()
         lb = ledger.get(lane) or {}
@@ -31342,9 +31191,6 @@ def _scope_pathway_specs_to_signed_epoch(
         stats = _session_stats_from_lane_metrics(metrics)
         stats["scope"] = "SIGNED_FRESH_EPOCH"
         stats["epoch_cutoff_utc"] = epoch_cutoff_utc
-        stats["settings_periods"] = _reconcile_settings_periods_to_headline(
-            stats, settings.get(lane) or []
-        )
         row["session_stats"] = stats
     scoped["session_scope"] = "SIGNED_FRESH_EPOCH"
     scoped["epoch_cutoff_utc"] = epoch_cutoff_utc
@@ -31588,7 +31434,6 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
                 "lab_net_pnl": 0.0,
                 "lab_open_shadows": 0,
             }
-    settings_breakdown = _settings_period_breakdown()
     merged = []
     for spec in static_payload.get("lanes") or []:
         lane = spec.get("lane")
@@ -31601,10 +31446,6 @@ def _merge_pathway_specs_with_session_stats(static_payload: dict, file_payload: 
         if dm:
             row["session_stats"] = _session_stats_from_lane_metrics(dm)
         row.setdefault("session_stats", {})
-        row["session_stats"]["settings_periods"] = _reconcile_settings_periods_to_headline(
-            row["session_stats"],
-            settings_breakdown.get(lane) or [],
-        )
         merged.append(row)
     out = copy.deepcopy(static_payload)
     out["lanes"] = merged
@@ -31652,7 +31493,6 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
                     for row in (analyzer_payload.get("lanes") or [])
                     if row.get("lane")
                 }
-                settings_breakdown = _settings_period_breakdown()
                 merged_lanes = []
                 for spec in static_payload.get("lanes") or []:
                     row = copy.deepcopy(spec)
@@ -31661,10 +31501,6 @@ def get_pathway_lane_specs_cached(for_api: bool = False) -> dict:
                         if analyzer_row.get(key) is not None:
                             row[key] = copy.deepcopy(analyzer_row[key])
                     row.setdefault("session_stats", {})
-                    row["session_stats"]["settings_periods"] = _reconcile_settings_periods_to_headline(
-                        row["session_stats"],
-                        settings_breakdown.get(str(spec.get("lane") or "")) or [],
-                    )
                     merged_lanes.append(row)
                 payload = copy.deepcopy(static_payload)
                 payload["lanes"] = merged_lanes
@@ -33982,14 +33818,10 @@ DASHBOARD_JS = """(function () {
               + '<div style="color:' + (col || '#c9d1d9') + ';font-weight:600;font-size:0.9em;">' + val + '</div></div>';
           };
           const pnl = stats.net_pnl_real != null ? stats.net_pnl_real : 0;
-          const settingPeriods = Array.isArray(stats.settings_periods) ? stats.settings_periods : [];
-          const currentSettingsPeriod = settingPeriods.find(function (period) { return period && period.current; }) || null;
-          const headlineClosed = currentSettingsPeriod ? Number(currentSettingsPeriod.executed || 0) : Number(stats.real_fills || 0);
-          const headlinePnl = currentSettingsPeriod ? Number(currentSettingsPeriod.pnl_usd || 0) : Number(pnl || 0);
-          const headlineApprovals = currentSettingsPeriod ? Number(currentSettingsPeriod.approvals || 0) : Number(stats.approves || 0);
-          const explicitHeadlineEv = currentSettingsPeriod
-            ? currentSettingsPeriod.ev_per_approval
-            : stats.per_approve_ev;
+          const headlineClosed = Number(stats.real_fills || 0);
+          const headlinePnl = Number(pnl || 0);
+          const headlineApprovals = Number(stats.approves || 0);
+          const explicitHeadlineEv = stats.per_approve_ev;
           const parsedHeadlineEv = Number(explicitHeadlineEv);
           const headlineEv = headlineApprovals > 0
             ? ((explicitHeadlineEv != null && Number.isFinite(parsedHeadlineEv))
@@ -34006,55 +33838,12 @@ DASHBOARD_JS = """(function () {
             const flat = n - w - l;
             return Math.round(100 * w / n) + '% (' + w + 'W/' + l + 'L)' + (flat > 0 ? ' · ' + flat + ' flat' : '');
           };
-          const headlineWinLabel = currentSettingsPeriod
-            ? winPctLabel(currentSettingsPeriod.wins, currentSettingsPeriod.losses, headlineClosed)
-            : winPctLabel(stats.wins, stats.losses, headlineClosed);
-          const formatPeriodTime = function (epoch) {
-            if (!epoch) return '—';
-            try {
-              return new Date(Number(epoch) * 1000).toLocaleString('en-AU', {
-                timeZone: 'Australia/Melbourne',
-                day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
-              });
-            } catch (_) {
-              return '—';
-            }
-          };
-          const settingsRows = settingPeriods.map(function (period) {
-            const legacy = period.settings_recorded === false;
-            const gap = legacy ? 'Not recorded' : ((period.gap_buckets || []).join(', ') || 'None');
-            const chase = legacy ? 'Not recorded' : ((period.chase_buckets || []).join(', ') || 'None');
-            const periodLabel = legacy
-              ? 'Legacy baseline'
-              : (formatPeriodTime(period.start) + (period.current ? ' · CURRENT' : ''));
-            const periodPnl = Number(period.pnl_usd || 0);
-            const periodEv = period.ev_per_approval;
-            return '<tr>'
-              + '<td style="padding:5px;border-bottom:1px solid #30363d;">' + periodLabel + '</td>'
-              + '<td style="padding:5px;border-bottom:1px solid #30363d;">' + gap + '</td>'
-              + '<td style="padding:5px;border-bottom:1px solid #30363d;">' + chase + '</td>'
-              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + Number(period.approvals || 0) + '</td>'
-              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + Number(period.executed || 0) + '</td>'
-              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;color:' + (periodPnl >= 0 ? '#3fb950' : '#f85149') + ';">$' + periodPnl.toFixed(2) + '</td>'
-              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + (periodEv == null ? '—' : ('$' + Number(periodEv).toFixed(2))) + '</td>'
-              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + winPctLabel(period.wins, period.losses, period.executed) + '</td>'
-              + '</tr>';
-          }).join('');
-          const statsScope = currentSettingsPeriod
-            ? 'current execution-settings period; earlier rows remain separate'
-            : (stats.scope === 'SIGNED_FRESH_EPOCH'
-              ? 'current signed clean-epoch total'
-              : 'historical/analyzer total');
-          const settingsBreakdown = '<div style="margin-top:8px;border:1px solid #30363d;border-radius:8px;overflow:auto;">'
-            + '<div style="padding:7px 8px;background:#161b22;color:#8b949e;font-size:0.74em;">Settings-period breakdown · headline is the ' + statsScope + '</div>'
-            + '<table style="width:100%;border-collapse:collapse;font-size:0.72em;white-space:nowrap;">'
-            + '<thead><tr style="color:#8b949e;background:#101820;">'
-            + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Global submit windows</th>'
-            + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Closed</th>'
-            + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th><th style="padding:5px;text-align:right;">Win %</th>'
-            + '</tr></thead><tbody>'
-            + (settingsRows || '<tr><td colspan="8" style="padding:7px;color:#6e7681;">Settings tracking starts with this bot release.</td></tr>')
-            + '</tbody></table></div>';
+          const headlineWinLabel = winPctLabel(stats.wins, stats.losses, headlineClosed);
+          const statsScope = stats.scope === 'SIGNED_FRESH_EPOCH'
+            ? 'current signed clean-epoch total'
+            : 'historical/analyzer total';
+          const statsScopeNote = '<div style="margin-top:4px;color:#6e7681;font-size:0.72em;">Headline scope: ' + statsScope
+            + (stats.epoch_cutoff_utc ? ' since ' + stats.epoch_cutoff_utc : '') + '</div>';
           const statsGrid = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + statRow('Pending', laneNow.pending || 0)
@@ -34064,7 +33853,7 @@ DASHBOARD_JS = """(function () {
             + statRow('EV/appr', headlineEvLabel)
             + statRow('Win %', headlineWinLabel)
             + '</div>'
-            + settingsBreakdown;
+            + statsScopeNote;
           const chips = (spec.filter_chips || []).map(function (c) {
             const chip = /^Chase\b/i.test(String(c || ''))
               ? String(c).replace(/^Chase\b/i, 'Reprice template')
@@ -34174,7 +33963,7 @@ DASHBOARD_JS = """(function () {
               if (kill) html += '<div style="margin-top:2px;"><strong style="color:#f85149;">Kill:</strong> <span style="color:#8b949e;">' + kill + '</span></div>';
               return html + '</div>';
             })()
-            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Current settings period: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>'
+            + '<div style="margin-top:8px;font-size:0.78em;color:#58a6ff;">Clean-epoch headline: n=' + headlineApprovals + ' approvals · ' + headlineClosed + ' closed · $' + headlinePnl.toFixed(2) + ' observed PnL · EV ' + headlineEvLabel + '/approve</div>'
             + (function () {
               const lines = spec.strategy_detail || [];
               if (!lines.length) {
@@ -38833,19 +38622,16 @@ def _dashboard_transfer_truth(snapshot: dict, now: float) -> tuple[dict, list]:
 
 def _dashboard_entry_rule(entry: dict) -> str | None:
     """Signal-time entry rule for policies whose limit is not a fixed offset."""
-    if entry.get("mode") != "ADAPTIVE_REGIME":
+    if entry.get("mode") != "TAKER_AT_SIGNAL":
         return None
     try:
         return (
-            f"regime-dependent entry: CALM RV15 <{float(entry['calm_below_bps']):g}bps \u2192 maker "
-            f"\u2264{int(entry['maker_improve_ticks'])} tick, {int(entry['maker_ttl_sec'])}s; "
-            f"NORMAL or fast move z\u2265{float(entry['fast_move_z']):g} \u2192 taker cap "
-            f"{float(entry['taker_protection_bps']):g}bps, {int(entry['taker_ttl_sec'])}s; "
-            f"EXTREME >{float(entry['extreme_above_bps']):g}bps or stop "
-            f"\u2265{float(entry['liquidation_guard_stop_bps']):g}bps \u2192 stand aside"
+            f"taker at signal: cap {float(entry['taker_protection_bps']):g}bps, "
+            f"{int(entry['taker_ttl_sec'])}s; stand aside if spread "
+            f">{float(entry['max_spread_bps']):g}bps or BBO >{float(entry['max_bbo_age_sec']):g}s old"
         )
     except (KeyError, TypeError, ValueError):
-        return "regime-dependent entry (rule not published)"
+        return "taker-at-signal entry (rule not published)"
 
 
 def _dashboard_tile_view() -> list[dict]:

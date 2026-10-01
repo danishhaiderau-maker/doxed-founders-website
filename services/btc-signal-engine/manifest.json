@@ -1,9 +1,9 @@
 {
-  "engine_version": "v31-dynamic-adaptive-ladder-paper-v4",
+  "engine_version": "v31-trend-fade-single-tile-v5",
   "combo_version": "2026-10-01",
-  "exit_version": "adaptive-regime-atr-trail-v1",
+  "exit_version": "time-exit-catastrophic-stop-v1",
   "benchmark_lane": "NONE",
-  "signal_hash": "98dc5eb6899b",
+  "signal_hash": "68091066f7d5",
   "source": "services/btc-conservative-agent/bot.py",
-  "updated_at": "2026-10-01T09:26:15.601Z"
+  "updated_at": "2026-10-01T21:35:45.071Z"
 }

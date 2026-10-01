@@ -1217,7 +1217,7 @@ jobs:
           python test_ws_live_readiness_contract.py
           python -m pytest test_order_multiverse.py test_chase_offset_touch_grid.py -q
           python -m pytest test_multiverse_tape_maturation.py test_shared_discovery_touch_grid.py test_collector_candle_snapshot.py test_collector_snapshot_runtime.py -q
-          python -m pytest test_paper_policy_family_adaptive_regime.py test_paper_policy_family_adaptive_regime_ladder.py test_paper_policy_family_adaptive_regime_ladder_be.py test_paper_policy_family_trend_fade_60.py test_tile_paired_comparison.py test_tile_win_rate.py test_family_policy_common.py test_family_tile_runtime_peak_persistence.py test_adaptive_entry_funnel.py test_dashboard_operating_truth.py -q
+          python -m pytest test_paper_policy_family_trend_fade_60.py test_tile_paired_comparison.py test_tile_win_rate.py test_family_policy_common.py test_family_tile_runtime_peak_persistence.py test_adaptive_entry_funnel.py test_dashboard_operating_truth.py -q
           python -m pytest test_dual_execution_truth_closed_rows.py test_exit_shadow_world_current_stack.py -q
           python -m pytest test_chase_exact_bucket_controls.py -q
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q

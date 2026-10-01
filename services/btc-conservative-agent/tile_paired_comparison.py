@@ -219,38 +219,6 @@ def _paired(by_lane: Mapping[str, list[dict[str, Any]]], a: str, b: str) -> dict
     }
 
 
-def _ladder_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
-                    dsr: float | None, now_ts: float) -> dict[str, Any]:
-    promote, kill = pre["promotion"], pre["kill"]
-    lo, hi = stats.get("per_fill_ev_ci95_bp") or [None, None]
-    plo, phi = paired.get("difference_ci95_bp") or [None, None]
-    fills = int(stats.get("fills") or 0)
-    registered = _ts(pre.get("registered_utc")) or now_ts
-    age_days = (now_ts - registered) / 86400.0
-    kills = []
-    if fills >= kill["k1_min_fills"] and hi is not None and hi < kill["k1_per_fill_ev_upper_ci95_lt_bp"]:
-        kills.append("K1_PER_FILL_EV_UPPER_CI_BELOW_ZERO")
-    if (paired.get("paired_signals") or 0) >= kill["k2_min_paired_signals"] and phi is not None \
-            and phi < kill["k2_paired_vs_control_upper_ci95_lt_bp"]:
-        kills.append("K2_LOSES_TO_CONTROL_ON_PAIRED_SIGNALS")
-    overshoot = stats.get("max_lock_or_stop_overshoot_bp")
-    if (stats.get("max_hard_stops_in_rolling_50") or 0) >= kill["k3_hard_stops_per_rolling_50_kill_at"] or (
-        overshoot is not None and overshoot > kill["k3_max_lock_or_stop_overshoot_bp"]
-    ):
-        kills.append("K3_STOP_FAILURE")
-    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
-        kills.append("K4_DRAWDOWN")
-    checks = {
-        "min_fills": fills >= promote["min_fills"],
-        "min_days": (stats.get("days_observed") or 0.0) >= promote["min_days"],
-        "per_fill_ev_lower_ci95_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
-        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
-        "deflated_sharpe": dsr is not None and dsr >= promote["deflated_sharpe_min"],
-        "beats_control_paired": plo is not None and plo > promote["paired_vs_control_lower_ci95_gt_bp"],
-    }
-    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
-
-
 def _trade_count_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
                          dsr: float | None, now_ts: float) -> dict[str, Any]:
     promote, kill = pre["promotion"], pre["kill"]
@@ -292,7 +260,6 @@ def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any
 
 
 VERDICT_RULES = {
-    "tile_pre_registration_v1": _ladder_verdict,
     "tile_pre_registration_trade_count_v1": _trade_count_verdict,
 }
 

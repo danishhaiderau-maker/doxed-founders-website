@@ -43,8 +43,6 @@ def _compile_scope_helper():
     namespace = {
         "copy": copy,
         "_derive_lane_pnl_ledger_from_trades": derive,
-        "_settings_period_breakdown": lambda: {},
-        "_reconcile_settings_periods_to_headline": lambda stats, rows: rows,
         "_session_stats_from_lane_metrics": lambda metrics: dict(metrics),
     }
     exec(compile(module, str(BOT_PATH), "exec"), namespace)

@@ -65,7 +65,7 @@ def runtime(tmp_path_factory, monkeypatch):
            "_resume_agent_debug_writes": Mock(), "get_genome_bridge": lambda: None,
            "active_tile_registry_signature": lambda: "d" * 64,
            "_enabled_execution_settings": lambda: {"gap_buckets": ["small"], "chase_buckets": ["2", "3", "4"]},
-           "_execution_settings_history_lock": threading.RLock(), "_settings_breakdown_cache": {"key": "old"},
+           "_execution_settings_history_lock": threading.RLock(),
            "EXECUTION_SETTINGS_HISTORY_FILE": str(settings_history), "utc_iso": lambda: "2026-09-05T00:00:00Z",
            "_safe_append_jsonl": append_settings,
            "reset_provisional_events": Mock(), "save_persistent_config": Mock(),
@@ -173,7 +173,6 @@ def test_actual_reset_deletes_research_retires_authority_and_writes_real_epoch(r
     assert history[1]["reason"] == "FRESH_COLLECTION_STARTED"
     assert history[1]["signature"] == "gap=small|chase=2,3,4"
     assert runtime["settings_observed_epochs"] == [result["new_epoch_id"]]
-    assert runtime["_settings_breakdown_cache"]["key"] is None
 
 
 def test_existing_real_empty_wal_is_rebound_only_after_deletion(runtime):

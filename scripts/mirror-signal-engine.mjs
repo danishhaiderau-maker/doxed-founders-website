@@ -84,7 +84,7 @@ if (existsSync(combosAgent)) {
   const manifest = {
     engine_version: engineVersion,
     combo_version: unchanged && previous.combo_version ? previous.combo_version : new Date().toISOString().slice(0, 10),
-    exit_version: 'adaptive-regime-atr-trail-v1',
+    exit_version: 'time-exit-catastrophic-stop-v1',
     benchmark_lane: 'NONE',
     signal_hash: botHash,
     source: 'services/btc-conservative-agent/bot.py',
@@ -144,18 +144,22 @@ copyFileSync(join(agentDir, 'crash_exception_receipt.py'), join(engineDir, 'cras
 const activePolicyFiles = [
   'family_policy_common.py',
   'adaptive_regime_entry.py',
-  'adaptive_profit_lock_binding.py',
   'taker_time_exit_binding.py',
   'scenario_c_config.py',
   ...readdirSync(agentDir).filter((name) => /^paper_policy_.+\.py$/.test(name)).sort(),
 ];
+// Bindings that only served retired tiles; removed so the mirror cannot keep them.
+const retiredPolicyBindings = ['adaptive_profit_lock_binding.py'];
 for (const name of activePolicyFiles) {
   const source = join(agentDir, name);
   if (!existsSync(source)) throw new Error(`Missing registry dependency: ${name}`);
   copyFileSync(source, join(engineDir, name));
 }
 for (const name of readdirSync(engineDir)) {
-  if (name.startsWith('paper_policy_') && !activePolicyFiles.includes(name)) {
+  if (
+    (name.startsWith('paper_policy_') && !activePolicyFiles.includes(name)) ||
+    retiredPolicyBindings.includes(name)
+  ) {
     rmSync(join(engineDir, name));
   }
 }

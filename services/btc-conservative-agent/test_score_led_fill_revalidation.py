@@ -168,6 +168,6 @@ def test_full_tile_blocks_only_at_its_own_cap(admission):
 
 
 def test_shared_pool_saturation_no_longer_refuses_tiles(admission):
-    admission.update({None: 25, TILE: 3})
+    admission.update({None: 25, TILE: int(bot.ACTIVE_TILE_REGISTRY[TILE]["max_active_signals"]) - 1})
     assert bot.evaluate_execution_admission(TILE) == (True, "ALLOWED")
     assert bot.ensure_lane_signal_capacity(TILE) is True

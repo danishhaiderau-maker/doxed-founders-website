@@ -6,7 +6,7 @@ from research.dual_execution_truth import split_execution_truth
 
 def _closed(**overrides):
     row = {
-        "trade_id": "fal-1", "research_lane": "FAMILY_ADAPTIVE_REGIME_LADDER",
+        "trade_id": "ftf-1", "research_lane": "FAMILY_TREND_FADE_60",
         "entry": 65000.0, "exit": 65006.0, "exit_reason": "BREAKEVEN_LOCK",
         "net_pnl_usd": 0.0018,
     }
