@@ -53,6 +53,8 @@ RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_work
 RUN python -c "import research_segment_format, research_segment_selection, research_segment_store, research_segment_shipper, research_segment_server, research_segment_prune, research_fresh_start_wipe"
 # Bitfinex fee profile, fill markouts and the Dynamic Adaptive policy load on the order path.
 RUN python -c "import bitfinex_cost_profile, execution_markouts, paper_policy_family_adaptive_regime"
+# Shadow cross-venue collector process and its shared tape contract.
+RUN python -c "import cross_venue_tape, cross_venue_collector"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data

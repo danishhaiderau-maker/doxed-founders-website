@@ -100,6 +100,14 @@ if ($offline) {
         dead_fields = @($inputHealth.dead_fields | ForEach-Object { [ordered]@{ path = [string]$_.path; kind = [string]$_.kind; calls = $_.calls } })
       }
     }
+    $crossVenue = $ready.cross_venue_health
+    if ($crossVenue) {
+      $runtime.cross_venue_health = [ordered]@{
+        status = [string]$crossVenue.status; reason = $crossVenue.reason
+        collector_age_s = $crossVenue.collector_age_s
+        stale_venues = @($crossVenue.stale_venues | ForEach-Object { [string]$_ })
+      }
+    }
     $runtime.strategy_progress = [ordered]@{
       ai_progressing = $progress.ai_progressing; ai_age_sec = $progress.ai_age_sec
       ai_stale_after_sec = $progress.ai_stale_after_sec; evaluation_age_sec = $progress.evaluation_age_sec

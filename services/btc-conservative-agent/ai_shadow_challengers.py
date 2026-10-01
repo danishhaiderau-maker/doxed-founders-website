@@ -55,6 +55,7 @@ CHALLENGERS = (
     "contrarian_5m",
     "random",
     "compact_v5",
+    "leader_10s",
 )
 COMPACT_DRIVERS = frozenset({"TREND", "FLOW", "LOCATION", "DERIVS", "VOL", "STALE", "CONFLICT"})
 
@@ -324,7 +325,8 @@ def compact_side(parsed: Optional[Mapping[str, Any]]) -> str:
 
 def compute_challenger_sides(ctx: Mapping[str, Any], ai_result: Mapping[str, Any],
                              tape: Mapping[str, Any], call_id: str,
-                             compact: Optional[Mapping[str, Any]] = None) -> dict:
+                             compact: Optional[Mapping[str, Any]] = None,
+                             leader: Optional[Mapping[str, Any]] = None) -> dict:
     ai_ok = not ai_result.get("ai_error")
     long_score, short_score = _score_pair(ai_result)
     gap = None
@@ -346,6 +348,9 @@ def compute_challenger_sides(ctx: Mapping[str, Any], ai_result: Mapping[str, Any
         "contrarian_5m": _opposite(_side_from_sign(_finite(tape.get("ret_5m_bp")))),
         "random": seeded_random_side(call_id),
         "compact_v5": compact_side(compact),
+        # Sign of the cross-venue leader's 10 s mid return when it moved >= 2 bp
+        # (cross_venue_tape.leader_features); NONE when absent or below threshold.
+        "leader_10s": str((leader or {}).get("side") or NONE),
     }
     return {
         "sides": sides,
