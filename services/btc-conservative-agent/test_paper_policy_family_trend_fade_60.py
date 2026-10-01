@@ -53,6 +53,7 @@ def test_registry_owns_this_paper_only_relay_ineligible_beta_tile():
     assert policy.POLICY_ID == spec["raw_policy_id"]
     assert policy.POLICY_ID not in RETIRED_POLICY_IDENTITIES
     assert policy.POLICY_SIGNATURE == spec["policy_signature"]
+    assert len({COMBO_LANE_SPECS[lane]["policy_signature"] for lane in ACTIVE_TILE_ORDER}) == len(ACTIVE_TILE_ORDER)
     assert policy.LANE not in RETIRED_TILE_LANES
     exit_policy = spec["exit_policy"]
     assert exit_policy["max_duration_sec"] == 3600

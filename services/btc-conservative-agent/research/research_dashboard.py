@@ -228,6 +228,7 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "ai_shadow_challengers.jsonl",
     "ai_shadow_compact_prompt.jsonl",
     "cross_venue_tape_1m.jsonl",
+    "xvl_shadow_signals.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )
@@ -7003,6 +7004,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <table><thead><tr><th>Tile</th><th>Fills</th><th>Days</th><th>EV bp/fill [95% CI]</th><th>Halves</th><th>Win %</th><th>Max DD</th><th>Hard stops /50</th><th>Max lock overshoot bp</th><th>Verdict</th></tr></thead><tbody id="tile-paired-tiles-body"></tbody></table>
     <table><thead><tr><th>Challenger - control</th><th>Paired signals</th><th>Mean diff bp [95% CI]</th><th>Win % on paired signals (control / challenger)</th><th>Challenger better</th><th>Unpaired control / challenger</th></tr></thead><tbody id="tile-paired-pairs-body"></tbody></table>
     <p class="note" id="tile-paired-note"></p>
+    <h3>Cross-venue lead tile (XVL) - shadow stream, tape replay and parity</h3>
+    <p class="note">Shadow triggers are logged every qualifying second whether or not the tile toggle is ON. Markout: Bitfinex taker at anchor+1 to anchor+1+hold, after spread, no fee. Capacity-one mirrors the single paper slot; replay re-runs the registered rule on the cross-venue and Bitfinex tapes. HINT - 12h evidence, not validated across days.</p>
+    <table><thead><tr><th>Tile</th><th>Triggers logged</th><th>Gates</th><th>Stale-feed share</th><th>Shadow cap-1 trades / Win % / mean bp [1 h CI]</th><th>Every qualifying second</th><th>Tape replay</th><th>Parity (match / side / gap bp)</th></tr></thead><tbody id="xvl-shadow-body"></tbody></table>
+    <p class="note" id="xvl-shadow-note"></p>
     <details id="exit-combos-detail-inventory" open>
     <summary>Detailed exit-analysis tables and evidence labels</summary>
     <h3>Executed-paper exit-family scorecard</h3>
@@ -8145,6 +8150,34 @@ async function loadTilePairedComparison() {
   if (note) note.textContent = `Signals filled by every tile: ${all.signals_filled_by_every_tile ?? 'n/a'}. Cohort ${d.cohort || 'n/a'}; Deflated Sharpe trials = ${d.deflated_sharpe_trials ?? 'n/a'} live hypotheses; generated ${d.generated_at || 'n/a'}.`;
 }
 
+async function loadXvlShadow() {
+  const body = document.getElementById('xvl-shadow-body');
+  const note = document.getElementById('xvl-shadow-note');
+  if (!body) return;
+  let d = null;
+  try {
+    const r = await fetch('/api/report/lead_lag_report.json');
+    d = r.ok ? await r.json() : null;
+  } catch (e) { d = null; }
+  const x = d && d.xvl;
+  if (!x || x.status !== 'OK') {
+    body.innerHTML = `<tr><td colspan="8">XVL section unavailable${x && x.status ? ' - ' + x.status : (d ? '' : ' - lead-lag report not generated yet')}.</td></tr>`;
+    return;
+  }
+  const num = (v, dp) => v == null ? 'n/a' : Number(v).toFixed(dp);
+  const pct = v => v == null ? 'n/a' : (Number(v) * 100).toFixed(1) + '%';
+  const ci = c => (c && c[0] != null) ? ` [${num(c[0], 2)}, ${num(c[1], 2)}]` : ' [CI n/a]';
+  const summary = s => (s && typeof s === 'object') ? `${s.trades ?? 'NO DATA'} / ${pct(s.win_rate)} / ${num(s.mean_net_bp, 2)}${ci(s.ci95_1h_clusters)}` : (s || 'n/a');
+  body.innerHTML = Object.entries(x.lanes || {}).map(([lane, c]) => {
+    const sh = c.shadow || {};
+    const par = c.parity || {};
+    const gates = Object.entries(sh.by_gate || {}).map(([g, n]) => `${g} ${n}`).join(', ') || 'none';
+    const parity = c.parity ? `${pct(par.match_rate)} / ${pct(par.side_agreement)} / ${num(par.mean_abs_net_gap_bp, 2)} (limit ${par.limit_bp ?? 'n/a'})` : 'n/a';
+    return `<tr><td>${lane}</td><td>${sh.triggers_logged ?? 'NO DATA'}</td><td>${gates}</td><td>${pct(sh.stale_feed_share)}</td><td>${summary(sh.capacity_one)}</td><td>${summary(sh.every_qualifying_second)}</td><td>${summary(c.replay)}</td><td>${parity}</td></tr>`;
+  }).join('') || '<tr><td colspan="8">No cross-venue registry tiles.</td></tr>';
+  if (note) note.textContent = `${x.markout || ''}. Report generated ${d.generated_at || d.generated_utc || 'n/a'}.`;
+}
+
 async function loadExitCombos() {
   setEvidenceScope('exit-combos', ...EVIDENCE_SCOPES['exit-combos']);
   const r = await fetch('/api/exit-combos');
@@ -8171,6 +8204,7 @@ async function loadExitCombos() {
   document.getElementById('stop-effectiveness-body').innerHTML = renderStops(executed.stop_effectiveness_matrix);
   document.getElementById('stop-effectiveness-shadow-body').innerHTML = renderStops(shadow.stop_effectiveness_matrix);
   loadTilePairedComparison();
+  loadXvlShadow();
   const shadowArchive = shadow.archive || {};
   const archiveNote = shadowArchive.archived_rows_excluded
     ? `Current stack ${shadowArchive.current_stack_version || 'n/a'} only. ${shadowArchive.archived_rows_excluded} archived shadow rows from prior stacks (${Object.entries(shadowArchive.archived_rows_by_version || {}).map(([v, n]) => v + ': ' + n).join(', ')}) are excluded and not analyzed.`

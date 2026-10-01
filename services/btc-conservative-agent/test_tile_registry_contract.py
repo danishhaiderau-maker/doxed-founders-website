@@ -80,14 +80,14 @@ TREND_FADE_60_SIGNATURE = "a0a04faefaba977b203ad0a84117612ca7d487b0ce22f9d55504f
 TREND_FADE_60_SCORE_LED_SIGNATURE = "1936f510d2ff7d0c3aaaa4a5c14431637a02362cb2980a24b2f474b91a4743e0"
 
 
-def test_active_registry_is_trend_fade_60_then_its_profit_lock_variant():
+def test_active_registry_is_trend_fade_60_then_profit_lock_then_cross_venue_lead():
     import combo_pathway_config as registry
     from scenario_c_config import TRAIL_LADDER_SCENARIO_C
 
-    assert ACTIVE_TILE_ORDER == ("FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_LADDER")
+    assert ACTIVE_TILE_ORDER == ("FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_LADDER", "FAMILY_XVENUE_LEAD_60S")
     manifest = active_tile_lifecycle_manifest()
     assert [(row["lane"], row["display_order"]) for row in manifest] == [
-        ("FAMILY_TREND_FADE_60", 1), ("FAMILY_TREND_FADE_60_LADDER", 2),
+        ("FAMILY_TREND_FADE_60", 1), ("FAMILY_TREND_FADE_60_LADDER", 2), ("FAMILY_XVENUE_LEAD_60S", 3),
     ]
     fade = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"]
     fade_ladder = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60_LADDER"]

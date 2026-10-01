@@ -146,6 +146,8 @@ const activePolicyFiles = [
   'adaptive_regime_entry.py',
   'taker_time_exit_binding.py',
   'scenario_c_config.py',
+  'cross_venue_tape.py',
+  'cross_venue_lead.py',
   ...readdirSync(agentDir).filter((name) => /^paper_policy_.+\.py$/.test(name)).sort(),
 ];
 // Bindings that only served retired tiles; removed so the mirror cannot keep them.
