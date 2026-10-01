@@ -15,6 +15,21 @@ DIVERGENCE_COHORTS = (
 )
 
 
+_NO_FILL_EXIT_MARKERS = ("NO_FILL", "UNFILLED", "TTL", "EXPIRED", "CANCEL", "ABANDON", "REJECT")
+
+
+def _closed_paper_fill(row) -> bool:
+    """A closed ledger row carries its fill implicitly: entry, exit and exit reason."""
+    if "executed" in row or row.get("status"):
+        return False
+    entry = row.get("fill_price") or row.get("entry")
+    exit_price = row.get("exit_price") or row.get("exit")
+    reason = str(row.get("exit_reason") or "").upper()
+    if not (entry and exit_price and reason):
+        return False
+    return not any(marker in reason for marker in _NO_FILL_EXIT_MARKERS)
+
+
 def _showcase_filled(row, showcase):
     paper = row.get("paper_trade") if isinstance(row.get("paper_trade"), dict) else {}
     if showcase.get("executed") and (row.get("filled") is True or showcase.get("fill_price")):
@@ -69,9 +84,10 @@ def split_execution_truth(row: dict) -> dict:
         copy_fill = evidence.get("copy_fill_observed") if isinstance(evidence.get("copy_fill_observed"), dict) else {}
     if not overlay:
         overlay = evidence.get("exchange_confirmed_shadow_overlay") if isinstance(evidence.get("exchange_confirmed_shadow_overlay"), dict) else {}
+    closed_fill = _closed_paper_fill(row)
     showcase = {
-        "executed": bool(row.get("executed") is True),
-        "status": row.get("status"),
+        "executed": bool(row.get("executed") is True or closed_fill),
+        "status": "FILLED_CLOSED" if closed_fill else row.get("status"),
         "fill_price": row.get("fill_price") or row.get("entry"),
         "exit_price": row.get("exit_price") or row.get("exit"),
         "pnl_usd": row.get("net_pnl_usd", row.get("pnl")),

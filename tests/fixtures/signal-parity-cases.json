@@ -1,21 +1,53 @@
 {
-  "description": "Frozen parity cases for the registry-owned Dynamic Adaptive paper tile; the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
+  "description": "Frozen parity cases for the three registry-owned Dynamic Adaptive paper tiles (ATR Trail; ATR Trail plus Scenario-C profit lock; and ATR Trail plus break-even and Scenario-C profit lock) sharing one direction call; the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
   "cases": [
     {
       "id": "dynamic-adaptive-long-shared-direction",
-      "ai": { "win_prob": 0, "bull_score": 8, "bear_score": 4 },
+      "ai": {
+        "win_prob": 0,
+        "bull_score": 8,
+        "bear_score": 4
+      },
       "direction": "LONG",
       "spread": 4,
-      "expect_lanes": ["FAMILY_ADAPTIVE_REGIME"],
-      "reject_lanes": ["FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5", "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK", "CONTINUOUS", "UNKNOWN_RETIRED_LANE"]
+      "expect_lanes": [
+        "FAMILY_ADAPTIVE_REGIME",
+        "FAMILY_ADAPTIVE_REGIME_LADDER",
+        "FAMILY_ADAPTIVE_REGIME_LADDER_BE"
+      ],
+      "reject_lanes": [
+        "FAMILY_CHANDELIER_3",
+        "FAMILY_ATR_TARGET_2_5",
+        "FAMILY_ATR_TRAIL",
+        "FAMILY_HYBRID_RUNNER",
+        "FAMILY_MFE_GIVEBACK",
+        "CONTINUOUS",
+        "UNKNOWN_RETIRED_LANE"
+      ]
     },
     {
       "id": "dynamic-adaptive-short-shared-direction",
-      "ai": { "win_prob": 0, "bull_score": 3, "bear_score": 8 },
+      "ai": {
+        "win_prob": 0,
+        "bull_score": 3,
+        "bear_score": 8
+      },
       "direction": "SHORT",
       "spread": 5,
-      "expect_lanes": ["FAMILY_ADAPTIVE_REGIME"],
-      "reject_lanes": ["FAMILY_CHANDELIER_3", "FAMILY_ATR_TARGET_2_5", "FAMILY_ATR_TRAIL", "FAMILY_HYBRID_RUNNER", "FAMILY_MFE_GIVEBACK", "CONTINUOUS", "UNKNOWN_RETIRED_LANE"]
+      "expect_lanes": [
+        "FAMILY_ADAPTIVE_REGIME",
+        "FAMILY_ADAPTIVE_REGIME_LADDER",
+        "FAMILY_ADAPTIVE_REGIME_LADDER_BE"
+      ],
+      "reject_lanes": [
+        "FAMILY_CHANDELIER_3",
+        "FAMILY_ATR_TARGET_2_5",
+        "FAMILY_ATR_TRAIL",
+        "FAMILY_HYBRID_RUNNER",
+        "FAMILY_MFE_GIVEBACK",
+        "CONTINUOUS",
+        "UNKNOWN_RETIRED_LANE"
+      ]
     },
     {
       "id": "retired-continuous-not-benchmark",
@@ -25,6 +57,16 @@
     {
       "id": "dynamic-adaptive-not-benchmark",
       "lane": "FAMILY_ADAPTIVE_REGIME",
+      "expect_benchmark": false
+    },
+    {
+      "id": "dynamic-adaptive-ladder-not-benchmark",
+      "lane": "FAMILY_ADAPTIVE_REGIME_LADDER",
+      "expect_benchmark": false
+    },
+    {
+      "id": "dynamic-adaptive-ladder-be-not-benchmark",
+      "lane": "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
       "expect_benchmark": false
     }
   ]

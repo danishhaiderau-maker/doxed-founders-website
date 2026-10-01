@@ -37,15 +37,33 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- The only registered tile is Dynamic Adaptive (`FAMILY_ADAPTIVE_REGIME`), an
-  honest paper experiment with no proven edge: trailing 15-minute realized-vol
+- Three tiles are registered, all honest paper experiments with no proven edge
+  that consume the same shared AI call with independent locks, orders,
+  positions, ledgers and analyzer cohorts. Dynamic Adaptive
+  (`FAMILY_ADAPTIVE_REGIME`): trailing 15-minute realized-vol
   regime from Bitfinex 1m candles (CALM below the frozen p40, EXTREME above the
   frozen p90), a fast-move z-score, taker with a bounded protection cap in
   NORMAL or on a fast move, a short-lived maker limit within one tick in CALM,
   stand-aside in EXTREME or when the initial stop is at least 40 bps, and an
   ATR Trail exit (SL 1.5 / arm 0.75 / trail 1). Direction comes from score-led
-  admission; a raw AI NO_TRADE or a score gap below 5 never trades. It defaults
-  OFF, is paper-only, and is relay-ineligible. The five former family tiles
+  admission; a raw AI NO_TRADE or a score gap below 5 never trades. Adaptive +
+  Profit Lock (`FAMILY_ADAPTIVE_REGIME_LADDER`) uses the identical entry and
+  admission, ATR Trail, and the Scenario-C ladder (8→5 … 150→120 margin % at
+  100x) with no break-even rung. Adaptive + Break-even + Profit Lock
+  (`FAMILY_ADAPTIVE_REGIME_LADDER_BE`) is the same plus a break-even rung (peak
+  +4% margin locks +1%, the round-trip fee plus a 1 bp exit-slip buffer). For
+  both ladder tiles the effective stop is the more protective of the ATR
+  stop/trail and the armed lock, locks book at the side-correct quote that
+  crossed them, the 30% margin hard stop and 2 h cap apply, and each holds at
+  most one position. All three default OFF, are paper-only, and are
+  relay-ineligible. The two ladder tiles carry a frozen registry
+  `pre_registration` scored by the analyzer's paired comparison against Tile 1
+  on identical signals: promotion (owner review, never relay) needs >=400 fills
+  over >=14 days, conservative per-fill EV lower 95% CI > 0, both halves
+  positive, Deflated Sharpe >= 0.95 across live hypotheses, and a positive
+  paired lower CI against Tile 1; kill on per-fill EV upper CI < 0 after 150
+  fills, a paired upper CI < 0 against Tile 1 after 300 signals, a stop failure,
+  drawdown above $1.50, or 21 days without promotion. The five former family tiles
   and the Continuous comparison label are retired (`RETIRED_TILE_LANES`); a
   future tile is promoted only if it passes the OOS promotion gate.
   The number of tiles is not an architecture constant; the frozen

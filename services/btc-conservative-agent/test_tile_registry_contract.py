@@ -8,6 +8,7 @@ from combo_pathway_config import (
     TILE_COMPONENT_SURFACES,
     active_tile_lifecycle_manifest,
     active_tile_registry_signature,
+    combo_toggle_defaults,
     validate_tile_registry,
     _policy_signature,
 )
@@ -67,28 +68,54 @@ RETIRED_ANALYZER_HYPOTHESIS_LANES = (
 )
 
 
-def test_active_registry_is_exactly_the_dynamic_adaptive_paper_experiment():
-    assert ACTIVE_TILE_ORDER == ("FAMILY_ADAPTIVE_REGIME",)
-    spec = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME"]
-    assert spec["raw_policy_id"].endswith(
-        "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1"
+def test_active_registry_is_exactly_the_three_dynamic_adaptive_paper_experiments():
+    assert ACTIVE_TILE_ORDER == (
+        "FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER", "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
     )
-    assert spec["policy_epoch"] == "v31-dynamic-adaptive-paper-v3"
-    assert spec["default_enabled"] is False
-    assert spec["paper_only"] is True
-    assert spec["platform_relay_eligible"] is False
-    assert spec["entry_policy"]["chase_windows"] == ()
-    assert spec["entry_policy"]["extreme_action"] == "STAND_ASIDE"
-    assert spec["entry_policy"]["block_raw_ai_no_trade"] is True
-    assert spec["entry_policy"]["min_score_gap"] == 5
-    assert spec["entry_policy"]["liquidation_guard_stop_bps"] == 40.0
-    exit_policy = spec["exit_policy"]
-    assert exit_policy["initial_stop_atr_k"] == 1.5
-    assert exit_policy["trail_activation_atr_k"] == 0.75
-    assert exit_policy["trail_atr_k"] == 1.0
-    result = spec["presentation"]["hypothesis_result"]
-    assert result["status"] == "UNPROVEN_HONEST_PAPER_EXPERIMENT"
-    assert "NO PROVEN EDGE" in spec["subtitle"]
+    base = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME"]
+    ladder = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME_LADDER"]
+    ladder_be = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME_LADDER_BE"]
+    prefix = "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1"
+    assert base["raw_policy_id"].endswith(prefix)
+    assert ladder["raw_policy_id"].endswith(prefix + "_SCENARIO_C_CAP1")
+    assert ladder_be["raw_policy_id"].endswith(prefix + "_SCENARIO_C_BE4_LOCK1_CAP1")
+    tiles = (base, ladder, ladder_be)
+    for lane, spec in zip(ACTIVE_TILE_ORDER, tiles):
+        assert spec["policy_epoch"] == "v31-dynamic-adaptive-ladder-paper-v4"
+        assert spec["default_enabled"] is False
+        assert spec["paper_only"] is True
+        assert spec["platform_relay_eligible"] is False
+        assert spec["entry_policy"]["chase_windows"] == ()
+        assert spec["entry_policy"]["extreme_action"] == "STAND_ASIDE"
+        assert spec["entry_policy"]["block_raw_ai_no_trade"] is True
+        assert spec["entry_policy"]["min_score_gap"] == 5
+        assert spec["entry_policy"]["liquidation_guard_stop_bps"] == 40.0
+        exit_policy = spec["exit_policy"]
+        assert exit_policy["initial_stop_atr_k"] == 1.5
+        assert exit_policy["trail_activation_atr_k"] == 0.75
+        assert exit_policy["trail_atr_k"] == 1.0
+        result = spec["presentation"]["hypothesis_result"]
+        assert result["status"] == "UNPROVEN_HONEST_PAPER_EXPERIMENT"
+        assert "NO PROVEN EDGE" in spec["subtitle"]
+        assert spec["entry_policy"] == base["entry_policy"]
+        assert spec["toggle_key"] == "research_lane_enabled"
+        assert combo_toggle_defaults()[lane] is False
+    assert len({spec["policy_signature"] for spec in tiles}) == 3
+    assert len({spec["id_prefix"] for spec in tiles}) == 3
+    assert not base.get("ladder") and ladder["ladder"] == ladder_be["ladder"]
+    assert base.get("max_active_signals", 10) == 10
+    assert ladder["max_active_signals"] == ladder_be["max_active_signals"] == 1
+    assert "breakeven_trigger_margin_pct" not in ladder["exit_policy"]
+    assert ladder_be["exit_policy"]["breakeven_trigger_margin_pct"] == 4.0
+    assert ladder_be["exit_policy"]["breakeven_lock_margin_pct"] == 1.0
+    assert "pre_registration" not in base
+    for spec in (ladder, ladder_be):
+        pre = spec["pre_registration"]
+        assert pre["control_lane"] == "FAMILY_ADAPTIVE_REGIME"
+        assert pre["promotion"]["min_fills"] == 400 and pre["promotion"]["min_days"] == 14
+        assert pre["kill"]["k1_min_fills"] == 150 and pre["kill"]["k4_max_drawdown_usd"] == 1.5
+        assert pre["kill"]["k5_max_days_without_promotion"] == 21
+    assert ladder["pre_registration"]["hypothesis_id"] != ladder_be["pre_registration"]["hypothesis_id"]
 
 
 def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():

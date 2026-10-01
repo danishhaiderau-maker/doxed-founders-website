@@ -143,6 +143,9 @@ copyFileSync(join(agentDir, 'crash_exception_receipt.py'), join(engineDir, 'cras
 // exactly one registry owner, so the canonical directory is the roster here.
 const activePolicyFiles = [
   'family_policy_common.py',
+  'adaptive_regime_entry.py',
+  'adaptive_profit_lock_binding.py',
+  'scenario_c_config.py',
   ...readdirSync(agentDir).filter((name) => /^paper_policy_.+\.py$/.test(name)).sort(),
 ];
 for (const name of activePolicyFiles) {

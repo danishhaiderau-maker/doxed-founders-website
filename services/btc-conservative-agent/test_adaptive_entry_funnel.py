@@ -7,13 +7,14 @@ import pytest
 
 import adaptive_entry_funnel as funnel
 
-V2 = "v31-dynamic-adaptive-paper-v3"
+V2 = "v31-dynamic-adaptive-ladder-paper-v4"
 V2_DEFECT = "v31-dynamic-adaptive-paper-v2"
 LANE = "FAMILY_ADAPTIVE_REGIME"
+LADDER = "FAMILY_ADAPTIVE_REGIME_LADDER"
 
 
-def _decision(call, action, reason, regime="CALM", version=V2):
-    row = {"research_lane": LANE, "shared_ai_call_id": call, "action": action,
+def _decision(call, action, reason, regime="CALM", version=V2, lane=LANE):
+    row = {"research_lane": lane, "shared_ai_call_id": call, "action": action,
            "reason": reason, "regime": regime}
     if version:
         row["bot_version"] = version
@@ -105,3 +106,30 @@ def test_analyzer_registers_the_adaptive_funnel_report():
     assert name in engine.ANALYZER_JSON_REPORT_FILES
     assert name in {row[1] for row in engine.DEEP_DIVE_REPORT_CATALOG}
     assert name in ANALYZER_REPORT_FILES
+
+
+def test_tiles_sharing_one_ai_call_are_separate_lane_cohorts():
+    report = funnel.build_report(
+        decisions=[
+            _decision("c1", "MAKER", "CALM_MAKER"),
+            _decision("c1", "MAKER", "CALM_MAKER", lane=LADDER),
+            _decision("c2", "STAND_ASIDE", "AI_NO_TRADE"),
+            _decision("c2", "STAND_ASIDE", "AI_NO_TRADE", lane=LADDER),
+            _decision("c0", "MAKER", "CALM_MAKER", version="v31-dynamic-adaptive-paper-v3"),
+        ],
+        taker_counterfactuals=[_cf("c1", 2.0, 4.0), _cf("c2", -1.0, -3.0)],
+        trades=[{"research_lane": LANE, "shared_ai_call_id": "c1", "net_pnl_usd": "-0.02", "exit_reason": "INITIAL_ATR_STOP"},
+                {"research_lane": LADDER, "shared_ai_call_id": "c1", "net_pnl_usd": "0.001", "exit_reason": "BREAKEVEN_LOCK"}],
+        expired=[],
+        current_version=V2,
+    )
+    assert report["current_cohort"]["decisions"] == 4
+    by_lane = report["current_cohort_by_lane"]
+    assert set(by_lane) == {LANE, LADDER}
+    for lane, pnl in ((LANE, -0.02), (LADDER, 0.001)):
+        groups = {(g["action"], g["outcome"]): g for g in by_lane[lane]["stand_aside_vs_trade"]}
+        assert by_lane[lane]["decisions"] == 2
+        assert groups[("MAKER", "FILLED_CLOSED")]["realized_net_pnl_usd"] == pytest.approx(pnl)
+        assert groups[("STAND_ASIDE", "STOOD_ASIDE")]["n"] == 1
+    prior = report["quarantined_cohorts"]["v31-dynamic-adaptive-paper-v3"]
+    assert prior["reason"] == "SUPERSEDED_SINGLE_TILE_STACK"

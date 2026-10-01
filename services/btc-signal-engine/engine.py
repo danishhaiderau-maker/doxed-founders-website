@@ -6560,6 +6560,7 @@ _TRIGGER_CONSISTENT_EXIT_REASONS = frozenset({
     "PHYSICAL_HARD_STOP_30PCT",
     "INITIAL_ATR_STOP",
     "PROFIT_PROTECTION_STOP",
+    "BREAKEVEN_LOCK",
     "PATH_END_120M",
 })
 
@@ -19579,6 +19580,11 @@ def _row_epoch(value) -> float:
         return 0.0
 
 
+def _win_rate_pct(wins: int, closed: int):
+    """Wins (net PnL > 0 after costs) over closed filled trades; None when nothing closed."""
+    return round(100.0 * int(wins) / int(closed), 1) if closed else None
+
+
 def _settings_period_breakdown() -> dict:
     """Exact fresh-collection PnL by recorded settings epoch; legacy settings stay unknown."""
     files = (EXECUTION_SETTINGS_HISTORY_FILE, CSV_TRADES)
@@ -19652,6 +19658,8 @@ def _settings_period_breakdown() -> dict:
             ]
             pnl = round(sum(lane_trades), 2)
             approved = len(lane_trades)
+            wins = sum(1 for value in lane_trades if value > 0)
+            losses = sum(1 for value in lane_trades if value < 0)
             output[lane].append({
                 **period,
                 "period_number": index + 1,
@@ -19660,6 +19668,9 @@ def _settings_period_breakdown() -> dict:
                 "executed": len(lane_trades),
                 "pnl_usd": pnl,
                 "ev_per_approval": round(pnl / approved, 2) if approved else None,
+                "wins": wins,
+                "losses": losses,
+                "win_rate_pct": _win_rate_pct(wins, len(lane_trades)),
             })
     _settings_breakdown_cache["key"] = key
     _settings_breakdown_cache["value"] = copy.deepcopy(output)
@@ -31128,8 +31139,13 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
     lab_win_rate = float(m.get("lab_win_rate") or 0.0)
     lab_ev = float(m.get("lab_per_close_ev") or 0.0)
     lab_open = int(m.get("lab_open_shadows") or 0)
-    raw_win_rate = m.get("win_rate_pct")
-    win_rate = None if raw_win_rate is None else float(raw_win_rate)
+    wins = int(m.get("wins") or 0)
+    losses = int(m.get("losses") or 0)
+    if m.get("wins") is not None or m.get("losses") is not None:
+        win_rate = _win_rate_pct(wins, fills)
+    else:
+        raw_win_rate = m.get("win_rate_pct")
+        win_rate = None if raw_win_rate is None or not fills else float(raw_win_rate)
     shadow_sim = bool(m.get("shadow_sim_mode"))
     checker_pass_sims = int(m.get("checker_pass_sims") or 0)
     checker_pass_pnl = float(m.get("checker_pass_pnl") or 0)
@@ -31173,6 +31189,8 @@ def _session_stats_from_lane_metrics(metrics: dict) -> dict:
         "verdict": m.get("verdict"),
         "summary_line": summary_line,
         "shadow_sim_mode": shadow_sim,
+        "wins": wins,
+        "losses": losses,
         "win_rate_pct": win_rate,
         "checker_pass_sims": checker_pass_sims,
         "checker_pass_pnl": round(checker_pass_pnl, 2),
@@ -33321,6 +33339,9 @@ DASHBOARD_JS = """(function () {
       if (!raw) return 'Not recorded';
       const labels = {
         PROFIT_LOCK_LADDER: 'Profit lock (trailing)',
+        BREAKEVEN_LOCK: 'Break-even lock',
+        INITIAL_ATR_STOP: 'Initial ATR stop',
+        PROFIT_PROTECTION_STOP: 'ATR trail stop',
         TAKE_PROFIT: 'Take profit',
         THESIS_FAST_CUT: 'Thesis fast cut',
         EARLY_FAIL: 'Early thesis failure',
@@ -33882,6 +33903,15 @@ DASHBOARD_JS = """(function () {
             : null;
           const headlineEvLabel = headlineEv == null ? '—' : ('$' + headlineEv.toFixed(2));
           const headlinePnlCol = headlinePnl >= 0 ? '#3fb950' : '#f85149';
+          const winPctLabel = function (wins, losses, closed) {
+            const n = Number(closed || 0);
+            if (!(n > 0)) return '—';
+            const w = Number(wins || 0);
+            return Math.round(100 * w / n) + '% (' + w + 'W/' + Number(losses || 0) + 'L)';
+          };
+          const headlineWinLabel = currentSettingsPeriod
+            ? winPctLabel(currentSettingsPeriod.wins, currentSettingsPeriod.losses, headlineClosed)
+            : winPctLabel(stats.wins, stats.losses, headlineClosed);
           const formatPeriodTime = function (epoch) {
             if (!epoch) return '—';
             try {
@@ -33910,6 +33940,7 @@ DASHBOARD_JS = """(function () {
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + Number(period.executed || 0) + '</td>'
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;color:' + (periodPnl >= 0 ? '#3fb950' : '#f85149') + ';">$' + periodPnl.toFixed(2) + '</td>'
               + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + (periodEv == null ? '—' : ('$' + Number(periodEv).toFixed(2))) + '</td>'
+              + '<td style="padding:5px;text-align:right;border-bottom:1px solid #30363d;">' + winPctLabel(period.wins, period.losses, period.executed) + '</td>'
               + '</tr>';
           }).join('');
           const statsScope = currentSettingsPeriod
@@ -33923,17 +33954,18 @@ DASHBOARD_JS = """(function () {
             + '<thead><tr style="color:#8b949e;background:#101820;">'
             + '<th style="padding:5px;text-align:left;">Period</th><th style="padding:5px;text-align:left;">Gap</th><th style="padding:5px;text-align:left;">Global submit windows</th>'
             + '<th style="padding:5px;text-align:right;">Approvals</th><th style="padding:5px;text-align:right;">Closed</th>'
-            + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th>'
+            + '<th style="padding:5px;text-align:right;">PnL</th><th style="padding:5px;text-align:right;">EV/appr</th><th style="padding:5px;text-align:right;">Win %</th>'
             + '</tr></thead><tbody>'
-            + (settingsRows || '<tr><td colspan="7" style="padding:7px;color:#6e7681;">Settings tracking starts with this bot release.</td></tr>')
+            + (settingsRows || '<tr><td colspan="8" style="padding:7px;color:#6e7681;">Settings tracking starts with this bot release.</td></tr>')
             + '</tbody></table></div>';
-          const statsGrid = '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
+          const statsGrid = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px;padding:8px;background:#161b22;border-radius:8px;">'
             + statRow('Status', on ? '🟢 ON' : '🔴 OFF', on ? '#3fb950' : '#f85149')
             + statRow('Pending', laneNow.pending || 0)
             + statRow('Open', laneNow.open || 0)
             + statRow('Closed', headlineClosed)
             + statRow('PnL', '$' + headlinePnl.toFixed(2), headlinePnlCol)
             + statRow('EV/appr', headlineEvLabel)
+            + statRow('Win %', headlineWinLabel)
             + '</div>'
             + settingsBreakdown;
           const chips = (spec.filter_chips || []).map(function (c) {
