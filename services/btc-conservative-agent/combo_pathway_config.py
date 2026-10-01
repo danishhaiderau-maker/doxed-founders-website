@@ -15,6 +15,8 @@ import math
 import os
 from typing import Any
 
+from scenario_c_config import SCENARIO_C_LADDER_LABEL, SCENARIO_C_PROFILE_ID, TRAIL_LADDER_SCENARIO_C
+
 # Startup-only, explicit research treatment. A restart changes policy identity;
 # this is not a mutable per-request switch or permission to relay live orders.
 SCORE_LED_PAPER_RESEARCH_ENABLED = os.getenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "") == "1"
@@ -106,6 +108,7 @@ def resolve_score_led_paper_admission(
 
 RESEARCH_LANE_AI_SCAN = "AI_SCAN"
 RESEARCH_LANE_FAMILY_TREND_FADE_60 = "FAMILY_TREND_FADE_60"
+RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER = "FAMILY_TREND_FADE_60_LADDER"
 INVERTED_SCORE_LED_ADMISSION_POLICY_ID = "INVERTED_SCORE_LED_SIDE_V1"
 TILE_REGISTRY_SCHEMA = "research_tile_registry_v1"
 TILE_ARCHITECTURE_VERSION = 3
@@ -133,6 +136,7 @@ TILE_LIFECYCLE_STATES = frozenset({"PAPER_ONLY"})
 
 COMBO_EXECUTION_LANES = (
     RESEARCH_LANE_FAMILY_TREND_FADE_60,
+    RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER,
 )
 COMBO_TILE_DISPLAY_ORDER = COMBO_EXECUTION_LANES
 
@@ -171,7 +175,8 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
           subtitle: str | None = None, policy_epoch: str | None = None,
           max_active_signals: int = TILE_MAX_ACTIVE_SIGNALS,
           pre_registration: dict | None = None,
-          admission_treatment: str | None = None) -> dict:
+          admission_treatment: str | None = None,
+          default_enabled: bool = False) -> dict:
     if SCORE_LED_PAPER_RESEARCH_ENABLED:
         raw_policy_id = SCORE_LED_ADMISSION_POLICY_ID + "::" + raw_policy_id
     chase = tuple(entry["chase_windows"])
@@ -211,7 +216,7 @@ def _tile(*, lane: str, label: str, raw_policy_id: str, id_prefix: str,
         "is_research_candidate": True, "is_legacy": False,
         "is_independent_ai": False, "uses_shared_ai_direction": True,
         "paper_only": True, "platform_relay_eligible": False,
-        "default_enabled": False, "id_prefix": id_prefix,
+        "default_enabled": bool(default_enabled), "id_prefix": id_prefix,
         "toggle_key": "research_lane_enabled", "lifecycle_state": "PAPER_ONLY",
         "implementation_modules": (module,), "dedicated_test_modules": (test_module,),
         "entry_offset_pct": entry["offset_pct"],
@@ -253,21 +258,27 @@ RESEARCH_STACK_VERSION = "v31-trend-fade-single-tile-v5"
 TREND_FADE_60_POLICY_EPOCH = "v31-dynamic-adaptive-ladder-paper-v4"
 
 
-def _trend_fade_pre_registration(hypothesis_id: str) -> dict:
+def _trend_fade_pre_registration(
+    hypothesis_id: str, *,
+    registered_utc: str = "2026-10-01T08:30:00Z",
+    registered_cohort: str = TREND_FADE_60_POLICY_EPOCH,
+    control_lane: str | None = None,
+    control_meaning: str = "AI's own score-led side on the same shared call",
+    control_status: str | None = "RETIRED_20261002_NO_PAIRED_CONTROL",
+    honest_label: str = "in-sample +$1.30 / 47 trades; expected heavy decay; beta test",
+) -> dict:
     """Owner-approved beta test; verdicts use post-registration trades only."""
     pre = {
         "schema": "tile_pre_registration_trade_count_v1",
         "hypothesis_id": hypothesis_id,
-        "registered_utc": "2026-10-01T08:30:00Z",
-        "registered_cohort": TREND_FADE_60_POLICY_EPOCH,
-        # The paired control tile was retired on 2026-10-02. No kill or
-        # promotion rule below reads the control, so the verdict is unchanged.
-        "control_lane": None,
-        "control_meaning": "AI's own score-led side on the same shared call",
-        "control_status": "RETIRED_20261002_NO_PAIRED_CONTROL",
+        "registered_utc": registered_utc,
+        "registered_cohort": registered_cohort,
+        "control_lane": control_lane,
+        "control_meaning": control_meaning,
+        **({"control_status": control_status} if control_status else {}),
         "evidence_world": "CONSERVATIVE_BBO",
         "ci_method": "6H_CLUSTER_BOOTSTRAP_95",
-        "honest_label": "in-sample +$1.30 / 47 trades; expected heavy decay; beta test",
+        "honest_label": honest_label,
         "promotion": {
             "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY",
             "min_fills": 150,
@@ -299,6 +310,21 @@ def _trend_fade_pre_registration(hypothesis_id: str) -> dict:
     return pre
 
 
+# One entry shared by Trend Fade 60 and its profit-lock variant so the two
+# tiles pair on identical signals; only the exit and capacity differ.
+_TREND_FADE_60_ENTRY = {
+    "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
+    "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
+    "direction_source": "INVERTED_SCORE_LED_SIDE",
+    "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR"),
+    "trades_raw_ai_no_trade": True, "min_score_gap": None,
+    "max_spread_bps": 1.68, "max_bbo_age_sec": 5.0,
+    "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
+    "ai_decision_role": "FEATURE_ONLY",
+}
+TREND_FADE_60_LADDER_MAX_OPEN_POSITIONS = 5
+_SCENARIO_C_LADDER = tuple(tuple(row) for row in TRAIL_LADDER_SCENARIO_C)
+
 
 COMBO_LANE_SPECS = {
     # Owner-approved beta test of the strongest in-sample research idea
@@ -313,16 +339,7 @@ COMBO_LANE_SPECS = {
         id_prefix="ftf",
         module="paper_policy_family_trend_fade_60.py",
         test_module="test_paper_policy_family_trend_fade_60.py",
-        entry={
-            "mode": "TAKER_AT_SIGNAL", "offset_pct": 0.0, "chase_windows": (),
-            "remaining_gap_step_pct": 0.0, "reprice_sec": 0,
-            "direction_source": "INVERTED_SCORE_LED_SIDE",
-            "refuse_on": ("SCORE_TIE", "INVALID_SCORES", "AI_ERROR"),
-            "trades_raw_ai_no_trade": True, "min_score_gap": None,
-            "max_spread_bps": 1.68, "max_bbo_age_sec": 5.0,
-            "taker_protection_bps": 5.0, "taker_ttl_sec": 15,
-            "ai_decision_role": "FEATURE_ONLY",
-        },
+        entry=dict(_TREND_FADE_60_ENTRY),
         exit_policy={
             "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP",
             "max_duration_sec": 3600,
@@ -345,6 +362,55 @@ COMBO_LANE_SPECS = {
         subtitle="BETA TEST — in-sample +$1.30 / 47 trades; expected heavy decay — PAPER ONLY — RELAY INELIGIBLE",
         policy_epoch=TREND_FADE_60_POLICY_EPOCH,
     ),
+    # Owner-requested variant of Trend Fade 60: identical entry and admission,
+    # exit = Scenario-C profit-lock ladder, 40 bp catastrophic stop and the 60 m
+    # time backstop; no break-even, trail or target beyond the ladder. Its own
+    # capacity holds up to five concurrent positions. Paired against Trend
+    # Fade 60 on the same calls. Owner asked for default ON; paper-only.
+    RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER: _tile(
+        lane=RESEARCH_LANE_FAMILY_TREND_FADE_60_LADDER,
+        label="Trend Fade 60 + Profit Lock · inverted AI side, Scenario-C ladder, 40 bp stop, 60-min backstop",
+        raw_policy_id="INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP_SCENARIO_C_CAP5",
+        id_prefix="ftl",
+        module="paper_policy_family_trend_fade_60_ladder.py",
+        test_module="test_paper_policy_family_trend_fade_60_ladder.py",
+        entry=dict(_TREND_FADE_60_ENTRY),
+        exit_policy={
+            "family": "TIME_EXIT_WITH_CATASTROPHIC_STOP_PROFIT_LOCK",
+            "max_duration_sec": 3600,
+            "hard_stop_bps": 40.0, "hard_stop_margin_pct": 40.0,
+            "profit_lock": "SCENARIO_C_LADDER",
+            "effective_stop": "MOST_PROTECTIVE_OF_CATASTROPHIC_STOP_AND_PROFIT_LOCK",
+            "breakeven": None, "trail": None, "take_profit": None,
+            "stop_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+            "lock_fill": "SIDE_CORRECT_BBO_TICK_THAT_CROSSED_THE_STOP",
+            "max_open_positions": TREND_FADE_60_LADDER_MAX_OPEN_POSITIONS,
+        },
+        ladder=_SCENARIO_C_LADDER,
+        ladder_label=SCENARIO_C_LADDER_LABEL,
+        ladder_profile_id=SCENARIO_C_PROFILE_ID,
+        hypothesis_result={
+            "status": "UNTESTED_VARIANT_PAPER_EXPERIMENT",
+            "hypothesis_id": "H5_TREND_FADE_60_SCENC_20261002",
+            "research_question": "Does the Scenario-C profit-lock ladder beat Trend Fade 60's plain 60-minute hold on the same inverted-side taker entries?",
+            "prior_evidence": "none for the ladder variant; Trend Fade 60 itself is in-sample only",
+        },
+        pre_registration=_trend_fade_pre_registration(
+            "H5_TREND_FADE_60_SCENC_20261002",
+            registered_utc="2026-10-02T00:00:00Z",
+            registered_cohort=RESEARCH_STACK_VERSION,
+            control_lane=RESEARCH_LANE_FAMILY_TREND_FADE_60,
+            control_meaning="Trend Fade 60 plain hold on the same inverted-side entries",
+            control_status=None,
+            honest_label="no in-sample evidence for the ladder variant; paired test vs Trend Fade 60",
+        ),
+        admission_treatment=INVERTED_SCORE_LED_ADMISSION_POLICY_ID,
+        max_active_signals=TREND_FADE_60_LADDER_MAX_OPEN_POSITIONS,
+        entry_ttl_sec=15,
+        subtitle="PAPER EXPERIMENT — Trend Fade 60 entry + Scenario-C profit lock, up to 5 open — NO PROVEN EDGE — PAPER ONLY — RELAY INELIGIBLE",
+        policy_epoch=RESEARCH_STACK_VERSION,
+        default_enabled=True,
+    ),
 }
 COMPARISON_BENCHMARK_LANE = None
 PRIMARY_PRODUCTION_LANE = RESEARCH_LANE_FAMILY_TREND_FADE_60
@@ -356,7 +422,7 @@ RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_TREND_FADE_60
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
 RESEARCH_STACK_FEATURES = (
-    "One paper tile consumes the shared three-minute call with its own lock, order, position, ledger and analyzer cohort. Tile 1 (Trend Fade 60, beta test) trades the opposite of the score-led side with a taker at the signal (5 bp cap, 15 s; stand aside when spread >1.68 bp), a 60-minute time exit and a 40 bp catastrophic stop; only ties, invalid scores and AI errors refuse. Stops fill at the side-correct quote that crossed them. It holds one position at a time and carries pre-registered promotion and kill rules. Default-OFF, paper-only and relay-ineligible. v5 retires the three Dynamic Adaptive tiles (all lost in conservative paper evidence); Trend Fade 60 keeps its v4 identity and cohort unchanged. v1/v2 remain quarantined plumbing-defect cohorts, v3 the prior single-tile cohort and v4 the four-tile cohort"
+    "Two paper tiles consume the shared three-minute call, each with its own lock, order, position, ledger and analyzer cohort, and pair on identical signals. Tile 1 (Trend Fade 60, beta test) trades the opposite of the score-led side with a taker at the signal (5 bp cap, 15 s; stand aside when spread >1.68 bp), a 60-minute time exit and a 40 bp catastrophic stop; only ties, invalid scores and AI errors refuse. It holds one position at a time, is default-OFF and keeps its v4 identity and cohort unchanged. Tile 2 (Trend Fade 60 + Profit Lock) uses the identical entry with the Scenario-C profit-lock ladder, the 40 bp catastrophic stop and the 60-minute backstop (no break-even, trail or target), holds up to five concurrent positions in its own capacity and is default-ON. Locks and stops fill at the side-correct quote that crossed them. Both carry pre-registered promotion and kill rules and are paper-only and relay-ineligible. v5 retires the three Dynamic Adaptive tiles (all lost in conservative paper evidence) and starts the Tile 2 cohort. v1/v2 remain quarantined plumbing-defect cohorts, v3 the prior single-tile cohort and v4 the four-tile cohort"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION
@@ -366,6 +432,16 @@ EXPECTED_BOT_VERSION = EXECUTION_FIX_VERSION
 
 ACTIVE_TILE_REGISTRY = {lane: dict(COMBO_LANE_SPECS[lane]) for lane in COMBO_EXECUTION_LANES}
 ACTIVE_TILE_ORDER = COMBO_EXECUTION_LANES
+
+
+def active_tile_policy_epochs() -> tuple[str, ...]:
+    """Distinct tile policy epochs in display order; tiles may pin older cohorts."""
+    epochs: list[str] = []
+    for lane in ACTIVE_TILE_ORDER:
+        epoch = str(ACTIVE_TILE_REGISTRY[lane].get("policy_epoch") or "")
+        if epoch and epoch not in epochs:
+            epochs.append(epoch)
+    return tuple(epochs)
 
 # Retiring a tile means removing it from ACTIVE_TILE_REGISTRY and recording its
 # lane token here for one release. The registry audit then fails while that
@@ -442,6 +518,15 @@ def validate_tile_registry() -> tuple[str, ...]:
             defects.append(f"{lane}:NOT_STRICTLY_PAPER_ONLY")
         if spec.get("live_copy_eligible") or spec.get("platform_relay_eligible"):
             defects.append(f"{lane}:LIVE_COPY_MUST_FAIL_CLOSED")
+        # Default ON is an owner choice for paper collection only; it can never
+        # stand in for relay qualification.
+        if spec.get("default_enabled") and (
+            not spec.get("paper_only")
+            or spec.get("platform_relay_eligible")
+            or spec.get("live_copy_eligible")
+            or spec.get("relay_capability") != "BLOCKED_UNQUALIFIED"
+        ):
+            defects.append(f"{lane}:DEFAULT_ON_REQUIRES_PAPER_ONLY_RELAY_BLOCKED")
         # Exchange-side partial reductions are not wired; a partial-exit tile
         # can never be relay-capable until they are.
         if tile_has_partial_exits(spec):
