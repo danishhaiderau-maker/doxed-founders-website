@@ -7,6 +7,7 @@ momentum and order-flow gates would have changed the observed PnL.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from datetime import datetime
 import math
@@ -38,7 +39,27 @@ def _direction(row):
     return str(row.get("final_direction") or row.get("dir") or row.get("direction") or "").upper()
 
 
-def _prior_price(tape, target):
+PRIOR_PRICE_SEARCH_SEC = 900.0
+
+
+def _bucket_ts(row):
+    return _ts(row.get("bucket_ts") or row.get("source_ts"))
+
+
+def _prior_price(tape, target, tape_ts=None):
+    """Latest quote available at ``target``.
+
+    ``tape_ts`` (sorted bucket times of ``tape``) bounds the scan to rows whose
+    bucket precedes ``target``; availability is never earlier than the bucket,
+    so the result is identical to a full scan whenever a quote exists within
+    ``PRIOR_PRICE_SEARCH_SEC`` (the full scan remains the fallback).
+    """
+    if tape_ts is not None:
+        hi = bisect_right(tape_ts, target)
+        lo = bisect_left(tape_ts, target - PRIOR_PRICE_SEARCH_SEC, 0, hi)
+        found = _prior_price(tape[lo:hi], target) if hi > lo else None
+        if found is not None or lo == 0:
+            return found
     eligible = [row for row in tape if _quote_available_at(row) is not None
                 and _quote_available_at(row) <= target]
     if not eligible:
@@ -129,6 +150,7 @@ def build_fill_time_guard_counterfactual(
         [dict(row) for row in tape_rows if _ts(row.get("bucket_ts") or row.get("source_ts")) is not None],
         key=lambda row: _ts(row.get("bucket_ts") or row.get("source_ts")),
     )
+    tape_ts = [_bucket_ts(row) for row in tape]
     executable_ids = {
         str(row.get("canonical_trade_id") or "") for row in source_observations
         if str(row.get("fill_gate_verdict") or "").upper() == "EXECUTABLE"
@@ -162,7 +184,7 @@ def build_fill_time_guard_counterfactual(
         )
         momentum_bps = {}
         for horizon in momentum_horizons_sec:
-            prior = _prior_price(tape, fill_ts - float(horizon))
+            prior = _prior_price(tape, fill_ts - float(horizon), tape_ts)
             if prior:
                 raw = (fill_price - prior) / prior * 10_000.0
                 momentum_bps[str(horizon)] = round(raw if direction == "SHORT" else -raw, 6)
@@ -170,7 +192,9 @@ def build_fill_time_guard_counterfactual(
                 momentum_bps[str(horizon)] = None
         flow_imbalance = {}
         for window in flow_windows_sec:
-            sample = [row for row in tape
+            lo = bisect_left(tape_ts, fill_ts - window)
+            hi = bisect_right(tape_ts, fill_ts)
+            sample = [row for row in tape[lo:hi]
                       if fill_ts - window <= _ts(row.get("bucket_ts") or row.get("source_ts"))
                       and _flow_available_at(row) is not None
                       and _flow_available_at(row) <= fill_ts]

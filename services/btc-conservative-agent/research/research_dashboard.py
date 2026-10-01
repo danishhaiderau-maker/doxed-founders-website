@@ -392,11 +392,19 @@ def _read_api_cache_key() -> str:
     return f"{request.full_path}|reports={_report_cache_generation_token()}"
 
 
+# Agent-export views carry their own freshness verdict and must never be served
+# from the report-generation cache (the export is written after the manifest).
+_UNCACHED_API_PATHS = (
+    "/api/health", "/api/status", "/api/integrity",
+    "/api/export/latest", "/api/hypotheses", "/api/streams/health",
+)
+
+
 @app.before_request
 def _serve_cached_read_api():
     if request.method != "GET" or not request.path.startswith("/api/"):
         return None
-    if request.path in ("/api/health", "/api/status", "/api/integrity"):
+    if request.path in _UNCACHED_API_PATHS:
         return None
     key = _read_api_cache_key()
     now = time.monotonic()
@@ -424,7 +432,7 @@ def _cache_read_api_response(response):
     if (
         request.method == "GET"
         and request.path.startswith("/api/")
-        and request.path not in ("/api/health", "/api/status", "/api/integrity")
+        and request.path not in _UNCACHED_API_PATHS
         and response.status_code == 200
         and response.mimetype == "application/json"
     ):
@@ -3229,6 +3237,33 @@ def api_health():
         "source_revision_parity": freshness["revision_parity"],
         "epoch_parity": freshness["epoch_parity"],
     })
+
+
+@app.route("/api/export/latest")
+def api_export_latest():
+    """Latest agent export summary (``?table=<name>&limit=<n>`` for one table)."""
+    from strategy_lab import api as _lab_api
+
+    return jsonify(_lab_api.export_latest(
+        report_root=str(ROOT), table=request.args.get("table") or None,
+        limit=request.args.get("limit", _lab_api.MAX_ROWS, type=int),
+    ))
+
+
+@app.route("/api/hypotheses")
+def api_hypotheses():
+    """Strategy-lab hypothesis verdicts and exploratory family tests from the export."""
+    from strategy_lab import api as _lab_api
+
+    return jsonify(_lab_api.hypotheses(report_root=str(ROOT)))
+
+
+@app.route("/api/streams/health")
+def api_streams_health():
+    """Mirror stream inventory, freshness and analyzer usage from the export."""
+    from strategy_lab import api as _lab_api
+
+    return jsonify(_lab_api.streams_health(report_root=str(ROOT)))
 
 
 @app.route("/api/runtime-incidents")

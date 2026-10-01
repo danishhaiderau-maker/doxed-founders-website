@@ -81,7 +81,7 @@ fill_time_guard_counterfactual_report.json policy_search_manifest.json roster_po
 tile_evidence_points_report.json trade_cohort_quarantine.json
 fixed_vs_dynamic_selector_report.json forward_trial_report.json
 multiverse_collection_health_report.json ai_challenger_report.json lead_lag_report.json
-adaptive_entry_funnel_report.json
+strategy_lab_report.json adaptive_entry_funnel_report.json
 tile_paired_comparison_report.json
 """.split())
 ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
