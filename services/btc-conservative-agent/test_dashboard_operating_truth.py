@@ -287,6 +287,20 @@ def test_gate_panel_never_claims_readiness_or_arming_it_cannot_see(tmp_path):
     assert "ADMIN_MANUAL (DEPLOY_MAINTENANCE)" in paused
 
 
+def test_dashboard_trade_rows_keep_the_stop_evidence_inputs():
+    ns = {"_enrich_melbourne_time_fields": dict}
+    source = _top_level_source({"_DASHBOARD_TRADE_API_KEYS", "_slim_trade_for_dashboard"})
+    exec(compile(source, "bot_helpers", "exec"), ns)
+    row = ns["_slim_trade_for_dashboard"]({
+        "trade_id": "far-1", "research_lane": "FAMILY_ADAPTIVE_REGIME",
+        "pnl_accounting_schema": "terminal_single_count_v1", "margin_usdt": 0.2, "leverage": 100,
+        "features_velocity": 1.0,
+    })
+    assert row["pnl_accounting_schema"] == "terminal_single_count_v1"
+    assert row["margin_usdt"] == 0.2 and row["leverage"] == 100
+    assert "features_velocity" not in row
+
+
 def test_gate_panel_entry_offsets_come_from_the_registry_not_a_fixed_anchor(tmp_path):
     tiles = _namespace(tmp_path)["_dashboard_tile_view"]()
     html = _render_gate_panel(tiles, {"entry_limit_policy": "deterministic_0.1pct_offset_v1"}, {})
