@@ -39,6 +39,7 @@ function Get-LaptopChainConfig {
     WatcherStatus = Join-Path $StateDir 'laptop-ack-watcher.status.json'
     WatcherLock = Join-Path $StateDir 'laptop-ack-watcher.lock.json'
     AnalyzerStatus = Join-Path $StateDir 'analyzer-run.status.json'
+    CycleStatus = Join-Path $StateDir 'segment-analyzer-cycle.status.json'
     MonitorState = Join-Path $StateDir 'laptop-chain-monitor.state.json'
     HeartbeatFile = Join-Path $dataRoot '.fly-data-sync-loop.heartbeat.json'
     UpstreamIdentityFile = Join-Path $dataRoot '.fly-upstream-identity.json'

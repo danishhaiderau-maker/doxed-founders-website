@@ -472,6 +472,35 @@ def test_status_snapshots_are_read_only_and_never_persist_secrets():
     assert "$runtime.token" not in runtime and "$runtime.headers" not in runtime.lower()
 
 
+def test_deploy_runs_snapshot_is_read_only_and_feeds_the_proof():
+    source = _source("laptop-status-snapshots.ps1")
+    deploys = source[source.index("New-Snapshot 'fly_deploy_runs_snapshot_v1'"):]
+    assert "gh run list --repo $deployRepo --workflow fly-bot-deploy.yml" in deploys
+    assert "fly_deploy_runs_snapshot_v1.json" in deploys and "$deploys.error = 'OFFLINE'" in deploys
+    for verb in ("gh workflow run", "gh run rerun", "gh run cancel", "gh pr merge", "gh api"):
+        assert verb not in source
+
+
+def test_analyzer_cadence_runs_from_cycle_start_and_retries_failed_cycles():
+    supervisor = _source("laptop-chain-supervisor.ps1")
+    assert "Read-JsonFile $cfg.CycleStatus" in supervisor
+    assert "$cycleFailed" in supervisor and "ConvertTo-UtcDate $cycle.startedAt" in supervisor
+    cycle = _source("run-segment-analyzer-cycle.ps1")
+    phases = [p for p in ("'PROMOTION'", "'MIGRATION'", "'ANALYZER'", "'DONE' $analyzerExit") if p in cycle]
+    assert len(phases) == 4
+    assert cycle.index("Set-CycleStatus 'MIGRATION'") < cycle.index("migrate_canonical_research_store.py")
+    stop = cycle.split("function Stop-Cycle", 1)[1].split("\n}\n", 1)[0]
+    assert "Set-CycleStatus 'STOPPED' $Code" in stop
+    assert "CycleStatus = Join-Path $StateDir 'segment-analyzer-cycle.status.json'" in _source("laptop-chain-common.ps1")
+
+
+def test_pull_loop_defers_parity_while_a_cycle_waits_to_promote():
+    loop = _source("research-segment-pull-loop.ps1")
+    defer = loop[loop.index("$cycle = Read-JsonFile $cfg.CycleStatus"):loop.index("$pullArgs = @(")]
+    assert "$cycle.phase -eq 'PROMOTION'" in defer and "TotalMinutes -lt 15" in defer
+    assert "$parityDue = $false" in defer
+
+
 def test_supervisor_runs_the_unattended_proof_after_the_monitor():
     supervisor = _source("laptop-chain-supervisor.ps1")
     assert supervisor.index("laptop-chain-monitor.ps1") < supervisor.index("unattended_proof.py")

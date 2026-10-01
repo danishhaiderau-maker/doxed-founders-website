@@ -34,9 +34,14 @@ try {
 
   if (-not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopAnalyzerRun')) -and
       -not (Test-SingleInstanceHeld (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle'))) {
+    # Cadence runs from the last cycle start: the analyzer itself starts 8-17 min
+    # into a cycle, and timing from it spaced generations 44-52 min apart. A
+    # cycle that stopped without a generation is retried on the next tick.
+    $cycle = Read-JsonFile $cfg.CycleStatus
     $analyzer = Read-JsonFile $cfg.AnalyzerStatus
-    $lastStart = if ($analyzer) { ConvertTo-UtcDate $analyzer.startedAt } else { $null }
-    $due = ($null -eq $lastStart) -or (([datetime]::UtcNow - $lastStart).TotalMinutes -ge $AnalyzerIntervalMin)
+    $lastStart = if ($cycle) { ConvertTo-UtcDate $cycle.startedAt } elseif ($analyzer) { ConvertTo-UtcDate $analyzer.startedAt } else { $null }
+    $cycleFailed = $cycle -and $null -ne $cycle.exitCode -and [int]$cycle.exitCode -ne 0
+    $due = ($null -eq $lastStart) -or $cycleFailed -or (([datetime]::UtcNow - $lastStart).TotalMinutes -ge $AnalyzerIntervalMin)
     $dashboardUp = $false
     try { $dashboardUp = [bool](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10 -UseBasicParsing) } catch { }
     if ($due -or -not $dashboardUp) {

@@ -3,8 +3,8 @@
 ``--start`` records T0 and the baseline identity. Every supervisor tick then
 calls ``--check``; a row is appended to the receipt at most every 30 minutes,
 built only from snapshots the supervisor tick already collected (Fly runtime,
-Fly segment head, relay status, analyzer run status and the monitor's active
-alerts). Missing or stale evidence fails the row: nothing is marked healthy
+Fly segment head, relay status, guarded deploy runs, analyzer run status and
+the monitor's active alerts). Missing or stale evidence fails the row: nothing is marked healthy
 without an observation. At T0+48h the verdict is written once.
 
 This script never calls the bot, the relay or Fly; it only reads local files.
@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fly_monitor_rules import DEPLOY_OWNER, DEPLOY_STUCK_SEC, cadence_findings  # noqa: E402
+from fly_monitor_rules import DEPLOY_OWNER, cadence_findings  # noqa: E402
 
 ROW_SCHEMA = "unattended_proof_row_v1"
 START_SCHEMA = "unattended_proof_start_v1"
@@ -43,6 +43,17 @@ HEAD_SNAPSHOT = "fly_segment_head_snapshot_v1.json"
 RELAY_SNAPSHOT = "relay_status_snapshot_v1.json"
 ANALYZER_STATUS = "analyzer-run.status.json"
 ACTIVE_ALERTS = str(Path("alerts") / "active-alerts.json")
+DEPLOY_RUNS_SNAPSHOT = "fly_deploy_runs_snapshot_v1.json"
+
+# A DEPLOY_MAINTENANCE pause is allowed only while a guarded deploy workflow
+# run (fly-bot-deploy.yml) was active at the observation, for at most this long,
+# and only if that run then concludes success (the workflow itself asserts
+# "Paper ACTIVE ... 2 advancing AI cycles" before succeeding).
+ALLOWED_GUARDED_DEPLOY = "ALLOWED_GUARDED_DEPLOY"
+BOUNDARY_STATUSES = frozenset({"BOUNDARY", ALLOWED_GUARDED_DEPLOY})
+GUARDED_DEPLOY_MAX_PAUSE_SEC = 45 * 60.0
+DEPLOY_RUN_SLACK_SEC = 120.0
+ACTIVE_RUN_STATUSES = frozenset({"queued", "requested", "waiting", "pending", "in_progress"})
 
 
 def parse_utc(value: Any) -> float | None:
@@ -135,31 +146,89 @@ def _fresh_snapshot(snapshot: Mapping[str, Any] | None, now: float, name: str) -
     return True, ""
 
 
+def _deploy_runs(snapshot: Mapping[str, Any] | None, now: float) -> tuple[list[Mapping[str, Any]] | None, str]:
+    ok, err = _fresh_snapshot(snapshot, now, "deploy runs")
+    if not ok:
+        return None, err
+    return [r for r in (snapshot or {}).get("runs") or [] if isinstance(r, Mapping)], ""
+
+
+def attribute_deploy_run(runs: list[Mapping[str, Any]], observed_at: float, now: float) -> Mapping[str, Any] | None:
+    """The guarded deploy run that was active when the runtime was observed, if any."""
+    for run in runs:
+        created = parse_utc(run.get("createdAt"))
+        if created is None:
+            continue
+        status = str(run.get("status") or "").lower()
+        if status in ACTIVE_RUN_STATUSES:
+            ended = now
+        elif status == "completed":
+            ended = parse_utc(run.get("updatedAt"))
+            if ended is None:
+                continue
+        else:
+            continue
+        if created - DEPLOY_RUN_SLACK_SEC <= observed_at <= ended + DEPLOY_RUN_SLACK_SEC:
+            return run
+    return None
+
+
+def _run_by_id(runs: list[Mapping[str, Any]] | None, run_id: Any) -> Mapping[str, Any] | None:
+    return next((r for r in runs or [] if str(r.get("databaseId")) == str(run_id)), None)
+
+
 def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] | None,
                  relay: Mapping[str, Any] | None, analyzer: Mapping[str, Any] | None,
                  alerts: Mapping[str, Any] | None, baseline: Mapping[str, Any],
                  previous: Mapping[str, Any] | None, manual_entries: list[Mapping[str, Any]],
-                 now: float) -> dict[str, Any]:
+                 now: float, deploy_runs: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One proof row. Every check is True, False or None (no evidence); None fails the row."""
     checks: dict[str, dict[str, Any]] = {}
     observed: dict[str, Any] = {}
     runtime_ok, runtime_err = _fresh_snapshot(runtime, now, "Fly runtime")
     rt = runtime if runtime_ok else {}
     prev_obs = (previous or {}).get("observed") or {}
+    prev_boundary = (previous or {}).get("status") in BOUNDARY_STATUSES
+    runs, runs_err = _deploy_runs(deploy_runs, now)
 
-    # Paper running; a DEPLOY_MAINTENANCE pause is a guarded deploy boundary.
+    # Paper running. A DEPLOY_MAINTENANCE pause is ALLOWED_GUARDED_DEPLOY only
+    # when a guarded deploy run was active at the observation and the pause is
+    # within GUARDED_DEPLOY_MAX_PAUSE_SEC.
     paused = rt.get("execution_paused")
     owner = rt.get("pause_owner") or ""
     observed.update({"execution_paused": paused, "pause_owner": owner or None,
                      "git_rev": rt.get("git_rev"), "tile_registry_signature": rt.get("tile_registry_signature")})
     boundary = False
+    deploy_pause = runtime_ok and paused is True and owner == DEPLOY_OWNER
+    deploy_detail = ""
     if not runtime_ok:
         checks["paper_running"] = _check(None, runtime_err)
     elif paused is False:
         checks["paper_running"] = _check(True, "paper running (execution_paused=false)")
-    elif paused is True and owner == DEPLOY_OWNER:
-        boundary = True
-        checks["paper_running"] = _check(True, f"guarded deploy boundary: paused by {DEPLOY_OWNER}", boundary=True)
+    elif deploy_pause:
+        observed_at = parse_utc(rt.get("observedAt")) or now
+        since = prev_obs.get("deploy_pause_since") if prev_boundary else None
+        since = float(since) if since is not None else observed_at
+        observed["deploy_pause_since"] = since
+        paused_min = (observed_at - since) / 60
+        run = attribute_deploy_run(runs, observed_at, now) if runs is not None else None
+        if run is not None:
+            observed["deploy_run_id"] = run.get("databaseId")
+            deploy_detail = (f"run {run.get('databaseId')} {run.get('status')}"
+                             f"{'/' + str(run.get('conclusion')) if run.get('conclusion') else ''}")
+        if runs is None:
+            checks["paper_running"] = _check(None, f"{DEPLOY_OWNER} pause cannot be attributed: {runs_err}")
+        elif run is None:
+            checks["paper_running"] = _check(False, f"{DEPLOY_OWNER} pause with no guarded deploy run active at the observation")
+        elif str(run.get("status")).lower() == "completed" and str(run.get("conclusion")).lower() != "success":
+            checks["paper_running"] = _check(False, f"paused by {DEPLOY_OWNER}; guarded deploy {deploy_detail} did not succeed")
+        elif observed_at - since > GUARDED_DEPLOY_MAX_PAUSE_SEC:
+            checks["paper_running"] = _check(False, f"paused by {DEPLOY_OWNER} for {paused_min:.0f} min "
+                                                    f"(> {GUARDED_DEPLOY_MAX_PAUSE_SEC / 60:.0f} min) during {deploy_detail}")
+        else:
+            boundary = True
+            checks["paper_running"] = _check(True, f"{ALLOWED_GUARDED_DEPLOY}: paused by {DEPLOY_OWNER} during "
+                                                   f"guarded deploy {deploy_detail} ({paused_min:.0f} min)", boundary=True)
     else:
         checks["paper_running"] = _check(False, f"paper paused (owner={owner or 'none'!r}, reason={rt.get('execution_reason')!r})")
 
@@ -275,8 +344,29 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
 
     # No manual intervention: operator pause, toggle drift from baseline, or a journalled action.
     reasons = []
-    if rt.get("manual_admin_pause") is True or (paused is True and owner.upper() in MANUAL_PAUSE_OWNERS):
+    # The guarded workflow pauses with manual_admin_pause=true under its own
+    # owner; that pause is judged by paper_running's deploy attribution above.
+    if not deploy_pause and (rt.get("manual_admin_pause") is True
+                             or (paused is True and owner.upper() in MANUAL_PAUSE_OWNERS)):
         reasons.append(f"manual pause (owner={owner!r})")
+    if deploy_pause and not boundary:
+        reasons.append(f"{DEPLOY_OWNER} pause not allowed as a guarded deploy")
+    # After an allowed boundary the attributed run must conclude success, i.e.
+    # the workflow proved Paper ACTIVE with 2 advancing AI cycles.
+    pending = observed.get("deploy_run_id") or prev_obs.get("pending_deploy_run_id") \
+        or (prev_obs.get("deploy_run_id") if prev_boundary else None)
+    if pending is not None and not deploy_pause:
+        run = _run_by_id(runs, pending)
+        status = str((run or {}).get("status") or "").lower()
+        conclusion = str((run or {}).get("conclusion") or "").lower()
+        if status == "completed" and conclusion == "success":
+            deploy_detail = f"guarded deploy run {pending} resumed paper and succeeded (Paper ACTIVE + 2 advancing AI cycles)"
+        elif status == "completed":
+            reasons.append(f"guarded deploy run {pending} concluded {conclusion or 'unknown'} after the boundary")
+        else:
+            observed["pending_deploy_run_id"] = pending
+    elif deploy_pause and boundary:
+        observed["pending_deploy_run_id"] = observed.get("deploy_run_id")
     base_rev, rev = baseline.get("git_rev"), rt.get("git_rev")
     if runtime_ok and base_rev and rev and rev != base_rev:
         observed["deploy_observed"] = True
@@ -288,12 +378,16 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
         checks["no_manual_intervention"] = _check(False, "; ".join(reasons))
     else:
         detail = "none observed"
+        if boundary:
+            detail = f"{ALLOWED_GUARDED_DEPLOY} ({deploy_detail})"
+        elif deploy_detail:
+            detail += f" ({deploy_detail})"
         if observed.get("deploy_observed"):
             detail += f" (Fly revision {base_rev} -> {rev}: deploy boundary, must be the guarded workflow)"
         checks["no_manual_intervention"] = _check(True, detail)
 
     failed = [name for name, c in checks.items() if c["ok"] is not True]
-    status = "FAIL" if failed else "BOUNDARY" if boundary else "PASS"
+    status = "FAIL" if failed else ALLOWED_GUARDED_DEPLOY if boundary else "PASS"
     return {"schema": ROW_SCHEMA, "kind": "ROW", "at": iso(now), "status": status,
             "failed_checks": failed, "checks": checks, "observed": observed}
 
@@ -314,10 +408,10 @@ def verdict(rows: list[Mapping[str, Any]], *, t0: float, ends_at: float, now: fl
     run_start = None
     for row in rows:
         at = parse_utc(row.get("at"))
-        if row.get("status") == "BOUNDARY":
+        if row.get("status") in BOUNDARY_STATUSES:
             run_start = run_start if run_start is not None else at
-            if at is not None and run_start is not None and at - run_start >= DEPLOY_STUCK_SEC:
-                reasons.append(f"deploy boundary not resumed within {DEPLOY_STUCK_SEC / 60:.0f} min (since {iso(run_start)})")
+            if at is not None and run_start is not None and at - run_start >= GUARDED_DEPLOY_MAX_PAUSE_SEC:
+                reasons.append(f"deploy boundary not resumed within {GUARDED_DEPLOY_MAX_PAUSE_SEC / 60:.0f} min (since {iso(run_start)})")
                 break
         else:
             run_start = None
@@ -379,7 +473,7 @@ def start(state_dir: Path, receipt_dir: Path, now: float, *, force: bool = False
         "thresholds": {"analyzer_max_age_min": ANALYZER_MAX_AGE_SEC / 60, "ws_max_age_sec": WS_MAX_AGE_SEC,
                        "segment_ack_tolerance_seq": SEGMENT_ACK_TOLERANCE_SEQ,
                        "snapshot_max_age_min": SNAPSHOT_MAX_AGE_SEC / 60, "max_row_gap_min": MAX_ROW_GAP_SEC / 60,
-                       "deploy_boundary_max_min": DEPLOY_STUCK_SEC / 60},
+                       "deploy_boundary_max_min": GUARDED_DEPLOY_MAX_PAUSE_SEC / 60},
         "manual_intervention_journal": str(state_dir / MANUAL_JOURNAL),
     }
     receipt.parent.mkdir(parents=True, exist_ok=True)
@@ -407,7 +501,8 @@ def check(state_dir: Path, now: float, *, force: bool = False) -> dict[str, Any]
             runtime=read_json(state_dir / RUNTIME_SNAPSHOT), head=read_json(state_dir / HEAD_SNAPSHOT),
             relay=read_json(state_dir / RELAY_SNAPSHOT), analyzer=read_json(state_dir / ANALYZER_STATUS),
             alerts=read_json(state_dir / ACTIVE_ALERTS), baseline=active.get("baseline") or {},
-            previous=rows[-1] if rows else None, manual_entries=_manual_entries(state_dir, t0), now=now)
+            previous=rows[-1] if rows else None, manual_entries=_manual_entries(state_dir, t0), now=now,
+            deploy_runs=read_json(state_dir / DEPLOY_RUNS_SNAPSHOT))
         with receipt.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(written, sort_keys=True) + "\n")
         rows.append(written)
