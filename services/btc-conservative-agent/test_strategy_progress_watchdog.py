@@ -82,6 +82,10 @@ def compile_snapshot(namespace):
     # so each case can continue to override only the dependency it exercises.
     namespace.setdefault("replay_lock", threading.RLock())
     namespace.setdefault("post_ai_evidence_health_snapshot", lambda: {})
+    namespace.setdefault("ai_provider_health_snapshot", lambda now=None: {
+        "alert": None, "ai_success_age_sec": None, "last_ai_success_at": None,
+        "consecutive_failures": 0,
+    })
     namespace.setdefault("sys", __import__("sys"))
     namespace.setdefault("math", __import__("math"))
     namespace.setdefault("traceback", __import__("traceback"))
@@ -244,6 +248,31 @@ class StrategyProgressHealthTest(unittest.TestCase):
 
     def test_healthy_requires_real_progress_not_only_process_heartbeat(self):
         self.assertTrue(self.snapshot(self.now)["ok"])
+
+    def test_completed_cycles_with_failing_provider_are_ai_stalled(self):
+        # 2026-10-01: every call timed out, yet cycles "completed" and
+        # ai_age stayed ~150 s because attempts were counted as progress.
+        self.snapshot.__globals__["scheduled_ai_cycle_state"] = {
+            "owner": None, "owner_ident": None, "started_ts": 0.0,
+            "completed_ts": self.now - 5, "stage": "IDLE",
+            "stage_started_ts": 0.0, "last_poll_ts": self.now - 5,
+            "last_poll_entry_eligible": False, "last_poll_reason": "AI_CADENCE_STALLED",
+        }
+        self.snapshot.__globals__["ai_provider_health_snapshot"] = lambda now=None: {
+            "alert": "AI_NO_SUCCESS_10M", "ai_success_age_sec": 9000.0,
+            "last_ai_success_at": "2026-10-01T18:56:00+00:00", "consecutive_failures": 31,
+        }
+        with mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "present"}):
+            result = self.snapshot(self.now)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["ai_progressing"])
+        self.assertFalse(result["recovery_probe_ok"])
+        # Same reason token keeps the AI-only recovery observation path open.
+        self.assertEqual(result["reasons"], ["AI_CADENCE_STALLED"])
+        self.assertEqual(result["ai_age_sec"], 9000.0)
+        self.assertEqual(result["ai_attempt_age_sec"], 10.0)
+        self.assertEqual(result["ai_consecutive_failures"], 31)
+        self.assertEqual(result["last_ai_success_at"], "2026-10-01T18:56:00+00:00")
 
     def test_wedged_trade_lock_is_unhealthy(self):
         self.lock.acquire()

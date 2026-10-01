@@ -45,6 +45,8 @@ POLICIES: Mapping[str, Policy] = {
     "deploy_stuck": Policy(1, 0.0, 3 * HOUR, False),
     "eval_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
     "ai_stale": Policy(2, 15 * 60.0, 6 * HOUR, True),
+    # The bot raises this only after 10 min of failing calls with no success.
+    "ai_no_success": Policy(1, 0.0, 3 * HOUR, True),
     # Informational (annotation only) until the segment pipeline is live.
     "transfer_lag": Policy(2, 60 * 60.0, 12 * HOUR, False),
     # Research collection quality; the bot already requires a 1h sample, and

@@ -116,6 +116,19 @@ def test_ai_stale_uses_larger_of_45_minutes_and_three_bot_thresholds():
     assert rules.cadence_findings(slow, paused=False, now=NOW) == {}
 
 
+def test_provider_no_success_alerts_even_when_entries_blocked():
+    cycle = {"last_poll_ts": NOW - 20, "completed_ts": NOW - 40, "last_poll_entry_eligible": False}
+    failing = _ready(scheduled_ai_cycle=cycle, ai_provider={
+        "alert": "AI_NO_SUCCESS_10M", "consecutive_failures": 7,
+        "last_ai_success_at": "2026-10-01T18:56:00+00:00", "last_error_class": "TIMEOUT"})
+    found = rules.cadence_findings(failing, paused=False, now=NOW)
+    assert set(found) == {"ai_no_success"}
+    assert "18:56:00" in found["ai_no_success"] and "TIMEOUT" in found["ai_no_success"]
+    healthy = _ready(ai_provider={"alert": None, "consecutive_failures": 0})
+    assert rules.cadence_findings(healthy, paused=False, now=NOW) == {}
+    assert "ai_no_success" in alerts.POLICIES
+
+
 def test_dead_scheduler_poll_is_eval_stale_even_when_entries_blocked():
     ready = _ready(scheduled_ai_cycle={"last_poll_ts": NOW - 900, "last_poll_entry_eligible": False, "stage": "X"})
     found = rules.cadence_findings(ready, paused=False, now=NOW)

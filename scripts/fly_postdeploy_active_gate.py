@@ -94,8 +94,14 @@ def relay_eligible_tiles(active_tiles: list) -> list[str]:
 
 
 def count_ai_completions(samples: list[float], started: float) -> int:
-    """Distinct scheduled-cycle completion timestamps observed after start."""
+    """Distinct successful-response timestamps observed after start."""
     return len({round(ts, 3) for ts in samples if ts > started})
+
+
+def ai_success_sample(ready: dict) -> float:
+    """Last successful model response; a completed cycle that timed out is not one."""
+    provider = (ready.get("strategy_progress") or {}).get("ai_provider") or {}
+    return float(provider.get("last_ai_success_ts") or 0)
 
 
 def _request(path: str, token: str, payload=None, timeout: int = 30) -> dict:
@@ -159,24 +165,32 @@ def main(argv=None) -> int:
         if last_problems:
             raise SystemExit("paper not active after deploy: " + ",".join(last_problems))
         ready = _retrying(lambda: _request("/ready", token))
-        cycle = (ready.get("strategy_progress") or {}).get("scheduled_ai_cycle") or {}
-        completed = float(cycle.get("completed_ts") or 0)
-        if completed:
-            completions.append(completed)
+        progress = ready.get("strategy_progress") or {}
+        cycle = progress.get("scheduled_ai_cycle") or {}
+        provider = progress.get("ai_provider") or {}
+        succeeded = ai_success_sample(ready)
+        if succeeded:
+            completions.append(succeeded)
         observed = count_ai_completions(completions, started)
         print(json.dumps({
-            "ai_completions_after_gate": observed,
+            "ai_successes_after_gate": observed,
+            "ai_consecutive_failures": provider.get("consecutive_failures"),
+            "ai_last_error_class": provider.get("last_error_class"),
+            "last_ai_success_at": provider.get("last_ai_success_at"),
             "stage": cycle.get("stage"),
             "last_poll_reason": cycle.get("last_poll_reason"),
             "signal_generation_ready": ready.get("signal_generation_ready"),
         }, sort_keys=True), flush=True)
         if observed >= REQUIRED_AI_COMPLETIONS:
-            print(f"Paper ACTIVE on {expected}: {observed} advancing AI cycles; live disarmed")
+            print(
+                f"Paper ACTIVE on {expected}: {observed} advancing AI cycles "
+                f"with successful model responses; live disarmed"
+            )
             return 0
         time.sleep(POLL_SEC)
     raise SystemExit(
-        f"AI cadence did not advance {REQUIRED_AI_COMPLETIONS} cycles within {deadline_sec}s "
-        f"(observed={count_ai_completions(completions, started)})"
+        f"AI did not return {REQUIRED_AI_COMPLETIONS} successful model responses within "
+        f"{deadline_sec}s (observed={count_ai_completions(completions, started)})"
     )
 
 

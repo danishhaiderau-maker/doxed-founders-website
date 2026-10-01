@@ -103,6 +103,40 @@ def test_ai_cadence_counts_distinct_completions_after_start():
     assert gate.count_ai_completions([90.0, 90.0], started=100.0) == 0
 
 
+def test_ai_gate_samples_successful_responses_not_cycle_completions():
+    timed_out_cycle = {"strategy_progress": {
+        "scheduled_ai_cycle": {"completed_ts": 500.0},
+        "ai_provider": {"last_ai_success_ts": 0.0, "consecutive_failures": 4},
+    }}
+    assert gate.ai_success_sample(timed_out_cycle) == 0.0
+    assert gate.ai_success_sample({"strategy_progress": {"scheduled_ai_cycle": {"completed_ts": 500.0}}}) == 0.0
+    ok = {"strategy_progress": {"ai_provider": {"last_ai_success_ts": 612.5}}}
+    assert gate.ai_success_sample(ok) == 612.5
+
+
+def test_gate_fails_when_cycles_complete_but_every_model_call_fails(monkeypatch):
+    monkeypatch.setenv("BOT_ADMIN_TOKEN", "t")
+    monkeypatch.setenv("EXPECTED_REVISION", "abcdef123456")
+    monkeypatch.setenv("POSTDEPLOY_ACTIVE_DEADLINE_SEC", "1")
+    monkeypatch.setattr(gate, "POLL_SEC", 0)
+    monkeypatch.setattr(gate, "enable_all_registry_tiles", lambda request: {})
+    clock = iter(range(1000, 10_000))
+    monkeypatch.setattr(gate.time, "time", lambda: float(next(clock)))
+
+    def request(path, token, payload=None, timeout=30):
+        if path == "/api/status":
+            return {**_active_status(), "pause_owner": ""}
+        return {"strategy_progress": {
+            "scheduled_ai_cycle": {"completed_ts": float(next(clock))},
+            "ai_provider": {"last_ai_success_ts": 0.0, "consecutive_failures": 9,
+                            "last_error_class": "TIMEOUT"},
+        }}
+
+    monkeypatch.setattr(gate, "_request", request)
+    with pytest.raises(SystemExit, match="successful model responses"):
+        gate.main([])
+
+
 def test_workflow_runs_gate_after_resume_unless_hold_or_operator_pause():
     assert "python scripts/fly_postdeploy_active_gate.py" in WORKFLOW
     step = WORKFLOW[WORKFLOW.index("Assert paper active with advancing AI cadence"):]
