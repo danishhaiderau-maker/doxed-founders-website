@@ -37545,6 +37545,11 @@ def _relay_trade_row_lite(row: dict) -> dict:
         "ai_band": row.get("ai_band"),
         "exit_reason": row.get("exit_reason"),
         "research_lane": row.get("research_lane"),
+        # While trading, /api/state overlays these rows; tradeStopEvidence
+        # flags FAMILY_* rows lacking the schema as double-counted.
+        "pnl_accounting_schema": row.get("pnl_accounting_schema"),
+        "margin_usdt": row.get("margin_usdt"),
+        "leverage": row.get("leverage"),
     }
 
 

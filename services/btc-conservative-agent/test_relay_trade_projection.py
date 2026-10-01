@@ -103,8 +103,12 @@ def test_projection_preserves_relay_identity_execution_and_fidelity_fields():
         "entry": 101, "exit": 100, "entry_ts": 10, "closed_ts": 20,
         "exit_reason": "TP", "net_pnl_usd": 1.25, "research_lane": "LANE",
         "status": "CLOSED", "executed": True, "epoch_id": "epoch-1",
+        "pnl_accounting_schema": "terminal_single_count_v1", "margin_usdt": 0.2, "leverage": 100,
     })
     recent, relay, fidelity = namespace["_snapshot_relay_trade_projections_locked"](0)
+    for row in (recent[0], relay[0]):
+        assert row["pnl_accounting_schema"] == "terminal_single_count_v1"
+        assert row["margin_usdt"] == 0.2 and row["leverage"] == 100
     assert recent[0]["trade_id"] == relay[0]["trade_id"] == fidelity[0]["trade_id"] == "trade-1"
     assert recent[0]["shared_ai_call_id"] == "scan-1"
     assert recent[0]["net_pnl_usd"] == 1.25
