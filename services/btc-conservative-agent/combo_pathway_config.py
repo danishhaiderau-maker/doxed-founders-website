@@ -274,7 +274,7 @@ COMBO_LANE_SPECS = {
         },
         entry_ttl_sec=60,
         subtitle="HONEST PAPER EXPERIMENT — NO PROVEN EDGE — PAPER ONLY — RELAY INELIGIBLE",
-        policy_epoch="v31-dynamic-adaptive-paper-v1",
+        policy_epoch="v31-dynamic-adaptive-paper-v2",
     ),
 }
 COMPARISON_BENCHMARK_LANE = None
@@ -286,9 +286,9 @@ PRIMARY_PRODUCTION_ROLE = "BENCHMARK"
 RESEARCH_CANDIDATE_LANE = RESEARCH_LANE_FAMILY_ADAPTIVE_REGIME
 RESEARCH_CANDIDATE_ROLE = "RESEARCH_CANDIDATE"
 
-RESEARCH_STACK_VERSION = "v31-dynamic-adaptive-paper-v1"
+RESEARCH_STACK_VERSION = "v31-dynamic-adaptive-paper-v2"
 RESEARCH_STACK_FEATURES = (
-    "One Dynamic Adaptive paper tile consumes the shared three-minute direction call; it stands aside on raw AI NO_TRADE, score gap <5, extreme volatility or a stop within the liquidation guard; default-OFF, paper-only and relay-ineligible. Former exit-family tiles and the Continuous comparison label are retired; exit variants survive only as analyzer research variants"
+    "One Dynamic Adaptive paper tile consumes the shared three-minute direction call; it stands aside on raw AI NO_TRADE, score gap <5, extreme volatility or a stop within the liquidation guard; default-OFF, paper-only and relay-ineligible. Former exit-family tiles and the Continuous comparison label are retired; exit variants survive only as analyzer research variants. v2 delivers the signal-time decision to the paper order path; every v1 decision was refused DECISION_MISSING and v1 is a quarantined cohort"
 )
 EXECUTION_FIX_VERSION = RESEARCH_STACK_VERSION
 ANALYZER_SYNC_ID = RESEARCH_STACK_VERSION

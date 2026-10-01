@@ -655,6 +655,7 @@ BENCHMARK_LANES = ANALYZER_COMPARE_LANES
 LEGACY_LANES = frozenset({"EDGE_ACCELERATION", "STABILITY", "EXEC_5M"})
 FAST_CUT_SWEEP_LEVELS = (-6, -8, -10, -12)
 MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE = "multiverse_collection_health_report.json"
+ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE = "adaptive_entry_funnel_report.json"
 ANALYZER_JSON_REPORT_FILES = (
     AI_CALIBRATION_REPORT_FILE,
     AI_FUNNEL_REPORT_FILE,
@@ -724,6 +725,7 @@ ANALYZER_JSON_REPORT_FILES = (
     POLICY_SEARCH_MANIFEST_FILE,
     ROSTER_POLICY_FILE,
     MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE,
+    ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE,
 )
 DEEP_DIVE_REPORT_CATALOG = (
     ("Safe Policy Genome V3", SAFE_POLICY_GENOME_V3_REPORT_FILE, "Normalized episodes, execution evidence, hierarchical search, drawdown and safe policy ranking"),
@@ -762,6 +764,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
+    ("Adaptive Entry Funnel", ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE, "Every signal-time taker/maker/stand-aside decision joined to its fill, expiry or skip and scored against the taker-at-signal counterfactual; superseded stack versions quarantined"),
     ("Missed Opportunity Proof", MISSED_OPPORTUNITY_PROOF_REPORT_FILE, "Signed compressed shadow schedules joined to causal identity and tape evidence; shadow-only proof classifications"),
     ("Chase Policy Lab", CHASE_POLICY_LAB_REPORT_FILE, "Descriptive signed shadow schedule ranking with executed evidence kept separate"),
     ("Pathway Survival", PATHWAY_SURVIVAL_REPORT_FILE, "Pathway stage survival and drop rates"),
@@ -9153,6 +9156,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         )
         write_trade_cohort_quarantine(cohort_quarantine)
         multiverse_collection_health_report(cohort_quarantine)
+        adaptive_entry_funnel_report()
         if cohort_quarantine["relay_interference"]["rows"]:
             print(
                 f"   Relay interference: {cohort_quarantine['relay_interference']['rows']} phantom-cancelled "
@@ -12000,6 +12004,35 @@ def write_trade_cohort_quarantine(summary: dict) -> None:
             json.dump(payload, f, indent=2, default=str)
     except OSError as exc:
         print(f"  ⚠️ Could not write {TRADE_COHORT_QUARANTINE_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+
+
+def adaptive_entry_funnel_report() -> dict:
+    """Score every adaptive stand-aside, expiry and fill against the taker counterfactual."""
+    print(f"\n=== ADAPTIVE ENTRY FUNNEL {PIPELINE_ENFORCEMENT_TAG} ===")
+    try:
+        import adaptive_entry_funnel
+        import execution_markouts
+        report = adaptive_entry_funnel.build_report_from_paths(
+            decisions_path=_agent_data_path(adaptive_entry_funnel.DECISIONS_FILE),
+            counterfactual_path=_agent_data_path(execution_markouts.TAKER_FILE),
+            trades_path=_agent_data_path(TRADES_FILE),
+            expired_path=_agent_data_path(EXPIRED_ORDERS_FILE),
+            current_version=EXPECTED_BOT_VERSION,
+        )
+    except Exception as exc:
+        report = {"schema": "adaptive_entry_funnel_v1", "status": "UNAVAILABLE", "error": str(exc)}
+    try:
+        with open(ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, default=str)
+    except OSError as exc:
+        print(f"  Could not write {ADAPTIVE_ENTRY_FUNNEL_REPORT_FILE}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    current = report.get("current_cohort") or {}
+    print(
+        f"  decisions={current.get('decisions')} by_action={current.get('by_action')} "
+        f"by_outcome={current.get('by_outcome')} quarantined={sorted(report.get('quarantined_cohorts') or {})} "
+        f"{PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return report
 
 
 def multiverse_collection_health_report(cohort_quarantine: dict = None) -> dict:
@@ -21439,8 +21472,14 @@ def write_report_manifest(
     return manifest
 
 
-def _generation_fee_profile_receipt(trades_path=TRADES_FILE):
-    """Which fee profile this generation's cost model and input trades used."""
+def _generation_fee_profile_receipt(trades_path=None):
+    """Which fee profile this generation's cost model and input trades used.
+
+    ``TRADES_FILE`` is rebound to the canonical data root at startup and the
+    process then runs from the report cwd, so the path must be resolved at
+    call time, never captured as a relative default.
+    """
+    trades_path = os.path.abspath(trades_path or _agent_data_path(TRADES_FILE))
     observed = {}
     try:
         with open(trades_path, newline="", encoding="utf-8-sig") as handle:
@@ -21451,6 +21490,7 @@ def _generation_fee_profile_receipt(trades_path=TRADES_FILE):
         observed = None
     return {
         "schema": "analyzer_fee_profile_receipt_v1",
+        "input_trades_path": trades_path,
         "cost_model": bitfinex_cost_profile.cost_profile(),
         "cost_model_signature": bitfinex_cost_profile.cost_profile_signature(),
         "input_trade_fee_profiles": observed,

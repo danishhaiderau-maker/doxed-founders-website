@@ -1217,6 +1217,7 @@ jobs:
           python test_ws_live_readiness_contract.py
           python -m pytest test_order_multiverse.py test_chase_offset_touch_grid.py -q
           python -m pytest test_multiverse_tape_maturation.py test_shared_discovery_touch_grid.py test_collector_candle_snapshot.py test_collector_snapshot_runtime.py -q
+          python -m pytest test_paper_policy_family_adaptive_regime.py test_adaptive_entry_funnel.py test_dashboard_operating_truth.py -q
           python -m pytest test_chase_exact_bucket_controls.py -q
           python -m pytest test_paper_natural_cycle_exits.py test_epoch_quarantine.py -q
           python test_manual_pause_entry_gate.py
