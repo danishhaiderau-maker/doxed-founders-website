@@ -227,6 +227,7 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "duplicate_intent_audit.jsonl",
     "ai_shadow_challengers.jsonl",
     "ai_shadow_compact_prompt.jsonl",
+    "cross_venue_tape_1m.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )

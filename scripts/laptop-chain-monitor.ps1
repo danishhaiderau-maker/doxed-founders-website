@@ -137,6 +137,12 @@ if ($inputHealth -and [string]$inputHealth.status -eq 'DEAD_INPUT') {
   Add-Alert 'AI_INPUT_DEAD_FIELD' 'warning' ("AI prompt {0}: {1}" -f $inputHealth.prompt_id, $fields)
 }
 
+# Shadow cross-venue leader tape: collector heartbeat or venue feeds stale.
+$crossVenue = if ($runtimeSnapshot) { $runtimeSnapshot.cross_venue_health } else { $null }
+if ($crossVenue -and @('OK', 'DISABLED') -notcontains [string]$crossVenue.status) {
+  Add-Alert 'CROSS_VENUE_TAPE_STALE' 'warning' ("cross-venue tape {0} ({1}); collector_age_s={2} stale_venues={3}" -f $crossVenue.status, $crossVenue.reason, $crossVenue.collector_age_s, (@($crossVenue.stale_venues) -join ','))
+}
+
 $notify = New-Object System.Collections.ArrayList
 $recorded = @()
 foreach ($alert in $alerts) {

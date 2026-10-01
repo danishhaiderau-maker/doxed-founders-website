@@ -364,6 +364,23 @@ def test_monitor_is_quiet_when_chain_is_healthy(chain):
 
 
 @windows_only
+@pytest.mark.parametrize("status,alerted", [("STALE", True), ("DOWN", True), ("DEGRADED", True),
+                                            ("OK", False), ("DISABLED", False)])
+def test_monitor_alerts_on_a_stale_cross_venue_tape(chain, status, alerted):
+    chain["state"].mkdir(parents=True, exist_ok=True)
+    (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))
+    _pull_status(chain, pid=1, finishedAt=_iso(-1), exitCode=0, error=None)
+    _heartbeat(chain, ok=True, inProgress=False, phase="complete")
+    _puller_status(chain)
+    (chain["segments"] / "parity-latest.json").write_text(json.dumps(
+        {"verdict": "GREEN", "seq": 40, "generated_at": _iso(-5)}), encoding="utf-8")
+    (chain["state"] / "fly_runtime_snapshot_v1.json").write_text(json.dumps({"cross_venue_health": {
+        "status": status, "reason": "X", "collector_age_s": 1.0, "stale_venues": ["okx"]}}))
+    result = _monitor_with_pull_loop_held(chain)
+    assert ("CROSS_VENUE_TAPE_STALE" in _active_alert_codes(chain)) is alerted, result.stdout + result.stderr
+
+
+@windows_only
 def test_monitor_raises_v2_ack_parity_and_shipper_alerts_not_retired_mirror_alerts(chain):
     chain["state"].mkdir(parents=True, exist_ok=True)
     (chain["state"] / "analyzer-run.status.json").write_text(json.dumps({"lastSuccessAt": _iso(-5)}))

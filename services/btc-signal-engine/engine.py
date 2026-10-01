@@ -28486,6 +28486,48 @@ RESEARCH DATA COLLECTION MODE (active):
 """
 
 
+import cross_venue_tape as _cvt
+
+# The cross-venue collector is its own process (fly-entrypoint.sh); the bot only
+# reads its atomically replaced live file for the shadow leader challenger and
+# the staleness alarm. Nothing here can gate readiness or an order.
+CROSS_VENUE_COLLECTOR_ENABLED = os.getenv("CROSS_VENUE_COLLECTOR_ENABLED", "1").strip() == "1"
+_CROSS_VENUE_LIVE_CACHE = {"read_ts": 0.0, "live": None}
+
+
+def _cross_venue_live(max_age_sec: float = 1.0):
+    now = time.time()
+    with _AI_SHADOW_LOCK:
+        if now - _CROSS_VENUE_LIVE_CACHE["read_ts"] < max_age_sec:
+            return _CROSS_VENUE_LIVE_CACHE["live"]
+    live = _cvt.read_live(_cvt.LIVE_FILE) if CROSS_VENUE_COLLECTOR_ENABLED else None
+    with _AI_SHADOW_LOCK:
+        _CROSS_VENUE_LIVE_CACHE.update(read_ts=now, live=live)
+    return live
+
+
+def cross_venue_health_snapshot() -> dict:
+    try:
+        return _cvt.health_from_live(
+            _cross_venue_live(), time.time(), enabled=CROSS_VENUE_COLLECTOR_ENABLED,
+        )
+    except Exception as exc:
+        return {"schema": _cvt.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
+def _ai_shadow_leader_features(decision_ts: float) -> dict:
+    try:
+        ts_list, rows = _AI_SHADOW_TAPE.snapshot()
+
+        def bfx_mid_at(sec):
+            return _ai_shadow.mid_at(ts_list, rows, sec, max_lag=0)
+
+        return _cvt.leader_features(_cross_venue_live(max_age_sec=0.0), decision_ts, bfx_mid_at)
+    except Exception as exc:
+        logger.warning(f"[AI SHADOW] leader features unavailable: {exc} [PIPELINE ENFORCEMENT]")
+        return {"side": _ai_shadow.NONE, "reason": "ERROR", "error": type(exc).__name__}
+
+
 def _ai_shadow_tape_features(now: float = None) -> dict:
     try:
         return _ai_shadow.tape_features(_AI_SHADOW_TAPE, float(now or time.time()))
@@ -28608,10 +28650,13 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
     tape = ctx.get("tape_features")
     if not isinstance(tape, dict) or tape.get("source") == "UNAVAILABLE":
         tape = _ai_shadow_tape_features(decision_ts)
+    leader = _ai_shadow_leader_features(decision_ts)
     compact_row = _ai_shadow_run_compact(ctx, tape, call_id, time.time())
     challengers = _ai_shadow.compute_challenger_sides(
-        ctx, ai_result, tape, call_id, compact=compact_row.get("parsed"),
+        ctx, ai_result, tape, call_id, compact=compact_row.get("parsed"), leader=leader,
     )
+    funding = ctx.get("funding") if isinstance(ctx.get("funding"), dict) else {}
+    live = _cross_venue_live()
     cycle = ctx.get("cycle_3m_universe") or ctx.get("exhaustion_3m") or {}
     with state_lock:
         leverage = state.get("leverage", DEFAULT_RESEARCH_LEVERAGE)
@@ -28639,6 +28684,18 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
             "(the tile ledgers are the truth for orders). This log never changes admission."
         ),
         "tape_features": tape,
+        "leader_features": leader,
+        "derivatives": {
+            "bitfinex": {
+                "funding_rate": funding.get("rate"),
+                "mark": funding.get("mark_price"),
+                "index": funding.get("index_price"),
+                "open_interest": funding.get("open_interest"),
+                "next_funding_ts": funding.get("next_time"),
+                "updated_ts": funding.get("updated_ts"),
+            },
+            "leaders": (live or {}).get("derivatives") if isinstance(live, dict) else None,
+        },
         "compact_prompt_state": compact_row.get("call_state"),
         "geometry_model": _ai_shadow.GEOMETRY_MODEL,
         "geometry_specs": (
@@ -28773,6 +28830,7 @@ def ai_shadow_dashboard_snapshot() -> dict:
         "tape_ring_seconds": len(_AI_SHADOW_TAPE),
         "win_prob_status": "NOT_REQUESTED_BY_PROMPT (ai_threshold has no effect)",
         "input_health": ai_input_health_snapshot(),
+        "cross_venue": cross_venue_health_snapshot(),
         "status": status,
         "horizons_sec": list(horizons),
         "rows": rows,
@@ -33413,11 +33471,14 @@ DASHBOARD_JS = """(function () {
       const st = s.status || {};
       const health = s.input_health || {};
       const dead = (health.dead_fields || []).map(f => f.path + '=' + f.kind).slice(0, 6);
+      const cv = s.cross_venue || {};
+      const cvStale = (cv.stale_venues || []).join(',');
       safeText('aiShadowStatus',
         'calls ' + (st.calls_logged || 0) + ' | pending ' + (s.pending_calls || 0)
         + ' | tape ' + (s.tape_ring_seconds || 0) + 's | compact ok ' + (st.compact_ok || 0)
         + ' err ' + (st.compact_errors || 0) + ' skip ' + (st.compact_skipped || 0)
         + ' | inputs ' + (health.status || '-') + (dead.length ? ' [' + dead.join(', ') + ']' : '')
+        + ' | leader feed ' + (cv.status || '-') + (cvStale ? ' [stale ' + cvStale + ']' : '')
         + ' | win_prob ' + (s.win_prob_status || '-'));
       const hs = (s.horizons_sec || []).map(String);
       const fmt = (c) => {
@@ -40259,6 +40320,12 @@ def status():
                 "qualification_model": "CONSERVATIVE_BBO_DEPTH_TAPE",
                 "per_second_trade_high_low": True,
             },
+            "cross_venue_tape": {
+                "tape_schema": _cvt.SCHEMA,
+                "file": _cvt.FILE_NAME,
+                "mode": "SHADOW_ONLY_NO_ORDERS",
+                **cross_venue_health_snapshot(),
+            },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
                 "taker_counterfactual_file": execution_markouts.TAKER_FILE,
@@ -40514,6 +40581,8 @@ def ready():
         "trading_ready": trading_ready,
         "trading_block_reason": None if trading_ready else trading_block_reason,
         "ai_input_health": ai_input_health_snapshot(),
+        # Shadow research feed health; deliberately not an input to ready_ok.
+        "cross_venue_health": cross_venue_health_snapshot(),
     }), (200 if ready_ok else 503)
 
 

@@ -583,6 +583,7 @@ MISSED_OPPORTUNITY_PROOF_REPORT_FILE = "missed_opportunity_proof_report.json"
 TILE_EVIDENCE_POINTS_REPORT_FILE = "tile_evidence_points_report.json"
 FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE = "fixed_vs_dynamic_selector_report.json"
 AI_CHALLENGER_REPORT_FILE = "ai_challenger_report.json"
+LEAD_LAG_REPORT_FILE = "lead_lag_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -685,6 +686,7 @@ ANALYZER_JSON_REPORT_FILES = (
     TILE_EVIDENCE_POINTS_REPORT_FILE,
     FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE,
     AI_CHALLENGER_REPORT_FILE,
+    LEAD_LAG_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -763,6 +765,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Tile Evidence Points", TILE_EVIDENCE_POINTS_REPORT_FILE, "Per-tile fill worlds, did vs missed, AI usefulness, collection rate, quarantine receipt and n>=30 after-cost EV ranking"),
     ("Fixed vs Dynamic Selector", FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, "Best single fixed tile vs regime-conditional tile selector, walk-forward OOS after costs, n>=30 gates per arm and regime"),
     ("AI vs Challengers", AI_CHALLENGER_REPORT_FILE, "Shadow-only: LLM side vs rule vote, inverted AI, 1m OFI, 5m contrarian, seeded random and compact v5 prompt; tape markouts and tile-geometry proxy, hour-cluster CIs, BH q-values, dead-input audit"),
+    ("Cross-Venue Lead-Lag", LEAD_LAG_REPORT_FILE, "Shadow-only: Binance/Bybit/OKX 1s mids vs Bitfinex tBTCF0 - return cross-correlation, Bitfinex response 1-30s after leader moves, capacity-1 leader-follow after-spread markouts (hour-cluster CIs, BH q), basis and funding/OI"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
@@ -9204,6 +9207,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             evidence_points = tile_evidence_points_report(session=session)
             selector_report = fixed_vs_dynamic_selector_report(session=session)
             ai_challenger_report(session=session)
+            lead_lag_report(session=session)
             forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
@@ -9319,6 +9323,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         evidence_points = tile_evidence_points_report(session=session)
         selector_report = fixed_vs_dynamic_selector_report(session=session)
         ai_challenger_report(session=session)
+        lead_lag_report(session=session)
         forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
@@ -12300,6 +12305,19 @@ def ai_challenger_report(session=None):
         payload = {"schema": "ai_challenger_report_v1", "status": "ERROR",
                    "error": f"{type(exc).__name__}: {exc}"}
     return _write_aux_report(AI_CHALLENGER_REPORT_FILE, payload, session)
+
+
+def lead_lag_report(session=None):
+    """Publish the cross-venue lead-lag study from the shadow cross-venue tape."""
+    from cross_venue_tape import FILE_NAME
+    from research.lead_lag_report import SCHEMA, build_from_data_dir
+
+    session = session or load_research_session()
+    try:
+        payload = build_from_data_dir(os.path.dirname(os.path.abspath(_agent_data_path(FILE_NAME))))
+    except Exception as exc:  # the lead-lag view must never stop the analyzer
+        payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(LEAD_LAG_REPORT_FILE, payload, session)
 
 
 def forward_trial_report(session=None, evidence=None, selector=None):
