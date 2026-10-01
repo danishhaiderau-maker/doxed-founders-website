@@ -325,6 +325,56 @@ def test_terminal_close_wins_the_actual_open_commit_barrier() -> None:
     assert any(call[0] == "mirror" for call in calls)
 
 
+def _real_terminal_signal_namespace() -> dict:
+    namespace: dict = {}
+    for node in BOT_TREE.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name)
+            and target.id in {"TERMINAL_SIGNAL_STATUSES", "TERMINAL_SIGNAL_OUTCOMES"}
+            for target in node.targets
+        ):
+            exec(compile(ast.Module(body=[node], type_ignores=[]), "<terminal-consts>", "exec"), namespace)
+    _compile_function("is_terminal_signal", namespace)
+    assert "FILLED" in namespace["TERMINAL_SIGNAL_STATUSES"]
+    return namespace
+
+
+def test_own_fill_commit_is_not_mistaken_for_a_terminal_close() -> None:
+    calls: list[tuple] = []
+    namespace = _real_terminal_signal_namespace()
+    namespace.update({
+        "copy": copy,
+        "time": time,
+        "position_close_lock": threading.Lock(),
+        "_emit_genome_execution_event": lambda *args: calls.append(("genome", *args)),
+        "_relay_mirror": lambda *args, **kwargs: calls.append(("mirror", *args)),
+    })
+    allowed = _compile_function("_position_open_relay_allowed", namespace)
+    _compile_function("_commit_position_open_lifecycle", namespace)
+    finalize = _compile_function("_finalize_position_open_lifecycle", namespace)
+
+    pos = {"trade_id": "far-own", "status": "OPEN", "dir": "SHORT", "qty": 0.01}
+    master = {"trade_id": "far-own", "status": "PENDING_ENTRY"}
+    order = {"trade_id": "far-own", "signal_dir": "SHORT", "qty": 0.01}
+    # fill_order's live_mutator stamps this inside the POSITION_OPENED transition.
+    master.update({"status": "FILLED", "filled_ts": 1.0, "fill_price": 63_500, "outcome": "OPEN"})
+
+    snapshot = finalize(pos, master, master, order, 63_500, "2026-10-01T00:00:00Z")
+
+    assert snapshot is not None
+    assert snapshot["status"] == "FILLED"
+    assert any(call[0] == "genome" for call in calls)
+    assert any(call[0] == "mirror" for call in calls)
+
+    closed_master = {"status": "CLOSED", "outcome": "WIN", "exit_reason": "TIME_EXIT"}
+    assert allowed({"status": "OPEN"}, closed_master) is False
+    assert allowed({"status": "OPEN"}, {"status": "FILLED", "outcome": "WIN"}) is False
+    assert allowed({"status": "OPEN"}, {"status": "FILLED", "outcome": "OPEN", "exit_reason": "SL"}) is False
+    assert allowed({"status": "OPEN"}, {"status": "EXPIRED"}) is False
+    assert allowed({"status": "CLOSED"}, {"status": "FILLED", "outcome": "OPEN"}) is False
+    assert allowed({"status": "OPEN", "_close_in_progress": True}, {"status": "FILLED", "outcome": "OPEN"}) is False
+
+
 def test_limit_chase_never_emits_after_the_same_trade_is_open() -> None:
     lock = threading.RLock()
     order = {

@@ -12275,7 +12275,15 @@ def _position_open_relay_allowed(pos, master=None):
     ):
         return False
     if isinstance(master, dict) and is_terminal_signal(master):
-        return False
+        # fill_order stamps FILLED/OPEN on master inside the POSITION_OPENED
+        # transition; FILLED is a terminal *signal* status, not a close.
+        own_open_commit = (
+            master.get("status") == "FILLED"
+            and master.get("outcome") == "OPEN"
+            and not master.get("exit_reason")
+        )
+        if not own_open_commit:
+            return False
     return True
 
 
