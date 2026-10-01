@@ -150,7 +150,14 @@ def _deploy_runs(snapshot: Mapping[str, Any] | None, now: float) -> tuple[list[M
     ok, err = _fresh_snapshot(snapshot, now, "deploy runs")
     if not ok:
         return None, err
-    return [r for r in (snapshot or {}).get("runs") or [] if isinstance(r, Mapping)], ""
+    runs: list[Mapping[str, Any]] = []
+    for entry in (snapshot or {}).get("runs") or []:
+        # Windows PowerShell 5 may serialize the array as {"value": [...], "Count": n}.
+        nested = entry.get("value") if isinstance(entry, Mapping) and "databaseId" not in entry else None
+        for run in nested if isinstance(nested, list) else [entry]:
+            if isinstance(run, Mapping):
+                runs.append(run)
+    return runs, ""
 
 
 def attribute_deploy_run(runs: list[Mapping[str, Any]], observed_at: float, now: float) -> Mapping[str, Any] | None:
