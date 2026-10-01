@@ -402,6 +402,59 @@ def test_snapshot_changing_during_every_copy_backs_off_without_stalling_others(t
     env.assert_tree_matches_source()
 
 
+def test_atomically_replaced_receipts_ship_their_new_version_instead_of_racing(tmp_path):
+    env = Env(tmp_path)
+    env.store = VolumeStore(env.store_root)
+    env.write("a_live.jsonl", _rows(0, 3))
+    receipts = [
+        env.write(f"v3/receipts/r/{name}/complete.json", b'{"v": 1}')
+        for name in "abcdef"
+    ]
+    assert len(receipts) > shipper_mod.RACE_REBUILDS_PER_CYCLE
+    shipper = env.shipper()
+    real_plan = shipper.plan
+
+    def plan_then_replace(*args, **kwargs):
+        ops = real_plan(*args, **kwargs)
+        for path in receipts:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(b'{"v": 2}')
+            os.replace(tmp, path)
+        return ops
+
+    shipper.plan = plan_then_replace
+    result = shipper.cycle()
+    assert result["shipped"] and "race" not in result
+    members = json.loads(env.store.get(fmt.manifest_key("v1", result["shipped"]["seq"])))["members"]
+    assert sorted(m["path"] for m in members) == ["a_live.jsonl"] + sorted(
+        f"v3/receipts/r/{name}/complete.json" for name in "abcdef"
+    )
+    assert shipper.race_backoff == {}
+    shipper.plan = real_plan
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_append_stream_replaced_between_scan_and_read_still_races(tmp_path):
+    env = Env(tmp_path)
+    env.store = VolumeStore(env.store_root)
+    live = env.write("a_live.jsonl", _rows(0, 3))
+    env.write("z_other.json", b'{"x": 1}')
+    shipper = env.shipper()
+    real_plan = shipper.plan
+
+    def plan_then_replace(*args, **kwargs):
+        ops = real_plan(*args, **kwargs)
+        tmp = live.with_suffix(".tmp")
+        tmp.write_bytes(live.read_bytes())
+        os.replace(tmp, live)
+        return ops
+
+    shipper.plan = plan_then_replace
+    raced = shipper.cycle()
+    assert raced["race"] == "a_live.jsonl"
+
+
 def test_file_deleted_between_scan_and_read_is_a_race_for_its_stream_only(tmp_path):
     env = Env(tmp_path)
     env.store = VolumeStore(env.store_root)
