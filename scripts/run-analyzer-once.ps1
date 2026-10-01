@@ -108,6 +108,8 @@ $exitCode = 1
 try {
   Write-JsonAtomic -Path $cfg.AnalyzerStatus -Value $status
   $env:DOXXED_NONINTERACTIVE = '1'
+  # A native crash (0xC0000005) otherwise leaves no Python stack behind.
+  $env:PYTHONFAULTHANDLER = '1'
   # A stale user-level value would point the analyzer at a retired store.
   Remove-Item -LiteralPath Env:BTC_AGENT_DATA_DIR -ErrorAction SilentlyContinue
   $health = $null
