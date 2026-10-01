@@ -73,14 +73,88 @@ def test_one_tile_off_fails():
     assert row["failed_checks"] == ["tiles_all_on"]
 
 
-def test_deploy_maintenance_pause_is_a_boundary_but_manual_pause_fails():
+def _deploys(now, *runs):
+    return {"schema": "fly_deploy_runs_snapshot_v1", "observedAt": up.iso(now - 20), "ok": True,
+            "workflow": "fly-bot-deploy.yml", "runs": list(runs)}
+
+
+def _run(run_id, created, updated=None, status="in_progress", conclusion=""):
+    return {"databaseId": run_id, "status": status, "conclusion": conclusion, "event": "push",
+            "createdAt": up.iso(created), "updatedAt": up.iso(updated if updated is not None else created)}
+
+
+def _deploy_pause(now, **over):
+    # What the guarded workflow really sets: owner DEPLOY_MAINTENANCE and manual_admin_pause=true.
+    return _runtime(now, execution_paused=True, pause_owner="DEPLOY_MAINTENANCE", manual_admin_pause=True, **over)
+
+
+def test_guarded_deploy_pause_is_allowed_while_its_run_is_active_but_manual_pause_fails():
     now = T0 + 60
-    boundary = up.evaluate_row(**_inputs(now, runtime=_runtime(now, execution_paused=True, pause_owner="DEPLOY_MAINTENANCE")))
-    assert boundary["status"] == "BOUNDARY"
+    deploys = _deploys(now, _run(36794875288, now - 900))
+    row = up.evaluate_row(**_inputs(now, runtime=_deploy_pause(now), deploy_runs=deploys))
+    assert row["status"] == up.ALLOWED_GUARDED_DEPLOY, row
+    assert row["checks"]["no_manual_intervention"]["ok"] is True
+    assert "ALLOWED_GUARDED_DEPLOY" in row["checks"]["no_manual_intervention"]["detail"]
+    assert row["observed"]["deploy_run_id"] == 36794875288
     manual = up.evaluate_row(**_inputs(now, runtime=_runtime(now, execution_paused=True, pause_owner="ADMIN_MANUAL",
-                                                               manual_admin_pause=True)))
+                                                               manual_admin_pause=True), deploy_runs=deploys))
     assert manual["status"] == "FAIL"
     assert {"paper_running", "no_manual_intervention"} <= set(manual["failed_checks"])
+
+
+def test_deploy_pause_without_an_attributable_run_fails_closed():
+    now = T0 + 60
+    unattributed = up.evaluate_row(**_inputs(now, runtime=_deploy_pause(now), deploy_runs=_deploys(now)))
+    assert unattributed["status"] == "FAIL"
+    assert {"paper_running", "no_manual_intervention"} <= set(unattributed["failed_checks"])
+    # A run that finished before the observation does not cover a later pause.
+    finished = _deploys(now, _run(1, now - 3600, now - 1200, "completed", "success"))
+    assert up.evaluate_row(**_inputs(now, runtime=_deploy_pause(now), deploy_runs=finished))["status"] == "FAIL"
+    no_evidence = up.evaluate_row(**_inputs(now, runtime=_deploy_pause(now), deploy_runs=None))
+    assert no_evidence["status"] == "FAIL" and no_evidence["checks"]["paper_running"]["ok"] is None
+    failed_run = _deploys(now, _run(2, now - 900, now - 10, "completed", "failure"))
+    assert up.evaluate_row(**_inputs(now, runtime=_deploy_pause(now), deploy_runs=failed_run))["status"] == "FAIL"
+
+
+def test_guarded_deploy_pause_longer_than_the_bound_fails():
+    now = T0 + 3600
+    deploys = _deploys(now, _run(3, now - 3600))
+    previous = {"status": up.ALLOWED_GUARDED_DEPLOY,
+                "observed": {"deploy_pause_since": now - 30 - 46 * 60, "deploy_run_id": 3,
+                             "ai_cycle_completed_ts": 1.0}}
+    row = up.evaluate_row(**_inputs(now, runtime=_deploy_pause(now), deploy_runs=deploys, previous=previous))
+    assert row["status"] == "FAIL" and "paper_running" in row["failed_checks"]
+    assert "> 45 min" in row["checks"]["paper_running"]["detail"]
+
+
+def test_after_the_boundary_the_run_must_succeed():
+    now = T0 + 1800
+    previous = {"status": up.ALLOWED_GUARDED_DEPLOY,
+                "observed": {"deploy_run_id": 4, "pending_deploy_run_id": 4, "ai_cycle_completed_ts": 1.0}}
+    ok = up.evaluate_row(**_inputs(now, previous=previous,
+                                   deploy_runs=_deploys(now, _run(4, now - 2400, now - 600, "completed", "success"))))
+    assert ok["status"] == "PASS", ok
+    assert "Paper ACTIVE + 2 advancing AI cycles" in ok["checks"]["no_manual_intervention"]["detail"]
+    assert "pending_deploy_run_id" not in ok["observed"]
+    running = up.evaluate_row(**_inputs(now, previous=previous, deploy_runs=_deploys(now, _run(4, now - 2400))))
+    assert running["status"] == "PASS" and running["observed"]["pending_deploy_run_id"] == 4
+    later = now + 1800
+    failed = up.evaluate_row(**_inputs(later, previous=running,
+                                       deploy_runs=_deploys(later, _run(4, now - 2400, later - 60, "completed", "failure"))))
+    assert failed["failed_checks"] == ["no_manual_intervention"]
+
+
+def test_tiles_come_from_the_runtime_roster_not_a_fixed_lane_list():
+    now = T0 + 60
+    single = _runtime(now, active_tile_lanes=["FAMILY_ADAPTIVE_REGIME"],
+                      research_lane_enabled={"FAMILY_ADAPTIVE_REGIME": True})
+    row = up.evaluate_row(**_inputs(now, runtime=single))
+    assert row["status"] == "PASS" and row["checks"]["tiles_all_on"]["detail"] == "1/1 tiles ON"
+    off = _runtime(now, active_tile_lanes=["FAMILY_ADAPTIVE_REGIME"],
+                   research_lane_enabled={"FAMILY_ADAPTIVE_REGIME": False, "FAMILY_ATR_TRAIL": True})
+    assert up.evaluate_row(**_inputs(now, runtime=off))["failed_checks"] == ["tiles_all_on"]
+    source = Path(up.__file__).read_text(encoding="utf-8")
+    assert "FAMILY_" not in source
 
 
 def test_ai_cycle_not_advancing_since_previous_row_fails():
@@ -136,6 +210,11 @@ def test_verdict_fails_a_boundary_that_never_resumes():
     assert up.verdict(rows, t0=T0, ends_at=ends, now=ends + 1)["result"] == "FAIL"
     short = [_row(T0 + 60 + i * 1800, "BOUNDARY" if i == 10 else "PASS") for i in range(97)]
     assert up.verdict(short, t0=T0, ends_at=ends, now=ends + 1)["result"] == "PASS"
+    allowed = [_row(T0 + 60 + i * 1800, up.ALLOWED_GUARDED_DEPLOY if i in (10, 40) else "PASS") for i in range(97)]
+    assert up.verdict(allowed, t0=T0, ends_at=ends, now=ends + 1)["result"] == "PASS"
+    # Two consecutive paused rows are already 30 min apart; a third exceeds the 45-min bound.
+    stuck = [_row(T0 + 60 + i * 1800, up.ALLOWED_GUARDED_DEPLOY if 10 <= i <= 12 else "PASS") for i in range(97)]
+    assert up.verdict(stuck, t0=T0, ends_at=ends, now=ends + 1)["result"] == "FAIL"
 
 
 def _state(tmp_path, now):
@@ -164,6 +243,20 @@ def test_start_then_check_writes_rows_on_cadence_and_refuses_double_start(tmp_pa
     assert [l["kind"] for l in lines] == ["START", "ROW"]
     active = json.loads((state / "unattended-proof" / up.ACTIVE_FILE).read_text(encoding="utf-8"))
     assert active["status"]["result"] == "IN_PROGRESS"
+
+
+def test_check_reads_the_deploy_runs_snapshot_for_a_guarded_pause(tmp_path):
+    state = _state(tmp_path, T0)
+    receipt = Path(up.start(state, tmp_path / "diag", T0)["receipt"])
+    now = T0 + 60
+    (state / up.RUNTIME_SNAPSHOT).write_text(json.dumps(_deploy_pause(now)), encoding="utf-8")
+    assert up.check(state, now)["row"] == "FAIL"  # no deploy-runs snapshot: cannot attribute
+    later = T0 + 120
+    (state / up.RUNTIME_SNAPSHOT).write_text(json.dumps(_deploy_pause(later)), encoding="utf-8")
+    (state / up.DEPLOY_RUNS_SNAPSHOT).write_text(json.dumps(_deploys(later, _run(9, later - 600))), encoding="utf-8")
+    assert up.check(state, later, force=True)["row"] == up.ALLOWED_GUARDED_DEPLOY
+    row = json.loads(receipt.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["observed"]["deploy_run_id"] == 9
 
 
 def test_force_restart_needs_a_reason_and_closes_the_old_window_as_superseded(tmp_path):

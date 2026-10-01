@@ -32,7 +32,15 @@ if ([System.IO.Path]::GetFullPath($ViewRoot).ToLowerInvariant().Contains('canoni
 
 # The supervisor only takes its dashboard-down path when no cycle is due, so a
 # cycle that stops before the analyzer must bring a dead dashboard back itself.
+function Set-CycleStatus([string]$Phase, $ExitCode = $null) {
+  $script:cycleStatus.phase = $Phase
+  $script:cycleStatus.updatedAt = Get-UtcNowIso
+  if ($null -ne $ExitCode) { $script:cycleStatus.finishedAt = Get-UtcNowIso; $script:cycleStatus.exitCode = $ExitCode }
+  Write-JsonAtomic -Path $cfg.CycleStatus -Value $script:cycleStatus
+}
+
 function Stop-Cycle([int]$Code) {
+  Set-CycleStatus 'STOPPED' $Code
   $up = $false
   try { $up = [bool](Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/health" -TimeoutSec 10 -UseBasicParsing) } catch { }
   if (-not $up) {
@@ -45,6 +53,12 @@ function Stop-Cycle([int]$Code) {
 
 $cycleLock = Enter-SingleInstance -Name (Get-ChainMutexName 'LaptopSegmentAnalyzerCycle')
 if (-not $cycleLock) { Write-ChainLog -Config $cfg -Name $logName -Message 'SKIP cycle already running'; exit 0 }
+# The supervisor schedules from this cycle start (not the later analyzer start),
+# and the pull loop defers a parity pass while the phase is PROMOTION.
+$cycleStatus = [ordered]@{ schema = 'segment_analyzer_cycle_status_v1'; pid = $PID; reason = $Reason
+                           startedAt = (Get-UtcNowIso); phase = 'PROMOTION'; updatedAt = $null
+                           finishedAt = $null; exitCode = $null }
+Set-CycleStatus 'PROMOTION'
 
 if (-not $env:BOT_ADMIN_TOKEN) {
   $raw = Get-Content -LiteralPath $cfg.VaultEnv -Raw
@@ -59,6 +73,7 @@ $promotion = $null
 $lockWaitStart = $null
 $previous = $ErrorActionPreference
 for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
+  Set-CycleStatus 'PROMOTION'
   # The view is this runner's own staging copy; each cycle starts empty.
   if (Test-Path -LiteralPath $ViewRoot) { Remove-Item -LiteralPath $ViewRoot -Recurse -Force }
   $ErrorActionPreference = 'Continue'
@@ -86,6 +101,7 @@ for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   if ($promotion -notmatch 'SHADOW_BEHIND_PUBLISHED|HEAD_MANIFEST_MISMATCH') { Stop-Cycle 3 }
 }
 if ($promotionExit -ne 0) { Stop-Cycle 3 }
+Set-CycleStatus 'MIGRATION'
 
 $ErrorActionPreference = 'Continue'
 try {
@@ -95,6 +111,7 @@ try {
 $migrationExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message ("MIGRATION exit={0} {1}" -f $migrationExit, $migration)
 if ($migrationExit -ne 0) { Stop-Cycle 4 }
+Set-CycleStatus 'ANALYZER'
 
 # Promotion plus migration outlive the default 10-minute receipt SLA as the
 # epoch grows; the receipt is still bound to this cycle's applied seq.
@@ -103,4 +120,5 @@ $env:ANALYZER_MIRROR_SYNC_MAX_AGE_SEC = "$SyncMaxAgeSec"
   -RepoRoot $cfg.RepoRoot -CanonicalRoot $cfg.CanonicalRoot -StateDir $cfg.StateDir -Port $Port -Reason $Reason
 $analyzerExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message "ANALYZER exit=$analyzerExit"
+Set-CycleStatus 'DONE' $analyzerExit
 exit $analyzerExit

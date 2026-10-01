@@ -33,6 +33,13 @@ try {
   while ($true) {
     $iteration++
     $parityDue = ($null -eq $lastParity) -or (([datetime]::UtcNow - $lastParity).TotalMinutes -ge $ParityIntervalMin)
+    # A parity pass holds the shadow-root lock ~7 min; do not start one while an
+    # analyzer cycle is waiting to promote (bounded: a stale marker is ignored).
+    $cycle = Read-JsonFile $cfg.CycleStatus
+    if ($parityDue -and $cycle -and $cycle.phase -eq 'PROMOTION' -and $null -eq $cycle.exitCode) {
+      $cycleUpdated = ConvertTo-UtcDate $cycle.updatedAt
+      if ($cycleUpdated -and ([datetime]::UtcNow - $cycleUpdated).TotalMinutes -lt 15) { $parityDue = $false }
+    }
     $pullArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $pullScript, '-RepoRoot', $cfg.RepoRoot,
                   '-Source', 'Http', '-BaseUrl', $cfg.SourceUrl, '-HomeBotEnv', $cfg.VaultEnv,
                   '-LegacyTree', $cfg.DataRoot, '-MaxSegments', "$MaxSegmentsPerPull")

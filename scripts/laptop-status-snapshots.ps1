@@ -132,4 +132,32 @@ if ($offline) {
   }
 }
 Write-JsonAtomic -Path (Join-Path $cfg.StateDir 'fly_runtime_snapshot_v1.json') -Value $runtime -Depth 6
-Write-Output ("SNAPSHOTS fly_head_ok={0} relay_ok={1} runtime_ok={2}" -f $head.ok, $relay.ok, $runtime.ok)
+
+# Recent guarded deploy workflow runs (read-only `gh run list`) so the proof can
+# attribute a DEPLOY_MAINTENANCE pause to an actual guarded deploy.
+$deploys = New-Snapshot 'fly_deploy_runs_snapshot_v1'
+$deployRepo = if ($env:DOXXED_DEPLOY_REPO) { $env:DOXXED_DEPLOY_REPO } else { 'danishhaiderau-maker/doxed-founders-website' }
+$deploys.repo = $deployRepo
+$deploys.workflow = 'fly-bot-deploy.yml'
+if ($offline) {
+  $deploys.error = 'OFFLINE'
+} elseif (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+  $deploys.error = 'GH_CLI_MISSING'
+} else {
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $raw = & gh run list --repo $deployRepo --workflow fly-bot-deploy.yml --limit 8 `
+      --json databaseId,status,conclusion,createdAt,updatedAt,event,headSha,displayTitle 2>$null | Out-String
+    if ($LASTEXITCODE -eq 0 -and $raw.Trim()) {
+      $deploys.runs = @($raw | ConvertFrom-Json)
+      $deploys.ok = $true
+    } else {
+      $deploys.error = 'GH_RUN_LIST_FAILED'
+    }
+  } catch {
+    $deploys.error = 'GH_RUN_LIST_FAILED'
+  } finally { $ErrorActionPreference = $previousPreference }
+}
+Write-JsonAtomic -Path (Join-Path $cfg.StateDir 'fly_deploy_runs_snapshot_v1.json') -Value $deploys -Depth 5
+Write-Output ("SNAPSHOTS fly_head_ok={0} relay_ok={1} runtime_ok={2} deploy_runs_ok={3}" -f $head.ok, $relay.ok, $runtime.ok, $deploys.ok)
