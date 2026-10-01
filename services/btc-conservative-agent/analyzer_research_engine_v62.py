@@ -6453,7 +6453,7 @@ def _load_trade_outcomes_v2():
     except Exception as e:
         print(f"⚠️ trade_outcome read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
         return pd.DataFrame()
-    contaminated = relay_interference_trade_ids(rows)
+    contaminated = cohort_excluded_trade_ids(rows)
     rows = [r for r in rows if str(r.get("trade_id") or "").strip() not in contaminated]
     return pd.DataFrame(rows) if rows else pd.DataFrame()
 
@@ -9224,6 +9224,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             )
         trades, cohort_quarantine = split_current_tile_cohort(
             trades, session, relay_interference=relay_interference_trade_ids(),
+            lifecycle_contradictions=lifecycle_contradiction_trade_ids(),
         )
         per_call, ai_outage_receipt = quarantine_ai_provider_outage_frames({
             "blocked": blocked, "decisions": decisions, "ai_log": ai_log,
@@ -12018,6 +12019,15 @@ def quarantine_ai_provider_outage_frames(named_frames: dict) -> tuple:
     }
     return kept, receipt
 PHANTOM_CANCEL_EXIT_REASON = "PHANTOM_CANCEL_BY_RELAY"
+LIFECYCLE_CONTRADICTION_REASON = "FILL_TTL_LIFECYCLE_CONTRADICTION"
+# Paper fills that opened after TTL expiry had already recorded the order as
+# expired (fill/expiry race fixed by the atomic fill claim). Their outcomes are
+# not a valid observation of any tile policy.
+FILL_TTL_CONTRADICTION_TRADE_IDS = frozenset({
+    "flb-6a32a8bad760",
+    "fal-39ccb12d2316",
+    "flb-4bc059d70908",
+})
 
 
 def _registry_lane_for_trade_id(trade_id) -> str:
@@ -12060,6 +12070,41 @@ def relay_interference_trade_ids(outcome_rows=None) -> dict:
     return found
 
 
+def lifecycle_contradiction_trade_ids() -> dict:
+    """Executed trades whose order was also recorded as TTL-expired.
+
+    Kept as opaque archive rows in the quarantine receipt; ledgers unmodified.
+    """
+    return {
+        trade_id: {
+            "trade_id": trade_id,
+            "research_lane": _registry_lane_for_trade_id(trade_id) or "UNLABELLED",
+            "reason": LIFECYCLE_CONTRADICTION_REASON,
+        }
+        for trade_id in sorted(FILL_TTL_CONTRADICTION_TRADE_IDS)
+    }
+
+
+def cohort_excluded_trade_ids(outcome_rows=None) -> set:
+    """Trade IDs every current-cohort report excludes regardless of lane or epoch."""
+    return set(relay_interference_trade_ids(outcome_rows)) | set(lifecycle_contradiction_trade_ids())
+
+
+def _lifecycle_contradiction_summary(contradictions, marked_in_trades: int) -> dict:
+    by_lane = {}
+    for item in (contradictions or {}).values():
+        by_lane[item["research_lane"]] = by_lane.get(item["research_lane"], 0) + 1
+    return {
+        "reason": LIFECYCLE_CONTRADICTION_REASON,
+        "rows": len(contradictions or {}),
+        "in_trade_cohort": int(marked_in_trades),
+        "by_lane": dict(sorted(by_lane.items())),
+        "basis": "paper fill opened after the same order was recorded TTL-expired; "
+                 "excluded from current-cohort stats and kept as opaque archive rows; ledgers unmodified",
+        "rows_detail": sorted((contradictions or {}).values(), key=lambda r: r["trade_id"]),
+    }
+
+
 def _relay_interference_summary(relay_interference, marked_in_trades: int) -> dict:
     by_lane = {}
     for item in (relay_interference or {}).values():
@@ -12076,18 +12121,20 @@ def _relay_interference_summary(relay_interference, marked_in_trades: int) -> di
     }
 
 
-def split_current_tile_cohort(trades, session=None, tile_lanes=None, relay_interference=None):
+def split_current_tile_cohort(trades, session=None, tile_lanes=None, relay_interference=None,
+                              lifecycle_contradictions=None):
     """Return (current cohort, quarantine summary) for executed trade rows.
 
     The current cohort is registry tile lanes from the runtime's current
     collection epoch. Everything else (Continuous benchmark rows, retired or
-    unknown lanes, prior epochs, relay-interference contamination) is excluded
-    from every current-cohort report. Rows without an epoch stamp are kept
+    unknown lanes, prior epochs, relay-interference contamination, fill/expiry
+    lifecycle contradictions) is excluded from every current-cohort report. Rows without an epoch stamp are kept
     because they cannot be proven prior.
     """
     tiles = {str(lane).upper() for lane in (CURRENT_RESEARCH_LANES if tile_lanes is None else tile_lanes)}
     empty = {"rows": 0, "by_reason": {}, "by_lane": {}, "net_pnl_usd": 0.0, "rows_detail": [],
-             "relay_interference": _relay_interference_summary(relay_interference, 0)}
+             "relay_interference": _relay_interference_summary(relay_interference, 0),
+             "lifecycle_contradictions": _lifecycle_contradiction_summary(lifecycle_contradictions, 0)}
     if trades is None or getattr(trades, "empty", True) or "research_lane" not in trades.columns:
         return trades, empty
     lane = trades["research_lane"].fillna("").astype(str).str.strip().str.upper()
@@ -12098,6 +12145,11 @@ def split_current_tile_cohort(trades, session=None, tile_lanes=None, relay_inter
         contaminated = trades["trade_id"].fillna("").astype(str).isin(set(relay_interference))
         reason[contaminated] = RELAY_INTERFERENCE_REASON
         marked_interference = int(contaminated.sum())
+    marked_contradictions = 0
+    if lifecycle_contradictions and "trade_id" in trades.columns:
+        contradicted = trades["trade_id"].fillna("").astype(str).isin(set(lifecycle_contradictions))
+        reason[contradicted & (reason == "")] = LIFECYCLE_CONTRADICTION_REASON
+        marked_contradictions = int(contradicted.sum())
     outage = ai_provider_outage_reason(trades, ts_cols=("entry_ts", "open_ts", "ts"))
     if len(outage):
         reason[(reason == "") & (outage != "")] = outage[(reason == "") & (outage != "")]
@@ -12126,6 +12178,7 @@ def split_current_tile_cohort(trades, session=None, tile_lanes=None, relay_inter
         "current_epoch_id": current_epoch or None,
         "rows_detail": detail,
         "relay_interference": _relay_interference_summary(relay_interference, marked_interference),
+        "lifecycle_contradictions": _lifecycle_contradiction_summary(lifecycle_contradictions, marked_contradictions),
     }
     return trades[reason == ""].copy(), summary
 
@@ -12277,10 +12330,9 @@ def _session_trade_scope(trades, tile_lanes):
     by_lane = unique["research_lane"].fillna("UNLABELLED").astype(str).str.upper().value_counts().to_dict()
     tiles = {str(lane).upper() for lane in tile_lanes}
     quarantine = {k: v for k, v in _CURRENT_TRADE_COHORT_QUARANTINE.items() if k != "rows_detail"}
-    if isinstance(quarantine.get("relay_interference"), dict):
-        quarantine["relay_interference"] = {
-            k: v for k, v in quarantine["relay_interference"].items() if k != "rows_detail"
-        }
+    for key in ("relay_interference", "lifecycle_contradictions"):
+        if isinstance(quarantine.get(key), dict):
+            quarantine[key] = {k: v for k, v in quarantine[key].items() if k != "rows_detail"}
     return {
         "session_trade_rows": int(len(unique)),
         "tile_trade_rows": int(sum(int(n) for lane, n in by_lane.items() if lane in tiles)),
@@ -12375,6 +12427,7 @@ def tile_evidence_points_report(session=None):
             epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
             v2_start_ts=v2_start.timestamp() if v2_start is not None else None,
             relay_interference_ids=set(relay_interference_trade_ids()),
+            lifecycle_contradiction_ids=set(lifecycle_contradiction_trade_ids()),
             **load_evidence_inputs(_agent_data_path),
         )
     except Exception as exc:  # the evidence view must never stop the analyzer
@@ -12417,6 +12470,7 @@ def fixed_vs_dynamic_selector_report(session=None):
             epoch_id=str(session.get("collector_v22_epoch_id") or "").strip() or None,
             v2_start_ts=v2_start.timestamp() if v2_start is not None else None,
             relay_interference_ids=set(relay_interference_trade_ids()),
+            lifecycle_contradiction_ids=set(lifecycle_contradiction_trade_ids()),
         )
     except Exception as exc:  # the selector view must never stop the analyzer
         payload = {"schema": "fixed_vs_dynamic_selector_v1", "status": "ERROR", "verdict": "ERROR",

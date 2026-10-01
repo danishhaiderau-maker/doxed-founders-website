@@ -198,7 +198,7 @@ def test_handoff_append_completes_short_writes_before_fsync():
             "_cancellation_evidence_handoff_lock": threading.Lock(),
             "logger": SimpleNamespace(error=lambda *args, **kwargs: None),
         }
-        _load(["_append_cancellation_evidence_handoff"], ns)
+        _load(["_append_cancellation_evidence_handoff", "_append_durable_handoff_row"], ns)
         assert ns["_append_cancellation_evidence_handoff"]({"receipt_id": "r"}) is True
     assert bytes(writes).endswith(b"\n")
     assert any(kind == "fsync" for kind, _ in calls)
@@ -217,7 +217,7 @@ def test_append_after_torn_tail_fences_new_receipt_without_rewriting_tail(tmp_pa
         "_cancellation_evidence_handoff_lock": threading.Lock(),
         "logger": SimpleNamespace(error=lambda *_args, **_kwargs: None),
     }
-    _load(["_append_cancellation_evidence_handoff"], ns)
+    _load(["_append_cancellation_evidence_handoff", "_append_durable_handoff_row"], ns)
     row = {
         "schema": "cancellation_evidence_handoff_pending_v1",
         "receipt_id": "c" * 64,

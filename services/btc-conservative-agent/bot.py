@@ -11091,6 +11091,7 @@ def process_virtual_chase_chase6_market_conversions(price: float):
         tid = order.get("trade_id")
         with trade_lock:
             if (not tid or tid in fill_handoff_trade_ids
+                    or order.get("cancel_claim_in_progress")
                     or order.get("status") != "PENDING"
                     or not any(row is order for row in pending_orders)):
                 continue
@@ -12121,7 +12122,7 @@ def reconcile_stale_signals():
         for s in trades_map.values():
             sig = s.get("signal_ref", {}) or {}
             tid = sig.get("trade_id")
-            if not tid:
+            if not tid or tid in fill_handoff_trade_ids:
                 continue
             st = sig.get("status")
             outcome = sig.get("outcome") or sig.get("exit_reason")
@@ -12167,7 +12168,7 @@ def reconcile_stale_signals():
                 expiry_records.append((sig, "SIGNAL_TTL_EXPIRED", True))
         for order in list(pending_orders):
             tid = order.get("trade_id")
-            if order.get("status") != "PENDING" or not tid:
+            if order.get("status") != "PENDING" or not tid or tid in fill_handoff_trade_ids:
                 continue
             master = trades_map.get(tid, {}).get("signal_ref", {}) or {}
             if is_terminal_signal(master) or (master.get("created_ts_ts", 0) and now - master.get("created_ts_ts", 0) > SIGNAL_TTL_SEC):
@@ -12295,8 +12296,33 @@ def _position_open_relay_allowed(pos, master=None):
     ):
         return False
     if isinstance(master, dict) and is_terminal_signal(master):
-        return False
+        # fill_order stamps FILLED/OPEN on master inside the POSITION_OPENED
+        # transition; FILLED is a terminal *signal* status, not a close.
+        own_open_commit = (
+            master.get("status") == "FILLED"
+            and master.get("outcome") == "OPEN"
+            and not master.get("exit_reason")
+        )
+        if not own_open_commit:
+            return False
     return True
+
+
+def _fill_commit_refusal(order, master) -> str:
+    """Why a claimed fill may not open; caller holds trade_lock and the claim.
+
+    The fill claim excludes every expiry/cancel finalizer, so a pass here
+    remains true through the POSITION_OPENED commit that follows it.
+    """
+    if order.get("cancel_claim_in_progress"):
+        return "CANCEL_CLAIMED"
+    if str(order.get("status") or "").upper() != "PENDING":
+        return "ORDER_NOT_PENDING"
+    if not any(row is order for row in pending_orders):
+        return "ORDER_NOT_IN_BOOK"
+    if isinstance(master, dict) and is_terminal_signal(master):
+        return "SIGNAL_TERMINAL"
+    return ""
 
 
 def _commit_position_open_lifecycle(pos, master, signal, order, fill_px, opened_ts):
@@ -13484,6 +13510,10 @@ _cancellation_evidence_handoff_lock = threading.Lock()
 _cancellation_evidence_worker = None
 _cancellation_evidence_worker_lock = threading.Lock()
 _cancellation_evidence_reset_fence = False
+_fill_evidence_handoff_lock = threading.Lock()
+_fill_evidence_worker = None
+_fill_evidence_worker_lock = threading.Lock()
+_fill_evidence_steps_done = {}
 _order_multiverse_maturation_cursor = 0
 _order_multiverse_ready_sweep_batch = 0
 _order_multiverse_ready_sweep_started_ts = 0.0
@@ -13947,6 +13977,9 @@ def _restore_collector_v22_provisionals() -> int:
     replay = globals().get("_replay_cancellation_evidence_handoffs")
     if callable(replay):
         replay()
+    fill_replay = globals().get("_replay_fill_evidence_handoffs")
+    if callable(fill_replay):
+        fill_replay()
     return restored
 
 
@@ -14987,11 +15020,17 @@ def _append_cancellation_evidence_handoff(row: dict) -> bool:
     the research write barrier.  The append is serialized only against other
     handoff rows and is fsynced before the bounded evidence worker is notified.
     """
-    path = _cancellation_evidence_handoff_path()
+    return _append_durable_handoff_row(
+        _cancellation_evidence_handoff_path(), row,
+        _cancellation_evidence_handoff_lock, "cancellation",
+    )
+
+
+def _append_durable_handoff_row(path: str, row: dict, lock, label: str) -> bool:
     encoded = json.dumps(row, default=str, separators=(",", ":")).encode("utf-8") + b"\n"
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with _cancellation_evidence_handoff_lock:
+        with lock:
             # A process crash can leave an incomplete final JSONL row.  Fence
             # the next append with a newline so the partial forensic bytes stay
             # isolated and the new durable receipt remains independently
@@ -15019,7 +15058,7 @@ def _append_cancellation_evidence_handoff(row: dict) -> bool:
                     while offset < len(view):
                         written = os.write(fd, view[offset:])
                         if written <= 0:
-                            raise OSError("cancellation evidence journal short write")
+                            raise OSError(f"{label} evidence journal short write")
                         offset += written
                 os.fsync(fd)
             finally:
@@ -15027,7 +15066,7 @@ def _append_cancellation_evidence_handoff(row: dict) -> bool:
         return True
     except (OSError, TypeError, ValueError) as exc:
         logger.error(
-            f"[COLLECTOR_V22] cancellation evidence handoff append failed: {exc} "
+            f"[COLLECTOR_V22] {label} evidence handoff append failed: {exc} "
             "[EVIDENCE GAP]"
         )
         return False
@@ -15212,6 +15251,295 @@ def _enqueue_cancellation_evidence_handoff(
     if not _append_cancellation_evidence_handoff(receipt):
         return False
     return _dispatch_cancellation_evidence_handoff(receipt)
+
+
+FILL_EVIDENCE_IDENTITY_KEYS = (
+    "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
+    "schedule_id", "fill_id", "tape_id",
+)
+
+
+def _fill_evidence_handoff_path() -> str:
+    return os.path.join(
+        str(_data_sync_runtime_root()), "fill_evidence_handoffs.jsonl"
+    )
+
+
+def _append_fill_evidence_handoff(row: dict) -> bool:
+    return _append_durable_handoff_row(
+        _fill_evidence_handoff_path(), row, _fill_evidence_handoff_lock, "fill",
+    )
+
+
+def _write_fill_evidence_handoff(job: dict) -> None:
+    """Apply one fill's post-open evidence exactly once per receipt.
+
+    Each step is idempotent (record_id ledgers, write-once multiverse,
+    set-valued snapshot patch, whole-file positions snapshot) or guarded by
+    the per-receipt step set, so a retry or restart replay never duplicates.
+    """
+    receipt = copy.deepcopy((job.get("payload") or {}).get("receipt") or {})
+    receipt_id = str(receipt.get("receipt_id") or "")
+    expected_epoch_id = str(receipt.get("collector_epoch_id") or "")
+    trade_id = str(receipt.get("trade_id") or "")
+    if not receipt_id or not expected_epoch_id or not trade_id:
+        raise ValueError("fill evidence receipt identity is incomplete")
+    if _collector_v22_epoch_id() != expected_epoch_id:
+        if not _append_fill_evidence_handoff({
+            "schema": "fill_evidence_handoff_result_v1",
+            "receipt_id": receipt_id,
+            "collector_epoch_id": expected_epoch_id,
+            "trade_id": trade_id,
+            "status": "EPOCH_MISMATCH_PRESERVED",
+            "completed_at": utc_iso(),
+        }):
+            raise OSError("could not durably append epoch-mismatch result")
+        _fill_evidence_steps_done.pop(receipt_id, None)
+        return
+    order = receipt.get("order_snapshot") or {}
+    signal = receipt.get("signal_snapshot") or {}
+    position = receipt.get("position_snapshot") or {}
+    fill_snapshot = receipt.get("fill_snapshot") or None
+    fill_commit_ts = float(receipt.get("fill_commit_ts") or 0) or time.time()
+    fill_px = float(receipt.get("fill_price") or 0)
+    done = _fill_evidence_steps_done.setdefault(receipt_id, set())
+    required_failures = []
+
+    def step(name, fn, *, required=False):
+        if name in done:
+            return
+        try:
+            fn()
+        except Exception as exc:
+            logger.error(
+                f"[FILL EVIDENCE] {name} failed trade_id={trade_id} error={exc} "
+                "[EVIDENCE GAP]"
+            )
+            if required:
+                required_failures.append(name)
+                return
+        done.add(name)
+
+    step("action_receipt", lambda: _append_paper_action_receipt(
+        order,
+        signal,
+        action_generation=int(order.get("limit_chase_count") or 0) + 1,
+        action_type="FILL_PROMOTED",
+        policy_due_ts=fill_commit_ts,
+        eligibility_ts=fill_commit_ts,
+        dispatch_start_ts=fill_commit_ts,
+        acknowledgement_ts=fill_commit_ts,
+        fill_ts=fill_commit_ts,
+        fill_price=order.get("fill_price") or order.get("limit_price"),
+        filled_qty=order.get("filled_qty") or order.get("qty"),
+    ))
+
+    def v3_fill():
+        fill_identity_receipt = dual_write_paper_fill(
+            order, signal, position,
+            epoch_id=expected_epoch_id,
+            data_dir=str(receipt.get("data_dir") or os.getcwd()),
+        )
+        identity = {
+            key: fill_identity_receipt[key]
+            for key in FILL_EVIDENCE_IDENTITY_KEYS
+            if fill_identity_receipt.get(key)
+        }
+        if identity:
+            with trade_lock:
+                for row in open_positions:
+                    if isinstance(row, dict) and str(row.get("trade_id") or "") == trade_id:
+                        row.update(identity)
+
+    step("v3_fill", v3_fill, required=True)
+    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
+    if callable(collector_refresh):
+        step("collector_refresh", lambda: collector_refresh(
+            order, signal or None,
+            lifecycle_final=True,
+            expected_epoch_id=expected_epoch_id,
+        ))
+    if fill_px > 0:
+        step("signal_snapshot", lambda: patch_signal_snapshot_outcome(
+            trade_id, executed=True, block_reason=None, fill_price=fill_px,
+            fill_dynamics=receipt.get("fill_dynamics"),
+        ))
+    step("persist_signal", lambda: persist_signal(fill_snapshot, "FILLED"))
+    step("multiverse", lambda: _sync_order_multiverse(
+        fill_snapshot or signal or order, path_complete=False,
+    ))
+    step("save_positions", save_positions)
+    if required_failures:
+        raise RuntimeError(
+            f"fill evidence incomplete steps={required_failures}; handoff remains pending"
+        )
+    if not _append_fill_evidence_handoff({
+        "schema": "fill_evidence_handoff_result_v1",
+        "receipt_id": receipt_id,
+        "collector_epoch_id": expected_epoch_id,
+        "trade_id": trade_id,
+        "status": "APPLIED",
+        "completed_at": utc_iso(),
+        "steps": sorted(done),
+    }):
+        raise OSError("could not durably append applied result")
+    _fill_evidence_steps_done.pop(receipt_id, None)
+
+
+def _fill_evidence_dead_letter(row: dict) -> None:
+    # The pending journal row has no terminal result, so restart replays it.
+    logger.error(
+        f"[FILL EVIDENCE] handoff deferred key={row.get('key')} "
+        f"reason={row.get('reason')} error={row.get('error')} [EVIDENCE GAP]"
+    )
+
+
+def _get_fill_evidence_worker():
+    global _fill_evidence_worker
+    with _fill_evidence_worker_lock:
+        if _cancellation_evidence_reset_fence or _fresh_collection_lock.locked():
+            return None
+        if _fill_evidence_worker is not None:
+            existing = _fill_evidence_worker.snapshot()
+            if (not existing.get("accepting")
+                    and not existing.get("timed_out_handler_alive")):
+                _fill_evidence_worker = None
+        if _fill_evidence_worker is None:
+            _fill_evidence_worker = BoundedEvidenceWorker(
+                _write_fill_evidence_handoff,
+                max_queue=256,
+                max_retries=2,
+                handler_timeout_sec=120.0,
+                name="fill-evidence",
+                on_dead_letter=_fill_evidence_dead_letter,
+            )
+        return _fill_evidence_worker
+
+
+def _shutdown_fill_evidence_worker(timeout: float = 5.0) -> bool:
+    global _fill_evidence_worker
+    worker = _fill_evidence_worker
+    if worker is None:
+        return True
+    drained = worker.shutdown(drain_timeout=timeout)
+    snapshot = worker.snapshot()
+    if not drained or snapshot.get("timed_out_handler_alive"):
+        return False
+    with _fill_evidence_worker_lock:
+        if _fill_evidence_worker is worker:
+            _fill_evidence_worker = None
+    return True
+
+
+def _dispatch_fill_evidence_handoff(receipt: dict) -> bool:
+    receipt_id = str(receipt.get("receipt_id") or "")
+    if not receipt_id:
+        return False
+    worker = _get_fill_evidence_worker()
+    if worker is None:
+        logger.warning(
+            f"[FILL EVIDENCE] dispatch fenced during reset receipt_id={receipt_id} "
+            "[EVIDENCE GAP]"
+        )
+        return False
+    return bool(worker.submit(
+        receipt_id,
+        {"receipt": receipt},
+        source_ts=float(receipt.get("fill_commit_ts") or time.time()),
+    ))
+
+
+def _replay_fill_evidence_handoffs() -> int:
+    """Replay append-first fill handoffs left pending by an interrupted process."""
+    path = _fill_evidence_handoff_path()
+    if not os.path.exists(path):
+        return 0
+    pending = {}
+    terminal = set()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except (TypeError, ValueError):
+                    continue
+                receipt_id = str(row.get("receipt_id") or "")
+                if not receipt_id:
+                    continue
+                if row.get("schema") == "fill_evidence_handoff_pending_v1":
+                    if len(receipt_id) != 64 or not row.get("collector_epoch_id"):
+                        continue
+                    pending.setdefault(receipt_id, row)
+                elif (
+                    row.get("schema") == "fill_evidence_handoff_result_v1"
+                    and row.get("status") in {"APPLIED", "EPOCH_MISMATCH_PRESERVED"}
+                ):
+                    terminal.add(receipt_id)
+    except OSError as exc:
+        logger.warning(f"[FILL EVIDENCE] replay unavailable: {exc}")
+        return 0
+    dispatched = 0
+    for receipt_id, receipt in pending.items():
+        if receipt_id not in terminal and _dispatch_fill_evidence_handoff(receipt):
+            dispatched += 1
+    return dispatched
+
+
+def _enqueue_fill_evidence_handoff(
+    order: dict, signal: dict, pos: dict, fill_snapshot,
+    *, fill_commit_ts: float, fill_px, fill_dynamics=None,
+) -> bool:
+    """Durably bind a committed fill's evidence, then hand it to the worker.
+
+    Runs on the fill thread after POSITION_OPENED: it must never raise and
+    must never wait on research-gate locks, ledgers, or the snapshot file.
+    """
+    trade_id = str((pos or {}).get("trade_id") or (order or {}).get("trade_id") or "")
+    try:
+        epoch_id = _collector_v22_epoch_id()
+        identity = {
+            "collector_epoch_id": epoch_id,
+            "trade_id": trade_id,
+            "event": "POSITION_OPENED",
+            "fill_commit_ts": fill_commit_ts,
+        }
+        receipt_id = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        receipt = {
+            "schema": "fill_evidence_handoff_pending_v1",
+            "receipt_id": receipt_id,
+            "collector_epoch_id": epoch_id,
+            "trade_id": trade_id,
+            "created_at": utc_iso(),
+            "data_dir": os.getcwd(),
+            "fill_commit_ts": fill_commit_ts,
+            "fill_price": fill_px,
+            "fill_dynamics": copy.deepcopy(fill_dynamics),
+            "order_snapshot": _stable_pending_signal_copy(order),
+            "signal_snapshot": _stable_pending_signal_copy(signal),
+            "position_snapshot": _stable_pending_signal_copy(pos),
+            "fill_snapshot": _stable_pending_signal_copy(fill_snapshot),
+        }
+    except Exception as exc:
+        logger.error(
+            f"[FILL EVIDENCE] receipt build failed trade_id={trade_id} error={exc} "
+            "[EVIDENCE GAP]"
+        )
+        return False
+    if not _append_fill_evidence_handoff(receipt):
+        logger.error(
+            f"[FILL EVIDENCE] journal append failed; dispatching without restart "
+            f"replay trade_id={trade_id} [EVIDENCE GAP]"
+        )
+    try:
+        return _dispatch_fill_evidence_handoff(receipt)
+    except Exception as exc:
+        logger.error(
+            f"[FILL EVIDENCE] dispatch failed trade_id={trade_id} error={exc} "
+            "[EVIDENCE GAP]"
+        )
+        return False
 
 
 @_collector_epoch_serialized
@@ -22363,13 +22691,19 @@ def _place_simulated_limit_order(signal: dict, limit_price: float, entry_mode: s
         order["limit_price"] = price
         order["entry_type"] = "SIM_MARKET"
         order["fee_type"] = "TAKER"
-        fill_order(order)
+        try:
+            fill_order(order)
+        finally:
+            _release_unfilled_fill_handoff(order)
         logger.info(f"[SIM] Instant fill micro-SR at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
     elif can_instant:
         order["limit_price"] = price
         order["entry_type"] = "SIM_MARKET"
         order["fee_type"] = "TAKER"
-        fill_order(order)
+        try:
+            fill_order(order)
+        finally:
+            _release_unfilled_fill_handoff(order)
         logger.info(f"[SIM] Instant fill (pullback=0%) at {fmt(price)} trade_id={signal.get('trade_id')} [PIPELINE ENFORCEMENT]")
     elif (
         defer_instant_fill
@@ -23998,7 +24332,11 @@ def process_pending_orders():
                 for pos in open_positions
             ):
                 continue
+            if order.get("cancel_claim_in_progress"):
+                continue
             fill_signal = trades_map.get(order.get("trade_id"), {}).get("signal_ref") or {}
+            if is_terminal_signal(fill_signal):
+                continue
             fill_age_sec = _order_signal_age_sec(order, fill_signal, time.time())
             if chase_age_window_should_cancel(fill_age_sec):
                 logger.debug(
@@ -24109,6 +24447,7 @@ def fill_order(order):
             cancellation = _cancel_pending_order_confirmed(
                 order, "ADMIN_MANUAL_PAUSE",
                 record_expired=True, expire_signal=True,
+                fill_claim_owner=True,
             )
             logger.warning(
                 f"[ADMIN PAUSE] suppressed raced fill trade_id={order.get('trade_id')} "
@@ -24128,6 +24467,7 @@ def fill_order(order):
             cancellation = _cancel_pending_order_confirmed(
                 order, RETIRED_TILE_BOUNDARY_REASON,
                 record_expired=True, expire_signal=True,
+                fill_claim_owner=True,
             )
             logger.warning(
                 f"[TILE_RETIRED] suppressed retired-tile paper fill trade_id={order.get('trade_id')} "
@@ -24137,6 +24477,21 @@ def fill_order(order):
         finally:
             clear_fill_handoff()
             pipeline_state_sync()
+        return None
+    with trade_lock:
+        claim_master = trades_map.get(order.get("trade_id"), {}).get("signal_ref")
+        refusal = _fill_commit_refusal(order, claim_master)
+        if not refusal and order.get("trade_id"):
+            # Instant fills arrive without a touch claim; take it here so no
+            # expiry can finalize between this check and the OPEN commit.
+            fill_handoff_trade_ids.add(order["trade_id"])
+            order["fill_handoff_in_progress"] = True
+    if refusal:
+        logger.warning(
+            f"[FILL CLAIM] refused fill of non-fillable order "
+            f"trade_id={order.get('trade_id')} reason={refusal} [PIPELINE ENFORCEMENT]"
+        )
+        clear_fill_handoff()
         return None
     direction = _normalize_order_side_to_dir(
         order.get("signal_dir") or order.get("dir") or order.get("side")
@@ -24278,53 +24633,21 @@ def fill_order(order):
         pos["chase_schedule_authoritative"] = (
             terminal_schedule.get("authoritative") is True
         )
-    _append_paper_action_receipt(
+    fill_dynamics = _mark_fill_replay_buffer_executed(pos.get("trade_id"), fill_px)
+    # The POSITION_OPENED commit above is the durable authority for the open
+    # position.  Evidence I/O must stay off this thread: every queued sibling
+    # fill waits behind it while TTL expiry keeps running.
+    _enqueue_fill_evidence_handoff(
         order,
-        signal,
-        action_generation=int(order.get("limit_chase_count") or 0) + 1,
-        action_type="FILL_PROMOTED",
-        policy_due_ts=fill_commit_ts,
-        eligibility_ts=fill_commit_ts,
-        dispatch_start_ts=fill_commit_ts,
-        acknowledgement_ts=fill_commit_ts,
-        fill_ts=fill_commit_ts,
-        fill_price=order.get("fill_price") or order.get("limit_price"),
-        filled_qty=order.get("filled_qty") or order.get("qty"),
+        signal if isinstance(signal, dict) else {},
+        pos,
+        fill_snapshot,
+        fill_commit_ts=fill_commit_ts,
+        fill_px=fill_px,
+        fill_dynamics=fill_dynamics,
     )
-    try:
-        fill_identity_receipt = dual_write_paper_fill(
-            order,
-            signal if isinstance(signal, dict) else {},
-            pos,
-            epoch_id=_collector_v22_epoch_id(),
-            data_dir=os.getcwd(),
-        )
-        for key in (
-            "epoch_id", "opportunity_id", "policy_signature", "policy_epoch_id",
-            "schedule_id", "fill_id", "tape_id",
-        ):
-            if fill_identity_receipt.get(key):
-                pos[key] = fill_identity_receipt[key]
-    except Exception as exc:
-        logger.error(
-            f"[COLLECTOR_V3] paper fill write failed "
-            f"trade_id={order.get('trade_id')} error={exc} [PIPELINE ENFORCEMENT]"
-        )
-    collector_refresh = globals().get("_refresh_collector_v22_registered_order_evidence")
-    if callable(collector_refresh):
-        collector_refresh(
-            order, signal if isinstance(signal, dict) else None,
-            lifecycle_final=True,
-        )
     clear_fill_handoff()
-    mark_approve_research_executed(pos.get("trade_id"), fill_px)
-    persist_signal(fill_snapshot, "FILLED")
-    _sync_order_multiverse(fill_snapshot or signal or order, path_complete=False)
     logger.info(f"[ORDER] POSITION OPENED from LIMIT {order['signal_dir']} qty={order['qty']} [PIPELINE ENFORCEMENT]")
-    # C3 fix: persist the newly-opened position to disk immediately so a crash between
-    # this fill and the next save never loses an open position (was only saved on close
-    # or graceful shutdown — a non-graceful crash orphaned every open position).
-    save_positions()
     pipeline_state_sync()
 
 def _observable_exit_price() -> float:
@@ -27475,6 +27798,7 @@ def _cancel_pending_order_confirmed(
     expire_signal: bool = True,
     final_status: str = "CANCELLED",
     evidence_lifecycle_final: bool = True,
+    fill_claim_owner: bool = False,
 ) -> dict:
     """Cancel one pending entry and finalize local state only after confirmation.
 
@@ -27483,6 +27807,11 @@ def _cancel_pending_order_confirmed(
     exchange order id and the order in both pending registries with the
     non-progressing ``CANCEL_PENDING_LIVE`` status. Local paper orders need no
     exchange confirmation and finalize immediately.
+
+    Fill and cancel claims are mutually exclusive per order under trade_lock:
+    a touched order already handed to the fill thread is never expired, and a
+    cancel in flight blocks a new fill claim until it finalizes or releases.
+    Only the fill thread itself (``fill_claim_owner``) may cancel its claim.
     """
     cancel_dispatch_ts = time.time()
     result = {
@@ -27499,6 +27828,13 @@ def _cancel_pending_order_confirmed(
 
     tid = str(order.get("trade_id") or "")
     result["trade_id"] = tid
+    owns_cancel_claim = False
+
+    def release_cancel_claim():
+        if owns_cancel_claim:
+            with trade_lock:
+                order.pop("cancel_claim_in_progress", None)
+
     with trade_lock:
         oid = str(order.get("bitfinex_order_id") or "")
         result["exchange_order_id"] = oid
@@ -27515,6 +27851,15 @@ def _cancel_pending_order_confirmed(
         if current_status in ("CANCELLED", "EXPIRED", "REJECTED") and not oid:
             result["failure_reason"] = "ALREADY_FINALIZED"
             return result
+        if not fill_claim_owner and (
+            order.get("fill_handoff_in_progress")
+            or (tid and tid in (globals().get("fill_handoff_trade_ids") or ()))
+        ):
+            result["failure_reason"] = "FILL_CLAIMED"
+            return result
+        if not fill_claim_owner and not order.get("cancel_claim_in_progress"):
+            order["cancel_claim_in_progress"] = str(reason)
+            owns_cancel_claim = True
         if oid:
             # Freeze every local fill/chase path while the private cancellation
             # is in flight, but retain the deterministic exchange handle.
@@ -27543,6 +27888,7 @@ def _cancel_pending_order_confirmed(
                 f"[BITFINEX LIVE] cancel deferred because caller holds trade_lock "
                 f"trade_id={tid} oid={oid} reason={reason} [PIPELINE ENFORCEMENT]"
             )
+            release_cancel_claim()
             return result
         if not _maybe_bitfinex_cancel(order):
             with trade_lock:
@@ -27562,6 +27908,7 @@ def _cancel_pending_order_confirmed(
                 f"[BITFINEX LIVE] cancel not confirmed; retained tracked order "
                 f"trade_id={tid} oid={oid} reason={reason} [PIPELINE ENFORCEMENT]"
             )
+            release_cancel_claim()
             return result
 
     with trade_lock:
@@ -27579,6 +27926,7 @@ def _cancel_pending_order_confirmed(
                 retained=bool(current_oid),
                 failure_reason="EXCHANGE_FILL_RACE",
             )
+            release_cancel_claim()
             return result
         if oid and current_oid not in ("", oid):
             order["status"] = "CANCEL_PENDING_LIVE"
@@ -27587,6 +27935,7 @@ def _cancel_pending_order_confirmed(
                 retained=True,
                 failure_reason="ORDER_ID_CHANGED",
             )
+            release_cancel_claim()
             return result
         if order in pending_orders and not record_expired:
             lane_unregister_pending_order(order)
@@ -27623,7 +27972,11 @@ def _cancel_pending_order_confirmed(
     result["confirmed"] = True
     result["finalized"] = True
     if record_expired:
-        result["expired_row"] = _record_expired_order(order, reason)
+        try:
+            result["expired_row"] = _record_expired_order(order, reason)
+        except BaseException:
+            release_cancel_claim()
+            raise
         # The executable recorder normally removes this inside its atomic live
         # mutator.  Keep the helper contract for non-relay/test recorders, but
         # only after the recorder has returned (never before PREPARE).
@@ -27650,6 +28003,7 @@ def _cancel_pending_order_confirmed(
             )
     else:
         result["evidence_handoff"] = "UNAVAILABLE"
+    release_cancel_claim()
     return result
 
 
@@ -30502,6 +30856,12 @@ def _perform_fresh_collection_reset_locked(send_local_signal: bool = True) -> di
         return {"ok": False, "wipe_aborted": True,
                 "error": "fresh_collection_cancellation_evidence_not_quiescent",
                 "summary": "Reset aborted before archive: cancellation evidence worker did not drain"}
+    if not _shutdown_fill_evidence_worker(timeout=5.0):
+        with _cancellation_evidence_worker_lock:
+            _cancellation_evidence_reset_fence = False
+        return {"ok": False, "wipe_aborted": True,
+                "error": "fresh_collection_fill_evidence_not_quiescent",
+                "summary": "Reset aborted before archive: fill evidence worker did not drain"}
     _FRESH_RESET_LIFECYCLE_RESTART_PENDING = (
         _FRESH_RESET_LIFECYCLE_RESTART_PENDING or lifecycle_was_registered
     )
@@ -45080,6 +45440,8 @@ def shutdown_handler(signum, frame):
     logger.warning(f"[SHUTDOWN] Pending-order evidence drained={drained}")
     cancellation_drained = _shutdown_cancellation_evidence_worker(timeout=5.0)
     logger.warning(f"[SHUTDOWN] Cancellation evidence drained={cancellation_drained}")
+    fill_evidence_drained = _shutdown_fill_evidence_worker(timeout=5.0)
+    logger.warning(f"[SHUTDOWN] Fill evidence drained={fill_evidence_drained}")
     post_ai_drained = _shutdown_post_ai_evidence_workers(timeout=2.0)
     logger.warning(f"[SHUTDOWN] Post-AI evidence drained={post_ai_drained}")
     combo_drained = _shutdown_combo_lane_execution_workers(timeout=5.0)
@@ -46267,6 +46629,16 @@ def begin_approve_research(signal: dict, ai: dict, pipeline_eff_thr: float):
 def mark_approve_research_executed(trade_id: str, fill_price: float):
     if not trade_id or not fill_price or fill_price <= 0:
         return
+    fill_dynamics = _mark_fill_replay_buffer_executed(trade_id, fill_price)
+    patch_signal_snapshot_outcome(
+        trade_id, executed=True, block_reason=None, fill_price=fill_price, fill_dynamics=fill_dynamics,
+    )
+
+
+def _mark_fill_replay_buffer_executed(trade_id: str, fill_price: float):
+    """In-memory replay-buffer promotion; returns fill dynamics for evidence."""
+    if not trade_id or not fill_price or fill_price <= 0:
+        return None
     fill_dynamics = None
     fill_stamps = _fill_replay_3m_stamps()
     with replay_lock:
@@ -46299,9 +46671,7 @@ def mark_approve_research_executed(trade_id: str, fill_price: float):
                 "pre_fill_mae_margin_pct": round(pre_fill_mae, 4),
                 "achieved_pullback_pct": round(abs(fill_price - start_price) / start_price, 6) if start_price > 0 else None,
             }
-    patch_signal_snapshot_outcome(
-        trade_id, executed=True, block_reason=None, fill_price=fill_price, fill_dynamics=fill_dynamics,
-    )
+    return fill_dynamics
 
 
 def _shadow_unreal_pct(buf: dict, price: float) -> float:

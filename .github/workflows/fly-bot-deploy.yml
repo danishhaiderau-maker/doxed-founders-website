@@ -1234,6 +1234,7 @@ jobs:
           python -m pytest ../../scripts/test_fly_postdeploy_active_gate.py -q
           python -m pytest test_ai_provider_health.py test_strategy_progress_watchdog.py test_analyzer_ai_provider_outage_quarantine.py -q
           python -m pytest test_manual_pause_fill_handoff.py -q
+          python -m pytest test_fill_guard_v2_atomic_claim.py test_async_cancellation_evidence.py test_paper_action_timing_integration.py test_position_registry_concurrency.py test_collector_v22_registered_order_bridge.py -q
           python test_paper_mode_private_api_isolation.py
           python test_platform_relay_lane_isolation.py
           python -m pytest test_platform_relay_lane_isolation.py test_relay_event_outbox.py test_paper_family_chase_durability.py -q

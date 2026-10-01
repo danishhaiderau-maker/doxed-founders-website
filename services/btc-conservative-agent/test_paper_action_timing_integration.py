@@ -92,10 +92,12 @@ def test_terminal_filled_schedule_is_synchronized_before_fill_and_close_writes()
     fill_commit = fill.index("fill_commit_ts = time.time()", lost_open_return)
     schedule_close = fill.index("schedule_close(", fill_commit)
     position_sync = fill.index('pos["research_chase_schedule"] = terminal_schedule')
-    receipt = fill.index('action_type="FILL_PROMOTED"')
-    dual_fill = fill.index("dual_write_paper_fill(")
+    enqueue = fill.index("_enqueue_fill_evidence_handoff(")
     assert open_finalize < lost_open_guard < lost_open_return < fill_commit < schedule_close
-    assert schedule_close < position_sync < receipt < dual_fill
+    assert schedule_close < position_sync < enqueue
+    assert "dual_write_paper_fill(" not in fill
+    handler = _function_source("_write_fill_evidence_handoff")
+    assert handler.index('action_type="FILL_PROMOTED"') < handler.index("dual_write_paper_fill(")
     assert close.index('action_type="CLOSE_CLAIMED"') < close.index("dual_write_paper_close(")
     assert 'action_type="CLOSE_CLAIMED"' in close
 
@@ -107,8 +109,7 @@ def test_lost_open_race_returns_before_any_filled_evidence_side_effect():
     fill_commit = fill.index("fill_commit_ts = time.time()", guarded_return)
     assert guarded_return < fill_commit
     assert fill_commit < fill.index("schedule_close(", fill_commit)
-    assert guarded_return < fill.index('action_type="FILL_PROMOTED"')
-    assert guarded_return < fill.index("dual_write_paper_fill(")
+    assert guarded_return < fill.index("_enqueue_fill_evidence_handoff(")
 
 
 def test_full_fill_preserves_explicit_zero_remaining_quantity():

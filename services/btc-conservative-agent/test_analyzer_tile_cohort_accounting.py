@@ -153,3 +153,39 @@ def test_outcome_loader_excludes_relay_interference_without_editing_ledger(engin
     assert contaminated and not contaminated & set(loaded["trade_id"])
     assert any(tid.endswith("-ok") for tid in loaded["trade_id"])
     assert path.read_text(encoding="utf-8") == body
+
+
+def test_fill_ttl_contradictions_are_quarantined_as_opaque_archive_rows(engine, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    contradictions = engine.lifecycle_contradiction_trade_ids()
+    assert set(contradictions) == {"flb-6a32a8bad760", "fal-39ccb12d2316", "flb-4bc059d70908"}
+    lane = engine.CURRENT_RESEARCH_LANES[0]
+    trades = pd.concat([_trades(engine), pd.DataFrame([
+        {"trade_id": tid, "research_lane": lane, "epoch_id": CURRENT, "net_pnl_usd": 0.07}
+        for tid in contradictions
+    ])], ignore_index=True)
+    kept, quarantine = engine.split_current_tile_cohort(
+        trades, {"collector_v22_epoch_id": CURRENT}, lifecycle_contradictions=contradictions,
+    )
+    assert not set(contradictions) & set(kept["trade_id"])
+    assert quarantine["by_reason"]["FILL_TTL_LIFECYCLE_CONTRADICTION"] == 3
+    summary = quarantine["lifecycle_contradictions"]
+    assert summary["rows"] == 3 and summary["in_trade_cohort"] == 3
+    engine.write_trade_cohort_quarantine(quarantine)
+    receipt = json.loads((tmp_path / engine.TRADE_COHORT_QUARANTINE_FILE).read_text(encoding="utf-8"))
+    assert {r["trade_id"] for r in receipt["lifecycle_contradictions"]["rows_detail"]} == set(contradictions)
+    scope = engine._session_trade_scope(kept, engine.CURRENT_RESEARCH_LANES)
+    assert "rows_detail" not in scope["quarantined_trade_rows"]["lifecycle_contradictions"]
+
+
+def test_outcome_loader_excludes_fill_ttl_contradictions(engine, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    rows = _outcomes(engine) + [
+        {"trade_id": "flb-6a32a8bad760", "research_lane": engine.CURRENT_RESEARCH_LANES[0], "exit_reason": "TRAIL_STOP"},
+    ]
+    path = tmp_path / engine.TRADE_OUTCOME_FILE
+    body = "".join(json.dumps(row) + "\n" for row in rows)
+    path.write_text(body, encoding="utf-8")
+    loaded = engine._load_trade_outcomes_v2()
+    assert "flb-6a32a8bad760" not in set(loaded["trade_id"])
+    assert path.read_text(encoding="utf-8") == body

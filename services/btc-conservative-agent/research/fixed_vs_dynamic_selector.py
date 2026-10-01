@@ -115,11 +115,13 @@ def build_fixed_vs_dynamic_selector(
     *, registry: Mapping[str, Any], tile_order: Iterable[str], trades: Iterable[Mapping[str, Any]],
     epoch_id: str | None, v2_start_ts: float | None, generated_at: float | None = None,
     relay_interference_ids: Iterable[str] = (),
+    lifecycle_contradiction_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     order = [str(lane).upper() for lane in tile_order]
     current, _quarantined = classify_trade_rows(
         trades, tiles=set(order), epoch_id=epoch_id, v2_start_ts=v2_start_ts,
-        relay_interference_ids=set(relay_interference_ids or ()))
+        relay_interference_ids=set(relay_interference_ids or ()),
+        lifecycle_contradiction_ids=set(lifecycle_contradiction_ids or ()))
     closes, excluded, signatures = _strategy_closes(current)
 
     signals: dict[str, dict[str, Any]] = {}

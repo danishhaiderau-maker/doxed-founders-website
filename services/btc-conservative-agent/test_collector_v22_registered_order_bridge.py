@@ -317,8 +317,11 @@ def test_filled_terminal_schedule_is_published_only_after_open_commit_wins():
     # manual-pause branch remains free to publish its sole cancellation truth.
     commit = fill_body.index("fill_snapshot = _finalize_position_open_lifecycle(")
     guard = fill_body.index("if fill_snapshot is None:", commit)
-    terminal = fill_body.index("lifecycle_final=True", guard)
+    terminal = fill_body.index("_enqueue_fill_evidence_handoff(", guard)
     assert commit < guard < terminal
+    handler_start = BOT_SOURCE.index("def _write_fill_evidence_handoff(job: dict)")
+    handler_end = BOT_SOURCE.index("\ndef _fill_evidence_dead_letter", handler_start)
+    assert "lifecycle_final=True" in BOT_SOURCE[handler_start:handler_end]
 
 
 def test_runtime_registration_captures_constraints_before_evidence_enqueue():
