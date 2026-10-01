@@ -34,14 +34,14 @@ try {
   while ($true) {
     $iteration++
     $parityDue = ($null -eq $lastParity) -or (([datetime]::UtcNow - $lastParity).TotalMinutes -ge $ParityIntervalMin)
-    # A parity pass holds the shadow-root lock ~7 min and slows promotion, migration
-    # and the analyzer when they overlap; run it between analyzer cycles instead.
+    # A parity pass holds the shadow-root lock, which promotion and migration
+    # need; the analyzer reads only the canonical store, so parity runs then.
     # Bounded: a stale cycle marker is ignored and parity is never deferred past
     # -ParityMaxDeferMin since the last pass.
     $cycle = Read-JsonFile $cfg.CycleStatus
     $parityOverdue = ($null -eq $lastParity) -or (([datetime]::UtcNow - $lastParity).TotalMinutes -ge $ParityMaxDeferMin)
     if ($parityDue -and -not $parityOverdue -and $cycle -and $null -eq $cycle.exitCode -and
-        @('PROMOTION', 'MIGRATION', 'ANALYZER') -contains $cycle.phase) {
+        @('PROMOTION', 'MIGRATION') -contains $cycle.phase) {
       $cycleStarted = ConvertTo-UtcDate $cycle.startedAt
       if ($cycleStarted -and ([datetime]::UtcNow - $cycleStarted).TotalMinutes -lt 75) { $parityDue = $false }
     }
