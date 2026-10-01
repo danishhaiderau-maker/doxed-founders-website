@@ -150,7 +150,9 @@ if ($offline) {
     $raw = & gh run list --repo $deployRepo --workflow fly-bot-deploy.yml --limit 8 `
       --json databaseId,status,conclusion,createdAt,updatedAt,event,headSha,displayTitle 2>$null | Out-String
     if ($LASTEXITCODE -eq 0 -and $raw.Trim()) {
-      $deploys.runs = @($raw | ConvertFrom-Json)
+      # Windows PowerShell 5 emits the parsed JSON array as one object; enumerate it so
+      # ConvertTo-Json writes a flat list instead of a {"value": [...], "Count": n} wrapper.
+      $deploys.runs = [object[]]@($raw | ConvertFrom-Json | ForEach-Object { $_ })
       $deploys.ok = $true
     } else {
       $deploys.error = 'GH_RUN_LIST_FAILED'

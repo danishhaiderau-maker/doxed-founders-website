@@ -290,3 +290,12 @@ def test_manual_journal_written_with_a_bom_is_still_read(tmp_path):
 
 def test_check_without_window_is_a_noop(tmp_path):
     assert up.check(tmp_path, T0)["result"] == "NO_ACTIVE_WINDOW"
+
+
+def test_deploy_runs_accepts_powershell5_value_wrapper():
+    now = T0 + 600
+    run = _run(1, T0, T0 + 300, status="completed", conclusion="success")
+    flat, err = up._deploy_runs(_deploys(now, run), now)
+    wrapped, err2 = up._deploy_runs(_deploys(now, {"value": [run], "Count": 1}), now)
+    assert err == err2 == ""
+    assert flat == wrapped == [run]
