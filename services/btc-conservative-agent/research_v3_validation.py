@@ -260,12 +260,7 @@ def _policy_values(rows: list[dict[str, Any]], policy_id: str) -> tuple[list[flo
     return values, states, missing
 
 
-@lru_cache(maxsize=8192)
-def _episode_block_bootstrap_cached(
-    values: tuple[float, ...], samples: int, seed: int,
-) -> tuple[int, float | None, float | None, float | None]:
-    if not values:
-        return 0, None, None, None
+def _python_bootstrap_means(values: tuple[float, ...], samples: int, seed: int) -> list[float]:
     rng = random.Random(seed)
     means = []
     value_count = len(values)
@@ -280,6 +275,70 @@ def _episode_block_bootstrap_cached(
         for _index in range(value_count):
             total += float(values[rng.randrange(value_count)])
         means.append(total / value_count)
+    return means
+
+
+def _vectorized_bootstrap_means(values: tuple[float, ...], samples: int, seed: int) -> list[float] | None:
+    """Bit-identical numpy replica of ``_python_bootstrap_means``.
+
+    ``random.Random(seed)`` is an MT19937 whose ``randrange(n)`` takes one
+    32-bit output shifted right by ``32 - n.bit_length()`` and rejects values
+    >= n. numpy's MT19937 loaded with the same state emits the same 32-bit
+    stream, so the same indices are drawn; ``np.add.accumulate`` sums each
+    sample strictly left to right like the Python loop.
+    """
+    import numpy as np
+
+    value_count = len(values)
+    bits = value_count.bit_length()
+    if bits > 32:
+        return None
+    state = random.Random(seed).getstate()[1]
+    generator = np.random.MT19937()
+    generator.state = {"bit_generator": "MT19937",
+                       "state": {"key": np.asarray(state[:624], dtype=np.uint32), "pos": int(state[624])}}
+    needed = samples * value_count
+    shift = np.uint64(32 - bits)
+    accepted, have = [], 0
+    while have < needed:
+        draws = generator.random_raw(max(1024, int((needed - have) * 2.1))) >> shift
+        draws = draws[draws < value_count]
+        accepted.append(draws)
+        have += draws.size
+    indices = np.concatenate(accepted)[:needed].astype(np.intp).reshape(samples, value_count)
+    totals = np.add.accumulate(np.asarray(values, dtype=np.float64)[indices], axis=1)[:, -1]
+    return (totals / value_count).tolist()
+
+
+_VECTORIZED_BOOTSTRAP_OK: bool | None = None
+
+
+def _vectorized_bootstrap_available() -> bool:
+    """Use the numpy path only after it reproduces the Python draw exactly here."""
+    global _VECTORIZED_BOOTSTRAP_OK
+    if _VECTORIZED_BOOTSTRAP_OK is None:
+        try:
+            probe = random.Random(11)
+            cases = [(1, 50, 7), (2, 50, 7), (3, 40, 3), (64, 20, 7), (65, 20, 9), (257, 8, 7)]
+            _VECTORIZED_BOOTSTRAP_OK = all(
+                _vectorized_bootstrap_means(values, samples, seed) == _python_bootstrap_means(values, samples, seed)
+                for count, samples, seed in cases
+                for values in [tuple(round(probe.uniform(-5, 5), 6) for _ in range(count))]
+            )
+        except Exception:
+            _VECTORIZED_BOOTSTRAP_OK = False
+    return _VECTORIZED_BOOTSTRAP_OK
+
+
+@lru_cache(maxsize=8192)
+def _episode_block_bootstrap_cached(
+    values: tuple[float, ...], samples: int, seed: int,
+) -> tuple[int, float | None, float | None, float | None]:
+    if not values:
+        return 0, None, None, None
+    means = _vectorized_bootstrap_means(values, samples, seed) if _vectorized_bootstrap_available() else None
+    if means is None:
+        means = _python_bootstrap_means(values, samples, seed)
     return (
         samples,
         round(float(_percentile(means, 0.025)), 8),
