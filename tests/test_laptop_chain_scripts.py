@@ -706,6 +706,8 @@ def test_auto_ff_refuses_dirty_checkout_and_waits_for_a_busy_cycle(tmp_path, cha
 def test_supervisor_fast_forwards_before_starting_a_cycle_and_cycle_refuses_old_checkout():
     supervisor = _source("laptop-chain-supervisor.ps1")
     assert supervisor.index("v2c-auto-ff.ps1") < supervisor.index("run-segment-analyzer-cycle.ps1")
+    # The fast-forward reads the deploy-run snapshot, so it must be fresh this tick.
+    assert supervisor.index("laptop-status-snapshots.ps1") < supervisor.index("v2c-auto-ff.ps1")
     assert "v2c-auto-ff.disabled" in supervisor
     cycle = _source("run-segment-analyzer-cycle.ps1")
     check = cycle[cycle.index("ANALYZER_REVISION_MISMATCH") - 900:cycle.index("Set-CycleStatus 'ANALYZER'")]
