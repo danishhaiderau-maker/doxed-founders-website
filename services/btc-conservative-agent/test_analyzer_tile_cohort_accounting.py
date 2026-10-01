@@ -158,7 +158,7 @@ def test_outcome_loader_excludes_relay_interference_without_editing_ledger(engin
 def test_fill_ttl_contradictions_are_quarantined_as_opaque_archive_rows(engine, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     contradictions = engine.lifecycle_contradiction_trade_ids()
-    assert set(contradictions) == {"flb-6a32a8bad760", "fal-39ccb12d2316", "flb-4bc059d70908"}
+    assert set(contradictions) == {"flb-6a32a8bad760", "fal-39ccb12d2316", "flb-4bc059d70908", "flb-8b9ada769c63"}
     lane = engine.CURRENT_RESEARCH_LANES[0]
     trades = pd.concat([_trades(engine), pd.DataFrame([
         {"trade_id": tid, "research_lane": lane, "epoch_id": CURRENT, "net_pnl_usd": 0.07}
@@ -168,9 +168,9 @@ def test_fill_ttl_contradictions_are_quarantined_as_opaque_archive_rows(engine, 
         trades, {"collector_v22_epoch_id": CURRENT}, lifecycle_contradictions=contradictions,
     )
     assert not set(contradictions) & set(kept["trade_id"])
-    assert quarantine["by_reason"]["FILL_TTL_LIFECYCLE_CONTRADICTION"] == 3
+    assert quarantine["by_reason"]["FILL_TTL_LIFECYCLE_CONTRADICTION"] == 4
     summary = quarantine["lifecycle_contradictions"]
-    assert summary["rows"] == 3 and summary["in_trade_cohort"] == 3
+    assert summary["rows"] == 4 and summary["in_trade_cohort"] == 4
     engine.write_trade_cohort_quarantine(quarantine)
     receipt = json.loads((tmp_path / engine.TRADE_COHORT_QUARANTINE_FILE).read_text(encoding="utf-8"))
     assert {r["trade_id"] for r in receipt["lifecycle_contradictions"]["rows_detail"]} == set(contradictions)
