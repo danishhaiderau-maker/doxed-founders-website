@@ -9,6 +9,11 @@ import {
 } from '@dcf/utils';
 import { CredentialsCryptoService } from '../credentials/credentials-crypto.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  PLATFORM_SETTINGS_ID,
+  cachedPlatformSettings,
+  invalidatePlatformSettingsCache,
+} from '../prisma/platform-settings-cache';
 import { ExchangeAdapterRegistry } from '../exchanges/exchange-adapter.registry';
 import type { ExchangeCredentials } from '../exchanges/exchange-adapter.interface';
 import {
@@ -33,7 +38,27 @@ export class ShowcaseRuntimeService {
   ) {}
 
   async getCredentialsStatus() {
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await cachedPlatformSettings('showcaseCredentialsStatus', async () => {
+      const settings = await this.prisma.platformSettings.findUnique({
+        where: { id: PLATFORM_SETTINGS_ID },
+        select: {
+          showcaseAiProvider: true,
+          showcaseExchangeCredentialEnc: true,
+          showcaseAiCredentialEnc: true,
+          showcaseCredentialsUpdatedAt: true,
+          showcaseRuntimePushedAt: true,
+        },
+      });
+      return settings
+        ? {
+            showcaseAiProvider: settings.showcaseAiProvider,
+            showcaseExchangeCredentialEnc: Boolean(settings.showcaseExchangeCredentialEnc),
+            showcaseAiCredentialEnc: Boolean(settings.showcaseAiCredentialEnc),
+            showcaseCredentialsUpdatedAt: settings.showcaseCredentialsUpdatedAt,
+            showcaseRuntimePushedAt: settings.showcaseRuntimePushedAt,
+          }
+        : null;
+    });
     const exchangeProvider = 'bitfinex' as ExchangeProvider;
     const aiProvider = (row?.showcaseAiProvider ?? 'deepseek') as TradingAgentAiProvider;
 
@@ -84,7 +109,14 @@ export class ShowcaseRuntimeService {
       );
     }
 
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: {
+        showcaseAiProvider: true,
+        showcaseExchangeCredentialEnc: true,
+        showcaseAiCredentialEnc: true,
+      },
+    });
     const exchangeProvider = 'bitfinex' as ExchangeProvider;
     const aiProvider = (input.aiProvider ??
       row?.showcaseAiProvider ??
@@ -133,7 +165,8 @@ export class ShowcaseRuntimeService {
     }
 
     await this.prisma.platformSettings.upsert({
-      where: { id: 'default' },
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: { id: true },
       create: {
         id: 'default',
         showcaseExchangeProvider: exchangeProvider,
@@ -154,6 +187,7 @@ export class ShowcaseRuntimeService {
         updatedByUserId: userId,
       },
     });
+    invalidatePlatformSettingsCache();
 
     return this.getCredentialsStatus();
   }
@@ -163,7 +197,8 @@ export class ShowcaseRuntimeService {
     if (target === 'exchange' || target === 'all') data.showcaseExchangeCredentialEnc = null;
     if (target === 'ai' || target === 'all') data.showcaseAiCredentialEnc = null;
     await this.prisma.platformSettings.update({
-      where: { id: 'default' },
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: { id: true },
       data: {
         ...data,
         showcaseBotPublicUrl: CANONICAL_SHOWCASE_BOT_URL,
@@ -171,6 +206,7 @@ export class ShowcaseRuntimeService {
         showcaseCredentialsUpdatedAt: new Date(),
       },
     });
+    invalidatePlatformSettingsCache();
     return this.getCredentialsStatus();
   }
 

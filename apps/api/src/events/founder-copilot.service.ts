@@ -2774,7 +2774,10 @@ export class FounderCopilotService {
         take: 5,
         select: { title: true, payload: true },
       }),
-      this.prisma.platformSettings.findUnique({ where: { id: 'default' } }),
+      this.prisma.platformSettings.findUnique({
+        where: { id: 'default' },
+        select: { globalShareFooter: true },
+      }),
       this.prisma.founderUpdate.findMany({
         where: { founderId: founder.id },
         orderBy: { publishedAt: 'desc' },

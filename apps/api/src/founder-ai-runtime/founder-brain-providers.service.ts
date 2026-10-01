@@ -56,7 +56,10 @@ export class FounderBrainProvidersService implements OnModuleInit {
   }
 
   async getAdminView(): Promise<FounderBrainProvidersAdminView> {
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: { founderBrainProvidersJson: true, updatedAt: true },
+    });
     const config = this.mergeConfig(row?.founderBrainProvidersJson);
     this.cachedConfig = config;
     const [deepseekStatus, glmStatus] = await Promise.all([
@@ -106,6 +109,7 @@ export class FounderBrainProvidersService implements OnModuleInit {
 
     await this.prisma.platformSettings.upsert({
       where: { id: 'default' },
+      select: { id: true },
       create: {
         id: 'default',
         founderBrainProvidersJson: next,

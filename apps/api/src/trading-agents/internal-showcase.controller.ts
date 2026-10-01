@@ -1,4 +1,5 @@
-import { Body, Controller, Headers, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post, Query } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { Public } from '../auth/public.decorator';
 import {
   ShowcaseInferenceUsageService,
@@ -21,6 +22,22 @@ export class InternalShowcaseController {
   ) {
     this.snapshots.assertAuthorized(secret);
     return this.snapshots.ingest(body);
+  }
+
+  /**
+   * Relay-executor worker reads the latest pushed snapshot from this process
+   * over Railway private networking instead of from Postgres.
+   */
+  @Public()
+  @SkipThrottle()
+  @Get('showcase-snapshot/latest')
+  latestSnapshot(
+    @Headers('x-bot-control-secret') secret: string | undefined,
+    @Query('since_seq') sinceSeq: string | undefined,
+  ) {
+    this.snapshots.assertAuthorized(secret);
+    const parsed = sinceSeq != null && /^\d+$/.test(sinceSeq) ? Number(sinceSeq) : null;
+    return this.snapshots.getLatestForPeer(parsed);
   }
 
   /**

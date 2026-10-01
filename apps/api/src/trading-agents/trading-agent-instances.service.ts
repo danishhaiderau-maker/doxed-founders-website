@@ -133,7 +133,10 @@ export class TradingAgentInstancesService {
       hireFeeDdollarPaid: needsHireFee ? cost : 0,
     });
 
-    const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const showcase = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: { showcaseAiProvider: true },
+    });
     /** Live tier mirrors admin DeepSeek decisions — users only connect exchange keys. */
     const aiProvider = (showcase?.showcaseAiProvider ?? 'deepseek') as string;
 
@@ -583,7 +586,10 @@ export class TradingAgentInstancesService {
     const ddCost = Math.min(500, Math.max(100, amountUsd));
     await this.points.spend(userId, ddCost, `AGENT_PAPER_TRACK:${agent.slug}`);
 
-    const showcase = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const showcase = await this.prisma.platformSettings.findUnique({
+      where: { id: 'default' },
+      select: { showcaseAiProvider: true },
+    });
     const aiProvider = showcase?.showcaseAiProvider ?? 'deepseek';
     const sessionState = buildFreshInstanceDashboardState('copy', amountUsd, {
       paperDdSpent: ddCost,

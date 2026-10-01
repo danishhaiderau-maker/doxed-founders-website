@@ -7,6 +7,11 @@ import {
   type TradingAgentAiProvider,
 } from '@dcf/utils';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  PLATFORM_SETTINGS_ID,
+  cachedPlatformSettings,
+  invalidatePlatformSettingsCache,
+} from '../prisma/platform-settings-cache';
 import { BotBridgeService } from '../trading-agents/bot-bridge.service';
 import { TradingAgentsService } from '../trading-agents/trading-agents.service';
 import { PLATFORM_X_SHARE_FOOTER } from '@dcf/utils';
@@ -23,17 +28,22 @@ export class AdminControlService {
   ) {}
 
   async getShareFooter(): Promise<string> {
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: { globalShareFooter: true },
+    });
     return row?.globalShareFooter?.trim() || PLATFORM_X_SHARE_FOOTER;
   }
 
   async updateShareFooter(userId: string, footer: string) {
     const globalShareFooter = footer.trim() || null;
     await this.prisma.platformSettings.upsert({
-      where: { id: 'default' },
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: { id: true },
       create: { id: 'default', globalShareFooter, updatedByUserId: userId },
       update: { globalShareFooter, updatedByUserId: userId },
     });
+    invalidatePlatformSettingsCache();
     return { globalShareFooter: globalShareFooter ?? PLATFORM_X_SHARE_FOOTER };
   }
 
@@ -85,7 +95,16 @@ export class AdminControlService {
     const [bridge, agent, settings, credentials] = await Promise.all([
       this.tradingAgents.getBotBridgeStatusAdmin(),
       this.prisma.tradingAgent.findUnique({ where: { slug: 'conservative-btc' } }),
-      this.prisma.platformSettings.findUnique({ where: { id: 'default' } }),
+      cachedPlatformSettings('agentControlOverviewSettings', () =>
+        this.prisma.platformSettings.findUnique({
+          where: { id: PLATFORM_SETTINGS_ID },
+          select: {
+            showcaseAiProvider: true,
+            agentShowcaseDefaultSettings: true,
+            subscriberMaxMarginUsd: true,
+          },
+        }),
+      ),
       this.showcaseRuntime.getCredentialsStatus(),
     ]);
     const botState = bridge.botState ?? null;
@@ -354,7 +373,8 @@ export class AdminControlService {
       );
     }
     await this.prisma.platformSettings.upsert({
-      where: { id: 'default' },
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: { id: true },
       create: {
         id: 'default',
         showcaseExchangeProvider: input.exchangeProvider ?? 'bitfinex',
@@ -378,11 +398,15 @@ export class AdminControlService {
         updatedByUserId: userId,
       },
     });
+    invalidatePlatformSettingsCache();
     return this.getAgentControlOverview();
   }
 
   async getAgentDefaultSettings(): Promise<string | null> {
-    const row = await this.prisma.platformSettings.findUnique({ where: { id: 'default' } });
+    const row = await this.prisma.platformSettings.findUnique({
+      where: { id: PLATFORM_SETTINGS_ID },
+      select: { agentShowcaseDefaultSettings: true },
+    });
     return row?.agentShowcaseDefaultSettings?.trim() || null;
   }
 }

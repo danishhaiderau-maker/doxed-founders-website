@@ -1,5 +1,9 @@
 import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  PLATFORM_SETTINGS_ID,
+  cachedPlatformSettings,
+} from '../prisma/platform-settings-cache';
 
 /**
  * Env override (emergency debug only). When `RATE_LIMIT_FAIL_OPEN=true` the
@@ -56,7 +60,12 @@ export class RateLimiterService {
     userId: string,
     endpoint: string,
   ): Promise<{ allowed: boolean; remaining: number; resetInMs: number; reason?: string }> {
-    const settings = await this.prisma.platformSettings.findFirst();
+    const settings = await cachedPlatformSettings('rateLimits', () =>
+      this.prisma.platformSettings.findUnique({
+        where: { id: PLATFORM_SETTINGS_ID },
+        select: { rateLimitDaily: true, rateLimitHourly: true },
+      }),
+    );
     const dailyLimit = settings?.rateLimitDaily ?? 50;
     const hourlyLimit = settings?.rateLimitHourly ?? 10;
 
