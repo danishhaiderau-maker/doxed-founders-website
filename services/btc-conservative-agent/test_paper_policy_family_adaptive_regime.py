@@ -206,12 +206,15 @@ def test_entry_fields_follow_only_an_executable_decision():
 
 
 @pytest.mark.parametrize("candles,intent,ttl", [(CALM, "MAKER", 60), (NORMAL, "TAKER", 15)])
-def test_bot_entry_builder_places_the_spawn_time_decision(candles, intent, ttl):
+def test_bot_entry_builder_places_the_spawn_time_decision(candles, intent, ttl, monkeypatch):
     import bot
 
     decision = _decide(candles, "LONG")
     signal = {"final_direction": "LONG", "signal_price": 64995.0,
               "research_lane": policy.LANE, "atr14_3m": 100.0}
+    monkeypatch.setitem(bot.state, "feature_snapshot", {"atr14_3m": 100.0, "frozen_global": True})
+    bot.atomic_freeze_signal(signal, 0.0, 0.0)
+    assert signal["features"] and "adaptive_entry_decision" not in signal["features"]
     bot.compute_family_tile_entry(signal, features={"adaptive_entry_decision": decision})
     assert signal["structural_entry_valid"] is True
     assert signal["adaptive_liquidity_intent"] == intent
@@ -220,7 +223,8 @@ def test_bot_entry_builder_places_the_spawn_time_decision(candles, intent, ttl):
         pytest.approx(decision["limit_price"]), bot.ENTRY_MODE_AI_DIRECT,
     )
 
-    bare = {"final_direction": "LONG", "signal_price": 64995.0, "research_lane": policy.LANE}
+    bare = {"final_direction": "LONG", "signal_price": 64995.0, "research_lane": policy.LANE,
+            "features": {"adaptive_entry_decision": decision}}
     bot.compute_family_tile_entry(bare)
     assert bare["structural_entry_valid"] is False
     assert bare["entry_reason"] == "ADAPTIVE_NO_ORDER_DECISION_MISSING"
