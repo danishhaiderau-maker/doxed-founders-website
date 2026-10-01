@@ -15,6 +15,7 @@ import csv
 import zipfile
 import io
 import json
+import system_health_banner
 import uuid
 import requests
 import glob
@@ -28933,6 +28934,7 @@ _AI_DRAIN_POST_PATHS = {
 _READ_ONLY_GET_PATHS = {
     "/", "/health", "/status", "/api/ping", "/api/status", "/api/state",
     "/api/build", "/api/relay-state", "/api/relay-execution-state", "/api/analyzer/summary",
+    "/api/system-health",
     "/api/analyzer/genome", "/api/download_debug_config",
     "/debug_state", "/static/dashboard.js",
 }
@@ -40247,6 +40249,98 @@ def _book_refresh_telemetry_snapshot(now: float = None) -> dict:
             ),
             "stale_claims": int(state.get("book_refresh_stale_claims") or 0),
         }
+
+
+_SYSTEM_HEALTH_REPORT = {"report": None, "received_at": None}
+_SYSTEM_HEALTH_LOCK = threading.Lock()
+
+
+def _system_health_fly_self_checks(now: float | None = None) -> list:
+    """Cheap Fly-side facts that stay truthful even when the laptop report is stale."""
+    now = float(now or time.time())
+    with state_lock:
+        ws_ts = float(state.get("ws_last_tick") or 0)
+        paused = bool(state.get("execution_paused", False))
+        live_armed = bool(state.get("live_armed", False))
+    ws_age = max(0.0, now - ws_ts) if ws_ts else None
+    checks = [
+        {
+            "id": "fly.ws_ticks",
+            "status": "GREEN" if ws_age is not None and ws_age <= 120 else "RED",
+            "observed": "never" if ws_age is None else f"{int(ws_age)}s",
+            "threshold": "<=120s",
+        },
+        {
+            "id": "fly.paused",
+            "status": "AMBER" if paused else "GREEN",
+            "observed": "paused" if paused else "running",
+            "threshold": "running",
+        },
+        {
+            "id": "fly.live_armed",
+            "status": "RED" if live_armed else "GREEN",
+            "observed": "armed" if live_armed else "disarmed",
+            "threshold": "disarmed",
+        },
+    ]
+    provider = globals().get("_ai_provider_health")
+    if isinstance(provider, dict):
+        last_ok = provider.get("last_success_ts")
+        failures = int(provider.get("consecutive_failures") or 0)
+        age = max(0.0, now - float(last_ok)) if isinstance(last_ok, (int, float)) and last_ok else None
+        checks.append({
+            "id": "fly.ai_success",
+            "status": "RED" if age is None or age > 720 or failures >= 3
+            else ("AMBER" if age > 360 else "GREEN"),
+            "observed": ("no success" if age is None else f"last success {int(age // 60)}m ago")
+            + f", {failures} consecutive failures",
+            "threshold": "<12m, <3 failures",
+        })
+    return checks
+
+
+@app.route('/api/system-health/report', methods=['POST'])
+def system_health_report():
+    if (request.content_length or 0) > system_health_banner.MAX_REPORT_BYTES:
+        return jsonify({"ok": False, "error": "report too large"}), 413
+    report = system_health_banner.sanitize_report(request.get_json(silent=True))
+    if report is None:
+        return jsonify({"ok": False, "error": "invalid system_health_v1 report"}), 400
+    with _SYSTEM_HEALTH_LOCK:
+        _SYSTEM_HEALTH_REPORT["report"] = report
+        _SYSTEM_HEALTH_REPORT["received_at"] = system_health_banner.utc_now_iso()
+    return jsonify({"ok": True, "verdict": report["verdict"]})
+
+
+@app.route('/api/system-health')
+def system_health_view():
+    with _SYSTEM_HEALTH_LOCK:
+        report = _SYSTEM_HEALTH_REPORT["report"]
+        received_at = _SYSTEM_HEALTH_REPORT["received_at"]
+    out = system_health_banner.with_staleness(report)
+    out["received_at"] = received_at
+    self_checks = _system_health_fly_self_checks()
+    out["fly_self_checks"] = self_checks
+    bad = [c for c in self_checks if c["status"] != "GREEN"]
+    if bad:
+        out["failing"] = list(out.get("failing") or []) + bad
+        rank = {"GREEN": 0, "SKIP": 0, "AMBER": 1, "RED": 2}
+        worst = max(bad, key=lambda c: rank[c["status"]])["status"]
+        if rank[worst] > rank.get(out.get("verdict"), 0):
+            out["verdict"] = worst
+    if not _admin_authed_strict():
+        out["failing"] = [
+            {k: c.get(k) for k in ("id", "status", "observed", "threshold")}
+            for c in out.get("failing") or []
+        ]
+    response = jsonify(out)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.after_request
+def _inject_system_health_banner(response):
+    return system_health_banner.inject_banner(response)
 
 
 @app.route('/api/status')

@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 MELBOURNE_TZ = ZoneInfo("Australia/Melbourne")
 from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
 from runtime_incident_history import build_runtime_incident_history
+import system_health_banner as _system_health_banner
 import shutil
 from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
@@ -396,7 +397,7 @@ def _read_api_cache_key() -> str:
 def _serve_cached_read_api():
     if request.method != "GET" or not request.path.startswith("/api/"):
         return None
-    if request.path in ("/api/health", "/api/status", "/api/integrity"):
+    if request.path in ("/api/health", "/api/status", "/api/integrity", "/api/system-health"):
         return None
     key = _read_api_cache_key()
     now = time.monotonic()
@@ -424,7 +425,7 @@ def _cache_read_api_response(response):
     if (
         request.method == "GET"
         and request.path.startswith("/api/")
-        and request.path not in ("/api/health", "/api/status", "/api/integrity")
+        and request.path not in ("/api/health", "/api/status", "/api/integrity", "/api/system-health")
         and response.status_code == 200
         and response.mimetype == "application/json"
     ):
@@ -438,6 +439,20 @@ def _cache_read_api_response(response):
                     body,
                 )
         response.headers["X-Research-Cache"] = "MISS"
+    return response
+
+
+@app.after_request
+def _inject_system_health_banner(response):
+    return _system_health_banner.inject_banner(response)
+
+
+@app.route("/api/system-health")
+def api_system_health():
+    state_dir = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain")
+    report = _system_health_banner.read_report_file(state_dir / "health" / "system-health-latest.json")
+    response = jsonify(_system_health_banner.with_staleness(report))
+    response.headers["Cache-Control"] = "no-store"
     return response
 _DASHBOARD_STARTED_AT = datetime.now(timezone.utc)
 
