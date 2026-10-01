@@ -28,6 +28,7 @@ UNSTAMPED_COHORT = "UNSTAMPED"
 # rows were first stamped with bot_version in v2, so unstamped rows are v1.
 SUPERSEDED_COHORTS = {
     "v31-dynamic-adaptive-paper-v1": "ADAPTIVE_DECISION_PLUMBING_DEFECT",
+    "v31-dynamic-adaptive-paper-v2": "ADAPTIVE_DECISION_PLUMBING_DEFECT",
     UNSTAMPED_COHORT: "ADAPTIVE_DECISION_PLUMBING_DEFECT",
 }
 

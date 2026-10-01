@@ -484,8 +484,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert score_child.stdout.splitlines() == [
-        "v31-dynamic-adaptive-paper-v2",
-        "b6ca920378391f8d5f5a4fbbc3478dfdbf0243a60eb07e09036485185543d9a6",
+        "v31-dynamic-adaptive-paper-v3",
+        "b6f07a2f4e292ecb52b582735a5585c2a37dea00c70a5d495d6d4f1f1ad8850a",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -499,8 +499,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert hypothesis_child.stdout.splitlines() == [
-        "v31-dynamic-adaptive-paper-v2",
-        "a26e7e15f4066108e9abcdb7d10f682b76fee910fc3d3c885a12a0c08ae196d3",
+        "v31-dynamic-adaptive-paper-v3",
+        "d297d08a3e102d14786f88e9ea143f8a4d7f409b24f72bda40f1e0eb6b993fbc",
     ]
 
 

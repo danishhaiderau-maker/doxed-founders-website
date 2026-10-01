@@ -7,7 +7,8 @@ import pytest
 
 import adaptive_entry_funnel as funnel
 
-V2 = "v31-dynamic-adaptive-paper-v2"
+V2 = "v31-dynamic-adaptive-paper-v3"
+V2_DEFECT = "v31-dynamic-adaptive-paper-v2"
 LANE = "FAMILY_ADAPTIVE_REGIME"
 
 
@@ -33,6 +34,7 @@ def test_every_decision_is_scored_against_the_taker_counterfactual():
             _decision("c4", "STAND_ASIDE", "AI_NO_TRADE"),
             _decision("c5", "MAKER", "CALM_MAKER", version=None),
             _decision("c6", "MAKER", "CALM_MAKER", version="v31-dynamic-adaptive-paper-v1"),
+            _decision("c7", "TAKER", "NORMAL_TAKER", "NORMAL", version=V2_DEFECT),
         ],
         taker_counterfactuals=[_cf("c1", 2.0, 4.0), _cf("c2", -1.0, -3.0), _cf("c3", 1.0, 1.0),
                                _cf("c4", -5.0, -2.0), _cf("c4", 99.0, 99.0, latency=0.25)],
@@ -52,6 +54,7 @@ def test_every_decision_is_scored_against_the_taker_counterfactual():
     assert groups[("MAKER", "FILLED_CLOSED")]["realized_net_pnl_usd"] == pytest.approx(0.012)
     quarantined = report["quarantined_cohorts"]
     assert quarantined["v31-dynamic-adaptive-paper-v1"]["reason"] == "ADAPTIVE_DECISION_PLUMBING_DEFECT"
+    assert quarantined[V2_DEFECT]["reason"] == "ADAPTIVE_DECISION_PLUMBING_DEFECT"
     assert quarantined[funnel.UNSTAMPED_COHORT]["decisions"] == 1
     assert quarantined[funnel.UNSTAMPED_COHORT]["reason"] == "ADAPTIVE_DECISION_PLUMBING_DEFECT"
 
