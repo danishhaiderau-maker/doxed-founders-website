@@ -112,6 +112,8 @@ from combo_pathway_config import (
     is_immediate_entry_lane,
     is_independent_ai_lane,
     is_shared_ai_direction_lane,
+    is_cross_venue_clock_lane,
+    cross_venue_clock_lanes,
     is_research_candidate_lane,
     is_shadow_only_lane,
     is_static_bracket_lane,
@@ -18719,6 +18721,7 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
                 and not is_patient_chase_lane(lane)
             )
             or is_deterministic_bracket_lane(lane)
+            or is_cross_venue_clock_lane(lane)
         ):
             continue
         tile_ai, tile_direction, tile_spread, tile_admission_reason = _tile_view_of_shared_call(
@@ -24258,8 +24261,11 @@ def process_signal(event: dict):
                         _set_lane_pipeline_stage(research_lane, "IDLE")
                         state["last_pipeline_stage"] = "IDLE"
                         return
-                log_ai_tranche_outcome(ai, event="AI_SPAWN")
-                _append_ai_history_row(ai)
+                # AI History holds one row per real AI call; cross-venue
+                # triggers are not AI calls.
+                if not is_cross_venue_clock_lane(research_lane):
+                    log_ai_tranche_outcome(ai, event="AI_SPAWN")
+                    _append_ai_history_row(ai)
             else:
                 ai_rem = ai_cooldown_remaining_sec(research_lane)
                 ai_cd = get_effective_ai_cooldown_sec(research_lane)
@@ -28399,6 +28405,300 @@ def cross_venue_health_snapshot() -> dict:
         return {"schema": _cvt.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
 
 
+import cross_venue_lead as _xvl
+
+# Per-second cross-venue lead evaluator for registry tiles on the
+# CROSS_VENUE_SIGNAL_CLOCK. Shadow trigger/outcome rows are written on every
+# qualifying second whatever the tile toggle; a paper attempt needs the tile ON,
+# a free one-slot worker and the registry rate caps. It runs ~0.6 s after each
+# second (after the 1 s tape and the collector close that second), never
+# catches up missed seconds, and does O(lookback) work per tick, so it cannot
+# starve the fill thread, the AI cadence or the segment shipper.
+XVL_EVALUATOR_ENABLED = os.getenv("XVL_EVALUATOR_ENABLED", "1").strip() == "1"
+XVL_SHADOW_FILE = _xvl.SHADOW_FILE
+XVL_HEALTH_SCHEMA = "xvl_evaluator_health_v1"
+XVL_TICK_OFFSET_SEC = 0.6
+XVL_TAPE_TAIL_SEC = 120
+XVL_MAX_TRIGGER_LATENCY_SEC = 1.5
+XVL_STALE_AFTER_SEC = 10.0
+_XVL_LOCK = threading.Lock()
+_XVL_EVALUATORS = {}
+_xvl_status = {
+    "started_ts": 0.0, "last_tick_ts": 0.0, "ticks": 0, "tick_errors": 0,
+    "last_error": None, "max_tick_ms": 0.0, "last_tick_ms": 0.0,
+    "rows_written": 0, "write_failures": 0, "thread_niced": False,
+}
+_xvl_lane_runtime = {}
+
+
+def _xvl_lane_state(lane: str) -> dict:
+    return _xvl_lane_runtime.setdefault(lane, {
+        "busy": False, "last_attempt_ts": 0.0, "submissions": deque(maxlen=512),
+        "attempts": 0, "orders_eligible": 0, "skips": {}, "last_attempt": None,
+    })
+
+
+def _xvl_count_skip(lane: str, reason: str) -> None:
+    with _XVL_LOCK:
+        skips = _xvl_lane_state(lane)["skips"]
+        skips[reason] = int(skips.get(reason, 0)) + 1
+
+
+def _xvl_lower_thread_priority() -> None:
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 5)
+        _xvl_status["thread_niced"] = True
+    except (AttributeError, OSError, PermissionError):
+        _xvl_status["thread_niced"] = False
+
+
+def _xvl_append(row: dict) -> None:
+    ok = _safe_append_jsonl(XVL_SHADOW_FILE, row, label="XVL_SHADOW", fallback_on_error=False)
+    with _XVL_LOCK:
+        _xvl_status["rows_written" if ok else "write_failures"] += 1
+
+
+def _xvl_maybe_attempt_paper(lane: str, evaluation: dict, trigger: dict, now: float) -> None:
+    """Cheap, lock-guarded gate on the evaluator thread; the attempt runs elsewhere."""
+    if evaluation.get("status") != _xvl.STATUS_TRIGGER:
+        return
+    if not is_research_lane_enabled(lane):
+        return
+    entry = (COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}
+    min_gap = float(entry.get("min_submit_interval_sec") or 5)
+    hourly_cap = int(entry.get("max_submissions_per_hour") or 60)
+    with _XVL_LOCK:
+        lane_state = _xvl_lane_state(lane)
+        if lane_state["busy"]:
+            reason = "WORKER_BUSY"
+        elif now - lane_state["last_attempt_ts"] < min_gap:
+            reason = "MIN_SUBMIT_INTERVAL"
+        elif sum(1 for ts in lane_state["submissions"] if now - ts < 3600) >= hourly_cap:
+            reason = "HOURLY_SUBMISSION_CAP"
+        else:
+            reason = None
+            lane_state["busy"] = True
+            lane_state["last_attempt_ts"] = now
+            lane_state["attempts"] += 1
+    if reason:
+        _xvl_count_skip(lane, reason)
+        return
+    threading.Thread(
+        target=_xvl_paper_attempt, args=(lane, dict(trigger)),
+        daemon=True, name=f"xvl-paper-{lane.lower()}",
+    ).start()
+
+
+def _xvl_paper_attempt(lane: str, trigger: dict) -> None:
+    outcome = "UNKNOWN"
+    try:
+        outcome = _xvl_paper_attempt_inner(lane, trigger)
+    except Exception as exc:
+        outcome = f"ERROR:{type(exc).__name__}"
+        logger.error(f"[XVL] paper attempt failed lane={lane} error={exc} [PIPELINE ENFORCEMENT]")
+    finally:
+        with _XVL_LOCK:
+            lane_state = _xvl_lane_state(lane)
+            lane_state["busy"] = False
+            lane_state["last_attempt"] = {
+                "trigger_id": trigger.get("trigger_id"), "side": trigger.get("side"),
+                "lead_bp": trigger.get("lead_bp"), "outcome": outcome, "ts": time.time(),
+            }
+            if outcome == "ORDER_ELIGIBLE":
+                lane_state["orders_eligible"] += 1
+        if outcome != "ORDER_ELIGIBLE":
+            _xvl_count_skip(lane, outcome.split(":", 1)[0] if outcome.startswith("ERROR") else outcome)
+
+
+def _xvl_paper_attempt_inner(lane: str, trigger: dict) -> str:
+    if time.time() - float(trigger.get("evaluated_ts") or 0) > XVL_MAX_TRIGGER_LATENCY_SEC:
+        return "TRIGGER_STALE"
+    if not is_research_data_collection() or not is_research_lane_enabled(lane):
+        return "TILE_OFF"
+    if invert_signal_active():
+        return "INVERT_SIGNAL_ACTIVE"
+    if not ensure_lane_signal_capacity(lane):
+        return "TILE_POSITION_OPEN"
+    side = str(trigger.get("side") or "").upper()
+    call_id = str(trigger["trigger_id"])
+    call_ts = datetime.fromtimestamp(float(trigger["evaluated_ts"]), timezone.utc).isoformat()
+    policy = _patient_chase_policy(lane)
+    with state_lock:
+        bid = _buf_float(state.get("bid"), 0.0)
+        ask = _buf_float(state.get("ask"), 0.0)
+        bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
+        last = _buf_float(state.get("price"), 0.0)
+    reference = last or ((bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0)
+    signal_features = {
+        "xvl_trigger": {
+            key: copy.deepcopy(trigger.get(key)) for key in (
+                "trigger_id", "anchor_bucket_ts", "evaluated_ts", "side", "lead_bp",
+                "venue_ret_bp", "bfx_ret_bp", "venue_bbo_age_s", "collector_age_s",
+                "bfx_bbo_age_s", "bfx_bid", "bfx_ask", "spread_bps", "episode_id",
+                "episode_first", "rule",
+            )
+        },
+        "signal_clock": _xvl.SIGNAL_CLOCK,
+    }
+    decision = policy.decide_entry(
+        direction=side, signal_ts=time.time(), bid=bid, ask=ask, bbo_ts=bbo_ts,
+        reference_price=reference,
+        ai_feature={"xvl_trigger_id": call_id, "lead_bp": trigger.get("lead_bp")},
+    )
+    decision["shared_ai_call_id"] = call_id
+    decision["xvl_trigger_id"] = call_id
+    _record_adaptive_entry_decision(lane, decision)
+    accepted = decision.get("action") != "STAND_ASIDE"
+    ai = {
+        "decision": "APPROVE", "approved": True, "execution_tier": "APPROVE",
+        "research_soft": "APPROVE", "direction": side, "candidate_direction": side,
+        "raw_direction": side, "raw_decision": "XVL_TRIGGER",
+        "direction_source": _xvl_direction_source(lane),
+        "shared_ai_call_id": call_id, "shared_ai_call_ts": call_ts, "trade_id": call_id,
+        "effective_research_direction": side,
+        "effective_research_admission_policy_id": (COMBO_LANE_SPECS.get(lane) or {}).get("admission_treatment"),
+        "effective_research_admission": {"applied": True, "accepted": True, "reason": "XVL_TRIGGER",
+                                         "effective_direction": side},
+    }
+    ctx = {
+        "trade_id": call_id, "shared_ai_call_id": call_id, "shared_ai_call_ts": call_ts,
+        "price": reference, "symbol": SYMBOL,
+    }
+    disposition = "ORDER_ELIGIBLE" if accepted else "POLICY_FILTERED_NO_ORDER"
+    reason = "XVL_TRIGGER_AND_POLICY_PASS" if accepted else f"ADAPTIVE_{decision.get('reason')}"
+    evidence_ready = _write_v3_shared_lane_decision(
+        lane, ai, ctx, signal_features,
+        policy_decision="ACCEPT" if accepted else "REJECT",
+        execution_disposition=disposition, exact_reason=reason,
+    )
+    if not accepted:
+        return reason
+    if not evidence_ready:
+        logger.error(f"[{lane}] order blocked: immutable pre-entry evidence unavailable [PIPELINE ENFORCEMENT]")
+        return "PRE_ENTRY_EVIDENCE_UNAVAILABLE"
+    with _XVL_LOCK:
+        _xvl_lane_state(lane)["submissions"].append(time.time())
+    _spawn_combo_lane(
+        ctx, ai, 0.0, {**signal_features, "adaptive_entry_decision": decision}, lane,
+        f"XVL_TRIGGER_{COMBO_LANE_SPECS[lane]['combo_key']}",
+    )
+    return "ORDER_ELIGIBLE"
+
+
+def _xvl_direction_source(lane: str) -> str:
+    return str(((COMBO_LANE_SPECS.get(lane) or {}).get("entry_policy") or {}).get("direction_source") or "")
+
+
+def _xvl_tick(now: float) -> None:
+    live = _cross_venue_live(max_age_sec=0.5)
+    quotes = _AI_SHADOW_TAPE.tail(XVL_TAPE_TAIL_SEC)
+    with state_lock:
+        bbo_ts = _buf_float(state.get("bbo_ts"), 0.0) or None
+    for lane, evaluator in list(_XVL_EVALUATORS.items()):
+        evaluation, trigger, outcomes = evaluator.step(
+            now=now, live=live, bfx_quotes=quotes, bfx_bbo_ts=bbo_ts,
+        )
+        for row in ([trigger] if trigger else []) + list(outcomes):
+            row["research_lane"] = lane
+            _xvl_append(row)
+        if trigger:
+            _xvl_maybe_attempt_paper(lane, evaluation, trigger, now)
+
+
+def xvl_evaluator_loop():
+    lanes = cross_venue_clock_lanes()
+    if not XVL_EVALUATOR_ENABLED or not lanes:
+        return
+    _xvl_lower_thread_priority()
+    for lane in lanes:
+        policy = _patient_chase_policy(lane)
+        _XVL_EVALUATORS[lane] = _xvl.LeadEvaluator(
+            policy.RULE, policy_id=policy.POLICY_ID, policy_signature=policy.POLICY_SIGNATURE,
+        )
+    _xvl_status["started_ts"] = time.time()
+    next_tick = math.floor(time.time()) + 1 + XVL_TICK_OFFSET_SEC
+    while not shutdown_event.is_set():
+        wait = next_tick - time.time()
+        if wait > 0 and shutdown_event.wait(wait):
+            break
+        now = time.time()
+        next_tick = math.floor(now) + 1 + XVL_TICK_OFFSET_SEC
+        started = time.perf_counter()
+        try:
+            _xvl_tick(now)
+        except Exception as exc:
+            with _XVL_LOCK:
+                _xvl_status["tick_errors"] += 1
+                _xvl_status["last_error"] = f"{type(exc).__name__}: {exc}"[:240]
+            logger.warning(f"[XVL] evaluator tick failed: {exc} [PIPELINE ENFORCEMENT]")
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        with _XVL_LOCK:
+            _xvl_status["ticks"] += 1
+            _xvl_status["last_tick_ts"] = now
+            _xvl_status["last_tick_ms"] = round(elapsed_ms, 3)
+            _xvl_status["max_tick_ms"] = round(max(_xvl_status["max_tick_ms"], elapsed_ms), 3)
+
+
+def xvl_evaluator_thread() -> None:
+    """Research-only thread: a crash is reported as STALE health, never an execution pause."""
+    try:
+        xvl_evaluator_loop()
+    except Exception as exc:
+        with _XVL_LOCK:
+            _xvl_status["tick_errors"] += 1
+            _xvl_status["last_error"] = f"LOOP_CRASH {type(exc).__name__}: {exc}"[:240]
+        logger.exception(f"[XVL] evaluator thread stopped: {exc} [PIPELINE ENFORCEMENT]")
+
+
+def xvl_evaluator_snapshot() -> dict:
+    """Evaluator status, per-lane shadow counters and paper-attempt counters."""
+    now = time.time()
+    lanes = cross_venue_clock_lanes()
+    with _XVL_LOCK:
+        status = dict(_xvl_status)
+        runtime = {
+            lane: {
+                "busy": bool(row["busy"]),
+                "attempts": int(row["attempts"]),
+                "orders_eligible": int(row["orders_eligible"]),
+                "submissions_last_hour": sum(1 for ts in row["submissions"] if now - ts < 3600),
+                "skips": dict(row["skips"]),
+                "last_attempt": copy.deepcopy(row["last_attempt"]),
+            }
+            for lane, row in _xvl_lane_runtime.items()
+        }
+    last = float(status.get("last_tick_ts") or 0.0)
+    tick_age = round(now - last, 3) if last else None
+    if not XVL_EVALUATOR_ENABLED or not lanes:
+        health, reason = "DISABLED", ("XVL_EVALUATOR_ENABLED=0" if lanes else "NO_CROSS_VENUE_CLOCK_TILES")
+    elif tick_age is None:
+        started = float(status.get("started_ts") or 0.0)
+        health = "STARTING" if started and now - started < XVL_STALE_AFTER_SEC else "STALE"
+        reason = "NO_TICK_YET"
+    elif tick_age > XVL_STALE_AFTER_SEC:
+        health, reason = "STALE", f"TICK_AGE_{tick_age:.0f}S"
+    elif status.get("write_failures"):
+        health, reason = "DEGRADED", "SHADOW_WRITE_FAILURES"
+    else:
+        health, reason = "OK", None
+    return {
+        "schema": XVL_HEALTH_SCHEMA,
+        "status": health,
+        "reason": reason,
+        "mode": "SHADOW_ALWAYS_PAPER_WHEN_TILE_ON",
+        "shadow_file": XVL_SHADOW_FILE,
+        "signal_clock": _xvl.SIGNAL_CLOCK,
+        "tick_age_s": tick_age,
+        "lanes": {
+            lane: {**(_XVL_EVALUATORS[lane].snapshot() if lane in _XVL_EVALUATORS else {}),
+                   "paper": runtime.get(lane, {})}
+            for lane in lanes
+        },
+        **{k: status[k] for k in ("ticks", "tick_errors", "last_error", "max_tick_ms", "last_tick_ms",
+                                  "rows_written", "write_failures", "thread_niced")},
+    }
+
+
 def _ai_shadow_leader_features(decision_ts: float) -> dict:
     try:
         ts_list, rows = _AI_SHADOW_TAPE.snapshot()
@@ -30858,6 +31158,7 @@ def build_static_pathway_lane_specs() -> dict:
     for tile_number, lane_id in enumerate(ACTIVE_TILE_ORDER, start=1):
         lane_spec = COMBO_LANE_SPECS[lane_id]
         policy_view = _patient_chase_policy(lane_id).dashboard_policy()
+        cross_venue_clock = is_cross_venue_clock_lane(lane_id)
         lanes.append({
             "lane": lane_id,
             "label": lane_spec["label"],
@@ -30879,11 +31180,18 @@ def build_static_pathway_lane_specs() -> dict:
             "hypothesis_result": dict(lane_spec.get("presentation", {}).get("hypothesis_result") or {}),
             "research_question": lane_spec["research_question"],
             "entry": {
-                **policy_view["entry"], "ai_cadence": ai_cadence,
-                "chase_detail": chase_detail,
+                **policy_view["entry"],
+                "ai_cadence": "No AI — per-second cross-venue evaluator" if cross_venue_clock else ai_cadence,
+                "chase_detail": policy_view["entry"]["chase_detail"] if cross_venue_clock else chase_detail,
                 "margin_usd": float(lane_spec["margin_usd"]),
                 "filters": lane_spec,
             },
+            "signal_clock": lane_spec.get("signal_clock") or "SHARED_AI_CALL",
+            "evidence_badge": (
+                "HINT — 12h evidence"
+                if str((lane_spec.get("presentation", {}).get("hypothesis_result") or {}).get("status")) == "HINT_12H_EVIDENCE"
+                else None
+            ),
             "exit": policy_view["exit"],
             "exit_path": policy_view["exit"]["profile"],
             "promotion_criteria": lane_spec["promotion_criteria"],
@@ -33860,8 +34168,20 @@ DASHBOARD_JS = """(function () {
               : c;
             return '<span style="display:inline-block;padding:2px 8px;margin:2px 4px 0 0;background:#21262d;border:1px solid #30363d;border-radius:999px;font-size:0.75em;color:#c9d1d9;">' + chip + '</span>';
           }).join('');
-          const badge = spec.badge
+          const badge = (spec.badge
             ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#3d2e00;border:1px solid #d4a72c;border-radius:4px;color:#f0c14b;font-size:0.72em;font-weight:700;">' + spec.badge + '</span>')
+            : '')
+            + (spec.evidence_badge
+              ? ('<span style="display:inline-block;margin-left:6px;padding:2px 8px;background:#2d1b00;border:1px solid #f0883e;border-radius:4px;color:#ffa657;font-size:0.72em;font-weight:700;">' + spec.evidence_badge + ' · Win % ' + headlineWinLabel + '</span>')
+              : '');
+          const xvlLane = ((d.xvl_evaluator || {}).lanes || {})[spec.lane];
+          const xvlShadow = xvlLane
+            ? ('<div style="margin-top:8px;padding:7px 9px;background:#1b1530;border:1px solid #8957e5;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
+              + '<strong style="color:#a371f7;">Cross-venue evaluator (' + ((d.xvl_evaluator || {}).status || 'UNKNOWN') + '):</strong> '
+              + 'shadow triggers ' + Number(xvlLane.triggers_logged || 0) + ' · qualifying ' + Number(xvlLane.qualifying || 0)
+              + ' · shadow outcomes ' + Number(xvlLane.outcomes_ok || 0) + ' · paper attempts ' + Number((xvlLane.paper || {}).attempts || 0)
+              + ' · orders ' + Number((xvlLane.paper || {}).orders_eligible || 0)
+              + '<div style="color:#8b949e;">Every qualifying lead is logged as a shadow signal whether or not this tile is ON (since process start).</div></div>')
             : '';
           const chaseTiming = spec.chase_timing || {};
           const chaseTruth = '<div style="margin-top:8px;padding:7px 9px;background:#132033;border:1px solid #1f6feb;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
@@ -33921,12 +34241,18 @@ DASHBOARD_JS = """(function () {
             + '<div style="margin-top:6px;">' + chips + '</div></div>'
             + toggleHtml + '</div>'
             + orderBanner
-            + chaseTruth
+            + (xvlLane ? xvlShadow : chaseTruth)
             + '<div style="margin-top:10px;font-size:0.78em;color:#8b949e;line-height:1.45;">' + (spec.subtitle || '') + '</div>'
             + statsGrid
             + (function () {
               const result = spec.hypothesis_result || {};
               if (!result.status) return '';
+              if (result.in_sample) {
+                return '<div style="margin-top:8px;padding:7px 8px;background:#2d1b00;border:1px solid #f0883e;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
+                  + '<strong style="color:#ffa657;">' + (result.hypothesis_id || 'Hypothesis') + ' · ' + result.status + ':</strong> ' + result.in_sample
+                  + (result.expected_live ? '<div style="margin-top:2px;color:#d29922;">Expected live: ' + result.expected_live + '</div>' : '')
+                  + '</div>';
+              }
               return '<div style="margin-top:8px;padding:7px 8px;background:#14251b;border:1px solid #238636;border-radius:6px;font-size:0.74em;line-height:1.45;color:#c9d1d9;">'
                 + '<strong style="color:#3fb950;">Analyzer hypothesis receipt:</strong> '
                 + (result.model || 'model unavailable')
@@ -37840,6 +38166,7 @@ def _build_relay_execution_state_snapshot() -> dict:
     # payload is intentionally cached while paper execution is running, so
     # these counts must travel through the live overlay as well or they freeze
     # at the values observed during the first heavy build.
+    snapshot["xvl_evaluator"] = xvl_evaluator_snapshot()
     snapshot["lane_position_counts"] = {}
     for lane_name in dict.fromkeys(
         PATHWAY_LAB_LANES + (LEGACY_ADOPTION_LANE,)
@@ -40148,6 +40475,7 @@ def status():
                 "mode": "SHADOW_ONLY_NO_ORDERS",
                 **cross_venue_health_snapshot(),
             },
+            "xvl_evaluator": xvl_evaluator_snapshot(),
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
                 "taker_counterfactual_file": execution_markouts.TAKER_FILE,
@@ -40405,6 +40733,7 @@ def ready():
         "ai_input_health": ai_input_health_snapshot(),
         # Shadow research feed health; deliberately not an input to ready_ok.
         "cross_venue_health": cross_venue_health_snapshot(),
+        "xvl_evaluator_health": xvl_evaluator_snapshot(),
     }), (200 if ready_ok else 503)
 
 
@@ -50112,6 +50441,7 @@ def main():
     threading.Thread(target=safe_thread(order_book_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(ohlcv_refresh_loop), daemon=True).start()
     threading.Thread(target=safe_thread(microstructure_capture_loop), daemon=True).start()
+    threading.Thread(target=xvl_evaluator_thread, name="xvl-evaluator", daemon=True).start()
     threading.Thread(
         target=collector_maturation_worker_loop, name="collector-maturation", daemon=True,
     ).start()
