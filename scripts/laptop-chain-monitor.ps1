@@ -143,6 +143,12 @@ if ($crossVenue -and @('OK', 'DISABLED') -notcontains [string]$crossVenue.status
   Add-Alert 'CROSS_VENUE_TAPE_STALE' 'warning' ("cross-venue tape {0} ({1}); collector_age_s={2} stale_venues={3}" -f $crossVenue.status, $crossVenue.reason, $crossVenue.collector_age_s, (@($crossVenue.stale_venues) -join ','))
 }
 
+# XVL per-second cross-venue evaluator: ticks stopped or shadow rows failing to write.
+$xvl = if ($runtimeSnapshot) { $runtimeSnapshot.xvl_evaluator_health } else { $null }
+if ($xvl -and @('OK', 'DISABLED', 'STARTING') -notcontains [string]$xvl.status) {
+  Add-Alert 'XVL_EVALUATOR_STALE' 'warning' ("XVL evaluator {0} ({1}); tick_age_s={2} write_failures={3}" -f $xvl.status, $xvl.reason, $xvl.tick_age_s, $xvl.write_failures)
+}
+
 $notify = New-Object System.Collections.ArrayList
 $recorded = @()
 foreach ($alert in $alerts) {

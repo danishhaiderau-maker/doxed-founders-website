@@ -6,7 +6,7 @@ import pytest
 import tile_paired_comparison as tpc
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
-T1, T2, T3, T4 = ACTIVE_TILE_ORDER
+T1, T2, T3, T4 = ACTIVE_TILE_ORDER[:4]
 T0 = 1_790_000_000.0
 BP = 0.0025  # 1 bp of $25 notional
 
@@ -33,7 +33,8 @@ def test_tiles_pair_only_on_signals_both_filled():
     rows.append(_fill(T2, "other-lane-only", 4.0, T0))
     rows.append(_fill("FAMILY_ATR_TRAIL", "c0", 99.0, T0))
     report = _report(rows)
-    assert report["tile_order"] == [T1, T2, T3, T4]
+    assert report["tile_order"] == list(ACTIVE_TILE_ORDER)
+    assert report["all_tiles_paired"]["paired_tiles"] == [T1, T2, T3, T4]
     assert report["tiles"][T1]["fills"] == 13
     pairs = {(p["control"], p["challenger"]): p for p in report["paired"]}
     t2_vs_t1 = pairs[(T1, T2)]
@@ -45,7 +46,7 @@ def test_tiles_pair_only_on_signals_both_filled():
     assert report["all_tiles_paired"]["signals_filled_by_every_tile"] == 12
     assert report["all_tiles_paired"]["per_tile_ev_bp"] == {T1: -2.0, T2: 1.0, T3: 0.5, T4: 2.0}
     assert pairs[(T1, T4)]["mean_difference_bp"] == pytest.approx(4.0)
-    assert set(report["pre_registered"]) == {T2, T3, T4}
+    assert set(report["pre_registered"]) == {T2, T3, T4, *ACTIVE_TILE_ORDER[4:]}
     assert report["pre_registered"][T4]["control_meaning"].startswith("AI's own")
     json.dumps(report, allow_nan=False)
 

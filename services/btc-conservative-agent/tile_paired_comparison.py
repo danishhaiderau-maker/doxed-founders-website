@@ -82,11 +82,12 @@ def _fill_row(row: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _cluster_ci(rows: Sequence[tuple[float, float]]) -> tuple[float | None, float | None]:
-    """95% CI of the mean of values, resampling 6-hour clusters (``(ts, value)``)."""
+def _cluster_ci(rows: Sequence[tuple[float, float]],
+                cluster_sec: int = CLUSTER_SEC) -> tuple[float | None, float | None]:
+    """95% CI of the mean of values, resampling time clusters (``(ts, value)``)."""
     clusters: dict[int, list[float]] = {}
     for ts, value in rows:
-        clusters.setdefault(int(ts // CLUSTER_SEC), []).append(value)
+        clusters.setdefault(int(ts // cluster_sec), []).append(value)
     groups = list(clusters.values())
     if len(groups) < 2:
         return None, None
@@ -278,6 +279,78 @@ def _trade_count_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pr
     return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
 
 
+def _xvl_extra_stats(fills: list[dict[str, Any]], pre: Mapping[str, Any]) -> dict[str, Any]:
+    """1 h-cluster CI, UTC-day, Asia-session and single-hour concentration facts."""
+    fills = sorted(fills, key=lambda r: r["close_ts"])
+    bps = [(r["close_ts"], r["bp"]) for r in fills if r["bp"] is not None]
+    lo, hi = _cluster_ci(bps, cluster_sec=3600)
+    days: dict[str, float] = {}
+    asia: dict[str, int] = {}
+    hours: dict[int, float] = {}
+    start_h, end_h = pre["promotion"].get("asia_session_utc_hours", (0, 8))
+    for r in fills:
+        moment = datetime.fromtimestamp(r["close_ts"], timezone.utc)
+        day = moment.date().isoformat()
+        days[day] = days.get(day, 0.0) + r["pnl_usd"]
+        if start_h <= moment.hour < end_h:
+            asia[day] = asia.get(day, 0) + 1
+        hour = int(r["close_ts"] // 3600)
+        hours[hour] = hours.get(hour, 0.0) + r["pnl_usd"]
+    total = sum(r["pnl_usd"] for r in fills)
+    first5 = [days[d] for d in sorted(days)[:5]]
+    return {
+        "mean_bp": round(sum(v for _, v in bps) / len(bps), 4) if bps else None,
+        "per_fill_ev_ci95_bp_1h": [lo, hi],
+        "utc_days": len(days),
+        "asia_sessions_qualified": sum(
+            1 for n in asia.values() if n >= pre["promotion"]["min_asia_session_fills"]
+        ),
+        "first_5_days_observed": len(first5),
+        "positive_days_of_first_5": sum(1 for v in first5 if v > 0),
+        "max_single_hour_profit_share": round(max(hours.values()) / total, 4) if fills and total > 0 else None,
+    }
+
+
+def _xvl_verdict(stats: Mapping[str, Any], paired: Mapping[str, Any], pre: Mapping[str, Any],
+                 dsr: float | None, now_ts: float) -> dict[str, Any]:
+    promote, kill = pre["promotion"], pre["kill"]
+    lo, hi = stats.get("per_fill_ev_ci95_bp_1h") or [None, None]
+    fills = int(stats.get("fills") or 0)
+    mean = stats.get("mean_bp")
+    age_days = (now_ts - (_ts(pre.get("registered_utc")) or now_ts)) / 86400.0
+    kills = []
+    if fills >= kill["k1_after_fills"] and mean is not None and mean <= kill["k1_mean_bp_at_or_below"]:
+        kills.append("K1_MEAN_NOT_POSITIVE_AFTER_150")
+    if fills >= kill["k2_after_fills"] and hi is not None and hi < kill["k2_upper_ci95_lt_bp"]:
+        kills.append("K2_UPPER_CI_BELOW_HALF_BP_AFTER_400")
+    worst = stats.get("worst_fill_bp")
+    stale_share = stats.get("stale_feed_fill_share")
+    if (worst is not None and worst < kill["k3_worst_trade_bp_below"]) or (
+        stale_share is not None and stale_share > kill["k3_max_stale_feed_fill_share"]
+    ):
+        kills.append("K3_STOP_OR_STALE_FEED_FAILURE")
+    if (stats.get("max_drawdown_usd") or 0.0) > kill["k4_max_drawdown_usd"]:
+        kills.append("K4_DRAWDOWN")
+    share = stats.get("max_single_hour_profit_share")
+    parity = stats.get("replay_parity_gap_bp")
+    latency = stats.get("median_signal_to_fill_sec")
+    overshoot = stats.get("max_lock_or_stop_overshoot_bp")
+    checks = {
+        "min_fills": fills >= promote["min_fills"],
+        "min_utc_days": (stats.get("utc_days") or 0) >= promote["min_utc_days"],
+        "asia_sessions": (stats.get("asia_sessions_qualified") or 0) >= promote["min_asia_sessions"],
+        "per_fill_ev_lower_ci95_1h_gt_0": lo is not None and lo > promote["per_fill_ev_lower_ci95_gt_bp"],
+        "positive_days_of_first_5": (stats.get("first_5_days_observed") or 0) >= 5
+        and (stats.get("positive_days_of_first_5") or 0) >= promote["min_positive_days_of_first_5"],
+        "both_halves_positive": (stats.get("first_half_ev_bp") or 0) > 0 and (stats.get("second_half_ev_bp") or 0) > 0,
+        "no_hour_dominates": share is not None and share <= promote["max_single_hour_profit_share"],
+        "replay_parity": parity is not None and abs(parity) <= promote["max_replay_parity_gap_bp"],
+        "signal_to_fill_latency": latency is not None and latency <= promote["max_median_signal_to_fill_sec"],
+        "stops_within_limit": overshoot is None or overshoot <= promote["max_stop_overshoot_bp"],
+    }
+    return _finish(kills, checks, kill, age_days, deflated_sharpe=dsr)
+
+
 def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any], age_days: float,
             *, deflated_sharpe: float | None) -> dict[str, Any]:
     promoted = all(checks.values())
@@ -294,7 +367,9 @@ def _finish(kills: list[str], checks: Mapping[str, bool], kill: Mapping[str, Any
 VERDICT_RULES = {
     "tile_pre_registration_v1": _ladder_verdict,
     "tile_pre_registration_trade_count_v1": _trade_count_verdict,
+    "tile_pre_registration_xvl_v1": _xvl_verdict,
 }
+EXTRA_STATS = {"tile_pre_registration_xvl_v1": _xvl_extra_stats}
 
 
 def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, Mapping[str, Any]],
@@ -319,20 +394,27 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
     if len(srs) >= 2:
         mu = sum(srs) / len(srs)
         sr_variance = sum((s - mu) ** 2 for s in srs) / (len(srs) - 1)
-    pairs = [_paired(by_lane, a, b) for i, a in enumerate(lanes) for b in lanes[i + 1:]]
+    # Only tiles fed by the shared AI call can share a signal; cross-venue
+    # clock tiles are reported on their own and never paired.
+    paired_lanes = [
+        lane for lane in lanes
+        if (registry.get(lane) or {}).get("uses_shared_ai_direction", True) is not False
+    ]
+    pairs = [_paired(by_lane, a, b) for i, a in enumerate(paired_lanes) for b in paired_lanes[i + 1:]]
     common = set.intersection(*[
-        {r["call"] for r in by_lane[lane] if r["call"] and r["bp"] is not None} for lane in lanes
-    ]) if lanes else set()
+        {r["call"] for r in by_lane[lane] if r["call"] and r["bp"] is not None} for lane in paired_lanes
+    ]) if paired_lanes else set()
     all_paired = {
+        "paired_tiles": paired_lanes,
         "signals_filled_by_every_tile": len(common),
         "per_tile_win": {
             lane: _win_fields([r["pnl_usd"] for r in by_lane[lane] if r["call"] in common])
-            for lane in lanes
+            for lane in paired_lanes
         },
         "per_tile_ev_bp": {
             lane: round(sum(r["bp"] for r in by_lane[lane] if r["call"] in common) / len(common), 4)
             if common else None
-            for lane in lanes
+            for lane in paired_lanes
         },
     }
     pre_registered = {}
@@ -342,11 +424,14 @@ def build_report(*, trades: Iterable[Mapping[str, Any]], registry: Mapping[str, 
             continue
         values = [r["bp"] for r in sorted(by_lane[lane], key=lambda r: r["close_ts"]) if r["bp"] is not None]
         dsr = deflated_sharpe(values, trials=trials, sr_variance=sr_variance)
-        vs_control = next((p for p in pairs if p["control"] == pre["control_lane"] and p["challenger"] == lane), {})
+        extra = EXTRA_STATS.get(pre.get("schema"))
+        if extra and by_lane[lane]:
+            stats[lane].update(extra(by_lane[lane], pre))
+        vs_control = next((p for p in pairs if p["control"] == pre.get("control_lane") and p["challenger"] == lane), {})
         rule = VERDICT_RULES.get(pre.get("schema"))
         pre_registered[lane] = {
             "hypothesis_id": pre["hypothesis_id"],
-            "control_lane": pre["control_lane"],
+            "control_lane": pre.get("control_lane"),
             "control_meaning": pre.get("control_meaning"),
             "honest_label": pre.get("honest_label"),
             "rules": pre,

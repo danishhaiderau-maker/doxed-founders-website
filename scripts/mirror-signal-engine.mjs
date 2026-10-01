@@ -147,6 +147,8 @@ const activePolicyFiles = [
   'adaptive_profit_lock_binding.py',
   'taker_time_exit_binding.py',
   'scenario_c_config.py',
+  'cross_venue_tape.py',
+  'cross_venue_lead.py',
   ...readdirSync(agentDir).filter((name) => /^paper_policy_.+\.py$/.test(name)).sort(),
 ];
 for (const name of activePolicyFiles) {

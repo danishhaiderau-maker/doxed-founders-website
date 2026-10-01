@@ -78,6 +78,23 @@
   The paired view compares it with Tile 1 (the AI's own side). The five former family tiles
   and the Continuous comparison label are retired (`RETIRED_TILE_LANES`); a
   future tile is promoted only if it passes the OOS promotion gate.
+  Cross-venue lead (`FAMILY_XVENUE_LEAD_60S`, prefix `xvl`) uses no AI: a
+  bounded per-second evaluator (`cross_venue_lead.py`, its own thread, separate
+  from the 180 s AI cadence) takes a Bitfinex taker entry (5 bp cap, 3 s TTL) in
+  the direction of the mean Binance/Bybit 10 s mid return when it leads Bitfinex
+  by >=8 bp, refuses when any feed is >2 s old or the spread exceeds 3 bp, and
+  exits at 60 s or a 40 bp catastrophic stop; one position, >=5 s between
+  submissions, <=60 per hour. Every qualifying second is logged to
+  `xvl_shadow_signals.jsonl` with its hypothetical 60 s after-spread outcome
+  whether or not the toggle is ON. Venue prices are data only; fees are
+  Bitfinex-only. Its label discloses "HINT - 12h evidence". Pre-registration:
+  promotion (owner review) needs >=1000 fills over >=5 UTC days incl. 3 Asia
+  sessions of >=50 trades, 1 h-cluster lower 95% CI > 0, 4 of the first 5 days
+  and both halves positive, no hour above 15% of profit, and shadow/paper parity
+  within 1 bp; kill when the mean is not positive after 150 trades, the upper CI
+  is below 0.5 bp after 400, on a -45 bp trade or >1% stale-feed share, drawdown
+  above $0.50, or day 10 without promotion. It is excluded from shared-AI
+  pairing and scored alone.
   The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.
 - Adding a tile requires one registry specification with a unique lane, policy
