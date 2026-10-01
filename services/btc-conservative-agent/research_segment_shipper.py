@@ -624,9 +624,18 @@ class SegmentShipper:
         if kind == fmt.KIND_TOMBSTONE:
             tracked = op["tracked"]
             return b"", {"last_sha256": tracked.get("sha256"), "last_offset": tracked.get("offset")}
+        atomic_file = (
+            (kind == fmt.KIND_SNAPSHOT
+             or (kind == fmt.KIND_REWRITE and not self._is_append_class(op["path"])))
+            and not _is_sqlite(op["path"])
+        )
         with path.open("rb") as handle:
             live = os.fstat(handle.fileno())
-            if (int(live.st_dev), int(live.st_ino)) != (int(stat.st_dev), int(stat.st_ino)):
+            # A whole-file JSON receipt is replaced by atomic rename on every
+            # ledger append; the new inode is a complete newer version, so it
+            # ships as-is. Append-class and SQLite identity changes still race.
+            if ((int(live.st_dev), int(live.st_ino)) != (int(stat.st_dev), int(stat.st_ino))
+                    and not atomic_file):
                 raise PlanRace(f"{op['path']} changed identity", op["stream"])
             if kind in (fmt.KIND_SNAPSHOT,) or (kind == fmt.KIND_REWRITE and not self._is_append_class(op["path"])):
                 # Stability is required only during the copy itself: a hot
