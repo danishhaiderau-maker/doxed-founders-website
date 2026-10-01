@@ -455,6 +455,86 @@ def test_append_stream_replaced_between_scan_and_read_still_races(tmp_path):
     assert raced["race"] == "a_live.jsonl"
 
 
+def test_many_racing_streams_never_block_the_append_backlog_and_build_once(tmp_path):
+    env = Env(tmp_path)
+    env.store = VolumeStore(env.store_root)
+    live = env.write("market_microstructure_1s.jsonl", _rows(0, 200))
+    doomed = [env.write(f"v3/receipts/handoff-{name}.json", b'{"x": 1}') for name in "abcdefgh"]
+    swapped = env.write("z_rotating.jsonl", _rows(0, 3))
+    assert len(doomed) + 1 > shipper_mod.RACE_REBUILDS_PER_CYCLE
+    shipper = env.shipper()
+    real_plan, real_build = shipper.plan, shipper._build
+    builds = [0]
+
+    def plan_then_churn(*args, **kwargs):
+        ops = real_plan(*args, **kwargs)
+        for path in doomed:
+            path.unlink()
+        tmp = swapped.with_suffix(".tmp")
+        tmp.write_bytes(swapped.read_bytes())
+        os.replace(tmp, swapped)
+        return ops
+
+    def counting_build(*args, **kwargs):
+        builds[0] += 1
+        return real_build(*args, **kwargs)
+
+    shipper.plan, shipper._build = plan_then_churn, counting_build
+    result = shipper.cycle()
+    assert result["shipped"], result
+    assert builds[0] == 1
+    members = json.loads(env.store.get(fmt.manifest_key("v1", result["shipped"]["seq"])))["members"]
+    assert [m["path"] for m in members] == ["market_microstructure_1s.jsonl"]
+    assert {item["path"] for item in shipper.racing_paths()} == {
+        *(f"v3/receipts/handoff-{name}.json" for name in "abcdefgh"), "z_rotating.jsonl"}
+    assert "market_microstructure_1s.jsonl" not in shipper.race_backoff
+
+    shipper.plan = real_plan
+    with live.open("ab") as handle:
+        handle.write(_rows(200, 50))
+    env.clock[0] += shipper_mod.RACE_BACKOFF_BASE_SECONDS
+    follow = shipper.cycle()
+    members = json.loads(env.store.get(fmt.manifest_key("v1", follow["shipped"]["seq"])))["members"]
+    by_path = {m["path"]: m for m in members}
+    assert by_path["market_microstructure_1s.jsonl"]["kind"] == fmt.KIND_APPEND
+    assert by_path["market_microstructure_1s.jsonl"]["base_offset"] > 0
+    assert "z_rotating.jsonl" in by_path
+    assert shipper.race_backoff == {}
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
+def test_seal_race_skips_the_dependent_append_of_the_same_stream(tmp_path):
+    env = Env(tmp_path)
+    env.store = VolumeStore(env.store_root)
+    live = env.write("a_live.jsonl", _rows(0, 3))
+    env.write("b_other.json", b'{"x": 1}')
+    shipper = env.shipper()
+    assert shipper.cycle()["shipped"]
+    with live.open("ab") as handle:
+        handle.write(_rows(3, 2))
+    os.replace(live, live.with_name("a_live.jsonl.1"))
+    env.write("a_live.jsonl", _rows(5, 2))
+    env.write("b_other.json", b'{"x": 2}')
+    real_read = shipper._read
+
+    def seal_races(op):
+        if op["kind"] == fmt.KIND_SEAL:
+            raise shipper_mod.PlanRace("sealed file changed", op["stream"])
+        return real_read(op)
+
+    shipper._read = seal_races
+    result = shipper.cycle()
+    members = json.loads(env.store.get(fmt.manifest_key("v1", result["shipped"]["seq"])))["members"]
+    assert [m["path"] for m in members] == ["b_other.json"]
+    assert result["race"] == "a_live.jsonl"
+    shipper._read = real_read
+    env.clock[0] += shipper_mod.RACE_BACKOFF_BASE_SECONDS
+    assert shipper.cycle()["shipped"]
+    env.puller().pull_once()
+    env.assert_tree_matches_source()
+
+
 def test_file_deleted_between_scan_and_read_is_a_race_for_its_stream_only(tmp_path):
     env = Env(tmp_path)
     env.store = VolumeStore(env.store_root)
