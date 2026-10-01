@@ -163,7 +163,7 @@ Optional tuning (Fly env): `RESEARCH_SEGMENTS_INTERVAL_SECONDS` (300),
 `RESEARCH_SEGMENTS_MAX_SEGMENT_BYTES` (8 MiB), `RESEARCH_SEGMENTS_MAX_MEMBER_BYTES`
 (64 MiB), `RESEARCH_SEGMENTS_LARGE_SNAPSHOT_BYTES` (1 MiB),
 `RESEARCH_SEGMENTS_LARGE_SNAPSHOT_INTERVAL_SECONDS` (3600),
-`RESEARCH_SEGMENTS_ACK_POLL_SECONDS` (1800), `RESEARCH_SEGMENTS_MIN_FREE_BYTES`
+`RESEARCH_SEGMENTS_ACK_POLL_SECONDS` (300), `RESEARCH_SEGMENTS_MIN_FREE_BYTES`
 (200 MiB), `RESEARCH_SEGMENTS_PREFIX` (`v1`).
 
 **Rollback:** `fly secrets unset --stage -a doxed-btc-bot RESEARCH_SEGMENTS_ENABLED`,
@@ -246,3 +246,14 @@ backlog grew past the laptop promotion gate (32 MiB).
   wait, log tail, and a timed dry-run scan/plan with per-stream pending bytes.
 - The 32 MiB promotion gate is unchanged: it is ~10 min of peak growth and a
   caught-up shipper holds a few MiB between cycles.
+- A file that shrinks while its anchors are hashed (rotation or rewrite between
+  scan and hash) is a race for its stream only, in planning and in the build;
+  before 2026-10-01 the planning-phase race aborted the whole cycle.
+- Starvation guard: an idle-priority cycle still running after
+  `RESEARCH_SEGMENTS_STARVED_CYCLE_SECONDS` (180) is raised to the boost nice
+  for the rest of that cycle and returns to idle afterwards. Measured on
+  2026-10-01: with the bot at load ~4.4, SCHED_IDLE cycles took 13-27 min and
+  no segment shipped from 18:03Z.
+- The laptop ACK is polled at the top of every loop, outside the cycle's error
+  path, so `laptop_acked_seq` on /health trails the laptop by at most one
+  cycle plus the poll interval.

@@ -81,11 +81,18 @@ appends a row at most every 30 minutes from the tick's own snapshots
 `DEPLOY_MAINTENANCE` pause counts as a guarded deploy boundary), every
 runtime tile is ON, the AI cycle advanced since the last row, WS ticks are
 under 60s old, published-minus-acked segments are within 30 with pruning
-off, the analyzer generation is under 45 min old, no critical alarm is
+off and any lag is bounded (see below), the analyzer generation is under 45 min old, no critical alarm is
 open, live/Bitfinex is disarmed and no manual intervention was seen.
 Missing or stale evidence fails the row. At T0+48h the verdict is appended
 and written to `unattended-proof-<T0>.verdict.json`: PASS needs no FAIL rows,
 no gap over 45 min and every boundary resumed within 60 min.
+
+Fly reads the laptop ACK between shipper cycles, so its `laptop_acked_seq`
+can trail the laptop for a few minutes. A non-zero ACK lag passes only when
+the laptop's own `segment-pull.status.json` (finished within 10 min, no
+error) shows everything published as acked, or the newest published segment
+is at most 10 min old. A lag that was already present at the previous row
+with no ACK progress since always fails, whatever the laptop reports.
 
 Any operator action during the window must be journalled as one JSON line
 (`{"at": "<UTC ISO>", "action": "..."}`) in

@@ -35,11 +35,17 @@ SNAPSHOT_MAX_AGE_SEC = 15 * 60.0
 ANALYZER_MAX_AGE_SEC = 45 * 60.0
 WS_MAX_AGE_SEC = 60.0
 SEGMENT_ACK_TOLERANCE_SEQ = 30
+# Fly reads the laptop ACK between shipper cycles, so its acked seq trails the
+# laptop by up to a cycle plus the poll interval. A lag younger than this, or
+# one the laptop's own fresh pull status shows as acked, is in flight; a lag
+# that survives two consecutive rows with no ACK progress is a stall.
+SEGMENT_ACK_MAX_LAG_SEC = 10 * 60.0
 MANUAL_PAUSE_OWNERS = frozenset({"ADMIN_MANUAL", "OPERATOR", "MANUAL"})
 DEFAULT_RECEIPT_DIR = r"C:\DoxxedCrypto\btc-v31-current\diagnostics"
 
 RUNTIME_SNAPSHOT = "fly_runtime_snapshot_v1.json"
 HEAD_SNAPSHOT = "fly_segment_head_snapshot_v1.json"
+LAPTOP_PULL_STATUS = "segment-pull.status.json"
 RELAY_SNAPSHOT = "relay_status_snapshot_v1.json"
 ANALYZER_STATUS = "analyzer-run.status.json"
 ACTIVE_ALERTS = str(Path("alerts") / "active-alerts.json")
@@ -184,11 +190,24 @@ def _run_by_id(runs: list[Mapping[str, Any]] | None, run_id: Any) -> Mapping[str
     return next((r for r in runs or [] if str(r.get("databaseId")) == str(run_id)), None)
 
 
+def _laptop_acked_seq(pull: Mapping[str, Any] | None, now: float) -> tuple[int | None, str]:
+    """The laptop's own ACKed seq from a fresh, error-free pull status, else (None, why)."""
+    if not isinstance(pull, Mapping):
+        return None, "laptop pull status missing"
+    finished = parse_utc(pull.get("finishedAt"))
+    if finished is None or now - finished > SEGMENT_ACK_MAX_LAG_SEC:
+        return None, f"laptop pull status stale (finishedAt={pull.get('finishedAt')!r})"
+    if pull.get("error") or pull.get("exitCode") not in (0, None) or pull.get("ackedSeq") is None:
+        return None, f"laptop pull status not ok (exitCode={pull.get('exitCode')!r}, error={pull.get('error')!r})"
+    return int(pull["ackedSeq"]), f"laptop acked {int(pull['ackedSeq'])} at {pull.get('finishedAt')}"
+
+
 def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] | None,
                  relay: Mapping[str, Any] | None, analyzer: Mapping[str, Any] | None,
                  alerts: Mapping[str, Any] | None, baseline: Mapping[str, Any],
                  previous: Mapping[str, Any] | None, manual_entries: list[Mapping[str, Any]],
-                 now: float, deploy_runs: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                 now: float, deploy_runs: Mapping[str, Any] | None = None,
+                 laptop_pull: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """One proof row. Every check is True, False or None (no evidence); None fails the row."""
     checks: dict[str, dict[str, Any]] = {}
     observed: dict[str, Any] = {}
@@ -293,11 +312,17 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
     else:
         checks["ws_fresh"] = _check(True, f"ws tick {float(ws_age):.1f}s old")
 
-    # Segments published == acked within tolerance; pruning must stay off.
+    # Segments published == acked within tolerance and bounded lag age; pruning must stay off.
     head_ok, head_err = _fresh_snapshot(head, now, "Fly segment head")
     shipped, acked = (head or {}).get("shipped_seq"), (head or {}).get("laptop_acked_seq")
+    head_at = parse_utc((head or {}).get("observedAt")) or now
+    newest = parse_utc((head or {}).get("last_segment_at"))
+    newest_age = None if newest is None else max(0.0, head_at - newest)
+    laptop_acked, laptop_detail = _laptop_acked_seq(laptop_pull, now)
     observed.update({"shipped_seq": shipped, "laptop_acked_seq": acked,
-                     "pruning_enabled": (head or {}).get("pruning_enabled")})
+                     "pruning_enabled": (head or {}).get("pruning_enabled"),
+                     "newest_segment_age_sec": newest_age, "laptop_pull_acked_seq": laptop_acked})
+    prev_acked, prev_shipped = prev_obs.get("laptop_acked_seq"), prev_obs.get("shipped_seq")
     if not head_ok:
         checks["segments_acked"] = _check(None, head_err)
     elif shipped is None or acked is None:
@@ -306,11 +331,22 @@ def evaluate_row(*, runtime: Mapping[str, Any] | None, head: Mapping[str, Any] |
         checks["segments_acked"] = _check(False, "segment pruning is enabled")
     elif int(shipped) - int(acked) > SEGMENT_ACK_TOLERANCE_SEQ:
         checks["segments_acked"] = _check(False, f"published {shipped} vs acked {acked} (lag > {SEGMENT_ACK_TOLERANCE_SEQ})")
-    elif prev_obs.get("laptop_acked_seq") is not None and int(shipped) > int(prev_obs.get("shipped_seq") or 0) \
-            and int(acked) <= int(prev_obs["laptop_acked_seq"]):
-        checks["segments_acked"] = _check(False, f"acked seq stuck at {acked} while published advanced to {shipped}")
+    elif int(acked) >= int(shipped):
+        checks["segments_acked"] = _check(True, f"published {shipped} / acked {acked} (lag 0)")
+    elif prev_acked is not None and prev_shipped is not None and int(prev_acked) < int(prev_shipped) \
+            and int(acked) <= int(prev_acked):
+        checks["segments_acked"] = _check(False, f"acked seq stuck at {acked} across two rows while published "
+                                                 f"is {shipped} (previous row {prev_shipped}/{prev_acked}); {laptop_detail}")
+    elif laptop_acked is not None and laptop_acked >= int(shipped):
+        checks["segments_acked"] = _check(True, f"published {shipped} / Fly acked {acked}; {laptop_detail} "
+                                                f"(Fly ACK view in flight)")
+    elif newest_age is not None and newest_age <= SEGMENT_ACK_MAX_LAG_SEC:
+        checks["segments_acked"] = _check(True, f"published {shipped} / acked {acked}; newest segment "
+                                                f"{newest_age / 60:.1f} min old (ACK in flight)")
     else:
-        checks["segments_acked"] = _check(True, f"published {shipped} / acked {acked} (lag {int(shipped) - int(acked)})")
+        age_text = "unknown" if newest_age is None else f"{newest_age / 60:.0f} min"
+        checks["segments_acked"] = _check(False, f"published {shipped} / acked {acked}: newest segment age {age_text} "
+                                                 f"(> {SEGMENT_ACK_MAX_LAG_SEC / 60:.0f} min) and {laptop_detail}")
 
     # Analyzer generation fresh.
     generated = parse_utc((analyzer or {}).get("lastCompletedGenerationAt") or (analyzer or {}).get("lastSuccessAt"))
@@ -479,6 +515,7 @@ def start(state_dir: Path, receipt_dir: Path, now: float, *, force: bool = False
                                                  "bitfinex_live_enabled")},
         "thresholds": {"analyzer_max_age_min": ANALYZER_MAX_AGE_SEC / 60, "ws_max_age_sec": WS_MAX_AGE_SEC,
                        "segment_ack_tolerance_seq": SEGMENT_ACK_TOLERANCE_SEQ,
+                       "segment_ack_max_lag_min": SEGMENT_ACK_MAX_LAG_SEC / 60,
                        "snapshot_max_age_min": SNAPSHOT_MAX_AGE_SEC / 60, "max_row_gap_min": MAX_ROW_GAP_SEC / 60,
                        "deploy_boundary_max_min": GUARDED_DEPLOY_MAX_PAUSE_SEC / 60},
         "manual_intervention_journal": str(state_dir / MANUAL_JOURNAL),
@@ -509,7 +546,8 @@ def check(state_dir: Path, now: float, *, force: bool = False) -> dict[str, Any]
             relay=read_json(state_dir / RELAY_SNAPSHOT), analyzer=read_json(state_dir / ANALYZER_STATUS),
             alerts=read_json(state_dir / ACTIVE_ALERTS), baseline=active.get("baseline") or {},
             previous=rows[-1] if rows else None, manual_entries=_manual_entries(state_dir, t0), now=now,
-            deploy_runs=read_json(state_dir / DEPLOY_RUNS_SNAPSHOT))
+            deploy_runs=read_json(state_dir / DEPLOY_RUNS_SNAPSHOT),
+            laptop_pull=read_json(state_dir / LAPTOP_PULL_STATUS))
         with receipt.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(written, sort_keys=True) + "\n")
         rows.append(written)

@@ -30,8 +30,8 @@ def _runtime(now, **over):
 def _inputs(now, **over):
     base = {
         "runtime": _runtime(now),
-        "head": {"observedAt": up.iso(now - 20), "ok": True, "shipped_seq": 100, "laptop_acked_seq": 98,
-                 "pruning_enabled": False},
+        "head": {"observedAt": up.iso(now - 20), "ok": True, "shipped_seq": 100, "laptop_acked_seq": 100,
+                 "pruning_enabled": False, "last_segment_at": now - 140},
         "relay": {"observedAt": up.iso(now - 20), "ok": True, "relayExecutionMode": "PAUSED", "relayArmedAt": None},
         "analyzer": {"lastCompletedGenerationAt": up.iso(now - 600)},
         "alerts": {"checkedAt": up.iso(now - 10), "alerts": []},
@@ -183,6 +183,57 @@ def test_segment_lag_stuck_ack_and_pruning_fail():
     assert up.evaluate_row(**_inputs(now, head=pruning))["failed_checks"] == ["segments_acked"]
 
 
+def _head(now, shipped, acked, newest_age_sec):
+    return {"observedAt": up.iso(now), "ok": True, "shipped_seq": shipped, "laptop_acked_seq": acked,
+            "pruning_enabled": False, "last_segment_at": now - newest_age_sec}
+
+
+def _pull(now, acked, age_sec=60, **over):
+    status = {"schema": "laptop_segment_pull_status_v1", "finishedAt": up.iso(now - age_sec), "exitCode": 0,
+              "appliedSeq": acked, "ackedSeq": acked, "remotePublishedSeq": acked, "error": None}
+    status.update(over)
+    return status
+
+
+def _seg(now, head, previous=None, laptop_pull=None):
+    prev = None if previous is None else {"observed": {"shipped_seq": previous[0], "laptop_acked_seq": previous[1],
+                                                       "ai_cycle_completed_ts": 1.0}}
+    return up.evaluate_row(**_inputs(now, head=head, previous=prev, laptop_pull=laptop_pull))["checks"]["segments_acked"]
+
+
+def test_fly_ack_view_lag_confirmed_by_the_laptop_passes_once():
+    # 2026-10-01T18:15:50Z: previous row 2008/2008; Fly published 2009/2010 by
+    # 18:03:18 and the laptop acked both by 18:03:28, but Fly's ACK poll ran
+    # only after its 13-27 min idle cycles, so the head still said 2008.
+    now = T0 + 60
+    head = _head(now, 2010, 2008, newest_age_sec=12.5 * 60)
+    ok = _seg(now, head, previous=(2008, 2008), laptop_pull=_pull(now, 2010))
+    assert ok["ok"] is True and "laptop acked 2010" in ok["detail"]
+    assert _seg(now, head, previous=(2008, 2008))["ok"] is False
+    assert _seg(now, head, previous=(2008, 2008), laptop_pull=_pull(now, 2010, age_sec=11 * 60))["ok"] is False
+    assert _seg(now, head, previous=(2008, 2008), laptop_pull=_pull(now, 2009))["ok"] is False
+    assert _seg(now, head, previous=(2008, 2008), laptop_pull=_pull(now, 2010, exitCode=1))["ok"] is False
+
+
+def test_young_unacked_segment_is_in_flight():
+    now = T0 + 60
+    assert _seg(now, _head(now, 2010, 2008, newest_age_sec=3 * 60), previous=(2008, 2008))["ok"] is True
+    assert _seg(now, _head(now, 2010, 2008, newest_age_sec=11 * 60), previous=(2008, 2008))["ok"] is False
+    no_age = {**_head(now, 2010, 2008, 0), "last_segment_at": None}
+    assert _seg(now, no_age, previous=(2008, 2008))["ok"] is False
+
+
+def test_ack_lag_surviving_two_rows_without_progress_fails_even_if_the_laptop_acked():
+    now = T0 + 60
+    head = _head(now, 2010, 2008, newest_age_sec=60)
+    stuck = _seg(now, head, previous=(2010, 2008), laptop_pull=_pull(now, 2010))
+    assert stuck["ok"] is False and "across two rows" in stuck["detail"]
+    advancing = _seg(now, _head(now, 2012, 2010, newest_age_sec=60), previous=(2010, 2008))
+    assert advancing["ok"] is True
+    caught_up = _seg(now, _head(now, 2010, 2010, newest_age_sec=3600), previous=(2010, 2008))
+    assert caught_up["ok"] is True
+
+
 def test_stale_analyzer_critical_alarm_armed_relay_and_journal_fail():
     now = T0 + 60
     assert up.evaluate_row(**_inputs(now, analyzer={"lastCompletedGenerationAt": up.iso(now - 46 * 60)}))["failed_checks"] == ["analyzer_fresh"]
@@ -264,6 +315,21 @@ def test_check_reads_the_deploy_runs_snapshot_for_a_guarded_pause(tmp_path):
     assert up.check(state, later, force=True)["row"] == up.ALLOWED_GUARDED_DEPLOY
     row = json.loads(receipt.read_text(encoding="utf-8").splitlines()[-1])
     assert row["observed"]["deploy_run_id"] == 9
+
+
+def test_check_reads_the_laptop_pull_status_for_ack_lag(tmp_path):
+    state = _state(tmp_path, T0)
+    receipt = Path(up.start(state, tmp_path / "diag", T0)["receipt"])
+    now = T0 + 60
+    (state / up.HEAD_SNAPSHOT).write_text(json.dumps(_head(now, 2010, 2008, 12.5 * 60)), encoding="utf-8")
+    assert up.check(state, now)["row"] == "FAIL"
+    later = T0 + 120
+    (state / up.HEAD_SNAPSHOT).write_text(json.dumps(_head(later, 2010, 2008, 12.5 * 60)), encoding="utf-8")
+    (state / up.LAPTOP_PULL_STATUS).write_text(json.dumps(_pull(later, 2010)), encoding="utf-8")
+    # The previous row already lagged at 2008 with no progress since: still a stall.
+    assert up.check(state, later, force=True)["row"] == "FAIL"
+    row = json.loads(receipt.read_text(encoding="utf-8").splitlines()[-1])
+    assert row["observed"]["laptop_pull_acked_seq"] == 2010
 
 
 def test_force_restart_needs_a_reason_and_closes_the_old_window_as_superseded(tmp_path):
