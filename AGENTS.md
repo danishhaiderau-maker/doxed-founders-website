@@ -37,47 +37,29 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Four tiles are registered, all honest paper experiments with no proven edge
-  that consume the same shared AI call with independent locks, orders,
-  positions, ledgers and analyzer cohorts. Dynamic Adaptive
-  (`FAMILY_ADAPTIVE_REGIME`): trailing 15-minute realized-vol
-  regime from Bitfinex 1m candles (CALM below the frozen p40, EXTREME above the
-  frozen p90), a fast-move z-score, taker with a bounded protection cap in
-  NORMAL or on a fast move, a short-lived maker limit within one tick in CALM,
-  stand-aside in EXTREME or when the initial stop is at least 40 bps, and an
-  ATR Trail exit (SL 1.5 / arm 0.75 / trail 1). Direction comes from score-led
-  admission; a raw AI NO_TRADE or a score gap below 5 never trades. Adaptive +
-  Profit Lock (`FAMILY_ADAPTIVE_REGIME_LADDER`) uses the identical entry and
-  admission, ATR Trail, and the Scenario-C ladder (8→5 … 150→120 margin % at
-  100x) with no break-even rung. Adaptive + Break-even + Profit Lock
-  (`FAMILY_ADAPTIVE_REGIME_LADDER_BE`) is the same plus a break-even rung (peak
-  +4% margin locks +1%, the round-trip fee plus a 1 bp exit-slip buffer). For
-  both ladder tiles the effective stop is the more protective of the ATR
-  stop/trail and the armed lock, locks book at the side-correct quote that
-  crossed them, the 30% margin hard stop and 2 h cap apply, and each holds at
-  most one position. Trend Fade 60 (`FAMILY_TREND_FADE_60`) is an owner-approved
-  beta: its own lane admission trades the opposite of the shared call's
-  score-led side (raw AI NO_TRADE and small gaps still trade; ties, invalid
-  scores and AI errors refuse), enters taker at the signal with a 5 bp price
-  cap and 15 s TTL, stands aside when the spread exceeds 1.68 bp or the BBO is
-  stale, and exits only at 60 minutes or a 40 bp catastrophic stop booked at the
-  crossing quote (no ladder, break-even, trail or target; one position). Its
-  label discloses "in-sample +$1.30 / 47 trades; expected heavy decay". All
-  four default OFF, are paper-only, and are relay-ineligible. The two ladder tiles carry a frozen registry
-  `pre_registration` scored by the analyzer's paired comparison against Tile 1
-  on identical signals: promotion (owner review, never relay) needs >=400 fills
-  over >=14 days, conservative per-fill EV lower 95% CI > 0, both halves
-  positive, Deflated Sharpe >= 0.95 across live hypotheses, and a positive
-  paired lower CI against Tile 1; kill on per-fill EV upper CI < 0 after 150
-  fills, a paired upper CI < 0 against Tile 1 after 300 signals, a stop failure,
-  drawdown above $1.50, or 21 days without promotion. Trend Fade 60 has its own
-  trade-count pre-registration: promotion (owner review) needs >=150 trades, a
-  per-trade EV lower 95% CI > 0, both halves positive and no 2 h window above 30%
-  of profit; kill when down $0.40 after 40 trades, not positive after 80, any
-  trade worse than -60 bp, drawdown above $1.00, or day 14 without promotion.
-  The paired view compares it with Tile 1 (the AI's own side). The five former family tiles
-  and the Continuous comparison label are retired (`RETIRED_TILE_LANES`); a
-  future tile is promoted only if it passes the OOS promotion gate.
+- One tile is registered: Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`), an
+  owner-approved paper beta with no proven edge. It consumes the shared AI call
+  with its own lock, orders, positions, ledger and analyzer cohort. Its own lane
+  admission trades the opposite of the shared call's score-led side (raw AI
+  NO_TRADE and small gaps still trade; ties, invalid scores and AI errors
+  refuse), enters taker at the signal with a 5 bp price cap and 15 s TTL, stands
+  aside when the spread exceeds 1.68 bp or the BBO is stale, and exits only at 60
+  minutes or a 40 bp catastrophic stop booked at the crossing quote (no ladder,
+  break-even, trail or target; one position). Its label discloses "in-sample
+  +$1.30 / 47 trades; expected heavy decay". It defaults OFF in source (the
+  deploy turns it ON), is paper-only, and is relay-ineligible. Its frozen
+  trade-count pre-registration: promotion (owner review, never relay) needs
+  >=150 trades, a per-trade EV lower 95% CI > 0, both halves positive and no 2 h
+  window above 30% of profit; kill when down $0.40 after 40 trades, not positive
+  after 80, any trade worse than -60 bp, drawdown above $1.00, or day 14 without
+  promotion. Its policy epoch and signature are pinned so its cohort continues
+  across registry-version bumps; it has no paired control since the Dynamic
+  Adaptive tiles were retired on 2026-10-02. The three Dynamic Adaptive tiles
+  (`FAMILY_ADAPTIVE_REGIME`, `FAMILY_ADAPTIVE_REGIME_LADDER`,
+  `FAMILY_ADAPTIVE_REGIME_LADDER_BE`), the five former family tiles and the
+  Continuous comparison label are retired (`RETIRED_TILE_LANES`); their history
+  is opaque archive data. A future tile is promoted only if it passes the OOS
+  promotion gate.
   The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.
 - Adding a tile requires one registry specification with a unique lane, policy

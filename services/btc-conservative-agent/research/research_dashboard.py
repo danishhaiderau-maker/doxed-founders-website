@@ -7053,7 +7053,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <p class="note" id="exit-combos-note">Exit reason × AI × spread × peak MFE × time-in-trade × lane.</p>
     <div class="kpis" id="exit-combos-kpis"></div>
     <h3>Pre-registered tile comparison - identical signals</h3>
-    <p class="note">Tile 1 vs Tile 2 vs Tile 3 on the same shared AI call. A signal is paired only when both tiles closed a fill from it. EV in bp of notional per fill; 95% CI from a 6 h-cluster bootstrap. Verdicts follow each tile's frozen registry pre-registration and are advisory: kill means the owner toggles OFF and retires, promotion means owner review, never relay.</p>
+    <p class="note">Every registered tile on the same shared AI call; with a single registered tile there is no paired control and the pairs table stays empty. A signal is paired only when both tiles closed a fill from it. EV in bp of notional per fill; 95% CI from a 6 h-cluster bootstrap. Verdicts follow each tile's frozen registry pre-registration and are advisory: kill means the owner toggles OFF and retires, promotion means owner review, never relay.</p>
     <table><thead><tr><th>Tile</th><th>Fills</th><th>Days</th><th>EV bp/fill [95% CI]</th><th>Halves</th><th>Win %</th><th>Max DD</th><th>Hard stops /50</th><th>Max lock overshoot bp</th><th>Verdict</th></tr></thead><tbody id="tile-paired-tiles-body"></tbody></table>
     <table><thead><tr><th>Challenger - control</th><th>Paired signals</th><th>Mean diff bp [95% CI]</th><th>Win % on paired signals (control / challenger)</th><th>Challenger better</th><th>Unpaired control / challenger</th></tr></thead><tbody id="tile-paired-pairs-body"></tbody></table>
     <p class="note" id="tile-paired-note"></p>
@@ -8192,7 +8192,9 @@ async function loadTilePairedComparison() {
   }).join('') || '<tr><td colspan="10">No registry tiles.</td></tr>';
   pairsBody.innerHTML = (d.paired || []).map(p =>
     `<tr><td>${p.challenger} - ${p.control}</td><td>${p.paired_signals}</td><td>${num(p.mean_difference_bp, 2)}${ci(p.difference_ci95_bp)}</td><td>${winPctLabel(p.control_wins, p.control_losses, p.paired_signals)} / ${winPctLabel(p.challenger_wins, p.challenger_losses, p.paired_signals)}</td><td>${p.challenger_better_signals ?? 'n/a'}</td><td>${p.unpaired_control_fills ?? 'n/a'} / ${p.unpaired_challenger_fills ?? 'n/a'}</td></tr>`
-  ).join('') || '<tr><td colspan="6">No paired signals yet.</td></tr>';
+  ).join('') || ((d.tile_order || []).length < 2
+    ? '<tr><td colspan="6">No paired control: only one registered tile.</td></tr>'
+    : '<tr><td colspan="6">No paired signals yet.</td></tr>');
   const all = d.all_tiles_paired || {};
   if (note) note.textContent = `Signals filled by every tile: ${all.signals_filled_by_every_tile ?? 'n/a'}. Cohort ${d.cohort || 'n/a'}; Deflated Sharpe trials = ${d.deflated_sharpe_trials ?? 'n/a'} live hypotheses; generated ${d.generated_at || 'n/a'}.`;
 }

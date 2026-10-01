@@ -484,8 +484,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert score_child.stdout.splitlines() == [
-        "v31-dynamic-adaptive-ladder-paper-v4",
-        "35860f9d58614d5a80fc84a1630612aaf58609c6b38b398b5d37b45b01a343af",
+        "v31-trend-fade-single-tile-v5",
+        "2d44035c5756e90fa6a1a2d13620148f2b47fec543b3577cff55f6d378fe0572",
     ]
 
     monkeypatch.delenv("SCORE_LED_PAPER_RESEARCH_ENABLED", raising=False)
@@ -499,8 +499,8 @@ def test_child_registry_identity_matches_parent_mode_without_credentials(monkeyp
         text=True,
     )
     assert hypothesis_child.stdout.splitlines() == [
-        "v31-dynamic-adaptive-ladder-paper-v4",
-        "7a00d768359af7621938835b6004d5f3b48b5e715e7a20a8d004a03f28959f29",
+        "v31-trend-fade-single-tile-v5",
+        "339dedf655c5c5a1f8bcf5847d43e1c23b1db36ccba4b651aa7682109f65cdb6",
     ]
 
 
