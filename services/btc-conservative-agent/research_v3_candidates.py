@@ -1414,8 +1414,11 @@ def evaluate_protection_screen(
             if state not in {"FULL_FILL", "PARTIAL_FILL", "NO_FILL", "NO_TRADE", "REJECTED", "REALIZED_ZERO_PNL"}
         )
         regime_breakdown = {}
-        for regime in sorted({str(row.get("regime") or "UNKNOWN") for row in oos}):
-            regime_rows = [row for row in oos if str(row.get("regime") or "UNKNOWN") == regime]
+        oos_by_regime: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in oos:
+            oos_by_regime[str(row.get("regime") or "UNKNOWN")].append(row)
+        for regime in sorted(oos_by_regime):
+            regime_rows = oos_by_regime[regime]
             regime_pnls = [
                 float(((row.get("policy_outcomes") or {}).get(policy_id) or {}).get("net_pnl_usd"))
                 for row in regime_rows

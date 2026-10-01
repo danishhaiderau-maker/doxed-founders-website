@@ -579,6 +579,21 @@ def _declared_delayed_variants(episode, generation):
     if not isinstance(declarations,list) or len(declarations)>64:
         return [{'status':'UNKNOWN','reason_codes':['TIMING_DECLARATION_LIST_INVALID'],'results':[]}]
     variants=[]
+    # The pinned coverage tape is identical for every timing x baseline pair of
+    # this episode; verify it once and replay the same result or error.
+    verified_tape={}
+    def episode_tape(evidence,bindings):
+        if 'error' in verified_tape:
+            raise verified_tape['error']
+        if 'tape' not in verified_tape:
+            try:
+                verified_tape['tape']=verified_segment_rows(evidence,bindings,pins,
+                    {key:opportunity.get(key) for key in IDENTITY_FIELDS},capture['symbol'])
+            except (ValueError,TypeError,KeyError,AttributeError,ArithmeticError) as exc:
+                verified_tape['error']=exc
+                raise
+        tape,hashes=verified_tape['tape']
+        return list(tape),list(hashes)
     for timing in declarations:
         if not isinstance(timing,Mapping) or timing.get('source_capture_signature')!=capture.get('capture_signature'):
             continue
@@ -595,8 +610,7 @@ def _declared_delayed_variants(episode, generation):
                     raise ValueError('DELAYED_SINGLE_PINNED_SEGMENT_REQUIRED')
                 evidence=[item['object'] for item in coverage]
                 bindings=[item['binding'] for item in coverage]
-                tape,_=verified_segment_rows(evidence,bindings,pins,
-                    {key:opportunity.get(key) for key in IDENTITY_FIELDS},capture['symbol'])
+                tape,_=episode_tape(evidence,bindings)
                 inputs=(conditional_directional_baseline_inputs if conditional else declared_directional_baseline_inputs)(capture,baseline)
                 replay=(replay_conditional_delayed_entry if conditional else replay_delayed_entry)(schedule=capture['schedules'][baseline['baseline_id']]['schedule'],
                     delay_sec=timing.get('delay_sec'),ordering_treatment=timing.get('ordering_treatment'),

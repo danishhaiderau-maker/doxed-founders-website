@@ -14,6 +14,12 @@ published at the deployed revision.
 
 The live shadow tree is never written; the puller's run lock is held while
 copying so no segment is applied mid-copy.
+
+The view persists between cycles and is updated incrementally: unchanged files
+(same source and view size/mtime as the index recorded) are reused, append-only
+growth is verified against the recorded prefix hash and only the tail is
+written, and anything else is recopied. A periodic verify pass re-hashes every
+reused file; a missing or unreadable index forces a full rebuild.
 """
 
 from __future__ import annotations
@@ -24,6 +30,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +41,12 @@ from research_segment_store import HttpSegmentSource, StoreError
 
 HEARTBEAT_NAME = ".segment-promotion.heartbeat.json"
 SYNC_STATE_NAME = ".fly-sync-state.json"
+INDEX_NAME = ".segment-promotion.index.json"
+INDEX_SCHEMA = "research_segment_promotion_index_v1"
+VIEW_CONTROL_NAMES = frozenset({HEARTBEAT_NAME, SYNC_STATE_NAME, INDEX_NAME})
 RECEIPT_SCHEMA = "research_segment_promotion_view_v1"
+DEFAULT_VERIFY_INTERVAL_SEC = 24 * 3600
+_CHUNK = 4 * 1024 * 1024
 DEFAULT_MAX_UNSHIPPED_BYTES = 32 * 1024 * 1024
 # Per-append integrity caches keyed to the Fly inode/mtime of their source;
 # meaningless off-host and never read by the analyzer.
@@ -54,9 +66,71 @@ def _utc_now() -> str:
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        for chunk in iter(lambda: handle.read(_CHUNK), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _copy_hashed(source: Path, target: Path) -> str:
+    """Copy source to target in one pass, returning the sha256 of the bytes written."""
+    digest = hashlib.sha256()
+    with source.open("rb") as src, target.open("wb") as dst:
+        for chunk in iter(lambda: src.read(_CHUNK), b""):
+            digest.update(chunk)
+            dst.write(chunk)
+    shutil.copystat(source, target)
+    return digest.hexdigest()
+
+
+def _append_tail(source: Path, target: Path, prefix_size: int, prefix_sha: str) -> str | None:
+    """Append source[prefix_size:] to target if source starts with the recorded prefix.
+
+    Returns the full-file sha256, or None when the source prefix no longer
+    matches (the caller then recopies the whole file).
+    """
+    digest = hashlib.sha256()
+    with source.open("rb") as src:
+        remaining = prefix_size
+        while remaining:
+            chunk = src.read(min(_CHUNK, remaining))
+            if not chunk:
+                return None
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if digest.hexdigest() != prefix_sha:
+            return None
+        with target.open("r+b") as dst:
+            dst.seek(prefix_size)
+            for chunk in iter(lambda: src.read(_CHUNK), b""):
+                digest.update(chunk)
+                dst.write(chunk)
+            dst.truncate()
+    shutil.copystat(source, target)
+    return digest.hexdigest()
+
+
+def _load_index(view_root: Path) -> dict | None:
+    try:
+        index = json.loads((view_root / INDEX_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(index, dict) or index.get("schema") != INDEX_SCHEMA or not isinstance(index.get("files"), dict):
+        return None
+    return index
+
+
+def _write_json_atomic(path: Path, payload: dict, indent: int | None = None) -> None:
+    candidate = path.with_name(path.name + ".tmp")
+    candidate.write_text(json.dumps(payload, sort_keys=True, indent=indent), encoding="utf-8")
+    os.replace(candidate, path)
+
+
+def _clear_view(view_root: Path) -> None:
+    for child in view_root.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
 
 
 def deny_reasons(state: dict, head: dict, health: dict, tree: Path,
@@ -109,14 +183,19 @@ def genesis_window_end(manifest_raw: bytes | None) -> float | None:
 
 def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
                max_unshipped_bytes: int = DEFAULT_MAX_UNSHIPPED_BYTES,
-               genesis_at: float | None = None) -> dict:
+               genesis_at: float | None = None, full: bool = False,
+               verify_interval_sec: float = DEFAULT_VERIFY_INTERVAL_SEC,
+               now: float | None = None) -> dict:
     shadow_root = refuse_unsafe_root(shadow_root, "shadow root")
     view_root = refuse_unsafe_root(view_root, "promotion view")
     tree = shadow_root / "tree"
     if view_root.resolve() == tree.resolve() or tree.resolve() in view_root.resolve().parents:
         raise PromotionRefused(["VIEW_INSIDE_SHADOW_TREE"])
-    if view_root.exists() and any(view_root.iterdir()):
+    # Only a view this tool staged (it carries the index) may be updated in place.
+    index = _load_index(view_root) if view_root.is_dir() else None
+    if index is None and view_root.exists() and any(view_root.iterdir()):
         raise PromotionRefused(["VIEW_NOT_EMPTY"])
+    now = time.time() if now is None else now
     lock = _RunLock(shadow_root / ".puller" / "run.lock")
     try:
         state_path = shadow_root / ".puller" / "state.json"
@@ -124,17 +203,63 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         reasons = deny_reasons(state, head, health, tree, max_unshipped_bytes)
         if reasons:
             raise PromotionRefused(reasons)
-        sync_state, byte_count = {}, 0
+        view_root.mkdir(parents=True, exist_ok=True)
+        # The view is not consumable while it is being updated.
+        for name in (SYNC_STATE_NAME, HEARTBEAT_NAME):
+            (view_root / name).unlink(missing_ok=True)
+        rebuild = full or index is None
+        if rebuild:
+            _clear_view(view_root)
+            previous, last_verified = {}, now
+        else:
+            previous = index["files"]
+            last_verified = float(index.get("last_verified_at") or 0)
+        verify = not rebuild and now - last_verified >= verify_interval_sec
+        _write_json_atomic(view_root / INDEX_NAME, {"schema": INDEX_SCHEMA, "complete": False, "files": previous,
+                                                   "last_verified_at": last_verified})
+        files, sync_state, byte_count = {}, {}, 0
+        counts = {"reused": 0, "appended": 0, "copied": 0, "removed": 0}
+        written_bytes = 0
         for source in sorted(path for path in tree.rglob("*") if path.is_file()):
             relative = source.relative_to(tree).as_posix()
             target = view_root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+            src_stat = source.stat()
+            prior = previous.get(relative)
+            view_stat = target.stat() if prior and target.is_file() else None
+            view_intact = bool(view_stat and view_stat.st_size == prior["size"]
+                               and view_stat.st_mtime_ns == prior["mtime_ns"])
+            sha = None
+            if (view_intact and src_stat.st_size == prior.get("src_size")
+                    and src_stat.st_mtime_ns == prior.get("src_mtime_ns")):
+                sha = prior["sha256"]
+                if verify and (_sha256_file(target) != sha or _sha256_file(source) != sha):
+                    sha = None
+                else:
+                    counts["reused"] += 1
+            if sha is None and view_intact and src_stat.st_size > prior["size"]:
+                sha = _append_tail(source, target, prior["size"], prior["sha256"])
+                if sha is not None:
+                    counts["appended"] += 1
+                    written_bytes += src_stat.st_size - prior["size"]
+            if sha is None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                sha = _copy_hashed(source, target)
+                counts["copied"] += 1
+                written_bytes += src_stat.st_size
             stat = target.stat()
-            size = stat.st_size
-            sync_state[relative] = {"size": size, "sha256": _sha256_file(target),
-                                    "inode": int(stat.st_ino), "mtime_ns": int(stat.st_mtime_ns)}
-            byte_count += size
+            if stat.st_size != src_stat.st_size:
+                raise PromotionRefused([f"VIEW_SIZE_MISMATCH:{relative}"])
+            record = {"size": stat.st_size, "sha256": sha, "inode": int(stat.st_ino), "mtime_ns": int(stat.st_mtime_ns)}
+            sync_state[relative] = record
+            files[relative] = {**record, "src_size": src_stat.st_size, "src_mtime_ns": src_stat.st_mtime_ns}
+            byte_count += stat.st_size
+        for stale in sorted(path for path in view_root.rglob("*") if path.is_file()):
+            relative = stale.relative_to(view_root).as_posix()
+            if relative not in files and relative not in VIEW_CONTROL_NAMES and not relative.endswith(".tmp"):
+                stale.unlink()
+                counts["removed"] += 1
+        _write_json_atomic(view_root / INDEX_NAME, {"schema": INDEX_SCHEMA, "complete": True, "files": files,
+                                                   "last_verified_at": now if verify else last_verified})
     finally:
         lock.release()
     revision = str(state["last_source_git_rev"]).lower()
@@ -160,6 +285,9 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
     (view_root / HEARTBEAT_NAME).write_text(json.dumps(heartbeat, sort_keys=True, indent=2), encoding="utf-8")
     return {"schema": RECEIPT_SCHEMA, "staged_at": _utc_now(), "view": str(view_root),
             "files": len(sync_state), "bytes": byte_count, "applied_seq": state["applied_seq"],
+            "mode": "FULL_REBUILD" if rebuild else ("INCREMENTAL_VERIFIED" if verify else "INCREMENTAL"),
+            "files_reused": counts["reused"], "files_appended": counts["appended"],
+            "files_copied": counts["copied"], "files_removed": counts["removed"], "bytes_written": written_bytes,
             "head_manifest_sha256": state["last_manifest_sha256"], "source_revision": revision}
 
 
@@ -176,6 +304,8 @@ def main(argv=None) -> int:
                         or "https://doxed-btc-bot.fly.dev")
     parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v2")
     parser.add_argument("--max-unshipped-bytes", type=int, default=DEFAULT_MAX_UNSHIPPED_BYTES)
+    parser.add_argument("--full", action="store_true", help="rebuild the view from scratch")
+    parser.add_argument("--verify-interval-sec", type=float, default=DEFAULT_VERIFY_INTERVAL_SEC)
     args = parser.parse_args(argv)
     try:
         source = HttpSegmentSource(base_url=args.base_url, prefix=args.prefix,
@@ -183,7 +313,8 @@ def main(argv=None) -> int:
         receipt = stage_view(shadow_root=Path(args.shadow_root), view_root=Path(args.view),
                              head=source.head(), health=_health(args.base_url),
                              max_unshipped_bytes=args.max_unshipped_bytes,
-                             genesis_at=genesis_window_end(source.get(fmt.manifest_key(args.prefix, 1))))
+                             genesis_at=genesis_window_end(source.get(fmt.manifest_key(args.prefix, 1))),
+                             full=args.full, verify_interval_sec=args.verify_interval_sec)
     except PromotionRefused as exc:
         print(json.dumps({"ok": False, "deny_reasons": exc.reasons}, indent=2))
         return 3

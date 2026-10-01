@@ -4,7 +4,8 @@
 # Windows PowerShell 5.1 compatible. Never prints credentials.
 #
 # Exit codes: 0 analyzer pass completed; 3 promotion refused after retries;
-# 4 migration failed; otherwise run-analyzer-once.ps1's exit code.
+# 4 migration failed; 5 checkout does not contain the deployed revision;
+# otherwise run-analyzer-once.ps1's exit code.
 param(
   [string]$RepoRoot = '',
   [string]$CanonicalRoot = '',
@@ -74,8 +75,11 @@ $lockWaitStart = $null
 $previous = $ErrorActionPreference
 for ($attempt = 1; $attempt -le $PromotionAttempts; $attempt++) {
   Set-CycleStatus 'PROMOTION'
-  # The view is this runner's own staging copy; each cycle starts empty.
-  if (Test-Path -LiteralPath $ViewRoot) { Remove-Item -LiteralPath $ViewRoot -Recurse -Force }
+  # The view is this runner's own staging copy and is updated incrementally;
+  # one without the promotion index (legacy or foreign) is cleared first.
+  if ((Test-Path -LiteralPath $ViewRoot) -and -not (Test-Path -LiteralPath (Join-Path $ViewRoot '.segment-promotion.index.json'))) {
+    Remove-Item -LiteralPath $ViewRoot -Recurse -Force
+  }
   $ErrorActionPreference = 'Continue'
   try {
     $null = & $Python @pullArgs 2>&1 | Out-String
@@ -111,6 +115,24 @@ try {
 $migrationExit = $LASTEXITCODE
 Write-ChainLog -Config $cfg -Name $logName -Message ("MIGRATION exit={0} {1}" -f $migrationExit, $migration)
 if ($migrationExit -ne 0) { Stop-Cycle 4 }
+
+# The analyzer must run code that contains the revision Fly was running when
+# this data was promoted; an older checkout ran the 02:40Z flyMatch=False pass
+# that crashed natively. The supervisor's auto fast-forward fixes the checkout
+# before the retry.
+$heartbeat = Read-JsonFile (Join-Path $ViewRoot '.segment-promotion.heartbeat.json')
+$deployedRev = if ($heartbeat) { [string]$heartbeat.deployedRevision } else { '' }
+$deployedFull = if ($deployedRev) { Resolve-FullRevision -RepoRoot $cfg.RepoRoot -Revision $deployedRev } else { $null }
+$checkoutHead = ([string]((Invoke-NativeQuiet { & git -C $cfg.RepoRoot rev-parse HEAD }) | Select-Object -First 1)).Trim()
+$containsDeployed = $false
+if ($deployedFull) {
+  Invoke-NativeQuiet { & git -C $cfg.RepoRoot merge-base --is-ancestor $deployedFull $checkoutHead } | Out-Null
+  $containsDeployed = ($LASTEXITCODE -eq 0)
+}
+if (-not $containsDeployed) {
+  Write-ChainLog -Config $cfg -Name $logName -Message ("ANALYZER_REVISION_MISMATCH checkout={0} deployed={1}" -f $checkoutHead, $deployedRev)
+  Stop-Cycle 5
+}
 Set-CycleStatus 'ANALYZER'
 
 # Promotion plus migration outlive the default 10-minute receipt SLA as the
