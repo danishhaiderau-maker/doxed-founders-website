@@ -84,6 +84,10 @@ def split_execution_truth(row: dict) -> dict:
         "actual_pnl_usd": row.get("actual_bitfinex_realized_pnl_usd"),
     }
     cohort = divergence_cohort(row, showcase, bitfinex, evidence, copy_fill)
+    # Closed ledger rows carry no ``executed`` flag; an exit with a fill or
+    # entry price proves the paper position was filled. An explicit false wins.
+    if row.get("executed") is None and row.get("exit_reason") and showcase["fill_price"] is not None:
+        showcase["executed"] = True
     relationship = {
         "divergence_classification": overlay.get("divergence_classification") or copy_fill.get("divergence_reason") or cohort,
         "divergence_cohort": cohort,
