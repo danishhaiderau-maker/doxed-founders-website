@@ -32,6 +32,12 @@ try {
     Write-ChainLog -Config $cfg -Name $logName -Message "SEGMENT_PULL_STARTED pid=$($segmentLoop.Id)"
   }
 
+  # Read-only Fly v2 shipper head, runtime, deploy-run and relay-status
+  # snapshots; never fails the tick. Refreshed before the fast-forward so a
+  # deploy that finished since the last tick is followed before a cycle starts.
+  $snapshots = (& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots 2>&1 |
+    Select-Object -Last 1) -as [string]
+
   # Follow Fly to a successfully deployed revision before any cycle starts, so
   # promotion and the analyzer run the code Fly runs. Opt out with
   # <StateDir>\v2c-auto-ff.disabled. Never fails the tick.
@@ -65,9 +71,6 @@ try {
     }
   }
 
-  # Read-only Fly v2 shipper head and relay-status snapshots; never fails the tick.
-  $snapshots = (& $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-status-snapshots.ps1') @roots 2>&1 |
-    Select-Object -Last 1) -as [string]
   & $powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'laptop-chain-monitor.ps1') @roots | Out-Null
   $monitorExit = $LASTEXITCODE
   # Unattended-proof row (at most every 30 min) from the snapshots and alert
