@@ -275,6 +275,7 @@ class SegmentShipper:
         # stream -> (consecutive races, retry-not-before); in memory only, so a
         # restart retries every stream once.
         self.race_backoff: dict[str, tuple[int, float]] = {}
+        self.build_raced: list[PlanRace] = []
         self.store = store
         self.volume_root = Path(volume_root).resolve()
         self.runtime_root = Path(runtime_root).resolve()
@@ -714,19 +715,35 @@ class SegmentShipper:
     def _build(self, state, selected, new_state, files, tombstones, payloads, members, seq,
                generation_of) -> tuple[bytes, bytes, dict]:
         snapshot_file = None
+        # A racing stream is skipped in place (with any later ops of the same
+        # stream, which depend on it) so one hot file costs neither a rebuild
+        # nor the rest of the segment.
+        self.build_raced = []
+        skipped: set[str] = set()
+        shipped_ops: list[dict] = []
         for op in selected:
             relpath, kind = op["path"], op["kind"]
+            if op["stream"] in skipped:
+                continue
             try:
-                if self._sqlite_snapshot_op(op):
-                    if len(selected) != 1:
-                        raise RuntimeError("a SQLite snapshot must be the only segment member")
-                    snapshot_file, size, digest = self._snapshot_sqlite(op)
-                    raw, extra = b"", {"consistency": SQLITE_CONSISTENCY}
-                else:
-                    raw, extra = self._read(op)
-                    size, digest = len(raw), fmt.sha256_bytes(raw)
-            except FileNotFoundError as exc:
-                raise PlanRace(f"{op['path']} vanished before it was read", op["stream"]) from exc
+                try:
+                    if self._sqlite_snapshot_op(op):
+                        if len(selected) != 1:
+                            raise RuntimeError("a SQLite snapshot must be the only segment member")
+                        snapshot_file, size, digest = self._snapshot_sqlite(op)
+                        raw, extra = b"", {"consistency": SQLITE_CONSISTENCY}
+                    else:
+                        raw, extra = self._read(op)
+                        size, digest = len(raw), fmt.sha256_bytes(raw)
+                except FileNotFoundError as exc:
+                    raise PlanRace(f"{op['path']} vanished before it was read", op["stream"]) from exc
+            except PlanRace as exc:
+                if exc.stream is None:
+                    raise
+                skipped.add(op["stream"])
+                self.build_raced.append(exc)
+                continue
+            shipped_ops.append(op)
             member = {"index": len(members), "kind": kind, "path": relpath,
                       "size": size, "sha256": digest}
             if kind in (fmt.KIND_APPEND, fmt.KIND_SEAL):
@@ -777,6 +794,8 @@ class SegmentShipper:
                     files[relpath].update({"size": int(stat.st_size), "snapshot_size": size,
                                            "wal": op["wal"]})
                 tombstones.pop(relpath, None)
+        if not members:
+            raise self.build_raced[-1]
         if snapshot_file is not None:
             segment_raw = fmt.build_segment_from_file(snapshot_file, members[0]["size"])
         else:
@@ -784,7 +803,7 @@ class SegmentShipper:
         # The window is derived from source mtimes, not the wall clock, so a
         # rebuild over the same bytes yields a byte-identical manifest.
         previous_end = float(state.get("last_window_end") or 0.0)
-        mtimes = [op["stat"].st_mtime_ns / 1e9 for op in selected if op.get("stat") is not None]
+        mtimes = [op["stat"].st_mtime_ns / 1e9 for op in shipped_ops if op.get("stat") is not None]
         window_end = max([previous_end, *mtimes])
         manifest = fmt.build_manifest(
             prefix=self.prefix, seq=seq, prev_manifest_sha256=state["last_manifest_sha256"],
@@ -974,27 +993,34 @@ class SegmentShipper:
         while selected:
             try:
                 segment_raw, manifest_raw, new_state = self.build(state, selected)
-                break
             except PlanRace as exc:
                 if exc.stream is None:
                     raise
-                # Nothing was written: back the racing stream off and rebuild the
-                # other streams (they never depend on each other) in this cycle.
-                self._back_off(exc.stream)
-                raced.append(exc.stream)
-                dropped = [op for op in selected if op["stream"] == exc.stream]
-                selected = [op for op in selected if op["stream"] != exc.stream]
-                deferred += sum(op["bytes"] for op in dropped)
-                if not dropped or len(raced) > RACE_REBUILDS_PER_CYCLE:
-                    deferred += sum(op["bytes"] for op in selected)
-                    selected = []
-                if not selected:
-                    self.last_deferred = deferred
-                    self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
-                                      last_error=f"PLAN_RACE: {exc}", racing_paths=self.racing_paths(),
-                                      **mode)
-                    return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred,
-                            "race": exc.stream, **mode}
+                # Nothing was written: every selected stream raced.
+                failure = exc
+            else:
+                failure = None
+            # Racing streams are backed off and deferred; the rest of the build
+            # (streams never depend on each other) ships in this same pass.
+            race_streams = list(dict.fromkeys(item.stream for item in self.build_raced))
+            for stream in race_streams:
+                self._back_off(stream)
+            raced.extend(race_streams)
+            dropped = [op for op in selected if op["stream"] in race_streams]
+            selected = [op for op in selected if op["stream"] not in race_streams]
+            deferred += sum(op["bytes"] for op in dropped)
+            if failure is None:
+                break
+            if not dropped or len(raced) > RACE_REBUILDS_PER_CYCLE:
+                deferred += sum(op["bytes"] for op in selected)
+                selected = []
+            if not selected:
+                self.last_deferred = deferred
+                self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
+                                  last_error=f"PLAN_RACE: {failure}", racing_paths=self.racing_paths(),
+                                  **mode)
+                return {"shipped": None, "recovered": recovered, "deferred_bytes": deferred,
+                        "race": failure.stream, **mode}
         self.last_deferred = deferred
         if new_state is None:
             self.write_status(shipped_seq=state["seq"], unshipped_bytes=deferred,
