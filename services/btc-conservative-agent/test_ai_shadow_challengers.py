@@ -1,3 +1,4 @@
+import pytest
 """Shadow AI challenger log, compact prompt, tape features and dead-input alarm."""
 
 import json
@@ -191,8 +192,15 @@ def test_compact_prompt_facts_render_and_parse():
     ok = shadow.parse_compact_response('{"p_long_success":0.61,"p_short_success":0.40,"abstain":false,"drivers":["trend","bogus"]}')
     assert ok["parse_status"] == "OK" and ok["drivers"] == ["TREND"]
     assert shadow.compact_side(ok) == "LONG"
-    weak = shadow.parse_compact_response('{"p_long_success":0.55,"p_short_success":0.45,"abstain":false}')
+    gap = shadow.parse_compact_response('{"p_long_success":0.42,"p_short_success":0.38,"abstain":false}')
+    assert shadow.compact_side(gap) == "LONG"
+    short = shadow.parse_compact_response('{"p_long_success":0.36,"p_short_success":0.44,"abstain":false}')
+    assert shadow.compact_side(short) == "SHORT"
+    weak = shadow.parse_compact_response('{"p_long_success":0.52,"p_short_success":0.50,"abstain":false}')
     assert shadow.compact_side(weak) == "NONE"
+    summary = shadow.compact_summary(gap)
+    assert summary["side_rule"] == shadow.COMPACT_SIDE_RULE and summary["side"] == "LONG"
+    assert summary["gap"] == pytest.approx(0.04)
     assert shadow.parse_compact_response("not json")["parse_status"] == "INVALID_JSON"
     assert shadow.parse_compact_response('{"p_long_success":1.4,"p_short_success":0.2,"abstain":false}')["parse_status"] == "OUT_OF_RANGE_OR_MISSING"
     abstain = shadow.parse_compact_response('{"p_long_success":0.7,"p_short_success":0.3,"abstain":true}')
@@ -460,7 +468,10 @@ def test_challenger_hook_logs_rows_and_never_touches_orders():
         assert row["gates_orders"] is False and row["row_kind"] == "CALL"
         assert row["sides"]["compact_v5"] == "LONG"
         assert row["score_led_admission_side"] == row["sides"]["llm_score_led"] == "LONG"
-        assert row["win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
+        assert row["main_ai_win_prob_status"] == "NOT_REQUESTED_BY_PROMPT"
+        assert row["main_ai_win_prob"] is None
+        assert row["win_prob_status"] == "COMPACT_SHADOW_P_SUCCESS_SCORE_LED_SIDE"
+        assert row["win_prob"] == 64.0 and row["win_prob_source"] == shadow.COMPACT_PROMPT_ID
         assert row["sides"]["leader_10s"] == "SHORT"
         assert row["leader_features"]["leader_venue"] == "binance"
         assert row["leader_features"]["anchor_bucket_ts"] == anchor

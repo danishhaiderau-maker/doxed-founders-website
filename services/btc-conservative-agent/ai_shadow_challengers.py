@@ -35,7 +35,12 @@ MATURITY_GRACE_SEC = 120
 TAPE_RING_SECONDS = 3 * 3600 + 900
 
 ABSTAIN_GAP_FLOOR = 5
-COMPACT_MIN_EDGE = 0.08
+# The model's success probabilities are calibrated below 0.5 for both sides
+# (median ~0.42/0.40), so an absolute edge over a coin flip never fired. The
+# side is the more likely direction when the two probabilities differ by at
+# least COMPACT_MIN_GAP; rows carry COMPACT_SIDE_RULE so cohorts never mix rules.
+COMPACT_MIN_GAP = 0.04
+COMPACT_SIDE_RULE = "relative_gap_0.04_v2"
 
 GEOMETRY_MODEL = "TILE_GEOMETRY_PROXY_V1"
 GEOMETRY_FILL_WINDOW_SEC = 1200
@@ -319,8 +324,23 @@ def compact_side(parsed: Optional[Mapping[str, Any]]) -> str:
     p_long, p_short = parsed.get("p_long_success"), parsed.get("p_short_success")
     if p_long is None or p_short is None or p_long == p_short:
         return NONE
-    side, best = (LONG, p_long) if p_long > p_short else (SHORT, p_short)
-    return side if best - 0.5 >= COMPACT_MIN_EDGE else NONE
+    side = LONG if p_long > p_short else SHORT
+    return side if abs(p_long - p_short) >= COMPACT_MIN_GAP - 1e-9 else NONE
+
+
+def compact_summary(parsed: Optional[Mapping[str, Any]]) -> dict:
+    """Raw compact probabilities and the rule that turned them into a side."""
+    parsed = parsed if isinstance(parsed, Mapping) else {}
+    p_long, p_short = _finite(parsed.get("p_long_success")), _finite(parsed.get("p_short_success"))
+    return {
+        "side_rule": COMPACT_SIDE_RULE,
+        "min_gap": COMPACT_MIN_GAP,
+        "parse_status": parsed.get("parse_status"),
+        "p_long_success": p_long,
+        "p_short_success": p_short,
+        "gap": None if p_long is None or p_short is None else round(p_long - p_short, 4),
+        "side": compact_side(parsed),
+    }
 
 
 def compute_challenger_sides(ctx: Mapping[str, Any], ai_result: Mapping[str, Any],
@@ -369,6 +389,7 @@ def compute_challenger_sides(ctx: Mapping[str, Any], ai_result: Mapping[str, Any
             "ai_error": not ai_ok,
         },
         "rule_votes": vote["votes"],
+        "compact": compact_summary(compact),
     }
 
 

@@ -747,6 +747,76 @@ def new_grid_state(rows: Sequence[Mapping[str, Any]]) -> dict:
     }
 
 
+TOUCH_FLAGS_VERSION = "quote_cross_trade_through_queue_v2"
+AT_LIMIT_TOL_USD = 0.5
+CERTAIN_QUOTE_CROSS = "CERTAIN_QUOTE_CROSS"
+CERTAIN_TRADE_THROUGH = "CERTAIN_TRADE_THROUGH"
+UNCERTAIN_AT_LIMIT_QUEUE = "UNCERTAIN_AT_LIMIT_QUEUE"
+UNCERTAIN_RANGE_ONLY = "UNCERTAIN_RANGE_ONLY"
+CERTAIN_FILLS = (CERTAIN_QUOTE_CROSS, CERTAIN_TRADE_THROUGH)
+
+
+def classify_touch(
+    *, side: str, limit_price: float, last: Optional[float], high: Optional[float] = None,
+    low: Optional[float] = None, bid: Optional[float] = None, ask: Optional[float] = None,
+    bid_qty: Optional[float] = None, ask_qty: Optional[float] = None,
+) -> dict:
+    """How strongly a touch implies a resting maker limit would really have filled.
+
+    * quote cross - the opposite best quote reached the limit, so a resting
+      order there would have been taken (certain);
+    * trade through - a print strictly beyond the limit, so every order at
+      the limit was consumed first (certain);
+    * print at the limit only - the order fills only if the queue ahead of it
+      traded; ``queue_ahead_upper_btc`` is the displayed same-side L1 size
+      when the best same-side price equals the limit (an upper bound, since
+      some of it may have joined behind us), otherwise unknown.
+    """
+    sell = str(side).lower() == "sell"
+    limit = float(limit_price)
+
+    def ok(v):
+        return v is not None and float(v) > 0
+
+    quote_cross = bool(ok(bid) and float(bid) >= limit) if sell else bool(ok(ask) and float(ask) <= limit)
+    trade_through = bool(ok(last) and float(last) > limit + AT_LIMIT_TOL_USD) if sell \
+        else bool(ok(last) and float(last) < limit - AT_LIMIT_TOL_USD)
+    at_limit = bool(ok(last) and abs(float(last) - limit) <= AT_LIMIT_TOL_USD)
+    range_only = bool(
+        (sell and ok(high) and float(high) >= limit) or (not sell and ok(low) and float(low) <= limit)
+    ) and not (quote_cross or trade_through or at_limit)
+    same_best, same_qty = (ask, ask_qty) if sell else (bid, bid_qty)
+    queue_ahead = None
+    if at_limit and ok(same_best) and abs(float(same_best) - limit) <= AT_LIMIT_TOL_USD and same_qty is not None:
+        queue_ahead = round(float(same_qty), 6)
+    if quote_cross:
+        certainty = CERTAIN_QUOTE_CROSS
+    elif trade_through:
+        certainty = CERTAIN_TRADE_THROUGH
+    elif at_limit:
+        certainty = UNCERTAIN_AT_LIMIT_QUEUE
+    elif range_only:
+        certainty = UNCERTAIN_RANGE_ONLY
+    else:
+        certainty = None
+    opposite = bid if sell else ask
+    gap_bp = None
+    if ok(opposite):
+        gap_bp = round(((limit - float(opposite)) if sell else (float(opposite) - limit)) / limit * 1e4, 3)
+    return {
+        "touch_flags_version": TOUCH_FLAGS_VERSION,
+        "quote_cross": quote_cross,
+        "trade_through": trade_through,
+        "trade_print_at_limit": at_limit,
+        "fill_certainty": certainty,
+        "opposite_quote_gap_bp": gap_bp,
+        "queue_ahead_upper_btc": queue_ahead,
+        "queue_ahead_status": "L1_SAME_SIDE_AT_LIMIT" if queue_ahead is not None else (
+            "UNKNOWN_NOT_AT_BEST" if at_limit else "NOT_APPLICABLE"),
+        "high_low_source": "LAST_ONLY" if high in (None, last) and low in (None, last) else "RANGE",
+    }
+
+
 def poll_grid_state(
     state: dict,
     *,
@@ -756,15 +826,42 @@ def poll_grid_state(
     low: Optional[float] = None,
     bid: Optional[float] = None,
     ask: Optional[float] = None,
+    bid_qty: Optional[float] = None,
+    ask_qty: Optional[float] = None,
 ) -> list:
-    """Return newly touched overlay rows. Never places orders."""
+    """Return newly touched overlay rows. Never places orders.
+
+    The first touch of each offset emits ``TOUCHED`` (unchanged contract) with
+    the touch classification. An offset whose first touch was uncertain keeps
+    being polled and emits one ``CERTAIN_TOUCH`` row when a quote cross or a
+    trade-through later proves the fill.
+    """
     if not state or now_ts > float(state.get("expires_ts") or 0):
         return []
     direction = state.get("direction") or "SHORT"
     side = "sell" if str(direction).upper() == "SHORT" else "buy"
     out = []
     for offset_pct, slot in state["offsets"].items():
+        if slot.get("certain_ts") is not None:
+            continue
         if slot["touched"]:
+            flags = classify_touch(side=side, limit_price=slot["limit_price"], last=last, high=high,
+                                   low=low, bid=bid, ask=ask, bid_qty=bid_qty, ask_qty=ask_qty)
+            if flags["fill_certainty"] in CERTAIN_FILLS:
+                slot["certain_ts"] = now_ts
+                out.append({
+                    "schema": TOUCH_GRID_SCHEMA,
+                    "event": "CERTAIN_TOUCH",
+                    "trade_id": state["trade_id"],
+                    "direction": direction,
+                    "offset_pct": offset_pct,
+                    "limit_price": slot["limit_price"],
+                    "first_touch_ts": slot["touch_ts"],
+                    "certain_ts": now_ts,
+                    "sec_after_first_touch": round(now_ts - float(slot["touch_ts"]), 3),
+                    "last": last, "bid": bid, "ask": ask,
+                    **flags,
+                })
             continue
         if pending_limit_touched(
             side=side,
@@ -775,8 +872,12 @@ def poll_grid_state(
             bid=bid,
             ask=ask,
         ):
+            flags = classify_touch(side=side, limit_price=slot["limit_price"], last=last, high=high,
+                                   low=low, bid=bid, ask=ask, bid_qty=bid_qty, ask_qty=ask_qty)
             slot["touched"] = True
             slot["touch_ts"] = now_ts
+            if flags["fill_certainty"] in CERTAIN_FILLS:
+                slot["certain_ts"] = now_ts
             out.append({
                 "schema": TOUCH_GRID_SCHEMA,
                 "event": "TOUCHED",
@@ -793,6 +894,9 @@ def poll_grid_state(
                 "low": low,
                 "bid": bid,
                 "ask": ask,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                **flags,
             })
     return out
 

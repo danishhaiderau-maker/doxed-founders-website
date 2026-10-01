@@ -4329,7 +4329,8 @@ def log_ai_input_full(
             "context": copy.deepcopy(ctx),
             "ai": {
                 "decision": ai_result.get("decision"),
-                "win_prob": ai_result.get("win_prob"),
+                "win_prob": evidence_win_prob(ai_result),
+                "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "direction": ai_result.get("direction"),
                 "bull_score": ai_result.get("bull_score"),
                 "bear_score": ai_result.get("bear_score"),
@@ -8468,6 +8469,10 @@ RESEARCH_ARCHIVE_DIR = "research_archive"
 POST_BLOCK_CONTINUATION_SEC = 3600  # min post-block tick window for block-quality research
 POST_EXIT_REPLAY_SEC = int(os.getenv("POST_EXIT_REPLAY_SEC", str(2 * 3600)))  # 120m post-close ticks for horizon recovery
 POST_EXIT_REPLAY_TICK_MAX = int(os.getenv("POST_EXIT_REPLAY_TICK_MAX", "10000"))
+# The expiry sweep used to fire exactly at the deadline, before the tick at
+# exit + POST_EXIT_REPLAY_SEC arrived, so most executed replays dumped at
+# 7190-7199 s as INCOMPLETE. Keep collecting this long past the deadline.
+POST_EXIT_REPLAY_GRACE_SEC = int(os.getenv("POST_EXIT_REPLAY_GRACE_SEC", "90"))
 # Sidecar JSONL that lets post-exit replay buffers survive bot restarts.
 # Each line is one tick event for one trade_id; the loader on startup rebuilds
 # any buffer whose post_exit_deadline_ts has not yet passed.
@@ -14128,7 +14133,7 @@ def _recover_compressed_shadow_chases_once(now: float = None) -> None:
         _compressed_shadow_recovery_attempted = True
 
 
-def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
+def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None, bid_qty=None, ask_qty=None):
     if price is None or float(price) <= 0:
         return
     now = time.time()
@@ -14147,6 +14152,8 @@ def _poll_chase_offset_touch_grid(price: float, bid=None, ask=None):
                     low=float(price),
                     bid=None if not bid else float(bid),
                     ask=None if not ask else float(ask),
+                    bid_qty=None if not bid_qty else float(bid_qty),
+                    ask_qty=None if not ask_qty else float(ask_qty),
                 ):
                     _safe_append_jsonl(CHASE_OFFSET_TOUCH_GRID_FILE, row, label="TOUCH_GRID")
             except Exception as exc:
@@ -15584,6 +15591,17 @@ def derive_candidate_direction(long_score: int, short_score: int, raw_direction:
     if short_value > long_value:
         return "SHORT"
     return "NO_TRADE"
+
+
+def evidence_win_prob(ai_result: Optional[dict]):
+    """Win probability for evidence rows: null unless the model actually emitted one.
+
+    ``parse_ai_response_fields`` keeps a placeholder 0 for gating code when the
+    prompt does not request a win probability; logging that 0 as a forecast is wrong.
+    """
+    if not isinstance(ai_result, dict) or ai_result.get("win_prob_status") != "EMITTED":
+        return None
+    return ai_result.get("win_prob")
 
 
 def parse_ai_response_fields(text: str) -> dict:
@@ -18049,7 +18067,8 @@ def log_ai_tranche_outcome(ai_result, event="AI_DECISION"):
                 "ai_direction_raw": ai_result.get("direction"),
                 "decision": ai_result.get("decision"),
                 "approved": ai_result.get("approved", False),
-                "win_prob": ai_result.get("win_prob"),
+                "win_prob": evidence_win_prob(ai_result),
+                "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "comment": (ai_result.get("comment") or "")[:2000],
                 "source": ai_result.get("source"),
                 "event": event,
@@ -20593,7 +20612,7 @@ def log_ai(signal, ai):
         if ai.get("_tranche_logged"):
             return
         signal["_ai_logged"] = True
-        row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": ai.get("win_prob"),"comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry"),"bull_score": ai.get("bull_score", 0),"bear_score": ai.get("bear_score", 0),"ai_error": ai.get("ai_error", False),"error_type": ai.get("error_type"),"error_detail": (ai.get("error_detail") or "")[:2000],"latency_ms": ai.get("latency_ms"), **csv_research_meta(signal)}
+        row = {"ts": utc_iso(),"trade_id": signal.get("trade_id"),"ai_direction_raw": ai.get("direction"),"final_direction": signal.get("final_direction"),"inverted": signal.get("inverted", False),"approved": ai.get("approved", False),"win_prob": evidence_win_prob(ai),"win_prob_status": ai.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT","comment": ai.get("comment"),"source": ai.get("source"),"event": "AI_DECISION","decision": ai.get("decision"),"override": ai.get("override", False),"full_comment": ai.get("comment"),"edge_score": signal.get("edge_score_at_entry"),"bull_score": ai.get("bull_score", 0),"bear_score": ai.get("bear_score", 0),"ai_error": ai.get("ai_error", False),"error_type": ai.get("error_type"),"error_detail": (ai.get("error_detail") or "")[:2000],"latency_ms": ai.get("latency_ms"), **csv_research_meta(signal)}
         dynamic_csv_writer(CSV_AI_TRANCHE, row)
         logger.info(f"[LOG AI] trade_id={signal.get('trade_id')} prob={ai.get('win_prob')} source={ai.get('source')} decision={ai.get('decision')} override={ai.get('override')} final_direction={signal.get('final_direction')} inverted={signal.get('inverted')} [PIPELINE ENFORCEMENT]")
     except Exception as e:
@@ -20755,7 +20774,7 @@ def log_blocked_signal(signal, ai, reason):
     try:
         assert signal.get("trade_id"), "[CRITICAL] trade_id missing in log_blocked_signal"
         sr = state.get("support_resistance", {})
-        row = {"ts": utc_iso(), "trade_id": signal.get("trade_id", "duplicate"), "dir": signal.get("final_direction", signal.get("dir", "UNKNOWN")), "ai_win_prob": ai.get("win_prob"), "ai_threshold": get_ai_threshold(), "ai_approved": ai.get("approved", False), "reason": reason, "ai_source": ai.get("source","UNKNOWN"),"structure": sr.get("sr_state", "UNKNOWN"),"participation": state.get("ema_status", {}).get("ema_spread", 0.0),"context": state.get("regime", "UNKNOWN"),"ai_decision_text": ai.get("decision"),"price": signal.get("price"),"edge_score": signal.get("edge_score_at_entry"),"final_direction": signal.get("final_direction")}
+        row = {"ts": utc_iso(), "trade_id": signal.get("trade_id", "duplicate"), "dir": signal.get("final_direction", signal.get("dir", "UNKNOWN")), "ai_win_prob": evidence_win_prob(ai), "ai_win_prob_status": ai.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT", "ai_threshold": get_ai_threshold(), "ai_approved": ai.get("approved", False), "reason": reason, "ai_source": ai.get("source","UNKNOWN"),"structure": sr.get("sr_state", "UNKNOWN"),"participation": state.get("ema_status", {}).get("ema_spread", 0.0),"context": state.get("regime", "UNKNOWN"),"ai_decision_text": ai.get("decision"),"price": signal.get("price"),"edge_score": signal.get("edge_score_at_entry"),"final_direction": signal.get("final_direction")}
         if "features" in signal:
             row.update({f"features_{k}": v for k,v in signal["features"].items()})
         if "context" in signal:
@@ -23763,7 +23782,9 @@ def process_pending_orders():
         with state_lock:
             grid_bid = float(state.get("bid") or 0)
             grid_ask = float(state.get("ask") or 0)
-        _poll_chase_offset_touch_grid(price, grid_bid, grid_ask)
+            grid_bid_qty = float(state.get("bid_qty") or 0)
+            grid_ask_qty = float(state.get("ask_qty") or 0)
+        _poll_chase_offset_touch_grid(price, grid_bid, grid_ask, grid_bid_qty, grid_ask_qty)
     except Exception:
         pass
     process_awaiting_micro_entries()
@@ -24846,7 +24867,7 @@ def process_signal(event: dict):
                 "trigger": event_obj.get("event_trigger", False),
                 "ai_called": True,
                 "ai_decision": ai.get("decision"),
-                "ai_win_prob": ai.get("win_prob"),
+                "ai_win_prob": evidence_win_prob(ai),
                 "ai_reason": ai.get("comment", ""),
                 "effective_threshold": pipeline_eff_thr,
             }
@@ -26549,7 +26570,9 @@ def state_monitor_loop():
                     elif is_deferred_shadow and age_from_start > SHADOW_REPLAY_TTL_SEC:
                         expired_ids.append(tid)
                     elif buf.get("post_exit"):
-                        if time.time() >= _buf_float(buf.get("post_exit_deadline_ts"), 0):
+                        if time.time() >= (
+                            _buf_float(buf.get("post_exit_deadline_ts"), 0) + POST_EXIT_REPLAY_GRACE_SEC
+                        ):
                             expired_ids.append(tid)
                     elif is_lab_or_collect and age_from_start > LAB_REPLAY_TTL_SEC:
                         expired_ids.append(tid)
@@ -28696,6 +28719,27 @@ def cross_venue_health_snapshot() -> dict:
         return {"schema": _cvt.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
 
 
+import market_context_tape as _mct
+
+# Watch-only market-context collector (fly-entrypoint.sh, own niced process).
+# The bot only reads its live file for status/monitoring; never readiness or orders.
+MARKET_CONTEXT_COLLECTOR_ENABLED = os.getenv("MARKET_CONTEXT_COLLECTOR_ENABLED", "1").strip() == "1"
+_MARKET_CONTEXT_LIVE_CACHE = {"read_ts": 0.0, "live": None}
+
+
+def market_context_health_snapshot() -> dict:
+    try:
+        now = time.time()
+        if now - _MARKET_CONTEXT_LIVE_CACHE["read_ts"] >= 5.0:
+            live = _cvt.read_live(_mct.LIVE_FILE) if MARKET_CONTEXT_COLLECTOR_ENABLED else None
+            _MARKET_CONTEXT_LIVE_CACHE.update(read_ts=now, live=live)
+        return _mct.health_from_live(
+            _MARKET_CONTEXT_LIVE_CACHE["live"], now, enabled=MARKET_CONTEXT_COLLECTOR_ENABLED,
+        )
+    except Exception as exc:
+        return {"schema": _mct.HEALTH_SCHEMA, "status": "UNAVAILABLE", "error": type(exc).__name__}
+
+
 def _ai_shadow_leader_features(decision_ts: float) -> dict:
     try:
         ts_list, rows = _AI_SHADOW_TAPE.snapshot()
@@ -28818,6 +28862,34 @@ def _ai_shadow_run_compact(ctx: dict, tape: dict, call_id: str, now_ts: float) -
     return row
 
 
+def _ai_shadow_win_prob(ai_result: dict, challengers: dict) -> dict:
+    """Evidence win probability: the compact model's success probability for the score-led side.
+
+    The shared direction prompt does not request a win probability, so its
+    parsed ``win_prob`` is a placeholder 0; it is reported as null with its
+    status instead of as a real 0 % forecast.
+    """
+    main_status = ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT"
+    out = {
+        "main_ai_win_prob_status": main_status,
+        "main_ai_win_prob": ai_result.get("win_prob") if main_status == "EMITTED" else None,
+        "win_prob": None,
+        "win_prob_status": main_status if main_status == "EMITTED" else "UNAVAILABLE",
+        "win_prob_source": "MAIN_AI_PROMPT" if main_status == "EMITTED" else None,
+    }
+    if main_status == "EMITTED":
+        out["win_prob"] = ai_result.get("win_prob")
+        return out
+    side = (challengers.get("sides") or {}).get("llm_score_led")
+    compact = challengers.get("compact") or {}
+    p = {"LONG": compact.get("p_long_success"), "SHORT": compact.get("p_short_success")}.get(side)
+    if compact.get("parse_status") == "OK" and p is not None:
+        out.update(win_prob=round(float(p) * 100.0, 2),
+                   win_prob_status="COMPACT_SHADOW_P_SUCCESS_SCORE_LED_SIDE",
+                   win_prob_source=_ai_shadow.COMPACT_PROMPT_ID)
+    return out
+
+
 def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
     """Log every challenger's side for one shared call; never touches orders."""
     ctx = ctx or {}
@@ -28856,8 +28928,7 @@ def _run_ai_shadow_challengers(ctx: dict, ai_result: dict) -> None:
         "prompt_id": ai_result.get("prompt_id") or SHARED_DIRECTION_PROMPT_ID,
         "prompt_schema": SHARED_DIRECTION_PROMPT_SCHEMA,
         "deepseek_model": ai_result.get("deepseek_model"),
-        "win_prob_status": ai_result.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
-        "win_prob": ai_result.get("win_prob"),
+        **_ai_shadow_win_prob(ai_result, challengers),
         **challengers,
         "score_led_admission_side": challengers["sides"]["llm_score_led"],
         "admission_note": (
@@ -40540,6 +40611,13 @@ def status():
                 "mode": "SHADOW_ONLY_NO_ORDERS",
                 **cross_venue_health_snapshot(),
             },
+            "market_context_tape": {
+                "tape_schema": _mct.SCHEMA,
+                "file": _mct.FILE_NAME,
+                "liquidations_file": _mct.LIQ_FILE_NAME,
+                "mode": "WATCH_ONLY_NO_ORDERS",
+                **market_context_health_snapshot(),
+            },
             "execution_markouts": {
                 "fill_file": execution_markouts.FILL_FILE,
                 "taker_counterfactual_file": execution_markouts.TAKER_FILE,
@@ -40797,6 +40875,7 @@ def ready():
         "ai_input_health": ai_input_health_snapshot(),
         # Shadow research feed health; deliberately not an input to ready_ok.
         "cross_venue_health": cross_venue_health_snapshot(),
+        "market_context_health": market_context_health_snapshot(),
     }), (200 if ready_ok else 503)
 
 
@@ -45802,6 +45881,63 @@ def patch_signal_snapshot_outcome(
         logger.error(f"[SIGNAL_SNAPSHOT] patch failed trade_id={trade_id}: {e}")
 
 
+def _snapshot_shared_ai_call_id(trade_id, signal: dict, ai: dict):
+    """The shared AI call that caused this signal; a scan trade id is that call's id."""
+    explicit = (signal or {}).get("shared_ai_call_id") or (ai or {}).get("shared_ai_call_id")
+    if explicit:
+        return str(explicit)
+    return str(trade_id) if str(trade_id or "").startswith("scan-") else None
+
+
+def counterfactual_join_fields(trade_id, snapshot: dict, replay: dict) -> dict:
+    """Timestamps and causal join keys every counterfactual row must carry.
+
+    Rows written before signal snapshots recorded these keys fall back to the
+    deterministic scan-call identity; anything still unknown stays null and is
+    listed in ``join_keys_missing`` instead of being guessed.
+    """
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    replay = replay if isinstance(replay, dict) else {}
+    def _num(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            try:
+                number = datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+            except (TypeError, ValueError):
+                return None
+        return number if math.isfinite(number) and number > 0 else None
+    signal_ts = _num(snapshot.get("approve_ts"))
+    if signal_ts is None:
+        signal_ts = _num(replay.get("start_ts"))
+    shared = (snapshot.get("shared_ai_call_id") or replay.get("shared_ai_call_id")
+              or _snapshot_shared_ai_call_id(trade_id, {}, snapshot.get("ai") or {}))
+    epoch = (snapshot.get("epoch_id") or snapshot.get("collection_epoch_id")
+             or replay.get("epoch_id") or replay.get("collection_epoch_id"))
+    now = time.time()
+    out = {
+        "ts": utc_iso(),
+        "written_ts": round(now, 3),
+        "signal_ts": signal_ts,
+        "signal_utc": snapshot.get("ts") or (
+            datetime.fromtimestamp(signal_ts, timezone.utc).isoformat() if signal_ts else None),
+        "shared_ai_call_id": shared,
+        "epoch_id": epoch,
+        "research_lane": snapshot.get("research_lane") or replay.get("research_lane"),
+    }
+    out["join_keys_missing"] = [k for k in ("signal_ts", "shared_ai_call_id", "epoch_id") if not out.get(k)]
+    return out
+
+
+def _counterfactual_snapshot_with_join_keys(trade_id, snapshot: dict, replay: dict) -> dict:
+    joined = counterfactual_join_fields(trade_id, snapshot, replay)
+    enriched = dict(snapshot or {})
+    for key in ("shared_ai_call_id", "epoch_id"):
+        if not enriched.get(key) and joined.get(key):
+            enriched[key] = joined[key]
+    return enriched
+
+
 def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
     """Persist APPROVE-time config for counterfactual / shadow research."""
     try:
@@ -45825,6 +45961,10 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "research_model": signal.get("research_model"),
             "ts": utc_iso(),
             "approve_ts": time.time(),
+            "shared_ai_call_id": _snapshot_shared_ai_call_id(trade_id, signal, ai),
+            "epoch_id": _collector_v22_epoch_id(),
+            "policy_signature": signal.get("policy_signature")
+            or (signal.get("policy_identity") or {}).get("policy_signature"),
             "approve_index": approve_idx,
             "direction": signal.get("final_direction"),
             "price": price,
@@ -45835,7 +45975,8 @@ def log_signal_snapshot(signal: dict, ai: dict, pipeline_eff_thr: float):
             "ai": {
                 "approved": True,
                 "decision": "APPROVE",
-                "win_prob": ai.get("win_prob"),
+                "win_prob": evidence_win_prob(ai),
+                "win_prob_status": ai.get("win_prob_status") or "NOT_REQUESTED_BY_PROMPT",
                 "direction": ai.get("direction"),
                 "bull_score": ai.get("bull_score"),
                 "bear_score": ai.get("bear_score"),
@@ -47273,7 +47414,13 @@ def close_replay_buffer(trade_id):
         if replay_buffers.get(trade_id) is buf:
             replay_buffers.pop(trade_id, None)
 
-def dump_replay(trade_id: str):
+def dump_replay(trade_id: str, terminal_reason: Optional[str] = None):
+    """Append the buffer's replay row.
+
+    ``terminal_reason`` labels a dump that is not the buffer's natural end
+    (e.g. ``CENSORED_PROCESS_SHUTDOWN``) so the analyzer can tell a censored
+    path from a genuinely incomplete one and dedupe re-dumps per trade.
+    """
     global write_counter
     mv_source = None
     with replay_lock:
@@ -47311,9 +47458,26 @@ def dump_replay(trade_id: str):
                 and has_fill_origin
                 and (not is_executed or post_exit_complete)
             )
+            buf["dump_seq"] = _buf_int(buf.get("dump_seq"), 0) + 1
+            natural_reason = (
+                "POST_EXIT_HORIZON_COMPLETE"
+                if post_exit_complete
+                else "FILL_ORIGIN_BUFFER_CLOSED"
+                if replay_complete
+                else "INCOMPLETE_EXECUTED_POST_EXIT"
+                if is_executed
+                else "BUFFER_CLOSED_NO_FILL_ORIGIN"
+                if buf.get("closed") and buf.get("ticks") and not has_fill_origin
+                else "INCOMPLETE_BUFFER"
+            )
+            censored = bool(terminal_reason) and not replay_complete
             replay = {
                 "schema": "signal_replay_v4",
                 "trade_id": trade_id,
+                "dumped_ts": round(now, 3),
+                "dump_seq": buf["dump_seq"],
+                "dump_reason": terminal_reason or ("BUFFER_CLOSED" if buf.get("closed") else "EXPIRED_OR_EVICTED"),
+                "censored": censored,
                 "start_ts": utc_iso(datetime.fromtimestamp(buf["start_ts"], timezone.utc)),
                 "start_price": buf["start_price"],
                 "direction": buf.get("direction"),
@@ -47329,17 +47493,8 @@ def dump_replay(trade_id: str):
                 ), 3),
                 "post_exit_complete": post_exit_complete,
                 "replay_complete": replay_complete,
-                "replay_completion_reason": (
-                    "POST_EXIT_HORIZON_COMPLETE"
-                    if post_exit_complete
-                    else "FILL_ORIGIN_BUFFER_CLOSED"
-                    if replay_complete
-                    else "INCOMPLETE_EXECUTED_POST_EXIT"
-                    if is_executed
-                    else "BUFFER_CLOSED_NO_FILL_ORIGIN"
-                    if buf.get("closed") and buf.get("ticks") and not has_fill_origin
-                    else "INCOMPLETE_BUFFER"
-                ),
+                "replay_completion_reason": terminal_reason if censored else natural_reason,
+                "natural_completion_reason": natural_reason,
                 "terminal_provenance": (
                     "SHOWCASE_STRATEGY_EXIT" if is_executed else "COUNTERFACTUAL_ONLY"
                 ),
@@ -48297,14 +48452,16 @@ def offline_simulator(signal_snapshot_file=SIGNAL_SNAPSHOT_FILE, signal_replay_f
             "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
         }
         outcome = simulate_replay_outcome(buf)
+        snapshot = _counterfactual_snapshot_with_join_keys(trade_id, snapshot, replay)
         counterfactual = {
             "schema": "counterfactual_v2",
             "trade_id": trade_id,
+            **counterfactual_join_fields(trade_id, snapshot, replay),
             "scenario": buf["direction"],
             "executed": bool(snapshot.get("executed")),
             "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
             "lane": replay.get("lane"),
-            "ai_win_prob": snapshot.get("ai", {}).get("win_prob"),
+            "ai_win_prob": evidence_win_prob(snapshot.get("ai")),
             "edge_score": snapshot.get("edge_score"),
             "fill_price": outcome.get("fill_price"),
             "fill_delay_sec": outcome.get("fill_delay_sec"),
@@ -48484,14 +48641,16 @@ def _run_counterfactual_catchup():
                 "correlated_cluster_boundary_pct": replay.get("correlated_cluster_boundary_pct"),
             }
             outcome = simulate_replay_outcome(buf)
+            snapshot = _counterfactual_snapshot_with_join_keys(tid, snapshot, replay)
             counterfactual = {
                 "schema": "counterfactual_v2",
                 "trade_id": tid,
+                **counterfactual_join_fields(tid, snapshot, replay),
                 "scenario": buf["direction"],
                 "executed": bool(snapshot.get("executed")),
                 "block_reason": snapshot.get("block_reason") or replay.get("block_reason"),
                 "lane": replay.get("lane"),
-                "ai_win_prob": snapshot.get("ai", {}).get("win_prob"),
+                "ai_win_prob": evidence_win_prob(snapshot.get("ai")),
                 "edge_score": snapshot.get("edge_score"),
                 "fill_price": outcome.get("fill_price"),
                 "fill_delay_sec": outcome.get("fill_delay_sec"),
@@ -50556,12 +50715,12 @@ def main():
                         ):
                             finalize_shadow_lane_collecting(tid, buf_copy)
                         else:
-                            dump_replay(tid)
+                            dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
                             with replay_lock:
                                 replay_buffers.pop(tid, None)
                     except Exception as e:
                         logger.error(f"[SHUTDOWN] replay finalize failed tid={tid}: {e}")
-                        dump_replay(tid)
+                        dump_replay(tid, terminal_reason="CENSORED_PROCESS_SHUTDOWN")
                         with replay_lock:
                             replay_buffers.pop(tid, None)
                 _stop_lifecycle_pipeline_runtime(timeout=5.0)
