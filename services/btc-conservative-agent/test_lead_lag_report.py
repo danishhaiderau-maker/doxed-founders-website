@@ -104,3 +104,85 @@ def test_loaders_read_rotations_and_window_the_bitfinex_tape():
     assert all(s % 97 != 0 for s in q)
     report = llr.build_from_data_dir(tmp)
     assert report["span"]["minutes"] == 60 and report["span"]["bitfinex_source"] == "MICROSTRUCTURE_TAPE"
+
+
+def _xvl_step_rows(hours=3, step_every=300, step_bp=15.0, lag=3, half_spread=0.5):
+    n = hours * 3600 + 120
+    leader = np.full(n, 80000.0)
+    for j in range(200, n - 100, step_every):
+        sign = 1.0 if (j // step_every) % 2 == 0 else -1.0
+        leader[j:] *= 1.0 + sign * step_bp / 1e4
+    bfx = np.empty(n)
+    bfx[lag:] = leader[:-lag] + 10.0
+    bfx[:lag] = leader[0] + 10.0
+    rows, quotes = [], {}
+    for m in range(hours * 60):
+        t0 = T0 + 60 * m
+        secs = range(t0, t0 + 60)
+        samples = [{"sec": s, "mid": float(leader[s - T0]), "last": None, "buy": 0.0, "sell": 0.0}
+                   for s in secs]
+        row = cvt.encode_minute(t0, {"binance": samples, "bybit": samples},
+                                [float(bfx[s - T0]) for s in secs],
+                                meta={"collector_version": cvt.COLLECTOR_VERSION, "cpu_pct": 1.0})
+        rows.append(json.loads(json.dumps(row)))
+        for s in secs:
+            mid = float(bfx[s - T0])
+            quotes[s] = (mid - half_spread, mid + half_spread)
+    return rows, quotes
+
+
+def _shadow_rows_from(trades, signature):
+    from cross_venue_lead import OUTCOME_SCHEMA, TRIGGER_SCHEMA
+    triggers, outcomes = [], []
+    for t in trades:
+        base = {"trigger_id": f"xvl-{t['anchor']}", "anchor_bucket_ts": t["anchor"], "side": t["side"],
+                "gate": "TRIGGER", "qualifies": True, "cap1_take": True, "policy_signature": signature}
+        triggers.append({"schema": TRIGGER_SCHEMA, **base})
+        outcomes.append({"schema": OUTCOME_SCHEMA, **base, "status": "OK",
+                         "net_bp_after_spread": t["net_bp"]})
+    return triggers, outcomes
+
+
+def test_xvl_section_replays_the_registered_rule_and_matches_the_shadow_stream():
+    from combo_pathway_config import ACTIVE_TILE_REGISTRY
+    lane = "FAMILY_XVENUE_LEAD_60S"
+    signature = ACTIVE_TILE_REGISTRY[lane]["policy_signature"]
+    rows, quotes = _xvl_step_rows()
+    report = llr.build_lead_lag_report(rows, quotes)
+    cell = report["xvl"]["lanes"][lane]
+    assert cell["rule"]["lead_threshold_bps"] == 8.0
+    assert cell["replay"]["trades"] >= 30
+    assert cell["replay"]["mean_net_bp"] > 5 and cell["replay"]["win_rate"] == 1.0
+    assert cell["shadow"]["triggers_logged"] == 0
+
+    trades = llr.xvl_replay_trades(llr.Aligned(rows, quotes), llr._xvl_rules()[lane][0])
+    foreign = _shadow_rows_from(trades[:3], "other-signature")
+    triggers, outcomes = _shadow_rows_from(trades, signature)
+    report = llr.build_lead_lag_report(rows, quotes, xvl_rows=(triggers + foreign[0], outcomes + foreign[1]))
+    cell = report["xvl"]["lanes"][lane]
+    assert cell["shadow"]["triggers_logged"] == len(trades)
+    assert cell["shadow"]["by_gate"] == {"TRIGGER": len(trades)}
+    assert cell["shadow"]["capacity_one"]["trades"] == len(trades)
+    parity = cell["parity"]
+    assert parity["match_rate"] == 1.0 and parity["side_agreement"] == 1.0
+    assert parity["mean_abs_net_gap_bp"] == 0.0
+
+
+def test_xvl_shadow_loader_reads_rotations_and_no_data_still_reports_the_shadow():
+    from cross_venue_lead import SHADOW_FILE
+    tmp = tempfile.mkdtemp()
+    triggers, outcomes = _shadow_rows_from(
+        [{"anchor": T0 + 10, "side": "LONG", "net_bp": 2.0},
+         {"anchor": T0 + 90, "side": "SHORT", "net_bp": -1.0}], "")
+    with open(os.path.join(tmp, SHADOW_FILE + ".1"), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(triggers[0]) + "\n" + json.dumps(outcomes[0]) + "\n")
+    with open(os.path.join(tmp, SHADOW_FILE), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(triggers[1]) + "\nnot-json\n" + json.dumps(outcomes[1]) + "\n")
+    loaded = llr.load_xvl_shadow_rows(tmp)
+    assert [len(x) for x in loaded] == [2, 2]
+    report = llr.build_from_data_dir(tmp)
+    assert report["status"] == "NO_DATA"
+    cell = report["xvl"]["lanes"]["FAMILY_XVENUE_LEAD_60S"]
+    assert cell["shadow"]["triggers_logged"] == 2
+    assert cell["shadow"]["capacity_one"]["win_rate"] == 0.5
+    assert cell["replay"] == "UNAVAILABLE_NO_BITFINEX_BBO"

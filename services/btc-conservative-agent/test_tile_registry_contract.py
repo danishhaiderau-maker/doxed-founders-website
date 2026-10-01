@@ -80,11 +80,11 @@ TREND_FADE_60_SIGNATURE = "a0a04faefaba977b203ad0a84117612ca7d487b0ce22f9d55504f
 TREND_FADE_60_SCORE_LED_SIGNATURE = "1936f510d2ff7d0c3aaaa4a5c14431637a02362cb2980a24b2f474b91a4743e0"
 
 
-def test_active_registry_is_exactly_trend_fade_60_as_tile_1():
+def test_active_registry_is_trend_fade_60_as_tile_1_then_cross_venue_lead():
     import combo_pathway_config as registry
 
-    assert ACTIVE_TILE_ORDER == ("FAMILY_TREND_FADE_60",)
-    assert active_tile_lifecycle_manifest()[0]["display_order"] == 1
+    assert ACTIVE_TILE_ORDER == ("FAMILY_TREND_FADE_60", "FAMILY_XVENUE_LEAD_60S")
+    assert [row["display_order"] for row in active_tile_lifecycle_manifest()] == [1, 2]
     fade = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"]
     expected = (TREND_FADE_60_SCORE_LED_SIGNATURE if registry.SCORE_LED_PAPER_RESEARCH_ENABLED
                 else TREND_FADE_60_SIGNATURE)

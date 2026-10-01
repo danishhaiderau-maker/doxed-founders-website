@@ -37,7 +37,10 @@ from family_policy_common import (
     exit_config as _config,
 )
 
-DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE"})
+# CROSS_VENUE_LEAD tiles take their side from the per-second cross-venue
+# evaluator (cross_venue_lead.py), never from the shared AI call.
+CROSS_VENUE_LEAD = "CROSS_VENUE_LEAD"
+DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE", CROSS_VENUE_LEAD})
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
 
 
@@ -78,7 +81,9 @@ class TakerTimeExitBinding:
         admission = dict(admission or {})
         score_led = str(admission.get("effective_direction") or "").upper()
         reason = None
-        if raw.get("ai_error"):
+        if self.entry["direction_source"] == CROSS_VENUE_LEAD:
+            reason = "NOT_A_SHARED_AI_TILE"
+        elif raw.get("ai_error"):
             reason = "AI_ERROR"
         elif not admission.get("applied"):
             reason = "SCORE_LED_TREATMENT_INACTIVE"
@@ -203,9 +208,12 @@ class TakerTimeExitBinding:
         tile = COMBO_LANE_SPECS[self.lane]
         entry, exit_policy = self.entry, self.exit
         payload = _dashboard(self.spec)
+        source = entry["direction_source"]
+        if source == CROSS_VENUE_LEAD:
+            return self._cross_venue_dashboard_policy(payload, tile)
         side = (
             "Side = opposite of score-led AI side"
-            if entry["direction_source"] == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
+            if source == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
         )
         payload["filter_chips"] = [
             "PAPER ONLY", side,
@@ -234,13 +242,50 @@ class TakerTimeExitBinding:
             "stop_fill": exit_policy["stop_fill"],
             "max_open_positions": exit_policy.get("max_open_positions"),
         })
+        return self._with_pre_registration(payload, tile)
+
+    @staticmethod
+    def _with_pre_registration(payload, tile):
         pre = tile.get("pre_registration")
         if pre:
             payload["pre_registration"] = {
                 "hypothesis_id": pre["hypothesis_id"],
-                "control_lane": pre["control_lane"],
+                "control_lane": pre.get("control_lane"),
                 "honest_label": pre.get("honest_label"),
                 "promotion": tile["promotion_criteria"],
                 "kill": tile["kill_criteria"],
             }
         return payload
+
+    def _cross_venue_dashboard_policy(self, payload, tile):
+        entry, exit_policy = self.entry, self.exit
+        venues = "/".join(v.capitalize() for v in entry["leader_venues"])
+        hold = int(exit_policy["max_duration_sec"])
+        payload["filter_chips"] = [
+            "PAPER ONLY", "HINT — 12h evidence",
+            f"Side = {venues} lead ≥{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s",
+            f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
+            f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
+            f"Any feed >{entry['max_venue_age_sec']:g}s old → no trade",
+            f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
+            f"{hold}s time exit",
+            f"Max {int(exit_policy.get('max_open_positions') or 1)} open position",
+        ]
+        payload["entry"].update({
+            "trigger": (
+                f"Per-second cross-venue evaluator (no AI): mean {venues} mid return led Bitfinex by ≥"
+                f"{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s"
+            ),
+            "entry_path": self.lane,
+            "chase_detail": "No chase; one trigger-time marketable limit or stand-aside",
+            "direction_source": entry["direction_source"],
+            "signal_clock": entry["signal_clock"],
+        })
+        payload["exit"].update({
+            "profile": exit_policy["family"],
+            "fixed_time_exit": f"{hold}s",
+            "hard_stop_bps": exit_policy["hard_stop_bps"],
+            "stop_fill": exit_policy["stop_fill"],
+            "max_open_positions": exit_policy.get("max_open_positions"),
+        })
+        return self._with_pre_registration(payload, tile)

@@ -52,7 +52,7 @@ RUN python -c "import future_path_attempt_receipt, research_v3_future_paths_work
 # Optional shadow segment shipper (RESEARCH_SEGMENTS_ENABLED=1) must be importable.
 RUN python -c "import research_segment_format, research_segment_selection, research_segment_store, research_segment_shipper, research_segment_server, research_segment_prune, research_fresh_start_wipe"
 # Bitfinex fee profile, fill markouts and every registry tile policy load on the order path.
-RUN python -c "import bitfinex_cost_profile, execution_markouts, adaptive_regime_entry, scenario_c_config, taker_time_exit_binding, paper_policy_family_trend_fade_60, tile_paired_comparison"
+RUN python -c "import bitfinex_cost_profile, execution_markouts, adaptive_regime_entry, scenario_c_config, taker_time_exit_binding, paper_policy_family_trend_fade_60, cross_venue_lead, paper_policy_family_xvenue_lead, tile_paired_comparison"
 # Shadow cross-venue collector process and its shared tape contract.
 RUN python -c "import cross_venue_tape, cross_venue_collector"
 

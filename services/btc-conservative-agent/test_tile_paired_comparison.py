@@ -6,7 +6,7 @@ import pytest
 import tile_paired_comparison as tpc
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
-(T1,) = ACTIVE_TILE_ORDER
+T1, XVL = ACTIVE_TILE_ORDER
 A, B = "SYNTHETIC_TILE_A", "SYNTHETIC_TILE_B"
 T0 = 1_790_000_000.0
 BP = 0.0025  # 1 bp of $25 notional
@@ -56,14 +56,16 @@ def test_tiles_pair_only_on_signals_both_filled():
     json.dumps(report, allow_nan=False)
 
 
-def test_single_registered_tile_reports_without_a_paired_control():
+def test_registered_tiles_report_without_a_paired_control():
     rows = [_fill(T1, f"c{i}", 1.0, T0 + i * 3600, reason="PATH_END_60M") for i in range(5)]
     report = _report(rows)
-    assert report["tile_order"] == [T1]
+    assert report["tile_order"] == [T1, XVL]
     assert report["paired"] == []
+    assert report["all_tiles_paired"]["paired_tiles"] == [T1]
+    assert report["pre_registered"][XVL]["control_lane"] is None
     assert report["tiles"][T1]["fills"] == 5
     assert report["pre_registered"][T1]["verdict"]["status"] == "COLLECTING"
-    assert set(tpc.VERDICT_RULES) == {"tile_pre_registration_trade_count_v1"}
+    assert set(tpc.VERDICT_RULES) == {"tile_pre_registration_trade_count_v1", "tile_pre_registration_xvl_v1"}
     json.dumps(report, allow_nan=False)
 
 

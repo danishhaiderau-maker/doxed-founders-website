@@ -36,7 +36,7 @@ counterfactual.jsonl approved_but_rejected.jsonl near_miss.jsonl soft_reject_sha
 golden_stack_rejections.jsonl trend_health.csv reversal_study.jsonl
 ai_reason_research.jsonl ai_confidence_calibration.jsonl trade_lifecycle.jsonl
 ai_input_log.jsonl edge_census.jsonl fill_quality.jsonl shadow_vs_live_entry.jsonl
-ai_shadow_challengers.jsonl ai_shadow_compact_prompt.jsonl
+ai_shadow_challengers.jsonl ai_shadow_compact_prompt.jsonl xvl_shadow_signals.jsonl
 execution_funnel.jsonl lane_opportunity_capture.jsonl ai_edge_disagreement.jsonl
 shadow_runner_study.jsonl shadow_lane_outcome.jsonl duplicate_intent_audit.jsonl
 pathway_scorecard.json fill_quality_report.json shadow_fill_outcome_report.json
