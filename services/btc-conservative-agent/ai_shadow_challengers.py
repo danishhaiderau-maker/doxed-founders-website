@@ -176,6 +176,15 @@ class TapeRing:
         with self._lock:
             return list(self._ts), list(self._rows)
 
+    def tail(self, seconds: int) -> dict:
+        """{bucket_ts: (bid, ask)} for the newest ``seconds`` buckets (O(seconds))."""
+        out = {}
+        with self._lock:
+            n = min(len(self._ts), max(0, int(seconds)))
+            for i in range(len(self._ts) - n, len(self._ts)):
+                out[self._ts[i]] = (self._rows[i][0], self._rows[i][1])
+        return out
+
     def latest_ts(self) -> Optional[int]:
         with self._lock:
             return self._ts[-1] if self._ts else None
