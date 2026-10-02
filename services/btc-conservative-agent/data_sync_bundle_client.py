@@ -111,8 +111,15 @@ def _verified_local_members(raw_root, selected, check_deadline):
                 raise BundleClientError("LOCAL_REUSE_LINK_REJECTED")
         return True
 
+    # ``st_ctime_ns`` is not a stable cross-API identity on Windows: the
+    # path-based ``lstat`` and handle-based ``fstat`` views can legitimately
+    # differ for an unchanged file.  Including it makes verified local reuse
+    # fail closed for healthy files and forces an unnecessary payload fetch.
+    # Device/inode/size/mtime remain stable identity checks; content SHA-256
+    # and the before/after checks below still protect against replacement or
+    # mutation while the file is being reused.
     signature = lambda value: (value.st_dev, value.st_ino, value.st_size,
-                               value.st_mtime_ns, value.st_ctime_ns)
+                               value.st_mtime_ns)
     try:
         if not unlinked(root) or not root.is_dir() or root.resolve(strict=True) != root:
             return None

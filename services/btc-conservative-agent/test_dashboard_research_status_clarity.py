@@ -20,6 +20,17 @@ def main() -> None:
     assert ">not evaluated</span>" not in source
     assert ">pending</span>" not in source
 
+    # A live process or fresh market BBO is not enough to present a two-day-old
+    # AI/tile payload as current research. The dashboard must expose this
+    # distinction before a user can interpret any visible tile totals.
+    assert 'id="researchFreshness"' in source
+    assert "Research evidence: STALE" in source
+    assert "Current server and market-feed status are separate" in source
+    assert "visible tile totals are not a current strategy ranking" in source
+    assert "d.execution_paused === true || d.manual_admin_pause === true" in source
+    assert "d.last_ai_call_ts" in source
+    assert "d.ai_input_time" in source
+
     # Tile headlines deliberately show one comparable fresh-collection
     # accounting row only. Shadow/counterfactual results stay in analyzer
     # reports and must never be mixed into account-like tile PnL.

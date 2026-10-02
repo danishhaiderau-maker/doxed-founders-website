@@ -39,7 +39,11 @@ def cached_descriptor(root, entry, generation):
     if cache_directory(root) is None:
         return None
     path = root / (digest + ".json")
-    signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    # Windows can expose different ``st_ctime_ns`` values through path-based
+    # lstat and handle-based fstat for the same unchanged cache file.  Treat
+    # device/inode/size/mtime as the stable identity here; the descriptor hash
+    # and generation/entry equality below remain authoritative.
+    signature = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
     try:
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or getattr(before, "st_file_attributes", 0) & 0x400:

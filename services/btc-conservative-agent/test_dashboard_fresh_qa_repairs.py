@@ -265,6 +265,7 @@ def test_freshness_compares_dataset_source_when_analyzer_code_revision_differs(m
         "ok": True,
         "pollOk": True,
         "inProgress": False,
+        "updatedAt": dashboard.datetime.now(dashboard.timezone.utc).isoformat(),
         "revisionParity": "MATCH",
         "observedSourceRevision": "577a188d2abc",
     })

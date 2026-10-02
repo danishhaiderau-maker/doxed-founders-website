@@ -187,6 +187,9 @@ def main() -> None:
     assert "logger.error(f\"data-sync inventory background refresh failed: {exc}\")" not in SOURCE
     assert '"error": type(exc).__name__' not in SOURCE
     assert "_data_sync_inventory_public_failure_code" in SOURCE
+    assert 'inventory_error = _data_sync_inventory_public_failure_code(' in SOURCE
+    assert '"inventory_error": inventory_error' in SOURCE
+    assert "const inventoryReason = body.inventory_error" in SOURCE
     parent_state, logged = _run_parent_exception()
     assert parent_state["error"] == "INVENTORY_WORKER_FAILED"
     assert parent_state["last_worker_failure_stage"] == "PARENT_REFRESH"

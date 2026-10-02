@@ -117,13 +117,48 @@ def test_stale_scope_overrides_otherwise_current_flag():
     assert "not current session data" in scope[1]
 
 
+def test_publication_stale_overrides_broad_current_flag():
+    scope = run_helpers("summaryEvidenceScope({stale:{stale:false,generation_freshness:{current:true},publication_freshness:{stale:true}}})")
+    assert "STALE SAVED" in scope[0]
+    assert "not current session data" in scope[1]
+
+
+def test_unverified_mirror_receipt_overrides_broad_current_flag():
+    scope = run_helpers("summaryEvidenceScope({stale:{stale:false,generation_freshness:{current:true,mirror_sync_receipt_freshness:'STALE',mirror_sync_poll_ok:null,mirror_sync_activity_status:'UNKNOWN_STALE'}}})")
+    assert "STALE SAVED" in scope[0]
+    assert "not current session data" in scope[1]
+
+
+def test_parity_mismatch_overrides_broad_current_flag():
+    scope = run_helpers("summaryEvidenceScope({stale:{stale:false,generation_freshness:{current:true,mirror_sync_receipt_freshness:'FRESH',mirror_sync_poll_ok:true,mirror_sync_activity_status:'REPORTED_IDLE_OWNER_UNVERIFIED',revision_parity:'MISMATCH',epoch_parity:'MATCH',mirror_sync_revision_parity:'MATCH'}}})")
+    assert "STALE SAVED" in scope[0]
+    assert "not current session data" in scope[1]
+
+
+def test_backend_freshness_requires_fresh_idle_poll_receipt():
+    source = SOURCE.read_text(encoding="utf-8")
+    start = source.index("def _generation_freshness_meta")
+    end = source.index("def _shared_context_projection", start)
+    freshness = source[start:end]
+    assert "sync_poll_ok is True" in freshness
+    assert 'mirror_sync_receipt_freshness") == "FRESH"' in freshness
+    assert 'mirror_sync_activity_status") == "REPORTED_IDLE_OWNER_UNVERIFIED"' in freshness
+    assert "poll is not confirmed successful" in freshness
+
+
+def test_header_never_calls_stale_session_fresh():
+    scope = run_helpers("analyzerHeaderScope({scope:'FRESH-COLLECTION',data_scope:'SESSION',stale:{stale:false,generation_freshness:{current:true},publication_freshness:{stale:true}}})")
+    assert scope == "STALE SAVED FRESH-COLLECTION REPORT · READ-ONLY"
+
+
 def test_current_is_not_claimed_as_qualified():
-    scope = run_helpers("summaryEvidenceScope({stale:{stale:false,generation_freshness:{current:true}},integrity:{valid:true,report_status:'VALID'}})")
+    scope = run_helpers("summaryEvidenceScope({stale:{stale:false,generation_freshness:{current:true,mirror_sync_receipt_freshness:'FRESH',mirror_sync_poll_ok:true,mirror_sync_activity_status:'REPORTED_IDLE_OWNER_UNVERIFIED',revision_parity:'MATCH',epoch_parity:'MATCH',mirror_sync_revision_parity:'MATCH'}},integrity:{valid:true,report_status:'VALID'}})")
     assert "CURRENT PINNED" in scope[0]
     assert "Current does not mean qualified" in scope[1]
     source = html()
     assert "EVIDENCE_SCOPES.summary = summaryEvidenceScope(d);" in source
     assert "setEvidenceScope('summary', ...EVIDENCE_SCOPES.summary);" in source
+    assert "const scopeLabel = analyzerHeaderScope(d);" in source
     assert "Best-policy evidence is current/pinned" not in source
 
 

@@ -30920,6 +30920,9 @@ HTML = """<!DOCTYPE html>
 <p id="serverBanner" style="background:#1f2937;border:1px solid #374151;padding:8px 12px;border-radius:6px;color:#8b949e;font-size:0.9em;">
   Server: checking…
 </p>
+<p id="researchFreshness" role="status" aria-live="polite" style="margin:8px 0;padding:8px 12px;background:#1f2937;border:1px solid #374151;border-radius:6px;color:#8b949e;font-size:0.86em;">
+  Research evidence freshness: checking…
+</p>
 __ADMIN_ACCESS_CONTROLS__
 <nav class="section-nav" aria-label="Dashboard sections">
   <a href="#marketOverview">Overview</a>
@@ -32170,7 +32173,8 @@ DASHBOARD_JS = """(function () {
           const age = Number.isFinite(generatedMs) && observed > 0 && observed * 1000 >= generatedMs ? Math.floor((observed * 1000 - generatedMs) / 1000) + 's' : 'unavailable';
           const inventoryMb = body.inventory_transferable_mb == null ? 'unavailable' : Number(body.inventory_transferable_mb).toFixed(1) + ' MiB';
           const progress = body.inventory_progress || {};
-          inventoryStatusEl.textContent = 'Cached transferable inventory: ' + inventoryMb + ' | ' + inventoryStatus + ' | generated: ' + generatedText + ' | age: ' + age + ' | refresh: ' + (body.inventory_refreshing ? 'running' : 'not running') + ' | phase: ' + (progress.phase || 'unavailable') + ' | pages: ' + (progress.pages_written == null ? '?' : progress.pages_written) + '/' + (progress.pages_total == null ? '?' : progress.pages_total);
+          const inventoryReason = body.inventory_error ? ' | reason: ' + String(body.inventory_error) : '';
+          inventoryStatusEl.textContent = 'Cached transferable inventory: ' + inventoryMb + ' | ' + inventoryStatus + inventoryReason + ' | generated: ' + generatedText + ' | age: ' + age + ' | refresh: ' + (body.inventory_refreshing ? 'running' : 'not running') + ' | phase: ' + (progress.phase || 'unavailable') + ' | pages: ' + (progress.pages_written == null ? '?' : progress.pages_written) + '/' + (progress.pages_total == null ? '?' : progress.pages_total);
           inventoryStatusEl.style.color = inventoryCurrent ? '#3fb950' : (inventoryStatus.includes('STALE') ? '#d29922' : '#ef4444');
         }
         if (pctEl) pctEl.textContent = body.volume_pct == null ? '-' : Number(body.volume_pct).toFixed(1);
@@ -32272,6 +32276,51 @@ DASHBOARD_JS = """(function () {
           sb.style.borderColor = '#238636';
           sb.style.color = '#c9d1d9';
           sb.innerText = txt;
+        }
+        const researchFreshness = document.getElementById('researchFreshness');
+        if (researchFreshness) {
+          const toEpochSec = function (value) {
+            if (value == null || value === '') return null;
+            if (typeof value === 'number' && Number.isFinite(value)) {
+              return value > 100000000000 ? value / 1000 : value;
+            }
+            const parsed = Date.parse(String(value));
+            return Number.isFinite(parsed) ? parsed / 1000 : null;
+          };
+          const candidates = [
+            d.last_ai_call_ts,
+            d.ai_input_time,
+            d.debug_state && d.debug_state.last_ai_call,
+            d.ai_history_updated,
+          ].map(toEpochSec).filter(function (value) {
+            return value != null && value > 0;
+          });
+          const newestResearchTs = candidates.length ? Math.max.apply(null, candidates) : null;
+          const pausedForResearch = d.execution_paused === true || d.manual_admin_pause === true;
+          const staleAfterSec = Number.isFinite(Number(d.dashboard_research_stale_sec))
+            ? Number(d.dashboard_research_stale_sec) : 900;
+          if (newestResearchTs == null) {
+            researchFreshness.textContent = pausedForResearch
+              ? 'Research evidence: PAUSED — no post-start AI/research record. Current server and market-feed status are separate from strategy evidence.'
+              : 'Research evidence: UNAVAILABLE — no AI/research timestamp was supplied. Do not treat visible tile totals as a current strategy ranking.';
+            researchFreshness.style.borderColor = '#f85149';
+            researchFreshness.style.color = '#fecaca';
+          } else {
+            const ageSec = Math.max(0, Math.round(Date.now() / 1000 - newestResearchTs));
+            const ageText = ageSec >= 86400
+              ? (ageSec / 86400).toFixed(1) + 'd'
+              : (ageSec >= 3600 ? (ageSec / 3600).toFixed(1) + 'h' : ageSec + 's');
+            const stamp = new Date(newestResearchTs * 1000).toISOString();
+            if (ageSec > staleAfterSec) {
+              researchFreshness.textContent = 'Research evidence: STALE (' + ageText + '; newest record ' + stamp + '). Current server and market-feed status are separate; visible tile totals are not a current strategy ranking.' + (pausedForResearch ? ' ADMIN_MANUAL pause explains why fresh evaluation is not expected.' : ' Investigate collection before relying on it.');
+              researchFreshness.style.borderColor = '#f0b429';
+              researchFreshness.style.color = '#f0c14b';
+            } else {
+              researchFreshness.textContent = 'Research evidence: FRESH (' + ageText + '; newest record ' + stamp + '). Qualification still requires current mirror/analyzer receipts.';
+              researchFreshness.style.borderColor = '#238636';
+              researchFreshness.style.color = '#c9d1d9';
+            }
+          }
         }
         const src = document.getElementById('dataSource');
         const banner = document.getElementById('dataBanner');
@@ -38841,6 +38890,9 @@ def api_data_size():
 
     inventory = _data_size_cached_inventory_summary()
     raw_inventory_status = inventory["status"]
+    inventory_error = _data_sync_inventory_public_failure_code(
+        inventory.get("error")
+    )
     try:
         inventory_unexpired = time.monotonic() < float(inventory["expires_at"] or 0.0)
     except (TypeError, ValueError):
@@ -38935,7 +38987,7 @@ def api_data_size():
             "pages_written": inventory.get("worker_pages_written"),
             "pages_total": inventory.get("worker_pages_total"),
         },
-        "inventory_error": inventory["error"],
+        "inventory_error": inventory_error,
         "collector_version": COLLECTOR_V31_VERSION,
         "legacy_collector_version": COLLECTOR_V22_VERSION,
         "storage_state": storage_payload,

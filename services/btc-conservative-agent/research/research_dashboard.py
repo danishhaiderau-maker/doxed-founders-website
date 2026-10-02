@@ -1193,8 +1193,18 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
         reasons.append(
             "Canonical Fly mirror synchronization receipt is failed or unavailable"
         )
-    if sync_poll_ok is False:
-        reasons.append("Canonical Fly mirror synchronization poll failed")
+    if sync_poll_ok is not True:
+        reasons.append(
+            "Canonical Fly mirror synchronization poll failed or is not confirmed successful"
+        )
+    if sync_activity.get("mirror_sync_receipt_freshness") != "FRESH":
+        reasons.append(
+            "Canonical Fly mirror activity receipt is stale, invalid, or missing"
+        )
+    if sync_activity.get("mirror_sync_activity_status") != "REPORTED_IDLE_OWNER_UNVERIFIED":
+        reasons.append(
+            "Canonical Fly mirror activity is not freshly classified as idle"
+        )
     if sync_revision_parity != "MATCH":
         reasons.append(
             "Canonical Fly mirror synchronization revision parity is not confirmed"
@@ -1210,8 +1220,10 @@ def _generation_freshness_meta(manifest: dict | None = None) -> dict:
     sync_current = bool(
         not sync_in_progress
         and sync_receipt_ok
-        and sync_poll_ok is not False
+        and sync_poll_ok is True
         and sync_revision_parity == "MATCH"
+        and sync_activity.get("mirror_sync_receipt_freshness") == "FRESH"
+        and sync_activity.get("mirror_sync_activity_status") == "REPORTED_IDLE_OWNER_UNVERIFIED"
         and (
             not observed_revision
             or not mirror_revision
@@ -7182,10 +7194,29 @@ function missedProofTouchLabel(row) {
     ? 'UNKNOWN — checkpoint touch reported; conservative evidence incomplete or inconsistent'
     : 'UNKNOWN — touch not established in available tape';
 }
+function mirrorReceiptStale(stale) {
+  const freshness = stale?.generation_freshness || {};
+  const parityFields = ['revision_parity', 'epoch_parity', 'mirror_sync_revision_parity'];
+  return freshness.mirror_sync_receipt_freshness === 'STALE'
+    || freshness.mirror_sync_poll_ok === false
+    || freshness.mirror_sync_activity_status === 'UNKNOWN_STALE'
+    || parityFields.some(field => freshness[field] != null && freshness[field] !== 'MATCH');
+}
+function mirrorReceiptUnverified(stale) {
+  const freshness = stale?.generation_freshness || {};
+  const parityFields = ['revision_parity', 'epoch_parity', 'mirror_sync_revision_parity'];
+  const complete = freshness.mirror_sync_receipt_freshness === 'FRESH'
+    && freshness.mirror_sync_poll_ok === true
+    && freshness.mirror_sync_activity_status === 'REPORTED_IDLE_OWNER_UNVERIFIED'
+    && parityFields.every(field => freshness[field] === 'MATCH');
+  return !complete && !mirrorReceiptStale(stale);
+}
 function summaryEvidenceScope(data) {
   const stale = data?.stale || {};
   const freshness = stale.generation_freshness || {};
-  if (stale.stale === true || freshness.current === false) return [
+  const publicationFreshness = stale.publication_freshness || {};
+  if (stale.stale === true || freshness.current === false
+      || publicationFreshness.stale === true || mirrorReceiptStale(stale)) return [
     'STALE SAVED POLICY + SEPARATE HISTORICAL EXECUTED — READ-ONLY',
     'Saved policy evidence is not current session data. Freshness/parity must recover before qualification; historical executed results remain a separate cohort.'
   ];
@@ -7196,6 +7227,33 @@ function summaryEvidenceScope(data) {
   ];
   return ['FRESHNESS UNVERIFIED — READ-ONLY',
     'No complete freshness receipt is available. Do not treat saved policy or historical executed results as current qualified evidence.'];
+}
+function generationFreshnessUnverified(data) {
+  const stale = data?.stale || {};
+  const freshness = stale.generation_freshness || {};
+  return stale.stale === false && (freshness.current !== true || mirrorReceiptUnverified(stale));
+}
+function isFreshCollectionReport(data) {
+  const scope = String(data?.scope || '').trim().toUpperCase();
+  const dataScope = String(data?.data_scope || '').trim().toUpperCase();
+  return scope === 'FRESH-COLLECTION' || scope === 'FRESH COLLECTION'
+    || (dataScope === 'SESSION' && data?.stale?.fresh_collection_mode === true);
+}
+function analyzerHeaderScope(data) {
+  const stale = data?.stale || {};
+  const freshness = stale.generation_freshness || {};
+  const publication = stale.publication_freshness || {};
+  const savedEvidenceStale = stale.stale === true
+    || freshness.current === false
+    || publication.stale === true
+    || mirrorReceiptStale(stale);
+  if (savedEvidenceStale && isFreshCollectionReport(data)) {
+    return 'STALE SAVED FRESH-COLLECTION REPORT · READ-ONLY';
+  }
+  if (savedEvidenceStale) return 'STALE SAVED ANALYZER GENERATION · READ-ONLY';
+  if (generationFreshnessUnverified(data)) return 'FRESHNESS UNVERIFIED · READ-ONLY';
+  if (data?.all_data_fallback_active) return 'FRESH COLLECTION · reports/all_data fallback';
+  return (data?.scope || 'ALL-DATA') + ' · ' + (data?.data_scope || '').toUpperCase();
 }
 function analyzerAttemptLabel(d) {
   const generated = typeof d.generated_at === 'string' && d.generated_at
@@ -7213,9 +7271,9 @@ function analyzerAttemptLabel(d) {
 }
 function analyzerRecoveryGuidance(d) {
   if (((d || {}).analysis_run || {}).phase === 'FAILED') {
-    return 'Latest analysis failed. Recovery required: inspect the failure receipt and repair the verified mirror/publication through the existing single-owner workflow. Do not start a duplicate analyzer.';
+    return 'Latest analysis failed. Wait for the verified Fly mirror, then inspect the failure receipt and repair the verified mirror/publication through the existing single-owner workflow. Do not start a duplicate analyzer.';
   }
-  return 'Current publication is not verified. Check the existing single-owner workflow and its receipts; saved status does not prove a process is running. Do not start a duplicate analyzer.';
+  return 'Current publication is not verified. Wait for the verified Fly mirror and check the existing single-owner workflow and its receipts; saved status does not prove a process is running. Do not start a duplicate analyzer.';
 }
 function formatExecutiveText(raw, d) {
   if (!raw) return analyzerRecoveryGuidance(d);
@@ -7300,11 +7358,7 @@ async function loadSummary() {
       banner.style.display = 'none';
     }
   }
-  const scopeLabel = stale.stale
-    ? 'STALE SAVED ANALYZER GENERATION · READ-ONLY'
-    : d.all_data_fallback_active
-      ? 'FRESH COLLECTION · reports/all_data fallback'
-      : (d.scope || 'ALL-DATA') + ' · ' + (d.data_scope || '').toUpperCase();
+  const scopeLabel = analyzerHeaderScope(d);
   document.getElementById('scope').textContent = scopeLabel;
   const bundleProvenance = document.getElementById('bundle-provenance');
   if (bundleProvenance) {

@@ -69,6 +69,7 @@ def _install_generation(monkeypatch, *, mirror_revision=REVISION, mirror_epoch=E
             "ok": True,
             "pollOk": True,
             "inProgress": False,
+            "updatedAt": dashboard.datetime.now(dashboard.timezone.utc).isoformat(),
             "revisionParity": "MATCH",
             "sourceRevision": mirror_revision,
             "mirroredSourceRevision": mirror_revision,
