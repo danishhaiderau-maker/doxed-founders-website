@@ -23,6 +23,7 @@ closes or prunes. Repairs go through the normal guarded workflow (WALL slot,
 | Alerts page, Fly | `https://doxed-btc-bot.fly.dev/alerts`, plus the Alerts section on the main dashboard |
 | Agent feed | `insights_client.snapshot()["active_alerts"]` and `["components"]["alerts"]`, or `GET 127.0.0.1:9001/api/insights` |
 | Fly endpoint (after the batched deploy) | `GET https://doxed-btc-bot.fly.dev/api/system-health` |
+| Self-diagnosis, AI scorecard, edges, digest | `http://127.0.0.1:9021/` and `/api/selfaware/*`, `health_client.self_aware()`, `scripts/self_aware_client.py`; alarms appear here as `selfaware.*`. See [SELF_AWARE_RUNBOOK.md](SELF_AWARE_RUNBOOK.md) |
 
 Files under `C:\DoxxedCrypto\laptop-chain\health\`:
 

@@ -10,6 +10,7 @@
     hist = health_client.alerts(limit=50)    # alert history, active first then newest first
     for a in hist["alerts"]:
         print(a["severity"], a["started"]["aest"], a["title"], a["duration_text"])
+    diag = health_client.self_aware()        # self-diagnosis from 127.0.0.1:9021 (None if down)
 
 Order of sources: the local endpoint (127.0.0.1:9011), then the published
 file, then an in-process evaluation. ``python scripts/health_client.py``
@@ -72,6 +73,16 @@ def uptime(*, state_dir: str = sh.DEFAULT_STATE_DIR,
         out["note"] = fly["error"]
     out["proof"] = runtime_uptime.read_proof_progress(state_dir)
     return out
+
+
+def self_aware(timeout: float = 30.0) -> dict[str, Any] | None:
+    """Self-diagnosis (invariants, progress, probable causes) from the self-aware daemon; None if it is down."""
+    import self_aware_client  # noqa: PLC0415
+
+    try:
+        return self_aware_client.health()
+    except self_aware_client.SelfAwareError:
+        return None
 
 
 def failing(report: dict[str, Any]) -> list[dict[str, Any]]:
