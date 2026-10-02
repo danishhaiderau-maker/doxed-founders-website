@@ -418,9 +418,19 @@ def _paper_fill_execution_receipt(
     )
     supported = verdict == "EXECUTABLE" and all(value not in (None, "") for value in required)
     fill_sim = order.get("fill_sim") if isinstance(order.get("fill_sim"), Mapping) else {}
+    fill_model = gate.get("fill_model") or "PRE_REALISTIC_V1_BBO_CROSS"
+    fill_basis = gate.get("fill_basis")
     return {
-        "execution_basis": "CONSERVATIVE_BBO_DEPTH" if supported else "UNSUPPORTED",
+        "execution_basis": (f"{fill_model}:{fill_basis}" if supported and fill_basis
+                            else "CONSERVATIVE_BBO_DEPTH" if supported else "UNSUPPORTED"),
         "conservative_fill_supported": supported,
+        "fill_model": fill_model,
+        "fill_model_role": gate.get("fill_model_role"),
+        "fill_basis": fill_basis,
+        "fill_id": gate.get("fill_id"),
+        "tape_id": gate.get("tape_id"),
+        "queue_estimate": copy.deepcopy(gate.get("queue_estimate")),
+        "optimistic_shadow": copy.deepcopy(gate.get("optimistic_shadow")),
         "fill_gate_policy": _first(source.get("gate_policy"), evidence.get("gate_policy")),
         "fill_gate_verdict": verdict or None,
         "activation_ts": _first(source.get("activation_ts"), evidence.get("activation_ts")),

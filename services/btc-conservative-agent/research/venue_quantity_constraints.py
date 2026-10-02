@@ -55,8 +55,14 @@ def capture_quantity_constraints(
     try:
         market = exchange.market(ccxt_symbol)
     except Exception:
-        market = None
-        reasons.append("VENUE_MARKET_METADATA_UNAVAILABLE")
+        # A fresh public client has no markets until load_markets(); ccxt caches
+        # the result, so this costs one public request per process.
+        try:
+            exchange.load_markets()
+            market = exchange.market(ccxt_symbol)
+        except Exception:
+            market = None
+            reasons.append("VENUE_MARKET_METADATA_UNAVAILABLE")
     if not isinstance(market, Mapping):
         return {"supported": False, "receipt": None, "reasons": reasons or ["VENUE_MARKET_METADATA_INVALID"]}
 
