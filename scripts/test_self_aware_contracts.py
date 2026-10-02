@@ -220,8 +220,11 @@ def test_run_publishes_history_and_summary_feeds_findings(paths, store):
     doc = ct.run(store, paths, {"runtime": {"active_tile_lanes": ROSTER}}, state, {}, tier="heavy", registry=reg)
     assert doc["counts"]["RED"] == 1 and doc["surfaces"]["exports"] == "RED"
     assert len(store.history(ct.HISTORY_TABLE, limit=10, kind="CONTRACT")) == 2
+    state["jobs"] = {"contracts": {"last_ok": "2099-01-01T00:00:00Z"}}  # a deferred heavy job still records last_ok
     light = ct.run(store, paths, {"runtime": {}}, state, {}, tier="light", registry=reg)
     assert light["evaluated"] == 1 and len(light["contracts"]) == 2
+    assert light["heavy_at"] == doc["heavy_at"] == state["contracts_heavy_at"]
+    assert ct.run(store, paths, {"runtime": {}}, {}, {}, tier="light", registry=reg)["heavy_at"] is None
     summ = ct.summary(doc)
     found = {f.id: f for f in diagnose.check_contracts({"now": time.time(), "contracts": summ}, {}, store)}
     assert found["contract.exports"].severity == "RED" and found["contract.analyzer"].severity == "GREEN"

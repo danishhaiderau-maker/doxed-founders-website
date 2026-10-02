@@ -994,6 +994,7 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
             extra["archive_drift"] = {"error": f"{type(exc).__name__}: {str(exc)[:200]}", "findings": []}
         extra["coverage"] = coverage(paths.analyzer_repo, reg)
         state["contracts_heavy_extra"] = {k: v for k, v in extra.items()}
+        state["contracts_heavy_at"] = iso(now)
         if store is not None:
             store.append(HISTORY_TABLE, [{"at": iso(now), "kind": "CONTRACT", "id": r["id"], "status": r["status"],
                                           "metrics": r.get("metrics"), "dims": r.get("dims"),
@@ -1010,7 +1011,7 @@ def run(store, paths: Paths, facts: dict[str, Any], state: dict[str, Any], docs:
     return {"schema": SCHEMA, "generated_at": iso(now), "tier": tier, "registry_hash": reg["registry_hash"],
             "contracts_total": len(reg["contracts"]), "evaluated": len(results), "counts": counts, "surfaces": surfaces,
             "fly_calls": fetch.fly_calls, "ms": int((time.time() - t0) * 1000),
-            "heavy_at": (state.get("jobs") or {}).get("contracts", {}).get("last_ok") if tier == "light" else iso(now),
+            "heavy_at": state.get("contracts_heavy_at"),
             "contracts": allr, **extra}
 
 
