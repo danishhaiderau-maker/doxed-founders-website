@@ -24,7 +24,7 @@ except ImportError:  # direct script/test execution
 
 EVIDENCE_SCHEMA = "market_microstructure_1s_v1"
 RECEIPT_SCHEMA = "conservative_limit_fill_receipt_v2"
-EVALUATOR_VERSION = "public-tape-conservative-v3-quantity-aware"
+EVALUATOR_VERSION = "public-tape-conservative-v4-realistic-v1"
 MAX_AGGRESSOR_WINDOW_SEC = 5
 FILL_MODEL = "REALISTIC_V1"
 SHADOW_FILL_MODEL = "OPTIMISTIC_TOUCH_V1"
