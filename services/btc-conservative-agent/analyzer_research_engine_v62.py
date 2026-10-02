@@ -9244,6 +9244,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         signal_persist, pipeline_events = per_call["signal_persist"], per_call["pipeline_events"]
         ai_errors = per_call["ai_errors"]
         cohort_quarantine["ai_provider_outage"] = ai_outage_receipt
+        cohort_quarantine["ai_served_model"] = ai_served_model_split(trades)
         if ai_outage_receipt["rows"]:
             print(
                 f"   AI provider outage quarantine: {ai_outage_receipt['rows']} per-call rows "
@@ -11991,6 +11992,75 @@ AI_PROVIDER_OUTAGE_INTERVALS = (
     },
 )
 RELAY_INTERFERENCE_REASON = "RELAY_INTERFERENCE_PHANTOM_CANCEL"
+# Immutable served-model cohort annotation.  A provider-side model swap keeps
+# the epoch and every tile policy signature (the cohort continues); analysis
+# splits results by the model that actually answered.  Rows recorded before
+# the bot logged the response ``model`` field are attributed by timestamp.
+AI_SERVED_MODEL_SWITCHOVER = {
+    "from_model": "deepseek-v4-flash",
+    "to_model": "deepseek-flash",
+    "to_model_name": "DeepSeek-V4.1-Flash",
+    "window_start": "2026-10-01T18:56:01Z",
+    "window_end": "2026-10-01T21:30:47Z",
+    "approx_switch_at": "2026-10-01T21:30:47Z",
+    "basis": "DeepSeek retired deepseek-v4-flash from /models and answers it as deepseek-flash; "
+             "the swap happened inside the 18:56-21:30Z provider outage (no successful response "
+             "in between). Pre-fix rows carried only the configured id; first echo-confirmed "
+             "deepseek-flash response 2026-10-01T21:34Z (in-machine probe run 36929501389).",
+}
+SERVED_MODEL_COLUMNS = ("deepseek_served_model", "ai_served_model", "served_model")
+SERVED_MODEL_SWITCHOVER_UNKNOWN = "UNKNOWN_SWITCHOVER_WINDOW"
+
+
+def ai_served_model_cohort(df, ts_cols=("entry_ts", "open_ts", "ts", "timestamp")) -> "pd.Series":
+    """Served model per row: the recorded response ``model`` field, else the annotation."""
+    if df is None or getattr(df, "empty", True):
+        return pd.Series(dtype=object)
+    served = pd.Series("", index=df.index, dtype=object)
+    for col in SERVED_MODEL_COLUMNS:
+        if col in df.columns:
+            values = df[col].fillna("").astype(str).str.strip()
+            served[(served == "") & (values != "")] = values[(served == "") & (values != "")]
+    col = next((c for c in ts_cols if c in df.columns), None)
+    if col is None:
+        return served
+    raw = df[col]
+    numeric = pd.to_numeric(raw, errors="coerce")
+    text = raw.where(numeric.isna(), None)
+    try:
+        ser = pd.to_datetime(text, utc=True, errors="coerce", format="ISO8601")
+    except (TypeError, ValueError):
+        ser = pd.to_datetime(text, utc=True, errors="coerce")
+    epoch = pd.to_datetime(numeric, unit="s", utc=True, errors="coerce")
+    ser = ser.where(numeric.isna(), epoch)
+    start = pd.Timestamp(AI_SERVED_MODEL_SWITCHOVER["window_start"])
+    end = pd.Timestamp(AI_SERVED_MODEL_SWITCHOVER["window_end"])
+    missing = served == ""
+    served[missing & (ser <= start)] = AI_SERVED_MODEL_SWITCHOVER["from_model"]
+    served[missing & (ser >= end)] = AI_SERVED_MODEL_SWITCHOVER["to_model"]
+    served[missing & (ser > start) & (ser < end)] = SERVED_MODEL_SWITCHOVER_UNKNOWN
+    return served
+
+
+def ai_served_model_split(trades) -> dict:
+    """Per-lane closed-trade stats split by served model (annotation receipt)."""
+    receipt = {"switchover": dict(AI_SERVED_MODEL_SWITCHOVER), "by_lane": {}, "rows_by_model": {},
+               "basis": "recorded response model field, else timestamp annotation; epoch and "
+                        "policy signatures unchanged"}
+    if trades is None or getattr(trades, "empty", True):
+        return receipt
+    served = ai_served_model_cohort(trades)
+    pnl = pd.to_numeric(trades.get("net_pnl_usd"), errors="coerce") if "net_pnl_usd" in trades.columns else None
+    lanes = trades["research_lane"].fillna("").astype(str) if "research_lane" in trades.columns else pd.Series("", index=trades.index)
+    receipt["rows_by_model"] = {str(k or "UNATTRIBUTED"): int(v) for k, v in served.value_counts().items()}
+    for (lane, model), idx in trades.groupby([lanes, served]).groups.items():
+        row = {"trades": int(len(idx))}
+        if pnl is not None:
+            values = pnl.loc[idx].dropna()
+            row.update({"net_pnl_usd": round(float(values.sum()), 6),
+                        "win_rate": round(float((values > 0).mean()), 4) if len(values) else None})
+        receipt["by_lane"].setdefault(str(lane or "UNKNOWN"), {})[str(model or "UNATTRIBUTED")] = row
+    return receipt
 
 
 def ai_provider_outage_reason(df, ts_cols=("ts", "timestamp")) -> "pd.Series":

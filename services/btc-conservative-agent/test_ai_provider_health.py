@@ -23,6 +23,7 @@ FUNCTIONS = {
     "_epoch_iso",
     "ai_provider_health_snapshot",
     "call_deepseek_api",
+    "call_deepseek_api_with_meta",
 }
 ASSIGNS = {
     "AI_NO_SUCCESS_ALERT_SEC",
@@ -47,6 +48,11 @@ def compile_provider(unrecorded):
         "os": os, "threading": threading, "time": time,
         "datetime": datetime, "timezone": timezone,
         "_call_deepseek_api_unrecorded": unrecorded,
+        "_deepseek_config_receipt": lambda: ("deepseek-flash", "disabled"),
+        "deepseek_balance_snapshot": lambda now=None: {"status": "UNKNOWN", "checked_at": None},
+        "_ai_deadline_lock": threading.Lock(),
+        "_ai_deadline_state": {"abandoned_in_flight": 0, "deadline_exceeded_total": 0},
+        "AI_CALL_DEADLINE_SEC": 75.0,
     }
     module = ast.Module(body=nodes, type_ignores=[])
     ast.fix_missing_locations(module)
@@ -94,12 +100,56 @@ def test_no_success_for_more_than_ten_minutes_alerts_then_success_clears():
     assert snap["successes_since_boot"] == 2 and snap["failures_since_boot"] == 3
 
 
+META = {"requested_model": "deepseek-flash", "served_model": "deepseek-flash",
+        "system_fingerprint": "aeb56401ca74e127821c4f9126dcb669"}
+
+
 def test_success_records_model_echo_and_returns_text_latency_pair():
-    ns = compile_provider(lambda *a, **k: ("{}", 1200, "deepseek-flash"))
+    ns = compile_provider(lambda *a, **k: ("{}", 1200, dict(META)))
     assert ns["call_deepseek_api"]([], purpose="trading_direction") == ("{}", 1200)
     snap = ns["ai_provider_health_snapshot"]()
     assert snap["successes_since_boot"] == 1 and snap["last_latency_ms"] == 1200
     assert snap["last_model_echo"] == "deepseek-flash"
+    assert snap["last_system_fingerprint"] == META["system_fingerprint"]
+    assert snap["configured_model"] == "deepseek-flash"
+    assert snap["served_model_matches_configured"] is True
+    assert snap["served_model_changes"] == []
+    assert snap["call_deadline_sec"] == 75.0 and "deepseek_balance" in snap
+
+
+def test_with_meta_returns_served_model_and_fingerprint():
+    ns = compile_provider(lambda *a, **k: ("{}", 900, dict(META)))
+    text, latency, meta = ns["call_deepseek_api_with_meta"]([], purpose="trading_direction")
+    assert (text, latency) == ("{}", 900)
+    assert meta == META
+
+
+def test_unexpected_served_model_change_is_recorded_and_mismatch_flagged():
+    ns = compile_provider(lambda *a, **k: ("{}", 900, dict(META)))
+    record = ns["record_ai_provider_outcome"]
+    t0 = 1_790_880_960.0
+    record("trading_direction", ok=True, now=t0, model_echo="deepseek-v4-flash")
+    record("trading_direction", ok=True, now=t0 + 60, model_echo="deepseek-v4-flash")
+    record("trading_direction", ok=True, now=t0 + 9000, model_echo="deepseek-flash", system_fingerprint="fp2")
+    snap = ns["ai_provider_health_snapshot"](t0 + 9001)
+    assert snap["served_model_changes"] == [
+        {"from": "deepseek-v4-flash", "to": "deepseek-flash", "at": "2026-10-01T21:26:00+00:00"}]
+    record("trading_direction", ok=True, now=t0 + 9100, model_echo="deepseek-flash-next")
+    snap = ns["ai_provider_health_snapshot"](t0 + 9101)
+    assert snap["served_model_matches_configured"] is False and len(snap["served_model_changes"]) == 2
+
+
+def test_deadline_failures_count_toward_consecutive_failures():
+    def deadline(*_a, **_k):
+        raise RuntimeError("AI_DEADLINE_EXCEEDED:75s")
+
+    ns = compile_provider(deadline)
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="AI_DEADLINE_EXCEEDED"):
+            ns["call_deepseek_api"]([], purpose="trading_direction")
+    snap = ns["ai_provider_health_snapshot"]()
+    assert snap["consecutive_failures"] == 3 and snap["last_error_class"] == "DEADLINE"
+    assert snap["successes_since_boot"] == 0
 
 
 def test_shadow_and_local_refusals_do_not_touch_primary_provider_truth():
