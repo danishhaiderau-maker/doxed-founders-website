@@ -38,3 +38,21 @@ def test_check_status_verifiers_never_pass_on_absent_checks():
     live["w9011"]["checks"][0]["status"] = "AMBER"
     assert verifier(live)[0]
     assert not verifier({"w9011": {"features": ["missing_data_not_green"], "checks": []}})[0]
+
+
+def test_round2_verifiers_need_live_evidence():
+    state = "state restored=True crashed=False clean_streak=1 incident_close_allowed=False"
+    run2 = {"gh_monitor2": {"databaseId": 2, "headSha": "b" * 40, "conclusion": "success", "lines": [state]}}
+    assert ledger.v_monitor_rules2(run2)[0] and not ledger.v_monitor_rules2(_monitor("success", state))[0]
+    w = {"checks": [{"id": "a"}, {"id": "b"}], "failing": [{"id": "a"}], "acked": []}
+    assert ledger.v_unique_check_ids({"w9011": w})[0] and ledger.v_acks_supported({"w9011": w})[0]
+    assert not ledger.v_unique_check_ids({"w9011": {**w, "checks": [{"id": "a"}, {"id": "a"}]}})[0]
+    assert not ledger.v_acks_supported({"w9011": {"checks": []}})[0]
+    ok = {"a9001_insights": {"components": {"transfer": {"status": "STALE", "data": None, "reason": "old"}}}}
+    lie = {"a9001_insights": {"components": {"transfer": {"status": "OK", "data": {"applied_seq": None}}}}}
+    assert ledger.v_insights_transfer(ok)[0] and not ledger.v_insights_transfer(lie)[0]
+    assert not ledger.v_insights_transfer({})[0]
+    c = {"w9011": {"checks": [{"id": "laptop.pull_ack", "observed_fields": {"max_run_seconds": None}}]}}
+    assert not ledger.v_field_in_check("laptop.pull_ack", "max_run_seconds", not_none=True)(c)[0]
+    assert ledger.v_field_in_check("laptop.pull_ack", "max_run_seconds")(c)[0]
+    assert ledger.v_secret_history({"gh_secret_history": {"conclusion": "success"}})[0]
