@@ -852,14 +852,15 @@ def _conservative_child_receipt(
 
 
 PROTECTION_REPLAY_WINDOW_SCHEMA = "protection_replay_event_window_v1"
-DEFAULT_PROTECTION_REPLAY_MAX_EVENTS = 400
+DEFAULT_PROTECTION_REPLAY_MAX_EVENTS = 150
 
 
 def protection_replay_max_events() -> int | None:
     """Most-recent-event bound for the protection replay; 0 means unbounded.
 
     The replay materialises every entry child x protection variant per event
-    and its cost grows with the epoch (1,764 events took >25 min and ~30 GB).
+    and its cost grows with the epoch (1,764 events took >25 min and ~30 GB;
+    ~1.7 s per replayed event plus ~2 min fixed for the 21k-policy screen).
     """
     raw = os.getenv("ANALYZER_PROTECTION_REPLAY_MAX_EVENTS", "").strip()
     try:
