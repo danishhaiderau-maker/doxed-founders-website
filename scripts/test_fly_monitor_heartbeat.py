@@ -1,4 +1,4 @@
-"""Schedule-gap heartbeat, image-deploy-only suppression, and crash/reset-safe incident closing."""
+﻿"""Schedule-gap heartbeat, image-deploy-only suppression, and crash/reset-safe incident closing."""
 
 import json
 
@@ -86,11 +86,12 @@ def test_heartbeat_write_patches_then_creates_the_variable(monkeypatch):
 
     monkeypatch.setenv("FLY_MONITOR_VARIABLES_TOKEN", "t0ken")
     monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "3")
     monkeypatch.setattr(runner, "GitHub", _GH)
     note = runner.write_heartbeat(NOW, crashed=True, restored=False)
     assert "t0ken" not in note
     assert calls == [("FLY_MONITOR_HEARTBEAT", {
-        "at": hb.iso(NOW), "run_id": "42", "attempt": "", "crashed": True, "restored": False,
+        "at": hb.iso(NOW), "run_id": "42", "attempt": "3", "crashed": True, "restored": False,
     })]
 
 
