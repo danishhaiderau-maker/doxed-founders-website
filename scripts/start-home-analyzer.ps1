@@ -242,7 +242,7 @@ function Restart-OwnedAnalyzerDashboard {
   Stop-Process -Id $owner -Force -ErrorAction Stop
   Wait-Process -Id $owner -Timeout 10 -ErrorAction SilentlyContinue
   # The listen socket can outlive the stopped process by a few seconds.
-  $releaseBy = (Get-Date).AddSeconds(15)
+  $releaseBy = (Get-Date).AddSeconds(30)
   while (@(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction SilentlyContinue).Count -ne 0 -and
          (Get-Date) -lt $releaseBy) { Start-Sleep -Milliseconds 500 }
   if (@(Get-NetTCPConnection -LocalPort $AnalyzerPort -State Listen -ErrorAction SilentlyContinue).Count -ne 0) {
