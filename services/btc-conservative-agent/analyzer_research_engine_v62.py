@@ -587,6 +587,8 @@ LEAD_LAG_REPORT_FILE = "lead_lag_report.json"
 STRATEGY_LAB_REPORT_FILE = "strategy_lab_report.json"
 MAIN_RANKINGS_REPORT_FILE = "main_rankings_report.json"
 STREAM_STUDIES_REPORT_FILE = "stream_studies_report.json"
+DATA_HEALTH_REPORT_FILE = "data_health_report.json"
+EVENT_STUDY_REPORT_FILE = "event_study_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -693,6 +695,8 @@ ANALYZER_JSON_REPORT_FILES = (
     STRATEGY_LAB_REPORT_FILE,
     MAIN_RANKINGS_REPORT_FILE,
     STREAM_STUDIES_REPORT_FILE,
+    DATA_HEALTH_REPORT_FILE,
+    EVENT_STUDY_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -775,6 +779,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Strategy Lab", STRATEGY_LAB_REPORT_FILE, "Pre-registered hypotheses judged on unseen post-registration trades (Holm), bounded exploratory families with family-wise nulls, BH q, deflated Sharpe and walk-forward, live-fill simulator parity and correlation to live tiles; CONSERVATIVE_BBO 1s tape, Bitfinex costs"),
     ("Main Rankings (corrected)", MAIN_RANKINGS_REPORT_FILE, "Every main ranking (tiles, top combinations, regime x lane cells, feature correlations, expanding-quintile feature buckets) with hour-cluster p, Holm FWER and BH q; corrected verdict per row"),
     ("Stream Studies", STREAM_STUDIES_REPORT_FILE, "Exit-timing regret from post_exit_replay, taker counterfactual EV per AI decision and tile, post-fill markout curves per tile x liquidity, research_events_v22 outcome/observation mix; per-stream health"),
+    ("Data Health", DATA_HEALTH_REPORT_FILE, "Coverage %, staleness and row counts per stream: market-context spot/premium/derivatives/liquidations/session flags, cross-venue taker flow up-mask, Bitfinex 1s tape; distinct-trade replay completeness and repaired-stream quality"),
+    ("Pre-registered Event Studies", EVENT_STUDY_REPORT_FILE, "Frozen hypotheses H1-H5 (XVL lead, liquidation burst, funding-window drift, US cash open, Coinbase premium lead): matched controls (hour x trailing-vol tercile), CAR curves, hour-cluster t, lockbox counted until it closes, BH q on scored lockboxes"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
@@ -9299,6 +9305,8 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             ai_challenger_report(session=session)
             lead_lag_report(session=session)
             strategy_lab_report(session=session, trades=trades)
+            data_health_report(session=session)
+            event_study_report(session=session)
             forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
@@ -9416,6 +9424,8 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         ai_challenger_report(session=session)
         lead_lag_report(session=session)
         strategy_lab_report(session=session, trades=trades)
+        data_health_report(session=session)
+        event_study_report(session=session)
         forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
@@ -12726,6 +12736,34 @@ def strategy_lab_report(session=None, trades=None):
         f"verdicts={verdicts} parity={((payload.get('sim_parity') or {}).get('verdict'))} {PIPELINE_ENFORCEMENT_TAG}"
     )
     return _write_aux_report(STRATEGY_LAB_REPORT_FILE, payload, session)
+
+
+def data_health_report(session=None):
+    """Publish per-stream coverage, staleness and repaired-stream quality."""
+    from cross_venue_tape import FILE_NAME
+    SCHEMA = "data_health_v1"
+    session = session or load_research_session()
+    try:
+        from research.data_health_report import SCHEMA, build_data_health
+
+        payload = build_data_health(os.path.dirname(os.path.abspath(_agent_data_path(FILE_NAME))))
+    except Exception as exc:  # the health panel must never stop the analyzer
+        payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(DATA_HEALTH_REPORT_FILE, payload, session)
+
+
+def event_study_report(session=None):
+    """Publish the pre-registered event studies (lockboxes counted until they close)."""
+    from cross_venue_tape import FILE_NAME
+    SCHEMA = "event_study_report_v1"
+    session = session or load_research_session()
+    try:
+        from research.event_study import SCHEMA, build_from_data_dir
+
+        payload = build_from_data_dir(os.path.dirname(os.path.abspath(_agent_data_path(FILE_NAME))))
+    except Exception as exc:  # the event study must never stop the analyzer
+        payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    return _write_aux_report(EVENT_STUDY_REPORT_FILE, payload, session)
 
 
 def forward_trial_report(session=None, evidence=None, selector=None):

@@ -83,6 +83,7 @@ fixed_vs_dynamic_selector_report.json forward_trial_report.json
 multiverse_collection_health_report.json ai_challenger_report.json lead_lag_report.json
 strategy_lab_report.json adaptive_entry_funnel_report.json
 tile_paired_comparison_report.json main_rankings_report.json stream_studies_report.json
+data_health_report.json event_study_report.json
 """.split())
 ACCUMULATOR_FILES = frozenset({"research_trades_v983.db", "research_accumulator_status.json", "trades_accumulated.csv"})
 GENOME_MIRROR_FILES = frozenset({"environment_genome.jsonl", "market_genome.jsonl",

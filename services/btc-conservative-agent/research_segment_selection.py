@@ -41,6 +41,9 @@ EXCLUDED_NAMES = frozenset({
     # Cross-venue collector live state, replaced every second; the evidence is
     # cross_venue_tape_1m.jsonl.
     "cross_venue_live.json",
+    # Market-context collector live state, replaced every 5 s; the evidence is
+    # market_context_1m.jsonl and liquidations.jsonl.
+    "market_context_live.json",
 })
 
 # Fly-local validation caches rewritten on every append to their ledger; they

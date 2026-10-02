@@ -325,6 +325,9 @@ def encode_minute(minute_ts: int, venue_samples: Mapping[str, list],
             "b": [int(round((s.get("buy") or 0.0) / QTY_UNIT)) for s in seq],
             "s": [int(round((s.get("sell") or 0.0) / QTY_UNIT)) for s in seq],
         }
+        if any("up" in s for s in seq):
+            # Per-second connection mask: b/s zeros at a '0' second are unknown flow.
+            row["venues"][venue]["up"] = "".join("1" if s.get("up") else "0" for s in seq)
     basis = {}
     for venue, v in row["venues"].items():
         vals = []
@@ -367,6 +370,7 @@ def decode_minute(row: Mapping[str, Any]) -> dict:
         cells = {}
         dms, dls = v.get("dm") or [], v.get("dl") or []
         buys, sells = v.get("b") or [], v.get("s") or []
+        up = v.get("up")
         for i in range(min(60, len(dms))):
             mid = _decode_value(v.get("m0"), dms[i], unit)
             dl = dls[i] if i < len(dls) else None
@@ -375,6 +379,8 @@ def decode_minute(row: Mapping[str, Any]) -> dict:
                 "last": None if mid is None or dl is None else mid + dl * unit,
                 "buy": (buys[i] if i < len(buys) else 0) * qunit,
                 "sell": (sells[i] if i < len(sells) else 0) * qunit,
+                # None for rows written before the mask existed.
+                "up": None if not isinstance(up, str) else (i < len(up) and up[i] == "1"),
             }
         out[venue] = cells
     return out

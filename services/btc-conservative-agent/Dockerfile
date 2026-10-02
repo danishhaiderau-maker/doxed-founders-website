@@ -55,6 +55,8 @@ RUN python -c "import research_segment_format, research_segment_selection, resea
 RUN python -c "import bitfinex_cost_profile, execution_markouts, adaptive_regime_entry, scenario_c_config, taker_time_exit_binding, paper_policy_family_trend_fade_60, paper_policy_family_trend_fade_60_ladder, cross_venue_lead, paper_policy_family_xvenue_lead, tile_paired_comparison"
 # Shadow cross-venue collector process and its shared tape contract.
 RUN python -c "import cross_venue_tape, cross_venue_collector"
+# Watch-only market-context collector and its tape/session/regime helpers.
+RUN python -c "import market_session_calendar, trailing_regime, market_context_tape, market_context_collector"
 
 # Persistent volume mount point (created at runtime; fly.toml mounts bot_data here).
 RUN mkdir -p /app/data

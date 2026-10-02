@@ -29,6 +29,7 @@ import shutil
 from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
 from research import ai_challenger_view as _ai_challenger_view
+from research import data_health_view as _data_health_view
 
 CURRENT_RESEARCH_LANES = frozenset(_CANONICAL_TILE_LANES)
 
@@ -230,6 +231,8 @@ OPTIONAL_ANALYZER_RAW_INPUTS = (
     "ai_shadow_compact_prompt.jsonl",
     "cross_venue_tape_1m.jsonl",
     "xvl_shadow_signals.jsonl",
+    "market_context_1m.jsonl",
+    "liquidations.jsonl",
     "signal_persist.log",
     "near_edge.log",
 )
@@ -9141,6 +9144,7 @@ DECISION_NAV_LINKS = (
     ("Partial reduction", "/partial-reduction"),
     ("Evidence points", "/evidence-points"),
     ("AI vs challengers", "/ai-challengers"),
+    ("Data health", "/data-health"),
     ("Decision JSON", "/api/decision"),
 )
 
@@ -9313,6 +9317,29 @@ def ai_challengers_page():
     report, evidence = _ai_challenger_payload()
     resp = make_response(_ai_challenger_view.render_ai_challenger_html(
         report, evidence=evidence, nav_links=DECISION_NAV_LINKS))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
+def _data_health_payload() -> tuple[dict, dict, dict]:
+    report, evidence = _current_lane_artifact(_data_health_view.REPORT_FILE)
+    study, _study_evidence = _current_lane_artifact(_data_health_view.EVENT_STUDY_FILE)
+    manifest = _read_json(REPORT_MANIFEST_FILE, {}) or {}
+    generated_at = manifest.get("generated_at")
+    return report, study, {**evidence, "generated_at_display": format_melbourne_dt(generated_at) if generated_at else None}
+
+
+@app.route("/api/streams/data-health")
+def api_data_health():
+    report, study, evidence = _data_health_payload()
+    return jsonify({"evidence": evidence, "report": report or None, "event_study": study or None})
+
+
+@app.route("/data-health")
+def data_health_page():
+    report, study, evidence = _data_health_payload()
+    resp = make_response(_data_health_view.render_data_health_html(
+        report, study, evidence=evidence, nav_links=DECISION_NAV_LINKS))
     resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
 
