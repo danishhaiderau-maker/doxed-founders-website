@@ -220,6 +220,9 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
         reasons = deny_reasons(state, head, health, tree, max_unshipped_bytes)
         if reasons:
             raise PromotionRefused(reasons)
+        # The shadow equals the just-fetched Fly published head now; a quiet or
+        # lock-blocked puller leaves last_applied_at old without any lag.
+        head_verified_at = _utc_now()
         view_root.mkdir(parents=True, exist_ok=True)
         # The view is not consumable while it is being updated.
         for name in (SYNC_STATE_NAME, HEARTBEAT_NAME):
@@ -297,7 +300,8 @@ def stage_view(*, shadow_root: Path, view_root: Path, head: dict, health: dict,
     revision = str(state["last_source_git_rev"]).lower()
     heartbeat = {
         "ok": True, "inProgress": False, "phase": "complete",
-        "source": "research_segments_volume_sink", "syncedAt": state.get("last_applied_at"),
+        "source": "research_segments_volume_sink", "syncedAt": head_verified_at,
+        "segmentLastAppliedAt": state.get("last_applied_at"),
         "sourceRevision": revision, "observedSourceRevision": revision,
         "mirroredSourceRevision": revision,
         "deployedRevision": str(health["source_git_rev"]).lower(), "revisionParity": "MATCH",

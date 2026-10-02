@@ -799,6 +799,8 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Compact Summary", RESEARCH_COMPACT_SUMMARY_FILE, "Machine-readable rollup of all KPIs"),
     ("Top Leakage Trades", TOP_LEAKAGE_REPORT_FILE, "Top 50 trades — peak vs booked, money left on table"),
     ("Feature Importance", FEATURE_IMPORTANCE_REPORT_FILE, "Which trading features correlate with PnL"),
+    ("Regime Leaderboard", REGIME_LEADERBOARD_REPORT_FILE, "Regime x lane cells (day type, session, ADX, volatility, funding, liquidity) with best lane per regime; recommend-only"),
+    ("Roster Policy", ROSTER_POLICY_FILE, "Recommended lane weights from the regime leaderboard; human approval required, never auto-applied"),
     ("Chase Profit", CHASE_PROFIT_REPORT_FILE, "Incremental PnL from chase-assisted vs static fills"),
     ("Confidence × Lane", CONFIDENCE_BAND_CROSS_REPORT_FILE, "Performance by AI band per lane"),
     ("Edge Validation", EDGE_VALIDATION_REPORT_FILE, "ACTIVE / WATCHLIST / DEPRECATED status for edge filter"),
@@ -1117,8 +1119,147 @@ def _session_hours(session: dict = None) -> float:
     return (pd.Timestamp.now(tz="UTC") - start).total_seconds() / 3600.0
 
 
+_EPOCH_GUARD = None
+_EPOCH_MANIFEST_DIR = None
+_LAPTOP_MIRROR_TREE = r"C:\DoxxedCrypto\fly-mirror-segments\tree"
+_EPOCH_AUDIT_SKIP_SUFFIXES = (".malformed_rows.jsonl",)
+
+
+def _analyzer_data_root():
+    return os.path.dirname(os.path.abspath(_agent_data_path(TRADES_FILE)))
+
+
+def _epoch_manifest_roots():
+    """Directories that may hold the declared data_epoch.json, in priority order."""
+    override = os.getenv("BTC_DATA_EPOCH_DIR")
+    if override:
+        return [override]
+    roots = []
+    for root in (os.getenv("BTC_AGENT_DATA_DIR"), _analyzer_data_root(), _LAPTOP_MIRROR_TREE):
+        if root:
+            roots += [root, os.path.join(root, "v3")]
+    return roots
+
+
+def _epoch_guard():
+    """Process-wide clean-epoch guard; admits every row while no epoch is declared."""
+    global _EPOCH_GUARD, _EPOCH_MANIFEST_DIR
+    if _EPOCH_GUARD is None:
+        from analyzer_epoch_guard import EpochGuard
+
+        guard = EpochGuard(None)
+        for root in _epoch_manifest_roots():
+            candidate = EpochGuard.from_data_dir(root)
+            if candidate.declared:
+                guard, _EPOCH_MANIFEST_DIR = candidate, root
+                break
+        _EPOCH_GUARD = guard
+    return _EPOCH_GUARD
+
+
+def _epoch_filter_frame(relpath, frame):
+    guard = _epoch_guard()
+    if not guard.declared or frame is None or frame.empty:
+        return frame
+    out = guard.filter_frame(os.path.basename(relpath), frame).reset_index(drop=True)
+    dropped = len(frame) - len(out)
+    if dropped:
+        print(
+            f"   Clean epoch {guard.manifest['epoch_id']}: excluded {dropped} pre-epoch row(s) "
+            f"from {os.path.basename(relpath)} {PIPELINE_ENFORCEMENT_TAG}"
+        )
+    return out
+
+
+def _epoch_admit(relpath, row):
+    guard = _epoch_guard()
+    return not guard.declared or guard.admit(os.path.basename(relpath), row)
+
+
+def _epoch_audit_streams(data_root):
+    """Current-cohort data files under the analyzer data root (active + numeric rotations)."""
+    import data_epoch as de
+
+    root = Path(data_root)
+    candidates = [(p, p.name) for p in root.glob("*") if p.is_file()]
+    ledgers = root / "v3" / "ledgers"
+    if ledgers.is_dir():
+        candidates += [(p, f"v3/ledgers/{p.name}") for p in ledgers.glob("*") if p.is_file()]
+    for path, relpath in sorted(candidates, key=lambda item: item[1]):
+        stem, dot, suffix = relpath.rpartition(".")
+        if dot and suffix.isdigit():
+            relpath = stem
+        if not relpath.endswith((".jsonl", ".csv")) or relpath.endswith(_EPOCH_AUDIT_SKIP_SUFFIXES):
+            continue
+        if de.epoch_independent(relpath):
+            continue
+        yield path, relpath
+
+
+def _epoch_purity_audit(guard, data_root):
+    """Pre-epoch rows any analyzer reader could still pick up from the data root.
+
+    Row filters cover the engine's own loaders, but research modules read some
+    streams directly, so purity is proven against the files themselves.
+    """
+    import csv
+
+    import data_epoch as de
+    from analyzer_epoch_guard import ADMITTED_CLASSES
+
+    if not guard.declared:
+        return 0, {}
+    manifest = guard.manifest
+    found = {}
+    for path, relpath in _epoch_audit_streams(data_root):
+        bad = 0
+        try:
+            if relpath.endswith(".csv"):
+                with open(path, "r", encoding="utf-8", errors="replace", newline="") as handle:
+                    for row in csv.DictReader(handle):
+                        if de.classify_row(relpath, row, manifest) not in ADMITTED_CLASSES:
+                            bad += 1
+            else:
+                with open(path, "rb") as handle:
+                    for line in handle:
+                        if not line.strip():
+                            continue
+                        cls = de.classify(relpath, stamp_value=de.line_stamp(line), ts=de.line_ts(line),
+                                          manifest=manifest)
+                        if cls not in ADMITTED_CLASSES:
+                            bad += 1
+        except OSError as exc:
+            found[relpath] = found.get(relpath, 0) + 1
+            print(f"  ?? epoch purity audit could not read {path}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+            continue
+        if bad:
+            found[relpath] = found.get(relpath, 0) + bad
+    return sum(found.values()), dict(sorted(found.items()))
+
+
+def _epoch_receipt_block():
+    """Generation-receipt ``data_epoch`` block, or None while no epoch is declared."""
+    guard = _epoch_guard()
+    if not guard.declared:
+        return None
+    data_root = _analyzer_data_root()
+    admitted, by_stream = _epoch_purity_audit(guard, data_root)
+    block = guard.receipt_block(pre_epoch_rows_admitted=admitted)
+    block.update({
+        "manifest_dir": _EPOCH_MANIFEST_DIR,
+        "audited_data_root": data_root,
+        "pre_epoch_rows_admitted_by_stream": by_stream,
+        "unstamped_rule": "rows without data_epoch_id are admitted only when timestamped at or after "
+                          "started_at_utc (labelled CURRENT_UNSTAMPED / UNSTAMPED_POST_EPOCH)",
+    })
+    return block
+
+
 def _v2_data_start_ts():
-    """v2 segment genesis: Fly shipper baseline, else the promoted laptop heartbeat."""
+    """Clean-epoch start when declared; else v2 segment genesis (Fly shipper baseline, then laptop heartbeat)."""
+    guard = _epoch_guard()
+    if guard.declared:
+        return pd.Timestamp(float(guard.manifest["started_at_ts"]), unit="s", tz="UTC")
     sources = (
         (os.path.join("segment-shipper-v2", "state.json"),
          lambda doc: (doc.get("baseline") or {}).get("created_at")),
@@ -1530,6 +1671,16 @@ def load_data():
     near_edge = robust_read_csv(NEAR_EDGE_FILE, "Near Edge")
     pipeline_events = robust_read_csv(PIPELINE_EVENTS_FILE, "Pipeline Events")
     ai_errors = robust_read_csv(AI_ERRORS_FILE, "AI Errors")
+    trades = _epoch_filter_frame(TRADES_FILE, trades)
+    blocked = _epoch_filter_frame(BLOCKED_FILE, blocked)
+    decisions = _epoch_filter_frame(DECISIONS_FILE, decisions)
+    ai_log = _epoch_filter_frame(AI_TRANCHE_FILE, ai_log)
+    setups = _epoch_filter_frame(SETUP_LOG_FILE, setups)
+    candles = _epoch_filter_frame(CANDLES_FILE, candles)
+    signal_persist = _epoch_filter_frame(SIGNAL_PERSIST_FILE, signal_persist)
+    near_edge = _epoch_filter_frame(NEAR_EDGE_FILE, near_edge)
+    pipeline_events = _epoch_filter_frame(PIPELINE_EVENTS_FILE, pipeline_events)
+    ai_errors = _epoch_filter_frame(AI_ERRORS_FILE, ai_errors)
 
     required = [
         "net_pnl_usd", "conf", "ai_win_prob", "dir", "regime", "exit_reason",
@@ -2159,6 +2310,8 @@ def _load_jsonl_replays(use_cache=True):
                     if not isinstance(row, dict):
                         malformed += 1
                         continue
+                    if not _epoch_admit(SIGNAL_REPLAY_FILE, row):
+                        continue
                     tid = row.get("trade_id")
                     if tid:
                         replays[tid] = _merge_replay_revision(replays.get(tid), row)
@@ -2213,6 +2366,8 @@ def _load_jsonl_by_trade_id(path):
                     if not line:
                         continue
                     row = json.loads(line)
+                    if not _epoch_admit(path, row):
+                        continue
                     tid = row.get("trade_id")
                     if tid:
                         rows[tid] = row
@@ -2402,7 +2557,7 @@ def _load_jsonl_rows_all_generations(filename, contains=None, keep=None):
                         row = json.loads(line)
                     except ValueError:
                         continue
-                    if isinstance(row, dict) and (keep is None or keep(row)):
+                    if isinstance(row, dict) and (keep is None or keep(row)) and _epoch_admit(filename, row):
                         rows.append(row)
         except OSError as exc:
             print(f"  ⚠️ {path} read error: {exc} {PIPELINE_ENFORCEMENT_TAG}")
@@ -2442,9 +2597,11 @@ def _load_jsonl_rows(path):
                 if not line:
                     continue
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
                 except Exception:
                     continue
+                if not isinstance(row, dict) or _epoch_admit(path, row):
+                    rows.append(row)
     except Exception as e:
         print(f"⚠️ {path} read error: {e} {PIPELINE_ENFORCEMENT_TAG}")
     return rows
@@ -21562,12 +21719,19 @@ def _attach_generation_receipt(manifest, *, optional_errors):
                        "reason_code": "COLLECTOR_ERROR",
                        "reason": f"{type(exc).__name__}: {exc}"[:300]}],
         }
+    try:
+        data_epoch = _epoch_receipt_block()
+    except Exception as exc:
+        # epoch_id None never matches the declared epoch, so purity stays RED.
+        data_epoch = {"declared": True, "epoch_id": None, "pre_epoch_rows_admitted": None,
+                      "error": f"{type(exc).__name__}: {exc}"[:300]}
     receipt = build_generation_receipt(
         manifest,
         optional_errors=optional_errors,
         integrity=_load_json_report(analyzer_report_path(ANALYZER_INTEGRITY_REPORT_FILE), {}) or {},
         input_blockers=input_blockers,
         protection_replay_window=_protection_replay_window_from_reports(),
+        data_epoch=data_epoch,
     )
     recon = _write_ledger_reconciliation(manifest)
     if recon:
@@ -21586,6 +21750,8 @@ def _attach_generation_receipt(manifest, *, optional_errors):
             "failed_optional_studies", "integrity_status", "protection_replay_window",
         )
     }
+    if "data_epoch" in receipt:
+        manifest["generation_receipt"]["data_epoch"] = receipt["data_epoch"]
     artifacts = manifest.setdefault("text_artifacts", [])
     if RECEIPT_FILE not in artifacts:
         artifacts.append(RECEIPT_FILE)

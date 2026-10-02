@@ -58,6 +58,8 @@ VIOLATION_HELP = {
     "RECONCILE_MISMATCH": "counts/PnL disagree with the canonical ledger cohort", "LABEL_CONTRADICTION": "status says OK but content is empty/dead",
     "DEAD_SECTION": "Fly panel returns 200 with no analyzer data", "DRIFT_COLLAPSE": "metric fell below half its rolling baseline",
     "DRIFT_DIMS_DROPPED": "dimension present in the baseline vanished", "CONTRACT_ERROR": "the evaluator crashed on this contract",
+    "FILL_MODEL_UNDECLARED": "headline result does not declare fill_model=REALISTIC_V1",
+    "FILL_MODEL_OPTIMISTIC_HEADLINE": "an optimistic (touch/ideal/mid) fill number is shown as headline instead of a labelled shadow",
 }
 DRIFT_WINDOW = 12
 ARCHIVE_MAX_FILE_BYTES = 40_000_000
@@ -497,7 +499,7 @@ def evaluate(spec: dict[str, Any], obj: Any, meta: dict[str, Any], ctx: dict[str
     # reconciliation
     if spec.get("reconcile"):
         try:
-            rv, rm = RECONCILERS[spec["reconcile"]](obj, ctx)
+            rv, rm = RECONCILERS[spec["reconcile"]](obj, {**ctx, "spec": spec})
             viol.extend(rv)
             metrics.update(rm)
         except Exception as exc:  # noqa: BLE001
@@ -857,17 +859,34 @@ def _rec_decision_vs_cohort(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
 def _rec_accumulator_vs_cohort(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
     cohort = _cohort(ctx)
     viol, met = [], {}
+    labelled_usd = obj.get("pnl_unit") == "USD"
+    if not labelled_usd:
+        viol.append(_v("UNIT_UNLABELLED", AMBER, "accumulator by_lane pnl carries no unit (pre-fix status file)"))
+    rec = obj.get("ledger_reconciliation") if isinstance(obj.get("ledger_reconciliation"), dict) else None
+    if rec is not None:
+        met["accumulator:ledger_reconciliation"] = rec.get("status")
+        if rec.get("status") == "MISMATCH":
+            for lane in rec.get("mismatched_lanes") or []:
+                r = (rec.get("lanes") or {}).get(lane) or {}
+                viol.append(_v("RECONCILE_MISMATCH", AMBER,
+                               f"{lane}: accumulator n={r.get('accumulator_n')} ${r.get('accumulator_net_pnl_usd')} vs "
+                               f"mirror ledger n={r.get('ledger_n')} ${r.get('ledger_net_pnl_usd')}"))
+        elif rec.get("status") != "MATCH":
+            viol.append(_v("RECONCILE_UNAVAILABLE", AMBER, f"accumulator ledger reconciliation: {rec.get('status')}"))
     for lane, v in (obj.get("by_lane") or {}).items():
         c = cohort.get(lane)
         if not isinstance(c, dict) or not isinstance(v, dict):
             continue
         an, cn = int(v.get("n") or 0), int(c.get("n") or 0)
-        ap, cp = _num(v.get("pnl")), _num(c.get("net_pnl_usd"))
+        ap = _num(v.get("net_pnl_usd") if labelled_usd else v.get("pnl"))
+        cp = _num(c.get("net_pnl_usd"))
         met[f"closes:{lane}:accumulator"], met[f"closes:{lane}:cohort"] = an, cn
-        if abs(an - cn) > 1:
+        # The accumulator holds the mirror-ledger cohort; the analyzer cohort drops quarantined closes.
+        if abs(an - cn) > 1 and rec is None:
             viol.append(_v("RECONCILE_MISMATCH", AMBER, f"{lane}: accumulator n={an} vs cohort n={cn}"))
         if ap is not None and cp is not None and ap * cp < 0 and abs(ap) > 0.05 and abs(cp) > 0.05:
-            viol.append(_v("UNIT_OR_SIGN_MISMATCH", AMBER, f"{lane}: accumulator pnl={ap:+.2f} (unit unlabelled) but cohort "
+            unit = "USD" if labelled_usd else "unit unlabelled"
+            viol.append(_v("UNIT_OR_SIGN_MISMATCH", AMBER, f"{lane}: accumulator pnl={ap:+.2f} ({unit}) but cohort "
                                                           f"net_pnl_usd={cp:+.3f}: opposite sign"))
     return viol, met
 
@@ -909,7 +928,86 @@ def _rec_fly_chase_buckets(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
     return [], {}
 
 
+HEADLINE_FILL_MODEL = "REALISTIC_V1"
+_OPTIMISTIC_FILL_TOKENS = ("IDEAL", "TOUCH", "OPTIMISTIC", "MID_TO_MID", "BBO_MARKETABLE")
+
+
+def _declared_fill_model(obj: Any) -> str | None:
+    fm = obj.get("fill_model") if isinstance(obj, dict) else None
+    if isinstance(fm, dict):
+        fm = fm.get("fill_model") or fm.get("version")
+    return str(fm) if fm else None
+
+
+def _optimistic(value: Any) -> bool:
+    text = str(value or "").upper()
+    return bool(text) and text != HEADLINE_FILL_MODEL and any(t in text for t in _OPTIMISTIC_FILL_TOKENS)
+
+
+def _optimistic_headlines(obj: Any, path: str = "", depth: int = 0) -> list[str]:
+    """Paths where an optimistic fill world is labelled as the headline (shadows must carry a non-headline role)."""
+    if depth > 6:
+        return []
+    hits: list[str] = []
+    if isinstance(obj, dict):
+        role = str(obj.get("fill_model_role") or obj.get("role") or "").upper()
+        if role == "HEADLINE" and _optimistic(obj.get("fill_model") or obj.get("fill_world")):
+            hits.append(path or "$")
+        for k, v in obj.items():
+            if str(k).startswith("headline") and not isinstance(v, (dict, list)) and _optimistic(v):
+                hits.append(f"{path}.{k}".lstrip("."))
+            elif isinstance(v, (dict, list)):
+                hits.extend(_optimistic_headlines(v, f"{path}.{k}".lstrip("."), depth + 1))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:200]):
+            hits.extend(_optimistic_headlines(v, f"{path}[{i}]", depth + 1))
+    return hits
+
+
+def _rec_fill_model_headline(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
+    """Every headline result must declare fill_model=REALISTIC_V1; an optimistic world shown as headline is RED."""
+    viol = []
+    spec = ctx.get("spec") or {}
+    declared = _declared_fill_model(obj)
+    headline_world = obj.get("headline_fill_world") if isinstance(obj, dict) else None
+    met = {"fill_model:declared": declared or "UNDECLARED", "fill_model:headline_world": headline_world or "-"}
+    if declared != HEADLINE_FILL_MODEL:
+        sev = RED if declared and _optimistic(declared) else spec.get("fill_model_undeclared_severity", RED)
+        viol.append(_v("FILL_MODEL_UNDECLARED", sev,
+                       f"headline result declares fill_model={declared or 'none'}; required {HEADLINE_FILL_MODEL}"
+                       + (f" ({spec['fill_model_pending']})" if spec.get("fill_model_pending") and sev != RED else "")))
+    if headline_world is not None and headline_world != HEADLINE_FILL_MODEL:
+        viol.append(_v("FILL_MODEL_OPTIMISTIC_HEADLINE", RED,
+                       f"headline_fill_world={headline_world}; optimistic worlds may only appear as labelled comparison shadows"))
+    bad = _optimistic_headlines(obj)
+    if bad:
+        viol.append(_v("FILL_MODEL_OPTIMISTIC_HEADLINE", RED,
+                       f"optimistic fill model labelled as headline at {', '.join(bad[:5])}"))
+    met["fill_model:optimistic_headlines"] = len(bad)
+    return viol, met
+
+
+def _rec_edges_fill_model(obj: Any, ctx: dict[str, Any]) -> tuple[list, dict]:
+    """Edge-tracker hit rates are headline numbers: every published edge row must be REALISTIC_V1."""
+    store = ctx.get("store")
+    if store is None or not store.table_exists("res_edges"):
+        return [_v("RECONCILE_SKIPPED", INFO, "edge tracker has not published res_edges yet")], {}
+    cols = {r["column_name"] for r in store.read(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'res_edges'")}
+    if "fill_model" not in cols:
+        return [_v("FILL_MODEL_UNDECLARED", RED, "res_edges rows carry no fill_model: hit rates are pre-REALISTIC_V1 "
+                   "(gross mid-to-mid) numbers shown as headline")], {"edges:fill_model": "UNDECLARED"}
+    rows = store.read("SELECT fill_model, count(*) AS n FROM res_edges GROUP BY fill_model")
+    met = {f"edges:{r['fill_model'] or 'UNDECLARED'}": int(r["n"]) for r in rows}
+    bad = [r for r in rows if r.get("fill_model") != HEADLINE_FILL_MODEL]
+    viol = [_v("FILL_MODEL_UNDECLARED", RED, f"{sum(int(r['n']) for r in bad)} edge rows declare "
+               f"{sorted({str(r.get('fill_model')) for r in bad})}; required {HEADLINE_FILL_MODEL}")] if bad else []
+    return viol, met
+
+
 RECONCILERS: dict[str, Callable[[Any, dict[str, Any]], tuple[list, dict]]] = {
+    "fill_model_headline": _rec_fill_model_headline,
+    "edges_fill_model": _rec_edges_fill_model,
     "fly_chase_buckets": _rec_fly_chase_buckets,
     "lanes_vs_cohort": _rec_lanes_vs_cohort,
     "export_ledger": _rec_export_ledger,

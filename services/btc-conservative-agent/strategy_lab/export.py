@@ -234,11 +234,14 @@ def generation_health(report_dir: str) -> dict:
     receipt = _read_report(report_dir, "analyzer_generation_receipt.json")
     blockers = _read_report(report_dir, "analyzer_input_blockers.json")
     recon = _read_report(report_dir, "ledger_reconciliation.json")
+    receipt_view = {k: receipt.get(k) for k in (
+        "level", "complete", "reasons", "failed_required_studies", "failed_optional_studies",
+        "integrity_status", "protection_replay_window", "ledger_reconciliation", "generated_at",
+    )} if receipt else {"status": "MISSING"}
+    if receipt.get("data_epoch"):
+        receipt_view["data_epoch"] = receipt["data_epoch"]
     return {
-        "generation_receipt": {k: receipt.get(k) for k in (
-            "level", "complete", "reasons", "failed_required_studies", "failed_optional_studies",
-            "integrity_status", "protection_replay_window", "ledger_reconciliation", "generated_at",
-        )} if receipt else {"status": "MISSING"},
+        "generation_receipt": receipt_view,
         "input_blockers": {"level": blockers.get("level"), "counts": blockers.get("counts"),
                            "epoch_id": blockers.get("epoch_id"),
                            "items": [{k: i.get(k) for k in ("input", "status", "reason_code", "reason")}

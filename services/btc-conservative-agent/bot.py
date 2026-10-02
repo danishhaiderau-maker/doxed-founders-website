@@ -50869,22 +50869,25 @@ DATA_EPOCH_ID = (os.getenv("DATA_EPOCH_ID") or "").strip() or None
 _DATA_EPOCH_MANIFEST: dict | None = None
 
 
-def _data_epoch_fill_model() -> str:
+def _data_epoch_fill_model() -> dict:
+    """research/fill_model.py declaration (REALISTIC-FILLS); FILL_MODEL_VERSION env overrides the version."""
+    try:
+        from research.fill_model import fill_model_declaration
+        declaration = dict(fill_model_declaration())
+    except Exception:
+        declaration = {"fill_model": "unspecified"}
     configured = (os.getenv("FILL_MODEL_VERSION") or "").strip()
     if configured:
-        return configured
-    try:
-        from research.fill_model import FILL_MODEL_VERSION as shared_fill_model
-        return str(shared_fill_model)
-    except Exception:
-        return "unspecified"
+        declaration["fill_model"] = configured
+    return declaration
 
 
-def _data_epoch_fingerprint() -> dict:
+def _data_epoch_fingerprint(fill_model: dict) -> dict:
     return _data_epoch.epoch_fingerprint(
         bot_version=EXECUTION_FIX_VERSION, research_stack_version=COMBO_EXECUTION_FIX_VERSION,
-        fill_model=_data_epoch_fill_model(), collector_fill_model=FILL_MODEL_IDEAL_TOUCH,
-        collector_version=COLLECTOR_VERSION, feature_schema_version=FEATURE_SCHEMA_VERSION,
+        fill_model=fill_model.get("fill_model"), fill_model_fingerprint=fill_model.get("fill_model_fingerprint"),
+        collector_fill_model=FILL_MODEL_IDEAL_TOUCH, collector_version=COLLECTOR_VERSION,
+        feature_schema_version=FEATURE_SCHEMA_VERSION,
     )
 
 
@@ -50894,11 +50897,12 @@ def _open_data_epoch() -> dict | None:
     if not DATA_EPOCH_ID:
         return None
     try:
+        fill_model = _data_epoch_fill_model()
         _DATA_EPOCH_MANIFEST = _data_epoch.ensure_runtime_manifest(
             str(_data_sync_runtime_root()), DATA_EPOCH_ID, source_git_rev=_runtime_git_rev(),
             bot_version=EXECUTION_FIX_VERSION,
             segment_prefix=(os.getenv("RESEARCH_SEGMENTS_PREFIX") or "").strip(),
-            fingerprint=_data_epoch_fingerprint(),
+            fill_model=fill_model, fingerprint=_data_epoch_fingerprint(fill_model),
         )
     except (OSError, ValueError) as exc:
         _DATA_EPOCH_MANIFEST = None

@@ -78,7 +78,53 @@ class TradeAccumulatorEpochTest(unittest.TestCase):
         status = json.loads(acc._status_path(self.root).read_text(encoding="utf-8"))
         self.assertEqual(status["epoch_id"], CURRENT_EPOCH)
         self.assertIn("COLLECTOR_EPOCH", status["epoch_reason"])
-        self.assertEqual(status["by_lane"], {self.lane: {"n": 1, "pnl": 0.01}})
+        self.assertEqual(status["by_lane"], {self.lane: {
+            "n": 1, "wins": 1, "net_pnl_usd": 0.01, "pnl": 0.01, "pnl_unit": "USD",
+            "pnl_basis_counts": {"RECORDED_CSV_VALUE": 1},
+        }})
+
+    def test_pnl_is_exact_usd_never_the_percent_column(self):
+        receipt = json.dumps({"reconciled": True, "observed_net_pnl_usd": -0.004321})
+        rows = [
+            {**_trade("rounded-zero", self.lane, pnl=0.0), "pnl": 1.79, "execution_cost_accounting": receipt},
+            {**_trade("plain", self.lane, pnl=-0.02), "pnl": -3.5},
+        ]
+        _write_data(self.data, rows)
+        acc.sync_accumulator(root=self.root, data_dir=self.data)
+        lane = acc.build_status(root=self.root)["by_lane"][self.lane]
+        self.assertEqual(lane["net_pnl_usd"], round(-0.004321 - 0.02, 6))
+        self.assertEqual(lane["pnl"], lane["net_pnl_usd"])
+        self.assertEqual(lane["pnl_unit"], "USD")
+        self.assertEqual(lane["wins"], 0)
+        with closing(sqlite3.connect(acc._db_path(self.root))) as conn:
+            stored = dict(conn.execute("SELECT trade_id, net_pnl_usd FROM trades").fetchall())
+        self.assertEqual(stored, {"rounded-zero": -0.004321, "plain": -0.02})
+
+    def test_rows_stored_with_the_percent_value_are_repaired(self):
+        _write_data(self.data, [{**_trade("cur-1", self.lane, pnl=0.0), "pnl": 1.79}])
+        acc.sync_accumulator(root=self.root, data_dir=self.data)
+        with closing(sqlite3.connect(acc._db_path(self.root))) as conn:
+            conn.execute("UPDATE trades SET net_pnl_usd=1.79")
+            conn.commit()
+        acc.sync_accumulator(root=self.root, data_dir=self.data)
+        with closing(sqlite3.connect(acc._db_path(self.root))) as conn:
+            self.assertEqual(conn.execute("SELECT net_pnl_usd FROM trades").fetchone()[0], 0.0)
+
+    def test_status_reconciles_with_the_mirror_ledger(self):
+        _write_data(self.data, [_trade("a", self.lane, pnl=0.01), _trade("b", self.lane, pnl=-0.03)])
+        acc.sync_accumulator(root=self.root, data_dir=self.data)
+        ledger = {"mirror_ledger": {self.lane: {"n": 2, "net_pnl_usd": -0.02}}, "quarantined": {self.lane: 1}}
+        (self.root / acc.LEDGER_RECONCILIATION_FILE).write_text(json.dumps(ledger), encoding="utf-8")
+        rec = acc.build_status(root=self.root)["ledger_reconciliation"]
+        self.assertEqual(rec["status"], "MATCH")
+        self.assertEqual(rec["lanes"][self.lane]["quarantined_in_analyzer_cohort"], 1)
+        ledger["mirror_ledger"][self.lane]["net_pnl_usd"] = -0.46
+        (self.root / acc.LEDGER_RECONCILIATION_FILE).write_text(json.dumps(ledger), encoding="utf-8")
+        rec = acc.build_status(root=self.root)["ledger_reconciliation"]
+        self.assertEqual((rec["status"], rec["mismatched_lanes"]), ("MISMATCH", [self.lane]))
+
+    def test_missing_ledger_reconciliation_is_unavailable_not_match(self):
+        self.assertEqual(acc.reconcile_with_ledger({}, self.root)["status"], "UNAVAILABLE")
 
     def test_reads_expose_only_current_epoch_after_epoch_change(self):
         _write_data(self.data, [_trade("cur-1", self.lane)])

@@ -19,17 +19,25 @@ on:
       - "scripts/test_research_segment_fly_parity.py"
       - "scripts/laptop_chain_incident.py"
       - "scripts/self_aware/**"
-      - "scripts/test_self_aware.py"
-      - "scripts/test_self_aware_contracts.py"
+      - "scripts/test_self_aware*.py"
       - "scripts/*.ps1"
       - "tests/test_laptop_chain_scripts.py"
       - "tests/test_blindspot_closure_ledger.py"
       - "scripts/blindspot_closure_ledger.py"
       - "services/btc-conservative-agent/research_segment_puller.py"
       - "services/btc-conservative-agent/research_segment_store.py"
+      - "services/btc-conservative-agent/research_segment_promotion.py"
       - "services/btc-conservative-agent/strategy_lab/**"
       - "services/btc-conservative-agent/research/**"
       - "services/btc-conservative-agent/test_research_segment*.py"
+      - "services/btc-conservative-agent/analysis_archive.py"
+      - "services/btc-conservative-agent/analyzer_research_engine_v62.py"
+      - "services/btc-conservative-agent/test_research_trade_accumulator_epoch.py"
+      - "services/btc-conservative-agent/test_dashboard_report_publication.py"
+      - "services/btc-conservative-agent/test_past_analysis_archive_card.py"
+      - "services/btc-conservative-agent/test_genome_search_space_disclosure.py"
+      - "services/btc-conservative-agent/test_data_retention.py"
+      - "services/btc-conservative-agent/test_v31_overview_best_policy_counts.py"
       - "scripts/fly_monitor_*.py"
       - ".github/workflows/laptop-tests.yml"
   push:
@@ -44,17 +52,25 @@ on:
       - "scripts/test_research_segment_fly_parity.py"
       - "scripts/laptop_chain_incident.py"
       - "scripts/self_aware/**"
-      - "scripts/test_self_aware.py"
-      - "scripts/test_self_aware_contracts.py"
+      - "scripts/test_self_aware*.py"
       - "scripts/*.ps1"
       - "tests/test_laptop_chain_scripts.py"
       - "tests/test_blindspot_closure_ledger.py"
       - "scripts/blindspot_closure_ledger.py"
       - "services/btc-conservative-agent/research_segment_puller.py"
       - "services/btc-conservative-agent/research_segment_store.py"
+      - "services/btc-conservative-agent/research_segment_promotion.py"
       - "services/btc-conservative-agent/strategy_lab/**"
       - "services/btc-conservative-agent/research/**"
       - "services/btc-conservative-agent/test_research_segment*.py"
+      - "services/btc-conservative-agent/analysis_archive.py"
+      - "services/btc-conservative-agent/analyzer_research_engine_v62.py"
+      - "services/btc-conservative-agent/test_research_trade_accumulator_epoch.py"
+      - "services/btc-conservative-agent/test_dashboard_report_publication.py"
+      - "services/btc-conservative-agent/test_past_analysis_archive_card.py"
+      - "services/btc-conservative-agent/test_genome_search_space_disclosure.py"
+      - "services/btc-conservative-agent/test_data_retention.py"
+      - "services/btc-conservative-agent/test_v31_overview_best_policy_counts.py"
       - "scripts/fly_monitor_*.py"
       - ".github/workflows/laptop-tests.yml"
 
@@ -75,19 +91,24 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install minimal dependencies
-        run: python -m pip install -r services/btc-conservative-agent/requirements.txt pytest
+        # duckdb/scipy are the self-aware engine's store and stats deps; without
+        # them its tests importorskip and CI silently runs none of them.
+        run: python -m pip install -r services/btc-conservative-agent/requirements.txt pytest "duckdb>=1.1,<2" scipy
       - name: System health, laptop incident and self-aware watcher
         working-directory: scripts
         run: |
+          python -c "import duckdb, scipy"
           tests="test_system_health.py test_system_health_meta.py test_fly_platform_status.py test_research_segment_fly_parity.py test_laptop_chain_incident.py"
-          if [ -f test_self_aware.py ]; then tests="$tests test_self_aware.py"; fi
-          if [ -f test_self_aware_contracts.py ]; then tests="$tests test_self_aware_contracts.py"; fi
-          python -m pytest $tests -q -p no:cacheprovider
+          for t in test_self_aware*.py; do [ -f "$t" ] && tests="$tests $t"; done
+          python -m pytest $tests -q -p no:cacheprovider -rs
       - name: Laptop chain scripts (PowerShell cases skip on Linux)
         run: python -m pytest tests/test_laptop_chain_scripts.py tests/test_blindspot_closure_ledger.py -q -p no:cacheprovider
       - name: Segment puller and store
         working-directory: services/btc-conservative-agent
         run: python -m pytest test_research_segments.py test_research_segments_volume.py test_research_segments_promotion.py test_research_segments_epoch.py test_research_segments_prune.py -q -p no:cacheprovider
+      - name: Analyzer sections (accumulator, archive, dashboard publication)
+        working-directory: services/btc-conservative-agent
+        run: python -m pytest test_research_trade_accumulator_epoch.py test_dashboard_report_publication.py test_past_analysis_archive_card.py test_genome_search_space_disclosure.py test_data_retention.py::ArchiveTests test_v31_overview_best_policy_counts.py -q -p no:cacheprovider
 
   windows-powershell:
     # tests/test_laptop_chain_scripts.py runs the supervisor/monitor .ps1

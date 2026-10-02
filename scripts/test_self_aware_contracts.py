@@ -141,6 +141,33 @@ def test_invariant_counter_ratio_expect():
     assert ok["status"] == "GREEN"
 
 
+class _CohortFetch:
+    def __init__(self, cohort: dict):
+        self.summary = {"ledger_reconciliation": {"analyzer_cohort": cohort}}
+
+    def get(self, source):
+        return self.summary, {}
+
+
+def test_accumulator_reconciles_in_usd_against_the_ledger():
+    cohort = {"FAMILY_A": {"n": 25, "net_pnl_usd": -0.188739}}
+    ctx = _ctx(fetch=_CohortFetch(cohort))
+    legacy = {"by_lane": {"FAMILY_A": {"n": 26, "pnl": 2.49}}}
+    viol, _ = ct._rec_accumulator_vs_cohort(legacy, ctx)
+    assert {"UNIT_UNLABELLED", "UNIT_OR_SIGN_MISMATCH"} <= {v["kind"] for v in viol}
+
+    lane = {"FAMILY_A": {"accumulator_n": 26, "ledger_n": 26, "accumulator_net_pnl_usd": -0.220617,
+                         "ledger_net_pnl_usd": -0.220617, "status": "MATCH"}}
+    fixed = {"pnl_unit": "USD", "by_lane": {"FAMILY_A": {"n": 26, "net_pnl_usd": -0.220617, "pnl": -0.220617}},
+             "ledger_reconciliation": {"status": "MATCH", "mismatched_lanes": [], "lanes": lane}}
+    viol, met = ct._rec_accumulator_vs_cohort(fixed, ctx)
+    assert viol == [] and met["accumulator:ledger_reconciliation"] == "MATCH"
+
+    fixed["ledger_reconciliation"] = {"status": "MISMATCH", "mismatched_lanes": ["FAMILY_A"],
+                                      "lanes": {"FAMILY_A": {**lane["FAMILY_A"], "ledger_net_pnl_usd": -0.46}}}
+    assert [v["kind"] for v in ct._rec_accumulator_vs_cohort(fixed, ctx)[0]] == ["RECONCILE_MISMATCH"]
+
+
 def test_label_contradiction():
     spec = _spec(status_path="status", tables=[{"path": "rows", "min_rows": 1, "empty_silent_severity": "AMBER"}])
     assert "LABEL_CONTRADICTION" in _kinds(_eval(spec, {"status": "OK", "rows": []}))
@@ -167,6 +194,43 @@ def test_fly_chase_buckets_dead_vs_not_applicable():
     dead = _eval(spec, {"chase_analytics": {"status": "UNAVAILABLE", "reason": "NO_VALIDATED_ANALYZER_BUNDLE"}})
     assert dead["status"] == "RED" and "DEAD_SECTION" in _kinds(dead)
     assert _eval(spec, {"chase_analytics": {"status": "NOT_APPLICABLE"}})["status"] == "GREEN"
+
+
+def test_fill_model_headline_requires_realistic_v1():
+    spec = _spec(id="analyzer.genome_grid_fill_model", reconcile="fill_model_headline")
+    good = {"fill_model": {"fill_model": "REALISTIC_V1", "shadow_fill_model": "OPTIMISTIC_TOUCH_V1"},
+            "headline_fill_world": "REALISTIC_V1",
+            "rows": [{"fill_world": "REALISTIC_V1", "fill_model": "REALISTIC_V1", "fill_model_role": "HEADLINE"},
+                     {"fill_world": "OPTIMISTIC_TOUCH_SHADOW", "fill_model": "OPTIMISTIC_TOUCH_V1",
+                      "fill_model_role": "COMPARISON_SHADOW_NOT_HEADLINE"}]}
+    assert _eval(spec, good)["status"] == "GREEN"
+    legacy = _eval(spec, {"rows": [{"fill_world": "IDEAL_TOUCH"}]})
+    assert legacy["status"] == "RED" and "FILL_MODEL_UNDECLARED" in _kinds(legacy)
+    swapped = _eval(spec, {**good, "headline_fill_world": "OPTIMISTIC_TOUCH_SHADOW"})
+    assert swapped["status"] == "RED" and "FILL_MODEL_OPTIMISTIC_HEADLINE" in _kinds(swapped)
+    mislabelled = dict(good, rows=[{"fill_world": "IDEAL_TOUCH", "fill_model": "OPTIMISTIC_TOUCH_V1", "fill_model_role": "HEADLINE"}])
+    assert "FILL_MODEL_OPTIMISTIC_HEADLINE" in _kinds(_eval(spec, mislabelled))
+
+
+def test_fill_model_undeclared_severity_is_per_contract_but_optimistic_is_always_red():
+    spec = _spec(id="fly.fill_model", surface="fly", reconcile="fill_model_headline",
+                 fill_model_undeclared_severity="AMBER", fill_model_pending="ships post-freeze")
+    pending = _eval(spec, {"trades": []})
+    assert pending["status"] == "AMBER" and "ships post-freeze" in pending["violations"][0]["detail"]
+    assert _eval(spec, {"fill_model": "OPTIMISTIC_TOUCH_V1"})["status"] == "RED"
+    assert _eval(spec, {"fill_model": {"fill_model": "REALISTIC_V1"}})["status"] == "GREEN"
+
+
+def test_edges_fill_model_reads_published_rows(store):
+    import pandas as pd
+    spec = _spec(id="selfaware.edges_fill_model", surface="selfaware", reconcile="edges_fill_model")
+    assert _eval(spec, {"ok": 1}, store=store)["status"] == "GREEN"
+    store.publish("edges", pd.DataFrame({"edge": ["A"], "holdout_hit": [0.55]}), sources=["t"])
+    legacy = _eval(spec, {"ok": 1}, store=store)
+    assert legacy["status"] == "RED" and "FILL_MODEL_UNDECLARED" in _kinds(legacy)
+    store.publish("edges", pd.DataFrame({"edge": ["A", "B"], "fill_model": ["REALISTIC_V1", "REALISTIC_V1"]}), sources=["t"])
+    res = _eval(spec, {"ok": 1}, store=store)
+    assert res["status"] == "GREEN" and res["metrics"]["edges:REALISTIC_V1"] == 2
 
 
 # ------------------------------------------------------------------ drift

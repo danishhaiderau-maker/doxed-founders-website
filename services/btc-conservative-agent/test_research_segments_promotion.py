@@ -119,6 +119,23 @@ def test_view_must_be_empty_and_outside_the_shadow_tree(tmp_path):
         promotion.stage_view(shadow_root=env.shadow, view_root=occupied, head=head, health=health)
     assert (occupied / "keep.txt").read_text() == "evidence"
 
+def test_synced_at_is_the_head_verification_not_the_last_applied_segment(tmp_path, monkeypatch):
+    # 10-02 14:10Z: no segment applied for 31 min (parity held the lock, then the
+    # head was idle), promotion verified shadow == published head, yet the
+    # analyzer refused MIRROR_SYNC_RECEIPT_STALE off last_applied_at.
+    env, head, health = _synced(tmp_path)
+    state_path = env.shadow / ".puller" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["last_applied_at"] = "2026-10-02T13:39:06Z"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(promotion, "_utc_now", lambda: "2026-10-02T13:55:21Z")
+    view = tmp_path / "view"
+    promotion.stage_view(shadow_root=env.shadow, view_root=view, head=head, health=health)
+    heartbeat = json.loads((view / promotion.HEARTBEAT_NAME).read_text(encoding="utf-8"))
+    assert heartbeat["syncedAt"] == "2026-10-02T13:55:21Z"
+    assert heartbeat["segmentLastAppliedAt"] == "2026-10-02T13:39:06Z"
+
+
 def test_promotion_heartbeat_carries_v2_genesis(tmp_path):
     env, head, health = _synced(tmp_path)
     view = tmp_path / "view"

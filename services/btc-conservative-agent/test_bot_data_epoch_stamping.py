@@ -47,6 +47,7 @@ def test_boot_opens_manifest_and_rows_are_stamped(tmp_path, monkeypatch):
     assert on_disk["fingerprint"]["fill_model"] == "REALISTIC_V1"
     assert on_disk["fingerprint"]["bot_version"] == "v31-test"
     assert on_disk["fingerprint"]["sha256_16"]
+    assert on_disk["fill_model"]["fill_model"] == "REALISTIC_V1"
     stamped = ns["_data_epoch_row"](str(tmp_path / "trade_outcome.jsonl"), {"ts": 1})
     assert stamped["data_epoch_id"] == "ce-20261004-v31-clean"
     sealed = {"ts": 1, "row_sha256": "x"}

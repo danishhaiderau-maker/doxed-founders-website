@@ -14,8 +14,12 @@ every collected signal episode instead:
 * outcome: N, fills, win rate, EV, net, R-multiple, MFE/MAE, drawdown and a
   fixed chronological 70/30 holdout, per fill world.
 
-Every row is SIMULATED on public 1 s Bitfinex tape (two fill worlds: BBO
-marketable and ideal touch). Live paper outcomes are reported separately as
+Every row is SIMULATED on public 1 s Bitfinex tape. The headline fill world is
+the shared ``REALISTIC_V1`` model (research/fill_model.py: measured latency,
+opposite-BBO taker fills with size walk, maker fills only on trade-through or
+queue consumption, latency on marketable exits, targets booked at the level);
+``OPTIMISTIC_TOUCH_SHADOW`` is a labelled comparison shadow, never the
+headline. Live paper outcomes are reported separately as
 LIVE_PAPER per lane. Nothing here can place or change an order; retired tiles
 are evaluated only as parameter sets over market data, never as runtime code.
 """
@@ -46,6 +50,8 @@ AGENT_DIR = Path(__file__).resolve().parents[1]
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
+from research import fill_model as fm  # noqa: E402
+
 SCHEMA = "genome_grid_report_v1"
 ROWS_SCHEMA = "genome_grid_policy_row_v1"
 DEFAULT_MIRROR = r"C:\DoxxedCrypto\fly-mirror-segments\tree"
@@ -63,7 +69,11 @@ HOLDOUT_TRAIN_FRACTION = 0.7
 MIN_OOS_FILLS_FOR_RANK = 10
 MIN_TRAIN_FILLS_FOR_RANK = 30
 DUPLICATE_SIGNAL_SEC = 90
-WORLDS = ("BBO_MARKETABLE", "IDEAL_TOUCH")
+HEADLINE_WORLD = fm.FILL_MODEL_VERSION
+SHADOW_WORLD = "OPTIMISTIC_TOUCH_SHADOW"
+WORLDS = (HEADLINE_WORLD, SHADOW_WORLD)
+TRADE_FIELDS = ("bid_qty", "ask_qty", "tlow", "thigh", "buy_qty", "sell_qty", "buy_vwap", "sell_vwap")
+VALUE_COLUMNS = ("net_pnl_usd", "r_multiple", "mfe_pct", "mae_pct", "fill_fraction", "markout_60s_bp", "maker")
 DIRECTION_RULES = ("FOLLOW", "FADE")
 
 # Chase identities follow research_v3_search: windows are 5-minute buckets, the
@@ -157,6 +167,14 @@ class Tape:
     high: np.ndarray
     fresh: np.ndarray
     receipts: list[dict[str, Any]]
+    bid_qty: np.ndarray | None = None
+    ask_qty: np.ndarray | None = None
+    tlow: np.ndarray | None = None
+    thigh: np.ndarray | None = None
+    buy_qty: np.ndarray | None = None
+    sell_qty: np.ndarray | None = None
+    buy_vwap: np.ndarray | None = None
+    sell_vwap: np.ndarray | None = None
 
     @property
     def end(self) -> int:
@@ -164,7 +182,11 @@ class Tape:
 
     def window(self, start: int, end: int) -> dict[str, np.ndarray]:
         a, b = max(0, start - self.t0), max(0, min(len(self.bid), end - self.t0))
-        return {k: getattr(self, k)[a:b] for k in ("bid", "ask", "last", "low", "high", "fresh")}
+        out = {k: getattr(self, k)[a:b] for k in ("bid", "ask", "last", "low", "high", "fresh")}
+        for k in TRADE_FIELDS:
+            arr = getattr(self, k)
+            out[k] = arr[a:b] if arr is not None else np.full(max(0, b - a), np.nan)
+        return out
 
 
 def _tape_sources(mirror: Path, tier_a: Path) -> list[tuple[str, Path]]:
@@ -202,15 +224,20 @@ def load_tape(mirror: Path, tier_a: Path) -> Tape:
         high = _num(row.get("trade_high")) or last
         age = _num(row.get("source_age_sec"))
         fresh = row.get("valid_bbo", True) is not False and row.get("fresh", True) is not False and (age is None or age <= TAPE_STALE_SEC)
-        by_ts[int(ts)] = (bid, ask, last, min(low, last), max(high, last), 1.0 if fresh else 0.0)
+        nan = float("nan")
+        trade = tuple(nan if v is None else v for v in (
+            _num(row.get("bid_qty")), _num(row.get("ask_qty")), _num(row.get("trade_low")), _num(row.get("trade_high")),
+            _num(row.get("buy_qty")), _num(row.get("sell_qty")), _num(row.get("buy_vwap")), _num(row.get("sell_vwap"))))
+        by_ts[int(ts)] = (bid, ask, last, min(low, last), max(high, last), 1.0 if fresh else 0.0) + trade
     if not by_ts:
         raise SystemExit("GENOME_GRID_NO_TAPE")
     t0, t1 = min(by_ts), max(by_ts) + 1
-    arr = np.full((t1 - t0, 6), np.nan)
+    arr = np.full((t1 - t0, 6 + len(TRADE_FIELDS)), np.nan)
     for ts, vals in by_ts.items():
         arr[ts - t0] = vals
+    extra = {k: arr[:, 6 + j].copy() for j, k in enumerate(TRADE_FIELDS)}
     return Tape(t0, arr[:, 0].copy(), arr[:, 1].copy(), arr[:, 2].copy(), arr[:, 3].copy(), arr[:, 4].copy(),
-                np.nan_to_num(arr[:, 5]), receipts)
+                np.nan_to_num(arr[:, 5]), receipts, **extra)
 
 
 def tape_atr14_pct(tape: Tape, ts: float, bar_sec: int = 180, bars: int = 14) -> float | None:
@@ -397,31 +424,129 @@ def limit_schedule(entry: Mapping[str, Any], direction: str, signal_price: float
     return limit
 
 
-def simulate_fill(entry: Mapping[str, Any], direction: str, signal_price: float,
-                  w: Mapping[str, np.ndarray]) -> dict[str, tuple[int, float] | None]:
-    """First fill second and price per world, or None (no fill / insufficient tape)."""
+Fill = tuple  # (fill second, entry price, filled fraction, maker 0/1)
+
+
+def _w(w: Mapping[str, np.ndarray], key: str, n: int) -> np.ndarray:
+    arr = w.get(key)
+    return arr if arr is not None else np.full(n, np.nan)
+
+
+def _qty(price: float) -> float:
+    return MARGIN_USD * LEVERAGE / price
+
+
+def realistic_taker_fill(direction: str, w: Mapping[str, np.ndarray], start: int = 0) -> Fill | None:
+    """REALISTIC_V1 taker: opposite BBO of the first fresh quote at/after arrival, with size walk."""
+    bid, ask, fresh = w["bid"], w["ask"], w["fresh"]
+    long = direction == "LONG"
+    for i in range(max(0, start), min(start + fm.TAKER_MAX_WAIT_SEC + 1, len(bid))):
+        if fresh[i] and bid[i] == bid[i] and ask[i] >= bid[i]:
+            top = float(ask[i] if long else bid[i])
+            top_qty = _w(w, "ask_qty" if long else "bid_qty", len(bid))[i]
+            walk = fm.size_walk(top, top_qty, float(ask[i] - bid[i]), _qty(top), direction)
+            return (i, float(walk["vwap"]), 1.0, 0)
+    return None
+
+
+def realistic_maker_fill(entry: Mapping[str, Any], direction: str, signal_price: float,
+                         w: Mapping[str, np.ndarray], start: int = 0) -> Fill | None:
+    """REALISTIC_V1 resting limit (row twin: fill_model.maker_fill_rows): trade-through or queue consumption."""
+    ttl = int(entry["ttl_sec"])
+    n_all = len(w["bid"])
+    if n_all < start + ttl:
+        return None
+    sl = slice(start, start + ttl)
+    long = direction == "LONG"
+    sign = 1.0 if long else -1.0
+    bid, ask, fresh = w["bid"][sl], w["ask"][sl], w["fresh"][sl]
+    limit = fm.round_limit_passive(limit_schedule(entry, direction, signal_price, bid, ask), direction)
+    touch, opp = (bid, ask) if long else (ask, bid)
+    touch_qty = _w(w, "bid_qty" if long else "ask_qty", n_all)[sl]
+    opp_qty = _w(w, "ask_qty" if long else "bid_qty", n_all)[sl]
+    agg_qty = _w(w, "sell_qty" if long else "buy_qty", n_all)[sl]
+    agg_vwap = _w(w, "sell_vwap" if long else "buy_vwap", n_all)[sl]
+    eps = fm.price_tol(limit)
+    with np.errstate(invalid="ignore"):
+        printed = np.nan_to_num(agg_qty) > 0
+        through = printed & (sign * (limit - agg_vwap) > eps)
+        at_limit = printed & (np.abs(agg_vwap - limit) <= eps)
+        at_qty = np.where(at_limit, np.nan_to_num(agg_qty), 0.0)
+        quoted = (fresh > 0) & ~np.isnan(touch) & ~np.isnan(opp)
+        reached = quoted & (sign * (limit - touch) >= -eps)
+        marketable = quoted & (sign * (limit - opp) >= -eps)
+    qty = _qty(float(limit[0]))
+    starts = np.flatnonzero(np.r_[True, limit[1:] != limit[:-1]])
+    ends = np.r_[starts[1:], ttl]
+    filled, cost, first = 0.0, 0.0, None
+    for s, e in zip(starts.tolist(), ends.tolist()):
+        lim = float(limit[s])
+        tol = float(eps[s])
+        if filled == 0.0 and marketable[s]:
+            walk = fm.size_walk(float(opp[s]), opp_qty[s], float(ask[s] - bid[s]), qty, direction)
+            return (start + s, float(walk["vwap"]), 1.0, 0)
+        seg_through = through[s:e]
+        t_rel = int(np.argmax(seg_through)) if seg_through.any() else None
+        prints = at_qty[s:e]
+        f_rel, part = None, 0.0
+        if prints.any():
+            r = reached[s:e]
+            r_rel = int(np.argmax(r)) if r.any() else None
+            p_rel = int(np.argmax(prints > 0))
+            q_rel = r_rel if r_rel is not None and r_rel <= p_rel else p_rel
+            q_qty = touch_qty[s + q_rel]
+            if q_rel == r_rel and abs(touch[s + q_rel] - lim) > tol:
+                queue = 0.0  # the limit improved the touch: nobody ahead
+            else:
+                queue = float(q_qty) if q_qty == q_qty else math.inf
+            avail = np.cumsum(prints) - queue
+            full = avail >= (qty - filled) - 1e-15
+            f_rel = int(np.argmax(full)) if full.any() else None
+        hits = [x for x in (t_rel, f_rel) if x is not None]
+        if hits:
+            k = min(hits)
+            cost += (qty - filled) * lim
+            return (first if first is not None else start + s + k, cost / qty, 1.0, 1)
+        if prints.any():
+            part = float(min(qty - filled, max(0.0, avail[-1])))
+            if part > 0:
+                first = first if first is not None else start + s + int(np.argmax(avail > 0))
+                filled += part
+                cost += part * lim
+    if filled > 0 and first is not None:
+        return (first, cost / filled, filled / qty, 1)
+    return None
+
+
+def optimistic_touch_fill(entry: Mapping[str, Any], direction: str, signal_price: float,
+                          w: Mapping[str, np.ndarray]) -> Fill | None:
+    """OPTIMISTIC_TOUCH shadow (the former IDEAL_TOUCH world): taker at last, maker on any traded touch."""
     bid, ask, last, low, high, fresh = (w[k] for k in ("bid", "ask", "last", "low", "high", "fresh"))
     if entry["offset_pct"] == 0.0:
         for i in range(min(5, len(bid))):
             if fresh[i] and bid[i] == bid[i]:
-                return {"BBO_MARKETABLE": (i, float(ask[i] if direction == "LONG" else bid[i])),
-                        "IDEAL_TOUCH": (i, float(last[i]))}
-        return {"BBO_MARKETABLE": None, "IDEAL_TOUCH": None}
+                return (i, float(last[i]), 1.0, 0)
+        return None
     ttl = int(entry["ttl_sec"])
     if len(bid) < ttl:
-        return {"BBO_MARKETABLE": None, "IDEAL_TOUCH": None}
+        return None
     limit = limit_schedule(entry, direction, signal_price, bid[:ttl], ask[:ttl])
     with np.errstate(invalid="ignore"):
-        if direction == "LONG":
-            bbo = (fresh[:ttl] > 0) & (ask[:ttl] <= limit)
-            touch = low[:ttl] <= limit
-        else:
-            bbo = (fresh[:ttl] > 0) & (bid[:ttl] >= limit)
-            touch = high[:ttl] >= limit
-    out: dict[str, tuple[int, float] | None] = {}
-    for world, hit in (("BBO_MARKETABLE", bbo), ("IDEAL_TOUCH", touch)):
-        out[world] = (int(np.argmax(hit)), float(limit[int(np.argmax(hit))])) if hit.any() else None
-    return out
+        touch = low[:ttl] <= limit if direction == "LONG" else high[:ttl] >= limit
+    if not touch.any():
+        return None
+    i = int(np.argmax(touch))
+    return (i, float(limit[i]), 1.0, 1)
+
+
+def simulate_fill(entry: Mapping[str, Any], direction: str, signal_price: float,
+                  w: Mapping[str, np.ndarray], latency_steps: int = 0) -> dict[str, Fill | None]:
+    """Fill per world: (second, price, filled fraction, maker) or None (no fill / insufficient tape)."""
+    if entry["offset_pct"] == 0.0:
+        real = realistic_taker_fill(direction, w, latency_steps)
+    else:
+        real = realistic_maker_fill(entry, direction, signal_price, w, latency_steps)
+    return {HEADLINE_WORLD: real, SHADOW_WORLD: optimistic_touch_fill(entry, direction, signal_price, w)}
 
 
 def prepare_path(direction: str, entry_price: float, fill_idx: int, w: Mapping[str, np.ndarray]) -> dict[str, np.ndarray] | None:
@@ -437,12 +562,26 @@ def prepare_path(direction: str, entry_price: float, fill_idx: int, w: Mapping[s
     price = seg[ok]
     raw = (price - entry_price) / entry_price * 100.0
     cur = raw * LEVERAGE if direction == "LONG" else -raw * LEVERAGE
-    return {"age": age, "price": price, "cur": cur, "mfe": np.maximum.accumulate(cur), "mae": np.minimum.accumulate(cur)}
+    # Exit-side aggressor VWAP (buy prints above a LONG's sell target, sell prints below a SHORT's buy target).
+    thr = w.get("buy_vwap" if direction == "LONG" else "sell_vwap")
+    thr_qty = w.get("buy_qty" if direction == "LONG" else "sell_qty")
+    if thr is not None and thr_qty is not None:
+        thr = np.where(np.nan_to_num(thr_qty) > 0, thr, np.nan)
+    thr_seg = thr[fill_idx: fill_idx + PATH_END_SEC][ok] if thr is not None else np.full(len(price), np.nan)
+    thr_raw = (thr_seg - entry_price) / entry_price * 100.0 * LEVERAGE
+    return {"age": age, "price": price, "cur": cur, "mfe": np.maximum.accumulate(cur), "mae": np.minimum.accumulate(cur),
+            "thr_cur": thr_raw if direction == "LONG" else -thr_raw}
 
 
 def fast_replay(path: Mapping[str, np.ndarray], spec: Mapping[str, Any], atr_pct: float,
-                margin_usd: float = MARGIN_USD) -> dict[str, Any]:
-    """Vectorised twin of research_v3_policy_replay.replay_protected_policy (same precedence and floors)."""
+                margin_usd: float = MARGIN_USD, *, realistic: bool = False,
+                exit_latency_sec: float = 0.0) -> dict[str, Any]:
+    """Vectorised twin of research_v3_policy_replay.replay_protected_policy (same precedence and floors).
+
+    ``realistic=True`` applies the REALISTIC_V1 exit rules: targets / partial take-profits fill only when a trade
+    prints through the level and are booked at the level; every other exit books the executable-side mark at
+    trigger + ``exit_latency_sec``. ``realistic=False`` is the canonical trigger-mark booking (parity mode).
+    """
     loss, profit = spec["loss_protection"], spec["profit_protection"]
     cur, mfe, age = path["cur"], path["mfe"], path["age"]
     n = len(cur)
@@ -483,8 +622,13 @@ def fast_replay(path: Mapping[str, np.ndarray], spec: Mapping[str, Any], atr_pct
     conds.append(("PROFIT_PROTECTION_FLOOR", active_any & (cur <= active)))
     if loss.get("time_stop_min") is not None:
         conds.append(("TIME_STOP", age >= float(loss["time_stop_min"]) * 60.0))
-    if mode in {"ATR_TARGET", "HYBRID_RUNNER"} and profit.get("atr_tp_k") is not None:
-        conds.append(("ATR_TAKE_PROFIT", cur >= float(profit["atr_tp_k"]) * atr_m))
+    tp_m = float(profit["atr_tp_k"]) * atr_m if profit.get("atr_tp_k") is not None else None
+    thr_cur = path.get("thr_cur")
+    if thr_cur is None:
+        thr_cur = np.full(n, np.nan)
+    if mode in {"ATR_TARGET", "HYBRID_RUNNER"} and tp_m is not None:
+        with np.errstate(invalid="ignore"):
+            conds.append(("ATR_TAKE_PROFIT", thr_cur > tp_m if realistic else cur >= tp_m))
     best, reason = n, "PATH_END"
     for name, c in conds:
         if c.any():
@@ -492,15 +636,21 @@ def fast_replay(path: Mapping[str, np.ndarray], spec: Mapping[str, Any], atr_pct
             if i < best:
                 best, reason = i, name
     exit_idx = best if best < n else n - 1
-    exit_margin = float(cur[exit_idx])
+    if realistic:
+        exit_margin, _ = fm.realistic_exit_margin(cur, age, exit_idx, reason, latency_sec=exit_latency_sec,
+                                                  target_margin=tp_m)
+    else:
+        exit_margin = float(cur[exit_idx])
     remaining, realized = 1.0, 0.0
     for trigger_k, fraction in profit.get("partial_take_profits") or []:
         if remaining <= 0:
             continue
-        hit = cur[: exit_idx + 1] >= float(trigger_k) * atr_m
+        level = float(trigger_k) * atr_m
+        with np.errstate(invalid="ignore"):
+            hit = thr_cur[: exit_idx + 1] > level if realistic else cur[: exit_idx + 1] >= level
         if hit.any():
             take = min(float(fraction), remaining)
-            realized += take * float(cur[int(np.argmax(hit))])
+            realized += take * (level if realistic else float(cur[int(np.argmax(hit))]))
             remaining -= take
     realized += remaining * exit_margin
     return {
@@ -530,6 +680,7 @@ NO_FILL, CENSORED_PATH = -1, -2
 _TAPE: Tape | None = None
 _ENTRIES: list[dict[str, Any]] = []
 _PROTECTIONS: dict[str, dict[str, Any]] = {}
+_LATENCY_SEC: float = 0.0
 
 
 def _below_normal() -> None:
@@ -545,10 +696,17 @@ def _below_normal() -> None:
         pass
 
 
-def _init_worker(tape: Tape, entries: list[dict[str, Any]], protections: dict[str, dict[str, Any]]) -> None:
-    global _TAPE, _ENTRIES, _PROTECTIONS
-    _TAPE, _ENTRIES, _PROTECTIONS = tape, entries, protections
+def _init_worker(tape: Tape, entries: list[dict[str, Any]], protections: dict[str, dict[str, Any]],
+                 latency_sec: float = 0.0) -> None:
+    global _TAPE, _ENTRIES, _PROTECTIONS, _LATENCY_SEC
+    _TAPE, _ENTRIES, _PROTECTIONS, _LATENCY_SEC = tape, entries, protections, float(latency_sec)
     _below_normal()
+
+
+def latency_steps(signal_ts: float, latency_sec: float) -> int:
+    """Tape index (0 = first full second after the signal) of the first quote observed at/after arrival."""
+    start = int(math.floor(signal_ts)) + 1
+    return max(0, int(math.ceil(float(signal_ts) + float(latency_sec) - fm.PRICE_EPS)) - start)
 
 
 def _spec(protection: Mapping[str, Any]) -> dict[str, Any]:
@@ -568,7 +726,8 @@ def evaluate_episode(job: tuple[int, dict[str, Any]]) -> dict[str, Any]:
     tape = _TAPE
     assert tape is not None
     start = int(math.floor(ep["signal_ts"])) + 1
-    need = max(int(e["ttl_sec"]) for e in _ENTRIES) + PATH_END_SEC + 5
+    lat = latency_steps(ep["signal_ts"], _LATENCY_SEC)
+    need = max(int(e["ttl_sec"]) for e in _ENTRIES) + PATH_END_SEC + 5 + lat + fm.TAKER_MAX_WAIT_SEC
     if start < tape.t0 or start + need > tape.end:
         return {"idx": idx, "status": "CENSORED_TAPE_WINDOW", "rows": []}
     if not ep.get("atr14_pct"):
@@ -579,37 +738,53 @@ def evaluate_episode(job: tuple[int, dict[str, Any]]) -> dict[str, Any]:
     rows: list[tuple] = []
     nan = float("nan")
     sweep = sweep_protections(_PROTECTIONS)
+    maker_rate, taker_rate = fm._cost.fee_rates()
+    notional = MARGIN_USD * LEVERAGE
+    mid = (w["bid"] + w["ask"]) / 2.0
+    horizon = fm.ADVERSE_SELECTION_HORIZON_SEC
     for rule in DIRECTION_RULES:
         direction = ep["direction"] if rule == "FOLLOW" else ("SHORT" if ep["direction"] == "LONG" else "LONG")
         paths: dict[tuple[int, float], dict | None] = {}
-        replays: dict[tuple[int, float, str], dict] = {}
+        replays: dict[tuple[int, float, str, bool], dict] = {}
         for e_i, entry in enumerate(_ENTRIES):
-            fills = simulate_fill(entry, direction, ep["signal_price"], w)
+            fills = simulate_fill(entry, direction, ep["signal_price"], w, lat)
             prot_ids = list(_PROTECTIONS) if "PROTECTION_SWEEP" in entry["stages"] else sweep
             for world in WORLDS:
                 fill = fills.get(world)
                 if fill is None:
-                    rows.extend((nan, nan, nan, nan, NO_FILL) for _ in prot_ids)
+                    rows.extend((nan, nan, nan, nan, nan, nan, nan, NO_FILL) for _ in prot_ids)
                     continue
-                if fill not in paths:
-                    paths[fill] = prepare_path(direction, fill[1], fill[0], w)
-                path = paths[fill]
+                f_idx, f_px, frac, maker = fill
+                realistic = world == HEADLINE_WORLD
+                pkey = (f_idx, f_px)
+                if pkey not in paths:
+                    paths[pkey] = prepare_path(direction, f_px, f_idx, w)
+                path = paths[pkey]
+                markout = nan
+                if realistic and maker and f_idx + horizon < len(mid):
+                    markout = fm.adverse_selection_bp(float(mid[f_idx + horizon]), f_px, direction)
+                    markout = nan if markout is None else markout
                 for pid in prot_ids:
                     if path is None:
-                        rows.append((nan, nan, nan, nan, CENSORED_PATH))
+                        rows.append((nan, nan, nan, nan, frac, markout, maker, CENSORED_PATH))
                         continue
-                    key = (fill[0], fill[1], pid)
+                    key = (f_idx, f_px, pid, realistic)
                     rep = replays.get(key)
                     if rep is None:
                         spec = _spec(_PROTECTIONS[pid])
-                        rep = fast_replay(path, spec, ep["atr14_pct"])
+                        rep = fast_replay(path, spec, ep["atr14_pct"], realistic=realistic,
+                                          exit_latency_sec=fm.EXIT_LATENCY_SEC if realistic else 0.0)
                         rep["r_multiple"] = rep["portfolio_margin_return_pct"] / initial_risk_margin_pct(spec, ep["atr14_pct"])
+                        if realistic:
+                            exit_rate = maker_rate if rep["exit_reason"] == "ATR_TAKE_PROFIT" else taker_rate
+                            rep["fees_usd"] = notional * ((maker_rate if maker else taker_rate) + exit_rate)
                         replays[key] = rep
-                    rows.append((rep["net_pnl_usd"], rep["r_multiple"], rep["mfe_pct"], rep["mae_pct"],
+                    pnl = (rep["net_pnl_usd"] - rep.get("fees_usd", 0.0)) * frac
+                    rows.append((pnl, rep["r_multiple"], rep["mfe_pct"], rep["mae_pct"], frac, markout, maker,
                                  EXIT_REASONS.index(rep["exit_reason"])))
     arr = np.array(rows, dtype=np.float64)
-    return {"idx": idx, "status": "EVALUATED", "values": arr[:, :4],
-            "code": arr[:, 4].astype(np.int8)}
+    return {"idx": idx, "status": "EVALUATED", "values": arr[:, :len(VALUE_COLUMNS)],
+            "code": arr[:, len(VALUE_COLUMNS)].astype(np.int8)}
 
 
 def canonical_parity_sample(episodes: list[dict[str, Any]], tape: Tape, protections: dict[str, dict[str, Any]],
@@ -617,6 +792,7 @@ def canonical_parity_sample(episodes: list[dict[str, Any]], tape: Tape, protecti
     """Replay a deterministic sample through the engine's canonical evaluator and compare exactly."""
     from research_v3_policy_replay import replay_protected_policy  # noqa: PLC0415
     checked = mismatches = 0
+    r_checked = r_mismatches = 0
     examples: list[dict[str, Any]] = []
     pids = list(protections)
     stride = max(1, len(episodes) // max(1, sample))
@@ -649,10 +825,41 @@ def canonical_parity_sample(episodes: list[dict[str, Any]], tape: Tape, protecti
                     examples.append({"episode_id": ep["episode_id"], "protection_id": pid,
                                      "canonical": [canon["net_pnl_usd"], canon["exit_reason"]],
                                      "genome_grid": [round(fast["net_pnl_usd"], 8), fast["exit_reason"]]})
-    return {"schema": "genome_grid_canonical_parity_v1",
+            r_ok, r_exp, r_got = realistic_exit_parity(canon, path, spec, float(ep["atr14_pct"]), start)
+            if r_ok is None:
+                continue
+            r_checked += 1
+            if not r_ok:
+                r_mismatches += 1
+                if len(examples) < 5:
+                    examples.append({"episode_id": ep["episode_id"], "protection_id": pid, "world": HEADLINE_WORLD,
+                                     "canonical_trigger_plus_fill_model": r_exp, "genome_grid": r_got})
+    return {"schema": "genome_grid_canonical_parity_v2",
             "evaluator": "research_v3_policy_replay.replay_protected_policy", "checked": checked,
             "mismatches": mismatches, "examples": examples,
-            "status": "MATCH" if checked and not mismatches else ("MISMATCH" if mismatches else "NOT_CHECKED")}
+            "status": "MATCH" if checked and not mismatches else ("MISMATCH" if mismatches else "NOT_CHECKED"),
+            "realistic_exit_parity": {
+                "fill_model": HEADLINE_WORLD, "checked": r_checked, "mismatches": r_mismatches,
+                "rule": "canonical trigger (exit_ts, reason) + fill_model.realistic_exit_margin == genome grid "
+                        "REALISTIC_V1 exit (marketable exits, no partial take-profits)",
+                "status": "MATCH" if r_checked and not r_mismatches else ("MISMATCH" if r_mismatches else "NOT_CHECKED")}}
+
+
+def realistic_exit_parity(canon: Mapping[str, Any], path: Mapping[str, np.ndarray], spec: Mapping[str, Any],
+                          atr_pct: float, start: int) -> tuple[bool | None, float | None, float | None]:
+    """Apply the shared fill model to the canonical replay's trigger and compare with the grid's realistic exit."""
+    profit = spec["profit_protection"]
+    reason = str(canon.get("exit_reason") or "")
+    if profit.get("partial_take_profits") or reason == "ATR_TAKE_PROFIT" or canon.get("exit_ts") is None:
+        return None, None, None
+    fast = fast_replay(path, spec, atr_pct, realistic=True, exit_latency_sec=fm.EXIT_LATENCY_SEC)
+    if fast["exit_reason"] != reason:
+        return None, None, None  # a trade-through target changed the trigger; not a booking comparison
+    idx = int(np.searchsorted(path["age"], float(canon["exit_ts"]) - start - 1e-6))
+    idx = min(idx, len(path["age"]) - 1)
+    margin, _ = fm.realistic_exit_margin(path["cur"], path["age"], idx, reason, latency_sec=fm.EXIT_LATENCY_SEC)
+    expected = MARGIN_USD * margin / 100.0
+    return abs(expected - fast["net_pnl_usd"]) <= 1e-9, round(expected, 10), round(fast["net_pnl_usd"], 10)
 
 
 # ------------------------------------------------------------ aggregation
@@ -711,6 +918,18 @@ def aggregate(results: list[dict[str, Any]], episodes: list[dict[str, Any]], ent
         filled = codes[:, k] >= 0
         v = values[filled, k].astype(np.float64)
         oos_f = is_oos[filled]
+        attempted = ~np.isnan(values[:, k, 4])
+        fq = values[attempted, k]
+        maker_fills = fq[fq[:, 6] > 0]
+        markouts = maker_fills[:, 5][~np.isnan(maker_fills[:, 5])] if len(maker_fills) else np.array([])
+        fill_quality = {
+            "fills_incl_censored_path": int(attempted.sum()),
+            "partial_fills": int((fq[:, 4] < 1.0 - 1e-12).sum()),
+            "avg_fill_fraction": round(float(fq[:, 4].mean()), 4) if len(fq) else None,
+            "maker_fills": int(len(maker_fills)),
+            "maker_avg_markout_60s_bp": round(float(markouts.mean()), 3) if len(markouts) else None,
+            "maker_adverse_share": round(float((markouts < 0).mean()), 4) if len(markouts) else None,
+        }
         a = {"pnl": v[:, 0].tolist(), "r": v[:, 1].tolist(), "mfe": v[:, 2].tolist(), "mae": v[:, 3].tolist(),
              "exit": [EXIT_REASONS[c] for c in codes[filled, k]], "train": v[~oos_f, 0].tolist(),
              "oos": v[oos_f, 0].tolist(), "oos_r": v[oos_f, 1].tolist(), "sig_train": n_train, "sig_oos": n_oos}
@@ -720,6 +939,8 @@ def aggregate(results: list[dict[str, Any]], episodes: list[dict[str, Any]], ent
         rows.append({
             "schema": ROWS_SCHEMA, "policy_id": f"{rule}|{entry['entry_id']}|{pid}",
             "evidence_label": "SIMULATED_COUNTERFACTUAL", "fill_world": world, "direction_rule": rule,
+            "fill_model": world, "fill_model_role": fm.HEADLINE_ROLE if world == HEADLINE_WORLD else fm.SHADOW_ROLE,
+            "fill_quality": fill_quality,
             "policy_family": prot["policy_family"], "stages": entry["stages"],
             "entry": {"entry_id": entry["entry_id"], "offset_pct": entry["offset_pct"], "chase_id": entry["chase_id"],
                       "chase_windows_5m": list(windows), "chase_remaining_gap_step": step, "reprice_sec": interval,
@@ -821,6 +1042,9 @@ def live_paper_by_lane(mirror: Path) -> list[dict[str, Any]]:
         arr = np.array(vals)
         status = "ACTIVE_REGISTRY" if lane in active else "RETIRED_QUARANTINED" if lane in retired else "NON_TILE_OR_CONTROL"
         out.append({"lane": lane, "evidence_label": "LIVE_PAPER", "registry_status": status,
+                    "fill_model": "FLY_PAPER_PRE_REALISTIC_V1",
+                    "fill_model_note": "Fly paper fills predate REALISTIC_V1 (post-freeze clean epoch); not comparable "
+                                       "with the REALISTIC_V1 headline rows",
                     "terminal_closes": len(vals), "wins": int((arr > 0).sum()),
                     "win_rate_pct": round(100 * float((arr > 0).mean()), 2),
                     "net_pnl_usd": round(float(arr.sum()), 6), "ev_per_close_usd": round(float(arr.mean()), 6),
@@ -844,9 +1068,11 @@ def analyzer_cycle_busy(status_path: Path) -> bool:
     return not st.get("finishedAt") and str(st.get("phase") or "").upper() == "ANALYZER"
 
 
-def grid_signature(entries: list[dict[str, Any]], protections: Mapping[str, Any]) -> str:
-    """Identity of every input that shapes one episode's outcome arrays (grid, constants, this code)."""
+def grid_signature(entries: list[dict[str, Any]], protections: Mapping[str, Any], latency_sec: float = 0.0) -> str:
+    """Identity of every input that shapes one episode's outcome arrays (grid, constants, fill model, this code)."""
     blob = json.dumps({"entries": entries, "protections": protections, "chases": CHASES, "worlds": WORLDS,
+                       "fill_model": fm.fill_model_fingerprint(), "latency_sec": latency_sec,
+                       "fill_model_code": hashlib.sha256(Path(fm.__file__).read_bytes()).hexdigest(),
                        "rules": DIRECTION_RULES, "lev": LEVERAGE, "margin": MARGIN_USD, "path_end": PATH_END_SEC,
                        "coverage": MIN_PATH_COVERAGE, "stale": TAPE_STALE_SEC,
                        "code": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()},
@@ -905,10 +1131,12 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
     episodes, episode_stats = load_episodes(mirror, tape)
     protections = protection_specs()
     entries = entry_specs()
+    latency = measure_latency(mirror)
+    lat_sec = float(latency["latency_sec"])
     if max_episodes:
-        need = max(int(e['ttl_sec']) for e in entries) + PATH_END_SEC + 5
+        need = max(int(e['ttl_sec']) for e in entries) + PATH_END_SEC + 5 + int(math.ceil(lat_sec)) + fm.TAKER_MAX_WAIT_SEC + 1
         episodes = [ep for ep in episodes if int(ep['signal_ts']) + 1 + need <= tape.end][-max_episodes:]
-    signature = grid_signature(entries, protections)
+    signature = grid_signature(entries, protections, lat_sec)
     cache = out_dir / "episode-cache" / signature
     cache.mkdir(parents=True, exist_ok=True)
     for stale in (out_dir / "episode-cache").iterdir():
@@ -924,10 +1152,10 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
     cached = len(results)
     if workers > 1 and len(jobs) > 16:
         with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker,
-                                 initargs=(tape, entries, protections)) as pool:
+                                 initargs=(tape, entries, protections, lat_sec)) as pool:
             fresh = list(pool.map(evaluate_episode, jobs, chunksize=8))
     else:
-        _init_worker(tape, entries, protections)
+        _init_worker(tape, entries, protections, lat_sec)
         fresh = [evaluate_episode(j) for j in jobs]
     for res in fresh:
         _cache_store(cache, episodes[res["idx"]], res)
@@ -945,16 +1173,27 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
         "generated_at": _iso(time.time()),
         "code_revision": _revision(),
         "evidence_label": "SIMULATED_COUNTERFACTUAL",
+        "fill_model": fm.fill_model_declaration(decision_latency=latency, exit_latency_sec=fm.EXIT_LATENCY_SEC),
+        "headline_fill_world": HEADLINE_WORLD,
+        "shadow_fill_worlds": [SHADOW_WORLD],
+        "headline_vs_shadow": headline_vs_shadow(rows),
         "note": ("Simulated on collected 1 s Bitfinex tape for every collected signal episode (executed, shadow, "
                  "blocked, and score-led side of no-trade calls). Not execution evidence and not qualification; live "
                  "paper outcomes are listed separately as LIVE_PAPER. Retired tiles appear only as parameter sets "
                  "evaluated over market data."),
         "fill_worlds": {
-            "BBO_MARKETABLE": "fills at the resting limit only when a fresh valid opposite BBO is at/through it "
-                              "(no queue position, no depth-quantity check)",
-            "IDEAL_TOUCH": "fills at the limit when the traded price touches it (optimistic diagnostic)",
+            HEADLINE_WORLD: "HEADLINE. Shared research/fill_model.py REALISTIC_V1: taker at the opposite BBO of the "
+                            f"first fresh quote at signal + measured latency ({lat_sec:g}s, {latency['source']}) with "
+                            "size walk; resting limits fill only on a trade print through the limit or at-limit "
+                            "aggressor volume beyond the top-of-book queue estimate (partials allowed, reprice loses "
+                            "queue); stops/floors/time exits at the executable-side BBO after "
+                            f"{fm.EXIT_LATENCY_SEC:g}s; targets fill only on a trade through and book at the level",
+            SHADOW_WORLD: "COMPARISON SHADOW, NOT HEADLINE (former IDEAL_TOUCH): taker at last price with no "
+                          "latency, limit fills on any traded touch, exits booked at the triggering mark",
         },
-        "cost_model": "zero trading fees and no funding (as the canonical replay); taker entries pay the spread",
+        "cost_model": (f"fees from bitfinex_cost_profile ({fm._cost.FEE_PROFILE_ID}: maker "
+                       f"{fm._cost.MAKER_FEE_RATE:g}, taker {fm._cost.TAKER_FEE_RATE:g}) applied per leg in "
+                       "REALISTIC_V1; no funding; spread, latency and size walk are in the fill prices"),
         "path_model": (f"executable-side 1 s marks (bid for LONG exits, ask for SHORT) for {PATH_END_SEC}s after fill; "
                        f"windows with <{int(MIN_PATH_COVERAGE * 100)}% tape coverage are CENSORED"),
         "holdout": {"rule": "CHRONOLOGICAL_70_30_BY_SIGNAL_TS", "cut_ts": cut_ts, "cut_utc": _iso(cut_ts),
@@ -1006,6 +1245,39 @@ def run(mirror: Path, tier_a: Path, out_dir: Path, *, workers: int = 2, max_epis
     _atomic_write(out_dir / "genome_grid_rows.jsonl.gz", blob)
     _atomic_write(out_dir / "genome_grid_report.json", json.dumps(report, indent=1, default=str).encode("utf-8"))
     return report
+
+
+def measure_latency(mirror: Path) -> dict[str, Any]:
+    """Measured signal -> paper order latency of AI-clock lanes (cross-venue per-second lanes excluded)."""
+    try:
+        import combo_pathway_config as registry  # noqa: PLC0415
+        lanes = set(registry.ACTIVE_TILE_ORDER) | set(getattr(registry, "RETIRED_TILE_LANES", ()))
+        exclude = {lane for lane in lanes if registry.is_cross_venue_clock_lane(lane)}
+    except Exception:  # noqa: BLE001
+        exclude = set()
+    exclude |= {"FAMILY_XVENUE_LEAD_60S", "FAMILY_XVENUE_PREMIUM_60S"}
+    return fm.measure_decision_latency(mirror / "v3" / "ledgers", exclude_lanes=exclude)
+
+
+def headline_vs_shadow(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """How the headline (REALISTIC_V1) differs from the optimistic shadow over the same policies."""
+    out: dict[str, Any] = {}
+    for world in WORLDS:
+        rs = [r for r in rows if r["fill_world"] == world]
+        fills = sum(r["all"]["fills"] for r in rs)
+        out[world] = {
+            "role": fm.HEADLINE_ROLE if world == HEADLINE_WORLD else fm.SHADOW_ROLE,
+            "policies": len(rs), "fills": fills,
+            "net_pnl_usd_all_policies": round(sum(r["all"]["net_pnl_usd"] for r in rs), 4),
+            "positive_ev_policies": sum(1 for r in rs if (r["all"]["ev_per_fill_usd"] or 0) > 0),
+            "holdout_verdicts": dict(Counter(r["holdout_verdict"] for r in rs)),
+            "partial_fills": sum((r.get("fill_quality") or {}).get("partial_fills") or 0 for r in rs),
+        }
+        taker = [r for r in rs if r["entry"]["entry_id"] == "TAKER_AT_SIGNAL" and r["exit"]["protection_id"].startswith("REGISTRY_")]
+        out[world]["registry_taker_rows"] = [
+            {"policy_id": r["policy_id"], "fills": r["all"]["fills"], "win_rate_pct": r["all"]["win_rate_pct"],
+             "ev_per_fill_usd": r["all"]["ev_per_fill_usd"], "net_pnl_usd": r["all"]["net_pnl_usd"]} for r in taker]
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
