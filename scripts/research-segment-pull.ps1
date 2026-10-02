@@ -22,7 +22,7 @@ param(
   [string]$HomeBotEnv = 'C:\DoxxedCrypto\doxedcryptofounder-secrets\vault\home-bot.env',
   [string]$LegacyTree = 'C:\DoxxedCrypto\btc-v31-current\services\btc-conservative-agent\canonical-research-data',
   [string]$Python = 'python',
-  [string]$Prefix = 'v2',
+  [string]$Prefix = 'v3',
   [int]$MaxSegments = 0,
   [switch]$NoAck,
   [switch]$Parity

@@ -19,7 +19,7 @@ the hold grow with the tree and starved the pull loop. Every cached digest is
 still re-verified from disk once per 24-48 h (spread per path).
 
     set BOT_ADMIN_TOKEN=...   (never printed)
-    python scripts/research_segment_fly_parity.py --prefix v2 --report C:\\DoxxedCrypto\\fly-mirror-segments\\parity-latest.json
+    python scripts/research_segment_fly_parity.py --prefix v3 --report C:\\DoxxedCrypto\\fly-mirror-segments\\parity-latest.json
 """
 
 from __future__ import annotations
@@ -178,7 +178,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--shadow-root", default=r"C:\DoxxedCrypto\fly-mirror-segments")
     parser.add_argument("--base-url", default="https://doxed-btc-bot.fly.dev")
-    parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v2")
+    parser.add_argument("--prefix", default=os.getenv("RESEARCH_SEGMENTS_PREFIX") or "v3")
     parser.add_argument("--report", required=True)
     parser.add_argument("--retention-dir", default=r"C:\DoxxedCrypto\bot-data-retention")
     parser.add_argument("--max-lock-seconds", type=float,
