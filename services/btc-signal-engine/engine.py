@@ -18509,7 +18509,18 @@ def _deepseek_post_with_deadline(url, *, headers, json_payload, idle_timeout, de
         err.latency_ms = int(deadline_sec * 1000)  # type: ignore[attr-defined]
         raise err
     if box["error"] is not None:
-        if isinstance(box["error"], TimeoutError) and str(box["error"]) == "AI_DEADLINE_EXCEEDED":
+        # The worker's read timeout is clamped to deadline_sec, so its own
+        # timeout can win the race against finished.wait() (coarse Windows
+        # timers); a timeout at the deadline is still a deadline expiry.
+        worker_hit_deadline = (
+            isinstance(box["error"], TimeoutError) and str(box["error"]) == "AI_DEADLINE_EXCEEDED"
+        ) or (
+            isinstance(box["error"], requests.exceptions.Timeout)
+            and time.monotonic() >= deadline - 0.05
+        )
+        if worker_hit_deadline:
+            with _ai_deadline_lock:
+                _ai_deadline_state["deadline_exceeded_total"] += 1
             err = RuntimeError(f"AI_DEADLINE_EXCEEDED:{deadline_sec:.0f}s")
             err.latency_ms = int(deadline_sec * 1000)  # type: ignore[attr-defined]
             raise err
