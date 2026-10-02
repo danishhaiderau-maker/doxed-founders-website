@@ -506,3 +506,71 @@ it ticks itself (`TAKEOVER` in its log).
 `age_sec`, `generated_at` and `refresh: started|running`, and starts at most one
 background re-evaluation. Only when the cache is older than 120 s does it wait (up to
 10 s) for that refresh (`refresh: completed`).
+
+<a id="analyzer-parity_checker"></a>
+### analyzer.parity_checker
+`C:\DoxxedCrypto\fly-mirror-segments\parity-latest.json`, written by
+`research_segment_fly_parity.py` after a parity pull. RED when the verdict is not GREEN
+(missing, sealed mismatch or corrupt SQLite) or the report is older than 8 h; AMBER after
+3 h, or while a running scan has held the puller lock for more than 15 minutes.
+`timing` shows `lock_held_sec`, `hashed` and `hash_cache_hits`: snapshot digests are
+cached by size and mtime, so a slow scan with few cache hits means the cache was reset or
+the tree churned.
+
+<a id="laptop-puller_lock"></a>
+### laptop.puller_lock
+Whether the shadow-root lock is starving the segment pull. Only counted while the
+puller's own status shows `LOCK_BUSY` naming the same holder (a crashed holder's sidecar
+file is ignored). AMBER after 20 minutes, RED after 45. Also shows the last OK run's
+`run_seconds` against `max_run_seconds`. Do not kill a parity scan by hand without
+preserving its log; it releases the lock when it exits.
+
+<a id="laptop-chain_monitor"></a>
+### laptop.chain_monitor
+Active alerts from `laptop-chain-monitor.state.json` (previously toast/event-log only):
+critical is RED, warning is AMBER, and a monitor that has not checked for 30 minutes is
+AMBER. Fix the underlying alert code; see `alerts\alerts-*.jsonl` for its history.
+
+<a id="laptop-incident_relay"></a>
+### laptop.incident_relay
+`laptop-chain-incident.state.json`: AMBER when the incident watchdog heartbeat is older
+than 30 minutes; RED when deploy-maintenance suppression has lasted more than 90 minutes
+(it must cap out, otherwise real incidents are muted).
+
+<a id="watcher-interim"></a>
+### watcher.interim
+`health\interim-tick.status.json`, written by every `system-health-tick.ps1 -Interim`
+run with its `DEFERRED`/`TAKEOVER` decision. AMBER when older than 20 minutes: the
+`DoxxedSystemHealthWatcher` task stopped and nobody watches the watcher.
+
+<a id="watcher-delivery"></a>
+### watcher.delivery
+Result of the previous tick's Fly banner push. AMBER after 2 consecutive failures, RED
+after 12 (about an hour): the Fly dashboard banner and alarm history go stale.
+
+<a id="watcher-fly_copy"></a>
+### watcher.fly_copy
+Lag between the Fly-published copy (`GET /api/system-health`) and the previous local
+verdict. AMBER above 15 minutes, RED above 1 hour.
+
+<a id="watcher-flapping"></a>
+### watcher.flapping
+Checks with 4 or more status changes in the last 12 ticks (each flagged `flapping`).
+Tune the threshold or fix the intermittent source before people learn to ignore it.
+
+<a id="coordination-wall"></a>
+### coordination.wall
+`diagnostics\WALL-STATUS-FLY.md`: AMBER when any of the last 40 entries is not
+`timestamp | owner | msg | STATE`, or the newest entry is older than 12 h.
+
+<a id="laptop-adhoc_processes"></a>
+### laptop.adhoc_processes
+Visibility only (owner: Danish): listeners on :7002/:9097 and running `watch_queue.ps1`
+copies. Always GREEN; it never changes the verdict.
+
+### Acknowledging an AMBER
+Write `C:\DoxxedCrypto\laptop-chain\health\acks.json`:
+`{"acks": [{"check": "<id>", "until": "<ISO time>", "by": "<name>", "reason": "<why>"}]}`.
+An unexpired ack removes that AMBER from the verdict and `failing` and lists it under
+`acked`. RED is never acknowledged (the check gets `ack_ignored`). Duplicate check ids are
+merged, keeping the worst status.

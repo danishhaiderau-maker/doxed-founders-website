@@ -506,6 +506,8 @@ def test_run_deadline_stops_between_segments_and_resumes(tmp_path, monkeypatch):
     monkeypatch.setattr(puller_mod.time, "monotonic", lambda: float(next(clock)))
     stopped = env.puller().pull_once(max_run_seconds=50)
     assert stopped["applied_now"] == 1 and stopped["applied_seq"] == 1 and stopped["deadline_reached"] is True
+    status = json.loads((env.puller().meta / "status.json").read_text(encoding="utf-8"))
+    assert status["deadline_reached"] is True and status["max_run_seconds"] == 50 and status["run_seconds"] > 50
     assert env.puller().pull_once() == {"applied_now": 1, "applied_seq": 2, "acked_seq": 2}
     env.assert_tree_matches_source()
 

@@ -406,7 +406,8 @@ class SegmentPuller:
         applied = 0
         # Checked only between segments (each applied seq is already durable in
         # state.json), and never before the first one so every run makes progress.
-        deadline = time.monotonic() + max_run_seconds if max_run_seconds else None
+        started = time.monotonic()
+        deadline = started + max_run_seconds if max_run_seconds else None
         deadline_reached = False
         while max_segments is None or applied < max_segments:
             if deadline is not None and applied and time.monotonic() >= deadline:
@@ -444,7 +445,9 @@ class SegmentPuller:
         receipt = getattr(self.store, "last_ack_response", None)
         if receipt:
             result["ack_receipt"] = receipt
-        self.write_status(ATTEMPT_OK, result=result)
+        self.write_status(ATTEMPT_OK, result={**result, "deadline_reached": deadline_reached,
+                                              "run_seconds": round(time.monotonic() - started, 1),
+                                              "max_run_seconds": max_run_seconds or 0})
         return result
 
     def ack(self, state: dict) -> int:
