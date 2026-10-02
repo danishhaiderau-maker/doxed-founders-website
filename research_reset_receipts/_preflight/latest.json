@@ -1,0 +1,1 @@
+{"attempt_id": "920b9d7eb6784a0abb6c5d19e2b494e8", "deletion_authority": false, "error": "RuntimeError", "recorded_at": "2026-09-06T06:06:54.841845+00:00", "schema": "research_reset_preflight_diagnostic_v1", "stage": "BOUNDARY", "status": "FAILED"}

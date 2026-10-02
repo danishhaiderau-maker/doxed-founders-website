@@ -86,6 +86,7 @@ if (!existsSync(inventoryWorkerAgent)) {
   throw new Error('Missing canonical data_sync_inventory_worker.py');
 }
 copyFileSync(inventoryWorkerAgent, inventoryWorkerEngine);
+copyFileSync(join(agentDir, 'data_sync_quarantine_receipt.py'), join(engineDir, 'data_sync_quarantine_receipt.py'));
 console.log(`Mirrored data-sync inventory worker (${sha256(readFileSync(inventoryWorkerAgent, 'utf8'))})`);
 
 if (!existsSync(relayEvidenceWorkerAgent)) {
