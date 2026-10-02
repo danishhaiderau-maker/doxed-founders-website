@@ -584,6 +584,7 @@ TILE_EVIDENCE_POINTS_REPORT_FILE = "tile_evidence_points_report.json"
 FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE = "fixed_vs_dynamic_selector_report.json"
 AI_CHALLENGER_REPORT_FILE = "ai_challenger_report.json"
 LEAD_LAG_REPORT_FILE = "lead_lag_report.json"
+STRATEGY_LAB_REPORT_FILE = "strategy_lab_report.json"
 FORWARD_TRIAL_REPORT_FILE = "forward_trial_report.json"
 TRADE_COHORT_QUARANTINE_FILE = "trade_cohort_quarantine.json"
 CHASE_POLICY_LAB_REPORT_FILE = "chase_policy_lab_report.json"
@@ -687,6 +688,7 @@ ANALYZER_JSON_REPORT_FILES = (
     FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE,
     AI_CHALLENGER_REPORT_FILE,
     LEAD_LAG_REPORT_FILE,
+    STRATEGY_LAB_REPORT_FILE,
     FORWARD_TRIAL_REPORT_FILE,
     TRADE_COHORT_QUARANTINE_FILE,
     CHASE_POLICY_LAB_REPORT_FILE,
@@ -766,6 +768,7 @@ DEEP_DIVE_REPORT_CATALOG = (
     ("Fixed vs Dynamic Selector", FIXED_VS_DYNAMIC_SELECTOR_REPORT_FILE, "Best single fixed tile vs regime-conditional tile selector, walk-forward OOS after costs, n>=30 gates per arm and regime"),
     ("AI vs Challengers", AI_CHALLENGER_REPORT_FILE, "Shadow-only: LLM side vs rule vote, inverted AI, 1m OFI, 5m contrarian, seeded random and compact v5 prompt; tape markouts and tile-geometry proxy, hour-cluster CIs, BH q-values, dead-input audit"),
     ("Cross-Venue Lead-Lag", LEAD_LAG_REPORT_FILE, "Shadow-only: Binance/Bybit/OKX 1s mids vs Bitfinex tBTCF0 - return cross-correlation, Bitfinex response 1-30s after leader moves, capacity-1 leader-follow after-spread markouts (hour-cluster CIs, BH q), basis and funding/OI"),
+    ("Strategy Lab", STRATEGY_LAB_REPORT_FILE, "Pre-registered hypotheses judged on unseen post-registration trades (Holm), bounded exploratory families with family-wise nulls, BH q, deflated Sharpe and walk-forward, live-fill simulator parity and correlation to live tiles; CONSERVATIVE_BBO 1s tape, Bitfinex costs"),
     ("Forward Trial", FORWARD_TRIAL_REPORT_FILE, "Freeze gates per tile; signed candidate+control freeze manifest and 15-day forward-trial tracker once a tile qualifies"),
     ("Trade Cohort Quarantine", TRADE_COHORT_QUARANTINE_FILE, "Trade rows excluded from the current tile cohort, with reasons; ledgers unmodified"),
     ("Multiverse Collection Health", MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE, "Order-multiverse empty-path rate, tape path source, entry-grid dedupe integrity, discovery touch-grid coverage and the empty-path quarantine"),
@@ -2347,6 +2350,68 @@ def _load_jsonl_by_trade_id(path):
             attached["paper_trade"] = paper_trade
         rows[trade_id] = attached
     return rows
+
+
+def _rotation_paths(path):
+    """Closed numeric rotations of ``path`` oldest-to-newest, then the active file."""
+    active = Path(path)
+    rotated = []
+    try:
+        for candidate in active.parent.glob(active.name + ".*"):
+            suffix = candidate.name[len(active.name) + 1:]
+            if candidate.is_file() and suffix.isdigit():
+                rotated.append((int(suffix), candidate))
+    except OSError:
+        rotated = []
+    paths = [str(candidate) for _, candidate in sorted(rotated)]
+    if active.is_file():
+        paths.append(str(active))
+    return paths
+
+
+def _load_jsonl_rows_all_generations(filename, contains=None, keep=None):
+    """Rows from every rotation of a data-dir JSONL stream.
+
+    ``contains`` is a cheap substring pre-filter applied before JSON parsing;
+    ``keep`` filters parsed rows. Used where an active-file-only read silently
+    dropped closed rotations.
+    """
+    rows = []
+    for path in _rotation_paths(_agent_data_path(filename)):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if contains is not None and contains not in line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(row, dict) and (keep is None or keep(row)):
+                        rows.append(row)
+        except OSError as exc:
+            print(f"  ⚠️ {path} read error: {exc} {PIPELINE_ENFORCEMENT_TAG}")
+    return rows
+
+
+def _tape_rows_near(times, before_sec, after_sec=1.0):
+    """1 s tape rows (all rotations) within [t - before_sec, t + after_sec] of any time."""
+    import bisect
+
+    starts = sorted(float(t) - float(before_sec) for t in times if t is not None)
+    if not starts:
+        return []
+    span = float(before_sec) + float(after_sec)
+
+    def keep(row):
+        try:
+            ts = float(row.get("bucket_ts") or row.get("source_ts"))
+        except (TypeError, ValueError):
+            return False
+        k = bisect.bisect_right(starts, ts) - 1
+        return k >= 0 and ts <= starts[k] + span
+
+    return _load_jsonl_rows_all_generations("market_microstructure_1s.jsonl", keep=keep)
 
 
 def _load_jsonl_rows(path):
@@ -9222,6 +9287,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
             selector_report = fixed_vs_dynamic_selector_report(session=session)
             ai_challenger_report(session=session)
             lead_lag_report(session=session)
+            strategy_lab_report(session=session, trades=trades)
             forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
             pre_test_analytics_reports(
                 trades=trades,
@@ -9338,6 +9404,7 @@ def _run_analyzer_iteration_with_lease(iteration, interval_min, session_only):
         selector_report = fixed_vs_dynamic_selector_report(session=session)
         ai_challenger_report(session=session)
         lead_lag_report(session=session)
+        strategy_lab_report(session=session, trades=trades)
         forward_trial_report(session=session, evidence=evidence_points, selector=selector_report)
         pre_test_analytics_reports(
             trades=trades,
@@ -12137,7 +12204,9 @@ def multiverse_collection_health_report(cohort_quarantine: dict = None) -> dict:
     print(f"\n=== MULTIVERSE COLLECTION HEALTH {PIPELINE_ENFORCEMENT_TAG} ===")
     try:
         from multiverse_collection_health import build_multiverse_collection_report, write_report
-        report = build_multiverse_collection_report(os.getcwd())
+        data_root = os.path.dirname(os.path.abspath(_agent_data_path("order_multiverse.jsonl")))
+        epoch_id = str(load_research_session().get("collector_v22_epoch_id") or "").strip() or None
+        report = build_multiverse_collection_report(data_root, epoch_id=epoch_id)
         write_report(report, MULTIVERSE_COLLECTION_HEALTH_REPORT_FILE)
     except Exception as exc:
         report = {"schema": "multiverse_collection_health_v1", "status": "UNAVAILABLE", "error": str(exc)}
@@ -12384,6 +12453,51 @@ def lead_lag_report(session=None):
     except Exception as exc:  # the lead-lag view must never stop the analyzer
         payload = {"schema": SCHEMA, "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
     return _write_aux_report(LEAD_LAG_REPORT_FILE, payload, session)
+
+
+def _laptop_artifacts_enabled():
+    """Strategy-lab cache and agent export run on the analyzer host, never inside tests."""
+    if os.getenv("DOXXED_ANALYZER_EXPORT_DIR"):
+        return True
+    return os.name == "nt" and os.path.isdir(r"C:\DoxxedCrypto") and "PYTEST_CURRENT_TEST" not in os.environ
+
+
+def _strategy_lab_cache_dir():
+    configured = os.getenv("STRATEGY_LAB_CACHE_DIR")
+    if configured:
+        return configured
+    if not _laptop_artifacts_enabled():
+        return None
+    state = os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain"
+    return os.path.join(state, "strategy-lab-cache")
+
+
+def strategy_lab_report(session=None, trades=None):
+    """Pre-registered hypotheses, bounded exploration and live-fill parity (strategy_lab)."""
+    session = session or load_research_session()
+    tables = {}
+    stage = None
+    try:
+        # strategy_lab is laptop-only (outside the Fly image); a missing package
+        # degrades to an ERROR report instead of stopping the analyzer.
+        from strategy_lab.engine import run_strategy_lab
+        from strategy_lab.export import stage_strategy_lab as stage
+
+        data_root = os.path.dirname(os.path.abspath(_agent_data_path("market_microstructure_1s.jsonl")))
+        payload, tables = run_strategy_lab(
+            data_root, session=session, registry=ACTIVE_TILE_REGISTRY, tile_lanes=CURRENT_RESEARCH_LANES,
+            trades=trades, cache_dir=_strategy_lab_cache_dir(),
+        )
+    except Exception as exc:  # the lab view must never stop the analyzer
+        payload = {"schema": "strategy_lab_report_v1", "status": "ERROR", "error": f"{type(exc).__name__}: {exc}"}
+    if stage is not None:
+        stage(payload, tables)
+    verdicts = {h.get("id"): h.get("verdict") for h in payload.get("hypotheses") or []}
+    print(
+        f"  Strategy lab: status={payload.get('status')} total={((payload.get('timing') or {}).get('total_sec'))}s "
+        f"verdicts={verdicts} parity={((payload.get('sim_parity') or {}).get('verdict'))} {PIPELINE_ENFORCEMENT_TAG}"
+    )
+    return _write_aux_report(STRATEGY_LAB_REPORT_FILE, payload, session)
 
 
 def forward_trial_report(session=None, evidence=None, selector=None):
@@ -12986,7 +13100,7 @@ def _compressed_shadow_rows(session=None):
             if resolved in seen or not path.is_file():
                 continue
             seen.add(resolved)
-            for row in _load_jsonl_rows(str(path)):
+            for row in (r for gen in _rotation_paths(str(path)) for r in _load_jsonl_rows(gen)):
                 if str(row.get("schema") or "") == "compressed_chase_shadow_v1":
                     rows.append(row)
     return _filter_jsonl_rows_by_session(rows, session)
@@ -13005,7 +13119,7 @@ def _compressed_shadow_arm_receipts(session=None):
             if resolved in seen or not path.is_file():
                 continue
             seen.add(resolved)
-            for row in _load_jsonl_rows(str(path)):
+            for row in (r for gen in _rotation_paths(str(path)) for r in _load_jsonl_rows(gen)):
                 if str(row.get("schema") or "") == "compressed_chase_arm_receipt_v1":
                     rows.append(row)
     return _filter_jsonl_rows_by_session(rows, session)
@@ -15137,7 +15251,7 @@ def first_15m_outcome_report(trades=None, session=None):
         session = load_research_session()
     scope = _shadow_scope_label(session)
     print(f"\n=== FIRST 15M OUTCOME REPORT — {scope.lower()} {ANALYZER_SYNC_ID} {PIPELINE_ENFORCEMENT_TAG} ===")
-    replays = _filter_jsonl_rows_by_session(_load_jsonl_rows(SIGNAL_REPLAY_FILE), session)
+    replays = _filter_jsonl_rows_by_session(list(_load_jsonl_replays().values()), session)
     replay_by_id = {}
     for row in replays:
         tid = str(row.get("trade_id") or "")
@@ -20449,6 +20563,19 @@ def cross_world_evidence_report():
     return report
 
 
+def _ftg_epoch_seconds(value):
+    from research.fill_time_guard_counterfactual import _ts as _ftg_ts
+
+    return _ftg_ts(value)
+
+
+def _ftg_tape_window_sec():
+    """Tape history the fill-time guard can consult: prior-price search + longest horizon."""
+    from research.fill_time_guard_counterfactual import PRIOR_PRICE_SEARCH_SEC
+
+    return PRIOR_PRICE_SEARCH_SEC + 180.0
+
+
 def fill_time_guard_counterfactual_report(trades=None):
     """Build research-only fill revalidation grids from the signed epoch.
 
@@ -20475,8 +20602,12 @@ def fill_time_guard_counterfactual_report(trades=None):
         trades=trade_rows,
         executions=primary_fills,
         ai_inputs=_load_jsonl_rows(AI_INPUT_LOG_FILE),
-        tape_rows=_load_jsonl_rows("market_microstructure_1s.jsonl"),
-        source_observations=_load_jsonl_rows(SOURCE_ORDER_MARKET_EVIDENCE_FILE),
+        tape_rows=_tape_rows_near(
+            [_ftg_epoch_seconds(row.get("fill_ts")) for row in primary_fills],
+            before_sec=_ftg_tape_window_sec(),
+        ),
+        source_observations=_load_jsonl_rows_all_generations(
+            SOURCE_ORDER_MARKET_EVIDENCE_FILE, contains='"EXECUTABLE"'),
         epoch_id=epoch_id,
     )
     if len(epoch_ids) != 1:
@@ -22775,6 +22906,19 @@ def finalize_analyzer_outputs(
         lifecycle_bundle_inventory=lifecycle_inventory,
         lifecycle_bundle_inventory_error=lifecycle_inventory_error,
     )
+    if _laptop_artifacts_enabled():
+        try:
+            from strategy_lab.export import export_root, write_export
+
+            export = write_export(
+                report_dir=os.path.dirname(os.path.abspath(REPORT_MANIFEST_FILE)),
+                data_dir=os.path.dirname(os.path.abspath(_agent_data_path("trades_3factor.csv"))),
+                trades=trades, registry=ACTIVE_TILE_REGISTRY, lanes=CURRENT_RESEARCH_LANES,
+            )
+            print(f"  ✅ Agent export: {export_root()}\\latest ({export.get('export_id')}) {PIPELINE_ENFORCEMENT_TAG}")
+        except Exception as exc:
+            # A failed export leaves the previous one in place; readers refuse it as stale.
+            print(f"  ⚠️ Agent export failed: {type(exc).__name__}: {exc} {PIPELINE_ENFORCEMENT_TAG}")
     try:
         from research.research_trade_accumulator import sync_accumulator_from_analyzer_run
 
