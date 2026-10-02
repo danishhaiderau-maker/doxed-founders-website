@@ -202,6 +202,30 @@ def test_unverified_young_newest_and_changed_rotations_are_kept(venv):
     assert result["skipped_changed"] == 1 and rotated.exists()
 
 
+def test_tape_rotations_outlive_the_restart_minute_bar_window(venv, monkeypatch):
+    monkeypatch.setattr(prune_mod, "OTHER_KEEP_LATEST", 0)
+    tape = venv.write("market_microstructure_1s.jsonl.1", _rows(0, 20))
+    venv.write("market_microstructure_1s.jsonl", _rows(20, 2))
+    venv.ship_all()
+    venv.server_app.record_ack(_ack_body(1, venv.store.get(fmt.manifest_key("v1", 1))))
+    venv.write("market_microstructure_1s.jsonl", _rows(22, 2), append=True)
+    venv.ship_all()
+    venv.server_app.record_ack(_ack_body(2, venv.store.get(fmt.manifest_key("v1", 2))))
+    shipper = venv.shipper()
+    custody = _custody(venv, 2, {"market_microstructure_1s.jsonl.1": fmt.sha256_bytes(_rows(0, 20))})
+
+    def plan(age_days):
+        return prune_mod.plan_prune(shipper_state=shipper.load_state(), universe=shipper.scan(),
+                                    store_root=venv.store_root, prefix="v1", custody=custody,
+                                    now=tape.stat().st_mtime + age_days * 86400)
+
+    window_days = prune_mod.TAPE_STORE_RETENTION_MINUTES / 1440.0
+    assert window_days >= 14
+    held = plan(window_days)
+    assert held["runtime"] == [] and held["runtime_skipped"]["TOO_YOUNG"] == 1
+    assert [item["relpath"] for item in plan(window_days + 2)["runtime"]] == ["market_microstructure_1s.jsonl.1"]
+
+
 def test_prune_never_runs_with_an_intent_pending(venv, monkeypatch):
     monkeypatch.setenv("RESEARCH_SEGMENTS_PRUNE_ENABLED", "1")
     venv.write("a.jsonl", _rows(0, 2))
