@@ -20,8 +20,11 @@ def _checked_path(raw, root: Path) -> Path:
     if path == root or root not in path.parents:
         raise ResearchDeletionRejected("PATH_OUTSIDE_EXPLICIT_ROOT")
     for part in (path, *path.parents):
-        if io_path(part).exists() or io_path(part).is_symlink():
+        try:
             info = io_path(part).lstat()
+        except FileNotFoundError:
+            pass
+        else:
             if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
                 raise ResearchDeletionRejected("SYMLINK_OR_REPARSE_POINT")
         if part == root:
@@ -148,7 +151,8 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
                                 max_total_bytes: int = 64 * 1024**3,
                                 expected_sha256_by_path: Mapping[str, str] | None = None,
                                 receipt_context: Mapping | None = None,
-                                prospective_receipt_parent: bool = False) -> dict:
+                                prospective_receipt_parent: bool = False,
+                                progress_callback=None) -> dict:
     """Shared non-hashing admission checks; never create receipts or delete.
 
     ``recovery_states`` must be authoritative caller observations, not assumed
@@ -191,6 +195,12 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
             raise ResearchDeletionRejected("RECEIPT_CONTEXT_LIMIT_EXCEEDED")
         context = json.loads(encoded_context)
     root = Path(os.path.abspath(os.fspath(root)))
+    checked_paths = {}
+    def checked_once(raw):
+        key = os.path.normcase(os.path.abspath(os.fspath(raw)))
+        if key not in checked_paths:
+            checked_paths[key] = _checked_path(raw, root)
+        return checked_paths[key]
     if not io_path(root).is_dir() or root.parent == root:
         raise ResearchDeletionRejected("UNSAFE_ROOT")
     # Validate root and its ancestors too, including Windows junctions.
@@ -202,16 +212,22 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
         raise ResearchDeletionRejected("INVALID_FILE_LIMIT")
     if not isinstance(max_total_bytes, int) or isinstance(max_total_bytes, bool) or not 0 < max_total_bytes <= 1024**4:
         raise ResearchDeletionRejected("INVALID_BYTE_LIMIT")
-    bounded = []
+    raw_targets = []
     for raw in targets:
-        if len(bounded) >= max_files:
+        if len(raw_targets) >= max_files:
             raise ResearchDeletionRejected("FILE_LIMIT_EXCEEDED")
-        bounded.append(_checked_path(raw, root))
+        raw_targets.append(raw)
+    bounded = []
+    _notify_reset_progress(progress_callback, 'METADATA_ADMISSION', 0, len(raw_targets), 0)
+    for index, raw in enumerate(raw_targets):
+        bounded.append(checked_once(raw))
+        _notify_reset_progress(progress_callback, 'METADATA_ADMISSION',
+                               index + 1, len(raw_targets), 0)
     allowed = set()
     for index, raw in enumerate(allowed_paths):
         if index >= max_files:
             raise ResearchDeletionRejected("ALLOWLIST_LIMIT_EXCEEDED")
-        allowed.add(_checked_path(raw, root))
+        allowed.add(checked_once(raw))
     protected = set()
     for index, raw in enumerate(protected_paths):
         if index >= max_files:
@@ -250,7 +266,7 @@ def validate_exact_research_deletion(*, root, targets, allowed_paths, receipt_pa
             raise ResearchDeletionRejected("INVALID_EXPECTED_HASH_MAP")
         target_set = set(paths)
         for raw, digest in expected_sha256_by_path.items():
-            path = _checked_path(raw, root)
+            path = checked_once(raw)
             if path not in target_set or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ResearchDeletionRejected("INVALID_EXPECTED_HASH_BINDING")
             if str(path) in expected_hashes and expected_hashes[str(path)] != digest:
@@ -288,7 +304,8 @@ def delete_exact_research_files(*, root, targets, allowed_paths, receipt_path,
         root=root, targets=targets, allowed_paths=allowed_paths, receipt_path=receipt_path,
         quiescent=quiescent, recovery_states=recovery_states, protected_paths=protected_paths,
         max_files=max_files, max_total_bytes=max_total_bytes,
-        expected_sha256_by_path=expected_sha256_by_path, receipt_context=receipt_context)
+        expected_sha256_by_path=expected_sha256_by_path, receipt_context=receipt_context,
+        progress_callback=progress_callback)
     root, paths, receipt, journal, context, expected_hashes = (
         admission[key] for key in ("root", "paths", "receipt", "journal", "context", "expected_hashes"))
     inventory = []

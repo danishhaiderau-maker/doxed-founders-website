@@ -8,7 +8,7 @@ import time
 
 from research_exact_deletion import _checked_path
 
-PHASES=frozenset({'EXECUTOR_FINGERPRINT','DELETER_FINGERPRINT','PRE_UNLINK_REVALIDATION'})
+PHASES=frozenset({'METADATA_ADMISSION','EXECUTOR_FINGERPRINT','DELETER_FINGERPRINT','PRE_UNLINK_REVALIDATION'})
 
 
 def make_reset_progress_callback(runtime_root, *, attempt_id, reset_id, scope_name=None):
