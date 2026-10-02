@@ -38,7 +38,11 @@ def test_monitor_expects_latest_successful_deploy_on_master():
 def test_monitor_splits_fast_liveness_from_full_readiness_fail_closed():
     assert MONITOR_RUNNER.count('"https://doxed-btc-bot.fly.dev/health"') == 1
     assert MONITOR_RUNNER.count('"https://doxed-btc-bot.fly.dev/ready"') == 1
-    assert "/api/status" not in MONITOR_RUNNER
+    # /api/status feeds only the optional subsystem rules (lifecycle pipeline,
+    # cross-venue reconnects); it never decides liveness or readiness.
+    assert MONITOR_RUNNER.count("/api/status") == 1
+    assert MONITOR_RUNNER.count("STATUS_URL") == 2
+    assert "optional_probe(STATUS_URL, notes)" in MONITOR_RUNNER
     assert '"PROCESS_LIVENESS_ONLY"' in MONITOR_RUNNER
     assert "require_strategy_progress(payload)" in MONITOR_RUNNER
     assert "require_tile_registry(" in MONITOR_RUNNER

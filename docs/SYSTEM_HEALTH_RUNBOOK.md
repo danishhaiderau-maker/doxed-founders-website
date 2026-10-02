@@ -72,6 +72,33 @@ Files under `C:\DoxxedCrypto\laptop-chain\health\`:
   `NEON_EGRESS_BUDGET_BYTES_PER_HOUR` defaults to 200 MiB/h; optional `NEON_ORG_ID`
   skips the org lookup.
 
+## Fly monitor heartbeat
+
+The scheduled GitHub monitor (`fly-bot-monitor.yml`) writes the
+`FLY_MONITOR_HEARTBEAT` repository variable at the end of every run once the
+`FLY_MONITOR_VARIABLES_TOKEN` secret exists. A laptop check can read it with
+`gh variable get FLY_MONITOR_HEARTBEAT` (JSON; parse `at`, stale after 45
+minutes) or, without the secret, with
+`gh run list --workflow fly-bot-monitor.yml --limit 1 --json createdAt,conclusion`.
+The monitor in turn watches this watcher through Fly `/api/system-health`
+(`laptop_health_silent` when `age_sec` > 1800 or `stale`). Details:
+`docs/BOT_ALERTING_RUNBOOK.md`, "Monitor heartbeat".
+
+## CI and [skip ci]
+
+`.github/workflows/laptop-tests.yml` runs the watcher, incident, supervisor
+(PowerShell, on `windows-latest`) and segment-puller tests on every pull
+request that touches them, and on master pushes. It is read-only: no secrets,
+no deploy steps.
+
+GitHub skips `pull_request` workflows when the PR **head commit** message
+contains `[skip ci]`, so a PR whose commits carry it merges untested.
+
+- Never put `[skip ci]` in commits pushed to a PR branch.
+- Put `[skip ci]` only in the **squash-merge subject**. The resulting master
+  push then does not trigger `fly-bot-deploy.yml`, and the v2c laptop-only
+  follow path accepts it.
+
 ## Checks and fixes
 
 Each check reports status, observed value, threshold, `last_good_at`, a hint,

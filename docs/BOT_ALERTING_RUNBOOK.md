@@ -19,6 +19,13 @@ nobody has to watch dashboards.
 - The issue body is edited in place. A comment is only added when a
   condition first alerts, re-alerts after its interval, or recovers. The
   issue closes automatically after two consecutive clean checks.
+- A crashed monitor run (`monitor_error: monitor crashed`) observes nothing,
+  so it never counts as a clean check, and a run that started from a reset
+  state (cache miss) never closes the issue. Closing needs two consecutive
+  clean runs on restored state. Each run summary shows `restored` and `crashed`.
+- Severity: **critical** alerts fail the run (red) and comment on the issue.
+  **warning** alerts are listed in the issue (and comment on it) but the run
+  stays green.
 
 | Label | Source | Cadence |
 |---|---|---|
@@ -39,14 +46,68 @@ Fly monitor (`scripts/fly_monitor_rules.py`, dedup in `scripts/fly_monitor_alert
 | `disk_critical` | Fly volume >= 85% used (URGENT) | 2h |
 | `eval_stale` | no completed evaluation > 20 min while entries are eligible, or AI scheduler not polling > 10 min | 6h |
 | `ai_stale` | no AI call > max(45 min, 3x bot threshold) while entries are eligible | 6h |
-| `laptop_silent` | `LAPTOP_CHAIN_HEARTBEAT` repo variable older than 2h | 12h |
+| `laptop_silent` | `LAPTOP_CHAIN_HEARTBEAT` repo variable older than 2h, unparseable, or unset/empty | 12h |
+| `laptop_health_silent` | Fly `/api/system-health` `age_sec` > 1800 or `stale=true` (laptop watcher stopped pushing), 2 runs / 30 min | 12h |
+| `monitor_schedule_gap` (warning) | > 45 min since the previous monitor run (heartbeat variable, cached state, or Actions runs list) | 12h |
+| `xvl_evaluator_stale` | `/ready` `xvl_evaluator_health` `STALE` or `tick_age_s` > 60s (not `DISABLED`/`STARTING`), 2 runs / 15 min | 6h |
+| `cross_venue_stale` | `/ready` `cross_venue_health` `DOWN`/`STALE` or `collector_age_s` > 120s; or `DEGRADED` (some venues stale) continuously > 30 min; 2 runs / 30 min | 6h |
+| `cross_venue_reconnects` (warning) | `/api/status` cross-venue venue reconnects grew >= 30 since the previous run, 2 runs / 30 min | 6h |
+| `market_context_stale` | `/ready` `market_context_health` `COLLECTOR_DOWN`/`DEGRADED`/`UNAVAILABLE` (lists `stale_feeds`), 2 runs / 30 min | 6h |
+| `ai_input_dead` | `/ready` `ai_input_health.status == DEAD_INPUT` while unpaused, 2 runs / 30 min | 6h |
+| `bbo_refresh_stale` | `/ready` `bbo_refresh` last success > 300s, in flight > 120s, or >= 10 consecutive failures, while unpaused; 2 runs / 15 min | 6h |
+| `lifecycle_stalled` | `/api/status` `lifecycle_pipeline` not running, `last_success_age_sec` > 3600, or `emergency=true`; 2 runs / 30 min | 6h |
+| `lifecycle_wal` | `lifecycle_pipeline.emergency_wal.status` `ALARM`/`INVALID`/`STALE`, 2 runs / 15 min | 6h |
+| `lifecycle_blocked` (warning) | any `lifecycle_pipeline.blocker_counts` code >= 10 lifecycles, 2 runs / 60 min | 12h |
+| `collector_v3_reconcile_stalled` | `/health` `research_collection.multiverse.v3_reconcile_worker`: phase != `IDLE` > 600s, 0 runs after 15 min, or not alive (`COLLECTOR_V3_RECONCILE_STALLED`); 2 runs / 15 min | 6h |
+| `relay_stale_owner_pending` (warning; critical while `live_armed`) | `/api/relay-execution-state` `state_integrity.relay_push.delivery_scheduler.counts.stale_owner_pending` > 0 continuously > 30 min | 6h |
+| `entries_blocked` (warning) | `/ready` `scheduled_ai_cycle.last_poll_entry_eligible=false` continuously > 2h while unpaused | 6h |
+| `contract_field_missing` (warning) | a required field path (`scripts/fly_monitor_subsystems.py` `REQUIRED_FIELDS`) is absent from an endpoint that answered, 2 runs / 15 min | 12h |
 | `transfer_lag` | segment shipper stale/erroring/> 36 segments un-ACKed, or legacy ACK > 3h | informational until `FLY_MONITOR_SEGMENTS_LIVE=1` |
 | `not_ready`, `revision_drift`, `registry_drift`, `monitor_error` | unchanged from PR #185 | 6-12h |
 
 Cadence rules are skipped while paper is paused (covered by `paper_paused`)
-and during the first 20 minutes after boot. Transitional rules are
-suppressed for up to 90 minutes during a guarded deploy; `safety`, disk,
-`deploy_stuck` and `laptop_silent` never are.
+and during the first 20 minutes after boot; the `/ready` subsystem rules also
+skip the first 20 minutes, and the AI-input, BBO and entries rules skip while
+paused. Transitional rules are suppressed only while an **image deploy** is in
+progress (a push run, or a dispatch whose `test-and-deploy` job is not skipped)
+and for at most 45 minutes after it started, or while `DEPLOY_MAINTENANCE`
+owns the pause (also capped at 45 minutes). Inspect, snapshot, repair and
+restart dispatches never suppress anything. `safety`
+(`force_paper_mode`/`live_armed`/`bitfinex_live_enabled`), disk, `deploy_stuck`,
+`laptop_silent`, `laptop_health_silent`, `monitor_schedule_gap` and
+`relay_stale_owner_pending` are never suppressed.
+
+A missing optional field still skips its rule, but the fields the deployed
+revision is known to emit are a contract: their absence raises
+`contract_field_missing` instead of silently disabling the rule. Update
+`REQUIRED_FIELDS` in the same change that removes or renames such a field.
+
+## Monitor heartbeat (missed schedules)
+
+GitHub delivers `*/15` schedules best-effort (66% delivery and a 63-minute gap
+were measured in BLINDSPOT-AUDIT-3). Every run compares now with the newest
+evidence of the previous run and raises `monitor_schedule_gap` above 45 minutes.
+Evidence sources, newest wins:
+
+1. repository variable `FLY_MONITOR_HEARTBEAT`, written at the end of every run
+   (success or failure) as compact JSON
+   `{"at":"<UTC ISO>","run_id":"...","attempt":"...","crashed":false,"restored":true}`;
+2. `last_run.ts` in the cached incident state;
+3. the previous run of `fly-bot-monitor.yml` from the Actions runs API.
+
+`GITHUB_TOKEN` cannot write Actions variables (there is no `variables`
+workflow permission). The write therefore uses the optional secret
+`FLY_MONITOR_VARIABLES_TOKEN`: a fine-grained PAT for this repository with
+**Variables: read and write** only. Until it is configured the monitor logs
+"heartbeat variable not written" and gap detection relies on sources 2 and 3,
+which need only the existing `actions: read`. (`LAPTOP_CHAIN_HEARTBEAT` is
+written by the laptop with the owner's own `gh` login, not from Actions.)
+
+The laptop watcher can read it with
+`gh variable get FLY_MONITOR_HEARTBEAT --repo danishhaiderau-maker/doxed-founders-website`
+(parse `at`; stale > 45 min means the monitor itself is not running), or,
+without the secret, with
+`gh run list --workflow fly-bot-monitor.yml --limit 1 --json createdAt,conclusion,databaseId`.
 
 Laptop watchdog (`scripts/laptop_chain_incident.py`):
 
