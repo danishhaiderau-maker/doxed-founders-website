@@ -45704,20 +45704,218 @@ def research_export_files():
     ]
 
 
+_RESEARCH_EXPORT_MAX_SOURCE_BYTES = 64 * 1024 * 1024
+_RESEARCH_EXPORT_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+_RESEARCH_EXPORT_MIN_FREE_BYTES = 256 * 1024 * 1024
+_RESEARCH_EXPORT_BUILD_TIMEOUT_SEC = 20.0
+_RESEARCH_EXPORT_COPY_CHUNK_BYTES = 256 * 1024
+_RESEARCH_EXPORT_BUILD_LOCK = threading.Lock()
+_RESEARCH_EXPORT_MANIFEST_NAME = "EXPORT_MANIFEST.json"
+
+
+class _ResearchExportTooLarge(RuntimeError):
+    pass
+
+
+class _ResearchExportUnavailable(RuntimeError):
+    pass
+
+
+class _BoundedResearchArchiveWriter:
+    """File proxy that refuses to let ZipFile grow beyond the export cap."""
+
+    def __init__(self, raw_file, *, max_bytes, deadline):
+        self._raw_file = raw_file
+        self._max_bytes = int(max_bytes)
+        self._deadline = float(deadline)
+        self._high_water = 0
+
+    def write(self, data):
+        if time.monotonic() > self._deadline:
+            raise _ResearchExportUnavailable("archive build deadline exceeded")
+        end_position = max(self._high_water, self._raw_file.tell() + len(data))
+        if end_position > self._max_bytes:
+            raise _ResearchExportTooLarge("archive output exceeds small-export limit")
+        written = self._raw_file.write(data)
+        self._high_water = max(self._high_water, self._raw_file.tell())
+        return written
+
+    def __getattr__(self, name):
+        return getattr(self._raw_file, name)
+
+
+def _research_export_members():
+    """Return existing allowlisted files rooted inside the runtime data directory."""
+    data_root = Path.cwd().resolve()
+    members = []
+    omitted_optional = []
+    seen_arcnames = {_RESEARCH_EXPORT_MANIFEST_NAME}
+    total_source_bytes = 0
+    try:
+        configured_paths = dict.fromkeys(research_export_files())
+    except (TypeError, ValueError) as exc:
+        raise _ResearchExportUnavailable("invalid research export allowlist") from exc
+    for configured_path in configured_paths:
+        try:
+            candidate = Path(configured_path)
+            source_path = (candidate if candidate.is_absolute() else data_root / candidate).resolve()
+            relative_name = source_path.relative_to(data_root).as_posix()
+        except (OSError, TypeError, ValueError) as exc:
+            raise _ResearchExportUnavailable("unsafe research export member path") from exc
+        if not source_path.exists():
+            omitted_optional.append(relative_name)
+            continue
+        if not source_path.is_file():
+            raise _ResearchExportUnavailable("research export member is not a regular file")
+        arcname = source_path.name
+        if arcname in seen_arcnames:
+            raise _ResearchExportUnavailable("conflicting research export member names")
+        try:
+            source_bytes = source_path.stat().st_size
+        except OSError as exc:
+            raise _ResearchExportUnavailable("research export member cannot be inspected") from exc
+        total_source_bytes += source_bytes
+        if total_source_bytes > _RESEARCH_EXPORT_MAX_SOURCE_BYTES:
+            raise _ResearchExportTooLarge("research export source exceeds small-export limit")
+        seen_arcnames.add(arcname)
+        members.append((source_path, arcname, source_bytes))
+    return members, omitted_optional, total_source_bytes
+
+
+def _research_export_manifest(members, omitted_optional):
+    """Describe this convenience bundle without claiming canonical evidence coverage."""
+    return {
+        "schema": "bounded_research_export_manifest_v1",
+        "scope": "diagnostic_convenience_existing_files_only",
+        "canonical_mirror_ack_evidence": False,
+        "complete_research_coverage": False,
+        "generated_members": [_RESEARCH_EXPORT_MANIFEST_NAME],
+        "included_members": [arcname for _, arcname, _ in members],
+        "omitted_optional_absent": list(omitted_optional),
+    }
+
+
+def _research_export_error(status_code):
+    if status_code == 413:
+        payload = {
+            "error": "research export exceeds the bounded HTTP download limit",
+            "action": "use the verified research sync for large exports",
+        }
+    else:
+        payload = {
+            "error": "research export temporarily unavailable",
+            "action": "retry later or use the verified research sync",
+        }
+    response = jsonify(payload)
+    response.status_code = status_code
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if status_code == 503:
+        response.headers["Retry-After"] = "60"
+    return response
+
+
 @app.route('/api/export_csv')
 @app.route('/api/export.csv')
 def export_csv():
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # Include both legacy 3-factor files and the authoritative per-lane
-        # research lifecycle. The old export omitted these newer files, so a
-        # downloaded ZIP could show replay buffers but could not prove whether
-        # Current lane filled, expired, closed, or remained counterfactual.
-        for file in dict.fromkeys(research_export_files()):
-            if os.path.exists(file):
-                zip_file.write(file, arcname=os.path.basename(file))
-    zip_buffer.seek(0)
-    return send_file(zip_buffer, mimetype='application/zip', as_attachment=True, download_name='3factor_logs.zip')
+    build_lock_acquired = _RESEARCH_EXPORT_BUILD_LOCK.acquire(blocking=False)
+    if not build_lock_acquired:
+        return _research_export_error(503)
+    zip_buffer = None
+    try:
+        members, omitted_optional, _ = _research_export_members()
+        if not members:
+            raise _ResearchExportUnavailable("no research export data files are available")
+        temp_root = Path(tempfile.gettempdir())
+        try:
+            free_bytes = shutil.disk_usage(temp_root).free
+        except OSError as exc:
+            raise _ResearchExportUnavailable("temporary storage cannot be inspected") from exc
+        required_free_bytes = (
+            _RESEARCH_EXPORT_MIN_FREE_BYTES + _RESEARCH_EXPORT_MAX_ARCHIVE_BYTES
+        )
+        if free_bytes < required_free_bytes:
+            raise _ResearchExportUnavailable("insufficient temporary storage reserve")
+
+        deadline = time.monotonic() + _RESEARCH_EXPORT_BUILD_TIMEOUT_SEC
+        zip_buffer = tempfile.TemporaryFile(mode="w+b", dir=temp_root)
+        bounded_writer = _BoundedResearchArchiveWriter(
+            zip_buffer,
+            max_bytes=_RESEARCH_EXPORT_MAX_ARCHIVE_BYTES,
+            deadline=deadline,
+        )
+        copied_source_bytes = 0
+        with zipfile.ZipFile(bounded_writer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr(
+                _RESEARCH_EXPORT_MANIFEST_NAME,
+                json.dumps(
+                    _research_export_manifest(members, omitted_optional),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+            # Include both legacy 3-factor files and the authoritative per-lane
+            # research lifecycle. The old export omitted these newer files, so a
+            # downloaded ZIP could show replay buffers but could not prove whether
+            # Current lane filled, expired, closed, or remained counterfactual.
+            for source_path, arcname, _ in members:
+                try:
+                    with source_path.open("rb") as source, zip_file.open(arcname, "w") as target:
+                        while True:
+                            if time.monotonic() > deadline:
+                                raise _ResearchExportUnavailable("archive build deadline exceeded")
+                            chunk = source.read(_RESEARCH_EXPORT_COPY_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            copied_source_bytes += len(chunk)
+                            if copied_source_bytes > _RESEARCH_EXPORT_MAX_SOURCE_BYTES:
+                                raise _ResearchExportTooLarge(
+                                    "research export source exceeds small-export limit"
+                                )
+                            target.write(chunk)
+                except (_ResearchExportTooLarge, _ResearchExportUnavailable):
+                    raise
+                except OSError as exc:
+                    raise _ResearchExportUnavailable(
+                        "research export member could not be copied"
+                    ) from exc
+        content_length = zip_buffer.tell()
+        zip_buffer.seek(0)
+        _RESEARCH_EXPORT_BUILD_LOCK.release()
+        build_lock_acquired = False
+        response = send_file(
+            zip_buffer,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name="3factor_logs.zip",
+            conditional=False,
+        )
+        response.headers["Content-Length"] = str(content_length)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.call_on_close(zip_buffer.close)
+        return response
+    except _ResearchExportTooLarge:
+        if zip_buffer is not None:
+            zip_buffer.close()
+        if build_lock_acquired:
+            _RESEARCH_EXPORT_BUILD_LOCK.release()
+        logger.warning("[EXPORT] bounded HTTP research export rejected as too large")
+        return _research_export_error(413)
+    except _ResearchExportUnavailable:
+        if zip_buffer is not None:
+            zip_buffer.close()
+        if build_lock_acquired:
+            _RESEARCH_EXPORT_BUILD_LOCK.release()
+        logger.warning("[EXPORT] bounded HTTP research export unavailable", exc_info=True)
+        return _research_export_error(503)
+    except Exception:
+        if zip_buffer is not None:
+            zip_buffer.close()
+        if build_lock_acquired:
+            _RESEARCH_EXPORT_BUILD_LOCK.release()
+        logger.error("[EXPORT ERROR] failed to build bounded research archive", exc_info=True)
+        return _research_export_error(503)
 
 def _capture_runtime_quantity_constraints(*, evidence_symbol=None, source_revision=None) -> dict:
     """Capture exact venue metadata for evidence; never invent constraints."""
