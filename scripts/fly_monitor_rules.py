@@ -236,4 +236,25 @@ def collection_findings(health: Mapping[str, Any] | None) -> dict[str, str]:
             f"{int(grid.get('eligible_calls_1h') or 0)} tile-eligible calls in the last hour"
             + (f" ({coverage * 100:.0f}%)" if coverage is not None else "")
         )
+    runtime = block.get("runtime_failures") if isinstance(block.get("runtime_failures"), dict) else {}
+    if "RELAY_OUTBOX_STALE_OWNER_PENDING" in alarms:
+        relay = (health or {}).get("relay_outbox")
+        relay = relay if isinstance(relay, dict) else {}
+        findings["relay_outbox_stale_owner"] = (
+            f"relay outbox holds {relay.get('stale_owner_pending')!r} stale-owner event(s) for "
+            f"{relay.get('stale_owner_age_sec')!r}s (quarantined={relay.get('quarantined_pending')!r}, "
+            f"arming_block={relay.get('arming_block_reason')!r}); held, never delivered"
+        )
+    if "LEDGER_WRITE_FAILURES" in alarms:
+        findings["ledger_write_failures"] = (
+            f"lane P&L ledger writes failing in the last hour: "
+            f"{runtime.get('ledger_write_failures_recent')!r} "
+            f"(total since boot={runtime.get('ledger_write_failures_total')!r})"
+        )
+    if "EXECUTION_FUNNEL_HOOK_FAILURES" in alarms:
+        findings["execution_funnel_hook_failures"] = (
+            f"execution funnel hooks failing in the last hour: "
+            f"{runtime.get('execution_funnel_hook_failures_recent')!r} "
+            f"(total since boot={runtime.get('execution_funnel_hook_failures_total')!r})"
+        )
     return findings

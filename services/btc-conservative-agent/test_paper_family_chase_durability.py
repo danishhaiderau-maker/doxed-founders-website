@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from combo_pathway_config import COMBO_LANE_SPECS
 from relay_event_outbox import RelayEventOutbox
+import thread_health
 
 
 def fixture(tmp_path, lane):
@@ -46,7 +47,8 @@ def fixture(tmp_path, lane):
           "_normalize_order_side_to_dir": lambda _: "LONG",
           "_compute_limit_chase_target": lambda *a, **k: (95.0, "LIMIT_CHASE"),
           "_limit_chase_market_gap": lambda *a: 5.0, "fmt": str,
-          "logger": SimpleNamespace(info=lambda *a: None, debug=lambda *a: None)}
+          "logger": SimpleNamespace(info=lambda *a: None, debug=lambda *a: None),
+          "_FUNNEL_HOOK_FAILURES": thread_health.FailureCounters()}
     exec(compile(ast.Module(body=functions, type_ignores=[]), "bot.py", "exec"), ns)
     return ns, order, signal, outbox, paused, schedules, relay
 
