@@ -68,7 +68,8 @@ Files under `C:\DoxxedCrypto\laptop-chain\health\`:
 - **Neon slot.** Set `NEON_API_KEY` and `NEON_PROJECT_ID` (read-only key) in the
   watcher's environment or in `C:\DoxxedCrypto\laptop-chain\health\neon.env`
   (outside git) to enable `neon.usage`. The optional
-  `NEON_EGRESS_BUDGET_BYTES_PER_HOUR` defaults to 200 MB/h.
+  `NEON_EGRESS_BUDGET_BYTES_PER_HOUR` defaults to 200 MiB/h; optional `NEON_ORG_ID`
+  skips the org lookup.
 
 ## Checks and fixes
 
@@ -282,10 +283,25 @@ Neon is unreachable from Railway.
 
 <a id="neon-usage"></a>
 ### neon.usage
-Neon project data-transfer and compute consumption, with an egress rate against the
-budget. SKIP until `NEON_API_KEY` and `NEON_PROJECT_ID` are set (environment or
-`laptop-chain\health\neon.env`); the observed text names the missing variable. See #261
-for the egress fix pattern.
+Neon month-to-date usage from the usage-based consumption API
+(`GET /api/v2/consumption_history/v2/projects`, cached 15 min; errors cached 5 min).
+The project object's `data_transfer_bytes` / `compute_time_seconds` counters stay 0 on
+Launch (`launch_v3`) plans, so they are not read. Completed days come from `daily`
+buckets, today and the rate from `hourly` buckets. Reported: public egress (vs the 500 GB
+Launch allowance), the egress of the latest complete hour, compute CU-hours, storage and
+PITR GB-months, and an estimated cost at Launch list prices (compute $0.106/CU-h,
+storage $0.35, PITR $0.20, snapshots $0.09 per GB-month, egress over 500 GB $0.10/GB;
+extra branches not priced).
+
+- GREEN: non-zero usage reported and the last complete hour's egress is within
+  `NEON_EGRESS_BUDGET_BYTES_PER_HOUR` (default 200 MiB/h).
+- AMBER: hourly egress over budget (look for a polling loop or unbounded query; see
+  #261), no complete hour reported yet, no/all-zero consumption, or any API error.
+  `HTTP_401` is a rejected key, `HTTP_403` means the plan has no consumption API, and
+  `HTTP_404` means the key cannot see the org. Zeros never count as GREEN.
+- SKIP until `NEON_API_KEY` and `NEON_PROJECT_ID` are set (environment or
+  `laptop-chain\health\neon.env`); the observed text names the missing variable.
+  `org_id` is required by the API. It is read from the project unless `NEON_ORG_ID` is set.
 
 <a id="bitfinex-exposure"></a>
 ### bitfinex.exposure

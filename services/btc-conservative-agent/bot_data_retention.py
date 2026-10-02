@@ -56,6 +56,7 @@ CUSTODY_SCHEMA = "research_segment_custody_receipt_v1"
 COMPACT_SCHEMA = "tier_a_compact_partition_v1"
 GIB = 1024 ** 3
 GB = 1000 ** 3
+LOCK_WAIT_SEC = 180.0
 DEFAULTS = {
     "shadow_root": r"C:\DoxxedCrypto\fly-mirror-segments",
     "view_root": r"C:\DoxxedCrypto\segment-promotion-view",
@@ -898,6 +899,29 @@ def load_config(args) -> dict:
     return cfg
 
 
+def retrying_lock_factory(wait_sec: float, *, sleep=time.sleep, clock=time.monotonic, lock_class=None):
+    """Acquire the puller's shadow-root lock, retrying for ``wait_sec``.
+
+    The pull loop holds this lock for a few seconds per pull; a single
+    non-blocking attempt loses that race on most cycles.
+    """
+    from research_segment_puller import PullerError, _RunLock
+
+    lock_class = lock_class or _RunLock
+
+    def factory(path):
+        deadline = clock() + max(wait_sec, 0.0)
+        while True:
+            try:
+                return lock_class(path)
+            except PullerError as exc:
+                if clock() >= deadline:
+                    raise RuntimeError(f"shadow-root lock busy for {wait_sec:.0f}s; retry next cycle") from exc
+                sleep(1.0)
+
+    return factory
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-root", required=True, help="canonical-research-data the analyzer reads")
@@ -921,13 +945,8 @@ def main(argv=None) -> int:
         _atomic_json(state_dir / "mode.json", {"mode": mode, "set_at": _iso(_utc_now())})
         print(json.dumps({"ok": True, "mode": mode}))
         return 0
-    from research_segment_puller import PullerError, _RunLock
-
-    def lock_factory(path):
-        try:
-            return _RunLock(path)
-        except PullerError as exc:
-            raise RuntimeError("shadow-root lock busy; retry next cycle") from exc
+    lock_factory = retrying_lock_factory(
+        float(os.environ.get("BOT_DATA_RETENTION_LOCK_WAIT_SEC") or LOCK_WAIT_SEC))
 
     requested = {"dry-run": MODE_DRY_RUN, "enforce": MODE_ENFORCE}.get(args.mode, "auto")
     try:

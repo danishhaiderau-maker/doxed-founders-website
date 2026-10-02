@@ -698,13 +698,118 @@ def test_neon_config_reads_env_then_uncommitted_state_file(tmp_path, monkeypatch
     inputs["neon"] = {"missing": ["NEON_API_KEY"]}
     neon = next(c for c in sh.evaluate(inputs, {}) if c["id"] == "neon.usage")
     assert neon["status"] == sh.SKIP and "NEON_API_KEY" in neon["observed"]
-    (tmp_path / "health" / "neon.env").write_text("NEON_API_KEY=napi_test\nNEON_PROJECT_ID=fancy-mode-1\n")
+
+
+def _neon_bucket(start, hours, **metrics):
+    end = sh.iso(sh.parse_ts(start) + hours * 3600)
+    return {"timeframe_start": start, "timeframe_end": end,
+            "metrics": [{"metric_name": k, "value": v} for k, v in metrics.items()]}
+
+
+def _neon_payload(*buckets, project="fancy-mode-1", plan="launch"):
+    return {"projects": [{"project_id": project, "periods": [
+        {"period_plan": plan, "period_start": "2026-10-01T00:00:00Z", "consumption": list(buckets)}]}]}
+
+
+NEON_DAILY = _neon_payload(_neon_bucket("2026-10-01T00:00:00Z", 24, compute_unit_seconds=36_000,
+                                        public_network_transfer_bytes=11_000_000_000,
+                                        root_branch_bytes_month=4_000_000, instant_restore_bytes_month=36_000_000))
+NEON_HOURLY = _neon_payload(
+    _neon_bucket("2026-09-30T23:00:00Z", 1, public_network_transfer_bytes=999_000_000_000),  # previous month
+    _neon_bucket("2026-10-02T05:00:00Z", 1, compute_unit_seconds=900, public_network_transfer_bytes=25_000_000,
+                 root_branch_bytes_month=187_000),
+    _neon_bucket("2026-10-02T06:00:00Z", 1, compute_unit_seconds=900, public_network_transfer_bytes=24_000_000,
+                 root_branch_bytes_month=187_000),
+    _neon_bucket("2026-10-02T07:00:00Z", 1, compute_unit_seconds=300, public_network_transfer_bytes=9_000_000))
+
+
+def _neon_env(tmp_path, monkeypatch, body="NEON_API_KEY=napi_secret_test\nNEON_PROJECT_ID=fancy-mode-1\n"):
+    for name in ("NEON_API_KEY", "NEON_PROJECT_ID", "NEON_ORG_ID", "NEON_EGRESS_BUDGET_BYTES_PER_HOUR"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / "health").mkdir(exist_ok=True)
+    (tmp_path / "health" / "neon.env").write_text(body)
+
+
+def _neon_check(neon):
+    inputs = healthy(ts("2026-10-02T07:40:00Z"))
+    inputs["neon"] = neon
+    return next(c for c in sh.evaluate(inputs, {}) if c["id"] == "neon.usage")
+
+
+def test_neon_usage_reads_consumption_history_v2(tmp_path, monkeypatch):
+    _neon_env(tmp_path, monkeypatch)
+    now = ts("2026-10-02T07:40:00Z")
     calls = []
-    monkeypatch.setattr(sh, "http_json", lambda url, **kw: calls.append((url, kw["headers"])) or (
-        {"project": {"data_transfer_bytes": 5_000_000_000, "compute_time_seconds": 3600}}, None))
-    out = sh.collect_neon({}, str(tmp_path))
-    assert out["data_transfer_bytes"] == 5_000_000_000
-    assert calls[0][0].endswith("/projects/fancy-mode-1") and calls[0][1]["Authorization"] == "Bearer napi_test"
+
+    def fake(url, **kw):
+        calls.append((url, kw["headers"]))
+        if "/consumption_history/v2/projects" not in url:
+            return {"project": {"id": "fancy-mode-1", "org_id": "org-test-1", "data_transfer_bytes": 0}}, None
+        return (NEON_HOURLY if "granularity=hourly" in url else NEON_DAILY), None
+
+    monkeypatch.setattr(sh, "http_json", fake)
+    cache = {}
+    out = sh.collect_neon(cache, str(tmp_path), now)
+    assert calls[0][0].endswith("/projects/fancy-mode-1")
+    assert all(h["Authorization"] == "Bearer napi_secret_test" for _u, h in calls)
+    hourly = next(u for u, _h in calls if "granularity=hourly" in u)
+    daily = next(u for u, _h in calls if "granularity=daily" in u)
+    assert "org_id=org-test-1" in hourly and "project_ids=fancy-mode-1" in hourly
+    assert "public_network_transfer_bytes" in hourly and "compute_unit_seconds" in hourly
+    assert "from=2026-10-01T00%3A00%3A00Z" in daily and "to=2026-10-02T00%3A00%3A00Z" in daily
+    # MTD = Oct 1 (daily) + Oct 2 hourly; the Sept 30 hour only feeds the rate window, never the month.
+    assert out["egress_bytes"] == 11_058_000_000
+    assert out["compute_cu_hours"] == pytest.approx((36_000 + 2_100) / 3600)
+    assert out["rate_bytes_per_hour"] == 24_000_000 and out["rate_hour"] == "2026-10-02T06:00:00Z"
+    assert out["plan"] == "launch" and out["est_cost_usd"] == pytest.approx(
+        round(38_100 / 3600 * 0.106 + 0.004374 * 0.35 + 0.036 * 0.20, 2))
+    assert "napi_secret_test" not in json.dumps(out)
+    # Cached for 15 min (and the resolved org is reused afterwards, no project lookup).
+    n = len(calls)
+    assert sh.collect_neon(cache, str(tmp_path), now + 60) == out and len(calls) == n
+    sh.collect_neon(cache, str(tmp_path), now + 16 * 60)
+    assert len(calls) == n + 2 and not any(u.endswith("/projects/fancy-mode-1") for u, _h in calls[n:])
+
+    check = _neon_check(out)
+    assert check["status"] == sh.GREEN, check
+    assert "MTD egress 11.06GB" in check["observed"] and "rate 24.0MB/h (hour 06:00Z)" in check["observed"]
+    assert "CU-h" in check["observed"] and "est. cost $" in check["observed"]
+    assert "napi_secret_test" not in json.dumps(check)
+
+
+def test_neon_usage_never_green_on_zero_empty_error_or_unknown_rate(tmp_path, monkeypatch):
+    _neon_env(tmp_path, monkeypatch, "NEON_API_KEY=k\nNEON_PROJECT_ID=fancy-mode-1\nNEON_ORG_ID=org-1\n")
+    now = ts("2026-10-02T07:40:00Z")
+    monkeypatch.setattr(sh, "http_json", lambda url, **kw: (_neon_payload(), None))
+    empty = sh.collect_neon({}, str(tmp_path), now)
+    assert empty["buckets"] == 0
+    check = _neon_check(empty)
+    assert check["status"] == sh.AMBER and "no consumption reported" in check["observed"]
+
+    zeros = _neon_payload(_neon_bucket("2026-10-02T06:00:00Z", 1, public_network_transfer_bytes=0))
+    monkeypatch.setattr(sh, "http_json", lambda url, **kw: (zeros, None))
+    assert _neon_check(sh.collect_neon({}, str(tmp_path), now))["status"] == sh.AMBER
+
+    for code, words in (("HTTP_403", "not available on this plan"), ("HTTP_401", "key rejected")):
+        monkeypatch.setattr(sh, "http_json", lambda url, code=code, **kw: (None, code))
+        out = sh.collect_neon({}, str(tmp_path), now)
+        check = _neon_check(out)
+        assert check["status"] == sh.AMBER and code in check["observed"] and words in check["observed"]
+
+    no_rate = sh.summarize_neon_usage(NEON_DAILY, _neon_payload(), "fancy-mode-1", now)
+    check = _neon_check({**no_rate, "project": "fancy-mode-1"})
+    assert no_rate["rate_bytes_per_hour"] is None and check["status"] == sh.AMBER and "rate ?" in check["observed"]
+
+    hot = sh.summarize_neon_usage(NEON_DAILY, NEON_HOURLY, "fancy-mode-1", now)
+    check = _neon_check({**hot, "budget_bytes_per_hour": "10000000"})
+    assert check["status"] == sh.AMBER and "#261" in check["hint"]
+
+
+def test_neon_org_lookup_failure_is_amber(tmp_path, monkeypatch):
+    _neon_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(sh, "http_json", lambda url, **kw: ({"project": {"id": "fancy-mode-1"}}, None))
+    out = sh.collect_neon({}, str(tmp_path), ts("2026-10-02T07:40:00Z"))
+    assert out["error"] == "NO_ORG_ID" and _neon_check(out)["status"] == sh.AMBER
 
 
 def test_incident_escalation_reads_open_alarms():

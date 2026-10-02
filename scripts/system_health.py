@@ -37,7 +37,8 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+import urllib.parse
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -122,6 +123,8 @@ THRESHOLDS: dict[str, float] = {
     "deepseek_balance_amber_usd": 5.0,
     "deepseek_balance_red_usd": 1.0,
     "deepseek_balance_cache_sec": 10 * MIN,
+    "neon_usage_cache_sec": 15 * MIN,
+    "neon_usage_error_cache_sec": 5 * MIN,
     "deepseek_balance_fly_max_age_sec": 30 * MIN,
 }
 
@@ -490,7 +493,7 @@ def collect(opts: argparse.Namespace, state: dict[str, Any], now: float | None =
         inputs["laptop_disk"] = {"free": usage.free, "total": usage.total}
     except OSError:
         inputs["laptop_disk"] = None
-    inputs["neon"] = collect_neon(cache, opts.state_dir)
+    inputs["neon"] = collect_neon(cache, opts.state_dir, now)
     inputs["deepseek_balance"] = collect_deepseek_balance(vault, cache, now)
     return inputs
 
@@ -540,27 +543,133 @@ def neon_config(state_dir: str) -> dict[str, str]:
     """NEON_API_KEY / NEON_PROJECT_ID from the environment, else ``<state>/health/neon.env`` (never in git)."""
     file_values = load_vault(str(Path(state_dir) / "health" / "neon.env"))
     return {name: os.environ.get(name) or file_values.get(name) or ""
-            for name in ("NEON_API_KEY", "NEON_PROJECT_ID", "NEON_EGRESS_BUDGET_BYTES_PER_HOUR")}
+            for name in ("NEON_API_KEY", "NEON_PROJECT_ID", "NEON_ORG_ID", "NEON_EGRESS_BUDGET_BYTES_PER_HOUR")}
 
 
-def collect_neon(cache: dict[str, Any], state_dir: str = DEFAULT_STATE_DIR) -> dict[str, Any] | None:
-    """Neon consumption, only when NEON_API_KEY + NEON_PROJECT_ID are configured."""
+NEON_API = "https://console.neon.tech/api/v2"
+# Usage-based plans (Launch/Scale) leave the project object's consumption counters at 0;
+# only /consumption_history/v2 reports invoice-aligned usage.
+NEON_METRICS = ("compute_unit_seconds", "root_branch_bytes_month", "child_branch_bytes_month",
+                "instant_restore_bytes_month", "snapshot_storage_bytes_month",
+                "public_network_transfer_bytes", "private_network_transfer_bytes", "extra_branches_month")
+# Launch list prices (neon.com/docs/introduction/plans); extra branches are not priced here.
+NEON_LAUNCH_RATES = {"cu_hour": 0.106, "storage_gb_month": 0.35, "instant_restore_gb_month": 0.20,
+                     "snapshot_gb_month": 0.09, "egress_gb": 0.10, "egress_included_gb": 500.0}
+NEON_ERROR_HINTS = {"HTTP_401": "API key rejected", "HTTP_403": "consumption API not available on this plan",
+                    "HTTP_404": "org not accessible with this key", "HTTP_406": "time range rejected",
+                    "HTTP_429": "rate limited"}
+
+
+def _neon_buckets(payload: Any, project: str) -> Iterable[tuple[str, float, float, dict[str, float]]]:
+    for proj in dig(payload, "projects", default=[]) or []:
+        if not isinstance(proj, Mapping) or proj.get("project_id") != project:
+            continue
+        for period in proj.get("periods") or []:
+            for bucket in (period.get("consumption") or []) if isinstance(period, Mapping) else []:
+                start, end = parse_ts(bucket.get("timeframe_start")), parse_ts(bucket.get("timeframe_end"))
+                if start is None or end is None:
+                    continue
+                values: dict[str, float] = {}
+                for metric in bucket.get("metrics") or []:
+                    try:
+                        values[str(metric["metric_name"])] = float(metric.get("value") or 0)
+                    except (KeyError, TypeError, ValueError, AttributeError):
+                        continue
+                yield str(period.get("period_plan") or ""), start, end, values
+
+
+def summarize_neon_usage(daily: Any, hourly: Any, project: str, now: float) -> dict[str, Any]:
+    """Month-to-date totals (completed days from ``daily`` + today from ``hourly``) and the last complete hour."""
+    hour = datetime.fromtimestamp(now, timezone.utc).replace(minute=0, second=0, microsecond=0)
+    month_start = hour.replace(day=1, hour=0).timestamp()
+    day_start = hour.replace(hour=0).timestamp()
+    totals = {name: 0.0 for name in NEON_METRICS}
+    plans: set[str] = set()
+    used = 0
+    for source, keep in ((daily, lambda s: month_start <= s < day_start), (hourly, lambda s: s >= day_start)):
+        for plan, start, _end, values in _neon_buckets(source, project):
+            if keep(start):
+                used += 1
+                plans.add(plan)
+                for name in NEON_METRICS:
+                    totals[name] += values.get(name, 0.0)
+    complete = sorted((start, values) for _p, start, end, values in _neon_buckets(hourly, project)
+                      if end <= now and values)
+    out: dict[str, Any] = {
+        "month_start": iso(month_start), "buckets": used, "plan": ",".join(sorted(p for p in plans if p)) or None,
+        "egress_bytes": totals["public_network_transfer_bytes"],
+        "private_egress_bytes": totals["private_network_transfer_bytes"],
+        "compute_cu_hours": totals["compute_unit_seconds"] / HOUR,
+        "storage_gb_month": (totals["root_branch_bytes_month"] + totals["child_branch_bytes_month"]) / 1e9,
+        "instant_restore_gb_month": totals["instant_restore_bytes_month"] / 1e9,
+        "snapshot_gb_month": totals["snapshot_storage_bytes_month"] / 1e9,
+        "extra_branches_month": totals["extra_branches_month"],
+        "rate_bytes_per_hour": complete[-1][1].get("public_network_transfer_bytes", 0.0) if complete else None,
+        "rate_hour": iso(complete[-1][0]) if complete else None,
+    }
+    if out["plan"] == "launch":
+        r = NEON_LAUNCH_RATES
+        out["est_cost_usd"] = round(
+            out["compute_cu_hours"] * r["cu_hour"] + out["storage_gb_month"] * r["storage_gb_month"]
+            + out["instant_restore_gb_month"] * r["instant_restore_gb_month"]
+            + out["snapshot_gb_month"] * r["snapshot_gb_month"]
+            + max(0.0, out["egress_bytes"] / 1e9 - r["egress_included_gb"]) * r["egress_gb"], 2)
+    return out
+
+
+def collect_neon(cache: dict[str, Any], state_dir: str = DEFAULT_STATE_DIR,
+                 now: float | None = None) -> dict[str, Any] | None:
+    """Neon usage from the consumption-history API, only when NEON_API_KEY + NEON_PROJECT_ID are configured.
+
+    Cached for ``neon_usage_cache_sec`` (Neon refreshes consumption ~every 15 min). The key goes only
+    into the request header and never into the returned summary.
+    """
     cfg = neon_config(state_dir)
     key, project = cfg["NEON_API_KEY"], cfg["NEON_PROJECT_ID"]
     if not key or not project:
         return {"missing": [n for n in ("NEON_API_KEY", "NEON_PROJECT_ID") if not cfg[n]]} \
             if (key or project) else None
-    payload, err = http_json(f"https://console.neon.tech/api/v2/projects/{project}",
-                             headers={"Authorization": f"Bearer {key}"}, timeout=20)
-    if err:
-        return {"error": err}
-    proj = payload.get("project") or {}
-    out = {k: proj.get(k) for k in ("data_transfer_bytes", "compute_time_seconds",
-                                    "active_time_seconds", "written_data_bytes",
-                                    "consumption_period_start")}
+    now = time.time() if now is None else float(now)
+    cached = cache.get("neon_usage")
+    if isinstance(cached, Mapping) and cached.get("project") == project:
+        ttl = THRESHOLDS["neon_usage_error_cache_sec" if cached.get("error") else "neon_usage_cache_sec"]
+        if now - float(cached.get("checked_at") or 0) < ttl:
+            return dict(cached)
+    headers = {"Authorization": f"Bearer {key}"}
+    base: dict[str, Any] = {"checked_at": now, "project": project}
     if cfg["NEON_EGRESS_BUDGET_BYTES_PER_HOUR"]:
-        out["budget_bytes_per_hour"] = cfg["NEON_EGRESS_BUDGET_BYTES_PER_HOUR"]
-    return out
+        base["budget_bytes_per_hour"] = cfg["NEON_EGRESS_BUDGET_BYTES_PER_HOUR"]
+
+    def finish(result: dict[str, Any]) -> dict[str, Any]:
+        cache["neon_usage"] = result
+        return result
+
+    org = cfg["NEON_ORG_ID"] or (cached.get("org_id") if isinstance(cached, Mapping)
+                                 and cached.get("project") == project else None)
+    if not org:
+        payload, err = http_json(f"{NEON_API}/projects/{project}", headers=headers, timeout=20)
+        org = dig(payload, "project", "org_id") if not err else None
+        if not org:
+            return finish({**base, "error": err or "NO_ORG_ID", "endpoint": "project"})
+    base["org_id"] = org
+    hour = datetime.fromtimestamp(now, timezone.utc).replace(minute=0, second=0, microsecond=0)
+    month_start, day_start = hour.replace(day=1, hour=0), hour.replace(hour=0)
+    fmt = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def fetch(granularity: str, start: datetime, end: datetime) -> tuple[Any, str | None]:
+        query = urllib.parse.urlencode({"project_ids": project, "org_id": org, "granularity": granularity,
+                                        "from": fmt(start), "to": fmt(end), "metrics": ",".join(NEON_METRICS)})
+        return http_json(f"{NEON_API}/consumption_history/v2/projects?{query}", headers=headers, timeout=20)
+
+    hourly, err = fetch("hourly", min(day_start, hour - timedelta(hours=3)), hour + timedelta(hours=1))
+    if err:
+        return finish({**base, "error": err, "endpoint": "consumption_history"})
+    daily = None
+    if day_start > month_start:
+        daily, err = fetch("daily", month_start, day_start)
+        if err:
+            return finish({**base, "error": err, "endpoint": "consumption_history"})
+    return finish({**base, **summarize_neon_usage(daily, hourly, project, now)})
 
 
 def latest_proof_row(active: Any, proof_dir: Path) -> dict[str, Any] | None:
@@ -1142,21 +1251,38 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
         add(check("neon.usage", "neon", SKIP, f"not configured (missing {' + '.join(neon['missing'])})",
                   "egress growth below budget"))
     elif neon.get("error"):
-        add(check("neon.usage", "neon", AMBER, f"Neon API {neon['error']}", "readable"))
+        hint = NEON_ERROR_HINTS.get(str(neon["error"]), "")
+        add(check("neon.usage", "neon", AMBER,
+                  f"Neon {neon.get('endpoint') or 'API'} {neon['error']}{f' ({hint})' if hint else ''}; usage unknown",
+                  "consumption history readable", "check NEON_API_KEY / org access; see runbook"))
     else:
-        prev = mem.get("neon_prev") or {}
-        egress = neon.get("data_transfer_bytes")
-        rate = None
-        if prev.get("bytes") is not None and egress is not None and now > float(prev.get("ts") or now):
-            rate = (float(egress) - float(prev["bytes"])) / ((now - float(prev["ts"])) / HOUR)
-        mem["neon_prev"] = {"ts": now, "bytes": egress}
         budget = float(neon.get("budget_bytes_per_hour") or os.environ.get("NEON_EGRESS_BUDGET_BYTES_PER_HOUR")
                        or 200 * 1024**2)
-        st = AMBER if rate is not None and rate > budget else GREEN
-        add(check("neon.usage", "neon", st,
-                  f"egress this period {float(egress or 0) / 1e9:.2f}GB, rate {('%.0fMB/h' % (rate / 1e6)) if rate is not None else '?'}; "
-                  f"compute {neon.get('compute_time_seconds')}s", f"egress <= {budget / 1e6:.0f}MB/h",
-                  "" if st == GREEN else "polling loop or unbounded query (see #261)"))
+        expected = f"egress <= {budget / 1e6:.0f}MB/h with non-zero reported usage"
+        egress, compute = float(neon.get("egress_bytes") or 0), float(neon.get("compute_cu_hours") or 0)
+        storage = float(neon.get("storage_gb_month") or 0)
+        rate = neon.get("rate_bytes_per_hour")
+        if not neon.get("buckets") or not (egress or compute or storage):
+            add(check("neon.usage", "neon", AMBER,
+                      f"no consumption reported for {neon.get('project')} since {neon.get('month_start')} "
+                      f"({neon.get('buckets') or 0} buckets, all zero); usage unknown", expected,
+                      "zeros are not proof of low usage - check the plan / consumption API"))
+        else:
+            summary = (f"MTD egress {egress / 1e9:.2f}GB "
+                       f"({egress / 1e9 / NEON_LAUNCH_RATES['egress_included_gb'] * 100:.1f}% of 500GB incl.), "
+                       f"rate {('%.1fMB/h' % (float(rate) / 1e6)) if rate is not None else '?'}"
+                       f"{(' (hour ' + str(neon.get('rate_hour'))[11:16] + 'Z)') if rate is not None else ''}; "
+                       f"compute {compute:.1f} CU-h; storage {storage:.3f} GB-mo "
+                       f"+ PITR {float(neon.get('instant_restore_gb_month') or 0):.3f}")
+            if neon.get("est_cost_usd") is not None:
+                summary += f"; est. cost ${float(neon['est_cost_usd']):.2f} ({neon.get('plan')})"
+            if rate is None:
+                st, action = AMBER, "no complete hourly bucket reported yet - rate unknown"
+            elif float(rate) > budget:
+                st, action = AMBER, "polling loop or unbounded query (see #261)"
+            else:
+                st, action = GREEN, ""
+            add(check("neon.usage", "neon", st, summary, expected, action))
 
     # ---------------- Bitfinex
     live_armed = dig(status, "live_armed", default=dig(health, "live_armed"))

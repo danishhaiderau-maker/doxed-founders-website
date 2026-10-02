@@ -417,6 +417,31 @@ class LaptopRetentionTests(unittest.TestCase):
         self.assertEqual(report["counts"]["missing"], 1)
         self.assertEqual(report["verdict"], "RED")
 
+    def test_lock_factory_waits_out_a_pull_then_gives_up(self):
+        from research_segment_puller import PullerError
+        attempts, now = [], [0.0]
+
+        def busy_twice(path):
+            attempts.append(path)
+            if len(attempts) <= 2:
+                raise PullerError("busy")
+            return "LOCK"
+
+        def sleep(seconds):
+            now[0] += seconds
+
+        factory = bdr.retrying_lock_factory(180, sleep=sleep, clock=lambda: now[0], lock_class=busy_twice)
+        self.assertEqual(factory("run.lock"), "LOCK")
+        self.assertEqual(len(attempts), 3)
+
+        def always_busy(path):
+            raise PullerError("busy")
+
+        now[0] = 0.0
+        factory = bdr.retrying_lock_factory(5, sleep=sleep, clock=lambda: now[0], lock_class=always_busy)
+        with self.assertRaisesRegex(RuntimeError, "busy for 5s"):
+            factory("run.lock")
+
     def test_refuses_onedrive_paths(self):
         with self.assertRaises(RuntimeError):
             bdr.refuse_onedrive(r"C:\Users\x\OneDrive\Desktop\data")

@@ -26,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
@@ -37,9 +36,6 @@ import pandas as pd
 DEFAULT_ROOT = os.environ.get("DOXXED_ANALYZER_EXPORT_DIR") or r"C:\DoxxedCrypto\analyzer-exports"
 DEFAULT_DASHBOARD = os.environ.get("DOXXED_ANALYZER_DASHBOARD_URL") or "http://127.0.0.1:9001"
 SCHEMA = "analyzer_export_v1"
-# Concurrent pyarrow parquet reads in one process (threaded :9001 /api/insights)
-# crash natively with 0xC0000005 in arrow.dll on Windows; table reads are serialized.
-_TABLE_READ_LOCK = threading.Lock()
 
 
 class StaleExportError(RuntimeError):
@@ -161,19 +157,18 @@ def load_latest(root: Optional[str] = None, *, tables: Optional[Iterable[str]] =
                                       now=time.time(), timeout=timeout)
             wanted = list(tables) if tables else list(summary.get("tables") or {})
             out = {}
-            with _TABLE_READ_LOCK:
-                for name in wanted:
-                    meta = (summary.get("tables") or {}).get(name)
-                    if meta is None:
-                        raise KeyError(f"export has no table {name!r}")
-                    if meta.get("parquet"):
-                        try:
-                            out[name] = pd.read_parquet(os.path.join(path, meta["parquet"]["file"]))
-                            continue
-                        except Exception:
-                            pass
-                    fp = os.path.join(path, meta["csv"]["file"])
-                    out[name] = pd.read_csv(fp) if meta.get("rows") else pd.DataFrame(columns=meta.get("columns") or [])
+            for name in wanted:
+                meta = (summary.get("tables") or {}).get(name)
+                if meta is None:
+                    raise KeyError(f"export has no table {name!r}")
+                if meta.get("parquet"):
+                    try:
+                        out[name] = pd.read_parquet(os.path.join(path, meta["parquet"]["file"]))
+                        continue
+                    except Exception:
+                        pass
+                fp = os.path.join(path, meta["csv"]["file"])
+                out[name] = pd.read_csv(fp) if meta.get("rows") else pd.DataFrame(columns=meta.get("columns") or [])
             again, _ = _verify(path, max_age_min=max_age_min, check_live=False, dashboard_url=dashboard_url,
                                require_revision=None, now=time.time(), timeout=timeout)
             if again.get("export_id") != summary.get("export_id"):

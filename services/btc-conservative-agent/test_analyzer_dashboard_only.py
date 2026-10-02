@@ -47,3 +47,18 @@ def test_dashboard_branch_after_scrub_provenance_before_engine_operations():
     assert branch < source.index('$discoveredEnginePids =')
     block=source[source.index('function Restart-OwnedAnalyzerDashboard'):branch]
     assert '.home-analyzer.pid' not in block
+
+
+def test_dashboard_entry_pins_arrow_to_the_system_allocator():
+    import sys
+
+    shim = (ROOT / "services" / "btc-conservative-agent" / "research_dashboard.py").read_text(encoding="utf-8")
+    main = shim.split('if __name__ == "__main__":', 1)[1]
+    pin = 'os.environ.setdefault("ARROW_DEFAULT_MEMORY_POOL", "system")'
+    assert pin in main and main.index(pin) < main.index("runpy.run_path(")
+    assert "import pyarrow" not in shim and "import pandas" not in shim
+    probe = (pin.replace("os.environ", "__import__('os').environ")
+             + "; import pyarrow as pa; print(pa.default_memory_pool().backend_name)")
+    env = {k: v for k, v in __import__("os").environ.items() if k != "ARROW_DEFAULT_MEMORY_POOL"}
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, env=env, check=True)
+    assert out.stdout.strip() == "system"

@@ -36,6 +36,10 @@ WINDOW_SEC = 86400
 MAX_DAYS = 7
 STALE_SEC = {"second": 180, "minute": 600, "event": 6 * 3600}
 DEGRADED_COVERAGE_PCT = 95.0
+# Laptop pulls lag Fly by minutes; a stream is judged against the mirror head and
+# the mirror itself is judged against the wall clock.
+MIRROR_STALE_SEC = 1800
+OK_STATUSES = ("OK", "WARMUP")
 REPLAY_MAX_BYTES = 400 * 1024 * 1024
 HEAD_BYTES = 6000
 _BUCKET_RE = re.compile(rb'"bucket_ts":\s*(\d+)')
@@ -405,6 +409,12 @@ def repaired_stream_quality(data_dir: str) -> dict:
     return out
 
 
+def _regime_warming(stream: dict, head: float) -> bool:
+    """The trailing regime labels WARMUP until it has a day of its own history."""
+    first = stream.get("first_ts")
+    return first is not None and head - float(first) < 86400 + 3600
+
+
 def build_data_health(data_dir: str, now: Optional[float] = None,
                       clock: Callable[[], float] = time.time) -> dict:
     now = clock() if now is None else float(now)
@@ -416,6 +426,13 @@ def build_data_health(data_dir: str, now: Optional[float] = None,
     for s in streams:
         s["lag_vs_mirror_head_sec"] = (None if head is None or s.get("last_ts") is None
                                        else round(head - s["last_ts"], 1))
+        if head is not None:
+            s["status"] = _verdict(s.get("last_ts"), head, s["cadence"], s.get("coverage_pct_24h"))
+        if s["stream"] == "trailing_regime_1m" and s["status"] == "DEGRADED" and _regime_warming(s, head):
+            s["status"] = "WARMUP"
+    mirror_staleness = None if head is None else round(now - head, 1)
+    mirror_status = ("MISSING" if head is None else
+                     "STALE" if mirror_staleness > MIRROR_STALE_SEC else "OK")
     counts = Counter(s["status"] for s in streams)
     meta = (mc_rows[-1].get("meta") or {}) if mc_rows else {}
     return {
@@ -423,8 +440,11 @@ def build_data_health(data_dir: str, now: Optional[float] = None,
         "generated_ts": round(now, 3),
         "window_sec": WINDOW_SEC,
         "mirror_head_ts": head,
+        "mirror_staleness_sec": mirror_staleness,
+        "mirror_status": mirror_status,
+        "stream_status_basis": "lag behind the mirror head (laptop pull lag is reported as mirror_staleness_sec)",
         "status_counts": dict(counts),
-        "status": "OK" if set(counts) <= {"OK"} else "ATTENTION",
+        "status": "OK" if set(counts) <= set(OK_STATUSES) and mirror_status == "OK" else "ATTENTION",
         "streams": streams,
         "signal_replay": signal_replay_health(data_dir),
         "repaired_streams": repaired_stream_quality(data_dir),
