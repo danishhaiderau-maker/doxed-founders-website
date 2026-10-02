@@ -5,6 +5,11 @@ mock of the Bitfinex exchange object so NO real orders are ever placed.
 
 Run: cd services/btc-conservative-agent && python test_toggle_matrix.py
 """
+
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("script-style suite; executed by test_script_style_suites.py",
+                allow_module_level=True)
 import os
 import sys
 

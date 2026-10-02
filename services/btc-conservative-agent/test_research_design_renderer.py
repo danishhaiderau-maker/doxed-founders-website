@@ -14,7 +14,8 @@ def test_actual_research_design_renderer_resolves_all_response_paths(mode):
         'async function loadResearchDesign()', 1)[1].split('async function loadEvidenceCoverage()', 1)[0]
     script = """
 const assert=require('assert'); const elements={};
-global.document={getElementById:id=>elements[id]||(elements[id]={style:{}})};
+const mkEl=()=>({style:{},children:[],closest(){return mkEl();},replaceChildren(){this.children=[];},appendChild(c){this.children.push(c);}});
+global.document={getElementById:id=>elements[id]||(elements[id]=mkEl()),createElement:()=>mkEl()};
 global.fetch=async()=>({ok:MODE!=='http',status:503,json:async()=>{
  if(MODE==='json') throw new Error('invalid JSON');
  return {status:'CURRENT',entry_baselines:[{baseline_id:'<unsafe>',required_evidence:[]}],

@@ -18,6 +18,7 @@ def _separate_receipt_fixture(tmp_path):
     receipt = {
         "epoch_id": "epoch-1", "opportunity_id": "opp-1", "episode_id": "ep-1",
         "receipt_schema": "pre_entry_features_v1",
+        "capture_schema": "measured_feature_capture_v1",
         "availability_boundary": "PRE_DECISION_ONLY", "captured_at_ts": 9.0,
         "features": {name: {"value": "LOW", "observed_ts": 8.0}
                      for name in DEFAULT_CAUSAL_FEATURES},

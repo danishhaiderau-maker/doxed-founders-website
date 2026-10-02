@@ -27,7 +27,7 @@ def test_api_to_actual_loader_preserves_unknown_and_zero(monkeypatch, present):
     node=shutil.which('node')
     if not node: pytest.skip('Node unavailable')
     fn='async function loadResearchDesign('+dashboard.DASHBOARD_HTML.split('async function loadResearchDesign(',1)[1].split('async function loadEvidenceCoverage',1)[0]
-    js="const assert=require('assert'),nodes={};global.document={getElementById:id=>nodes[id]||(nodes[id]={style:{}})};global.fetch=async()=>({ok:true,json:async()=>("+json.dumps(payload)+")});"+fn+"""
+    js="const assert=require('assert'),nodes={};const mkEl=()=>({style:{},children:[],closest(){return mkEl();},replaceChildren(){this.children=[];},appendChild(c){this.children.push(c);}});global.document={getElementById:id=>nodes[id]||(nodes[id]=mkEl()),createElement:()=>mkEl()};global.fetch=async()=>({ok:true,json:async()=>("+json.dumps(payload)+")});"+fn+"""
 loadResearchDesign().then(()=>{
 const k=nodes['research-design-kpis'].innerHTML,rows=nodes['research-baseline-body'].innerHTML;
 assert.equal((rows.match(/<tr>/g)||[]).length,11);

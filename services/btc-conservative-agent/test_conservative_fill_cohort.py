@@ -25,7 +25,8 @@ def tape_row(ts, *, ask=101, bid=99, ask_qty=2, bid_qty=2,
              fresh=True, symbol="BTC"):
     return {
         "schema": "market_microstructure_1s_v1", "symbol": symbol,
-        "bucket_ts": ts, "fresh": fresh, "valid_bbo": True,
+        "bucket_ts": ts, "source_ts": ts, "observed_at_ts": ts,
+        "fresh": fresh, "valid_bbo": True,
         "ask": ask, "bid": bid, "ask_qty": ask_qty, "bid_qty": bid_qty,
         "sell_qty": sell_qty, "buy_qty": buy_qty,
         "sell_vwap": sell_vwap, "buy_vwap": buy_vwap,

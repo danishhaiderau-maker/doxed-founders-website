@@ -107,6 +107,8 @@ def test_fresh_reset_clears_in_memory_lane_totals_and_cached_tile_payload() -> N
         '"lane_lab_pnl_ledger": {}',
     ):
         assert field in reset
-    fresh_reset = _function_source("_perform_fresh_collection_reset_locked")
-    assert "global _cached_pathway_lane_specs" in fresh_reset
+    assert "_perform_fresh_collection_reset_quiesced(" in _function_source(
+        "_perform_fresh_collection_reset_locked")
+    fresh_reset = _function_source("_perform_fresh_collection_reset_quiesced")
+    assert "global _last_fresh_maintain_ts, _cached_pathway_scorecard, _cached_pathway_lane_specs" in fresh_reset
     assert "_cached_pathway_lane_specs = {}" in fresh_reset

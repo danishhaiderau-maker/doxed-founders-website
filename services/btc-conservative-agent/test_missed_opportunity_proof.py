@@ -123,6 +123,8 @@ def _canonical_tape_row(bucket, *, bid, ask, qty=5.0):
         "schema": "market_microstructure_1s_v1",
         "symbol": "tBTCF0:USTF0",
         "bucket_ts": bucket,
+        "source_ts": bucket,
+        "observed_at_ts": bucket,
         "fresh": True,
         "valid_bbo": True,
         "bid": bid,
@@ -330,7 +332,8 @@ def _compressed_join_inputs(*, available_qty=5.0):
     tape = {
         second: {
             "schema": "market_microstructure_1s_v1", "symbol": "tBTCF0:USTF0",
-            "bucket_ts": second, "fresh": True, "valid_bbo": True,
+            "bucket_ts": second, "source_ts": second, "observed_at_ts": second,
+            "fresh": True, "valid_bbo": True,
             "bid": 100.0 + second - 1000,
             "ask": 101.0 + second - 1000, "bid_qty": available_qty,
             "ask_qty": available_qty, "row_sha256": str(second),
@@ -465,7 +468,9 @@ def test_short_path_uses_bid_touch_and_declared_limit():
 def _tape_row(bucket, *, symbol="tBTCF0:USTF0", row_hash=None, ask=101.0):
     row = {
         "schema": "market_microstructure_1s_v1", "symbol": symbol,
-        "bucket_ts": bucket, "fresh": True, "valid_bbo": True,
+        "bucket_ts": bucket,
+        "source_ts": bucket,
+        "observed_at_ts": bucket, "fresh": True, "valid_bbo": True,
         "bid": ask - 1.0, "ask": ask, "bid_qty": 5.0, "ask_qty": 5.0,
     }
     canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False)
