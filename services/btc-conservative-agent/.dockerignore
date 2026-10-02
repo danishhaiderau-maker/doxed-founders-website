@@ -26,6 +26,7 @@ research/*
 !research/analysis_eligibility.py
 !research/dual_execution_truth.py
 !research/close_origin.py
+!research/decision_model_report.py
 !research/platform_relay_evidence.py
 !research/source_market_evidence.py
 !research/immutable_archive.py
