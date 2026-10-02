@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from . import ai_scorecard, alarms, data_awareness, diagnose, digest, edges, repair, tiles, uptime
+from . import ai_scorecard, alarms, analyzer_sections, data_awareness, diagnose, digest, edges, repair, tiles, uptime
 from .ai_scorecard import json_safe
 from .config import ALARM_PREFIX, CADENCE_SEC, SCHEMA_VERSION, SERVER_PORT, Paths
 from .facts import collect, iso, parse_ts
@@ -62,7 +62,7 @@ class Engine:
         self.jobs: dict[str, Callable[[], Any]] = {
             "views": self.job_views, "diagnose": self.job_diagnose, "uptime": self.job_uptime,
             "tiles": self.job_tiles, "ai": self.job_ai, "edges": self.job_edges, "digest": self.job_digest,
-            "data": self.job_data,
+            "data": self.job_data, "sections": self.job_sections,
         }
 
     # ------------------------------------------------------------ state
@@ -94,6 +94,7 @@ class Engine:
         now = time.time()
         self.facts = collect(self.paths, self.store, now, probe_local=self.probe_local)
         self.facts["data_awareness"] = (self.docs.get("data") or {}).get("summary")
+        self.facts["analyzer_sections"] = self.docs.get("sections") or self.state.get("analyzer_sections_doc")
         found = diagnose.run(self.paths, self.store, self.facts, self.state)
         changes = diagnose.transitions(found, self.state, now)
         evidence = diagnose.preserve_evidence(self.paths, changes, self.facts)
@@ -167,6 +168,15 @@ class Engine:
         return {"streams": s["streams"], "uncatalogued": s["uncatalogued"], "watch_alarms": sum(len(v) for v in
                 s["watch_alarms"].values()), "ms": s["ms"],
                 "sufficiency": {q["id"]: q["status"] for q in s["sufficiency"]}}
+
+    def job_sections(self) -> dict:
+        doc = json_safe(analyzer_sections.run(self.paths, self.state))
+        self.docs["sections"] = doc
+        # Kept in state so the 2-hourly result survives a daemon restart instead of reading SKIP until the next run.
+        self.state["analyzer_sections_doc"] = doc
+        d = doc["dashboard"]
+        return {"verdict": d.get("verdict"), "counts": d.get("counts"), "error": d.get("error"),
+                "genome_grid_age_sec": doc["genome_grid"].get("age_sec"), "shrank": len(doc["shrank"])}
 
     def job_ai(self) -> dict:
         return ai_scorecard.run(self.store)
@@ -242,8 +252,8 @@ class Engine:
         return now - last >= CADENCE_SEC[name]
 
     def run_once(self) -> dict:
-        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "ai", "edges",
-                                                      "diagnose", "digest")}
+        return {name: self.run_job(name) for name in ("views", "diagnose", "uptime", "tiles", "data", "sections", "ai",
+                                                      "edges", "diagnose", "digest")}
 
     def loop(self) -> None:
         # Views and the cheap in-memory documents are rebuilt at start so no endpoint answers 503 after a restart.

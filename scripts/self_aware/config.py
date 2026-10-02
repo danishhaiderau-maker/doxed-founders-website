@@ -21,6 +21,7 @@ CADENCE_SEC = {
     "edges": 1800,
     "digest": 3600,
     "data": 1800,
+    "sections": 7200,
 }
 
 THRESHOLDS = {
@@ -53,6 +54,7 @@ THRESHOLDS = {
     "fly_hours_to_full_amber": 72.0,
     "fly_hours_to_full_red": 24.0,
     "data_doc_max_age_sec": 2 * 3600,
+    "sections_doc_max_age_sec": 3 * 3600,
 }
 
 

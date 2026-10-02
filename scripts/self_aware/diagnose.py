@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from . import analyzer_sections
 from .config import RUNBOOK, RUNBOOK_BASE, THRESHOLDS, Paths
 from .facts import iso, parse_ts, snapshot_age, watcher_check
 
@@ -709,6 +710,21 @@ def check_data(f, sig, store) -> list[Finding]:
     return out
 
 
+_SECTION_TITLES = {
+    "analyzer.sections": "Every :9001 analyzer section is readable, populated and fresh",
+    "analyzer.dimensions": "Top-100 combos and Safe Policy Genome evaluate every policy dimension",
+    "analyzer.consistency": "Analyzer sections agree with the collected data",
+}
+
+
+def check_analyzer_sections(f, sig, store) -> list[Finding]:
+    """Analyzer dashboard sections (2-hourly): populated, fresh, dimension-complete, consistent with collection."""
+    rows = analyzer_sections.findings(f.get("analyzer_sections"), f["now"], THRESHOLDS["sections_doc_max_age_sec"])
+    return [Finding(r["id"], _SECTION_TITLES[r["id"]], "analyzer", r["severity"], r["observed"], r["expected"],
+                    evidence=r.get("evidence") or {}, emit_alarm=r.get("emit_alarm", True),
+                    drill_sql=None) for r in rows]
+
+
 # ------------------------------------------------------------- run
 
 def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> list[Finding]:
@@ -729,6 +745,7 @@ def run(paths: Paths, store, facts: dict[str, Any], state: dict[str, Any]) -> li
         lambda: check_fly_reachability(facts, sig, store, state),
         lambda: check_engine(facts, sig, store, state),
         lambda: check_data(facts, sig, store),
+        lambda: check_analyzer_sections(facts, sig, store),
     ]
     findings: list[Finding] = []
     for fn in checks:
