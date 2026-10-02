@@ -23,7 +23,7 @@ from strategy_lab import SCHEMA, hypotheses as H
 from strategy_lab import stats as S
 from strategy_lab.signals import (ai_direction, attach_funding, load_ai_calls, rv15_at, xvl_lead,
                                   xvl_signals)
-from strategy_lab.simulator import CostModel, live_fill_parity, simulate, spec_dict
+from strategy_lab.simulator import CostModel, live_fill_parity, recorded_fill_atr, simulate, spec_dict
 from strategy_lab.tape import cross_venue_mids, load_bitfinex_tape
 
 LIVE_TEST_MARGIN_USD = 0.25
@@ -491,7 +491,8 @@ def run_strategy_lab(data_dir: str, *, session: Optional[dict] = None, registry:
     timing["families_sec"] = round(time.perf_counter() - t, 2)
 
     t = time.perf_counter()
-    parity = live_fill_parity(tape, trades, registry or {}, tile_lanes, LIVE_TEST_LEVERAGE)
+    parity = live_fill_parity(tape, trades, registry or {}, tile_lanes, LIVE_TEST_LEVERAGE,
+                              recorded_atr=recorded_fill_atr(data_dir))
     corr = correlations(sims, trades, tile_lanes)
     timing["parity_corr_sec"] = round(time.perf_counter() - t, 2)
     timing["total_sec"] = round(time.perf_counter() - started, 2)

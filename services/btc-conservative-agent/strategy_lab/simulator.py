@@ -318,10 +318,49 @@ def spec_dict(obj) -> dict:
 
 
 PARITY_TOLERANCE_BP = 2.0
+DEFAULT_V3_LEDGER_DIRS = (r"C:\DoxxedCrypto\segment-promotion-view\v3\ledgers",)
+
+
+def recorded_fill_atr(data_dir: Optional[str] = None, extra_dirs=DEFAULT_V3_LEDGER_DIRS) -> dict:
+    """trade id -> (atr14 in bp of price, basis) from V3 execution fill records.
+
+    ``atr14_pct_at_fill`` is percent of price as the runtime recorded it at fill
+    (``atr14_pct_basis`` says whether the observation was verified at fill time).
+    """
+    import json
+    import os
+
+    dirs = [os.path.join(data_dir, "v3", "ledgers")] if data_dir else []
+    dirs += [d for d in (os.environ.get("STRATEGY_LAB_V3_LEDGER_DIR"),) if d] + list(extra_dirs or ())
+    out: dict = {}
+    for d in dirs:
+        path = os.path.join(d, "execution.jsonl")
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if b"atr14_pct_at_fill" not in raw:
+                    continue
+                try:
+                    r = json.loads(raw)
+                except ValueError:
+                    continue
+                value = r.get("atr14_pct_at_fill")
+                tid = str(r.get("event_id") or r.get("trade_id") or "")
+                try:
+                    bp = float(value) * 100.0
+                except (TypeError, ValueError):
+                    continue
+                if tid and math.isfinite(bp) and bp > 0:
+                    out[tid] = (bp, str(r.get("atr14_pct_basis") or "UNKNOWN"))
+        if out:
+            break
+    return out
 _FORCED = {"ADMIN_MANUAL_CLOSE", "ADMIN_FORCE_FLAT", "CIRCUIT_BREAKER_ADMIN_MANUAL"}
 
 
-def live_fill_parity(tape: Tape, trades: pd.DataFrame, registry: dict, lanes, leverage: float = 100.0) -> dict:
+def live_fill_parity(tape: Tape, trades: pd.DataFrame, registry: dict, lanes, leverage: float = 100.0,
+                     recorded_atr: Optional[dict] = None) -> dict:
     """Replay each closed current-cohort tile trade from its real fill and compare.
 
     The live fill second and price are taken from the ledger (entry fill
@@ -356,7 +395,11 @@ def live_fill_parity(tape: Tape, trades: pd.DataFrame, registry: dict, lanes, le
             j = int(math.floor(fill_ts)) - tape.t0
             if not (0 <= j < tape.n - 2) or not all(np.isfinite([entry_px, exit_px])):
                 continue
-            atr_bp = float(tape.atr_abs([fill_ts])[0] / entry_px * 1e4)
+            rec = (recorded_atr or {}).get(str(r.get("trade_id") or ""))
+            if rec is not None:
+                atr_bp, atr_basis = rec[0], f"RECORDED:{rec[1]}"
+            else:
+                atr_bp, atr_basis = float(tape.atr_abs([fill_ts])[0] / entry_px * 1e4), "TAPE_REBUILT"
             off, u, sim_reason, censored = _exit_path(tape, j, entry_px, side, exit_spec, atr_bp)
             live_bp = side * (exit_px - entry_px) / entry_px * 1e4
             quote = tape.ask[j] if side > 0 else tape.bid[j]
@@ -367,6 +410,7 @@ def live_fill_parity(tape: Tape, trades: pd.DataFrame, registry: dict, lanes, le
                 "diff_bp": (u - live_bp) if not censored and np.isfinite(u) else math.nan,
                 "live_hold_sec": dur, "sim_hold_sec": float(off), "censored": bool(censored),
                 "entry_gap_bp": side * (entry_px - quote) / quote * 1e4 if tape.present[j] else math.nan,
+                "atr_bp": atr_bp, "atr_basis": atr_basis if exit_spec.needs_atr else "NOT_USED",
             })
     df = pd.DataFrame(rows)
     lanes_out = {}
@@ -374,9 +418,12 @@ def live_fill_parity(tape: Tape, trades: pd.DataFrame, registry: dict, lanes, le
         for lane, g in df.groupby("research_lane"):
             d = g["diff_bp"].dropna()
             exit_spec, _ = exit_spec_from_registry((registry or {}).get(lane) or {}, leverage)
+            rec = g[g["atr_basis"].astype(str).str.startswith("RECORDED")]["diff_bp"].dropna()
             lanes_out[lane] = {
                 "n": int(len(g)), "compared": int(len(d)),
                 "atr_dependent": bool(exit_spec is not None and exit_spec.needs_atr),
+                "recorded_atr_compared": int(len(rec)),
+                "recorded_atr_mae_bp": round(float(rec.abs().mean()), 3) if len(rec) else None,
                 "mae_bp": round(float(d.abs().mean()), 3) if len(d) else None,
                 "within_tolerance_share": round(float((d.abs() <= PARITY_TOLERANCE_BP).mean()), 3) if len(d) else None,
                 "mean_entry_gap_bp": round(float(g["entry_gap_bp"].dropna().mean()), 3)
@@ -399,6 +446,8 @@ def live_fill_parity(tape: Tape, trades: pd.DataFrame, registry: dict, lanes, le
         "rows": df.to_dict("records"),
         "basis": "real fill second+price from the ledger; exit re-simulated from the registry exit spec on "
                  "the 1 s CONSERVATIVE_BBO tape; admin/deploy closes excluded",
-        "atr_note": "ATR-dependent lanes use a 3 m mid-quote Wilder ATR14 rebuilt from the tape; the runtime's "
-                    "fill-time ATR (exchange candles) is not in the mirror, so their residual includes ATR basis",
+        "atr_note": "ATR-dependent lanes use the runtime's recorded fill-time ATR14 (V3 execution "
+                    "atr14_pct_at_fill) when present, else a 3 m mid-quote Wilder ATR14 rebuilt from the tape; "
+                    "atr_basis per row says which",
+        "recorded_atr_trades": len(recorded_atr or {}),
     }

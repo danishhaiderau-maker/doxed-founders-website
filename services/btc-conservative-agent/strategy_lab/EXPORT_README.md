@@ -70,7 +70,7 @@ and `data`. A refused component always has `data: null`: old data is never retur
 | `family_tests` | bounded exploratory configs: CI, BH q, family-wise max-t null p (`fwer_p`) |
 | `walk_forward` | anchored walk-forward folds per exploratory family (embargo = max hold) |
 | `correlation` | hourly PnL correlation of each primary hypothesis vs live tiles and vs each other |
-| `sim_parity` | live tile trades re-simulated from their real fill; `diff_bp` = sim - live |
+| `sim_parity` | live tile trades re-simulated from their real fill; `diff_bp` = sim - live; `atr_basis` = `RECORDED:<basis>` (runtime fill-time ATR from the V3 execution ledger) or `TAPE_REBUILT` |
 | `stream_health` | mirror streams: files, rotations, bytes, age, content lag, which analyzer path reads them |
 | `quarantine` | trade rows excluded from the current tile cohort, with reason |
 | `main_rankings` | every main-ranking row (tiles, top combinations, regime x lane cells, feature correlations, expanding-quintile feature buckets) with p, Holm p, BH q and `corrected_verdict` |

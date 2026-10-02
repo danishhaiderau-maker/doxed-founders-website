@@ -174,6 +174,37 @@ def test_stream_studies_isolate_a_broken_stream(tmp_path, monkeypatch):
     assert h.loc["post_exit_replay.jsonl", "status"] == "ANALYSED"
 
 
+# ------------------------------------------------------------------ recorded fill-time ATR
+def test_parity_uses_recorded_fill_time_atr(tmp_path):
+    from strategy_lab.simulator import live_fill_parity, recorded_fill_atr
+    from strategy_lab.tape import build_tape
+
+    ledgers = tmp_path / "v3" / "ledgers"
+    ledgers.mkdir(parents=True)
+    _write_jsonl(ledgers / "execution.jsonl", [
+        {"event_id": "far-1", "atr14_pct_at_fill": 0.25, "atr14_pct_basis": "UNVERIFIED_TIMING_FALLBACK"},
+        {"event_id": "far-x", "atr14_pct_at_fill": None},
+    ])
+    rec = recorded_fill_atr(str(tmp_path), extra_dirs=())
+    assert rec == {"far-1": (25.0, "UNVERIFIED_TIMING_FALLBACK")}
+    n = 4000
+    mid = np.full(n, 60000.0)
+    mid[400:] = 60000.0 * (1 - 30 / 1e4)
+    ts = np.arange(T0, T0 + n)
+    tape = build_tape(ts, mid - 0.5, mid + 0.5)
+    registry = {"FAMILY_ATR": {"exit_policy": {"family": "ATR_TRAIL", "initial_stop_atr_k": 1.0,
+                                               "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0,
+                                               "max_duration_sec": 3600}}}
+    fill = T0 + 100
+    trades = pd.DataFrame([{"research_lane": "FAMILY_ATR", "trade_id": "far-1", "dir": "LONG", "entry": 60000.5,
+                            "exit": 60000.5 * (1 - 25 / 1e4), "dur_min": 5.0, "exit_reason": "ATR_STOP",
+                            "close_ts": pd.Timestamp(fill + 300, unit="s", tz="UTC").isoformat()}])
+    p = live_fill_parity(tape, trades, registry, ["FAMILY_ATR"], recorded_atr=rec)
+    row = p["rows"][0]
+    assert row["atr_basis"] == "RECORDED:UNVERIFIED_TIMING_FALLBACK" and row["atr_bp"] == pytest.approx(25.0)
+    assert p["lanes"]["FAMILY_ATR"]["recorded_atr_compared"] == 1 and p["recorded_atr_trades"] == 1
+
+
 # ------------------------------------------------------------------ export groups
 def test_export_carries_rankings_and_stream_tables(tmp_path):
     tr = _trades(lane_means=(0.05, 0.0))
