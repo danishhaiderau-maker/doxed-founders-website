@@ -1235,9 +1235,12 @@ def evaluate_protection_screen(
             # Actual paper children use the complete ``ENTRY|EXIT`` identity
             # as their fallback chase_id, while counterfactual children carry
             # only the chase suffix. Both describe the same entry policy.
+            # Tiles sharing one taker entry with different exits (e.g. Trend
+            # Fade and its ladder) must collapse to one candidate entry.
             canonical_chase_id = (
                 entry_id.split("_CHASE_", 1)[1]
-                if "_CHASE_" in entry_id else str(child.get("chase_id") or entry_id)
+                if "_CHASE_" in entry_id
+                else str(child.get("chase_id") or entry_id).split("|", 1)[0]
             )
             conservative_receipt = _conservative_child_receipt(
                 source, child, microstructure_by_ts=microstructure_by_ts,

@@ -114,6 +114,7 @@ def reconcile_analyzer_integrity_with_policy_reports(
     checks.append(policy_check)
 
     valid = all(bool(check.get("passed")) for check in checks if isinstance(check, Mapping))
+    payload.pop("policy_cycle_error", None)
     payload.update({
         "valid": valid,
         "report_status": "VALID" if valid else "INVALID",
@@ -121,6 +122,56 @@ def reconcile_analyzer_integrity_with_policy_reports(
         "checks": checks,
         "failed_checks": [check for check in checks if not check.get("passed")],
         "policy_lifecycle_reconciled_at": datetime.now(timezone.utc).isoformat(),
+    })
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    os.replace(temp, target)
+    return payload
+
+
+def mark_analyzer_integrity_unchecked(
+    integrity_path: str | os.PathLike[str],
+    reason: str,
+) -> dict[str, Any]:
+    """Record that the policy-cycle reconciliation could not run this generation.
+
+    Without this, a failing policy cycle leaves the pre-policy receipt VALID even
+    though lifecycle/order-resolution defects were never checked.
+    """
+    target = Path(integrity_path)
+    payload = _load_json(target) or {
+        "schema": "analyzer_integrity_v1",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "checks": [],
+    }
+    checks = [
+        check for check in (payload.get("checks") or [])
+        if not (
+            isinstance(check, Mapping)
+            and check.get("check") == "v3_policy_lifecycle_integrity"
+        )
+    ]
+    checks.append({
+        "check": "v3_policy_lifecycle_integrity",
+        "passed": False,
+        "status": "UNCHECKED",
+        "expected": "policy-cycle reports built and reconciled this generation",
+        "found": "POLICY_CYCLE_FAILED",
+        "detail": f"Lifecycle/order-resolution integrity was not checked: {str(reason)[:500]}",
+        "source_reports": [],
+    })
+    payload.update({
+        "valid": False,
+        "report_status": "UNCHECKED",
+        "banner": (
+            "REPORT UNCHECKED - policy cycle failed, lifecycle/order-resolution "
+            "integrity was not verified this generation"
+        ),
+        "checks": checks,
+        "failed_checks": [check for check in checks if not check.get("passed")],
+        "policy_cycle_error": str(reason)[:500],
+        "policy_lifecycle_reconciled_at": None,
     })
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_name(f"{target.name}.{os.getpid()}.tmp")

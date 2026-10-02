@@ -3522,6 +3522,7 @@ def api_status():
         "required_reports_ok": required_reports_ok,
         "required_report_status": required_report_status,
         "required_report_failures": required_report_failures,
+        "generation_receipt": manifest.get("generation_receipt"),
         "analysis_in_progress": run_state.get("in_progress"),
         "analysis_run": run_state,
         "dashboard_started_at": _DASHBOARD_STARTED_AT.isoformat(),

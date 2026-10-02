@@ -241,6 +241,25 @@ Fix: the supervisor restarts a down dashboard (`run-analyzer-once.ps1 -EnsureDas
 
 Fix: check `v2c-auto-ff.receipts.jsonl` (refusals) and the cycle phase log.
 
+<a id="analyzer-studies"></a>
+### analyzer.studies
+Reads `analyzer_generation_receipt.json` and `analyzer_integrity_report.json` from the
+published analyzer reports. An analyzer pass exits 0 even when a study throws, so this is
+the only check that sees it.
+- RED: a required study is ERROR/MISSING/INVALID (for example Best Policy Research), or
+  integrity is `INVALID` or `UNCHECKED` (the policy cycle failed, so lifecycle and
+  order-resolution integrity were never verified), or the protection replay kept fewer
+  than half of the eligible events.
+- AMBER: an optional study failed, an input is BLOCKED/DEGRADED, the protection replay is
+  truncated, or there is no receipt for the current generation.
+Fix: read the receipt `reasons` and the `analyzer-once-*.out.log` line for the study.
+
+<a id="analyzer-data_health"></a>
+### analyzer.data_health
+`data_health_report.json` per-stream verdicts, judged against the mirror head (#293).
+AMBER when the mirror is STALE or any stream is not OK/WARMUP. Reports without
+`stream_status_basis` used wall-clock staleness (always STALE) and are SKIP.
+
 <a id="exports-freshness"></a>
 ### exports.freshness
 Freshness of `C:\DoxxedCrypto\analyzer-exports\latest`. When `analyzer_client` is
