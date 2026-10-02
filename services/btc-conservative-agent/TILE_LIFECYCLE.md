@@ -13,7 +13,9 @@ same ordered manifest and registry signature at the exact deployed revision.
 
 1. Add one registry specification with a unique lane, policy ID, ID prefix,
    toggle key, lifecycle state, implementation module and dedicated tests.
-2. New experiments start `PAPER_ONLY`, relay-ineligible and default OFF.
+2. New experiments start `PAPER_ONLY`, relay-ineligible and default OFF. Only
+   an explicit owner request may set `default_enabled=True`, and the registry
+   refuses it unless the tile stays paper-only and relay-blocked.
 3. Add the policy implementation and its focused tests.
 4. Wire generic registry consumers; do not add another active-tile roster.
 5. Run registry, execution-graph, signal-parity, analyzer-parity and visual QA.

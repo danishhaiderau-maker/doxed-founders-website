@@ -118,6 +118,16 @@ def test_healthy_system_is_green_with_every_field():
         assert c["runbook"].startswith("docs/SYSTEM_HEALTH_RUNBOOK.md#")
 
 
+@pytest.mark.parametrize("status,amber", [("STALE", True), ("DEGRADED", True), ("OK", False),
+                                          ("STARTING", False), ("DISABLED", False)])
+def test_stalled_xvl_evaluator_turns_streams_amber(status, amber):
+    inputs = healthy(ts("2026-10-02T00:00:00Z"))
+    inputs["fly_status"]["collection"]["xvl_evaluator"] = {"status": status, "reason": "TICK_AGE_30S"}
+    check = by_id(sh.evaluate(inputs, {}))["streams.coverage"]
+    assert (check["status"] == sh.AMBER) is amber, check
+    assert ("XVL evaluator" in check["observed"]) is amber
+
+
 def test_runbook_documents_every_check():
     doc = (Path(__file__).resolve().parents[1] / "docs" / "SYSTEM_HEALTH_RUNBOOK.md").read_text(encoding="utf-8")
     report, _ = run(healthy(ts("2026-10-02T00:00:00Z")), {})

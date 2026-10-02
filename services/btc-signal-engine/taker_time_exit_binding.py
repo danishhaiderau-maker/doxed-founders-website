@@ -9,9 +9,12 @@ Everything is read from the bound lane's registry spec:
 * Entry is one marketable limit at the signal (ask/bid plus a protection cap,
   short TTL). The tile stands aside when the quoted spread or the BBO age exceeds
   its registry limits.
-* Exit is the time limit or the catastrophic price stop, nothing else. The stop
-  books the side-correct quote that crossed it, so gap-through is reported as
-  realised loss rather than hidden.
+* Exit is the time limit or the catastrophic price stop. A tile whose registry
+  spec declares a ``ladder`` also arms that profit-lock ladder (margin % peak →
+  locked at the tile's leverage); the effective stop is the more protective of
+  the catastrophic stop and the armed lock. Stops and locks book the
+  side-correct quote that crossed them, so gap-through is reported as realised
+  loss rather than hidden.
 """
 from __future__ import annotations
 
@@ -37,7 +40,10 @@ from family_policy_common import (
     exit_config as _config,
 )
 
-DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE"})
+# CROSS_VENUE_LEAD tiles take their side from the per-second cross-venue
+# evaluator (cross_venue_lead.py), never from the shared AI call.
+CROSS_VENUE_LEAD = "CROSS_VENUE_LEAD"
+DIRECTION_SOURCES = frozenset({"SCORE_LED_SIDE", "INVERTED_SCORE_LED_SIDE", CROSS_VENUE_LEAD})
 _OPPOSITE = {"LONG": "SHORT", "SHORT": "LONG"}
 
 
@@ -54,6 +60,7 @@ class TakerTimeExitBinding:
         self.exit = spec["exit_policy"]
         if self.entry["direction_source"] not in DIRECTION_SOURCES:
             raise ValueError(f"{lane}: unknown direction_source {self.entry['direction_source']}")
+        self.ladder = tuple(tuple(row) for row in spec.get("ladder") or ())
         self.spec = PolicySpec(
             policy_id=self.policy_id, lane=lane, label=label,
             family=self.exit["family"], entry_offset_pct=0.0, chase_windows=(),
@@ -63,6 +70,9 @@ class TakerTimeExitBinding:
             hard_stop_margin_pct=float(self.exit["hard_stop_margin_pct"]),
             max_duration_sec=int(self.exit["max_duration_sec"]),
             margin_cap_usd=float(spec["requested_margin_usd"]),
+            trail_ladder=self.ladder,
+            ladder_label=spec.get("ladder_label") if self.ladder else None,
+            ladder_profile_id=spec.get("ladder_profile_id") if self.ladder else None,
         )
         # Reuses the adaptive decision contract so the generic lifecycle adapter
         # and analyzer treat this tile's signal-time record identically.
@@ -78,7 +88,9 @@ class TakerTimeExitBinding:
         admission = dict(admission or {})
         score_led = str(admission.get("effective_direction") or "").upper()
         reason = None
-        if raw.get("ai_error"):
+        if self.entry["direction_source"] == CROSS_VENUE_LEAD:
+            reason = "NOT_A_SHARED_AI_TILE"
+        elif raw.get("ai_error"):
             reason = "AI_ERROR"
         elif not admission.get("applied"):
             reason = "SCORE_LED_TREATMENT_INACTIVE"
@@ -203,9 +215,21 @@ class TakerTimeExitBinding:
         tile = COMBO_LANE_SPECS[self.lane]
         entry, exit_policy = self.entry, self.exit
         payload = _dashboard(self.spec)
+        source = entry["direction_source"]
+        if source == CROSS_VENUE_LEAD:
+            return self._cross_venue_dashboard_policy(payload, tile)
         side = (
             "Side = opposite of score-led AI side"
-            if entry["direction_source"] == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
+            if source == "INVERTED_SCORE_LED_SIDE" else "Side = score-led AI side"
+        )
+        max_open = int(exit_policy.get("max_open_positions") or 1)
+        exit_chips = (
+            [
+                f"Ladder {self.spec.ladder_label}",
+                "Stop = tighter of catastrophic stop and lock",
+                "No break-even / trail / target beyond the ladder",
+            ]
+            if self.ladder else ["No ladder / break-even / trail / target"]
         )
         payload["filter_chips"] = [
             "PAPER ONLY", side,
@@ -213,8 +237,8 @@ class TakerTimeExitBinding:
             f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
             f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
             f"{int(exit_policy['max_duration_sec']) // 60}m time exit",
-            "No ladder / break-even / trail / target",
-            f"Max {int(exit_policy.get('max_open_positions') or 1)} open position",
+            *exit_chips,
+            f"Max {max_open} open position" + ("s" if max_open > 1 else ""),
         ]
         payload["entry"].update({
             "trigger": (
@@ -234,13 +258,56 @@ class TakerTimeExitBinding:
             "stop_fill": exit_policy["stop_fill"],
             "max_open_positions": exit_policy.get("max_open_positions"),
         })
+        if self.ladder:
+            payload["exit"].update({
+                "profit_lock": exit_policy["profit_lock"],
+                "lock_fill": exit_policy["lock_fill"],
+                "ladder": self.spec.ladder_label,
+            })
+        return self._with_pre_registration(payload, tile)
+
+    @staticmethod
+    def _with_pre_registration(payload, tile):
         pre = tile.get("pre_registration")
         if pre:
             payload["pre_registration"] = {
                 "hypothesis_id": pre["hypothesis_id"],
-                "control_lane": pre["control_lane"],
+                "control_lane": pre.get("control_lane"),
                 "honest_label": pre.get("honest_label"),
                 "promotion": tile["promotion_criteria"],
                 "kill": tile["kill_criteria"],
             }
         return payload
+
+    def _cross_venue_dashboard_policy(self, payload, tile):
+        entry, exit_policy = self.entry, self.exit
+        venues = "/".join(v.capitalize() for v in entry["leader_venues"])
+        hold = int(exit_policy["max_duration_sec"])
+        payload["filter_chips"] = [
+            "PAPER ONLY", "HINT — 12h evidence",
+            f"Side = {venues} lead ≥{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s",
+            f"Taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s",
+            f"Spread >{entry['max_spread_bps']:g}bps → stand aside",
+            f"Any feed >{entry['max_venue_age_sec']:g}s old → no trade",
+            f"Stop {exit_policy['hard_stop_bps']:g}bp catastrophic",
+            f"{hold}s time exit",
+            f"Max {int(exit_policy.get('max_open_positions') or 1)} open position",
+        ]
+        payload["entry"].update({
+            "trigger": (
+                f"Per-second cross-venue evaluator (no AI): mean {venues} mid return led Bitfinex by ≥"
+                f"{entry['lead_threshold_bps']:g}bp over {entry['lookback_sec']}s"
+            ),
+            "entry_path": self.lane,
+            "chase_detail": "No chase; one trigger-time marketable limit or stand-aside",
+            "direction_source": entry["direction_source"],
+            "signal_clock": entry["signal_clock"],
+        })
+        payload["exit"].update({
+            "profile": exit_policy["family"],
+            "fixed_time_exit": f"{hold}s",
+            "hard_stop_bps": exit_policy["hard_stop_bps"],
+            "stop_fill": exit_policy["stop_fill"],
+            "max_open_positions": exit_policy.get("max_open_positions"),
+        })
+        return self._with_pre_registration(payload, tile)

@@ -80,12 +80,19 @@ TREND_FADE_60_SIGNATURE = "a0a04faefaba977b203ad0a84117612ca7d487b0ce22f9d55504f
 TREND_FADE_60_SCORE_LED_SIGNATURE = "1936f510d2ff7d0c3aaaa4a5c14431637a02362cb2980a24b2f474b91a4743e0"
 
 
-def test_active_registry_is_exactly_trend_fade_60_as_tile_1():
+def test_active_registry_is_trend_fade_60_then_profit_lock_then_cross_venue_lead():
     import combo_pathway_config as registry
+    from scenario_c_config import TRAIL_LADDER_SCENARIO_C
 
-    assert ACTIVE_TILE_ORDER == ("FAMILY_TREND_FADE_60",)
-    assert active_tile_lifecycle_manifest()[0]["display_order"] == 1
+    assert ACTIVE_TILE_ORDER == ("FAMILY_TREND_FADE_60", "FAMILY_TREND_FADE_60_LADDER", "FAMILY_XVENUE_LEAD_60S")
+    manifest = active_tile_lifecycle_manifest()
+    assert [(row["lane"], row["display_order"]) for row in manifest] == [
+        ("FAMILY_TREND_FADE_60", 1), ("FAMILY_TREND_FADE_60_LADDER", 2), ("FAMILY_XVENUE_LEAD_60S", 3),
+    ]
     fade = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"]
+    fade_ladder = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60_LADDER"]
+    assert len({fade["policy_signature"], fade_ladder["policy_signature"]}) == 2
+    assert {fade["id_prefix"], fade_ladder["id_prefix"]} == {"ftf", "ftl"}
     expected = (TREND_FADE_60_SCORE_LED_SIGNATURE if registry.SCORE_LED_PAPER_RESEARCH_ENABLED
                 else TREND_FADE_60_SIGNATURE)
     assert fade["policy_signature"] == expected
@@ -95,6 +102,17 @@ def test_active_registry_is_exactly_trend_fade_60_as_tile_1():
     assert fade["policy_epoch"] == "v31-dynamic-adaptive-ladder-paper-v4"
     assert registry.RESEARCH_STACK_VERSION == "v31-trend-fade-single-tile-v5"
     assert fade["default_enabled"] is False and combo_toggle_defaults()["FAMILY_TREND_FADE_60"] is False
+    assert fade_ladder["default_enabled"] is True and combo_toggle_defaults()["FAMILY_TREND_FADE_60_LADDER"] is True
+    assert fade_ladder["paper_only"] is True and fade_ladder["platform_relay_eligible"] is False
+    assert fade_ladder["entry_policy"] == fade["entry_policy"]
+    assert fade_ladder["max_active_signals"] == 5
+    assert fade_ladder["ladder"] == tuple(tuple(row) for row in TRAIL_LADDER_SCENARIO_C)
+    assert fade_ladder["policy_epoch"] == registry.RESEARCH_STACK_VERSION
+    assert fade_ladder["pre_registration"]["control_lane"] == "FAMILY_TREND_FADE_60"
+    assert fade_ladder["pre_registration"]["registered_cohort"] == registry.RESEARCH_STACK_VERSION
+    assert fade_ladder["pre_registration"]["kill"] == fade["pre_registration"]["kill"]
+    assert fade_ladder["pre_registration"]["promotion"] == fade["pre_registration"]["promotion"]
+    assert "control_status" not in fade_ladder["pre_registration"]
     assert fade["paper_only"] is True and fade["platform_relay_eligible"] is False
     assert fade["live_copy_eligible"] is False
     assert fade["entry_policy"]["direction_source"] == "INVERTED_SCORE_LED_SIDE"
@@ -149,6 +167,22 @@ def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():
         "OFFSET_0.30_CHASE_w234_s50_i180|ATR_TP_2.5_GIVEBACK_20PCT",
     ):
         assert raw in RETIRED_POLICY_IDENTITIES
+
+
+def test_default_on_is_refused_for_anything_but_a_paper_only_relay_blocked_tile():
+    lane = "FAMILY_TREND_FADE_60_LADDER"
+    spec = ACTIVE_TILE_REGISTRY[lane]
+    original = dict(spec)
+    try:
+        spec["relay_capability"] = "QUALIFIED"
+        assert f"{lane}:DEFAULT_ON_REQUIRES_PAPER_ONLY_RELAY_BLOCKED" in validate_tile_registry()
+        spec.update(original)
+        spec["platform_relay_eligible"] = True
+        assert f"{lane}:DEFAULT_ON_REQUIRES_PAPER_ONLY_RELAY_BLOCKED" in validate_tile_registry()
+    finally:
+        spec.clear()
+        spec.update(original)
+    assert validate_tile_registry() == ()
 
 
 def test_policy_signature_binds_execution_parameters_not_just_display_id():

@@ -6,7 +6,7 @@ import pytest
 import tile_paired_comparison as tpc
 from combo_pathway_config import ACTIVE_TILE_ORDER, ACTIVE_TILE_REGISTRY
 
-(T1,) = ACTIVE_TILE_ORDER
+T1, T2, XVL = ACTIVE_TILE_ORDER
 A, B = "SYNTHETIC_TILE_A", "SYNTHETIC_TILE_B"
 T0 = 1_790_000_000.0
 BP = 0.0025  # 1 bp of $25 notional
@@ -56,14 +56,38 @@ def test_tiles_pair_only_on_signals_both_filled():
     json.dumps(report, allow_nan=False)
 
 
-def test_single_registered_tile_reports_without_a_paired_control():
+def test_registered_tiles_report_without_a_paired_control():
     rows = [_fill(T1, f"c{i}", 1.0, T0 + i * 3600, reason="PATH_END_60M") for i in range(5)]
-    report = _report(rows)
+    report = tpc.build_report(trades=rows, registry={T1: ACTIVE_TILE_REGISTRY[T1]}, tile_order=(T1,),
+                              now_ts=T0 + 3600)
     assert report["tile_order"] == [T1]
     assert report["paired"] == []
+    assert report["all_tiles_paired"]["paired_tiles"] == [T1]
     assert report["tiles"][T1]["fills"] == 5
     assert report["pre_registered"][T1]["verdict"]["status"] == "COLLECTING"
-    assert set(tpc.VERDICT_RULES) == {"tile_pre_registration_trade_count_v1"}
+    assert set(tpc.VERDICT_RULES) == {"tile_pre_registration_trade_count_v1", "tile_pre_registration_xvl_v1"}
+    json.dumps(report, allow_nan=False)
+
+
+def test_profit_lock_tile_pairs_against_trend_fade_on_the_same_calls():
+    rows = []
+    for i in range(12):
+        ts = T0 + i * 4 * 3600
+        rows += [_fill(T1, f"c{i}", 2.0, ts, reason="PATH_END_60M"),
+                 _fill(T2, f"c{i}", 5.0, ts, reason="PROFIT_LOCK_LADDER")]
+    rows += [_fill(T2, f"extra{i}", 1.0, T0 + i) for i in range(4)]
+    report = _report(rows)
+    assert report["tile_order"] == [T1, T2, XVL]
+    assert report["all_tiles_paired"]["paired_tiles"] == [T1, T2]
+    assert not any(XVL in (p["control"], p["challenger"]) for p in report["paired"])
+    pairs = {(p["control"], p["challenger"]): p for p in report["paired"]}
+    assert pairs[(T1, T2)]["paired_signals"] == 12
+    assert pairs[(T1, T2)]["mean_difference_bp"] == pytest.approx(3.0)
+    assert pairs[(T1, T2)]["unpaired_challenger_fills"] == 4
+    assert report["tiles"][T2]["fills"] == 16
+    assert set(report["pre_registered"]) == {T1, T2, XVL}
+    assert report["pre_registered"][T1]["control_lane"] is None
+    assert report["pre_registered"][T2]["control_lane"] == T1
     json.dumps(report, allow_nan=False)
 
 
@@ -112,6 +136,18 @@ def test_tile1_promotion_needs_150_trades_and_no_dominant_two_hour_window():
     verdict = _report(burst, now=T0 + 150 * 3 * 3600)["pre_registered"][T1]["verdict"]
     assert verdict["promotion_checks"]["no_2h_window_dominates"] is False
     assert verdict["status"] != "PROMOTION_ELIGIBLE_FOR_OWNER_REVIEW"
+
+
+def test_profit_lock_tile_reuses_the_trade_count_rules():
+    down = [_fill(T2, f"l{i}", -4.1, T0 + i * 3600, reason="PHYSICAL_HARD_STOP_40PCT") for i in range(40)]
+    verdict = _report(down)["pre_registered"][T2]["verdict"]
+    assert verdict["status"] == "KILL" and "K1_NET_LOSS_AFTER_40" in verdict["kill_reasons"]
+    gap = [_fill(T2, "g0", -61.0, T0, reason="PHYSICAL_HARD_STOP_40PCT")]
+    assert "K3_STOP_FAILURE" in _report(gap)["pre_registered"][T2]["verdict"]["kill_reasons"]
+    winners = [_fill(T2, f"w{i}", 3.0 + (i % 5) * 0.2, T0 + i * 3 * 3600, reason="PROFIT_LOCK_LADDER")
+               for i in range(150)]
+    verdict = _report(winners, now=T0 + 150 * 3 * 3600)["pre_registered"][T2]["verdict"]
+    assert verdict["status"] == "PROMOTION_ELIGIBLE_FOR_OWNER_REVIEW", verdict
 
 
 def test_tile1_time_box_kills_after_fourteen_days_without_promotion():
