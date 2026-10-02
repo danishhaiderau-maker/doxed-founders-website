@@ -192,7 +192,8 @@ def _bundle_files(root: str) -> None:
     here = os.path.dirname(os.path.abspath(__file__))
     for src, dst in (("client.py", "analyzer_client.py"), ("insights.py", "insights_client.py"),
                      ("EXPORT_README.md", "README.md"),
-                     (os.path.join("..", "system_health_alerts.py"), "system_health_alerts.py")):
+                     (os.path.join("..", "system_health_alerts.py"), "system_health_alerts.py"),
+                     (os.path.join("..", "runtime_uptime.py"), "runtime_uptime.py")):
         s = os.path.join(here, src)
         if os.path.isfile(s):
             tmp = os.path.join(root, dst + ".tmp")

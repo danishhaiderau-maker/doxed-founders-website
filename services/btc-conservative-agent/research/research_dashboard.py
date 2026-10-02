@@ -26,6 +26,7 @@ from pathway_lane_roster import DASHBOARD_PRIMARY_LANES as _CANONICAL_TILE_LANES
 from runtime_incident_history import build_runtime_incident_history
 import system_health_banner as _system_health_banner
 import system_health_alerts as _system_health_alerts
+import runtime_uptime as _runtime_uptime
 import shutil
 from research import decision_view as _decision_view
 from research import evidence_points_view as _evidence_points_view
@@ -469,9 +470,25 @@ def _inject_system_health_banner(response):
 def api_system_health():
     state_dir = Path(os.getenv("DOXXED_LAPTOP_CHAIN_STATE") or r"C:\DoxxedCrypto\laptop-chain")
     report = _system_health_banner.read_report_file(state_dir / "health" / "system-health-latest.json")
-    response = jsonify(_system_health_banner.with_staleness(report))
+    out = _system_health_banner.with_staleness(report)
+    out["uptime"] = _analyzer_uptime(state_dir)
+    response = jsonify(out)
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+def _analyzer_uptime(state_dir: Path) -> dict:
+    """Fly's uninterrupted-runtime block plus the laptop-side 48h proof progress."""
+    fly = _runtime_uptime.fetch_fly_uptime(
+        os.getenv("DOXXED_FLY_STATUS_URL") or "https://doxed-btc-bot.fly.dev/api/status")
+    uptime = dict(fly["uptime"]) if fly["uptime"] else {
+        "schema": _runtime_uptime.SCHEMA, "available": False, "state": "UNKNOWN", "colour": "amber",
+        "uninterrupted_label": "Fly uptime unavailable", "definition": _runtime_uptime.DEFINITION}
+    if fly["error"]:
+        uptime["note"] = fly["error"]
+    uptime["proof"] = _runtime_uptime.read_proof_progress(state_dir)
+    uptime["source"] = "Fly /api/status uptime (cached 30s); proof from laptop-chain unattended-proof/active.json"
+    return uptime
 
 
 def _alert_history() -> dict:
