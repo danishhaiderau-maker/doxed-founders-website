@@ -128,8 +128,11 @@ def test_fill_and_close_callbacks_are_after_narrow_registry_transitions():
     assert "with trade_lock:\n        if order in pending_orders:" not in fill_body
     assert "lane_register_open_position(pos)" not in fill_body
     assert fill_body.index("promote_pending_to_open(") < fill_body.index(
-        "dual_write_paper_fill("
+        "_enqueue_fill_evidence_handoff("
     )
+    handler_start = BOT_SOURCE.index("def _write_fill_evidence_handoff(job: dict)")
+    handler_end = BOT_SOURCE.index("\ndef _fill_evidence_dead_letter", handler_start)
+    assert "dual_write_paper_fill(" in BOT_SOURCE[handler_start:handler_end]
 
     close_start = BOT_SOURCE.index("def close_position(pos: dict, exit_reason: str):")
     close_end = BOT_SOURCE.index("\ndef _client_ip(", close_start)

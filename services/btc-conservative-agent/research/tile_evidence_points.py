@@ -264,7 +264,8 @@ def _ai_verdict(scan: Mapping[str, Any] | None) -> str:
 
 
 def classify_trade_rows(trades: Iterable[Mapping[str, Any]], *, tiles: set[str], epoch_id: str | None,
-                        v2_start_ts: float | None, relay_interference_ids: set[str] = frozenset()):
+                        v2_start_ts: float | None, relay_interference_ids: set[str] = frozenset(),
+                        lifecycle_contradiction_ids: set[str] = frozenset()):
     """Split closed trade rows into the current tile cohort and quarantined rows."""
     current, quarantined, seen = [], [], set()
     for row in trades or ():
@@ -281,6 +282,8 @@ def classify_trade_rows(trades: Iterable[Mapping[str, Any]], *, tiles: set[str],
             reason = "LEGACY_CONTINUOUS_LANE" if lane == "CONTINUOUS" else "NON_REGISTRY_LANE"
         elif trade_id in relay_interference_ids or exit_reason in RELAY_INTERFERENCE_EXIT_REASONS:
             reason = "RELAY_INTERFERENCE_PHANTOM_CANCEL"
+        elif trade_id in lifecycle_contradiction_ids:
+            reason = "FILL_TTL_LIFECYCLE_CONTRADICTION"
         elif epoch_id and row_epoch and row_epoch.lower() != "nan" and row_epoch != epoch_id:
             reason = "PRIOR_EPOCH"
         elif v2_start_ts and closed_ts is not None and closed_ts < v2_start_ts:
@@ -299,6 +302,7 @@ def build_tile_evidence_points(
     intent_audit: Iterable[Mapping[str, Any]], tape_rows: Iterable[Mapping[str, Any]],
     epoch_id: str | None, v2_start_ts: float | None, generated_at: float | None = None,
     relay_interference_ids: Iterable[str] = (),
+    lifecycle_contradiction_ids: Iterable[str] = (),
 ) -> dict[str, Any]:
     tile_order = [str(lane).upper() for lane in tile_order]
     tiles = set(tile_order)
@@ -313,7 +317,8 @@ def build_tile_evidence_points(
 
     current, quarantined = classify_trade_rows(
         trades, tiles=tiles, epoch_id=epoch_id, v2_start_ts=v2_start_ts,
-        relay_interference_ids=set(relay_interference_ids or ()))
+        relay_interference_ids=set(relay_interference_ids or ()),
+        lifecycle_contradiction_ids=set(lifecycle_contradiction_ids or ()))
 
     submitted: dict[str, dict[str, float | None]] = defaultdict(dict)
     filled_ids: dict[str, set[str]] = defaultdict(set)

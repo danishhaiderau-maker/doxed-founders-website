@@ -246,3 +246,13 @@ def test_lifecycle_no_fill_terminals_feed_fill_worlds_and_reconcile_with_expired
         "in_both_ledgers": 1, "expired_orders_ledger_only": 0, "lifecycle_ledger_only": 2,
         "world_disagreements": 0}
     assert "V3_LIFECYCLE_MISSING_TILE_NO_FILL_TERMINALS" not in {g["code"] for g in report["evidence_gaps"]}
+
+
+def test_fill_ttl_lifecycle_contradictions_are_quarantined():
+    rows = [_trade(1), _trade(2), _trade(3, lane="FAMILY_B")]
+    current, quarantined = tep.classify_trade_rows(
+        rows, tiles=set(ORDER), epoch_id=EPOCH, v2_start_ts=T0,
+        lifecycle_contradiction_ids={"FAMILY_A-t2"})
+    assert [r["trade_id"] for r in current] == ["FAMILY_A-t1", "FAMILY_B-t3"]
+    assert [(r["trade_id"], reason) for r, reason in quarantined] == [
+        ("FAMILY_A-t2", "FILL_TTL_LIFECYCLE_CONTRADICTION")]
