@@ -31,6 +31,7 @@ SUPERSEDED_COHORTS = {
     "v31-dynamic-adaptive-paper-v1": "ADAPTIVE_DECISION_PLUMBING_DEFECT",
     "v31-dynamic-adaptive-paper-v2": "ADAPTIVE_DECISION_PLUMBING_DEFECT",
     "v31-dynamic-adaptive-paper-v3": "SUPERSEDED_SINGLE_TILE_STACK",
+    "v31-dynamic-adaptive-ladder-paper-v4": "SUPERSEDED_FOUR_TILE_STACK",
     UNSTAMPED_COHORT: "ADAPTIVE_DECISION_PLUMBING_DEFECT",
 }
 

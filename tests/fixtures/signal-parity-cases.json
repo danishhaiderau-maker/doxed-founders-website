@@ -1,8 +1,8 @@
 {
-  "description": "Frozen parity cases for the four registry-owned paper tiles sharing one direction call: Dynamic Adaptive ATR Trail; plus Scenario-C profit lock; plus break-even and Scenario-C profit lock; and the Trend Fade 60 beta (side derived from the same call by its own lane admission, so the shared fingerprint matches it too). The five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
+  "description": "Frozen parity cases for the single registry-owned paper tile: Trend Fade 60 (Tile 1), whose side is derived from the shared direction call by its own lane admission, so the shared fingerprint matches it. The three Dynamic Adaptive tiles, the five family tiles and the Continuous benchmark are retired and must never match or be a benchmark.",
   "cases": [
     {
-      "id": "dynamic-adaptive-long-shared-direction",
+      "id": "trend-fade-60-long-shared-direction",
       "ai": {
         "win_prob": 0,
         "bull_score": 8,
@@ -11,12 +11,12 @@
       "direction": "LONG",
       "spread": 4,
       "expect_lanes": [
-        "FAMILY_ADAPTIVE_REGIME",
-        "FAMILY_ADAPTIVE_REGIME_LADDER",
-        "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
         "FAMILY_TREND_FADE_60"
       ],
       "reject_lanes": [
+        "FAMILY_ADAPTIVE_REGIME",
+        "FAMILY_ADAPTIVE_REGIME_LADDER",
+        "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
         "FAMILY_CHANDELIER_3",
         "FAMILY_ATR_TARGET_2_5",
         "FAMILY_ATR_TRAIL",
@@ -27,7 +27,7 @@
       ]
     },
     {
-      "id": "dynamic-adaptive-short-shared-direction",
+      "id": "trend-fade-60-short-shared-direction",
       "ai": {
         "win_prob": 0,
         "bull_score": 3,
@@ -36,12 +36,12 @@
       "direction": "SHORT",
       "spread": 5,
       "expect_lanes": [
-        "FAMILY_ADAPTIVE_REGIME",
-        "FAMILY_ADAPTIVE_REGIME_LADDER",
-        "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
         "FAMILY_TREND_FADE_60"
       ],
       "reject_lanes": [
+        "FAMILY_ADAPTIVE_REGIME",
+        "FAMILY_ADAPTIVE_REGIME_LADDER",
+        "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
         "FAMILY_CHANDELIER_3",
         "FAMILY_ATR_TARGET_2_5",
         "FAMILY_ATR_TRAIL",
@@ -54,21 +54,6 @@
     {
       "id": "retired-continuous-not-benchmark",
       "lane": "CONTINUOUS",
-      "expect_benchmark": false
-    },
-    {
-      "id": "dynamic-adaptive-not-benchmark",
-      "lane": "FAMILY_ADAPTIVE_REGIME",
-      "expect_benchmark": false
-    },
-    {
-      "id": "dynamic-adaptive-ladder-not-benchmark",
-      "lane": "FAMILY_ADAPTIVE_REGIME_LADDER",
-      "expect_benchmark": false
-    },
-    {
-      "id": "dynamic-adaptive-ladder-be-not-benchmark",
-      "lane": "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
       "expect_benchmark": false
     },
     {

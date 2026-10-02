@@ -6,11 +6,13 @@ import os
 import pytest
 
 import adaptive_entry_funnel as funnel
+from combo_pathway_config import RESEARCH_STACK_VERSION
 
-V2 = "v31-dynamic-adaptive-ladder-paper-v4"
+V2 = RESEARCH_STACK_VERSION
 V2_DEFECT = "v31-dynamic-adaptive-paper-v2"
-LANE = "FAMILY_ADAPTIVE_REGIME"
-LADDER = "FAMILY_ADAPTIVE_REGIME_LADDER"
+V4_FOUR_TILE = "v31-dynamic-adaptive-ladder-paper-v4"
+LANE = "TILE_A"
+LADDER = "TILE_B"
 
 
 def _decision(call, action, reason, regime="CALM", version=V2, lane=LANE):
@@ -116,6 +118,7 @@ def test_tiles_sharing_one_ai_call_are_separate_lane_cohorts():
             _decision("c2", "STAND_ASIDE", "AI_NO_TRADE"),
             _decision("c2", "STAND_ASIDE", "AI_NO_TRADE", lane=LADDER),
             _decision("c0", "MAKER", "CALM_MAKER", version="v31-dynamic-adaptive-paper-v3"),
+            _decision("c9", "TAKER", "NORMAL_TAKER", "NORMAL", version=V4_FOUR_TILE),
         ],
         taker_counterfactuals=[_cf("c1", 2.0, 4.0), _cf("c2", -1.0, -3.0)],
         trades=[{"research_lane": LANE, "shared_ai_call_id": "c1", "net_pnl_usd": "-0.02", "exit_reason": "INITIAL_ATR_STOP"},
@@ -133,3 +136,4 @@ def test_tiles_sharing_one_ai_call_are_separate_lane_cohorts():
         assert groups[("STAND_ASIDE", "STOOD_ASIDE")]["n"] == 1
     prior = report["quarantined_cohorts"]["v31-dynamic-adaptive-paper-v3"]
     assert prior["reason"] == "SUPERSEDED_SINGLE_TILE_STACK"
+    assert report["quarantined_cohorts"][V4_FOUR_TILE]["reason"] == "SUPERSEDED_FOUR_TILE_STACK"

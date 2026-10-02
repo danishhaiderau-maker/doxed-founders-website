@@ -68,64 +68,72 @@ RETIRED_ANALYZER_HYPOTHESIS_LANES = (
 )
 
 
-def test_active_registry_is_exactly_the_four_paper_experiments():
-    assert ACTIVE_TILE_ORDER == (
-        "FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER", "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
-        "FAMILY_TREND_FADE_60",
-    )
-    base = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME"]
-    ladder = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME_LADDER"]
-    ladder_be = ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME_LADDER_BE"]
-    prefix = "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1"
-    assert base["raw_policy_id"].endswith(prefix)
-    assert ladder["raw_policy_id"].endswith(prefix + "_SCENARIO_C_CAP1")
-    assert ladder_be["raw_policy_id"].endswith(prefix + "_SCENARIO_C_BE4_LOCK1_CAP1")
-    tiles = (base, ladder, ladder_be)
-    for lane, spec in zip(ACTIVE_TILE_ORDER, tiles):
-        assert spec["policy_epoch"] == "v31-dynamic-adaptive-ladder-paper-v4"
-        assert spec["default_enabled"] is False
-        assert spec["paper_only"] is True
-        assert spec["platform_relay_eligible"] is False
-        assert spec["entry_policy"]["chase_windows"] == ()
-        assert spec["entry_policy"]["extreme_action"] == "STAND_ASIDE"
-        assert spec["entry_policy"]["block_raw_ai_no_trade"] is True
-        assert spec["entry_policy"]["min_score_gap"] == 5
-        assert spec["entry_policy"]["liquidation_guard_stop_bps"] == 40.0
-        exit_policy = spec["exit_policy"]
-        assert exit_policy["initial_stop_atr_k"] == 1.5
-        assert exit_policy["trail_activation_atr_k"] == 0.75
-        assert exit_policy["trail_atr_k"] == 1.0
-        result = spec["presentation"]["hypothesis_result"]
-        assert result["status"] == "UNPROVEN_HONEST_PAPER_EXPERIMENT"
-        assert "NO PROVEN EDGE" in spec["subtitle"]
-        assert spec["entry_policy"] == base["entry_policy"]
-        assert spec["toggle_key"] == "research_lane_enabled"
-        assert combo_toggle_defaults()[lane] is False
+RETIRED_DYNAMIC_ADAPTIVE_LANES = (
+    "FAMILY_ADAPTIVE_REGIME",
+    "FAMILY_ADAPTIVE_REGIME_LADDER",
+    "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
+)
+
+# Trend Fade 60 identity frozen at registration; the v5 roster change must not
+# alter it, so its cohort continues across the retirement.
+TREND_FADE_60_SIGNATURE = "a0a04faefaba977b203ad0a84117612ca7d487b0ce22f9d55504f3554b927d65"
+TREND_FADE_60_SCORE_LED_SIGNATURE = "1936f510d2ff7d0c3aaaa4a5c14431637a02362cb2980a24b2f474b91a4743e0"
+
+
+def test_active_registry_is_exactly_trend_fade_60_as_tile_1():
+    import combo_pathway_config as registry
+
+    assert ACTIVE_TILE_ORDER == ("FAMILY_TREND_FADE_60",)
+    assert active_tile_lifecycle_manifest()[0]["display_order"] == 1
     fade = ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"]
-    every = (*tiles, fade)
-    assert len({spec["policy_signature"] for spec in every}) == 4
-    assert len({spec["id_prefix"] for spec in every}) == 4
+    expected = (TREND_FADE_60_SCORE_LED_SIGNATURE if registry.SCORE_LED_PAPER_RESEARCH_ENABLED
+                else TREND_FADE_60_SIGNATURE)
+    assert fade["policy_signature"] == expected
+    assert fade["raw_policy_id"].endswith("INVERT_SCORE_LED_SIDE_SPREADLE1.68BP_TAKER_CAP5BPS|TIME_3600_HARD40BP")
+    assert fade["id_prefix"] == "ftf"
+    assert fade["toggle_key"] == "research_lane_enabled"
+    assert fade["policy_epoch"] == "v31-dynamic-adaptive-ladder-paper-v4"
+    assert registry.RESEARCH_STACK_VERSION == "v31-trend-fade-single-tile-v5"
     assert fade["default_enabled"] is False and combo_toggle_defaults()["FAMILY_TREND_FADE_60"] is False
     assert fade["paper_only"] is True and fade["platform_relay_eligible"] is False
+    assert fade["live_copy_eligible"] is False
     assert fade["entry_policy"]["direction_source"] == "INVERTED_SCORE_LED_SIDE"
     assert fade["entry_policy"]["mode"] == "TAKER_AT_SIGNAL"
     assert fade["exit_policy"]["max_duration_sec"] == 3600 and fade["exit_policy"]["hard_stop_bps"] == 40
     assert fade["max_active_signals"] == 1
-    assert fade["pre_registration"]["control_lane"] == "FAMILY_ADAPTIVE_REGIME"
-    assert not base.get("ladder") and ladder["ladder"] == ladder_be["ladder"]
-    assert base.get("max_active_signals", 10) == 10
-    assert ladder["max_active_signals"] == ladder_be["max_active_signals"] == 1
-    assert "breakeven_trigger_margin_pct" not in ladder["exit_policy"]
-    assert ladder_be["exit_policy"]["breakeven_trigger_margin_pct"] == 4.0
-    assert ladder_be["exit_policy"]["breakeven_lock_margin_pct"] == 1.0
-    assert "pre_registration" not in base
-    for spec in (ladder, ladder_be):
-        pre = spec["pre_registration"]
-        assert pre["control_lane"] == "FAMILY_ADAPTIVE_REGIME"
-        assert pre["promotion"]["min_fills"] == 400 and pre["promotion"]["min_days"] == 14
-        assert pre["kill"]["k1_min_fills"] == 150 and pre["kill"]["k4_max_drawdown_usd"] == 1.5
-        assert pre["kill"]["k5_max_days_without_promotion"] == 21
-    assert ladder["pre_registration"]["hypothesis_id"] != ladder_be["pre_registration"]["hypothesis_id"]
+    pre = fade["pre_registration"]
+    assert pre["registered_cohort"] == "v31-dynamic-adaptive-ladder-paper-v4"
+    assert pre["control_lane"] is None
+    assert pre["promotion"] == {
+        "meaning": "ELIGIBLE_FOR_OWNER_REVIEW_NEVER_RELAY", "min_fills": 150,
+        "per_fill_ev_lower_ci95_gt_bp": 0.0, "both_halves_positive": True,
+        "max_2h_window_profit_share": 0.30,
+    }
+    assert pre["kill"] == {
+        "k1_after_fills": 40, "k1_net_usd_at_or_below": -0.40,
+        "k2_after_fills": 80, "k2_net_usd_at_or_below": 0.0,
+        "k3_worst_trade_bp_below": -60.0, "k4_max_drawdown_usd": 1.0,
+        "k5_max_days_without_promotion": 14,
+    }
+    assert registry.PRIMARY_PRODUCTION_LANE == registry.RESEARCH_CANDIDATE_LANE == "FAMILY_TREND_FADE_60"
+
+
+def test_dynamic_adaptive_tiles_are_one_atomic_retirement():
+    import json
+
+    for lane in RETIRED_DYNAMIC_ADAPTIVE_LANES:
+        assert lane in RETIRED_TILE_LANES
+        assert lane not in ACTIVE_TILE_REGISTRY
+        assert lane not in COMBO_EXECUTION_LANES
+    assert not any(lane in json.dumps(ACTIVE_TILE_REGISTRY, default=list) for lane in RETIRED_DYNAMIC_ADAPTIVE_LANES)
+    prefix = "ADAPTIVE_RV15_P40_P90_FZ1.5_T5BPS_M1TICK_G40|ATR_TRAIL_SL_1.5_ARM_0.75_TRAIL_1"
+    for suffix in ("", "_SCENARIO_C_CAP1", "_SCENARIO_C_BE4_LOCK1_CAP1"):
+        assert prefix + suffix in RETIRED_POLICY_IDENTITIES
+    service_dir = __import__("pathlib").Path(__file__).resolve().parent
+    for gone in ("paper_policy_family_adaptive_regime.py", "paper_policy_family_adaptive_regime_ladder.py",
+                 "paper_policy_family_adaptive_regime_ladder_be.py", "adaptive_profit_lock_binding.py"):
+        assert not (service_dir / gone).exists(), gone
+        assert not (service_dir.parent / "btc-signal-engine" / gone).exists(), gone
 
 
 def test_retired_family_tiles_and_continuous_are_one_atomic_retirement():

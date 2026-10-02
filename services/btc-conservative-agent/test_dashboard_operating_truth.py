@@ -184,23 +184,21 @@ def _tile_entry_text(tile, *, html=False):
     return f"{tile['label']} {tile['offset_pct']:.2f}%"
 
 
-def test_adaptive_regime_tiles_publish_their_rule_not_a_zero_offset(tmp_path):
+def test_taker_tiles_publish_their_rule_not_a_zero_offset(tmp_path):
     ns = _namespace(tmp_path)
     tiles = ns["_dashboard_tile_view"]()
     for tile in tiles:
         entry = ACTIVE_TILE_REGISTRY[tile["lane"]]["entry_policy"]
-        if entry.get("mode") != "ADAPTIVE_REGIME":
+        if entry.get("mode") != "TAKER_AT_SIGNAL":
             assert tile["entry_rule"] is None
             continue
         rule = tile["entry_rule"]
-        assert f"CALM RV15 <{entry['calm_below_bps']:g}bps" in rule
-        assert f"maker \u2264{entry['maker_improve_ticks']} tick, {entry['maker_ttl_sec']}s" in rule
-        assert f"NORMAL or fast move z\u2265{entry['fast_move_z']:g}" in rule
-        assert f"taker cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s" in rule
-        assert f"EXTREME >{entry['extreme_above_bps']:g}bps" in rule
-        assert f"stop \u2265{entry['liquidation_guard_stop_bps']:g}bps" in rule
+        assert f"cap {entry['taker_protection_bps']:g}bps, {entry['taker_ttl_sec']}s" in rule
+        assert f"spread >{entry['max_spread_bps']:g}bps" in rule
+        assert f"BBO >{entry['max_bbo_age_sec']:g}s old" in rule
         assert f"{tile['label']} 0.00%" not in ns["_dashboard_tile_offsets_text"]([tile])
-    assert ns["_dashboard_entry_rule"]({"mode": "ADAPTIVE_REGIME"}) == "regime-dependent entry (rule not published)"
+    assert ns["_dashboard_entry_rule"]({"mode": "TAKER_AT_SIGNAL"}) == "taker-at-signal entry (rule not published)"
+    assert ns["_dashboard_entry_rule"]({"mode": "ADAPTIVE_REGIME"}) is None
     assert ns["_dashboard_entry_rule"]({"offset_pct": 0.3}) is None
 
 
@@ -292,7 +290,7 @@ def test_dashboard_trade_rows_keep_the_stop_evidence_inputs():
     source = _top_level_source({"_DASHBOARD_TRADE_API_KEYS", "_slim_trade_for_dashboard"})
     exec(compile(source, "bot_helpers", "exec"), ns)
     row = ns["_slim_trade_for_dashboard"]({
-        "trade_id": "far-1", "research_lane": "FAMILY_ADAPTIVE_REGIME",
+        "trade_id": "ftf-1", "research_lane": "FAMILY_TREND_FADE_60",
         "pnl_accounting_schema": "terminal_single_count_v1", "margin_usdt": 0.2, "leverage": 100,
         "features_velocity": 1.0,
     })

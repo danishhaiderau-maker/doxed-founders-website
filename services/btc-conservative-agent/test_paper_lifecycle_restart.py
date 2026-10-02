@@ -46,6 +46,14 @@ class PaperLifecycleRestartTests(unittest.TestCase):
             self.assertTrue(worker.shutdown(drain_timeout=5.0))
             self.bot._pending_order_evidence_worker = None
 
+    def _with_generic_atr_stop_exit(self):
+        """Exercise the generic ATR stop projection on the registry lane's spec."""
+        lane = self.bot.COMBO_EXECUTION_LANES[0]
+        exit_policy = {"family": "ATR_TRAIL", "initial_stop_atr_k": 1.5, "atr_tp_k": None}
+        patcher = mock.patch.dict(self.bot.COMBO_LANE_SPECS[lane], {"exit_policy": exit_policy})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _position(self):
         return {
             "trade_id": "family-pos-1", "status": "OPEN", "entry": 78000.0,
@@ -58,7 +66,7 @@ class PaperLifecycleRestartTests(unittest.TestCase):
 
     def _order(self):
         return {
-            "trade_id": "far-order-1", "status": "PENDING", "limit_price": 77900.0,
+            "trade_id": "ftf-order-1", "status": "PENDING", "limit_price": 77900.0,
             "created_ts": 1000.0, "entry_expires_ts": 9999999999.0,
             "research_lane": self.bot.COMBO_EXECUTION_LANES[0], "chase_count": 3,
             "last_chase_ts": 1200.0, "signal_dir": "LONG",
@@ -110,6 +118,7 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.assertEqual(payload["git_rev"], "unknown")
 
     def test_family_snapshot_persists_only_enforced_policy_protection(self):
+        self._with_generic_atr_stop_exit()
         self.bot.open_positions.append(self._position())
         self.assertTrue(self.bot.save_paper_lifecycle(reason="test"))
         payload = json.loads(Path(self.bot.PAPER_LIFECYCLE_FILE).read_text(encoding="utf-8"))
@@ -158,6 +167,7 @@ class PaperLifecycleRestartTests(unittest.TestCase):
         self.assertEqual(Path(self.bot.PAPER_LIFECYCLE_FILE).read_bytes(), baseline)
 
     def test_family_restore_repairs_generic_tp_sl_projection(self):
+        self._with_generic_atr_stop_exit()
         payload = {"schema": "paper_lifecycle_v1", "paper_only": True, "live_armed": False,
                    "positions": [self._position()], "pending_orders": []}
         Path(self.bot.PAPER_LIFECYCLE_FILE).write_text(json.dumps(payload), encoding="utf-8")

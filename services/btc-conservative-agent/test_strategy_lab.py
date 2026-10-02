@@ -95,7 +95,11 @@ def test_registry_exit_specs_map_every_active_tile():
         assert ex is not None, (lane, why)
     ftf = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_TREND_FADE_60"])[0]
     assert ftf.tcap_sec == 3600 and ftf.hard_bp == pytest.approx(40.0) and not ftf.needs_atr
-    ladder = exit_spec_from_registry(cpc.ACTIVE_TILE_REGISTRY["FAMILY_ADAPTIVE_REGIME_LADDER"])[0]
+    ladder_spec = {"exit_policy": {"family": "ATR_TRAIL_PROFIT_LOCK", "initial_stop_atr_k": 1.5,
+                                   "trail_activation_atr_k": 0.75, "trail_atr_k": 1.0,
+                                   "hard_stop_margin_pct": 30.0, "max_duration_sec": 7200},
+                   "ladder": [(8.0, 5.0), (150.0, 120.0)]}
+    ladder = exit_spec_from_registry(ladder_spec)[0]
     assert ladder.ladder and ladder.needs_atr
 
 

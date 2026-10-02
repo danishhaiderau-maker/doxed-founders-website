@@ -21,7 +21,7 @@ import system_health_server as server  # noqa: E402
 
 FIX = Path(__file__).resolve().parent / "fixtures" / "system_health"
 TICK = 5 * 60.0
-LANES = ["FAMILY_ADAPTIVE_REGIME", "FAMILY_ADAPTIVE_REGIME_LADDER", "FAMILY_TREND_FADE_60"]
+LANES = ["FAMILY_TREND_FADE_60", "SYNTHETIC_TILE_B", "SYNTHETIC_TILE_C"]
 
 
 def ts(text: str) -> float:

@@ -1,16 +1,16 @@
-﻿"""Dedicated contract for Tile 4: trend fade (opposite of the score-led side), 60 m time exit."""
+﻿"""Dedicated contract for Tile 1: trend fade (opposite of the score-led side), 60 m time exit."""
 import copy
 import time
 
 import pytest
 
 import bot
-import paper_policy_family_adaptive_regime as base
 import paper_policy_family_trend_fade_60 as policy
 from combo_pathway_config import (
     ACTIVE_TILE_ORDER,
     COMBO_LANE_SPECS,
     INVERTED_SCORE_LED_ADMISSION_POLICY_ID,
+    RETIRED_POLICY_IDENTITIES,
     RETIRED_TILE_LANES,
     resolve_score_led_paper_admission,
 )
@@ -40,7 +40,7 @@ def _decide(direction="SHORT", bid=64999.0, ask=65000.0, bbo_age=1.0):
 
 def test_registry_owns_this_paper_only_relay_ineligible_beta_tile():
     spec = COMBO_LANE_SPECS[policy.LANE]
-    assert ACTIVE_TILE_ORDER[-1] == policy.LANE and len(ACTIVE_TILE_ORDER) == 4
+    assert ACTIVE_TILE_ORDER == (policy.LANE,)
     assert spec["paper_only"] is True
     assert spec["platform_relay_eligible"] is False
     assert spec["default_enabled"] is False
@@ -49,9 +49,9 @@ def test_registry_owns_this_paper_only_relay_ineligible_beta_tile():
     assert spec["requested_margin_usd"] == 0.25
     assert spec["implementation_modules"] == ("paper_policy_family_trend_fade_60.py",)
     assert spec["admission_treatment"] == INVERTED_SCORE_LED_ADMISSION_POLICY_ID
-    assert policy.POLICY_ID == spec["raw_policy_id"] != base.POLICY_ID
+    assert policy.POLICY_ID == spec["raw_policy_id"]
+    assert policy.POLICY_ID not in RETIRED_POLICY_IDENTITIES
     assert policy.POLICY_SIGNATURE == spec["policy_signature"]
-    assert len({COMBO_LANE_SPECS[lane]["policy_signature"] for lane in ACTIVE_TILE_ORDER}) == 4
     assert policy.LANE not in RETIRED_TILE_LANES
     exit_policy = spec["exit_policy"]
     assert exit_policy["max_duration_sec"] == 3600
@@ -126,7 +126,6 @@ def test_taker_limit_is_capped_at_five_bp_and_rounded_toward_the_cap(direction):
     else:
         assert 64999.0 * 0.9995 <= decision["limit_price"] < 64999.0
     assert policy.decision_is_executable(decision, direction)
-    assert not base.decision_is_executable(decision, direction)
     fields = policy.adaptive_entry_fields(direction, 64999.5, decision)
     assert fields["entry_path"] == policy.LANE
 
@@ -184,17 +183,14 @@ def test_dashboard_discloses_beta_label_and_absence_of_ladder():
     assert config["hard_stop_bps"] == 40 and config["ladder_profile_id"] is None
 
 
-def test_existing_tiles_keep_their_reason_strings():
-    action = base.exit_action(entry=ENTRY, direction="LONG", price=ENTRY, atr_abs=60.0,
-                              leverage=100.0, age_sec=7200)
-    assert action.reason == "PATH_END_120M"
+def test_time_exit_and_stop_reasons_are_trigger_consistent():
     assert bot._is_trigger_consistent_exit_reason("PATH_END_60M")
     assert bot._is_trigger_consistent_exit_reason("PHYSICAL_HARD_STOP_40PCT")
     assert bot._is_trigger_consistent_exit_reason("PATH_END_120M")
     assert not bot._is_trigger_consistent_exit_reason("PATH_END_SOON")
 
 
-def test_runtime_tile_view_inverts_only_this_tile_and_never_mutates_the_shared_call():
+def test_runtime_tile_view_inverts_only_this_tile_and_never_mutates_the_shared_call(monkeypatch):
     raw = _ai(70, 30, raw_direction="NO_TRADE", raw_decision="NO_TRADE", direction="NO_TRADE", decision="REJECT")
     admission = _admission(raw)
     shared = dict(copy.deepcopy(raw), direction="LONG", decision="APPROVE")
@@ -206,7 +202,8 @@ def test_runtime_tile_view_inverts_only_this_tile_and_never_mutates_the_shared_c
     assert spread == bot.compute_directional_spread("SHORT", ai) < 0
     assert reason == "LANE_ADMISSION_INVERTED_SCORE_LED_SIDE"
     assert shared == snapshot
-    same = bot._tile_view_of_shared_call(base.LANE, raw, shared, admission, "LONG", 4)
+    monkeypatch.setattr(bot, "_patient_chase_policy", lambda lane: object())
+    same = bot._tile_view_of_shared_call("SHARED_VIEW_TILE", raw, shared, admission, "LONG", 4)
     assert same == (shared, "LONG", 4, None)
 
 

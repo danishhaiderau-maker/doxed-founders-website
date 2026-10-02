@@ -25,11 +25,12 @@ def test_tile_headlines_use_one_identical_seven_metric_contract():
 
 def test_tile_headlines_always_use_executed_fresh_collection_metrics():
     chunk = _render_chunk()
-    assert "currentSettingsPeriod" in chunk
-    assert "headlineClosed" in chunk
+    assert "const headlineClosed = Number(stats.real_fills || 0)" in chunk
+    assert "const headlineApprovals = Number(stats.approves || 0)" in chunk
     assert "headlinePnl" in chunk
     assert "headlineEv" in chunk
-    assert "current execution-settings period; earlier rows remain separate" in chunk
+    assert "Headline scope: " in chunk
+    assert "Clean-epoch headline: n=" in chunk
     assert "labPrimaryTrades" not in chunk
     assert "v2ChkPass" not in chunk
 
@@ -37,10 +38,16 @@ def test_tile_headlines_always_use_executed_fresh_collection_metrics():
 def test_tile_ev_is_unavailable_when_there_are_no_approvals():
     chunk = _render_chunk()
     assert "const headlineEv = headlineApprovals > 0" in chunk
-    assert "const headlineEvLabel = headlineEv == null ? '—'" in chunk
+    assert "const headlineEvLabel = headlineEv == null ? '\u2014'" in chunk
     assert "statRow('EV/appr', headlineEvLabel)" in chunk
-    assert "· EV ' + headlineEvLabel + '/approve" in chunk
+    assert "EV ' + headlineEvLabel + '/approve" in chunk
     assert "headlineApprovals ? headlinePnl / headlineApprovals : 0" not in chunk
+
+
+def test_win_pct_counts_net_wins_over_closed_trades():
+    chunk = _render_chunk()
+    assert "const headlineWinLabel = winPctLabel(stats.wins, stats.losses, headlineClosed)" in chunk
+    assert "statRow('Win %', headlineWinLabel)" in chunk
 
 
 def test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference():
@@ -55,20 +62,18 @@ def test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference():
     assert "terminal_single_count_v1" in SOURCE
 
 
-def test_settings_periods_are_durable_and_attached_to_both_payload_paths():
+def test_legacy_settings_period_breakdown_is_retired():
+    # The audit trail stays on disk; the synthetic "Legacy baseline" table and
+    # its approvals back-fill are gone from the API and the tile card.
     assert 'EXECUTION_SETTINGS_HISTORY_FILE = "execution_settings_history.jsonl"' in SOURCE
-    assert '_record_execution_settings_epoch("CHASE_CHANGED")' in SOURCE
-    assert '_record_execution_settings_epoch("GAP_CHANGED")' in SOURCE
-    assert '_record_execution_settings_epoch("TRACKING_STARTED")' in SOURCE
     assert '_record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)' in SOURCE
-    # Current signed-epoch normalization plus the disk and analyzer-backed
-    # payload paths must all reconcile their period rows to the same headline.
-    assert SOURCE.count('["settings_periods"] = _reconcile_settings_periods_to_headline(') == 3
-    assert "def _reconcile_settings_periods_to_headline" in SOURCE
+    for retired in ("_settings_period_breakdown", "_reconcile_settings_periods_to_headline",
+                    '["settings_periods"]', "_settings_breakdown_cache"):
+        assert retired not in SOURCE
     chunk = _render_chunk()
-    assert "Settings-period breakdown" in chunk
-    assert "Legacy baseline" in chunk
-    assert "Not recorded" in chunk
+    for retired in ("Settings-period breakdown", "Legacy baseline", "Not recorded",
+                    "settings_periods", "currentSettingsPeriod"):
+        assert retired not in chunk
 
 
 def test_server_is_authoritative_for_execution_gate_controls():
@@ -106,39 +111,14 @@ def test_virtual_chase_candidates_are_separate_from_pending_orders():
     assert "VIRTUAL ONLY" not in SOURCE
 
 
-def test_settings_period_approvals_reconcile_to_analyzer_headline():
-    namespace = {}
-    start = SOURCE.index("def _reconcile_settings_periods_to_headline")
-    end = SOURCE.index("\ndef spread_gate_allows", start)
-    exec("import copy\n" + SOURCE[start:end], namespace)
-    reconcile = namespace["_reconcile_settings_periods_to_headline"]
-    rows = reconcile(
-        {"approves": 1375},
-        [
-            {
-                "settings_recorded": False,
-                "approvals": 1377,
-                "pnl_usd": 30.39,
-            },
-            {
-                "settings_recorded": True,
-                "approvals": 0,
-                "pnl_usd": 0,
-            },
-        ],
-    )
-    assert sum(row["approvals"] for row in rows) == 1375
-    assert rows[0]["approvals"] == 1375
-    assert rows[0]["ev_per_approval"] == 0.02
-
-
 if __name__ == "__main__":
     test_tile_headlines_use_one_identical_seven_metric_contract()
     test_tile_headlines_always_use_executed_fresh_collection_metrics()
     test_tile_ev_is_unavailable_when_there_are_no_approvals()
+    test_win_pct_counts_net_wins_over_closed_trades()
     test_trade_rows_distinguish_observed_loss_from_stop_trigger_reference()
-    test_settings_periods_are_durable_and_attached_to_both_payload_paths()
+    test_legacy_settings_period_breakdown_is_retired()
     test_server_is_authoritative_for_execution_gate_controls()
+    test_paper_tile_banner_reports_each_relay_blocker_truthfully()
     test_virtual_chase_candidates_are_separate_from_pending_orders()
-    test_settings_period_approvals_reconcile_to_analyzer_headline()
-    print("tile summary/settings-period regression checks passed")
+    print("tile summary regression checks passed")

@@ -40,43 +40,16 @@ def test_session_stats_carry_ledger_wins_and_losses_from_the_pnl_ledger():
     assert empty["win_rate_pct"] is None and empty["wins"] == 0
 
 
-def test_settings_periods_count_wins_from_the_same_rows_as_period_pnl(tmp_path, monkeypatch):
-    lane = ACTIVE_TILE_ORDER[-1]
-    start = 1_790_000_000.0
-    history = tmp_path / "history.jsonl"
-    history.write_text(json.dumps({"epoch": start, "signature": "s1", "gap_buckets": [5], "chase_buckets": []}) + "\n",
-                       encoding="utf-8")
-    trades = tmp_path / "trades.csv"
-    with trades.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["research_lane", "ts", "net_pnl_usd"])
-        writer.writeheader()
-        for i, pnl in enumerate((0.04, -0.02, 0.0, -0.01)):
-            ts = datetime.fromtimestamp(start + 60 * (i + 1), tz=timezone.utc).isoformat()
-            writer.writerow({"research_lane": lane, "ts": ts, "net_pnl_usd": pnl})
-    monkeypatch.setattr(bot, "EXECUTION_SETTINGS_HISTORY_FILE", str(history))
-    monkeypatch.setattr(bot, "CSV_TRADES", str(trades))
-    monkeypatch.setattr(bot, "_fresh_collection_start_epoch", lambda: start)
-    monkeypatch.setattr(bot, "_settings_breakdown_cache", {"key": None, "value": {}})
-    periods = bot._settings_period_breakdown()
-    assert set(periods) == set(ACTIVE_TILE_ORDER)
-    current = [row for row in periods[lane] if row["current"]][0]
-    assert current["executed"] == 4 and current["pnl_usd"] == 0.01
-    assert (current["wins"], current["losses"], current["win_rate_pct"]) == (1, 2, 25.0)
-    other = [row for row in periods[ACTIVE_TILE_ORDER[0]] if row["current"]][0]
-    assert other["executed"] == 0 and other["win_rate_pct"] is None
-
-
-def test_fly_card_and_settings_table_render_win_pct_generically():
+def test_fly_card_renders_win_pct_generically():
     chunk = _render_chunk()
     assert "statRow('Win %', headlineWinLabel)" in chunk
     start = chunk.index("const winPctLabel = function")
     source = chunk[start:chunk.index("};", start) + 2]
     script = source + ";console.log(JSON.stringify([winPctLabel(2, 3, 5), winPctLabel(12, 9, 27), winPctLabel(0, 0, 0)]))"
     labels = json.loads(subprocess.run(["node", "-e", script], capture_output=True, text=True, encoding="utf-8", check=True).stdout)
-    assert labels == ["40% (2W/3L)", "44% (12W/9L) · 6 flat", "—"]
-    assert "if (!(n > 0)) return '—';" in chunk
-    assert "winPctLabel(period.wins, period.losses, period.executed)" in chunk
-    assert '<th style="padding:5px;text-align:right;">Win %</th>' in chunk
+    assert labels == ["40% (2W/3L)", "44% (12W/9L) \u00b7 6 flat", "\u2014"]
+    assert "if (!(n > 0)) return '\u2014';" in chunk
+    assert "winPctLabel(period." not in chunk
     for lane in ACTIVE_TILE_ORDER:
         assert lane not in chunk
 
@@ -90,7 +63,8 @@ def test_analyzer_lane_rows_and_paired_panel_show_win_pct():
 
 
 def test_paired_comparison_reports_win_counts_and_excludes_unfilled_rows():
-    t1, t2 = ACTIVE_TILE_ORDER[0], ACTIVE_TILE_ORDER[1]
+    t1, t2 = "SYNTHETIC_TILE_A", ACTIVE_TILE_ORDER[0]
+    registry = {t1: {"label": "A"}, t2: ACTIVE_TILE_REGISTRY[t2]}
     base = 1_790_000_000.0
     rows = []
     for i, (a, b) in enumerate(((-0.01, 0.02), (0.01, 0.03), (-0.02, -0.01), (0.0, 0.01), (-0.03, 0.02))):
@@ -98,7 +72,7 @@ def test_paired_comparison_reports_win_counts_and_excludes_unfilled_rows():
         rows.append({"research_lane": t2, "shared_ai_call_id": f"c{i}", "net_pnl_usd": b, "close_ts": base + i})
     rows.append({"research_lane": t2, "shared_ai_call_id": "nf", "net_pnl_usd": 0.0, "close_ts": base,
                  "exit_reason": "NO_FILL"})
-    report = tpc.build_report(trades=rows, registry=ACTIVE_TILE_REGISTRY, tile_order=ACTIVE_TILE_ORDER,
+    report = tpc.build_report(trades=rows, registry=registry, tile_order=(t1, t2),
                               now_ts=base + 3600)
     s1, s2 = report["tiles"][t1], report["tiles"][t2]
     assert (s1["fills"], s1["wins"], s1["losses"], s1["win_rate_pct"]) == (5, 1, 3, 20.0)
@@ -106,4 +80,3 @@ def test_paired_comparison_reports_win_counts_and_excludes_unfilled_rows():
     pair = next(p for p in report["paired"] if p["control"] == t1 and p["challenger"] == t2)
     assert (pair["control_wins"], pair["control_losses"]) == (1, 3)
     assert (pair["challenger_wins"], pair["challenger_losses"], pair["challenger_win_rate_pct"]) == (4, 1, 80.0)
-    assert report["tiles"][ACTIVE_TILE_ORDER[-1]] == {"fills": 0}

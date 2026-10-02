@@ -26,9 +26,9 @@ BOT_PATH = Path(__file__).with_name("bot.py")
 BOT_SOURCE = BOT_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(BOT_SOURCE)
 TILE_LANES = {
-    "far": "FAMILY_ADAPTIVE_REGIME",
-    "fal": "FAMILY_ADAPTIVE_REGIME_LADDER",
-    "flb": "FAMILY_ADAPTIVE_REGIME_LADDER_BE",
+    "ftf": "FAMILY_TREND_FADE_60",
+    "tsa": "SYNTHETIC_TILE_A",
+    "tsb": "SYNTHETIC_TILE_B",
 }
 
 
@@ -202,8 +202,8 @@ def test_same_tick_sibling_fills_on_three_tiles_never_lose_to_ttl_expiry():
     # Fill-thread work per fill (0.25 s) far exceeds the 0.05 s TTL deadline,
     # reproducing the flb-6a32a8bad760 timing: touched together, filled late.
     rt = FillRuntime(fill_thread_work_sec=0.25)
-    siblings = [rt.add_order(prefix, expires_in=0.05) for prefix in ("far", "fal", "flb")]
-    unclaimed = rt.add_order("far", expires_in=0.05)
+    siblings = [rt.add_order(prefix, expires_in=0.05) for prefix in ("ftf", "tsa", "tsb")]
+    unclaimed = rt.add_order("ftf", expires_in=0.05)
     for order in siblings:
         rt.claim_touch(order)
 
@@ -240,7 +240,7 @@ def test_same_tick_sibling_fills_on_three_tiles_never_lose_to_ttl_expiry():
 
 def test_claimed_touch_survives_overdue_ttl_sweep_then_fills():
     rt = FillRuntime()
-    order = rt.add_order("fal", expires_in=-1)
+    order = rt.add_order("tsa", expires_in=-1)
     rt.claim_touch(order)
     assert rt.ns["cleanup_expired_orders"]() == 0
     outcome = rt.ns["_cancel_pending_order_confirmed"](order, "TTL_EXPIRED")
@@ -253,14 +253,14 @@ def test_claimed_touch_survives_overdue_ttl_sweep_then_fills():
 
 def test_already_expired_order_never_opens_a_position():
     rt = FillRuntime()
-    order = rt.add_order("flb", expires_in=-1)
+    order = rt.add_order("tsb", expires_in=-1)
     assert rt.ns["cleanup_expired_orders"]() == 1
     assert rt.fill(order) is None
     assert not rt.open_positions and not rt.evidence
     assert rt.warnings("reason=ORDER_NOT_PENDING")
     assert not rt.handoffs
     # Same verdict if a recorder left the status untouched but removed the row.
-    ghost = rt.add_order("flb", expires_in=60)
+    ghost = rt.add_order("tsb", expires_in=60)
     rt.pending.remove(ghost)
     assert rt.fill(ghost) is None
     assert rt.warnings("reason=ORDER_NOT_IN_BOOK") and not rt.open_positions
@@ -268,12 +268,12 @@ def test_already_expired_order_never_opens_a_position():
 
 def test_terminal_signal_or_in_flight_cancel_blocks_the_fill():
     rt = FillRuntime()
-    expired_signal = rt.add_order("far", expires_in=60)
+    expired_signal = rt.add_order("ftf", expires_in=60)
     rt.trades_map[expired_signal["trade_id"]]["signal_ref"].update(
         status="EXPIRED", outcome="SIGNAL_TTL_EXPIRED", exit_reason="SIGNAL_TTL_EXPIRED",
     )
     assert rt.fill(expired_signal) is None
-    cancelling = rt.add_order("fal", expires_in=60)
+    cancelling = rt.add_order("tsa", expires_in=60)
     cancelling["cancel_claim_in_progress"] = "TTL_EXPIRED"
     assert rt.fill(cancelling) is None
     assert not rt.open_positions
@@ -284,7 +284,7 @@ def test_terminal_signal_or_in_flight_cancel_blocks_the_fill():
 
 def test_cancel_claim_is_released_when_the_durable_recorder_fails():
     rt = FillRuntime()
-    order = rt.add_order("far", expires_in=-1)
+    order = rt.add_order("ftf", expires_in=-1)
 
     def failing_recorder(row, reason):
         raise RuntimeError("DURABLE_PREPARE_FAILED")
@@ -298,7 +298,7 @@ def test_cancel_claim_is_released_when_the_durable_recorder_fails():
 
 def test_filled_own_commit_is_not_terminal_for_post_fill_steps():
     rt = FillRuntime()
-    orders = [rt.add_order(prefix, expires_in=60) for prefix in ("far", "fal", "flb")]
+    orders = [rt.add_order(prefix, expires_in=60) for prefix in ("ftf", "tsa", "tsb")]
     for order in orders:
         rt.claim_touch(order)
         rt.fill(order)
@@ -307,7 +307,7 @@ def test_filled_own_commit_is_not_terminal_for_post_fill_steps():
     assert not rt.warnings("[FILL GUARD]")
 
     allowed = rt.ns["_position_open_relay_allowed"]
-    pos = {"trade_id": "far-own", "status": "OPEN"}
+    pos = {"trade_id": "ftf-own", "status": "OPEN"}
     assert allowed(pos, {"status": "FILLED", "outcome": "OPEN"}) is True
     assert allowed(pos, {"status": "EXPIRED", "outcome": "TTL_EXPIRED"}) is False
     assert allowed(pos, {"status": "FILLED", "outcome": "OPEN", "exit_reason": "TTL_EXPIRED"}) is False
@@ -320,7 +320,7 @@ class EvidenceRuntime:
 
     def __init__(self, root: Path, *, v3_delay=0.0, v3_failures=0):
         self.calls = []
-        self.open_positions = [{"trade_id": "fal-9", "status": "OPEN"}]
+        self.open_positions = [{"trade_id": "tsa-9", "status": "OPEN"}]
         failures = {"left": v3_failures}
 
         def record(name):
@@ -332,7 +332,7 @@ class EvidenceRuntime:
             if failures["left"] > 0:
                 failures["left"] -= 1
                 raise OSError("ledger busy")
-            return {"fill_id": "fill-fal-9", "policy_signature": "sig-1"}
+            return {"fill_id": "fill-tsa-9", "policy_signature": "sig-1"}
 
         self.ns = {
             "copy": copy, "hashlib": hashlib, "json": json, "os": os, "time": time,
@@ -369,10 +369,10 @@ class EvidenceRuntime:
 
     def enqueue(self):
         return self.ns["_enqueue_fill_evidence_handoff"](
-            {"trade_id": "fal-9", "fill_price": 84000.0, "qty": 0.0003},
-            {"trade_id": "fal-9", "status": "FILLED"},
+            {"trade_id": "tsa-9", "fill_price": 84000.0, "qty": 0.0003},
+            {"trade_id": "tsa-9", "status": "FILLED"},
             self.open_positions[0],
-            {"trade_id": "fal-9", "status": "FILLED"},
+            {"trade_id": "tsa-9", "status": "FILLED"},
             fill_commit_ts=1_790_000_000.25, fill_px=84000.0, fill_dynamics={"fill_delay_sec": 1.0},
         )
 
@@ -403,7 +403,7 @@ def test_post_fill_evidence_is_written_exactly_once(tmp_path):
     assert rt.drain()
     assert rt.calls == STEPS
     assert len(rt.rows("APPLIED")) == 1
-    assert rt.open_positions[0]["fill_id"] == "fill-fal-9"
+    assert rt.open_positions[0]["fill_id"] == "fill-tsa-9"
     assert rt.ns["_replay_fill_evidence_handoffs"]() == 0
     assert rt.calls == STEPS
 
