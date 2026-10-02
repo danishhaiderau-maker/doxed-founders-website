@@ -151,9 +151,12 @@ function Update-AnalyzerDashboardCode {
   try {
     $dash = Invoke-Launcher -LauncherArgs @('-DashboardOnly', '-NoWait', "-Port $Port") -Tag 'dashboard' -TimeoutMs 120000
     Write-ChainLog -Config $cfg -Name $logName -Message ("DASHBOARD_CODE_REFRESH from={0} to={1} exit={2} {3}" -f $(if ($served) { $served } else { 'unknown' }), $head, $dash.ExitCode, $dash.Tail)
-    $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
-    while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
-    if ($dash.ExitCode -eq 0) { Set-DashboardCodeRevision $head }
+    # A failed refresh may have left :9001 down; the ensure below restores it at once.
+    if ($dash.ExitCode -eq 0) {
+      $readyBy = (Get-Date).AddSeconds($DashboardReadySec)
+      while (-not (Get-AnalyzerStatus) -and (Get-Date) -lt $readyBy) { Start-Sleep -Seconds 3 }
+      Set-DashboardCodeRevision $head
+    }
   } finally {
     Exit-SingleInstance $guard
   }
