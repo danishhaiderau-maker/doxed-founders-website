@@ -35372,6 +35372,7 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     "archive-v2",
     "object-store",
     "object_store",
+    "recovery_receipts",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 

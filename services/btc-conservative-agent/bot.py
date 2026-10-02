@@ -831,7 +831,7 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
     # without these fields caused V2/V3 to silently mint an epoch-v22-* alias
     # while the dashboard continued to advertise the official epoch-* id.
     # Only a new, explicitly confirmed reset is allowed to replace them.
-    if fcm and not fresh_collection_reset:
+    if not fresh_collection_reset:
         for key in (
             "collector_v22_epoch_ts",
             "collector_v22_epoch_id",
@@ -839,6 +839,14 @@ def _write_research_session(start_ts: float, fresh_collection_reset: bool = Fals
         ):
             if prev.get(key) not in (None, ""):
                 payload[key] = prev.get(key)
+        if not fcm:
+            for key in (
+                "fresh_collection_start_time",
+                "fresh_collection_start_iso",
+                "fresh_collection_start_iso_utc",
+            ):
+                if prev.get(key) not in (None, ""):
+                    payload[key] = prev.get(key)
     if fresh_collection_reset and fresh_start is not None:
         cutoff = _utc_isoformat_ns(float(fresh_start))
         material = f"fresh_research_epoch_v1|SHOWCASE_FRESH_COLLECTION|{cutoff}"
@@ -36612,6 +36620,7 @@ _DATA_SYNC_EXCLUDED_DIR_NAMES = frozenset({
     # Original corrupt evidence is preserved with a hash/line receipt for
     # manual review. It must not starve the active mirror sync repeatedly.
     "corrupt_evidence_quarantine",
+    "recovery_receipts",
 })
 _DATA_SYNC_CHUNK_MAX = 4 * 1024 * 1024
 _DATA_SYNC_APPEND_PREFIX_NAMES = frozenset({
