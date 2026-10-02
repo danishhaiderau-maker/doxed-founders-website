@@ -504,8 +504,9 @@ it ticks itself (`TAKEOVER` in its log).
 
 `GET :9011/api/system-health?live=1` returns the newest cached verdict at once with
 `age_sec`, `generated_at` and `refresh: started|running`, and starts at most one
-background re-evaluation. Only when the cache is older than 120 s does it wait (up to
-10 s) for that refresh (`refresh: completed`).
+background re-evaluation. Only when the cache is older than 360 s (one 5-minute watcher
+tick plus slack) does it wait, up to 2 s, for that refresh (`refresh: completed`); the
+endpoint therefore answers within 3 s even while a full evaluation is running.
 
 <a id="analyzer-parity_checker"></a>
 ### analyzer.parity_checker

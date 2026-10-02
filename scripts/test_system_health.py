@@ -1429,6 +1429,18 @@ def test_live_refresh_waits_bounded_only_when_the_cache_is_old(tmp_path):
     assert out["refresh"] == "started" and out["cache_source"] == "published" and out["age_sec"] >= 600
 
 
+def test_live_refresh_defaults_answer_within_budget_mid_tick(tmp_path):
+    import time as _time
+
+    for age in (200, 900):
+        _write_latest(tmp_path, sh.utcnow() - age)
+        hung = lambda: _time.sleep(30)
+        t0 = _time.monotonic()
+        out = server.LiveRefresher(str(tmp_path), hung).get()
+        assert _time.monotonic() - t0 < 3.0
+        assert out["cache_source"] == "published" and out["refresh"] == "started"
+
+
 def test_live_endpoint_p95_under_two_seconds(tmp_path):
     import threading
     import time as _time

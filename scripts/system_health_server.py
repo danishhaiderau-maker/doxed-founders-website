@@ -27,8 +27,11 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "services" / "btc-cons
 import system_health as sh  # noqa: E402
 import system_health_alerts as alerts  # noqa: E402
 
-LIVE_MAX_AGE_SEC = 120.0
-LIVE_WAIT_SEC = 10.0
+# The watcher publishes every 5 min and a full evaluation takes longer than any wait we can
+# afford, so a verdict younger than one tick plus slack is served as-is and the wait stays
+# inside the 3 s live=1 latency budget.
+LIVE_MAX_AGE_SEC = 360.0
+LIVE_WAIT_SEC = 2.0
 
 
 def annotate(report: dict, now: float | None = None) -> dict:
