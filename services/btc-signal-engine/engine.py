@@ -92,6 +92,7 @@ from combo_pathway_config import (
     ACTIVE_TILE_REGISTRY,
     AI_PROMPT_INPUT_REVISION,
     COMMITTED_FADE_MIN_SCORE_GAP,
+    CONTINUOUS_AUG_ADMISSION_POLICY_ID,
     TILE_ARCHITECTURE_VERSION,
     TILE_REGISTRY_SCHEMA,
     BENCHMARK_LANE as COMBO_BENCHMARK_LANE,
@@ -1511,6 +1512,10 @@ def _build_open_position(order: dict, signal: dict, ai: dict = None) -> dict:
         "original_limit_price": order.get("original_limit_price") or order.get("planned_limit_price"),
         "last_chase_ts": order.get("last_chase_ts") or signal.get("last_chase_ts"),
         "exit_config": copy.deepcopy(signal.get("exit_config") or get_exit_config_for_lane(signal.get("research_lane"))),
+        **(
+            {"aug_touch_fill_shadow": copy.deepcopy(order["aug_touch_fill_shadow"])}
+            if order.get("aug_touch_fill_shadow") else {}
+        ),
     }
 
 def compute_live_factor_scores(mc: dict):
@@ -4860,12 +4865,27 @@ def _apply_family_tile_exit(pos: dict, price: float, now: float) -> bool:
     previous_peak = float(pos.get("policy_peak_price") or entry)
     current_peak = max(previous_peak, float(price)) if direction == "LONG" else min(previous_peak, float(price))
     pos["policy_peak_price"] = current_peak
+    exit_kwargs = {}
+    if getattr(policy, "EXIT_CONTEXT", False):
+        # Same tick-level inputs the legacy exit chain read: the stored peak,
+        # the post-fill grace, the operator early-fail toggle, the entry
+        # thesis, and the latest market context from the AI cadence.
+        with state_lock:
+            exit_kwargs["exit_context"] = {
+                "peak_pct": _buf_float(pos.get("max_pnl_pct"), 0.0),
+                "in_post_fill_grace": _in_post_fill_grace(pos, now),
+                "early_fail_enabled": bool(state.get("early_fail_enabled", True)),
+                "conviction_spread": int(pos.get("conviction_spread") or 0),
+                "trend_health": copy.deepcopy(state.get("trend_health") or {}),
+                "entry_thesis": pos.get("entry_thesis") or {},
+                "market_context": copy.deepcopy(state.get("market_context") or {}),
+            }
     action = policy.exit_action(
         entry=entry, direction=direction, price=price, atr_abs=atr_abs,
         atr_pct=_buf_float(pos.get("atr14_pct_3m"), 0.0), age_sec=age,
         leverage=float(pos.get("leverage") or 100), remaining_fraction=remaining,
         completed_partials=pos.get("policy_completed_partials") or (),
-        peak_price=current_peak,
+        peak_price=current_peak, **exit_kwargs,
     )
     if not action:
         with trade_lock:
@@ -8472,6 +8492,7 @@ TRADING_AI_ALLOWED_PURPOSES = frozenset({
     "trading_direction",
     "trading_confirmation",
     "trading_direction_shadow",
+    "trading_direction_continuous_aug",
 })
 FAST_MONITOR_INTERVAL_SEC = 2.0
 STARTING_BALANCE = 500.0
@@ -19262,6 +19283,9 @@ def _combo_lane_execution_dead_letter(lane: str, row: dict) -> None:
 
 def _run_combo_lane_execution_job(job: dict) -> None:
     payload = job.get("payload") or {}
+    if payload.get("own_ai"):
+        _run_own_ai_tile_call(payload)
+        return
     _spawn_combo_lane(
         payload.get("ctx") or {}, payload.get("ai") or {},
         payload.get("edge_score") or 0.0, payload.get("features") or {},
@@ -19738,6 +19762,262 @@ def _tile_view_of_shared_call(lane: str, raw_ai: dict, lane_ai: dict, admission:
     return tile_ai, direction, tile_spread, view["reason"]
 
 
+def _record_tile_decision_and_dispatch(
+    lane: str, ctx: dict, raw_ai: dict, tile_ai: dict, tile_direction: str,
+    tile_spread: int, edge_score: float, features: dict, enriched: dict, *,
+    admission_reason: str | None, accept_reason: str, dispatch,
+) -> None:
+    """Write one tile's signed verdict for a shared call; dispatch only an eligible order."""
+    detail = combo_lane_match_detail(
+        lane, tile_ai, tile_direction, tile_spread, features=enriched,
+    )
+    ai_accepted = str(tile_ai.get("decision") or "").upper() == "APPROVE"
+    lane_features = enriched
+    decision_features = features or {}
+    adaptive = (
+        _adaptive_regime_entry_decision(lane, tile_direction, ctx, raw_ai, enriched)
+        if ai_accepted else None
+    )
+    if adaptive is not None:
+        # The decision is per tile; the pre-entry receipt is one immutable
+        # record per shared call, so it must stay lane-independent.
+        lane_features = {**enriched, "adaptive_entry_decision": adaptive}
+        _record_adaptive_entry_decision(lane, adaptive)
+        if adaptive.get("action") == "STAND_ASIDE" and detail.get("passes"):
+            detail = {**detail, "passes": False, "block_reason": f"ADAPTIVE_{adaptive.get('reason')}"}
+    lane_enabled = is_research_lane_enabled(lane)
+    policy_accepted = ai_accepted and bool(detail.get("passes"))
+    if not ai_accepted:
+        disposition = "AI_REJECTED_NO_ORDER"
+        decision_reason = admission_reason or f"AI_{str(tile_ai.get('decision') or 'REJECT').upper()}"
+    elif not detail.get("passes"):
+        disposition = "POLICY_FILTERED_NO_ORDER"
+        decision_reason = detail.get("block_reason") or "COMBO_FILTER"
+    elif not lane_enabled:
+        disposition = "LANE_DISABLED_NO_ORDER"
+        decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
+    else:
+        disposition = "ORDER_ELIGIBLE"
+        decision_reason = admission_reason or accept_reason
+    # Keep the operator-facing AI History joined to the same signed
+    # per-family decision that is written to the V3 ledger below.  The
+    # ledger was complete, but without this stamp genuine family
+    # evaluations rendered as "not evaluated" even while their paper
+    # workers and orders were advancing.
+    _stamp_shared_ai_lane_verdict(
+        _shared_ai_call_id(ai_result=tile_ai, ctx=ctx),
+        lane,
+        policy_accepted,
+        decision_reason,
+        score=tile_spread,
+        policy_version=str(
+            (_v3_lane_policy_material(lane) or {}).get("policy_signature")
+            or (_v3_lane_policy_material(lane) or {}).get("raw_policy_id")
+            or lane
+        ),
+        effective_direction=(
+            tile_ai.get("effective_research_direction") or tile_direction
+        ),
+        admission_policy_id=(
+            tile_ai.get("effective_research_admission_policy_id")
+        ),
+    )
+    evidence_ready = _write_v3_shared_lane_decision(
+        lane, tile_ai, ctx, decision_features,
+        policy_decision=(
+            "ERROR" if bool(tile_ai.get("ai_error"))
+            else "ACCEPT" if policy_accepted else "REJECT"
+        ),
+        execution_disposition=disposition,
+        exact_reason=decision_reason,
+    )
+    if disposition == "ORDER_ELIGIBLE" and not evidence_ready:
+        logger.error(
+            f"[{lane}] order blocked: immutable pre-entry evidence unavailable "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return
+    if not ai_accepted:
+        return
+    if not detail.get("passes"):
+        br = detail.get("block_reason") or "COMBO_FILTER"
+        log_lane_opportunity_event(
+            lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
+            (tile_ai or {}).get("direction"), (tile_ai or {}).get("win_prob"), edge_score,
+            block_reason=br,
+        )
+        logger.info(
+            f"[{lane}] combo filter blocked spawn reason={br} "
+            f"[PIPELINE ENFORCEMENT]"
+        )
+        return
+    dispatch(lane_features)
+
+
+def _lane_same_side_exposure(lane: str) -> list[dict]:
+    """Resting limits and open entries of one tile, for its duplicate-exposure rule."""
+    rows: list[dict] = []
+    with trade_lock:
+        for order in pending_orders:
+            if order.get("status") != "PENDING" or order.get("research_lane") != lane:
+                continue
+            side = str(order.get("side") or "").lower()
+            rows.append({
+                "direction": order.get("signal_dir") or ("LONG" if side == "buy" else "SHORT" if side == "sell" else ""),
+                "reference_price": order.get("planned_limit_price") or order.get("limit_price"),
+                "trade_id": order.get("trade_id"),
+                "source": "PENDING_ORDER",
+            })
+        for pos in open_positions:
+            if pos.get("research_lane") != lane:
+                continue
+            rows.append({
+                "direction": pos.get("dir"),
+                "reference_price": pos.get("entry"),
+                "trade_id": pos.get("trade_id"),
+                "source": "OPEN_POSITION",
+            })
+    return rows
+
+
+def _route_own_ai_tile(lane: str, ctx: dict, ai: dict, edge_score: float, features: dict) -> None:
+    """Hand an own-AI tile its slot of the shared 180 s cadence.
+
+    The tile's model call runs on the tile's own execution worker, so the shared
+    fan-out never waits on it.  A tile that is OFF makes no model call at all;
+    its verdict row records the skip so the cadence ledger stays complete.
+    """
+    call_id = _shared_ai_call_id(ai_result=ai, ctx=ctx)
+    identity = {
+        "shared_ai_call_id": call_id,
+        "shared_ai_call_ts": (ai or {}).get("shared_ai_call_ts") or (ctx or {}).get("shared_ai_call_ts"),
+        "trade_id": (ai or {}).get("trade_id") or (ctx or {}).get("trade_id"),
+        "own_ai_call": True,
+    }
+    if not is_research_lane_enabled(lane):
+        skipped = {**identity, "decision": "SKIPPED", "direction": "NO_TRADE", "long_score": None, "short_score": None}
+        _stamp_shared_ai_lane_verdict(
+            call_id, lane, False, "OWN_AI_CALL_SKIPPED_TILE_OFF",
+            score=0,
+            policy_version=str((_v3_lane_policy_material(lane) or {}).get("policy_signature") or lane),
+            effective_direction="NO_TRADE",
+            admission_policy_id=None,
+        )
+        _write_v3_shared_lane_decision(
+            lane, skipped, ctx, features or {},
+            policy_decision="REJECT",
+            execution_disposition="LANE_DISABLED_NO_ORDER",
+            exact_reason="OWN_AI_CALL_SKIPPED_TILE_OFF",
+        )
+        return
+    accepted = _get_combo_lane_execution_worker(lane).submit(
+        f"{lane}:{call_id}:own_ai",
+        {
+            "own_ai": True,
+            "ctx": copy.deepcopy(ctx),
+            "ai": identity,
+            "edge_score": float(edge_score),
+            "features": copy.deepcopy(features),
+            "target_lane": lane,
+        },
+        source_ts=time.time(),
+    )
+    if not accepted:
+        logger.warning(
+            f"[{lane}] own AI call not accepted call={call_id} [PIPELINE ENFORCEMENT]"
+        )
+
+
+def _run_own_ai_tile_call(payload: dict) -> None:
+    """One tile-owned DeepSeek call, decided by the tile module, recorded like a shared verdict."""
+    lane = str(payload.get("target_lane") or "").upper()
+    policy = _patient_chase_policy(lane)
+    raw_ctx = payload.get("ctx") or {}
+    identity = payload.get("ai") or {}
+    features = payload.get("features") or {}
+    edge_score = float(payload.get("edge_score") or 0.0)
+    ctx = copy.deepcopy(raw_ctx)
+    if not ctx.get("ai_input_upgrade"):
+        ctx = enrich_ai_context_upgrade(ctx)
+    ctx = sanitize_ai_inputs(ctx)
+    tile_ai = {
+        **identity,
+        "own_ai_call": True,
+        "source": "OWN_AI_CALL",
+        "ai_prompt_id": policy.PROMPT_ID,
+        "effective_research_admission_policy_id": CONTINUOUS_AUG_ADMISSION_POLICY_ID,
+        "bull_score": 0,
+        "bear_score": 0,
+    }
+    ok, reason = validate_ai_features(ctx)
+    if not ok:
+        tile_ai.update({
+            "decision": "REJECT", "direction": "NO_TRADE", "ai_error": True,
+            "comment": f"FEATURE_VALIDATION:{reason}", "factors": {},
+        })
+        admission_reason = f"FEATURE_VALIDATION:{reason}"
+    else:
+        messages, projection = policy.render_messages(ctx)
+        tile_ai["aug_input_projection"] = projection
+        try:
+            text, latency_ms, meta = call_deepseek_api_with_meta(
+                messages, policy.AI_TEMPERATURE, purpose=policy.AI_PURPOSE,
+            )
+        except Exception as exc:
+            text, latency_ms, meta = None, None, {}
+            tile_ai.update({"ai_error": True, "comment": f"AI_CALL_FAILED:{type(exc).__name__}"})
+        tile_ai.update({
+            "ai_latency_ms": latency_ms,
+            "deepseek_model": meta.get("requested_model"),
+            "deepseek_served_model": meta.get("served_model"),
+            "deepseek_system_fingerprint": meta.get("system_fingerprint"),
+        })
+        if text is None:
+            tile_ai.update({"decision": "REJECT", "direction": "NO_TRADE", "factors": {}})
+            admission_reason = tile_ai["comment"]
+        else:
+            parsed = policy.parse_response(text)
+            verdict = policy.decide(ctx, parsed)
+            tile_ai.update({
+                "decision": "APPROVE" if verdict["accepted"] else "REJECT",
+                "raw_decision": verdict["tier"],
+                "direction": verdict["direction"],
+                "raw_direction": parsed["raw_direction"],
+                "candidate_direction": verdict["candidate_direction"],
+                "effective_research_direction": verdict["candidate_direction"],
+                "long_score": verdict["long_score"],
+                "short_score": verdict["short_score"],
+                "win_prob": parsed["win_prob"],
+                "factors": parsed["factors"],
+                "comment": parsed["reason"],
+                "effective_research_admission": verdict,
+            })
+            admission_reason = verdict["reason"]
+    direction = str(tile_ai.get("direction") or "NO_TRADE").upper()
+    final_direction = direction
+    if invert_signal_active() and direction in ("LONG", "SHORT"):
+        final_direction = "SHORT" if direction == "LONG" else "LONG"
+    spread = int(compute_directional_spread(final_direction, tile_ai)) if direction in ("LONG", "SHORT") else 0
+    if tile_ai["decision"] == "APPROVE":
+        price = float(nz(state.get("price")))
+        planned = policy.entry_fields(final_direction, price).get("planned_limit_price") if price > 0 else None
+        duplicate = policy.duplicate_exposure(final_direction, planned, _lane_same_side_exposure(lane))
+        if duplicate is not None:
+            tile_ai["decision"] = "REJECT"
+            tile_ai["duplicate_exposure"] = duplicate
+            admission_reason = f"AUG_DUPLICATE_EXPOSURE {duplicate['source']} {duplicate['trade_id']}"
+    _record_tile_decision_and_dispatch(
+        lane, raw_ctx, tile_ai, tile_ai, final_direction, spread, edge_score,
+        features, _enrich_combo_lane_features(features, raw_ctx),
+        admission_reason=None if tile_ai["decision"] == "APPROVE" else admission_reason,
+        accept_reason=admission_reason,
+        dispatch=lambda lane_features: _spawn_combo_lane(
+            raw_ctx, tile_ai, edge_score, lane_features, lane,
+            f"OWN_AI_{COMBO_LANE_SPECS[lane]['combo_key']}",
+        ),
+    )
+
+
 def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: str):
     """Fan out APPROVE to all enabled combo tiles matching entry fingerprint (independent orders).
 
@@ -19787,99 +20067,25 @@ def spawn_combo_lanes_from_ai_scan(ctx, ai, edge_score, features, source_lane: s
             or is_cross_venue_clock_lane(lane)
         ):
             continue
+        if getattr(_patient_chase_policy(lane), "OWN_AI_CALL", False):
+            _route_own_ai_tile(lane, ctx, ai, edge_score, features)
+            continue
         tile_ai, tile_direction, tile_spread, tile_admission_reason = _tile_view_of_shared_call(
             lane, ai, lane_ai, score_led_admission, final_direction, spread,
         )
-        detail = combo_lane_match_detail(
-            lane, tile_ai, tile_direction, tile_spread, features=enriched,
-        )
-        ai_accepted = str(tile_ai.get("decision") or "").upper() == "APPROVE"
-        lane_features = enriched
-        decision_features = features or {}
-        adaptive = (
-            _adaptive_regime_entry_decision(lane, tile_direction, ctx, ai, enriched)
-            if ai_accepted else None
-        )
-        if adaptive is not None:
-            # The decision is per tile; the pre-entry receipt is one immutable
-            # record per shared call, so it must stay lane-independent.
-            lane_features = {**enriched, "adaptive_entry_decision": adaptive}
-            _record_adaptive_entry_decision(lane, adaptive)
-            if adaptive.get("action") == "STAND_ASIDE" and detail.get("passes"):
-                detail = {**detail, "passes": False, "block_reason": f"ADAPTIVE_{adaptive.get('reason')}"}
-        lane_enabled = is_research_lane_enabled(lane)
-        policy_accepted = ai_accepted and bool(detail.get("passes"))
-        if not ai_accepted:
-            disposition = "AI_REJECTED_NO_ORDER"
-            decision_reason = tile_admission_reason or f"AI_{str(tile_ai.get('decision') or 'REJECT').upper()}"
-        elif not detail.get("passes"):
-            disposition = "POLICY_FILTERED_NO_ORDER"
-            decision_reason = detail.get("block_reason") or "COMBO_FILTER"
-        elif not lane_enabled:
-            disposition = "LANE_DISABLED_NO_ORDER"
-            decision_reason = "PAPER_LANE_TOGGLE_OFF_NO_SHADOW"
-        else:
-            disposition = "ORDER_ELIGIBLE"
-            decision_reason = tile_admission_reason or (
+        _record_tile_decision_and_dispatch(
+            lane, ctx, ai, tile_ai, tile_direction, tile_spread, edge_score,
+            features, enriched,
+            admission_reason=tile_admission_reason,
+            accept_reason=(
                 score_led_admission["reason"]
                 if score_led_admission.get("applied")
                 else "SHARED_AI_APPROVE_AND_POLICY_PASS"
-            )
-        # Keep the operator-facing AI History joined to the same signed
-        # per-family decision that is written to the V3 ledger below.  The
-        # ledger was complete, but without this stamp genuine family
-        # evaluations rendered as "not evaluated" even while their paper
-        # workers and orders were advancing.
-        _stamp_shared_ai_lane_verdict(
-            _shared_ai_call_id(ai_result=tile_ai, ctx=ctx),
-            lane,
-            policy_accepted,
-            decision_reason,
-            score=tile_spread,
-            policy_version=str(
-                (_v3_lane_policy_material(lane) or {}).get("policy_signature")
-                or (_v3_lane_policy_material(lane) or {}).get("raw_policy_id")
-                or lane
             ),
-            effective_direction=(
-                tile_ai.get("effective_research_direction") or tile_direction
+            dispatch=lambda lane_features, _lane=lane, _ai=tile_ai: _enqueue_combo_lane_execution(
+                ctx, _ai, edge_score, lane_features, _lane,
+                f"COMBO_MATCH_{COMBO_LANE_SPECS[_lane]['combo_key']}",
             ),
-            admission_policy_id=(
-                tile_ai.get("effective_research_admission_policy_id")
-            ),
-        )
-        evidence_ready = _write_v3_shared_lane_decision(
-            lane, tile_ai, ctx, decision_features,
-            policy_decision=(
-                "ERROR" if bool(tile_ai.get("ai_error"))
-                else "ACCEPT" if policy_accepted else "REJECT"
-            ),
-            execution_disposition=disposition,
-            exact_reason=decision_reason,
-        )
-        if disposition == "ORDER_ELIGIBLE" and not evidence_ready:
-            logger.error(
-                f"[{lane}] order blocked: immutable pre-entry evidence unavailable "
-                f"[PIPELINE ENFORCEMENT]"
-            )
-            continue
-        if not ai_accepted:
-            continue
-        if not detail.get("passes"):
-            br = detail.get("block_reason") or "COMBO_FILTER"
-            log_lane_opportunity_event(
-                lane, "SPAWN_FILTERED", (ctx or {}).get("trade_id"),
-                (tile_ai or {}).get("direction"), (tile_ai or {}).get("win_prob"), edge_score,
-                block_reason=br,
-            )
-            logger.info(
-                f"[{lane}] combo filter blocked spawn reason={br} "
-                f"[PIPELINE ENFORCEMENT]"
-            )
-            continue
-        _enqueue_combo_lane_execution(
-            ctx, tile_ai, edge_score, lane_features, lane,
-            f"COMBO_MATCH_{COMBO_LANE_SPECS[lane]['combo_key']}",
         )
 
 
@@ -24230,6 +24436,26 @@ def _pending_limit_ready_for_fill(
             observation,
             label="SOURCE ORDER MARKET EVIDENCE",
         )
+    shadow_policy = (globals().get("TILE_POLICY_MODULES") or {}).get(
+        str(order.get("research_lane") or "").upper()
+    )
+    if (
+        shadow_policy is not None
+        and hasattr(shadow_policy, "touch_shadow")
+        and not order.get("aug_touch_fill_shadow")
+        and shadow_policy.touch_shadow(order, price=float(price or 0), bid=float(bid or 0), ask=float(ask or 0))
+    ):
+        # Evidence only: the legacy touch fill is recorded beside the realistic
+        # ledger and never decides whether this order fills.
+        order["aug_touch_fill_shadow"] = {
+            "fill_model": "AUG_OPTIMISTIC_TOUCH",
+            "touched_ts": now,
+            "touch_price": float(order.get("limit_price") or 0),
+            "limit_chase_count": int(order.get("limit_chase_count") or 0),
+            "market_price": float(price or 0),
+            "bid": float(bid or 0),
+            "ask": float(ask or 0),
+        }
     if order.get("marketable_fallback_inflight"):
         # Freeze natural source fills while the exact terminal revision is
         # crossing the platform boundary. Cancellation/TTL may still change
@@ -24448,7 +24674,10 @@ def process_pending_orders():
                 )
                 continue
             fill_ai_view = _fill_revalidation_ai_for_lane(fill_ai_views, order.get("research_lane"))
-            revalidation_reason = stale_fill_direction_conflict(
+            fill_policy = TILE_POLICY_MODULES.get(str(order.get("research_lane") or "").upper())
+            # An own-AI tile is never rechecked against the shared call: that
+            # is a different prompt, and its replicated rule had no fill recheck.
+            revalidation_reason = "" if getattr(fill_policy, "OWN_AI_CALL", False) else stale_fill_direction_conflict(
                 order,
                 fill_signal,
                 now=time.time(),
@@ -26285,6 +26514,12 @@ def _apply_family_policy_chase(order: dict, signal: dict, price: float, now: flo
         bid=chase_bid,
         ask=chase_ask,
     ):
+        return False
+    chase_permitted = getattr(policy, "chase_permitted", None)
+    if chase_permitted is not None and not chase_permitted(
+        direction=direction, limit_price=old_limit,
+        original_limit=original, market_price=float(price),
+    )[0]:
         return False
     new_limit, reason = _compute_limit_chase_target(
         direction, old_limit, float(price), original,

@@ -26,6 +26,13 @@ def load_function(name, namespace):
     return namespace[name]
 
 
+def load_fanout(namespace):
+    """The shared fan-out plus the per-tile verdict helper it delegates to."""
+    namespace.setdefault("_patient_chase_policy", lambda _lane: None)
+    load_function("_record_tile_decision_and_dispatch", namespace)
+    return load_function("spawn_combo_lanes_from_ai_scan", namespace)
+
+
 class _ScoreLedEnabledOs:
     """Fan-out refuses to start unless SCORE_LED_PAPER_RESEARCH_ENABLED is exactly 1."""
 
@@ -265,7 +272,7 @@ def test_ai_fanout_queues_lane_execution_instead_of_blocking_scheduler():
 def test_family_decision_stamps_dashboard_history_before_v3_ledger_write():
     fanout = ast.get_source_segment(
         SOURCE, next(item for item in TREE.body if isinstance(item, ast.FunctionDef)
-                     and item.name == "spawn_combo_lanes_from_ai_scan"),
+                     and item.name == "_record_tile_decision_and_dispatch"),
     )
     stamp = fanout.index("_stamp_shared_ai_lane_verdict(")
     ledger = fanout.index("_write_v3_shared_lane_decision(")
@@ -320,7 +327,7 @@ def test_family_fanout_records_approved_rejected_and_ai_error_evidence(
         "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
         "logger": QuietLogger(),
     }
-    fanout = load_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout = load_fanout(namespace)
     fanout(
         {"trade_id": "scan-gate"},
         {"decision": decision, "direction": "LONG", "ai_error": ai_error},
@@ -391,7 +398,7 @@ def test_per_tile_adaptive_decisions_share_one_pre_entry_receipt_and_every_tile_
         "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
         "logger": QuietLogger(),
     }
-    load_function("spawn_combo_lanes_from_ai_scan", namespace)(ctx, ai, 2.0, shared_features, "AI_SCAN")
+    load_fanout(namespace)(ctx, ai, 2.0, shared_features, "AI_SCAN")
 
     assert [lane for lane, _ in receipts] == list(lanes)
     assert all(features == shared_features for _, features in receipts)
@@ -490,7 +497,7 @@ def test_shared_fanout_persists_one_canonical_pre_entry_receipt_for_all_lanes(tm
         "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
         "logger": QuietLogger(),
     }
-    fanout = load_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout = load_fanout(namespace)
     fanout(ctx, ai, 2.0, base_features, "AI_SCAN")
     assert persist(
         "CONTINUOUS", ai, ctx, base_features,
@@ -666,7 +673,7 @@ def test_pre_entry_writer_failure_blocks_combo_enqueue_and_records_dead_letter()
         "log_lane_opportunity_event": lambda *_args, **_kwargs: None,
         "logger": QuietLogger(),
     }
-    fanout = load_function("spawn_combo_lanes_from_ai_scan", fanout_namespace)
+    fanout = load_fanout(fanout_namespace)
     fanout(
         {"trade_id": "scan-failure"},
         {"decision": "APPROVE", "direction": "LONG", "ai_error": False},

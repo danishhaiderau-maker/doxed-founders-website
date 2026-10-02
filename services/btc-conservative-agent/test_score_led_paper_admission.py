@@ -41,6 +41,14 @@ def _load_bot_function(name, namespace):
     return namespace[name]
 
 
+def _load_fanout(namespace):
+    """The shared fan-out plus the per-tile verdict helper it delegates to."""
+    namespace.setdefault("_patient_chase_policy", lambda _lane: None)
+    namespace.setdefault("is_cross_venue_clock_lane", lambda _lane: False)
+    _load_bot_function("_record_tile_decision_and_dispatch", namespace)
+    return _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
+
+
 def _resolve(ai, **overrides):
     scope = {
         "score_led_enabled": True,
@@ -216,7 +224,7 @@ def test_family_fanout_preserves_raw_ai_and_records_effective_admission():
         "logger": type("Logger", (), {"error": lambda *_args: None, "info": lambda *_args: None})(),
         "os": os,
     }
-    fanout = _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout = _load_fanout(namespace)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
     try:
@@ -380,7 +388,7 @@ def test_applied_rejection_fanout_records_evidence_without_parsing_spread(fields
         )(),
         "os": os,
     }
-    fanout = _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout = _load_fanout(namespace)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("SCORE_LED_PAPER_RESEARCH_ENABLED", "1")
     try:
@@ -487,7 +495,7 @@ def test_missing_score_led_flag_refuses_research_start_present_flag_does_not(raw
         )(),
         "os": os,
     }
-    fanout = _load_bot_function("spawn_combo_lanes_from_ai_scan", namespace)
+    fanout = _load_fanout(namespace)
     try:
         fanout({"trade_id": "scan-flag-gate"}, raw_ai, 2.0, {}, "AI_SCAN")
     finally:

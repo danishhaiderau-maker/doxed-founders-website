@@ -37,10 +37,11 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Four tiles are registered, all owner-approved paper experiments with no
-  proven edge, each with its own lock, orders, positions, ledger and analyzer
-  cohort. All default OFF in source (the deploy turns them ON), are paper-only
-  and relay-ineligible.
+- Five tiles are registered: four owner-approved paper experiments with no
+  proven edge and the Continuous baseline benchmark (Tile 5), each with its
+  own lock, orders, positions, ledger and analyzer cohort. The four
+  experiments default OFF in source (the deploy turns them ON); the baseline
+  defaults ON. All are paper-only and relay-ineligible.
 - Tile 1, Trend Fade 60 (`FAMILY_TREND_FADE_60`, prefix `ftf`): its own lane
   admission trades the opposite of the shared call's score-led side (raw AI
   NO_TRADE and small gaps still trade; ties, invalid scores and AI errors
@@ -94,11 +95,27 @@
   the 5 s-delay shadow < -0.5 bp after 300, a trade < -45 bp or >1% stale,
   drawdown > $0.50, day 14, or pause on any execution defect. Cross-venue tiles
   are excluded from shared-AI pairing and scored alone.
+- Tile 5, Continuous - August 2026 replica (`FAMILY_CONTINUOUS_AUG_ORIGINAL`,
+  prefix `caug`) is the permanent baseline benchmark: paper-only, never
+  relay-eligible, and the one tile that defaults ON. It replicates the
+  early-August Continuous: its own DeepSeek call on the shared 180 s cadence
+  (v3 prompt verbatim, temperature 0, purpose
+  `trading_direction_continuous_aug`; no call while the tile is OFF), side =
+  higher score, gap >=5, reject when long+short <50, hard reject on structure
+  conflict, R2 floor 4; 0.1% maker limit with the 25% remaining-gap chase every
+  60 s for 10 min; Scenario C ladder, -12% thesis cut (MFE protect 5%), 30%
+  stop, -32% early fail, 40/10 peak-never-loser, 2 h cap; $0.25 flat paper
+  margin; tile cap 10 plus the August $15/0.25% same-side duplicate rule.
+  Realistic BBO/depth fills are its ledger; the August touch fill is recorded
+  as the labelled `aug_touch_fill_shadow`. It is not rechecked against the
+  shared call at fill time. Every other tile is paired against it
+  (`vs_baseline`); it is never a deflated-Sharpe trial.
 - The Trend Fade 60 ladder, the three Dynamic Adaptive tiles
   (`FAMILY_ADAPTIVE_REGIME`, `FAMILY_ADAPTIVE_REGIME_LADDER`,
   `FAMILY_ADAPTIVE_REGIME_LADDER_BE`), the five former family tiles and the
-  Continuous comparison label are retired (`RETIRED_TILE_LANES`); their history
-  is opaque archive data. A future tile is promoted only if it passes the OOS
+  legacy `CONTINUOUS` lane token are retired (`RETIRED_TILE_LANES`); their
+  history is opaque archive data. The token stays retired: Tile 5 is a new
+  lane with its own signed identity, not a revival of archived rows. A future tile is promoted only if it passes the OOS
   promotion gate.
   The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.

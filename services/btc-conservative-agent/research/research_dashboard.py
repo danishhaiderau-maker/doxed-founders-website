@@ -8469,11 +8469,13 @@ async function loadTilePairedComparison() {
   tilesBody.innerHTML = (d.tile_order || []).map(lane => {
     const s = (d.tiles || {})[lane] || {};
     const v = (pre[lane] || {}).verdict;
-    const verdict = v ? `${pre[lane].hypothesis_id}: ${v.status}${(v.kill_reasons || []).length ? ' (' + v.kill_reasons.join(', ') + ')' : ''}` : 'CONTROL (no pre-registration)';
+    const verdict = v ? `${pre[lane].hypothesis_id}: ${v.status}${(v.kill_reasons || []).length ? ' (' + v.kill_reasons.join(', ') + ')' : ''}` : (lane === d.baseline_lane ? 'BASELINE BENCHMARK (never promoted)' : 'CONTROL (no pre-registration)');
     const honest = v && pre[lane].honest_label ? `<br><span class="note">${pre[lane].honest_label}</span>` : '';
     return `<tr><td>${(d.labels || {})[lane] || lane}<br><span class="note">${lane}</span></td><td>${s.fills ?? 'n/a'}</td><td>${num(s.days_observed, 2)}</td><td>${num(s.per_fill_ev_bp, 2)}${ci(s.per_fill_ev_ci95_bp)}</td><td>${num(s.first_half_ev_bp, 2)} / ${num(s.second_half_ev_bp, 2)}</td><td>${winPctLabel(s.wins, s.losses, s.fills)}</td><td>${s.max_drawdown_usd == null ? 'n/a' : '$' + num(s.max_drawdown_usd, 2)}</td><td>${s.max_hard_stops_in_rolling_50 ?? 'n/a'}</td><td>${num(s.max_lock_or_stop_overshoot_bp, 2)}</td><td>${verdict}${honest}</td></tr>`;
   }).join('') || '<tr><td colspan="10">No registry tiles.</td></tr>';
-  pairsBody.innerHTML = (d.paired || []).map(p =>
+  const baselinePairs = d.vs_baseline || [];
+  const pairRows = baselinePairs.concat((d.paired || []).filter(p => !d.baseline_lane || (p.control !== d.baseline_lane && p.challenger !== d.baseline_lane)));
+  pairsBody.innerHTML = pairRows.map(p =>
     `<tr><td>${p.challenger} - ${p.control}</td><td>${p.paired_signals}</td><td>${num(p.mean_difference_bp, 2)}${ci(p.difference_ci95_bp)}</td><td>${winPctLabel(p.control_wins, p.control_losses, p.paired_signals)} / ${winPctLabel(p.challenger_wins, p.challenger_losses, p.paired_signals)}</td><td>${p.challenger_better_signals ?? 'n/a'}</td><td>${p.unpaired_control_fills ?? 'n/a'} / ${p.unpaired_challenger_fills ?? 'n/a'}</td></tr>`
   ).join('') || ((d.tile_order || []).length < 2
     ? '<tr><td colspan="6">No paired control: only one registered tile.</td></tr>'
