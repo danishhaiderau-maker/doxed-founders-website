@@ -80,7 +80,8 @@ SPEC: dict[str, Any] = {
     "queue_estimate": "top-of-book size at placement when limit == touch; 0 when limit improves the touch; "
                       "touch size when the touch first reaches a deeper limit",
     "exits": "stop/floor/time = marketable at executable-side BBO at trigger + exit latency "
-             f"({EXIT_LATENCY_SEC:g}s); target/partial TP = maker with trade-through rule (exit-side aggressor VWAP "
+             f"({EXIT_LATENCY_SEC:g}s), booked at the worse of trigger mark and post-latency mark until exit "
+             "latency is measured live; target/partial TP = maker with trade-through rule (exit-side aggressor VWAP "
              "beyond the level), booked at the target level",
     "fees": "bitfinex_cost_profile maker/taker rates (explicit fields)",
     "adverse_selection": f"signed mid markout {ADVERSE_SELECTION_HORIZON_SEC}s after a maker fill (bp, negative = adverse)",
@@ -374,7 +375,9 @@ def realistic_exit_margin(cur: Sequence[float], age: Sequence[float], exit_idx: 
     """REALISTIC_V1 exit booking on an executable-side margin path: (margin %, booked index).
 
     Targets are resting makers booked exactly at the target level; every other exit is marketable and books
-    the executable-side mark of the first observation at or after trigger + latency.
+    the WORSE of the trigger mark and the executable-side mark of the first observation at or after
+    trigger + latency. Trigger marks sit at local extremes and usually revert within a second, so letting
+    the (assumed, not yet live-measured) exit latency improve the booked price would flatter results.
     """
     if reason == "ATR_TAKE_PROFIT" and target_margin is not None:
         return float(target_margin), int(exit_idx)
@@ -383,6 +386,8 @@ def realistic_exit_margin(cur: Sequence[float], age: Sequence[float], exit_idx: 
     j = int(exit_idx)
     while j < n - 1 and float(age[j]) < due - PRICE_EPS:
         j += 1
+    if float(cur[exit_idx]) < float(cur[j]):
+        return float(cur[exit_idx]), int(exit_idx)
     return float(cur[j]), j
 
 

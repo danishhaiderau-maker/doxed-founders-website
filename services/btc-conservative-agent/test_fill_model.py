@@ -112,6 +112,9 @@ def test_realistic_exit_booking_targets_at_level_and_latency_on_marketable_exits
     cur = np.array([0, 1, 2, 3, -40, -45, -50, -50, -50, -50], float)
     margin, j = fm.realistic_exit_margin(cur, age, 4, "PHYSICAL_HARD_STOP", latency_sec=1.0)
     assert (margin, j) == (-45.0, 5)
+    # A trigger mark that reverts within the latency books the worse trigger mark, never the rebound.
+    rebound = np.array([0, 1, 2, 3, -45, -40, -40, -40, -40, -40], float)
+    assert fm.realistic_exit_margin(rebound, age, 4, "PHYSICAL_HARD_STOP", latency_sec=1.0) == (-45.0, 4)
     assert fm.realistic_exit_margin(cur, age, 3, "ATR_TAKE_PROFIT", latency_sec=1.0, target_margin=2.5) == (2.5, 3)
     path = {"age": age, "cur": cur, "mfe": np.maximum.accumulate(cur), "mae": np.minimum.accumulate(cur),
             "thr_cur": np.full(10, np.nan)}
