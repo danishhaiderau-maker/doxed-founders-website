@@ -12,11 +12,13 @@ from pathlib import Path
 import analyzer_research_engine_v62 as engine
 
 DASHBOARD = Path(__file__).resolve().parent / "research" / "research_dashboard.py"
+# Appended to the manifest by its own atomic mirror step, outside the catalog.
+SEPARATELY_PUBLISHED = {engine.ENTRY_BASELINE_REPLAY_REPORT_FILE}
 
 
 def test_every_dashboard_report_fetch_is_published():
     fetched = set(re.findall(r"/api/report/([A-Za-z0-9_.\-]+\.json)", DASHBOARD.read_text(encoding="utf-8")))
-    published = {fname for _, fname, _ in engine.DEEP_DIVE_REPORT_CATALOG}
+    published = {fname for _, fname, _ in engine.DEEP_DIVE_REPORT_CATALOG} | SEPARATELY_PUBLISHED
     assert fetched, "dashboard no longer fetches reports by name; update this contract"
     assert sorted(fetched - published) == []
 
