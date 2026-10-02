@@ -33,7 +33,12 @@ FRESHNESS_MAX_AGE_MIN = 45
 LATEST_POINTER = "latest_export_id.txt"     # not "LATEST": Windows paths are case-insensitive
 TABLES = ("tile_stats", "hypotheses", "hypothesis_trades", "family_tests", "walk_forward", "correlation",
           "sim_parity", "stream_health", "quarantine", "main_rankings", "exit_regret", "exit_regret_trades",
-          "taker_counterfactual", "fill_markouts", "research_events", "stream_study_health")
+          "taker_counterfactual", "fill_markouts", "research_events", "stream_study_health",
+          "event_study_hypotheses", "data_health_streams")
+EVENT_STUDY_REPORT = "event_study_report.json"
+DATA_HEALTH_REPORT = "data_health_report.json"
+COVERAGE_COLUMNS = ("epoch_coverage_share", "in_window_present_share", "first_available", "horizon_hours",
+                    "tier_a_rows", "archive_rows", "mirror_rows")
 # Table owned by each staged group (stage_group); a group that did not run exports empty tables.
 GROUP_TABLES = {
     "main_rankings": ("main_rankings",),
@@ -155,6 +160,7 @@ def stream_health(data_dir: str, lab: dict, now: float) -> pd.DataFrame:
                                       if ((lab.get("cross_venue") or {}).get("span") or {}).get("end_ts") else None,
                                       "last decoded minute"),
     }
+    coverage = lab.get("stream_coverage") or {}
     for row in rows:
         last, basis = derived.get(row["stream"], (None, None))
         row["content_last_at"] = last
@@ -166,7 +172,83 @@ def stream_health(data_dir: str, lab: dict, now: float) -> pd.DataFrame:
                 row["status"] = "CONTENT_STALE"
         else:
             row["content_lag_sec"] = None
+        cov = coverage.get(row["stream"]) or {}
+        sources = cov.get("sources") or {}
+        for col in COVERAGE_COLUMNS:
+            row[col] = sources.get(col) if col.endswith("_rows") else cov.get(col)
     return pd.DataFrame(rows)
+
+
+def _read_report(report_dir: str, name: str) -> dict:
+    try:
+        with open(os.path.join(report_dir, name), encoding="utf-8") as handle:
+            doc = json.load(handle)
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def event_study_summary(report_dir: str) -> tuple:
+    """Lockbox counters per pre-registered event-study hypothesis (summary, table)."""
+    doc = _read_report(report_dir, EVENT_STUDY_REPORT)
+    if not doc:
+        return {"status": "MISSING"}, pd.DataFrame()
+    rows = []
+    for h in doc.get("hypotheses") or []:
+        lock = h.get("lockbox") or {}
+        disc = h.get("discovery") or {}
+        rows.append({"id": h.get("id"), "spec_hash": h.get("spec_hash"), "status": h.get("status"),
+                     "metric": h.get("metric"), "min_lockbox_events": h.get("min_lockbox_events"),
+                     "lockbox_open": lock.get("open"), "lockbox_scored": lock.get("scored"),
+                     "lockbox_start_utc": lock.get("start_utc"), "lockbox_end_utc": lock.get("end_utc"),
+                     "lockbox_events_counted": lock.get("events_counted"),
+                     "lockbox_events_per_day": lock.get("events_per_day"),
+                     "lockbox_days_to_min_sample": lock.get("days_to_min_sample"),
+                     "discovery_n_events": disc.get("n_events"),
+                     "discovery_events_with_controls": disc.get("events_with_controls")})
+    summary = {"status": "OK", "schema": doc.get("schema"), "generated_ts": doc.get("generated_ts"),
+               "span": doc.get("span"), "data_status": doc.get("data_status"),
+               "registered_utc": (doc.get("registry") or {}).get("registered_utc"),
+               "dataset_epoch": doc.get("dataset_epoch"), "hypotheses": rows}
+    return summary, pd.DataFrame(rows)
+
+
+def data_health_summary(report_dir: str) -> tuple:
+    """Per-stream data-health verdicts (summary, table)."""
+    doc = _read_report(report_dir, DATA_HEALTH_REPORT)
+    if not doc:
+        return {"status": "MISSING"}, pd.DataFrame()
+    keys = ("stream", "source_file", "status", "cadence", "rows", "rows_24h", "first_ts", "last_ts",
+            "staleness_sec", "coverage_pct_24h", "lag_vs_mirror_head_sec")
+    rows = [{k: s.get(k) for k in keys} for s in doc.get("streams") or [] if isinstance(s, dict)]
+    summary = {"status": doc.get("status"), "schema": doc.get("schema"), "generated_ts": doc.get("generated_ts"),
+               "window_sec": doc.get("window_sec"), "mirror_head_ts": doc.get("mirror_head_ts"),
+               "status_counts": doc.get("status_counts"), "dataset_epoch": doc.get("dataset_epoch"),
+               "streams": {r["stream"]: {"status": r["status"], "coverage_pct_24h": r["coverage_pct_24h"],
+                                         "staleness_sec": r["staleness_sec"]} for r in rows if r.get("stream")}}
+    return summary, pd.DataFrame(rows)
+
+
+def generation_health(report_dir: str) -> dict:
+    """Generation receipt, BLOCKED inputs and ledger reconciliation of this generation."""
+    receipt = _read_report(report_dir, "analyzer_generation_receipt.json")
+    blockers = _read_report(report_dir, "analyzer_input_blockers.json")
+    recon = _read_report(report_dir, "ledger_reconciliation.json")
+    return {
+        "generation_receipt": {k: receipt.get(k) for k in (
+            "level", "complete", "reasons", "failed_required_studies", "failed_optional_studies",
+            "integrity_status", "protection_replay_window", "ledger_reconciliation", "generated_at",
+        )} if receipt else {"status": "MISSING"},
+        "input_blockers": {"level": blockers.get("level"), "counts": blockers.get("counts"),
+                           "epoch_id": blockers.get("epoch_id"),
+                           "items": [{k: i.get(k) for k in ("input", "status", "reason_code", "reason")}
+                                     for i in blockers.get("items") or [] if isinstance(i, dict)]}
+        if blockers else {"status": "MISSING"},
+        "ledger_reconciliation": {k: recon.get(k) for k in (
+            "level", "reasons", "source_data_through", "win_pct_definition", "win_pct_source",
+            "analyzer_cohort", "mirror_ledger", "quarantined", "cents_display_drift",
+        )} if recon else {"status": "MISSING"},
+    }
 
 
 def _write_table(df: pd.DataFrame, directory: str, name: str) -> dict:
@@ -225,10 +307,14 @@ def write_export(*, report_dir: str, data_dir: str, trades: Optional[pd.DataFram
     for col in TILE_VERDICT_COLUMNS:
         tiles[col] = [(verdicts.get(str(lane)) or {}).get(col) for lane in tiles.get("research_lane", [])] \
             if len(tiles) else []
+    event_study, event_table = event_study_summary(report_dir)
+    data_health, health_table = data_health_summary(report_dir)
     tables = {
         "tile_stats": tiles,
         "stream_health": stream_health(data_dir, lab, now),
         "quarantine": quarantine_table(report_dir),
+        "event_study_hypotheses": event_table,
+        "data_health_streams": health_table,
     }
     for group, names in GROUP_TABLES.items():
         staged = (groups.get(group) or {}).get("tables") or {}
@@ -251,7 +337,8 @@ def write_export(*, report_dir: str, data_dir: str, trades: Optional[pd.DataFram
     lab_summary = {k: lab.get(k) for k in ("status", "generated_at", "epoch_id", "epoch_start", "world", "usd_per_bp",
                                            "sizing_basis", "cost_model", "tape", "cross_venue", "ai_calls",
                                            "hypothesis_registry_signature", "registry_defects", "heavy", "timing",
-                                           "method", "families", "sim_parity", "hypotheses", "error")}
+                                           "method", "families", "sim_parity", "hypotheses", "error",
+                                           "stream_coverage", "history_sources")}
     summary = {
         "schema": EXPORT_SCHEMA,
         "export_id": name,
@@ -279,12 +366,17 @@ def write_export(*, report_dir: str, data_dir: str, trades: Optional[pd.DataFram
         "tables": table_meta,
         "strategy_lab": lab_summary,
         "main_rankings": {k: rankings.get(k) for k in ("status", "schema", "method", "family_summaries",
-                                                       "tile_verdicts", "error")} if rankings else
+                                                       "tile_verdicts", "error", "tile_pool")} if rankings else
         {"status": "NOT_RUN"},
         "stream_studies": {k: studies.get(k) for k in ("status", "schema", "timing", "cache", "errors", "stream_health",
                                                        "exit_regret", "taker_counterfactual",
-                                                       "fill_markouts", "research_events")} if studies else
+                                                       "fill_markouts", "research_events",
+                                                       "history_sources")} if studies else
         {"status": "NOT_RUN"},
+        "stream_coverage": lab.get("stream_coverage") or {},
+        "event_study": event_study,
+        "data_health": data_health,
+        **generation_health(report_dir),
         "dashboard": {"export": "http://127.0.0.1:9001/api/export/latest",
                       "hypotheses": "http://127.0.0.1:9001/api/hypotheses",
                       "streams": "http://127.0.0.1:9001/api/streams/health",
