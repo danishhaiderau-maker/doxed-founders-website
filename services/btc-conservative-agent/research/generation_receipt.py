@@ -111,9 +111,11 @@ def build_generation_receipt(
             f"{window.get('events_selected')}/{window.get('events_eligible')} events"
         )
     elif window_level != GREEN:
+        marks = window.get("mark_source") or {}
+        fallback = window.get("mark_fallback_events", marks.get("fallback_events"))
         reasons.append(
-            f"protection replay {window.get('reason') or 'degraded'} "
-            f"({window.get('mark_fallback_events')} events off side-correct 1s marks)"
+            f"protection replay {window.get('reason') or marks.get('reason') or 'degraded'} "
+            f"({fallback} events off side-correct 1s marks)"
         )
     if blockers_level != GREEN:
         blocked = [

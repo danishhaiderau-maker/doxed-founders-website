@@ -91,14 +91,22 @@ def utc_iso(ts: float) -> str:
     return datetime.fromtimestamp(float(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def epoch_fingerprint(**parts: Any) -> dict:
+    """Versions that define what an epoch's rows mean (bot, research stack, fill model, ...) plus their digest."""
+    material = {str(k): str(v) for k, v in sorted(parts.items()) if v not in (None, "")}
+    digest = hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+    return {**material, "sha256_16": digest}
+
+
 def new_manifest(epoch_id: str, *, started_at_ts: float, source_git_rev: str = "", bot_version: str = "",
-                 segment_prefix: str = "", previous: dict | None = None, fill_model: dict | None = None) -> dict:
+                 segment_prefix: str = "", previous: dict | None = None, fill_model: dict | None = None,
+                 fingerprint: dict | None = None) -> dict:
     if not valid_epoch_id(epoch_id):
         raise ValueError(f"invalid epoch id {epoch_id!r}: expected ce-YYYYMMDD[THHMMSSZ]-<label>")
     return {
         "schema": MANIFEST_SCHEMA, "epoch_id": epoch_id, "started_at_ts": float(started_at_ts),
         "started_at_utc": utc_iso(started_at_ts), "source_git_rev": source_git_rev, "bot_version": bot_version,
-        "segment_prefix": segment_prefix, "stamp_field": STAMP_FIELD,
+        "segment_prefix": segment_prefix, "stamp_field": STAMP_FIELD, "fingerprint": fingerprint or None,
         "previous": previous or None, "status": "OPEN",
         # research/fill_model.py declaration: rows from different fill models are not comparable.
         "fill_model": dict(fill_model) if fill_model else None,
@@ -144,25 +152,87 @@ def write_json_atomic(path: str | os.PathLike, doc: dict) -> None:
 
 def ensure_runtime_manifest(runtime_root: str | os.PathLike, epoch_id: str | None, *, now: float | None = None,
                             source_git_rev: str = "", bot_version: str = "", segment_prefix: str = "",
-                            fill_model: dict | None = None) -> dict | None:
+                            fill_model: dict | None = None, fingerprint: dict | None = None) -> dict | None:
     """Bot boot hook: keep the manifest for ``epoch_id`` or open a new one.
 
     A restart with the same id keeps the original start time; a new id opens a
     new epoch and records the previous manifest. No id configured means no
     epoch is declared (rows stay unstamped, everything classifies LEGACY).
+    A restart under the same id with a different fingerprint keeps the epoch
+    but records the change, so certification can reject a mixed epoch.
     """
     if not epoch_id:
         return None
     path = Path(runtime_root) / MANIFEST_NAME
     current = load_manifest(path)
     if current and current["epoch_id"] == epoch_id:
+        if fingerprint and current.get("fingerprint") and current["fingerprint"] != fingerprint:
+            changes = list(current.get("fingerprint_changes") or [])
+            if not changes or changes[-1].get("fingerprint") != fingerprint:
+                changes.append({"at_utc": utc_iso(time.time() if now is None else now), "fingerprint": fingerprint})
+                current = {**current, "fingerprint_changes": changes[-20:]}
+                write_json_atomic(path, current)
         return current
     doc = new_manifest(epoch_id, started_at_ts=time.time() if now is None else now, source_git_rev=source_git_rev,
-                       bot_version=bot_version, segment_prefix=segment_prefix,
+                       bot_version=bot_version, segment_prefix=segment_prefix, fingerprint=fingerprint,
                        previous={k: current.get(k) for k in ("epoch_id", "started_at_utc", "status")} if current else None,
                        fill_model=fill_model)
     write_json_atomic(path, doc)
     return doc
+
+
+# ------------------------------------------------------------------ process-wide active epoch
+
+_ACTIVE: dict | None = None
+_ENV_ROOT: Path | None = None
+_ENV_NEXT_TRY = 0.0
+ENV_RETRY_SEC = 60.0
+
+
+def activate(manifest: dict | None) -> None:
+    """Declare the epoch every writer in this process stamps (bot boot calls this once)."""
+    global _ACTIVE, _ENV_ROOT
+    _ACTIVE = dict(manifest) if manifest and not validate_manifest(manifest) else None
+    _ENV_ROOT = None
+
+
+def activate_from_env(runtime_root: str | os.PathLike) -> dict | None:
+    """Sidecar processes (collectors): adopt the bot's manifest when it names ``DATA_EPOCH_ID``.
+
+    The bot writes the manifest; a sidecar started before it keeps retrying
+    (at most once a minute) and never opens an epoch itself.
+    """
+    global _ENV_ROOT, _ENV_NEXT_TRY
+    _ENV_ROOT, _ENV_NEXT_TRY = Path(runtime_root), 0.0
+    return active_manifest()
+
+
+def _adopt_env_manifest() -> None:
+    global _ACTIVE, _ENV_NEXT_TRY
+    now = time.time()
+    if _ENV_ROOT is None or now < _ENV_NEXT_TRY:
+        return
+    _ENV_NEXT_TRY = now + ENV_RETRY_SEC
+    wanted = (os.getenv("DATA_EPOCH_ID") or "").strip()
+    doc = load_manifest(_ENV_ROOT) if wanted else None
+    if doc and doc["epoch_id"] == wanted:
+        _ACTIVE = doc
+
+
+def active_manifest() -> dict | None:
+    if _ACTIVE is None:
+        _adopt_env_manifest()
+    return _ACTIVE
+
+
+def active_epoch_id() -> str | None:
+    manifest = active_manifest()
+    return manifest["epoch_id"] if manifest else None
+
+
+def stamp_active(row: Any) -> Any:
+    """``row`` stamped with the active epoch; unchanged when no epoch is active or the row is not stampable."""
+    return stamp(row, active_epoch_id()) if isinstance(row, dict) else row
 
 
 # ------------------------------------------------------------------ stamping

@@ -14,7 +14,7 @@ param(
   [string]$ShadowRoot = 'C:\DoxxedCrypto\fly-mirror-segments',
   [string]$ArchiveRoot = 'C:\DoxxedCrypto\fly-segments',
   [string]$ViewRoot = 'C:\DoxxedCrypto\segment-promotion-view',
-  [string]$Prefix = 'v2',
+  [string]$Prefix = 'v3',
   [string]$Python = 'python',
   [int]$Port = 9001,
   [int]$PromotionAttempts = 6,

@@ -112,6 +112,18 @@ def test_receipt_names_mark_fallback_instead_of_truncation():
     assert any("REPLAY_MARK_FALLBACK" in reason and "12 events" in reason for reason in receipt["reasons"])
 
 
+def test_receipt_reads_mark_fallback_from_nested_mark_source():
+    manifest = _manifest(**{"a.json": {"available_in_generation": True}})
+    receipt = build_generation_receipt(
+        manifest,
+        integrity={"report_status": "VALID"},
+        protection_replay_window={"truncated": False, "events_eligible": 3054, "events_selected": 3054,
+                                  "alert_level": "AMBER",
+                                  "mark_source": {"reason": "REPLAY_MARK_FALLBACK", "fallback_events": 55}},
+    )
+    assert any("REPLAY_MARK_FALLBACK" in reason and "(55 events" in reason for reason in receipt["reasons"])
+
+
 def test_receipt_round_trips(tmp_path):
     receipt = build_generation_receipt(_manifest(), integrity={"report_status": "VALID"})
     write_generation_receipt(tmp_path, receipt)

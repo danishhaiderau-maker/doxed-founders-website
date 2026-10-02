@@ -10,6 +10,8 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from statistics import mean
 
+from data_epoch import stamp_active
+
 FUNNEL_FILE = "execution_funnel.jsonl"
 FILL_QUALITY_FILE = "fill_quality_report.json"
 APPROVAL_EV_FILE = "approval_ev_report.json"
@@ -43,7 +45,7 @@ def _utc_iso() -> str:
 def _append_jsonl(path: str, row: dict) -> None:
     with _lock:
         with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, default=str) + "\n")
+            f.write(json.dumps(stamp_active(row), default=str) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
@@ -83,7 +85,7 @@ def _append_close_once(path: str, row: dict) -> bool:
         if tid in closed_ids:
             return False
         with open(resolved, "a", encoding="utf-8") as output:
-            output.write(json.dumps(row, default=str) + "\n")
+            output.write(json.dumps(stamp_active(row), default=str) + "\n")
             output.flush()
             os.fsync(output.fileno())
         closed_ids.add(tid)

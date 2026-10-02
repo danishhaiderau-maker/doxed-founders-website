@@ -1,3 +1,4 @@
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -284,6 +285,12 @@ def test_production_startup_and_fresh_reset_wire_exact_identity_inputs():
     assert "bridge.bind_generation_identity(" in BOT_SOURCE
     assert '"GENOME_IDENTITY_INVALID": 1000' in BOT_SOURCE
     assert BOT_SOURCE.count('set_execution_paused("GENOME_IDENTITY_INVALID")') == 2
+    reset_source = BOT_SOURCE[BOT_SOURCE.index("def _perform_fresh_collection_reset_locked"):]
+    rebind = reset_source[reset_source.index("bridge.bind_generation_identity("):]
+    rebind = rebind[:rebind.index("_record_execution_settings_epoch(")]
+    # A reset rebind failure keeps the restart-only pause and fails the reset.
+    assert 'set_execution_paused("GENOME_IDENTITY_INVALID")' in rebind
+    assert re.search(r"\n\s+raise\s*\n", rebind)
     assert "bridge identity init failed closed" in BOT_SOURCE
     assert 'if active_reason == "GENOME_IDENTITY_INVALID":' in BOT_SOURCE
     assert '"remediation": "restart with valid exact generation identity metadata"' in BOT_SOURCE

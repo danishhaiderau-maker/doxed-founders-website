@@ -25,14 +25,18 @@ primary_region = "sin"   # Singapore — Bitfinex low latency + avoids congested
   RESEARCH_SEGMENTS_BACKLOG_BOOST_BYTES = "8388608"
   RESEARCH_SEGMENTS_BOOST_SEGMENT_BYTES = "67108864"
   RESEARCH_SEGMENTS_BOOST_NICE = "10"
-  # Fresh-start epoch (2026-09-30): v2 begins at a genesis BASELINE segment,
-  # so only data written after the cutover ships. v1 is superseded.
-  RESEARCH_SEGMENTS_PREFIX = "v2"
-  RESEARCH_SEGMENTS_STATE_DIR = "/app/data/segment-shipper-v2"
+  # Clean data epoch (post-freeze): every record written by this release carries
+  # data_epoch_id; data_epoch.json at the runtime root fixes the start (kept
+  # across restarts). Pre-epoch data is wiped only after the 2 h certification
+  # gate (diagnostics/CLEAN-EPOCH-RUNBOOK-20261003.md).
+  DATA_EPOCH_ID = "ce-20261004-v31-clean"
+  # v3 begins at a genesis BASELINE segment, so only clean-epoch bytes ship.
+  RESEARCH_SEGMENTS_PREFIX = "v3"
+  RESEARCH_SEGMENTS_STATE_DIR = "/app/data/segment-shipper-v3"
   RESEARCH_SEGMENTS_BASELINE_GENESIS = "1"
-  # v1 stays readable/ACKable (no shipper writes it) until the laptop holds
-  # every v1 seq; only then may fresh-start-wipe remove it.
-  RESEARCH_SEGMENTS_ARCHIVE_PREFIXES = "v1=/app/data/segment-shipper"
+  # v1/v2 stay readable/ACKable (no shipper writes them) until the laptop holds
+  # every seq; only then may clean-epoch-wipe remove them.
+  RESEARCH_SEGMENTS_ARCHIVE_PREFIXES = "v1=/app/data/segment-shipper,v2=/app/data/segment-shipper-v2"
 
 # Trading bot must stay up 24/7 — never auto-stop.
 [http_service]

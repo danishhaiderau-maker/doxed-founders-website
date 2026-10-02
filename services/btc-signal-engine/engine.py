@@ -15,6 +15,7 @@ import csv
 import zipfile
 import io
 import json
+import data_epoch as _data_epoch
 import system_health_banner
 import system_health_alerts
 import runtime_uptime
@@ -32009,10 +32010,20 @@ def _perform_fresh_collection_reset_quiesced(send_local_signal: bool = True) -> 
         if _collector_v22_epoch_id() != boundary["new_epoch"]:
             raise RuntimeError("RESET_NEW_EPOCH_IDENTITY_MISMATCH")
         if bridge is not None:
-            bridge.bind_generation_identity(
-                dataset_epoch=boundary["new_epoch"], deployed_revision=boundary["deployed_revision"],
-                tile_config_signature=active_tile_registry_signature(),
-            )
+            try:
+                bridge.bind_generation_identity(
+                    dataset_epoch=boundary["new_epoch"], deployed_revision=boundary["deployed_revision"],
+                    tile_config_signature=active_tile_registry_signature(),
+                )
+            except Exception as exc:
+                # A stale bridge identity must never be resumable by an operator:
+                # only a restart with valid identity metadata clears this pause.
+                set_execution_paused("GENOME_IDENTITY_INVALID")
+                logger.error(
+                    f"[GENOME] bridge identity rebind failed closed during fresh reset: {exc}; "
+                    "GENOME_IDENTITY_INVALID requires a valid restart [PIPELINE ENFORCEMENT]"
+                )
+                raise
         # Preserve prior settings periods and start a fresh one only after
         # deletion, authority retirement and new-epoch publication succeeded.
         _record_execution_settings_epoch("FRESH_COLLECTION_STARTED", force=True)
@@ -41922,6 +41933,7 @@ def status():
         "ai_provider_health": strategy_progress["ai_provider"],
         "lifecycle_pipeline": _lifecycle_pipeline_public_status(now),
         "uptime": _runtime_uptime_summary(now),
+        "data_epoch": _data_epoch_public(),
         **execution_control,
         "system_ready": runtime["system_ready"],
         "signal_generation_ready": runtime["signal_generation_ready"],
@@ -50462,10 +50474,16 @@ _JSONL_SERIALIZED_APPEND_CONSTANTS = (
     "COUNTERFACTUAL_FILE",
     "SOURCE_ORDER_MARKET_EVIDENCE_FILE",
     "MICROSTRUCTURE_TAPE_FILE",
+    "ADAPTIVE_ENTRY_DECISIONS_FILE",
+    "RETIRED_TILE_BOUNDARY_FILE",
+    "XVL_SHADOW_FILE",
 )
 _JSONL_SERIALIZED_APPEND_LITERALS = (
     "execution_funnel.jsonl",
     "shadow_runner_study.jsonl",
+    "fill_markouts.jsonl",
+    "taker_signal_counterfactuals.jsonl",
+    "xvp_shadow_signals.jsonl",
 )
 
 
@@ -50909,7 +50927,8 @@ def _safe_append_jsonl(
             label, admission["reason"], admission["threshold"],
         )
         return False
-    line = json.dumps(row, default=str) + "\n"
+    stamp_epoch = globals().get("_data_epoch_row")
+    line = json.dumps(stamp_epoch(path, row) if stamp_epoch else row, default=str) + "\n"
     last_err = None
     # Some contract tests compile this helper in isolation; the path lock still
     # provides their local serialization while production supplies the shared
@@ -50954,6 +50973,91 @@ def _safe_append_jsonl(
     if outcome is not None:
         outcome["status"] = "WRITE_FAILED"
     return False
+
+
+DATA_EPOCH_ID = (os.getenv("DATA_EPOCH_ID") or "").strip() or None
+_DATA_EPOCH_MANIFEST: dict | None = None
+
+
+def _data_epoch_fill_model() -> dict:
+    """research/fill_model.py declaration (REALISTIC-FILLS); FILL_MODEL_VERSION env overrides the version."""
+    try:
+        from research.fill_model import fill_model_declaration
+        declaration = dict(fill_model_declaration())
+    except Exception:
+        declaration = {"fill_model": "unspecified"}
+    configured = (os.getenv("FILL_MODEL_VERSION") or "").strip()
+    if configured:
+        declaration["fill_model"] = configured
+    return declaration
+
+
+def _data_epoch_fingerprint(fill_model: dict) -> dict:
+    return _data_epoch.epoch_fingerprint(
+        bot_version=EXECUTION_FIX_VERSION, research_stack_version=COMBO_EXECUTION_FIX_VERSION,
+        fill_model=fill_model.get("fill_model"), fill_model_fingerprint=fill_model.get("fill_model_fingerprint"),
+        collector_fill_model=FILL_MODEL_IDEAL_TOUCH, collector_version=COLLECTOR_VERSION,
+        feature_schema_version=FEATURE_SCHEMA_VERSION,
+    )
+
+
+def _open_data_epoch() -> dict | None:
+    """Boot hook: open (or keep, across restarts) the clean data epoch named by DATA_EPOCH_ID."""
+    global _DATA_EPOCH_MANIFEST
+    if not DATA_EPOCH_ID:
+        return None
+    try:
+        fill_model = _data_epoch_fill_model()
+        _DATA_EPOCH_MANIFEST = _data_epoch.ensure_runtime_manifest(
+            str(_data_sync_runtime_root()), DATA_EPOCH_ID, source_git_rev=_runtime_git_rev(),
+            bot_version=EXECUTION_FIX_VERSION,
+            segment_prefix=(os.getenv("RESEARCH_SEGMENTS_PREFIX") or "").strip(),
+            fill_model=fill_model, fingerprint=_data_epoch_fingerprint(fill_model),
+        )
+    except (OSError, ValueError) as exc:
+        _DATA_EPOCH_MANIFEST = None
+        logger.error(f"[DATA EPOCH] cannot open {DATA_EPOCH_ID}: {exc}; rows stay unstamped [PIPELINE ENFORCEMENT]")
+        return None
+    _data_epoch.activate(_DATA_EPOCH_MANIFEST)
+    try:
+        import epoch_boundary_rotation
+        epoch_boundary_rotation.start_boundary_thread(_data_sync_runtime_root(), _DATA_EPOCH_MANIFEST,
+                                                      log=logger.info)
+    except Exception as exc:
+        logger.error(f"[DATA EPOCH] boundary cutover not started: {exc} [PIPELINE ENFORCEMENT]")
+    logger.info(
+        f"[DATA EPOCH] {_DATA_EPOCH_MANIFEST['epoch_id']} since {_DATA_EPOCH_MANIFEST['started_at_utc']} "
+        "[PIPELINE ENFORCEMENT]"
+    )
+    return _DATA_EPOCH_MANIFEST
+
+
+def _data_epoch_row(path: str, row):
+    manifest = globals().get("_DATA_EPOCH_MANIFEST")
+    if not manifest or not isinstance(row, dict):
+        return row
+    return _data_epoch.stamp(row, manifest["epoch_id"])
+
+
+def _data_epoch_boundary_status(manifest: dict) -> dict | None:
+    if not manifest:
+        return None
+    try:
+        import epoch_boundary_rotation
+        root = _data_sync_runtime_root()
+        return {stream: (epoch_boundary_rotation.load_receipt(root, manifest["epoch_id"], stream) or {}).get("status")
+                for stream in ("research_events_v22", "v3")}
+    except Exception:
+        return None
+
+
+def _data_epoch_public() -> dict:
+    manifest = _DATA_EPOCH_MANIFEST or {}
+    return {"declared": bool(manifest), "configured": DATA_EPOCH_ID, "epoch_id": manifest.get("epoch_id"),
+            "started_at_utc": manifest.get("started_at_utc"), "stamp_field": _data_epoch.STAMP_FIELD,
+            "segment_prefix": manifest.get("segment_prefix"), "fingerprint": manifest.get("fingerprint"),
+            "boundary": _data_epoch_boundary_status(manifest),
+            "fingerprint_changes": len(manifest.get("fingerprint_changes") or [])}
 
 
 def _validate_research_ledgers_on_startup():
@@ -51745,6 +51849,7 @@ def main():
             "[AI INIT] DEEPSEEK_API_KEY missing - copy .env.example to .env in this folder "
             "or set env vars before starting. AI will return MISSING_API_KEY until fixed."
         )
+    _open_data_epoch()
     _wipe_research_on_startup_if_needed()
     _validate_research_ledgers_on_startup()
     _restore_collector_v22_provisionals()

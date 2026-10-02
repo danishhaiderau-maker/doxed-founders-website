@@ -23,6 +23,7 @@ from lifecycle_pipeline import (
     process_incremental_lifecycle_pipeline,
 )
 from research_v3_store import V3EvidenceStore
+from data_epoch import activate_from_env
 
 
 REQUEST_SCHEMA = "lifecycle_pipeline_worker_request_v1"
@@ -379,6 +380,7 @@ def run(request_path: Path, result_path: Path, nonce: str) -> int:
     try:
         _lower_priority()
         request = _load(request_path, result_path, nonce)
+        activate_from_env(request["_data_root"])
         started = time.time()
         deadline = time.monotonic() + request["_runtime"]
         emergency_wal = None

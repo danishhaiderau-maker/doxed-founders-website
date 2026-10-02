@@ -727,7 +727,8 @@ def compact_json_line(record: Mapping[str, Any]) -> str:
 
 
 def write_order_multiverse(path: str, record: Mapping[str, Any]) -> str:
-    line = compact_json_line(record)
+    from data_epoch import stamp_active
+    line = compact_json_line(stamp_active(dict(record)))
     if line.count("\n"):
         raise ValueError("order_multiverse row must be one JSON line")
     with open(path, "a", encoding="utf-8") as handle:

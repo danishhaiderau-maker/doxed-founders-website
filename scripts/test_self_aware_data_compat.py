@@ -113,6 +113,22 @@ def test_declared_epoch_turns_pre_epoch_rows_red_and_purity_needs_receipt(tmp_pa
     assert fnd["data.compat_mixed"]["severity"] == "RED" and fnd["data.compat_epoch_purity"]["severity"] == "RED"
 
 
+def test_unstampable_csv_counts_as_declared_once_every_post_epoch_row_is_epoch_dated(tmp_path, monkeypatch):
+    paths = _paths(tmp_path)
+    m = tmp_path / "mirror"
+    (tmp_path / "chain").mkdir(parents=True)
+    m.mkdir(parents=True)
+    (m / "data_epoch.json").write_text(json.dumps(dc.de.new_manifest(EPOCH, started_at_ts=START)))
+    (m / "trend_health.csv").write_text(f"ts,score\n{START + 5},1\n{START + 6},2\n", encoding="utf-8")
+    _write(m / "execution_funnel.jsonl", [{"ts": START + 5, "stage": "scan", "data_epoch_id": EPOCH}])
+    _write(m / "xvl_shadow_signals.jsonl", [{"ts": START + 5, "side": "LONG"}])
+    doc = _run(paths, monkeypatch)
+    by = {s["stream"]: s for s in doc["streams"]}
+    assert by["trend_health.csv"]["version_declared"] is True
+    assert by["execution_funnel.jsonl"]["version_declared"] is True
+    assert doc["undeclared_streams"] == ["xvl_shadow_signals.jsonl"]
+
+
 def test_stale_doc_skips_and_diagnose_registers_check(tmp_path, monkeypatch):
     assert all(f["severity"] == "SKIP" for f in dc.findings(None, NOW, 7200))
     assert CADENCE_SEC["compat"] == 1800 and THRESHOLDS["compat_doc_max_age_sec"] == 7200

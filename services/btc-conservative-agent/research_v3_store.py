@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from research_v3_contract import EVIDENCE_SCHEMA, LEDGER_NAMES, canonical_json
+from data_epoch import STAMP_FIELD as DATA_EPOCH_STAMP_FIELD, active_epoch_id
 from combo_pathway_config import active_tile_registry_signature
 from collector_storage import emergency_admission, storage_blocks_new_nonessential_research
 from emergency_evidence_wal import EmergencyEvidenceWal
@@ -2214,6 +2215,9 @@ class V3EvidenceStore:
             "epoch_id": self.epoch_id,
             **_collection_provenance(),
         })
+        data_epoch_id = active_epoch_id()
+        if data_epoch_id:
+            material.setdefault(DATA_EPOCH_STAMP_FIELD, data_epoch_id)
         if ledger == "opportunity":
             # Every producer path converges here.  Stamp the complete available
             # causal identity once rather than relying on each bridge caller to
