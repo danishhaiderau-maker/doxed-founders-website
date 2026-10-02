@@ -318,9 +318,20 @@ def main():
         run(request, emit=lambda receipt: print(json.dumps(receipt, separators=(",", ":")), flush=True))
         return 0
     except Exception as error:
-        code = str(error)
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]{1,95}", code):
-            code = "BUNDLE_CLIENT_FAILED"
+        # Never emit a traceback: exception messages can contain request URLs,
+        # response fragments, or credentials.  The stdout receipt below is the
+        # bounded, machine-readable diagnostic channel.
+        print("BUNDLE_CLIENT_DIAGNOSTIC_REDACTED", file=sys.stderr)
+        # Never promote arbitrary exception text to an externally visible
+        # error code.  Even an all-caps/underscore exception can contain a
+        # secret or customer-controlled value.  The sole non-generic code is
+        # this locally constructed pressure-circuit class; bounded structured
+        # diagnostics remain below for its known-safe fields.
+        code = (
+            "BUNDLE_INDEX_PRESSURE_CIRCUIT_OPEN"
+            if isinstance(error, IndexPressureError)
+            else "BUNDLE_CLIENT_FAILED"
+        )
         receipt = {"schema": "fly_bundle_staging_receipt_v1", "status": "FAILED", "error": code}
         diagnostic = sanitize_diagnostic(error.diagnostic) if isinstance(error, BundleClientError) else None
         if diagnostic is not None:

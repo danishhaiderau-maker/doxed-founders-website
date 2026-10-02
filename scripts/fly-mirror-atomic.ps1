@@ -1,3 +1,13 @@
+function ConvertTo-MirrorLongPath {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  $full = [System.IO.Path]::GetFullPath($Path)
+  if ($full.StartsWith('\\?\')) { return $full }
+  if ($full.StartsWith('\\')) {
+    return '\\?\UNC\' + $full.Substring(2)
+  }
+  return '\\?\' + $full
+}
+
 function Test-MirrorCandidate {
   param(
     [Parameter(Mandatory = $true)][string]$Path,
@@ -12,6 +22,7 @@ function Test-MirrorCandidate {
   ) {
     throw "Downloaded candidate has an invalid relative path: $RelativePath."
   }
+  $longPath = ConvertTo-MirrorLongPath $Path
   $name = $normalizedRelativePath.ToLowerInvariant()
   $opaqueCorruptEvidence = $name.StartsWith(
     "corrupt_evidence_quarantine/",
@@ -24,7 +35,7 @@ function Test-MirrorCandidate {
     if ($null -eq $ExpectedSize -or [int64]$ExpectedSize -lt 0) {
       throw "Quarantine evidence manifest size is unavailable for $RelativePath."
     }
-    $candidateSize = [int64](Get-Item -LiteralPath $Path).Length
+    $candidateSize = [int64]([System.IO.FileInfo]::new($longPath).Length)
     if ($candidateSize -ne [int64]$ExpectedSize) {
       throw "Quarantine evidence manifest size mismatch for $RelativePath."
     }
@@ -36,20 +47,22 @@ function Test-MirrorCandidate {
   }
   # This legacy filename is an append-only newline-delimited crash journal,
   # not one JSON document. Validating the whole file as JSON stalls the mirror
-  # as soon as a second crash record is appended.
-  if ($name -eq "crash_dump.json") {
-    $name = "crash_dump.jsonl"
+  # as soon as a second crash record is appended. Match root and nested paths
+  # (e.g. recovery_receipts/.../crash_dump.json).
+  if ($name -eq "crash_dump.json" -or $name.EndsWith("/crash_dump.json")) {
+    $name = $name.Substring(0, $name.Length - 5) + ".jsonl"
   }
   if ($name -match '\.json$') {
     try {
-      $null = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+      $raw = [System.IO.File]::ReadAllText($longPath, [System.Text.UTF8Encoding]::new($false, $true))
+      $null = $raw | ConvertFrom-Json
     } catch {
       throw "Downloaded JSON candidate is invalid for ${RelativePath}: $($_.Exception.Message)"
     }
     return
   }
   if ($name -match '\.jsonl(?:\.\d+)?$') {
-    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $stream = [System.IO.File]::Open($longPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
       if ($stream.Length -eq 0) { return }
       $stream.Seek(-1, [System.IO.SeekOrigin]::End) | Out-Null
@@ -72,7 +85,7 @@ function Test-MirrorCandidate {
     return
   }
   if ($name -match '\.csv(?:\.\d+)?$') {
-    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+    $stream = [System.IO.File]::Open($longPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
     try {
       if ($stream.Length -eq 0) { return }
       $stream.Seek(-1, [System.IO.SeekOrigin]::End) | Out-Null
@@ -146,18 +159,25 @@ function Publish-MirrorCandidate {
     [int]$ReplaceAttempts = 12
   )
   $backup = "$Candidate.replace-backup"
+  $longCandidate = ConvertTo-MirrorLongPath $Candidate
+  $longDestination = ConvertTo-MirrorLongPath $Destination
+  $longBackup = ConvertTo-MirrorLongPath $backup
   try {
-    if (Test-Path -LiteralPath $Destination) {
+    $parentFull = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($Destination))
+    if ($parentFull) {
+      [void][System.IO.Directory]::CreateDirectory((ConvertTo-MirrorLongPath $parentFull))
+    }
+    if ([System.IO.File]::Exists($longDestination)) {
       Invoke-MirrorAtomicReplace `
-        -Candidate $Candidate `
-        -Destination $Destination `
-        -Backup $backup `
+        -Candidate $longCandidate `
+        -Destination $longDestination `
+        -Backup $longBackup `
         -Attempts $ReplaceAttempts
     } else {
-      [System.IO.File]::Move($Candidate, $Destination)
+      [System.IO.File]::Move($longCandidate, $longDestination)
     }
   } finally {
-    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    try { [System.IO.File]::Delete($longBackup) } catch { }
   }
 }
 
@@ -169,9 +189,12 @@ function Invoke-MirrorAtomicReplace {
     [int]$Attempts = 12
   )
   $boundedAttempts = [Math]::Max(1, [Math]::Min(20, $Attempts))
+  $longCandidate = ConvertTo-MirrorLongPath $Candidate
+  $longDestination = ConvertTo-MirrorLongPath $Destination
+  $longBackup = ConvertTo-MirrorLongPath $Backup
   for ($attempt = 1; $attempt -le $boundedAttempts; $attempt++) {
     try {
-      [System.IO.File]::Replace($Candidate, $Destination, $Backup, $true)
+      [System.IO.File]::Replace($longCandidate, $longDestination, $longBackup, $true)
       return
     } catch [System.IO.IOException] {
       if ($attempt -ge $boundedAttempts) {

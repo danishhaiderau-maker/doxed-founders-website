@@ -13,7 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+# Under .score-led-boundary/scripts this file's parents[1] is the boundary
+# checkout, but the canonical store lives in the parent worktree
+# (…/btc-v31-current/services/…/canonical-research-data). Resolve to that.
+_SCRIPT = Path(__file__).resolve()
+REPO_ROOT = _SCRIPT.parents[1]
+if REPO_ROOT.name.startswith(".score-led"):
+    REPO_ROOT = _SCRIPT.parents[2]
 AGENT_ROOT = REPO_ROOT / "services" / "btc-conservative-agent"
 if str(AGENT_ROOT) not in sys.path:
     sys.path.insert(0, str(AGENT_ROOT))

@@ -1,5 +1,15 @@
 # BTC V3.1 Agent Contract
 
+## Current user authority (14 September 2026)
+
+- Danish authorizes editing any project file required for repairs, tests and QA.
+  Older "no additional file edits" goal text is superseded.
+- Follow `C:\DoxxedCrypto\btc-v31-current\BTC_V31_ACTIVE_GOAL.md` and its linked
+  audit. This nested worktree is selected by the existing sync launcher; inspect
+  its actual dirty changes and code hashes before implementation.
+- Live remains disarmed until technical AND strategy gates pass and Danish
+  separately explicitly authorizes arming. Historical sizing is context only.
+
 ## Canonical workspace
 
 - Work only from `C:\DoxxedCrypto\btc-v31-current`.
@@ -14,14 +24,10 @@
 - A tile toggle never arms Bitfinex.
 - Relay OFF means paper only.
 - Relay ON may copy only new, signed, allowlisted paper intents created after arming. It must never copy historical or already-open paper state.
-- The user normally arms or disarms the Bitfinex relay. For the current goal,
-  the user has explicitly delegated arming authority to the primary agent only
-  after every technical-readiness, exact-size, protection, partial-reduction,
-  restart-recovery, reconciliation, analyzer-parity, dashboard-truthfulness,
-  visual-QA, and safe-boundary gate is current and GREEN. Any uncertainty must
-  fail closed. This delegation never permits early arming, upward size rounding,
-  strategy/risk expansion, copying historical paper state, or force-closing
-  real exposure.
+- Only a separate explicit Danish arming instruction permits live arming after
+  every technical, strategy, reconciliation, analyzer and visual-QA gate passes.
+  Never round size upward, expand risk, copy historical paper state or force-close
+  real exposure under a research or repair instruction.
 
 ## Live-test safety
 
@@ -37,7 +43,7 @@
   active-tile registry. Runtime, API, production dashboard, collector, mirror,
   analyzer, monitoring, and tests must derive their roster from it; do not add a
   second hard-coded tile list.
-- Current registered tiles are the analyzer-hypothesis paper experiment:
+- Historical registered tiles in the analyzer-hypothesis paper experiment were:
   Chandelier 1.5 ATR; Fixed ATR Target 2.5 with Scenario-C ladder; ATR Trail
   SL 1.5 / arm 0.75 / trail 1; Hybrid Runner with 25% at 1 ATR plus 25% at
   1.5 ATR; and MFE Giveback 20%. Their entry offsets are 0.27% for Fixed and
@@ -45,7 +51,10 @@
   and 180-second repricing. All five default OFF, are
   paper-only, and are relay-ineligible; Continuous remains an analytical
   comparison label only and cannot create an order.
-  The number of tiles is not an architecture constant; the frozen
+  That snapshot predates the deployed score-led paper experiment. Resolve the
+  actual roster, policy treatment, defaults and Continuous order eligibility from
+  the exact deployed registry and environment; do not restore this historical
+  snapshot as configuration. The number of tiles is not an architecture constant; the frozen
   toggle/paper/relay/identity rules above are.
 - Adding a tile requires one registry specification with a unique lane, policy
   signature, ID prefix, toggle key, default state, relay eligibility, and complete
