@@ -414,6 +414,8 @@ def migrate(source: Path, destination: Path, heartbeat_path: Path, *, full: bool
         "files_appended": counts["appended"],
         "files_copied": counts["copied"],
         "bytes_written": written_bytes,
+        "promotion_level": str(heartbeat.get("promotionLevel") or "GREEN"),
+        "promotion_warnings": [str(item) for item in heartbeat.get("promotionWarnings") or []],
     }
     (destination / "migration" / "migration_receipt.json").write_text(
         json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
