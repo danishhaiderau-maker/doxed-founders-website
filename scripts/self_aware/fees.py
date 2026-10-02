@@ -261,6 +261,9 @@ def scan_literals(root: Path, max_files: int = 4000) -> list[dict[str, Any]]:
                 if s.startswith(("#", "//", "*")) or "fee" not in s.lower():
                     continue
                 for m in LITERAL_RE.finditer(s):
+                    name = m.group(1).lower()
+                    if name.endswith("fees") or "usd" in name:
+                        continue  # accumulated fee amounts (e.g. maker_fees = 0.0), not rates
                     hits.append({"file": rel, "line": lineno, "field": m.group(1), "value": _num(m.group(2)),
                                  "text": s[:160]})
     return hits
