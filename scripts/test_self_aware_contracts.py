@@ -349,3 +349,23 @@ def test_contract_routes(paths, store):
         assert "Section contracts" in html and eng.spec_id in html
     finally:
         srv.shutdown()
+
+
+def test_declared_blocker_downgrades_only_matching_violations_until_expiry():
+    blocker = {"id": "PENDING_FIX", "kinds": ["EMPTY_SILENT"], "severity": "AMBER", "reason": "known upstream defect",
+               "fix": "deploy X", "eta": "2026-10-04T15:00Z", "expires": "2026-10-06T00:00:00Z",
+               "when": {"path": "status", "in": ["BLOCKED"]}}
+    spec = _spec(tables=[{"path": "rows", "min_rows": 1}], declared_blockers=[blocker])
+    ct.validate_registry({"contracts": [spec]})
+    now = ct.parse_ts("2026-10-03T22:00:00Z")
+    res = _eval(spec, {"rows": [], "status": "BLOCKED"}, now=now)
+    assert res["status"] == "AMBER" and res["declared_blockers"][0]["id"] == "PENDING_FIX"
+    hit = [v for v in res["violations"] if v.get("declared_blocker")]
+    assert hit and hit[0]["severity_undeclared"] == "RED" and "ETA 2026-10-04T15:00Z" in hit[0]["detail"]
+    assert _eval(spec, {"rows": [], "status": "OK"}, now=now)["status"] == "RED"
+    late = _eval(spec, {"rows": [], "status": "BLOCKED"}, now=ct.parse_ts("2026-10-06T01:00:00Z"))
+    assert late["status"] == "RED" and "DECLARED_BLOCKER_EXPIRED" in _kinds(late)
+    with pytest.raises(ValueError):
+        ct.validate_registry({"contracts": [_spec(declared_blockers=[dict(blocker, severity="GREEN")])]})
+    with pytest.raises(ValueError):
+        ct.validate_registry({"contracts": [_spec(declared_blockers=[{"id": "x"}])]})

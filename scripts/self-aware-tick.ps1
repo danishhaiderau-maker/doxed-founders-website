@@ -54,6 +54,20 @@ $mine = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
   Where-Object { $_.CommandLine -like '*self_aware.engine*' })
 if ($answered) {
   if ($ping.starting -or -not $ping.engine) { Write-TickLog 'STARTING (engine loading)'; exit 0 }
+  # A daemon started from a shell with SELF_AWARE_HOME pointing at a scratch home keeps its own state and
+  # alarm baseline, so alarms it never opened can never clear. Only the keeper's home may own the port.
+  $store = [string]$ping.engine.store
+  $homeFull = [IO.Path]::GetFullPath($HomeDir).TrimEnd('\') + '\'
+  if ($store -and -not $store.StartsWith($homeFull, [StringComparison]::OrdinalIgnoreCase)) {
+    foreach ($p in $mine) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+    Write-Journal 'restart_wrong_home_self_aware' 'EXECUTED' "port $Port held by self-aware with store $store outside $HomeDir"
+    Write-TickLog "RESTART wrong home store=$store"
+    Start-Sleep -Seconds 3
+    $answered = $false
+    $mine = @()
+  }
+}
+if ($answered) {
   $started = [datetime]::Parse($ping.engine.started_at).ToUniversalTime()
   if (([datetime]::UtcNow - $started).TotalMinutes -lt 10) { Write-TickLog 'OK (within 10 min start grace)'; exit 0 }
   $stale = @(Get-StaleReasons $ping.engine)
@@ -99,6 +113,9 @@ $out = Join-Path $logDir 'daemon.out.log'
 $err = Join-Path $logDir 'daemon.err.log'
 foreach ($f in @($out, $err)) { if ((Test-Path $f) -and (Get-Item $f).Length -gt 20MB) { Move-Item $f "$f.1" -Force } }
 $env:PYTHONIOENCODING = 'utf-8'
+# Never let a caller's SELF_AWARE_* overrides (scratch homes, test mirrors) leak into the production daemon.
+Get-ChildItem Env: | Where-Object { $_.Name -like 'SELF_AWARE_*' } | ForEach-Object { Remove-Item "Env:$($_.Name)" }
+$env:SELF_AWARE_HOME = $HomeDir
 $proc = Start-Process -FilePath $python -ArgumentList @('-m', 'self_aware.engine') -WorkingDirectory $PSScriptRoot `
   -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
 Write-Journal 'start_self_aware' 'EXECUTED' "nothing answered on 127.0.0.1:$Port"

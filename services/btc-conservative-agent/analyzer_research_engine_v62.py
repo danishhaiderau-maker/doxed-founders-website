@@ -20019,22 +20019,37 @@ def _save_rolling_snapshot():
         dest = os.path.join(REPORTS_HISTORY_DIR, stamp)
         os.makedirs(dest, exist_ok=True)
         copied = 0
+        # Oversized per-episode reports (entry_baseline_replay_report.json is
+        # 280 MB+ and grows with every episode) are kept compressed per run by
+        # research.report_history in analysis-archive; a raw copy per rolling
+        # folder multiplied laptop storage without adding evidence.
+        max_bytes = int(os.getenv("ANALYZER_ROLLING_SNAPSHOT_MAX_FILE_BYTES", str(64 * 1024 * 1024)))
+        skipped_large = []
+
+        def _copy(src, dst):
+            size = os.path.getsize(src)
+            if size > max_bytes:
+                skipped_large.append({"file": os.path.basename(src), "bytes": size})
+                return False
+            shutil.copy2(src, dst)
+            return True
+
         for fname in ANALYZER_JSON_REPORT_FILES:
-            if os.path.isfile(fname):
-                shutil.copy2(fname, os.path.join(dest, os.path.basename(fname)))
+            if os.path.isfile(fname) and _copy(fname, os.path.join(dest, os.path.basename(fname))):
                 copied += 1
         rep_dir = REPORTS_DIR
         if os.path.isdir(rep_dir):
             snap_rep = os.path.join(dest, "reports")
             os.makedirs(snap_rep, exist_ok=True)
             for p in glob.glob(os.path.join(rep_dir, "*.json")):
-                shutil.copy2(p, os.path.join(snap_rep, os.path.basename(p)))
+                _copy(p, os.path.join(snap_rep, os.path.basename(p)))
         for txt in (
             EXECUTIVE_SUMMARY_FILE, RESEARCH_FINDINGS_FILE, REPORT_MANIFEST_FILE,
         ):
             if os.path.isfile(txt):
                 shutil.copy2(txt, os.path.join(dest, txt))
-        meta = {"snapshot_at": datetime.now(timezone.utc).isoformat(), "files_copied": copied}
+        meta = {"snapshot_at": datetime.now(timezone.utc).isoformat(), "files_copied": copied,
+                "max_file_bytes": max_bytes, "skipped_large": skipped_large}
         with open(os.path.join(dest, "snapshot_meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         return dest

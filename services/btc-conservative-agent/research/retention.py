@@ -458,6 +458,47 @@ def _prune_derived_folders(
     }
 
 
+def _prune_policy_evidence_generations(
+    parent: Path,
+    *,
+    now: datetime,
+    keep_latest: int,
+    minimum_age_sec: int = 3600,
+) -> dict:
+    """Bound the disposable per-generation policy-evidence caches.
+
+    Every analyzer cycle derives a new generation key, so without this each
+    cycle left a ~40 MB ``generation-<sha256>`` directory behind forever. The
+    caches are rebuilt from the raw ledgers; only the newest few are read.
+    """
+    if not parent.is_dir():
+        return {"path": str(parent), "kept": 0, "deleted": 0, "deleted_bytes": 0}
+    folders = sorted(
+        (
+            p for p in parent.iterdir()
+            if p.is_dir() and p.name.startswith("generation-")
+            and len(p.name) == len("generation-") + 64
+            and all(c in "0123456789abcdef" for c in p.name[len("generation-"):])
+        ),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    kept = deleted = deleted_bytes = 0
+    for index, folder in enumerate(folders):
+        age_sec = now.timestamp() - folder.stat().st_mtime
+        if index < keep_latest or age_sec < minimum_age_sec:
+            kept += 1
+            continue
+        try:
+            size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
+            shutil.rmtree(folder)
+            deleted += 1
+            deleted_bytes += size
+        except OSError:
+            kept += 1
+    return {"path": str(parent), "kept": kept, "deleted": deleted, "deleted_bytes": deleted_bytes}
+
+
 def _reconcile_session_index(root: Path) -> None:
     path = root / "research_session_index.json"
     archive_root = root / "research_session_archives"
@@ -501,6 +542,7 @@ def run_analyzer_retention(
     daily_keep_days = _env_int("ANALYZER_DAILY_EVIDENCE_DAYS", 90, 30)
     rotation_age_hours = _env_int("ANALYZER_ROTATED_RAW_RETENTION_HOURS", 24, 6)
     rotation_keep_latest = _env_int("ANALYZER_ROTATED_RAW_KEEP_LATEST", 2, 1)
+    policy_evidence_keep = _env_int("ANALYZER_POLICY_EVIDENCE_KEEP_GENERATIONS", 3, 1)
     raw_db_retain_hours = _env_int("ANALYZER_RAW_DB_RETENTION_HOURS", 72, 24)
     raw_mirror_cap_gib = _env_int(
         "ANALYZER_RAW_MIRROR_CAP_GIB", DEFAULT_RAW_MIRROR_CAP_GIB, 1
@@ -524,6 +566,10 @@ def run_analyzer_retention(
                     ),
                     _prune_derived_folders(
                         root / "research_session_archives", now=now, retain_days=retain_days
+                    ),
+                    _prune_policy_evidence_generations(
+                        data_root / "derived" / "policy-evidence", now=now,
+                        keep_latest=policy_evidence_keep,
                     ),
                 ]
                 _reconcile_session_index(root)
@@ -700,6 +746,10 @@ def run_analyzer_retention(
         ),
         _prune_derived_folders(
             root / DAILY_DIR, now=now, retain_days=daily_keep_days
+        ),
+        _prune_policy_evidence_generations(
+            data_root / "derived" / "policy-evidence", now=now,
+            keep_latest=policy_evidence_keep,
         ),
     ]
     _reconcile_session_index(root)

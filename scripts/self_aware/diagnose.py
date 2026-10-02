@@ -771,12 +771,19 @@ def check_contracts(f, sig, store) -> list[Finding]:
                            evidence={"offenders": bad[:20], "api": f"/api/selfaware/contracts?surface={surface}"},
                            drill_sql=drill))
     col = c.get("collapse") or []
+    declared = c.get("declared_blockers") or []
+    # Older summaries carry no per-entry severity; treat those as RED like before.
+    col_sev = RED if any(x.get("severity", RED) == RED for x in col) else AMBER
+    declared_txt = ("; declared blockers: " + ", ".join(f"{d['id']} ({'/'.join(d['blockers'])}, ETA {d['eta']})"
+                                                        for d in declared[:4])) if declared else ""
     out.append(Finding("contract.collapse", "No section collapsed (dimensions, rows, silent emptiness)", "contracts",
-                       RED if col else GREEN,
-                       "collapsed: " + ", ".join(f"{x['id']} ({'/'.join(x['kinds'])})" for x in col[:6]) if col else
-                       "no dimension collapse, silent emptiness, label contradiction or dead Fly panel",
+                       col_sev if col else GREEN,
+                       ("collapsed: " + ", ".join(f"{x['id']} ({'/'.join(x['kinds'])}{' ' + x['severity'] if x.get('severity') else ''})"
+                                                  for x in col[:6]) if col else
+                        "no undeclared dimension collapse, silent emptiness, label contradiction or dead Fly panel")
+                       + declared_txt,
                        "every section keeps its expected dimensions and row counts vs its baseline",
-                       evidence={"collapse": col}, drill_sql=drill))
+                       evidence={"collapse": col, "declared_blockers": declared}, drill_sql=drill))
     adf, adr = c.get("archive_drift_findings") or 0, c.get("archive_drift_red") or 0
     stale_heavy = not heavy or f["now"] - heavy > THRESHOLDS["contracts_heavy_max_age_sec"]
     out.append(Finding("contract.archive_drift", "Archived analyzer reports keep their shape across generations", "contracts",

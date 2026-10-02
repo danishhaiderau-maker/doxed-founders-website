@@ -292,5 +292,47 @@ class ResearchRetentionTests(unittest.TestCase):
             self.assertNotIn("OneDrive", json.dumps(public_status))
 
 
+class PolicyEvidenceGenerationPruneTests(unittest.TestCase):
+    def test_keeps_newest_and_young_generations_and_ignores_other_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            now_dt = datetime(2026, 10, 3, 22, 0, tzinfo=timezone.utc)
+            now = now_dt.timestamp()
+            ages_h = [10, 9, 8, 7, 0.5]
+            gens = []
+            for i, age in enumerate(ages_h):
+                d = parent / f"generation-{i:064x}"
+                d.mkdir()
+                (d / "policy.sqlite").write_bytes(b"x" * 100)
+                os.utime(d, (now - age * 3600, now - age * 3600))
+                gens.append(d)
+            keep = parent / "not-a-generation"
+            keep.mkdir()
+            os.utime(keep, (now - 99 * 3600, now - 99 * 3600))
+            res = retention._prune_policy_evidence_generations(parent, now=now_dt, keep_latest=2)
+            self.assertEqual(res["deleted"], 3)
+            self.assertEqual(res["deleted_bytes"], 300)
+            self.assertEqual(sorted(p.name for p in parent.iterdir()),
+                             sorted([gens[3].name, gens[4].name, keep.name]))
+
+    def test_young_generations_survive_even_beyond_keep_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            now_dt = datetime(2026, 10, 3, 22, 0, tzinfo=timezone.utc)
+            now = now_dt.timestamp()
+            for i in range(4):
+                d = parent / f"generation-{i:064x}"
+                d.mkdir()
+                os.utime(d, (now - 600 - i, now - 600 - i))
+            res = retention._prune_policy_evidence_generations(parent, now=now_dt, keep_latest=1)
+            self.assertEqual(res["deleted"], 0)
+            self.assertEqual(len(list(parent.iterdir())), 4)
+
+    def test_missing_parent_is_a_noop(self):
+        res = retention._prune_policy_evidence_generations(Path(tempfile.gettempdir()) / "no-such-policy-evidence",
+                                                          now=datetime.now(timezone.utc), keep_latest=3)
+        self.assertEqual(res["deleted"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

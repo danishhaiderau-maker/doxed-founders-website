@@ -82,6 +82,18 @@ REPO = "danishhaiderau-maker/doxed-founders-website"
 MIN = 60.0
 HOUR = 3600.0
 
+# Integrity INVALID whose only failure is these current-epoch Fly lifecycle defects is a known, owned
+# blocker: the clean epoch shipped by the post-freeze #351 deploy retires that evidence. AMBER until it
+# expires, then RED again so it cannot silently become permanent.
+CLEAN_EPOCH_PENDING = {
+    "id": "CLEAN_EPOCH_PENDING",
+    "check": "v3_policy_lifecycle_integrity",
+    "defects": frozenset({"CAUSAL_IDENTITY_ALIAS_EXCLUDED", "ORPHAN_EXPECTED_ORDER", "POLICY_IDENTITY_CONTAMINATION"}),
+    "fix": "post-freeze #351 deploy (clean epoch ce-20261004-v31-clean via #336) + clean_epoch_certify",
+    "eta": "2026-10-04T15:00Z",
+    "expires": "2026-10-06T00:00:00Z",
+}
+
 # Thresholds in seconds unless named otherwise. RED means "blocks trading,
 # data custody or safety"; AMBER means "degraded, look soon".
 THRESHOLDS: dict[str, float] = {
@@ -934,6 +946,23 @@ def _fail_open_guard(checks: list[dict[str, Any]], errors: Mapping[str, Any], do
                                         "are blind", fields={"failing_sources": sorted(long_down)})
 
 
+def declared_integrity_blocker(integrity: Mapping[str, Any], now: float) -> tuple[str | None, bool]:
+    """(disclosure, expired) when integrity fails only on CLEAN_EPOCH_PENDING defects, else (None, False)."""
+    b = CLEAN_EPOCH_PENDING
+    failed = [c for c in integrity.get("checks") or [] if isinstance(c, Mapping) and c.get("passed") is False]
+    if not failed or any(c.get("check") != b["check"] for c in failed):
+        return None, False
+    found = {str(x) for c in failed for x in (c.get("found") or [])}
+    if not found or not found <= b["defects"]:
+        return None, False
+    expired = now >= (parse_ts(b["expires"]) or 0)
+    if expired:
+        return (f"declared blocker {b['id']} EXPIRED {b['expires']} with {sorted(found)} still failing; "
+                f"fix was: {b['fix']}"), True
+    return (f"declared blocker {b['id']}: integrity fails only on current-epoch Fly lifecycle defects "
+            f"{sorted(found)}; fix: {b['fix']}; ETA {b['eta']}"), False
+
+
 def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mapping[str, float] | None = None
              ) -> list[dict[str, Any]]:
     """Pure evaluation of every check. ``state`` carries progress memory."""
@@ -1605,9 +1634,15 @@ def evaluate(inputs: Mapping[str, Any], state: dict[str, Any], thresholds: Mappi
     else:
         st = str(receipt.get("level") or AMBER).upper()
         st = st if st in (GREEN, AMBER, RED) else AMBER
+        reasons = list(receipt.get("reasons") or [])
         if integrity_status != "VALID":
             st = RED
-        reasons = list(receipt.get("reasons") or [])
+            declared, expired = declared_integrity_blocker(integrity, now)
+            if declared and not expired and not receipt.get("failed_required_studies") \
+                    and not any(str(r).startswith("clean epoch") for r in reasons):
+                st = AMBER
+            if declared:
+                reasons.append(declared)
         add(check("analyzer.studies", "analyzer", st,
                   "; ".join(reasons) or f"all {len(receipt.get('studies') or [])} studies OK; integrity VALID",
                   "every required study OK, integrity VALID, protection replay not truncated, inputs not BLOCKED",
